@@ -213,7 +213,7 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 
 - Extended full-priority platform detection to Android APK/OBB, iOS, Switch, PS4, WebGL, WebPlayer, Wii U, and Windows Phone. It returns consumed paths, root/name, optional game data path, and ordered DataPaths; duplicate Android APK/OBB candidates are explicit errors.
 - Seven synthetic platform tests cover Android with OBB and duplicate rejection, iOS, PS4, Switch, Wii U, WebGL precedence, WebPlayer pairing, and Windows-before-Windows-Phone source priority. cargo test --workspace --locked passed 183 tests; warnings-denied Clippy, formatting, baseline verification (1,449 reference files), and diff check passed.
-- Mono assembly collection, backend identification, and real-file/C# differential validation remain outstanding.
+- Real-file/C# differential validation remains outstanding.
 
 
 ## Platform game-file registration
@@ -224,7 +224,17 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - PowerShell `& 'C:\Users\koishi\.cargo\bin\cargo.exe' fmt --all`: exit 0. `cargo test --workspace --locked`: exit 0; 190 tests passed, 0 failed, 0 doc tests.
 - PowerShell `& 'C:\Users\koishi\.cargo\bin\cargo.exe' clippy --workspace --all-targets --locked -- -D warnings`: exit 0. `cargo fmt --all -- --check`: exit 0.
 - `tools/verify-baseline.ps1`: exit 0; all 1,449 reference files remain unchanged. `git diff --check`: exit 0.
-- Mono assembly collection/backend identification and product input-flow integration remain incomplete. No real-file/C# differential has run.
+- Product input-flow integration and real-file/C# differential remain incomplete.
+
+
+## Platform scripting backend and Mono assemblies
+
+- Added platform-specific IL2CPP marker checks for Windows, Linux, macOS, Android, iOS, Switch, PS4, and Windows Phone. IL2CPP wins only when both its expected game assembly and metadata exist; otherwise direct ManagedPath DLL presence selects Mono. Wii U remains Mono-only; WebGL/WebPlayer remain Unknown.
+- Mono assembly inventory follows the source ManagedPath per platform, collects only direct lowercase `.dll` filenames, bounds candidates, and reports duplicate basenames while retaining the first deterministic path. Android `libil2cpp.so` search uses bounded recursive directory traversal.
+- Four focused tests cover direct-only Mono DLL collection plus limits, requiring both IL2CPP markers, marker precedence for all eight layouts, and Wii U's Mono-only behavior.
+- PowerShell `& 'C:\Users\koishi\.cargo\bin\cargo.exe' fmt --all`: exit 0. `cargo test --workspace --locked --quiet`: exit 0; 196 tests passed, 0 failed, 0 doc tests.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: exit 0. `cargo fmt --all -- --check`: exit 0. `tools/verify-baseline.ps1`: exit 0; 1,449 reference files unchanged. `git diff --check`: exit 0.
+- No .NET or real platform-build differential has run. Product import flow, top-level unreferenced bundles, and WebData initial import remain outstanding.
 
 
 ## Platform inputs to the SerializedFile workspace
@@ -233,4 +243,4 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Synthetic VFS coverage verifies a `globalgamemanagers` file loads and resolves `shared.assets` from its DataPath, as well as an explicit error when a platform has no primary SerializedFile inputs.
 - PowerShell `& 'C:\Users\koishi\.cargo\bin\cargo.exe' fmt --all`: exit 0. `cargo test --workspace --locked --quiet`: exit 0; 192 tests passed, 0 failed, 0 doc tests.
 - Warnings-denied workspace Clippy, `cargo fmt --all -- --check`, `tools/verify-baseline.ps1` (1,449 unchanged reference files), and `git diff --check` all passed for this integration.
-- Unreferenced top-level bundles and WebData are not initial workspace inputs. Mono assembly/backend detection, general container import, and product input-flow integration remain incomplete; no real-file/C# differential has run.
+- Unreferenced top-level bundles and WebData are not initial workspace inputs. General container import, product input-flow integration, and real-file/C# differential remain incomplete.

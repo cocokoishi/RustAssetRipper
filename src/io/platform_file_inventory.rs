@@ -1,6 +1,6 @@
 //! Platform game file registration matching `PlatformGameStructure.CollectFiles`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::io::{self, Read, Seek, SeekFrom};
@@ -22,6 +22,7 @@ pub struct PlatformFileInventoryLimits {
     pub max_inspected_files: usize,
     pub max_single_file_bytes: u64,
     pub max_total_inspected_bytes: u64,
+    pub max_assemblies: usize,
     pub max_directories: usize,
     pub max_directory_depth: usize,
     pub max_path_bytes: usize,
@@ -33,6 +34,7 @@ impl Default for PlatformFileInventoryLimits {
             max_inspected_files: 1_000_000,
             max_single_file_bytes: 2 * 1024 * 1024 * 1024,
             max_total_inspected_bytes: 16 * 1024 * 1024 * 1024,
+            max_assemblies: 100_000,
             max_directories: 100_000,
             max_directory_depth: 256,
             max_path_bytes: 1024 * 1024,
@@ -52,14 +54,27 @@ pub struct PlatformFileInventory {
     pub registered_files: Vec<DependencyFilePath>,
     /// Source `IsPrimaryEngineFile` matches to parse as initial SerializedFile inputs.
     pub primary_file_inputs: Vec<DependencyFilePath>,
+    pub scripting_backend: ScriptingBackend,
+    /// Mono assemblies selected by the source platform's `ManagedPath` rules.
+    pub assemblies: Vec<DependencyFilePath>,
     pub report: PlatformFileInventoryReport,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ScriptingBackend {
+    #[default]
+    Unknown,
+    Mono,
+    Il2Cpp,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PlatformFileInventoryReport {
     pub inspected_files: usize,
     pub inspected_bytes: u64,
     pub traversed_directories: usize,
+    pub assembly_candidates: usize,
+    pub duplicate_assembly_names: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -97,6 +112,7 @@ impl PlatformStructure {
             inspected_paths: BTreeSet::new(),
             registered_files: BTreeSet::new(),
             primary_file_inputs: BTreeSet::new(),
+            assemblies: BTreeMap::new(),
         };
 
         state.collect_web_platform_file(self)?;
@@ -117,6 +133,7 @@ impl PlatformStructure {
         if self.platform == PlatformKind::Android {
             state.collect_android_asset_bundles(self)?;
         }
+        let scripting_backend = state.detect_backend_and_collect_assemblies(self)?;
 
         Ok(PlatformFileInventory {
             registered_files: state
@@ -129,6 +146,15 @@ impl PlatformStructure {
                 .collect(),
             primary_file_inputs: state
                 .primary_file_inputs
+                .into_iter()
+                .map(|(file_name, virtual_path)| DependencyFilePath {
+                    file_name,
+                    virtual_path,
+                })
+                .collect(),
+            scripting_backend,
+            assemblies: state
+                .assemblies
                 .into_iter()
                 .map(|(file_name, virtual_path)| DependencyFilePath {
                     file_name,
@@ -188,6 +214,7 @@ struct InventoryState<'a> {
     inspected_paths: BTreeSet<String>,
     registered_files: BTreeSet<(String, String)>,
     primary_file_inputs: BTreeSet<(String, String)>,
+    assemblies: BTreeMap<String, String>,
 }
 
 impl InventoryState<'_> {
@@ -295,6 +322,234 @@ impl InventoryState<'_> {
         self.collect_bundle_directory(&assets, true)
     }
 
+    fn detect_backend_and_collect_assemblies(
+        &mut self,
+        structure: &PlatformStructure,
+    ) -> Result<ScriptingBackend, PlatformFileInventoryError> {
+        let managed_path = managed_path(structure);
+        let backend = if self.has_il2cpp_files(structure, managed_path.as_deref())? {
+            ScriptingBackend::Il2Cpp
+        } else if let Some(path) = managed_path.as_deref() {
+            if self.has_mono_assemblies(path)? {
+                ScriptingBackend::Mono
+            } else {
+                ScriptingBackend::Unknown
+            }
+        } else {
+            ScriptingBackend::Unknown
+        };
+
+        if backend == ScriptingBackend::Mono {
+            if let Some(path) = managed_path.as_deref() {
+                if self.directory_exists(path)? {
+                    self.collect_assemblies(path)?;
+                    return Ok(backend);
+                }
+            }
+            if let Some(game_data_path) = structure.game_data_path.as_deref() {
+                let lib_path = join_path(game_data_path, "lib");
+                if self.directory_exists(&lib_path)? {
+                    self.collect_assemblies(game_data_path)?;
+                    self.collect_assemblies(&lib_path)?;
+                }
+            }
+        }
+        Ok(backend)
+    }
+
+    fn has_il2cpp_files(
+        &mut self,
+        structure: &PlatformStructure,
+        managed_path: Option<&str>,
+    ) -> Result<bool, PlatformFileInventoryError> {
+        let Some(game_data_path) = structure.game_data_path.as_deref() else {
+            return Ok(false);
+        };
+        let exists_pair = |this: &Self, game_assembly: &str, metadata: &str| {
+            Ok(this.file_exists(game_assembly)? && this.file_exists(metadata)?)
+        };
+        match structure.platform {
+            PlatformKind::Windows => exists_pair(
+                self,
+                &join_path(&structure.root_path, "GameAssembly.dll"),
+                &join_path(game_data_path, "il2cpp_data/Metadata/global-metadata.dat"),
+            ),
+            PlatformKind::Linux => exists_pair(
+                self,
+                &join_path(&structure.root_path, "GameAssembly.so"),
+                &join_path(game_data_path, "il2cpp_data/Metadata/global-metadata.dat"),
+            ),
+            PlatformKind::Mac => exists_pair(
+                self,
+                &join_path(
+                    &structure.root_path,
+                    "Contents/Frameworks/GameAssembly.dylib",
+                ),
+                &join_path(game_data_path, "il2cpp_data/Metadata/global-metadata.dat"),
+            ),
+            PlatformKind::Android => {
+                let Some(managed_path) = managed_path else {
+                    return Ok(false);
+                };
+                let metadata = join_path(managed_path, "Metadata/global-metadata.dat");
+                if !self.file_exists(&metadata)? {
+                    return Ok(false);
+                }
+                let lib_path = join_path(&structure.root_path, "lib");
+                self.contains_file_recursively(&lib_path, "libil2cpp.so")
+            }
+            PlatformKind::Ios => {
+                let Some(name) = structure.name.as_deref() else {
+                    return Ok(false);
+                };
+                let app_path = join_path(
+                    &join_path(&structure.root_path, "Payload"),
+                    &format!("{name}.app"),
+                );
+                let assembly_path = join_path(&app_path, name);
+                let Some(managed_path) = managed_path else {
+                    return Ok(false);
+                };
+                exists_pair(
+                    self,
+                    &assembly_path,
+                    &join_path(managed_path, "Metadata/global-metadata.dat"),
+                )
+            }
+            PlatformKind::Switch => {
+                let Some(managed_path) = managed_path else {
+                    return Ok(false);
+                };
+                exists_pair(
+                    self,
+                    &join_path(&structure.root_path, "exefs/main"),
+                    &join_path(managed_path, "Metadata/global-metadata.dat"),
+                )
+            }
+            PlatformKind::Ps4 => exists_pair(
+                self,
+                &join_path(game_data_path, "Modules/Il2CppUserAssemblies.prx"),
+                &join_path(game_data_path, "Metadata/global-metadata.dat"),
+            ),
+            PlatformKind::WindowsPhone => exists_pair(
+                self,
+                &join_path(&structure.root_path, "GameAssembly.dll"),
+                &join_path(game_data_path, "il2cpp_data/Metadata/global-metadata.dat"),
+            ),
+            PlatformKind::WiiU | PlatformKind::WebGl | PlatformKind::WebPlayer => Ok(false),
+        }
+    }
+
+    fn has_mono_assemblies(&self, managed_path: &str) -> Result<bool, PlatformFileInventoryError> {
+        if !self.directory_exists(managed_path)? {
+            return Ok(false);
+        }
+        Ok(self
+            .top_level_files(managed_path)?
+            .iter()
+            .any(|path| file_name(path).ends_with(".dll")))
+    }
+
+    fn contains_file_recursively(
+        &mut self,
+        root: &str,
+        expected_name: &str,
+    ) -> Result<bool, PlatformFileInventoryError> {
+        if !self.directory_exists(root)? {
+            return Ok(false);
+        }
+        let mut pending = vec![(root.to_owned(), 0usize)];
+        while let Some((directory, depth)) = pending.pop() {
+            self.record_directory_visit(&directory)?;
+            if self
+                .top_level_files(&directory)?
+                .iter()
+                .any(|path| file_name(path) == expected_name)
+            {
+                return Ok(true);
+            }
+            for child in self.top_level_directories(&directory)? {
+                let child_depth = depth.checked_add(1).ok_or_else(|| {
+                    PlatformFileInventoryError::new(
+                        Some(child.clone()),
+                        PlatformFileInventoryErrorKind::DirectoryDepthOverflow,
+                    )
+                })?;
+                if child_depth > self.limits.max_directory_depth {
+                    return Err(PlatformFileInventoryError::new(
+                        Some(child.clone()),
+                        PlatformFileInventoryErrorKind::DirectoryDepthLimitExceeded {
+                            depth: child_depth,
+                            limit: self.limits.max_directory_depth,
+                        },
+                    ));
+                }
+                pending.push((child, child_depth));
+            }
+        }
+        Ok(false)
+    }
+
+    fn collect_assemblies(&mut self, root: &str) -> Result<(), PlatformFileInventoryError> {
+        for path in self.top_level_files(root)? {
+            let name = file_name(&path);
+            if !name.ends_with(".dll") {
+                continue;
+            }
+            let next_count = self
+                .report
+                .assembly_candidates
+                .checked_add(1)
+                .ok_or_else(|| {
+                    PlatformFileInventoryError::new(
+                        Some(path.clone()),
+                        PlatformFileInventoryErrorKind::AssemblyCountOverflow,
+                    )
+                })?;
+            if next_count > self.limits.max_assemblies {
+                return Err(PlatformFileInventoryError::new(
+                    Some(path.clone()),
+                    PlatformFileInventoryErrorKind::AssemblyCountLimitExceeded {
+                        count: next_count,
+                        limit: self.limits.max_assemblies,
+                    },
+                ));
+            }
+            self.report.assembly_candidates = next_count;
+            if self
+                .assemblies
+                .insert(name.to_owned(), path.clone())
+                .is_some()
+            {
+                self.report.duplicate_assembly_names.push(name.to_owned());
+            }
+        }
+        Ok(())
+    }
+
+    fn record_directory_visit(&mut self, path: &str) -> Result<(), PlatformFileInventoryError> {
+        self.report.traversed_directories = self
+            .report
+            .traversed_directories
+            .checked_add(1)
+            .ok_or_else(|| {
+                PlatformFileInventoryError::new(
+                    Some(path.to_owned()),
+                    PlatformFileInventoryErrorKind::DirectoryCountOverflow,
+                )
+            })?;
+        if self.report.traversed_directories > self.limits.max_directories {
+            return Err(PlatformFileInventoryError::new(
+                Some(path.to_owned()),
+                PlatformFileInventoryErrorKind::DirectoryCountLimitExceeded {
+                    count: self.report.traversed_directories,
+                    limit: self.limits.max_directories,
+                },
+            ));
+        }
+        Ok(())
+    }
+
     fn collect_optional_bundle_tree(
         &mut self,
         root: &str,
@@ -312,25 +567,7 @@ impl InventoryState<'_> {
     ) -> Result<(), PlatformFileInventoryError> {
         let mut pending = vec![(root.to_owned(), 0usize)];
         while let Some((directory, depth)) = pending.pop() {
-            self.report.traversed_directories = self
-                .report
-                .traversed_directories
-                .checked_add(1)
-                .ok_or_else(|| {
-                    PlatformFileInventoryError::new(
-                        Some(directory.clone()),
-                        PlatformFileInventoryErrorKind::DirectoryCountOverflow,
-                    )
-                })?;
-            if self.report.traversed_directories > self.limits.max_directories {
-                return Err(PlatformFileInventoryError::new(
-                    Some(directory.clone()),
-                    PlatformFileInventoryErrorKind::DirectoryCountLimitExceeded {
-                        count: self.report.traversed_directories,
-                        limit: self.limits.max_directories,
-                    },
-                ));
-            }
+            self.record_directory_visit(&directory)?;
 
             for path in self.top_level_files(&directory)? {
                 if self.probe_bundle_header(&path)? {
@@ -526,6 +763,24 @@ fn is_primary_engine_file(name: &str) -> bool {
             .is_some_and(is_shared_assets_number)
 }
 
+fn managed_path(structure: &PlatformStructure) -> Option<String> {
+    match structure.platform {
+        PlatformKind::Windows
+        | PlatformKind::Linux
+        | PlatformKind::Mac
+        | PlatformKind::Android
+        | PlatformKind::Ios
+        | PlatformKind::Switch
+        | PlatformKind::Ps4
+        | PlatformKind::WiiU => structure
+            .game_data_path
+            .as_deref()
+            .map(|path| join_path(path, "Managed")),
+        PlatformKind::WindowsPhone => Some(structure.root_path.clone()),
+        PlatformKind::WebGl | PlatformKind::WebPlayer => None,
+    }
+}
+
 fn is_number_with_optional_split_zero(suffix: &str) -> bool {
     let digits = suffix.strip_suffix(".split0").unwrap_or(suffix);
     !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
@@ -594,6 +849,8 @@ pub enum PlatformFileInventoryErrorKind {
     DirectoryCountLimitExceeded { count: usize, limit: usize },
     DirectoryDepthOverflow,
     DirectoryDepthLimitExceeded { depth: usize, limit: usize },
+    AssemblyCountOverflow,
+    AssemblyCountLimitExceeded { count: usize, limit: usize },
     FileSystem(io::Error),
 }
 
@@ -653,6 +910,10 @@ impl Display for PlatformFileInventoryErrorKind {
             Self::DirectoryDepthOverflow => formatter.write_str("directory depth overflows"),
             Self::DirectoryDepthLimitExceeded { depth, limit } => {
                 write!(formatter, "directory depth {depth} exceeds limit {limit}")
+            }
+            Self::AssemblyCountOverflow => formatter.write_str("assembly count overflows"),
+            Self::AssemblyCountLimitExceeded { count, limit } => {
+                write!(formatter, "assembly count {count} exceeds limit {limit}")
             }
             Self::FileSystem(source) => write!(formatter, "{source}"),
         }
@@ -737,7 +998,7 @@ impl Error for PlatformWorkspaceLoadErrorKind {
 mod tests {
     use super::{
         is_primary_engine_file, PlatformFileInventoryErrorKind, PlatformFileInventoryLimits,
-        PlatformFileInventoryOptions,
+        PlatformFileInventoryOptions, ScriptingBackend,
     };
     use crate::io::filesystem::VirtualFileSystem;
     use crate::io::platform_structure::{PlatformKind, PlatformStructure};
@@ -765,6 +1026,11 @@ mod tests {
     }
 
     fn write_file(filesystem: &mut VirtualFileSystem, path: &str, bytes: &[u8]) {
+        let parent = path
+            .rsplit_once('/')
+            .map(|(parent, _)| parent)
+            .unwrap_or("");
+        filesystem.create_directory(Some(parent)).unwrap();
         let mut stream = filesystem.create_file(path).unwrap();
         use std::io::Write;
         stream.write_all(bytes).unwrap();
@@ -979,6 +1245,271 @@ mod tests {
             error.kind,
             super::PlatformWorkspaceLoadErrorKind::NoPrimarySerializedFiles
         ));
+    }
+
+    #[test]
+    fn mono_backend_collects_direct_managed_assemblies_only() {
+        let mut filesystem = VirtualFileSystem::new();
+        make_directory(&mut filesystem, "/game/Game_Data/Managed/Nested");
+        write_file(
+            &mut filesystem,
+            "/game/Game_Data/Managed/Assembly-CSharp.dll",
+            b"assembly",
+        );
+        write_file(
+            &mut filesystem,
+            "/game/Game_Data/Managed/Nested/NotCollected.dll",
+            b"nested assembly",
+        );
+        write_file(
+            &mut filesystem,
+            "/game/Game_Data/Managed/notice.txt",
+            b"text",
+        );
+        let structure = structure(
+            PlatformKind::Windows,
+            "/game",
+            &["/game/Game_Data"],
+            Some("/game/Game_Data"),
+            Some("Game"),
+        );
+
+        let inventory = structure
+            .collect_game_files(
+                &filesystem,
+                PlatformFileInventoryOptions {
+                    skip_streaming_assets: true,
+                },
+                PlatformFileInventoryLimits::default(),
+            )
+            .unwrap();
+        assert_eq!(inventory.scripting_backend, ScriptingBackend::Mono);
+        assert_eq!(inventory.assemblies.len(), 1);
+        assert_eq!(inventory.assemblies[0].file_name, "Assembly-CSharp.dll");
+        assert_eq!(
+            inventory.assemblies[0].virtual_path,
+            "/game/Game_Data/Managed/Assembly-CSharp.dll"
+        );
+
+        let error = structure
+            .collect_game_files(
+                &filesystem,
+                PlatformFileInventoryOptions {
+                    skip_streaming_assets: true,
+                },
+                PlatformFileInventoryLimits {
+                    max_assemblies: 0,
+                    ..PlatformFileInventoryLimits::default()
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error.kind,
+            PlatformFileInventoryErrorKind::AssemblyCountLimitExceeded { count: 1, limit: 0 }
+        ));
+    }
+
+    #[test]
+    fn backend_falls_back_to_mono_when_either_il2cpp_marker_is_missing() {
+        for (assembly_marker, metadata_marker) in [(true, false), (false, true)] {
+            let mut filesystem = VirtualFileSystem::new();
+            if assembly_marker {
+                write_file(&mut filesystem, "/game/GameAssembly.dll", b"player marker");
+            }
+            if metadata_marker {
+                write_file(
+                    &mut filesystem,
+                    "/game/Game_Data/il2cpp_data/Metadata/global-metadata.dat",
+                    b"metadata marker",
+                );
+            }
+            write_file(
+                &mut filesystem,
+                "/game/Game_Data/Managed/Assembly-CSharp.dll",
+                b"managed assembly",
+            );
+            let structure = structure(
+                PlatformKind::Windows,
+                "/game",
+                &["/game/Game_Data"],
+                Some("/game/Game_Data"),
+                Some("Game"),
+            );
+
+            let inventory = structure
+                .collect_game_files(
+                    &filesystem,
+                    PlatformFileInventoryOptions {
+                        skip_streaming_assets: true,
+                    },
+                    PlatformFileInventoryLimits::default(),
+                )
+                .unwrap();
+            assert_eq!(inventory.scripting_backend, ScriptingBackend::Mono);
+            assert_eq!(inventory.assemblies.len(), 1);
+        }
+    }
+
+    #[test]
+    fn il2cpp_layout_markers_take_precedence_over_managed_dlls() {
+        let cases = [
+            (
+                structure(
+                    PlatformKind::Windows,
+                    "/win",
+                    &["/win/Game_Data"],
+                    Some("/win/Game_Data"),
+                    Some("Game"),
+                ),
+                "/win/GameAssembly.dll",
+                "/win/Game_Data/il2cpp_data/Metadata/global-metadata.dat",
+                "/win/Game_Data/Managed/Assembly-CSharp.dll",
+            ),
+            (
+                structure(
+                    PlatformKind::Linux,
+                    "/linux",
+                    &["/linux/Game_Data"],
+                    Some("/linux/Game_Data"),
+                    Some("Game"),
+                ),
+                "/linux/GameAssembly.so",
+                "/linux/Game_Data/il2cpp_data/Metadata/global-metadata.dat",
+                "/linux/Game_Data/Managed/Assembly-CSharp.dll",
+            ),
+            (
+                structure(
+                    PlatformKind::Mac,
+                    "/Game.app",
+                    &[
+                        "/Game.app/Contents/Resources/Data",
+                        "/Game.app/Contents/Resources",
+                    ],
+                    Some("/Game.app/Contents/Resources/Data"),
+                    Some("Game"),
+                ),
+                "/Game.app/Contents/Frameworks/GameAssembly.dylib",
+                "/Game.app/Contents/Resources/Data/il2cpp_data/Metadata/global-metadata.dat",
+                "/Game.app/Contents/Resources/Data/Managed/Assembly-CSharp.dll",
+            ),
+            (
+                structure(
+                    PlatformKind::Android,
+                    "/apk",
+                    &["/apk/assets/bin/Data"],
+                    Some("/apk/assets/bin/Data"),
+                    None,
+                ),
+                "/apk/lib/arm64-v8a/libil2cpp.so",
+                "/apk/assets/bin/Data/Managed/Metadata/global-metadata.dat",
+                "/apk/assets/bin/Data/Managed/Assembly-CSharp.dll",
+            ),
+            (
+                structure(
+                    PlatformKind::Ios,
+                    "/ipa",
+                    &["/ipa/Payload/Game.app/Data"],
+                    Some("/ipa/Payload/Game.app/Data"),
+                    Some("Game"),
+                ),
+                "/ipa/Payload/Game.app/Game",
+                "/ipa/Payload/Game.app/Data/Managed/Metadata/global-metadata.dat",
+                "/ipa/Payload/Game.app/Data/Managed/Assembly-CSharp.dll",
+            ),
+            (
+                structure(
+                    PlatformKind::Switch,
+                    "/switch",
+                    &["/switch/romfs/Data"],
+                    Some("/switch/romfs/Data"),
+                    Some("switch"),
+                ),
+                "/switch/exefs/main",
+                "/switch/romfs/Data/Managed/Metadata/global-metadata.dat",
+                "/switch/romfs/Data/Managed/Assembly-CSharp.dll",
+            ),
+            (
+                structure(
+                    PlatformKind::Ps4,
+                    "/ps4",
+                    &["/ps4/Media"],
+                    Some("/ps4/Media"),
+                    Some("ps4"),
+                ),
+                "/ps4/Media/Modules/Il2CppUserAssemblies.prx",
+                "/ps4/Media/Metadata/global-metadata.dat",
+                "/ps4/Media/Managed/Assembly-CSharp.dll",
+            ),
+            (
+                structure(
+                    PlatformKind::WindowsPhone,
+                    "/wp",
+                    &["/wp/Data"],
+                    Some("/wp/Data"),
+                    Some("wp"),
+                ),
+                "/wp/GameAssembly.dll",
+                "/wp/Data/il2cpp_data/Metadata/global-metadata.dat",
+                "/wp/Assembly-CSharp.dll",
+            ),
+        ];
+
+        for (platform_structure, game_assembly, metadata, managed_assembly) in cases {
+            let mut filesystem = VirtualFileSystem::new();
+            write_file(&mut filesystem, game_assembly, b"native player marker");
+            write_file(&mut filesystem, metadata, b"metadata marker");
+            write_file(&mut filesystem, managed_assembly, b"managed assembly");
+            let inventory = platform_structure
+                .collect_game_files(
+                    &filesystem,
+                    PlatformFileInventoryOptions {
+                        skip_streaming_assets: true,
+                    },
+                    PlatformFileInventoryLimits::default(),
+                )
+                .unwrap();
+            assert_eq!(inventory.scripting_backend, ScriptingBackend::Il2Cpp);
+            assert!(inventory.assemblies.is_empty());
+        }
+    }
+
+    #[test]
+    fn wiiu_remains_mono_even_when_other_platform_il2cpp_markers_exist() {
+        let mut filesystem = VirtualFileSystem::new();
+        write_file(
+            &mut filesystem,
+            "/wii/exefs/main",
+            b"not a supported backend marker",
+        );
+        write_file(
+            &mut filesystem,
+            "/wii/content/Data/Metadata/global-metadata.dat",
+            b"metadata",
+        );
+        write_file(
+            &mut filesystem,
+            "/wii/content/Data/Managed/Assembly-CSharp.dll",
+            b"assembly",
+        );
+        let structure = structure(
+            PlatformKind::WiiU,
+            "/wii",
+            &["/wii/content/Data"],
+            Some("/wii/content/Data"),
+            Some("wii"),
+        );
+
+        let inventory = structure
+            .collect_game_files(
+                &filesystem,
+                PlatformFileInventoryOptions {
+                    skip_streaming_assets: true,
+                },
+                PlatformFileInventoryLimits::default(),
+            )
+            .unwrap();
+        assert_eq!(inventory.scripting_backend, ScriptingBackend::Mono);
+        assert_eq!(inventory.assemblies.len(), 1);
     }
 
     #[test]
