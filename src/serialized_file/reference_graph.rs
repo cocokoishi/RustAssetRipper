@@ -1,12 +1,22 @@
 //! Per-SerializedFile object identity indexing and TypeTree-backed PPtr collection.
 
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
 use super::file::{SerializedFile, SerializedFileError};
-use super::metadata::SerializedFileMetadata;
+use super::metadata::{FileIdentifier, SerializedFileMetadata};
 use super::object::{ObjectDecodeLimits, SerializedValue};
 use super::references::PPtrResolution;
+
+type ExternalDependencyResolver<'a> = dyn FnMut(usize, &FileIdentifier) -> Option<usize> + 'a;
+
+#[derive(Clone, Copy)]
+struct ReferenceSource<'a> {
+    file_index: usize,
+    metadata: &'a SerializedFileMetadata,
+    graph: &'a ObjectReferenceGraph,
+}
 
 /// Bounds for constructing a per-file reference scan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -488,6 +498,25 @@ impl<'a> MultiFileReferenceGraph<'a> {
         files: &[NamedObjectReferenceGraph<'a>],
         limits: MultiFileReferenceGraphLimits,
     ) -> Result<Self, MultiFileReferenceGraphBuildError> {
+        Self::build_internal(files, limits, None)
+    }
+
+    pub(crate) fn build_with_dependency_resolver<F>(
+        files: &[NamedObjectReferenceGraph<'a>],
+        limits: MultiFileReferenceGraphLimits,
+        mut dependency_resolver: F,
+    ) -> Result<Self, MultiFileReferenceGraphBuildError>
+    where
+        F: FnMut(usize, &FileIdentifier) -> Option<usize>,
+    {
+        Self::build_internal(files, limits, Some(&mut dependency_resolver))
+    }
+
+    fn build_internal(
+        files: &[NamedObjectReferenceGraph<'a>],
+        limits: MultiFileReferenceGraphLimits,
+        mut dependency_resolver: Option<&mut ExternalDependencyResolver<'_>>,
+    ) -> Result<Self, MultiFileReferenceGraphBuildError> {
         if files.len() > limits.max_files {
             return Err(MultiFileReferenceGraphBuildError::FileCountLimitExceeded {
                 file_count: files.len(),
@@ -595,14 +624,29 @@ impl<'a> MultiFileReferenceGraph<'a> {
             input_graphs_complete,
         };
         for (source_file_index, source_file) in files.iter().enumerate() {
+            let mut dependency_targets = HashMap::<usize, Option<usize>>::new();
             for reference in source_file.graph.references() {
-                let resolution = result.resolve_reference(
-                    source_file_index,
-                    source_file.metadata,
-                    source_file.graph,
-                    reference.file_id,
-                    reference.path_id,
-                );
+                let resolution = if let Some(resolver) = dependency_resolver.as_deref_mut() {
+                    result.resolve_reference_with_dependency_resolver(
+                        ReferenceSource {
+                            file_index: source_file_index,
+                            metadata: source_file.metadata,
+                            graph: source_file.graph,
+                        },
+                        reference.file_id,
+                        reference.path_id,
+                        &mut dependency_targets,
+                        resolver,
+                    )?
+                } else {
+                    result.resolve_reference(
+                        source_file_index,
+                        source_file.metadata,
+                        source_file.graph,
+                        reference.file_id,
+                        reference.path_id,
+                    )
+                };
                 result.references.push(MultiFileObjectReference {
                     source_file_index,
                     source_object_index: reference.source_object_index,
@@ -721,6 +765,86 @@ impl<'a> MultiFileReferenceGraph<'a> {
             })
     }
 
+    fn resolve_reference_with_dependency_resolver(
+        &self,
+        source: ReferenceSource<'_>,
+        file_id: i32,
+        path_id: i64,
+        dependency_targets: &mut HashMap<usize, Option<usize>>,
+        dependency_resolver: &mut dyn FnMut(usize, &FileIdentifier) -> Option<usize>,
+    ) -> Result<MultiFilePPtrResolution, MultiFileReferenceGraphBuildError> {
+        if path_id == 0 || file_id == 0 {
+            return Ok(self.resolve_reference(
+                source.file_index,
+                source.metadata,
+                source.graph,
+                file_id,
+                path_id,
+            ));
+        }
+        let Some(external_index) = file_id
+            .checked_sub(1)
+            .and_then(|index| usize::try_from(index).ok())
+        else {
+            return Ok(MultiFilePPtrResolution::InvalidFileId {
+                file_id,
+                external_count: source.metadata.externals.len(),
+            });
+        };
+        let Some(identifier) = source.metadata.externals.get(external_index) else {
+            return Ok(MultiFilePPtrResolution::InvalidFileId {
+                file_id,
+                external_count: source.metadata.externals.len(),
+            });
+        };
+        let target_file_index =
+            if let Some(target_file_index) = dependency_targets.get(&external_index) {
+                *target_file_index
+            } else {
+                let target_file_index = dependency_resolver(source.file_index, identifier);
+                dependency_targets.try_reserve(1).map_err(|_| {
+                    MultiFileReferenceGraphBuildError::AllocationFailed {
+                        resource: "per-file external collection resolution cache",
+                        requested: 1,
+                    }
+                })?;
+                dependency_targets.insert(external_index, target_file_index);
+                target_file_index
+            };
+        let Some(target_file_index) = target_file_index else {
+            return Ok(MultiFilePPtrResolution::MissingDependency {
+                external_index,
+                path_id,
+            });
+        };
+        let Some(target_graph) = self.file_graphs.get(target_file_index) else {
+            return Err(
+                MultiFileReferenceGraphBuildError::DependencyTargetFileIndexOutOfBounds {
+                    source_file_index: source.file_index,
+                    target_file_index,
+                    file_count: self.file_graphs.len(),
+                },
+            );
+        };
+        Ok(match local_path_id_resolution(target_graph, path_id) {
+            LocalPathIdResolution::Unique(target_object_index) => MultiFilePPtrResolution::Object {
+                target_file_index,
+                target_object_index,
+            },
+            LocalPathIdResolution::Missing => MultiFilePPtrResolution::MissingExternalObject {
+                target_file_index,
+                path_id,
+            },
+            LocalPathIdResolution::Ambiguous(match_count) => {
+                MultiFilePPtrResolution::AmbiguousExternalObject {
+                    target_file_index,
+                    path_id,
+                    match_count,
+                }
+            }
+        })
+    }
+
     fn resolve_reference(
         &self,
         source_file_index: usize,
@@ -835,6 +959,14 @@ pub enum MultiFileReferenceGraphBuildError {
         reference_count: usize,
         limit: usize,
     },
+    DependencyTargetFileIndexOutOfBounds {
+        source_file_index: usize,
+        target_file_index: usize,
+        file_count: usize,
+    },
+    SourceCollectionTopologyInvalid {
+        message: String,
+    },
 }
 
 impl Display for MultiFileReferenceGraphBuildError {
@@ -869,6 +1001,17 @@ impl Display for MultiFileReferenceGraphBuildError {
                 reference_count,
                 limit,
             } => write!(f, "reference count {reference_count} exceeds limit {limit}"),
+            Self::DependencyTargetFileIndexOutOfBounds {
+                source_file_index,
+                target_file_index,
+                file_count,
+            } => write!(
+                f,
+                "dependency resolver selected file {target_file_index} for source file {source_file_index}, outside the {file_count} loaded files"
+            ),
+            Self::SourceCollectionTopologyInvalid { message } => {
+                write!(f, "source collection topology is invalid: {message}")
+            }
         }
     }
 }

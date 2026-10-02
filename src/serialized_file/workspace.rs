@@ -17,7 +17,10 @@ use crate::io::dependency::{
     DependencyIndexLimits, DependencyLookup, DependencyLookupError,
 };
 use crate::io::filesystem::{SearchOption, VirtualFileSystem};
-use crate::io::special_names::fix_file_identifier;
+use crate::io::special_names::{
+    fix_file_identifier, BUILTIN_EXTRA_NAME_1, BUILTIN_EXTRA_NAME_2, DEFAULT_RESOURCE_NAME_1,
+    DEFAULT_RESOURCE_NAME_2,
+};
 use crate::scheme::{
     ContainerMountError, ContainerMountLimits, DispatchedFile, FileKind, MountedContainerBundle,
     MountedResourceFile, MountedSerializedFile, ParsedFile, SchemeError, SchemeReader,
@@ -130,6 +133,248 @@ pub struct WorkspaceResourceFile {
     pub container_bundle_index: usize,
     pub container_entry_index: usize,
     pub container_resource_index: usize,
+}
+
+struct SourceBundleCollectionLookup<'a> {
+    workspace: &'a SerializedFileWorkspace,
+    fixed_file_names: Vec<String>,
+    root_collection_file_indices: Vec<usize>,
+    /// Root Bundle children retain workspace insertion order, as Bundle.ResolveCollection scans.
+    root_bundle_indices: Vec<usize>,
+    /// Nested Bundle children are ordered by their source entry positions.
+    child_bundle_entries: Vec<Vec<(usize, usize)>>,
+}
+
+impl<'a> SourceBundleCollectionLookup<'a> {
+    fn build(
+        workspace: &'a SerializedFileWorkspace,
+        limits: MultiFileReferenceGraphLimits,
+    ) -> Result<Self, MultiFileReferenceGraphBuildError> {
+        if workspace.files.len() > limits.max_files {
+            return Err(MultiFileReferenceGraphBuildError::FileCountLimitExceeded {
+                file_count: workspace.files.len(),
+                limit: limits.max_files,
+            });
+        }
+        let source_order = workspace
+            .source_collection_file_indices()
+            .map_err(|error| {
+                MultiFileReferenceGraphBuildError::SourceCollectionTopologyInvalid {
+                    message: error.to_string(),
+                }
+            })?;
+
+        let mut fixed_file_names = Vec::new();
+        fixed_file_names
+            .try_reserve_exact(workspace.files.len())
+            .map_err(|_| MultiFileReferenceGraphBuildError::AllocationFailed {
+                resource: "source collection fixed names",
+                requested: workspace.files.len(),
+            })?;
+        let mut total_file_name_bytes = 0usize;
+        for (file_index, file) in workspace.files.iter().enumerate() {
+            if file.file_name.len() > limits.max_file_name_bytes {
+                return Err(MultiFileReferenceGraphBuildError::FileNameLimitExceeded {
+                    file_index,
+                    byte_count: file.file_name.len(),
+                    limit: limits.max_file_name_bytes,
+                });
+            }
+            let fixed_name = fix_file_identifier(&file.file_name);
+            if fixed_name.len() > limits.max_file_name_bytes {
+                return Err(MultiFileReferenceGraphBuildError::FileNameLimitExceeded {
+                    file_index,
+                    byte_count: fixed_name.len(),
+                    limit: limits.max_file_name_bytes,
+                });
+            }
+            total_file_name_bytes = total_file_name_bytes
+                .checked_add(fixed_name.len())
+                .ok_or(MultiFileReferenceGraphBuildError::TotalFileNameBytesOverflow)?;
+            if total_file_name_bytes > limits.max_total_file_name_bytes {
+                return Err(
+                    MultiFileReferenceGraphBuildError::TotalFileNameBytesLimitExceeded {
+                        byte_count: total_file_name_bytes,
+                        limit: limits.max_total_file_name_bytes,
+                    },
+                );
+            }
+            fixed_file_names.push(fixed_name);
+        }
+
+        let mut root_collection_file_indices = Vec::new();
+        root_collection_file_indices
+            .try_reserve_exact(workspace.files.len())
+            .map_err(|_| MultiFileReferenceGraphBuildError::AllocationFailed {
+                resource: "root collection indexes",
+                requested: workspace.files.len(),
+            })?;
+        root_collection_file_indices.extend(source_order.into_iter().filter(|file_index| {
+            workspace
+                .files
+                .get(*file_index)
+                .is_some_and(|file| file.container_bundle_index.is_none())
+        }));
+
+        let bundle_count = workspace.container_bundles.len();
+        let mut root_bundle_indices = Vec::new();
+        root_bundle_indices
+            .try_reserve_exact(bundle_count)
+            .map_err(|_| MultiFileReferenceGraphBuildError::AllocationFailed {
+                resource: "root collection bundle indexes",
+                requested: bundle_count,
+            })?;
+        let mut child_bundle_entries = Vec::new();
+        child_bundle_entries
+            .try_reserve_exact(bundle_count)
+            .map_err(|_| MultiFileReferenceGraphBuildError::AllocationFailed {
+                resource: "nested collection bundle adjacency",
+                requested: bundle_count,
+            })?;
+        child_bundle_entries.resize_with(bundle_count, Vec::new);
+        for (bundle_index, bundle) in workspace.container_bundles.iter().enumerate() {
+            match (bundle.parent_bundle_index, bundle.parent_entry_index) {
+                (None, None) => root_bundle_indices.push(bundle_index),
+                (Some(parent), Some(entry_index)) if parent < bundle_index => {
+                    let Some(children) = child_bundle_entries.get_mut(parent) else {
+                        return Err(
+                            MultiFileReferenceGraphBuildError::SourceCollectionTopologyInvalid {
+                                message: format!(
+                                    "bundle {bundle_index} has invalid parent bundle {parent}"
+                                ),
+                            },
+                        );
+                    };
+                    children.try_reserve(1).map_err(|_| {
+                        MultiFileReferenceGraphBuildError::AllocationFailed {
+                            resource: "nested collection bundle indexes",
+                            requested: children.len().saturating_add(1),
+                        }
+                    })?;
+                    children.push((entry_index, bundle_index));
+                }
+                _ => {
+                    return Err(
+                        MultiFileReferenceGraphBuildError::SourceCollectionTopologyInvalid {
+                            message: format!(
+                                "bundle {bundle_index} has an invalid parent/entry relation"
+                            ),
+                        },
+                    );
+                }
+            }
+        }
+        for children in &mut child_bundle_entries {
+            children.sort_unstable_by_key(|(entry_index, _)| *entry_index);
+            if children.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+                return Err(
+                    MultiFileReferenceGraphBuildError::SourceCollectionTopologyInvalid {
+                        message: "sibling bundles have duplicate source entry indexes".to_owned(),
+                    },
+                );
+            }
+        }
+
+        Ok(Self {
+            workspace,
+            fixed_file_names,
+            root_collection_file_indices,
+            root_bundle_indices,
+            child_bundle_entries,
+        })
+    }
+
+    fn resolve(&self, source_file_index: usize, requested_name: &str) -> Option<usize> {
+        let source_file = self.workspace.files.get(source_file_index)?;
+        if let Some(file_index) =
+            self.resolve_name_in_source_scope(source_file.container_bundle_index, requested_name)
+        {
+            return Some(file_index);
+        }
+
+        let fixed_name = fix_file_identifier(requested_name);
+        if fixed_name != requested_name {
+            if let Some(file_index) =
+                self.resolve_name_in_source_scope(source_file.container_bundle_index, &fixed_name)
+            {
+                return Some(file_index);
+            }
+        }
+        let alias = match fixed_name.as_str() {
+            DEFAULT_RESOURCE_NAME_1 => Some(DEFAULT_RESOURCE_NAME_2),
+            DEFAULT_RESOURCE_NAME_2 => Some(DEFAULT_RESOURCE_NAME_1),
+            BUILTIN_EXTRA_NAME_1 => Some(BUILTIN_EXTRA_NAME_2),
+            BUILTIN_EXTRA_NAME_2 => Some(BUILTIN_EXTRA_NAME_1),
+            _ => None,
+        }?;
+        self.resolve_name_in_source_scope(source_file.container_bundle_index, alias)
+    }
+
+    fn resolve_name_in_source_scope(
+        &self,
+        source_bundle_index: Option<usize>,
+        name: &str,
+    ) -> Option<usize> {
+        let mut current_bundle_index = source_bundle_index;
+        let mut excluded_child_bundle = None;
+        loop {
+            let direct_collections = match current_bundle_index {
+                Some(bundle_index) => {
+                    &self
+                        .workspace
+                        .container_bundles
+                        .get(bundle_index)?
+                        .direct_collection_file_indices
+                }
+                None => &self.root_collection_file_indices,
+            };
+            if let Some(file_index) = self.find_name(direct_collections, name) {
+                return Some(file_index);
+            }
+
+            let child_bundles = match current_bundle_index {
+                Some(bundle_index) => self.child_bundle_entries.get(bundle_index)?,
+                None => {
+                    for &bundle_index in &self.root_bundle_indices {
+                        if Some(bundle_index) == excluded_child_bundle {
+                            continue;
+                        }
+                        let bundle = self.workspace.container_bundles.get(bundle_index)?;
+                        if let Some(file_index) =
+                            self.find_name(&bundle.direct_collection_file_indices, name)
+                        {
+                            return Some(file_index);
+                        }
+                    }
+                    return None;
+                }
+            };
+            for &(_, child_bundle_index) in child_bundles {
+                if Some(child_bundle_index) == excluded_child_bundle {
+                    continue;
+                }
+                let child_bundle = self.workspace.container_bundles.get(child_bundle_index)?;
+                if let Some(file_index) =
+                    self.find_name(&child_bundle.direct_collection_file_indices, name)
+                {
+                    return Some(file_index);
+                }
+            }
+
+            let bundle_index = current_bundle_index?;
+            let bundle = self.workspace.container_bundles.get(bundle_index)?;
+            excluded_child_bundle = Some(bundle_index);
+            current_bundle_index = bundle.parent_bundle_index;
+        }
+    }
+
+    fn find_name(&self, file_indices: &[usize], name: &str) -> Option<usize> {
+        file_indices.iter().copied().find(|file_index| {
+            self.fixed_file_names
+                .get(*file_index)
+                .is_some_and(|fixed_name| fixed_name == name)
+        })
+    }
 }
 
 /// Result of walking external-file tables reachable from the initial workspace files.
@@ -1679,7 +1924,7 @@ impl SerializedFileWorkspace {
         self.report
     }
 
-    /// Join every loaded file's per-file PPtr scan by normalized SerializedFile name.
+    /// Join per-file PPtr scans using the source Bundle collection lookup order.
     pub fn reference_graph(
         &self,
         limits: MultiFileReferenceGraphLimits,
@@ -1696,7 +1941,15 @@ impl SerializedFileWorkspace {
             metadata: &file.metadata,
             graph: &file.reference_graph,
         }));
-        MultiFileReferenceGraph::build_with_limits(&named_files, limits)
+        let collection_lookup = SourceBundleCollectionLookup::build(self, limits)?;
+        MultiFileReferenceGraph::build_with_dependency_resolver(
+            &named_files,
+            limits,
+            |source_file_index, identifier| {
+                let dependency_name = identifier.get_file_path()?;
+                collection_lookup.resolve(source_file_index, &dependency_name)
+            },
+        )
     }
 }
 
@@ -3219,7 +3472,8 @@ fn workspace_error(
 mod tests {
     use super::{
         append_mounted_container_bundles, SerializedFileDependencyOutcome, SerializedFileWorkspace,
-        SerializedFileWorkspaceErrorKind, SerializedFileWorkspaceLimits, WorkspaceSerializedBundle,
+        SerializedFileWorkspaceErrorKind, SerializedFileWorkspaceLimits,
+        SerializedFileWorkspaceReport, WorkspaceSerializedBundle,
     };
     use crate::io::dependency::{DependencyFilePath, DependencyIndexLimits};
     use crate::io::filesystem::VirtualFileSystem;
@@ -3234,12 +3488,13 @@ mod tests {
     use crate::serialized_file::collection_workspace::{
         WorkspaceAssetCollections, WorkspaceCollectionErrorKind, WorkspaceCollectionLimits,
     };
+    use crate::serialized_file::file::SerializedFile;
     use crate::serialized_file::object::SerializedValue;
     use crate::serialized_file::object_workspace::{
         ObjectWorkspace, ObjectWorkspaceErrorKind, ObjectWorkspaceLimits,
     };
     use crate::serialized_file::reference_graph::{
-        MultiFilePPtrResolution, MultiFileReferenceGraphLimits,
+        MultiFilePPtrResolution, MultiFileReferenceGraphLimits, ObjectReferenceGraph,
     };
 
     fn put_u16_le(output: &mut Vec<u8>, value: u16) {
@@ -3711,6 +3966,264 @@ mod tests {
             graph.references()[0].resolution,
             MultiFilePPtrResolution::Object {
                 target_file_index: 0,
+                target_object_index: 0,
+            }
+        );
+        assert!(graph.is_complete());
+    }
+
+    #[test]
+    fn workspace_reference_graph_uses_root_collection_precedence_over_child_bundles() {
+        let make_loaded_file =
+            |file_name: &str,
+             virtual_path: &str,
+             bytes: Vec<u8>,
+             container_scope: Option<&str>,
+             container_entry_index: Option<usize>,
+             container_collection_index: Option<usize>,
+             container_bundle_index: Option<usize>| {
+                let parsed = SerializedFile::parse(&bytes).unwrap();
+                let reference_graph = ObjectReferenceGraph::build(&parsed).unwrap();
+                super::LoadedSerializedFile {
+                    file_name: file_name.to_owned(),
+                    virtual_path: virtual_path.to_owned(),
+                    container_scope: container_scope.map(str::to_owned),
+                    container_entry_index,
+                    container_collection_index,
+                    container_bundle_index,
+                    header: parsed.header,
+                    metadata: parsed.metadata,
+                    reference_graph,
+                }
+            };
+        let files = vec![
+            make_loaded_file(
+                "main.assets",
+                "/game/main.assets",
+                make_generation_10_file_with(&["shared.assets"], 1, 42, 42),
+                None,
+                None,
+                None,
+                None,
+            ),
+            make_loaded_file(
+                "shared.assets",
+                "/game/container/shared.assets",
+                make_generation_10_file_with(&["shared.assets"], 1, 42, 42),
+                Some("/game/container"),
+                Some(0),
+                Some(0),
+                Some(0),
+            ),
+            make_loaded_file(
+                "shared.assets",
+                "/game/shared.assets",
+                make_generation_10_file(),
+                None,
+                None,
+                None,
+                None,
+            ),
+        ];
+        let workspace = SerializedFileWorkspace {
+            files,
+            container_bundles: vec![WorkspaceSerializedBundle {
+                scope_path: Some("/game/container".to_owned()),
+                parent_bundle_index: None,
+                parent_entry_index: None,
+                direct_collection_file_indices: vec![1],
+                direct_resource_file_indices: Vec::new(),
+            }],
+            resource_files: Vec::new(),
+            report: SerializedFileWorkspaceReport::default(),
+        };
+
+        let graph = workspace
+            .reference_graph(MultiFileReferenceGraphLimits::default())
+            .unwrap();
+        assert_eq!(graph.references().len(), 3);
+        assert_eq!(
+            graph.references()[0].resolution,
+            MultiFilePPtrResolution::Object {
+                target_file_index: 2,
+                target_object_index: 0,
+            }
+        );
+        assert_eq!(
+            graph.references()[1].resolution,
+            MultiFilePPtrResolution::Object {
+                target_file_index: 1,
+                target_object_index: 0,
+            }
+        );
+        assert!(graph.is_complete());
+    }
+
+    #[test]
+    fn workspace_reference_graph_keeps_first_root_bundle_collection_match() {
+        let make_loaded_file =
+            |file_name: &str,
+             virtual_path: &str,
+             bytes: Vec<u8>,
+             container_scope: Option<&str>,
+             container_bundle_index: Option<usize>| {
+                let parsed = SerializedFile::parse(&bytes).unwrap();
+                let reference_graph = ObjectReferenceGraph::build(&parsed).unwrap();
+                super::LoadedSerializedFile {
+                    file_name: file_name.to_owned(),
+                    virtual_path: virtual_path.to_owned(),
+                    container_scope: container_scope.map(str::to_owned),
+                    container_entry_index: container_bundle_index.map(|_| 0),
+                    container_collection_index: container_bundle_index.map(|_| 0),
+                    container_bundle_index,
+                    header: parsed.header,
+                    metadata: parsed.metadata,
+                    reference_graph,
+                }
+            };
+        let workspace = SerializedFileWorkspace {
+            files: vec![
+                make_loaded_file(
+                    "main.assets",
+                    "/game/main.assets",
+                    make_generation_10_file_with(&["shared.assets"], 1, 42, 42),
+                    None,
+                    None,
+                ),
+                make_loaded_file(
+                    "shared.assets",
+                    "/game/first/shared.assets",
+                    make_generation_10_file(),
+                    Some("/game/first"),
+                    Some(0),
+                ),
+                make_loaded_file(
+                    "shared.assets",
+                    "/game/second/shared.assets",
+                    make_generation_10_file(),
+                    Some("/game/second"),
+                    Some(1),
+                ),
+            ],
+            container_bundles: vec![
+                WorkspaceSerializedBundle {
+                    scope_path: Some("/game/first".to_owned()),
+                    parent_bundle_index: None,
+                    parent_entry_index: None,
+                    direct_collection_file_indices: vec![1],
+                    direct_resource_file_indices: Vec::new(),
+                },
+                WorkspaceSerializedBundle {
+                    scope_path: Some("/game/second".to_owned()),
+                    parent_bundle_index: None,
+                    parent_entry_index: None,
+                    direct_collection_file_indices: vec![2],
+                    direct_resource_file_indices: Vec::new(),
+                },
+            ],
+            resource_files: Vec::new(),
+            report: SerializedFileWorkspaceReport::default(),
+        };
+
+        let graph = workspace
+            .reference_graph(MultiFileReferenceGraphLimits::default())
+            .unwrap();
+        assert_eq!(
+            graph.references()[0].resolution,
+            MultiFilePPtrResolution::Object {
+                target_file_index: 1,
+                target_object_index: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn workspace_reference_graph_orders_nested_bundle_matches_by_source_entry() {
+        let make_loaded_file = |file_name: &str,
+                                virtual_path: &str,
+                                bytes: Vec<u8>,
+                                container_scope: &str,
+                                container_entry_index: usize,
+                                container_collection_index: usize,
+                                container_bundle_index: usize| {
+            let parsed = SerializedFile::parse(&bytes).unwrap();
+            let reference_graph = ObjectReferenceGraph::build(&parsed).unwrap();
+            super::LoadedSerializedFile {
+                file_name: file_name.to_owned(),
+                virtual_path: virtual_path.to_owned(),
+                container_scope: Some(container_scope.to_owned()),
+                container_entry_index: Some(container_entry_index),
+                container_collection_index: Some(container_collection_index),
+                container_bundle_index: Some(container_bundle_index),
+                header: parsed.header,
+                metadata: parsed.metadata,
+                reference_graph,
+            }
+        };
+        let workspace = SerializedFileWorkspace {
+            files: vec![
+                make_loaded_file(
+                    "main.assets",
+                    "/game/root/main.assets",
+                    make_generation_10_file_with(&["shared.assets"], 1, 42, 42),
+                    "/game/root",
+                    0,
+                    0,
+                    0,
+                ),
+                make_loaded_file(
+                    "shared.assets",
+                    "/game/root/entry-five/shared.assets",
+                    make_generation_10_file(),
+                    "/game/root/entry-five",
+                    0,
+                    0,
+                    1,
+                ),
+                make_loaded_file(
+                    "shared.assets",
+                    "/game/root/entry-two/shared.assets",
+                    make_generation_10_file(),
+                    "/game/root/entry-two",
+                    0,
+                    0,
+                    2,
+                ),
+            ],
+            container_bundles: vec![
+                WorkspaceSerializedBundle {
+                    scope_path: Some("/game/root".to_owned()),
+                    parent_bundle_index: None,
+                    parent_entry_index: None,
+                    direct_collection_file_indices: vec![0],
+                    direct_resource_file_indices: Vec::new(),
+                },
+                WorkspaceSerializedBundle {
+                    scope_path: Some("/game/root/entry-five".to_owned()),
+                    parent_bundle_index: Some(0),
+                    parent_entry_index: Some(5),
+                    direct_collection_file_indices: vec![1],
+                    direct_resource_file_indices: Vec::new(),
+                },
+                WorkspaceSerializedBundle {
+                    scope_path: Some("/game/root/entry-two".to_owned()),
+                    parent_bundle_index: Some(0),
+                    parent_entry_index: Some(2),
+                    direct_collection_file_indices: vec![2],
+                    direct_resource_file_indices: Vec::new(),
+                },
+            ],
+            resource_files: Vec::new(),
+            report: SerializedFileWorkspaceReport::default(),
+        };
+
+        let graph = workspace
+            .reference_graph(MultiFileReferenceGraphLimits::default())
+            .unwrap();
+        assert_eq!(
+            graph.references()[0].resolution,
+            MultiFilePPtrResolution::Object {
+                target_file_index: 2,
                 target_object_index: 0,
             }
         );
