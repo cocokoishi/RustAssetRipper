@@ -153,3 +153,13 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - PowerShell `& 'C:\Users\koishi\.cargo\bin\cargo.exe' clippy --workspace --all-targets --locked -- -D warnings`: exit 0. `cargo fmt --all -- --check`: exit 0.
 - `tools/verify-baseline.ps1`: exit 0; all 1,449 reference files match the manifest. `git diff --check`: exit 0.
 - The import orchestrator still needs to build the registry/DataPaths and recursively parse dispatched dependencies into the bundle graph. No host directory or user sample was scanned; no real-file/C# differential has run.
+
+## VFS SerializedFile workspace load
+
+- Added bounded `SerializedFileWorkspace::load_from_vfs`: preflights caller-supplied named VFS paths and aggregate input/name limits, dispatches each input through `SchemeReader`, requires a SerializedFile, parses its header and metadata, builds its per-file PPtr graph, and enforces aggregate object/reference limits.
+- The workspace retains source name/path, header, metadata, and reference graph. Input bytes remain owned by VFS and are not copied into the workspace result. `reference_graph()` can join the loaded set by normalized names; absent dependencies remain visible in its result.
+- Three synthetic tests cover successful generation-10 VFS load and self-reference resolution, total-input preflight before processing, a Resource rejected as non-SerializedFile, and aggregate object limits. A warnings-denied Clippy run initially flagged the contextual error type's size; boxing the error resolved the lint without suppressing it.
+- PowerShell `& 'C:\Users\koishi\.cargo\bin\cargo.exe' test --workspace --locked --quiet`: exit 0; 162 unit tests passed, 0 failed, 0 doc tests.
+- PowerShell `& 'C:\Users\koishi\.cargo\bin\cargo.exe' clippy --workspace --all-targets --locked -- -D warnings`: exit 0. `cargo fmt --all -- --check`: exit 0.
+- `tools/verify-baseline.ps1`: exit 0; all 1,449 reference files match the manifest. `git diff --check`: exit 0.
+- Recursive dependency loading, automatic discovery of all serialized-file leaves, and real-file/C# differential validation have not run or been implemented. No user sample was read.
