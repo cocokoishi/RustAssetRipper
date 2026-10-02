@@ -1,6 +1,7 @@
 //! Source-compatible detection and recursive decoding of top-level file schemes.
 
 use std::borrow::Cow;
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::io::{self, Read, Seek, SeekFrom};
@@ -15,7 +16,7 @@ use crate::container::unityfs::{UnityFsBundle, UnityFsError, UnityFsLimits};
 use crate::container::web_file::{WebFile, WebFileError, WebFileLimits};
 use crate::io::discovery::{discover_directory_inputs, DirectoryDiscoveryError};
 use crate::io::filesystem::VirtualFileSystem;
-use crate::io::stream::{logical_file_name, open_logical_file, SmartStream};
+use crate::io::stream::{logical_file_name, logical_file_path, open_logical_file, SmartStream};
 use crate::serialized_file::file::{SerializedFile, SerializedFileError};
 use crate::serialized_file::format_version::FormatVersion;
 
@@ -140,6 +141,23 @@ pub struct BatchMountReport {
     pub mounted_bytes: u64,
 }
 
+/// One explicitly selected local path and its virtual destination root.
+///
+/// A split-file group should be represented by one base path or one `.splitN` part path. The
+/// destination is used as the root for container entries and as the parent for standalone files.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PathMountInput {
+    pub path: std::path::PathBuf,
+    pub destination_root: Option<String>,
+}
+
+struct BatchInputRequest {
+    path: std::path::PathBuf,
+    source_bytes: u64,
+    standalone_destination: Option<String>,
+    container_destination: Option<String>,
+}
+
 #[derive(Debug)]
 pub struct BatchMountError {
     pub partial_report: BatchMountReport,
@@ -150,8 +168,14 @@ pub struct BatchMountError {
 #[derive(Debug)]
 pub enum BatchMountErrorKind {
     DirectoryDiscovery(Box<DirectoryDiscoveryError>),
+    InputCountLimitExceeded { count: usize, limit: usize },
+    DuplicateInputPath,
+    ExplicitInputIsDirectory,
+    ExplicitInputIsSymbolicLink,
+    ExplicitInputNotRegular,
     TotalInputLimitExceeded { requested_total: u64, limit: u64 },
     InputFileLimitExceeded { size: u64, limit: u64 },
+    InputListAllocationFailed { requested: usize },
     TotalOutputLimitExceeded { requested_total: u64, limit: u64 },
     InvalidInputPathEncoding,
     ReportOverflow,
@@ -624,10 +648,40 @@ fn merge_batch_mount_report(
     Ok(())
 }
 
+fn batch_input_io_error(
+    report: BatchMountReport,
+    path: &Path,
+    source: std::io::Error,
+) -> BatchMountError {
+    BatchMountError::new(
+        report,
+        Some(path.to_path_buf()),
+        BatchMountErrorKind::InputMount(Box::new(ContainerMountError::new(
+            ContainerMountReport::default(),
+            ContainerMountErrorKind::Scheme(SchemeError::new(SchemeErrorKind::StreamInput(source))),
+        ))),
+    )
+}
+
 impl Display for BatchMountErrorKind {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::DirectoryDiscovery(error) => Display::fmt(error, formatter),
+            Self::InputCountLimitExceeded { count, limit } => write!(
+                formatter,
+                "input list contains {count} paths, exceeding batch limit {limit}"
+            ),
+            Self::DuplicateInputPath => formatter.write_str(
+                "input list contains the same logical path and destination more than once",
+            ),
+            Self::ExplicitInputIsDirectory => formatter
+                .write_str("path-list inputs must be files; use mount_directory for directories"),
+            Self::ExplicitInputIsSymbolicLink => {
+                formatter.write_str("symbolic-link inputs are not allowed")
+            }
+            Self::ExplicitInputNotRegular => {
+                formatter.write_str("path-list input is not a regular file")
+            }
             Self::TotalInputLimitExceeded {
                 requested_total,
                 limit,
@@ -638,6 +692,10 @@ impl Display for BatchMountErrorKind {
             Self::InputFileLimitExceeded { size, limit } => write!(
                 formatter,
                 "input has {size} bytes, exceeding per-file limit {limit}"
+            ),
+            Self::InputListAllocationFailed { requested } => write!(
+                formatter,
+                "could not allocate storage for {requested} path-list inputs"
             ),
             Self::TotalOutputLimitExceeded {
                 requested_total,
@@ -1236,6 +1294,116 @@ impl SchemeReader {
         }
     }
 
+    /// Preflight and mount an explicit list of local file or split-file paths.
+    ///
+    /// The list order is preserved. Each item supplies its own virtual destination root so
+    /// callers can keep inputs from different source directories separate.
+    pub fn mount_paths(
+        inputs: &[PathMountInput],
+        filesystem: &mut VirtualFileSystem,
+        scheme_limits: SchemeReaderLimits,
+        mount_limits: ContainerMountLimits,
+        batch_limits: BatchMountLimits,
+    ) -> Result<BatchMountReport, BatchMountError> {
+        let mut report = BatchMountReport {
+            discovered_inputs: inputs.len(),
+            ..BatchMountReport::default()
+        };
+        if inputs.len() > batch_limits.max_inputs {
+            return Err(BatchMountError::new(
+                report,
+                None,
+                BatchMountErrorKind::InputCountLimitExceeded {
+                    count: inputs.len(),
+                    limit: batch_limits.max_inputs,
+                },
+            ));
+        }
+
+        let mut requests = Vec::new();
+        requests.try_reserve_exact(inputs.len()).map_err(|_| {
+            BatchMountError::new(
+                report.clone(),
+                None,
+                BatchMountErrorKind::InputListAllocationFailed {
+                    requested: inputs.len(),
+                },
+            )
+        })?;
+        let mut seen = BTreeSet::new();
+        for input in inputs {
+            let destination_key = input.destination_root.as_deref().unwrap_or("").to_owned();
+            let logical_path = logical_file_path(&input.path);
+            if !seen.insert((logical_path, destination_key)) {
+                return Err(BatchMountError::new(
+                    report,
+                    Some(input.path.clone()),
+                    BatchMountErrorKind::DuplicateInputPath,
+                ));
+            }
+
+            match std::fs::symlink_metadata(&input.path) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(BatchMountError::new(
+                        report,
+                        Some(input.path.clone()),
+                        BatchMountErrorKind::ExplicitInputIsSymbolicLink,
+                    ));
+                }
+                Ok(metadata) if metadata.is_dir() => {
+                    return Err(BatchMountError::new(
+                        report,
+                        Some(input.path.clone()),
+                        BatchMountErrorKind::ExplicitInputIsDirectory,
+                    ));
+                }
+                Ok(metadata) if !metadata.is_file() => {
+                    return Err(BatchMountError::new(
+                        report,
+                        Some(input.path.clone()),
+                        BatchMountErrorKind::ExplicitInputNotRegular,
+                    ));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(batch_input_io_error(report, &input.path, error));
+                }
+            }
+
+            let mut stream = open_logical_file(&input.path)
+                .map_err(|error| batch_input_io_error(report.clone(), &input.path, error))?;
+            let source_bytes = stream
+                .seek(SeekFrom::End(0))
+                .map_err(|error| batch_input_io_error(report.clone(), &input.path, error))?;
+            report.discovered_source_bytes = report
+                .discovered_source_bytes
+                .checked_add(source_bytes)
+                .ok_or_else(|| {
+                    BatchMountError::new(
+                        report.clone(),
+                        Some(input.path.clone()),
+                        BatchMountErrorKind::ReportOverflow,
+                    )
+                })?;
+            requests.push(BatchInputRequest {
+                path: input.path.clone(),
+                source_bytes,
+                standalone_destination: input.destination_root.clone(),
+                container_destination: input.destination_root.clone(),
+            });
+        }
+
+        Self::mount_batch_requests(
+            requests,
+            filesystem,
+            scheme_limits,
+            mount_limits,
+            batch_limits,
+            report,
+        )
+    }
+
     /// Discover and mount every regular input beneath a local directory.
     ///
     /// Traversal is deterministic, symbolic links and special files are rejected, numbered
@@ -1270,25 +1438,93 @@ impl SchemeReader {
                 BatchMountErrorKind::DirectoryDiscovery(Box::new(error)),
             )
         })?;
-        let mut report = BatchMountReport {
+        let report = BatchMountReport {
             directory_entries_scanned: discovery_report.directory_entries_scanned,
             discovered_inputs: discovery_report.discovered_inputs,
             discovered_source_bytes: discovery_report.source_bytes,
             ..BatchMountReport::default()
         };
 
-        if discovery_report.source_bytes > batch_limits.max_total_input_bytes {
+        let mut requests = Vec::new();
+        requests.try_reserve_exact(inputs.len()).map_err(|_| {
+            BatchMountError::new(
+                report.clone(),
+                None,
+                BatchMountErrorKind::InputListAllocationFailed {
+                    requested: inputs.len(),
+                },
+            )
+        })?;
+        for input in inputs {
+            let standalone_destination =
+                directory_input_destination(destination_root, &input.relative_path).map_err(
+                    |_| {
+                        BatchMountError::new(
+                            report.clone(),
+                            Some(input.path.clone()),
+                            BatchMountErrorKind::InvalidInputPathEncoding,
+                        )
+                    },
+                )?;
+            let container_destination =
+                directory_relative_destination(destination_root, &input.relative_path).map_err(
+                    |_| {
+                        BatchMountError::new(
+                            report.clone(),
+                            Some(input.path.clone()),
+                            BatchMountErrorKind::InvalidInputPathEncoding,
+                        )
+                    },
+                )?;
+            requests.push(BatchInputRequest {
+                path: input.path,
+                source_bytes: input.source_bytes,
+                standalone_destination,
+                container_destination,
+            });
+        }
+
+        Self::mount_batch_requests(
+            requests,
+            filesystem,
+            scheme_limits,
+            mount_limits,
+            batch_limits,
+            report,
+        )
+    }
+
+    fn mount_batch_requests(
+        requests: Vec<BatchInputRequest>,
+        filesystem: &mut VirtualFileSystem,
+        scheme_limits: SchemeReaderLimits,
+        mount_limits: ContainerMountLimits,
+        batch_limits: BatchMountLimits,
+        mut report: BatchMountReport,
+    ) -> Result<BatchMountReport, BatchMountError> {
+        if requests.len() > batch_limits.max_inputs {
+            return Err(BatchMountError::new(
+                report,
+                None,
+                BatchMountErrorKind::InputCountLimitExceeded {
+                    count: requests.len(),
+                    limit: batch_limits.max_inputs,
+                },
+            ));
+        }
+        if report.discovered_source_bytes > batch_limits.max_total_input_bytes {
+            let requested_total = report.discovered_source_bytes;
             return Err(BatchMountError::new(
                 report,
                 None,
                 BatchMountErrorKind::TotalInputLimitExceeded {
-                    requested_total: discovery_report.source_bytes,
+                    requested_total,
                     limit: batch_limits.max_total_input_bytes,
                 },
             ));
         }
         let per_input_limit = u64::try_from(scheme_limits.max_input_bytes).unwrap_or(u64::MAX);
-        if let Some(input) = inputs
+        if let Some(input) = requests
             .iter()
             .find(|input| input.source_bytes > per_input_limit)
         {
@@ -1302,7 +1538,7 @@ impl SchemeReader {
             ));
         }
 
-        for input in inputs {
+        for input in requests {
             let dispatched = Self::read_path(&input.path, scheme_limits).map_err(|error| {
                 BatchMountError::new(
                     report.clone(),
@@ -1321,18 +1557,11 @@ impl SchemeReader {
                     | FileKind::UnityWebData
                     | FileKind::UnityArchive
             );
-            let input_destination = if is_container {
-                directory_relative_destination(destination_root, &input.relative_path)
+            let destination = if is_container {
+                input.container_destination.as_deref()
             } else {
-                directory_input_destination(destination_root, &input.relative_path)
-            }
-            .map_err(|_| {
-                BatchMountError::new(
-                    report.clone(),
-                    Some(input.path.clone()),
-                    BatchMountErrorKind::InvalidInputPathEncoding,
-                )
-            })?;
+                input.standalone_destination.as_deref()
+            };
             let remaining_output = batch_limits
                 .max_total_output_bytes
                 .checked_sub(report.mounted_bytes)
@@ -1353,7 +1582,7 @@ impl SchemeReader {
                 &input.path,
                 dispatched,
                 filesystem,
-                input_destination.as_deref(),
+                destination,
                 per_input_mount_limits,
             );
             match mounted {
@@ -1776,7 +2005,7 @@ impl Display for SchemeErrorKind {
 mod tests {
     use super::{
         BatchMountErrorKind, BatchMountLimits, ContainerMountErrorKind, ContainerMountLimits,
-        FileKind, SchemeErrorKind, SchemeReader, SchemeReaderLimits, WrapperKind,
+        FileKind, PathMountInput, SchemeErrorKind, SchemeReader, SchemeReaderLimits, WrapperKind,
     };
     use crate::compression::wrappers::{
         compress_gzip, decompress_brotli, has_brotli_file_signature,
@@ -2440,6 +2669,121 @@ mod tests {
         ));
         assert_eq!(depth_limited.count(), 1);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn mount_paths_imports_explicit_roots_and_honors_each_destination() {
+        let resource_path = unique_temp_file_path("explicit-resource");
+        let container_path = unique_temp_file_path("explicit-container");
+        std::fs::write(&resource_path, b"first").unwrap();
+        std::fs::write(&container_path, webdata_fixture(&[("leaf.bin", b"leaf")])).unwrap();
+        let inputs = [
+            PathMountInput {
+                path: resource_path.clone(),
+                destination_root: Some("/explicit".to_owned()),
+            },
+            PathMountInput {
+                path: container_path.clone(),
+                destination_root: Some("/explicit/container".to_owned()),
+            },
+        ];
+        let mut filesystem = VirtualFileSystem::new();
+
+        let report = SchemeReader::mount_paths(
+            &inputs,
+            &mut filesystem,
+            SchemeReaderLimits::default(),
+            ContainerMountLimits::default(),
+            BatchMountLimits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(report.discovered_inputs, 2);
+        assert_eq!(report.completed_inputs, 2);
+        assert_eq!(report.mounted_entries, 2);
+        assert_eq!(report.mounted_bytes, 9);
+        let resource_virtual_path = format!(
+            "/explicit/{}",
+            resource_path.file_name().unwrap().to_string_lossy()
+        );
+        assert_eq!(
+            filesystem
+                .read_all_bytes(&resource_virtual_path, 16)
+                .unwrap(),
+            b"first"
+        );
+        assert_eq!(
+            filesystem
+                .read_all_bytes("/explicit/container/leaf.bin", 16)
+                .unwrap(),
+            b"leaf"
+        );
+        std::fs::remove_file(resource_path).unwrap();
+        std::fs::remove_file(container_path).unwrap();
+    }
+
+    #[test]
+    fn mount_paths_preflights_input_size_and_rejects_duplicate_split_groups() {
+        let resource_path = unique_temp_file_path("explicit-limit");
+        std::fs::write(&resource_path, b"resource").unwrap();
+        let inputs = [PathMountInput {
+            path: resource_path.clone(),
+            destination_root: Some("/explicit".to_owned()),
+        }];
+        let mut filesystem = VirtualFileSystem::new();
+
+        let error = SchemeReader::mount_paths(
+            &inputs,
+            &mut filesystem,
+            SchemeReaderLimits::default(),
+            ContainerMountLimits::default(),
+            BatchMountLimits {
+                max_total_input_bytes: 4,
+                ..BatchMountLimits::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error.kind,
+            BatchMountErrorKind::TotalInputLimitExceeded {
+                requested_total: 8,
+                limit: 4
+            }
+        ));
+        assert_eq!(filesystem.count(), 1);
+
+        let split_base = unique_temp_file_path("explicit-split");
+        let split0 = PathBuf::from(format!("{}.split0", split_base.display()));
+        let split1 = PathBuf::from(format!("{}.split1", split_base.display()));
+        std::fs::write(&split0, b"split ").unwrap();
+        std::fs::write(&split1, b"group").unwrap();
+        let split_inputs = [
+            PathMountInput {
+                path: split0.clone(),
+                destination_root: Some("/explicit".to_owned()),
+            },
+            PathMountInput {
+                path: split1.clone(),
+                destination_root: Some("/explicit".to_owned()),
+            },
+        ];
+        let error = SchemeReader::mount_paths(
+            &split_inputs,
+            &mut filesystem,
+            SchemeReaderLimits::default(),
+            ContainerMountLimits::default(),
+            BatchMountLimits::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error.kind,
+            BatchMountErrorKind::DuplicateInputPath
+        ));
+        assert_eq!(filesystem.count(), 1);
+
+        std::fs::remove_file(resource_path).unwrap();
+        std::fs::remove_file(split0).unwrap();
+        std::fs::remove_file(split1).unwrap();
     }
 
     #[test]

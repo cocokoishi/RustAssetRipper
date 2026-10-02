@@ -38,7 +38,7 @@ Phase 1: full Rust port of the local AssetRipper source baseline. The Phase 1 ga
 ## Latest verification
 
 - `cargo fmt --all -- --check`: exit 0.
-- `cargo test --workspace --locked`: exit 0; 145 unit tests passed, 0 failed, 0 doc tests.
+- `cargo test --workspace --locked`: exit 0; 147 unit tests passed, 0 failed, 0 doc tests.
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`: exit 0.
 - `cargo tree --locked`: exit 0; the dependency graph is recorded in `docs/dependencies-and-licenses.md`.
 - `tools/verify-baseline.ps1`: exit 0; all 1,449 reference files match the manifest.
@@ -49,7 +49,7 @@ Phase 1: full Rust port of the local AssetRipper source baseline. The Phase 1 ga
 
 ## Next work
 
-1. Add the broader local FileSystem adapter and explicit path-list batching around the new directory importer; then connect full object construction and cross-file external resource resolution.
+1. Add the broader local FileSystem adapter around directory and explicit-path import; then connect full object construction and cross-file external resource resolution.
 2. Add independent codec and real-file fixtures, and resolve source differentials such as the Brotli marker issue with executable C# evidence when a .NET environment is available.
 3. Expand `docs/feature-parity.md` into per-version/per-platform behavior rows across all 51 projects, registration tables, options/defaults, generators, GUI workflows, and exporters.
 4. Add independent generic fixtures and source-derived regression coverage for untested SerializedFile generations and malformed layouts; obtain a usable .NET environment before claiming C# differential validation.
@@ -71,4 +71,12 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Directory entries, depth, logical input count, aggregate source bytes, and aggregate mounted leaf bytes have configurable limits. Input bytes are preflighted before mount mutation; later mount failures retain completed-input and partial-output counts.
 - Synthetic tests cover standalone files, nested directories, a root WebData container, split parts, aggregate input/output bounds, partial progress, colliding internal paths from separate bundles, and ambiguous regular/split names. No user samples were scanned.
 - `cargo test --workspace --locked`: 145 tests passed; formatting and Clippy are clean, and the baseline verifier matched all 1,449 reference files.
-- Remaining input work: broader local FileSystem adapter, explicit path-list batching, and external dependency discovery/loading. The next major implementation area is full object construction and cross-file reference resolution.
+- Remaining input work: broader local FileSystem adapter and external dependency discovery/loading. The next major implementation area is full object construction and cross-file reference resolution.
+
+## Explicit path-list batch import
+
+- `SchemeReader::mount_paths` accepts an ordered slice of local path/destination pairs and shares the directory importer’s input, output, per-file, and per-container limits.
+- The full logical input length is preflighted before any VFS mutation. Directories and symbolic links are rejected; repeated logical split paths targeting the same virtual root are rejected before mounting.
+- Synthetic tests cover a standalone Resource plus a WebData container with independent destinations, aggregate input-size preflight, and duplicate split-group rejection.
+- `cargo test --workspace --locked`: 147 tests passed; warnings-denied Clippy and `cargo fmt --all -- --check` passed.
+- Callers must provide one path per logical split group and choose distinct destination roots where source names may collide. Real-file and C# differential validation remains outstanding.

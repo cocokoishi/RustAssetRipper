@@ -776,7 +776,14 @@ fn open_split_file(base_path: &Path, max_parts: usize) -> io::Result<MultiFileSt
         let Some(suffix) = name.strip_prefix(&prefix) else {
             continue;
         };
-        if !entry.file_type()?.is_file() {
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("split part {name:?} is a symbolic link"),
+            ));
+        }
+        if !file_type.is_file() {
             continue;
         }
         if suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {

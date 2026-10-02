@@ -117,3 +117,11 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`: exit 0.
 - `tools/verify-baseline.ps1`: exit 0; all 1,449 reference files match the manifest. `git diff --check`: exit 0.
 - The implementation has not yet been differentially checked against real AssetRipper input directories or C# `MultiFileStream` execution. It does not load external resource dependencies or provide the broader local `FileSystem` adapter.
+
+## Explicit path-list batch import
+
+- `SchemeReader::mount_paths` imports caller-ordered `PathMountInput` values, using each supplied destination root for that input's container entries or standalone-file parent.
+- Preflight opens each local regular or split logical stream to determine its complete byte length, rejects directory/symbolic-link inputs and duplicate logical path/destination pairs, and checks the aggregate input budget before mounting.
+- Two synthetic temporary-file tests cover Resource and WebData imports at separate destinations, total input size rejection before VFS mutation, and repeated `.splitN` members rejected before mutation.
+- `cargo test --workspace --locked`: exit 0; 147 unit tests passed, 0 failed, 0 doc tests. `cargo clippy --workspace --all-targets --locked -- -D warnings`: exit 0. `cargo fmt --all -- --check`: exit 0.
+- No real-file or C# differential has run; callers must represent each split family with one path.
