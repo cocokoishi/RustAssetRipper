@@ -1,0 +1,283 @@
+//! Bounded decoder for Unity's LZMA block payloads.
+
+use std::error::Error;
+use std::fmt::{self, Display, Formatter};
+use std::io::{self, Cursor, Write};
+
+/// Decode a Unity LZMA payload: five LZMA properties bytes followed by a raw stream.
+///
+/// The expected decoded size is supplied by Unity's bundle metadata. Both the output
+/// allocation and the decoder's history buffer are bounded by `maximum_output_size`.
+pub fn decompress_block(
+    input: &[u8],
+    expected_output_size: usize,
+    maximum_output_size: usize,
+) -> Result<Vec<u8>, LzmaBlockError> {
+    if expected_output_size > maximum_output_size {
+        return Err(LzmaBlockError::new(
+            0,
+            LzmaBlockErrorKind::OutputLimitExceeded {
+                requested: expected_output_size,
+                limit: maximum_output_size,
+            },
+        ));
+    }
+    if input.len() < 5 {
+        return Err(LzmaBlockError::new(
+            input.len(),
+            LzmaBlockErrorKind::HeaderTooShort {
+                actual: input.len(),
+            },
+        ));
+    }
+
+    let property_byte = input[0];
+    if property_byte >= 9 * 5 * 5 {
+        return Err(LzmaBlockError::new(
+            0,
+            LzmaBlockErrorKind::InvalidProperties {
+                value: property_byte,
+            },
+        ));
+    }
+    let lc = u32::from(property_byte % 9);
+    let property_tail = u32::from(property_byte / 9);
+    let lp = property_tail % 5;
+    let pb = property_tail / 5;
+
+    let declared_dictionary_size =
+        u32::from_le_bytes([input[1], input[2], input[3], input[4]]).max(4096);
+    // A valid match cannot refer farther back than the amount of output we allow.
+    // Clamping also prevents malicious dictionary declarations from overflowing
+    // the decoder's circular-buffer index arithmetic on 32-bit targets.
+    let index_limit = usize::MAX / 2;
+    let effective_dictionary_size = (declared_dictionary_size as usize)
+        .min(maximum_output_size.max(1))
+        .min(index_limit.max(1));
+    let effective_dictionary_size = u32::try_from(effective_dictionary_size).map_err(|_| {
+        LzmaBlockError::new(
+            1,
+            LzmaBlockErrorKind::DictionarySizeUnrepresentable {
+                size: effective_dictionary_size,
+            },
+        )
+    })?;
+
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(expected_output_size)
+        .map_err(|_| {
+            LzmaBlockError::new(
+                0,
+                LzmaBlockErrorKind::AllocationFailed {
+                    requested: expected_output_size,
+                },
+            )
+        })?;
+
+    let params = lzma_rs::decompress::raw::LzmaParams::new(
+        lzma_rs::decompress::raw::LzmaProperties { lc, lp, pb },
+        effective_dictionary_size,
+        Some(expected_output_size as u64),
+    );
+    let mut decoder = lzma_rs::decompress::raw::LzmaDecoder::new(
+        params,
+        Some(maximum_output_size.min(index_limit)),
+    )
+    .map_err(|error| LzmaBlockError::new(0, LzmaBlockErrorKind::Decoder(error.to_string())))?;
+
+    let mut writer = BoundedOutput {
+        bytes: output,
+        maximum: expected_output_size,
+        exceeded: false,
+    };
+    let mut reader = Cursor::new(&input[5..]);
+    if let Err(error) = decoder.decompress(&mut reader, &mut writer) {
+        if writer.exceeded {
+            return Err(LzmaBlockError::new(
+                5 + reader.position() as usize,
+                LzmaBlockErrorKind::OutputExceeded {
+                    expected: expected_output_size,
+                },
+            ));
+        }
+        return Err(LzmaBlockError::new(
+            5 + reader.position() as usize,
+            LzmaBlockErrorKind::Decoder(error.to_string()),
+        ));
+    }
+
+    if writer.bytes.len() != expected_output_size {
+        return Err(LzmaBlockError::new(
+            5 + reader.position() as usize,
+            LzmaBlockErrorKind::OutputSizeMismatch {
+                expected: expected_output_size,
+                actual: writer.bytes.len(),
+            },
+        ));
+    }
+    Ok(writer.bytes)
+}
+
+struct BoundedOutput {
+    bytes: Vec<u8>,
+    maximum: usize,
+    exceeded: bool,
+}
+
+impl Write for BoundedOutput {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let end = self.bytes.len().checked_add(bytes.len()).ok_or_else(|| {
+            self.exceeded = true;
+            io::Error::new(io::ErrorKind::InvalidData, "decoded output length overflow")
+        })?;
+        if end > self.maximum {
+            self.exceeded = true;
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "decoded output exceeds expected size",
+            ));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LzmaBlockError {
+    input_offset: usize,
+    kind: LzmaBlockErrorKind,
+}
+
+impl LzmaBlockError {
+    fn new(input_offset: usize, kind: LzmaBlockErrorKind) -> Self {
+        Self { input_offset, kind }
+    }
+
+    pub fn input_offset(&self) -> usize {
+        self.input_offset
+    }
+}
+
+impl Display for LzmaBlockError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{} at payload byte {}",
+            self.kind, self.input_offset
+        )
+    }
+}
+
+impl Error for LzmaBlockError {}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum LzmaBlockErrorKind {
+    HeaderTooShort { actual: usize },
+    InvalidProperties { value: u8 },
+    DictionarySizeUnrepresentable { size: usize },
+    OutputLimitExceeded { requested: usize, limit: usize },
+    AllocationFailed { requested: usize },
+    OutputExceeded { expected: usize },
+    OutputSizeMismatch { expected: usize, actual: usize },
+    Decoder(String),
+}
+
+impl Display for LzmaBlockErrorKind {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::HeaderTooShort { actual } => {
+                write!(
+                    formatter,
+                    "LZMA properties header has {actual} bytes, expected 5"
+                )
+            }
+            Self::InvalidProperties { value } => {
+                write!(formatter, "invalid LZMA properties byte {value}")
+            }
+            Self::DictionarySizeUnrepresentable { size } => {
+                write!(
+                    formatter,
+                    "LZMA dictionary size {size} cannot be represented"
+                )
+            }
+            Self::OutputLimitExceeded { requested, limit } => write!(
+                formatter,
+                "decoded size {requested} exceeds configured limit {limit}"
+            ),
+            Self::AllocationFailed { requested } => {
+                write!(formatter, "could not allocate {requested} decoded bytes")
+            }
+            Self::OutputExceeded { expected } => {
+                write!(formatter, "decoded output exceeds declared size {expected}")
+            }
+            Self::OutputSizeMismatch { expected, actual } => write!(
+                formatter,
+                "decoded output has {actual} bytes, expected {expected}"
+            ),
+            Self::Decoder(detail) => write!(formatter, "LZMA decoder: {detail}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use super::{decompress_block, LzmaBlockErrorKind};
+
+    #[test]
+    fn decodes_a_raw_stream_with_unity_properties() {
+        let original = b"Unity LZMA blocks preserve the complete decoded payload.";
+        let mut framed = Vec::new();
+        lzma_rs::lzma_compress(&mut Cursor::new(original), &mut framed).unwrap();
+        assert!(framed.len() >= 13);
+
+        // The .lzma-alone frame has a 5-byte properties prefix, an 8-byte
+        // uncompressed-size field, and the same raw stream used by Unity.
+        let mut unity_payload = framed[..5].to_vec();
+        unity_payload.extend_from_slice(&framed[13..]);
+
+        assert_eq!(
+            decompress_block(&unity_payload, original.len(), original.len()).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn rejects_short_and_invalid_property_headers() {
+        let short = decompress_block(&[0, 1, 2, 3], 0, 0).unwrap_err();
+        assert_eq!(short.input_offset(), 4);
+        assert_eq!(short.kind, LzmaBlockErrorKind::HeaderTooShort { actual: 4 });
+
+        let invalid = decompress_block(&[225, 0, 0, 0, 0], 0, 0).unwrap_err();
+        assert_eq!(invalid.input_offset(), 0);
+        assert_eq!(
+            invalid.kind,
+            LzmaBlockErrorKind::InvalidProperties { value: 225 }
+        );
+    }
+
+    #[test]
+    fn rejects_output_larger_than_configured_limit() {
+        let error = decompress_block(&[0, 0, 0, 0, 0], 16, 15).unwrap_err();
+        assert_eq!(
+            error.kind,
+            LzmaBlockErrorKind::OutputLimitExceeded {
+                requested: 16,
+                limit: 15
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_raw_stream_with_context_offset() {
+        let error = decompress_block(&[93, 0, 0, 16, 0, 1], 32, 64).unwrap_err();
+        assert!(matches!(error.kind, LzmaBlockErrorKind::Decoder(_)));
+        assert!(error.input_offset >= 5);
+    }
+}

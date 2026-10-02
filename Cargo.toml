@@ -11,3 +11,4 @@ name = "assetripper"
 path = "src/lib.rs"
 
 [dependencies]
+lzma-rs = { version = "0.3.0", default-features = false, features = ["raw_decoder"] }

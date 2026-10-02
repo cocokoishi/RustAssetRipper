@@ -3,6 +3,7 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
 use crate::compression::lz4_block::{decompress_block, Lz4BlockError};
+use crate::compression::lzma::{decompress_block as decompress_lzma_block, LzmaBlockError};
 use crate::io::binary::{BinaryError, BinaryReader, Endian};
 
 const UNITY_FS_MAGIC: &str = "UnityFS";
@@ -800,6 +801,14 @@ fn decode_payload<'a>(
             }
             Ok(Cow::Borrowed(input))
         }
+        1 => decompress_lzma_block(input, expected_size, maximum_output_size)
+            .map(Cow::Owned)
+            .map_err(|error| {
+                UnityFsError::new(
+                    input_offset.saturating_add(error.input_offset()),
+                    UnityFsErrorKind::Lzma { context, error },
+                )
+            }),
         2 | 3 => decompress_block(input, expected_size, maximum_output_size)
             .map(Cow::Owned)
             .map_err(|error| {
@@ -1123,6 +1132,10 @@ pub enum UnityFsErrorKind {
         context: &'static str,
         error: Lz4BlockError,
     },
+    Lzma {
+        context: &'static str,
+        error: LzmaBlockError,
+    },
     MetadataRead {
         decoded_offset: usize,
         detail: String,
@@ -1222,6 +1235,7 @@ impl Display for UnityFsErrorKind {
                 "compression type {compression} is not implemented for {context}"
             ),
             Self::Lz4 { context, error } => write!(f, "LZ4 {context}: {error}"),
+            Self::Lzma { context, error } => write!(f, "LZMA {context}: {error}"),
             Self::MetadataRead {
                 decoded_offset,
                 detail,
@@ -1340,6 +1354,15 @@ mod tests {
         result
     }
 
+    fn lzma_raw_block(bytes: &[u8]) -> Vec<u8> {
+        let mut framed = Vec::new();
+        lzma_rs::lzma_compress(&mut std::io::Cursor::new(bytes), &mut framed).unwrap();
+        assert!(framed.len() >= 13);
+        let mut raw = framed[..5].to_vec();
+        raw.extend_from_slice(&framed[13..]);
+        raw
+    }
+
     fn make_bundle(
         entry_bytes: &[u8],
         metadata_compression: u8,
@@ -1364,12 +1387,37 @@ mod tests {
         flags_extra: u32,
         metadata_at_end: bool,
     ) -> Vec<u8> {
+        make_bundle_with_block_compression(
+            entry_bytes,
+            metadata_compression,
+            0,
+            split_data_block,
+            version,
+            flags_extra,
+            metadata_at_end,
+        )
+    }
+
+    fn make_bundle_with_block_compression(
+        entry_bytes: &[u8],
+        metadata_compression: u8,
+        block_compression: u8,
+        split_data_block: bool,
+        version: i32,
+        flags_extra: u32,
+        metadata_at_end: bool,
+    ) -> Vec<u8> {
         let (first_data, second_data) = if split_data_block {
             (&entry_bytes[..2], &entry_bytes[2..])
         } else {
             (entry_bytes, &[][..])
         };
-        let first_compressed = first_data.to_vec();
+        let first_compressed = match block_compression {
+            0 => first_data.to_vec(),
+            1 => lzma_raw_block(first_data),
+            2 | 3 => lz4_literal_block(first_data),
+            other => panic!("test helper does not encode compression type {other}"),
+        };
         let second_compressed = if split_data_block {
             lz4_literal_block(second_data)
         } else {
@@ -1380,7 +1428,7 @@ mod tests {
         push_i32(&mut metadata, if split_data_block { 2 } else { 1 });
         metadata.extend_from_slice(&(first_data.len() as u32).to_be_bytes());
         metadata.extend_from_slice(&(first_compressed.len() as u32).to_be_bytes());
-        metadata.extend_from_slice(&0u16.to_be_bytes());
+        metadata.extend_from_slice(&(block_compression as u16).to_be_bytes());
         if split_data_block {
             metadata.extend_from_slice(&(second_data.len() as u32).to_be_bytes());
             metadata.extend_from_slice(&(second_compressed.len() as u32).to_be_bytes());
@@ -1392,10 +1440,11 @@ mod tests {
         push_i32(&mut metadata, 4);
         push_cstring(&mut metadata, "data/file.bin");
 
-        let encoded_metadata = if metadata_compression == 0 {
-            metadata.clone()
-        } else {
-            lz4_literal_block(&metadata)
+        let encoded_metadata = match metadata_compression {
+            0 => metadata.clone(),
+            1 => lzma_raw_block(&metadata),
+            2 | 3 => lz4_literal_block(&metadata),
+            other => panic!("test helper does not encode compression type {other}"),
         };
         let mut header = Vec::new();
         push_cstring(&mut header, "UnityFS");
@@ -1459,6 +1508,17 @@ mod tests {
         let bundle = UnityFsBundle::parse(&input).unwrap();
         assert_eq!(bundle.storage_blocks.len(), 2);
         assert_eq!(bundle.read_entry(0).unwrap().as_ref(), b"abcdefghijklmnop");
+    }
+
+    #[test]
+    fn decodes_lzma_metadata_and_storage_blocks() {
+        let input =
+            make_bundle_with_block_compression(b"lzma entry payload", 1, 1, false, 6, 0, false);
+        let bundle = UnityFsBundle::parse(&input).unwrap();
+        assert_eq!(
+            bundle.read_entry(0).unwrap().as_ref(),
+            b"lzma entry payload"
+        );
     }
 
     #[test]
