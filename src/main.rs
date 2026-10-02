@@ -11,6 +11,9 @@ use assetripper::io::platform_file_inventory::{
     PlatformFileInventoryLimits, PlatformFileInventoryOptions, PlatformWorkspaceLoadOptions,
 };
 use assetripper::io::platform_structure::{detect_platform_structure, PlatformStructureLimits};
+use assetripper::processing::project_settings::{
+    EditorBuildSettingsLimits, EditorBuildSettingsModel,
+};
 use assetripper::processing::scene::SceneRootDiscoveryLimits;
 use assetripper::processing::scene::{SceneGraph, SceneGraphLimits};
 use assetripper::processing::scene_collections::{
@@ -353,6 +356,30 @@ fn print_workspace_summary_to<W: io::Write>(
             build_settings_paths = Some(scenes);
             selected_build_settings = Some((file_index, object.path_id));
             break 'select_build_settings;
+        }
+    }
+
+    let editor_build_settings = build_settings_paths
+        .as_deref()
+        .map(|paths| {
+            EditorBuildSettingsModel::from_build_settings_paths(
+                paths,
+                EditorBuildSettingsLimits::default(),
+            )
+        })
+        .transpose()?;
+    if let Some(settings) = &editor_build_settings {
+        writeln!(
+            output,
+            "Generated EditorBuildSettings: {} scenes",
+            settings.scenes().len()
+        )?;
+        for (scene_index, scene) in settings.scenes().iter().enumerate() {
+            writeln!(
+                output,
+                "  scene[{scene_index}]: enabled={}, path={:?}",
+                scene.enabled, scene.path
+            )?;
         }
     }
 
@@ -1652,6 +1679,8 @@ mod tests {
         assert!(summary.contains(
             "BuildSettings object 42: 1 scene paths (selected by source collection traversal)"
         ));
+        assert!(summary.contains("Generated EditorBuildSettings: 1 scenes"));
+        assert!(summary.contains("scene[0]: enabled=true, path=\"Assets/Scenes/First.unity\""));
         assert!(!summary.contains(
             "BuildSettings object 43: 1 scene paths (selected by source collection traversal)"
         ));

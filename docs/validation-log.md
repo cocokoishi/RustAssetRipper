@@ -505,3 +505,11 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Synthetic tests cover initial membership, collection lookup, appending another collection, duplicate ownership, and invalid scene/collection indexes. The streamed-scene WebData CLI fixture asserts the model output and its collection link.
 - `cargo test --workspace --locked --quiet`: exit 0; 257 library and 9 binary tests passed. `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo fmt --all -- --check`, `tools/verify-baseline.ps1` (1,449 reference files unchanged), and `git diff --check` all exited 0.
 - The model still refers to SerializedFile workspace indexes rather than materialized `AssetCollection` objects. Missing/zero GUIDs remain generation policies, and Prefab-generated collections, generated EditorBuildSettings assets, export, and runtime/reference-tool differential validation remain open. Phase 1 remains open; no user AssetBundle or UABEA content was inspected.
+
+## EditorBuildSettings scene model
+
+- Added a bounded `EditorBuildSettingsModel` copied from the final source-order BuildSettings path list. It preserves order and duplicate paths and marks every generated scene entry enabled, matching `SceneDefinitionProcessor`.
+- CLI inspection builds and reports this model when a BuildSettings object exists; it does not emit a Unity asset.
+- Synthetic tests cover path order, duplicates, enabled state, scene-count limits, and aggregate path-byte limits. A CLI fixture with two conflicting BuildSettings objects confirms the selected object's path is used.
+- `cargo test --workspace --locked --quiet`: exit 0; 259 library and 9 binary tests passed. `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo fmt --all -- --check`, `tools/verify-baseline.ps1` (1,449 reference files unchanged), and `git diff --check` all exited 0.
+- The source Generated Settings `AssetCollection`, concrete `EditorBuildSettings` object serialization, `EditorSettings.SetToDefaults`, and Unity project export are still open. No Unity-produced file, user AssetBundle, or UABEA content was inspected; Phase 1 remains open.
