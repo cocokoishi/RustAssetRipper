@@ -10,13 +10,18 @@ use assetripper::io::platform_file_inventory::{
     PlatformFileInventoryLimits, PlatformFileInventoryOptions, PlatformWorkspaceLoadOptions,
 };
 use assetripper::io::platform_structure::{detect_platform_structure, PlatformStructureLimits};
+use assetripper::processing::scene::SceneRootDiscoveryLimits;
+use assetripper::processing::scene::{SceneGraph, SceneGraphLimits};
 use assetripper::processing::scene_metadata::{
     decode_build_settings_scene_paths_from_parts, BuildSettingsSceneLimits,
 };
 use assetripper::scheme::{
     BatchMountLimits, BatchMountReport, ContainerMountLimits, SchemeReader, SchemeReaderLimits,
 };
+use assetripper::serialized_file::file::SerializedFile;
+use assetripper::serialized_file::metadata::ObjectInfo;
 use assetripper::serialized_file::object::ObjectDecodeLimits;
+use assetripper::serialized_file::reference_graph::MultiFileReferenceGraphLimits;
 use assetripper::serialized_file::workspace::{
     SerializedFileDependencyReport, SerializedFileWorkspace, SerializedFileWorkspaceLimits,
 };
@@ -226,8 +231,20 @@ fn print_workspace_summary(
     workspace: &SerializedFileWorkspace,
     dependencies: &SerializedFileDependencyReport,
 ) -> Result<(), Box<dyn Error>> {
+    let has_scene_objects = workspace.files().iter().any(|file| {
+        file.metadata
+            .objects
+            .iter()
+            .any(|object| matches!(workspace_object_class_id(object), Some(1 | 4 | 224)))
+    });
+    let multi_file_graph = if has_scene_objects {
+        Some(workspace.reference_graph(MultiFileReferenceGraphLimits::default())?)
+    } else {
+        None
+    };
+
     println!("SerializedFiles: {}", workspace.files().len());
-    for file in workspace.files() {
+    for (file_index, file) in workspace.files().iter().enumerate() {
         println!(
             "  {:?}: {:?}, {} objects",
             file.file_name,
@@ -236,11 +253,13 @@ fn print_workspace_summary(
         );
 
         let mut file_bytes = None;
+        let contains_scene_objects = file
+            .metadata
+            .objects
+            .iter()
+            .any(|object| matches!(workspace_object_class_id(object), Some(1 | 4 | 224)));
         for (object_index, object) in file.metadata.objects.iter().enumerate() {
-            let class_id = object
-                .class_id
-                .map(i32::from)
-                .or_else(|| object.resolved_type_index.map(|_| object.raw_type_id));
+            let class_id = workspace_object_class_id(object);
             if class_id != Some(141) {
                 continue;
             }
@@ -270,6 +289,61 @@ fn print_workspace_summary(
                 println!("      scene[{scene_index}]: {path}");
             }
         }
+
+        if contains_scene_objects {
+            if file_bytes.is_none() {
+                let maximum_bytes =
+                    usize::try_from(SerializedFileWorkspaceLimits::default().max_file_bytes)
+                        .unwrap_or(usize::MAX);
+                file_bytes = Some(filesystem.read_all_bytes(&file.virtual_path, maximum_bytes)?);
+            }
+            let Some(file_bytes) = file_bytes.as_deref() else {
+                return Err(invalid_data("scene input bytes were not retained").into());
+            };
+            let parsed_file = SerializedFile::parse(file_bytes)?;
+            let mut scene_graph = SceneGraph::build(&parsed_file, SceneGraphLimits::default())?;
+            let reference_graph = multi_file_graph
+                .as_ref()
+                .ok_or_else(|| invalid_data("multi-file reference graph was not built"))?;
+            scene_graph.resolve_with_multi_file_graph(
+                file_index,
+                &file.file_name,
+                reference_graph,
+            )?;
+            let root_discovery =
+                scene_graph.discover_local_roots(SceneRootDiscoveryLimits::default())?;
+            let hierarchy_issues = scene_graph.audit_local_transform_links()?;
+            let game_object_count = scene_graph
+                .objects()
+                .iter()
+                .filter(|object| object.class_id == Some(1))
+                .count();
+            let transform_count = scene_graph
+                .objects()
+                .iter()
+                .filter(|object| matches!(object.class_id, Some(4 | 224)))
+                .count();
+            println!(
+                "    Scene graph: {game_object_count} GameObjects, {transform_count} Transforms, {} relationships, {} decode issues, complete={}",
+                scene_graph.relationships().len(),
+                scene_graph.issues().len(),
+                scene_graph.is_complete()
+            );
+            println!(
+                "    Local root candidates: {}, root issues: {}, hierarchy issues: {}",
+                root_discovery.roots().len(),
+                root_discovery.issues().len(),
+                hierarchy_issues.len()
+            );
+            for root in root_discovery.roots() {
+                if let Some(object) = scene_graph.objects().get(root.game_object_index) {
+                    println!(
+                        "      root candidate PathID {} ({:?})",
+                        object.path_id, root.reason
+                    );
+                }
+            }
+        }
     }
     println!(
         "external requests: {}; newly loaded dependencies: {}; resolved: {}",
@@ -278,6 +352,13 @@ fn print_workspace_summary(
         dependencies.is_complete()
     );
     Ok(())
+}
+
+fn workspace_object_class_id(object: &ObjectInfo) -> Option<i32> {
+    object
+        .class_id
+        .map(i32::from)
+        .or_else(|| object.resolved_type_index.map(|_| object.raw_type_id))
 }
 
 fn remaining_budget_u64(limit: u64, consumed: u64, description: &str) -> Result<u64, io::Error> {
