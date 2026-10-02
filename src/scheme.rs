@@ -87,6 +87,8 @@ pub struct ContainerMountLimits {
     pub max_total_container_scope_path_bytes: u64,
     /// Maximum aggregate SerializedFile path bytes retained for source-order metadata.
     pub max_total_serialized_file_path_bytes: u64,
+    /// Maximum aggregate ResourceFile path bytes retained for bundle-resource metadata.
+    pub max_total_resource_file_path_bytes: u64,
 }
 
 impl Default for ContainerMountLimits {
@@ -98,6 +100,7 @@ impl Default for ContainerMountLimits {
             max_active_nested_bytes: 1024 * 1024 * 1024,
             max_total_container_scope_path_bytes: 64 * 1024 * 1024,
             max_total_serialized_file_path_bytes: 64 * 1024 * 1024,
+            max_total_resource_file_path_bytes: 64 * 1024 * 1024,
         }
     }
 }
@@ -150,6 +153,11 @@ pub struct ContainerMountReport {
     pub serialized_files: Vec<MountedSerializedFile>,
     /// Aggregate bytes in `serialized_files` virtual paths.
     pub serialized_file_path_bytes: u64,
+    /// ResourceFile leaves in source entry traversal order. Their local bundle index identifies
+    /// the owning source container, and `resource_index` preserves its direct resource order.
+    pub resource_files: Vec<MountedResourceFile>,
+    /// Aggregate bytes in `resource_files` virtual paths.
+    pub resource_file_path_bytes: u64,
 }
 
 /// One source FileContainer in the recursively mounted SerializedBundle tree.
@@ -169,6 +177,18 @@ pub struct MountedSerializedFile {
     pub entry_index: usize,
     /// Zero-based order among this source container's direct SerializedFiles.
     pub collection_index: Option<usize>,
+}
+
+/// One ResourceFile leaf directly owned by a recursively mounted source container.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MountedResourceFile {
+    pub virtual_path: String,
+    pub container_scope_index: Option<usize>,
+    /// Local index of the owning container node in this mount report.
+    pub container_bundle_index: usize,
+    pub entry_index: usize,
+    /// Zero-based order among this source container's direct ResourceFiles.
+    pub resource_index: usize,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -251,6 +271,8 @@ struct ContainerTreeMountState<'a> {
     active_nested_bytes: u64,
     container_scope_path_bytes: u64,
     bundle_serialized_file_counts: Vec<usize>,
+    bundle_resource_file_counts: Vec<usize>,
+    resource_file_path_bytes: u64,
     report: ContainerMountReport,
 }
 
@@ -295,6 +317,9 @@ pub enum ContainerMountErrorKind {
     ContainerBundleCollectionIndexAllocationFailed {
         requested: usize,
     },
+    ContainerBundleResourceIndexAllocationFailed {
+        requested: usize,
+    },
     ContainerBundleParentIndexOutOfBounds {
         index: usize,
         count: usize,
@@ -317,6 +342,19 @@ pub enum ContainerMountErrorKind {
         count: usize,
     },
     ContainerCollectionIndexOverflow,
+    ResourceFilePathSizeOverflow,
+    ResourceFilePathLimitExceeded {
+        requested: u64,
+        limit: u64,
+    },
+    ResourceFilePathAllocationFailed {
+        requested: usize,
+    },
+    ResourceFileEntryCountOverflow,
+    ResourceFileEntryAllocationFailed {
+        requested: usize,
+    },
+    ContainerResourceIndexOverflow,
     TotalOutputLimitExceeded {
         entry_index: usize,
         requested_total: u64,
@@ -586,6 +624,8 @@ impl<'a> DispatchedFile<'a> {
             active_nested_bytes: 0,
             container_scope_path_bytes: 0,
             bundle_serialized_file_counts: Vec::new(),
+            bundle_resource_file_counts: Vec::new(),
+            resource_file_path_bytes: 0,
             report: ContainerMountReport::default(),
         };
         self.mount_container_tree_at(destination_root, 0, None, None, &mut state)?;
@@ -942,6 +982,10 @@ impl Display for ContainerMountErrorKind {
                 formatter,
                 "could not reserve collection-order counters for {requested} container bundles"
             ),
+            Self::ContainerBundleResourceIndexAllocationFailed { requested } => write!(
+                formatter,
+                "could not reserve resource-order counters for {requested} container bundles"
+            ),
             Self::ContainerBundleParentIndexOutOfBounds { index, count } => write!(
                 formatter,
                 "container bundle parent index {index} is outside {count} recorded bundles"
@@ -973,6 +1017,27 @@ impl Display for ContainerMountErrorKind {
             ),
             Self::ContainerCollectionIndexOverflow => {
                 formatter.write_str("container collection order overflows usize")
+            }
+            Self::ResourceFilePathSizeOverflow => {
+                formatter.write_str("ResourceFile path byte count overflows u64")
+            }
+            Self::ResourceFilePathLimitExceeded { requested, limit } => write!(
+                formatter,
+                "ResourceFile paths use {requested} bytes, exceeding metadata limit {limit}"
+            ),
+            Self::ResourceFilePathAllocationFailed { requested } => write!(
+                formatter,
+                "could not reserve {requested} bytes for ResourceFile path metadata"
+            ),
+            Self::ResourceFileEntryCountOverflow => {
+                formatter.write_str("ResourceFile entry metadata count overflows usize")
+            }
+            Self::ResourceFileEntryAllocationFailed { requested } => write!(
+                formatter,
+                "could not reserve space for {requested} ResourceFile entry records"
+            ),
+            Self::ContainerResourceIndexOverflow => {
+                formatter.write_str("container resource order overflows usize")
             }
             Self::TotalOutputLimitExceeded {
                 entry_index,
@@ -1378,6 +1443,27 @@ fn record_container_bundle(
                 },
             )
         })?;
+    let requested_resource_counters = state
+        .bundle_resource_file_counts
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| {
+            ContainerMountError::new(
+                state.report.clone(),
+                ContainerMountErrorKind::ContainerBundleCountOverflow,
+            )
+        })?;
+    state
+        .bundle_resource_file_counts
+        .try_reserve(1)
+        .map_err(|_| {
+            ContainerMountError::new(
+                state.report.clone(),
+                ContainerMountErrorKind::ContainerBundleResourceIndexAllocationFailed {
+                    requested: requested_resource_counters,
+                },
+            )
+        })?;
     let bundle_index = state.report.container_bundles.len();
     state.report.container_bundles.push(MountedContainerBundle {
         scope_index,
@@ -1385,6 +1471,7 @@ fn record_container_bundle(
         parent_entry_index,
     });
     state.bundle_serialized_file_counts.push(0);
+    state.bundle_resource_file_counts.push(0);
     Ok(bundle_index)
 }
 
@@ -1467,6 +1554,17 @@ fn mount_tree_child<'a>(
             } else {
                 None
             };
+            let resource_file = if child.kind == FileKind::Resource {
+                Some(prepare_mounted_resource_file(
+                    &entry_path,
+                    entry_index,
+                    container_scope_index,
+                    container_bundle_index,
+                    state,
+                )?)
+            } else {
+                None
+            };
             mount_container_entry_at_path(
                 state.filesystem,
                 &entry_path,
@@ -1480,6 +1578,13 @@ fn mount_tree_child<'a>(
                 state.report.serialized_files.push(serialized_file.record);
                 state.bundle_serialized_file_counts[container_bundle_index] =
                     serialized_file.next_bundle_collection_count;
+            }
+            if let Some(resource_file) = resource_file {
+                state.resource_file_path_bytes = resource_file.total_path_bytes;
+                state.report.resource_file_path_bytes = resource_file.total_path_bytes;
+                state.report.resource_files.push(resource_file.record);
+                state.bundle_resource_file_counts[container_bundle_index] =
+                    resource_file.next_bundle_resource_count;
             }
             Ok(())
         }
@@ -1584,6 +1689,107 @@ fn prepare_mounted_serialized_file(
         },
         total_path_bytes,
         next_bundle_collection_count,
+    })
+}
+
+struct PendingMountedResourceFile {
+    record: MountedResourceFile,
+    total_path_bytes: u64,
+    next_bundle_resource_count: usize,
+}
+
+fn prepare_mounted_resource_file(
+    virtual_path: &str,
+    entry_index: usize,
+    container_scope_index: Option<usize>,
+    container_bundle_index: usize,
+    state: &mut ContainerTreeMountState<'_>,
+) -> Result<PendingMountedResourceFile, ContainerMountError> {
+    let limits = state.limits;
+    let path_bytes = u64::try_from(virtual_path.len()).map_err(|_| {
+        ContainerMountError::new(
+            state.report.clone(),
+            ContainerMountErrorKind::ResourceFilePathSizeOverflow,
+        )
+    })?;
+    let total_path_bytes = state
+        .resource_file_path_bytes
+        .checked_add(path_bytes)
+        .ok_or_else(|| {
+            ContainerMountError::new(
+                state.report.clone(),
+                ContainerMountErrorKind::ResourceFilePathSizeOverflow,
+            )
+        })?;
+    if total_path_bytes > limits.max_total_resource_file_path_bytes {
+        return Err(ContainerMountError::new(
+            state.report.clone(),
+            ContainerMountErrorKind::ResourceFilePathLimitExceeded {
+                requested: total_path_bytes,
+                limit: limits.max_total_resource_file_path_bytes,
+            },
+        ));
+    }
+    let requested_count = state
+        .report
+        .resource_files
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| {
+            ContainerMountError::new(
+                state.report.clone(),
+                ContainerMountErrorKind::ResourceFileEntryCountOverflow,
+            )
+        })?;
+    state.report.resource_files.try_reserve(1).map_err(|_| {
+        ContainerMountError::new(
+            state.report.clone(),
+            ContainerMountErrorKind::ResourceFileEntryAllocationFailed {
+                requested: requested_count,
+            },
+        )
+    })?;
+    let mut owned_path = String::new();
+    owned_path
+        .try_reserve_exact(virtual_path.len())
+        .map_err(|_| {
+            ContainerMountError::new(
+                state.report.clone(),
+                ContainerMountErrorKind::ResourceFilePathAllocationFailed {
+                    requested: virtual_path.len(),
+                },
+            )
+        })?;
+    owned_path.push_str(virtual_path);
+    let Some(resource_index) = state
+        .bundle_resource_file_counts
+        .get(container_bundle_index)
+        .copied()
+    else {
+        return Err(ContainerMountError::new(
+            state.report.clone(),
+            ContainerMountErrorKind::ContainerBundleParentIndexOutOfBounds {
+                index: container_bundle_index,
+                count: state.bundle_resource_file_counts.len(),
+            },
+        ));
+    };
+    let next_bundle_resource_count = resource_index.checked_add(1).ok_or_else(|| {
+        ContainerMountError::new(
+            state.report.clone(),
+            ContainerMountErrorKind::ContainerResourceIndexOverflow,
+        )
+    })?;
+    Ok(PendingMountedResourceFile {
+        record: MountedResourceFile {
+            virtual_path: owned_path,
+            container_scope_index,
+            container_bundle_index,
+            entry_index,
+            resource_index,
+        },
+        total_path_bytes,
+        next_bundle_resource_count,
     })
 }
 
@@ -2683,8 +2889,8 @@ impl Display for SchemeErrorKind {
 mod tests {
     use super::{
         BatchMountErrorKind, BatchMountLimits, ContainerMountErrorKind, ContainerMountLimits,
-        FileKind, MountedContainerBundle, MountedSerializedFile, PathMountInput, SchemeErrorKind,
-        SchemeReader, SchemeReaderLimits, WrapperKind,
+        FileKind, MountedContainerBundle, MountedResourceFile, MountedSerializedFile,
+        PathMountInput, SchemeErrorKind, SchemeReader, SchemeReaderLimits, WrapperKind,
     };
     use crate::compression::wrappers::{
         compress_gzip, decompress_brotli, has_brotli_file_signature,
@@ -3146,6 +3352,95 @@ mod tests {
             root_collection_order,
             ["/tree/z-first.asset", "/tree/a-second.asset"]
         );
+    }
+
+    #[test]
+    fn recursively_mounted_resource_records_preserve_each_container_entry_order() {
+        let nested = webdata_fixture(&[("nested.resS", b"nested resource")]);
+        let input = webdata_fixture(&[
+            ("z-first.resource", b"first resource"),
+            ("nested.bundle", &nested),
+            ("a-second.ress", b"second resource"),
+        ]);
+        let file = SchemeReader::read(&input).unwrap();
+        let mut filesystem = VirtualFileSystem::new();
+        let report = file
+            .mount_container_tree(
+                &mut filesystem,
+                Some("/tree"),
+                ContainerMountLimits::default(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            report.resource_files,
+            [
+                MountedResourceFile {
+                    virtual_path: "/tree/z-first.resource".to_owned(),
+                    container_scope_index: Some(0),
+                    container_bundle_index: 0,
+                    entry_index: 0,
+                    resource_index: 0,
+                },
+                MountedResourceFile {
+                    virtual_path: "/tree/nested.bundle/nested.resS".to_owned(),
+                    container_scope_index: Some(1),
+                    container_bundle_index: 1,
+                    entry_index: 0,
+                    resource_index: 0,
+                },
+                MountedResourceFile {
+                    virtual_path: "/tree/a-second.ress".to_owned(),
+                    container_scope_index: Some(0),
+                    container_bundle_index: 0,
+                    entry_index: 2,
+                    resource_index: 1,
+                },
+            ]
+        );
+        assert_eq!(
+            report.resource_file_path_bytes,
+            u64::try_from(
+                "/tree/z-first.resource".len()
+                    + "/tree/nested.bundle/nested.resS".len()
+                    + "/tree/a-second.ress".len(),
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            filesystem
+                .read_all_bytes("/tree/nested.bundle/nested.resS", 64)
+                .unwrap(),
+            b"nested resource"
+        );
+    }
+
+    #[test]
+    fn resource_file_order_metadata_obeys_aggregate_path_bound() {
+        let input = webdata_fixture(&[("long.bin", b"resource")]);
+        let file = SchemeReader::read(&input).unwrap();
+        let mut filesystem = VirtualFileSystem::new();
+        let error = file
+            .mount_container_tree(
+                &mut filesystem,
+                Some("/tree"),
+                ContainerMountLimits {
+                    max_total_resource_file_path_bytes: 4,
+                    ..ContainerMountLimits::default()
+                },
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            error.kind,
+            ContainerMountErrorKind::ResourceFilePathLimitExceeded {
+                requested: 14,
+                limit: 4
+            }
+        ));
+        assert_eq!(error.partial_report.mounted_entries, 0);
+        assert!(error.partial_report.resource_files.is_empty());
+        assert_eq!(error.partial_report.resource_file_path_bytes, 0);
     }
 
     #[test]

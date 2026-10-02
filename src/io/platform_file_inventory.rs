@@ -591,6 +591,7 @@ fn import_initial_platform_files(
                     container_scopes: mount_report.container_scopes,
                     container_bundles: mount_report.container_bundles,
                     serialized_files: mount_report.serialized_files,
+                    resource_files: mount_report.resource_files,
                 });
                 expansions.push(PlatformContainerExpansionReport {
                     source_file: entry.clone(),

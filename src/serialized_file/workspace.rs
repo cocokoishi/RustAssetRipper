@@ -13,7 +13,8 @@ use crate::io::filesystem::{SearchOption, VirtualFileSystem};
 use crate::io::special_names::fix_file_identifier;
 use crate::scheme::{
     ContainerMountError, ContainerMountLimits, DispatchedFile, FileKind, MountedContainerBundle,
-    MountedSerializedFile, ParsedFile, SchemeError, SchemeReader, SchemeReaderLimits,
+    MountedResourceFile, MountedSerializedFile, ParsedFile, SchemeError, SchemeReader,
+    SchemeReaderLimits,
 };
 
 use super::header::SerializedFileHeader;
@@ -40,6 +41,7 @@ pub struct SerializedFileWorkspaceLimits {
     pub max_total_dependency_container_output_bytes: u64,
     pub max_total_bundle_scope_bytes: usize,
     pub max_total_bundle_node_path_bytes: usize,
+    pub max_total_bundle_resource_file_path_bytes: usize,
     pub max_total_objects: usize,
     pub max_total_reference_edges: usize,
     pub scheme: SchemeReaderLimits,
@@ -62,6 +64,7 @@ impl Default for SerializedFileWorkspaceLimits {
             max_total_dependency_container_output_bytes: 2 * 1024 * 1024 * 1024,
             max_total_bundle_scope_bytes: 64 * 1024 * 1024,
             max_total_bundle_node_path_bytes: 64 * 1024 * 1024,
+            max_total_bundle_resource_file_path_bytes: 64 * 1024 * 1024,
             max_total_objects: 20_000_000,
             max_total_reference_edges: 5_000_000,
             scheme: SchemeReaderLimits::default(),
@@ -107,17 +110,27 @@ pub struct LoadedSerializedFile {
 pub struct SerializedFileWorkspace {
     files: Vec<LoadedSerializedFile>,
     container_bundles: Vec<WorkspaceSerializedBundle>,
+    resource_files: Vec<WorkspaceResourceFile>,
     report: SerializedFileWorkspaceReport,
 }
 
-/// A source container node attached to its parent and to its direct workspace collections.
-/// Resource-file associations are tracked separately from this collection-oriented view.
+/// A source container node attached to its parent, direct workspace collections, and resources.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceSerializedBundle {
     pub scope_path: Option<String>,
     pub parent_bundle_index: Option<usize>,
     pub parent_entry_index: Option<usize>,
     pub direct_collection_file_indices: Vec<usize>,
+    pub direct_resource_file_indices: Vec<usize>,
+}
+
+/// Metadata for a mounted ResourceFile leaf; its bytes remain in the source VFS.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceResourceFile {
+    pub virtual_path: String,
+    pub container_bundle_index: usize,
+    pub container_entry_index: usize,
+    pub container_resource_index: usize,
 }
 
 /// Result of walking external-file tables reachable from the initial workspace files.
@@ -135,6 +148,7 @@ pub(crate) struct PreExpandedContainer {
     pub container_scopes: Vec<String>,
     pub container_bundles: Vec<MountedContainerBundle>,
     pub serialized_files: Vec<MountedSerializedFile>,
+    pub resource_files: Vec<MountedResourceFile>,
 }
 
 pub(crate) struct SerializedFileDependencyLoadOptions<'a> {
@@ -476,6 +490,7 @@ impl SerializedFileWorkspace {
         Ok(Self {
             files,
             container_bundles: Vec::new(),
+            resource_files: Vec::new(),
             report,
         })
     }
@@ -682,6 +697,7 @@ impl SerializedFileWorkspace {
             workspace.report,
         )?;
         let mut total_bundle_node_path_bytes = 0usize;
+        let mut total_bundle_resource_file_path_bytes = 0usize;
         for container in preexpanded_containers {
             append_mounted_container_bundles(
                 &mut workspace,
@@ -689,11 +705,13 @@ impl SerializedFileWorkspace {
                     container_scopes: &container.container_scopes,
                     mounted_bundles: &container.container_bundles,
                     serialized_files: &container.serialized_files,
+                    resource_files: &container.resource_files,
                     loaded_paths: &loaded_paths,
                     limits,
                     bundle_count_limit: max_container_bundle_count,
                 },
                 &mut total_bundle_node_path_bytes,
+                &mut total_bundle_resource_file_path_bytes,
             )?;
         }
         let mut total_bundle_scope_bytes = 0usize;
@@ -1201,11 +1219,13 @@ impl SerializedFileWorkspace {
                                                 container_scopes: &mount_report.container_scopes,
                                                 mounted_bundles: &mount_report.container_bundles,
                                                 serialized_files: &mount_report.serialized_files,
+                                                resource_files: &mount_report.resource_files,
                                                 loaded_paths: &loaded_paths,
                                                 limits,
                                                 bundle_count_limit: max_container_bundle_count,
                                             },
                                             &mut total_bundle_node_path_bytes,
+                                            &mut total_bundle_resource_file_path_bytes,
                                         )?;
                                         for file in &mut workspace.files[first_loaded_file_index..]
                                         {
@@ -1335,9 +1355,14 @@ impl SerializedFileWorkspace {
         &self.files
     }
 
-    /// Source container hierarchy with each node's direct workspace collection indexes.
+    /// Source container hierarchy with each node's direct collection and ResourceFile indexes.
     pub fn container_bundles(&self) -> &[WorkspaceSerializedBundle] {
         &self.container_bundles
+    }
+
+    /// ResourceFile path and container metadata; file contents remain in the source VFS.
+    pub fn resource_files(&self) -> &[WorkspaceResourceFile] {
+        &self.resource_files
     }
 
     /// Returns workspace indexes for direct collections in one mounted container, ordered as
@@ -1582,6 +1607,7 @@ struct MountedContainerBundleInput<'a> {
     container_scopes: &'a [String],
     mounted_bundles: &'a [MountedContainerBundle],
     serialized_files: &'a [MountedSerializedFile],
+    resource_files: &'a [MountedResourceFile],
     loaded_paths: &'a HashMap<String, usize>,
     limits: SerializedFileWorkspaceLimits,
     bundle_count_limit: usize,
@@ -1591,11 +1617,13 @@ fn append_mounted_container_bundles(
     workspace: &mut SerializedFileWorkspace,
     input: MountedContainerBundleInput<'_>,
     total_node_path_bytes: &mut usize,
+    total_resource_file_path_bytes: &mut usize,
 ) -> Result<(), Box<SerializedFileWorkspaceError>> {
     let MountedContainerBundleInput {
         container_scopes,
         mounted_bundles,
         serialized_files,
+        resource_files,
         loaded_paths,
         limits,
         bundle_count_limit,
@@ -1604,6 +1632,7 @@ fn append_mounted_container_bundles(
         if serialized_files
             .iter()
             .any(|file| file.container_bundle_index.is_some())
+            || !resource_files.is_empty()
         {
             return Err(workspace_error(
                 workspace.report,
@@ -1647,6 +1676,30 @@ fn append_mounted_container_bundles(
                 SerializedFileWorkspaceErrorKind::AllocationFailed {
                     resource: "workspace serialized bundle nodes",
                     requested: requested_bundle_count,
+                },
+            )
+        })?;
+    let requested_resource_file_count = workspace
+        .resource_files
+        .len()
+        .checked_add(resource_files.len())
+        .ok_or_else(|| {
+            workspace_error(
+                workspace.report,
+                None,
+                SerializedFileWorkspaceErrorKind::ResourceFileCountOverflow,
+            )
+        })?;
+    workspace
+        .resource_files
+        .try_reserve(resource_files.len())
+        .map_err(|_| {
+            workspace_error(
+                workspace.report,
+                None,
+                SerializedFileWorkspaceErrorKind::AllocationFailed {
+                    resource: "workspace mounted ResourceFiles",
+                    requested: requested_resource_file_count,
                 },
             )
         })?;
@@ -1776,6 +1829,219 @@ fn append_mounted_container_bundles(
         pairs.push((collection_index, workspace_file_index));
     }
 
+    let mut resource_files_by_bundle = Vec::new();
+    resource_files_by_bundle
+        .try_reserve_exact(mounted_bundles.len())
+        .map_err(|_| {
+            workspace_error(
+                workspace.report,
+                None,
+                SerializedFileWorkspaceErrorKind::AllocationFailed {
+                    resource: "direct ResourceFile mappings by bundle",
+                    requested: mounted_bundles.len(),
+                },
+            )
+        })?;
+    resource_files_by_bundle.resize_with(mounted_bundles.len(), Vec::new);
+
+    let mut ordered_resource_files = Vec::new();
+    ordered_resource_files
+        .try_reserve_exact(resource_files.len())
+        .map_err(|_| {
+            workspace_error(
+                workspace.report,
+                None,
+                SerializedFileWorkspaceErrorKind::AllocationFailed {
+                    resource: "mounted ResourceFile order records",
+                    requested: resource_files.len(),
+                },
+            )
+        })?;
+    for resource_file in resource_files {
+        let bundle_index = resource_file.container_bundle_index;
+        let Some(bundle) = mounted_bundles.get(bundle_index) else {
+            return Err(workspace_error(
+                workspace.report,
+                Some(&resource_file.virtual_path),
+                SerializedFileWorkspaceErrorKind::InvalidMountedContainerHierarchy { bundle_index },
+            ));
+        };
+        if bundle.scope_index != resource_file.container_scope_index {
+            return Err(workspace_error(
+                workspace.report,
+                Some(&resource_file.virtual_path),
+                SerializedFileWorkspaceErrorKind::InvalidMountedContainerHierarchy { bundle_index },
+            ));
+        }
+        ordered_resource_files.push((bundle_index, resource_file.resource_index, resource_file));
+    }
+    ordered_resource_files
+        .sort_unstable_by_key(|(bundle_index, resource_index, _)| (*bundle_index, *resource_index));
+
+    let mut seen_resource_paths = HashSet::<&str>::new();
+    let seen_resource_path_count = workspace
+        .resource_files
+        .len()
+        .checked_add(resource_files.len())
+        .ok_or_else(|| {
+            workspace_error(
+                workspace.report,
+                None,
+                SerializedFileWorkspaceErrorKind::ResourceFileCountOverflow,
+            )
+        })?;
+    seen_resource_paths
+        .try_reserve(seen_resource_path_count)
+        .map_err(|_| {
+            workspace_error(
+                workspace.report,
+                None,
+                SerializedFileWorkspaceErrorKind::AllocationFailed {
+                    resource: "mounted ResourceFile path validation",
+                    requested: seen_resource_path_count,
+                },
+            )
+        })?;
+    for resource_file in &workspace.resource_files {
+        seen_resource_paths.insert(resource_file.virtual_path.as_str());
+    }
+    let mut resource_file_count_by_bundle = Vec::new();
+    resource_file_count_by_bundle
+        .try_reserve_exact(mounted_bundles.len())
+        .map_err(|_| {
+            workspace_error(
+                workspace.report,
+                None,
+                SerializedFileWorkspaceErrorKind::AllocationFailed {
+                    resource: "mounted ResourceFile order counters",
+                    requested: mounted_bundles.len(),
+                },
+            )
+        })?;
+    resource_file_count_by_bundle.resize(mounted_bundles.len(), 0usize);
+    let mut new_resource_files = Vec::new();
+    new_resource_files
+        .try_reserve_exact(resource_files.len())
+        .map_err(|_| {
+            workspace_error(
+                workspace.report,
+                None,
+                SerializedFileWorkspaceErrorKind::AllocationFailed {
+                    resource: "workspace ResourceFile records",
+                    requested: resource_files.len(),
+                },
+            )
+        })?;
+    let mut next_resource_path_bytes = *total_resource_file_path_bytes;
+    for (bundle_index, actual_index, resource_file) in ordered_resource_files {
+        let expected_index = resource_file_count_by_bundle[bundle_index];
+        if actual_index != expected_index {
+            return Err(workspace_error(
+                workspace.report,
+                Some(&resource_file.virtual_path),
+                SerializedFileWorkspaceErrorKind::InvalidContainerResourceSequence {
+                    expected: expected_index,
+                    actual: actual_index,
+                },
+            ));
+        }
+        resource_file_count_by_bundle[bundle_index] =
+            expected_index.checked_add(1).ok_or_else(|| {
+                workspace_error(
+                    workspace.report,
+                    Some(&resource_file.virtual_path),
+                    SerializedFileWorkspaceErrorKind::ResourceFileCountOverflow,
+                )
+            })?;
+        if !seen_resource_paths.insert(&resource_file.virtual_path) {
+            return Err(workspace_error(
+                workspace.report,
+                Some(&resource_file.virtual_path),
+                SerializedFileWorkspaceErrorKind::DuplicateMountedResourceFilePath,
+            ));
+        }
+        next_resource_path_bytes = next_resource_path_bytes
+            .checked_add(resource_file.virtual_path.len())
+            .ok_or_else(|| {
+                workspace_error(
+                    workspace.report,
+                    Some(&resource_file.virtual_path),
+                    SerializedFileWorkspaceErrorKind::BundleResourcePathByteCountOverflow,
+                )
+            })?;
+        if next_resource_path_bytes > limits.max_total_bundle_resource_file_path_bytes {
+            return Err(workspace_error(
+                workspace.report,
+                Some(&resource_file.virtual_path),
+                SerializedFileWorkspaceErrorKind::TotalBundleResourceFilePathBytesLimitExceeded {
+                    byte_count: next_resource_path_bytes,
+                    limit: limits.max_total_bundle_resource_file_path_bytes,
+                },
+            ));
+        }
+        let mut owned_path = String::new();
+        owned_path
+            .try_reserve_exact(resource_file.virtual_path.len())
+            .map_err(|_| {
+                workspace_error(
+                    workspace.report,
+                    Some(&resource_file.virtual_path),
+                    SerializedFileWorkspaceErrorKind::AllocationFailed {
+                        resource: "workspace ResourceFile path",
+                        requested: resource_file.virtual_path.len(),
+                    },
+                )
+            })?;
+        owned_path.push_str(&resource_file.virtual_path);
+        let global_bundle_index = base_index.checked_add(bundle_index).ok_or_else(|| {
+            workspace_error(
+                workspace.report,
+                Some(&resource_file.virtual_path),
+                SerializedFileWorkspaceErrorKind::ContainerBundleCountOverflow,
+            )
+        })?;
+        let resource_workspace_index = workspace
+            .resource_files
+            .len()
+            .checked_add(new_resource_files.len())
+            .ok_or_else(|| {
+                workspace_error(
+                    workspace.report,
+                    Some(&resource_file.virtual_path),
+                    SerializedFileWorkspaceErrorKind::ResourceFileCountOverflow,
+                )
+            })?;
+        new_resource_files.push(WorkspaceResourceFile {
+            virtual_path: owned_path,
+            container_bundle_index: global_bundle_index,
+            container_entry_index: resource_file.entry_index,
+            container_resource_index: resource_file.resource_index,
+        });
+        let direct_resource_indices = &mut resource_files_by_bundle[bundle_index];
+        let requested_direct_resource_count = direct_resource_indices
+            .len()
+            .checked_add(1)
+            .ok_or_else(|| {
+                workspace_error(
+                    workspace.report,
+                    Some(&resource_file.virtual_path),
+                    SerializedFileWorkspaceErrorKind::ResourceFileCountOverflow,
+                )
+            })?;
+        direct_resource_indices.try_reserve(1).map_err(|_| {
+            workspace_error(
+                workspace.report,
+                Some(&resource_file.virtual_path),
+                SerializedFileWorkspaceErrorKind::AllocationFailed {
+                    resource: "bundle direct ResourceFile indexes",
+                    requested: requested_direct_resource_count,
+                },
+            )
+        })?;
+        direct_resource_indices.push(resource_workspace_index);
+    }
+    drop(seen_resource_paths);
+
     let mut new_bundles = Vec::new();
     new_bundles
         .try_reserve_exact(mounted_bundles.len())
@@ -1877,6 +2143,20 @@ fn append_mounted_container_bundles(
                 )
             })?;
         direct_collection_file_indices.extend(pairs.iter().map(|(_, file_index)| *file_index));
+        let mut direct_resource_file_indices = Vec::new();
+        direct_resource_file_indices
+            .try_reserve_exact(resource_files_by_bundle[bundle_index].len())
+            .map_err(|_| {
+                workspace_error(
+                    workspace.report,
+                    owned_scope_path.as_deref(),
+                    SerializedFileWorkspaceErrorKind::AllocationFailed {
+                        resource: "bundle direct ResourceFile indexes",
+                        requested: resource_files_by_bundle[bundle_index].len(),
+                    },
+                )
+            })?;
+        direct_resource_file_indices.extend_from_slice(&resource_files_by_bundle[bundle_index]);
         let parent_bundle_index = match bundle.parent_bundle_index {
             Some(parent) => Some(base_index.checked_add(parent).ok_or_else(|| {
                 workspace_error(
@@ -1892,6 +2172,7 @@ fn append_mounted_container_bundles(
             parent_bundle_index,
             parent_entry_index: bundle.parent_entry_index,
             direct_collection_file_indices,
+            direct_resource_file_indices,
         });
     }
     for (local_bundle_index, bundle) in new_bundles.iter().enumerate() {
@@ -1928,7 +2209,9 @@ fn append_mounted_container_bundles(
         }
     }
     workspace.container_bundles.extend(new_bundles);
+    workspace.resource_files.extend(new_resource_files);
     *total_node_path_bytes = next_node_path_bytes;
+    *total_resource_file_path_bytes = next_resource_path_bytes;
     Ok(())
 }
 
@@ -2367,6 +2650,17 @@ pub enum SerializedFileWorkspaceErrorKind {
         byte_count: usize,
         limit: usize,
     },
+    ResourceFileCountOverflow,
+    BundleResourcePathByteCountOverflow,
+    TotalBundleResourceFilePathBytesLimitExceeded {
+        byte_count: usize,
+        limit: usize,
+    },
+    DuplicateMountedResourceFilePath,
+    InvalidContainerResourceSequence {
+        expected: usize,
+        actual: usize,
+    },
     PreExpandedContainerCountLimitExceeded {
         count: usize,
         limit: usize,
@@ -2570,6 +2864,23 @@ impl Display for SerializedFileWorkspaceErrorKind {
                 f,
                 "container bundle node paths use {byte_count} bytes, exceeding limit {limit}"
             ),
+            Self::ResourceFileCountOverflow => {
+                f.write_str("mounted ResourceFile count overflows")
+            }
+            Self::BundleResourcePathByteCountOverflow => {
+                f.write_str("mounted bundle ResourceFile path byte count overflows")
+            }
+            Self::TotalBundleResourceFilePathBytesLimitExceeded { byte_count, limit } => write!(
+                f,
+                "mounted bundle ResourceFile paths use {byte_count} bytes, exceeding limit {limit}"
+            ),
+            Self::DuplicateMountedResourceFilePath => {
+                f.write_str("mounted ResourceFile path occurs more than once in bundle metadata")
+            }
+            Self::InvalidContainerResourceSequence { expected, actual } => write!(
+                f,
+                "container ResourceFile order is not contiguous: expected index {expected}, found {actual}"
+            ),
             Self::PreExpandedContainerCountLimitExceeded { count, limit } => write!(
                 f,
                 "pre-expanded container count {count} exceeds limit {limit}"
@@ -2668,6 +2979,7 @@ mod tests {
     use crate::io::platform_structure::{PlatformKind, PlatformStructure};
     use crate::scheme::{
         ContainerMountErrorKind, ContainerMountLimits, FileKind, MountedContainerBundle,
+        MountedResourceFile,
     };
     use crate::serialized_file::reference_graph::{
         MultiFilePPtrResolution, MultiFileReferenceGraphLimits,
@@ -2930,12 +3242,17 @@ mod tests {
         let mut filesystem = VirtualFileSystem::new();
         let serialized_leaf = make_generation_10_file();
         let nested_leaf = make_generation_10_file();
-        let nested_webdata = make_webdata_fixture(&[("inner.assets", &nested_leaf)]);
+        let nested_webdata = make_webdata_fixture(&[
+            ("inner.assets", &nested_leaf),
+            ("inner.resS", b"nested stream data"),
+        ]);
         let webdata = make_webdata_fixture(&[
             ("z-first.assets", &serialized_leaf),
             ("shared.assets", &serialized_leaf),
             ("nested.bundle", &nested_webdata),
             ("a-last.assets", &serialized_leaf),
+            ("z-resource.resS", b"first root stream"),
+            ("a-resource.resource", b"second root stream"),
         ]);
         insert_file(
             &mut filesystem,
@@ -3045,6 +3362,27 @@ mod tests {
             bundle_nodes[1].direct_collection_file_indices,
             [nested_file_index]
         );
+        assert_eq!(bundle_nodes[0].direct_resource_file_indices, [0, 1]);
+        assert_eq!(bundle_nodes[1].direct_resource_file_indices, [2]);
+        let workspace_resources = loaded.workspace.resource_files();
+        assert_eq!(workspace_resources.len(), 3);
+        assert_eq!(
+            workspace_resources
+                .iter()
+                .map(|resource| resource.virtual_path.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "/.assetripper/import/initial/0/z-resource.resS",
+                "/.assetripper/import/initial/0/a-resource.resource",
+                "/.assetripper/import/initial/0/nested.bundle/inner.resS",
+            ]
+        );
+        assert_eq!(workspace_resources[0].container_bundle_index, 0);
+        assert_eq!(workspace_resources[0].container_entry_index, 4);
+        assert_eq!(workspace_resources[0].container_resource_index, 0);
+        assert_eq!(workspace_resources[2].container_bundle_index, 1);
+        assert_eq!(workspace_resources[2].container_entry_index, 1);
+        assert_eq!(workspace_resources[2].container_resource_index, 0);
         let mut invalid_workspace = loaded.workspace.clone();
         let a_last_index = invalid_workspace
             .files
@@ -3098,9 +3436,17 @@ mod tests {
             parent_entry_index: None,
         }];
         let mounted_files = [];
+        let mounted_resources = [MountedResourceFile {
+            virtual_path: "/root/stream.resS".to_owned(),
+            container_scope_index: Some(0),
+            container_bundle_index: 0,
+            entry_index: 0,
+            resource_index: 0,
+        }];
         let loaded_paths = std::collections::HashMap::new();
         let mut workspace = SerializedFileWorkspace::default();
         let mut total_path_bytes = 0usize;
+        let mut total_resource_path_bytes = 0usize;
         let path_limited = SerializedFileWorkspaceLimits {
             max_total_bundle_node_path_bytes: 4,
             ..SerializedFileWorkspaceLimits::default()
@@ -3111,11 +3457,13 @@ mod tests {
                 container_scopes: &scopes,
                 mounted_bundles: &bundles,
                 serialized_files: &mounted_files,
+                resource_files: &mounted_resources,
                 loaded_paths: &loaded_paths,
                 limits: path_limited,
                 bundle_count_limit: 1,
             },
             &mut total_path_bytes,
+            &mut total_resource_path_bytes,
         )
         .unwrap_err();
         assert!(matches!(
@@ -3127,17 +3475,85 @@ mod tests {
         ));
         assert!(workspace.container_bundles().is_empty());
 
+        let resource_path_limited = SerializedFileWorkspaceLimits {
+            max_total_bundle_resource_file_path_bytes: 4,
+            ..SerializedFileWorkspaceLimits::default()
+        };
         let error = append_mounted_container_bundles(
             &mut workspace,
             super::MountedContainerBundleInput {
                 container_scopes: &scopes,
                 mounted_bundles: &bundles,
                 serialized_files: &mounted_files,
+                resource_files: &mounted_resources,
+                loaded_paths: &loaded_paths,
+                limits: resource_path_limited,
+                bundle_count_limit: 1,
+            },
+            &mut total_path_bytes,
+            &mut total_resource_path_bytes,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error.kind,
+            SerializedFileWorkspaceErrorKind::TotalBundleResourceFilePathBytesLimitExceeded {
+                byte_count: 17,
+                limit: 4
+            }
+        ));
+        assert!(workspace.container_bundles().is_empty());
+        assert!(workspace.resource_files().is_empty());
+
+        let gapped_resources = [
+            MountedResourceFile {
+                resource_index: 0,
+                ..mounted_resources[0].clone()
+            },
+            MountedResourceFile {
+                virtual_path: "/root/second.resS".to_owned(),
+                entry_index: 1,
+                resource_index: 2,
+                ..mounted_resources[0].clone()
+            },
+        ];
+        let error = append_mounted_container_bundles(
+            &mut workspace,
+            super::MountedContainerBundleInput {
+                container_scopes: &scopes,
+                mounted_bundles: &bundles,
+                serialized_files: &mounted_files,
+                resource_files: &gapped_resources,
+                loaded_paths: &loaded_paths,
+                limits: SerializedFileWorkspaceLimits::default(),
+                bundle_count_limit: 1,
+            },
+            &mut total_path_bytes,
+            &mut total_resource_path_bytes,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error.kind,
+            SerializedFileWorkspaceErrorKind::InvalidContainerResourceSequence {
+                expected: 1,
+                actual: 2
+            }
+        ));
+        assert!(workspace.container_bundles().is_empty());
+        assert!(workspace.resource_files().is_empty());
+
+        let error = append_mounted_container_bundles(
+            &mut workspace,
+            super::MountedContainerBundleInput {
+                container_scopes: &scopes,
+                mounted_bundles: &bundles,
+                serialized_files: &mounted_files,
+                resource_files: &mounted_resources,
                 loaded_paths: &loaded_paths,
                 limits: SerializedFileWorkspaceLimits::default(),
                 bundle_count_limit: 0,
             },
             &mut total_path_bytes,
+            &mut total_resource_path_bytes,
         )
         .unwrap_err();
         assert!(matches!(
@@ -3154,6 +3570,7 @@ mod tests {
     fn pathless_container_root_keeps_its_direct_collection_membership() {
         let mut filesystem = VirtualFileSystem::new();
         insert_file(&mut filesystem, "/first.asset", &make_generation_10_file());
+        insert_file(&mut filesystem, "/resource.resS", b"stream data");
         let inputs = [input("/first.asset")];
         let mut workspace = SerializedFileWorkspace::load_from_vfs(
             &filesystem,
@@ -3174,20 +3591,30 @@ mod tests {
             entry_index: 0,
             collection_index: Some(0),
         }];
+        let mounted_resources = [MountedResourceFile {
+            virtual_path: "/resource.resS".to_owned(),
+            container_scope_index: None,
+            container_bundle_index: 0,
+            entry_index: 1,
+            resource_index: 0,
+        }];
         let mut loaded_paths = std::collections::HashMap::new();
         loaded_paths.insert("/first.asset".to_owned(), 0);
         let mut total_node_path_bytes = 0;
+        let mut total_resource_path_bytes = 0;
         append_mounted_container_bundles(
             &mut workspace,
             super::MountedContainerBundleInput {
                 container_scopes: &scopes,
                 mounted_bundles: &bundles,
                 serialized_files: &mounted_files,
+                resource_files: &mounted_resources,
                 loaded_paths: &loaded_paths,
                 limits: SerializedFileWorkspaceLimits::default(),
                 bundle_count_limit: 1,
             },
             &mut total_node_path_bytes,
+            &mut total_resource_path_bytes,
         )
         .unwrap();
         let order = super::build_mounted_file_order_index(
@@ -3205,8 +3632,15 @@ mod tests {
             workspace.container_bundles()[0].direct_collection_file_indices,
             [0]
         );
+        assert_eq!(
+            workspace.container_bundles()[0].direct_resource_file_indices,
+            [0]
+        );
         assert_eq!(workspace.files()[0].container_bundle_index, Some(0));
         assert_eq!(workspace.files()[0].container_collection_index, Some(0));
+        assert_eq!(workspace.resource_files().len(), 1);
+        assert_eq!(workspace.resource_files()[0].virtual_path, "/resource.resS");
+        assert_eq!(workspace.resource_files()[0].container_bundle_index, 0);
     }
 
     #[test]
@@ -3326,6 +3760,63 @@ mod tests {
             }
         );
         assert!(graph.is_complete());
+    }
+
+    #[test]
+    fn dependency_container_resource_leaf_attaches_to_its_workspace_bundle() {
+        let mut filesystem = VirtualFileSystem::new();
+        let serialized_leaf = make_generation_10_file();
+        let container = make_webdata_fixture(&[
+            ("shared.assets", &serialized_leaf),
+            ("stream.resS", b"dependency stream"),
+        ]);
+        insert_file(
+            &mut filesystem,
+            "/game/main.assets",
+            &make_generation_10_file_with(&["shared.assets"], 1, 10, 42),
+        );
+        insert_file(&mut filesystem, "/game/shared.assets", &container);
+        let inputs = [input("/game/main.assets")];
+        let data_paths = ["/game".to_owned()];
+
+        let (workspace, dependency_report) =
+            SerializedFileWorkspace::load_from_vfs_with_dependencies(
+                &mut filesystem,
+                &inputs,
+                &[],
+                &data_paths,
+                SerializedFileWorkspaceLimits::default(),
+                DependencyIndexLimits::default(),
+                ContainerMountLimits::default(),
+            )
+            .unwrap();
+
+        assert!(dependency_report.is_complete());
+        assert_eq!(workspace.files().len(), 2);
+        assert_eq!(workspace.container_bundles().len(), 1);
+        assert_eq!(
+            workspace.container_bundles()[0].direct_collection_file_indices,
+            [1]
+        );
+        assert_eq!(
+            workspace.container_bundles()[0].direct_resource_file_indices,
+            [0]
+        );
+        assert_eq!(
+            workspace.resource_files(),
+            [super::WorkspaceResourceFile {
+                virtual_path: "/__assetripper_dependency_mount_0/stream.resS".to_owned(),
+                container_bundle_index: 0,
+                container_entry_index: 1,
+                container_resource_index: 0,
+            }]
+        );
+        assert_eq!(
+            filesystem
+                .read_all_bytes("/__assetripper_dependency_mount_0/stream.resS", 64)
+                .unwrap(),
+            b"dependency stream"
+        );
     }
 
     #[test]
