@@ -18,12 +18,13 @@ Phase 1: full Rust port of the local AssetRipper source baseline. The Phase 1 ga
 - Metadata prefix parsing, including pre-generation-9 metadata-at-end/endian handling, version text, target platform, and TypeTree flag.
 - Metadata tables: serialized types, object records and checked payload ranges, local script identifiers, external file identifiers, reference types, dependencies, and user information.
 - Legacy TypeTree records and the generation-10 / generation-12+ string-buffer form, including reference hashes and the audited common-string lookup table.
-- Rust package has no third-party dependencies; `Cargo.lock` is checked in when checkpointed. Product CLI, bundle/container handling, decompression, dynamic object decoding, reference graph, resource handlers, exporters, and UI have not been implemented.
+- TypeTree-driven object payload decoding for primitive fields, strings, arrays, nested structs, unknown fixed-size leaves, field/array alignment, and explicit allocation limits. Missing-TypeTree and managed-reference-registry inputs report explicit errors rather than being treated as decoded data.
+- Rust package has no third-party dependencies; `Cargo.lock` is checked in when checkpointed. Product CLI, bundle/container handling, decompression, full Unity object models and no-TypeTree recovery, reference graph, resource handlers, exporters, and UI have not been implemented.
 
 ## Latest verification
 
 - `cargo fmt -- --check`: exit 0.
-- `cargo test --workspace`: exit 0; 35 unit tests passed, 0 failed, 0 doc tests.
+- `cargo test --workspace`: exit 0; 46 unit tests passed, 0 failed, 0 doc tests.
 - `cargo clippy --workspace --all-targets -- -D warnings`: exit 0.
 - `tools/verify-baseline.ps1`: exit 0; all 1,449 reference files match the manifest.
 - `dotnet --info`: exit 1 because PowerShell cannot find `dotnet`; AssetRipper build and tests remain unrun.

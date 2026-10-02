@@ -226,6 +226,23 @@ impl<'a> BinaryReader<'a> {
         self.skip(padding)
     }
 
+    /// Align the cursor relative to this reader's slice start.
+    ///
+    /// Serialized object payloads are decoded from independent object slices, whose alignment
+    /// origin is the beginning of that object's data rather than the containing file.
+    pub fn align_relative(&mut self, alignment: usize) -> Result<(), BinaryError> {
+        if alignment == 0 || !alignment.is_power_of_two() {
+            return Err(BinaryError::new(
+                self.offset(),
+                BinaryErrorKind::InvalidAlignment { alignment },
+            ));
+        }
+
+        let mask = alignment - 1;
+        let padding = (alignment - (self.position & mask)) & mask;
+        self.skip(padding)
+    }
+
     /// Read a UTF-8 string from the next `length` bytes without allocating.
     ///
     /// Invalid UTF-8 leaves the cursor unchanged so the caller can report or recover from
@@ -445,6 +462,18 @@ mod tests {
         assert_eq!(child.offset(), 4);
         assert_eq!(child.read_u8().unwrap(), 4);
         assert_eq!(parent.position(), 5);
+    }
+
+    #[test]
+    fn relative_alignment_uses_the_slice_start_with_a_nonzero_base_offset() {
+        let input = [0; 8];
+        let mut reader = BinaryReader::with_base_offset(&input, Endian::Little, 3).unwrap();
+        reader.skip(1).unwrap();
+
+        reader.align_relative(4).unwrap();
+
+        assert_eq!(reader.position(), 4);
+        assert_eq!(reader.offset(), 7);
     }
 
     #[test]

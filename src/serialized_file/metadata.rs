@@ -413,6 +413,11 @@ struct ParsedUnityVersion {
     release_number: u32,
 }
 
+pub(crate) fn unity_version_aligns_arrays(unity_version: Option<&str>) -> bool {
+    ParsedUnityVersion::parse(unity_version.unwrap_or_default())
+        .is_some_and(|version| version.major >= 2017)
+}
+
 impl ParsedUnityVersion {
     fn parse(value: &str) -> Option<Self> {
         let mut cursor = 0usize;
