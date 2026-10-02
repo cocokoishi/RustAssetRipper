@@ -190,5 +190,5 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 ## GUID-derived Meta dependency identity
 
 - Implemented the local source rule that FileIdentifier.GetFilePath returns the Unity GUID for AssetType.Meta, while other types use normalized PathName. GUID formatting follows the four serialized words in order, each lowercase and padded to eight hexadecimal digits.
-- Three focused synthetic tests passed: GUID identity overrides the serialized path for Meta, a non-Meta identifier continues using its path, and a Meta identifier without a GUID fails explicitly. No C# runtime, real AssetBundle, user sample, or UABEA was used.
+- Focused synthetic cases passed: `GetFilePath` emits the four-word GUID for Meta and normalized PathName for ordinary file types; the platform dependency index still resolves a Meta external request by PathName; malformed missing-GUID bundle identity is explicit. No C# runtime, real AssetBundle, user sample, or UABEA was used.
 - Full verification passed: `cargo test --workspace --locked` (171 passed, 0 failed); warnings-denied workspace Clippy; `cargo fmt --all -- --check`; `tools/verify-baseline.ps1` (1,449 unchanged reference files); and `git diff --check`. No real-file or C# differential has run.

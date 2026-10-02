@@ -304,10 +304,11 @@ impl FileIdentifier {
         crate::io::special_names::fix_file_identifier(&self.path_name_origin)
     }
 
-    /// Return the source `FileIdentifier.GetFilePath` identity for dependency lookup.
+    /// Return the source `FileIdentifier.GetFilePath` identity used by game-bundle collection
+    /// matching. Platform external dependency requests use normalized `PathName` instead.
     /// `AssetType.Meta` uses the Unity GUID words; other file types use the normalized path.
     /// A Meta identifier without its generation-5+ GUID is malformed and returns `None`.
-    pub fn dependency_path_name(&self) -> Option<String> {
+    pub fn get_file_path(&self) -> Option<String> {
         const ASSET_TYPE_META: i32 = 3;
 
         if self.file_type == Some(ASSET_TYPE_META) {

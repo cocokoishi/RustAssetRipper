@@ -134,6 +134,6 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 
 ## GUID-derived Meta dependency identity
 
-- FileIdentifier now selects the source GetFilePath identity: non-Meta dependencies use the normalized path, while AssetType.Meta uses four lowercase, zero-padded 32-bit GUID words with no separators. A Meta identifier missing its GUID returns an explicit lookup error instead of falling back to the unrelated path.
-- Three synthetic tests cover source word formatting and GUID-over-path precedence, ordinary file types retaining path lookup despite a GUID, and missing-GUID failure. The full workspace suite passed 171 tests; warnings-denied Clippy, format check, 1,449-file baseline verification, and diff check passed. No real-file or C# differential has run.
+- FileIdentifier::get_file_path preserves the source bundle-collection identity: AssetType.Meta uses four lowercase, zero-padded GUID words with no separators. Platform external requests still use normalized PathName, matching StructureDependencyProvider. A malformed Meta record without a GUID has no bundle identity.
+- Synthetic tests cover source GUID word formatting for game-bundle identity, external Meta requests still resolving by PathName, ordinary path lookup, and malformed missing-GUID handling. The full workspace suite passed 171 tests; warnings-denied Clippy, format check, 1,449-file baseline verification, and diff check passed. No real-file or C# differential has run.
 - Next: derive platform registries and ordered DataPaths from mounted inputs, then connect the remaining platform-specific lookup rules. Phase 1 is still open; do not inspect user AssetBundles or UABEA.
