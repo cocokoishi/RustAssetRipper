@@ -5,5 +5,7 @@
 //! This crate is under active development. Modules are added only as their source behavior
 //! is audited and implemented; the presence of this crate does not imply product parity.
 
+pub mod compression;
+pub mod container;
 pub mod io;
 pub mod serialized_file;

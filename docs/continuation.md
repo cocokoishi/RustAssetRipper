@@ -20,13 +20,14 @@ Phase 1: full Rust port of the local AssetRipper source baseline. The Phase 1 ga
 - Legacy TypeTree records and the generation-10 / generation-12+ string-buffer form, including reference hashes and the audited common-string lookup table.
 - TypeTree-driven object payload decoding for primitive fields, strings, arrays, nested structs, recognized PPtr fileID/pathID pairs, unknown fixed-size leaves, field/array alignment, and explicit allocation limits. Missing-TypeTree and managed-reference-registry inputs report explicit errors rather than being treated as decoded data.
 - PPtr file-scope classification: null PathIDs, unique/missing/ambiguous local targets, one-based external table entries, and invalid FileIDs. External bundles are identified but are not loaded or traversed yet.
+- UnityFS container work: header and block/directory metadata for start/end placement, version-7 alignment and padding flags, bounded metadata parsing, uncompressed and raw LZ4 blocks, and directory-entry extraction across blocks. LZMA, Zstd, LZHAM, other bundle schemes, and external-file integration remain incomplete.
 - Complete-file `SerializedFile::parse` facade that reads a real encoded header, metadata, and referenced object payloads from the same borrowed byte slice; a generation-10 synthetic end-to-end fixture covers this path.
-- Rust package has no third-party dependencies; `Cargo.lock` is checked in when checkpointed. Product CLI, bundle/container handling, decompression, full Unity object models and no-TypeTree recovery, reference graph, resource handlers, exporters, and UI have not been implemented.
+- Rust package has no third-party dependencies; `Cargo.lock` is checked in when checkpointed. UnityFS header/metadata/directory parsing and raw LZ4 decoding are partial. Product CLI, remaining bundle schemes/codecs, full Unity object models and no-TypeTree recovery, multi-file reference graph, resource handlers, exporters, and UI have not been implemented.
 
 ## Latest verification
 
 - `cargo fmt -- --check`: exit 0.
-- `cargo test --workspace`: exit 0; 54 unit tests passed, 0 failed, 0 doc tests.
+- `cargo test --workspace`: exit 0; 61 unit tests passed, 0 failed, 0 doc tests.
 - `cargo clippy --workspace --all-targets -- -D warnings`: exit 0.
 - `tools/verify-baseline.ps1`: exit 0; all 1,449 reference files match the manifest.
 - `dotnet --info`: exit 1 because PowerShell cannot find `dotnet`; AssetRipper build and tests remain unrun.
@@ -36,8 +37,8 @@ Phase 1: full Rust port of the local AssetRipper source baseline. The Phase 1 ga
 
 ## Next work
 
-1. Continue from file-scoped PPtr classification into bundle dependency loading and multi-file reference traversal; preserve missing dependencies, missing targets, and explicit nulls as distinct states.
-2. Audit and implement stream abstractions, bundle variants, block directories, and compression paths from the current source snapshot.
+1. Complete UnityFS compression variants (LZMA, Zstd compatibility paths) and audit old BundleFile/Raw/Web/Archive readers; add independent conformance evidence.
+2. Audit and implement stream abstractions and integrate extracted UnityFS entries with SerializedFile and external resource resolution.
 3. Expand `docs/feature-parity.md` into per-version/per-platform behavior rows across all 51 projects, registration tables, options/defaults, generators, GUI workflows, and exporters.
 4. Add independent generic fixtures and source-derived regression coverage for untested SerializedFile generations and malformed layouts; obtain a usable .NET environment before claiming C# differential validation.
 5. Continue into object/reference construction, all resource handlers, export formats, configuration, CLI, UI, and complete integration/end-to-end verification.
