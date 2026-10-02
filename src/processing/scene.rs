@@ -8,6 +8,9 @@ use crate::serialized_file::metadata::{ObjectInfo, SerializedFileMetadata};
 use crate::serialized_file::object::{
     ObjectDecodeLimits, ParsedObjectPayload, SerializedValue, SerializedValueLookupError,
 };
+use crate::serialized_file::reference_graph::{
+    MultiFileObjectReference, MultiFilePPtrResolution, MultiFileReferenceGraph,
+};
 
 const GAME_OBJECT_CLASS_ID: i32 = 1;
 const TRANSFORM_CLASS_ID: i32 = 4;
@@ -72,10 +75,32 @@ pub enum SceneRelationshipTarget {
         path_id: i64,
         match_count: usize,
     },
+    WorkspaceObject {
+        file_index: usize,
+        object_index: usize,
+    },
     ExternalObject {
         file_id: i32,
         external_index: usize,
         path_id: i64,
+    },
+    MissingDependency {
+        external_index: usize,
+        path_id: i64,
+    },
+    AmbiguousDependency {
+        external_index: usize,
+        path_id: i64,
+        candidate_count: usize,
+    },
+    MissingExternalObject {
+        file_index: usize,
+        path_id: i64,
+    },
+    AmbiguousExternalObject {
+        file_index: usize,
+        path_id: i64,
+        match_count: usize,
     },
     InvalidFileId {
         file_id: i32,
@@ -93,6 +118,12 @@ pub struct SceneRelationship {
     pub file_id: i32,
     pub path_id: i64,
     pub target: SceneRelationshipTarget,
+}
+
+struct ScenePointerField {
+    file_id: i32,
+    path_id: i64,
+    field_path: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -224,15 +255,107 @@ impl SceneGraph {
         &self.issues
     }
 
-    /// True when relevant TypeTrees decoded and every recovered pointer is null or local/unique.
+    /// True when relevant TypeTrees decoded and every pointer uniquely resolves in the joined set.
     pub fn is_complete(&self) -> bool {
         self.issues.is_empty()
             && self.relationships.iter().all(|relationship| {
                 matches!(
                     &relationship.target,
-                    SceneRelationshipTarget::Null | SceneRelationshipTarget::LocalObject { .. }
+                    SceneRelationshipTarget::Null
+                        | SceneRelationshipTarget::LocalObject { .. }
+                        | SceneRelationshipTarget::WorkspaceObject { .. }
                 )
             })
+    }
+
+    /// Resolve every scene edge through a cross-file graph built from the same ordered workspace.
+    ///
+    /// The source file name and every object-table PathID are checked before any target is
+    /// changed. The update is transactional: a missing or ambiguous field-path match leaves the
+    /// original per-file targets intact.
+    pub fn resolve_with_multi_file_graph(
+        &mut self,
+        source_file_index: usize,
+        source_file_name: &str,
+        graph: &MultiFileReferenceGraph<'_>,
+    ) -> Result<(), SceneGraphResolveError> {
+        let Some(graph_file_name) = graph.normalized_file_names().get(source_file_index) else {
+            return Err(SceneGraphResolveError::SourceFileIndexOutOfBounds {
+                file_index: source_file_index,
+                file_count: graph.file_count(),
+            });
+        };
+        let normalized_source_name =
+            crate::io::special_names::fix_file_identifier(source_file_name);
+        if normalized_source_name != *graph_file_name {
+            return Err(SceneGraphResolveError::SourceFileNameMismatch {
+                file_index: source_file_index,
+                expected: graph_file_name.clone(),
+                actual: normalized_source_name,
+            });
+        }
+        for object in &self.objects {
+            let identity = graph
+                .object_identity(source_file_index, object.object_index)
+                .ok_or(SceneGraphResolveError::ObjectTableMismatch {
+                    file_index: source_file_index,
+                    object_index: object.object_index,
+                })?;
+            if identity.path_id != object.path_id {
+                return Err(SceneGraphResolveError::ObjectIdentityMismatch {
+                    file_index: source_file_index,
+                    object_index: object.object_index,
+                    scene_path_id: object.path_id,
+                    graph_path_id: identity.path_id,
+                });
+            }
+        }
+        if graph
+            .object_identity(source_file_index, self.objects.len())
+            .is_some()
+        {
+            return Err(SceneGraphResolveError::ObjectCountMismatch {
+                file_index: source_file_index,
+                scene_count: self.objects.len(),
+            });
+        }
+
+        let mut resolved_targets = Vec::new();
+        resolved_targets
+            .try_reserve_exact(self.relationships.len())
+            .map_err(|_| SceneGraphResolveError::AllocationFailed {
+                requested: self.relationships.len(),
+            })?;
+        for (relationship_index, relationship) in self.relationships.iter().enumerate() {
+            let mut matches = graph
+                .references_from_object(source_file_index, relationship.source_object_index)
+                .filter(|reference| {
+                    reference.source_path_id == relationship.source_path_id
+                        && reference_field_path_matches(reference, &relationship.field_path)
+                });
+            let Some(reference) = matches.next() else {
+                return Err(SceneGraphResolveError::ReferenceFieldNotFound {
+                    relationship_index,
+                    object_index: relationship.source_object_index,
+                    field_path: relationship.field_path.clone(),
+                });
+            };
+            if matches.next().is_some() {
+                return Err(SceneGraphResolveError::ReferenceFieldAmbiguous {
+                    relationship_index,
+                    object_index: relationship.source_object_index,
+                    field_path: relationship.field_path.clone(),
+                });
+            }
+            resolved_targets.push(scene_target_from_multi_file_resolution(
+                &reference.resolution,
+                source_file_index,
+            ));
+        }
+        for (relationship, target) in self.relationships.iter_mut().zip(resolved_targets) {
+            relationship.target = target;
+        }
+        Ok(())
     }
 }
 
@@ -397,8 +520,8 @@ impl<'a> SceneGraphBuilder<'a> {
                     object_index,
                     path_id,
                     SceneRelationshipKind::GameObjectComponent,
-                    field_path,
-                    pointer,
+                    pointer.field_path,
+                    (pointer.file_id, pointer.path_id),
                 )?;
             }
         }
@@ -462,9 +585,13 @@ impl<'a> SceneGraphBuilder<'a> {
         path_id: i64,
         field_path: &str,
         value: &SerializedValue,
-    ) -> Result<Option<(i32, i64)>, SceneGraphBuildError> {
+    ) -> Result<Option<ScenePointerField>, SceneGraphBuildError> {
         if let Some(pointer) = value.pptr() {
-            return Ok(Some(pointer));
+            return Ok(Some(ScenePointerField {
+                file_id: pointer.0,
+                path_id: pointer.1,
+                field_path: field_path.to_owned(),
+            }));
         }
         let value = match value.unique_field("component") {
             Ok(Some(value)) => value,
@@ -484,7 +611,14 @@ impl<'a> SceneGraphBuilder<'a> {
                 return Ok(None);
             }
         };
-        self.pointer_value(object_index, path_id, field_path, value)
+        let pointer_field_path = format!("{field_path}.component");
+        Ok(self
+            .pointer_value(object_index, path_id, &pointer_field_path, value)?
+            .map(|pointer| ScenePointerField {
+                file_id: pointer.0,
+                path_id: pointer.1,
+                field_path: pointer_field_path,
+            }))
     }
 
     fn pointer_value(
@@ -759,6 +893,196 @@ fn value_type_name(value: &SerializedValue) -> &'static str {
     }
 }
 
+fn reference_field_path_matches(
+    reference: &MultiFileObjectReference<'_>,
+    relationship_field_path: &str,
+) -> bool {
+    reference.field_path == relationship_field_path
+        || reference
+            .field_path
+            .strip_suffix(relationship_field_path)
+            .and_then(|prefix| prefix.strip_suffix('.'))
+            .is_some_and(|prefix| prefix.split('.').all(|segment| segment == "Base"))
+}
+
+fn scene_target_from_multi_file_resolution(
+    resolution: &MultiFilePPtrResolution,
+    source_file_index: usize,
+) -> SceneRelationshipTarget {
+    match resolution {
+        MultiFilePPtrResolution::Null => SceneRelationshipTarget::Null,
+        MultiFilePPtrResolution::Object {
+            target_file_index,
+            target_object_index,
+        } if *target_file_index == source_file_index => SceneRelationshipTarget::LocalObject {
+            object_index: *target_object_index,
+        },
+        MultiFilePPtrResolution::Object {
+            target_file_index,
+            target_object_index,
+        } => SceneRelationshipTarget::WorkspaceObject {
+            file_index: *target_file_index,
+            object_index: *target_object_index,
+        },
+        MultiFilePPtrResolution::MissingLocalObject { path_id } => {
+            SceneRelationshipTarget::MissingLocalObject { path_id: *path_id }
+        }
+        MultiFilePPtrResolution::AmbiguousLocalObject {
+            path_id,
+            match_count,
+        } => SceneRelationshipTarget::AmbiguousLocalObject {
+            path_id: *path_id,
+            match_count: *match_count,
+        },
+        MultiFilePPtrResolution::MissingDependency {
+            external_index,
+            path_id,
+        } => SceneRelationshipTarget::MissingDependency {
+            external_index: *external_index,
+            path_id: *path_id,
+        },
+        MultiFilePPtrResolution::AmbiguousDependency {
+            external_index,
+            path_id,
+            candidate_count,
+        } => SceneRelationshipTarget::AmbiguousDependency {
+            external_index: *external_index,
+            path_id: *path_id,
+            candidate_count: *candidate_count,
+        },
+        MultiFilePPtrResolution::MissingExternalObject {
+            target_file_index,
+            path_id,
+        } => SceneRelationshipTarget::MissingExternalObject {
+            file_index: *target_file_index,
+            path_id: *path_id,
+        },
+        MultiFilePPtrResolution::AmbiguousExternalObject {
+            target_file_index,
+            path_id,
+            match_count,
+        } => SceneRelationshipTarget::AmbiguousExternalObject {
+            file_index: *target_file_index,
+            path_id: *path_id,
+            match_count: *match_count,
+        },
+        MultiFilePPtrResolution::InvalidFileId {
+            file_id,
+            external_count,
+        } => SceneRelationshipTarget::InvalidFileId {
+            file_id: *file_id,
+            external_count: *external_count,
+        },
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SceneGraphResolveError {
+    SourceFileIndexOutOfBounds {
+        file_index: usize,
+        file_count: usize,
+    },
+    SourceFileNameMismatch {
+        file_index: usize,
+        expected: String,
+        actual: String,
+    },
+    ObjectTableMismatch {
+        file_index: usize,
+        object_index: usize,
+    },
+    ObjectIdentityMismatch {
+        file_index: usize,
+        object_index: usize,
+        scene_path_id: i64,
+        graph_path_id: i64,
+    },
+    ObjectCountMismatch {
+        file_index: usize,
+        scene_count: usize,
+    },
+    ReferenceFieldNotFound {
+        relationship_index: usize,
+        object_index: usize,
+        field_path: String,
+    },
+    ReferenceFieldAmbiguous {
+        relationship_index: usize,
+        object_index: usize,
+        field_path: String,
+    },
+    AllocationFailed {
+        requested: usize,
+    },
+}
+
+impl Display for SceneGraphResolveError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SourceFileIndexOutOfBounds {
+                file_index,
+                file_count,
+            } => write!(
+                f,
+                "scene source file index {file_index} is outside the {file_count}-file reference graph"
+            ),
+            Self::SourceFileNameMismatch {
+                file_index,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "scene source file {file_index} has normalized name '{actual}', but the reference graph has '{expected}'"
+            ),
+            Self::ObjectTableMismatch {
+                file_index,
+                object_index,
+            } => write!(
+                f,
+                "scene object {file_index}:{object_index} is absent from the reference graph"
+            ),
+            Self::ObjectIdentityMismatch {
+                file_index,
+                object_index,
+                scene_path_id,
+                graph_path_id,
+            } => write!(
+                f,
+                "scene object {file_index}:{object_index} has PathID {scene_path_id}, but the reference graph has PathID {graph_path_id}"
+            ),
+            Self::ObjectCountMismatch {
+                file_index,
+                scene_count,
+            } => write!(
+                f,
+                "scene graph file {file_index} has {scene_count} objects, but the reference graph contains additional objects"
+            ),
+            Self::ReferenceFieldNotFound {
+                relationship_index,
+                object_index,
+                field_path,
+            } => write!(
+                f,
+                "scene relationship {relationship_index} for object {object_index} has no matching decoded reference at '{field_path}'"
+            ),
+            Self::ReferenceFieldAmbiguous {
+                relationship_index,
+                object_index,
+                field_path,
+            } => write!(
+                f,
+                "scene relationship {relationship_index} for object {object_index} matches multiple decoded references at '{field_path}'"
+            ),
+            Self::AllocationFailed { requested } => write!(
+                f,
+                "could not reserve {requested} resolved scene targets"
+            ),
+        }
+    }
+}
+
+impl Error for SceneGraphResolveError {}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SceneGraphBuildError {
     ObjectCountLimitExceeded {
@@ -872,8 +1196,8 @@ impl Error for SceneGraphBuildError {}
 #[cfg(test)]
 mod tests {
     use super::{
-        SceneGraph, SceneGraphIssueKind, SceneGraphLimits, SceneRelationshipKind,
-        SceneRelationshipTarget,
+        reference_field_path_matches, MultiFileReferenceGraph, SceneGraph, SceneGraphIssueKind,
+        SceneGraphLimits, SceneRelationshipKind, SceneRelationshipTarget,
     };
     use crate::io::binary::Endian;
     use crate::serialized_file::file::SerializedFile;
@@ -973,7 +1297,12 @@ mod tests {
         put_u32_le(output, 0);
     }
 
-    fn make_game_object_file() -> Vec<u8> {
+    fn make_game_object_file(
+        name: &str,
+        path_id: i32,
+        component: Option<(i32, i32)>,
+        external_path: Option<&str>,
+    ) -> Vec<u8> {
         let mut strings = Vec::new();
         let root_type = push_tree_string(&mut strings, "GameObject");
         let empty = push_tree_string(&mut strings, "");
@@ -1026,19 +1355,34 @@ mod tests {
         metadata.extend_from_slice(&strings);
         put_u32_le(&mut metadata, 0);
         put_i32_le(&mut metadata, 1);
-        put_i32_le(&mut metadata, 42);
+        put_i32_le(&mut metadata, path_id);
         put_u32_le(&mut metadata, 0);
 
         let mut payload = Vec::new();
-        put_i32_le(&mut payload, 4);
-        payload.extend_from_slice(b"Root");
+        put_i32_le(&mut payload, i32::try_from(name.len()).unwrap());
+        payload.extend_from_slice(name.as_bytes());
+        let name_padding = (4 - name.len() % 4) % 4;
+        payload.resize(payload.len() + name_padding, 0);
         payload.push(1);
-        put_i32_le(&mut payload, 0);
+        if let Some((file_id, target_path_id)) = component {
+            put_i32_le(&mut payload, 1);
+            put_i32_le(&mut payload, file_id);
+            put_i32_le(&mut payload, target_path_id);
+        } else {
+            put_i32_le(&mut payload, 0);
+        }
         put_i32_le(&mut metadata, i32::try_from(payload.len()).unwrap());
         put_i32_le(&mut metadata, 1);
         put_u16_le(&mut metadata, 1);
         put_u16_le(&mut metadata, 0);
-        put_i32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, i32::from(external_path.is_some()));
+        if let Some(external_path) = external_path {
+            metadata.push(0); // empty asset path
+            metadata.extend_from_slice(&[0; 16]); // GUID
+            put_i32_le(&mut metadata, 0); // asset type
+            metadata.extend_from_slice(external_path.as_bytes());
+            metadata.push(0);
+        }
         metadata.push(0);
 
         let header_size = 20usize;
@@ -1145,18 +1489,219 @@ mod tests {
 
     #[test]
     fn builds_a_scene_graph_from_a_complete_serialized_file() {
-        let bytes = make_game_object_file();
+        let bytes = make_game_object_file("Root", 42, Some((0, 42)), None);
         let file = SerializedFile::parse(&bytes).unwrap();
-        let graph = SceneGraph::build(&file, SceneGraphLimits::default()).unwrap();
+        let mut graph = SceneGraph::build(&file, SceneGraphLimits::default()).unwrap();
 
         assert_eq!(graph.objects().len(), 1);
         assert_eq!(graph.objects()[0].path_id, 42);
         assert_eq!(graph.objects()[0].class_id, Some(1));
         assert_eq!(graph.objects()[0].name_bytes.as_deref(), Some(&b"Root"[..]));
         assert_eq!(graph.objects()[0].is_active, Some(true));
-        assert!(graph.relationships().is_empty());
+        assert_eq!(graph.relationships().len(), 1);
+        assert_eq!(graph.relationships()[0].field_path, "m_Component[0]");
+        assert_eq!(
+            graph.relationships()[0].target,
+            SceneRelationshipTarget::LocalObject { object_index: 0 }
+        );
         assert!(graph.issues().is_empty());
         assert!(graph.is_complete());
+
+        let per_file_graph =
+            crate::serialized_file::reference_graph::ObjectReferenceGraph::build(&file).unwrap();
+        let named_file = crate::serialized_file::reference_graph::NamedObjectReferenceGraph {
+            file_name: "GameObject.assets",
+            metadata: &file.metadata,
+            graph: &per_file_graph,
+        };
+        let multi_file_graph = MultiFileReferenceGraph::build(&[named_file]).unwrap();
+        let target_before_failed_resolution = graph.relationships()[0].target.clone();
+        assert!(matches!(
+            graph.resolve_with_multi_file_graph(0, "wrong.assets", &multi_file_graph),
+            Err(super::SceneGraphResolveError::SourceFileNameMismatch { .. })
+        ));
+        assert_eq!(
+            graph.relationships()[0].target,
+            target_before_failed_resolution
+        );
+        graph
+            .resolve_with_multi_file_graph(0, "GAMEOBJECT.ASSETS", &multi_file_graph)
+            .unwrap();
+        assert_eq!(
+            graph.relationships()[0].target,
+            SceneRelationshipTarget::LocalObject { object_index: 0 }
+        );
+    }
+
+    #[test]
+    fn resolves_scene_component_links_across_loaded_serialized_files() {
+        let source_bytes =
+            make_game_object_file("Source", 42, Some((1, 99)), Some("shared.assets"));
+        let target_bytes = make_game_object_file("Target", 99, None, None);
+        let source_file = SerializedFile::parse(&source_bytes).unwrap();
+        let target_file = SerializedFile::parse(&target_bytes).unwrap();
+        let source_per_file_graph =
+            crate::serialized_file::reference_graph::ObjectReferenceGraph::build(&source_file)
+                .unwrap();
+        let target_per_file_graph =
+            crate::serialized_file::reference_graph::ObjectReferenceGraph::build(&target_file)
+                .unwrap();
+        let named_files = [
+            crate::serialized_file::reference_graph::NamedObjectReferenceGraph {
+                file_name: "main.assets",
+                metadata: &source_file.metadata,
+                graph: &source_per_file_graph,
+            },
+            crate::serialized_file::reference_graph::NamedObjectReferenceGraph {
+                file_name: "shared.assets",
+                metadata: &target_file.metadata,
+                graph: &target_per_file_graph,
+            },
+        ];
+        let reference_graph = MultiFileReferenceGraph::build(&named_files).unwrap();
+        let mut scene = SceneGraph::build(&source_file, SceneGraphLimits::default()).unwrap();
+        assert!(matches!(
+            scene.relationships()[0].target,
+            SceneRelationshipTarget::ExternalObject {
+                file_id: 1,
+                external_index: 0,
+                path_id: 99,
+            }
+        ));
+
+        scene
+            .resolve_with_multi_file_graph(0, "main.assets", &reference_graph)
+            .unwrap();
+        assert_eq!(
+            scene.relationships()[0].target,
+            SceneRelationshipTarget::WorkspaceObject {
+                file_index: 1,
+                object_index: 0,
+            }
+        );
+        assert!(scene.is_complete());
+
+        let source_only = [
+            crate::serialized_file::reference_graph::NamedObjectReferenceGraph {
+                file_name: "main.assets",
+                metadata: &source_file.metadata,
+                graph: &source_per_file_graph,
+            },
+        ];
+        let missing_reference_graph = MultiFileReferenceGraph::build(&source_only).unwrap();
+        let mut missing_scene =
+            SceneGraph::build(&source_file, SceneGraphLimits::default()).unwrap();
+        missing_scene
+            .resolve_with_multi_file_graph(0, "main.assets", &missing_reference_graph)
+            .unwrap();
+        assert_eq!(
+            missing_scene.relationships()[0].target,
+            SceneRelationshipTarget::MissingDependency {
+                external_index: 0,
+                path_id: 99,
+            }
+        );
+        assert!(!missing_scene.is_complete());
+
+        let no_edge_bytes = make_game_object_file("Source", 42, None, Some("shared.assets"));
+        let no_edge_file = SerializedFile::parse(&no_edge_bytes).unwrap();
+        let no_edge_per_file_graph =
+            crate::serialized_file::reference_graph::ObjectReferenceGraph::build(&no_edge_file)
+                .unwrap();
+        let no_edge_named = [
+            crate::serialized_file::reference_graph::NamedObjectReferenceGraph {
+                file_name: "main.assets",
+                metadata: &no_edge_file.metadata,
+                graph: &no_edge_per_file_graph,
+            },
+        ];
+        let no_edge_graph = MultiFileReferenceGraph::build(&no_edge_named).unwrap();
+        let mut unmatched_scene =
+            SceneGraph::build(&source_file, SceneGraphLimits::default()).unwrap();
+        let original_target = unmatched_scene.relationships()[0].target.clone();
+        assert!(matches!(
+            unmatched_scene.resolve_with_multi_file_graph(0, "main.assets", &no_edge_graph),
+            Err(super::SceneGraphResolveError::ReferenceFieldNotFound { .. })
+        ));
+        assert_eq!(unmatched_scene.relationships()[0].target, original_target);
+    }
+
+    #[test]
+    fn matches_inherited_scene_reference_field_paths_without_matching_neighbors() {
+        let reference = crate::serialized_file::reference_graph::MultiFileObjectReference {
+            source_file_index: 0,
+            source_object_index: 4,
+            source_path_id: 42,
+            field_path: "Base.m_Component[0].component",
+            resolution: crate::serialized_file::reference_graph::MultiFilePPtrResolution::Null,
+        };
+        assert!(reference_field_path_matches(
+            &reference,
+            "m_Component[0].component"
+        ));
+        assert!(!reference_field_path_matches(
+            &reference,
+            "m_Component[1].component"
+        ));
+        assert!(!reference_field_path_matches(&reference, "component"));
+    }
+
+    #[test]
+    fn preserves_all_cross_file_reference_failure_categories() {
+        use crate::serialized_file::reference_graph::MultiFilePPtrResolution as Resolution;
+
+        let cases = [
+            (
+                Resolution::AmbiguousDependency {
+                    external_index: 2,
+                    path_id: 70,
+                    candidate_count: 3,
+                },
+                SceneRelationshipTarget::AmbiguousDependency {
+                    external_index: 2,
+                    path_id: 70,
+                    candidate_count: 3,
+                },
+            ),
+            (
+                Resolution::MissingExternalObject {
+                    target_file_index: 4,
+                    path_id: 71,
+                },
+                SceneRelationshipTarget::MissingExternalObject {
+                    file_index: 4,
+                    path_id: 71,
+                },
+            ),
+            (
+                Resolution::AmbiguousExternalObject {
+                    target_file_index: 5,
+                    path_id: 72,
+                    match_count: 2,
+                },
+                SceneRelationshipTarget::AmbiguousExternalObject {
+                    file_index: 5,
+                    path_id: 72,
+                    match_count: 2,
+                },
+            ),
+            (
+                Resolution::InvalidFileId {
+                    file_id: -1,
+                    external_count: 2,
+                },
+                SceneRelationshipTarget::InvalidFileId {
+                    file_id: -1,
+                    external_count: 2,
+                },
+            ),
+        ];
+        for (resolution, expected) in cases {
+            assert_eq!(
+                super::scene_target_from_multi_file_resolution(&resolution, 0),
+                expected
+            );
+        }
     }
 
     #[test]

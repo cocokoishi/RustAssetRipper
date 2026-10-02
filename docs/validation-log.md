@@ -296,4 +296,13 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Synthetic root tests cover relationship order and classifications, nested `Base` fields, malformed data, duplicate/incomplete root sets, duplicate object PathIDs, limits, and modern object class IDs derived from resolved serialized types. A complete generated generation-10 SerializedFile with a GameObject TypeTree exercises `SceneGraph::build` end to end.
 - The first full-file fixture attempt failed because the fixture incorrectly emitted an enable-TypeTree flag for generation 10; the decoder correctly treated those bytes as part of the type count. The fixture now follows generation 10's implicit TypeTree-present rule, and the focused integration case passes.
 - `cargo test --workspace --locked --quiet`: exit 0; 210 library tests and 4 binary tests passed, 0 failed, 0 doc tests. Warnings-denied workspace Clippy, formatting check, baseline verification (1,449 reference files unchanged), and `git diff --check` passed.
-- This does not validate an actual Unity-produced file or AssetRipper runtime behavior. Transform full-file coverage, scene roots, Prefabs, external multi-file target resolution, transform values, and export remain incomplete.
+- This does not validate an actual Unity-produced file or AssetRipper runtime behavior. Transform full-file coverage, scene roots, Prefabs, transform values, and export remain incomplete; dependency discovery/loading is performed by the workspace before the scene graph is joined.
+
+
+## Multi-file scene PPtr resolution
+
+- `SceneGraph::resolve_with_multi_file_graph` now validates the caller file name and every object-table PathID against the joined graph before resolving relation fields. It matches only the exact field path or a prefix made entirely of inherited `Base` nodes, then applies targets atomically after all scene edges match.
+- Local/unique and cross-file/unique targets remain file-scoped. Missing local objects, duplicate local PathIDs, missing/ambiguous dependencies, missing/ambiguous target objects, invalid FileIDs, and null PPtrs retain distinct states. A field-path mismatch returns an error and leaves the original scene targets unchanged.
+- Generated generation-10 SerializedFiles verify a local GameObject component pointer, a cross-file component pointer from `main.assets` to `shared.assets`, unresolved dependency status, filename mismatch, and transactional field-path failure. No user samples or real Unity files were used.
+- `cargo test --workspace --locked --quiet`: exit 0; 213 library tests and 4 binary tests passed, 0 failed, 0 doc tests. Warnings-denied Clippy, formatting check, baseline verification (1,449 reference files unchanged), and `git diff --check` passed.
+- This resolves scene edges only against a caller-built workspace graph. Parent/child consistency policy, full Transform/RectTransform layouts, scene roots, Prefabs, Unity runtime comparison, and export remain open.
