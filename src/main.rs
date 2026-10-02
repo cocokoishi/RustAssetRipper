@@ -230,7 +230,28 @@ fn mount_input_directories(
     Ok((filesystem, selected_paths, total_mount_report))
 }
 
+#[cfg(not(test))]
 fn print_workspace_summary(
+    filesystem: &VirtualFileSystem,
+    workspace: &SerializedFileWorkspace,
+    dependencies: &SerializedFileDependencyReport,
+) -> Result<(), Box<dyn Error>> {
+    let stdout = io::stdout();
+    let mut output = stdout.lock();
+    print_workspace_summary_to(&mut output, filesystem, workspace, dependencies)
+}
+
+#[cfg(test)]
+fn print_workspace_summary(
+    filesystem: &VirtualFileSystem,
+    workspace: &SerializedFileWorkspace,
+    dependencies: &SerializedFileDependencyReport,
+) -> Result<(), Box<dyn Error>> {
+    print_workspace_summary_to(&mut io::sink(), filesystem, workspace, dependencies)
+}
+
+fn print_workspace_summary_to<W: io::Write>(
+    output: &mut W,
     filesystem: &VirtualFileSystem,
     workspace: &SerializedFileWorkspace,
     dependencies: &SerializedFileDependencyReport,
@@ -247,16 +268,17 @@ fn print_workspace_summary(
         None
     };
 
-    println!("SerializedFiles: {}", workspace.files().len());
+    writeln!(output, "SerializedFiles: {}", workspace.files().len())?;
     let mut build_settings_paths = None;
     let mut conflicting_build_settings = false;
     for (file_index, file) in workspace.files().iter().enumerate() {
-        println!(
+        writeln!(
+            output,
             "  {:?}: {:?}, {} objects",
             file.file_name,
             file.header.format_version,
             file.metadata.objects.len()
-        );
+        )?;
 
         let mut file_bytes = None;
         let scene_manager_count = file
@@ -266,9 +288,10 @@ fn print_workspace_summary(
             .filter(|object| scene_manager_kind(workspace_object_class_id(object)).is_some())
             .count();
         if scene_manager_count > 0 {
-            println!(
+            writeln!(
+                output,
                 "    Scene collection candidate: {scene_manager_count} LevelGameManager objects"
-            );
+            )?;
             let contains_occlusion_settings = file.metadata.objects.iter().any(|object| {
                 scene_manager_kind(workspace_object_class_id(object))
                     == Some(SceneManagerKind::OcclusionCullingSettings)
@@ -292,26 +315,28 @@ fn print_workspace_summary(
                 let Some(kind) = scene_manager_kind(workspace_object_class_id(object)) else {
                     continue;
                 };
-                println!(
+                writeln!(
+                    output,
                     "      manager PathID {}: {:?} (class ID {})",
                     object.path_id,
                     kind,
                     kind.class_id()
-                );
+                )?;
                 if kind == SceneManagerKind::OcclusionCullingSettings {
                     let parsed_file = parsed_scene_guid_file.as_ref().ok_or_else(|| {
                         invalid_data("OcclusionCullingSettings file was not parsed")
                     })?;
                     let payload = parsed_file.decode_object_payload(object_index)?;
                     match extract_occlusion_scene_guid(&payload.root)? {
-                        Some(scene_guid) => println!(
+                        Some(scene_guid) => writeln!(
+                            output,
                             "        SceneGUID words: [0x{:08x}, 0x{:08x}, 0x{:08x}, 0x{:08x}]",
                             scene_guid.data[0],
                             scene_guid.data[1],
                             scene_guid.data[2],
                             scene_guid.data[3]
-                        ),
-                        None => println!("        SceneGUID: absent from this TypeTree"),
+                        )?,
+                        None => writeln!(output, "        SceneGUID: absent from this TypeTree")?,
                     }
                 }
             }
@@ -344,13 +369,14 @@ fn print_workspace_summary(
                 BuildSettingsSceneLimits::default(),
                 &ObjectDecodeLimits::default(),
             )?;
-            println!(
+            writeln!(
+                output,
                 "    BuildSettings object {}: {} scene paths",
                 object.path_id,
                 scenes.len()
-            );
+            )?;
             for (scene_index, path) in scenes.iter().enumerate() {
-                println!("      scene[{scene_index}]: {path}");
+                writeln!(output, "      scene[{scene_index}]: {path}")?;
             }
             if !conflicting_build_settings {
                 match build_settings_paths.as_ref() {
@@ -397,24 +423,27 @@ fn print_workspace_summary(
                 .iter()
                 .filter(|object| matches!(object.class_id, Some(4 | 224)))
                 .count();
-            println!(
+            writeln!(
+                output,
                 "    Scene graph: {game_object_count} GameObjects, {transform_count} Transforms, {} relationships, {} decode issues, complete={}",
                 scene_graph.relationships().len(),
                 scene_graph.issues().len(),
                 scene_graph.is_complete()
-            );
-            println!(
+            )?;
+            writeln!(
+                output,
                 "    Local root candidates: {}, root issues: {}, hierarchy issues: {}",
                 root_discovery.roots().len(),
                 root_discovery.issues().len(),
                 hierarchy_issues.len()
-            );
+            )?;
             for root in root_discovery.roots() {
                 if let Some(object) = scene_graph.objects().get(root.game_object_index) {
-                    println!(
+                    writeln!(
+                        output,
                         "      root candidate PathID {} ({:?})",
                         object.path_id, root.reason
-                    );
+                    )?;
                 }
             }
         }
@@ -441,17 +470,19 @@ fn print_workspace_summary(
             file.metadata.prefix.unity_version_text.as_deref(),
             scene_path_set,
         );
-        println!(
+        writeln!(
+            output,
             "    Scene path mapping for collection {:?}: {status}",
             file.file_name
-        );
+        )?;
     }
-    println!(
+    writeln!(
+        output,
         "external requests: {}; newly loaded dependencies: {}; resolved: {}",
         dependencies.requests.len(),
         dependencies.loaded_serialized_files,
         dependencies.is_complete()
-    );
+    )?;
     Ok(())
 }
 
@@ -719,6 +750,81 @@ mod tests {
         file
     }
 
+    fn make_build_settings_file(scene_paths: &[&str]) -> Vec<u8> {
+        let mut string_buffer = Vec::new();
+        let build_settings_type = push_type_tree_string(&mut string_buffer, "BuildSettings");
+        let empty_name = push_type_tree_string(&mut string_buffer, "");
+        let vector_type = push_type_tree_string(&mut string_buffer, "vector");
+        let scenes_field = push_type_tree_string(&mut string_buffer, "m_Scenes");
+        let array_type = push_type_tree_string(&mut string_buffer, "Array");
+        let int_type = push_type_tree_string(&mut string_buffer, "int");
+        let size_field = push_type_tree_string(&mut string_buffer, "size");
+        let string_type = push_type_tree_string(&mut string_buffer, "string");
+        let data_field = push_type_tree_string(&mut string_buffer, "data");
+        let char_type = push_type_tree_string(&mut string_buffer, "char");
+
+        let mut metadata = Vec::new();
+        metadata.extend_from_slice(b"2019.4.0f1\0");
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 1);
+        put_i32_le(&mut metadata, 141);
+        put_i32_le(&mut metadata, 8);
+        put_i32_le(&mut metadata, i32::try_from(string_buffer.len()).unwrap());
+        for (level, type_offset, name_offset, byte_size, index) in [
+            (0, build_settings_type, empty_name, -1, 0),
+            (1, vector_type, scenes_field, -1, 1),
+            (2, array_type, array_type, -1, 2),
+            (3, int_type, size_field, 4, 3),
+            (3, string_type, data_field, -1, 4),
+            (4, array_type, array_type, -1, 5),
+            (5, int_type, size_field, 4, 6),
+            (5, char_type, data_field, 1, 7),
+        ] {
+            put_node(
+                &mut metadata,
+                level,
+                type_offset,
+                name_offset,
+                byte_size,
+                index,
+            );
+        }
+        metadata.extend_from_slice(&string_buffer);
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 1);
+        put_i32_le(&mut metadata, 42);
+        put_u32_le(&mut metadata, 0);
+
+        let mut payload = Vec::new();
+        put_i32_le(&mut payload, i32::try_from(scene_paths.len()).unwrap());
+        for scene_path in scene_paths {
+            let scene_path = scene_path.as_bytes();
+            put_i32_le(&mut payload, i32::try_from(scene_path.len()).unwrap());
+            payload.extend_from_slice(scene_path);
+            let padding = (4 - scene_path.len() % 4) % 4;
+            payload.resize(payload.len() + padding, 0);
+        }
+        put_i32_le(&mut metadata, i32::try_from(payload.len()).unwrap());
+        put_i32_le(&mut metadata, 141);
+        put_u16_le(&mut metadata, 141);
+        put_u16_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 0);
+        metadata.push(0);
+
+        let data_offset = 20usize + metadata.len();
+        let file_size = data_offset + payload.len();
+        let mut file = Vec::with_capacity(file_size);
+        file.extend_from_slice(&i32::try_from(metadata.len()).unwrap().to_be_bytes());
+        file.extend_from_slice(&u32::try_from(file_size).unwrap().to_be_bytes());
+        file.extend_from_slice(&10i32.to_be_bytes());
+        file.extend_from_slice(&u32::try_from(data_offset).unwrap().to_be_bytes());
+        file.push(0);
+        file.extend_from_slice(&[0; 3]);
+        file.extend_from_slice(&metadata);
+        file.extend_from_slice(&payload);
+        file
+    }
+
     fn make_occlusion_settings_file(scene_guid: [u32; 4]) -> Vec<u8> {
         let mut string_buffer = Vec::new();
         let root_type = push_type_tree_string(&mut string_buffer, "OcclusionCullingSettings");
@@ -869,6 +975,57 @@ mod tests {
         };
 
         super::inspect_directories(std::slice::from_ref(&input.directory)).unwrap();
+    }
+
+    #[test]
+    fn workspace_summary_maps_scene_collection_path_and_guid() {
+        let directory = TestInputDirectory::new_root();
+        let scene_file = directory.join("level0");
+        let build_settings_file = directory.join("globalgamemanagers");
+        fs::write(
+            &scene_file,
+            make_occlusion_settings_file([0x0123_4567, 0x89ab_cdef, 3, 4]),
+        )
+        .unwrap();
+        fs::write(
+            &build_settings_file,
+            make_build_settings_file(&["Assets/Scenes/Main.unity"]),
+        )
+        .unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![scene_file, build_settings_file],
+            subdirectories: Vec::new(),
+        };
+        let (mut filesystem, selected_paths, _) =
+            super::mount_input_directories(std::slice::from_ref(&input.directory), false).unwrap();
+        let mixed = super::MixedGameStructure::from_vfs_paths(
+            &filesystem,
+            &selected_paths,
+            super::MixedGameStructureLimits::default(),
+        )
+        .unwrap();
+        let (workspace, dependencies) =
+            super::SerializedFileWorkspace::load_from_vfs_with_dependencies(
+                &mut filesystem,
+                &mixed.serialized_file_inputs,
+                &mixed.registered_files,
+                &mixed.data_paths,
+                super::SerializedFileWorkspaceLimits::default(),
+                super::DependencyIndexLimits::default(),
+                super::ContainerMountLimits::default(),
+            )
+            .unwrap();
+        let mut output = Vec::new();
+        super::print_workspace_summary_to(&mut output, &filesystem, &workspace, &dependencies)
+            .unwrap();
+        let summary = String::from_utf8(output).unwrap();
+        assert!(
+            summary.contains("SceneGUID words: [0x01234567, 0x89abcdef, 0x00000003, 0x00000004]")
+        );
+        assert!(summary.contains(
+            "Scene path mapping for collection \"level0\": Assets/Scenes/Main (BuildSettings index 0, duplicate path=false)"
+        ));
     }
 
     #[test]
