@@ -178,6 +178,75 @@ pub struct SceneGraphIssue {
     pub kind: SceneGraphIssueKind,
 }
 
+/// A known contradiction in local Transform `m_Father`/`m_Children` relationships.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SceneHierarchyIssue {
+    pub relationship_index: usize,
+    pub source_object_index: usize,
+    pub target_object_index: usize,
+    pub field_path: String,
+    pub kind: SceneHierarchyIssueKind,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SceneHierarchyIssueKind {
+    TargetClassUnknown,
+    TargetIsNotTransform {
+        class_id: i32,
+    },
+    MissingReciprocal {
+        counterpart_kind: SceneRelationshipKind,
+    },
+    DuplicateReciprocal {
+        counterpart_kind: SceneRelationshipKind,
+        match_count: usize,
+    },
+    MismatchedReciprocalTarget {
+        counterpart_kind: SceneRelationshipKind,
+        actual_target: SceneRelationshipTarget,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct IndexedHierarchyRelationship {
+    source_object_index: usize,
+    kind: SceneRelationshipKind,
+    target_local_object_index: Option<usize>,
+    relationship_index: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SceneGraphAuditError {
+    AllocationFailed {
+        resource: &'static str,
+        requested: usize,
+    },
+    InvalidRelationshipIndex {
+        relationship_index: usize,
+        relationship_count: usize,
+    },
+}
+
+impl Display for SceneGraphAuditError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AllocationFailed { resource, requested } => write!(
+                f,
+                "could not reserve {requested} entries for scene graph audit {resource}"
+            ),
+            Self::InvalidRelationshipIndex {
+                relationship_index,
+                relationship_count,
+            } => write!(
+                f,
+                "scene graph audit index {relationship_index} is outside the {relationship_count} relationships"
+            ),
+        }
+    }
+}
+
+impl Error for SceneGraphAuditError {}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SceneGraphIssueKind {
     ObjectDecodeFailed {
@@ -310,6 +379,180 @@ impl SceneGraph {
                         | SceneRelationshipTarget::WorkspaceObject { .. }
                 )
             })
+    }
+
+    /// Audit reciprocal parent/child pointers whose targets resolve inside this scene graph.
+    ///
+    /// Cross-file targets are not checked here because this graph contains scene values for only
+    /// one file. The source editor conversion requires each non-root Transform to appear in its
+    /// father's child array when it calculates root order; this method reports that and related
+    /// contradictions without panicking or repairing the serialized values.
+    pub fn audit_local_transform_links(
+        &self,
+    ) -> Result<Vec<SceneHierarchyIssue>, SceneGraphAuditError> {
+        let relationship_count = self
+            .relationships
+            .iter()
+            .filter(|relationship| {
+                matches!(
+                    relationship.kind,
+                    SceneRelationshipKind::TransformParent | SceneRelationshipKind::TransformChild
+                )
+            })
+            .count();
+        let mut index = Vec::new();
+        index.try_reserve_exact(relationship_count).map_err(|_| {
+            SceneGraphAuditError::AllocationFailed {
+                resource: "local Transform relationship index",
+                requested: relationship_count,
+            }
+        })?;
+        for (relationship_index, relationship) in self.relationships.iter().enumerate() {
+            if !matches!(
+                relationship.kind,
+                SceneRelationshipKind::TransformParent | SceneRelationshipKind::TransformChild
+            ) {
+                continue;
+            }
+            index.push(IndexedHierarchyRelationship {
+                source_object_index: relationship.source_object_index,
+                kind: relationship.kind,
+                target_local_object_index: match relationship.target {
+                    SceneRelationshipTarget::LocalObject { object_index } => Some(object_index),
+                    _ => None,
+                },
+                relationship_index,
+            });
+        }
+        index.sort_unstable_by_key(|entry| {
+            (
+                entry.source_object_index,
+                hierarchy_kind_rank(entry.kind),
+                entry.target_local_object_index.unwrap_or(usize::MAX),
+                entry.relationship_index,
+            )
+        });
+
+        let mut issues = Vec::new();
+        issues.try_reserve_exact(relationship_count).map_err(|_| {
+            SceneGraphAuditError::AllocationFailed {
+                resource: "local Transform consistency issues",
+                requested: relationship_count,
+            }
+        })?;
+        for (relationship_index, relationship) in self.relationships.iter().enumerate() {
+            let counterpart_kind = match relationship.kind {
+                SceneRelationshipKind::TransformParent => SceneRelationshipKind::TransformChild,
+                SceneRelationshipKind::TransformChild => SceneRelationshipKind::TransformParent,
+                _ => continue,
+            };
+            let SceneRelationshipTarget::LocalObject {
+                object_index: target_index,
+            } = &relationship.target
+            else {
+                continue;
+            };
+            let target_index = *target_index;
+            let Some(target_object) = self.objects.get(target_index) else {
+                continue;
+            };
+            match target_object.class_id {
+                Some(TRANSFORM_CLASS_ID | RECT_TRANSFORM_CLASS_ID) => {}
+                Some(class_id) => {
+                    issues.push(SceneHierarchyIssue {
+                        relationship_index,
+                        source_object_index: relationship.source_object_index,
+                        target_object_index: target_index,
+                        field_path: relationship.field_path.clone(),
+                        kind: SceneHierarchyIssueKind::TargetIsNotTransform { class_id },
+                    });
+                    continue;
+                }
+                None => {
+                    issues.push(SceneHierarchyIssue {
+                        relationship_index,
+                        source_object_index: relationship.source_object_index,
+                        target_object_index: target_index,
+                        field_path: relationship.field_path.clone(),
+                        kind: SceneHierarchyIssueKind::TargetClassUnknown,
+                    });
+                    continue;
+                }
+            }
+
+            let counterpart_source_index = target_index;
+            let expected_target_index = relationship.source_object_index;
+            let range =
+                hierarchy_relationship_range(&index, counterpart_source_index, counterpart_kind);
+            let entries = &index[range];
+            match relationship.kind {
+                SceneRelationshipKind::TransformParent => {
+                    let match_count = entries
+                        .iter()
+                        .filter(|entry| {
+                            entry.target_local_object_index == Some(expected_target_index)
+                        })
+                        .count();
+                    let kind = match match_count {
+                        0 => Some(SceneHierarchyIssueKind::MissingReciprocal { counterpart_kind }),
+                        1 => None,
+                        match_count => Some(SceneHierarchyIssueKind::DuplicateReciprocal {
+                            counterpart_kind,
+                            match_count,
+                        }),
+                    };
+                    if let Some(kind) = kind {
+                        issues.push(SceneHierarchyIssue {
+                            relationship_index,
+                            source_object_index: relationship.source_object_index,
+                            target_object_index: target_index,
+                            field_path: relationship.field_path.clone(),
+                            kind,
+                        });
+                    }
+                }
+                SceneRelationshipKind::TransformChild => match entries {
+                    [] => issues.push(SceneHierarchyIssue {
+                        relationship_index,
+                        source_object_index: relationship.source_object_index,
+                        target_object_index: target_index,
+                        field_path: relationship.field_path.clone(),
+                        kind: SceneHierarchyIssueKind::MissingReciprocal { counterpart_kind },
+                    }),
+                    [entry] if entry.target_local_object_index == Some(expected_target_index) => {}
+                    [entry] => {
+                        let counterpart = self.relationships.get(entry.relationship_index).ok_or(
+                            SceneGraphAuditError::InvalidRelationshipIndex {
+                                relationship_index: entry.relationship_index,
+                                relationship_count: self.relationships.len(),
+                            },
+                        )?;
+                        issues.push(SceneHierarchyIssue {
+                            relationship_index,
+                            source_object_index: relationship.source_object_index,
+                            target_object_index: target_index,
+                            field_path: relationship.field_path.clone(),
+                            kind: SceneHierarchyIssueKind::MismatchedReciprocalTarget {
+                                counterpart_kind,
+                                actual_target: counterpart.target.clone(),
+                            },
+                        });
+                    }
+                    entries => issues.push(SceneHierarchyIssue {
+                        relationship_index,
+                        source_object_index: relationship.source_object_index,
+                        target_object_index: target_index,
+                        field_path: relationship.field_path.clone(),
+                        kind: SceneHierarchyIssueKind::DuplicateReciprocal {
+                            counterpart_kind,
+                            match_count: entries.len(),
+                        },
+                    }),
+                },
+                _ => {}
+            }
+        }
+        Ok(issues)
     }
 
     /// Resolve every scene edge through a cross-file graph built from the same ordered workspace.
@@ -1168,6 +1411,30 @@ fn object_scene_class_id(object: &ObjectInfo) -> Option<i32> {
         .or_else(|| object.resolved_type_index.map(|_| object.raw_type_id))
 }
 
+fn hierarchy_kind_rank(kind: SceneRelationshipKind) -> u8 {
+    match kind {
+        SceneRelationshipKind::GameObjectComponent => 0,
+        SceneRelationshipKind::ComponentGameObject => 1,
+        SceneRelationshipKind::TransformParent => 2,
+        SceneRelationshipKind::TransformChild => 3,
+    }
+}
+
+fn hierarchy_relationship_range(
+    index: &[IndexedHierarchyRelationship],
+    source_object_index: usize,
+    kind: SceneRelationshipKind,
+) -> std::ops::Range<usize> {
+    let key = (source_object_index, hierarchy_kind_rank(kind));
+    let start = index.partition_point(|entry| {
+        (entry.source_object_index, hierarchy_kind_rank(entry.kind)) < key
+    });
+    let end = index.partition_point(|entry| {
+        (entry.source_object_index, hierarchy_kind_rank(entry.kind)) <= key
+    });
+    start..end
+}
+
 fn is_scene_object_class(class_id: Option<i32>) -> bool {
     matches!(
         class_id,
@@ -1502,8 +1769,9 @@ impl Error for SceneGraphBuildError {}
 mod tests {
     use super::{
         reference_field_path_matches, MultiFileReferenceGraph, SceneGraph, SceneGraphIssueKind,
-        SceneGraphLimits, SceneQuaternion, SceneRectTransformValues, SceneRelationshipKind,
-        SceneRelationshipTarget, SceneTransformValues, SceneVector2, SceneVector3,
+        SceneGraphLimits, SceneHierarchyIssueKind, SceneQuaternion, SceneRectTransformValues,
+        SceneRelationshipKind, SceneRelationshipTarget, SceneTransformValues, SceneVector2,
+        SceneVector3,
     };
     use crate::io::binary::Endian;
     use crate::serialized_file::file::SerializedFile;
@@ -1968,7 +2236,121 @@ mod tests {
             SceneRelationshipTarget::LocalObject { object_index: 1 }
         );
         assert!(graph.issues().is_empty());
+        assert!(graph.audit_local_transform_links().unwrap().is_empty());
         assert!(graph.is_complete());
+    }
+
+    #[test]
+    fn audits_missing_reciprocal_transform_child_links() {
+        let metadata = metadata(&[(10, 4), (20, 4)]);
+        let mut child_fields = transform_fields(false);
+        child_fields
+            .iter_mut()
+            .find(|field| field.name == "m_Father")
+            .unwrap()
+            .value = pptr(0, 20);
+        let roots = vec![
+            (0, Value::Struct(child_fields)),
+            (
+                1,
+                Value::Struct(transform_fields_with_links(false, pptr(0, 0), Vec::new())),
+            ),
+        ];
+        let graph =
+            SceneGraph::from_decoded_roots(&metadata, &roots, SceneGraphLimits::default()).unwrap();
+
+        let issues = graph.audit_local_transform_links().unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(
+            issues[0].kind,
+            SceneHierarchyIssueKind::MissingReciprocal {
+                counterpart_kind: SceneRelationshipKind::TransformChild,
+            }
+        );
+        assert_eq!(issues[0].source_object_index, 0);
+        assert_eq!(issues[0].target_object_index, 1);
+    }
+
+    #[test]
+    fn audits_mismatched_and_duplicate_reciprocal_transform_links() {
+        let metadata = metadata(&[(10, 4), (20, 4)]);
+        let mismatched_roots = vec![
+            (
+                0,
+                Value::Struct(transform_fields_with_links(
+                    false,
+                    pptr(0, 0),
+                    vec![pptr(0, 20)],
+                )),
+            ),
+            (1, Value::Struct(transform_fields(false))),
+        ];
+        let mismatched = SceneGraph::from_decoded_roots(
+            &metadata,
+            &mismatched_roots,
+            SceneGraphLimits::default(),
+        )
+        .unwrap();
+        let mismatch_issues = mismatched.audit_local_transform_links().unwrap();
+        assert_eq!(mismatch_issues.len(), 1);
+        assert_eq!(
+            mismatch_issues[0].kind,
+            SceneHierarchyIssueKind::MismatchedReciprocalTarget {
+                counterpart_kind: SceneRelationshipKind::TransformParent,
+                actual_target: SceneRelationshipTarget::Null,
+            }
+        );
+
+        let duplicate_roots = vec![
+            (
+                0,
+                Value::Struct(transform_fields_with_links(
+                    false,
+                    pptr(0, 0),
+                    vec![pptr(0, 20), pptr(0, 20)],
+                )),
+            ),
+            (
+                1,
+                Value::Struct(transform_fields_with_links(false, pptr(0, 10), Vec::new())),
+            ),
+        ];
+        let duplicate = SceneGraph::from_decoded_roots(
+            &metadata,
+            &duplicate_roots,
+            SceneGraphLimits::default(),
+        )
+        .unwrap();
+        let duplicate_issues = duplicate.audit_local_transform_links().unwrap();
+        assert_eq!(duplicate_issues.len(), 1);
+        assert_eq!(
+            duplicate_issues[0].kind,
+            SceneHierarchyIssueKind::DuplicateReciprocal {
+                counterpart_kind: SceneRelationshipKind::TransformChild,
+                match_count: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn audits_local_parent_pointers_that_target_non_transforms() {
+        let metadata = metadata(&[(10, 4), (20, 23)]);
+        let mut fields = transform_fields(false);
+        fields
+            .iter_mut()
+            .find(|field| field.name == "m_Father")
+            .unwrap()
+            .value = pptr(0, 20);
+        let roots = vec![(0, Value::Struct(fields))];
+        let graph =
+            SceneGraph::from_decoded_roots(&metadata, &roots, SceneGraphLimits::default()).unwrap();
+
+        let issues = graph.audit_local_transform_links().unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(
+            issues[0].kind,
+            SceneHierarchyIssueKind::TargetIsNotTransform { class_id: 23 }
+        );
     }
 
     #[test]
