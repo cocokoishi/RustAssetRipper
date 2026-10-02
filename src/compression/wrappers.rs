@@ -16,48 +16,139 @@ pub fn has_gzip_magic(input: &[u8]) -> bool {
 /// scheme reads the first metadata-block length and compares its payload with a
 /// fixed UnityWeb marker before invoking the Brotli decoder.
 pub fn has_brotli_file_signature(input: &[u8]) -> bool {
-    if input.len() < 4 {
+    let mut reader = BrotliBitReader::new(input);
+    if read_brotli_window_bits(&mut reader).is_none() {
         return false;
     }
 
-    // The first byte contains the Brotli window header. The source detector
-    // advances past it and reads the following metadata-block length fields.
-    let mut position = 1usize;
-    let mut current = input[position];
-    position += 1;
-    let size_bytes = usize::from(current & 0x03);
-    if position
-        .checked_add(size_bytes)
-        .is_none_or(|end| end > input.len())
-    {
-        return false;
-    }
-
-    let mut length = 0usize;
-    for index in 0..size_bytes {
-        let next = input[position];
-        position += 1;
-        let bits = usize::from((current >> 2) | ((next & 0x03) << 6));
-        let Some(shift) = index.checked_mul(8) else {
-            return false;
-        };
-        let Some(part) = bits.checked_shl(shift as u32) else {
-            return false;
-        };
-        let Some(combined) = length.checked_add(part) else {
-            return false;
-        };
-        length = combined;
-        current = next;
-    }
-
-    if length != BROTLI_FILE_SIGNATURE.len() {
-        return false;
-    }
-    let Some(end) = position.checked_add(length) else {
+    // AssetRipper's marker is an empty, non-final Brotli metadata meta-block.
+    let Some(is_last) = reader.read_bits(1) else {
         return false;
     };
-    input.get(position..end) == Some(BROTLI_FILE_SIGNATURE)
+    let Some(nibble_code) = reader.read_bits(2) else {
+        return false;
+    };
+    if is_last != 0 || decode_metadata_nibble_count(nibble_code) != Some(0) {
+        return false;
+    }
+    let Some(reserved) = reader.read_bits(1) else {
+        return false;
+    };
+    let Some(skip_bytes) = reader.read_bits(2) else {
+        return false;
+    };
+    if reserved != 0 || skip_bytes == 0 {
+        return false;
+    }
+
+    // RFC 7932 encodes MSKIPLEN - 1 in the selected number of bytes.
+    let Some(length_minus_one) = reader.read_bits((skip_bytes * 8) as usize) else {
+        return false;
+    };
+    let Some(length) = usize::try_from(length_minus_one)
+        .ok()
+        .and_then(|value| value.checked_add(1))
+    else {
+        return false;
+    };
+    if length != BROTLI_FILE_SIGNATURE.len() || !reader.align_to_byte() {
+        return false;
+    }
+    reader.read_aligned_bytes(length) == Some(BROTLI_FILE_SIGNATURE)
+}
+
+fn decode_metadata_nibble_count(code: u32) -> Option<u32> {
+    match code {
+        3 => Some(0),
+        0 => Some(4),
+        1 => Some(5),
+        2 => Some(6),
+        _ => None,
+    }
+}
+
+fn read_brotli_window_bits(reader: &mut BrotliBitReader<'_>) -> Option<u8> {
+    let first_bit = reader.read_bits(1)?;
+    if first_bit == 0 {
+        return Some(16);
+    }
+
+    let code4 = 1 | (reader.read_bits(3)? << 1);
+    match code4 {
+        3 => Some(18),
+        5 => Some(19),
+        7 => Some(20),
+        9 => Some(21),
+        11 => Some(22),
+        13 => Some(23),
+        15 => Some(24),
+        1 => {
+            let code7 = code4 | (reader.read_bits(3)? << 4);
+            match code7 {
+                1 => Some(17),
+                33 => Some(10),
+                49 => Some(11),
+                65 => Some(12),
+                81 => Some(13),
+                97 => Some(14),
+                113 => Some(15),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+struct BrotliBitReader<'a> {
+    input: &'a [u8],
+    bit_position: usize,
+}
+
+impl<'a> BrotliBitReader<'a> {
+    fn new(input: &'a [u8]) -> Self {
+        Self {
+            input,
+            bit_position: 0,
+        }
+    }
+
+    fn read_bits(&mut self, count: usize) -> Option<u32> {
+        if count > u32::BITS as usize {
+            return None;
+        }
+        let end = self.bit_position.checked_add(count)?;
+        if end > self.input.len().checked_mul(8)? {
+            return None;
+        }
+        let mut value = 0u32;
+        for index in 0..count {
+            let byte = *self.input.get(self.bit_position / 8)?;
+            let bit = (byte >> (self.bit_position % 8)) & 1;
+            value |= u32::from(bit) << index;
+            self.bit_position += 1;
+        }
+        Some(value)
+    }
+
+    fn align_to_byte(&mut self) -> bool {
+        while self.bit_position & 7 != 0 {
+            if self.read_bits(1) != Some(0) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn read_aligned_bytes(&mut self, length: usize) -> Option<&'a [u8]> {
+        if self.bit_position & 7 != 0 {
+            return None;
+        }
+        let start = self.bit_position / 8;
+        let end = start.checked_add(length)?;
+        let bytes = self.input.get(start..end)?;
+        self.bit_position = end.checked_mul(8)?;
+        Some(bytes)
+    }
 }
 
 pub fn decompress_gzip(
@@ -344,13 +435,10 @@ mod tests {
     }
 
     #[test]
-    fn detects_the_unity_brotli_metadata_marker() {
+    fn rejects_the_source_detector_nonstandard_marker_length_prefix() {
         let mut input = vec![0xce, ((BROTLI_FILE_SIGNATURE.len() as u8) << 2) | 1, 0];
         input.extend_from_slice(BROTLI_FILE_SIGNATURE);
         input.extend_from_slice(&[0; 4]);
-        assert!(has_brotli_file_signature(&input));
-
-        input[3] ^= 1;
         assert!(!has_brotli_file_signature(&input));
         assert!(!has_brotli_file_signature(&input[..3]));
     }

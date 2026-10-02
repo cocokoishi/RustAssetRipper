@@ -6,7 +6,7 @@
 
 `ruzstd` provides Zstandard frame decoding in pure Rust. It is built with `std` and `hash` for streaming I/O and frame checksum validation. Its decoder window is bounded by `UnityFsLimits::max_zstd_window_bytes`. The implementation uses Zstandard only for UnityFS storage blocks whose compression type is unknown to the source enum and whose data has the Zstandard frame signature. LZHAM type 4 remains explicitly unsupported, and metadata compression does not use this fallback.
 
-`brotli-decompressor` provides a pure-Rust Brotli streaming reader. `flate2` provides GZip decoding and encoding with only its `rust_backend` feature enabled, using the pure-Rust `miniz_oxide` backend. Wrapper decoders cap decoded output; `flate2::read::MultiGzDecoder` reads concatenated GZip members. GZip encoding caps the compressed bytes written to memory. Unity's Brotli metadata marker is checked separately before a future scheme dispatcher selects the decoder.
+`brotli-decompressor` provides a pure-Rust Brotli streaming reader. `flate2` provides GZip decoding and encoding with only its `rust_backend` feature enabled, using the pure-Rust `miniz_oxide` backend. Wrapper decoders cap decoded output; `flate2::read::MultiGzDecoder` reads concatenated GZip members. GZip encoding caps the compressed bytes written to memory. Unity's Brotli metadata marker is parsed with a bounded RFC 7932 bit reader, then `SchemeReader` recursively applies the decoder. The Rust parser accounts for the metadata length field's `MSKIPLEN - 1` representation; the source discrepancy is tracked in `docs/differential-findings.md`.
 
 | Crate | Locked version | Use | Declared license | Rust version metadata |
 |---|---:|---|---|---|
