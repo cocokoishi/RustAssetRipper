@@ -7,4 +7,5 @@ pub mod header;
 pub mod metadata;
 pub mod metadata_prefix;
 pub mod object;
+pub mod reference_graph;
 pub mod references;
