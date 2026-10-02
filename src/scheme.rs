@@ -85,6 +85,8 @@ pub struct ContainerMountLimits {
     pub max_active_nested_bytes: u64,
     /// Maximum aggregate path bytes retained for the nested container-scope report.
     pub max_total_container_scope_path_bytes: u64,
+    /// Maximum aggregate SerializedFile path bytes retained for source-order metadata.
+    pub max_total_serialized_file_path_bytes: u64,
 }
 
 impl Default for ContainerMountLimits {
@@ -95,6 +97,7 @@ impl Default for ContainerMountLimits {
             max_depth: 64,
             max_active_nested_bytes: 1024 * 1024 * 1024,
             max_total_container_scope_path_bytes: 64 * 1024 * 1024,
+            max_total_serialized_file_path_bytes: 64 * 1024 * 1024,
         }
     }
 }
@@ -137,6 +140,19 @@ pub struct ContainerMountReport {
     pub container_scopes: Vec<String>,
     /// Aggregate bytes in `container_scopes` paths.
     pub container_scope_path_bytes: u64,
+    /// SerializedFile leaves in source entry traversal order. `container_scope_index` indexes
+    /// `container_scopes`; filtering these records by scope preserves that container's direct
+    /// SerializedFile order even when traversal visits nested containers between direct leaves.
+    pub serialized_files: Vec<MountedSerializedFile>,
+    /// Aggregate bytes in `serialized_files` virtual paths.
+    pub serialized_file_path_bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MountedSerializedFile {
+    pub virtual_path: String,
+    pub container_scope_index: Option<usize>,
+    pub entry_index: usize,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -253,6 +269,18 @@ pub enum ContainerMountErrorKind {
     },
     ContainerScopeCountOverflow,
     ContainerScopeAllocationFailed {
+        requested: usize,
+    },
+    SerializedFilePathSizeOverflow,
+    SerializedFilePathLimitExceeded {
+        requested: u64,
+        limit: u64,
+    },
+    SerializedFilePathAllocationFailed {
+        requested: usize,
+    },
+    SerializedFileEntryCountOverflow,
+    SerializedFileEntryAllocationFailed {
         requested: usize,
     },
     TotalOutputLimitExceeded {
@@ -535,7 +563,7 @@ impl<'a> DispatchedFile<'a> {
         depth: usize,
         state: &mut ContainerTreeMountState<'_>,
     ) -> Result<(), ContainerMountError> {
-        record_container_scope(destination_root, state)?;
+        let container_scope_index = record_container_scope(destination_root, state)?;
         if depth > state.limits.max_depth {
             return Err(ContainerMountError::new(
                 state.report.clone(),
@@ -576,7 +604,7 @@ impl<'a> DispatchedFile<'a> {
                             )
                         },
                     )?;
-                    mount_tree_child(child, path, index, depth, state)?;
+                    mount_tree_child(child, path, index, container_scope_index, depth, state)?;
                 }
             }
             ParsedFile::RawWeb(bundle) => {
@@ -605,7 +633,7 @@ impl<'a> DispatchedFile<'a> {
                                     ContainerMountErrorKind::Scheme(error),
                                 )
                             })?;
-                    mount_tree_child(child, path, index, depth, state)?;
+                    mount_tree_child(child, path, index, container_scope_index, depth, state)?;
                 }
             }
             ParsedFile::WebData(web_file) => {
@@ -637,7 +665,7 @@ impl<'a> DispatchedFile<'a> {
                                     ContainerMountErrorKind::Scheme(error),
                                 )
                             })?;
-                    mount_tree_child(child, path, index, depth, state)?;
+                    mount_tree_child(child, path, index, container_scope_index, depth, state)?;
                 }
             }
             ParsedFile::SerializedFile(_) | ParsedFile::Resource(_) => {
@@ -835,6 +863,24 @@ impl Display for ContainerMountErrorKind {
             Self::ContainerScopeAllocationFailed { requested } => write!(
                 formatter,
                 "could not reserve {requested} bytes for container-scope metadata"
+            ),
+            Self::SerializedFilePathSizeOverflow => {
+                formatter.write_str("SerializedFile path byte count overflows u64")
+            }
+            Self::SerializedFilePathLimitExceeded { requested, limit } => write!(
+                formatter,
+                "SerializedFile paths use {requested} bytes, exceeding metadata limit {limit}"
+            ),
+            Self::SerializedFilePathAllocationFailed { requested } => write!(
+                formatter,
+                "could not reserve {requested} bytes for SerializedFile path metadata"
+            ),
+            Self::SerializedFileEntryCountOverflow => {
+                formatter.write_str("SerializedFile entry metadata count overflows usize")
+            }
+            Self::SerializedFileEntryAllocationFailed { requested } => write!(
+                formatter,
+                "could not reserve space for {requested} SerializedFile entry records"
             ),
             Self::TotalOutputLimitExceeded {
                 entry_index,
@@ -1100,9 +1146,9 @@ fn preflight_tree_entry_count(
 fn record_container_scope(
     virtual_path: Option<&str>,
     state: &mut ContainerTreeMountState<'_>,
-) -> Result<(), ContainerMountError> {
+) -> Result<Option<usize>, ContainerMountError> {
     let Some(virtual_path) = virtual_path else {
-        return Ok(());
+        return Ok(None);
     };
     let path_bytes = u64::try_from(virtual_path.len()).map_err(|_| {
         ContainerMountError::new(
@@ -1159,16 +1205,18 @@ fn record_container_scope(
             )
         })?;
     owned_path.push_str(virtual_path);
+    let scope_index = state.report.container_scopes.len();
     state.report.container_scopes.push(owned_path);
     state.container_scope_path_bytes = requested_bytes;
     state.report.container_scope_path_bytes = requested_bytes;
-    Ok(())
+    Ok(Some(scope_index))
 }
 
 fn mount_tree_child<'a>(
     child: DispatchedFile<'a>,
     entry_path: String,
     entry_index: usize,
+    container_scope_index: Option<usize>,
     parent_depth: usize,
     state: &mut ContainerTreeMountState<'_>,
 ) -> Result<(), ContainerMountError> {
@@ -1224,15 +1272,109 @@ fn mount_tree_child<'a>(
             state.active_nested_bytes -= child_owned_bytes;
             result
         }
-        FileKind::SerializedFile | FileKind::Resource => mount_container_entry_at_path(
-            state.filesystem,
-            &entry_path,
-            entry_index,
-            child.contents,
-            state.limits,
-            &mut state.report,
-        ),
+        FileKind::SerializedFile | FileKind::Resource => {
+            let serialized_file = if child.kind == FileKind::SerializedFile {
+                Some(prepare_mounted_serialized_file(
+                    &entry_path,
+                    entry_index,
+                    container_scope_index,
+                    state.limits,
+                    &mut state.report,
+                )?)
+            } else {
+                None
+            };
+            mount_container_entry_at_path(
+                state.filesystem,
+                &entry_path,
+                entry_index,
+                child.contents,
+                state.limits,
+                &mut state.report,
+            )?;
+            if let Some(serialized_file) = serialized_file {
+                state.report.serialized_file_path_bytes = serialized_file.total_path_bytes;
+                state.report.serialized_files.push(serialized_file.record);
+            }
+            Ok(())
+        }
     }
+}
+
+struct PendingMountedSerializedFile {
+    record: MountedSerializedFile,
+    total_path_bytes: u64,
+}
+
+fn prepare_mounted_serialized_file(
+    virtual_path: &str,
+    entry_index: usize,
+    container_scope_index: Option<usize>,
+    limits: ContainerMountLimits,
+    report: &mut ContainerMountReport,
+) -> Result<PendingMountedSerializedFile, ContainerMountError> {
+    let path_bytes = u64::try_from(virtual_path.len()).map_err(|_| {
+        ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::SerializedFilePathSizeOverflow,
+        )
+    })?;
+    let total_path_bytes = report
+        .serialized_file_path_bytes
+        .checked_add(path_bytes)
+        .ok_or_else(|| {
+            ContainerMountError::new(
+                report.clone(),
+                ContainerMountErrorKind::SerializedFilePathSizeOverflow,
+            )
+        })?;
+    if total_path_bytes > limits.max_total_serialized_file_path_bytes {
+        return Err(ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::SerializedFilePathLimitExceeded {
+                requested: total_path_bytes,
+                limit: limits.max_total_serialized_file_path_bytes,
+            },
+        ));
+    }
+    let requested_count = report
+        .serialized_files
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| {
+            ContainerMountError::new(
+                report.clone(),
+                ContainerMountErrorKind::SerializedFileEntryCountOverflow,
+            )
+        })?;
+    report.serialized_files.try_reserve(1).map_err(|_| {
+        ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::SerializedFileEntryAllocationFailed {
+                requested: requested_count,
+            },
+        )
+    })?;
+    let mut owned_path = String::new();
+    owned_path
+        .try_reserve_exact(virtual_path.len())
+        .map_err(|_| {
+            ContainerMountError::new(
+                report.clone(),
+                ContainerMountErrorKind::SerializedFilePathAllocationFailed {
+                    requested: virtual_path.len(),
+                },
+            )
+        })?;
+    owned_path.push_str(virtual_path);
+    Ok(PendingMountedSerializedFile {
+        record: MountedSerializedFile {
+            virtual_path: owned_path,
+            container_scope_index,
+            entry_index,
+        },
+        total_path_bytes,
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2331,7 +2473,8 @@ impl Display for SchemeErrorKind {
 mod tests {
     use super::{
         BatchMountErrorKind, BatchMountLimits, ContainerMountErrorKind, ContainerMountLimits,
-        FileKind, PathMountInput, SchemeErrorKind, SchemeReader, SchemeReaderLimits, WrapperKind,
+        FileKind, MountedSerializedFile, PathMountInput, SchemeErrorKind, SchemeReader,
+        SchemeReaderLimits, WrapperKind,
     };
     use crate::compression::wrappers::{
         compress_gzip, decompress_brotli, has_brotli_file_signature,
@@ -2372,6 +2515,16 @@ mod tests {
             input.extend_from_slice(payload);
         }
         input
+    }
+
+    fn serialized_file_header_fixture() -> Vec<u8> {
+        // Scheme detection only needs a valid legacy header envelope; this deliberately minimal
+        // payload is not passed to the SerializedFile parser.
+        let mut bytes = vec![0; 29];
+        bytes[0..4].copy_from_slice(&13_i32.to_be_bytes());
+        bytes[4..8].copy_from_slice(&29_u32.to_be_bytes());
+        bytes[8..12].copy_from_slice(&6_i32.to_be_bytes());
+        bytes
     }
 
     fn write_bits(bytes: &mut Vec<u8>, bit_position: &mut usize, value: u32, count: usize) {
@@ -2688,6 +2841,88 @@ mod tests {
                 .unwrap(),
             b"nested leaf"
         );
+    }
+
+    #[test]
+    fn recursively_mounted_serialized_file_records_preserve_each_container_entry_order() {
+        let direct_first = serialized_file_header_fixture();
+        let nested_leaf = serialized_file_header_fixture();
+        let direct_second = serialized_file_header_fixture();
+        let nested = webdata_fixture(&[("inside.asset", &nested_leaf)]);
+        let input = webdata_fixture(&[
+            ("z-first.asset", &direct_first),
+            ("nested.bundle", &nested),
+            ("a-second.asset", &direct_second),
+        ]);
+        let file = SchemeReader::read(&input).unwrap();
+        let mut filesystem = VirtualFileSystem::new();
+        let report = file
+            .mount_container_tree(
+                &mut filesystem,
+                Some("/tree"),
+                ContainerMountLimits::default(),
+            )
+            .unwrap();
+
+        assert_eq!(report.container_scopes, ["/tree", "/tree/nested.bundle"]);
+        assert_eq!(
+            report.serialized_files,
+            [
+                MountedSerializedFile {
+                    virtual_path: "/tree/z-first.asset".to_owned(),
+                    container_scope_index: Some(0),
+                    entry_index: 0,
+                },
+                MountedSerializedFile {
+                    virtual_path: "/tree/nested.bundle/inside.asset".to_owned(),
+                    container_scope_index: Some(1),
+                    entry_index: 0,
+                },
+                MountedSerializedFile {
+                    virtual_path: "/tree/a-second.asset".to_owned(),
+                    container_scope_index: Some(0),
+                    entry_index: 2,
+                },
+            ]
+        );
+        let root_collection_order: Vec<_> = report
+            .serialized_files
+            .iter()
+            .filter(|file| file.container_scope_index == Some(0))
+            .map(|file| file.virtual_path.as_str())
+            .collect();
+        assert_eq!(
+            root_collection_order,
+            ["/tree/z-first.asset", "/tree/a-second.asset"]
+        );
+    }
+
+    #[test]
+    fn serialized_file_order_metadata_obeys_aggregate_path_bound() {
+        let serialized_file = serialized_file_header_fixture();
+        let input = webdata_fixture(&[("leaf.asset", &serialized_file)]);
+        let file = SchemeReader::read(&input).unwrap();
+        let mut filesystem = VirtualFileSystem::new();
+        let error = file
+            .mount_container_tree(
+                &mut filesystem,
+                Some("/tree"),
+                ContainerMountLimits {
+                    max_total_serialized_file_path_bytes: 4,
+                    ..ContainerMountLimits::default()
+                },
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            error.kind,
+            ContainerMountErrorKind::SerializedFilePathLimitExceeded {
+                requested: 16,
+                limit: 4
+            }
+        ));
+        assert_eq!(error.partial_report.mounted_entries, 0);
+        assert!(error.partial_report.serialized_files.is_empty());
     }
 
     #[test]
