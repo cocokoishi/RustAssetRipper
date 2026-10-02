@@ -4,6 +4,7 @@ use std::borrow::Cow;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::io::{Read, Seek, SeekFrom};
+use std::path::Path;
 
 use crate::compression::wrappers::{
     decompress_brotli, decompress_gzip, has_brotli_file_signature, has_gzip_magic,
@@ -12,6 +13,7 @@ use crate::compression::wrappers::{
 use crate::container::raw_web::{RawWebBundle, RawWebError, RawWebKind, RawWebLimits};
 use crate::container::unityfs::{UnityFsBundle, UnityFsError, UnityFsLimits};
 use crate::container::web_file::{WebFile, WebFileError, WebFileLimits};
+use crate::io::stream::open_logical_file;
 use crate::serialized_file::file::{SerializedFile, SerializedFileError};
 use crate::serialized_file::format_version::FormatVersion;
 
@@ -195,6 +197,16 @@ impl SchemeReader {
     /// Detect the source scheme and decode any outer GZip/Brotli wrappers recursively.
     pub fn read(input: &[u8]) -> Result<DispatchedFile<'_>, SchemeError> {
         Self::read_with_limits(input, SchemeReaderLimits::default())
+    }
+
+    /// Open a regular path or its numbered split parts and dispatch the logical file.
+    pub fn read_path(
+        path: impl AsRef<Path>,
+        limits: SchemeReaderLimits,
+    ) -> Result<DispatchedFile<'static>, SchemeError> {
+        let mut stream = open_logical_file(path)
+            .map_err(|error| SchemeError::new(SchemeErrorKind::StreamInput(error)))?;
+        Self::read_stream(&mut stream, limits)
     }
 
     /// Check only scheme signatures, matching `SchemeReader.IsReadableFile`; this does not decode
