@@ -513,3 +513,10 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Synthetic tests cover path order, duplicates, enabled state, scene-count limits, and aggregate path-byte limits. A CLI fixture with two conflicting BuildSettings objects confirms the selected object's path is used.
 - `cargo test --workspace --locked --quiet`: exit 0; 259 library and 9 binary tests passed. `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo fmt --all -- --check`, `tools/verify-baseline.ps1` (1,449 reference files unchanged), and `git diff --check` all exited 0.
 - The source Generated Settings `AssetCollection`, concrete `EditorBuildSettings` object serialization, `EditorSettings.SetToDefaults`, and Unity project export are still open. No Unity-produced file, user AssetBundle, or UABEA content was inspected; Phase 1 remains open.
+
+## EditorSettings baseline defaults
+
+- Read the local `EditorSettingsExtensions.SetToDefaults` implementation and modeled its semantic assignments: version-control modes, ForceText serialization, inline mappings, SpritePacker and ETC values, project-generation extensions/namespace, optional Collab and AssetPipeline settings, streaming/shader flags, Cache Server values, lightmap/probe flags, and enter-play options.
+- `EditorSettingsCapabilities` makes the source `Has_CollabEditorSettings` branch and the version-conditional AssetPipelineMode field explicit. The model stores enum meanings rather than guessing generated numeric serialization constants.
+- Synthetic tests assert every baseline value and both combinations where the optional fields are absent. `cargo test --workspace --locked --quiet`: exit 0; 261 library and 9 binary tests passed. Warnings-denied Clippy, format, baseline, and diff checks pass.
+- The defaults model is not yet connected to a target Unity schema or CLI Generated Settings collection. Numeric enum serialization, concrete EditorSettings object construction, `AssetCollection` materialization, and Unity project export remain open. No Unity-produced file or reference-tool differential was used; Phase 1 remains open.

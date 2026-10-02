@@ -17,6 +17,114 @@ pub struct EditorBuildSettingsModel {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EditorSettingsCapabilities {
+    pub collab_editor_settings: bool,
+    pub asset_pipeline_mode: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExternalVersionControlSupportMode {
+    Generic,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EditorSerializationMode {
+    ForceText,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AssetPipelineMode {
+    Version2,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CacheServerMode {
+    AsPreferences,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EnterPlayModeOptions {
+    pub disable_domain_reload: bool,
+    pub disable_scene_reload: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CollabEditorSettingsDefaults {
+    pub in_progress_enabled: bool,
+}
+
+/// Semantic values assigned by the baseline `EditorSettingsExtensions.SetToDefaults`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EditorSettingsModel {
+    pub external_version_control_support_text: &'static str,
+    pub external_version_control_support_mode: ExternalVersionControlSupportMode,
+    pub serialization_mode: EditorSerializationMode,
+    pub serialize_inline_mappings_on_one_line: bool,
+    pub sprite_packer_padding_power: i32,
+    pub etc_texture_compressor_behavior: i32,
+    pub etc_texture_fast_compressor: i32,
+    pub etc_texture_normal_compressor: i32,
+    pub etc_texture_best_compressor: i32,
+    pub project_generation_included_extensions: &'static str,
+    pub project_generation_root_namespace: &'static str,
+    pub collab_editor_settings: Option<CollabEditorSettingsDefaults>,
+    pub user_generated_project_suffix: &'static str,
+    pub enable_texture_streaming_in_edit_mode: bool,
+    pub enable_texture_streaming_in_play_mode: bool,
+    pub async_shader_compilation: bool,
+    pub asset_pipeline_mode: Option<AssetPipelineMode>,
+    pub cache_server_mode: CacheServerMode,
+    pub cache_server_endpoint: &'static str,
+    pub cache_server_namespace_prefix: &'static str,
+    pub cache_server_enable_download: bool,
+    pub cache_server_enable_upload: bool,
+    pub show_lightmap_resolution_overlay: bool,
+    pub use_legacy_probe_sample_count: bool,
+    pub enter_play_mode_options: EnterPlayModeOptions,
+}
+
+impl EditorSettingsModel {
+    pub fn source_defaults(capabilities: EditorSettingsCapabilities) -> Self {
+        Self {
+            external_version_control_support_text: "Visible Meta Files",
+            external_version_control_support_mode: ExternalVersionControlSupportMode::Generic,
+            serialization_mode: EditorSerializationMode::ForceText,
+            serialize_inline_mappings_on_one_line: true,
+            sprite_packer_padding_power: 1,
+            etc_texture_compressor_behavior: 1,
+            etc_texture_fast_compressor: 1,
+            etc_texture_normal_compressor: 2,
+            etc_texture_best_compressor: 4,
+            project_generation_included_extensions: "txt;xml;fnt;cd;asmdef;rsp;asmref",
+            project_generation_root_namespace: "",
+            collab_editor_settings: capabilities.collab_editor_settings.then_some(
+                CollabEditorSettingsDefaults {
+                    in_progress_enabled: true,
+                },
+            ),
+            user_generated_project_suffix: "",
+            enable_texture_streaming_in_edit_mode: true,
+            enable_texture_streaming_in_play_mode: true,
+            async_shader_compilation: true,
+            asset_pipeline_mode: capabilities
+                .asset_pipeline_mode
+                .then_some(AssetPipelineMode::Version2),
+            cache_server_mode: CacheServerMode::AsPreferences,
+            cache_server_endpoint: "",
+            cache_server_namespace_prefix: "default",
+            cache_server_enable_download: true,
+            cache_server_enable_upload: true,
+            show_lightmap_resolution_overlay: true,
+            use_legacy_probe_sample_count: true,
+            enter_play_mode_options: EnterPlayModeOptions {
+                disable_domain_reload: true,
+                disable_scene_reload: true,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EditorBuildSettingsLimits {
     pub max_scenes: usize,
     pub max_total_path_bytes: usize,
@@ -131,7 +239,12 @@ impl EditorBuildSettingsModel {
 
 #[cfg(test)]
 mod tests {
-    use super::{EditorBuildSettingsError, EditorBuildSettingsLimits, EditorBuildSettingsModel};
+    use super::{
+        AssetPipelineMode, CacheServerMode, CollabEditorSettingsDefaults, EditorBuildSettingsError,
+        EditorBuildSettingsLimits, EditorBuildSettingsModel, EditorSerializationMode,
+        EditorSettingsCapabilities, EditorSettingsModel, EnterPlayModeOptions,
+        ExternalVersionControlSupportMode,
+    };
 
     #[test]
     fn editor_build_settings_preserves_source_order_duplicates_and_enabled_state() {
@@ -187,5 +300,58 @@ mod tests {
                 limit: 2,
             })
         );
+    }
+
+    #[test]
+    fn editor_settings_defaults_match_the_source_extension_values() {
+        let settings = EditorSettingsModel::source_defaults(EditorSettingsCapabilities {
+            collab_editor_settings: true,
+            asset_pipeline_mode: true,
+        });
+        assert_eq!(
+            settings,
+            EditorSettingsModel {
+                external_version_control_support_text: "Visible Meta Files",
+                external_version_control_support_mode: ExternalVersionControlSupportMode::Generic,
+                serialization_mode: EditorSerializationMode::ForceText,
+                serialize_inline_mappings_on_one_line: true,
+                sprite_packer_padding_power: 1,
+                etc_texture_compressor_behavior: 1,
+                etc_texture_fast_compressor: 1,
+                etc_texture_normal_compressor: 2,
+                etc_texture_best_compressor: 4,
+                project_generation_included_extensions: "txt;xml;fnt;cd;asmdef;rsp;asmref",
+                project_generation_root_namespace: "",
+                collab_editor_settings: Some(CollabEditorSettingsDefaults {
+                    in_progress_enabled: true,
+                }),
+                user_generated_project_suffix: "",
+                enable_texture_streaming_in_edit_mode: true,
+                enable_texture_streaming_in_play_mode: true,
+                async_shader_compilation: true,
+                asset_pipeline_mode: Some(AssetPipelineMode::Version2),
+                cache_server_mode: CacheServerMode::AsPreferences,
+                cache_server_endpoint: "",
+                cache_server_namespace_prefix: "default",
+                cache_server_enable_download: true,
+                cache_server_enable_upload: true,
+                show_lightmap_resolution_overlay: true,
+                use_legacy_probe_sample_count: true,
+                enter_play_mode_options: EnterPlayModeOptions {
+                    disable_domain_reload: true,
+                    disable_scene_reload: true,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn editor_settings_defaults_respect_optional_field_capabilities() {
+        let settings = EditorSettingsModel::source_defaults(EditorSettingsCapabilities {
+            collab_editor_settings: false,
+            asset_pipeline_mode: false,
+        });
+        assert_eq!(settings.collab_editor_settings, None);
+        assert_eq!(settings.asset_pipeline_mode, None);
     }
 }
