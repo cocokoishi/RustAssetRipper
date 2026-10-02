@@ -4,7 +4,9 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
 use crate::io::special_names::fix_file_identifier;
-use crate::serialized_file::object::{SerializedValue, SerializedValueLookupError};
+use crate::serialized_file::object::{
+    SerializedFieldValue, SerializedValue, SerializedValueLookupError,
+};
 
 use super::scene_naming::{
     file_name_to_scene_index, scene_path_from_build_settings, SceneUnityVersion,
@@ -161,6 +163,380 @@ impl Default for SceneBundleMappingLimits {
             max_total_name_and_path_bytes: 16 * 1024 * 1024,
         }
     }
+}
+
+/// Scene-name metadata decoded from one class ID 142 AssetBundle object.
+///
+/// Optional fields remain optional because older or stripped TypeTrees can omit them. Callers
+/// should only apply scene mappings when `is_streamed_scene_asset_bundle == Some(true)`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamedSceneBundleMetadata {
+    pub is_streamed_scene_asset_bundle: Option<bool>,
+    /// Ordered `(scene path, serialized collection name)` entries from `SceneHashes`.
+    pub scene_hashes: Option<Vec<(String, String)>>,
+    /// Ordered scene path keys from the `Container` map.
+    pub container_paths: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StreamedSceneBundleDecodeError {
+    FieldLookup {
+        field_path: String,
+        source: SerializedValueLookupError,
+    },
+    DuplicateAliases {
+        primary: &'static str,
+        alternate: &'static str,
+    },
+    WrongType {
+        field_path: String,
+        expected: &'static str,
+        actual: &'static str,
+    },
+    MissingPairField {
+        field_path: String,
+        member: &'static str,
+    },
+    EntryCountLimitExceeded {
+        field_path: String,
+        count: usize,
+        limit: usize,
+    },
+    ByteLimitExceeded {
+        requested: usize,
+        limit: usize,
+    },
+    CountOverflow,
+    InvalidUtf8 {
+        field_path: String,
+    },
+    AllocationFailed {
+        field_path: String,
+        requested: usize,
+    },
+}
+
+impl Display for StreamedSceneBundleDecodeError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::FieldLookup { field_path, source } => {
+                write!(
+                    f,
+                    "AssetBundle field {field_path} lookup failed: {source:?}"
+                )
+            }
+            Self::DuplicateAliases { primary, alternate } => write!(
+                f,
+                "AssetBundle contains both {primary} and {alternate} fields"
+            ),
+            Self::WrongType {
+                field_path,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "AssetBundle field {field_path} has type {actual}; expected {expected}"
+            ),
+            Self::MissingPairField { field_path, member } => {
+                write!(
+                    f,
+                    "AssetBundle field {field_path} is missing pair member {member}"
+                )
+            }
+            Self::EntryCountLimitExceeded {
+                field_path,
+                count,
+                limit,
+            } => write!(
+                f,
+                "AssetBundle field {field_path} has {count} entries, exceeding limit {limit}"
+            ),
+            Self::ByteLimitExceeded { requested, limit } => write!(
+                f,
+                "AssetBundle scene metadata uses {requested} bytes, exceeding limit {limit}"
+            ),
+            Self::CountOverflow => f.write_str("AssetBundle scene metadata size overflows"),
+            Self::InvalidUtf8 { field_path } => {
+                write!(f, "AssetBundle field {field_path} is not valid UTF-8")
+            }
+            Self::AllocationFailed {
+                field_path,
+                requested,
+            } => write!(
+                f,
+                "could not reserve size {requested} for AssetBundle field {field_path}"
+            ),
+        }
+    }
+}
+
+impl Error for StreamedSceneBundleDecodeError {}
+
+/// Decode the scene-related fields from a TypeTree-decoded AssetBundle object.
+///
+/// Unity's serialized pair records use `first`/`second`; AssetBundle fields may be represented
+/// either by their serialized `m_` name or the generated property name. All reads are unique and
+/// inherited TypeTree `Base` fields are followed explicitly. The caller retains the original
+/// decoded object, so fields outside this scene processor remain available to later stages.
+pub fn extract_streamed_scene_bundle_metadata(
+    root: &SerializedValue,
+    limits: SceneBundleMappingLimits,
+) -> Result<StreamedSceneBundleMetadata, StreamedSceneBundleDecodeError> {
+    let streamed_field = unique_bundle_alias(
+        root,
+        "m_IsStreamedSceneAssetBundle",
+        "IsStreamedSceneAssetBundle",
+    )?;
+    let is_streamed_scene_asset_bundle = match streamed_field {
+        Some(SerializedValue::Bool(value)) => Some(*value),
+        Some(value) => {
+            return Err(StreamedSceneBundleDecodeError::WrongType {
+                field_path: "m_IsStreamedSceneAssetBundle".to_owned(),
+                expected: "bool",
+                actual: value_type_name(value),
+            });
+        }
+        None => None,
+    };
+
+    let scene_hashes_field = unique_bundle_alias(root, "m_SceneHashes", "SceneHashes")?;
+    let mut total_entries = 0usize;
+    let mut total_bytes = 0usize;
+    let scene_hashes = match scene_hashes_field {
+        Some(value) => Some(decode_scene_hash_pairs(
+            value,
+            limits,
+            &mut total_entries,
+            &mut total_bytes,
+        )?),
+        None => None,
+    };
+
+    let container_field = unique_bundle_alias(root, "m_Container", "Container")?;
+    let container_paths = match container_field {
+        Some(value) => Some(decode_container_paths(
+            value,
+            limits,
+            &mut total_entries,
+            &mut total_bytes,
+        )?),
+        None => None,
+    };
+
+    Ok(StreamedSceneBundleMetadata {
+        is_streamed_scene_asset_bundle,
+        scene_hashes,
+        container_paths,
+    })
+}
+
+fn unique_bundle_alias<'a>(
+    root: &'a SerializedValue,
+    primary: &'static str,
+    alternate: &'static str,
+) -> Result<Option<&'a SerializedValue>, StreamedSceneBundleDecodeError> {
+    let primary_value = root.unique_field_in_base_chain(primary).map_err(|source| {
+        StreamedSceneBundleDecodeError::FieldLookup {
+            field_path: primary.to_owned(),
+            source,
+        }
+    })?;
+    let alternate_value = root
+        .unique_field_in_base_chain(alternate)
+        .map_err(|source| StreamedSceneBundleDecodeError::FieldLookup {
+            field_path: alternate.to_owned(),
+            source,
+        })?;
+    match (primary_value, alternate_value) {
+        (Some(_), Some(_)) => {
+            Err(StreamedSceneBundleDecodeError::DuplicateAliases { primary, alternate })
+        }
+        (Some(value), None) | (None, Some(value)) => Ok(Some(value)),
+        (None, None) => Ok(None),
+    }
+}
+
+fn decode_scene_hash_pairs(
+    value: &SerializedValue,
+    limits: SceneBundleMappingLimits,
+    total_entries: &mut usize,
+    total_bytes: &mut usize,
+) -> Result<Vec<(String, String)>, StreamedSceneBundleDecodeError> {
+    let field_path = "m_SceneHashes";
+    let entries = bundle_array(value, field_path, limits, total_entries)?;
+    let mut decoded = reserve_bundle_entries(entries.len(), field_path)?;
+    for (index, entry) in entries.iter().enumerate() {
+        let entry_path = format!("{field_path}[{index}]");
+        let pair = bundle_struct(entry, &entry_path)?;
+        let scene_path = required_pair_field(pair, &entry_path, "first")?;
+        let collection_name = required_pair_field(pair, &entry_path, "second")?;
+        let scene_path = decode_bundle_string(
+            scene_path,
+            &format!("{entry_path}.first"),
+            total_bytes,
+            limits,
+        )?;
+        let collection_name = decode_bundle_string(
+            collection_name,
+            &format!("{entry_path}.second"),
+            total_bytes,
+            limits,
+        )?;
+        decoded.push((scene_path, collection_name));
+    }
+    Ok(decoded)
+}
+
+fn decode_container_paths(
+    value: &SerializedValue,
+    limits: SceneBundleMappingLimits,
+    total_entries: &mut usize,
+    total_bytes: &mut usize,
+) -> Result<Vec<String>, StreamedSceneBundleDecodeError> {
+    let field_path = "m_Container";
+    let entries = bundle_array(value, field_path, limits, total_entries)?;
+    let mut decoded = reserve_bundle_entries(entries.len(), field_path)?;
+    for (index, entry) in entries.iter().enumerate() {
+        let entry_path = format!("{field_path}[{index}]");
+        let pair = bundle_struct(entry, &entry_path)?;
+        let path = required_pair_field(pair, &entry_path, "first")?;
+        let asset_info = required_pair_field(pair, &entry_path, "second")?;
+        bundle_struct(asset_info, &format!("{entry_path}.second"))?;
+        decoded.push(decode_bundle_string(
+            path,
+            &format!("{entry_path}.first"),
+            total_bytes,
+            limits,
+        )?);
+    }
+    Ok(decoded)
+}
+
+fn bundle_array<'a>(
+    value: &'a SerializedValue,
+    field_path: &str,
+    limits: SceneBundleMappingLimits,
+    total_entries: &mut usize,
+) -> Result<&'a [SerializedValue], StreamedSceneBundleDecodeError> {
+    let SerializedValue::Array(entries) = value else {
+        return Err(StreamedSceneBundleDecodeError::WrongType {
+            field_path: field_path.to_owned(),
+            expected: "array",
+            actual: value_type_name(value),
+        });
+    };
+    let requested = total_entries
+        .checked_add(entries.len())
+        .ok_or(StreamedSceneBundleDecodeError::CountOverflow)?;
+    if requested > limits.max_entries {
+        return Err(StreamedSceneBundleDecodeError::EntryCountLimitExceeded {
+            field_path: field_path.to_owned(),
+            count: requested,
+            limit: limits.max_entries,
+        });
+    }
+    *total_entries = requested;
+    Ok(entries)
+}
+
+fn bundle_struct<'a>(
+    value: &'a SerializedValue,
+    field_path: &str,
+) -> Result<&'a [SerializedFieldValue], StreamedSceneBundleDecodeError> {
+    let SerializedValue::Struct(fields) = value else {
+        return Err(StreamedSceneBundleDecodeError::WrongType {
+            field_path: field_path.to_owned(),
+            expected: "struct",
+            actual: value_type_name(value),
+        });
+    };
+    Ok(fields)
+}
+
+fn required_pair_field<'a>(
+    fields: &'a [SerializedFieldValue],
+    entry_path: &str,
+    member: &'static str,
+) -> Result<&'a SerializedValue, StreamedSceneBundleDecodeError> {
+    unique_struct_field(fields, member)
+        .map_err(|source| StreamedSceneBundleDecodeError::FieldLookup {
+            field_path: format!("{entry_path}.{member}"),
+            source,
+        })?
+        .ok_or_else(|| StreamedSceneBundleDecodeError::MissingPairField {
+            field_path: entry_path.to_owned(),
+            member,
+        })
+}
+
+fn unique_struct_field<'a>(
+    fields: &'a [SerializedFieldValue],
+    name: &str,
+) -> Result<Option<&'a SerializedValue>, SerializedValueLookupError> {
+    let mut matching = fields.iter().filter(|field| field.name == name);
+    let Some(first) = matching.next() else {
+        return Ok(None);
+    };
+    if matching.next().is_some() {
+        let match_count = fields.iter().filter(|field| field.name == name).count();
+        return Err(SerializedValueLookupError::DuplicateField {
+            name: name.to_owned(),
+            match_count,
+        });
+    }
+    Ok(Some(&first.value))
+}
+
+fn decode_bundle_string(
+    value: &SerializedValue,
+    field_path: &str,
+    total_bytes: &mut usize,
+    limits: SceneBundleMappingLimits,
+) -> Result<String, StreamedSceneBundleDecodeError> {
+    let SerializedValue::StringBytes(bytes) = value else {
+        return Err(StreamedSceneBundleDecodeError::WrongType {
+            field_path: field_path.to_owned(),
+            expected: "string",
+            actual: value_type_name(value),
+        });
+    };
+    let requested = total_bytes
+        .checked_add(bytes.len())
+        .ok_or(StreamedSceneBundleDecodeError::CountOverflow)?;
+    if requested > limits.max_total_name_and_path_bytes {
+        return Err(StreamedSceneBundleDecodeError::ByteLimitExceeded {
+            requested,
+            limit: limits.max_total_name_and_path_bytes,
+        });
+    }
+    let text =
+        std::str::from_utf8(bytes).map_err(|_| StreamedSceneBundleDecodeError::InvalidUtf8 {
+            field_path: field_path.to_owned(),
+        })?;
+    let mut decoded = String::new();
+    decoded.try_reserve_exact(text.len()).map_err(|_| {
+        StreamedSceneBundleDecodeError::AllocationFailed {
+            field_path: field_path.to_owned(),
+            requested: text.len(),
+        }
+    })?;
+    decoded.push_str(text);
+    *total_bytes = requested;
+    Ok(decoded)
+}
+
+fn reserve_bundle_entries<T>(
+    count: usize,
+    field_path: &str,
+) -> Result<Vec<T>, StreamedSceneBundleDecodeError> {
+    let mut values = Vec::new();
+    values.try_reserve_exact(count).map_err(|_| {
+        StreamedSceneBundleDecodeError::AllocationFailed {
+            field_path: field_path.to_owned(),
+            requested: count,
+        }
+    })?;
+    Ok(values)
 }
 
 /// A source-order scene path mapped to a collection index in one serialized bundle.
@@ -582,11 +958,12 @@ mod tests {
     use crate::serialized_file::object::{SerializedFieldValue, SerializedValue};
 
     use super::{
-        extract_occlusion_scene_guid, map_container_paths_to_scene_collections,
-        map_scene_hashes_to_collections, resolve_scene_collection_path, scene_manager_kind,
-        streamed_scene_project_path, BuildSettingsScenePathSet, SceneBundleMappingError,
-        SceneBundleMappingLimits, SceneBundlePathMapping, SceneCollectionPathStatus,
-        SceneGuidError, SceneGuidWords, SceneManagerKind,
+        extract_occlusion_scene_guid, extract_streamed_scene_bundle_metadata,
+        map_container_paths_to_scene_collections, map_scene_hashes_to_collections,
+        resolve_scene_collection_path, scene_manager_kind, streamed_scene_project_path,
+        BuildSettingsScenePathSet, SceneBundleMappingError, SceneBundleMappingLimits,
+        SceneBundlePathMapping, SceneCollectionPathStatus, SceneGuidError, SceneGuidWords,
+        SceneManagerKind, StreamedSceneBundleDecodeError, StreamedSceneBundleMetadata,
     };
 
     #[test]
@@ -874,6 +1251,177 @@ mod tests {
                 resource: "SceneHashes",
                 count: 1,
                 limit: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn extracts_streamed_scene_bundle_fields_from_type_tree_values() {
+        let root = SerializedValue::Struct(vec![
+            field(
+                "Base",
+                SerializedValue::Struct(vec![field(
+                    "m_IsStreamedSceneAssetBundle",
+                    SerializedValue::Bool(true),
+                )]),
+            ),
+            field(
+                "m_SceneHashes",
+                SerializedValue::Array(vec![SerializedValue::Struct(vec![
+                    field(
+                        "first",
+                        SerializedValue::StringBytes(b"Scenes/Main.unity".to_vec()),
+                    ),
+                    field(
+                        "second",
+                        SerializedValue::StringBytes(b"CAB-Scene".to_vec()),
+                    ),
+                ])]),
+            ),
+            field(
+                "m_Container",
+                SerializedValue::Array(vec![SerializedValue::Struct(vec![
+                    field(
+                        "first",
+                        SerializedValue::StringBytes(b"Scenes/Other.unity".to_vec()),
+                    ),
+                    field(
+                        "second",
+                        SerializedValue::Struct(vec![field(
+                            "asset",
+                            SerializedValue::PPtr {
+                                file_id: 0,
+                                path_id: 0,
+                            },
+                        )]),
+                    ),
+                ])]),
+            ),
+        ]);
+
+        assert_eq!(
+            extract_streamed_scene_bundle_metadata(&root, SceneBundleMappingLimits::default())
+                .unwrap(),
+            StreamedSceneBundleMetadata {
+                is_streamed_scene_asset_bundle: Some(true),
+                scene_hashes: Some(vec![(
+                    "Scenes/Main.unity".to_owned(),
+                    "CAB-Scene".to_owned()
+                )]),
+                container_paths: Some(vec!["Scenes/Other.unity".to_owned()]),
+            }
+        );
+    }
+
+    #[test]
+    fn streamed_scene_bundle_metadata_preserves_absence_and_false_flag() {
+        let absent = SerializedValue::Struct(Vec::new());
+        assert_eq!(
+            extract_streamed_scene_bundle_metadata(&absent, SceneBundleMappingLimits::default())
+                .unwrap(),
+            StreamedSceneBundleMetadata {
+                is_streamed_scene_asset_bundle: None,
+                scene_hashes: None,
+                container_paths: None,
+            }
+        );
+
+        let false_flag = SerializedValue::Struct(vec![field(
+            "IsStreamedSceneAssetBundle",
+            SerializedValue::Bool(false),
+        )]);
+        assert_eq!(
+            extract_streamed_scene_bundle_metadata(
+                &false_flag,
+                SceneBundleMappingLimits::default()
+            )
+            .unwrap()
+            .is_streamed_scene_asset_bundle,
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn streamed_scene_bundle_metadata_rejects_ambiguous_and_unbounded_data() {
+        let duplicate_flag = SerializedValue::Struct(vec![
+            field("m_IsStreamedSceneAssetBundle", SerializedValue::Bool(true)),
+            field("IsStreamedSceneAssetBundle", SerializedValue::Bool(true)),
+        ]);
+        assert_eq!(
+            extract_streamed_scene_bundle_metadata(
+                &duplicate_flag,
+                SceneBundleMappingLimits::default()
+            ),
+            Err(StreamedSceneBundleDecodeError::DuplicateAliases {
+                primary: "m_IsStreamedSceneAssetBundle",
+                alternate: "IsStreamedSceneAssetBundle",
+            })
+        );
+
+        let too_many = SerializedValue::Struct(vec![field(
+            "m_Container",
+            SerializedValue::Array(vec![SerializedValue::Struct(vec![])]),
+        )]);
+        assert_eq!(
+            extract_streamed_scene_bundle_metadata(
+                &too_many,
+                SceneBundleMappingLimits {
+                    max_entries: 0,
+                    max_total_name_and_path_bytes: usize::MAX,
+                }
+            ),
+            Err(StreamedSceneBundleDecodeError::EntryCountLimitExceeded {
+                field_path: "m_Container".to_owned(),
+                count: 1,
+                limit: 0,
+            })
+        );
+
+        let combined_entries = SerializedValue::Struct(vec![
+            field(
+                "m_SceneHashes",
+                SerializedValue::Array(vec![SerializedValue::Struct(vec![
+                    field("first", SerializedValue::StringBytes(b"a".to_vec())),
+                    field("second", SerializedValue::StringBytes(b"b".to_vec())),
+                ])]),
+            ),
+            field(
+                "m_Container",
+                SerializedValue::Array(vec![SerializedValue::Struct(vec![
+                    field("first", SerializedValue::StringBytes(b"c".to_vec())),
+                    field("second", SerializedValue::Struct(Vec::new())),
+                ])]),
+            ),
+        ]);
+        assert_eq!(
+            extract_streamed_scene_bundle_metadata(
+                &combined_entries,
+                SceneBundleMappingLimits {
+                    max_entries: 1,
+                    max_total_name_and_path_bytes: usize::MAX,
+                }
+            ),
+            Err(StreamedSceneBundleDecodeError::EntryCountLimitExceeded {
+                field_path: "m_Container".to_owned(),
+                count: 2,
+                limit: 1,
+            })
+        );
+
+        let invalid_utf8 = SerializedValue::Struct(vec![field(
+            "m_SceneHashes",
+            SerializedValue::Array(vec![SerializedValue::Struct(vec![
+                field("first", SerializedValue::StringBytes(vec![0xff])),
+                field("second", SerializedValue::StringBytes(Vec::new())),
+            ])]),
+        )]);
+        assert_eq!(
+            extract_streamed_scene_bundle_metadata(
+                &invalid_utf8,
+                SceneBundleMappingLimits::default()
+            ),
+            Err(StreamedSceneBundleDecodeError::InvalidUtf8 {
+                field_path: "m_SceneHashes[0].first".to_owned(),
             })
         );
     }
