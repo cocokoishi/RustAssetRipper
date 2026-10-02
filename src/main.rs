@@ -45,7 +45,7 @@ struct StreamedSceneBundleWorkItem {
     owner_file_index: usize,
     object_index: usize,
     path_id: i64,
-    owner_collection_index: usize,
+    source_collection_order: usize,
     metadata: StreamedSceneBundleMetadata,
 }
 
@@ -280,6 +280,21 @@ fn print_workspace_summary_to<W: io::Write>(
     workspace: &SerializedFileWorkspace,
     dependencies: &SerializedFileDependencyReport,
 ) -> Result<(), Box<dyn Error>> {
+    let source_collection_file_indices = workspace.source_collection_file_indices()?;
+    let mut source_collection_order_by_file = Vec::new();
+    source_collection_order_by_file
+        .try_reserve_exact(workspace.files().len())
+        .map_err(|_| invalid_data("could not reserve source collection order index"))?;
+    source_collection_order_by_file.resize(workspace.files().len(), usize::MAX);
+    for (order, &file_index) in source_collection_file_indices.iter().enumerate() {
+        let Some(source_order) = source_collection_order_by_file.get_mut(file_index) else {
+            return Err(
+                invalid_data("source collection traversal returned an invalid file index").into(),
+            );
+        };
+        *source_order = order;
+    }
+
     let has_scene_objects = workspace.files().iter().any(|file| {
         file.metadata
             .objects
@@ -313,7 +328,34 @@ fn print_workspace_summary_to<W: io::Write>(
 
     writeln!(output, "SerializedFiles: {}", workspace.files().len())?;
     let mut build_settings_paths = None;
-    let mut conflicting_build_settings = false;
+    let mut selected_build_settings = None;
+    'select_build_settings: for &file_index in source_collection_file_indices.iter().rev() {
+        let file = workspace
+            .files()
+            .get(file_index)
+            .ok_or_else(|| invalid_data("source collection file index is invalid"))?;
+        for (object_index, object) in file.metadata.objects.iter().enumerate().rev() {
+            if workspace_object_class_id(object) != Some(141) {
+                continue;
+            }
+            let maximum_bytes =
+                usize::try_from(SerializedFileWorkspaceLimits::default().max_file_bytes)
+                    .unwrap_or(usize::MAX);
+            let file_bytes = filesystem.read_all_bytes(&file.virtual_path, maximum_bytes)?;
+            let scenes = decode_build_settings_scene_paths_from_parts(
+                &file.metadata,
+                &file.header,
+                &file_bytes,
+                object_index,
+                BuildSettingsSceneLimits::default(),
+                &ObjectDecodeLimits::default(),
+            )?;
+            build_settings_paths = Some(scenes);
+            selected_build_settings = Some((file_index, object.path_id));
+            break 'select_build_settings;
+        }
+    }
+
     for (file_index, file) in workspace.files().iter().enumerate() {
         writeln!(
             output,
@@ -417,22 +459,17 @@ fn print_workspace_summary_to<W: io::Write>(
             )?;
             writeln!(
                 output,
-                "    BuildSettings object {}: {} scene paths",
+                "    BuildSettings object {}: {} scene paths{}",
                 object.path_id,
-                scenes.len()
+                scenes.len(),
+                if selected_build_settings == Some((file_index, object.path_id)) {
+                    " (selected by source collection traversal)"
+                } else {
+                    ""
+                }
             )?;
             for (scene_index, path) in scenes.iter().enumerate() {
                 writeln!(output, "      scene[{scene_index}]: {path}")?;
-            }
-            if !conflicting_build_settings {
-                match build_settings_paths.as_ref() {
-                    None => build_settings_paths = Some(scenes.clone()),
-                    Some(existing) if existing != &scenes => {
-                        build_settings_paths = None;
-                        conflicting_build_settings = true;
-                    }
-                    Some(_) => {}
-                }
             }
         }
 
@@ -581,7 +618,7 @@ fn print_workspace_summary_to<W: io::Write>(
                         )?;
                         continue;
                     }
-                    let Some(owner_collection_index) = file.container_collection_index else {
+                    let Some(_owner_collection_index) = file.container_collection_index else {
                         return Err(invalid_data(
                             "streamed-scene AssetBundle is missing its source collection index",
                         )
@@ -594,7 +631,11 @@ fn print_workspace_summary_to<W: io::Write>(
                         owner_file_index: file_index,
                         object_index,
                         path_id: object.path_id,
-                        owner_collection_index,
+                        source_collection_order: *source_collection_order_by_file
+                            .get(file_index)
+                            .ok_or_else(|| {
+                            invalid_data("streamed-scene collection order is unavailable")
+                        })?,
                         metadata,
                     });
                 } else {
@@ -608,16 +649,8 @@ fn print_workspace_summary_to<W: io::Write>(
         }
     }
 
-    streamed_scene_bundle_work.sort_unstable_by(|left, right| {
-        workspace.files()[left.owner_file_index]
-            .container_bundle_index
-            .cmp(&workspace.files()[right.owner_file_index].container_bundle_index)
-            .then(
-                left.owner_collection_index
-                    .cmp(&right.owner_collection_index),
-            )
-            .then(left.object_index.cmp(&right.object_index))
-    });
+    streamed_scene_bundle_work
+        .sort_unstable_by_key(|bundle| (bundle.source_collection_order, bundle.object_index));
     let scene_bundle_limits = SceneBundleMappingLimits::default();
     let mut streamed_scene_path_assignments =
         HashMap::<usize, Vec<StreamedScenePathAssignment>>::new();
@@ -754,9 +787,7 @@ fn print_workspace_summary_to<W: io::Write>(
         }
     }
 
-    let scene_path_set = if conflicting_build_settings {
-        BuildSettingsScenePathSet::Ambiguous
-    } else if let Some(paths) = build_settings_paths.as_deref() {
+    let scene_path_set = if let Some(paths) = build_settings_paths.as_deref() {
         BuildSettingsScenePathSet::Unique(paths)
     } else {
         BuildSettingsScenePathSet::Missing
@@ -1273,6 +1304,10 @@ mod tests {
     }
 
     fn make_build_settings_file(scene_paths: &[&str]) -> Vec<u8> {
+        make_build_settings_file_with_path_id(scene_paths, 42)
+    }
+
+    fn make_build_settings_file_with_path_id(scene_paths: &[&str], object_path_id: i32) -> Vec<u8> {
         let mut string_buffer = Vec::new();
         let build_settings_type = push_type_tree_string(&mut string_buffer, "BuildSettings");
         let empty_name = push_type_tree_string(&mut string_buffer, "");
@@ -1314,7 +1349,7 @@ mod tests {
         metadata.extend_from_slice(&string_buffer);
         put_u32_le(&mut metadata, 0);
         put_i32_le(&mut metadata, 1);
-        put_i32_le(&mut metadata, 42);
+        put_i32_le(&mut metadata, object_path_id);
         put_u32_le(&mut metadata, 0);
 
         let mut payload = Vec::new();
@@ -1547,6 +1582,50 @@ mod tests {
         );
         assert!(summary.contains(
             "Scene path mapping for collection \"level0\": Assets/Scenes/Main (BuildSettings index 0, duplicate path=false)"
+        ));
+    }
+
+    #[test]
+    fn workspace_summary_selects_last_build_settings_in_source_collection_order() {
+        let mut filesystem = VirtualFileSystem::new();
+        insert_vfs_file(
+            &mut filesystem,
+            "/game/a.assets",
+            &make_build_settings_file_with_path_id(&["Assets/Scenes/First.unity"], 42),
+        );
+        insert_vfs_file(
+            &mut filesystem,
+            "/game/z.assets",
+            &make_build_settings_file_with_path_id(&["Assets/Scenes/Last.unity"], 43),
+        );
+        let selected_paths = vec!["/game/a.assets".to_owned(), "/game/z.assets".to_owned()];
+        let mixed = super::MixedGameStructure::from_vfs_paths(
+            &filesystem,
+            &selected_paths,
+            super::MixedGameStructureLimits::default(),
+        )
+        .unwrap();
+        let (workspace, dependencies) =
+            super::SerializedFileWorkspace::load_from_vfs_with_dependencies(
+                &mut filesystem,
+                &mixed.serialized_file_inputs,
+                &mixed.registered_files,
+                &mixed.data_paths,
+                super::SerializedFileWorkspaceLimits::default(),
+                super::DependencyIndexLimits::default(),
+                super::ContainerMountLimits::default(),
+            )
+            .unwrap();
+
+        let mut output = Vec::new();
+        super::print_workspace_summary_to(&mut output, &filesystem, &workspace, &dependencies)
+            .unwrap();
+        let summary = String::from_utf8(output).unwrap();
+        assert!(summary.contains(
+            "BuildSettings object 42: 1 scene paths (selected by source collection traversal)"
+        ));
+        assert!(!summary.contains(
+            "BuildSettings object 43: 1 scene paths (selected by source collection traversal)"
         ));
     }
 
