@@ -248,3 +248,10 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Distinct BuildSettings path arrays are reported as ambiguous. The source selects the last BuildSettings encountered in AssetCollection order; workspace ordering is not yet proven equivalent. A missing serialized Unity version is not replaced with a guessed default.
 - Latest verification: 236 library and 6 binary tests passed; a generated two-file summary test asserts the SceneGUID words and resolved BuildSettings path; warnings-denied Clippy, formatting, 1,449-file baseline verification, and diff check passed.
 - Next: recover the exact BuildSettings selection order/default-version behavior, inspect the source AssetBundle SceneHashes/container mapping path, and then aggregate scene collection identity, path, and GUID into SceneDefinitions. Phase 1 remains open; user AssetBundles and UABEA remain uninspected.
+
+## Streamed-scene bundle path mapping
+
+- Added bounded pure mapping helpers for decoded AssetBundle SceneHashes and Container entries. SceneHashes paths select the first matching normalized bundle collection. Container fallback assigns each ordered path key to the next collection flagged as a scene and advances the source cursor.
+- The helper removes extensions, applies the source rooted-path rule, and ensures an Assets/ prefix. Tests cover duplicate names, relative/rooted paths, ordered fallback, missing candidates, and limits.
+- Latest verification: 239 library and 6 binary tests passed; warnings-denied Clippy, formatting, 1,449-file baseline verification, and diff check passed.
+- Next: recover the class ID 142 TypeTree shapes for streamed-scene flags, SceneHashes, and Container, then preserve serialized bundle boundaries so the mappings can be applied to the correct scene collection files. Do not inspect user AssetBundles or UABEA before the Phase 1 gate.
