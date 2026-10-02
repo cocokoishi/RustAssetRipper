@@ -170,13 +170,13 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Platform inventory still does not make unreferenced top-level bundles/WebData initial inputs. Product UI flow and real-file/C# differential remain outstanding; Phase 1 remains open.
 
 
-## Platform inputs to the SerializedFile workspace
+## Platform registered containers in the SerializedFile workspace
 
-- `PlatformFileInventory` now separates the source `IsPrimaryEngineFile` name matches into `primary_file_inputs` while retaining every game-file registration for dependency lookup.
-- `PlatformStructure::load_primary_serialized_workspace` feeds those inputs, the full registration list, and ordered DataPaths into `SerializedFileWorkspace::load_from_vfs_with_dependencies`. Reachable external SerializedFiles are loaded recursively, and bundle dependencies use the existing bounded expansion path. An empty primary set returns an explicit error.
-- A synthetic `globalgamemanagers` fixture references a sibling `shared.assets`; the platform API loads both files and records the dependency outcome. A WebPlayer-only fixture verifies the helper does not silently return an empty successful workspace.
-- The full workspace suite passes 192 tests. Warnings-denied Clippy, formatting, baseline verification, and diff check all passed for this increment.
-- This helper does not import top-level bundles without a primary-file reference or treat WebData as an initial input. Full container/platform import and product UI integration remain outstanding.
+- Platform inventories expose source-named primary inputs separately from all registered game files. The loader now dispatches every registered non-primary file, adds direct SerializedFiles, records Resource candidates, and recursively expands registered UnityFS, UnityRaw, UnityWeb, and WebData containers before external dependency resolution.
+- SerializedFile and Resource leaves are registered under their relative container paths. The workspace receives the expanded-container identities up front, so an external reference to an already-expanded source container is reported as `ContainerAlreadyExpanded` instead of mounting it again.
+- Aggregate input bytes, visited entries, mounted bytes, source-container count, SerializedFile count, and dependency-registry size remain bounded. The synthetic WebData case verifies one leaf load and both `AlreadyLoaded`/`ContainerAlreadyExpanded` outcomes; a second case verifies the initial SerializedFile limit.
+- Current validation: `cargo test --workspace --locked --quiet` passed 198 tests; warnings-denied workspace Clippy, `cargo fmt --all -- --check`, reference-baseline verification, and `git diff --check` pass for this increment.
+- Arbitrary unregistered input paths, complete product UI flow, .NET/real-platform differential, and the Phase 1 gate remain incomplete. Do not inspect user AssetBundles or UABEA.
 
 
 ## Platform scripting backend and Mono assembly inventory

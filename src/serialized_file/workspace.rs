@@ -104,6 +104,21 @@ pub struct SerializedFileDependencyReport {
     pub loaded_serialized_files: usize,
 }
 
+/// A container mounted before the external dependency walk began.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PreExpandedContainer {
+    pub virtual_path: String,
+    pub serialized_files_loaded: usize,
+}
+
+pub(crate) struct SerializedFileDependencyLoadOptions<'a> {
+    pub data_paths: &'a [String],
+    pub limits: SerializedFileWorkspaceLimits,
+    pub index_limits: DependencyIndexLimits,
+    pub container_limits: ContainerMountLimits,
+    pub preexpanded_containers: &'a [PreExpandedContainer],
+}
+
 impl SerializedFileDependencyReport {
     /// True only when every external request resolved to one loaded SerializedFile identity.
     pub fn is_complete(&self) -> bool {
@@ -446,6 +461,33 @@ impl SerializedFileWorkspace {
         index_limits: DependencyIndexLimits,
         container_limits: ContainerMountLimits,
     ) -> Result<(Self, SerializedFileDependencyReport), Box<SerializedFileWorkspaceError>> {
+        Self::load_from_vfs_with_preexpanded_containers(
+            filesystem,
+            inputs,
+            registered_files,
+            SerializedFileDependencyLoadOptions {
+                data_paths,
+                limits,
+                index_limits,
+                container_limits,
+                preexpanded_containers: &[],
+            },
+        )
+    }
+
+    pub(crate) fn load_from_vfs_with_preexpanded_containers(
+        filesystem: &mut VirtualFileSystem,
+        inputs: &[DependencyFilePath],
+        registered_files: &[DependencyFilePath],
+        options: SerializedFileDependencyLoadOptions<'_>,
+    ) -> Result<(Self, SerializedFileDependencyReport), Box<SerializedFileWorkspaceError>> {
+        let SerializedFileDependencyLoadOptions {
+            data_paths,
+            limits,
+            index_limits,
+            container_limits,
+            preexpanded_containers,
+        } = options;
         let mut workspace = Self::load_from_vfs(filesystem, inputs, limits)?;
         let mut dynamic_registered_files = Vec::new();
         dynamic_registered_files
@@ -515,7 +557,44 @@ impl SerializedFileWorkspace {
         let mut total_container_input_bytes = 0u64;
         let mut total_container_entries = 0usize;
         let mut total_container_output_bytes = 0u64;
+        if preexpanded_containers.len() > limits.max_files {
+            return Err(workspace_error(
+                workspace.report,
+                None,
+                SerializedFileWorkspaceErrorKind::PreExpandedContainerCountLimitExceeded {
+                    count: preexpanded_containers.len(),
+                    limit: limits.max_files,
+                },
+            ));
+        }
         let mut expanded_containers = HashMap::<String, usize>::new();
+        expanded_containers
+            .try_reserve(preexpanded_containers.len())
+            .map_err(|_| {
+                workspace_error(
+                    workspace.report,
+                    None,
+                    SerializedFileWorkspaceErrorKind::AllocationFailed {
+                        resource: "pre-expanded container identities",
+                        requested: preexpanded_containers.len(),
+                    },
+                )
+            })?;
+        for container in preexpanded_containers {
+            if expanded_containers
+                .insert(
+                    container.virtual_path.clone(),
+                    container.serialized_files_loaded,
+                )
+                .is_some()
+            {
+                return Err(workspace_error(
+                    workspace.report,
+                    Some(&container.virtual_path),
+                    SerializedFileWorkspaceErrorKind::DuplicatePreExpandedContainerPath,
+                ));
+            }
+        }
         let mut next_mount_namespace = 0usize;
         let mut source_file_index = 0usize;
 
@@ -1429,6 +1508,11 @@ pub enum SerializedFileWorkspaceErrorKind {
         limit: usize,
     },
     DependencyContainerOutputByteCountOverflow,
+    PreExpandedContainerCountLimitExceeded {
+        count: usize,
+        limit: usize,
+    },
+    DuplicatePreExpandedContainerPath,
     TotalDependencyContainerOutputBytesLimitExceeded {
         byte_count: u64,
         limit: u64,
@@ -1561,6 +1645,13 @@ impl Display for SerializedFileWorkspaceErrorKind {
             Self::DependencyContainerOutputByteCountOverflow => {
                 f.write_str("dependency container output byte count overflows")
             }
+            Self::PreExpandedContainerCountLimitExceeded { count, limit } => write!(
+                f,
+                "pre-expanded container count {count} exceeds limit {limit}"
+            ),
+            Self::DuplicatePreExpandedContainerPath => {
+                f.write_str("pre-expanded container path occurs more than once")
+            }
             Self::TotalDependencyContainerOutputBytesLimitExceeded { byte_count, limit } => write!(
                 f,
                 "dependency container output uses {byte_count} bytes, exceeding limit {limit}"
@@ -1646,7 +1737,9 @@ mod tests {
     };
     use crate::io::dependency::{DependencyFilePath, DependencyIndexLimits};
     use crate::io::filesystem::VirtualFileSystem;
-    use crate::io::platform_file_inventory::PlatformWorkspaceLoadOptions;
+    use crate::io::platform_file_inventory::{
+        PlatformWorkspaceLoadErrorKind, PlatformWorkspaceLoadOptions,
+    };
     use crate::io::platform_structure::{PlatformKind, PlatformStructure};
     use crate::scheme::{ContainerMountErrorKind, ContainerMountLimits, FileKind};
     use crate::serialized_file::reference_graph::{
@@ -1899,6 +1992,101 @@ mod tests {
         assert!(matches!(
             loaded.dependencies.requests[0].outcome,
             SerializedFileDependencyOutcome::LoadedSerializedFile { .. }
+        ));
+    }
+
+    #[test]
+    fn platform_inventory_expands_initial_webdata_before_external_dependency_loading() {
+        let mut filesystem = VirtualFileSystem::new();
+        let serialized_leaf = make_generation_10_file();
+        let webdata = make_webdata_fixture(&[("shared.assets", &serialized_leaf)]);
+        insert_file(
+            &mut filesystem,
+            "/game/Game_Data/globalgamemanagers",
+            &make_generation_10_file_with(&["shared.assets", "data.unity3d"], 1, 10, 42),
+        );
+        insert_file(&mut filesystem, "/game/Game_Data/data.unity3d", &webdata);
+        let structure = PlatformStructure {
+            platform: PlatformKind::Windows,
+            selected_path: "/game".to_owned(),
+            consumed_paths: vec!["/game".to_owned()],
+            root_path: "/game".to_owned(),
+            name: Some("Game".to_owned()),
+            game_data_path: Some("/game/Game_Data".to_owned()),
+            data_paths: vec!["/game/Game_Data".to_owned()],
+        };
+
+        let loaded = structure
+            .load_primary_serialized_workspace(
+                &mut filesystem,
+                PlatformWorkspaceLoadOptions::default(),
+            )
+            .unwrap();
+
+        assert_eq!(loaded.workspace.files().len(), 2);
+        assert_eq!(loaded.initial_container_expansions.len(), 1);
+        assert_eq!(
+            loaded.initial_container_expansions[0].kind,
+            FileKind::UnityWebData
+        );
+        assert_eq!(
+            loaded.initial_container_expansions[0].serialized_files_found,
+            1
+        );
+        assert!(matches!(
+            loaded.dependencies.requests[0].outcome,
+            SerializedFileDependencyOutcome::AlreadyLoaded { .. }
+        ));
+        assert_eq!(
+            loaded.dependencies.requests[1].outcome,
+            SerializedFileDependencyOutcome::ContainerAlreadyExpanded {
+                virtual_path: "/game/Game_Data/data.unity3d".to_owned(),
+                serialized_files_loaded: 1,
+                matching_serialized_files: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn platform_inventory_enforces_initial_serialized_file_limit() {
+        let mut filesystem = VirtualFileSystem::new();
+        let serialized_leaf = make_generation_10_file();
+        let webdata = make_webdata_fixture(&[("shared.assets", &serialized_leaf)]);
+        insert_file(
+            &mut filesystem,
+            "/game/Game_Data/globalgamemanagers",
+            &make_generation_10_file(),
+        );
+        insert_file(&mut filesystem, "/game/Game_Data/data.unity3d", &webdata);
+        let structure = PlatformStructure {
+            platform: PlatformKind::Windows,
+            selected_path: "/game".to_owned(),
+            consumed_paths: vec!["/game".to_owned()],
+            root_path: "/game".to_owned(),
+            name: Some("Game".to_owned()),
+            game_data_path: Some("/game/Game_Data".to_owned()),
+            data_paths: vec!["/game/Game_Data".to_owned()],
+        };
+
+        let error = structure
+            .load_primary_serialized_workspace(
+                &mut filesystem,
+                PlatformWorkspaceLoadOptions {
+                    workspace_limits: SerializedFileWorkspaceLimits {
+                        max_files: 1,
+                        ..SerializedFileWorkspaceLimits::default()
+                    },
+                    ..PlatformWorkspaceLoadOptions::default()
+                },
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            error.kind,
+            PlatformWorkspaceLoadErrorKind::InitialSerializedFileCountLimitExceeded {
+                count: 2,
+                limit: 1
+            }
         ));
     }
 

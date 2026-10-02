@@ -244,3 +244,12 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - PowerShell `& 'C:\Users\koishi\.cargo\bin\cargo.exe' fmt --all`: exit 0. `cargo test --workspace --locked --quiet`: exit 0; 192 tests passed, 0 failed, 0 doc tests.
 - Warnings-denied workspace Clippy, `cargo fmt --all -- --check`, `tools/verify-baseline.ps1` (1,449 unchanged reference files), and `git diff --check` all passed for this integration.
 - Unreferenced top-level bundles and WebData are not initial workspace inputs. General container import, product input-flow integration, and real-file/C# differential remain incomplete.
+
+
+## Registered platform container initial expansion
+
+- `PlatformStructure::load_primary_serialized_workspace` now dispatches every source-registered non-primary file before creating the dependency workspace. Direct SerializedFiles become initial inputs; Resource candidates are retained; registered UnityFS, UnityRaw, UnityWeb, and WebData containers are recursively mounted under isolated VFS roots, with SerializedFile and Resource leaves registered by their relative container paths.
+- The dependency workspace is seeded with those expanded container identities. A later external reference to the source container is reported as `ContainerAlreadyExpanded`, while references to a leaf already in the workspace report `AlreadyLoaded`. Aggregate container inputs, visited entries, mounted bytes, initial container count, SerializedFile count, and dependency registry size are bounded.
+- Synthetic WebData coverage verifies one initial leaf load and both dependency outcomes. A separate fixture verifies the initial SerializedFile count limit. Full workspace suite: 198 passed, 0 failed, 0 doc tests.
+- PowerShell `& 'C:\Users\koishi\.cargo\bin\cargo.exe' clippy --workspace --all-targets --locked -- -D warnings`: exit 0. `cargo fmt --all -- --check`: exit 0. `tools/verify-baseline.ps1`: exit 0; all 1,449 reference files unchanged. `git diff --check`: exit 0.
+- Arbitrary unregistered paths, complete product input/UI flow, real-file/.NET differential validation, and the Phase 1 gate remain incomplete. User AssetBundles and UABEA were not inspected.

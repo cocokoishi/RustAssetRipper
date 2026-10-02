@@ -10,10 +10,12 @@ use crate::io::dependency::DependencyIndexLimits;
 use crate::io::filesystem::{SearchOption, VirtualFileSystem};
 use crate::io::platform_structure::{PlatformKind, PlatformStructure};
 use crate::io::stream::{logical_file_name, logical_file_path};
-use crate::scheme::{ContainerMountLimits, FileKind, SchemeReader};
+use crate::scheme::{
+    ContainerMountError, ContainerMountLimits, FileKind, SchemeError, SchemeReader,
+};
 use crate::serialized_file::workspace::{
-    SerializedFileDependencyReport, SerializedFileWorkspace, SerializedFileWorkspaceError,
-    SerializedFileWorkspaceLimits,
+    PreExpandedContainer, SerializedFileDependencyLoadOptions, SerializedFileDependencyReport,
+    SerializedFileWorkspace, SerializedFileWorkspaceError, SerializedFileWorkspaceLimits,
 };
 
 /// Bounds applied while collecting platform files and probing bundle headers.
@@ -91,6 +93,18 @@ pub struct PlatformWorkspaceLoadResult {
     pub file_inventory: PlatformFileInventory,
     pub workspace: SerializedFileWorkspace,
     pub dependencies: SerializedFileDependencyReport,
+    pub initial_container_expansions: Vec<PlatformContainerExpansionReport>,
+    /// Registered files that dispatch as Resources and are retained for dependency lookup.
+    pub resource_candidates: Vec<DependencyFilePath>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlatformContainerExpansionReport {
+    pub source_file: DependencyFilePath,
+    pub kind: FileKind,
+    pub mounted_entries: usize,
+    pub mounted_bytes: u64,
+    pub serialized_files_found: usize,
 }
 
 impl PlatformStructure {
@@ -165,9 +179,9 @@ impl PlatformStructure {
         })
     }
 
-    /// Load source-named primary SerializedFiles and resolve their external references using the
-    /// registered platform files and ordered DataPaths. This does not import top-level bundles
-    /// that are not referenced by a primary SerializedFile or load WebData as an initial input.
+    /// Load platform SerializedFiles and resolve their external references using the registered
+    /// files and ordered DataPaths. Registered initial containers are expanded before the
+    /// workspace starts its external dependency walk.
     pub fn load_primary_serialized_workspace(
         &self,
         filesystem: &mut VirtualFileSystem,
@@ -180,29 +194,38 @@ impl PlatformStructure {
                 options.file_inventory_limits,
             )
             .map_err(|error| {
-                PlatformWorkspaceLoadError::new(PlatformWorkspaceLoadErrorKind::Inventory(error))
+                PlatformWorkspaceLoadError::new(PlatformWorkspaceLoadErrorKind::Inventory(
+                    Box::new(error),
+                ))
             })?;
-        if file_inventory.primary_file_inputs.is_empty() {
+        let imported = import_initial_platform_files(filesystem, &file_inventory, options)?;
+        if imported.inputs.is_empty() {
             return Err(PlatformWorkspaceLoadError::new(
-                PlatformWorkspaceLoadErrorKind::NoPrimarySerializedFiles,
+                PlatformWorkspaceLoadErrorKind::NoSerializedFileInputs,
             ));
         }
-        let (workspace, dependencies) = SerializedFileWorkspace::load_from_vfs_with_dependencies(
-            filesystem,
-            &file_inventory.primary_file_inputs,
-            &file_inventory.registered_files,
-            &self.data_paths,
-            options.workspace_limits,
-            options.dependency_index_limits,
-            options.container_mount_limits,
-        )
-        .map_err(|error| {
-            PlatformWorkspaceLoadError::new(PlatformWorkspaceLoadErrorKind::Workspace(error))
-        })?;
+        let (workspace, dependencies) =
+            SerializedFileWorkspace::load_from_vfs_with_preexpanded_containers(
+                filesystem,
+                &imported.inputs,
+                &imported.registered_files,
+                SerializedFileDependencyLoadOptions {
+                    data_paths: &self.data_paths,
+                    limits: imported.workspace_limits,
+                    index_limits: options.dependency_index_limits,
+                    container_limits: options.container_mount_limits,
+                    preexpanded_containers: &imported.preexpanded_containers,
+                },
+            )
+            .map_err(|error| {
+                PlatformWorkspaceLoadError::new(PlatformWorkspaceLoadErrorKind::Workspace(error))
+            })?;
         Ok(PlatformWorkspaceLoadResult {
             file_inventory,
             workspace,
             dependencies,
+            initial_container_expansions: imported.expansions,
+            resource_candidates: imported.resource_candidates,
         })
     }
 }
@@ -215,6 +238,448 @@ struct InventoryState<'a> {
     registered_files: BTreeSet<(String, String)>,
     primary_file_inputs: BTreeSet<(String, String)>,
     assemblies: BTreeMap<String, String>,
+}
+
+struct ImportedInitialPlatformFiles {
+    inputs: Vec<DependencyFilePath>,
+    registered_files: Vec<DependencyFilePath>,
+    preexpanded_containers: Vec<PreExpandedContainer>,
+    expansions: Vec<PlatformContainerExpansionReport>,
+    resource_candidates: Vec<DependencyFilePath>,
+    workspace_limits: SerializedFileWorkspaceLimits,
+}
+
+fn import_initial_platform_files(
+    filesystem: &mut VirtualFileSystem,
+    inventory: &PlatformFileInventory,
+    options: PlatformWorkspaceLoadOptions,
+) -> Result<ImportedInitialPlatformFiles, PlatformWorkspaceLoadError> {
+    let mut inputs = BTreeSet::<(String, String)>::new();
+    let mut registered_files = BTreeSet::<(String, String)>::new();
+    let mut resource_candidates = BTreeSet::<(String, String)>::new();
+    let primary_paths: BTreeSet<&str> = inventory
+        .primary_file_inputs
+        .iter()
+        .map(|entry| entry.virtual_path.as_str())
+        .collect();
+    for entry in &inventory.primary_file_inputs {
+        inputs.insert((entry.file_name.clone(), entry.virtual_path.clone()));
+    }
+    for entry in &inventory.registered_files {
+        registered_files.insert((entry.file_name.clone(), entry.virtual_path.clone()));
+    }
+    if inputs.len() > options.workspace_limits.max_files {
+        return Err(PlatformWorkspaceLoadError::new(
+            PlatformWorkspaceLoadErrorKind::InitialSerializedFileCountLimitExceeded {
+                count: inputs.len(),
+                limit: options.workspace_limits.max_files,
+            },
+        ));
+    }
+    if registered_files.len() > options.dependency_index_limits.max_registered_files {
+        return Err(PlatformWorkspaceLoadError::new(
+            PlatformWorkspaceLoadErrorKind::InitialRegistryCountLimitExceeded {
+                count: registered_files.len(),
+                limit: options.dependency_index_limits.max_registered_files,
+            },
+        ));
+    }
+
+    let mut preexpanded_containers = Vec::new();
+    let mut expansions = Vec::new();
+    let mut namespace_index = 0usize;
+    let mut total_container_input_bytes = 0u64;
+    let mut total_container_entries = 0usize;
+    let mut total_container_output_bytes = 0u64;
+
+    for entry in &inventory.registered_files {
+        if primary_paths.contains(entry.virtual_path.as_str()) {
+            continue;
+        }
+        let mut stream = filesystem
+            .open_file(&entry.virtual_path)
+            .map_err(|source| {
+                PlatformWorkspaceLoadError::new(PlatformWorkspaceLoadErrorKind::FileSystem {
+                    virtual_path: entry.virtual_path.clone(),
+                    source: Box::new(source),
+                })
+            })?;
+        let dispatched = SchemeReader::read_stream(&mut stream, options.workspace_limits.scheme)
+            .map_err(|source| {
+                PlatformWorkspaceLoadError::new(PlatformWorkspaceLoadErrorKind::Scheme {
+                    virtual_path: entry.virtual_path.clone(),
+                    source: Box::new(source),
+                })
+            })?;
+
+        match dispatched.kind() {
+            FileKind::SerializedFile => {
+                inputs.insert((entry.file_name.clone(), entry.virtual_path.clone()));
+                if inputs.len() > options.workspace_limits.max_files {
+                    return Err(PlatformWorkspaceLoadError::new(
+                        PlatformWorkspaceLoadErrorKind::InitialSerializedFileCountLimitExceeded {
+                            count: inputs.len(),
+                            limit: options.workspace_limits.max_files,
+                        },
+                    ));
+                }
+            }
+            FileKind::Resource => {
+                resource_candidates.insert((entry.file_name.clone(), entry.virtual_path.clone()));
+            }
+            kind if is_platform_container_kind(kind) => {
+                if expansions.len() >= options.workspace_limits.max_files {
+                    return Err(PlatformWorkspaceLoadError::new(
+                        PlatformWorkspaceLoadErrorKind::InitialContainerCountLimitExceeded {
+                            count: expansions.len() + 1,
+                            limit: options.workspace_limits.max_files,
+                        },
+                    ));
+                }
+                let input_bytes = u64::try_from(dispatched.bytes().len()).map_err(|_| {
+                    PlatformWorkspaceLoadError::new(
+                        PlatformWorkspaceLoadErrorKind::InitialContainerInputByteCountOverflow,
+                    )
+                })?;
+                total_container_input_bytes = total_container_input_bytes
+                    .checked_add(input_bytes)
+                    .ok_or_else(|| {
+                        PlatformWorkspaceLoadError::new(
+                            PlatformWorkspaceLoadErrorKind::InitialContainerInputByteCountOverflow,
+                        )
+                    })?;
+                if total_container_input_bytes
+                    > options
+                        .workspace_limits
+                        .max_total_dependency_container_input_bytes
+                {
+                    return Err(PlatformWorkspaceLoadError::new(
+                        PlatformWorkspaceLoadErrorKind::InitialContainerInputLimitExceeded {
+                            byte_count: total_container_input_bytes,
+                            limit: options
+                                .workspace_limits
+                                .max_total_dependency_container_input_bytes,
+                        },
+                    ));
+                }
+                let remaining_entries = options
+                    .workspace_limits
+                    .max_total_dependency_container_entries
+                    .checked_sub(total_container_entries)
+                    .ok_or_else(|| {
+                        PlatformWorkspaceLoadError::new(
+                            PlatformWorkspaceLoadErrorKind::InitialContainerEntryCountOverflow,
+                        )
+                    })?;
+                let remaining_output_bytes = options
+                    .workspace_limits
+                    .max_total_dependency_container_output_bytes
+                    .checked_sub(total_container_output_bytes)
+                    .ok_or_else(|| {
+                        PlatformWorkspaceLoadError::new(
+                            PlatformWorkspaceLoadErrorKind::InitialContainerOutputByteCountOverflow,
+                        )
+                    })?;
+                let mut mount_limits = options.container_mount_limits;
+                mount_limits.max_entries = mount_limits.max_entries.min(remaining_entries);
+                mount_limits.max_total_output_bytes = mount_limits
+                    .max_total_output_bytes
+                    .min(remaining_output_bytes);
+
+                let mount_root = next_initial_container_root(
+                    filesystem,
+                    &mut namespace_index,
+                    options.workspace_limits.max_files,
+                )
+                .map_err(|source| {
+                    PlatformWorkspaceLoadError::new(PlatformWorkspaceLoadErrorKind::FileSystem {
+                        virtual_path: entry.virtual_path.clone(),
+                        source: Box::new(source),
+                    })
+                })?;
+                let mount_report = dispatched
+                    .mount_container_tree(filesystem, Some(&mount_root), mount_limits)
+                    .map_err(|source| {
+                        PlatformWorkspaceLoadError::new(
+                            PlatformWorkspaceLoadErrorKind::ContainerMount {
+                                virtual_path: entry.virtual_path.clone(),
+                                source: Box::new(source),
+                            },
+                        )
+                    })?;
+                total_container_entries = total_container_entries
+                    .checked_add(mount_report.mounted_entries)
+                    .ok_or_else(|| {
+                        PlatformWorkspaceLoadError::new(
+                            PlatformWorkspaceLoadErrorKind::InitialContainerEntryCountOverflow,
+                        )
+                    })?;
+                if total_container_entries
+                    > options
+                        .workspace_limits
+                        .max_total_dependency_container_entries
+                {
+                    return Err(PlatformWorkspaceLoadError::new(
+                        PlatformWorkspaceLoadErrorKind::InitialContainerEntryLimitExceeded {
+                            count: total_container_entries,
+                            limit: options
+                                .workspace_limits
+                                .max_total_dependency_container_entries,
+                        },
+                    ));
+                }
+                total_container_output_bytes = total_container_output_bytes
+                    .checked_add(mount_report.mounted_bytes)
+                    .ok_or_else(|| {
+                        PlatformWorkspaceLoadError::new(
+                            PlatformWorkspaceLoadErrorKind::InitialContainerOutputByteCountOverflow,
+                        )
+                    })?;
+                if total_container_output_bytes
+                    > options
+                        .workspace_limits
+                        .max_total_dependency_container_output_bytes
+                {
+                    return Err(PlatformWorkspaceLoadError::new(
+                        PlatformWorkspaceLoadErrorKind::InitialContainerOutputLimitExceeded {
+                            byte_count: total_container_output_bytes,
+                            limit: options
+                                .workspace_limits
+                                .max_total_dependency_container_output_bytes,
+                        },
+                    ));
+                }
+
+                let resulting_registry_count = registered_files
+                    .len()
+                    .checked_add(mount_report.mounted_entries)
+                    .ok_or_else(|| {
+                        PlatformWorkspaceLoadError::new(
+                            PlatformWorkspaceLoadErrorKind::InitialRegistryCountOverflow,
+                        )
+                    })?;
+                if resulting_registry_count > options.dependency_index_limits.max_registered_files {
+                    return Err(PlatformWorkspaceLoadError::new(
+                        PlatformWorkspaceLoadErrorKind::InitialRegistryCountLimitExceeded {
+                            count: resulting_registry_count,
+                            limit: options.dependency_index_limits.max_registered_files,
+                        },
+                    ));
+                }
+
+                let mut serialized_files_found = 0usize;
+                if filesystem
+                    .directory_exists(Some(&mount_root))
+                    .map_err(|source| {
+                        PlatformWorkspaceLoadError::new(
+                            PlatformWorkspaceLoadErrorKind::FileSystem {
+                                virtual_path: mount_root.clone(),
+                                source: Box::new(source),
+                            },
+                        )
+                    })?
+                {
+                    let leaf_paths = filesystem
+                        .enumerate_files(Some(&mount_root), "*", SearchOption::AllDirectories)
+                        .map_err(|source| {
+                            PlatformWorkspaceLoadError::new(
+                                PlatformWorkspaceLoadErrorKind::FileSystem {
+                                    virtual_path: mount_root.clone(),
+                                    source: Box::new(source),
+                                },
+                            )
+                        })?;
+                    let resulting_registry_count = registered_files
+                        .len()
+                        .checked_add(leaf_paths.len())
+                        .ok_or_else(|| {
+                            PlatformWorkspaceLoadError::new(
+                                PlatformWorkspaceLoadErrorKind::InitialRegistryCountOverflow,
+                            )
+                        })?;
+                    if resulting_registry_count
+                        > options.dependency_index_limits.max_registered_files
+                    {
+                        return Err(PlatformWorkspaceLoadError::new(
+                            PlatformWorkspaceLoadErrorKind::InitialRegistryCountLimitExceeded {
+                                count: resulting_registry_count,
+                                limit: options.dependency_index_limits.max_registered_files,
+                            },
+                        ));
+                    }
+                    for leaf_path in leaf_paths {
+                        let relative_name = relative_path_under(&leaf_path, &mount_root)
+                            .ok_or_else(|| {
+                                PlatformWorkspaceLoadError::new(
+                                    PlatformWorkspaceLoadErrorKind::UnexpectedContainerLeaf {
+                                        virtual_path: leaf_path.clone(),
+                                        kind: FileKind::Resource,
+                                    },
+                                )
+                            })?;
+                        let leaf_entry = DependencyFilePath {
+                            file_name: relative_name.to_owned(),
+                            virtual_path: leaf_path.clone(),
+                        };
+                        registered_files.insert((
+                            leaf_entry.file_name.clone(),
+                            leaf_entry.virtual_path.clone(),
+                        ));
+                        let mut leaf_stream =
+                            filesystem.open_file(&leaf_path).map_err(|source| {
+                                PlatformWorkspaceLoadError::new(
+                                    PlatformWorkspaceLoadErrorKind::FileSystem {
+                                        virtual_path: leaf_path.clone(),
+                                        source: Box::new(source),
+                                    },
+                                )
+                            })?;
+                        let leaf = SchemeReader::read_stream(
+                            &mut leaf_stream,
+                            options.workspace_limits.scheme,
+                        )
+                        .map_err(|source| {
+                            PlatformWorkspaceLoadError::new(
+                                PlatformWorkspaceLoadErrorKind::Scheme {
+                                    virtual_path: leaf_path.clone(),
+                                    source: Box::new(source),
+                                },
+                            )
+                        })?;
+                        match leaf.kind() {
+                            FileKind::SerializedFile => {
+                                let inserted = inputs.insert((
+                                    leaf_entry.file_name.clone(),
+                                    leaf_entry.virtual_path.clone(),
+                                ));
+                                if inserted {
+                                    serialized_files_found = serialized_files_found
+                                        .checked_add(1)
+                                        .ok_or_else(|| {
+                                            PlatformWorkspaceLoadError::new(
+                                                PlatformWorkspaceLoadErrorKind::InitialSerializedFileCountOverflow,
+                                            )
+                                        })?;
+                                    if inputs.len() > options.workspace_limits.max_files {
+                                        return Err(PlatformWorkspaceLoadError::new(
+                                            PlatformWorkspaceLoadErrorKind::InitialSerializedFileCountLimitExceeded {
+                                                count: inputs.len(),
+                                                limit: options.workspace_limits.max_files,
+                                            },
+                                        ));
+                                    }
+                                }
+                            }
+                            FileKind::Resource => {
+                                resource_candidates
+                                    .insert((leaf_entry.file_name, leaf_entry.virtual_path));
+                            }
+                            leaf_kind => {
+                                return Err(PlatformWorkspaceLoadError::new(
+                                    PlatformWorkspaceLoadErrorKind::UnexpectedContainerLeaf {
+                                        virtual_path: leaf_path,
+                                        kind: leaf_kind,
+                                    },
+                                ));
+                            }
+                        }
+                    }
+                }
+                preexpanded_containers.push(PreExpandedContainer {
+                    virtual_path: entry.virtual_path.clone(),
+                    serialized_files_loaded: serialized_files_found,
+                });
+                expansions.push(PlatformContainerExpansionReport {
+                    source_file: entry.clone(),
+                    kind,
+                    mounted_entries: mount_report.mounted_entries,
+                    mounted_bytes: mount_report.mounted_bytes,
+                    serialized_files_found,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    if inputs.len() > options.workspace_limits.max_files {
+        return Err(PlatformWorkspaceLoadError::new(
+            PlatformWorkspaceLoadErrorKind::InitialSerializedFileCountLimitExceeded {
+                count: inputs.len(),
+                limit: options.workspace_limits.max_files,
+            },
+        ));
+    }
+    if registered_files.len() > options.dependency_index_limits.max_registered_files {
+        return Err(PlatformWorkspaceLoadError::new(
+            PlatformWorkspaceLoadErrorKind::InitialRegistryCountLimitExceeded {
+                count: registered_files.len(),
+                limit: options.dependency_index_limits.max_registered_files,
+            },
+        ));
+    }
+    let mut workspace_limits = options.workspace_limits;
+    workspace_limits.max_total_dependency_container_input_bytes -= total_container_input_bytes;
+    workspace_limits.max_total_dependency_container_entries -= total_container_entries;
+    workspace_limits.max_total_dependency_container_output_bytes -= total_container_output_bytes;
+
+    Ok(ImportedInitialPlatformFiles {
+        inputs: into_dependency_paths(inputs),
+        registered_files: into_dependency_paths(registered_files),
+        preexpanded_containers,
+        expansions,
+        resource_candidates: into_dependency_paths(resource_candidates),
+        workspace_limits,
+    })
+}
+
+fn into_dependency_paths(files: BTreeSet<(String, String)>) -> Vec<DependencyFilePath> {
+    files
+        .into_iter()
+        .map(|(file_name, virtual_path)| DependencyFilePath {
+            file_name,
+            virtual_path,
+        })
+        .collect()
+}
+
+fn is_platform_container_kind(kind: FileKind) -> bool {
+    matches!(
+        kind,
+        FileKind::UnityFs
+            | FileKind::UnityRaw
+            | FileKind::UnityWebBundle
+            | FileKind::UnityWebData
+            | FileKind::UnityArchive
+    )
+}
+
+fn relative_path_under<'a>(path: &'a str, root: &str) -> Option<&'a str> {
+    let prefix = format!("{}/", root.trim_end_matches('/'));
+    path.strip_prefix(&prefix)
+        .filter(|relative| !relative.is_empty())
+}
+
+fn next_initial_container_root(
+    filesystem: &VirtualFileSystem,
+    namespace_index: &mut usize,
+    maximum_attempts: usize,
+) -> io::Result<String> {
+    for _ in 0..maximum_attempts {
+        let index = *namespace_index;
+        *namespace_index = namespace_index.checked_add(1).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "initial container namespace overflows",
+            )
+        })?;
+        let root = format!("/.assetripper/import/initial/{index}");
+        if !filesystem.directory_exists(Some(&root))? && !filesystem.file_exists(Some(&root))? {
+            return Ok(root);
+        }
+    }
+    Err(io::Error::other(
+        "could not allocate a unique initial container namespace",
+    ))
 }
 
 impl InventoryState<'_> {
@@ -951,9 +1416,55 @@ impl PlatformWorkspaceLoadError {
 
 #[derive(Debug)]
 pub enum PlatformWorkspaceLoadErrorKind {
-    NoPrimarySerializedFiles,
-    Inventory(PlatformFileInventoryError),
+    NoSerializedFileInputs,
+    Inventory(Box<PlatformFileInventoryError>),
     Workspace(Box<SerializedFileWorkspaceError>),
+    FileSystem {
+        virtual_path: String,
+        source: Box<io::Error>,
+    },
+    Scheme {
+        virtual_path: String,
+        source: Box<SchemeError>,
+    },
+    ContainerMount {
+        virtual_path: String,
+        source: Box<ContainerMountError>,
+    },
+    UnexpectedContainerLeaf {
+        virtual_path: String,
+        kind: FileKind,
+    },
+    InitialContainerCountLimitExceeded {
+        count: usize,
+        limit: usize,
+    },
+    InitialContainerInputByteCountOverflow,
+    InitialContainerInputLimitExceeded {
+        byte_count: u64,
+        limit: u64,
+    },
+    InitialContainerEntryCountOverflow,
+    InitialContainerEntryLimitExceeded {
+        count: usize,
+        limit: usize,
+    },
+    InitialContainerOutputByteCountOverflow,
+    InitialContainerOutputLimitExceeded {
+        byte_count: u64,
+        limit: u64,
+    },
+    InitialRegistryCountOverflow,
+    InitialRegistryCountLimitExceeded {
+        count: usize,
+        limit: usize,
+    },
+    InitialSerializedFileCountOverflow,
+    InitialSerializedFileCountLimitExceeded {
+        count: usize,
+        limit: usize,
+    },
+    ContainerNamespaceExhausted,
 }
 
 impl Display for PlatformWorkspaceLoadError {
@@ -965,11 +1476,81 @@ impl Display for PlatformWorkspaceLoadError {
 impl Display for PlatformWorkspaceLoadErrorKind {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NoPrimarySerializedFiles => {
-                formatter.write_str("no source-named primary SerializedFiles were found")
-            }
+            Self::NoSerializedFileInputs => formatter.write_str(
+                "no source-named or container-discovered SerializedFile inputs were found",
+            ),
             Self::Inventory(error) => write!(formatter, "{error}"),
             Self::Workspace(error) => write!(formatter, "{error}"),
+            Self::FileSystem {
+                virtual_path,
+                source,
+            } => {
+                write!(formatter, "VFS input '{virtual_path}' failed: {source}")
+            }
+            Self::Scheme {
+                virtual_path,
+                source,
+            } => {
+                write!(
+                    formatter,
+                    "scheme dispatch failed for '{virtual_path}': {source}"
+                )
+            }
+            Self::ContainerMount {
+                virtual_path,
+                source,
+            } => {
+                write!(
+                    formatter,
+                    "container '{virtual_path}' could not be expanded: {source}"
+                )
+            }
+            Self::UnexpectedContainerLeaf { virtual_path, kind } => write!(
+                formatter,
+                "container leaf '{virtual_path}' has unexpected scheme {kind:?}"
+            ),
+            Self::InitialContainerCountLimitExceeded { count, limit } => write!(
+                formatter,
+                "initial container count {count} exceeds limit {limit}"
+            ),
+            Self::InitialContainerInputByteCountOverflow => {
+                formatter.write_str("initial container input byte count overflows")
+            }
+            Self::InitialContainerInputLimitExceeded { byte_count, limit } => write!(
+                formatter,
+                "initial container inputs use {byte_count} bytes, exceeding limit {limit}"
+            ),
+            Self::InitialContainerEntryCountOverflow => {
+                formatter.write_str("initial container entry count overflows")
+            }
+            Self::InitialContainerEntryLimitExceeded { count, limit } => write!(
+                formatter,
+                "initial container entry count {count} exceeds limit {limit}"
+            ),
+            Self::InitialContainerOutputByteCountOverflow => {
+                formatter.write_str("initial container output byte count overflows")
+            }
+            Self::InitialContainerOutputLimitExceeded { byte_count, limit } => write!(
+                formatter,
+                "initial container outputs use {byte_count} bytes, exceeding limit {limit}"
+            ),
+            Self::InitialRegistryCountOverflow => {
+                formatter.write_str("initial dependency registry count overflows")
+            }
+            Self::InitialRegistryCountLimitExceeded { count, limit } => write!(
+                formatter,
+                "initial dependency registry count {count} exceeds limit {limit}"
+            ),
+            Self::InitialSerializedFileCountOverflow => {
+                formatter.write_str("initial SerializedFile count overflows")
+            }
+            Self::InitialSerializedFileCountLimitExceeded { count, limit } => write!(
+                formatter,
+                "initial SerializedFile count {count} exceeds limit {limit}"
+            ),
+            Self::ContainerNamespaceExhausted => {
+                formatter.write_str("no collision-free initial container namespace was available")
+            }
         }
     }
 }
@@ -979,7 +1560,23 @@ impl Error for PlatformWorkspaceLoadError {
         match &self.kind {
             PlatformWorkspaceLoadErrorKind::Inventory(error) => Some(error),
             PlatformWorkspaceLoadErrorKind::Workspace(error) => Some(error.as_ref()),
-            PlatformWorkspaceLoadErrorKind::NoPrimarySerializedFiles => None,
+            PlatformWorkspaceLoadErrorKind::NoSerializedFileInputs
+            | PlatformWorkspaceLoadErrorKind::InitialContainerCountLimitExceeded { .. }
+            | PlatformWorkspaceLoadErrorKind::InitialContainerInputByteCountOverflow
+            | PlatformWorkspaceLoadErrorKind::InitialContainerInputLimitExceeded { .. }
+            | PlatformWorkspaceLoadErrorKind::InitialContainerEntryCountOverflow
+            | PlatformWorkspaceLoadErrorKind::InitialContainerEntryLimitExceeded { .. }
+            | PlatformWorkspaceLoadErrorKind::InitialContainerOutputByteCountOverflow
+            | PlatformWorkspaceLoadErrorKind::InitialContainerOutputLimitExceeded { .. }
+            | PlatformWorkspaceLoadErrorKind::InitialRegistryCountOverflow
+            | PlatformWorkspaceLoadErrorKind::InitialRegistryCountLimitExceeded { .. }
+            | PlatformWorkspaceLoadErrorKind::InitialSerializedFileCountOverflow
+            | PlatformWorkspaceLoadErrorKind::InitialSerializedFileCountLimitExceeded { .. }
+            | PlatformWorkspaceLoadErrorKind::ContainerNamespaceExhausted
+            | PlatformWorkspaceLoadErrorKind::UnexpectedContainerLeaf { .. } => None,
+            PlatformWorkspaceLoadErrorKind::FileSystem { source, .. } => Some(source),
+            PlatformWorkspaceLoadErrorKind::Scheme { source, .. } => Some(source),
+            PlatformWorkspaceLoadErrorKind::ContainerMount { source, .. } => Some(source),
         }
     }
 }
@@ -989,7 +1586,23 @@ impl Error for PlatformWorkspaceLoadErrorKind {
         match self {
             Self::Inventory(error) => Some(error),
             Self::Workspace(error) => Some(error.as_ref()),
-            Self::NoPrimarySerializedFiles => None,
+            Self::NoSerializedFileInputs
+            | Self::InitialContainerCountLimitExceeded { .. }
+            | Self::InitialContainerInputByteCountOverflow
+            | Self::InitialContainerInputLimitExceeded { .. }
+            | Self::InitialContainerEntryCountOverflow
+            | Self::InitialContainerEntryLimitExceeded { .. }
+            | Self::InitialContainerOutputByteCountOverflow
+            | Self::InitialContainerOutputLimitExceeded { .. }
+            | Self::InitialRegistryCountOverflow
+            | Self::InitialRegistryCountLimitExceeded { .. }
+            | Self::InitialSerializedFileCountOverflow
+            | Self::InitialSerializedFileCountLimitExceeded { .. }
+            | Self::ContainerNamespaceExhausted
+            | Self::UnexpectedContainerLeaf { .. } => None,
+            Self::FileSystem { source, .. } => Some(source),
+            Self::Scheme { source, .. } => Some(source),
+            Self::ContainerMount { source, .. } => Some(source),
         }
     }
 }
@@ -1243,7 +1856,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(
             error.kind,
-            super::PlatformWorkspaceLoadErrorKind::NoPrimarySerializedFiles
+            super::PlatformWorkspaceLoadErrorKind::NoSerializedFileInputs
         ));
     }
 
