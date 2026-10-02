@@ -38,7 +38,7 @@ Phase 1: full Rust port of the local AssetRipper source baseline. The Phase 1 ga
 ## Latest verification
 
 - `cargo fmt --all -- --check`: exit 0.
-- `cargo test --workspace --locked`: exit 0; 147 unit tests passed, 0 failed, 0 doc tests.
+- `cargo test --workspace --locked`: exit 0; 150 unit tests passed, 0 failed, 0 doc tests.
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`: exit 0.
 - `cargo tree --locked`: exit 0; the dependency graph is recorded in `docs/dependencies-and-licenses.md`.
 - `tools/verify-baseline.ps1`: exit 0; all 1,449 reference files match the manifest.
@@ -80,3 +80,10 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Synthetic tests cover a standalone Resource plus a WebData container with independent destinations, aggregate input-size preflight, and duplicate split-group rejection.
 - `cargo test --workspace --locked`: 147 tests passed; warnings-denied Clippy and `cargo fmt --all -- --check` passed.
 - Callers must provide one path per logical split group and choose distinct destination roots where source names may collide. Real-file and C# differential validation remains outstanding.
+
+## Serialized external dependency-name normalization
+
+- Ported `SpecialFileNames.FixFileIdentifier`, `FixDependencyName`, and `FixResourcePath` to `src/io/special_names.rs` and exposed the normalized path through `FileIdentifier::fixed_path_name`; the original metadata string remains intact.
+- Tests cover `library/`, `resources/`, `archive:/`, lowercase rules, fallback paths, and original-name preservation.
+- `cargo test --workspace --locked`: 150 tests passed; Clippy with `-D warnings`, formatting, and the 1,449-file baseline verification passed.
+- Next: port the actual dependency lookup and loading path from `PlatformGameStructure.RequestDependency`, then connect loaded SerializedFiles to the cross-file PPtr graph. GUID-derived `AssetType.Meta` paths remain outstanding.

@@ -297,6 +297,14 @@ pub struct FileIdentifier {
     pub path_name_origin: String,
 }
 
+impl FileIdentifier {
+    /// Return the dependency lookup name used by the source `FileIdentifier.PathName`.
+    /// The serialized origin remains available unchanged in `path_name_origin`.
+    pub fn fixed_path_name(&self) -> String {
+        crate::io::special_names::fix_file_identifier(&self.path_name_origin)
+    }
+}
+
 fn read_serialized_type(
     reader: &mut BinaryReader<'_>,
     generation: FormatVersion,

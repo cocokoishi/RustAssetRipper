@@ -125,3 +125,10 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Two synthetic temporary-file tests cover Resource and WebData imports at separate destinations, total input size rejection before VFS mutation, and repeated `.splitN` members rejected before mutation.
 - `cargo test --workspace --locked`: exit 0; 147 unit tests passed, 0 failed, 0 doc tests. `cargo clippy --workspace --all-targets --locked -- -D warnings`: exit 0. `cargo fmt --all -- --check`: exit 0.
 - No real-file or C# differential has run; callers must represent each split family with one path.
+
+## Serialized external-name normalization
+
+- Added source-compatible `fix_file_identifier`, `fix_dependency_name`, and `fix_resource_path` helpers from `SpecialFileNames`; `FileIdentifier::fixed_path_name` exposes the normalized lookup path without replacing the original serialized name.
+- Synthetic tests cover `library/` and `resources/` prefixes, `archive:/` basename extraction, lowercase normalization, unchanged non-prefixed paths, helper case behavior, and preservation of the source name.
+- `cargo test --workspace --locked`: exit 0; 150 unit tests passed, 0 failed, 0 doc tests. `cargo clippy --workspace --all-targets --locked -- -D warnings`: exit 0. `cargo fmt --all -- --check`: exit 0.
+- `tools/verify-baseline.ps1`: exit 0; all 1,449 reference files match the manifest. No actual dependency file lookup/loading, GUID-derived Meta lookup, or C# differential is implemented by this increment.
