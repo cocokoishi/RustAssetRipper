@@ -180,6 +180,80 @@ impl VirtualFileSystem {
         Ok(stream)
     }
 
+    /// Inserts an already-owned readable stream, creating missing parent directories as one
+    /// entry-limit-checked operation. Existing files are never silently replaced.
+    pub(crate) fn insert_file_stream_with_parents(
+        &mut self,
+        path: &str,
+        stream: SmartStream,
+    ) -> io::Result<()> {
+        if stream.is_null() || !stream.can_read() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "inserted virtual file stream must be readable and non-null",
+            ));
+        }
+        let normalized = normalize_path(Some(path), self.limits)?;
+        let parts = path_parts(&normalized, self.limits)?;
+        let Some((file_name, directories)) = parts.split_last() else {
+            return Err(invalid_path("file path cannot be empty"));
+        };
+
+        let mut existing = &self.root;
+        let mut missing_start = None;
+        for (index, part) in directories.iter().enumerate() {
+            match existing.directories.get(*part) {
+                Some(directory) => existing = directory,
+                None => {
+                    missing_start = Some(index);
+                    break;
+                }
+            }
+        }
+        if missing_start.is_none() && existing.files.contains_key(*file_name) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("virtual file '{}' already exists", canonical_path(&parts)),
+            ));
+        }
+        let missing_directory_count = missing_start
+            .map(|index| directories.len() - index)
+            .unwrap_or(0);
+        let added_entries = missing_directory_count.checked_add(1).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "virtual entry count overflows")
+        })?;
+        let resulting_count = self.entry_count.checked_add(added_entries).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "virtual entry count overflows")
+        })?;
+        if resulting_count > self.limits.max_entries {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "inserting the file and {missing_directory_count} parent directories would exceed virtual filesystem entry limit {}",
+                    self.limits.max_entries
+                ),
+            ));
+        }
+
+        let mut current = &mut self.root;
+        let entry_count = &mut self.entry_count;
+        for part in directories {
+            if !current.directories.contains_key(*part) {
+                current
+                    .directories
+                    .insert((*part).to_owned(), DirectoryEntry::default());
+                *entry_count += 1;
+            }
+            current = current
+                .directories
+                .get_mut(*part)
+                .expect("directory was inserted or checked above");
+        }
+        current.files.insert((*file_name).to_owned(), stream);
+        *entry_count += 1;
+        Ok(())
+    }
+
     pub fn open_file(&self, path: &str) -> io::Result<SmartStream> {
         let normalized = normalize_path(Some(path), self.limits)?;
         let parts = path_parts(&normalized, self.limits)?;
@@ -475,6 +549,7 @@ fn unsupported_pattern(pattern: &str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::{SearchOption, VirtualFileSystem, VirtualFileSystemLimits};
+    use crate::io::stream::SmartStream;
     use std::io::{Read, Seek, SeekFrom, Write};
 
     #[test]
@@ -635,5 +710,62 @@ mod tests {
         );
         assert_eq!(limited.count(), 1);
         assert!(!limited.directory_exists(Some("/parent")).unwrap());
+    }
+
+    #[test]
+    fn inserting_a_stream_creates_parent_directories_and_rejects_replacement() {
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem
+            .insert_file_stream_with_parents(
+                "/assets/nested/file.bin",
+                SmartStream::from_memory(b"first".to_vec()),
+            )
+            .unwrap();
+        assert_eq!(filesystem.count(), 4);
+        assert_eq!(
+            filesystem
+                .read_all_bytes("/assets/nested/file.bin", 32)
+                .unwrap(),
+            b"first"
+        );
+
+        assert_eq!(
+            filesystem
+                .insert_file_stream_with_parents(
+                    "/assets/nested/file.bin",
+                    SmartStream::from_memory(b"replacement".to_vec()),
+                )
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(filesystem.count(), 4);
+        assert_eq!(
+            filesystem
+                .read_all_bytes("/assets/nested/file.bin", 32)
+                .unwrap(),
+            b"first"
+        );
+    }
+
+    #[test]
+    fn inserting_a_stream_checks_all_missing_entries_before_mutation() {
+        let mut filesystem = VirtualFileSystem::with_limits(VirtualFileSystemLimits {
+            max_entries: 3,
+            ..VirtualFileSystemLimits::default()
+        })
+        .unwrap();
+        assert_eq!(
+            filesystem
+                .insert_file_stream_with_parents(
+                    "/one/two/file.bin",
+                    SmartStream::from_memory(b"data".to_vec()),
+                )
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        assert_eq!(filesystem.count(), 1);
+        assert!(!filesystem.directory_exists(Some("/one")).unwrap());
     }
 }

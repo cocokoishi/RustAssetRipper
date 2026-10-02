@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use crate::compression::wrappers::{
@@ -13,7 +13,8 @@ use crate::compression::wrappers::{
 use crate::container::raw_web::{RawWebBundle, RawWebError, RawWebKind, RawWebLimits};
 use crate::container::unityfs::{UnityFsBundle, UnityFsError, UnityFsLimits};
 use crate::container::web_file::{WebFile, WebFileError, WebFileLimits};
-use crate::io::stream::open_logical_file;
+use crate::io::filesystem::VirtualFileSystem;
+use crate::io::stream::{open_logical_file, SmartStream};
 use crate::serialized_file::file::{SerializedFile, SerializedFileError};
 use crate::serialized_file::format_version::FormatVersion;
 
@@ -67,6 +68,74 @@ impl Default for SchemeReaderLimits {
             web_file: WebFileLimits::default(),
         }
     }
+}
+
+/// Bounds for mounting a parsed container's direct entries into a virtual filesystem.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ContainerMountLimits {
+    pub max_entries: usize,
+    pub max_total_output_bytes: u64,
+}
+
+impl Default for ContainerMountLimits {
+    fn default() -> Self {
+        Self {
+            max_entries: 1_000_000,
+            max_total_output_bytes: 2 * 1024 * 1024 * 1024,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ContainerMountReport {
+    pub mounted_entries: usize,
+    pub mounted_bytes: u64,
+}
+
+#[derive(Debug)]
+pub struct ContainerMountError {
+    pub partial_report: ContainerMountReport,
+    pub kind: ContainerMountErrorKind,
+}
+
+#[derive(Debug)]
+pub enum ContainerMountErrorKind {
+    Scheme(SchemeError),
+    NotContainer,
+    EntryCountLimitExceeded {
+        count: usize,
+        limit: usize,
+    },
+    TotalOutputLimitExceeded {
+        entry_index: usize,
+        requested_total: u64,
+        limit: u64,
+    },
+    TotalOutputSizeOverflow {
+        entry_index: usize,
+    },
+    InvalidEntryPath {
+        entry_index: usize,
+        path: String,
+    },
+    EntryPathTooLong {
+        entry_index: usize,
+        path: String,
+        limit: usize,
+    },
+    EntryPathAllocationFailed {
+        entry_index: usize,
+        requested: usize,
+    },
+    EntryAllocationFailed {
+        entry_index: usize,
+        requested: usize,
+    },
+    FileSystem {
+        entry_index: usize,
+        path: String,
+        source: io::Error,
+    },
 }
 
 /// Input bytes after any recognized GZip/Brotli wrappers have been removed.
@@ -179,6 +248,391 @@ impl<'a> DispatchedFile<'a> {
             FileKind::Resource => Ok(ParsedFile::Resource(bytes)),
         }
     }
+
+    /// Mount each direct bundle/WebData entry under `destination_root` in its parsed path form.
+    ///
+    /// Entry bytes are placed in owned SmartStreams. A failure reports the number and byte count
+    /// already mounted; earlier entries are not silently rolled back or reported as a full mount.
+    pub fn mount_container_entries(
+        &self,
+        filesystem: &mut VirtualFileSystem,
+        destination_root: Option<&str>,
+        limits: ContainerMountLimits,
+    ) -> Result<ContainerMountReport, ContainerMountError> {
+        let mut report = ContainerMountReport::default();
+        let parsed = self.parse().map_err(|error| {
+            ContainerMountError::new(report.clone(), ContainerMountErrorKind::Scheme(error))
+        })?;
+
+        match parsed {
+            ParsedFile::UnityFs(bundle) => {
+                preflight_entry_count(bundle.nodes.len(), limits, &report)?;
+                preflight_output_sizes(bundle.nodes.iter().map(|node| node.size), limits, &report)?;
+                for (index, node) in bundle.nodes.iter().enumerate() {
+                    let bytes = bundle.read_entry(index).map_err(|error| {
+                        ContainerMountError::new(
+                            report.clone(),
+                            ContainerMountErrorKind::Scheme(SchemeError::new(
+                                SchemeErrorKind::UnityFs(error),
+                            )),
+                        )
+                    })?;
+                    mount_container_entry(
+                        filesystem,
+                        destination_root,
+                        node.path.as_str(),
+                        index,
+                        bytes,
+                        limits,
+                        &mut report,
+                    )?;
+                }
+            }
+            ParsedFile::RawWeb(bundle) => {
+                preflight_entry_count(bundle.entries.len(), limits, &report)?;
+                preflight_output_sizes(
+                    bundle.entries.iter().map(|entry| u64::from(entry.size)),
+                    limits,
+                    &report,
+                )?;
+                for (index, entry) in bundle.entries.iter().enumerate() {
+                    let bytes = bundle.read_entry(index).map_err(|error| {
+                        ContainerMountError::new(
+                            report.clone(),
+                            ContainerMountErrorKind::Scheme(SchemeError::new(
+                                SchemeErrorKind::RawWeb(error),
+                            )),
+                        )
+                    })?;
+                    mount_container_entry(
+                        filesystem,
+                        destination_root,
+                        entry.path.as_str(),
+                        index,
+                        Cow::Borrowed(bytes),
+                        limits,
+                        &mut report,
+                    )?;
+                }
+            }
+            ParsedFile::WebData(web_file) => {
+                preflight_entry_count(web_file.entries.len(), limits, &report)?;
+                preflight_output_sizes(
+                    web_file.entries.iter().map(|entry| u64::from(entry.size)),
+                    limits,
+                    &report,
+                )?;
+                for (index, entry) in web_file.entries.iter().enumerate() {
+                    let bytes = web_file.entry_data(index).ok_or_else(|| {
+                        ContainerMountError::new(
+                            report.clone(),
+                            ContainerMountErrorKind::Scheme(SchemeError::new(
+                                SchemeErrorKind::WebDataEntryIndexOutOfBounds {
+                                    index,
+                                    entry_count: web_file.entries.len(),
+                                },
+                            )),
+                        )
+                    })?;
+                    mount_container_entry(
+                        filesystem,
+                        destination_root,
+                        entry.name.as_str(),
+                        index,
+                        Cow::Borrowed(bytes),
+                        limits,
+                        &mut report,
+                    )?;
+                }
+            }
+            ParsedFile::SerializedFile(_) | ParsedFile::Resource(_) => {
+                return Err(ContainerMountError::new(
+                    report,
+                    ContainerMountErrorKind::NotContainer,
+                ));
+            }
+        }
+
+        Ok(report)
+    }
+}
+
+impl ContainerMountError {
+    fn new(partial_report: ContainerMountReport, kind: ContainerMountErrorKind) -> Self {
+        Self {
+            partial_report,
+            kind,
+        }
+    }
+}
+
+impl Display for ContainerMountErrorKind {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Scheme(error) => Display::fmt(error, formatter),
+            Self::NotContainer => formatter.write_str("input is not a supported file container"),
+            Self::EntryCountLimitExceeded { count, limit } => write!(
+                formatter,
+                "container has {count} entries, exceeding mount limit {limit}"
+            ),
+            Self::TotalOutputLimitExceeded {
+                entry_index,
+                requested_total,
+                limit,
+            } => write!(
+                formatter,
+                "mounting entry {entry_index} would require {requested_total} bytes, exceeding output limit {limit}"
+            ),
+            Self::TotalOutputSizeOverflow { entry_index } => write!(
+                formatter,
+                "total mounted output size overflows while counting entry {entry_index}"
+            ),
+            Self::InvalidEntryPath {
+                entry_index,
+                path,
+            } => write!(
+                formatter,
+                "entry {entry_index} path '{path}' is empty or contains a parent-directory component"
+            ),
+            Self::EntryPathTooLong {
+                entry_index,
+                path,
+                limit,
+            } => write!(
+                formatter,
+                "entry {entry_index} path '{path}' exceeds the {limit}-byte path limit"
+            ),
+            Self::EntryPathAllocationFailed {
+                entry_index,
+                requested,
+            } => write!(
+                formatter,
+                "could not allocate {requested} bytes for the path of entry {entry_index}"
+            ),
+            Self::EntryAllocationFailed {
+                entry_index,
+                requested,
+            } => write!(
+                formatter,
+                "could not allocate {requested} bytes while mounting entry {entry_index}"
+            ),
+            Self::FileSystem {
+                entry_index,
+                path,
+                source,
+            } => write!(
+                formatter,
+                "could not mount entry {entry_index} at '{path}': {source}"
+            ),
+        }
+    }
+}
+
+impl Display for ContainerMountError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "container mount stopped after {} entries ({} bytes): {}",
+            self.partial_report.mounted_entries, self.partial_report.mounted_bytes, self.kind
+        )
+    }
+}
+
+impl Error for ContainerMountError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match &self.kind {
+            ContainerMountErrorKind::Scheme(error) => Some(error),
+            ContainerMountErrorKind::FileSystem { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
+
+fn preflight_entry_count(
+    count: usize,
+    limits: ContainerMountLimits,
+    report: &ContainerMountReport,
+) -> Result<(), ContainerMountError> {
+    if count > limits.max_entries {
+        return Err(ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::EntryCountLimitExceeded {
+                count,
+                limit: limits.max_entries,
+            },
+        ));
+    }
+    Ok(())
+}
+
+fn preflight_output_sizes(
+    sizes: impl IntoIterator<Item = u64>,
+    limits: ContainerMountLimits,
+    report: &ContainerMountReport,
+) -> Result<(), ContainerMountError> {
+    let mut total = 0u64;
+    for (entry_index, size) in sizes.into_iter().enumerate() {
+        total = total.checked_add(size).ok_or_else(|| {
+            ContainerMountError::new(
+                report.clone(),
+                ContainerMountErrorKind::TotalOutputSizeOverflow { entry_index },
+            )
+        })?;
+        if total > limits.max_total_output_bytes {
+            return Err(ContainerMountError::new(
+                report.clone(),
+                ContainerMountErrorKind::TotalOutputLimitExceeded {
+                    entry_index,
+                    requested_total: total,
+                    limit: limits.max_total_output_bytes,
+                },
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn mount_container_entry<'a>(
+    filesystem: &mut VirtualFileSystem,
+    destination_root: Option<&str>,
+    entry_name: &str,
+    entry_index: usize,
+    bytes: Cow<'a, [u8]>,
+    limits: ContainerMountLimits,
+    report: &mut ContainerMountReport,
+) -> Result<(), ContainerMountError> {
+    let entry_size = u64::try_from(bytes.len()).map_err(|_| {
+        ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::TotalOutputSizeOverflow { entry_index },
+        )
+    })?;
+    let new_total = report
+        .mounted_bytes
+        .checked_add(entry_size)
+        .ok_or_else(|| {
+            ContainerMountError::new(
+                report.clone(),
+                ContainerMountErrorKind::TotalOutputSizeOverflow { entry_index },
+            )
+        })?;
+    if new_total > limits.max_total_output_bytes {
+        return Err(ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::TotalOutputLimitExceeded {
+                entry_index,
+                requested_total: new_total,
+                limit: limits.max_total_output_bytes,
+            },
+        ));
+    }
+
+    let path = container_entry_path(
+        destination_root,
+        entry_name,
+        filesystem.limits().max_path_bytes,
+    )
+    .map_err(|error| {
+        let kind = match error {
+            ContainerEntryPathError::Invalid => ContainerMountErrorKind::InvalidEntryPath {
+                entry_index,
+                path: entry_name.to_owned(),
+            },
+            ContainerEntryPathError::TooLong => ContainerMountErrorKind::EntryPathTooLong {
+                entry_index,
+                path: entry_name.to_owned(),
+                limit: filesystem.limits().max_path_bytes,
+            },
+            ContainerEntryPathError::AllocationFailed { requested } => {
+                ContainerMountErrorKind::EntryPathAllocationFailed {
+                    entry_index,
+                    requested,
+                }
+            }
+        };
+        ContainerMountError::new(report.clone(), kind)
+    })?;
+    let owned_bytes = match bytes {
+        Cow::Owned(bytes) => bytes,
+        Cow::Borrowed(bytes) => {
+            let mut owned = Vec::new();
+            owned.try_reserve_exact(bytes.len()).map_err(|_| {
+                ContainerMountError::new(
+                    report.clone(),
+                    ContainerMountErrorKind::EntryAllocationFailed {
+                        entry_index,
+                        requested: bytes.len(),
+                    },
+                )
+            })?;
+            owned.extend_from_slice(bytes);
+            owned
+        }
+    };
+    filesystem
+        .insert_file_stream_with_parents(&path, SmartStream::from_memory(owned_bytes))
+        .map_err(|source| {
+            ContainerMountError::new(
+                report.clone(),
+                ContainerMountErrorKind::FileSystem {
+                    entry_index,
+                    path: path.clone(),
+                    source,
+                },
+            )
+        })?;
+    report.mounted_entries += 1;
+    report.mounted_bytes = new_total;
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ContainerEntryPathError {
+    Invalid,
+    TooLong,
+    AllocationFailed { requested: usize },
+}
+
+fn container_entry_path(
+    destination_root: Option<&str>,
+    entry_name: &str,
+    maximum_path_bytes: usize,
+) -> Result<String, ContainerEntryPathError> {
+    let root = destination_root
+        .unwrap_or("")
+        .trim_matches(|character| character == '/' || character == '\\');
+    let entry = entry_name.trim_matches(|character| character == '/' || character == '\\');
+    if entry.is_empty()
+        || entry
+            .split(['/', '\\'])
+            .any(|component| matches!(component, "." | ".."))
+        || root
+            .split(['/', '\\'])
+            .any(|component| matches!(component, "." | ".."))
+    {
+        return Err(ContainerEntryPathError::Invalid);
+    }
+    let separators = if root.is_empty() { 1 } else { 2 };
+    let path_size = root
+        .len()
+        .checked_add(entry.len())
+        .and_then(|size| size.checked_add(separators))
+        .ok_or(ContainerEntryPathError::TooLong)?;
+    if path_size > maximum_path_bytes {
+        return Err(ContainerEntryPathError::TooLong);
+    }
+    let mut path = String::new();
+    path.try_reserve_exact(path_size)
+        .map_err(|_| ContainerEntryPathError::AllocationFailed {
+            requested: path_size,
+        })?;
+    path.push('/');
+    if !root.is_empty() {
+        path.push_str(root);
+        path.push('/');
+    }
+    path.push_str(entry);
+    Ok(path)
 }
 
 /// Parsed file contents. Views borrow from the owning [`DispatchedFile`].
@@ -565,11 +1019,39 @@ impl Display for SchemeErrorKind {
 
 #[cfg(test)]
 mod tests {
-    use super::{FileKind, SchemeErrorKind, SchemeReader, SchemeReaderLimits, WrapperKind};
+    use super::{
+        ContainerMountErrorKind, ContainerMountLimits, FileKind, SchemeErrorKind, SchemeReader,
+        SchemeReaderLimits, WrapperKind,
+    };
     use crate::compression::wrappers::{
         compress_gzip, decompress_brotli, has_brotli_file_signature,
     };
+    use crate::io::filesystem::VirtualFileSystem;
     use std::io::{Cursor, Seek, SeekFrom};
+
+    fn webdata_fixture(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        assert!(entries.iter().all(|(name, _)| name.len() < 128));
+        let header_size = 20
+            + entries
+                .iter()
+                .map(|(name, _)| 9 + name.len())
+                .sum::<usize>();
+        let mut input = b"UnityWebData1.0\0".to_vec();
+        input.extend_from_slice(&(header_size as i32).to_le_bytes());
+
+        let mut data_offset = header_size;
+        for (name, payload) in entries {
+            input.extend_from_slice(&(data_offset as i32).to_le_bytes());
+            input.extend_from_slice(&(payload.len() as i32).to_le_bytes());
+            input.push(name.len() as u8);
+            input.extend_from_slice(name.as_bytes());
+            data_offset += payload.len();
+        }
+        for (_, payload) in entries {
+            input.extend_from_slice(payload);
+        }
+        input
+    }
 
     fn write_bits(bytes: &mut Vec<u8>, bit_position: &mut usize, value: u32, count: usize) {
         for bit in 0..count {
@@ -713,6 +1195,136 @@ mod tests {
             entry.parse().unwrap(),
             super::ParsedFile::Resource(_)
         ));
+    }
+
+    #[test]
+    fn mounts_webdata_entries_with_parent_directories() {
+        let input = webdata_fixture(&[
+            ("nested/asset.bin", b"embedded asset"),
+            ("other.bin", b"second"),
+        ]);
+        let file = SchemeReader::read(&input).unwrap();
+        let mut filesystem = VirtualFileSystem::new();
+        let report = file
+            .mount_container_entries(
+                &mut filesystem,
+                Some("/bundles/sample"),
+                ContainerMountLimits::default(),
+            )
+            .unwrap();
+
+        assert_eq!(report.mounted_entries, 2);
+        assert_eq!(report.mounted_bytes, 20);
+        assert_eq!(filesystem.count(), 6);
+        assert_eq!(
+            filesystem
+                .read_all_bytes("/bundles/sample/nested/asset.bin", 64)
+                .unwrap(),
+            b"embedded asset"
+        );
+        assert_eq!(
+            filesystem
+                .read_all_bytes("/bundles/sample/other.bin", 64)
+                .unwrap(),
+            b"second"
+        );
+    }
+
+    #[test]
+    fn container_mount_limits_fail_before_changing_the_virtual_filesystem() {
+        let input = webdata_fixture(&[("first.bin", b"first"), ("second.bin", b"second")]);
+        let file = SchemeReader::read(&input).unwrap();
+
+        let mut count_limited = VirtualFileSystem::new();
+        let error = file
+            .mount_container_entries(
+                &mut count_limited,
+                Some("/bundle"),
+                ContainerMountLimits {
+                    max_entries: 1,
+                    ..ContainerMountLimits::default()
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error.kind,
+            ContainerMountErrorKind::EntryCountLimitExceeded { count: 2, limit: 1 }
+        ));
+        assert_eq!(error.partial_report.mounted_entries, 0);
+        assert_eq!(count_limited.count(), 1);
+
+        let mut byte_limited = VirtualFileSystem::new();
+        let error = file
+            .mount_container_entries(
+                &mut byte_limited,
+                Some("/bundle"),
+                ContainerMountLimits {
+                    max_total_output_bytes: 5,
+                    ..ContainerMountLimits::default()
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error.kind,
+            ContainerMountErrorKind::TotalOutputLimitExceeded { .. }
+        ));
+        assert_eq!(error.partial_report.mounted_entries, 0);
+        assert_eq!(byte_limited.count(), 1);
+    }
+
+    #[test]
+    fn container_mount_reports_partial_progress_on_path_collision() {
+        let input = webdata_fixture(&[("new.bin", b"new"), ("existing.bin", b"incoming")]);
+        let file = SchemeReader::read(&input).unwrap();
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem.create_directory(Some("/mount")).unwrap();
+        filesystem
+            .write_all_bytes("/mount/existing.bin", b"original")
+            .unwrap();
+
+        let error = file
+            .mount_container_entries(
+                &mut filesystem,
+                Some("/mount"),
+                ContainerMountLimits::default(),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error.kind,
+            ContainerMountErrorKind::FileSystem { entry_index: 1, .. }
+        ));
+        assert_eq!(error.partial_report.mounted_entries, 1);
+        assert_eq!(error.partial_report.mounted_bytes, 3);
+        assert_eq!(
+            filesystem.read_all_bytes("/mount/new.bin", 32).unwrap(),
+            b"new"
+        );
+        assert_eq!(
+            filesystem
+                .read_all_bytes("/mount/existing.bin", 32)
+                .unwrap(),
+            b"original"
+        );
+    }
+
+    #[test]
+    fn container_mount_rejects_parent_directory_paths() {
+        let input = webdata_fixture(&[("../escape.bin", b"data")]);
+        let file = SchemeReader::read(&input).unwrap();
+        let mut filesystem = VirtualFileSystem::new();
+        let error = file
+            .mount_container_entries(
+                &mut filesystem,
+                Some("/bundle"),
+                ContainerMountLimits::default(),
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            error.kind,
+            ContainerMountErrorKind::InvalidEntryPath { entry_index: 0, .. }
+        ));
+        assert_eq!(filesystem.count(), 1);
     }
 
     #[test]
