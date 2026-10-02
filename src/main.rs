@@ -32,6 +32,7 @@ use assetripper::scheme::{
 use assetripper::serialized_file::file::SerializedFile;
 use assetripper::serialized_file::metadata::ObjectInfo;
 use assetripper::serialized_file::object::ObjectDecodeLimits;
+use assetripper::serialized_file::object_workspace::{ObjectWorkspace, ObjectWorkspaceLimits};
 use assetripper::serialized_file::reference_graph::MultiFileReferenceGraphLimits;
 use assetripper::serialized_file::workspace::{
     SerializedFileDependencyReport, SerializedFileWorkspace, SerializedFileWorkspaceLimits,
@@ -43,6 +44,7 @@ const MAX_STREAMED_SCENE_BUNDLE_OBJECTS: usize = 1_000_000;
 const MAX_TOTAL_STREAMED_SCENE_BUNDLE_ENTRIES: usize = 1_000_000;
 const MAX_TOTAL_STREAMED_SCENE_BUNDLE_STRING_BYTES: usize = 256 * 1024 * 1024;
 const MAX_TOTAL_STREAMED_SCENE_PATH_MAPPINGS: usize = 1_000_000;
+const MAX_OBJECT_DECODE_DIAGNOSTICS: usize = 128;
 
 struct StreamedSceneBundleWorkItem {
     owner_file_index: usize,
@@ -330,6 +332,55 @@ fn print_workspace_summary_to<W: io::Write>(
     let mut total_streamed_scene_bundle_string_bytes = 0usize;
 
     writeln!(output, "SerializedFiles: {}", workspace.files().len())?;
+    let decoded_objects =
+        ObjectWorkspace::load_from_vfs(filesystem, workspace, ObjectWorkspaceLimits::default())?;
+    let object_report = decoded_objects.report();
+    writeln!(
+        output,
+        "Object payload decode: {}/{} decoded, {} undecoded, {} raw fallback bytes",
+        object_report.decoded_objects,
+        object_report.object_count,
+        object_report.undecoded_objects,
+        object_report.total_undecoded_raw_bytes
+    )?;
+    let mut decode_diagnostics = 0usize;
+    for object in decoded_objects
+        .objects()
+        .iter()
+        .filter(|object| object.payload.is_err())
+        .take(MAX_OBJECT_DECODE_DIAGNOSTICS)
+    {
+        let file = workspace
+            .files()
+            .get(object.file_index)
+            .ok_or_else(|| invalid_data("decoded object refers to an invalid workspace file"))?;
+        let Err(error) = &object.payload else {
+            return Err(
+                invalid_data("undecoded-object diagnostics lost their decode error").into(),
+            );
+        };
+        writeln!(
+            output,
+            "  Undecoded object: file {} {:?} (name {:?}), object {}, PathID {}, class {:?}, bytes {:?}: {error}",
+            object.file_index,
+            file.virtual_path,
+            file.file_name,
+            object.object_index,
+            object.path_id,
+            object.class_id,
+            object.raw_payload_range
+        )?;
+        decode_diagnostics += 1;
+    }
+    if object_report.undecoded_objects > decode_diagnostics {
+        writeln!(
+            output,
+            "  {} additional object decode errors are not listed; summary counts include them",
+            object_report.undecoded_objects - decode_diagnostics,
+        )?;
+    }
+    drop(decoded_objects);
+
     let mut build_settings_paths = None;
     let mut selected_build_settings = None;
     'select_build_settings: for &file_index in source_collection_file_indices.iter().rev() {
@@ -1632,6 +1683,8 @@ mod tests {
         super::print_workspace_summary_to(&mut output, &filesystem, &workspace, &dependencies)
             .unwrap();
         let summary = String::from_utf8(output).unwrap();
+        assert!(summary
+            .contains("Object payload decode: 2/2 decoded, 0 undecoded, 0 raw fallback bytes"));
         assert!(
             summary.contains("SceneGUID words: [0x01234567, 0x89abcdef, 0x00000003, 0x00000004]")
         );

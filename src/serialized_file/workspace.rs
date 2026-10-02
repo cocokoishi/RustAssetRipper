@@ -3232,6 +3232,10 @@ mod tests {
         ContainerMountErrorKind, ContainerMountLimits, FileKind, MountedContainerBundle,
         MountedResourceFile,
     };
+    use crate::serialized_file::object::SerializedValue;
+    use crate::serialized_file::object_workspace::{
+        ObjectWorkspace, ObjectWorkspaceErrorKind, ObjectWorkspaceLimits,
+    };
     use crate::serialized_file::reference_graph::{
         MultiFilePPtrResolution, MultiFileReferenceGraphLimits,
     };
@@ -3470,6 +3474,122 @@ mod tests {
             workspace.source_collection_file_indices().unwrap(),
             [5, 0, 4, 1, 3, 2]
         );
+    }
+
+    #[test]
+    fn decoded_object_workspace_retains_identity_values_and_raw_fallback_ranges() {
+        let bytes = make_generation_10_file();
+        let filesystem = virtual_file_system("/game/main.assets", &bytes);
+        let workspace = SerializedFileWorkspace::load_from_vfs(
+            &filesystem,
+            &[input("/game/main.assets")],
+            SerializedFileWorkspaceLimits::default(),
+        )
+        .unwrap();
+        let decoded = ObjectWorkspace::load_from_vfs(
+            &filesystem,
+            &workspace,
+            ObjectWorkspaceLimits::default(),
+        )
+        .unwrap();
+
+        assert!(decoded.report().is_complete());
+        assert_eq!(decoded.report().object_count, 1);
+        let object = &decoded.objects()[0];
+        let source_object = &workspace.files()[0].metadata.objects[0];
+        assert_eq!(object.file_index, 0);
+        assert_eq!(object.object_index, 0);
+        assert_eq!(object.path_id, 42);
+        assert_eq!(
+            object.serialized_type_index,
+            source_object.serialized_type_index
+        );
+        assert_eq!(object.raw_type_id, source_object.raw_type_id);
+        assert_eq!(
+            object.resolved_type_index,
+            source_object.resolved_type_index
+        );
+        assert_eq!(object.class_id, Some(1));
+        assert_eq!(object.script_type_index, source_object.script_type_index);
+        assert_eq!(object.is_destroyed, source_object.is_destroyed);
+        assert_eq!(object.is_stripped, source_object.is_stripped);
+        let Ok(payload) = &object.payload else {
+            panic!("fixture object should decode: {:?}", object.payload);
+        };
+        assert_eq!(payload.path_id, 42);
+        assert_eq!(
+            payload.root,
+            SerializedValue::Struct(vec![
+                crate::serialized_file::object::SerializedFieldValue {
+                    name: "m_Value".to_owned(),
+                    value: SerializedValue::I32(0x1234_5678),
+                },
+                crate::serialized_file::object::SerializedFieldValue {
+                    name: "m_Target".to_owned(),
+                    value: SerializedValue::PPtr {
+                        file_id: 0,
+                        path_id: 42,
+                    },
+                },
+            ])
+        );
+
+        let raw_limited = ObjectWorkspace::load_from_vfs(
+            &filesystem,
+            &workspace,
+            ObjectWorkspaceLimits {
+                max_total_decoded_allocation_bytes: 0,
+                ..ObjectWorkspaceLimits::default()
+            },
+        )
+        .unwrap();
+        assert!(!raw_limited.report().is_complete());
+        assert_eq!(raw_limited.report().decoded_objects, 0);
+        assert_eq!(raw_limited.report().undecoded_objects, 1);
+        assert_eq!(raw_limited.report().total_undecoded_raw_bytes, 12);
+        assert!(matches!(
+            &raw_limited.objects()[0].payload,
+            Err(error)
+                if matches!(error.kind(),
+                    crate::serialized_file::file::SerializedFileErrorKind::Object(
+                        object_error
+                    )
+                    if matches!(
+                        object_error.kind(),
+                        crate::serialized_file::object::ObjectDecodeErrorKind::DecodeLimitExceeded {
+                            limit: 0,
+                            ..
+                        }
+                    )
+                )
+        ));
+        let start = usize::try_from(raw_limited.objects()[0].raw_payload_range.start).unwrap();
+        let end = usize::try_from(raw_limited.objects()[0].raw_payload_range.end).unwrap();
+        assert_eq!(&bytes[start..end], &bytes[bytes.len() - 12..]);
+    }
+
+    #[test]
+    fn decoded_object_workspace_enforces_object_count_limit() {
+        let filesystem = virtual_file_system("/game/main.assets", &make_generation_10_file());
+        let workspace = SerializedFileWorkspace::load_from_vfs(
+            &filesystem,
+            &[input("/game/main.assets")],
+            SerializedFileWorkspaceLimits::default(),
+        )
+        .unwrap();
+        let error = ObjectWorkspace::load_from_vfs(
+            &filesystem,
+            &workspace,
+            ObjectWorkspaceLimits {
+                max_objects: 0,
+                ..ObjectWorkspaceLimits::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error.kind,
+            ObjectWorkspaceErrorKind::ObjectCountLimitExceeded { count: 1, limit: 0 }
+        ));
     }
 
     #[test]
