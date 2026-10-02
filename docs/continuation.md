@@ -38,7 +38,7 @@ Phase 1: full Rust port of the local AssetRipper source baseline. The Phase 1 ga
 ## Latest verification
 
 - `cargo fmt --all -- --check`: exit 0.
-- `cargo test --workspace --locked`: exit 0; 153 unit tests passed, 0 failed, 0 doc tests.
+- `cargo test --workspace --locked`: exit 0; 159 unit tests passed, 0 failed, 0 doc tests.
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`: exit 0.
 - `cargo tree --locked`: exit 0; the dependency graph is recorded in `docs/dependencies-and-licenses.md`.
 - `tools/verify-baseline.ps1`: exit 0; all 1,449 reference files match the manifest.
@@ -49,7 +49,7 @@ Phase 1: full Rust port of the local AssetRipper source baseline. The Phase 1 ga
 
 ## Next work
 
-1. Implement source-compatible dependency discovery/loading from the mounted VFS and host paths, then feed loaded files into the new cross-file PPtr graph. GUID-derived `AssetType.Meta` identity and lookup remain open.
+1. Wire `DependencyIndex` into import orchestration so resolved streams are parsed recursively, registered alongside existing container SerializedFiles, and fed into the cross-file PPtr graph. GUID-derived `AssetType.Meta` identity and lookup remain open.
 2. Add independent codec and real-file fixtures, and resolve source differentials such as the Brotli marker issue with executable C# evidence when a .NET environment is available.
 3. Expand `docs/feature-parity.md` into per-version/per-platform behavior rows across all 51 projects, registration tables, options/defaults, generators, GUI workflows, and exporters.
 4. Add independent generic fixtures and source-derived regression coverage for untested SerializedFile generations and malformed layouts; obtain a usable .NET environment before claiming C# differential validation.
@@ -96,3 +96,11 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Synthetic tests cover unique cross-file resolution, missing and ambiguous names, missing target PathID, source-name aliases, candidate enumeration, and limits.
 - `cargo fmt --all -- --check`: exit 0. `cargo test --workspace --locked`: 153 tests passed, 0 failed. `cargo clippy --workspace --all-targets --locked -- -D warnings`: exit 0. Baseline verifier found all 1,449 reference files unchanged; `git diff --check`: exit 0.
 - No real-file or C# differential has run. GUID-derived `AssetType.Meta` matching and actual dependency discovery/loading remain outstanding.
+
+## Mounted VFS dependency lookup
+
+- Added `DependencyIndex`, built from caller-supplied source file identities/virtual paths and ordered DataPaths. It matches the source `RequestDependency` stages: registered name first, exact `DataPath / dependency` checks, then default-resource/builtin-extra aliases under the DataPath root, `Resources`, and legacy `unity` directories.
+- A unique result can be opened as a readable `SmartStream`. Missing and multiple viable paths remain explicit; lookup rejects absolute/traversing dependency names and enforces registered-file, DataPath, name/path byte, aggregate index, and candidate limits.
+- Synthetic VFS tests cover registered-name precedence, nested DataPath lookup, missing and ambiguous results, engine alias ordering, reading an opened result, path traversal rejection, and configured bounds.
+- `cargo test --workspace --locked --quiet`: 159 passed, 0 failed, 0 doc tests. `cargo clippy --workspace --all-targets --locked -- -D warnings`: exit 0. `cargo fmt --all -- --check`: exit 0; the baseline verifier found all 1,449 reference files unchanged.
+- The caller must still build the source structure's registry/DataPaths and recursively parse discovered SerializedFiles into the bundle graph. No host directory or user sample was scanned; no real-file/C# differential has run.

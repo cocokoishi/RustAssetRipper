@@ -143,3 +143,13 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - PowerShell `& 'C:\Users\koishi\.cargo\bin\cargo.exe' clippy --workspace --all-targets --locked -- -D warnings`: exit 0.
 - `tools/verify-baseline.ps1`: exit 0; all 1,449 reference files match the manifest. `git diff --check`: exit 0.
 - Real-file/C# differential validation, VFS/host dependency discovery and loading, and `AssetType.Meta` GUID identity lookup have not run or been implemented.
+
+## Mounted VFS dependency lookup and scheme dispatch
+
+- Added `DependencyIndex` for caller-supplied registered file identities/paths and ordered DataPaths. Lookup follows the source stages: registered name, exact DataPath path, then the default-resource or builtin-extra aliases under DataPath, `Resources`, and legacy `unity`.
+- Unique results can be opened as VFS SmartStreams and dispatched through the bounded `SchemeReader::read_stream` path. Missing and multiple viable candidates remain separate results. Unsafe absolute/traversing names and candidate/index limits return errors.
+- Synthetic VFS tests cover registered-name precedence, nested DataPath paths, missing and ambiguous results, engine alias/directory ordering, scheme dispatch, path traversal rejection, and limits. A first test attempt read an empty stream because the in-memory VFS shares its file cursor; the corrected test uses the same scheme dispatch entry, which seeks to byte zero before reading.
+- PowerShell `& 'C:\Users\koishi\.cargo\bin\cargo.exe' test --workspace --locked --quiet`: exit 0; 159 unit tests passed, 0 failed, 0 doc tests.
+- PowerShell `& 'C:\Users\koishi\.cargo\bin\cargo.exe' clippy --workspace --all-targets --locked -- -D warnings`: exit 0. `cargo fmt --all -- --check`: exit 0.
+- `tools/verify-baseline.ps1`: exit 0; all 1,449 reference files match the manifest. `git diff --check`: exit 0.
+- The import orchestrator still needs to build the registry/DataPaths and recursively parse dispatched dependencies into the bundle graph. No host directory or user sample was scanned; no real-file/C# differential has run.
