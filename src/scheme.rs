@@ -14,7 +14,7 @@ use crate::container::raw_web::{RawWebBundle, RawWebError, RawWebKind, RawWebLim
 use crate::container::unityfs::{UnityFsBundle, UnityFsError, UnityFsLimits};
 use crate::container::web_file::{WebFile, WebFileError, WebFileLimits};
 use crate::io::filesystem::VirtualFileSystem;
-use crate::io::stream::{open_logical_file, SmartStream};
+use crate::io::stream::{logical_file_name, open_logical_file, SmartStream};
 use crate::serialized_file::file::{SerializedFile, SerializedFileError};
 use crate::serialized_file::format_version::FormatVersion;
 
@@ -120,6 +120,7 @@ pub struct ContainerMountError {
 pub enum ContainerMountErrorKind {
     Scheme(SchemeError),
     NotContainer,
+    InputPathHasNoFileName,
     EntryCountLimitExceeded {
         count: usize,
         limit: usize,
@@ -543,6 +544,9 @@ impl Display for ContainerMountErrorKind {
         match self {
             Self::Scheme(error) => Display::fmt(error, formatter),
             Self::NotContainer => formatter.write_str("input is not a supported file container"),
+            Self::InputPathHasNoFileName => {
+                formatter.write_str("input path has no UTF-8 logical filename")
+            }
             Self::EntryCountLimitExceeded { count, limit } => write!(
                 formatter,
                 "container traversal reached {count} entries, exceeding mount limit {limit}"
@@ -970,6 +974,68 @@ impl SchemeReader {
         Self::read_stream(&mut stream, limits)
     }
 
+    /// Read one local regular or split-file input and mount it into the virtual filesystem.
+    ///
+    /// Containers are expanded through `mount_container_tree`; standalone resources and
+    /// SerializedFiles are mounted under their logical input filename. Directory and batch
+    /// discovery are handled by a higher-level caller.
+    pub fn mount_path(
+        path: impl AsRef<Path>,
+        filesystem: &mut VirtualFileSystem,
+        destination_root: Option<&str>,
+        scheme_limits: SchemeReaderLimits,
+        mount_limits: ContainerMountLimits,
+    ) -> Result<ContainerMountReport, ContainerMountError> {
+        let input_path = path.as_ref();
+        let dispatched = Self::read_path(input_path, scheme_limits).map_err(|error| {
+            ContainerMountError::new(
+                ContainerMountReport::default(),
+                ContainerMountErrorKind::Scheme(error),
+            )
+        })?;
+
+        match dispatched.kind {
+            FileKind::UnityFs
+            | FileKind::UnityRaw
+            | FileKind::UnityWebBundle
+            | FileKind::UnityWebData
+            | FileKind::UnityArchive => {
+                dispatched.mount_container_tree(filesystem, destination_root, mount_limits)
+            }
+            FileKind::SerializedFile | FileKind::Resource => {
+                dispatched.parse().map_err(|error| {
+                    ContainerMountError::new(
+                        ContainerMountReport::default(),
+                        ContainerMountErrorKind::Scheme(error),
+                    )
+                })?;
+                let file_name = logical_file_name(input_path).ok_or_else(|| {
+                    ContainerMountError::new(
+                        ContainerMountReport::default(),
+                        ContainerMountErrorKind::InputPathHasNoFileName,
+                    )
+                })?;
+                let mut report = ContainerMountReport::default();
+                let virtual_path = checked_container_entry_path(
+                    filesystem,
+                    destination_root,
+                    &file_name,
+                    0,
+                    &report,
+                )?;
+                mount_container_entry_at_path(
+                    filesystem,
+                    &virtual_path,
+                    0,
+                    dispatched.contents,
+                    mount_limits,
+                    &mut report,
+                )?;
+                Ok(report)
+            }
+        }
+    }
+
     /// Check only scheme signatures, matching `SchemeReader.IsReadableFile`; this does not decode
     /// or fully parse the input. UnityArchive is considered readable here because the baseline
     /// registers its detector even though its `Read` implementation is unsupported.
@@ -1335,6 +1401,17 @@ mod tests {
     };
     use crate::io::filesystem::VirtualFileSystem;
     use std::io::{Cursor, Seek, SeekFrom};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn unique_temp_file_path(extension: &str) -> PathBuf {
+        static NEXT_FILE_ID: AtomicU64 = AtomicU64::new(0);
+        let id = NEXT_FILE_ID.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "assetripper-rust-mount-{}-{id}.{extension}",
+            std::process::id()
+        ))
+    }
 
     fn webdata_fixture(entries: &[(&str, &[u8])]) -> Vec<u8> {
         assert!(entries.iter().all(|(name, _)| name.len() < 128));
@@ -1666,6 +1743,97 @@ mod tests {
                 .unwrap(),
             b"nested leaf"
         );
+    }
+
+    #[test]
+    fn mount_path_imports_a_root_resource_under_its_logical_filename() {
+        let path = unique_temp_file_path("bin");
+        std::fs::write(&path, b"standalone resource").unwrap();
+        let mut filesystem = VirtualFileSystem::new();
+
+        let report = SchemeReader::mount_path(
+            &path,
+            &mut filesystem,
+            Some("/inputs"),
+            SchemeReaderLimits::default(),
+            ContainerMountLimits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(report.mounted_entries, 1);
+        assert_eq!(report.mounted_bytes, 19);
+        assert_eq!(
+            filesystem
+                .read_all_bytes(
+                    &format!("/inputs/{}", path.file_name().unwrap().to_string_lossy()),
+                    64,
+                )
+                .unwrap(),
+            b"standalone resource"
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn mount_path_assembles_split_inputs_and_uses_the_logical_base_name() {
+        let base_path = unique_temp_file_path("bin");
+        let first_part = PathBuf::from(format!("{}.split0", base_path.display()));
+        let second_part = PathBuf::from(format!("{}.split1", base_path.display()));
+        std::fs::write(&first_part, b"split ").unwrap();
+        std::fs::write(&second_part, b"resource").unwrap();
+        let supplied_part = PathBuf::from(format!("{}.split1", base_path.display()));
+        let mut filesystem = VirtualFileSystem::new();
+
+        let report = SchemeReader::mount_path(
+            &supplied_part,
+            &mut filesystem,
+            Some("/inputs"),
+            SchemeReaderLimits::default(),
+            ContainerMountLimits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(report.mounted_entries, 1);
+        assert_eq!(
+            filesystem
+                .read_all_bytes(
+                    &format!(
+                        "/inputs/{}",
+                        base_path.file_name().unwrap().to_string_lossy()
+                    ),
+                    64,
+                )
+                .unwrap(),
+            b"split resource"
+        );
+        std::fs::remove_file(first_part).unwrap();
+        std::fs::remove_file(second_part).unwrap();
+    }
+
+    #[test]
+    fn mount_path_connects_root_webdata_to_recursive_virtual_mounting() {
+        let path = unique_temp_file_path("webdata");
+        let input = webdata_fixture(&[("assets/leaf.bin", b"root WebData leaf")]);
+        std::fs::write(&path, input).unwrap();
+        let mut filesystem = VirtualFileSystem::new();
+
+        let report = SchemeReader::mount_path(
+            &path,
+            &mut filesystem,
+            Some("/bundles/root"),
+            SchemeReaderLimits::default(),
+            ContainerMountLimits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(report.mounted_entries, 1);
+        assert_eq!(
+            filesystem
+                .read_all_bytes("/bundles/root/assets/leaf.bin", 64)
+                .unwrap(),
+            b"root WebData leaf"
+        );
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

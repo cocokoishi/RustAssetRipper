@@ -97,3 +97,11 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - ContainerMountLimits now bounds visited entry count across the tree, mounted leaf byte totals, nesting depth (default 64), and active owned nested-container buffers (default 1 GiB). Errors preserve the count of files and bytes mounted before failure.
 - Synthetic fixtures cover nested WebData, a GZip-wrapped nested WebData container, nested UnityFS, global entry-count/depth/active-buffer/output limits, and partial progress.
 - The recursive API is not yet connected to the product root-input or batch pipeline. No real-file or C# differential has run.
+## Single-file path to VFS import
+
+- cargo fmt --all: exit 0.
+- cargo test --workspace --locked: exit 0; 140 unit tests passed, 0 failed, 0 doc tests.
+- cargo clippy --workspace --all-targets --locked -- -D warnings: exit 0.
+- SchemeReader::mount_path reads one regular or .splitN logical file. Root containers use recursive tree mounting; standalone Resource and SerializedFile bytes use their logical filename.
+- Temporary-file tests exercise a regular Resource, invocation by a .split1 part path with base-name mapping, and a root WebData file flowing into recursive mounting.
+- This covers one path per call only. Directory/batch discovery and automatic external dependency loading remain unimplemented; no real-file or C# differential has run.
