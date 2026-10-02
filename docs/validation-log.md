@@ -435,3 +435,10 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - The synthetic platform import fixture asserts the API returns `z-first.assets`, `shared.assets`, `a-last.assets` in source order despite lexical VFS enumeration, then injects a collection-index gap and checks for an explicit error. The nested scope and dependency-container fixtures check their separate per-container lists.
 - `cargo test --workspace --locked --quiet`: exit 0; 245 library tests and 6 binary tests passed. `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo fmt --all -- --check`, `tools/verify-baseline.ps1` (1,449 reference files unchanged), and `git diff --check` all exited 0.
 - This API indexes direct collections only. AssetCollection construction, full parent/child SerializedBundle representation, and class ID 142 scene-path application remain open; Phase 1 remains open.
+
+## Streamed-scene mapping branch selection
+
+- Added `map_streamed_scene_bundle_paths`. It follows SceneDefinitionProcessor precedence: a nonempty SceneHashes list wins; otherwise ordered Container keys map to the next scene-flagged direct collection. A non-streamed flag returns no mappings; a selected streamed bundle with missing path metadata or mismatched collection arrays is an explicit error.
+- Synthetic tests verify SceneHashes precedence over conflicting Container data, empty-SceneHashes fallback, first normalized duplicate-name match, Container cursor order, missing metadata, collection count mismatch, and the existing path/count limits. No Unity-produced class ID 142 bundle was used in these mapping tests.
+- `cargo test --workspace --locked --quiet`: exit 0; 247 library tests and 6 binary tests passed. `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo fmt --all -- --check`, `tools/verify-baseline.ps1` (1,449 reference files unchanged), and `git diff --check` all exited 0.
+- The mapper is not yet called by CLI inspect or a scene exporter. Class ID 142 object discovery, scene-path override application, bundle hierarchy, and SceneDefinition construction remain open; Phase 1 remains open.

@@ -546,6 +546,18 @@ pub struct SceneBundlePathMapping {
     pub path: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SceneBundlePathMappingSource {
+    SceneHashes,
+    Container,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamedSceneBundlePathMappings {
+    pub source: SceneBundlePathMappingSource,
+    pub mappings: Vec<SceneBundlePathMapping>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SceneBundleMappingError {
     EntryCountLimitExceeded {
@@ -565,6 +577,11 @@ pub enum SceneBundleMappingError {
     SceneHashCollectionNotFound {
         entry_index: usize,
         collection_name: String,
+    },
+    MissingContainerScenePaths,
+    CollectionMetadataCountMismatch {
+        collection_name_count: usize,
+        scene_flag_count: usize,
     },
     ContainerEntryHasNoSceneCollection {
         entry_index: usize,
@@ -598,6 +615,16 @@ impl Display for SceneBundleMappingError {
             } => write!(
                 f,
                 "SceneHashes entry {entry_index} names missing bundle collection {collection_name:?}"
+            ),
+            Self::MissingContainerScenePaths => f.write_str(
+                "streamed-scene bundle has no nonempty SceneHashes and no decoded Container paths",
+            ),
+            Self::CollectionMetadataCountMismatch {
+                collection_name_count,
+                scene_flag_count,
+            } => write!(
+                f,
+                "bundle collection names ({collection_name_count}) and scene flags ({scene_flag_count}) have different counts"
             ),
             Self::ContainerEntryHasNoSceneCollection {
                 entry_index,
@@ -736,6 +763,53 @@ pub fn map_container_paths_to_scene_collections(
             .ok_or(SceneBundleMappingError::CountOverflow)?;
     }
     Ok(mappings)
+}
+
+/// Select the baseline mapping path for one decoded streamed-scene AssetBundle object.
+///
+/// A nonempty SceneHashes map takes precedence. Otherwise the ordered Container keys are assigned
+/// to the next scene collections. Missing streamed-scene flags leave the object unselected, while
+/// a selected streamed bundle with no usable path source is reported explicitly.
+pub fn map_streamed_scene_bundle_paths(
+    metadata: &StreamedSceneBundleMetadata,
+    bundle_collection_names: &[String],
+    bundle_collection_is_scene: &[bool],
+    limits: SceneBundleMappingLimits,
+) -> Result<Option<StreamedSceneBundlePathMappings>, SceneBundleMappingError> {
+    if metadata.is_streamed_scene_asset_bundle != Some(true) {
+        return Ok(None);
+    }
+    if bundle_collection_names.len() != bundle_collection_is_scene.len() {
+        return Err(SceneBundleMappingError::CollectionMetadataCountMismatch {
+            collection_name_count: bundle_collection_names.len(),
+            scene_flag_count: bundle_collection_is_scene.len(),
+        });
+    }
+    if let Some(scene_hashes) = metadata
+        .scene_hashes
+        .as_ref()
+        .filter(|scene_hashes| !scene_hashes.is_empty())
+    {
+        return Ok(Some(StreamedSceneBundlePathMappings {
+            source: SceneBundlePathMappingSource::SceneHashes,
+            mappings: map_scene_hashes_to_collections(
+                scene_hashes,
+                bundle_collection_names,
+                limits,
+            )?,
+        }));
+    }
+    let Some(container_paths) = metadata.container_paths.as_deref() else {
+        return Err(SceneBundleMappingError::MissingContainerScenePaths);
+    };
+    Ok(Some(StreamedSceneBundlePathMappings {
+        source: SceneBundlePathMappingSource::Container,
+        mappings: map_container_paths_to_scene_collections(
+            container_paths,
+            bundle_collection_is_scene,
+            limits,
+        )?,
+    }))
 }
 
 /// Apply the baseline streamed-scene path conversion: remove the extension, make rooted paths
@@ -960,10 +1034,12 @@ mod tests {
     use super::{
         extract_occlusion_scene_guid, extract_streamed_scene_bundle_metadata,
         map_container_paths_to_scene_collections, map_scene_hashes_to_collections,
-        resolve_scene_collection_path, scene_manager_kind, streamed_scene_project_path,
-        BuildSettingsScenePathSet, SceneBundleMappingError, SceneBundleMappingLimits,
-        SceneBundlePathMapping, SceneCollectionPathStatus, SceneGuidError, SceneGuidWords,
-        SceneManagerKind, StreamedSceneBundleDecodeError, StreamedSceneBundleMetadata,
+        map_streamed_scene_bundle_paths, resolve_scene_collection_path, scene_manager_kind,
+        streamed_scene_project_path, BuildSettingsScenePathSet, SceneBundleMappingError,
+        SceneBundleMappingLimits, SceneBundlePathMapping, SceneBundlePathMappingSource,
+        SceneCollectionPathStatus, SceneGuidError, SceneGuidWords, SceneManagerKind,
+        StreamedSceneBundleDecodeError, StreamedSceneBundleMetadata,
+        StreamedSceneBundlePathMappings,
     };
 
     #[test]
@@ -1251,6 +1327,123 @@ mod tests {
                 resource: "SceneHashes",
                 count: 1,
                 limit: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn streamed_scene_bundle_mapping_selects_scene_hashes_then_container_fallback() {
+        let collection_names = [
+            "CAB-Scene".to_owned(),
+            "not-a-scene".to_owned(),
+            "cab-scene".to_owned(),
+        ];
+        let collection_is_scene = [true, false, true];
+        let scene_hashes_metadata = StreamedSceneBundleMetadata {
+            is_streamed_scene_asset_bundle: Some(true),
+            scene_hashes: Some(vec![(
+                "Scenes/Main.unity".to_owned(),
+                "CAB-Scene".to_owned(),
+            )]),
+            container_paths: Some(vec!["Ignored/Container.unity".to_owned()]),
+        };
+        assert_eq!(
+            map_streamed_scene_bundle_paths(
+                &scene_hashes_metadata,
+                &collection_names,
+                &collection_is_scene,
+                SceneBundleMappingLimits::default(),
+            )
+            .unwrap(),
+            Some(StreamedSceneBundlePathMappings {
+                source: SceneBundlePathMappingSource::SceneHashes,
+                mappings: vec![SceneBundlePathMapping {
+                    collection_index: 0,
+                    path: "Assets/Scenes/Main".to_owned(),
+                }],
+            })
+        );
+
+        let container_metadata = StreamedSceneBundleMetadata {
+            is_streamed_scene_asset_bundle: Some(true),
+            scene_hashes: Some(Vec::new()),
+            container_paths: Some(vec![
+                "Scenes/First.unity".to_owned(),
+                "Scenes/Second.unity".to_owned(),
+            ]),
+        };
+        assert_eq!(
+            map_streamed_scene_bundle_paths(
+                &container_metadata,
+                &collection_names,
+                &collection_is_scene,
+                SceneBundleMappingLimits::default(),
+            )
+            .unwrap(),
+            Some(StreamedSceneBundlePathMappings {
+                source: SceneBundlePathMappingSource::Container,
+                mappings: vec![
+                    SceneBundlePathMapping {
+                        collection_index: 0,
+                        path: "Assets/Scenes/First".to_owned(),
+                    },
+                    SceneBundlePathMapping {
+                        collection_index: 2,
+                        path: "Assets/Scenes/Second".to_owned(),
+                    },
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn streamed_scene_bundle_mapping_keeps_unselected_and_missing_states_explicit() {
+        let not_streamed = StreamedSceneBundleMetadata {
+            is_streamed_scene_asset_bundle: Some(false),
+            scene_hashes: None,
+            container_paths: None,
+        };
+        assert_eq!(
+            map_streamed_scene_bundle_paths(
+                &not_streamed,
+                &[],
+                &[],
+                SceneBundleMappingLimits::default(),
+            )
+            .unwrap(),
+            None
+        );
+
+        let streamed_without_paths = StreamedSceneBundleMetadata {
+            is_streamed_scene_asset_bundle: Some(true),
+            scene_hashes: None,
+            container_paths: None,
+        };
+        assert_eq!(
+            map_streamed_scene_bundle_paths(
+                &streamed_without_paths,
+                &[],
+                &[],
+                SceneBundleMappingLimits::default(),
+            ),
+            Err(SceneBundleMappingError::MissingContainerScenePaths)
+        );
+
+        let empty_container = StreamedSceneBundleMetadata {
+            is_streamed_scene_asset_bundle: Some(true),
+            scene_hashes: Some(Vec::new()),
+            container_paths: Some(Vec::new()),
+        };
+        assert_eq!(
+            map_streamed_scene_bundle_paths(
+                &empty_container,
+                &["collection".to_owned()],
+                &[],
+                SceneBundleMappingLimits::default(),
+            ),
+            Err(SceneBundleMappingError::CollectionMetadataCountMismatch {
+                collection_name_count: 1,
+                scene_flag_count: 0,
             })
         );
     }

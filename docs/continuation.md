@@ -268,3 +268,8 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Recursive container mounting now reports each source container's virtual root, including nested/wrapped containers, in traversal order. This recovers boundaries that would otherwise be lost when SerializedFiles are flattened into a VFS.
 - Per-traversal scope strings are bounded at 64 MiB; report reservations are fallible. Synthetic tests cover root/nested order and limit failures.
 - `LoadedSerializedFile` now retains the deepest source container scope, source entry index, and direct collection index for both initial and dependency expansions. `ordered_collection_file_indices(scope)` returns each scope's direct collections in source order and rejects gaps. Next: connect this per-scope index to class ID 142 SceneHashes/Container extraction and scene mapping, then represent the full parent/child `SerializedBundle` tree. No bundle or user sample content was inspected.
+
+## Streamed-scene mapping branch selection
+
+- `map_streamed_scene_bundle_paths` now applies the source precedence rule: nonempty SceneHashes first, otherwise ordered Container paths against current scene flags. Non-streamed, missing-path, and mismatched-collection states remain explicit.
+- Synthetic tests cover precedence, first duplicate-name selection, Container fallback, missing path data, and count mismatches. Next: connect TypeTree-decoded class ID 142 objects from `inspect` to this mapper using `ordered_collection_file_indices(scope)`, then record effective scene-path overrides. Full SceneDefinition and bundle-tree processing remain open; user AssetBundles and UABEA remain uninspected.
