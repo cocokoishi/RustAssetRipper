@@ -105,3 +105,15 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - SchemeReader::mount_path reads one regular or .splitN logical file. Root containers use recursive tree mounting; standalone Resource and SerializedFile bytes use their logical filename.
 - Temporary-file tests exercise a regular Resource, invocation by a .split1 part path with base-name mapping, and a root WebData file flowing into recursive mounting.
 - This covers one path per call only. Directory/batch discovery and automatic external dependency loading remain unimplemented; no real-file or C# differential has run.
+
+## Directory and batch input to VFS
+
+- `SchemeReader::mount_directory` recursively discovers regular files in deterministic lexical order, preserves standalone file paths and namespaces each root container beneath its logical input path; numbered `.splitN` families count as one logical input.
+- The directory scanner rejects symbolic links and special filesystem entries, bounds directory entry count and depth, checks UTF-8 virtual paths, and rejects a regular file that collides with a split group.
+- Batch limits preflight aggregate physical input bytes before modifying the VFS and apply one output-byte budget across all imported roots. A mount failure returns completed-input and partial mounted-entry/byte counts.
+- Five synthetic temporary-directory tests cover mixed standalone/nested/container/split input, aggregate input preflight before mutation, cumulative output limits with partial progress, two containers with the same internal path, directory/input/depth bounds, and regular/split name ambiguity. All directory fixtures are created by the tests; no user AssetBundle paths are scanned.
+- `cargo fmt --all`: exit 0. `cargo fmt --all -- --check`: exit 0.
+- `cargo test --workspace --locked`: exit 0; 145 unit tests passed, 0 failed, 0 doc tests.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: exit 0.
+- `tools/verify-baseline.ps1`: exit 0; all 1,449 reference files match the manifest. `git diff --check`: exit 0.
+- The implementation has not yet been differentially checked against real AssetRipper input directories or C# `MultiFileStream` execution. It does not load external resource dependencies or provide the broader local `FileSystem` adapter.
