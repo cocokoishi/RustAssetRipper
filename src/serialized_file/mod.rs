@@ -1,5 +1,6 @@
 //! Unity SerializedFile parsing.
 
+pub mod collection_workspace;
 mod common_strings;
 pub mod file;
 pub mod format_version;

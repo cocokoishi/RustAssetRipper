@@ -5,6 +5,13 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::io;
 
+use super::header::SerializedFileHeader;
+use super::metadata::SerializedFileMetadata;
+use super::reference_graph::{
+    MultiFileReferenceGraph, MultiFileReferenceGraphBuildError, MultiFileReferenceGraphLimits,
+    NamedObjectReferenceGraph, ObjectReferenceGraph, ReferenceGraphBuildError,
+    ReferenceGraphLimits,
+};
 use crate::io::dependency::{
     DependencyDispatchError, DependencyFilePath, DependencyIndex, DependencyIndexBuildError,
     DependencyIndexLimits, DependencyLookup, DependencyLookupError,
@@ -15,14 +22,6 @@ use crate::scheme::{
     ContainerMountError, ContainerMountLimits, DispatchedFile, FileKind, MountedContainerBundle,
     MountedResourceFile, MountedSerializedFile, ParsedFile, SchemeError, SchemeReader,
     SchemeReaderLimits,
-};
-
-use super::header::SerializedFileHeader;
-use super::metadata::SerializedFileMetadata;
-use super::reference_graph::{
-    MultiFileReferenceGraph, MultiFileReferenceGraphBuildError, MultiFileReferenceGraphLimits,
-    NamedObjectReferenceGraph, ObjectReferenceGraph, ReferenceGraphBuildError,
-    ReferenceGraphLimits,
 };
 
 /// Resource bounds for loading and scanning a named set of VFS SerializedFiles.
@@ -3232,6 +3231,9 @@ mod tests {
         ContainerMountErrorKind, ContainerMountLimits, FileKind, MountedContainerBundle,
         MountedResourceFile,
     };
+    use crate::serialized_file::collection_workspace::{
+        WorkspaceAssetCollections, WorkspaceCollectionErrorKind, WorkspaceCollectionLimits,
+    };
     use crate::serialized_file::object::SerializedValue;
     use crate::serialized_file::object_workspace::{
         ObjectWorkspace, ObjectWorkspaceErrorKind, ObjectWorkspaceLimits,
@@ -3589,6 +3591,93 @@ mod tests {
         assert!(matches!(
             error.kind,
             ObjectWorkspaceErrorKind::ObjectCountLimitExceeded { count: 1, limit: 0 }
+        ));
+    }
+
+    #[test]
+    fn workspace_collection_models_follow_source_order_and_link_object_ranges() {
+        let mut filesystem = VirtualFileSystem::new();
+        insert_file(
+            &mut filesystem,
+            "/game/A.assets",
+            &make_generation_10_file(),
+        );
+        insert_file(
+            &mut filesystem,
+            "/game/Z.assets",
+            &make_generation_10_file(),
+        );
+        let workspace = SerializedFileWorkspace::load_from_vfs(
+            &filesystem,
+            &[input("/game/A.assets"), input("/game/Z.assets")],
+            SerializedFileWorkspaceLimits::default(),
+        )
+        .unwrap();
+        let objects = ObjectWorkspace::load_from_vfs(
+            &filesystem,
+            &workspace,
+            ObjectWorkspaceLimits::default(),
+        )
+        .unwrap();
+        let collections = WorkspaceAssetCollections::build(
+            &workspace,
+            &objects,
+            WorkspaceCollectionLimits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(collections.report().collection_count, 2);
+        assert_eq!(collections.report().object_count, 2);
+        assert_eq!(collections.collections()[0].source_file_index, 1);
+        assert_eq!(collections.collections()[0].fixed_name, "z.assets");
+        assert_eq!(collections.collections()[0].object_range, 1..2);
+        assert_eq!(collections.collections()[1].source_file_index, 0);
+        assert_eq!(collections.collections()[1].fixed_name, "a.assets");
+        assert_eq!(collections.collections()[1].object_range, 0..1);
+        assert_eq!(collections.collection_index_for_file(1), Some(0));
+        assert_eq!(collections.collection_index_for_file(0), Some(1));
+        assert_eq!(collections.collection_index_for_file(2), None);
+
+        let limited = WorkspaceAssetCollections::build(
+            &workspace,
+            &objects,
+            WorkspaceCollectionLimits {
+                max_collections: 1,
+                ..WorkspaceCollectionLimits::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            limited.kind,
+            WorkspaceCollectionErrorKind::CollectionCountLimitExceeded { count: 2, limit: 1 }
+        ));
+
+        let object_limited = WorkspaceAssetCollections::build(
+            &workspace,
+            &objects,
+            WorkspaceCollectionLimits {
+                max_objects: 1,
+                ..WorkspaceCollectionLimits::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            object_limited.kind,
+            WorkspaceCollectionErrorKind::ObjectCountLimitExceeded { count: 2, limit: 1 }
+        ));
+
+        let names_limited = WorkspaceAssetCollections::build(
+            &workspace,
+            &objects,
+            WorkspaceCollectionLimits {
+                max_total_collection_name_bytes: 1,
+                ..WorkspaceCollectionLimits::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            names_limited.kind,
+            WorkspaceCollectionErrorKind::CollectionNameByteLimitExceeded { limit: 1, .. }
         ));
     }
 

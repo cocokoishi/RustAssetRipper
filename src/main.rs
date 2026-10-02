@@ -29,6 +29,9 @@ use assetripper::processing::scene_metadata::{
 use assetripper::scheme::{
     BatchMountLimits, BatchMountReport, ContainerMountLimits, SchemeReader, SchemeReaderLimits,
 };
+use assetripper::serialized_file::collection_workspace::{
+    WorkspaceAssetCollections, WorkspaceCollectionLimits,
+};
 use assetripper::serialized_file::file::SerializedFile;
 use assetripper::serialized_file::metadata::ObjectInfo;
 use assetripper::serialized_file::object::ObjectDecodeLimits;
@@ -424,7 +427,20 @@ fn print_workspace_summary_to<W: io::Write>(
     writeln!(output, "SerializedFiles: {}", workspace.files().len())?;
     let decoded_objects =
         ObjectWorkspace::load_from_vfs(filesystem, workspace, ObjectWorkspaceLimits::default())?;
+    let collection_models = WorkspaceAssetCollections::build(
+        workspace,
+        &decoded_objects,
+        WorkspaceCollectionLimits::default(),
+    )?;
     let object_report = decoded_objects.report();
+    let collection_report = collection_models.report();
+    writeln!(
+        output,
+        "Workspace collections: {} ({} objects, {} external identifiers)",
+        collection_report.collection_count,
+        collection_report.object_count,
+        collection_report.external_identifier_count
+    )?;
     writeln!(
         output,
         "Object payload decode: {}/{} decoded, {} undecoded, {} raw fallback bytes",
@@ -526,12 +542,22 @@ fn print_workspace_summary_to<W: io::Write>(
     }
 
     for (file_index, file) in workspace.files().iter().enumerate() {
+        let collection_index = collection_models
+            .collection_index_for_file(file_index)
+            .ok_or_else(|| invalid_data("workspace file has no collection model"))?;
+        let collection = collection_models
+            .collections()
+            .get(collection_index)
+            .ok_or_else(|| invalid_data("workspace collection model index is invalid"))?;
         writeln!(
             output,
-            "  {:?}: {:?}, {} objects",
-            file.file_name,
+            "  Collection {collection_index} {:?}: file {:?}, {:?}, {} objects at {:?}, {} external identifiers",
+            collection.fixed_name,
+            file.virtual_path,
             file.header.format_version,
-            file.metadata.objects.len()
+            file.metadata.objects.len(),
+            collection.object_range,
+            collection.external_identifier_count
         )?;
 
         let mut file_bytes = None;
@@ -1780,6 +1806,7 @@ mod tests {
         let summary = String::from_utf8(output).unwrap();
         assert!(summary
             .contains("Object payload decode: 2/2 decoded, 0 undecoded, 0 raw fallback bytes"));
+        assert!(summary.contains("Workspace collections: 2 (2 objects, 0 external identifiers)"));
         assert!(summary.contains("TypeTree reference graph:"));
         assert!(
             summary.contains("SceneGUID words: [0x01234567, 0x89abcdef, 0x00000003, 0x00000004]")
