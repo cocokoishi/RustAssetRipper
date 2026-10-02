@@ -428,3 +428,10 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - `LoadedSerializedFile` now retains `container_entry_index` and `container_collection_index` beside its deepest container scope. A platform fixture mounts `z-first`, `shared`, a nested bundle, then `a-last`; despite sorted VFS enumeration, direct workspace files retain entry indexes 0, 1, 3 and collection indexes 0, 1, 2. The child collection has its own index 0. A dependency-container fixture verifies order metadata on dynamically loaded leaves.
 - `cargo test --workspace --locked --quiet`: exit 0; 245 library tests and 6 binary tests passed. `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo fmt --all -- --check`, `tools/verify-baseline.ps1` (1,449 reference files unchanged), and `git diff --check` all exited 0.
 - The source-compatible bundle/group API and class ID 142 scene-path application remain open; Phase 1 remains open. No user AssetBundle or UABEA content was inspected.
+
+## Per-container direct collection index API
+
+- Added `SerializedFileWorkspace::ordered_collection_file_indices(scope)`, which returns loaded workspace file indexes sorted by the direct collection order retained from the container mount report. It reports missing order metadata and gaps rather than returning a potentially wrong order.
+- The synthetic platform import fixture asserts the API returns `z-first.assets`, `shared.assets`, `a-last.assets` in source order despite lexical VFS enumeration, then injects a collection-index gap and checks for an explicit error. The nested scope and dependency-container fixtures check their separate per-container lists.
+- `cargo test --workspace --locked --quiet`: exit 0; 245 library tests and 6 binary tests passed. `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo fmt --all -- --check`, `tools/verify-baseline.ps1` (1,449 reference files unchanged), and `git diff --check` all exited 0.
+- This API indexes direct collections only. AssetCollection construction, full parent/child SerializedBundle representation, and class ID 142 scene-path application remain open; Phase 1 remains open.

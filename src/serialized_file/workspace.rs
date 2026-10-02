@@ -1276,6 +1276,77 @@ impl SerializedFileWorkspace {
         &self.files
     }
 
+    /// Returns workspace indexes for direct collections in one mounted container, ordered as
+    /// `SerializedBundle.Collections` is ordered by the source baseline.
+    pub fn ordered_collection_file_indices(
+        &self,
+        container_scope: &str,
+    ) -> Result<Vec<usize>, Box<SerializedFileWorkspaceError>> {
+        let matching_count = self
+            .files
+            .iter()
+            .filter(|file| file.container_scope.as_deref() == Some(container_scope))
+            .count();
+        let mut ordered_files = Vec::new();
+        ordered_files
+            .try_reserve_exact(matching_count)
+            .map_err(|_| {
+                workspace_error(
+                    self.report,
+                    Some(container_scope),
+                    SerializedFileWorkspaceErrorKind::AllocationFailed {
+                        resource: "ordered container collection indexes",
+                        requested: matching_count,
+                    },
+                )
+            })?;
+        for (file_index, file) in self.files.iter().enumerate() {
+            if file.container_scope.as_deref() != Some(container_scope) {
+                continue;
+            }
+            let Some(collection_index) = file.container_collection_index else {
+                return Err(workspace_error(
+                    self.report,
+                    Some(&file.virtual_path),
+                    SerializedFileWorkspaceErrorKind::MissingContainerCollectionOrder,
+                ));
+            };
+            ordered_files.push((collection_index, file_index, file.virtual_path.as_str()));
+        }
+        ordered_files.sort_unstable_by_key(|(collection_index, _, _)| *collection_index);
+        for (expected_index, (actual_index, _, path)) in ordered_files.iter().enumerate() {
+            if *actual_index != expected_index {
+                return Err(workspace_error(
+                    self.report,
+                    Some(path),
+                    SerializedFileWorkspaceErrorKind::InvalidContainerCollectionSequence {
+                        expected: expected_index,
+                        actual: *actual_index,
+                    },
+                ));
+            }
+        }
+        let mut file_indices = Vec::new();
+        file_indices
+            .try_reserve_exact(ordered_files.len())
+            .map_err(|_| {
+                workspace_error(
+                    self.report,
+                    Some(container_scope),
+                    SerializedFileWorkspaceErrorKind::AllocationFailed {
+                        resource: "ordered container collection file indexes",
+                        requested: ordered_files.len(),
+                    },
+                )
+            })?;
+        file_indices.extend(
+            ordered_files
+                .into_iter()
+                .map(|(_, file_index, _)| file_index),
+        );
+        Ok(file_indices)
+    }
+
     pub fn report(&self) -> SerializedFileWorkspaceReport {
         self.report
     }
@@ -1849,6 +1920,11 @@ pub enum SerializedFileWorkspaceErrorKind {
     InvalidMountedFileCollectionOrder,
     DuplicateMountedFileOrderPath,
     MountedFileScopeMismatch,
+    MissingContainerCollectionOrder,
+    InvalidContainerCollectionSequence {
+        expected: usize,
+        actual: usize,
+    },
     BundleScopeByteCountOverflow,
     TotalBundleScopeBytesLimitExceeded {
         byte_count: usize,
@@ -2021,6 +2097,13 @@ impl Display for SerializedFileWorkspaceErrorKind {
             Self::MountedFileScopeMismatch => {
                 f.write_str("mounted SerializedFile scope differs from its order metadata")
             }
+            Self::MissingContainerCollectionOrder => {
+                f.write_str("loaded container collection is missing its source order index")
+            }
+            Self::InvalidContainerCollectionSequence { expected, actual } => write!(
+                f,
+                "container collection order is not contiguous: expected index {expected}, found {actual}"
+            ),
             Self::BundleScopeByteCountOverflow => {
                 f.write_str("loaded bundle-scope byte count overflows")
             }
@@ -2454,6 +2537,35 @@ mod tests {
             .unwrap();
         assert_eq!(last_direct_file.container_entry_index, Some(3));
         assert_eq!(last_direct_file.container_collection_index, Some(2));
+        let direct_collection_indices = loaded
+            .workspace
+            .ordered_collection_file_indices("/.assetripper/import/initial/0")
+            .unwrap();
+        let direct_collection_names: Vec<_> = direct_collection_indices
+            .iter()
+            .map(|index| loaded.workspace.files()[*index].file_name.as_str())
+            .collect();
+        assert_eq!(
+            direct_collection_names,
+            ["z-first.assets", "shared.assets", "a-last.assets"]
+        );
+        let mut invalid_workspace = loaded.workspace.clone();
+        let a_last_index = invalid_workspace
+            .files
+            .iter()
+            .position(|file| file.file_name == "a-last.assets")
+            .unwrap();
+        invalid_workspace.files[a_last_index].container_collection_index = Some(4);
+        let error = invalid_workspace
+            .ordered_collection_file_indices("/.assetripper/import/initial/0")
+            .unwrap_err();
+        assert!(matches!(
+            error.kind,
+            SerializedFileWorkspaceErrorKind::InvalidContainerCollectionSequence {
+                expected: 2,
+                actual: 4
+            }
+        ));
         let nested_file = loaded
             .workspace
             .files()
@@ -2706,6 +2818,12 @@ mod tests {
         );
         assert_eq!(workspace.files()[1].container_entry_index, Some(0));
         assert_eq!(workspace.files()[1].container_collection_index, Some(0));
+        assert_eq!(
+            workspace
+                .ordered_collection_file_indices("/__assetripper_dependency_mount_0")
+                .unwrap(),
+            [1]
+        );
         assert!(dependency_report.is_complete());
         assert_eq!(
             dependency_report.requests[0].outcome,
