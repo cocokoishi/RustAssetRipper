@@ -21,6 +21,6 @@ The AssetRipper port is GPL-3.0-only. Before distributing binaries, package the 
 
 ## Verification scope
 
-The LZMA fixture is encoded with `lzma-rs`'s LZMA-alone encoder, then reshaped to Unity's raw layout by removing its eight-byte unpacked-size field. It exercises raw decoder and bundle integration but is not independent codec evidence.
+The raw LZMA fixture is encoded with `lzma-rs`'s LZMA-alone encoder, then reshaped to Unity's raw layout by removing its eight-byte unpacked-size field. The size-prefixed fixture uses the same encoder but replaces its unknown-size sentinel with the known decoded size. These exercise both decoder and bundle integrations but are not independent codec evidence.
 
 The Zstandard frame fixtures are constructed from the RFC frame and raw/RLE block fields, independently of the decoder implementation. They cover raw and RLE blocks, concatenated frames, skippable frames, malformed input, output bounds, and window bounds. No Huffman/FSE entropy-compressed Zstandard block from an independent encoder, Unity-produced LZMA sample, real Unity bundle, or AssetRipper differential has been run yet. See [RFC 8878](https://www.rfc-editor.org/rfc/rfc8878.html), the [ruzstd API](https://docs.rs/ruzstd/0.9.0/ruzstd/decoding/struct.StreamingDecoder.html), and its [upstream repository](https://github.com/KillingSpark/zstd-rs).

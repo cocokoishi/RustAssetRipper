@@ -13,6 +13,65 @@ pub fn decompress_block(
     expected_output_size: usize,
     maximum_output_size: usize,
 ) -> Result<Vec<u8>, LzmaBlockError> {
+    if input.len() < 5 {
+        return Err(LzmaBlockError::new(
+            input.len(),
+            LzmaBlockErrorKind::HeaderTooShort {
+                actual: input.len(),
+            },
+        ));
+    }
+    decompress_raw_block(
+        &input[..5],
+        &input[5..],
+        5,
+        expected_output_size,
+        maximum_output_size,
+    )
+}
+
+/// Decode Unity's size-prefixed LZMA stream: five property bytes, an eight-byte
+/// little-endian decoded length, and the raw LZMA payload.
+pub fn decompress_size_block(
+    input: &[u8],
+    expected_output_size: usize,
+    maximum_output_size: usize,
+) -> Result<Vec<u8>, LzmaBlockError> {
+    const SIZE_HEADER_LENGTH: usize = 13;
+    if input.len() < SIZE_HEADER_LENGTH {
+        return Err(LzmaBlockError::new(
+            input.len(),
+            LzmaBlockErrorKind::SizeHeaderTooShort {
+                actual: input.len(),
+            },
+        ));
+    }
+    let declared_size = u64::from_le_bytes(input[5..SIZE_HEADER_LENGTH].try_into().unwrap());
+    if declared_size != expected_output_size as u64 {
+        return Err(LzmaBlockError::new(
+            5,
+            LzmaBlockErrorKind::DeclaredSizeMismatch {
+                declared: declared_size,
+                expected: expected_output_size,
+            },
+        ));
+    }
+    decompress_raw_block(
+        &input[..5],
+        &input[SIZE_HEADER_LENGTH..],
+        SIZE_HEADER_LENGTH,
+        expected_output_size,
+        maximum_output_size,
+    )
+}
+
+fn decompress_raw_block(
+    properties: &[u8],
+    compressed_payload: &[u8],
+    payload_offset: usize,
+    expected_output_size: usize,
+    maximum_output_size: usize,
+) -> Result<Vec<u8>, LzmaBlockError> {
     if expected_output_size > maximum_output_size {
         return Err(LzmaBlockError::new(
             0,
@@ -22,16 +81,7 @@ pub fn decompress_block(
             },
         ));
     }
-    if input.len() < 5 {
-        return Err(LzmaBlockError::new(
-            input.len(),
-            LzmaBlockErrorKind::HeaderTooShort {
-                actual: input.len(),
-            },
-        ));
-    }
-
-    let property_byte = input[0];
+    let property_byte = properties[0];
     if property_byte >= 9 * 5 * 5 {
         return Err(LzmaBlockError::new(
             0,
@@ -46,7 +96,7 @@ pub fn decompress_block(
     let pb = property_tail / 5;
 
     let declared_dictionary_size =
-        u32::from_le_bytes([input[1], input[2], input[3], input[4]]).max(4096);
+        u32::from_le_bytes([properties[1], properties[2], properties[3], properties[4]]).max(4096);
     // A valid match cannot refer farther back than the amount of output we allow.
     // Clamping also prevents malicious dictionary declarations from overflowing
     // the decoder's circular-buffer index arithmetic on 32-bit targets.
@@ -91,7 +141,7 @@ pub fn decompress_block(
         maximum: expected_output_size,
         exceeded: false,
     };
-    let mut reader = Cursor::new(&input[5..]);
+    let mut reader = Cursor::new(compressed_payload);
     if let Err(error) = decoder.decompress(&mut reader, &mut writer) {
         if writer.exceeded {
             return Err(LzmaBlockError::new(
@@ -102,14 +152,14 @@ pub fn decompress_block(
             ));
         }
         return Err(LzmaBlockError::new(
-            5 + reader.position() as usize,
+            payload_offset + reader.position() as usize,
             LzmaBlockErrorKind::Decoder(error.to_string()),
         ));
     }
 
     if writer.bytes.len() != expected_output_size {
         return Err(LzmaBlockError::new(
-            5 + reader.position() as usize,
+            payload_offset + reader.position() as usize,
             LzmaBlockErrorKind::OutputSizeMismatch {
                 expected: expected_output_size,
                 actual: writer.bytes.len(),
@@ -178,6 +228,8 @@ impl Error for LzmaBlockError {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum LzmaBlockErrorKind {
     HeaderTooShort { actual: usize },
+    SizeHeaderTooShort { actual: usize },
+    DeclaredSizeMismatch { declared: u64, expected: usize },
     InvalidProperties { value: u8 },
     DictionarySizeUnrepresentable { size: usize },
     OutputLimitExceeded { requested: usize, limit: usize },
@@ -196,6 +248,14 @@ impl Display for LzmaBlockErrorKind {
                     "LZMA properties header has {actual} bytes, expected 5"
                 )
             }
+            Self::SizeHeaderTooShort { actual } => write!(
+                formatter,
+                "size-prefixed LZMA header has {actual} bytes, expected at least 13"
+            ),
+            Self::DeclaredSizeMismatch { declared, expected } => write!(
+                formatter,
+                "size-prefixed LZMA stream declares {declared} decoded bytes, expected {expected}"
+            ),
             Self::InvalidProperties { value } => {
                 write!(formatter, "invalid LZMA properties byte {value}")
             }
@@ -228,7 +288,7 @@ impl Display for LzmaBlockErrorKind {
 mod tests {
     use std::io::Cursor;
 
-    use super::{decompress_block, LzmaBlockErrorKind};
+    use super::{decompress_block, decompress_size_block, LzmaBlockErrorKind};
 
     #[test]
     fn decodes_a_raw_stream_with_unity_properties() {
@@ -245,6 +305,40 @@ mod tests {
         assert_eq!(
             decompress_block(&unity_payload, original.len(), original.len()).unwrap(),
             original
+        );
+    }
+
+    #[test]
+    fn decodes_a_size_prefixed_lzma_stream() {
+        let original = b"Unity Web chunks carry their decoded size in the LZMA frame.";
+        let mut framed = Vec::new();
+        lzma_rs::lzma_compress(&mut Cursor::new(original), &mut framed).unwrap();
+        framed[5..13].copy_from_slice(&(original.len() as u64).to_le_bytes());
+
+        assert_eq!(
+            decompress_size_block(&framed, original.len(), original.len()).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn rejects_truncated_or_mismatched_size_prefixes() {
+        let short = decompress_size_block(&[0; 12], 0, 0).unwrap_err();
+        assert_eq!(
+            short.kind,
+            LzmaBlockErrorKind::SizeHeaderTooShort { actual: 12 }
+        );
+
+        let mut frame = Vec::new();
+        lzma_rs::lzma_compress(&mut Cursor::new(b"abc"), &mut frame).unwrap();
+        frame[5..13].copy_from_slice(&3u64.to_le_bytes());
+        let mismatch = decompress_size_block(&frame, 4, 4).unwrap_err();
+        assert_eq!(
+            mismatch.kind,
+            LzmaBlockErrorKind::DeclaredSizeMismatch {
+                declared: 3,
+                expected: 4,
+            }
         );
     }
 

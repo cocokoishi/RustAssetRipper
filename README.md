@@ -2,7 +2,7 @@
 
 This repository is the independent Rust port of the local AssetRipper 2.0.0 source snapshot. The port is in its first phase; it is not yet a usable AssetRipper product and must not be treated as having full format or export coverage.
 
-The current implementation units are a bounded binary reader, a read-only complete SerializedFile entry point, versioned header and metadata parsers, TypeTree records with the audited Unity common-string table, checked object-data ranges, and a bounded TypeTree-driven object payload decoder. UnityFS currently has partial header, metadata, entry, LZ4, LZMA, and Zstandard support. `lzma-rs` and `ruzstd` provide codec implementations; the Rust product does not invoke AssetRipper, UABEA, .NET, or another Unity parser. This parser work is still only a small part of the full product migration.
+The current implementation units are a bounded binary reader, a read-only complete SerializedFile entry point, versioned header and metadata parsers, TypeTree records with the audited Unity common-string table, checked object-data ranges, and a bounded TypeTree-driven object payload decoder. UnityFS has partial header, metadata, entry, LZ4, LZMA, and Zstandard support. Legacy UnityRaw and UnityWeb have partial versioned header, directory, and entry parsing; UnityWeb's size-prefixed LZMA chunk is bounded and checked. `lzma-rs` and `ruzstd` provide codec implementations; the Rust product does not invoke AssetRipper, UABEA, .NET, or another Unity parser. This parser work is still only a small part of the full product migration.
 
 ## Development
 
