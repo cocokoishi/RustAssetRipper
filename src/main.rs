@@ -12,6 +12,7 @@ use assetripper::io::platform_file_inventory::{
 use assetripper::io::platform_structure::{detect_platform_structure, PlatformStructureLimits};
 use assetripper::processing::scene::SceneRootDiscoveryLimits;
 use assetripper::processing::scene::{SceneGraph, SceneGraphLimits};
+use assetripper::processing::scene_collections::scene_manager_kind;
 use assetripper::processing::scene_metadata::{
     decode_build_settings_scene_paths_from_parts, BuildSettingsSceneLimits,
 };
@@ -251,6 +252,29 @@ fn print_workspace_summary(
             file.header.format_version,
             file.metadata.objects.len()
         );
+
+        let scene_manager_count = file
+            .metadata
+            .objects
+            .iter()
+            .filter(|object| scene_manager_kind(workspace_object_class_id(object)).is_some())
+            .count();
+        if scene_manager_count > 0 {
+            println!(
+                "    Scene collection candidate: {scene_manager_count} LevelGameManager objects"
+            );
+            for object in &file.metadata.objects {
+                let Some(kind) = scene_manager_kind(workspace_object_class_id(object)) else {
+                    continue;
+                };
+                println!(
+                    "      manager PathID {}: {:?} (class ID {})",
+                    object.path_id,
+                    kind,
+                    kind.class_id()
+                );
+            }
+        }
 
         let mut file_bytes = None;
         let contains_scene_objects = file
