@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::error::Error;
 use std::ffi::OsString;
 use std::io;
@@ -13,8 +14,10 @@ use assetripper::io::platform_structure::{detect_platform_structure, PlatformStr
 use assetripper::processing::scene::SceneRootDiscoveryLimits;
 use assetripper::processing::scene::{SceneGraph, SceneGraphLimits};
 use assetripper::processing::scene_collections::{
-    extract_occlusion_scene_guid, resolve_scene_collection_path, scene_manager_kind,
-    BuildSettingsScenePathSet, SceneManagerKind,
+    extract_occlusion_scene_guid, extract_streamed_scene_bundle_metadata,
+    map_streamed_scene_bundle_paths, resolve_scene_collection_path, scene_manager_kind,
+    BuildSettingsScenePathSet, SceneBundleMappingLimits, SceneBundlePathMappingSource,
+    SceneManagerKind, StreamedSceneBundleMetadata,
 };
 use assetripper::processing::scene_metadata::{
     decode_build_settings_scene_paths_from_parts, BuildSettingsSceneLimits,
@@ -31,6 +34,25 @@ use assetripper::serialized_file::workspace::{
 };
 
 const MAX_INPUT_DIRECTORIES: usize = 100_000;
+const MAX_STREAMED_SCENE_BUNDLE_OBJECTS: usize = 1_000_000;
+const MAX_TOTAL_STREAMED_SCENE_BUNDLE_ENTRIES: usize = 1_000_000;
+const MAX_TOTAL_STREAMED_SCENE_BUNDLE_STRING_BYTES: usize = 256 * 1024 * 1024;
+const MAX_TOTAL_STREAMED_SCENE_PATH_MAPPINGS: usize = 1_000_000;
+
+struct StreamedSceneBundleWorkItem {
+    owner_file_index: usize,
+    object_index: usize,
+    path_id: i64,
+    owner_collection_index: usize,
+    metadata: StreamedSceneBundleMetadata,
+}
+
+struct StreamedScenePathAssignment {
+    path: String,
+    source: SceneBundlePathMappingSource,
+    asset_bundle_file_index: usize,
+    asset_bundle_path_id: i64,
+}
 
 fn main() {
     if let Err(error) = run(std::env::args_os().skip(1)) {
@@ -267,6 +289,20 @@ fn print_workspace_summary_to<W: io::Write>(
     } else {
         None
     };
+    let mut scene_collection_flags = Vec::new();
+    scene_collection_flags
+        .try_reserve_exact(workspace.files().len())
+        .map_err(|_| invalid_data("could not reserve scene collection flags"))?;
+    scene_collection_flags.extend(workspace.files().iter().map(|file| {
+        file.metadata
+            .objects
+            .iter()
+            .any(|object| scene_manager_kind(workspace_object_class_id(object)).is_some())
+    }));
+    let mut streamed_scene_bundle_work = Vec::new();
+    let mut total_streamed_scene_bundle_objects = 0usize;
+    let mut total_streamed_scene_bundle_entries = 0usize;
+    let mut total_streamed_scene_bundle_string_bytes = 0usize;
 
     writeln!(output, "SerializedFiles: {}", workspace.files().len())?;
     let mut build_settings_paths = None;
@@ -447,6 +483,258 @@ fn print_workspace_summary_to<W: io::Write>(
                 }
             }
         }
+
+        if file
+            .metadata
+            .objects
+            .iter()
+            .any(|object| workspace_object_class_id(object) == Some(142))
+        {
+            if file_bytes.is_none() {
+                let maximum_bytes =
+                    usize::try_from(SerializedFileWorkspaceLimits::default().max_file_bytes)
+                        .unwrap_or(usize::MAX);
+                file_bytes = Some(filesystem.read_all_bytes(&file.virtual_path, maximum_bytes)?);
+            }
+            let Some(file_bytes) = file_bytes.as_deref() else {
+                return Err(invalid_data("AssetBundle input bytes were not retained").into());
+            };
+            let parsed_file = SerializedFile::parse(file_bytes)?;
+            for (object_index, object) in file.metadata.objects.iter().enumerate() {
+                if workspace_object_class_id(object) != Some(142) {
+                    continue;
+                }
+                total_streamed_scene_bundle_objects = total_streamed_scene_bundle_objects
+                    .checked_add(1)
+                    .ok_or_else(|| invalid_data("AssetBundle object count overflows"))?;
+                if total_streamed_scene_bundle_objects > MAX_STREAMED_SCENE_BUNDLE_OBJECTS {
+                    return Err(invalid_data(
+                        "AssetBundle object count exceeds the inspect scene-mapping limit",
+                    )
+                    .into());
+                }
+                let payload = parsed_file.decode_object_payload(object_index)?;
+                let metadata = extract_streamed_scene_bundle_metadata(
+                    &payload.root,
+                    SceneBundleMappingLimits::default(),
+                )?;
+                let object_entries = metadata
+                    .scene_hashes
+                    .as_ref()
+                    .map_or(0, Vec::len)
+                    .checked_add(metadata.container_paths.as_ref().map_or(0, Vec::len))
+                    .ok_or_else(|| invalid_data("AssetBundle metadata entry count overflows"))?;
+                total_streamed_scene_bundle_entries = total_streamed_scene_bundle_entries
+                    .checked_add(object_entries)
+                    .ok_or_else(|| invalid_data("AssetBundle metadata entry count overflows"))?;
+                if total_streamed_scene_bundle_entries > MAX_TOTAL_STREAMED_SCENE_BUNDLE_ENTRIES {
+                    return Err(invalid_data(
+                        "AssetBundle metadata entries exceed the aggregate inspect limit",
+                    )
+                    .into());
+                }
+                let object_string_bytes = metadata
+                    .scene_hashes
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|entries| entries.iter())
+                    .flat_map(|(scene_path, collection_name)| {
+                        [scene_path.len(), collection_name.len()]
+                    })
+                    .chain(
+                        metadata
+                            .container_paths
+                            .as_ref()
+                            .into_iter()
+                            .flat_map(|paths| paths.iter().map(String::len)),
+                    )
+                    .try_fold(0usize, |total, size| total.checked_add(size))
+                    .ok_or_else(|| invalid_data("AssetBundle metadata byte count overflows"))?;
+                total_streamed_scene_bundle_string_bytes = total_streamed_scene_bundle_string_bytes
+                    .checked_add(object_string_bytes)
+                    .ok_or_else(|| invalid_data("AssetBundle metadata byte count overflows"))?;
+                if total_streamed_scene_bundle_string_bytes
+                    > MAX_TOTAL_STREAMED_SCENE_BUNDLE_STRING_BYTES
+                {
+                    return Err(invalid_data(
+                        "AssetBundle metadata strings exceed the aggregate inspect limit",
+                    )
+                    .into());
+                }
+
+                if metadata.is_streamed_scene_asset_bundle == Some(true) {
+                    if file.container_scope.is_none() {
+                        writeln!(
+                            output,
+                            "    Streamed-scene AssetBundle PathID {}: scene name recovery is unavailable outside a serialized container",
+                            object.path_id
+                        )?;
+                        continue;
+                    }
+                    let Some(owner_collection_index) = file.container_collection_index else {
+                        return Err(invalid_data(
+                            "streamed-scene AssetBundle is missing its source collection index",
+                        )
+                        .into());
+                    };
+                    streamed_scene_bundle_work.try_reserve(1).map_err(|_| {
+                        invalid_data("could not reserve streamed-scene AssetBundle work items")
+                    })?;
+                    streamed_scene_bundle_work.push(StreamedSceneBundleWorkItem {
+                        owner_file_index: file_index,
+                        object_index,
+                        path_id: object.path_id,
+                        owner_collection_index,
+                        metadata,
+                    });
+                } else {
+                    writeln!(
+                        output,
+                        "    AssetBundle PathID {}: streamed-scene flag {:?}",
+                        object.path_id, metadata.is_streamed_scene_asset_bundle
+                    )?;
+                }
+            }
+        }
+    }
+
+    streamed_scene_bundle_work.sort_unstable_by(|left, right| {
+        let left_scope = workspace.files()[left.owner_file_index]
+            .container_scope
+            .as_deref()
+            .unwrap_or_default();
+        let right_scope = workspace.files()[right.owner_file_index]
+            .container_scope
+            .as_deref()
+            .unwrap_or_default();
+        left_scope
+            .cmp(right_scope)
+            .then(
+                left.owner_collection_index
+                    .cmp(&right.owner_collection_index),
+            )
+            .then(left.object_index.cmp(&right.object_index))
+    });
+    let scene_bundle_limits = SceneBundleMappingLimits::default();
+    let mut streamed_scene_path_assignments =
+        HashMap::<usize, Vec<StreamedScenePathAssignment>>::new();
+    let mut total_streamed_scene_path_mappings = 0usize;
+    for bundle in streamed_scene_bundle_work {
+        let owner_file = workspace
+            .files()
+            .get(bundle.owner_file_index)
+            .ok_or_else(|| invalid_data("streamed-scene AssetBundle file index is invalid"))?;
+        let scope = owner_file
+            .container_scope
+            .as_deref()
+            .ok_or_else(|| invalid_data("streamed-scene AssetBundle lost its container scope"))?;
+        let collection_file_indices = workspace.ordered_collection_file_indices(scope)?;
+        if collection_file_indices.len() > scene_bundle_limits.max_entries {
+            return Err(assetripper::processing::scene_collections::SceneBundleMappingError::EntryCountLimitExceeded {
+                resource: "bundle collection",
+                count: collection_file_indices.len(),
+                limit: scene_bundle_limits.max_entries,
+            }
+            .into());
+        }
+        let mut collection_names = Vec::new();
+        collection_names
+            .try_reserve_exact(collection_file_indices.len())
+            .map_err(|_| invalid_data("could not reserve streamed-scene collection names"))?;
+        let mut collection_is_scene = Vec::new();
+        collection_is_scene
+            .try_reserve_exact(collection_file_indices.len())
+            .map_err(|_| invalid_data("could not reserve streamed-scene collection flags"))?;
+        let mut collection_name_bytes = 0usize;
+        for &collection_file_index in &collection_file_indices {
+            let collection_file =
+                workspace
+                    .files()
+                    .get(collection_file_index)
+                    .ok_or_else(|| {
+                        invalid_data("container collection file index is outside the workspace")
+                    })?;
+            let collection_name =
+                relative_container_collection_name(&collection_file.virtual_path, scope)
+                    .ok_or_else(|| {
+                        invalid_data("container collection path is outside its scope")
+                    })?;
+            collection_name_bytes = collection_name_bytes
+                .checked_add(collection_name.len())
+                .ok_or_else(|| invalid_data("streamed-scene collection-name bytes overflow"))?;
+            if collection_name_bytes > scene_bundle_limits.max_total_name_and_path_bytes {
+                return Err(assetripper::processing::scene_collections::SceneBundleMappingError::ByteLimitExceeded {
+                    requested: collection_name_bytes,
+                    limit: scene_bundle_limits.max_total_name_and_path_bytes,
+                }
+                .into());
+            }
+            collection_names.push(collection_name.to_owned());
+            collection_is_scene.push(scene_collection_flags[collection_file_index]);
+        }
+
+        let Some(path_mappings) = map_streamed_scene_bundle_paths(
+            &bundle.metadata,
+            &collection_names,
+            &collection_is_scene,
+            scene_bundle_limits,
+        )?
+        else {
+            return Err(invalid_data(
+                "streamed-scene AssetBundle was not selected for scene path mapping",
+            )
+            .into());
+        };
+        writeln!(
+            output,
+            "    Streamed-scene AssetBundle PathID {}: {:?}, {} path mappings",
+            bundle.path_id,
+            path_mappings.source,
+            path_mappings.mappings.len()
+        )?;
+        for mapping in path_mappings.mappings {
+            total_streamed_scene_path_mappings = total_streamed_scene_path_mappings
+                .checked_add(1)
+                .ok_or_else(|| invalid_data("streamed-scene path mapping count overflows"))?;
+            if total_streamed_scene_path_mappings > MAX_TOTAL_STREAMED_SCENE_PATH_MAPPINGS {
+                return Err(invalid_data(
+                    "streamed-scene path mappings exceed the aggregate inspect limit",
+                )
+                .into());
+            }
+            let target_file_index = *collection_file_indices
+                .get(mapping.collection_index)
+                .ok_or_else(|| invalid_data("scene mapping collection index is out of bounds"))?;
+            let collection_name = collection_names
+                .get(mapping.collection_index)
+                .ok_or_else(|| invalid_data("scene mapping collection name is unavailable"))?;
+            scene_collection_flags[target_file_index] = true;
+            writeln!(
+                output,
+                "      collection {:?} (workspace file {}): {}",
+                collection_name, target_file_index, mapping.path
+            )?;
+            if !streamed_scene_path_assignments.contains_key(&target_file_index) {
+                streamed_scene_path_assignments
+                    .try_reserve(1)
+                    .map_err(|_| {
+                        invalid_data("could not reserve streamed-scene path assignments")
+                    })?;
+                streamed_scene_path_assignments.insert(target_file_index, Vec::new());
+            }
+            let assignments = streamed_scene_path_assignments
+                .get_mut(&target_file_index)
+                .ok_or_else(|| invalid_data("streamed-scene assignment index disappeared"))?;
+            assignments
+                .try_reserve(1)
+                .map_err(|_| invalid_data("could not reserve streamed-scene assignment"))?;
+            assignments.push(StreamedScenePathAssignment {
+                path: mapping.path,
+                source: path_mappings.source,
+                asset_bundle_file_index: bundle.owner_file_index,
+                asset_bundle_path_id: bundle.path_id,
+            });
+        }
     }
 
     let scene_path_set = if conflicting_build_settings {
@@ -456,25 +744,49 @@ fn print_workspace_summary_to<W: io::Write>(
     } else {
         BuildSettingsScenePathSet::Missing
     };
-    for file in workspace.files() {
-        let is_scene_collection = file
-            .metadata
-            .objects
-            .iter()
-            .any(|object| scene_manager_kind(workspace_object_class_id(object)).is_some());
-        if !is_scene_collection {
+    for (file_index, file) in workspace.files().iter().enumerate() {
+        if !scene_collection_flags[file_index] {
             continue;
         }
+        let collection_name = file
+            .container_scope
+            .as_deref()
+            .and_then(|scope| relative_container_collection_name(&file.virtual_path, scope))
+            .unwrap_or(&file.file_name);
         let status = resolve_scene_collection_path(
-            &file.file_name,
+            collection_name,
             file.metadata.prefix.unity_version_text.as_deref(),
             scene_path_set,
         );
         writeln!(
             output,
             "    Scene path mapping for collection {:?}: {status}",
-            file.file_name
+            collection_name
         )?;
+        if let Some(assignments) = streamed_scene_path_assignments.get(&file_index) {
+            for assignment in assignments {
+                writeln!(
+                    output,
+                    "      streamed-scene override {:?} via AssetBundle file {} PathID {} ({:?})",
+                    assignment.path,
+                    assignment.asset_bundle_file_index,
+                    assignment.asset_bundle_path_id,
+                    assignment.source
+                )?;
+            }
+            if let Some(effective) = assignments.last() {
+                let conflicting = assignments
+                    .iter()
+                    .any(|assignment| assignment.path != effective.path);
+                writeln!(
+                    output,
+                    "      effective scene path: {} (streamed-scene override; assignments={}, conflicting={})",
+                    effective.path,
+                    assignments.len(),
+                    conflicting
+                )?;
+            }
+        }
     }
     writeln!(
         output,
@@ -491,6 +803,11 @@ fn workspace_object_class_id(object: &ObjectInfo) -> Option<i32> {
         .class_id
         .map(i32::from)
         .or_else(|| object.resolved_type_index.map(|_| object.raw_type_id))
+}
+
+fn relative_container_collection_name<'a>(virtual_path: &'a str, scope: &str) -> Option<&'a str> {
+    let relative_path = virtual_path.strip_prefix(scope)?.strip_prefix('/')?;
+    (!relative_path.is_empty()).then_some(relative_path)
 }
 
 fn remaining_budget_u64(limit: u64, consumed: u64, description: &str) -> Result<u64, io::Error> {
@@ -563,9 +880,10 @@ fn print_usage() {
 #[cfg(test)]
 mod tests {
     use super::{merge_mount_report, remaining_budget_u64, remaining_budget_usize};
+    use assetripper::io::filesystem::VirtualFileSystem;
     use assetripper::io::platform_file_inventory::PlatformWorkspaceLoadOptions;
     use assetripper::io::platform_structure::{
-        detect_platform_structure, PlatformKind, PlatformStructureLimits,
+        detect_platform_structure, PlatformKind, PlatformStructure, PlatformStructureLimits,
     };
     use assetripper::scheme::BatchMountReport;
     use assetripper::scheme::FileKind;
@@ -680,6 +998,130 @@ mod tests {
         put_i32_le(output, byte_size);
         put_i32_le(output, index);
         put_u32_le(output, 0);
+    }
+
+    fn insert_vfs_file(filesystem: &mut VirtualFileSystem, path: &str, bytes: &[u8]) {
+        let parent = path
+            .rsplit_once('/')
+            .map(|(parent, _)| parent)
+            .unwrap_or("");
+        filesystem.create_directory(Some(parent)).unwrap();
+        filesystem.write_all_bytes(path, bytes).unwrap();
+    }
+
+    fn push_asset_bundle_node(
+        strings: &mut Vec<u8>,
+        nodes: &mut Vec<(u8, u32, u32, i32, i32)>,
+        level: u8,
+        type_name: &str,
+        field_name: &str,
+        byte_size: i32,
+    ) {
+        let type_offset = push_type_tree_string(strings, type_name);
+        let name_offset = push_type_tree_string(strings, field_name);
+        let index = i32::try_from(nodes.len()).unwrap();
+        nodes.push((level, type_offset, name_offset, byte_size, index));
+    }
+
+    fn put_asset_bundle_string_payload(output: &mut Vec<u8>, value: &str) {
+        let bytes = value.as_bytes();
+        put_i32_le(output, i32::try_from(bytes.len()).unwrap());
+        output.extend_from_slice(bytes);
+        let padding = (4 - output.len() % 4) % 4;
+        output.resize(output.len() + padding, 0);
+    }
+
+    fn make_asset_bundle_file() -> Vec<u8> {
+        let mut strings = Vec::new();
+        let mut nodes = Vec::new();
+        push_asset_bundle_node(&mut strings, &mut nodes, 0, "AssetBundle", "", -1);
+        push_asset_bundle_node(&mut strings, &mut nodes, 1, "map", "m_Container", -1);
+        push_asset_bundle_node(&mut strings, &mut nodes, 2, "Array", "Array", -1);
+        push_asset_bundle_node(&mut strings, &mut nodes, 3, "int", "size", 4);
+        push_asset_bundle_node(&mut strings, &mut nodes, 3, "pair", "data", -1);
+        push_asset_bundle_node(&mut strings, &mut nodes, 4, "string", "first", -1);
+        push_asset_bundle_node(&mut strings, &mut nodes, 5, "Array", "Array", -1);
+        push_asset_bundle_node(&mut strings, &mut nodes, 6, "int", "size", 4);
+        push_asset_bundle_node(&mut strings, &mut nodes, 6, "char", "data", 1);
+        push_asset_bundle_node(&mut strings, &mut nodes, 4, "AssetInfo", "second", -1);
+        push_asset_bundle_node(&mut strings, &mut nodes, 5, "int", "preloadIndex", 4);
+        push_asset_bundle_node(&mut strings, &mut nodes, 5, "int", "preloadSize", 4);
+        push_asset_bundle_node(&mut strings, &mut nodes, 5, "PPtr<Object>", "asset", 12);
+        push_asset_bundle_node(&mut strings, &mut nodes, 6, "int", "m_FileID", 4);
+        push_asset_bundle_node(&mut strings, &mut nodes, 6, "SInt64", "m_PathID", 8);
+        push_asset_bundle_node(
+            &mut strings,
+            &mut nodes,
+            1,
+            "bool",
+            "m_IsStreamedSceneAssetBundle",
+            1,
+        );
+        push_asset_bundle_node(&mut strings, &mut nodes, 1, "map", "m_SceneHashes", -1);
+        push_asset_bundle_node(&mut strings, &mut nodes, 2, "Array", "Array", -1);
+        push_asset_bundle_node(&mut strings, &mut nodes, 3, "int", "size", 4);
+        push_asset_bundle_node(&mut strings, &mut nodes, 3, "pair", "data", -1);
+        for member in ["first", "second"] {
+            push_asset_bundle_node(&mut strings, &mut nodes, 4, "string", member, -1);
+            push_asset_bundle_node(&mut strings, &mut nodes, 5, "Array", "Array", -1);
+            push_asset_bundle_node(&mut strings, &mut nodes, 6, "int", "size", 4);
+            push_asset_bundle_node(&mut strings, &mut nodes, 6, "char", "data", 1);
+        }
+
+        let mut metadata = Vec::new();
+        metadata.extend_from_slice(b"2019.4.0f1\0");
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 1);
+        put_i32_le(&mut metadata, 142);
+        put_i32_le(&mut metadata, i32::try_from(nodes.len()).unwrap());
+        put_i32_le(&mut metadata, i32::try_from(strings.len()).unwrap());
+        for (level, type_offset, name_offset, byte_size, index) in nodes {
+            put_node(
+                &mut metadata,
+                level,
+                type_offset,
+                name_offset,
+                byte_size,
+                index,
+            );
+        }
+        metadata.extend_from_slice(&strings);
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 1);
+        put_i32_le(&mut metadata, 42);
+        put_u32_le(&mut metadata, 0);
+
+        let mut payload = Vec::new();
+        put_i32_le(&mut payload, 1);
+        put_asset_bundle_string_payload(&mut payload, "Assets/Scenes/Other.unity");
+        put_i32_le(&mut payload, 0);
+        put_i32_le(&mut payload, 0);
+        put_i32_le(&mut payload, 0);
+        payload.extend_from_slice(&0_i64.to_le_bytes());
+        payload.push(1);
+        put_i32_le(&mut payload, 1);
+        put_asset_bundle_string_payload(&mut payload, "Assets/Scenes/BundleScene.unity");
+        put_asset_bundle_string_payload(&mut payload, "CAB-Scene");
+
+        put_i32_le(&mut metadata, i32::try_from(payload.len()).unwrap());
+        put_i32_le(&mut metadata, 142);
+        put_u16_le(&mut metadata, 142);
+        put_u16_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 0);
+        metadata.push(0);
+
+        let data_offset = 20usize + metadata.len();
+        let file_size = data_offset + payload.len();
+        let mut file = Vec::with_capacity(file_size);
+        file.extend_from_slice(&i32::try_from(metadata.len()).unwrap().to_be_bytes());
+        file.extend_from_slice(&u32::try_from(file_size).unwrap().to_be_bytes());
+        file.extend_from_slice(&10i32.to_be_bytes());
+        file.extend_from_slice(&u32::try_from(data_offset).unwrap().to_be_bytes());
+        file.push(0);
+        file.extend_from_slice(&[0; 3]);
+        file.extend_from_slice(&metadata);
+        file.extend_from_slice(&payload);
+        file
     }
 
     fn make_generation_10_file() -> Vec<u8> {
@@ -1025,6 +1467,56 @@ mod tests {
         );
         assert!(summary.contains(
             "Scene path mapping for collection \"level0\": Assets/Scenes/Main (BuildSettings index 0, duplicate path=false)"
+        ));
+    }
+
+    #[test]
+    fn workspace_summary_applies_streamed_scene_bundle_path_override() {
+        let mut filesystem = VirtualFileSystem::new();
+        let scene_file = make_occlusion_settings_file([1, 2, 3, 4]);
+        let streamed_bundle = make_asset_bundle_file();
+        let webdata = make_webdata_fixture(&[
+            ("CAB-Scene", &scene_file),
+            ("assetbundle.assets", &streamed_bundle),
+        ]);
+        insert_vfs_file(
+            &mut filesystem,
+            "/game/Game_Data/globalgamemanagers",
+            &make_generation_10_file(),
+        );
+        insert_vfs_file(&mut filesystem, "/game/Game_Data/data.unity3d", &webdata);
+        let structure = PlatformStructure {
+            platform: PlatformKind::Windows,
+            selected_path: "/game".to_owned(),
+            consumed_paths: vec!["/game".to_owned()],
+            root_path: "/game".to_owned(),
+            name: Some("Game".to_owned()),
+            game_data_path: Some("/game/Game_Data".to_owned()),
+            data_paths: vec!["/game/Game_Data".to_owned()],
+        };
+        let loaded = structure
+            .load_primary_serialized_workspace(
+                &mut filesystem,
+                PlatformWorkspaceLoadOptions::default(),
+            )
+            .unwrap();
+
+        let mut output = Vec::new();
+        super::print_workspace_summary_to(
+            &mut output,
+            &filesystem,
+            &loaded.workspace,
+            &loaded.dependencies,
+        )
+        .unwrap();
+        let summary = String::from_utf8(output).unwrap();
+        assert!(
+            summary.contains("Streamed-scene AssetBundle PathID 42: SceneHashes, 1 path mappings")
+        );
+        assert!(summary.contains("collection \"CAB-Scene\" (workspace file"));
+        assert!(summary.contains(": Assets/Scenes/BundleScene"));
+        assert!(summary.contains(
+            "effective scene path: Assets/Scenes/BundleScene (streamed-scene override; assignments=1, conflicting=false)"
         ));
     }
 

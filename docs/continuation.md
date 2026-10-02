@@ -273,3 +273,8 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 
 - `map_streamed_scene_bundle_paths` now applies the source precedence rule: nonempty SceneHashes first, otherwise ordered Container paths against current scene flags. Non-streamed, missing-path, and mismatched-collection states remain explicit.
 - Synthetic tests cover precedence, first duplicate-name selection, Container fallback, missing path data, and count mismatches. Next: connect TypeTree-decoded class ID 142 objects from `inspect` to this mapper using `ordered_collection_file_indices(scope)`, then record effective scene-path overrides. Full SceneDefinition and bundle-tree processing remain open; user AssetBundles and UABEA remain uninspected.
+
+## CLI streamed-scene path mapping
+
+- `inspect` now decodes class ID 142 objects, uses their owning container scope to build direct collection names in source order, maps SceneHashes or Container paths, and reports the final streamed-scene override. Same-scope AssetBundle objects are processed by owner collection and object order so later source assignments take precedence.
+- The synthetic WebData end-to-end test confirms the TypeTree decode, class ID 142 mapping, and effective path output. Aggregate inspect limits bound bundle objects, metadata entries/string bytes, and path mappings. Next: construct source SceneDefinition/AssetCollection models and continue into Prefab/scene export. No Unity-produced class ID 142 differential or user sample inspection has occurred; Phase 1 remains open.
