@@ -240,3 +240,11 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - inspect lazily reads and parses a file when it finds OcclusionCullingSettings, then reports the source word values. A generated generation-10 SerializedFile fixture exercises this TypeTree and CLI path; the test asserts the decoded four words and that inspect completes. There is no Unity-produced file differential.
 - Latest verification: 234 library and 5 binary tests passed; warnings-denied Clippy, format check, 1,449-file baseline verification, and diff check passed.
 - Next: map scene manager files to collection identities, associate BuildSettings paths and the decoded SceneGUIDs, then handle streamed-scene AssetBundle SceneHashes/container entries and SceneDefinition aggregation. Phase 1 remains open; user AssetBundles and UABEA remain uninspected.
+
+## BuildSettings paths on scene collection candidates
+
+- Source collection identity is SerializedAssetCollection.Name = file.NameFixed; FileBase.NameFixed applies FixFileIdentifier normalization. The collection OriginalVersion drives SceneHelpers.TryGetScenePath.
+- inspect now resolves each manager candidate name through the unique decoded BuildSettings path list, applies the pre/post-5.3 filename rule, recovers the Unity path, and marks duplicate entries. Missing, conflicting, stale, malformed-version, and unusable-path states stay distinct.
+- Distinct BuildSettings path arrays are reported as ambiguous. The source selects the last BuildSettings encountered in AssetCollection order; workspace ordering is not yet proven equivalent. A missing serialized Unity version is not replaced with a guessed default.
+- Latest verification: 236 library and 5 binary tests passed; warnings-denied Clippy, formatting, 1,449-file baseline verification, and diff check passed.
+- Next: recover the exact BuildSettings selection order/default-version behavior, inspect the source AssetBundle SceneHashes/container mapping path, and then aggregate scene collection identity, path, and GUID into SceneDefinitions. Phase 1 remains open; user AssetBundles and UABEA remain uninspected.

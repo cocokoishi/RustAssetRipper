@@ -13,7 +13,8 @@ use assetripper::io::platform_structure::{detect_platform_structure, PlatformStr
 use assetripper::processing::scene::SceneRootDiscoveryLimits;
 use assetripper::processing::scene::{SceneGraph, SceneGraphLimits};
 use assetripper::processing::scene_collections::{
-    extract_occlusion_scene_guid, scene_manager_kind, SceneManagerKind,
+    extract_occlusion_scene_guid, resolve_scene_collection_path, scene_manager_kind,
+    BuildSettingsScenePathSet, SceneManagerKind,
 };
 use assetripper::processing::scene_metadata::{
     decode_build_settings_scene_paths_from_parts, BuildSettingsSceneLimits,
@@ -247,6 +248,8 @@ fn print_workspace_summary(
     };
 
     println!("SerializedFiles: {}", workspace.files().len());
+    let mut build_settings_paths = None;
+    let mut conflicting_build_settings = false;
     for (file_index, file) in workspace.files().iter().enumerate() {
         println!(
             "  {:?}: {:?}, {} objects",
@@ -349,6 +352,16 @@ fn print_workspace_summary(
             for (scene_index, path) in scenes.iter().enumerate() {
                 println!("      scene[{scene_index}]: {path}");
             }
+            if !conflicting_build_settings {
+                match build_settings_paths.as_ref() {
+                    None => build_settings_paths = Some(scenes.clone()),
+                    Some(existing) if existing != &scenes => {
+                        build_settings_paths = None;
+                        conflicting_build_settings = true;
+                    }
+                    Some(_) => {}
+                }
+            }
         }
 
         if contains_scene_objects {
@@ -405,6 +418,33 @@ fn print_workspace_summary(
                 }
             }
         }
+    }
+
+    let scene_path_set = if conflicting_build_settings {
+        BuildSettingsScenePathSet::Ambiguous
+    } else if let Some(paths) = build_settings_paths.as_deref() {
+        BuildSettingsScenePathSet::Unique(paths)
+    } else {
+        BuildSettingsScenePathSet::Missing
+    };
+    for file in workspace.files() {
+        let is_scene_collection = file
+            .metadata
+            .objects
+            .iter()
+            .any(|object| scene_manager_kind(workspace_object_class_id(object)).is_some());
+        if !is_scene_collection {
+            continue;
+        }
+        let status = resolve_scene_collection_path(
+            &file.file_name,
+            file.metadata.prefix.unity_version_text.as_deref(),
+            scene_path_set,
+        );
+        println!(
+            "    Scene path mapping for collection {:?}: {status}",
+            file.file_name
+        );
     }
     println!(
         "external requests: {}; newly loaded dependencies: {}; resolved: {}",

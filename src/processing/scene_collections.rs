@@ -3,7 +3,12 @@
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
+use crate::io::special_names::fix_file_identifier;
 use crate::serialized_file::object::{SerializedValue, SerializedValueLookupError};
+
+use super::scene_naming::{
+    file_name_to_scene_index, scene_path_from_build_settings, SceneUnityVersion,
+};
 
 /// AssetRipper's generated ClassIDType extension marks these four classes as
 /// inheriting from LevelGameManager.
@@ -34,6 +39,111 @@ pub const fn scene_manager_kind(class_id: Option<i32>) -> Option<SceneManagerKin
         Some(157) => Some(SceneManagerKind::LightmapSettings),
         Some(196) => Some(SceneManagerKind::NavMeshSettings),
         _ => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BuildSettingsScenePathSet<'a> {
+    Missing,
+    Unique(&'a [String]),
+    Ambiguous,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SceneCollectionPathStatus {
+    BuildSettingsMissing,
+    BuildSettingsAmbiguous,
+    UnityVersionUnavailable,
+    CollectionNameNotMapped,
+    StaleBuildSettingsIndex {
+        scene_index: usize,
+        scene_count: usize,
+    },
+    BuildSettingsPathUnusable {
+        scene_index: usize,
+    },
+    Resolved {
+        scene_index: usize,
+        path: String,
+        duplicate_path: bool,
+    },
+}
+
+impl Display for SceneCollectionPathStatus {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BuildSettingsMissing => f.write_str("BuildSettings unavailable"),
+            Self::BuildSettingsAmbiguous => f.write_str("multiple conflicting BuildSettings assets"),
+            Self::UnityVersionUnavailable => f.write_str("Unity version unavailable"),
+            Self::CollectionNameNotMapped => {
+                f.write_str("collection name has no BuildSettings index")
+            }
+            Self::StaleBuildSettingsIndex {
+                scene_index,
+                scene_count,
+            } => write!(
+                f,
+                "collection maps to stale BuildSettings index {scene_index} (only {scene_count} scenes)"
+            ),
+            Self::BuildSettingsPathUnusable { scene_index } => write!(
+                f,
+                "BuildSettings path at scene index {scene_index} cannot be recovered"
+            ),
+            Self::Resolved {
+                scene_index,
+                path,
+                duplicate_path,
+            } => write!(
+                f,
+                "{path} (BuildSettings index {scene_index}, duplicate path={duplicate_path})"
+            ),
+        }
+    }
+}
+
+/// Resolve a serialized scene collection name through the source naming and BuildSettings rules.
+///
+/// SerializedFile names are normalized like the baseline FileBase.NameFixed property before the
+/// version-specific `maindata`/`levelN` mapping is applied. Ambiguity and missing metadata remain
+/// distinct from stale indexes and unusable paths.
+pub fn resolve_scene_collection_path(
+    file_name: &str,
+    unity_version_text: Option<&str>,
+    build_settings: BuildSettingsScenePathSet<'_>,
+) -> SceneCollectionPathStatus {
+    let build_settings_scenes = match build_settings {
+        BuildSettingsScenePathSet::Missing => {
+            return SceneCollectionPathStatus::BuildSettingsMissing
+        }
+        BuildSettingsScenePathSet::Ambiguous => {
+            return SceneCollectionPathStatus::BuildSettingsAmbiguous;
+        }
+        BuildSettingsScenePathSet::Unique(scenes) => scenes,
+    };
+    let Some(version) = unity_version_text.and_then(SceneUnityVersion::parse) else {
+        return SceneCollectionPathStatus::UnityVersionUnavailable;
+    };
+    let collection_name = fix_file_identifier(file_name);
+    let Some(scene_index) = file_name_to_scene_index(&collection_name, version) else {
+        return SceneCollectionPathStatus::CollectionNameNotMapped;
+    };
+    let Some(scene_path) = build_settings_scenes.get(scene_index) else {
+        return SceneCollectionPathStatus::StaleBuildSettingsIndex {
+            scene_index,
+            scene_count: build_settings_scenes.len(),
+        };
+    };
+    let Some(path) = scene_path_from_build_settings(scene_path) else {
+        return SceneCollectionPathStatus::BuildSettingsPathUnusable { scene_index };
+    };
+    let duplicate_path = build_settings_scenes
+        .iter()
+        .enumerate()
+        .any(|(index, candidate)| index != scene_index && candidate == scene_path);
+    SceneCollectionPathStatus::Resolved {
+        scene_index,
+        path,
+        duplicate_path,
     }
 }
 
@@ -182,7 +292,8 @@ mod tests {
     use crate::serialized_file::object::{SerializedFieldValue, SerializedValue};
 
     use super::{
-        extract_occlusion_scene_guid, scene_manager_kind, SceneGuidError, SceneGuidWords,
+        extract_occlusion_scene_guid, resolve_scene_collection_path, scene_manager_kind,
+        BuildSettingsScenePathSet, SceneCollectionPathStatus, SceneGuidError, SceneGuidWords,
         SceneManagerKind,
     };
 
@@ -267,6 +378,106 @@ mod tests {
                 word_index: 1,
                 actual: "i32"
             })
+        );
+    }
+
+    #[test]
+    fn resolves_scene_collection_names_to_build_settings_paths() {
+        let scenes = [
+            "Assets/Scenes/Main.unity".to_owned(),
+            "Assets/Scenes/Next.unity".to_owned(),
+        ];
+        assert_eq!(
+            resolve_scene_collection_path(
+                "MAINDATA",
+                Some("5.2.4f1"),
+                BuildSettingsScenePathSet::Unique(&scenes),
+            ),
+            SceneCollectionPathStatus::Resolved {
+                scene_index: 0,
+                path: "Assets/Scenes/Main".to_owned(),
+                duplicate_path: false,
+            }
+        );
+        assert_eq!(
+            resolve_scene_collection_path(
+                "level0",
+                Some("5.3.0f1"),
+                BuildSettingsScenePathSet::Unique(&scenes),
+            ),
+            SceneCollectionPathStatus::Resolved {
+                scene_index: 0,
+                path: "Assets/Scenes/Main".to_owned(),
+                duplicate_path: false,
+            }
+        );
+        assert_eq!(
+            resolve_scene_collection_path(
+                "level0",
+                Some("5.2.4f1"),
+                BuildSettingsScenePathSet::Unique(&scenes),
+            ),
+            SceneCollectionPathStatus::Resolved {
+                scene_index: 1,
+                path: "Assets/Scenes/Next".to_owned(),
+                duplicate_path: false,
+            }
+        );
+    }
+
+    #[test]
+    fn keeps_missing_ambiguous_stale_and_unusable_scene_paths_distinct() {
+        let paths = ["".to_owned()];
+        assert_eq!(
+            resolve_scene_collection_path(
+                "level0",
+                Some("2022.3.1f1"),
+                BuildSettingsScenePathSet::Missing
+            ),
+            SceneCollectionPathStatus::BuildSettingsMissing
+        );
+        assert_eq!(
+            resolve_scene_collection_path(
+                "level0",
+                Some("2022.3.1f1"),
+                BuildSettingsScenePathSet::Ambiguous
+            ),
+            SceneCollectionPathStatus::BuildSettingsAmbiguous
+        );
+        assert_eq!(
+            resolve_scene_collection_path(
+                "level0",
+                None,
+                BuildSettingsScenePathSet::Unique(&paths)
+            ),
+            SceneCollectionPathStatus::UnityVersionUnavailable
+        );
+        assert_eq!(
+            resolve_scene_collection_path(
+                "other",
+                Some("2022.3.1f1"),
+                BuildSettingsScenePathSet::Unique(&paths)
+            ),
+            SceneCollectionPathStatus::CollectionNameNotMapped
+        );
+        assert_eq!(
+            resolve_scene_collection_path(
+                "level1",
+                Some("2022.3.1f1"),
+                BuildSettingsScenePathSet::Unique(&paths)
+            ),
+            SceneCollectionPathStatus::StaleBuildSettingsIndex {
+                scene_index: 1,
+                scene_count: 1
+            }
+        );
+        assert_eq!(
+            resolve_scene_collection_path(
+                "level0",
+                Some("2022.3.1f1"),
+                BuildSettingsScenePathSet::Unique(&paths)
+            ),
+            SceneCollectionPathStatus::BuildSettingsPathUnusable { scene_index: 0 }
         );
     }
 
