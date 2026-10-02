@@ -481,3 +481,11 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Synthetic WebData coverage checks root and nested resource ownership/order, source entry indexes, path-byte limits at both mount and workspace layers, noncontiguous direct resource-order rejection, pathless root membership, and a dynamically expanded dependency container. The VFS still returns the exact synthetic stream bytes by recorded path.
 - `cargo test --workspace --locked --quiet`: exit 0; 255 library and 7 binary tests passed. `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo fmt --all -- --check`, `tools/verify-baseline.ps1` (1,449 reference files unchanged), and `git diff --check` all exited 0.
 - No Unity-produced files, user AssetBundles, or UABEA content were inspected. FailedFiles, actual AssetCollection objects, resource decoding/export, and Unity/reference-tool differential checks remain open; Phase 1 is not passed.
+
+## Streamed-scene paths use workspace bundle identity
+
+- A streamed-scene AssetBundle object now selects its direct collection list through its owning `LoadedSerializedFile.container_bundle_index` and `WorkspaceSerializedBundle.direct_collection_file_indices`. This mirrors the source `assetBundleAsset.Collection.Bundle.Collections` relationship and avoids scope-path lookup as the identity key.
+- Collection order and each loaded file's bundle/order indexes are checked before scene path mapping. A bundle with no virtual scope path uses the file identity stored on its direct collection rather than failing solely because a path string is absent. AssetBundles without a SerializedBundle owner still report scene-name recovery as unavailable.
+- A focused pathless-node unit test verifies indexed owner lookup and direct collection order. The synthetic WebData CLI fixture still verifies SceneHashes mapping, streamed path override, and GUID preservation end to end. No actual AssetCollection or SceneDefinition object is materialized.
+- `cargo test --workspace --locked --quiet`: exit 0; 255 library and 8 binary tests passed. Warnings-denied Clippy, format, the 1,449-file baseline verifier, and `git diff --check` pass.
+- No Unity-produced files, user AssetBundles, or UABEA content were inspected. Phase 1 remains open.

@@ -32,6 +32,7 @@ use assetripper::serialized_file::object::ObjectDecodeLimits;
 use assetripper::serialized_file::reference_graph::MultiFileReferenceGraphLimits;
 use assetripper::serialized_file::workspace::{
     SerializedFileDependencyReport, SerializedFileWorkspace, SerializedFileWorkspaceLimits,
+    WorkspaceSerializedBundle,
 };
 
 const MAX_INPUT_DIRECTORIES: usize = 100_000;
@@ -572,10 +573,10 @@ fn print_workspace_summary_to<W: io::Write>(
                 }
 
                 if metadata.is_streamed_scene_asset_bundle == Some(true) {
-                    if file.container_scope.is_none() {
+                    if file.container_bundle_index.is_none() {
                         writeln!(
                             output,
-                            "    Streamed-scene AssetBundle PathID {}: scene name recovery is unavailable outside a serialized container",
+                            "    Streamed-scene AssetBundle PathID {}: scene name recovery is unavailable outside a SerializedBundle",
                             object.path_id
                         )?;
                         continue;
@@ -608,16 +609,9 @@ fn print_workspace_summary_to<W: io::Write>(
     }
 
     streamed_scene_bundle_work.sort_unstable_by(|left, right| {
-        let left_scope = workspace.files()[left.owner_file_index]
-            .container_scope
-            .as_deref()
-            .unwrap_or_default();
-        let right_scope = workspace.files()[right.owner_file_index]
-            .container_scope
-            .as_deref()
-            .unwrap_or_default();
-        left_scope
-            .cmp(right_scope)
+        workspace.files()[left.owner_file_index]
+            .container_bundle_index
+            .cmp(&workspace.files()[right.owner_file_index].container_bundle_index)
             .then(
                 left.owner_collection_index
                     .cmp(&right.owner_collection_index),
@@ -633,11 +627,11 @@ fn print_workspace_summary_to<W: io::Write>(
             .files()
             .get(bundle.owner_file_index)
             .ok_or_else(|| invalid_data("streamed-scene AssetBundle file index is invalid"))?;
-        let scope = owner_file
-            .container_scope
-            .as_deref()
-            .ok_or_else(|| invalid_data("streamed-scene AssetBundle lost its container scope"))?;
-        let collection_file_indices = workspace.ordered_collection_file_indices(scope)?;
+        let (owner_bundle_index, owner_bundle) = source_bundle_for_collection(
+            owner_file.container_bundle_index,
+            workspace.container_bundles(),
+        )?;
+        let collection_file_indices = &owner_bundle.direct_collection_file_indices;
         if collection_file_indices.len() > scene_bundle_limits.max_entries {
             return Err(assetripper::processing::scene_collections::SceneBundleMappingError::EntryCountLimitExceeded {
                 resource: "bundle collection",
@@ -655,7 +649,8 @@ fn print_workspace_summary_to<W: io::Write>(
             .try_reserve_exact(collection_file_indices.len())
             .map_err(|_| invalid_data("could not reserve streamed-scene collection flags"))?;
         let mut collection_name_bytes = 0usize;
-        for &collection_file_index in &collection_file_indices {
+        for (collection_index, &collection_file_index) in collection_file_indices.iter().enumerate()
+        {
             let collection_file =
                 workspace
                     .files()
@@ -663,11 +658,24 @@ fn print_workspace_summary_to<W: io::Write>(
                     .ok_or_else(|| {
                         invalid_data("container collection file index is outside the workspace")
                     })?;
-            let collection_name =
-                relative_container_collection_name(&collection_file.virtual_path, scope)
-                    .ok_or_else(|| {
-                        invalid_data("container collection path is outside its scope")
-                    })?;
+            if collection_file.container_bundle_index != Some(owner_bundle_index)
+                || collection_file.container_collection_index != Some(collection_index)
+                || collection_file.container_scope.as_deref() != owner_bundle.scope_path.as_deref()
+            {
+                return Err(invalid_data(
+                    "streamed-scene bundle collection links do not match their source node",
+                )
+                .into());
+            }
+            let collection_name = match owner_bundle.scope_path.as_deref() {
+                Some(scope) => {
+                    relative_container_collection_name(&collection_file.virtual_path, scope)
+                        .ok_or_else(|| {
+                            invalid_data("container collection path is outside its scope")
+                        })?
+                }
+                None => collection_file.file_name.as_str(),
+            };
             collection_name_bytes = collection_name_bytes
                 .checked_add(collection_name.len())
                 .ok_or_else(|| invalid_data("streamed-scene collection-name bytes overflow"))?;
@@ -845,6 +853,19 @@ fn relative_container_collection_name<'a>(virtual_path: &'a str, scope: &str) ->
     (!relative_path.is_empty()).then_some(relative_path)
 }
 
+fn source_bundle_for_collection(
+    bundle_index: Option<usize>,
+    bundles: &[WorkspaceSerializedBundle],
+) -> Result<(usize, &WorkspaceSerializedBundle), io::Error> {
+    let index = bundle_index.ok_or_else(|| {
+        invalid_data("serialized collection is not attached to a source SerializedBundle")
+    })?;
+    let bundle = bundles.get(index).ok_or_else(|| {
+        invalid_data("serialized collection bundle index is outside the workspace")
+    })?;
+    Ok((index, bundle))
+}
+
 fn remaining_budget_u64(limit: u64, consumed: u64, description: &str) -> Result<u64, io::Error> {
     limit.checked_sub(consumed).ok_or_else(|| {
         io::Error::new(
@@ -914,7 +935,12 @@ fn print_usage() {
 
 #[cfg(test)]
 mod tests {
-    use super::{merge_mount_report, remaining_budget_u64, remaining_budget_usize};
+    use std::io;
+
+    use super::{
+        merge_mount_report, remaining_budget_u64, remaining_budget_usize,
+        source_bundle_for_collection, WorkspaceSerializedBundle,
+    };
     use assetripper::io::filesystem::VirtualFileSystem;
     use assetripper::io::platform_file_inventory::PlatformWorkspaceLoadOptions;
     use assetripper::io::platform_structure::{
@@ -928,6 +954,25 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static NEXT_TEST_DIRECTORY: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn streamed_scene_bundle_lookup_uses_direct_collections_without_a_scope_path() {
+        let bundles = [WorkspaceSerializedBundle {
+            scope_path: None,
+            parent_bundle_index: None,
+            parent_entry_index: None,
+            direct_collection_file_indices: vec![3, 1],
+            direct_resource_file_indices: Vec::new(),
+        }];
+
+        let (bundle_index, bundle) = source_bundle_for_collection(Some(0), &bundles).unwrap();
+        assert_eq!(bundle_index, 0);
+        assert_eq!(bundle.scope_path, None);
+        assert_eq!(bundle.direct_collection_file_indices, [3, 1]);
+
+        let error = source_bundle_for_collection(None, &bundles).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
 
     struct TestInputDirectory {
         directory: PathBuf,

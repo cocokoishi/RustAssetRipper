@@ -289,8 +289,8 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 
 ## Workspace container tree and collection links
 
-- Current phase: Phase 1; gate not passed. Only `C:\Users\koishi\Desktop\RustAssetripper\RustAssetripper` is writable; the local AssetRipper baseline remains read-only. Latest pushed revision before this increment was `90da4732c1cfac67d6b3ea14cd4f9883bfb1c101`.
-- Mount reports now retain each ResourceFile leaf's virtual path, owning container, source entry, and direct resource order. Initial and dependency imports remap these records into workspace-global bundle and resource indexes. Workspace bundle nodes expose direct ResourceFile indexes alongside direct SerializedFile collections; resource bytes remain in the VFS.
-- Verification is synthetic: 255 library tests and 7 CLI tests passed; warnings-denied Clippy, format, 1,449-file baseline verification, and diff check passed. No user AssetBundle or UABEA content was inspected.
-- FailedFiles and actual AssetCollection objects remain unmodeled. This is metadata projection, not a complete source `SerializedBundle` or resource export implementation.
-- Next: build source-compatible AssetCollection objects and group scene plans by owning bundle, then generate EditorBuildSettings and scene export from path/GUID aggregation. Continue with remaining baseline processors and product entry points; Phase 1 remains open.
+- Current phase: Phase 1; gate not passed. Only `C:\Users\koishi\Desktop\RustAssetripper\RustAssetripper` is writable; the local AssetRipper baseline remains read-only. Latest pushed revision before this increment was `110ba5a68e07f3ef017f18e75dc7ef64d38649d9`.
+- Mount reports retain each ResourceFile leaf's path, owning container, source entry, and direct order; initial and dependency imports remap those links into workspace-global indexes. Streamed-scene AssetBundle mapping now reads the owning bundle node's direct collection indexes rather than looking up collections by scope path, so pathless root nodes are supported.
+- Verification is synthetic: 255 library tests and 8 CLI tests passed; warnings-denied Clippy, format, 1,449-file baseline verification, and diff check passed. No user AssetBundle or UABEA content was inspected.
+- FailedFiles and actual AssetCollection/SceneDefinition objects remain unmodeled. Resource bytes remain in the VFS; resource decoding/export and Unity runtime behavior are not implemented or verified.
+- Next: add an explicit serialized collection/object model over the parsed records, then materialize scene associations from decoded scene-manager objects. Continue with generated EditorBuildSettings, scene export, remaining baseline processors, and product entry points; Phase 1 remains open.
