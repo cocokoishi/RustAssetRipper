@@ -200,7 +200,9 @@ impl<'a> DependencyIndex<'a> {
                 limit: self.limits.max_name_bytes,
             });
         }
-        let dependency_name = identifier.fixed_path_name();
+        let dependency_name = identifier
+            .dependency_path_name()
+            .ok_or(DependencyLookupError::MetaIdentifierMissingGuid)?;
         if dependency_name.len() > self.limits.max_name_bytes {
             return Err(DependencyLookupError::NameTooLong {
                 byte_count: dependency_name.len(),
@@ -534,6 +536,7 @@ pub enum DependencyLookupError {
     AllocationFailed { requested: usize },
     NameTooLong { byte_count: usize, limit: usize },
     InvalidDependencyName { dependency_name: String },
+    MetaIdentifierMissingGuid,
     CandidateCountLimitExceeded { limit: usize },
     FileSystem { path: String, source: io::Error },
 }
@@ -576,6 +579,9 @@ impl Display for DependencyLookupError {
                 f,
                 "dependency name contains an absolute path or unsafe component: '{dependency_name}'"
             ),
+            Self::MetaIdentifierMissingGuid => {
+                f.write_str("Meta dependency identifier is missing its GUID")
+            }
             Self::CandidateCountLimitExceeded { limit } => {
                 write!(f, "dependency candidate count exceeds limit {limit}")
             }
@@ -651,6 +657,74 @@ mod tests {
             .dispatch_candidate(&candidate, crate::scheme::SchemeReaderLimits::default())
             .unwrap();
         assert_eq!(dispatched.kind(), crate::scheme::FileKind::Resource);
+    }
+
+    #[test]
+    fn meta_identifier_uses_lowercase_fixed_width_unity_guid_words() {
+        let mut filesystem = VirtualFileSystem::new();
+        insert_file(&mut filesystem, "/bundle/meta.asset");
+        let registered = [DependencyFilePath {
+            file_name: "0123456789ABCDEf00000000FFFFFFFF".to_owned(),
+            virtual_path: "/bundle/meta.asset".to_owned(),
+        }];
+        let index = DependencyIndex::new(&filesystem, &registered, &[]).unwrap();
+        let meta_identifier = FileIdentifier {
+            asset_path: Some(String::new()),
+            guid: Some([0x0123_4567, 0x89ab_cdef, 0, u32::MAX]),
+            file_type: Some(3),
+            path_name_origin: "Library/ignored-name.asset".to_owned(),
+        };
+
+        assert_eq!(
+            meta_identifier.dependency_path_name().as_deref(),
+            Some("0123456789abcdef00000000ffffffff")
+        );
+        assert_eq!(
+            index.resolve(&meta_identifier).unwrap(),
+            DependencyLookup::Found(super::DependencyCandidate {
+                virtual_path: "/bundle/meta.asset".to_owned(),
+                source: DependencyCandidateSource::RegisteredFileName,
+            })
+        );
+    }
+
+    #[test]
+    fn non_meta_identifier_keeps_path_identity_even_when_guid_is_present() {
+        let mut filesystem = VirtualFileSystem::new();
+        insert_file(&mut filesystem, "/data/ordinary.assets");
+        let index = DependencyIndex::new(&filesystem, &[], &["/data".to_owned()]).unwrap();
+        let ordinary_identifier = FileIdentifier {
+            asset_path: Some(String::new()),
+            guid: Some([0x0123_4567, 0x89ab_cdef, 0, u32::MAX]),
+            file_type: Some(2),
+            path_name_origin: "ordinary.assets".to_owned(),
+        };
+
+        assert_eq!(
+            index.resolve(&ordinary_identifier).unwrap(),
+            DependencyLookup::Found(super::DependencyCandidate {
+                virtual_path: "/data/ordinary.assets".to_owned(),
+                source: DependencyCandidateSource::DataPath,
+            })
+        );
+    }
+
+    #[test]
+    fn meta_identifier_without_guid_fails_instead_of_falling_back_to_path() {
+        let mut filesystem = VirtualFileSystem::new();
+        insert_file(&mut filesystem, "/data/fallback.asset");
+        let index = DependencyIndex::new(&filesystem, &[], &["/data".to_owned()]).unwrap();
+        let invalid_meta_identifier = FileIdentifier {
+            asset_path: Some(String::new()),
+            guid: None,
+            file_type: Some(3),
+            path_name_origin: "fallback.asset".to_owned(),
+        };
+
+        assert!(matches!(
+            index.resolve(&invalid_meta_identifier),
+            Err(DependencyLookupError::MetaIdentifierMissingGuid)
+        ));
     }
 
     #[test]

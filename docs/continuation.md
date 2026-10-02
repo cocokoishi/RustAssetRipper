@@ -130,3 +130,10 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - A synthetic WebData container fixture verifies mounting one nested SerializedFile, loading it into the workspace, matching the external identity, and resolving its PPtr through the cross-file graph. Empty-container reporting and aggregate input/entry/output limits are also covered. No real-file/C# differential has run.
 - `cargo test --workspace --locked`: 168 tests passed, 0 failed, 0 doc tests. Warnings-denied Clippy, `cargo fmt --all -- --check`, the 1,449-file baseline verifier, and `git diff --check` all passed.
 - Next: port GUID-derived `AssetType.Meta` identity and derive platform file registries/DataPaths from mounted inputs. The full Phase 1 gate remains open; do not inspect user AssetBundles or UABEA.
+
+
+## GUID-derived Meta dependency identity
+
+- FileIdentifier now selects the source GetFilePath identity: non-Meta dependencies use the normalized path, while AssetType.Meta uses four lowercase, zero-padded 32-bit GUID words with no separators. A Meta identifier missing its GUID returns an explicit lookup error instead of falling back to the unrelated path.
+- Three synthetic tests cover source word formatting and GUID-over-path precedence, ordinary file types retaining path lookup despite a GUID, and missing-GUID failure. The full workspace suite passed 171 tests; warnings-denied Clippy, format check, 1,449-file baseline verification, and diff check passed. No real-file or C# differential has run.
+- Next: derive platform registries and ordered DataPaths from mounted inputs, then connect the remaining platform-specific lookup rules. Phase 1 is still open; do not inspect user AssetBundles or UABEA.

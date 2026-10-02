@@ -303,6 +303,21 @@ impl FileIdentifier {
     pub fn fixed_path_name(&self) -> String {
         crate::io::special_names::fix_file_identifier(&self.path_name_origin)
     }
+
+    /// Return the source `FileIdentifier.GetFilePath` identity for dependency lookup.
+    /// `AssetType.Meta` uses the Unity GUID words; other file types use the normalized path.
+    /// A Meta identifier without its generation-5+ GUID is malformed and returns `None`.
+    pub fn dependency_path_name(&self) -> Option<String> {
+        const ASSET_TYPE_META: i32 = 3;
+
+        if self.file_type == Some(ASSET_TYPE_META) {
+            self.guid.map(|[data0, data1, data2, data3]| {
+                format!("{data0:08x}{data1:08x}{data2:08x}{data3:08x}")
+            })
+        } else {
+            Some(self.fixed_path_name())
+        }
+    }
 }
 
 fn read_serialized_type(
