@@ -1201,6 +1201,14 @@ pub enum ParsedFile<'a> {
 pub struct SchemeReader;
 
 impl SchemeReader {
+    /// Probe a raw VFS file header without reading the complete file or decoding wrappers.
+    ///
+    /// This is for source-style directory inventory, which checks file and bundle headers
+    /// directly. `prefix` should contain at least the first 32 bytes when available.
+    pub fn probe_raw_kind(prefix: &[u8], total_length: u64) -> FileKind {
+        detect_file_kind_with_length(prefix, total_length)
+    }
+
     /// Detect the source scheme and decode any outer GZip/Brotli wrappers recursively.
     pub fn read(input: &[u8]) -> Result<DispatchedFile<'_>, SchemeError> {
         Self::read_with_limits(input, SchemeReaderLimits::default())
@@ -1801,10 +1809,14 @@ fn decode_wrapper(
 /// The source collection initializer pushes SerializedFile first and FileStreamBundle last;
 /// `Stack<T>` enumerates from its top, so the actual precedence starts with UnityFS.
 fn detect_file_kind(input: &[u8]) -> FileKind {
+    detect_file_kind_with_length(input, input.len() as u64)
+}
+
+fn detect_file_kind_with_length(input: &[u8], total_length: u64) -> FileKind {
     if let Some(kind) = detect_primary_file_kind(input) {
         return kind;
     }
-    if is_serialized_file(input) {
+    if is_serialized_file_with_length(input, total_length) {
         FileKind::SerializedFile
     } else {
         FileKind::Resource
@@ -1836,6 +1848,10 @@ fn has_bundle_signature(input: &[u8], magic: &[u8]) -> bool {
 
 /// Source-compatible subset of `SerializedFileHeader.IsSerializedFileHeader`.
 fn is_serialized_file(input: &[u8]) -> bool {
+    is_serialized_file_with_length(input, input.len() as u64)
+}
+
+fn is_serialized_file_with_length(input: &[u8], total_length: u64) -> bool {
     if input.len() < 16 {
         return false;
     }
@@ -1861,7 +1877,7 @@ fn is_serialized_file(input: &[u8]) -> bool {
         (legacy_metadata_size, u64::from(legacy_file_size))
     };
 
-    metadata_size >= 13 && file_size >= 16 + 13 && u64::try_from(input.len()) == Ok(file_size)
+    metadata_size >= 13 && file_size >= 16 + 13 && total_length == file_size
 }
 
 #[derive(Debug)]
@@ -2975,13 +2991,37 @@ mod tests {
 
     #[test]
     fn recognizes_a_source_generation_22_serialized_file_header() {
-        let mut bytes = vec![0; 61];
+        let mut bytes = [0; 61];
         bytes[8..12].copy_from_slice(&22i32.to_be_bytes());
         bytes[20..24].copy_from_slice(&13i32.to_be_bytes());
         bytes[24..32].copy_from_slice(&61u64.to_be_bytes());
         assert_eq!(
             SchemeReader::read(&bytes).unwrap().kind(),
             FileKind::SerializedFile
+        );
+    }
+
+    #[test]
+    fn raw_header_probe_classifies_without_reading_the_file_body() {
+        let mut bytes = [0; 61];
+        bytes[8..12].copy_from_slice(&22i32.to_be_bytes());
+        bytes[20..24].copy_from_slice(&13i32.to_be_bytes());
+        bytes[24..32].copy_from_slice(&61u64.to_be_bytes());
+
+        assert_eq!(
+            SchemeReader::probe_raw_kind(&bytes[..32], bytes.len() as u64),
+            FileKind::SerializedFile
+        );
+        assert_eq!(
+            SchemeReader::probe_raw_kind(&bytes[..32], 62),
+            FileKind::Resource
+        );
+
+        let mut bundle_header = vec![0; 32];
+        bundle_header[..7].copy_from_slice(b"UnityFS");
+        assert_eq!(
+            SchemeReader::probe_raw_kind(&bundle_header, 64),
+            FileKind::UnityFs
         );
     }
 }
