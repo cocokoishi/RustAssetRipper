@@ -21,7 +21,7 @@ The reference source was read only. No build, export, or test output was written
 
 - `dotnet --info` was attempted and could not run because `dotnet` was not found on `PATH`.
 - `cargo`, `rustc`, and `rustup` are not on `PATH`, but were found under `%USERPROFILE%\.cargo\bin` and used directly.
-- The active toolchain is `rustc 1.98.1`, `cargo 1.98.1`, `stable-aarch64-pc-windows-msvc`. The declared Rust minimum is 1.74; that minimum version has not been tested.
+- The active toolchain is `rustc 1.98.1`, `cargo 1.98.1`, `stable-aarch64-pc-windows-msvc`. The Rust package now declares 1.87 as its minimum because `ruzstd` 0.9.0 requires it; that minimum version has not been tested.
 - The reference solution includes 8 test projects, but its tests remain unrun because `dotnet` is unavailable.
 - Current Rust verification is recorded in `validation-log.md`.
 - The Rust repository had no refs at initial identification. The active `main` branch now tracks the configured `origin/main`; validated Rust increments are committed and pushed there. No other repository is a write target.

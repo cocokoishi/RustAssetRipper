@@ -2,7 +2,7 @@
 name = "assetripper-rs"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.74"
+rust-version = "1.87"
 license = "GPL-3.0-only"
 description = "Independent Rust port of AssetRipper"
 
@@ -12,3 +12,4 @@ path = "src/lib.rs"
 
 [dependencies]
 lzma-rs = { version = "0.3.0", default-features = false, features = ["raw_decoder"] }
+ruzstd = { version = "=0.9.0", default-features = false, features = ["std", "hash"] }

@@ -4,6 +4,9 @@ use std::fmt::{self, Display, Formatter};
 
 use crate::compression::lz4_block::{decompress_block, Lz4BlockError};
 use crate::compression::lzma::{decompress_block as decompress_lzma_block, LzmaBlockError};
+use crate::compression::zstd::{
+    decompress_block as decompress_zstd_block, has_frame_magic, ZstdBlockError,
+};
 use crate::io::binary::{BinaryError, BinaryReader, Endian};
 
 const UNITY_FS_MAGIC: &str = "UnityFS";
@@ -23,6 +26,7 @@ pub struct UnityFsLimits {
     pub max_node_path_bytes: usize,
     pub max_entry_bytes: usize,
     pub max_block_uncompressed_bytes: usize,
+    pub max_zstd_window_bytes: usize,
 }
 
 impl Default for UnityFsLimits {
@@ -35,6 +39,7 @@ impl Default for UnityFsLimits {
             max_node_path_bytes: 1024 * 1024,
             max_entry_bytes: 512 * 1024 * 1024,
             max_block_uncompressed_bytes: 512 * 1024 * 1024,
+            max_zstd_window_bytes: 128 * 1024 * 1024,
         }
     }
 }
@@ -252,6 +257,7 @@ impl<'a> UnityFsBundle<'a> {
             metadata_compression,
             metadata_offset,
             "blocks metadata",
+            None,
         )?;
         let metadata_base_offset = if metadata_compression == 0 {
             metadata_offset
@@ -547,6 +553,7 @@ impl<'a> UnityFsBundle<'a> {
                         block.compression_type(),
                         compressed_start,
                         "storage block",
+                        Some(self.limits.max_zstd_window_bytes),
                     )?;
                     let part = decoded.get(local_start..local_end).ok_or_else(|| {
                         UnityFsError::new(
@@ -721,8 +728,8 @@ fn parse_metadata(
     let bytes_read = reader.position();
     if bytes_read != declared_size {
         let aligned_bytes_read = bytes_read.checked_add(3).map(|value| value & !3);
-        if !(reader_base_offset % 4 == 0
-            && declared_size % 4 == 0
+        if !(reader_base_offset.is_multiple_of(4)
+            && declared_size.is_multiple_of(4)
             && aligned_bytes_read == Some(declared_size))
         {
             return Err(metadata_problem(
@@ -776,6 +783,7 @@ fn decode_payload<'a>(
     compression: u8,
     input_offset: usize,
     context: &'static str,
+    maximum_zstd_window_size: Option<usize>,
 ) -> Result<Cow<'a, [u8]>, UnityFsError> {
     if expected_size > maximum_output_size {
         return Err(UnityFsError::new(
@@ -817,6 +825,27 @@ fn decode_payload<'a>(
                     UnityFsErrorKind::Lz4 { context, error },
                 )
             }),
+        compression if compression > 4 && has_frame_magic(input) => {
+            match maximum_zstd_window_size {
+                Some(maximum_window_size) => decompress_zstd_block(
+                    input,
+                    expected_size,
+                    maximum_output_size,
+                    maximum_window_size,
+                )
+                .map(Cow::Owned)
+                .map_err(|error| {
+                    UnityFsError::new(input_offset, UnityFsErrorKind::Zstd { context, error })
+                }),
+                None => Err(UnityFsError::new(
+                    input_offset,
+                    UnityFsErrorKind::UnsupportedCompression {
+                        compression,
+                        context,
+                    },
+                )),
+            }
+        }
         _ => Err(UnityFsError::new(
             input_offset,
             UnityFsErrorKind::UnsupportedCompression {
@@ -1136,6 +1165,10 @@ pub enum UnityFsErrorKind {
         context: &'static str,
         error: LzmaBlockError,
     },
+    Zstd {
+        context: &'static str,
+        error: ZstdBlockError,
+    },
     MetadataRead {
         decoded_offset: usize,
         detail: String,
@@ -1236,6 +1269,7 @@ impl Display for UnityFsErrorKind {
             ),
             Self::Lz4 { context, error } => write!(f, "LZ4 {context}: {error}"),
             Self::Lzma { context, error } => write!(f, "LZMA {context}: {error}"),
+            Self::Zstd { context, error } => write!(f, "Zstandard {context}: {error}"),
             Self::MetadataRead {
                 decoded_offset,
                 detail,
@@ -1363,6 +1397,25 @@ mod tests {
         raw
     }
 
+    fn zstd_raw_block(bytes: &[u8]) -> Vec<u8> {
+        assert!(bytes.len() <= 255);
+        let mut frame = vec![0x28, 0xb5, 0x2f, 0xfd, 0x20, bytes.len() as u8];
+        let block_header = ((bytes.len() as u32) << 3) | 1;
+        frame.extend_from_slice(&block_header.to_le_bytes()[..3]);
+        frame.extend_from_slice(bytes);
+        frame
+    }
+
+    fn zstd_rle_block(bytes: &[u8]) -> Vec<u8> {
+        assert!(!bytes.is_empty() && bytes.len() <= 255);
+        assert!(bytes.iter().all(|byte| *byte == bytes[0]));
+        let mut frame = vec![0x28, 0xb5, 0x2f, 0xfd, 0x20, bytes.len() as u8];
+        let block_header = ((bytes.len() as u32) << 3) | 3;
+        frame.extend_from_slice(&block_header.to_le_bytes()[..3]);
+        frame.push(bytes[0]);
+        frame
+    }
+
     fn make_bundle(
         entry_bytes: &[u8],
         metadata_compression: u8,
@@ -1416,6 +1469,8 @@ mod tests {
             0 => first_data.to_vec(),
             1 => lzma_raw_block(first_data),
             2 | 3 => lz4_literal_block(first_data),
+            4 | 5 => zstd_raw_block(first_data),
+            6 => zstd_rle_block(first_data),
             other => panic!("test helper does not encode compression type {other}"),
         };
         let second_compressed = if split_data_block {
@@ -1444,6 +1499,7 @@ mod tests {
             0 => metadata.clone(),
             1 => lzma_raw_block(&metadata),
             2 | 3 => lz4_literal_block(&metadata),
+            4 | 5 => zstd_raw_block(&metadata),
             other => panic!("test helper does not encode compression type {other}"),
         };
         let mut header = Vec::new();
@@ -1519,6 +1575,38 @@ mod tests {
             bundle.read_entry(0).unwrap().as_ref(),
             b"lzma entry payload"
         );
+    }
+
+    #[test]
+    fn decodes_zstd_storage_blocks_by_frame_signature() {
+        let entry_bytes = vec![b'Z'; 64];
+        let input = make_bundle_with_block_compression(&entry_bytes, 0, 6, false, 6, 0, false);
+        let bundle = UnityFsBundle::parse(&input).unwrap();
+        assert_eq!(bundle.read_entry(0).unwrap().as_ref(), entry_bytes);
+    }
+
+    #[test]
+    fn zstd_signature_does_not_override_metadata_or_lzham_dispatch() {
+        let metadata = make_bundle(b"entry", 5, false, 0);
+        let metadata_error = UnityFsBundle::parse(&metadata).unwrap_err();
+        assert!(matches!(
+            metadata_error.kind(),
+            UnityFsErrorKind::UnsupportedCompression {
+                compression: 5,
+                context: "blocks metadata"
+            }
+        ));
+
+        let lzham = make_bundle_with_block_compression(b"entry", 0, 4, false, 6, 0, false);
+        let bundle = UnityFsBundle::parse(&lzham).unwrap();
+        let lzham_error = bundle.read_entry(0).unwrap_err();
+        assert!(matches!(
+            lzham_error.kind(),
+            UnityFsErrorKind::UnsupportedCompression {
+                compression: 4,
+                context: "storage block"
+            }
+        ));
     }
 
     #[test]

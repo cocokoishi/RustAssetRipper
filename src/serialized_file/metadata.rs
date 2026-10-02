@@ -954,7 +954,7 @@ fn find_type_index(
     let mut found = None;
     for (index, serialized_type) in types.iter().enumerate() {
         if serialized_type.raw_type_id == raw_type_id
-            && stripped.map_or(true, |value| serialized_type.is_stripped_type == value)
+            && stripped.is_none_or(|value| serialized_type.is_stripped_type == value)
         {
             if found.is_some() {
                 return Err(SerializedFileMetadataError::new(
