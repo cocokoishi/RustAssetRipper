@@ -341,6 +341,464 @@ impl ObjectReferenceGraph {
     }
 }
 
+/// Resource bounds for joining references from a set of already parsed SerializedFiles.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MultiFileReferenceGraphLimits {
+    pub max_files: usize,
+    pub max_references: usize,
+    pub max_file_name_bytes: usize,
+    pub max_total_file_name_bytes: usize,
+}
+
+impl Default for MultiFileReferenceGraphLimits {
+    fn default() -> Self {
+        Self {
+            max_files: 1_000_000,
+            max_references: 5_000_000,
+            max_file_name_bytes: 1024 * 1024,
+            max_total_file_name_bytes: 64 * 1024 * 1024,
+        }
+    }
+}
+
+/// One parsed file and its independently built per-file reference scan.
+///
+/// `file_name` is the identity exposed by the source `FileBase.Name`; names are normalized with
+/// the same `SpecialFileNames.FixFileIdentifier` rules used by `FileIdentifier.PathName`.
+pub struct NamedObjectReferenceGraph<'a> {
+    pub file_name: &'a str,
+    pub metadata: &'a SerializedFileMetadata,
+    pub graph: &'a ObjectReferenceGraph,
+}
+
+/// One PPtr resolution across a set of loaded SerializedFiles.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MultiFileObjectReference<'a> {
+    pub source_file_index: usize,
+    pub source_object_index: usize,
+    pub source_path_id: i64,
+    pub field_path: &'a str,
+    pub resolution: MultiFilePPtrResolution,
+}
+
+/// Explicit result of resolving a PPtr against the supplied files.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MultiFilePPtrResolution {
+    Null,
+    Object {
+        target_file_index: usize,
+        target_object_index: usize,
+    },
+    MissingLocalObject {
+        path_id: i64,
+    },
+    AmbiguousLocalObject {
+        path_id: i64,
+        match_count: usize,
+    },
+    MissingDependency {
+        external_index: usize,
+        path_id: i64,
+    },
+    AmbiguousDependency {
+        external_index: usize,
+        path_id: i64,
+        candidate_count: usize,
+    },
+    MissingExternalObject {
+        target_file_index: usize,
+        path_id: i64,
+    },
+    AmbiguousExternalObject {
+        target_file_index: usize,
+        path_id: i64,
+        match_count: usize,
+    },
+    InvalidFileId {
+        file_id: i32,
+        external_count: usize,
+    },
+}
+
+/// A deterministic cross-file PPtr graph over files that have already been loaded and scanned.
+///
+/// This joins existing per-file graphs by normalized serialized-file name. It does not discover
+/// or load missing files from disk or containers; those remain `MissingDependency` results.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MultiFileReferenceGraph<'a> {
+    normalized_file_names: Vec<String>,
+    /// File indices sorted by normalized name and then caller-supplied file index. Duplicate
+    /// names remain separate entries so they resolve as ambiguous instead of being merged.
+    name_index: Vec<usize>,
+    file_graphs: Vec<&'a ObjectReferenceGraph>,
+    file_metadata: Vec<&'a SerializedFileMetadata>,
+    references: Vec<MultiFileObjectReference<'a>>,
+    input_graphs_complete: bool,
+}
+
+impl<'a> MultiFileReferenceGraph<'a> {
+    pub fn build(
+        files: &[NamedObjectReferenceGraph<'a>],
+    ) -> Result<Self, MultiFileReferenceGraphBuildError> {
+        Self::build_with_limits(files, MultiFileReferenceGraphLimits::default())
+    }
+
+    pub fn build_with_limits(
+        files: &[NamedObjectReferenceGraph<'a>],
+        limits: MultiFileReferenceGraphLimits,
+    ) -> Result<Self, MultiFileReferenceGraphBuildError> {
+        if files.len() > limits.max_files {
+            return Err(MultiFileReferenceGraphBuildError::FileCountLimitExceeded {
+                file_count: files.len(),
+                limit: limits.max_files,
+            });
+        }
+
+        let mut reference_count = 0usize;
+        for file in files {
+            reference_count = reference_count
+                .checked_add(file.graph.references.len())
+                .ok_or(MultiFileReferenceGraphBuildError::ReferenceCountOverflow)?;
+        }
+        if reference_count > limits.max_references {
+            return Err(
+                MultiFileReferenceGraphBuildError::ReferenceCountLimitExceeded {
+                    reference_count,
+                    limit: limits.max_references,
+                },
+            );
+        }
+
+        let mut normalized_file_names = Vec::new();
+        normalized_file_names
+            .try_reserve_exact(files.len())
+            .map_err(|_| MultiFileReferenceGraphBuildError::AllocationFailed {
+                resource: "normalized file names",
+                requested: files.len(),
+            })?;
+        let mut name_index = Vec::new();
+        name_index.try_reserve_exact(files.len()).map_err(|_| {
+            MultiFileReferenceGraphBuildError::AllocationFailed {
+                resource: "file-name index",
+                requested: files.len(),
+            }
+        })?;
+        let mut file_graphs = Vec::new();
+        file_graphs.try_reserve_exact(files.len()).map_err(|_| {
+            MultiFileReferenceGraphBuildError::AllocationFailed {
+                resource: "per-file reference graph index",
+                requested: files.len(),
+            }
+        })?;
+        let mut file_metadata = Vec::new();
+        file_metadata.try_reserve_exact(files.len()).map_err(|_| {
+            MultiFileReferenceGraphBuildError::AllocationFailed {
+                resource: "per-file metadata index",
+                requested: files.len(),
+            }
+        })?;
+        let mut total_file_name_bytes = 0usize;
+        for (file_index, file) in files.iter().enumerate() {
+            if file.file_name.len() > limits.max_file_name_bytes {
+                return Err(MultiFileReferenceGraphBuildError::FileNameLimitExceeded {
+                    file_index,
+                    byte_count: file.file_name.len(),
+                    limit: limits.max_file_name_bytes,
+                });
+            }
+            let normalized_name = crate::io::special_names::fix_file_identifier(file.file_name);
+            if normalized_name.len() > limits.max_file_name_bytes {
+                return Err(MultiFileReferenceGraphBuildError::FileNameLimitExceeded {
+                    file_index,
+                    byte_count: normalized_name.len(),
+                    limit: limits.max_file_name_bytes,
+                });
+            }
+            total_file_name_bytes = total_file_name_bytes
+                .checked_add(normalized_name.len())
+                .ok_or(MultiFileReferenceGraphBuildError::TotalFileNameBytesOverflow)?;
+            if total_file_name_bytes > limits.max_total_file_name_bytes {
+                return Err(
+                    MultiFileReferenceGraphBuildError::TotalFileNameBytesLimitExceeded {
+                        byte_count: total_file_name_bytes,
+                        limit: limits.max_total_file_name_bytes,
+                    },
+                );
+            }
+            normalized_file_names.push(normalized_name);
+            name_index.push(file_index);
+            file_graphs.push(file.graph);
+            file_metadata.push(file.metadata);
+        }
+        name_index.sort_unstable_by(|left, right| {
+            normalized_file_names[*left]
+                .cmp(&normalized_file_names[*right])
+                .then(left.cmp(right))
+        });
+
+        let mut references = Vec::new();
+        references.try_reserve_exact(reference_count).map_err(|_| {
+            MultiFileReferenceGraphBuildError::AllocationFailed {
+                resource: "cross-file references",
+                requested: reference_count,
+            }
+        })?;
+
+        let input_graphs_complete = files.iter().all(|file| file.graph.is_complete());
+        let mut result = Self {
+            normalized_file_names,
+            name_index,
+            file_graphs,
+            file_metadata,
+            references,
+            input_graphs_complete,
+        };
+        for (source_file_index, source_file) in files.iter().enumerate() {
+            for reference in source_file.graph.references() {
+                let resolution = result.resolve_reference(
+                    source_file_index,
+                    source_file.metadata,
+                    source_file.graph,
+                    reference.file_id,
+                    reference.path_id,
+                );
+                result.references.push(MultiFileObjectReference {
+                    source_file_index,
+                    source_object_index: reference.source_object_index,
+                    source_path_id: reference.source_path_id,
+                    field_path: &reference.field_path,
+                    resolution,
+                });
+            }
+        }
+        Ok(result)
+    }
+
+    pub fn file_count(&self) -> usize {
+        self.normalized_file_names.len()
+    }
+
+    pub fn normalized_file_names(&self) -> &[String] {
+        &self.normalized_file_names
+    }
+
+    pub fn references(&self) -> &[MultiFileObjectReference<'a>] {
+        &self.references
+    }
+
+    /// Return the source external-table entry associated with one unresolved dependency result.
+    pub fn dependency_identifier(
+        &self,
+        source_file_index: usize,
+        external_index: usize,
+    ) -> Option<&'a crate::serialized_file::metadata::FileIdentifier> {
+        self.file_metadata
+            .get(source_file_index)?
+            .externals
+            .get(external_index)
+    }
+
+    /// Return every supplied file matching the source-normalized dependency name.
+    pub fn candidate_file_indices<'b>(
+        &'b self,
+        file_name: &str,
+    ) -> impl Iterator<Item = usize> + 'b {
+        let normalized_name = crate::io::special_names::fix_file_identifier(file_name);
+        let first = self.name_index.partition_point(|file_index| {
+            self.normalized_file_names[*file_index].as_str() < normalized_name.as_str()
+        });
+        let end = self.name_index.partition_point(|file_index| {
+            self.normalized_file_names[*file_index].as_str() <= normalized_name.as_str()
+        });
+        self.name_index[first..end].iter().copied()
+    }
+
+    /// True only when all input scans are complete and every non-null PPtr resolves uniquely.
+    pub fn is_complete(&self) -> bool {
+        self.input_graphs_complete
+            && self.references.iter().all(|reference| {
+                matches!(
+                    reference.resolution,
+                    MultiFilePPtrResolution::Null | MultiFilePPtrResolution::Object { .. }
+                )
+            })
+    }
+
+    fn resolve_reference(
+        &self,
+        source_file_index: usize,
+        source_metadata: &SerializedFileMetadata,
+        source_graph: &ObjectReferenceGraph,
+        file_id: i32,
+        path_id: i64,
+    ) -> MultiFilePPtrResolution {
+        if path_id == 0 {
+            return MultiFilePPtrResolution::Null;
+        }
+        if file_id == 0 {
+            return match local_path_id_resolution(source_graph, path_id) {
+                LocalPathIdResolution::Unique(object_index) => MultiFilePPtrResolution::Object {
+                    target_file_index: source_file_index,
+                    target_object_index: object_index,
+                },
+                LocalPathIdResolution::Missing => {
+                    MultiFilePPtrResolution::MissingLocalObject { path_id }
+                }
+                LocalPathIdResolution::Ambiguous(match_count) => {
+                    MultiFilePPtrResolution::AmbiguousLocalObject {
+                        path_id,
+                        match_count,
+                    }
+                }
+            };
+        }
+
+        let Some(external_index) = file_id
+            .checked_sub(1)
+            .and_then(|index| usize::try_from(index).ok())
+        else {
+            return MultiFilePPtrResolution::InvalidFileId {
+                file_id,
+                external_count: source_metadata.externals.len(),
+            };
+        };
+        let Some(identifier) = source_metadata.externals.get(external_index) else {
+            return MultiFilePPtrResolution::InvalidFileId {
+                file_id,
+                external_count: source_metadata.externals.len(),
+            };
+        };
+        let dependency_name = identifier.fixed_path_name();
+        let first = self.name_index.partition_point(|file_index| {
+            self.normalized_file_names[*file_index].as_str() < dependency_name.as_str()
+        });
+        let end = self.name_index.partition_point(|file_index| {
+            self.normalized_file_names[*file_index].as_str() <= dependency_name.as_str()
+        });
+        match end - first {
+            0 => MultiFilePPtrResolution::MissingDependency {
+                external_index,
+                path_id,
+            },
+            1 => {
+                let target_file_index = self.name_index[first];
+                match local_path_id_resolution(self.file_graphs[target_file_index], path_id) {
+                    LocalPathIdResolution::Unique(object_index) => {
+                        MultiFilePPtrResolution::Object {
+                            target_file_index,
+                            target_object_index: object_index,
+                        }
+                    }
+                    LocalPathIdResolution::Missing => {
+                        MultiFilePPtrResolution::MissingExternalObject {
+                            target_file_index,
+                            path_id,
+                        }
+                    }
+                    LocalPathIdResolution::Ambiguous(match_count) => {
+                        MultiFilePPtrResolution::AmbiguousExternalObject {
+                            target_file_index,
+                            path_id,
+                            match_count,
+                        }
+                    }
+                }
+            }
+            candidate_count => MultiFilePPtrResolution::AmbiguousDependency {
+                external_index,
+                path_id,
+                candidate_count,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MultiFileReferenceGraphBuildError {
+    AllocationFailed {
+        resource: &'static str,
+        requested: usize,
+    },
+    FileCountLimitExceeded {
+        file_count: usize,
+        limit: usize,
+    },
+    FileNameLimitExceeded {
+        file_index: usize,
+        byte_count: usize,
+        limit: usize,
+    },
+    TotalFileNameBytesOverflow,
+    TotalFileNameBytesLimitExceeded {
+        byte_count: usize,
+        limit: usize,
+    },
+    ReferenceCountOverflow,
+    ReferenceCountLimitExceeded {
+        reference_count: usize,
+        limit: usize,
+    },
+}
+
+impl Display for MultiFileReferenceGraphBuildError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AllocationFailed {
+                resource,
+                requested,
+            } => {
+                write!(f, "could not allocate {requested} entries for {resource}")
+            }
+            Self::FileCountLimitExceeded { file_count, limit } => {
+                write!(f, "file count {file_count} exceeds limit {limit}")
+            }
+            Self::FileNameLimitExceeded {
+                file_index,
+                byte_count,
+                limit,
+            } => write!(
+                f,
+                "file name at index {file_index} has {byte_count} bytes, exceeding limit {limit}"
+            ),
+            Self::TotalFileNameBytesOverflow => {
+                f.write_str("total normalized file-name bytes overflow")
+            }
+            Self::TotalFileNameBytesLimitExceeded { byte_count, limit } => write!(
+                f,
+                "total normalized file-name bytes {byte_count} exceed limit {limit}"
+            ),
+            Self::ReferenceCountOverflow => f.write_str("cross-file reference count overflows"),
+            Self::ReferenceCountLimitExceeded {
+                reference_count,
+                limit,
+            } => write!(f, "reference count {reference_count} exceeds limit {limit}"),
+        }
+    }
+}
+
+impl Error for MultiFileReferenceGraphBuildError {}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LocalPathIdResolution {
+    Unique(usize),
+    Missing,
+    Ambiguous(usize),
+}
+
+fn local_path_id_resolution(graph: &ObjectReferenceGraph, path_id: i64) -> LocalPathIdResolution {
+    let first = graph
+        .path_id_index
+        .partition_point(|(candidate, _)| *candidate < path_id);
+    let end = graph
+        .path_id_index
+        .partition_point(|(candidate, _)| *candidate <= path_id);
+    match end - first {
+        0 => LocalPathIdResolution::Missing,
+        1 => LocalPathIdResolution::Unique(graph.path_id_index[first].1),
+        match_count => LocalPathIdResolution::Ambiguous(match_count),
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReferenceGraphBuildError {
     AllocationFailed {
@@ -563,7 +1021,12 @@ fn copy_field_path(path: &str) -> Result<String, WalkIssue> {
 
 #[cfg(test)]
 mod tests {
-    use super::{collect_references, ObjectReferenceGraph, ReferenceGraphLimits, WalkIssue};
+    use super::{
+        collect_references, MultiFileObjectReference, MultiFilePPtrResolution,
+        MultiFileReferenceGraph, MultiFileReferenceGraphBuildError, MultiFileReferenceGraphLimits,
+        NamedObjectReferenceGraph, ObjectReferenceGraph, ReferenceGraphLimits,
+        SerializedObjectReference, WalkIssue,
+    };
     use crate::io::binary::Endian;
     use crate::serialized_file::metadata::{FileIdentifier, ObjectInfo, SerializedFileMetadata};
     use crate::serialized_file::metadata_prefix::SerializedFileMetadataPrefix;
@@ -633,6 +1096,23 @@ mod tests {
         }
     }
 
+    fn graph_with_reference(
+        path_ids: &[i64],
+        source_path_id: i64,
+        file_id: i32,
+        path_id: i64,
+    ) -> ObjectReferenceGraph {
+        let mut graph = empty_graph(path_ids);
+        graph.references.push(SerializedObjectReference {
+            source_object_index: 0,
+            source_path_id,
+            field_path: "m_Target".to_owned(),
+            file_id,
+            path_id,
+        });
+        graph
+    }
+
     #[test]
     fn indexes_duplicate_ids_and_classifies_local_external_and_null_edges() {
         let metadata = metadata(&[101, 202, 101]);
@@ -669,6 +1149,192 @@ mod tests {
                 external_count: 2,
             }
         );
+    }
+
+    #[test]
+    fn joins_unique_external_file_names_and_resolves_target_path_ids() {
+        let source_metadata = metadata(&[11]);
+        let source_graph = graph_with_reference(&[11], 11, 1, 22);
+        let target_metadata = metadata(&[22]);
+        let target_graph = empty_graph(&[22]);
+        let files = [
+            NamedObjectReferenceGraph {
+                file_name: "root/main.assets",
+                metadata: &source_metadata,
+                graph: &source_graph,
+            },
+            NamedObjectReferenceGraph {
+                file_name: "SHARED.ASSETS",
+                metadata: &target_metadata,
+                graph: &target_graph,
+            },
+        ];
+
+        let graph = MultiFileReferenceGraph::build(&files).unwrap();
+        assert_eq!(graph.file_count(), 2);
+        assert_eq!(graph.normalized_file_names()[1], "shared.assets");
+        assert_eq!(
+            graph
+                .candidate_file_indices("library/Shared.Assets")
+                .collect::<Vec<_>>(),
+            [1]
+        );
+        assert_eq!(
+            graph.references(),
+            [MultiFileObjectReference {
+                source_file_index: 0,
+                source_object_index: 0,
+                source_path_id: 11,
+                field_path: "m_Target",
+                resolution: MultiFilePPtrResolution::Object {
+                    target_file_index: 1,
+                    target_object_index: 0,
+                },
+            }]
+        );
+        assert!(graph.is_complete());
+    }
+
+    #[test]
+    fn missing_and_ambiguous_external_files_remain_explicit() {
+        let source_metadata = metadata(&[11]);
+        let source_graph = graph_with_reference(&[11], 11, 1, 22);
+        let unrelated_metadata = metadata(&[22]);
+        let unrelated_graph = empty_graph(&[22]);
+        let missing_files = [
+            NamedObjectReferenceGraph {
+                file_name: "main.assets",
+                metadata: &source_metadata,
+                graph: &source_graph,
+            },
+            NamedObjectReferenceGraph {
+                file_name: "different.assets",
+                metadata: &unrelated_metadata,
+                graph: &unrelated_graph,
+            },
+        ];
+        let missing = MultiFileReferenceGraph::build(&missing_files).unwrap();
+        assert_eq!(
+            missing.references()[0].resolution,
+            MultiFilePPtrResolution::MissingDependency {
+                external_index: 0,
+                path_id: 22,
+            }
+        );
+        assert_eq!(
+            missing
+                .dependency_identifier(0, 0)
+                .unwrap()
+                .fixed_path_name(),
+            "shared.assets"
+        );
+        assert!(!missing.is_complete());
+
+        let duplicate_files = [
+            NamedObjectReferenceGraph {
+                file_name: "main.assets",
+                metadata: &source_metadata,
+                graph: &source_graph,
+            },
+            NamedObjectReferenceGraph {
+                file_name: "shared.assets",
+                metadata: &unrelated_metadata,
+                graph: &unrelated_graph,
+            },
+            NamedObjectReferenceGraph {
+                file_name: "LIBRARY/SHARED.ASSETS",
+                metadata: &unrelated_metadata,
+                graph: &unrelated_graph,
+            },
+        ];
+        let ambiguous = MultiFileReferenceGraph::build(&duplicate_files).unwrap();
+        assert_eq!(
+            ambiguous.references()[0].resolution,
+            MultiFilePPtrResolution::AmbiguousDependency {
+                external_index: 0,
+                path_id: 22,
+                candidate_count: 2,
+            }
+        );
+        assert_eq!(
+            ambiguous
+                .candidate_file_indices("shared.assets")
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
+        assert!(!ambiguous.is_complete());
+    }
+
+    #[test]
+    fn cross_file_graph_distinguishes_missing_target_objects_and_limits() {
+        let source_metadata = metadata(&[11]);
+        let source_graph = graph_with_reference(&[11], 11, 1, 404);
+        let target_metadata = metadata(&[22]);
+        let target_graph = empty_graph(&[22]);
+        let files = [
+            NamedObjectReferenceGraph {
+                file_name: "main.assets",
+                metadata: &source_metadata,
+                graph: &source_graph,
+            },
+            NamedObjectReferenceGraph {
+                file_name: "shared.assets",
+                metadata: &target_metadata,
+                graph: &target_graph,
+            },
+        ];
+
+        let graph = MultiFileReferenceGraph::build(&files).unwrap();
+        assert_eq!(
+            graph.references()[0].resolution,
+            MultiFilePPtrResolution::MissingExternalObject {
+                target_file_index: 1,
+                path_id: 404,
+            }
+        );
+        assert!(matches!(
+            MultiFileReferenceGraph::build_with_limits(
+                &files,
+                MultiFileReferenceGraphLimits {
+                    max_files: 1,
+                    ..MultiFileReferenceGraphLimits::default()
+                }
+            ),
+            Err(MultiFileReferenceGraphBuildError::FileCountLimitExceeded {
+                file_count: 2,
+                limit: 1
+            })
+        ));
+        assert!(matches!(
+            MultiFileReferenceGraph::build_with_limits(
+                &files,
+                MultiFileReferenceGraphLimits {
+                    max_references: 0,
+                    ..MultiFileReferenceGraphLimits::default()
+                }
+            ),
+            Err(
+                MultiFileReferenceGraphBuildError::ReferenceCountLimitExceeded {
+                    reference_count: 1,
+                    limit: 0
+                }
+            )
+        ));
+        assert!(matches!(
+            MultiFileReferenceGraph::build_with_limits(
+                &files,
+                MultiFileReferenceGraphLimits {
+                    max_total_file_name_bytes: 10,
+                    ..MultiFileReferenceGraphLimits::default()
+                }
+            ),
+            Err(
+                MultiFileReferenceGraphBuildError::TotalFileNameBytesLimitExceeded {
+                    byte_count: 11,
+                    limit: 10
+                }
+            )
+        ));
     }
 
     #[test]

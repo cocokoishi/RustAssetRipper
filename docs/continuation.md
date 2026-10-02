@@ -38,7 +38,7 @@ Phase 1: full Rust port of the local AssetRipper source baseline. The Phase 1 ga
 ## Latest verification
 
 - `cargo fmt --all -- --check`: exit 0.
-- `cargo test --workspace --locked`: exit 0; 150 unit tests passed, 0 failed, 0 doc tests.
+- `cargo test --workspace --locked`: exit 0; 153 unit tests passed, 0 failed, 0 doc tests.
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`: exit 0.
 - `cargo tree --locked`: exit 0; the dependency graph is recorded in `docs/dependencies-and-licenses.md`.
 - `tools/verify-baseline.ps1`: exit 0; all 1,449 reference files match the manifest.
@@ -49,7 +49,7 @@ Phase 1: full Rust port of the local AssetRipper source baseline. The Phase 1 ga
 
 ## Next work
 
-1. Add the broader local FileSystem adapter around directory and explicit-path import; then connect full object construction and cross-file external resource resolution.
+1. Implement source-compatible dependency discovery/loading from the mounted VFS and host paths, then feed loaded files into the new cross-file PPtr graph. GUID-derived `AssetType.Meta` identity and lookup remain open.
 2. Add independent codec and real-file fixtures, and resolve source differentials such as the Brotli marker issue with executable C# evidence when a .NET environment is available.
 3. Expand `docs/feature-parity.md` into per-version/per-platform behavior rows across all 51 projects, registration tables, options/defaults, generators, GUI workflows, and exporters.
 4. Add independent generic fixtures and source-derived regression coverage for untested SerializedFile generations and malformed layouts; obtain a usable .NET environment before claiming C# differential validation.
@@ -87,3 +87,12 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Tests cover `library/`, `resources/`, `archive:/`, lowercase rules, fallback paths, and original-name preservation.
 - `cargo test --workspace --locked`: 150 tests passed; Clippy with `-D warnings`, formatting, and the 1,449-file baseline verification passed.
 - Next: port the actual dependency lookup and loading path from `PlatformGameStructure.RequestDependency`, then connect loaded SerializedFiles to the cross-file PPtr graph. GUID-derived `AssetType.Meta` paths remain outstanding.
+
+## Cross-file PPtr graph
+
+- Added `MultiFileReferenceGraph` to join already-loaded per-file PPtr scans by normalized serialized-file identity, using the source `FileBase.Name` / `FileIdentifier.PathName` normalization rules.
+- Unique external file matches resolve PathIDs against the target file index. Nulls, invalid FileIDs, missing dependencies, duplicate file identities, and missing or duplicate target PathIDs remain separate outcomes; `is_complete` only returns true when every input scan is complete and every edge resolves uniquely or is explicitly null.
+- File, reference, per-name, and aggregate-name bounds are applied before constructing the cross-file result. The caller supplies the loaded file set; this increment does not discover or load dependencies from VFS or host paths.
+- Synthetic tests cover unique cross-file resolution, missing and ambiguous names, missing target PathID, source-name aliases, candidate enumeration, and limits.
+- `cargo fmt --all -- --check`: exit 0. `cargo test --workspace --locked`: 153 tests passed, 0 failed. `cargo clippy --workspace --all-targets --locked -- -D warnings`: exit 0. Baseline verifier found all 1,449 reference files unchanged; `git diff --check`: exit 0.
+- No real-file or C# differential has run. GUID-derived `AssetType.Meta` matching and actual dependency discovery/loading remain outstanding.

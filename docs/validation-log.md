@@ -132,3 +132,14 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Synthetic tests cover `library/` and `resources/` prefixes, `archive:/` basename extraction, lowercase normalization, unchanged non-prefixed paths, helper case behavior, and preservation of the source name.
 - `cargo test --workspace --locked`: exit 0; 150 unit tests passed, 0 failed, 0 doc tests. `cargo clippy --workspace --all-targets --locked -- -D warnings`: exit 0. `cargo fmt --all -- --check`: exit 0.
 - `tools/verify-baseline.ps1`: exit 0; all 1,449 reference files match the manifest. No actual dependency file lookup/loading, GUID-derived Meta lookup, or C# differential is implemented by this increment.
+
+## Cross-file PPtr graph
+
+- Added `MultiFileReferenceGraph` for an explicitly supplied set of named SerializedFiles with per-file reference scans. It applies source filename normalization, resolves unique external file names and target PathIDs, and retains explicit results for missing names, duplicate names, absent/duplicate target PathIDs, nulls, and invalid FileIDs.
+- Added limits for loaded file count, reference count, individual normalized file names, and aggregate normalized file-name bytes. The graph does not discover or load absent dependencies from the VFS or host filesystem.
+- Synthetic tests cover successful cross-file object resolution, missing and ambiguous file names, a missing target PathID, normalized aliases, duplicate candidate enumeration, and file/reference/name-byte bounds.
+- PowerShell `& 'C:\Users\koishi\.cargo\bin\cargo.exe' fmt --all -- --check`: exit 0.
+- PowerShell `& 'C:\Users\koishi\.cargo\bin\cargo.exe' test --workspace --locked`: exit 0; 153 tests passed, 0 failed, 0 doc tests.
+- PowerShell `& 'C:\Users\koishi\.cargo\bin\cargo.exe' clippy --workspace --all-targets --locked -- -D warnings`: exit 0.
+- `tools/verify-baseline.ps1`: exit 0; all 1,449 reference files match the manifest. `git diff --check`: exit 0.
+- Real-file/C# differential validation, VFS/host dependency discovery and loading, and `AssetType.Meta` GUID identity lookup have not run or been implemented.
