@@ -1,6 +1,6 @@
 //! Bounded loading of named SerializedFiles from the mounted VFS.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::io;
@@ -38,6 +38,7 @@ pub struct SerializedFileWorkspaceLimits {
     pub max_total_dependency_container_input_bytes: u64,
     pub max_total_dependency_container_entries: usize,
     pub max_total_dependency_container_output_bytes: u64,
+    pub max_total_bundle_scope_bytes: usize,
     pub max_total_objects: usize,
     pub max_total_reference_edges: usize,
     pub scheme: SchemeReaderLimits,
@@ -58,6 +59,7 @@ impl Default for SerializedFileWorkspaceLimits {
             max_total_dependency_container_input_bytes: 16 * 1024 * 1024 * 1024,
             max_total_dependency_container_entries: 1_000_000,
             max_total_dependency_container_output_bytes: 2 * 1024 * 1024 * 1024,
+            max_total_bundle_scope_bytes: 64 * 1024 * 1024,
             max_total_objects: 20_000_000,
             max_total_reference_edges: 5_000_000,
             scheme: SchemeReaderLimits::default(),
@@ -85,6 +87,8 @@ pub struct SerializedFileWorkspaceReport {
 pub struct LoadedSerializedFile {
     pub file_name: String,
     pub virtual_path: String,
+    /// Deepest source container virtual root containing this SerializedFile, if any.
+    pub container_scope: Option<String>,
     pub header: SerializedFileHeader,
     pub metadata: SerializedFileMetadata,
     pub reference_graph: ObjectReferenceGraph,
@@ -109,6 +113,7 @@ pub struct SerializedFileDependencyReport {
 pub(crate) struct PreExpandedContainer {
     pub virtual_path: String,
     pub serialized_files_loaded: usize,
+    pub container_scopes: Vec<String>,
 }
 
 pub(crate) struct SerializedFileDependencyLoadOptions<'a> {
@@ -437,6 +442,7 @@ impl SerializedFileWorkspace {
             files.push(LoadedSerializedFile {
                 file_name: input.file_name.clone(),
                 virtual_path: input.virtual_path.clone(),
+                container_scope: None,
                 header,
                 metadata,
                 reference_graph,
@@ -594,6 +600,47 @@ impl SerializedFileWorkspace {
                     SerializedFileWorkspaceErrorKind::DuplicatePreExpandedContainerPath,
                 ));
             }
+        }
+        let max_container_scope_count = limits
+            .max_files
+            .checked_add(limits.max_total_dependency_container_entries)
+            .ok_or_else(|| {
+                workspace_error(
+                    workspace.report,
+                    None,
+                    SerializedFileWorkspaceErrorKind::ContainerScopeCountOverflow,
+                )
+            })?;
+        let mut initial_scope_count = 0usize;
+        for container in preexpanded_containers {
+            initial_scope_count = initial_scope_count
+                .checked_add(container.container_scopes.len())
+                .ok_or_else(|| {
+                    workspace_error(
+                        workspace.report,
+                        Some(&container.virtual_path),
+                        SerializedFileWorkspaceErrorKind::ContainerScopeCountOverflow,
+                    )
+                })?;
+        }
+        let initial_scope_index = build_container_scope_index(
+            preexpanded_containers
+                .iter()
+                .flat_map(|container| container.container_scopes.iter()),
+            initial_scope_count,
+            max_container_scope_count,
+            workspace.report,
+            None,
+        )?;
+        let mut total_bundle_scope_bytes = 0usize;
+        for file in &mut workspace.files {
+            attach_container_scope(
+                file,
+                &initial_scope_index,
+                &mut total_bundle_scope_bytes,
+                limits,
+                workspace.report,
+            )?;
         }
         let mut next_mount_namespace = 0usize;
         let mut source_file_index = 0usize;
@@ -890,6 +937,24 @@ impl SerializedFileWorkspace {
                                                     ),
                                                 )
                                             })?;
+                                        let container_scope_count_limit = bounded_mount_limits
+                                            .max_entries
+                                            .checked_add(1)
+                                            .ok_or_else(|| {
+                                                workspace_error(
+                                                    workspace.report,
+                                                    Some(&candidate.virtual_path),
+                                                    SerializedFileWorkspaceErrorKind::ContainerScopeCountOverflow,
+                                                )
+                                            })?;
+                                        let scope_index = build_container_scope_index(
+                                            mount_report.container_scopes.iter(),
+                                            mount_report.container_scopes.len(),
+                                            container_scope_count_limit,
+                                            workspace.report,
+                                            Some(&candidate.virtual_path),
+                                        )?;
+                                        let first_loaded_file_index = workspace.files.len();
                                         total_container_entries = total_container_entries
                                             .checked_add(mount_report.mounted_entries)
                                             .ok_or_else(|| {
@@ -1056,6 +1121,16 @@ impl SerializedFileWorkspace {
                                                     ));
                                                 }
                                             }
+                                        }
+                                        for file in &mut workspace.files[first_loaded_file_index..]
+                                        {
+                                            attach_container_scope(
+                                                file,
+                                                &scope_index,
+                                                &mut total_bundle_scope_bytes,
+                                                limits,
+                                                workspace.report,
+                                            )?;
                                         }
                                         let requested_container_count = expanded_containers
                                             .len()
@@ -1242,6 +1317,113 @@ fn dependency_registry(
 
 fn file_name_from_virtual_path(path: &str) -> String {
     path.rsplit('/').next().unwrap_or_default().to_owned()
+}
+
+fn build_container_scope_index<'a>(
+    scope_paths: impl IntoIterator<Item = &'a String>,
+    scope_count: usize,
+    scope_count_limit: usize,
+    report: SerializedFileWorkspaceReport,
+    input_path: Option<&str>,
+) -> Result<HashSet<&'a str>, Box<SerializedFileWorkspaceError>> {
+    if scope_count > scope_count_limit {
+        return Err(workspace_error(
+            report,
+            input_path,
+            SerializedFileWorkspaceErrorKind::ContainerScopeCountLimitExceeded {
+                count: scope_count,
+                limit: scope_count_limit,
+            },
+        ));
+    }
+    let mut scope_index = HashSet::new();
+    scope_index.try_reserve(scope_count).map_err(|_| {
+        workspace_error(
+            report,
+            input_path,
+            SerializedFileWorkspaceErrorKind::AllocationFailed {
+                resource: "container scope identity index",
+                requested: scope_count,
+            },
+        )
+    })?;
+    for scope_path in scope_paths {
+        if !scope_index.insert(scope_path.as_str()) {
+            return Err(workspace_error(
+                report,
+                Some(scope_path),
+                SerializedFileWorkspaceErrorKind::DuplicateContainerScopePath,
+            ));
+        }
+    }
+    Ok(scope_index)
+}
+
+fn deepest_container_scope_for_path<'a>(
+    virtual_path: &str,
+    scope_index: &HashSet<&'a str>,
+) -> Option<&'a str> {
+    let mut search_end = virtual_path.len();
+    loop {
+        let separator = virtual_path[..search_end].rfind('/')?;
+        let candidate_end = if separator == 0 { 1 } else { separator };
+        let candidate = &virtual_path[..candidate_end];
+        if let Some(scope) = scope_index.get(candidate) {
+            return Some(*scope);
+        }
+        if separator == 0 {
+            return None;
+        }
+        search_end = separator;
+    }
+}
+
+fn attach_container_scope(
+    file: &mut LoadedSerializedFile,
+    scope_index: &HashSet<&str>,
+    total_scope_bytes: &mut usize,
+    limits: SerializedFileWorkspaceLimits,
+    report: SerializedFileWorkspaceReport,
+) -> Result<(), Box<SerializedFileWorkspaceError>> {
+    let Some(scope_path) = deepest_container_scope_for_path(&file.virtual_path, scope_index) else {
+        return Ok(());
+    };
+    let requested_bytes = total_scope_bytes
+        .checked_add(scope_path.len())
+        .ok_or_else(|| {
+            workspace_error(
+                report,
+                Some(&file.virtual_path),
+                SerializedFileWorkspaceErrorKind::BundleScopeByteCountOverflow,
+            )
+        })?;
+    if requested_bytes > limits.max_total_bundle_scope_bytes {
+        return Err(workspace_error(
+            report,
+            Some(&file.virtual_path),
+            SerializedFileWorkspaceErrorKind::TotalBundleScopeBytesLimitExceeded {
+                byte_count: requested_bytes,
+                limit: limits.max_total_bundle_scope_bytes,
+            },
+        ));
+    }
+    let mut owned_scope = String::new();
+    owned_scope
+        .try_reserve_exact(scope_path.len())
+        .map_err(|_| {
+            workspace_error(
+                report,
+                Some(&file.virtual_path),
+                SerializedFileWorkspaceErrorKind::AllocationFailed {
+                    resource: "loaded SerializedFile container scope",
+                    requested: scope_path.len(),
+                },
+            )
+        })?;
+    owned_scope.push_str(scope_path);
+    file.container_scope = Some(owned_scope);
+    *total_scope_bytes = requested_bytes;
+    Ok(())
 }
 
 fn remaining_workspace_limits(
@@ -1508,6 +1690,17 @@ pub enum SerializedFileWorkspaceErrorKind {
         limit: usize,
     },
     DependencyContainerOutputByteCountOverflow,
+    ContainerScopeCountOverflow,
+    ContainerScopeCountLimitExceeded {
+        count: usize,
+        limit: usize,
+    },
+    DuplicateContainerScopePath,
+    BundleScopeByteCountOverflow,
+    TotalBundleScopeBytesLimitExceeded {
+        byte_count: usize,
+        limit: usize,
+    },
     PreExpandedContainerCountLimitExceeded {
         count: usize,
         limit: usize,
@@ -1645,6 +1838,23 @@ impl Display for SerializedFileWorkspaceErrorKind {
             Self::DependencyContainerOutputByteCountOverflow => {
                 f.write_str("dependency container output byte count overflows")
             }
+            Self::ContainerScopeCountOverflow => {
+                f.write_str("container scope count overflows")
+            }
+            Self::ContainerScopeCountLimitExceeded { count, limit } => write!(
+                f,
+                "container scope count {count} exceeds workspace limit {limit}"
+            ),
+            Self::DuplicateContainerScopePath => {
+                f.write_str("container scope path occurs more than once")
+            }
+            Self::BundleScopeByteCountOverflow => {
+                f.write_str("loaded bundle-scope byte count overflows")
+            }
+            Self::TotalBundleScopeBytesLimitExceeded { byte_count, limit } => write!(
+                f,
+                "loaded bundle scopes use {byte_count} bytes, exceeding limit {limit}"
+            ),
             Self::PreExpandedContainerCountLimitExceeded { count, limit } => write!(
                 f,
                 "pre-expanded container count {count} exceeds limit {limit}"
@@ -1933,6 +2143,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(workspace.files().len(), 1);
+        assert_eq!(workspace.files()[0].container_scope, None);
         assert_eq!(workspace.files()[0].header.format_version.raw(), 10);
         assert_eq!(workspace.files()[0].metadata.objects[0].path_id, 42);
         assert!(workspace.files()[0].reference_graph.is_complete());
@@ -1999,7 +2210,12 @@ mod tests {
     fn platform_inventory_expands_initial_webdata_before_external_dependency_loading() {
         let mut filesystem = VirtualFileSystem::new();
         let serialized_leaf = make_generation_10_file();
-        let webdata = make_webdata_fixture(&[("shared.assets", &serialized_leaf)]);
+        let nested_leaf = make_generation_10_file();
+        let nested_webdata = make_webdata_fixture(&[("inner.assets", &nested_leaf)]);
+        let webdata = make_webdata_fixture(&[
+            ("shared.assets", &serialized_leaf),
+            ("nested.bundle", &nested_webdata),
+        ]);
         insert_file(
             &mut filesystem,
             "/game/Game_Data/globalgamemanagers",
@@ -2023,7 +2239,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(loaded.workspace.files().len(), 2);
+        assert_eq!(loaded.workspace.files().len(), 3);
         assert_eq!(loaded.initial_container_expansions.len(), 1);
         assert_eq!(
             loaded.initial_container_expansions[0].kind,
@@ -2031,7 +2247,27 @@ mod tests {
         );
         assert_eq!(
             loaded.initial_container_expansions[0].serialized_files_found,
-            1
+            2
+        );
+        let direct_file = loaded
+            .workspace
+            .files()
+            .iter()
+            .find(|file| file.virtual_path.ends_with("/shared.assets"))
+            .unwrap();
+        assert_eq!(
+            direct_file.container_scope.as_deref(),
+            Some("/.assetripper/import/initial/0")
+        );
+        let nested_file = loaded
+            .workspace
+            .files()
+            .iter()
+            .find(|file| file.virtual_path.ends_with("/nested.bundle/inner.assets"))
+            .unwrap();
+        assert_eq!(
+            nested_file.container_scope.as_deref(),
+            Some("/.assetripper/import/initial/0/nested.bundle")
         );
         assert!(matches!(
             loaded.dependencies.requests[0].outcome,
@@ -2041,7 +2277,7 @@ mod tests {
             loaded.dependencies.requests[1].outcome,
             SerializedFileDependencyOutcome::ContainerAlreadyExpanded {
                 virtual_path: "/game/Game_Data/data.unity3d".to_owned(),
-                serialized_files_loaded: 1,
+                serialized_files_loaded: 2,
                 matching_serialized_files: 0,
             }
         );
@@ -2267,6 +2503,10 @@ mod tests {
 
         assert_eq!(workspace.files().len(), 2);
         assert_eq!(workspace.files()[1].file_name, "shared.assets");
+        assert_eq!(
+            workspace.files()[1].container_scope.as_deref(),
+            Some("/__assetripper_dependency_mount_0")
+        );
         assert!(dependency_report.is_complete());
         assert_eq!(
             dependency_report.requests[0].outcome,
