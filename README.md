@@ -16,6 +16,16 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 
 On this workstation Cargo is installed under `%USERPROFILE%\.cargo\bin` but that directory is not on `PATH`; in PowerShell, prefix each command with `& "$env:USERPROFILE\.cargo\bin\cargo.exe"`. The latest Rust run and outstanding validation status are recorded in the [validation log](docs/validation-log.md). The local AssetRipper source tests remain unrun because `dotnet` is unavailable. See also the [continuation status](docs/continuation.md) and [dependency/license record](docs/dependencies-and-licenses.md).
 
+## Current command-line entry point
+
+The current partial CLI can mount one or more local input directories, detect a platform layout when possible, load recognized SerializedFiles and their external dependencies, and print a structural summary:
+
+```powershell
+cargo run -- inspect <input-directory> [input-directory ...]
+```
+
+`cargo run -- --help` and `cargo run -- --version` show command help and version. This is an import and inspection path only; it does not yet produce Unity projects or provide the source product's full options, exporters, or GUI.
+
 The source baseline and its local checksum manifest are documented in [baseline.md](docs/baseline.md). Port coverage is tracked in [feature-parity.md](docs/feature-parity.md).
 
 This repository is distributed under GPL-3.0-only; the baseline license text is included in [LICENSE.md](LICENSE.md).
