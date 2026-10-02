@@ -4,7 +4,12 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::str;
 
-use crate::serialized_file::object::{SerializedValue, SerializedValueLookupError};
+use crate::serialized_file::file::SerializedFile;
+use crate::serialized_file::header::SerializedFileHeader;
+use crate::serialized_file::metadata::{ObjectInfo, SerializedFileMetadata};
+use crate::serialized_file::object::{
+    ObjectDecodeLimits, SerializedValue, SerializedValueLookupError,
+};
 
 use super::scene_naming::{scene_path_for_collection, SceneUnityVersion};
 
@@ -101,6 +106,54 @@ pub fn extract_build_settings_scene_paths(
     Ok(paths)
 }
 
+/// Decode one BuildSettings object from a parsed SerializedFile and extract its ordered paths.
+pub fn decode_build_settings_scene_paths(
+    file: &SerializedFile<'_>,
+    object_index: usize,
+    scene_limits: BuildSettingsSceneLimits,
+    object_limits: &ObjectDecodeLimits,
+) -> Result<Vec<String>, BuildSettingsSceneError> {
+    decode_build_settings_scene_paths_from_parts(
+        &file.metadata,
+        &file.header,
+        file.input(),
+        object_index,
+        scene_limits,
+        object_limits,
+    )
+}
+
+/// Decode a BuildSettings object when metadata and original bytes are held separately by a workspace.
+pub fn decode_build_settings_scene_paths_from_parts(
+    metadata: &SerializedFileMetadata,
+    header: &SerializedFileHeader,
+    file_bytes: &[u8],
+    object_index: usize,
+    scene_limits: BuildSettingsSceneLimits,
+    object_limits: &ObjectDecodeLimits,
+) -> Result<Vec<String>, BuildSettingsSceneError> {
+    let object = metadata.objects.get(object_index).ok_or(
+        BuildSettingsSceneError::ObjectIndexOutOfBounds {
+            object_index,
+            object_count: metadata.objects.len(),
+        },
+    )?;
+    let class_id = object_scene_class_id(object);
+    if class_id != Some(BUILD_SETTINGS_CLASS_ID) {
+        return Err(BuildSettingsSceneError::UnexpectedObjectClass {
+            object_index,
+            actual_class_id: class_id,
+        });
+    }
+    let payload = metadata
+        .decode_object_payload_with_limits(file_bytes, header, object_index, object_limits)
+        .map_err(|error| BuildSettingsSceneError::ObjectDecode {
+            object_index,
+            message: error.to_string(),
+        })?;
+    extract_build_settings_scene_paths(&payload.root, scene_limits)
+}
+
 /// Resolve one collection name against a decoded BuildSettings object.
 pub fn scene_path_from_build_settings_value(
     collection_name: &str,
@@ -141,6 +194,15 @@ fn scene_path_bytes(
     }
 }
 
+const BUILD_SETTINGS_CLASS_ID: i32 = 141;
+
+fn object_scene_class_id(object: &ObjectInfo) -> Option<i32> {
+    object
+        .class_id
+        .map(i32::from)
+        .or_else(|| object.resolved_type_index.map(|_| object.raw_type_id))
+}
+
 fn value_type_name(value: &SerializedValue) -> &'static str {
     match value {
         SerializedValue::Bool(_) => "bool",
@@ -166,6 +228,18 @@ fn value_type_name(value: &SerializedValue) -> &'static str {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BuildSettingsSceneError {
+    ObjectIndexOutOfBounds {
+        object_index: usize,
+        object_count: usize,
+    },
+    UnexpectedObjectClass {
+        object_index: usize,
+        actual_class_id: Option<i32>,
+    },
+    ObjectDecode {
+        object_index: usize,
+        message: String,
+    },
     FieldLookup {
         field_name: &'static str,
         source: SerializedValueLookupError,
@@ -210,6 +284,24 @@ pub enum BuildSettingsSceneError {
 impl Display for BuildSettingsSceneError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ObjectIndexOutOfBounds {
+                object_index,
+                object_count,
+            } => write!(
+                f,
+                "BuildSettings object index {object_index} is outside the {object_count}-object table"
+            ),
+            Self::UnexpectedObjectClass {
+                object_index,
+                actual_class_id,
+            } => write!(
+                f,
+                "object {object_index} has class ID {actual_class_id:?}; expected BuildSettings class ID {BUILD_SETTINGS_CLASS_ID}"
+            ),
+            Self::ObjectDecode {
+                object_index,
+                message,
+            } => write!(f, "could not decode BuildSettings object {object_index}: {message}"),
             Self::FieldLookup { field_name, source } => {
                 write!(f, "could not read BuildSettings field '{field_name}': {source}")
             }
@@ -266,11 +358,15 @@ impl Error for BuildSettingsSceneError {}
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_build_settings_scene_paths, scene_path_from_build_settings_value,
-        BuildSettingsSceneError, BuildSettingsSceneLimits,
+        decode_build_settings_scene_paths, extract_build_settings_scene_paths,
+        scene_path_from_build_settings_value, BuildSettingsSceneError, BuildSettingsSceneLimits,
     };
-    use crate::processing::scene_naming::SceneUnityVersion;
-    use crate::serialized_file::object::{SerializedFieldValue, SerializedValue};
+    use crate::processing::scene_naming::{scene_path_for_collection, SceneUnityVersion};
+    use crate::serialized_file::file::SerializedFile;
+    use crate::serialized_file::format_version::FormatVersion;
+    use crate::serialized_file::object::{
+        ObjectDecodeLimits, SerializedFieldValue, SerializedValue,
+    };
 
     fn field(name: &str, value: SerializedValue) -> SerializedFieldValue {
         SerializedFieldValue {
@@ -284,6 +380,118 @@ mod tests {
             field("enabled", SerializedValue::Bool(true)),
             field("path", SerializedValue::StringBytes(path.to_vec())),
         ])
+    }
+
+    fn put_u16_le(output: &mut Vec<u8>, value: u16) {
+        output.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn put_i32_le(output: &mut Vec<u8>, value: i32) {
+        output.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn put_u32_le(output: &mut Vec<u8>, value: u32) {
+        output.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn push_tree_string(strings: &mut Vec<u8>, value: &str) -> u32 {
+        let offset = u32::try_from(strings.len()).unwrap();
+        strings.extend_from_slice(value.as_bytes());
+        strings.push(0);
+        offset
+    }
+
+    fn put_tree_node(
+        output: &mut Vec<u8>,
+        level: u8,
+        type_offset: u32,
+        name_offset: u32,
+        byte_size: i32,
+        index: i32,
+    ) {
+        put_u16_le(output, 1);
+        output.push(level);
+        output.push(0);
+        put_u32_le(output, type_offset);
+        put_u32_le(output, name_offset);
+        put_i32_le(output, byte_size);
+        put_i32_le(output, index);
+        put_u32_le(output, 0);
+    }
+
+    fn make_build_settings_file() -> Vec<u8> {
+        let mut strings = Vec::new();
+        let build_settings_type = push_tree_string(&mut strings, "BuildSettings");
+        let empty = push_tree_string(&mut strings, "");
+        let vector_type = push_tree_string(&mut strings, "vector");
+        let scenes_field = push_tree_string(&mut strings, "m_Scenes");
+        let array_type = push_tree_string(&mut strings, "Array");
+        let int_type = push_tree_string(&mut strings, "int");
+        let size_field = push_tree_string(&mut strings, "size");
+        let string_type = push_tree_string(&mut strings, "string");
+        let data_field = push_tree_string(&mut strings, "data");
+        let char_type = push_tree_string(&mut strings, "char");
+
+        let mut tree = Vec::new();
+        for (level, type_offset, name_offset, byte_size, index) in [
+            (0, build_settings_type, empty, -1, 0),
+            (1, vector_type, scenes_field, -1, 1),
+            (2, array_type, array_type, -1, 2),
+            (3, int_type, size_field, 4, 3),
+            (3, string_type, data_field, -1, 4),
+            (4, array_type, array_type, -1, 5),
+            (5, int_type, size_field, 4, 6),
+            (5, char_type, data_field, 1, 7),
+        ] {
+            put_tree_node(&mut tree, level, type_offset, name_offset, byte_size, index);
+        }
+
+        let mut metadata = Vec::new();
+        metadata.extend_from_slice(b"2019.4.0f1\0");
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 1);
+        put_i32_le(&mut metadata, 141);
+        put_i32_le(&mut metadata, 8);
+        put_i32_le(&mut metadata, i32::try_from(strings.len()).unwrap());
+        metadata.extend_from_slice(&tree);
+        metadata.extend_from_slice(&strings);
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 1);
+        put_i32_le(&mut metadata, 42);
+        put_u32_le(&mut metadata, 0);
+
+        let scene_paths = [
+            b"Assets/Scenes/Main.unity".as_slice(),
+            b"Assets/Scenes/Next.unity",
+        ];
+        let mut payload = Vec::new();
+        put_i32_le(&mut payload, i32::try_from(scene_paths.len()).unwrap());
+        for path in scene_paths {
+            put_i32_le(&mut payload, i32::try_from(path.len()).unwrap());
+            payload.extend_from_slice(path);
+            let padding = (4 - path.len() % 4) % 4;
+            payload.resize(payload.len() + padding, 0);
+        }
+
+        put_i32_le(&mut metadata, i32::try_from(payload.len()).unwrap());
+        put_i32_le(&mut metadata, 141);
+        put_u16_le(&mut metadata, 141);
+        put_u16_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 0);
+        metadata.push(0);
+
+        let header_size = 20usize;
+        let data_offset = header_size + metadata.len();
+        let file_size = data_offset + payload.len();
+        let mut file = Vec::with_capacity(file_size);
+        file.extend_from_slice(&i32::try_from(metadata.len()).unwrap().to_be_bytes());
+        file.extend_from_slice(&u32::try_from(file_size).unwrap().to_be_bytes());
+        file.extend_from_slice(&FormatVersion::Unknown10.raw().to_be_bytes());
+        file.extend_from_slice(&u32::try_from(data_offset).unwrap().to_be_bytes());
+        file.extend_from_slice(&[0, 0, 0, 0]);
+        file.extend_from_slice(&metadata);
+        file.extend_from_slice(&payload);
+        file
     }
 
     #[test]
@@ -340,6 +548,26 @@ mod tests {
             )
             .unwrap()
             .as_deref(),
+            Some("Assets/Scenes/Next")
+        );
+    }
+
+    #[test]
+    fn decodes_build_settings_paths_from_a_complete_serialized_file() {
+        let bytes = make_build_settings_file();
+        let file = SerializedFile::parse(&bytes).unwrap();
+        let paths = decode_build_settings_scene_paths(
+            &file,
+            0,
+            BuildSettingsSceneLimits::default(),
+            &ObjectDecodeLimits::default(),
+        )
+        .unwrap();
+        let version =
+            SceneUnityVersion::parse(file.metadata.prefix.unity_version_text.as_deref().unwrap())
+                .unwrap();
+        assert_eq!(
+            scene_path_for_collection("level1", version, &paths).as_deref(),
             Some("Assets/Scenes/Next")
         );
     }

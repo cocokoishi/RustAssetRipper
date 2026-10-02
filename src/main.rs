@@ -10,9 +10,13 @@ use assetripper::io::platform_file_inventory::{
     PlatformFileInventoryLimits, PlatformFileInventoryOptions, PlatformWorkspaceLoadOptions,
 };
 use assetripper::io::platform_structure::{detect_platform_structure, PlatformStructureLimits};
+use assetripper::processing::scene_metadata::{
+    decode_build_settings_scene_paths_from_parts, BuildSettingsSceneLimits,
+};
 use assetripper::scheme::{
     BatchMountLimits, BatchMountReport, ContainerMountLimits, SchemeReader, SchemeReaderLimits,
 };
+use assetripper::serialized_file::object::ObjectDecodeLimits;
 use assetripper::serialized_file::workspace::{
     SerializedFileDependencyReport, SerializedFileWorkspace, SerializedFileWorkspaceLimits,
 };
@@ -95,7 +99,7 @@ fn inspect_directories(input_directories: &[PathBuf]) -> Result<(), Box<dyn Erro
             "platform directory import: {} logical files, {} source bytes",
             total_mount_report.discovered_inputs, total_mount_report.discovered_source_bytes
         );
-        print_workspace_summary(&loaded.workspace, &loaded.dependencies);
+        print_workspace_summary(&filesystem, &loaded.workspace, &loaded.dependencies)?;
         return Ok(());
     }
 
@@ -132,7 +136,7 @@ fn inspect_directories(input_directories: &[PathBuf]) -> Result<(), Box<dyn Erro
         total_mount_report.mounted_entries,
         total_mount_report.mounted_bytes
     );
-    print_workspace_summary(&workspace, &dependencies);
+    print_workspace_summary(&filesystem, &workspace, &dependencies)?;
     Ok(())
 }
 
@@ -218,9 +222,10 @@ fn mount_input_directories(
 }
 
 fn print_workspace_summary(
+    filesystem: &VirtualFileSystem,
     workspace: &SerializedFileWorkspace,
     dependencies: &SerializedFileDependencyReport,
-) {
+) -> Result<(), Box<dyn Error>> {
     println!("SerializedFiles: {}", workspace.files().len());
     for file in workspace.files() {
         println!(
@@ -229,6 +234,42 @@ fn print_workspace_summary(
             file.header.format_version,
             file.metadata.objects.len()
         );
+
+        let mut file_bytes = None;
+        for (object_index, object) in file.metadata.objects.iter().enumerate() {
+            let class_id = object
+                .class_id
+                .map(i32::from)
+                .or_else(|| object.resolved_type_index.map(|_| object.raw_type_id));
+            if class_id != Some(141) {
+                continue;
+            }
+            if file_bytes.is_none() {
+                let maximum_bytes =
+                    usize::try_from(SerializedFileWorkspaceLimits::default().max_file_bytes)
+                        .unwrap_or(usize::MAX);
+                file_bytes = Some(filesystem.read_all_bytes(&file.virtual_path, maximum_bytes)?);
+            }
+            let Some(file_bytes) = file_bytes.as_deref() else {
+                return Err(invalid_data("BuildSettings file bytes were not retained").into());
+            };
+            let scenes = decode_build_settings_scene_paths_from_parts(
+                &file.metadata,
+                &file.header,
+                file_bytes,
+                object_index,
+                BuildSettingsSceneLimits::default(),
+                &ObjectDecodeLimits::default(),
+            )?;
+            println!(
+                "    BuildSettings object {}: {} scene paths",
+                object.path_id,
+                scenes.len()
+            );
+            for (scene_index, path) in scenes.iter().enumerate() {
+                println!("      scene[{scene_index}]: {path}");
+            }
+        }
     }
     println!(
         "external requests: {}; newly loaded dependencies: {}; resolved: {}",
@@ -236,6 +277,7 @@ fn print_workspace_summary(
         dependencies.loaded_serialized_files,
         dependencies.is_complete()
     );
+    Ok(())
 }
 
 fn remaining_budget_u64(limit: u64, consumed: u64, description: &str) -> Result<u64, io::Error> {
