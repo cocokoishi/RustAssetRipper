@@ -43,7 +43,7 @@ impl Default for SceneGraphLimits {
 }
 
 /// One object-table identity, retaining the source PathID and table index.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SceneObjectRecord {
     pub object_index: usize,
     pub path_id: i64,
@@ -51,6 +51,50 @@ pub struct SceneObjectRecord {
     /// Raw serialized UTF-8 bytes are kept so malformed input is not silently rewritten.
     pub name_bytes: Option<Vec<u8>>,
     pub is_active: Option<bool>,
+    /// Serialized local-space transform values for Transform and RectTransform objects.
+    pub transform: Option<SceneTransformValues>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SceneVector2 {
+    pub x: f32,
+    pub y: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SceneVector3 {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SceneQuaternion {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub w: f32,
+}
+
+/// Values serialized by Transform, with optional fields reflecting the active TypeTree layout.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SceneTransformValues {
+    pub local_position: Option<SceneVector3>,
+    pub local_rotation: Option<SceneQuaternion>,
+    pub local_scale: Option<SceneVector3>,
+    pub root_order: Option<i32>,
+    pub local_euler_angles_hint: Option<SceneVector3>,
+    pub rect_transform: Option<SceneRectTransformValues>,
+}
+
+/// Persisted layout data found on RectTransform; all values remain in their source coordinates.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SceneRectTransformValues {
+    pub anchor_min: Option<SceneVector2>,
+    pub anchor_max: Option<SceneVector2>,
+    pub anchored_position: Option<SceneVector2>,
+    pub size_delta: Option<SceneVector2>,
+    pub pivot: Option<SceneVector2>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -153,7 +197,7 @@ pub enum SceneGraphIssueKind {
 }
 
 /// File-scoped scene nodes and relationships recovered from GameObject/Transform TypeTrees.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SceneGraph {
     objects: Vec<SceneObjectRecord>,
     relationships: Vec<SceneRelationship>,
@@ -404,6 +448,7 @@ impl<'a> SceneGraphBuilder<'a> {
                 class_id: object_scene_class_id(object),
                 name_bytes: None,
                 is_active: None,
+                transform: None,
             });
             path_id_index.push((object.path_id, object_index));
         }
@@ -451,9 +496,12 @@ impl<'a> SceneGraphBuilder<'a> {
     ) -> Result<(), SceneGraphBuildError> {
         match class_id {
             Some(GAME_OBJECT_CLASS_ID) => self.read_game_object(object_index, path_id, root),
-            Some(TRANSFORM_CLASS_ID | RECT_TRANSFORM_CLASS_ID) => {
-                self.read_transform(object_index, path_id, root)
-            }
+            Some(TRANSFORM_CLASS_ID | RECT_TRANSFORM_CLASS_ID) => self.read_transform(
+                object_index,
+                path_id,
+                root,
+                class_id == Some(RECT_TRANSFORM_CLASS_ID),
+            ),
             _ => Ok(()),
         }
     }
@@ -533,7 +581,61 @@ impl<'a> SceneGraphBuilder<'a> {
         object_index: usize,
         path_id: i64,
         root: &SerializedValue,
+        is_rect_transform: bool,
     ) -> Result<(), SceneGraphBuildError> {
+        let local_position =
+            self.read_vector3_field(object_index, path_id, root, "m_LocalPosition", true)?;
+        let local_rotation =
+            self.read_quaternion_field(object_index, path_id, root, "m_LocalRotation", true)?;
+        let local_scale =
+            self.read_vector3_field(object_index, path_id, root, "m_LocalScale", true)?;
+        let root_order = self.read_i32_field(object_index, path_id, root, "m_RootOrder")?;
+        let local_euler_angles_hint =
+            self.read_vector3_field(object_index, path_id, root, "m_LocalEulerAnglesHint", false)?;
+        let rect_transform = if is_rect_transform {
+            Some(SceneRectTransformValues {
+                anchor_min: self.read_vector2_field(
+                    object_index,
+                    path_id,
+                    root,
+                    "m_AnchorMin",
+                    true,
+                )?,
+                anchor_max: self.read_vector2_field(
+                    object_index,
+                    path_id,
+                    root,
+                    "m_AnchorMax",
+                    true,
+                )?,
+                anchored_position: self.read_vector2_field(
+                    object_index,
+                    path_id,
+                    root,
+                    "m_AnchoredPosition",
+                    true,
+                )?,
+                size_delta: self.read_vector2_field(
+                    object_index,
+                    path_id,
+                    root,
+                    "m_SizeDelta",
+                    true,
+                )?,
+                pivot: self.read_vector2_field(object_index, path_id, root, "m_Pivot", true)?,
+            })
+        } else {
+            None
+        };
+        self.objects[object_index].transform = Some(SceneTransformValues {
+            local_position,
+            local_rotation,
+            local_scale,
+            root_order,
+            local_euler_angles_hint,
+            rect_transform,
+        });
+
         for (field_name, kind) in [
             ("m_GameObject", SceneRelationshipKind::ComponentGameObject),
             ("m_Father", SceneRelationshipKind::TransformParent),
@@ -577,6 +679,193 @@ impl<'a> SceneGraphBuilder<'a> {
             }
         }
         Ok(())
+    }
+
+    fn read_vector2_field(
+        &mut self,
+        object_index: usize,
+        path_id: i64,
+        root: &SerializedValue,
+        field_name: &str,
+        required: bool,
+    ) -> Result<Option<SceneVector2>, SceneGraphBuildError> {
+        let value = if required {
+            self.unique_field(object_index, path_id, root, field_name)?
+        } else {
+            self.optional_field(object_index, path_id, root, field_name)?
+        };
+        let Some(value) = value else {
+            return Ok(None);
+        };
+        if !matches!(value, SerializedValue::Struct(_)) {
+            self.unexpected_type(
+                object_index,
+                path_id,
+                field_name,
+                "Vector2",
+                value_type_name(value),
+            )?;
+            return Ok(None);
+        }
+        let Some(x) = self.read_f32_component(object_index, path_id, value, field_name, "x")?
+        else {
+            return Ok(None);
+        };
+        let Some(y) = self.read_f32_component(object_index, path_id, value, field_name, "y")?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(SceneVector2 { x, y }))
+    }
+
+    fn read_vector3_field(
+        &mut self,
+        object_index: usize,
+        path_id: i64,
+        root: &SerializedValue,
+        field_name: &str,
+        required: bool,
+    ) -> Result<Option<SceneVector3>, SceneGraphBuildError> {
+        let value = if required {
+            self.unique_field(object_index, path_id, root, field_name)?
+        } else {
+            self.optional_field(object_index, path_id, root, field_name)?
+        };
+        let Some(value) = value else {
+            return Ok(None);
+        };
+        if !matches!(value, SerializedValue::Struct(_)) {
+            self.unexpected_type(
+                object_index,
+                path_id,
+                field_name,
+                "Vector3",
+                value_type_name(value),
+            )?;
+            return Ok(None);
+        }
+        let Some(x) = self.read_f32_component(object_index, path_id, value, field_name, "x")?
+        else {
+            return Ok(None);
+        };
+        let Some(y) = self.read_f32_component(object_index, path_id, value, field_name, "y")?
+        else {
+            return Ok(None);
+        };
+        let Some(z) = self.read_f32_component(object_index, path_id, value, field_name, "z")?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(SceneVector3 { x, y, z }))
+    }
+
+    fn read_quaternion_field(
+        &mut self,
+        object_index: usize,
+        path_id: i64,
+        root: &SerializedValue,
+        field_name: &str,
+        required: bool,
+    ) -> Result<Option<SceneQuaternion>, SceneGraphBuildError> {
+        let value = if required {
+            self.unique_field(object_index, path_id, root, field_name)?
+        } else {
+            self.optional_field(object_index, path_id, root, field_name)?
+        };
+        let Some(value) = value else {
+            return Ok(None);
+        };
+        if !matches!(value, SerializedValue::Struct(_)) {
+            self.unexpected_type(
+                object_index,
+                path_id,
+                field_name,
+                "Quaternion",
+                value_type_name(value),
+            )?;
+            return Ok(None);
+        }
+        let Some(x) = self.read_f32_component(object_index, path_id, value, field_name, "x")?
+        else {
+            return Ok(None);
+        };
+        let Some(y) = self.read_f32_component(object_index, path_id, value, field_name, "y")?
+        else {
+            return Ok(None);
+        };
+        let Some(z) = self.read_f32_component(object_index, path_id, value, field_name, "z")?
+        else {
+            return Ok(None);
+        };
+        let Some(w) = self.read_f32_component(object_index, path_id, value, field_name, "w")?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(SceneQuaternion { x, y, z, w }))
+    }
+
+    fn read_i32_field(
+        &mut self,
+        object_index: usize,
+        path_id: i64,
+        root: &SerializedValue,
+        field_name: &str,
+    ) -> Result<Option<i32>, SceneGraphBuildError> {
+        let Some(value) = self.optional_field(object_index, path_id, root, field_name)? else {
+            return Ok(None);
+        };
+        match value {
+            SerializedValue::I32(value) => Ok(Some(*value)),
+            other => {
+                self.unexpected_type(
+                    object_index,
+                    path_id,
+                    field_name,
+                    "i32",
+                    value_type_name(other),
+                )?;
+                Ok(None)
+            }
+        }
+    }
+
+    fn read_f32_component(
+        &mut self,
+        object_index: usize,
+        path_id: i64,
+        vector: &SerializedValue,
+        vector_path: &str,
+        component_name: &str,
+    ) -> Result<Option<f32>, SceneGraphBuildError> {
+        let component_path = format!("{vector_path}.{component_name}");
+        match vector.unique_field(component_name) {
+            Ok(Some(SerializedValue::F32(value))) => Ok(Some(*value)),
+            Ok(Some(other)) => {
+                self.unexpected_type(
+                    object_index,
+                    path_id,
+                    &component_path,
+                    "f32",
+                    value_type_name(other),
+                )?;
+                Ok(None)
+            }
+            Ok(None) => {
+                self.push_issue(SceneGraphIssue {
+                    object_index,
+                    path_id,
+                    field_path: Some(component_path),
+                    kind: SceneGraphIssueKind::MissingField {
+                        field_name: component_name.to_owned(),
+                    },
+                })?;
+                Ok(None)
+            }
+            Err(error) => {
+                self.push_lookup_issue(object_index, path_id, &component_path, error)?;
+                Ok(None)
+            }
+        }
     }
 
     fn component_pointer(
@@ -662,6 +951,22 @@ impl<'a> SceneGraphBuilder<'a> {
                 })?;
                 Ok(None)
             }
+            Err(error) => {
+                self.push_lookup_issue(object_index, path_id, field_name, error)?;
+                Ok(None)
+            }
+        }
+    }
+
+    fn optional_field<'b>(
+        &mut self,
+        object_index: usize,
+        path_id: i64,
+        root: &'b SerializedValue,
+        field_name: &str,
+    ) -> Result<Option<&'b SerializedValue>, SceneGraphBuildError> {
+        match root.unique_field_in_base_chain(field_name) {
+            Ok(value) => Ok(value),
             Err(error) => {
                 self.push_lookup_issue(object_index, path_id, field_name, error)?;
                 Ok(None)
@@ -1197,7 +1502,8 @@ impl Error for SceneGraphBuildError {}
 mod tests {
     use super::{
         reference_field_path_matches, MultiFileReferenceGraph, SceneGraph, SceneGraphIssueKind,
-        SceneGraphLimits, SceneRelationshipKind, SceneRelationshipTarget,
+        SceneGraphLimits, SceneQuaternion, SceneRectTransformValues, SceneRelationshipKind,
+        SceneRelationshipTarget, SceneTransformValues, SceneVector2, SceneVector3,
     };
     use crate::io::binary::Endian;
     use crate::serialized_file::file::SerializedFile;
@@ -1259,11 +1565,64 @@ mod tests {
         Value::PPtr { file_id, path_id }
     }
 
+    fn vector2(x: f32, y: f32) -> Value {
+        Value::Struct(vec![field("x", Value::F32(x)), field("y", Value::F32(y))])
+    }
+
+    fn vector3(x: f32, y: f32, z: f32) -> Value {
+        Value::Struct(vec![
+            field("x", Value::F32(x)),
+            field("y", Value::F32(y)),
+            field("z", Value::F32(z)),
+        ])
+    }
+
+    fn quaternion(x: f32, y: f32, z: f32, w: f32) -> Value {
+        Value::Struct(vec![
+            field("x", Value::F32(x)),
+            field("y", Value::F32(y)),
+            field("z", Value::F32(z)),
+            field("w", Value::F32(w)),
+        ])
+    }
+
+    fn transform_fields(include_optional_version_fields: bool) -> Vec<Field> {
+        transform_fields_with_links(include_optional_version_fields, pptr(0, 0), Vec::new())
+    }
+
+    fn transform_fields_with_links(
+        include_optional_version_fields: bool,
+        father: Value,
+        children: Vec<Value>,
+    ) -> Vec<Field> {
+        let mut fields = vec![
+            field("m_GameObject", pptr(0, 10)),
+            field("m_LocalRotation", quaternion(0.1, 0.2, 0.3, 0.9)),
+            field("m_LocalPosition", vector3(1.25, -2.0, 3.5)),
+            field("m_LocalScale", vector3(2.0, 3.0, 4.0)),
+            field("m_Children", Value::Array(children)),
+            field("m_Father", father),
+        ];
+        if include_optional_version_fields {
+            fields.push(field("m_RootOrder", Value::I32(7)));
+            fields.push(field("m_LocalEulerAnglesHint", vector3(10.0, 20.0, 30.0)));
+        }
+        fields
+    }
+
     fn put_u16_le(output: &mut Vec<u8>, value: u16) {
         output.extend_from_slice(&value.to_le_bytes());
     }
 
     fn put_i32_le(output: &mut Vec<u8>, value: i32) {
+        output.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn put_i64_le(output: &mut Vec<u8>, value: i64) {
+        output.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn put_f32_le(output: &mut Vec<u8>, value: f32) {
         output.extend_from_slice(&value.to_le_bytes());
     }
 
@@ -1399,6 +1758,135 @@ mod tests {
         file
     }
 
+    fn make_transform_file() -> Vec<u8> {
+        let mut strings = Vec::new();
+        let root_type = push_tree_string(&mut strings, "Transform");
+        let empty = push_tree_string(&mut strings, "");
+        let pptr_game_object = push_tree_string(&mut strings, "PPtr<GameObject>");
+        let pptr_transform = push_tree_string(&mut strings, "PPtr<Transform>");
+        let quaternion_type = push_tree_string(&mut strings, "Quaternion");
+        let vector3_type = push_tree_string(&mut strings, "Vector3");
+        let float_type = push_tree_string(&mut strings, "float");
+        let int_type = push_tree_string(&mut strings, "int");
+        let vector_type = push_tree_string(&mut strings, "vector");
+        let array_type = push_tree_string(&mut strings, "Array");
+        let file_id_field = push_tree_string(&mut strings, "m_FileID");
+        let file_id_type = push_tree_string(&mut strings, "SInt32");
+        let path_id_field = push_tree_string(&mut strings, "m_PathID");
+        let path_id_type = push_tree_string(&mut strings, "SInt64");
+        let game_object_field = push_tree_string(&mut strings, "m_GameObject");
+        let local_rotation_field = push_tree_string(&mut strings, "m_LocalRotation");
+        let local_position_field = push_tree_string(&mut strings, "m_LocalPosition");
+        let local_scale_field = push_tree_string(&mut strings, "m_LocalScale");
+        let children_field = push_tree_string(&mut strings, "m_Children");
+        let father_field = push_tree_string(&mut strings, "m_Father");
+        let root_order_field = push_tree_string(&mut strings, "m_RootOrder");
+        let euler_hint_field = push_tree_string(&mut strings, "m_LocalEulerAnglesHint");
+        let x_field = push_tree_string(&mut strings, "x");
+        let y_field = push_tree_string(&mut strings, "y");
+        let z_field = push_tree_string(&mut strings, "z");
+        let w_field = push_tree_string(&mut strings, "w");
+        let size_field = push_tree_string(&mut strings, "size");
+        let data_field = push_tree_string(&mut strings, "data");
+
+        let mut nodes = Vec::new();
+        let mut add_node = |level, type_offset, name_offset, byte_size| {
+            let index = i32::try_from(nodes.len()).unwrap();
+            nodes.push((level, type_offset, name_offset, byte_size, index));
+        };
+        add_node(0, root_type, empty, -1);
+        add_node(1, pptr_game_object, game_object_field, -1);
+        add_node(2, file_id_type, file_id_field, 4);
+        add_node(2, path_id_type, path_id_field, 8);
+        add_node(1, quaternion_type, local_rotation_field, 16);
+        add_node(2, float_type, x_field, 4);
+        add_node(2, float_type, y_field, 4);
+        add_node(2, float_type, z_field, 4);
+        add_node(2, float_type, w_field, 4);
+        add_node(1, vector3_type, local_position_field, 12);
+        add_node(2, float_type, x_field, 4);
+        add_node(2, float_type, y_field, 4);
+        add_node(2, float_type, z_field, 4);
+        add_node(1, vector3_type, local_scale_field, 12);
+        add_node(2, float_type, x_field, 4);
+        add_node(2, float_type, y_field, 4);
+        add_node(2, float_type, z_field, 4);
+        add_node(1, vector_type, children_field, -1);
+        add_node(2, array_type, array_type, -1);
+        add_node(3, int_type, size_field, 4);
+        add_node(3, pptr_transform, data_field, -1);
+        add_node(4, file_id_type, file_id_field, 4);
+        add_node(4, path_id_type, path_id_field, 8);
+        add_node(1, pptr_transform, father_field, -1);
+        add_node(2, file_id_type, file_id_field, 4);
+        add_node(2, path_id_type, path_id_field, 8);
+        add_node(1, int_type, root_order_field, 4);
+        add_node(1, vector3_type, euler_hint_field, 12);
+        add_node(2, float_type, x_field, 4);
+        add_node(2, float_type, y_field, 4);
+        add_node(2, float_type, z_field, 4);
+
+        let mut metadata = Vec::new();
+        metadata.extend_from_slice(b"2019.4.0f1\0");
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 1);
+        put_i32_le(&mut metadata, 4);
+        put_i32_le(&mut metadata, i32::try_from(nodes.len()).unwrap());
+        put_i32_le(&mut metadata, i32::try_from(strings.len()).unwrap());
+        for (level, type_offset, name_offset, byte_size, index) in nodes {
+            put_tree_node(
+                &mut metadata,
+                level,
+                type_offset,
+                name_offset,
+                byte_size,
+                index,
+            );
+        }
+        metadata.extend_from_slice(&strings);
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 1);
+        put_i32_le(&mut metadata, 42);
+        put_u32_le(&mut metadata, 0);
+
+        let mut payload = Vec::new();
+        put_i32_le(&mut payload, 0);
+        put_i64_le(&mut payload, 0);
+        for value in [0.1, 0.2, 0.3, 0.9] {
+            put_f32_le(&mut payload, value);
+        }
+        for value in [1.25, -2.0, 3.5, 2.0, 3.0, 4.0] {
+            put_f32_le(&mut payload, value);
+        }
+        put_i32_le(&mut payload, 0); // m_Children count
+        put_i32_le(&mut payload, 0); // m_Father file ID
+        put_i64_le(&mut payload, 0); // m_Father PathID
+        put_i32_le(&mut payload, 7); // m_RootOrder
+        for value in [10.0, 20.0, 30.0] {
+            put_f32_le(&mut payload, value);
+        }
+
+        put_i32_le(&mut metadata, i32::try_from(payload.len()).unwrap());
+        put_i32_le(&mut metadata, 4);
+        put_u16_le(&mut metadata, 4);
+        put_u16_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 0); // external count
+        metadata.push(0); // reference type count
+
+        let header_size = 20usize;
+        let data_offset = header_size + metadata.len();
+        let file_size = data_offset + payload.len();
+        let mut file = Vec::with_capacity(file_size);
+        file.extend_from_slice(&i32::try_from(metadata.len()).unwrap().to_be_bytes());
+        file.extend_from_slice(&u32::try_from(file_size).unwrap().to_be_bytes());
+        file.extend_from_slice(&FormatVersion::Unknown10.raw().to_be_bytes());
+        file.extend_from_slice(&u32::try_from(data_offset).unwrap().to_be_bytes());
+        file.extend_from_slice(&[0, 0, 0, 0]);
+        file.extend_from_slice(&metadata);
+        file.extend_from_slice(&payload);
+        file
+    }
+
     #[test]
     fn reconstructs_game_object_component_and_transform_edges_without_merging_order() {
         let metadata = metadata(&[(10, 1), (20, 4), (30, 4), (40, 23)]);
@@ -1424,25 +1912,21 @@ mod tests {
             ),
             (
                 1,
-                Value::Struct(vec![
-                    field(
-                        "Base",
-                        Value::Struct(vec![field("m_GameObject", pptr(0, 10))]),
-                    ),
-                    field("m_Father", pptr(0, 0)),
-                    field("m_Children", Value::Array(vec![pptr(0, 30)])),
-                ]),
+                Value::Struct(vec![field(
+                    "Base",
+                    Value::Struct(transform_fields_with_links(
+                        true,
+                        pptr(0, 0),
+                        vec![pptr(0, 30)],
+                    )),
+                )]),
             ),
             (
                 2,
-                Value::Struct(vec![
-                    field(
-                        "Base",
-                        Value::Struct(vec![field("m_GameObject", pptr(0, 10))]),
-                    ),
-                    field("m_Father", pptr(0, 20)),
-                    field("m_Children", Value::Array(Vec::new())),
-                ]),
+                Value::Struct(vec![field(
+                    "Base",
+                    Value::Struct(transform_fields_with_links(true, pptr(0, 20), Vec::new())),
+                )]),
             ),
         ];
 
@@ -1485,6 +1969,114 @@ mod tests {
         );
         assert!(graph.issues().is_empty());
         assert!(graph.is_complete());
+    }
+
+    #[test]
+    fn decodes_transform_and_rect_transform_values_from_type_tree_fields() {
+        let metadata = metadata(&[(10, 4), (20, 224)]);
+        let mut rect_fields = vec![field("Base", Value::Struct(transform_fields(true)))];
+        rect_fields.extend([
+            field("m_AnchorMin", vector2(0.1, 0.2)),
+            field("m_AnchorMax", vector2(0.8, 0.9)),
+            field("m_AnchoredPosition", vector2(12.0, -6.0)),
+            field("m_SizeDelta", vector2(320.0, 180.0)),
+            field("m_Pivot", vector2(0.5, 1.0)),
+        ]);
+        let roots = vec![
+            (0, Value::Struct(transform_fields(false))),
+            (1, Value::Struct(rect_fields)),
+        ];
+
+        let graph =
+            SceneGraph::from_decoded_roots(&metadata, &roots, SceneGraphLimits::default()).unwrap();
+
+        assert_eq!(
+            graph.objects()[0].transform,
+            Some(SceneTransformValues {
+                local_position: Some(SceneVector3 {
+                    x: 1.25,
+                    y: -2.0,
+                    z: 3.5,
+                }),
+                local_rotation: Some(SceneQuaternion {
+                    x: 0.1,
+                    y: 0.2,
+                    z: 0.3,
+                    w: 0.9,
+                }),
+                local_scale: Some(SceneVector3 {
+                    x: 2.0,
+                    y: 3.0,
+                    z: 4.0,
+                }),
+                root_order: None,
+                local_euler_angles_hint: None,
+                rect_transform: None,
+            })
+        );
+        assert_eq!(
+            graph.objects()[1]
+                .transform
+                .as_ref()
+                .unwrap()
+                .rect_transform,
+            Some(SceneRectTransformValues {
+                anchor_min: Some(SceneVector2 { x: 0.1, y: 0.2 }),
+                anchor_max: Some(SceneVector2 { x: 0.8, y: 0.9 }),
+                anchored_position: Some(SceneVector2 { x: 12.0, y: -6.0 }),
+                size_delta: Some(SceneVector2 { x: 320.0, y: 180.0 }),
+                pivot: Some(SceneVector2 { x: 0.5, y: 1.0 }),
+            })
+        );
+        assert_eq!(
+            graph.objects()[1].transform.as_ref().unwrap().root_order,
+            Some(7)
+        );
+        assert_eq!(
+            graph.objects()[1]
+                .transform
+                .as_ref()
+                .unwrap()
+                .local_euler_angles_hint,
+            Some(SceneVector3 {
+                x: 10.0,
+                y: 20.0,
+                z: 30.0,
+            })
+        );
+        assert!(graph.issues().is_empty());
+    }
+
+    #[test]
+    fn reports_malformed_transform_values_without_filling_defaults() {
+        let metadata = metadata(&[(10, 4)]);
+        let mut fields = transform_fields(false);
+        fields
+            .iter_mut()
+            .find(|field| field.name == "m_LocalPosition")
+            .unwrap()
+            .value = Value::Bool(false);
+        let roots = vec![(0, Value::Struct(fields))];
+
+        let graph =
+            SceneGraph::from_decoded_roots(&metadata, &roots, SceneGraphLimits::default()).unwrap();
+
+        assert_eq!(
+            graph.objects()[0]
+                .transform
+                .as_ref()
+                .unwrap()
+                .local_position,
+            None
+        );
+        assert!(graph.issues().iter().any(|issue| matches!(
+            issue.kind,
+            SceneGraphIssueKind::UnexpectedValueType {
+                expected: "Vector3",
+                actual: "bool",
+            }
+        )));
+        assert!(!graph.is_complete());
     }
 
     #[test]
@@ -1531,6 +2123,46 @@ mod tests {
             graph.relationships()[0].target,
             SceneRelationshipTarget::LocalObject { object_index: 0 }
         );
+    }
+
+    #[test]
+    fn builds_transform_values_from_a_complete_2019_serialized_file() {
+        let bytes = make_transform_file();
+        let file = SerializedFile::parse(&bytes).unwrap();
+        let graph = SceneGraph::build(&file, SceneGraphLimits::default()).unwrap();
+
+        assert_eq!(graph.objects().len(), 1);
+        assert_eq!(graph.objects()[0].class_id, Some(4));
+        assert_eq!(
+            graph.objects()[0].transform,
+            Some(SceneTransformValues {
+                local_position: Some(SceneVector3 {
+                    x: 1.25,
+                    y: -2.0,
+                    z: 3.5,
+                }),
+                local_rotation: Some(SceneQuaternion {
+                    x: 0.1,
+                    y: 0.2,
+                    z: 0.3,
+                    w: 0.9,
+                }),
+                local_scale: Some(SceneVector3 {
+                    x: 2.0,
+                    y: 3.0,
+                    z: 4.0,
+                }),
+                root_order: Some(7),
+                local_euler_angles_hint: Some(SceneVector3 {
+                    x: 10.0,
+                    y: 20.0,
+                    z: 30.0,
+                }),
+                rect_transform: None,
+            })
+        );
+        assert_eq!(graph.relationships().len(), 2);
+        assert!(graph.issues().is_empty());
     }
 
     #[test]
@@ -1746,7 +2378,15 @@ mod tests {
             (
                 1,
                 Value::Struct(vec![
-                    field("m_GameObject", pptr(-1, 10)),
+                    field(
+                        "Base",
+                        Value::Struct(vec![
+                            field("m_GameObject", pptr(-1, 10)),
+                            field("m_LocalPosition", vector3(0.0, 0.0, 0.0)),
+                            field("m_LocalRotation", quaternion(0.0, 0.0, 0.0, 1.0)),
+                            field("m_LocalScale", vector3(1.0, 1.0, 1.0)),
+                        ]),
+                    ),
                     field("m_Father", pptr(0, 0)),
                     field("m_Father", pptr(0, 20)),
                     field("m_Children", Value::Bool(true)),
