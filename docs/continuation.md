@@ -167,4 +167,13 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - WebGL data files and the matched WebPlayer bundle follow their constructor registration rules. Streaming bundle scans use the source platform paths; Android scans the APK `assets` root recursively while skipping its direct `bin` subtree, even when `skip_streaming_assets` is true, matching the source Android override. Bundle candidates are accepted only when the raw UnityFS/UnityRaw/UnityWeb header is recognized.
 - The scanner bounds probed file count/size/aggregate bytes, directory count/depth, and all enumerated path lengths. Seven synthetic tests cover primary names, compressed game files, streaming bundles and skip mode, Android traversal, Web registrations, explicit missing DataPaths, and limits.
 - `cargo test --workspace --locked`: exit 0; 190 tests passed, 0 failed, 0 doc tests. Warnings-denied workspace Clippy and `cargo fmt --all -- --check` passed. `tools/verify-baseline.ps1` confirmed 1,449 reference files unchanged; `git diff --check` passed.
-- This API does not yet collect Mono assemblies, detect platform scripting backends, or connect the platform structure to the product input flow. No real-file or C# differential has run; Phase 1 remains open.
+- Platform inventory does not yet collect Mono assemblies, detect scripting backends, or make unreferenced top-level bundles/WebData initial inputs. Product UI flow and real-file/C# differential remain outstanding; Phase 1 remains open.
+
+
+## Platform inputs to the SerializedFile workspace
+
+- `PlatformFileInventory` now separates the source `IsPrimaryEngineFile` name matches into `primary_file_inputs` while retaining every game-file registration for dependency lookup.
+- `PlatformStructure::load_primary_serialized_workspace` feeds those inputs, the full registration list, and ordered DataPaths into `SerializedFileWorkspace::load_from_vfs_with_dependencies`. Reachable external SerializedFiles are loaded recursively, and bundle dependencies use the existing bounded expansion path. An empty primary set returns an explicit error.
+- A synthetic `globalgamemanagers` fixture references a sibling `shared.assets`; the platform API loads both files and records the dependency outcome. A WebPlayer-only fixture verifies the helper does not silently return an empty successful workspace.
+- The full workspace suite passes 192 tests. Warnings-denied Clippy, formatting, baseline verification, and diff check all passed for this increment.
+- This helper does not import top-level bundles without a primary-file reference or treat WebData as an initial input. Full container/platform import and product UI integration remain outstanding.

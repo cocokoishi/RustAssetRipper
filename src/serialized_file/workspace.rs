@@ -1646,6 +1646,8 @@ mod tests {
     };
     use crate::io::dependency::{DependencyFilePath, DependencyIndexLimits};
     use crate::io::filesystem::VirtualFileSystem;
+    use crate::io::platform_file_inventory::PlatformWorkspaceLoadOptions;
+    use crate::io::platform_structure::{PlatformKind, PlatformStructure};
     use crate::scheme::{ContainerMountErrorKind, ContainerMountLimits, FileKind};
     use crate::serialized_file::reference_graph::{
         MultiFilePPtrResolution, MultiFileReferenceGraphLimits,
@@ -1856,6 +1858,48 @@ mod tests {
             }
         );
         assert!(graph.is_complete());
+    }
+
+    #[test]
+    fn platform_inventory_feeds_primary_files_and_ordered_datapaths_to_dependency_loading() {
+        let mut filesystem = VirtualFileSystem::new();
+        insert_file(
+            &mut filesystem,
+            "/game/Game_Data/globalgamemanagers",
+            &make_generation_10_file_with(&["shared.assets"], 1, 10, 42),
+        );
+        insert_file(
+            &mut filesystem,
+            "/game/Game_Data/shared.assets",
+            &make_generation_10_file(),
+        );
+        let structure = PlatformStructure {
+            platform: PlatformKind::Windows,
+            selected_path: "/game".to_owned(),
+            consumed_paths: vec!["/game".to_owned()],
+            root_path: "/game".to_owned(),
+            name: Some("Game".to_owned()),
+            game_data_path: Some("/game/Game_Data".to_owned()),
+            data_paths: vec!["/game/Game_Data".to_owned()],
+        };
+
+        let loaded = structure
+            .load_primary_serialized_workspace(
+                &mut filesystem,
+                PlatformWorkspaceLoadOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(loaded.file_inventory.primary_file_inputs.len(), 1);
+        assert_eq!(
+            loaded.file_inventory.primary_file_inputs[0].file_name,
+            "globalgamemanagers"
+        );
+        assert_eq!(loaded.workspace.files().len(), 2);
+        assert_eq!(loaded.dependencies.loaded_serialized_files, 1);
+        assert!(matches!(
+            loaded.dependencies.requests[0].outcome,
+            SerializedFileDependencyOutcome::LoadedSerializedFile { .. }
+        ));
     }
 
     #[test]

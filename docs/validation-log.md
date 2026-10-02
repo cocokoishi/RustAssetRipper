@@ -225,3 +225,12 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - PowerShell `& 'C:\Users\koishi\.cargo\bin\cargo.exe' clippy --workspace --all-targets --locked -- -D warnings`: exit 0. `cargo fmt --all -- --check`: exit 0.
 - `tools/verify-baseline.ps1`: exit 0; all 1,449 reference files remain unchanged. `git diff --check`: exit 0.
 - Mono assembly collection/backend identification and product input-flow integration remain incomplete. No real-file/C# differential has run.
+
+
+## Platform inputs to the SerializedFile workspace
+
+- Platform inventories now expose source-named primary file inputs separately from all registered files. `PlatformStructure::load_primary_serialized_workspace` passes those inputs, the full file registry, and source-ordered DataPaths to the existing recursive dependency loader.
+- Synthetic VFS coverage verifies a `globalgamemanagers` file loads and resolves `shared.assets` from its DataPath, as well as an explicit error when a platform has no primary SerializedFile inputs.
+- PowerShell `& 'C:\Users\koishi\.cargo\bin\cargo.exe' fmt --all`: exit 0. `cargo test --workspace --locked --quiet`: exit 0; 192 tests passed, 0 failed, 0 doc tests.
+- Warnings-denied workspace Clippy, `cargo fmt --all -- --check`, `tools/verify-baseline.ps1` (1,449 unchanged reference files), and `git diff --check` all passed for this integration.
+- Unreferenced top-level bundles and WebData are not initial workspace inputs. Mono assembly/backend detection, general container import, and product input-flow integration remain incomplete; no real-file/C# differential has run.

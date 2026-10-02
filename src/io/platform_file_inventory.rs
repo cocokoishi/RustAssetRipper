@@ -6,10 +6,15 @@ use std::fmt::{self, Display, Formatter};
 use std::io::{self, Read, Seek, SeekFrom};
 
 use crate::io::dependency::DependencyFilePath;
+use crate::io::dependency::DependencyIndexLimits;
 use crate::io::filesystem::{SearchOption, VirtualFileSystem};
 use crate::io::platform_structure::{PlatformKind, PlatformStructure};
 use crate::io::stream::{logical_file_name, logical_file_path};
-use crate::scheme::{FileKind, SchemeReader};
+use crate::scheme::{ContainerMountLimits, FileKind, SchemeReader};
+use crate::serialized_file::workspace::{
+    SerializedFileDependencyReport, SerializedFileWorkspace, SerializedFileWorkspaceError,
+    SerializedFileWorkspaceLimits,
+};
 
 /// Bounds applied while collecting platform files and probing bundle headers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -45,6 +50,8 @@ pub struct PlatformFileInventoryOptions {
 pub struct PlatformFileInventory {
     /// Deterministically ordered `(logical file name, virtual path)` registrations.
     pub registered_files: Vec<DependencyFilePath>,
+    /// Source `IsPrimaryEngineFile` matches to parse as initial SerializedFile inputs.
+    pub primary_file_inputs: Vec<DependencyFilePath>,
     pub report: PlatformFileInventoryReport,
 }
 
@@ -53,6 +60,22 @@ pub struct PlatformFileInventoryReport {
     pub inspected_files: usize,
     pub inspected_bytes: u64,
     pub traversed_directories: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PlatformWorkspaceLoadOptions {
+    pub file_inventory: PlatformFileInventoryOptions,
+    pub file_inventory_limits: PlatformFileInventoryLimits,
+    pub workspace_limits: SerializedFileWorkspaceLimits,
+    pub dependency_index_limits: DependencyIndexLimits,
+    pub container_mount_limits: ContainerMountLimits,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlatformWorkspaceLoadResult {
+    pub file_inventory: PlatformFileInventory,
+    pub workspace: SerializedFileWorkspace,
+    pub dependencies: SerializedFileDependencyReport,
 }
 
 impl PlatformStructure {
@@ -73,6 +96,7 @@ impl PlatformStructure {
             report: PlatformFileInventoryReport::default(),
             inspected_paths: BTreeSet::new(),
             registered_files: BTreeSet::new(),
+            primary_file_inputs: BTreeSet::new(),
         };
 
         state.collect_web_platform_file(self)?;
@@ -103,7 +127,56 @@ impl PlatformStructure {
                     virtual_path,
                 })
                 .collect(),
+            primary_file_inputs: state
+                .primary_file_inputs
+                .into_iter()
+                .map(|(file_name, virtual_path)| DependencyFilePath {
+                    file_name,
+                    virtual_path,
+                })
+                .collect(),
             report: state.report,
+        })
+    }
+
+    /// Load source-named primary SerializedFiles and resolve their external references using the
+    /// registered platform files and ordered DataPaths. This does not import top-level bundles
+    /// that are not referenced by a primary SerializedFile or load WebData as an initial input.
+    pub fn load_primary_serialized_workspace(
+        &self,
+        filesystem: &mut VirtualFileSystem,
+        options: PlatformWorkspaceLoadOptions,
+    ) -> Result<PlatformWorkspaceLoadResult, PlatformWorkspaceLoadError> {
+        let file_inventory = self
+            .collect_game_files(
+                filesystem,
+                options.file_inventory,
+                options.file_inventory_limits,
+            )
+            .map_err(|error| {
+                PlatformWorkspaceLoadError::new(PlatformWorkspaceLoadErrorKind::Inventory(error))
+            })?;
+        if file_inventory.primary_file_inputs.is_empty() {
+            return Err(PlatformWorkspaceLoadError::new(
+                PlatformWorkspaceLoadErrorKind::NoPrimarySerializedFiles,
+            ));
+        }
+        let (workspace, dependencies) = SerializedFileWorkspace::load_from_vfs_with_dependencies(
+            filesystem,
+            &file_inventory.primary_file_inputs,
+            &file_inventory.registered_files,
+            &self.data_paths,
+            options.workspace_limits,
+            options.dependency_index_limits,
+            options.container_mount_limits,
+        )
+        .map_err(|error| {
+            PlatformWorkspaceLoadError::new(PlatformWorkspaceLoadErrorKind::Workspace(error))
+        })?;
+        Ok(PlatformWorkspaceLoadResult {
+            file_inventory,
+            workspace,
+            dependencies,
         })
     }
 }
@@ -114,6 +187,7 @@ struct InventoryState<'a> {
     report: PlatformFileInventoryReport,
     inspected_paths: BTreeSet<String>,
     registered_files: BTreeSet<(String, String)>,
+    primary_file_inputs: BTreeSet<(String, String)>,
 }
 
 impl InventoryState<'_> {
@@ -132,6 +206,8 @@ impl InventoryState<'_> {
                 let logical_path = logical_file_path(&path)
                     .to_string_lossy()
                     .replace('\\', "/");
+                self.primary_file_inputs
+                    .insert((logical_name.clone(), logical_path.clone()));
                 self.register(logical_name, logical_path);
             }
         }
@@ -601,6 +677,62 @@ impl Error for PlatformFileInventoryErrorKind {
     }
 }
 
+#[derive(Debug)]
+pub struct PlatformWorkspaceLoadError {
+    pub kind: PlatformWorkspaceLoadErrorKind,
+}
+
+impl PlatformWorkspaceLoadError {
+    fn new(kind: PlatformWorkspaceLoadErrorKind) -> Self {
+        Self { kind }
+    }
+}
+
+#[derive(Debug)]
+pub enum PlatformWorkspaceLoadErrorKind {
+    NoPrimarySerializedFiles,
+    Inventory(PlatformFileInventoryError),
+    Workspace(Box<SerializedFileWorkspaceError>),
+}
+
+impl Display for PlatformWorkspaceLoadError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        write!(formatter, "platform workspace load failed: {}", self.kind)
+    }
+}
+
+impl Display for PlatformWorkspaceLoadErrorKind {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoPrimarySerializedFiles => {
+                formatter.write_str("no source-named primary SerializedFiles were found")
+            }
+            Self::Inventory(error) => write!(formatter, "{error}"),
+            Self::Workspace(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+impl Error for PlatformWorkspaceLoadError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match &self.kind {
+            PlatformWorkspaceLoadErrorKind::Inventory(error) => Some(error),
+            PlatformWorkspaceLoadErrorKind::Workspace(error) => Some(error.as_ref()),
+            PlatformWorkspaceLoadErrorKind::NoPrimarySerializedFiles => None,
+        }
+    }
+}
+
+impl Error for PlatformWorkspaceLoadErrorKind {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Inventory(error) => Some(error),
+            Self::Workspace(error) => Some(error.as_ref()),
+            Self::NoPrimarySerializedFiles => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -690,6 +822,11 @@ mod tests {
             "sharedassets10.assets",
             "/game/Game_Data/sharedassets10.assets"
         )));
+        assert_eq!(inventory.primary_file_inputs.len(), 6);
+        assert!(!inventory
+            .primary_file_inputs
+            .iter()
+            .any(|entry| entry.file_name == "data.unity3d"));
         assert!(!entries.iter().any(|(name, _)| *name == "unrelated.assets"));
     }
 
@@ -817,6 +954,31 @@ mod tests {
             PlatformFileInventoryErrorKind::DataPathNotFound
         ));
         assert_eq!(error.virtual_path.as_deref(), Some("/game/Game_Data"));
+    }
+
+    #[test]
+    fn workspace_load_reports_when_the_structure_has_no_primary_serialized_files() {
+        let mut filesystem = VirtualFileSystem::new();
+        make_directory(&mut filesystem, "/player");
+        write_file(&mut filesystem, "/player/game.unity3d", b"bundle");
+        let structure = structure(
+            PlatformKind::WebPlayer,
+            "/player",
+            &["/player"],
+            None,
+            Some("game"),
+        );
+
+        let error = structure
+            .load_primary_serialized_workspace(
+                &mut filesystem,
+                super::PlatformWorkspaceLoadOptions::default(),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error.kind,
+            super::PlatformWorkspaceLoadErrorKind::NoPrimarySerializedFiles
+        ));
     }
 
     #[test]
