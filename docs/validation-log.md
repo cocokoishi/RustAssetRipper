@@ -257,9 +257,16 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 
 ## Partial directory-inspection command
 
-- Added `assetripper-rs inspect <input-directory> [input-directory ...]`. It mounts each selected directory into a distinct VFS root, shares the configured input/file/byte budgets across directories, detects and reports platform registrations when available, scans the recursively mounted selection through the Mixed registry, loads recognized SerializedFiles and their reachable dependencies, and prints a structural summary.
-- A binary test creates a synthetic generation-10 SerializedFile under the repository's ignored `target` directory, runs the same directory-import path, and cleans up the exact generated file and directory. Two other binary tests cover aggregate report arithmetic and remaining-budget checks.
-- PowerShell `& 'C:\Users\koishi\.cargo\bin\cargo.exe' fmt --all -- --check`: exit 0. `cargo test --workspace --locked --quiet`: exit 0; 198 library tests and 3 binary tests passed, 0 failed, 0 doc tests.
-- `cargo clippy --workspace --all-targets --locked -- -D warnings`: exit 0. `cargo run --locked --quiet -- --help` and `--version`: exit 0. `cargo run --locked --quiet -- inspect .\target\cli-directory-that-does-not-exist`: exit 1, as expected for a missing input directory.
+- `assetripper-rs inspect <input-directory> [input-directory ...]` now shares directory/input/byte budgets, detects platform layouts against the original file paths, and calls source platform registration plus initial container expansion. If no platform matches, it recursively remounts the selected directories and scans/loads them through the Mixed registry.
+- Four binary tests cover aggregate budget/report arithmetic, a synthetic mixed-directory-to-workspace path, and a synthetic Windows platform directory with `globalgamemanagers` referring to `shared.assets` inside initial WebData. The platform test asserts both the leaf's `AlreadyLoaded` and container's `ContainerAlreadyExpanded` outcomes.
+- PowerShell `& 'C:\Users\koishi\.cargo\bin\cargo.exe' fmt --all -- --check`: exit 0. `cargo test --workspace --locked --quiet`: exit 0; 200 library tests and 4 binary tests passed, 0 failed, 0 doc tests.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: exit 0. `cargo run --locked --quiet -- --help` and `--version`: exit 0. Inspecting a missing input directory exits 1 as expected.
 - `tools/verify-baseline.ps1`: exit 0; all 1,449 reference files unchanged. `git diff --check`: exit 0. No external or user AssetBundle was inspected.
-- This command is an inspection entry point only. The full AssetRipper CLI, configuration, exporters, UI, source C# differential, and Phase 1 gate remain incomplete.
+- This is an inspection entry point only. Full AssetRipper CLI options, configuration, exporters, UI, source C# differential, and the Phase 1 gate remain incomplete.
+
+
+## File-backed import preserving directory container identities
+
+- Added `SmartStream::from_reader` and exposed VFS insertion for owned readable streams. `SchemeReader::mount_directory_preserving_containers` imports bounded regular-file discoveries by relative path, assembles logical `.splitN` inputs, and stores their raw bytes behind read-only seekable streams without expanding containers.
+- The synthetic split WebData fixture confirms the original logical filename remains a VFS file, the full raw bytes match, and later scheme dispatch recognizes UnityWebData. The platform CLI path then expands source-registered containers through `PlatformStructure::load_primary_serialized_workspace`; mixed input still uses recursive directory mounting.
+- This directory-import increment passed 200 library tests and 4 binary tests; warnings-denied Clippy and formatting passed. `tools/verify-baseline.ps1` confirmed all 1,449 reference files unchanged and `git diff --check` passed. Real-file/.NET differential validation remains outstanding.

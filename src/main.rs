@@ -7,7 +7,7 @@ use assetripper::io::dependency::DependencyIndexLimits;
 use assetripper::io::filesystem::VirtualFileSystem;
 use assetripper::io::game_structure::{MixedGameStructure, MixedGameStructureLimits};
 use assetripper::io::platform_file_inventory::{
-    PlatformFileInventoryLimits, PlatformFileInventoryOptions,
+    PlatformFileInventoryLimits, PlatformFileInventoryOptions, PlatformWorkspaceLoadOptions,
 };
 use assetripper::io::platform_structure::{detect_platform_structure, PlatformStructureLimits};
 use assetripper::scheme::{
@@ -66,6 +66,80 @@ fn run(arguments: impl Iterator<Item = OsString>) -> Result<(), Box<dyn Error>> 
 }
 
 fn inspect_directories(input_directories: &[PathBuf]) -> Result<(), Box<dyn Error>> {
+    let (mut filesystem, selected_paths, total_mount_report) =
+        mount_input_directories(input_directories, true)?;
+    let structure = detect_platform_structure(
+        &filesystem,
+        &selected_paths,
+        PlatformStructureLimits::default(),
+    )?;
+    if let Some(structure) = structure {
+        let inventory = structure.collect_game_files(
+            &filesystem,
+            PlatformFileInventoryOptions::default(),
+            PlatformFileInventoryLimits::default(),
+        )?;
+        let loaded = structure.load_primary_serialized_workspace(
+            &mut filesystem,
+            PlatformWorkspaceLoadOptions::default(),
+        )?;
+        println!(
+            "platform: {:?}; source registrations: {}; scripting backend: {:?}; assemblies: {}; initial containers: {}",
+            structure.platform,
+            inventory.registered_files.len(),
+            inventory.scripting_backend,
+            inventory.assemblies.len(),
+            loaded.initial_container_expansions.len()
+        );
+        println!(
+            "platform directory import: {} logical files, {} source bytes",
+            total_mount_report.discovered_inputs, total_mount_report.discovered_source_bytes
+        );
+        print_workspace_summary(&loaded.workspace, &loaded.dependencies);
+        return Ok(());
+    }
+
+    drop(filesystem);
+    let (mut filesystem, selected_paths, total_mount_report) =
+        mount_input_directories(input_directories, false)?;
+    let mixed = MixedGameStructure::from_vfs_paths(
+        &filesystem,
+        &selected_paths,
+        MixedGameStructureLimits::default(),
+    )?;
+    if mixed.serialized_file_inputs.is_empty() {
+        return Err(invalid_input(
+            "the selected directories contain no recognized SerializedFile inputs",
+        ));
+    }
+    let (workspace, dependencies) = SerializedFileWorkspace::load_from_vfs_with_dependencies(
+        &mut filesystem,
+        &mixed.serialized_file_inputs,
+        &mixed.registered_files,
+        &mixed.data_paths,
+        SerializedFileWorkspaceLimits::default(),
+        DependencyIndexLimits::default(),
+        ContainerMountLimits::default(),
+    )?;
+    println!(
+        "platform: mixed; registered files: {}; assemblies: {}",
+        mixed.registered_files.len(),
+        mixed.assemblies.len()
+    );
+    println!(
+        "recursively mounted directory import: {} logical inputs, {} leaf files, {} output bytes",
+        total_mount_report.discovered_inputs,
+        total_mount_report.mounted_entries,
+        total_mount_report.mounted_bytes
+    );
+    print_workspace_summary(&workspace, &dependencies);
+    Ok(())
+}
+
+fn mount_input_directories(
+    input_directories: &[PathBuf],
+    preserve_containers: bool,
+) -> Result<(VirtualFileSystem, Vec<String>, BatchMountReport), Box<dyn Error>> {
     let mut filesystem = VirtualFileSystem::new();
     let batch_limits = BatchMountLimits::default();
     let mut total_mount_report = BatchMountReport::default();
@@ -100,23 +174,38 @@ fn inspect_directories(input_directories: &[PathBuf]) -> Result<(), Box<dyn Erro
                 total_mount_report.discovered_source_bytes,
                 "source input byte count",
             )?,
-            max_total_output_bytes: remaining_budget_u64(
-                batch_limits.max_total_output_bytes,
-                total_mount_report.mounted_bytes,
-                "mounted output byte count",
-            )?,
+            max_total_output_bytes: if preserve_containers {
+                batch_limits.max_total_output_bytes
+            } else {
+                remaining_budget_u64(
+                    batch_limits.max_total_output_bytes,
+                    total_mount_report.mounted_bytes,
+                    "mounted output byte count",
+                )?
+            },
         };
-        let report = SchemeReader::mount_directory(
-            input_directory,
-            &mut filesystem,
-            Some(&destination_root),
-            SchemeReaderLimits::default(),
-            ContainerMountLimits::default(),
-            remaining_limits,
-        )?;
+        let report = if preserve_containers {
+            SchemeReader::mount_directory_preserving_containers(
+                input_directory,
+                &mut filesystem,
+                Some(&destination_root),
+                SchemeReaderLimits::default(),
+                ContainerMountLimits::default(),
+                remaining_limits,
+            )?
+        } else {
+            SchemeReader::mount_directory(
+                input_directory,
+                &mut filesystem,
+                Some(&destination_root),
+                SchemeReaderLimits::default(),
+                ContainerMountLimits::default(),
+                remaining_limits,
+            )?
+        };
         merge_mount_report(&mut total_mount_report, &report)?;
         println!(
-            "mounted {}: {} logical inputs, {} leaf files, {} output bytes",
+            "mounted {}: {} logical inputs, {} VFS files, {} bytes",
             input_directory.display(),
             report.discovered_inputs,
             report.mounted_entries,
@@ -125,67 +214,7 @@ fn inspect_directories(input_directories: &[PathBuf]) -> Result<(), Box<dyn Erro
         selected_paths.push(destination_root);
     }
 
-    println!(
-        "total: {} logical inputs, {} leaf files, {} output bytes",
-        total_mount_report.discovered_inputs,
-        total_mount_report.mounted_entries,
-        total_mount_report.mounted_bytes
-    );
-
-    let structure = detect_platform_structure(
-        &filesystem,
-        &selected_paths,
-        PlatformStructureLimits::default(),
-    )?;
-    let platform_inventory = structure
-        .as_ref()
-        .map(|platform| {
-            platform.collect_game_files(
-                &filesystem,
-                PlatformFileInventoryOptions::default(),
-                PlatformFileInventoryLimits::default(),
-            )
-        })
-        .transpose()?;
-    let mixed = MixedGameStructure::from_vfs_paths(
-        &filesystem,
-        &selected_paths,
-        MixedGameStructureLimits::default(),
-    )?;
-    if mixed.serialized_file_inputs.is_empty() {
-        return Err(invalid_input(
-            "the selected directories contain no recognized SerializedFile inputs",
-        ));
-    }
-    let (workspace, dependencies) = SerializedFileWorkspace::load_from_vfs_with_dependencies(
-        &mut filesystem,
-        &mixed.serialized_file_inputs,
-        &mixed.registered_files,
-        &mixed.data_paths,
-        SerializedFileWorkspaceLimits::default(),
-        DependencyIndexLimits::default(),
-        ContainerMountLimits::default(),
-    )?;
-
-    if let (Some(structure), Some(inventory)) = (structure, platform_inventory) {
-        println!(
-            "platform: {:?}; source registrations: {}; scripting backend: {:?}; assemblies: {}",
-            structure.platform,
-            inventory.registered_files.len(),
-            inventory.scripting_backend,
-            inventory.assemblies.len()
-        );
-        println!("workspace import: recursively mounted selected directories");
-    } else {
-        println!(
-            "platform: mixed; registered files: {}; assemblies: {}",
-            mixed.registered_files.len(),
-            mixed.assemblies.len()
-        );
-    }
-    print_workspace_summary(&workspace, &dependencies);
-
-    Ok(())
+    Ok((filesystem, selected_paths, total_mount_report))
 }
 
 fn print_workspace_summary(
@@ -279,7 +308,13 @@ fn print_usage() {
 #[cfg(test)]
 mod tests {
     use super::{merge_mount_report, remaining_budget_u64, remaining_budget_usize};
+    use assetripper::io::platform_file_inventory::PlatformWorkspaceLoadOptions;
+    use assetripper::io::platform_structure::{
+        detect_platform_structure, PlatformKind, PlatformStructureLimits,
+    };
     use assetripper::scheme::BatchMountReport;
+    use assetripper::scheme::FileKind;
+    use assetripper::serialized_file::workspace::SerializedFileDependencyOutcome;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -288,26 +323,69 @@ mod tests {
 
     struct TestInputDirectory {
         directory: PathBuf,
-        file: PathBuf,
+        files: Vec<PathBuf>,
+        subdirectories: Vec<PathBuf>,
     }
 
     impl TestInputDirectory {
-        fn new() -> Self {
+        fn new_root() -> PathBuf {
             let index = NEXT_TEST_DIRECTORY.fetch_add(1, Ordering::Relaxed);
             let directory = std::env::current_dir()
                 .unwrap()
                 .join("target")
                 .join(format!("cli-input-{}-{index}", std::process::id()));
             fs::create_dir(&directory).unwrap();
+            directory
+        }
+
+        fn new() -> Self {
+            let directory = Self::new_root();
             let file = directory.join("main.assets");
             fs::write(&file, make_generation_10_file()).unwrap();
-            Self { directory, file }
+            Self {
+                directory,
+                files: vec![file],
+                subdirectories: Vec::new(),
+            }
+        }
+
+        fn new_windows_platform() -> Self {
+            let directory = Self::new_root();
+            let game_name = directory.file_name().unwrap().to_str().unwrap();
+            let executable = directory.join(format!("{game_name}.exe"));
+            let data_directory = directory.join(format!("{game_name}_Data"));
+            fs::create_dir(&data_directory).unwrap();
+            fs::write(&executable, b"synthetic executable marker").unwrap();
+
+            let primary = data_directory.join("globalgamemanagers");
+            fs::write(
+                &primary,
+                make_generation_10_file_with_externals(&["shared.assets", "data.unity3d"]),
+            )
+            .unwrap();
+            let container_path = data_directory.join("data.unity3d");
+            fs::write(
+                &container_path,
+                make_webdata_fixture(&[("shared.assets", &make_generation_10_file())]),
+            )
+            .unwrap();
+
+            Self {
+                directory,
+                files: vec![executable, primary, container_path],
+                subdirectories: vec![data_directory],
+            }
         }
     }
 
     impl Drop for TestInputDirectory {
         fn drop(&mut self) {
-            let _ = fs::remove_file(&self.file);
+            for file in &self.files {
+                let _ = fs::remove_file(file);
+            }
+            for directory in self.subdirectories.iter().rev() {
+                let _ = fs::remove_dir(directory);
+            }
             let _ = fs::remove_dir(&self.directory);
         }
     }
@@ -350,6 +428,10 @@ mod tests {
     }
 
     fn make_generation_10_file() -> Vec<u8> {
+        make_generation_10_file_with_externals(&[])
+    }
+
+    fn make_generation_10_file_with_externals(external_names: &[&str]) -> Vec<u8> {
         let mut string_buffer = Vec::new();
         let root_type = push_type_tree_string(&mut string_buffer, "Root");
         let empty_name = push_type_tree_string(&mut string_buffer, "");
@@ -383,7 +465,16 @@ mod tests {
         put_i32_le(&mut metadata, 1);
         put_u16_le(&mut metadata, 1);
         put_u16_le(&mut metadata, 0);
-        put_i32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, i32::try_from(external_names.len()).unwrap());
+        for external_name in external_names {
+            metadata.push(0);
+            for word in [0, 0, 0, 0] {
+                put_u32_le(&mut metadata, word);
+            }
+            put_i32_le(&mut metadata, 0);
+            metadata.extend_from_slice(external_name.as_bytes());
+            metadata.push(0);
+        }
         metadata.push(0);
 
         let data_offset = 20usize + metadata.len();
@@ -402,6 +493,28 @@ mod tests {
         file.extend_from_slice(&metadata);
         file.extend_from_slice(&payload);
         file
+    }
+
+    fn make_webdata_fixture(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let header_size = 20usize
+            + entries
+                .iter()
+                .map(|(name, _)| 9usize + name.len())
+                .sum::<usize>();
+        let mut container = b"UnityWebData1.0\0".to_vec();
+        container.extend_from_slice(&i32::try_from(header_size).unwrap().to_le_bytes());
+        let mut data_offset = header_size;
+        for (name, bytes) in entries {
+            container.extend_from_slice(&i32::try_from(data_offset).unwrap().to_le_bytes());
+            container.extend_from_slice(&i32::try_from(bytes.len()).unwrap().to_le_bytes());
+            container.push(u8::try_from(name.len()).unwrap());
+            container.extend_from_slice(name.as_bytes());
+            data_offset += bytes.len();
+        }
+        for (_, bytes) in entries {
+            container.extend_from_slice(bytes);
+        }
+        container
     }
 
     #[test]
@@ -442,6 +555,48 @@ mod tests {
     #[test]
     fn directory_inspection_loads_a_synthetic_serialized_file() {
         let input = TestInputDirectory::new();
+        super::inspect_directories(std::slice::from_ref(&input.directory)).unwrap();
+    }
+
+    #[test]
+    fn platform_directory_inspection_preserves_and_expands_registered_containers() {
+        let input = TestInputDirectory::new_windows_platform();
+        let (mut filesystem, selected_paths, _) =
+            super::mount_input_directories(std::slice::from_ref(&input.directory), true).unwrap();
+        let platform = detect_platform_structure(
+            &filesystem,
+            &selected_paths,
+            PlatformStructureLimits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(platform.platform, PlatformKind::Windows);
+
+        let loaded = platform
+            .load_primary_serialized_workspace(
+                &mut filesystem,
+                PlatformWorkspaceLoadOptions::default(),
+            )
+            .unwrap();
+
+        assert_eq!(loaded.workspace.files().len(), 2);
+        assert_eq!(loaded.initial_container_expansions.len(), 1);
+        assert_eq!(
+            loaded.initial_container_expansions[0].kind,
+            FileKind::UnityWebData
+        );
+        assert!(matches!(
+            loaded.dependencies.requests[0].outcome,
+            SerializedFileDependencyOutcome::AlreadyLoaded { .. }
+        ));
+        assert_eq!(
+            loaded.dependencies.requests[1].outcome,
+            SerializedFileDependencyOutcome::ContainerAlreadyExpanded {
+                virtual_path: format!("{}/data.unity3d", platform.data_paths[0]),
+                serialized_files_loaded: 1,
+                matching_serialized_files: 0,
+            }
+        );
         super::inspect_directories(std::slice::from_ref(&input.directory)).unwrap();
     }
 }

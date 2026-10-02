@@ -182,7 +182,7 @@ impl VirtualFileSystem {
 
     /// Inserts an already-owned readable stream, creating missing parent directories as one
     /// entry-limit-checked operation. Existing files are never silently replaced.
-    pub(crate) fn insert_file_stream_with_parents(
+    pub fn insert_file_stream_with_parents(
         &mut self,
         path: &str,
         stream: SmartStream,

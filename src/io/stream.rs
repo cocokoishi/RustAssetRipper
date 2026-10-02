@@ -215,6 +215,7 @@ struct SmartStreamShared {
 enum SmartStreamBackend {
     Memory(Cursor<Vec<u8>>),
     File(Arc<Mutex<File>>),
+    Reader(Box<dyn ReadSeek + Send>),
     Range(FileRangeStream),
     Temporary(TemporaryFile),
 }
@@ -247,6 +248,7 @@ impl Read for SmartStreamBackend {
                 .lock()
                 .map_err(|_| io::Error::other("smart file mutex was poisoned"))?
                 .read(buffer),
+            Self::Reader(reader) => reader.read(buffer),
             Self::Range(range) => range.read(buffer),
             Self::Temporary(file) => file.file_mut()?.read(buffer),
         }
@@ -261,6 +263,10 @@ impl Write for SmartStreamBackend {
                 .lock()
                 .map_err(|_| io::Error::other("smart file mutex was poisoned"))?
                 .write(buffer),
+            Self::Reader(_) => Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "reader-backed stream is read-only",
+            )),
             Self::Range(_) => Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "file range stream is read-only",
@@ -276,6 +282,7 @@ impl Write for SmartStreamBackend {
                 .lock()
                 .map_err(|_| io::Error::other("smart file mutex was poisoned"))?
                 .flush(),
+            Self::Reader(_) => Ok(()),
             Self::Range(_) => Ok(()),
             Self::Temporary(file) => file.file_mut()?.flush(),
         }
@@ -290,6 +297,7 @@ impl Seek for SmartStreamBackend {
                 .lock()
                 .map_err(|_| io::Error::other("smart file mutex was poisoned"))?
                 .seek(from),
+            Self::Reader(reader) => reader.seek(from),
             Self::Range(range) => range.seek(from),
             Self::Temporary(file) => file.file_mut()?.seek(from),
         }
@@ -366,6 +374,21 @@ impl SmartStream {
     pub fn open_read(path: impl AsRef<Path>) -> io::Result<Self> {
         Ok(Self::new(
             SmartStreamBackend::File(Arc::new(Mutex::new(File::open(path)?))),
+            SmartStreamType::File,
+            true,
+            false,
+        ))
+    }
+
+    /// Wraps an owned seekable reader as a shared, read-only file stream.
+    ///
+    /// The reader is positioned at byte zero before it is retained.
+    pub fn from_reader(mut reader: Box<dyn ReadSeek + Send>) -> io::Result<Self> {
+        reader.seek(SeekFrom::Start(0))?;
+        reader.seek(SeekFrom::End(0))?;
+        reader.seek(SeekFrom::Start(0))?;
+        Ok(Self::new(
+            SmartStreamBackend::Reader(reader),
             SmartStreamType::File,
             true,
             false,
@@ -517,6 +540,10 @@ impl SmartStream {
                 .lock()
                 .map_err(|_| io::Error::other("smart file mutex was poisoned"))?
                 .set_len(length),
+            SmartStreamBackend::Reader(_) => Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "reader-backed stream is read-only",
+            )),
             SmartStreamBackend::Range(_) => Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "file range stream is read-only",
@@ -1071,6 +1098,26 @@ mod tests {
         let mut suffix = [0; 3];
         assert_eq!(stream.read(&mut suffix).unwrap(), 2);
         assert_eq!(&suffix[..2], b"fg");
+    }
+
+    #[test]
+    fn smart_stream_wraps_a_split_reader_as_shared_read_only_file_storage() {
+        let parts = [b"raw".as_slice(), b" bundle".as_slice()]
+            .into_iter()
+            .map(|part| Cursor::new(part.to_vec()));
+        let reader = MultiFileStream::new(parts).unwrap();
+        let mut stream = SmartStream::from_reader(Box::new(reader)).unwrap();
+        let reference = stream.create_reference();
+
+        assert_eq!(stream.length().unwrap(), 10);
+        assert!(!stream.can_write());
+        let mut prefix = [0; 4];
+        assert_eq!(stream.read(&mut prefix).unwrap(), 4);
+        assert_eq!(&prefix, b"raw ");
+        assert_eq!(reference.position().unwrap(), 4);
+        assert_eq!(stream.to_vec(10).unwrap(), b"raw bundle");
+        assert_eq!(stream.position().unwrap(), 4);
+        assert!(stream.write_all(b"x").is_err());
     }
 
     #[test]

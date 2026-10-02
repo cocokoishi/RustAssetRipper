@@ -18,7 +18,7 @@ On this workstation Cargo is installed under `%USERPROFILE%\.cargo\bin` but that
 
 ## Current command-line entry point
 
-The current partial CLI can mount one or more local input directories, detect a platform layout when possible, load recognized SerializedFiles and their external dependencies, and print a structural summary:
+The current partial CLI can mount one or more local input directories, detect a platform layout when possible, load recognized SerializedFiles and their external dependencies, and print a structural summary. Platform inputs retain their original file-backed containers for source-specific inventory and expansion; mixed inputs are recursively mounted before loading:
 
 ```powershell
 cargo run -- inspect <input-directory> [input-directory ...]
