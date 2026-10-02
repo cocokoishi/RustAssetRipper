@@ -200,3 +200,10 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - A raw header probe classifies bundle signatures and SerializedFile headers from at most 32 bytes plus the stream length; it does not read resource bodies or decode outer wrappers. Inventory bounds are configurable and default to 1,000,000 scanned files, 2 GiB per file, and 16 GiB aggregate declared bytes.
 - Four synthetic tests cover directory and direct-file behavior, source-style names, DataPaths, and configured selection/file/byte/path errors. cargo test --workspace --locked passed 176 tests; warnings-denied Clippy, cargo fmt --all -- --check, baseline verification (1,449 reference files unchanged), and git diff --check passed. No real-file/C# differential or user sample was used.
 - Platform root detection and automatic platform DataPath order remain incomplete.
+
+
+## Desktop platform root detection
+
+- Added VFS detection for Windows, Linux, and macOS roots, including Windows/Linux executable and _Data selections, named/fallback Data directories, and macOS Contents/Resources/Data and ordered DataPaths.
+- Three synthetic tests passed for Windows and Linux root resolution, macOS path ordering, detection priority, and invalid/missing selections. cargo test --workspace --locked passed 179 tests; warnings-denied Clippy, format check, 1,449-file baseline verification, and diff check passed.
+- Mobile, console, WebGL/WebPlayer/Windows Phone root detectors, platform file collection, and real-file/C# differential validation remain outstanding.

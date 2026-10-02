@@ -145,3 +145,10 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Directory classification probes at most the first 32 bytes and uses the VFS-declared file length. The default bounds are 100,000 selections, 1,000,000 scanned files, 2 GiB per file, and 16 GiB aggregate declared bytes. GZip/Brotli-wrapped headers are not decoded during inventory.
 - Four synthetic tests cover file/directory inventory, file kinds and identity names, DataPaths, and selection/file/byte limits. Full workspace tests passed 176 tests; warnings-denied Clippy, formatting, the 1,449-file baseline verifier, and diff check passed. No real-file or C# differential has run.
 - Next: implement the source platform-root detectors and their ordered DataPaths, then wire game-structure inventory into the application input flow. Phase 1 remains open; do not inspect user AssetBundles or UABEA.
+
+
+## Desktop platform root detection
+
+- Added source-priority detection for Windows, Linux, and macOS selected paths. Windows/Linux executable and _Data inputs normalize to their application root; Windows named/fallback Data directories, Linux named/fallback Data directories, and macOS Contents/Resources/Data plus Contents/Resources DataPath order are preserved.
+- Three synthetic tests cover executable and Data-folder selection, platform priority, fallback paths, ordered macOS paths, and missing/invalid selections. Full workspace tests passed 179 tests; warnings-denied Clippy, formatting, the 1,449-file baseline verifier, and diff check passed. No real-file or C# differential has run.
+- Next: port Android/OBB and iOS layout detection, then console and Web platform layouts; keep platform file collection and product input-flow integration visible as separate unfinished scopes.
