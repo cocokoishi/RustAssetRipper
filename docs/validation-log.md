@@ -88,3 +88,12 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - DispatchedFile::mount_container_entries mounts direct UnityFS, UnityRaw/UnityWeb, and WebData entry bytes beneath an optional virtual destination. It preflights entry count and aggregate declared bytes, rejects parent-directory path components, and reports exact partial progress if a later entry fails.
 - WebData, UnityFS, UnityRaw, and UnityWeb synthetic tests cover direct entry path mounting and exact bytes. WebData tests additionally cover count and byte limits before mutation, duplicate-path collisions, partial reports, and path traversal rejection. These fixtures do not establish real-file or C# differential compatibility.
 - The initial test run had one fixture setup failure because the legacy write helper requires a pre-existing parent directory. The fixture now creates that directory first; the complete suite then passed.
+## Recursive parsed-container tree mounting
+
+- cargo fmt --all: exit 0.
+- cargo test --workspace --locked: exit 0; 137 unit tests passed, 0 failed, 0 doc tests.
+- cargo clippy --workspace --all-targets --locked -- -D warnings: exit 0.
+- The recursive API traverses supported nested UnityFS, UnityRaw/UnityWeb, and WebData containers and GZip/Brotli wrapper dispatch under parent-entry virtual paths. It mounts terminal Resource and SerializedFile bytes as leaves; nested container payloads are represented by their child path.
+- ContainerMountLimits now bounds visited entry count across the tree, mounted leaf byte totals, nesting depth (default 64), and active owned nested-container buffers (default 1 GiB). Errors preserve the count of files and bytes mounted before failure.
+- Synthetic fixtures cover nested WebData, a GZip-wrapped nested WebData container, nested UnityFS, global entry-count/depth/active-buffer/output limits, and partial progress.
+- The recursive API is not yet connected to the product root-input or batch pipeline. No real-file or C# differential has run.

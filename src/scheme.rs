@@ -70,11 +70,17 @@ impl Default for SchemeReaderLimits {
     }
 }
 
-/// Bounds for mounting a parsed container's direct entries into a virtual filesystem.
+/// Bounds for mounting parsed container entries into a virtual filesystem.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ContainerMountLimits {
+    /// Maximum number of visited entries. Recursive mounts count entries across all levels.
     pub max_entries: usize,
+    /// Maximum aggregate bytes inserted into the virtual filesystem.
     pub max_total_output_bytes: u64,
+    /// Maximum nested-container depth. The root container has depth zero.
+    pub max_depth: usize,
+    /// Maximum aggregate owned bytes retained for nested containers during traversal.
+    pub max_active_nested_bytes: u64,
 }
 
 impl Default for ContainerMountLimits {
@@ -82,14 +88,26 @@ impl Default for ContainerMountLimits {
         Self {
             max_entries: 1_000_000,
             max_total_output_bytes: 2 * 1024 * 1024 * 1024,
+            max_depth: 64,
+            max_active_nested_bytes: 1024 * 1024 * 1024,
         }
     }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ContainerMountReport {
+    /// Number of files inserted. Recursive mounting excludes nested container payloads.
     pub mounted_entries: usize,
+    /// Total bytes in files inserted into the virtual filesystem.
     pub mounted_bytes: u64,
+}
+
+struct ContainerTreeMountState<'a> {
+    filesystem: &'a mut VirtualFileSystem,
+    limits: ContainerMountLimits,
+    visited_entries: usize,
+    active_nested_bytes: u64,
+    report: ContainerMountReport,
 }
 
 #[derive(Debug)]
@@ -105,6 +123,16 @@ pub enum ContainerMountErrorKind {
     EntryCountLimitExceeded {
         count: usize,
         limit: usize,
+    },
+    EntryCountOverflow,
+    NestingDepthLimitExceeded {
+        depth: usize,
+        limit: usize,
+    },
+    ActiveNestedContainerLimitExceeded {
+        entry_index: usize,
+        requested_total: u64,
+        limit: u64,
     },
     TotalOutputLimitExceeded {
         entry_index: usize,
@@ -355,6 +383,150 @@ impl<'a> DispatchedFile<'a> {
 
         Ok(report)
     }
+
+    /// Recursively mount leaf entries from nested containers and wrapper files.
+    ///
+    /// Recognized nested containers become virtual directories named after their parent entry;
+    /// their contained leaves are mounted below that path. Container and wrapper payloads are
+    /// parsed in memory and are not inserted as leaf files. Entry count, nesting depth, and total
+    /// mounted bytes are bounded across the complete traversal.
+    pub fn mount_container_tree(
+        &self,
+        filesystem: &mut VirtualFileSystem,
+        destination_root: Option<&str>,
+        limits: ContainerMountLimits,
+    ) -> Result<ContainerMountReport, ContainerMountError> {
+        let mut state = ContainerTreeMountState {
+            filesystem,
+            limits,
+            visited_entries: 0,
+            active_nested_bytes: 0,
+            report: ContainerMountReport::default(),
+        };
+        self.mount_container_tree_at(destination_root, 0, &mut state)?;
+        Ok(state.report)
+    }
+
+    fn mount_container_tree_at(
+        &self,
+        destination_root: Option<&str>,
+        depth: usize,
+        state: &mut ContainerTreeMountState<'_>,
+    ) -> Result<(), ContainerMountError> {
+        if depth > state.limits.max_depth {
+            return Err(ContainerMountError::new(
+                state.report.clone(),
+                ContainerMountErrorKind::NestingDepthLimitExceeded {
+                    depth,
+                    limit: state.limits.max_depth,
+                },
+            ));
+        }
+
+        let parsed = self.parse().map_err(|error| {
+            ContainerMountError::new(state.report.clone(), ContainerMountErrorKind::Scheme(error))
+        })?;
+        match parsed {
+            ParsedFile::UnityFs(bundle) => {
+                preflight_tree_entry_count(bundle.nodes.len(), state)?;
+                for (index, node) in bundle.nodes.iter().enumerate() {
+                    let path = checked_container_entry_path(
+                        state.filesystem,
+                        destination_root,
+                        node.path.as_str(),
+                        index,
+                        &state.report,
+                    )?;
+                    let bytes = bundle.read_entry(index).map_err(|error| {
+                        ContainerMountError::new(
+                            state.report.clone(),
+                            ContainerMountErrorKind::Scheme(SchemeError::new(
+                                SchemeErrorKind::UnityFs(error),
+                            )),
+                        )
+                    })?;
+                    let child = SchemeReader::read_cow_with_limits(bytes, self.limits).map_err(
+                        |error| {
+                            ContainerMountError::new(
+                                state.report.clone(),
+                                ContainerMountErrorKind::Scheme(error),
+                            )
+                        },
+                    )?;
+                    mount_tree_child(child, path, index, depth, state)?;
+                }
+            }
+            ParsedFile::RawWeb(bundle) => {
+                preflight_tree_entry_count(bundle.entries.len(), state)?;
+                for (index, entry) in bundle.entries.iter().enumerate() {
+                    let path = checked_container_entry_path(
+                        state.filesystem,
+                        destination_root,
+                        entry.path.as_str(),
+                        index,
+                        &state.report,
+                    )?;
+                    let bytes = bundle.read_entry(index).map_err(|error| {
+                        ContainerMountError::new(
+                            state.report.clone(),
+                            ContainerMountErrorKind::Scheme(SchemeError::new(
+                                SchemeErrorKind::RawWeb(error),
+                            )),
+                        )
+                    })?;
+                    let child =
+                        SchemeReader::read_cow_with_limits(Cow::Borrowed(bytes), self.limits)
+                            .map_err(|error| {
+                                ContainerMountError::new(
+                                    state.report.clone(),
+                                    ContainerMountErrorKind::Scheme(error),
+                                )
+                            })?;
+                    mount_tree_child(child, path, index, depth, state)?;
+                }
+            }
+            ParsedFile::WebData(web_file) => {
+                preflight_tree_entry_count(web_file.entries.len(), state)?;
+                for (index, entry) in web_file.entries.iter().enumerate() {
+                    let path = checked_container_entry_path(
+                        state.filesystem,
+                        destination_root,
+                        entry.name.as_str(),
+                        index,
+                        &state.report,
+                    )?;
+                    let bytes = web_file.entry_data(index).ok_or_else(|| {
+                        ContainerMountError::new(
+                            state.report.clone(),
+                            ContainerMountErrorKind::Scheme(SchemeError::new(
+                                SchemeErrorKind::WebDataEntryIndexOutOfBounds {
+                                    index,
+                                    entry_count: web_file.entries.len(),
+                                },
+                            )),
+                        )
+                    })?;
+                    let child =
+                        SchemeReader::read_cow_with_limits(Cow::Borrowed(bytes), self.limits)
+                            .map_err(|error| {
+                                ContainerMountError::new(
+                                    state.report.clone(),
+                                    ContainerMountErrorKind::Scheme(error),
+                                )
+                            })?;
+                    mount_tree_child(child, path, index, depth, state)?;
+                }
+            }
+            ParsedFile::SerializedFile(_) | ParsedFile::Resource(_) => {
+                return Err(ContainerMountError::new(
+                    state.report.clone(),
+                    ContainerMountErrorKind::NotContainer,
+                ));
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl ContainerMountError {
@@ -373,7 +545,22 @@ impl Display for ContainerMountErrorKind {
             Self::NotContainer => formatter.write_str("input is not a supported file container"),
             Self::EntryCountLimitExceeded { count, limit } => write!(
                 formatter,
-                "container has {count} entries, exceeding mount limit {limit}"
+                "container traversal reached {count} entries, exceeding mount limit {limit}"
+            ),
+            Self::EntryCountOverflow => {
+                formatter.write_str("container traversal entry count overflows usize")
+            }
+            Self::NestingDepthLimitExceeded { depth, limit } => write!(
+                formatter,
+                "container nesting depth {depth} exceeds mount limit {limit}"
+            ),
+            Self::ActiveNestedContainerLimitExceeded {
+                entry_index,
+                requested_total,
+                limit,
+            } => write!(
+                formatter,
+                "nested container entry {entry_index} would retain {requested_total} owned bytes, exceeding active-container limit {limit}"
             ),
             Self::TotalOutputLimitExceeded {
                 entry_index,
@@ -501,6 +688,24 @@ fn mount_container_entry<'a>(
     limits: ContainerMountLimits,
     report: &mut ContainerMountReport,
 ) -> Result<(), ContainerMountError> {
+    let path = checked_container_entry_path(
+        filesystem,
+        destination_root,
+        entry_name,
+        entry_index,
+        report,
+    )?;
+    mount_container_entry_at_path(filesystem, &path, entry_index, bytes, limits, report)
+}
+
+fn mount_container_entry_at_path<'a>(
+    filesystem: &mut VirtualFileSystem,
+    path: &str,
+    entry_index: usize,
+    bytes: Cow<'a, [u8]>,
+    limits: ContainerMountLimits,
+    report: &mut ContainerMountReport,
+) -> Result<(), ContainerMountError> {
     let entry_size = u64::try_from(bytes.len()).map_err(|_| {
         ContainerMountError::new(
             report.clone(),
@@ -527,7 +732,48 @@ fn mount_container_entry<'a>(
         ));
     }
 
-    let path = container_entry_path(
+    let owned_bytes = match bytes {
+        Cow::Owned(bytes) => bytes,
+        Cow::Borrowed(bytes) => {
+            let mut owned = Vec::new();
+            owned.try_reserve_exact(bytes.len()).map_err(|_| {
+                ContainerMountError::new(
+                    report.clone(),
+                    ContainerMountErrorKind::EntryAllocationFailed {
+                        entry_index,
+                        requested: bytes.len(),
+                    },
+                )
+            })?;
+            owned.extend_from_slice(bytes);
+            owned
+        }
+    };
+    filesystem
+        .insert_file_stream_with_parents(path, SmartStream::from_memory(owned_bytes))
+        .map_err(|source| {
+            ContainerMountError::new(
+                report.clone(),
+                ContainerMountErrorKind::FileSystem {
+                    entry_index,
+                    path: path.to_owned(),
+                    source,
+                },
+            )
+        })?;
+    report.mounted_entries += 1;
+    report.mounted_bytes = new_total;
+    Ok(())
+}
+
+fn checked_container_entry_path(
+    filesystem: &VirtualFileSystem,
+    destination_root: Option<&str>,
+    entry_name: &str,
+    entry_index: usize,
+    report: &ContainerMountReport,
+) -> Result<String, ContainerMountError> {
+    container_entry_path(
         destination_root,
         entry_name,
         filesystem.limits().max_path_bytes,
@@ -551,39 +797,100 @@ fn mount_container_entry<'a>(
             }
         };
         ContainerMountError::new(report.clone(), kind)
+    })
+}
+
+fn preflight_tree_entry_count(
+    count: usize,
+    state: &mut ContainerTreeMountState<'_>,
+) -> Result<(), ContainerMountError> {
+    let requested = state.visited_entries.checked_add(count).ok_or_else(|| {
+        ContainerMountError::new(
+            state.report.clone(),
+            ContainerMountErrorKind::EntryCountOverflow,
+        )
     })?;
-    let owned_bytes = match bytes {
-        Cow::Owned(bytes) => bytes,
-        Cow::Borrowed(bytes) => {
-            let mut owned = Vec::new();
-            owned.try_reserve_exact(bytes.len()).map_err(|_| {
+    if requested > state.limits.max_entries {
+        return Err(ContainerMountError::new(
+            state.report.clone(),
+            ContainerMountErrorKind::EntryCountLimitExceeded {
+                count: requested,
+                limit: state.limits.max_entries,
+            },
+        ));
+    }
+    state.visited_entries = requested;
+    Ok(())
+}
+
+fn mount_tree_child<'a>(
+    child: DispatchedFile<'a>,
+    entry_path: String,
+    entry_index: usize,
+    parent_depth: usize,
+    state: &mut ContainerTreeMountState<'_>,
+) -> Result<(), ContainerMountError> {
+    match child.kind {
+        FileKind::UnityFs
+        | FileKind::UnityRaw
+        | FileKind::UnityWebBundle
+        | FileKind::UnityWebData
+        | FileKind::UnityArchive => {
+            let depth = parent_depth.checked_add(1).ok_or_else(|| {
                 ContainerMountError::new(
-                    report.clone(),
-                    ContainerMountErrorKind::EntryAllocationFailed {
-                        entry_index,
-                        requested: bytes.len(),
+                    state.report.clone(),
+                    ContainerMountErrorKind::NestingDepthLimitExceeded {
+                        depth: usize::MAX,
+                        limit: state.limits.max_depth,
                     },
                 )
             })?;
-            owned.extend_from_slice(bytes);
-            owned
+            let child_owned_bytes = match &child.contents {
+                Cow::Owned(bytes) => u64::try_from(bytes.len()).map_err(|_| {
+                    ContainerMountError::new(
+                        state.report.clone(),
+                        ContainerMountErrorKind::TotalOutputSizeOverflow { entry_index },
+                    )
+                })?,
+                Cow::Borrowed(_) => 0,
+            };
+            let requested_active_bytes = state
+                .active_nested_bytes
+                .checked_add(child_owned_bytes)
+                .ok_or_else(|| {
+                ContainerMountError::new(
+                    state.report.clone(),
+                    ContainerMountErrorKind::ActiveNestedContainerLimitExceeded {
+                        entry_index,
+                        requested_total: u64::MAX,
+                        limit: state.limits.max_active_nested_bytes,
+                    },
+                )
+            })?;
+            if requested_active_bytes > state.limits.max_active_nested_bytes {
+                return Err(ContainerMountError::new(
+                    state.report.clone(),
+                    ContainerMountErrorKind::ActiveNestedContainerLimitExceeded {
+                        entry_index,
+                        requested_total: requested_active_bytes,
+                        limit: state.limits.max_active_nested_bytes,
+                    },
+                ));
+            }
+            state.active_nested_bytes = requested_active_bytes;
+            let result = child.mount_container_tree_at(Some(&entry_path), depth, state);
+            state.active_nested_bytes -= child_owned_bytes;
+            result
         }
-    };
-    filesystem
-        .insert_file_stream_with_parents(&path, SmartStream::from_memory(owned_bytes))
-        .map_err(|source| {
-            ContainerMountError::new(
-                report.clone(),
-                ContainerMountErrorKind::FileSystem {
-                    entry_index,
-                    path: path.clone(),
-                    source,
-                },
-            )
-        })?;
-    report.mounted_entries += 1;
-    report.mounted_bytes = new_total;
-    Ok(())
+        FileKind::SerializedFile | FileKind::Resource => mount_container_entry_at_path(
+            state.filesystem,
+            &entry_path,
+            entry_index,
+            child.contents,
+            state.limits,
+            &mut state.report,
+        ),
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1325,6 +1632,135 @@ mod tests {
             ContainerMountErrorKind::InvalidEntryPath { entry_index: 0, .. }
         ));
         assert_eq!(filesystem.count(), 1);
+    }
+
+    #[test]
+    fn recursively_mounts_nested_and_wrapper_containers_under_their_entry_paths() {
+        let nested = webdata_fixture(&[("leaf.bin", b"nested leaf")]);
+        let wrapped_nested = compress_gzip(&nested, 4096).unwrap();
+        let input = webdata_fixture(&[
+            ("plain-container", &nested),
+            ("wrapped-container.gz", &wrapped_nested),
+        ]);
+        let file = SchemeReader::read(&input).unwrap();
+        let mut filesystem = VirtualFileSystem::new();
+        let report = file
+            .mount_container_tree(
+                &mut filesystem,
+                Some("/tree"),
+                ContainerMountLimits::default(),
+            )
+            .unwrap();
+
+        assert_eq!(report.mounted_entries, 2);
+        assert_eq!(report.mounted_bytes, 22);
+        assert_eq!(
+            filesystem
+                .read_all_bytes("/tree/plain-container/leaf.bin", 64)
+                .unwrap(),
+            b"nested leaf"
+        );
+        assert_eq!(
+            filesystem
+                .read_all_bytes("/tree/wrapped-container.gz/leaf.bin", 64)
+                .unwrap(),
+            b"nested leaf"
+        );
+    }
+
+    #[test]
+    fn recursive_mount_applies_global_count_depth_and_output_limits() {
+        let nested = webdata_fixture(&[("first.bin", b"first"), ("second.bin", b"second")]);
+        let input = webdata_fixture(&[("nested", &nested)]);
+        let file = SchemeReader::read(&input).unwrap();
+
+        let mut count_limited = VirtualFileSystem::new();
+        let error = file
+            .mount_container_tree(
+                &mut count_limited,
+                Some("/tree"),
+                ContainerMountLimits {
+                    max_entries: 2,
+                    ..ContainerMountLimits::default()
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error.kind,
+            ContainerMountErrorKind::EntryCountLimitExceeded { count: 3, limit: 2 }
+        ));
+        assert_eq!(error.partial_report.mounted_entries, 0);
+        assert_eq!(count_limited.count(), 1);
+
+        let mut depth_limited = VirtualFileSystem::new();
+        let error = file
+            .mount_container_tree(
+                &mut depth_limited,
+                Some("/tree"),
+                ContainerMountLimits {
+                    max_depth: 0,
+                    ..ContainerMountLimits::default()
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error.kind,
+            ContainerMountErrorKind::NestingDepthLimitExceeded { depth: 1, limit: 0 }
+        ));
+        assert_eq!(error.partial_report.mounted_entries, 0);
+        assert_eq!(depth_limited.count(), 1);
+
+        let wrapped_nested = compress_gzip(&nested, 4096).unwrap();
+        let wrapped_input = webdata_fixture(&[("nested.gz", &wrapped_nested)]);
+        let wrapped_file = SchemeReader::read(&wrapped_input).unwrap();
+        let mut active_byte_limited = VirtualFileSystem::new();
+        let error = wrapped_file
+            .mount_container_tree(
+                &mut active_byte_limited,
+                Some("/tree"),
+                ContainerMountLimits {
+                    max_active_nested_bytes: 0,
+                    ..ContainerMountLimits::default()
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error.kind,
+            ContainerMountErrorKind::ActiveNestedContainerLimitExceeded {
+                entry_index: 0,
+                limit: 0,
+                ..
+            }
+        ));
+        assert_eq!(error.partial_report.mounted_entries, 0);
+        assert_eq!(active_byte_limited.count(), 1);
+
+        let mut output_limited = VirtualFileSystem::new();
+        let error = file
+            .mount_container_tree(
+                &mut output_limited,
+                Some("/tree"),
+                ContainerMountLimits {
+                    max_total_output_bytes: 5,
+                    ..ContainerMountLimits::default()
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error.kind,
+            ContainerMountErrorKind::TotalOutputLimitExceeded { .. }
+        ));
+        assert_eq!(error.partial_report.mounted_entries, 1);
+        assert_eq!(error.partial_report.mounted_bytes, 5);
+        assert_eq!(
+            output_limited
+                .read_all_bytes("/tree/nested/first.bin", 32)
+                .unwrap(),
+            b"first"
+        );
+        assert!(!output_limited
+            .file_exists(Some("/tree/nested/second.bin"))
+            .unwrap());
     }
 
     #[test]

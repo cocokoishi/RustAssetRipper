@@ -1586,6 +1586,30 @@ mod tests {
     }
 
     #[test]
+    fn recursively_mounts_nested_unityfs_entries() {
+        let inner = make_bundle(b"nested UnityFS leaf", 0, false, 0);
+        let outer = make_bundle(&inner, 0, false, 0);
+        let dispatched = SchemeReader::read(&outer).unwrap();
+        let mut filesystem = VirtualFileSystem::new();
+        let report = dispatched
+            .mount_container_tree(
+                &mut filesystem,
+                Some("/bundles/tree"),
+                ContainerMountLimits::default(),
+            )
+            .unwrap();
+
+        assert_eq!(report.mounted_entries, 1);
+        assert_eq!(report.mounted_bytes, b"nested UnityFS leaf".len() as u64);
+        assert_eq!(
+            filesystem
+                .read_all_bytes("/bundles/tree/data/file.bin/data/file.bin", 128,)
+                .unwrap(),
+            b"nested UnityFS leaf"
+        );
+    }
+
+    #[test]
     fn recursively_dispatches_unityfs_entries() {
         let nested = compress_gzip(b"nested UnityFS entry", 1024).unwrap();
         let input = make_bundle(&nested, 0, false, 0);
