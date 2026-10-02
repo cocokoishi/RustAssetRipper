@@ -11,7 +11,10 @@ use crate::io::dependency::{
 };
 use crate::io::filesystem::{SearchOption, VirtualFileSystem};
 use crate::io::special_names::fix_file_identifier;
-use crate::scheme::{FileKind, ParsedFile, SchemeError, SchemeReader, SchemeReaderLimits};
+use crate::scheme::{
+    ContainerMountError, ContainerMountLimits, DispatchedFile, FileKind, ParsedFile, SchemeError,
+    SchemeReader, SchemeReaderLimits,
+};
 
 use super::header::SerializedFileHeader;
 use super::metadata::SerializedFileMetadata;
@@ -32,6 +35,9 @@ pub struct SerializedFileWorkspaceLimits {
     pub max_dependency_requests: usize,
     pub max_total_dependency_name_bytes: usize,
     pub max_total_dependency_candidate_path_bytes: usize,
+    pub max_total_dependency_container_input_bytes: u64,
+    pub max_total_dependency_container_entries: usize,
+    pub max_total_dependency_container_output_bytes: u64,
     pub max_total_objects: usize,
     pub max_total_reference_edges: usize,
     pub scheme: SchemeReaderLimits,
@@ -49,6 +55,9 @@ impl Default for SerializedFileWorkspaceLimits {
             max_dependency_requests: 1_000_000,
             max_total_dependency_name_bytes: 64 * 1024 * 1024,
             max_total_dependency_candidate_path_bytes: 64 * 1024 * 1024,
+            max_total_dependency_container_input_bytes: 16 * 1024 * 1024 * 1024,
+            max_total_dependency_container_entries: 1_000_000,
+            max_total_dependency_container_output_bytes: 2 * 1024 * 1024 * 1024,
             max_total_objects: 20_000_000,
             max_total_reference_edges: 5_000_000,
             scheme: SchemeReaderLimits::default(),
@@ -103,6 +112,14 @@ impl SerializedFileDependencyReport {
                 &request.outcome,
                 SerializedFileDependencyOutcome::AlreadyLoaded { .. }
                     | SerializedFileDependencyOutcome::LoadedSerializedFile { .. }
+                    | SerializedFileDependencyOutcome::ContainerExpanded {
+                        matching_serialized_files: 1,
+                        ..
+                    }
+                    | SerializedFileDependencyOutcome::ContainerAlreadyExpanded {
+                        matching_serialized_files: 1,
+                        ..
+                    }
             )
         })
     }
@@ -136,9 +153,18 @@ pub enum SerializedFileDependencyOutcome {
     ResourceCandidate {
         virtual_path: String,
     },
-    ContainerRequiresExpansion {
+    ContainerExpanded {
         virtual_path: String,
         kind: FileKind,
+        mounted_entries: usize,
+        mounted_bytes: u64,
+        serialized_files_loaded: usize,
+        matching_serialized_files: usize,
+    },
+    ContainerAlreadyExpanded {
+        virtual_path: String,
+        serialized_files_loaded: usize,
+        matching_serialized_files: usize,
     },
 }
 
@@ -408,27 +434,47 @@ impl SerializedFileWorkspace {
     /// Load every uniquely resolved SerializedFile reachable through external tables.
     ///
     /// The dependency registry is built from the currently mounted VFS file paths plus caller
-    /// supplied source identities. DataPaths retain their source ordering. Containers are
-    /// reported explicitly and are not expanded by this method.
+    /// supplied source identities. DataPaths retain their source ordering. Unique dependency
+    /// containers are recursively mounted beneath isolated VFS roots and their SerializedFile
+    /// leaves join the same external-dependency walk.
     pub fn load_from_vfs_with_dependencies(
-        filesystem: &VirtualFileSystem,
+        filesystem: &mut VirtualFileSystem,
         inputs: &[DependencyFilePath],
         registered_files: &[DependencyFilePath],
         data_paths: &[String],
         limits: SerializedFileWorkspaceLimits,
         index_limits: DependencyIndexLimits,
+        container_limits: ContainerMountLimits,
     ) -> Result<(Self, SerializedFileDependencyReport), Box<SerializedFileWorkspaceError>> {
         let mut workspace = Self::load_from_vfs(filesystem, inputs, limits)?;
-        let registry = dependency_registry(filesystem, inputs, registered_files, index_limits)
-            .map_err(|kind| workspace_error(workspace.report, None, kind))?;
-        let index = DependencyIndex::with_limits(filesystem, &registry, data_paths, index_limits)
-            .map_err(|error| {
-            workspace_error(
-                workspace.report,
-                None,
-                SerializedFileWorkspaceErrorKind::DependencyIndexBuild(Box::new(error)),
-            )
-        })?;
+        let mut dynamic_registered_files = Vec::new();
+        dynamic_registered_files
+            .try_reserve_exact(registered_files.len())
+            .map_err(|_| {
+                workspace_error(
+                    workspace.report,
+                    None,
+                    SerializedFileWorkspaceErrorKind::AllocationFailed {
+                        resource: "dependency source identities",
+                        requested: registered_files.len(),
+                    },
+                )
+            })?;
+        dynamic_registered_files.extend_from_slice(registered_files);
+        let mut registry =
+            dependency_registry(filesystem, inputs, &dynamic_registered_files, index_limits)
+                .map_err(|kind| workspace_error(workspace.report, None, kind))?;
+        let mut index = Some(
+            DependencyIndex::with_limits(filesystem, &registry, data_paths, index_limits).map_err(
+                |error| {
+                    workspace_error(
+                        workspace.report,
+                        None,
+                        SerializedFileWorkspaceErrorKind::DependencyIndexBuild(Box::new(error)),
+                    )
+                },
+            )?,
+        );
         let mut loaded_names = HashMap::<String, (usize, usize)>::new();
         loaded_names
             .try_reserve(workspace.files.len())
@@ -466,6 +512,11 @@ impl SerializedFileWorkspace {
         let mut dependency_report = SerializedFileDependencyReport::default();
         let mut total_dependency_name_bytes = 0usize;
         let mut total_candidate_path_bytes = 0usize;
+        let mut total_container_input_bytes = 0u64;
+        let mut total_container_entries = 0usize;
+        let mut total_container_output_bytes = 0u64;
+        let mut expanded_containers = HashMap::<String, usize>::new();
+        let mut next_mount_namespace = 0usize;
         let mut source_file_index = 0usize;
 
         while source_file_index < workspace.files.len() {
@@ -523,13 +574,23 @@ impl SerializedFileWorkspace {
                     Some((_, candidate_count)) => {
                         SerializedFileDependencyOutcome::AmbiguousLoadedIdentity { candidate_count }
                     }
-                    None => match index.resolve(&identifier).map_err(|error| {
-                        workspace_error(
-                            workspace.report,
-                            Some(&workspace.files[source_file_index].virtual_path),
-                            SerializedFileWorkspaceErrorKind::DependencyLookup(Box::new(error)),
-                        )
-                    })? {
+                    None => match index
+                        .as_ref()
+                        .ok_or_else(|| {
+                            workspace_error(
+                                workspace.report,
+                                Some(&workspace.files[source_file_index].virtual_path),
+                                SerializedFileWorkspaceErrorKind::DependencyIndexUnavailable,
+                            )
+                        })?
+                        .resolve(&identifier)
+                        .map_err(|error| {
+                            workspace_error(
+                                workspace.report,
+                                Some(&workspace.files[source_file_index].virtual_path),
+                                SerializedFileWorkspaceErrorKind::DependencyLookup(Box::new(error)),
+                            )
+                        })? {
                         DependencyLookup::Missing { .. } => {
                             SerializedFileDependencyOutcome::Missing
                         }
@@ -589,8 +650,28 @@ impl SerializedFileWorkspace {
                                 loaded_paths.get(&candidate.virtual_path).copied()
                             {
                                 SerializedFileDependencyOutcome::AlreadyLoaded { file_index }
+                            } else if let Some(serialized_files_loaded) =
+                                expanded_containers.get(&candidate.virtual_path).copied()
+                            {
+                                let matching_serialized_files = loaded_names
+                                    .get(&dependency_name)
+                                    .map(|(_, count)| *count)
+                                    .unwrap_or(0);
+                                SerializedFileDependencyOutcome::ContainerAlreadyExpanded {
+                                    virtual_path: candidate.virtual_path,
+                                    serialized_files_loaded,
+                                    matching_serialized_files,
+                                }
                             } else {
                                 let dispatched = index
+                                    .as_ref()
+                                    .ok_or_else(|| {
+                                        workspace_error(
+                                            workspace.report,
+                                            Some(&candidate.virtual_path),
+                                            SerializedFileWorkspaceErrorKind::DependencyIndexUnavailable,
+                                        )
+                                    })?
                                     .dispatch_candidate(&candidate, limits.scheme)
                                     .map_err(|error| {
                                         workspace_error(
@@ -602,12 +683,25 @@ impl SerializedFileWorkspace {
                                         )
                                     })?;
                                 let detected_kind = dispatched.kind();
-                                drop(dispatched);
                                 match detected_kind {
                                     FileKind::SerializedFile => {
-                                        let requested_loaded_file_count = workspace
-                                            .files
-                                            .len()
+                                        drop(dispatched);
+                                        let dependency_input = DependencyFilePath {
+                                            file_name: file_name_from_virtual_path(
+                                                &candidate.virtual_path,
+                                            ),
+                                            virtual_path: candidate.virtual_path.clone(),
+                                        };
+                                        let file_index = load_dependency_serialized_file(
+                                            filesystem,
+                                            &dependency_input,
+                                            limits,
+                                            &mut workspace,
+                                            &mut loaded_names,
+                                            &mut loaded_paths,
+                                        )?;
+                                        dependency_report.loaded_serialized_files = dependency_report
+                                            .loaded_serialized_files
                                             .checked_add(1)
                                             .ok_or_else(|| {
                                                 workspace_error(
@@ -616,79 +710,351 @@ impl SerializedFileWorkspace {
                                                     SerializedFileWorkspaceErrorKind::FileCountOverflow,
                                                 )
                                             })?;
-                                        loaded_names.try_reserve(1).map_err(|_| {
-                                            workspace_error(
-                                                workspace.report,
-                                                Some(&candidate.virtual_path),
-                                                SerializedFileWorkspaceErrorKind::AllocationFailed {
-                                                    resource: "loaded dependency identities",
-                                                    requested: requested_loaded_file_count,
-                                                },
-                                            )
-                                        })?;
-                                        loaded_paths.try_reserve(1).map_err(|_| {
-                                            workspace_error(
-                                                workspace.report,
-                                                Some(&candidate.virtual_path),
-                                                SerializedFileWorkspaceErrorKind::AllocationFailed {
-                                                    resource: "loaded dependency paths",
-                                                    requested: requested_loaded_file_count,
-                                                },
-                                            )
-                                        })?;
-                                        let dependency_input = DependencyFilePath {
-                                            file_name: file_name_from_virtual_path(
-                                                &candidate.virtual_path,
-                                            ),
-                                            virtual_path: candidate.virtual_path.clone(),
-                                        };
-                                        let additional = Self::load_from_vfs(
-                                            filesystem,
-                                            std::slice::from_ref(&dependency_input),
-                                            remaining_workspace_limits(
-                                                limits,
-                                                workspace.report,
-                                                workspace.files.len(),
-                                            ),
-                                        )
-                                        .map_err(|mut error| {
-                                            error.report = workspace.report;
-                                            error
-                                        })?;
-                                        let file_index = workspace.files.len();
-                                        append_workspace(&mut workspace, additional).map_err(
-                                            |kind| {
-                                                workspace_error(
-                                                    workspace.report,
-                                                    Some(&candidate.virtual_path),
-                                                    kind,
-                                                )
-                                            },
-                                        )?;
-                                        let loaded_file = &workspace.files[file_index];
-                                        let loaded_name = fix_file_identifier(&loaded_file.file_name);
-                                        loaded_names
-                                            .entry(loaded_name)
-                                            .and_modify(|(_, count)| *count += 1)
-                                            .or_insert((file_index, 1));
-                                        loaded_paths
-                                            .insert(loaded_file.virtual_path.clone(), file_index);
-                                        dependency_report.loaded_serialized_files += 1;
                                         SerializedFileDependencyOutcome::LoadedSerializedFile {
                                             file_index,
                                             virtual_path: candidate.virtual_path,
                                         }
                                     }
                                     FileKind::Resource => {
+                                        drop(dispatched);
                                         SerializedFileDependencyOutcome::ResourceCandidate {
                                             virtual_path: candidate.virtual_path,
                                         }
                                     }
-                                    kind => {
-                                        SerializedFileDependencyOutcome::ContainerRequiresExpansion {
+                                    kind if container_kind(kind) => {
+                                        let container_input_bytes = u64::try_from(
+                                            dispatched.bytes().len(),
+                                        )
+                                        .map_err(|_| {
+                                            workspace_error(
+                                                workspace.report,
+                                                Some(&candidate.virtual_path),
+                                                SerializedFileWorkspaceErrorKind::DependencyContainerInputByteCountOverflow,
+                                            )
+                                        })?;
+                                        total_container_input_bytes = total_container_input_bytes
+                                            .checked_add(container_input_bytes)
+                                            .ok_or_else(|| {
+                                                workspace_error(
+                                                    workspace.report,
+                                                    Some(&candidate.virtual_path),
+                                                    SerializedFileWorkspaceErrorKind::DependencyContainerInputByteCountOverflow,
+                                                )
+                                            })?;
+                                        if total_container_input_bytes
+                                            > limits.max_total_dependency_container_input_bytes
+                                        {
+                                            return Err(workspace_error(
+                                                workspace.report,
+                                                Some(&candidate.virtual_path),
+                                                SerializedFileWorkspaceErrorKind::TotalDependencyContainerInputBytesLimitExceeded {
+                                                    byte_count: total_container_input_bytes,
+                                                    limit: limits
+                                                        .max_total_dependency_container_input_bytes,
+                                                },
+                                            ));
+                                        }
+                                        let remaining_entries = limits
+                                            .max_total_dependency_container_entries
+                                            .checked_sub(total_container_entries)
+                                            .ok_or_else(|| {
+                                                workspace_error(
+                                                    workspace.report,
+                                                    Some(&candidate.virtual_path),
+                                                    SerializedFileWorkspaceErrorKind::DependencyContainerEntryCountOverflow,
+                                                )
+                                            })?;
+                                        let remaining_output_bytes = limits
+                                            .max_total_dependency_container_output_bytes
+                                            .checked_sub(total_container_output_bytes)
+                                            .ok_or_else(|| {
+                                                workspace_error(
+                                                    workspace.report,
+                                                    Some(&candidate.virtual_path),
+                                                    SerializedFileWorkspaceErrorKind::DependencyContainerOutputByteCountOverflow,
+                                                )
+                                            })?;
+                                        let mut bounded_mount_limits = container_limits;
+                                        bounded_mount_limits.max_entries =
+                                            bounded_mount_limits.max_entries.min(remaining_entries);
+                                        bounded_mount_limits.max_total_output_bytes =
+                                            bounded_mount_limits
+                                                .max_total_output_bytes
+                                                .min(remaining_output_bytes);
+
+                                        drop(index.take());
+                                        let mount_root = new_dependency_expansion_root(
+                                            filesystem,
+                                            &mut next_mount_namespace,
+                                        )
+                                        .map_err(|source| {
+                                            workspace_error(
+                                                workspace.report,
+                                                Some(&candidate.virtual_path),
+                                                SerializedFileWorkspaceErrorKind::FileSystem(
+                                                    source,
+                                                ),
+                                            )
+                                        })?;
+                                        let mount_report = dispatched
+                                            .mount_container_tree(
+                                                filesystem,
+                                                Some(&mount_root),
+                                                bounded_mount_limits,
+                                            )
+                                            .map_err(|error| {
+                                                workspace_error(
+                                                    workspace.report,
+                                                    Some(&candidate.virtual_path),
+                                                    SerializedFileWorkspaceErrorKind::ContainerMount(
+                                                        Box::new(error),
+                                                    ),
+                                                )
+                                            })?;
+                                        total_container_entries = total_container_entries
+                                            .checked_add(mount_report.mounted_entries)
+                                            .ok_or_else(|| {
+                                                workspace_error(
+                                                    workspace.report,
+                                                    Some(&candidate.virtual_path),
+                                                    SerializedFileWorkspaceErrorKind::DependencyContainerEntryCountOverflow,
+                                                )
+                                            })?;
+                                        if total_container_entries
+                                            > limits.max_total_dependency_container_entries
+                                        {
+                                            return Err(workspace_error(
+                                                workspace.report,
+                                                Some(&candidate.virtual_path),
+                                                SerializedFileWorkspaceErrorKind::TotalDependencyContainerEntriesLimitExceeded {
+                                                    count: total_container_entries,
+                                                    limit: limits
+                                                        .max_total_dependency_container_entries,
+                                                },
+                                            ));
+                                        }
+                                        total_container_output_bytes = total_container_output_bytes
+                                            .checked_add(mount_report.mounted_bytes)
+                                            .ok_or_else(|| {
+                                                workspace_error(
+                                                    workspace.report,
+                                                    Some(&candidate.virtual_path),
+                                                    SerializedFileWorkspaceErrorKind::DependencyContainerOutputByteCountOverflow,
+                                                )
+                                            })?;
+                                        if total_container_output_bytes
+                                            > limits.max_total_dependency_container_output_bytes
+                                        {
+                                            return Err(workspace_error(
+                                                workspace.report,
+                                                Some(&candidate.virtual_path),
+                                                SerializedFileWorkspaceErrorKind::TotalDependencyContainerOutputBytesLimitExceeded {
+                                                    byte_count: total_container_output_bytes,
+                                                    limit: limits
+                                                        .max_total_dependency_container_output_bytes,
+                                                },
+                                            ));
+                                        }
+
+                                        let leaf_paths = filesystem
+                                            .enumerate_files(
+                                                Some(&mount_root),
+                                                "*",
+                                                SearchOption::AllDirectories,
+                                            )
+                                            .map_err(|source| {
+                                                workspace_error(
+                                                    workspace.report,
+                                                    Some(&mount_root),
+                                                    SerializedFileWorkspaceErrorKind::FileSystem(
+                                                        source,
+                                                    ),
+                                                )
+                                            })?;
+                                        let requested_registry_file_count = dynamic_registered_files
+                                            .len()
+                                            .checked_add(leaf_paths.len())
+                                            .ok_or_else(|| {
+                                                workspace_error(
+                                                    workspace.report,
+                                                    Some(&mount_root),
+                                                    SerializedFileWorkspaceErrorKind::DependencyRegistryCountOverflow,
+                                                )
+                                            })?;
+                                        if requested_registry_file_count
+                                            > index_limits.max_registered_files
+                                        {
+                                            return Err(workspace_error(
+                                                workspace.report,
+                                                Some(&mount_root),
+                                                SerializedFileWorkspaceErrorKind::DependencyRegistryCountLimitExceeded {
+                                                    count: requested_registry_file_count,
+                                                    limit: index_limits.max_registered_files,
+                                                },
+                                            ));
+                                        }
+                                        dynamic_registered_files
+                                            .try_reserve(leaf_paths.len())
+                                            .map_err(|_| {
+                                                workspace_error(
+                                                    workspace.report,
+                                                    Some(&mount_root),
+                                                    SerializedFileWorkspaceErrorKind::AllocationFailed {
+                                                        resource: "container leaf identities",
+                                                        requested: requested_registry_file_count,
+                                                    },
+                                                )
+                                            })?;
+                                        let mut serialized_files_loaded = 0usize;
+                                        for leaf_path in leaf_paths {
+                                            let relative_name = relative_path_under(
+                                                &leaf_path,
+                                                &mount_root,
+                                            )
+                                            .ok_or_else(|| {
+                                                workspace_error(
+                                                    workspace.report,
+                                                    Some(&leaf_path),
+                                                    SerializedFileWorkspaceErrorKind::UnexpectedContainerLeaf {
+                                                        virtual_path: leaf_path.clone(),
+                                                        kind: FileKind::Resource,
+                                                    },
+                                                )
+                                            })?;
+                                            dynamic_registered_files.push(DependencyFilePath {
+                                                file_name: relative_name.to_owned(),
+                                                virtual_path: leaf_path.clone(),
+                                            });
+                                            let leaf = dispatch_vfs_file(
+                                                filesystem,
+                                                &leaf_path,
+                                                limits.scheme,
+                                                workspace.report,
+                                            )?;
+                                            match leaf.kind() {
+                                                FileKind::SerializedFile => {
+                                                    drop(leaf);
+                                                    if !loaded_paths.contains_key(&leaf_path) {
+                                                        let leaf_input = DependencyFilePath {
+                                                            file_name: relative_name.to_owned(),
+                                                            virtual_path: leaf_path.clone(),
+                                                        };
+                                                        load_dependency_serialized_file(
+                                                            filesystem,
+                                                            &leaf_input,
+                                                            limits,
+                                                            &mut workspace,
+                                                            &mut loaded_names,
+                                                            &mut loaded_paths,
+                                                        )?;
+                                                        serialized_files_loaded =
+                                                            serialized_files_loaded.checked_add(1).ok_or_else(|| {
+                                                                workspace_error(
+                                                                    workspace.report,
+                                                                    Some(&leaf_path),
+                                                                    SerializedFileWorkspaceErrorKind::FileCountOverflow,
+                                                                )
+                                                            })?;
+                                                        dependency_report.loaded_serialized_files =
+                                                            dependency_report.loaded_serialized_files.checked_add(1).ok_or_else(|| {
+                                                                workspace_error(
+                                                                    workspace.report,
+                                                                    Some(&leaf_path),
+                                                                    SerializedFileWorkspaceErrorKind::FileCountOverflow,
+                                                                )
+                                                            })?;
+                                                    }
+                                                }
+                                                FileKind::Resource => drop(leaf),
+                                                kind => {
+                                                    return Err(workspace_error(
+                                                        workspace.report,
+                                                            Some(&leaf_path),
+                                                            SerializedFileWorkspaceErrorKind::UnexpectedContainerLeaf {
+                                                                virtual_path: leaf_path.clone(),
+                                                            kind,
+                                                        },
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                        let requested_container_count = expanded_containers
+                                            .len()
+                                            .checked_add(1)
+                                            .ok_or_else(|| {
+                                                workspace_error(
+                                                    workspace.report,
+                                                    Some(&candidate.virtual_path),
+                                                    SerializedFileWorkspaceErrorKind::DependencyContainerCountOverflow,
+                                                )
+                                            })?;
+                                        expanded_containers.try_reserve(1).map_err(|_| {
+                                            workspace_error(
+                                                workspace.report,
+                                                Some(&candidate.virtual_path),
+                                                SerializedFileWorkspaceErrorKind::AllocationFailed {
+                                                    resource: "expanded dependency containers",
+                                                    requested: requested_container_count,
+                                                },
+                                            )
+                                        })?;
+                                        expanded_containers.insert(
+                                            candidate.virtual_path.clone(),
+                                            serialized_files_loaded,
+                                        );
+                                        registry = dependency_registry(
+                                            filesystem,
+                                            inputs,
+                                            &dynamic_registered_files,
+                                            index_limits,
+                                        )
+                                        .map_err(|kind| {
+                                            workspace_error(
+                                                workspace.report,
+                                                Some(&candidate.virtual_path),
+                                                kind,
+                                            )
+                                        })?;
+                                        index = Some(
+                                            DependencyIndex::with_limits(
+                                                filesystem,
+                                                &registry,
+                                                data_paths,
+                                                index_limits,
+                                            )
+                                            .map_err(|error| {
+                                                workspace_error(
+                                                    workspace.report,
+                                                    Some(&candidate.virtual_path),
+                                                    SerializedFileWorkspaceErrorKind::DependencyIndexBuild(
+                                                        Box::new(error),
+                                                    ),
+                                                )
+                                            })?,
+                                        );
+                                        let matching_serialized_files = loaded_names
+                                            .get(&dependency_name)
+                                            .map(|(_, count)| *count)
+                                            .unwrap_or(0);
+                                        SerializedFileDependencyOutcome::ContainerExpanded {
                                             virtual_path: candidate.virtual_path,
                                             kind,
+                                            mounted_entries: mount_report.mounted_entries,
+                                            mounted_bytes: mount_report.mounted_bytes,
+                                            serialized_files_loaded,
+                                            matching_serialized_files,
                                         }
+                                    }
+                                    _ => {
+                                        drop(dispatched);
+                                        return Err(workspace_error(
+                                            workspace.report,
+                                            Some(&candidate.virtual_path),
+                                            SerializedFileWorkspaceErrorKind::UnexpectedContainerLeaf {
+                                                virtual_path: candidate.virtual_path.clone(),
+                                                kind: detected_kind,
+                                            },
+                                        ));
                                     }
                                 }
                             }
@@ -886,6 +1252,122 @@ fn append_workspace(
     Ok(())
 }
 
+fn load_dependency_serialized_file(
+    filesystem: &VirtualFileSystem,
+    input: &DependencyFilePath,
+    limits: SerializedFileWorkspaceLimits,
+    workspace: &mut SerializedFileWorkspace,
+    loaded_names: &mut HashMap<String, (usize, usize)>,
+    loaded_paths: &mut HashMap<String, usize>,
+) -> Result<usize, Box<SerializedFileWorkspaceError>> {
+    let requested_file_count = workspace.files.len().checked_add(1).ok_or_else(|| {
+        workspace_error(
+            workspace.report,
+            Some(&input.virtual_path),
+            SerializedFileWorkspaceErrorKind::FileCountOverflow,
+        )
+    })?;
+    loaded_names.try_reserve(1).map_err(|_| {
+        workspace_error(
+            workspace.report,
+            Some(&input.virtual_path),
+            SerializedFileWorkspaceErrorKind::AllocationFailed {
+                resource: "loaded dependency identities",
+                requested: requested_file_count,
+            },
+        )
+    })?;
+    loaded_paths.try_reserve(1).map_err(|_| {
+        workspace_error(
+            workspace.report,
+            Some(&input.virtual_path),
+            SerializedFileWorkspaceErrorKind::AllocationFailed {
+                resource: "loaded dependency paths",
+                requested: requested_file_count,
+            },
+        )
+    })?;
+
+    let additional = SerializedFileWorkspace::load_from_vfs(
+        filesystem,
+        std::slice::from_ref(input),
+        remaining_workspace_limits(limits, workspace.report, workspace.files.len()),
+    )
+    .map_err(|mut error| {
+        error.report = workspace.report;
+        error
+    })?;
+    let file_index = workspace.files.len();
+    append_workspace(workspace, additional)
+        .map_err(|kind| workspace_error(workspace.report, Some(&input.virtual_path), kind))?;
+    let loaded_file = &workspace.files[file_index];
+    let loaded_name = fix_file_identifier(&loaded_file.file_name);
+    loaded_names
+        .entry(loaded_name)
+        .and_modify(|(_, count)| *count += 1)
+        .or_insert((file_index, 1));
+    loaded_paths.insert(loaded_file.virtual_path.clone(), file_index);
+    Ok(file_index)
+}
+
+fn dispatch_vfs_file(
+    filesystem: &VirtualFileSystem,
+    virtual_path: &str,
+    limits: SchemeReaderLimits,
+    report: SerializedFileWorkspaceReport,
+) -> Result<DispatchedFile<'static>, Box<SerializedFileWorkspaceError>> {
+    let mut stream = filesystem.open_file(virtual_path).map_err(|source| {
+        workspace_error(
+            report,
+            Some(virtual_path),
+            SerializedFileWorkspaceErrorKind::FileSystem(source),
+        )
+    })?;
+    SchemeReader::read_stream(&mut stream, limits).map_err(|source| {
+        workspace_error(
+            report,
+            Some(virtual_path),
+            SerializedFileWorkspaceErrorKind::Scheme(source),
+        )
+    })
+}
+
+fn new_dependency_expansion_root(
+    filesystem: &mut VirtualFileSystem,
+    next_namespace: &mut usize,
+) -> io::Result<String> {
+    loop {
+        let namespace = *next_namespace;
+        *next_namespace = namespace.checked_add(1).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "dependency expansion namespace count overflows",
+            )
+        })?;
+        let root = format!("/__assetripper_dependency_mount_{namespace}");
+        if filesystem.file_exists(Some(&root))? || filesystem.directory_exists(Some(&root))? {
+            continue;
+        }
+        filesystem.create_directory(Some(&root))?;
+        return Ok(root);
+    }
+}
+
+fn container_kind(kind: FileKind) -> bool {
+    matches!(
+        kind,
+        FileKind::UnityFs
+            | FileKind::UnityRaw
+            | FileKind::UnityWebBundle
+            | FileKind::UnityArchive
+            | FileKind::UnityWebData
+    )
+}
+
+fn relative_path_under<'a>(path: &'a str, root: &str) -> Option<&'a str> {
+    path.strip_prefix(root)?.strip_prefix('/')
+}
+
 #[derive(Debug)]
 pub struct SerializedFileWorkspaceError {
     pub report: SerializedFileWorkspaceReport,
@@ -934,6 +1416,27 @@ pub enum SerializedFileWorkspaceErrorKind {
         byte_count: usize,
         limit: usize,
     },
+    DependencyIndexUnavailable,
+    DependencyContainerInputByteCountOverflow,
+    TotalDependencyContainerInputBytesLimitExceeded {
+        byte_count: u64,
+        limit: u64,
+    },
+    DependencyContainerEntryCountOverflow,
+    DependencyContainerCountOverflow,
+    TotalDependencyContainerEntriesLimitExceeded {
+        count: usize,
+        limit: usize,
+    },
+    DependencyContainerOutputByteCountOverflow,
+    TotalDependencyContainerOutputBytesLimitExceeded {
+        byte_count: u64,
+        limit: u64,
+    },
+    UnexpectedContainerLeaf {
+        virtual_path: String,
+        kind: FileKind,
+    },
     DuplicateVirtualPath,
     FileSizeLimitExceeded {
         file_bytes: u64,
@@ -961,6 +1464,7 @@ pub enum SerializedFileWorkspaceErrorKind {
     DependencyIndexBuild(Box<DependencyIndexBuildError>),
     DependencyLookup(Box<DependencyLookupError>),
     DependencyDispatch(Box<DependencyDispatchError>),
+    ContainerMount(Box<ContainerMountError>),
     Scheme(SchemeError),
     ReferenceGraph(ReferenceGraphBuildError),
 }
@@ -1034,6 +1538,37 @@ impl Display for SerializedFileWorkspaceErrorKind {
                 f,
                 "reported dependency candidate paths use {byte_count} bytes, exceeding limit {limit}"
             ),
+            Self::DependencyIndexUnavailable => {
+                f.write_str("dependency index is unavailable during the dependency walk")
+            }
+            Self::DependencyContainerInputByteCountOverflow => {
+                f.write_str("dependency container input byte count overflows")
+            }
+            Self::TotalDependencyContainerInputBytesLimitExceeded { byte_count, limit } => write!(
+                f,
+                "dependency container input uses {byte_count} bytes, exceeding limit {limit}"
+            ),
+            Self::DependencyContainerEntryCountOverflow => {
+                f.write_str("dependency container entry count overflows")
+            }
+            Self::DependencyContainerCountOverflow => {
+                f.write_str("expanded dependency container count overflows")
+            }
+            Self::TotalDependencyContainerEntriesLimitExceeded { count, limit } => write!(
+                f,
+                "dependency container entry count {count} exceeds limit {limit}"
+            ),
+            Self::DependencyContainerOutputByteCountOverflow => {
+                f.write_str("dependency container output byte count overflows")
+            }
+            Self::TotalDependencyContainerOutputBytesLimitExceeded { byte_count, limit } => write!(
+                f,
+                "dependency container output uses {byte_count} bytes, exceeding limit {limit}"
+            ),
+            Self::UnexpectedContainerLeaf { virtual_path, kind } => write!(
+                f,
+                "mounted container leaf '{virtual_path}' is still a {kind:?} container"
+            ),
             Self::DuplicateVirtualPath => f.write_str("virtual path occurs more than once"),
             Self::FileSizeLimitExceeded { file_bytes, limit } => {
                 write!(f, "file size {file_bytes} bytes exceeds limit {limit}")
@@ -1067,6 +1602,7 @@ impl Display for SerializedFileWorkspaceErrorKind {
             Self::DependencyDispatch(error) => {
                 write!(f, "could not dispatch dependency: {error}")
             }
+            Self::ContainerMount(error) => write!(f, "could not expand dependency container: {error}"),
             Self::Scheme(error) => write!(f, "file scheme error: {error}"),
             Self::ReferenceGraph(error) => write!(f, "per-file reference graph error: {error}"),
         }
@@ -1080,6 +1616,7 @@ impl Error for SerializedFileWorkspaceError {
             SerializedFileWorkspaceErrorKind::DependencyIndexBuild(error) => Some(error.as_ref()),
             SerializedFileWorkspaceErrorKind::DependencyLookup(error) => Some(error.as_ref()),
             SerializedFileWorkspaceErrorKind::DependencyDispatch(error) => Some(error.as_ref()),
+            SerializedFileWorkspaceErrorKind::ContainerMount(error) => Some(error.as_ref()),
             SerializedFileWorkspaceErrorKind::Scheme(error) => Some(error),
             SerializedFileWorkspaceErrorKind::ReferenceGraph(error) => Some(error),
             _ => None,
@@ -1109,7 +1646,7 @@ mod tests {
     };
     use crate::io::dependency::{DependencyFilePath, DependencyIndexLimits};
     use crate::io::filesystem::VirtualFileSystem;
-    use crate::scheme::FileKind;
+    use crate::scheme::{ContainerMountErrorKind, ContainerMountLimits, FileKind};
     use crate::serialized_file::reference_graph::{
         MultiFilePPtrResolution, MultiFileReferenceGraphLimits,
     };
@@ -1225,6 +1762,29 @@ mod tests {
         file
     }
 
+    fn make_webdata_fixture(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let header_size = 20usize
+            + entries
+                .iter()
+                .map(|(name, _)| 9usize + name.len())
+                .sum::<usize>();
+        let mut container = b"UnityWebData1.0\0".to_vec();
+        container.extend_from_slice(&i32::try_from(header_size).unwrap().to_le_bytes());
+        let mut data_offset = header_size;
+        for (name, bytes) in entries {
+            assert!(name.len() < 128);
+            container.extend_from_slice(&i32::try_from(data_offset).unwrap().to_le_bytes());
+            container.extend_from_slice(&i32::try_from(bytes.len()).unwrap().to_le_bytes());
+            container.push(u8::try_from(name.len()).unwrap());
+            container.extend_from_slice(name.as_bytes());
+            data_offset += bytes.len();
+        }
+        for (_, bytes) in entries {
+            container.extend_from_slice(bytes);
+        }
+        container
+    }
+
     fn virtual_file_system(path: &str, bytes: &[u8]) -> VirtualFileSystem {
         let mut filesystem = VirtualFileSystem::new();
         let parent = path
@@ -1243,6 +1803,19 @@ mod tests {
             .unwrap_or("");
         filesystem.create_directory(Some(parent)).unwrap();
         filesystem.write_all_bytes(path, bytes).unwrap();
+    }
+
+    fn dependency_container_filesystem() -> VirtualFileSystem {
+        let mut filesystem = VirtualFileSystem::new();
+        let leaf = make_generation_10_file();
+        let container = make_webdata_fixture(&[("shared.assets", &leaf)]);
+        insert_file(
+            &mut filesystem,
+            "/game/main.assets",
+            &make_generation_10_file_with(&["shared.assets"], 1, 10, 42),
+        );
+        insert_file(&mut filesystem, "/game/shared.assets", &container);
+        filesystem
     }
 
     fn input(path: &str) -> DependencyFilePath {
@@ -1308,12 +1881,13 @@ mod tests {
 
         let (workspace, dependency_report) =
             SerializedFileWorkspace::load_from_vfs_with_dependencies(
-                &filesystem,
+                &mut filesystem,
                 &inputs,
                 &[],
                 &data_paths,
                 SerializedFileWorkspaceLimits::default(),
                 DependencyIndexLimits::default(),
+                ContainerMountLimits::default(),
             )
             .unwrap();
 
@@ -1393,12 +1967,13 @@ mod tests {
 
         let (workspace, dependency_report) =
             SerializedFileWorkspace::load_from_vfs_with_dependencies(
-                &filesystem,
+                &mut filesystem,
                 &inputs,
                 &[],
                 &data_paths,
                 SerializedFileWorkspaceLimits::default(),
                 DependencyIndexLimits::default(),
+                ContainerMountLimits::default(),
             )
             .unwrap();
 
@@ -1421,20 +1996,155 @@ mod tests {
         );
         assert_eq!(
             dependency_report.requests[3].outcome,
-            SerializedFileDependencyOutcome::ContainerRequiresExpansion {
+            SerializedFileDependencyOutcome::ContainerExpanded {
                 virtual_path: "/game/Data/archive.webdata".to_owned(),
                 kind: FileKind::UnityWebData,
+                mounted_entries: 0,
+                mounted_bytes: 0,
+                serialized_files_loaded: 0,
+                matching_serialized_files: 0,
             }
         );
     }
 
     #[test]
+    fn expands_dependency_containers_and_loads_their_serialized_file_leaves() {
+        let mut filesystem = VirtualFileSystem::new();
+        let serialized_leaf = make_generation_10_file();
+        let container = make_webdata_fixture(&[("shared.assets", &serialized_leaf)]);
+        insert_file(
+            &mut filesystem,
+            "/game/main.assets",
+            &make_generation_10_file_with(&["shared.assets"], 1, 10, 42),
+        );
+        insert_file(&mut filesystem, "/game/shared.assets", &container);
+        let inputs = [input("/game/main.assets")];
+        let data_paths = ["/game".to_owned()];
+
+        let (workspace, dependency_report) =
+            SerializedFileWorkspace::load_from_vfs_with_dependencies(
+                &mut filesystem,
+                &inputs,
+                &[],
+                &data_paths,
+                SerializedFileWorkspaceLimits::default(),
+                DependencyIndexLimits::default(),
+                ContainerMountLimits::default(),
+            )
+            .unwrap();
+
+        assert_eq!(workspace.files().len(), 2);
+        assert_eq!(workspace.files()[1].file_name, "shared.assets");
+        assert!(dependency_report.is_complete());
+        assert_eq!(
+            dependency_report.requests[0].outcome,
+            SerializedFileDependencyOutcome::ContainerExpanded {
+                virtual_path: "/game/shared.assets".to_owned(),
+                kind: FileKind::UnityWebData,
+                mounted_entries: 1,
+                mounted_bytes: u64::try_from(serialized_leaf.len()).unwrap(),
+                serialized_files_loaded: 1,
+                matching_serialized_files: 1,
+            }
+        );
+        let graph = workspace
+            .reference_graph(MultiFileReferenceGraphLimits::default())
+            .unwrap();
+        assert_eq!(graph.references().len(), 2);
+        assert_eq!(
+            graph.references()[0].resolution,
+            MultiFilePPtrResolution::Object {
+                target_file_index: 1,
+                target_object_index: 0,
+            }
+        );
+        assert!(graph.is_complete());
+    }
+
+    #[test]
+    fn enforces_aggregate_dependency_container_input_entry_and_output_limits() {
+        let inputs = [input("/game/main.assets")];
+        let data_paths = ["/game".to_owned()];
+
+        let mut filesystem = dependency_container_filesystem();
+        let error = SerializedFileWorkspace::load_from_vfs_with_dependencies(
+            &mut filesystem,
+            &inputs,
+            &[],
+            &data_paths,
+            SerializedFileWorkspaceLimits {
+                max_total_dependency_container_input_bytes: 1,
+                ..SerializedFileWorkspaceLimits::default()
+            },
+            DependencyIndexLimits::default(),
+            ContainerMountLimits::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error.kind,
+            SerializedFileWorkspaceErrorKind::TotalDependencyContainerInputBytesLimitExceeded {
+                limit: 1,
+                ..
+            }
+        ));
+        assert!(!filesystem
+            .directory_exists(Some("/__assetripper_dependency_mount_0"))
+            .unwrap());
+
+        let mut filesystem = dependency_container_filesystem();
+        let error = SerializedFileWorkspace::load_from_vfs_with_dependencies(
+            &mut filesystem,
+            &inputs,
+            &[],
+            &data_paths,
+            SerializedFileWorkspaceLimits {
+                max_total_dependency_container_entries: 0,
+                ..SerializedFileWorkspaceLimits::default()
+            },
+            DependencyIndexLimits::default(),
+            ContainerMountLimits::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error.kind,
+            SerializedFileWorkspaceErrorKind::ContainerMount(ref mount_error)
+                if matches!(
+                    mount_error.kind,
+                    ContainerMountErrorKind::EntryCountLimitExceeded { limit: 0, .. }
+                )
+        ));
+
+        let mut filesystem = dependency_container_filesystem();
+        let error = SerializedFileWorkspace::load_from_vfs_with_dependencies(
+            &mut filesystem,
+            &inputs,
+            &[],
+            &data_paths,
+            SerializedFileWorkspaceLimits {
+                max_total_dependency_container_output_bytes: 1,
+                ..SerializedFileWorkspaceLimits::default()
+            },
+            DependencyIndexLimits::default(),
+            ContainerMountLimits::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error.kind,
+            SerializedFileWorkspaceErrorKind::ContainerMount(ref mount_error)
+                if matches!(
+                    mount_error.kind,
+                    ContainerMountErrorKind::TotalOutputLimitExceeded { limit: 1, .. }
+                )
+        ));
+    }
+
+    #[test]
     fn bounds_dependency_request_walk() {
         let bytes = make_generation_10_file_with(&["shared.assets"], 1, 10, 42);
-        let filesystem = virtual_file_system("/game/main.assets", &bytes);
+        let mut filesystem = virtual_file_system("/game/main.assets", &bytes);
         let inputs = [input("/game/main.assets")];
         let error = SerializedFileWorkspace::load_from_vfs_with_dependencies(
-            &filesystem,
+            &mut filesystem,
             &inputs,
             &[],
             &[],
@@ -1443,6 +2153,7 @@ mod tests {
                 ..SerializedFileWorkspaceLimits::default()
             },
             DependencyIndexLimits::default(),
+            ContainerMountLimits::default(),
         )
         .unwrap_err();
         assert_eq!(error.report.completed_files, 1);
@@ -1467,7 +2178,7 @@ mod tests {
         );
         let inputs = [input("/game/main.assets")];
         let error = SerializedFileWorkspace::load_from_vfs_with_dependencies(
-            &filesystem,
+            &mut filesystem,
             &inputs,
             &[],
             &[],
@@ -1476,6 +2187,7 @@ mod tests {
                 ..SerializedFileWorkspaceLimits::default()
             },
             DependencyIndexLimits::default(),
+            ContainerMountLimits::default(),
         )
         .unwrap_err();
 

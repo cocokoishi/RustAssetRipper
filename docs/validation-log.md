@@ -14,7 +14,7 @@
 | Command | Exit code | Result |
 |---|---:|---|
 | `& 'C:\Users\koishi\.cargo\bin\cargo.exe' fmt --all -- --check` | 0 | All Rust files are formatted |
-| `& 'C:\Users\koishi\.cargo\bin\cargo.exe' test --workspace --locked` | 0 | 166 unit tests passed; 0 failed; 0 doc tests |
+| `& 'C:\Users\koishi\.cargo\bin\cargo.exe' test --workspace --locked` | 0 | 168 unit tests passed; 0 failed; 0 doc tests |
 | `& 'C:\Users\koishi\.cargo\bin\cargo.exe' clippy --workspace --all-targets --locked -- -D warnings` | 0 | Passed with warnings denied |
 | `& 'C:\Users\koishi\.cargo\bin\cargo.exe' tree --locked` | 0 | Locked graph includes `brotli-decompressor` 5.0.3, `flate2` 1.1.10 with pure-Rust `miniz_oxide` 0.9.1, `lzma-rs` 0.3.0, and `ruzstd` 0.9.0; full graph is recorded in `docs/dependencies-and-licenses.md` |
 | `& '.\tools\verify-baseline.ps1'` | 0 | Verified 1,449 baseline files; none missing, changed, or unlisted |
@@ -174,3 +174,14 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - PowerShell `& 'C:\Users\koishi\.cargo\bin\cargo.exe' clippy --workspace --all-targets --locked -- -D warnings`: exit 0.
 - `tools/verify-baseline.ps1`: exit 0; all 1,449 reference files match the manifest. `git diff --check`: exit 0.
 - Container candidates are reported but not expanded yet. Platform-specific DataPath construction, GUID-derived `AssetType.Meta` matching, and real-file/C# differential validation remain outstanding.
+
+## Dependency container expansion
+
+- The recursive dependency walk now dispatches and mounts supported UnityFS, UnityRaw, UnityWeb, and WebData candidates into unique internal VFS roots. It rebuilds its bounded dependency index, registers each leaf by its path relative to that root, and queues uniquely loaded SerializedFiles.
+- Aggregate dispatched-container bytes, mounted entries, and mounted output bytes are bounded across the walk. Per-container recursion/entry/output limits and the VFS entry cap still apply. UnityArchive remains unsupported by the source baseline parser.
+- A synthetic WebData fixture contains a generation-10 SerializedFile named to match the external identifier. The test verifies the expanded file is loaded, the dependency report records a unique identity match, and the cross-file PPtr resolves. An empty WebData dependency is separately reported as expanded with no SerializedFiles. Additional fixtures enforce aggregate input, mounted-entry, and output-byte limits. No user AssetBundle was read.
+- PowerShell `& 'C:\Users\koishi\.cargo\bin\cargo.exe' fmt --all -- --check`: exit 0.
+- PowerShell `& 'C:\Users\koishi\.cargo\bin\cargo.exe' test --workspace --locked`: exit 0; 168 tests passed, 0 failed, 0 doc tests.
+- PowerShell `& 'C:\Users\koishi\.cargo\bin\cargo.exe' clippy --workspace --all-targets --locked -- -D warnings`: exit 0.
+- `tools/verify-baseline.ps1`: exit 0; all 1,449 reference files match the manifest. `git diff --check`: exit 0.
+- Platform-specific DataPath discovery, GUID-derived `AssetType.Meta` identity, and real-file/C# differential validation remain outstanding.
