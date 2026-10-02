@@ -12,7 +12,9 @@ use assetripper::io::platform_file_inventory::{
 use assetripper::io::platform_structure::{detect_platform_structure, PlatformStructureLimits};
 use assetripper::processing::scene::SceneRootDiscoveryLimits;
 use assetripper::processing::scene::{SceneGraph, SceneGraphLimits};
-use assetripper::processing::scene_collections::scene_manager_kind;
+use assetripper::processing::scene_collections::{
+    extract_occlusion_scene_guid, scene_manager_kind, SceneManagerKind,
+};
 use assetripper::processing::scene_metadata::{
     decode_build_settings_scene_paths_from_parts, BuildSettingsSceneLimits,
 };
@@ -253,6 +255,7 @@ fn print_workspace_summary(
             file.metadata.objects.len()
         );
 
+        let mut file_bytes = None;
         let scene_manager_count = file
             .metadata
             .objects
@@ -263,7 +266,26 @@ fn print_workspace_summary(
             println!(
                 "    Scene collection candidate: {scene_manager_count} LevelGameManager objects"
             );
-            for object in &file.metadata.objects {
+            let contains_occlusion_settings = file.metadata.objects.iter().any(|object| {
+                scene_manager_kind(workspace_object_class_id(object))
+                    == Some(SceneManagerKind::OcclusionCullingSettings)
+            });
+            let parsed_scene_guid_file = if contains_occlusion_settings {
+                if file_bytes.is_none() {
+                    let maximum_bytes =
+                        usize::try_from(SerializedFileWorkspaceLimits::default().max_file_bytes)
+                            .unwrap_or(usize::MAX);
+                    file_bytes =
+                        Some(filesystem.read_all_bytes(&file.virtual_path, maximum_bytes)?);
+                }
+                let Some(bytes) = file_bytes.as_deref() else {
+                    return Err(invalid_data("scene manager input bytes were not retained").into());
+                };
+                Some(SerializedFile::parse(bytes)?)
+            } else {
+                None
+            };
+            for (object_index, object) in file.metadata.objects.iter().enumerate() {
                 let Some(kind) = scene_manager_kind(workspace_object_class_id(object)) else {
                     continue;
                 };
@@ -273,10 +295,25 @@ fn print_workspace_summary(
                     kind,
                     kind.class_id()
                 );
+                if kind == SceneManagerKind::OcclusionCullingSettings {
+                    let parsed_file = parsed_scene_guid_file.as_ref().ok_or_else(|| {
+                        invalid_data("OcclusionCullingSettings file was not parsed")
+                    })?;
+                    let payload = parsed_file.decode_object_payload(object_index)?;
+                    match extract_occlusion_scene_guid(&payload.root)? {
+                        Some(scene_guid) => println!(
+                            "        SceneGUID words: [0x{:08x}, 0x{:08x}, 0x{:08x}, 0x{:08x}]",
+                            scene_guid.data[0],
+                            scene_guid.data[1],
+                            scene_guid.data[2],
+                            scene_guid.data[3]
+                        ),
+                        None => println!("        SceneGUID: absent from this TypeTree"),
+                    }
+                }
             }
         }
 
-        let mut file_bytes = None;
         let contains_scene_objects = file
             .metadata
             .objects
@@ -642,6 +679,70 @@ mod tests {
         file
     }
 
+    fn make_occlusion_settings_file(scene_guid: [u32; 4]) -> Vec<u8> {
+        let mut string_buffer = Vec::new();
+        let root_type = push_type_tree_string(&mut string_buffer, "OcclusionCullingSettings");
+        let empty_name = push_type_tree_string(&mut string_buffer, "");
+        let guid_type = push_type_tree_string(&mut string_buffer, "GUID");
+        let scene_guid_name = push_type_tree_string(&mut string_buffer, "m_SceneGUID");
+        let uint32_type = push_type_tree_string(&mut string_buffer, "UInt32");
+        let word_names = [
+            push_type_tree_string(&mut string_buffer, "m_Data_0_"),
+            push_type_tree_string(&mut string_buffer, "m_Data_1_"),
+            push_type_tree_string(&mut string_buffer, "m_Data_2_"),
+            push_type_tree_string(&mut string_buffer, "m_Data_3_"),
+        ];
+
+        let mut metadata = Vec::new();
+        metadata.extend_from_slice(b"2019.4.0f1\0");
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 1);
+        put_i32_le(&mut metadata, 29);
+        put_i32_le(&mut metadata, 6);
+        put_i32_le(&mut metadata, i32::try_from(string_buffer.len()).unwrap());
+        put_node(&mut metadata, 0, root_type, empty_name, -1, 0);
+        put_node(&mut metadata, 1, guid_type, scene_guid_name, 16, 1);
+        for (index, name) in word_names.into_iter().enumerate() {
+            put_node(
+                &mut metadata,
+                2,
+                uint32_type,
+                name,
+                4,
+                i32::try_from(index + 2).unwrap(),
+            );
+        }
+        metadata.extend_from_slice(&string_buffer);
+
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 1);
+        put_i32_le(&mut metadata, 42);
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 16);
+        put_i32_le(&mut metadata, 29);
+        put_u16_le(&mut metadata, 29);
+        put_u16_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 0);
+        metadata.push(0);
+
+        let data_offset = 20usize + metadata.len();
+        let mut payload = Vec::new();
+        for word in scene_guid {
+            put_u32_le(&mut payload, word);
+        }
+        let file_size = data_offset + payload.len();
+        let mut file = Vec::with_capacity(file_size);
+        file.extend_from_slice(&i32::try_from(metadata.len()).unwrap().to_be_bytes());
+        file.extend_from_slice(&u32::try_from(file_size).unwrap().to_be_bytes());
+        file.extend_from_slice(&10i32.to_be_bytes());
+        file.extend_from_slice(&u32::try_from(data_offset).unwrap().to_be_bytes());
+        file.push(0);
+        file.extend_from_slice(&[0; 3]);
+        file.extend_from_slice(&metadata);
+        file.extend_from_slice(&payload);
+        file
+    }
+
     fn make_webdata_fixture(entries: &[(&str, &[u8])]) -> Vec<u8> {
         let header_size = 20usize
             + entries
@@ -702,6 +803,31 @@ mod tests {
     #[test]
     fn directory_inspection_loads_a_synthetic_serialized_file() {
         let input = TestInputDirectory::new();
+        super::inspect_directories(std::slice::from_ref(&input.directory)).unwrap();
+    }
+
+    #[test]
+    fn directory_inspection_decodes_scene_collection_guid_words() {
+        let directory = TestInputDirectory::new_root();
+        let file = directory.join("level0");
+        let expected = [0x0123_4567, 0x89ab_cdef, 3, 4];
+        let bytes = make_occlusion_settings_file(expected);
+        let parsed = assetripper::serialized_file::file::SerializedFile::parse(&bytes).unwrap();
+        let payload = parsed.decode_object_payload(0).unwrap();
+        assert_eq!(
+            assetripper::processing::scene_collections::extract_occlusion_scene_guid(&payload.root)
+                .unwrap()
+                .unwrap()
+                .data,
+            expected
+        );
+        fs::write(&file, bytes).unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![file],
+            subdirectories: Vec::new(),
+        };
+
         super::inspect_directories(std::slice::from_ref(&input.directory)).unwrap();
     }
 

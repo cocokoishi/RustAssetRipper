@@ -232,4 +232,11 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - The inspected baseline extension enumerates four classes inheriting LevelGameManager: OcclusionCullingSettings (29), RenderSettings (104), LightmapSettings (157), and NavMeshSettings (196). SceneDefinitionProcessor uses any ILevelGameManager in a collection to mark it as a scene collection.
 - Added this source-derived ClassID mapping. inspect reports candidate files plus each manager class and PathID. The mapping unit test covers all four IDs and representative non-manager values.
 - Latest verification: 232 library and 4 binary tests passed; warnings-denied Clippy, formatting, baseline verification, and diff check passed. No original Unity scene file was used.
-- Next: decode SceneGUID from OcclusionCullingSettings with strict TypeTree field/type validation, then associate scene candidates with BuildSettings paths using source collection identity rules. Continue with streamed-scene AssetBundle SceneHashes/container mapping and SceneDefinition aggregation. Phase 1 remains open; user AssetBundles and UABEA remain uninspected.
+- Next: associate SceneGUID values and scene candidates with BuildSettings paths using source collection identity rules. Continue with streamed-scene AssetBundle SceneHashes/container mapping and SceneDefinition aggregation. Phase 1 remains open; user AssetBundles and UABEA remain uninspected.
+
+## OcclusionCullingSettings SceneGUID extraction
+
+- Added strict optional extraction of SceneGUID/m_SceneGUID from decoded class ID 29 objects. The GUID struct must contain exactly one spelling for each of the four source u32 data words; absent TypeTree fields remain absent and malformed/ambiguous values stay errors.
+- inspect lazily reads and parses a file when it finds OcclusionCullingSettings, then reports the source word values. A generated generation-10 SerializedFile fixture exercises this TypeTree and CLI path; the test asserts the decoded four words and that inspect completes. There is no Unity-produced file differential.
+- Latest verification: 234 library and 5 binary tests passed; warnings-denied Clippy, format check, 1,449-file baseline verification, and diff check passed.
+- Next: map scene manager files to collection identities, associate BuildSettings paths and the decoded SceneGUIDs, then handle streamed-scene AssetBundle SceneHashes/container entries and SceneDefinition aggregation. Phase 1 remains open; user AssetBundles and UABEA remain uninspected.
