@@ -1,0 +1,13 @@
+[package]
+name = "assetripper-rs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+license = "GPL-3.0-only"
+description = "Independent Rust port of AssetRipper"
+
+[lib]
+name = "assetripper"
+path = "src/lib.rs"
+
+[dependencies]
