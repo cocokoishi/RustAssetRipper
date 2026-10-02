@@ -361,6 +361,10 @@ mod tests {
         decode_build_settings_scene_paths, extract_build_settings_scene_paths,
         scene_path_from_build_settings_value, BuildSettingsSceneError, BuildSettingsSceneLimits,
     };
+    use crate::processing::scene_collections::{
+        extract_streamed_scene_bundle_metadata, SceneBundleMappingLimits,
+        StreamedSceneBundleMetadata,
+    };
     use crate::processing::scene_naming::{scene_path_for_collection, SceneUnityVersion};
     use crate::serialized_file::file::SerializedFile;
     use crate::serialized_file::format_version::FormatVersion;
@@ -417,6 +421,120 @@ mod tests {
         put_i32_le(output, byte_size);
         put_i32_le(output, index);
         put_u32_le(output, 0);
+    }
+
+    fn add_tree_node(
+        strings: &mut Vec<u8>,
+        nodes: &mut Vec<(u8, u32, u32, i32, i32)>,
+        level: u8,
+        type_name: &str,
+        field_name: &str,
+        byte_size: i32,
+    ) {
+        let type_offset = push_tree_string(strings, type_name);
+        let name_offset = push_tree_string(strings, field_name);
+        let index = i32::try_from(nodes.len()).unwrap();
+        nodes.push((level, type_offset, name_offset, byte_size, index));
+    }
+
+    fn put_string_payload(output: &mut Vec<u8>, value: &str) {
+        let bytes = value.as_bytes();
+        put_i32_le(output, i32::try_from(bytes.len()).unwrap());
+        output.extend_from_slice(bytes);
+        let padding = (4 - output.len() % 4) % 4;
+        output.resize(output.len() + padding, 0);
+    }
+
+    fn make_asset_bundle_file() -> Vec<u8> {
+        let mut strings = Vec::new();
+        let mut nodes = Vec::new();
+        add_tree_node(&mut strings, &mut nodes, 0, "AssetBundle", "", -1);
+
+        add_tree_node(&mut strings, &mut nodes, 1, "map", "m_Container", -1);
+        add_tree_node(&mut strings, &mut nodes, 2, "Array", "Array", -1);
+        add_tree_node(&mut strings, &mut nodes, 3, "int", "size", 4);
+        add_tree_node(&mut strings, &mut nodes, 3, "pair", "data", -1);
+        add_tree_node(&mut strings, &mut nodes, 4, "string", "first", -1);
+        add_tree_node(&mut strings, &mut nodes, 5, "Array", "Array", -1);
+        add_tree_node(&mut strings, &mut nodes, 6, "int", "size", 4);
+        add_tree_node(&mut strings, &mut nodes, 6, "char", "data", 1);
+        add_tree_node(&mut strings, &mut nodes, 4, "AssetInfo", "second", -1);
+        add_tree_node(&mut strings, &mut nodes, 5, "int", "preloadIndex", 4);
+        add_tree_node(&mut strings, &mut nodes, 5, "int", "preloadSize", 4);
+        add_tree_node(&mut strings, &mut nodes, 5, "PPtr<Object>", "asset", 12);
+        add_tree_node(&mut strings, &mut nodes, 6, "int", "m_FileID", 4);
+        add_tree_node(&mut strings, &mut nodes, 6, "SInt64", "m_PathID", 8);
+
+        add_tree_node(
+            &mut strings,
+            &mut nodes,
+            1,
+            "bool",
+            "m_IsStreamedSceneAssetBundle",
+            1,
+        );
+        add_tree_node(&mut strings, &mut nodes, 1, "map", "m_SceneHashes", -1);
+        add_tree_node(&mut strings, &mut nodes, 2, "Array", "Array", -1);
+        add_tree_node(&mut strings, &mut nodes, 3, "int", "size", 4);
+        add_tree_node(&mut strings, &mut nodes, 3, "pair", "data", -1);
+        for member in ["first", "second"] {
+            add_tree_node(&mut strings, &mut nodes, 4, "string", member, -1);
+            add_tree_node(&mut strings, &mut nodes, 5, "Array", "Array", -1);
+            add_tree_node(&mut strings, &mut nodes, 6, "int", "size", 4);
+            add_tree_node(&mut strings, &mut nodes, 6, "char", "data", 1);
+        }
+
+        let node_count = i32::try_from(nodes.len()).unwrap();
+        let mut tree = Vec::new();
+        for (level, type_offset, name_offset, byte_size, index) in nodes {
+            put_tree_node(&mut tree, level, type_offset, name_offset, byte_size, index);
+        }
+
+        let mut metadata = Vec::new();
+        metadata.extend_from_slice(b"2019.4.0f1\0");
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 1);
+        put_i32_le(&mut metadata, 142);
+        put_i32_le(&mut metadata, node_count);
+        put_i32_le(&mut metadata, i32::try_from(strings.len()).unwrap());
+        metadata.extend_from_slice(&tree);
+        metadata.extend_from_slice(&strings);
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 1);
+        put_i32_le(&mut metadata, 42);
+        put_u32_le(&mut metadata, 0);
+
+        let mut payload = Vec::new();
+        put_i32_le(&mut payload, 1);
+        put_string_payload(&mut payload, "Assets/Scenes/Main.unity");
+        put_i32_le(&mut payload, 0);
+        put_i32_le(&mut payload, 0);
+        put_i32_le(&mut payload, 0);
+        payload.extend_from_slice(&0_i64.to_le_bytes());
+        payload.push(1);
+        put_i32_le(&mut payload, 1);
+        put_string_payload(&mut payload, "Assets/Scenes/Main.unity");
+        put_string_payload(&mut payload, "CAB-Scene");
+
+        put_i32_le(&mut metadata, i32::try_from(payload.len()).unwrap());
+        put_i32_le(&mut metadata, 142);
+        put_u16_le(&mut metadata, 142);
+        put_u16_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 0);
+        metadata.push(0);
+
+        let header_size = 20usize;
+        let data_offset = header_size + metadata.len();
+        let file_size = data_offset + payload.len();
+        let mut file = Vec::with_capacity(file_size);
+        file.extend_from_slice(&i32::try_from(metadata.len()).unwrap().to_be_bytes());
+        file.extend_from_slice(&u32::try_from(file_size).unwrap().to_be_bytes());
+        file.extend_from_slice(&FormatVersion::Unknown10.raw().to_be_bytes());
+        file.extend_from_slice(&u32::try_from(data_offset).unwrap().to_be_bytes());
+        file.extend_from_slice(&[0, 0, 0, 0]);
+        file.extend_from_slice(&metadata);
+        file.extend_from_slice(&payload);
+        file
     }
 
     fn make_build_settings_file() -> Vec<u8> {
@@ -569,6 +687,55 @@ mod tests {
         assert_eq!(
             scene_path_for_collection("level1", version, &paths).as_deref(),
             Some("Assets/Scenes/Next")
+        );
+    }
+
+    #[test]
+    fn decodes_assetbundle_scene_fields_from_a_complete_serialized_file() {
+        let bytes = make_asset_bundle_file();
+        let file = SerializedFile::parse(&bytes).unwrap();
+        assert_eq!(file.metadata.objects[0].class_id, Some(142));
+        let object = file.decode_object_payload(0).unwrap();
+        assert_eq!(object.type_name, "AssetBundle");
+        assert_eq!(object.trailing_bytes, []);
+        assert_eq!(
+            extract_streamed_scene_bundle_metadata(
+                &object.root,
+                SceneBundleMappingLimits::default()
+            )
+            .unwrap(),
+            StreamedSceneBundleMetadata {
+                is_streamed_scene_asset_bundle: Some(true),
+                scene_hashes: Some(vec![(
+                    "Assets/Scenes/Main.unity".to_owned(),
+                    "CAB-Scene".to_owned()
+                )]),
+                container_paths: Some(vec!["Assets/Scenes/Main.unity".to_owned()]),
+            }
+        );
+
+        let container = object.root.unique_field("m_Container").unwrap().unwrap();
+        let SerializedValue::Array(entries) = container else {
+            panic!("AssetBundle m_Container TypeTree did not decode as an array");
+        };
+        let pair = entries[0].struct_fields().unwrap();
+        let asset_info = pair
+            .iter()
+            .find(|field| field.name == "second")
+            .unwrap()
+            .value
+            .struct_fields()
+            .unwrap();
+        assert_eq!(
+            asset_info
+                .iter()
+                .find(|field| field.name == "asset")
+                .unwrap()
+                .value,
+            SerializedValue::PPtr {
+                file_id: 0,
+                path_id: 0
+            }
         );
     }
 
