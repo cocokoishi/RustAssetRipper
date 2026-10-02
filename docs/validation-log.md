@@ -14,12 +14,12 @@
 | Command | Exit code | Result |
 |---|---:|---|
 | `& "$env:USERPROFILE\.cargo\bin\cargo.exe" fmt -- --check` | 0 | All Rust files are formatted |
-| `& "$env:USERPROFILE\.cargo\bin\cargo.exe" test --workspace` | 0 | 48 unit tests passed; 0 failed; 0 doc tests |
+| `& "$env:USERPROFILE\.cargo\bin\cargo.exe" test --workspace` | 0 | 50 unit tests passed; 0 failed; 0 doc tests |
 | `& "$env:USERPROFILE\.cargo\bin\cargo.exe" clippy --workspace --all-targets -- -D warnings` | 0 | Passed with warnings denied |
 | `& '.\tools\verify-baseline.ps1'` | 0 | Verified 1,449 baseline files; none missing, changed, or unlisted |
 | `dotnet --info` | 1 | Not run: PowerShell could not find `dotnet` |
 
-The 48 Rust tests comprise 10 binary-reader tests, 1 common-string lookup test, 3 format-generation tests, 8 header tests, 10 metadata tests, 4 metadata-prefix tests, 10 object-payload tests, and 2 complete-file entry-point tests. Metadata fixtures cover generations 8, 10–14, 17, 19, 21, and 22, including both endian modes, legacy and string-buffer TypeTrees, type/hash records, object IDs and data ranges, script IDs, references, and malformed bounds. Payload fixtures cover both endian modes, primitive and character fields, nested structs and arrays, UTF-8 byte strings, aligned primitive arrays, explicit field alignment, unknown fixed-size leaves, no-TypeTree errors, managed-reference rejection, and caller limits. The entry-point fixture encodes a real generation-10 header followed by metadata and an object payload. All are hand-constructed fixtures checked against inspected source branches; they are not real Unity files or differential runs against the C# implementation.
+The 50 Rust tests comprise 10 binary-reader tests, 1 common-string lookup test, 3 format-generation tests, 8 header tests, 10 metadata tests, 4 metadata-prefix tests, 12 object-payload tests, and 2 complete-file entry-point tests. Metadata fixtures cover generations 8, 10–14, 17, 19, 21, and 22, including both endian modes, legacy and string-buffer TypeTrees, type/hash records, object IDs and data ranges, script IDs, references, and malformed bounds. Payload fixtures cover both endian modes, primitive and character fields, nested structs and arrays, UTF-8 byte strings, aligned primitive arrays, explicit field alignment, unknown fixed-size leaves, 64-bit and legacy 32-bit PPtr payloads, no-TypeTree errors, managed-reference rejection, and caller limits. The entry-point fixture encodes a generation-10 header followed by metadata and an object payload. All are hand-constructed fixtures checked against inspected source branches; they are not real Unity files or differential runs against the C# implementation.
 
 ## Fixed transient failures
 

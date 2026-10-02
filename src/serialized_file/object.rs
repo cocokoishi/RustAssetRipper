@@ -193,6 +193,11 @@ pub enum SerializedValue {
     Bytes(Vec<u8>),
     Array(Vec<SerializedValue>),
     Struct(Vec<SerializedFieldValue>),
+    /// A Unity object reference retaining its file-table index and signed PathID.
+    PPtr {
+        file_id: i32,
+        path_id: i64,
+    },
     /// Unknown leaf data with a nonnegative TypeTree byte size is preserved without decoding.
     Raw {
         type_name: String,
@@ -365,37 +370,17 @@ fn decode_root(
             ));
         }
     }
-    let root = &type_tree.nodes[0];
-    let children = direct_children(type_tree, 0, object_index, reader.offset())?;
-    if children.is_empty() {
-        return decode_node_value(
-            reader,
-            type_tree,
-            0,
-            arrays_align,
-            object_index,
-            root_name,
-            0,
-            false,
-            budget,
-        );
-    }
-
-    let mut fields = reserve_fields(children.len(), reader.offset(), root_name, budget)?;
-    for child_index in children {
-        fields.push(decode_field(
-            reader,
-            type_tree,
-            child_index,
-            arrays_align,
-            object_index,
-            root_name,
-            1,
-            budget,
-        )?);
-    }
-    let _ = root;
-    Ok(SerializedValue::Struct(fields))
+    decode_node_value(
+        reader,
+        type_tree,
+        0,
+        arrays_align,
+        object_index,
+        root_name,
+        0,
+        false,
+        budget,
+    )
 }
 
 // Keep the reader, tree, field identity, version rule, and allocation budget explicit at this
@@ -564,6 +549,67 @@ fn decode_node_value(
             align_nested_arrays,
             budget,
         );
+    }
+
+    if let Some((file_id_node, path_id_node)) =
+        pptr_shape(type_tree, node_index, object_index, reader.offset())?
+    {
+        let pointer_offset = reader.offset();
+        let file_id = decode_field(
+            reader,
+            type_tree,
+            file_id_node,
+            arrays_align,
+            object_index,
+            path,
+            depth + 1,
+            budget,
+        )?;
+        let path_id = decode_field(
+            reader,
+            type_tree,
+            path_id_node,
+            arrays_align,
+            object_index,
+            path,
+            depth + 1,
+            budget,
+        )?;
+        let file_id_value = match file_id.value {
+            SerializedValue::I32(value) => value,
+            _ => {
+                return Err(invalid_pptr_component(
+                    pointer_offset,
+                    object_index,
+                    path,
+                    &file_id.name,
+                    type_tree.nodes[file_id_node]
+                        .type_name
+                        .as_deref()
+                        .unwrap_or(""),
+                ));
+            }
+        };
+        let path_id_value = match path_id.value {
+            SerializedValue::I32(value) => i64::from(value),
+            SerializedValue::I64(value) => value,
+            _ => {
+                return Err(invalid_pptr_component(
+                    pointer_offset,
+                    object_index,
+                    path,
+                    &path_id.name,
+                    type_tree.nodes[path_id_node]
+                        .type_name
+                        .as_deref()
+                        .unwrap_or(""),
+                ));
+            }
+        };
+        return Ok(SerializedValue::PPtr {
+            file_id: file_id_value,
+            path_id: path_id_value,
+        });
     }
 
     if let Some(value) = decode_primitive(
@@ -840,6 +886,54 @@ fn is_string_node(
     let data = &type_tree.nodes[data_node];
     Ok(matches!(data.type_name.as_deref(), Some("char" | "UInt8"))
         && direct_children(type_tree, data_node, object_index, offset)?.is_empty())
+}
+
+/// Matches AssetRipper's TypeTree PPtr shape test: a `PPtr<...>` node with exactly two leaf
+/// children named `m_FileID` and `m_PathID` in that order.
+fn pptr_shape(
+    type_tree: &TypeTreeLayout<'_>,
+    node_index: usize,
+    object_index: usize,
+    offset: usize,
+) -> Result<Option<(usize, usize)>, ObjectDecodeError> {
+    let node = type_tree.nodes.get(node_index).ok_or_else(|| {
+        ObjectDecodeError::new(
+            offset,
+            ObjectDecodeErrorKind::InvalidTypeTreeNodeIndex { node_index },
+        )
+    })?;
+    let type_name = type_name(node);
+    if !type_name.starts_with("PPtr<") || !type_name.ends_with('>') {
+        return Ok(None);
+    }
+    let children = direct_children(type_tree, node_index, object_index, offset)?;
+    if children.len() != 2
+        || type_tree.nodes[children[0]].name.as_deref() != Some("m_FileID")
+        || type_tree.nodes[children[1]].name.as_deref() != Some("m_PathID")
+        || !direct_children(type_tree, children[0], object_index, offset)?.is_empty()
+        || !direct_children(type_tree, children[1], object_index, offset)?.is_empty()
+    {
+        return Ok(None);
+    }
+    Ok(Some((children[0], children[1])))
+}
+
+fn invalid_pptr_component(
+    offset: usize,
+    object_index: usize,
+    path: &str,
+    field_name: &str,
+    type_name: &str,
+) -> ObjectDecodeError {
+    ObjectDecodeError::new(
+        offset,
+        ObjectDecodeErrorKind::InvalidPPtrComponent {
+            object_index,
+            path: path.to_owned(),
+            field_name: field_name.to_owned(),
+            type_name: type_name.to_owned(),
+        },
+    )
 }
 
 fn field_aligns(
@@ -1243,6 +1337,12 @@ pub enum ObjectDecodeErrorKind {
         type_name: String,
         field_name: String,
     },
+    InvalidPPtrComponent {
+        object_index: usize,
+        path: String,
+        field_name: String,
+        type_name: String,
+    },
     ObjectDataRangeOverflow {
         object_index: usize,
     },
@@ -1357,6 +1457,15 @@ impl Display for ObjectDecodeErrorKind {
             } => write!(
                 f,
                 "object {object_index} contains managed-reference TypeTree node {type_name} {field_name}; registry decoding is not implemented"
+            ),
+            Self::InvalidPPtrComponent {
+                object_index,
+                path,
+                field_name,
+                type_name,
+            } => write!(
+                f,
+                "object {object_index} field {path} has unsupported PPtr component {field_name} of type {type_name}"
             ),
             Self::ObjectDataRangeOverflow { object_index } => {
                 write!(f, "object {object_index} data range overflows the address space")
@@ -1732,6 +1841,62 @@ mod tests {
             SerializedValue::Raw {
                 type_name: "VendorThing".to_owned(),
                 bytes: vec![0xaa, 0xbb],
+            }
+        );
+        assert_eq!(object.consumed_bytes, payload.len());
+    }
+
+    #[test]
+    fn decodes_typed_pptr_nodes_without_losing_file_or_path_identity() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&2i32.to_le_bytes());
+        payload.extend_from_slice(&0x1234_5678_9abc_def0i64.to_le_bytes());
+        let (file, header, mut metadata) = make_file(&payload);
+        metadata.types[0].type_tree = Some(TypeTree {
+            nodes: vec![
+                node(0, "Root", "Root", -1, 0),
+                node(1, "m_Target", "PPtr<$GameObject>", 12, 0),
+                node(2, "m_FileID", "SInt32", 4, 0),
+                node(2, "m_PathID", "SInt64", 8, 0),
+            ],
+            string_buffer: Vec::new(),
+        });
+
+        let object = metadata.decode_object_payload(&file, &header, 0).unwrap();
+        assert_eq!(
+            object.root,
+            SerializedValue::Struct(vec![super::SerializedFieldValue {
+                name: "m_Target".to_owned(),
+                value: SerializedValue::PPtr {
+                    file_id: 2,
+                    path_id: 0x1234_5678_9abc_def0,
+                },
+            }])
+        );
+        assert_eq!(object.consumed_bytes, payload.len());
+    }
+
+    #[test]
+    fn sign_extends_legacy_32_bit_pptr_path_ids() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&(-1i32).to_le_bytes());
+        payload.extend_from_slice(&(-42i32).to_le_bytes());
+        let (file, header, mut metadata) = make_file(&payload);
+        metadata.types[0].type_tree = Some(TypeTree {
+            nodes: vec![
+                node(0, "PPtr<Object>", "PPtr<Object>", 8, 0),
+                node(1, "m_FileID", "SInt32", 4, 0),
+                node(1, "m_PathID", "SInt32", 4, 0),
+            ],
+            string_buffer: Vec::new(),
+        });
+
+        let object = metadata.decode_object_payload(&file, &header, 0).unwrap();
+        assert_eq!(
+            object.root,
+            SerializedValue::PPtr {
+                file_id: -1,
+                path_id: -42,
             }
         );
         assert_eq!(object.consumed_bytes, payload.len());

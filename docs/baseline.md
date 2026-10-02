@@ -24,7 +24,7 @@ The reference source was read only. No build, export, or test output was written
 - The active toolchain is `rustc 1.98.1`, `cargo 1.98.1`, `stable-aarch64-pc-windows-msvc`. The declared Rust minimum is 1.74; that minimum version has not been tested.
 - The reference solution includes 8 test projects, but its tests remain unrun because `dotnet` is unavailable.
 - Current Rust verification is recorded in `validation-log.md`.
-- The current Rust repository clone was empty: the named GitHub repository had no refs at the time of the read-only lookup. The local clone is now the active Git worktree; no remote write has been made.
+- The Rust repository had no refs at initial identification. The active `main` branch now tracks the configured `origin/main`; validated Rust increments are committed and pushed there. No other repository is a write target.
 
 ## Scope findings still open
 
