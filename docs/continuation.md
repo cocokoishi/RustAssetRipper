@@ -158,4 +158,13 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 
 - detect_platform_structure now follows local PlatformChecker priority across Windows, Linux, macOS, Android, iOS, Switch, PS4, WebGL, WebPlayer, Wii U, and Windows Phone. Android accepts one APK and optional OBB root, rejects duplicate roots, and emits APK then OBB DataPaths. Other added layouts cover iOS Payload apps, PS4 Media, Switch ExeFS/RomFS, WebGL Build/Development/Release, WebPlayer HTML/bundle pairs, Wii U content/Data, and the source Windows Phone predicate.
 - Seven synthetic platform tests pass. Full workspace tests passed 183 tests; warnings-denied Clippy, formatting, the 1,449-file baseline verifier, and diff check passed. The Windows Phone overlap test confirms Windows wins earlier in the source priority order. No real-file or C# differential has run.
-- Platform file collection, platform-specific assemblies/streaming assets, and application-flow integration remain unfinished; Phase 1 remains open.
+- Platform file registration is now implemented for the source game-file and streaming-bundle paths; Mono assembly collection, backend identification, and application-flow integration remain unfinished. Phase 1 remains open.
+
+
+## Platform game-file registration
+
+- Added `PlatformStructure::collect_game_files` in `src/io/platform_file_inventory.rs`. It visits DataPaths in source order, registers `data.unity3d`, `datapack.unity3d`, and the source primary SerializedFile name patterns, and uses logical base paths for `.split0` parts.
+- WebGL data files and the matched WebPlayer bundle follow their constructor registration rules. Streaming bundle scans use the source platform paths; Android scans the APK `assets` root recursively while skipping its direct `bin` subtree, even when `skip_streaming_assets` is true, matching the source Android override. Bundle candidates are accepted only when the raw UnityFS/UnityRaw/UnityWeb header is recognized.
+- The scanner bounds probed file count/size/aggregate bytes, directory count/depth, and all enumerated path lengths. Seven synthetic tests cover primary names, compressed game files, streaming bundles and skip mode, Android traversal, Web registrations, explicit missing DataPaths, and limits.
+- `cargo test --workspace --locked`: exit 0; 190 tests passed, 0 failed, 0 doc tests. Warnings-denied workspace Clippy and `cargo fmt --all -- --check` passed. `tools/verify-baseline.ps1` confirmed 1,449 reference files unchanged; `git diff --check` passed.
+- This API does not yet collect Mono assemblies, detect platform scripting backends, or connect the platform structure to the product input flow. No real-file or C# differential has run; Phase 1 remains open.

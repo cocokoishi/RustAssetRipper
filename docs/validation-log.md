@@ -213,4 +213,15 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 
 - Extended full-priority platform detection to Android APK/OBB, iOS, Switch, PS4, WebGL, WebPlayer, Wii U, and Windows Phone. It returns consumed paths, root/name, optional game data path, and ordered DataPaths; duplicate Android APK/OBB candidates are explicit errors.
 - Seven synthetic platform tests cover Android with OBB and duplicate rejection, iOS, PS4, Switch, Wii U, WebGL precedence, WebPlayer pairing, and Windows-before-Windows-Phone source priority. cargo test --workspace --locked passed 183 tests; warnings-denied Clippy, formatting, baseline verification (1,449 reference files), and diff check passed.
-- Full platform file collection and real-file/C# differential validation remain outstanding.
+- Mono assembly collection, backend identification, and real-file/C# differential validation remain outstanding.
+
+
+## Platform game-file registration
+
+- Added bounded platform file registration for source primary file names, split0 logical names, `data.unity3d`/`datapack.unity3d`, WebGL data files, WebPlayer matched bundles, and header-confirmed streaming bundles. Android bundle scanning follows the APK assets layout and omits the direct `bin` subtree.
+- Seven synthetic platform inventory tests cover source naming, DataPath registration, streaming traversal and skip mode, Android exclusion, Web platform special files, missing DataPath reporting, and scan/depth limits.
+- Android's APK asset-bundle scan runs even when `skip_streaming_assets` is true, matching the source override. The optional platform StreamingAssets traversal is skipped by that setting.
+- PowerShell `& 'C:\Users\koishi\.cargo\bin\cargo.exe' fmt --all`: exit 0. `cargo test --workspace --locked`: exit 0; 190 tests passed, 0 failed, 0 doc tests.
+- PowerShell `& 'C:\Users\koishi\.cargo\bin\cargo.exe' clippy --workspace --all-targets --locked -- -D warnings`: exit 0. `cargo fmt --all -- --check`: exit 0.
+- `tools/verify-baseline.ps1`: exit 0; all 1,449 reference files remain unchanged. `git diff --check`: exit 0.
+- Mono assembly collection/backend identification and product input-flow integration remain incomplete. No real-file/C# differential has run.
