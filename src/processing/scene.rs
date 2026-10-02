@@ -216,6 +216,141 @@ struct IndexedHierarchyRelationship {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct IndexedSceneRelationship {
+    source_object_index: usize,
+    kind: SceneRelationshipKind,
+    relationship_index: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SceneRootDiscoveryLimits {
+    pub max_roots: usize,
+    pub max_issues: usize,
+}
+
+impl Default for SceneRootDiscoveryLimits {
+    fn default() -> Self {
+        Self {
+            max_roots: 4_000_000,
+            max_issues: 100_000,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SceneRootReason {
+    NoTransformComponent,
+    NullFather,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SceneRootCandidate {
+    pub game_object_index: usize,
+    pub transform_index: Option<usize>,
+    pub reason: SceneRootReason,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SceneRootDiscoveryIssue {
+    pub game_object_index: usize,
+    pub transform_index: Option<usize>,
+    pub kind: SceneRootDiscoveryIssueKind,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SceneRootDiscoveryIssueKind {
+    ComponentListIncomplete,
+    UnresolvedComponent {
+        target: SceneRelationshipTarget,
+    },
+    MultipleTransformComponents {
+        selected_transform_index: usize,
+        match_count: usize,
+    },
+    MissingTransformParent,
+    DuplicateTransformParent {
+        match_count: usize,
+    },
+    UnresolvedTransformParent {
+        target: SceneRelationshipTarget,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SceneRootDiscovery {
+    roots: Vec<SceneRootCandidate>,
+    issues: Vec<SceneRootDiscoveryIssue>,
+}
+
+impl SceneRootDiscovery {
+    pub fn roots(&self) -> &[SceneRootCandidate] {
+        &self.roots
+    }
+
+    pub fn issues(&self) -> &[SceneRootDiscoveryIssue] {
+        &self.issues
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.issues.is_empty()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SceneRootDiscoveryError {
+    CountOverflow {
+        resource: &'static str,
+    },
+    RootCountLimitExceeded {
+        requested: usize,
+        limit: usize,
+    },
+    IssueCountLimitExceeded {
+        requested: usize,
+        limit: usize,
+    },
+    AllocationFailed {
+        resource: &'static str,
+        requested: usize,
+    },
+    InvalidRelationshipIndex {
+        relationship_index: usize,
+        relationship_count: usize,
+    },
+}
+
+impl Display for SceneRootDiscoveryError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CountOverflow { resource } => {
+                write!(f, "scene root discovery count overflows for {resource}")
+            }
+            Self::RootCountLimitExceeded { requested, limit } => write!(
+                f,
+                "scene root candidate count {requested} exceeds configured limit {limit}"
+            ),
+            Self::IssueCountLimitExceeded { requested, limit } => write!(
+                f,
+                "scene root issue count {requested} exceeds configured limit {limit}"
+            ),
+            Self::AllocationFailed { resource, requested } => write!(
+                f,
+                "could not reserve {requested} entries for scene root discovery {resource}"
+            ),
+            Self::InvalidRelationshipIndex {
+                relationship_index,
+                relationship_count,
+            } => write!(
+                f,
+                "scene root relationship index {relationship_index} is outside the {relationship_count} relationships"
+            ),
+        }
+    }
+}
+
+impl Error for SceneRootDiscoveryError {}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SceneGraphAuditError {
     AllocationFailed {
         resource: &'static str,
@@ -379,6 +514,290 @@ impl SceneGraph {
                         | SceneRelationshipTarget::WorkspaceObject { .. }
                 )
             })
+    }
+
+    /// Find local GameObject root candidates using the source SceneHierarchyObject rule.
+    ///
+    /// A GameObject is a root when it has no resolved Transform component or its first resolved
+    /// Transform component has a null father. Missing, ambiguous, or cross-file component and
+    /// father pointers are reported as issues and do not become roots by assumption. This returns
+    /// file-local candidates; assigning them to a SceneDefinition still requires collection and
+    /// scene metadata that this graph does not hold.
+    pub fn discover_local_roots(
+        &self,
+        limits: SceneRootDiscoveryLimits,
+    ) -> Result<SceneRootDiscovery, SceneRootDiscoveryError> {
+        let indexed_relationship_count = self
+            .relationships
+            .iter()
+            .filter(|relationship| {
+                matches!(
+                    relationship.kind,
+                    SceneRelationshipKind::GameObjectComponent
+                        | SceneRelationshipKind::TransformParent
+                )
+            })
+            .count();
+        let mut relation_index = Vec::new();
+        relation_index
+            .try_reserve_exact(indexed_relationship_count)
+            .map_err(|_| SceneRootDiscoveryError::AllocationFailed {
+                resource: "relationship lookup index",
+                requested: indexed_relationship_count,
+            })?;
+        for (relationship_index, relationship) in self.relationships.iter().enumerate() {
+            if matches!(
+                relationship.kind,
+                SceneRelationshipKind::GameObjectComponent | SceneRelationshipKind::TransformParent
+            ) {
+                relation_index.push(IndexedSceneRelationship {
+                    source_object_index: relationship.source_object_index,
+                    kind: relationship.kind,
+                    relationship_index,
+                });
+            }
+        }
+        relation_index.sort_unstable_by_key(|entry| {
+            (
+                entry.source_object_index,
+                hierarchy_kind_rank(entry.kind),
+                entry.relationship_index,
+            )
+        });
+
+        let mut component_issue_objects = Vec::new();
+        component_issue_objects
+            .try_reserve_exact(self.issues.len())
+            .map_err(|_| SceneRootDiscoveryError::AllocationFailed {
+                resource: "GameObject component issue index",
+                requested: self.issues.len(),
+            })?;
+        for issue in &self.issues {
+            if issue.field_path.as_deref().is_some_and(|field_path| {
+                field_path == "m_Component" || field_path.starts_with("m_Component[")
+            }) {
+                component_issue_objects.push(issue.object_index);
+            }
+        }
+        component_issue_objects.sort_unstable();
+        component_issue_objects.dedup();
+
+        let mut discovery = SceneRootDiscovery {
+            roots: Vec::new(),
+            issues: Vec::new(),
+        };
+        for (game_object_index, object) in self.objects.iter().enumerate() {
+            if object.class_id != Some(GAME_OBJECT_CLASS_ID) {
+                continue;
+            }
+            let mut component_list_incomplete = component_issue_objects
+                .binary_search(&game_object_index)
+                .is_ok();
+            if component_list_incomplete {
+                push_scene_root_issue(
+                    &mut discovery.issues,
+                    limits.max_issues,
+                    SceneRootDiscoveryIssue {
+                        game_object_index,
+                        transform_index: None,
+                        kind: SceneRootDiscoveryIssueKind::ComponentListIncomplete,
+                    },
+                )?;
+            }
+
+            let mut selected_transform = None;
+            let mut transform_match_count = 0usize;
+            let component_range = scene_relationship_range(
+                &relation_index,
+                game_object_index,
+                SceneRelationshipKind::GameObjectComponent,
+            );
+            for entry in &relation_index[component_range] {
+                let relationship = self.relationships.get(entry.relationship_index).ok_or(
+                    SceneRootDiscoveryError::InvalidRelationshipIndex {
+                        relationship_index: entry.relationship_index,
+                        relationship_count: self.relationships.len(),
+                    },
+                )?;
+                match &relationship.target {
+                    SceneRelationshipTarget::Null => {}
+                    SceneRelationshipTarget::LocalObject { object_index } => {
+                        let Some(component) = self.objects.get(*object_index) else {
+                            component_list_incomplete = true;
+                            push_scene_root_issue(
+                                &mut discovery.issues,
+                                limits.max_issues,
+                                SceneRootDiscoveryIssue {
+                                    game_object_index,
+                                    transform_index: selected_transform,
+                                    kind: SceneRootDiscoveryIssueKind::UnresolvedComponent {
+                                        target: relationship.target.clone(),
+                                    },
+                                },
+                            )?;
+                            continue;
+                        };
+                        match component.class_id {
+                            Some(TRANSFORM_CLASS_ID | RECT_TRANSFORM_CLASS_ID) => {
+                                transform_match_count = transform_match_count
+                                    .checked_add(1)
+                                    .ok_or(SceneRootDiscoveryError::CountOverflow {
+                                        resource: "Transform components",
+                                    })?;
+                                if selected_transform.is_none() {
+                                    selected_transform = Some(*object_index);
+                                }
+                            }
+                            Some(_) => {}
+                            None => {
+                                component_list_incomplete = true;
+                                push_scene_root_issue(
+                                    &mut discovery.issues,
+                                    limits.max_issues,
+                                    SceneRootDiscoveryIssue {
+                                        game_object_index,
+                                        transform_index: selected_transform,
+                                        kind: SceneRootDiscoveryIssueKind::UnresolvedComponent {
+                                            target: relationship.target.clone(),
+                                        },
+                                    },
+                                )?;
+                            }
+                        }
+                    }
+                    target => {
+                        component_list_incomplete = true;
+                        push_scene_root_issue(
+                            &mut discovery.issues,
+                            limits.max_issues,
+                            SceneRootDiscoveryIssue {
+                                game_object_index,
+                                transform_index: selected_transform,
+                                kind: SceneRootDiscoveryIssueKind::UnresolvedComponent {
+                                    target: target.clone(),
+                                },
+                            },
+                        )?;
+                    }
+                }
+            }
+            if transform_match_count > 1 {
+                if let Some(selected_transform_index) = selected_transform {
+                    push_scene_root_issue(
+                        &mut discovery.issues,
+                        limits.max_issues,
+                        SceneRootDiscoveryIssue {
+                            game_object_index,
+                            transform_index: Some(selected_transform_index),
+                            kind: SceneRootDiscoveryIssueKind::MultipleTransformComponents {
+                                selected_transform_index,
+                                match_count: transform_match_count,
+                            },
+                        },
+                    )?;
+                }
+            }
+
+            if component_list_incomplete {
+                continue;
+            }
+
+            let Some(transform_index) = selected_transform else {
+                push_scene_root_candidate(
+                    &mut discovery.roots,
+                    limits.max_roots,
+                    SceneRootCandidate {
+                        game_object_index,
+                        transform_index: None,
+                        reason: SceneRootReason::NoTransformComponent,
+                    },
+                )?;
+                continue;
+            };
+
+            let father_range = scene_relationship_range(
+                &relation_index,
+                transform_index,
+                SceneRelationshipKind::TransformParent,
+            );
+            let father_entries = &relation_index[father_range];
+            match father_entries {
+                [] => push_scene_root_issue(
+                    &mut discovery.issues,
+                    limits.max_issues,
+                    SceneRootDiscoveryIssue {
+                        game_object_index,
+                        transform_index: Some(transform_index),
+                        kind: SceneRootDiscoveryIssueKind::MissingTransformParent,
+                    },
+                )?,
+                [entry] => {
+                    let father = self.relationships.get(entry.relationship_index).ok_or(
+                        SceneRootDiscoveryError::InvalidRelationshipIndex {
+                            relationship_index: entry.relationship_index,
+                            relationship_count: self.relationships.len(),
+                        },
+                    )?;
+                    match &father.target {
+                        SceneRelationshipTarget::Null => push_scene_root_candidate(
+                            &mut discovery.roots,
+                            limits.max_roots,
+                            SceneRootCandidate {
+                                game_object_index,
+                                transform_index: Some(transform_index),
+                                reason: SceneRootReason::NullFather,
+                            },
+                        )?,
+                        SceneRelationshipTarget::LocalObject { object_index } => {
+                            let parent_is_transform =
+                                self.objects.get(*object_index).is_some_and(|parent| {
+                                    matches!(
+                                        parent.class_id,
+                                        Some(TRANSFORM_CLASS_ID | RECT_TRANSFORM_CLASS_ID)
+                                    )
+                                });
+                            if !parent_is_transform {
+                                push_scene_root_issue(
+                                    &mut discovery.issues,
+                                    limits.max_issues,
+                                    SceneRootDiscoveryIssue {
+                                        game_object_index,
+                                        transform_index: Some(transform_index),
+                                        kind:
+                                            SceneRootDiscoveryIssueKind::UnresolvedTransformParent {
+                                                target: father.target.clone(),
+                                            },
+                                    },
+                                )?;
+                            }
+                        }
+                        target => push_scene_root_issue(
+                            &mut discovery.issues,
+                            limits.max_issues,
+                            SceneRootDiscoveryIssue {
+                                game_object_index,
+                                transform_index: Some(transform_index),
+                                kind: SceneRootDiscoveryIssueKind::UnresolvedTransformParent {
+                                    target: target.clone(),
+                                },
+                            },
+                        )?,
+                    }
+                }
+                entries => push_scene_root_issue(
+                    &mut discovery.issues,
+                    limits.max_issues,
+                    SceneRootDiscoveryIssue {
+                        game_object_index,
+                        transform_index: Some(transform_index),
+                        kind: SceneRootDiscoveryIssueKind::DuplicateTransformParent {
+                            match_count: entries.len(),
+                        },
+                    },
+                )?,
+            }
+        }
+        Ok(discovery)
     }
 
     /// Audit reciprocal parent/child pointers whose targets resolve inside this scene graph.
@@ -1435,6 +1854,65 @@ fn hierarchy_relationship_range(
     start..end
 }
 
+fn scene_relationship_range(
+    index: &[IndexedSceneRelationship],
+    source_object_index: usize,
+    kind: SceneRelationshipKind,
+) -> std::ops::Range<usize> {
+    let key = (source_object_index, hierarchy_kind_rank(kind));
+    let start = index.partition_point(|entry| {
+        (entry.source_object_index, hierarchy_kind_rank(entry.kind)) < key
+    });
+    let end = index.partition_point(|entry| {
+        (entry.source_object_index, hierarchy_kind_rank(entry.kind)) <= key
+    });
+    start..end
+}
+
+fn push_scene_root_issue(
+    issues: &mut Vec<SceneRootDiscoveryIssue>,
+    limit: usize,
+    issue: SceneRootDiscoveryIssue,
+) -> Result<(), SceneRootDiscoveryError> {
+    let requested = issues
+        .len()
+        .checked_add(1)
+        .ok_or(SceneRootDiscoveryError::CountOverflow { resource: "issues" })?;
+    if requested > limit {
+        return Err(SceneRootDiscoveryError::IssueCountLimitExceeded { requested, limit });
+    }
+    issues
+        .try_reserve(1)
+        .map_err(|_| SceneRootDiscoveryError::AllocationFailed {
+            resource: "issues",
+            requested,
+        })?;
+    issues.push(issue);
+    Ok(())
+}
+
+fn push_scene_root_candidate(
+    roots: &mut Vec<SceneRootCandidate>,
+    limit: usize,
+    root: SceneRootCandidate,
+) -> Result<(), SceneRootDiscoveryError> {
+    let requested = roots
+        .len()
+        .checked_add(1)
+        .ok_or(SceneRootDiscoveryError::CountOverflow { resource: "roots" })?;
+    if requested > limit {
+        return Err(SceneRootDiscoveryError::RootCountLimitExceeded { requested, limit });
+    }
+    roots
+        .try_reserve(1)
+        .map_err(|_| SceneRootDiscoveryError::AllocationFailed {
+            resource: "roots",
+            requested,
+        })?;
+    roots.push(root);
+    Ok(())
+}
+
 fn is_scene_object_class(class_id: Option<i32>) -> bool {
     matches!(
         class_id,
@@ -1770,7 +2248,8 @@ mod tests {
     use super::{
         reference_field_path_matches, MultiFileReferenceGraph, SceneGraph, SceneGraphIssueKind,
         SceneGraphLimits, SceneHierarchyIssueKind, SceneQuaternion, SceneRectTransformValues,
-        SceneRelationshipKind, SceneRelationshipTarget, SceneTransformValues, SceneVector2,
+        SceneRelationshipKind, SceneRelationshipTarget, SceneRootDiscoveryIssueKind,
+        SceneRootDiscoveryLimits, SceneRootReason, SceneTransformValues, SceneVector2,
         SceneVector3,
     };
     use crate::io::binary::Endian;
@@ -1876,6 +2355,22 @@ mod tests {
             fields.push(field("m_LocalEulerAnglesHint", vector3(10.0, 20.0, 30.0)));
         }
         fields
+    }
+
+    fn game_object_fields(name: &str, components: Vec<Value>) -> Vec<Field> {
+        vec![
+            field("m_Name", Value::StringBytes(name.as_bytes().to_vec())),
+            field("m_IsActive", Value::Bool(true)),
+            field(
+                "m_Component",
+                Value::Array(
+                    components
+                        .into_iter()
+                        .map(|component| Value::Struct(vec![field("component", component)]))
+                        .collect(),
+                ),
+            ),
+        ]
     }
 
     fn put_u16_le(output: &mut Vec<u8>, value: u16) {
@@ -2351,6 +2846,146 @@ mod tests {
             issues[0].kind,
             SceneHierarchyIssueKind::TargetIsNotTransform { class_id: 23 }
         );
+    }
+
+    #[test]
+    fn discovers_transform_roots_and_game_objects_without_transforms() {
+        let metadata = metadata(&[(10, 1), (20, 4), (30, 1), (40, 4), (50, 1)]);
+        let mut child_transform_fields =
+            transform_fields_with_links(false, pptr(0, 20), Vec::new());
+        child_transform_fields
+            .iter_mut()
+            .find(|field| field.name == "m_GameObject")
+            .unwrap()
+            .value = pptr(0, 30);
+        let roots = vec![
+            (
+                0,
+                Value::Struct(game_object_fields("Root", vec![pptr(0, 20)])),
+            ),
+            (
+                1,
+                Value::Struct(transform_fields_with_links(
+                    false,
+                    pptr(0, 0),
+                    vec![pptr(0, 40)],
+                )),
+            ),
+            (
+                2,
+                Value::Struct(game_object_fields("Child", vec![pptr(0, 40)])),
+            ),
+            (3, Value::Struct(child_transform_fields)),
+            (
+                4,
+                Value::Struct(game_object_fields("NoTransform", Vec::new())),
+            ),
+        ];
+        let graph =
+            SceneGraph::from_decoded_roots(&metadata, &roots, SceneGraphLimits::default()).unwrap();
+
+        let discovery = graph
+            .discover_local_roots(SceneRootDiscoveryLimits::default())
+            .unwrap();
+        assert_eq!(
+            discovery.roots(),
+            [
+                super::SceneRootCandidate {
+                    game_object_index: 0,
+                    transform_index: Some(1),
+                    reason: SceneRootReason::NullFather,
+                },
+                super::SceneRootCandidate {
+                    game_object_index: 4,
+                    transform_index: None,
+                    reason: SceneRootReason::NoTransformComponent,
+                },
+            ]
+        );
+        assert!(discovery.issues().is_empty());
+        assert!(discovery.is_complete());
+        assert!(matches!(
+            graph.discover_local_roots(SceneRootDiscoveryLimits {
+                max_roots: 1,
+                ..SceneRootDiscoveryLimits::default()
+            }),
+            Err(super::SceneRootDiscoveryError::RootCountLimitExceeded {
+                requested: 2,
+                limit: 1,
+            })
+        ));
+    }
+
+    #[test]
+    fn root_discovery_keeps_unresolved_component_and_parent_states_visible() {
+        let component_metadata = metadata(&[(10, 1), (20, 4)]);
+        let component_roots = vec![
+            (
+                0,
+                Value::Struct(game_object_fields(
+                    "Unknown",
+                    vec![pptr(0, 99), pptr(0, 20)],
+                )),
+            ),
+            (1, Value::Struct(transform_fields(false))),
+        ];
+        let component_graph = SceneGraph::from_decoded_roots(
+            &component_metadata,
+            &component_roots,
+            SceneGraphLimits::default(),
+        )
+        .unwrap();
+        let component_discovery = component_graph
+            .discover_local_roots(SceneRootDiscoveryLimits::default())
+            .unwrap();
+        assert!(component_discovery.roots().is_empty());
+        assert!(matches!(
+            component_discovery.issues()[0].kind,
+            SceneRootDiscoveryIssueKind::UnresolvedComponent {
+                target: SceneRelationshipTarget::MissingLocalObject { path_id: 99 }
+            }
+        ));
+        assert!(matches!(
+            component_graph.discover_local_roots(SceneRootDiscoveryLimits {
+                max_issues: 0,
+                ..SceneRootDiscoveryLimits::default()
+            }),
+            Err(super::SceneRootDiscoveryError::IssueCountLimitExceeded {
+                requested: 1,
+                limit: 0,
+            })
+        ));
+
+        let parent_metadata = metadata(&[(10, 1), (20, 4)]);
+        let mut transform = transform_fields(false);
+        transform
+            .iter_mut()
+            .find(|field| field.name == "m_Father")
+            .unwrap()
+            .value = pptr(0, 99);
+        let parent_roots = vec![
+            (
+                0,
+                Value::Struct(game_object_fields("UnknownParent", vec![pptr(0, 20)])),
+            ),
+            (1, Value::Struct(transform)),
+        ];
+        let parent_graph = SceneGraph::from_decoded_roots(
+            &parent_metadata,
+            &parent_roots,
+            SceneGraphLimits::default(),
+        )
+        .unwrap();
+        let parent_discovery = parent_graph
+            .discover_local_roots(SceneRootDiscoveryLimits::default())
+            .unwrap();
+        assert!(parent_discovery.roots().is_empty());
+        assert!(parent_discovery.issues().iter().any(|issue| matches!(
+            issue.kind,
+            SceneRootDiscoveryIssueKind::UnresolvedTransformParent {
+                target: SceneRelationshipTarget::MissingLocalObject { path_id: 99 }
+            }
+        )));
     }
 
     #[test]
