@@ -3,6 +3,7 @@
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 /// A stream that supports both sequential reads and repositioning.
 pub trait ReadSeek: Read + Seek {}
@@ -88,6 +89,95 @@ impl<S: Read + Seek> Seek for PartialStream<S> {
         self.position = next;
         Ok(next)
     }
+}
+
+/// A read-only file range whose logical position is independent from sibling views.
+pub struct FileRangeStream {
+    file: Arc<Mutex<File>>,
+    base_offset: u64,
+    length: u64,
+    position: u64,
+}
+
+impl FileRangeStream {
+    pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
+        let file = File::open(path)?;
+        let length = file.metadata()?.len();
+        Self::from_file(file, 0, length)
+    }
+
+    pub fn from_file(file: File, base_offset: u64, length: u64) -> io::Result<Self> {
+        validate_file_range(file.metadata()?.len(), base_offset, length)?;
+        Ok(Self {
+            file: Arc::new(Mutex::new(file)),
+            base_offset,
+            length,
+            position: 0,
+        })
+    }
+
+    pub fn subrange(&self, offset: u64, length: u64) -> io::Result<Self> {
+        validate_file_range(self.length, offset, length)?;
+        let base_offset = self.base_offset.checked_add(offset).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "file range offset overflows")
+        })?;
+        Ok(Self {
+            file: Arc::clone(&self.file),
+            base_offset,
+            length,
+            position: 0,
+        })
+    }
+
+    pub fn length(&self) -> u64 {
+        self.length
+    }
+}
+
+impl Read for FileRangeStream {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let available = self.length.saturating_sub(self.position);
+        let requested = buffer
+            .len()
+            .min(usize::try_from(available).unwrap_or(usize::MAX));
+        if requested == 0 {
+            return Ok(0);
+        }
+        let absolute_position = self.base_offset.checked_add(self.position).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "file range position overflows")
+        })?;
+        let mut file = self
+            .file
+            .lock()
+            .map_err(|_| io::Error::other("file range handle mutex was poisoned"))?;
+        file.seek(SeekFrom::Start(absolute_position))?;
+        let read = file.read(&mut buffer[..requested])?;
+        self.position = self.position.checked_add(read as u64).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "file range position overflows")
+        })?;
+        Ok(read)
+    }
+}
+
+impl Seek for FileRangeStream {
+    fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
+        let next = seek_target(self.position, self.length, from)?;
+        self.position = next;
+        Ok(next)
+    }
+}
+
+fn validate_file_range(file_length: u64, offset: u64, length: u64) -> io::Result<()> {
+    let end = offset
+        .checked_add(length)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "file range overflows"))?;
+    if end > file_length {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("file range {offset}..{end} exceeds file length {file_length}"),
+        ));
+    }
+    Ok(())
 }
 
 /// A logical file composed of ordered, seekable streams such as `.split0`, `.split1`, etc.
@@ -386,8 +476,10 @@ fn seek_target(position: u64, length: u64, from: SeekFrom) -> io::Result<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{logical_file_name, logical_file_path, open_logical_file};
-    use super::{MultiFileStream, PartialStream};
+    use super::{
+        logical_file_name, logical_file_path, open_logical_file, FileRangeStream, MultiFileStream,
+        PartialStream,
+    };
     use crate::compression::wrappers::compress_gzip;
     use crate::scheme::{FileKind, SchemeReader, SchemeReaderLimits};
     use std::io::{Cursor, Read, Seek, SeekFrom};
@@ -537,5 +629,44 @@ mod tests {
         assert_eq!(file.kind(), FileKind::Resource);
         assert_eq!(file.bytes(), b"regular file payload");
         remove_test_files(&directory, &["sample.resource"]);
+    }
+
+    #[test]
+    fn file_range_streams_share_a_handle_but_keep_independent_positions() {
+        let directory = create_test_directory("file-range");
+        let path = directory.join("ranges.bin");
+        std::fs::write(&path, b"abcdef").unwrap();
+        {
+            let mut whole = FileRangeStream::open(&path).unwrap();
+            let mut view = whole.subrange(1, 4).unwrap();
+            let mut nested = whole.subrange(2, 2).unwrap();
+
+            let mut left = [0; 2];
+            assert_eq!(view.read(&mut left).unwrap(), 2);
+            assert_eq!(&left, b"bc");
+            let mut middle = [0; 2];
+            assert_eq!(nested.read(&mut middle).unwrap(), 2);
+            assert_eq!(&middle, b"cd");
+            assert_eq!(view.seek(SeekFrom::End(-1)).unwrap(), 3);
+            let mut last = [0; 1];
+            assert_eq!(view.read(&mut last).unwrap(), 1);
+            assert_eq!(&last, b"e");
+            let mut prefix = [0; 2];
+            assert_eq!(whole.read(&mut prefix).unwrap(), 2);
+            assert_eq!(&prefix, b"ab");
+        }
+        remove_test_files(&directory, &["ranges.bin"]);
+    }
+
+    #[test]
+    fn file_range_stream_rejects_overflow_and_out_of_bounds_ranges() {
+        let directory = create_test_directory("file-range-bounds");
+        let path = directory.join("ranges.bin");
+        std::fs::write(&path, b"abc").unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        assert!(FileRangeStream::from_file(file, u64::MAX, 1).is_err());
+        let file = std::fs::File::open(&path).unwrap();
+        assert!(FileRangeStream::from_file(file, 2, 2).is_err());
+        remove_test_files(&directory, &["ranges.bin"]);
     }
 }
