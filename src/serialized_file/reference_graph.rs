@@ -233,6 +233,36 @@ impl ObjectReferenceGraph {
         &self.issues
     }
 
+    /// Returns every object-table index with this PathID, preserving duplicate identities.
+    pub fn object_indices_for_path_id(
+        &self,
+        path_id: i64,
+    ) -> impl ExactSizeIterator<Item = usize> + '_ {
+        let first = self
+            .path_id_index
+            .partition_point(|(candidate, _)| *candidate < path_id);
+        let end = self
+            .path_id_index
+            .partition_point(|(candidate, _)| *candidate <= path_id);
+        self.path_id_index[first..end]
+            .iter()
+            .map(|(_, object_index)| *object_index)
+    }
+
+    /// Returns the PPtr edges recorded for one source object in field traversal order.
+    pub fn references_from_object(
+        &self,
+        object_index: usize,
+    ) -> impl Iterator<Item = &SerializedObjectReference> {
+        let first = self
+            .references
+            .partition_point(|reference| reference.source_object_index < object_index);
+        let end = self
+            .references
+            .partition_point(|reference| reference.source_object_index <= object_index);
+        self.references[first..end].iter()
+    }
+
     /// True only when every object's TypeTree payload was decoded and every recognized PPtr was
     /// collected within the configured bounds.
     pub fn is_complete(&self) -> bool {
@@ -379,6 +409,17 @@ pub struct MultiFileObjectReference<'a> {
     pub source_path_id: i64,
     pub field_path: &'a str,
     pub resolution: MultiFilePPtrResolution,
+}
+
+/// Stable object identity within the caller-ordered set joined by a multi-file graph.
+///
+/// File indexes disambiguate duplicate file names; object indexes preserve duplicate PathIDs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MultiFileObjectIdentity<'a> {
+    pub file_index: usize,
+    pub normalized_file_name: &'a str,
+    pub object_index: usize,
+    pub path_id: i64,
 }
 
 /// Explicit result of resolving a PPtr against the supplied files.
@@ -584,6 +625,62 @@ impl<'a> MultiFileReferenceGraph<'a> {
 
     pub fn references(&self) -> &[MultiFileObjectReference<'a>] {
         &self.references
+    }
+
+    /// Returns the parsed identity for a file-scoped object-table entry.
+    pub fn object_identity(
+        &self,
+        file_index: usize,
+        object_index: usize,
+    ) -> Option<MultiFileObjectIdentity<'_>> {
+        let path_id = self
+            .file_metadata
+            .get(file_index)?
+            .objects
+            .get(object_index)?
+            .path_id;
+        Some(MultiFileObjectIdentity {
+            file_index,
+            normalized_file_name: self.normalized_file_names.get(file_index)?,
+            object_index,
+            path_id,
+        })
+    }
+
+    /// Returns references emitted by one file-scoped source object.
+    pub fn references_from_object(
+        &self,
+        file_index: usize,
+        object_index: usize,
+    ) -> impl Iterator<Item = &MultiFileObjectReference<'a>> {
+        let key = (file_index, object_index);
+        let first = self.references.partition_point(|reference| {
+            (reference.source_file_index, reference.source_object_index) < key
+        });
+        let end = self.references.partition_point(|reference| {
+            (reference.source_file_index, reference.source_object_index) <= key
+        });
+        self.references[first..end].iter()
+    }
+
+    /// Returns incoming uniquely resolved references to one file-scoped object.
+    ///
+    /// This scans the bounded edge list; ambiguous or missing references are not reported as
+    /// incoming object edges.
+    pub fn references_to_object(
+        &self,
+        file_index: usize,
+        object_index: usize,
+    ) -> impl Iterator<Item = &MultiFileObjectReference<'a>> {
+        self.references.iter().filter(move |reference| {
+            matches!(
+                &reference.resolution,
+                MultiFilePPtrResolution::Object {
+                    target_file_index,
+                    target_object_index,
+                } if *target_file_index == file_index && *target_object_index == object_index
+            )
+        })
     }
 
     /// Return the source external-table entry associated with one unresolved dependency result.
@@ -1022,10 +1119,10 @@ fn copy_field_path(path: &str) -> Result<String, WalkIssue> {
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_references, MultiFileObjectReference, MultiFilePPtrResolution,
-        MultiFileReferenceGraph, MultiFileReferenceGraphBuildError, MultiFileReferenceGraphLimits,
-        NamedObjectReferenceGraph, ObjectReferenceGraph, ReferenceGraphLimits,
-        SerializedObjectReference, WalkIssue,
+        collect_references, MultiFileObjectIdentity, MultiFileObjectReference,
+        MultiFilePPtrResolution, MultiFileReferenceGraph, MultiFileReferenceGraphBuildError,
+        MultiFileReferenceGraphLimits, NamedObjectReferenceGraph, ObjectReferenceGraph,
+        ReferenceGraphLimits, SerializedObjectReference, WalkIssue,
     };
     use crate::io::binary::Endian;
     use crate::serialized_file::metadata::{FileIdentifier, ObjectInfo, SerializedFileMetadata};
@@ -1118,6 +1215,15 @@ mod tests {
         let metadata = metadata(&[101, 202, 101]);
         let graph = empty_graph(&[101, 202, 101]);
         assert_eq!(
+            graph.object_indices_for_path_id(101).collect::<Vec<_>>(),
+            [0, 2]
+        );
+        assert_eq!(
+            graph.object_indices_for_path_id(202).collect::<Vec<_>>(),
+            [1]
+        );
+        assert_eq!(graph.object_indices_for_path_id(303).count(), 0);
+        assert_eq!(
             graph.resolve_pointer(&metadata, 0, 202),
             PPtrResolution::LocalObject { object_index: 1 }
         );
@@ -1174,6 +1280,14 @@ mod tests {
         assert_eq!(graph.file_count(), 2);
         assert_eq!(graph.normalized_file_names()[1], "shared.assets");
         assert_eq!(
+            source_graph
+                .references_from_object(0)
+                .map(|reference| reference.field_path.as_str())
+                .collect::<Vec<_>>(),
+            ["m_Target"]
+        );
+        assert_eq!(source_graph.references_from_object(1).count(), 0);
+        assert_eq!(
             graph
                 .candidate_file_indices("library/Shared.Assets")
                 .collect::<Vec<_>>(),
@@ -1193,6 +1307,76 @@ mod tests {
             }]
         );
         assert!(graph.is_complete());
+    }
+
+    #[test]
+    fn exposes_file_scoped_object_identity_and_incoming_outgoing_edges() {
+        let source_metadata = metadata(&[11, 12, 13]);
+        let mut source_graph = empty_graph(&[11, 12, 13]);
+        source_graph.references = vec![
+            SerializedObjectReference {
+                source_object_index: 0,
+                source_path_id: 11,
+                field_path: "m_External".to_owned(),
+                file_id: 1,
+                path_id: 22,
+            },
+            SerializedObjectReference {
+                source_object_index: 1,
+                source_path_id: 12,
+                field_path: "m_Local".to_owned(),
+                file_id: 0,
+                path_id: 13,
+            },
+            SerializedObjectReference {
+                source_object_index: 2,
+                source_path_id: 13,
+                field_path: "m_External".to_owned(),
+                file_id: 1,
+                path_id: 22,
+            },
+        ];
+        let target_metadata = metadata(&[22]);
+        let target_graph = empty_graph(&[22]);
+        let files = [
+            NamedObjectReferenceGraph {
+                file_name: "root/main.assets",
+                metadata: &source_metadata,
+                graph: &source_graph,
+            },
+            NamedObjectReferenceGraph {
+                file_name: "SHARED.ASSETS",
+                metadata: &target_metadata,
+                graph: &target_graph,
+            },
+        ];
+
+        let graph = MultiFileReferenceGraph::build(&files).unwrap();
+        assert_eq!(
+            graph.object_identity(1, 0),
+            Some(MultiFileObjectIdentity {
+                file_index: 1,
+                normalized_file_name: "shared.assets",
+                object_index: 0,
+                path_id: 22,
+            })
+        );
+        assert_eq!(graph.object_identity(1, 1), None);
+        assert_eq!(
+            graph
+                .references_from_object(0, 1)
+                .map(|reference| reference.field_path)
+                .collect::<Vec<_>>(),
+            ["m_Local"]
+        );
+        assert_eq!(
+            graph
+                .references_to_object(1, 0)
+                .map(|reference| (reference.source_file_index, reference.source_object_index))
+                .collect::<Vec<_>>(),
+            [(0, 0), (0, 2)]
+        );
+        assert_eq!(graph.references_from_object(4, 0).count(), 0);
     }
 
     #[test]

@@ -270,3 +270,12 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Added `SmartStream::from_reader` and exposed VFS insertion for owned readable streams. `SchemeReader::mount_directory_preserving_containers` imports bounded regular-file discoveries by relative path, assembles logical `.splitN` inputs, and stores their raw bytes behind read-only seekable streams without expanding containers.
 - The synthetic split WebData fixture confirms the original logical filename remains a VFS file, the full raw bytes match, and later scheme dispatch recognizes UnityWebData. The platform CLI path then expands source-registered containers through `PlatformStructure::load_primary_serialized_workspace`; mixed input still uses recursive directory mounting.
 - This directory-import increment passed 200 library tests and 4 binary tests; warnings-denied Clippy and formatting passed. `tools/verify-baseline.ps1` confirmed all 1,449 reference files unchanged and `git diff --check` passed. Real-file/.NET differential validation remains outstanding.
+
+
+## File-scoped object graph navigation
+
+- `ObjectReferenceGraph` now exposes all table indexes matching a PathID without merging duplicates and exposes outgoing edges per source object. `MultiFileReferenceGraph` now returns normalized file-scoped identities, outgoing edges for one source object, and incoming edges only for uniquely resolved targets.
+- Synthetic tests exercise duplicate PathIDs, missing object indexes, normalized file identity, and incoming/outgoing references across loaded SerializedFiles.
+- `cargo fmt --all`: exit 0. `cargo test --workspace --locked --quiet`: exit 0; 201 library tests and 4 binary tests passed, 0 failed, 0 doc tests.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo fmt --all -- --check`, `tools/verify-baseline.ps1`, and `git diff --check`: exit 0; all 1,449 reference files remain unchanged.
+- No real Unity file or source-runtime differential was used for this API; full runtime-class construction and processing remain incomplete.

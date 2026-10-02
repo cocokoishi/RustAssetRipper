@@ -196,3 +196,11 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - The inspect CLI first uses this source-preserving mode. A detected platform uses `collect_game_files` and `load_primary_serialized_workspace`, which expands registered initial containers. Mixed inputs are re-imported through the recursive directory mount and then loaded through `MixedGameStructure`.
 - Synthetic split-WebData coverage verifies that the exact container remains a VFS file and dispatches after import. CLI tests cover both the mixed fallback and a Windows platform directory whose `data.unity3d` is expanded with a matching external leaf. Current verification passed 200 library and 4 binary tests; warnings-denied Clippy, formatting, CLI help/version, baseline verification, and diff checks passed.
 - Full local FileSystem parity, the rest of CLI/product workflows, export/UI, and the Phase 1 gate remain incomplete. User AssetBundles and UABEA remain uninspected.
+
+
+## File-scoped object graph navigation
+
+- `ObjectReferenceGraph::object_indices_for_path_id` returns every matching object-table index, so duplicate PathIDs stay distinct. Per-file and multi-file graph APIs now expose outgoing edges by source object; the multi-file graph also exposes normalized file-scoped object identities and incoming uniquely resolved edges.
+- Caller file indexes disambiguate duplicate normalized file names, and object-table indexes disambiguate duplicate PathIDs. Incoming-edge lookup scans the already bounded reference list rather than allocating a second graph-sized index.
+- Synthetic tests cover duplicate identity lookup, normalized file identity, invalid object indexes, and incoming/outgoing edges. Validation results are recorded in `docs/validation-log.md`.
+- Next: build runtime object classes and field-to-object relationships from source-generated schemas, then add explicit no-TypeTree and managed-reference paths. Full Unity object construction, resource handlers, exporters, product UI, and the Phase 1 gate remain incomplete; user AssetBundles and UABEA remain uninspected.
