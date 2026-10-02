@@ -1355,6 +1355,8 @@ impl Display for UnityFsErrorKind {
 #[cfg(test)]
 mod tests {
     use super::{UnityFsBundle, UnityFsErrorKind, UnityFsLimits};
+    use crate::compression::wrappers::compress_gzip;
+    use crate::scheme::{FileKind, ParsedFile, SchemeReader, WrapperKind};
 
     fn push_i32(output: &mut Vec<u8>, value: i32) {
         output.extend_from_slice(&value.to_be_bytes());
@@ -1556,6 +1558,20 @@ mod tests {
             bundle.read_entry(0).unwrap(),
             std::borrow::Cow::Borrowed(_)
         ));
+    }
+
+    #[test]
+    fn recursively_dispatches_unityfs_entries() {
+        let nested = compress_gzip(b"nested UnityFS entry", 1024).unwrap();
+        let input = make_bundle(&nested, 0, false, 0);
+        let bundle = SchemeReader::read(&input).unwrap();
+        assert_eq!(bundle.kind(), FileKind::UnityFs);
+
+        let entry = bundle.dispatch_entry(0).unwrap();
+        assert_eq!(entry.kind(), FileKind::Resource);
+        assert_eq!(entry.bytes(), b"nested UnityFS entry");
+        assert_eq!(entry.wrappers()[0].kind, WrapperKind::Gzip);
+        assert!(matches!(entry.parse().unwrap(), ParsedFile::Resource(_)));
     }
 
     #[test]

@@ -95,6 +95,33 @@ impl<'a> DispatchedFile<'a> {
         self.kind != FileKind::Resource || !self.wrappers.is_empty()
     }
 
+    /// Dispatch one directory entry from any supported container through the same registry.
+    /// The returned file borrows from this container when the entry is stored without decoding.
+    pub fn dispatch_entry(&self, index: usize) -> Result<DispatchedFile<'_>, SchemeError> {
+        match self.kind {
+            FileKind::UnityFs => {
+                let ParsedFile::UnityFs(bundle) = self.parse()? else {
+                    return Err(SchemeError::new(SchemeErrorKind::NotContainer));
+                };
+                let entry = bundle
+                    .read_entry(index)
+                    .map_err(|error| SchemeError::new(SchemeErrorKind::UnityFs(error)))?;
+                SchemeReader::read_cow_with_limits(entry, self.limits)
+            }
+            FileKind::UnityRaw | FileKind::UnityWebBundle => {
+                let ParsedFile::RawWeb(bundle) = self.parse()? else {
+                    return Err(SchemeError::new(SchemeErrorKind::NotContainer));
+                };
+                let entry = bundle
+                    .into_entry(index)
+                    .map_err(|error| SchemeError::new(SchemeErrorKind::RawWeb(error)))?;
+                SchemeReader::read_cow_with_limits(entry, self.limits)
+            }
+            FileKind::UnityWebData => self.parse_web_data_entry(index),
+            _ => Err(SchemeError::new(SchemeErrorKind::NotContainer)),
+        }
+    }
+
     /// Dispatch one resource entry in a Unity WebData file through the same scheme registry.
     pub fn parse_web_data_entry(&self, index: usize) -> Result<DispatchedFile<'_>, SchemeError> {
         if self.kind != FileKind::UnityWebData {
@@ -109,7 +136,7 @@ impl<'a> DispatchedFile<'a> {
                 entry_count: web_file.entries.len(),
             })
         })?;
-        SchemeReader::read_with_limits(bytes, self.limits)
+        SchemeReader::read_cow_with_limits(Cow::Borrowed(bytes), self.limits)
     }
 
     /// Parse the detected leaf with its format parser.
@@ -181,7 +208,13 @@ impl SchemeReader {
         input: &[u8],
         limits: SchemeReaderLimits,
     ) -> Result<DispatchedFile<'_>, SchemeError> {
-        let mut contents = Cow::Borrowed(input);
+        Self::read_cow_with_limits(Cow::Borrowed(input), limits)
+    }
+
+    fn read_cow_with_limits<'a>(
+        mut contents: Cow<'a, [u8]>,
+        limits: SchemeReaderLimits,
+    ) -> Result<DispatchedFile<'a>, SchemeError> {
         let mut wrappers = Vec::new();
         let mut total_decompressed = 0usize;
 
@@ -382,6 +415,7 @@ pub enum SchemeErrorKind {
     },
     TotalDecompressedLengthOverflow,
     NotWebDataContainer,
+    NotContainer,
     WebDataEntryIndexOutOfBounds {
         index: usize,
         entry_count: usize,
@@ -419,6 +453,9 @@ impl Display for SchemeErrorKind {
             }
             Self::NotWebDataContainer => {
                 write!(formatter, "cannot dispatch an entry from a non-WebData file")
+            }
+            Self::NotContainer => {
+                write!(formatter, "cannot dispatch an entry from a non-container file")
             }
             Self::WebDataEntryIndexOutOfBounds { index, entry_count } => write!(
                 formatter,
@@ -559,7 +596,7 @@ mod tests {
 
         let web_file = SchemeReader::read(&input).unwrap();
         assert_eq!(web_file.kind(), FileKind::UnityWebData);
-        let entry = web_file.parse_web_data_entry(0).unwrap();
+        let entry = web_file.dispatch_entry(0).unwrap();
         assert_eq!(entry.bytes(), b"embedded asset");
         assert_eq!(entry.wrappers()[0].kind, WrapperKind::Gzip);
         assert!(matches!(

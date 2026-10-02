@@ -173,6 +173,72 @@ impl<'a> RawWebBundle<'a> {
     }
 
     pub fn read_entry(&self, entry_index: usize) -> Result<&[u8], RawWebError> {
+        let range = self.entry_range(entry_index)?;
+        self.data.get(range.clone()).ok_or_else(|| {
+            let entry = &self.entries[entry_index];
+            RawWebError::new(
+                range.start,
+                RawWebErrorKind::EntryOutOfBounds {
+                    path: entry.path.clone(),
+                    offset: entry.offset,
+                    size: entry.size,
+                    data_size: self.data.len(),
+                },
+            )
+        })
+    }
+
+    /// Consume the bundle and return one entry while retaining borrowed raw data when possible.
+    /// UnityWeb entries are slices of an owned decompressed chunk, so those ranges are copied.
+    pub fn into_entry(self, entry_index: usize) -> Result<Cow<'a, [u8]>, RawWebError> {
+        let range = self.entry_range(entry_index)?;
+        match self.data {
+            Cow::Borrowed(data) => data.get(range.clone()).map(Cow::Borrowed).ok_or_else(|| {
+                let entry = &self.entries[entry_index];
+                RawWebError::new(
+                    range.start,
+                    RawWebErrorKind::EntryOutOfBounds {
+                        path: entry.path.clone(),
+                        offset: entry.offset,
+                        size: entry.size,
+                        data_size: data.len(),
+                    },
+                )
+            }),
+            Cow::Owned(data) => {
+                let Some(entry_data) = data.get(range.clone()) else {
+                    let entry = &self.entries[entry_index];
+                    return Err(RawWebError::new(
+                        range.start,
+                        RawWebErrorKind::EntryOutOfBounds {
+                            path: entry.path.clone(),
+                            offset: entry.offset,
+                            size: entry.size,
+                            data_size: data.len(),
+                        },
+                    ));
+                };
+                if range.start == 0 && range.end == data.len() {
+                    Ok(Cow::Owned(data))
+                } else {
+                    let mut output = Vec::new();
+                    output.try_reserve_exact(entry_data.len()).map_err(|_| {
+                        RawWebError::new(
+                            range.start,
+                            RawWebErrorKind::AllocationFailed {
+                                field: "entry bytes",
+                                requested: entry_data.len(),
+                            },
+                        )
+                    })?;
+                    output.extend_from_slice(entry_data);
+                    Ok(Cow::Owned(output))
+                }
+            }
+        }
+    }
+
+    fn entry_range(&self, entry_index: usize) -> Result<std::ops::Range<usize>, RawWebError> {
         let entry = self.entries.get(entry_index).ok_or_else(|| {
             RawWebError::new(
                 0,
@@ -193,17 +259,7 @@ impl<'a> RawWebBundle<'a> {
                 },
             )
         })?;
-        self.data.get(start..end).ok_or_else(|| {
-            RawWebError::new(
-                start,
-                RawWebErrorKind::EntryOutOfBounds {
-                    path: entry.path.clone(),
-                    offset: entry.offset,
-                    size: entry.size,
-                    data_size: self.data.len(),
-                },
-            )
-        })
+        Ok(start..end)
     }
 
     pub fn data_size(&self) -> usize {
@@ -700,6 +756,8 @@ impl Display for RawWebErrorKind {
 #[cfg(test)]
 mod tests {
     use super::{RawWebBundle, RawWebKind, RawWebLimits, RawWebScene};
+    use crate::compression::wrappers::compress_gzip;
+    use crate::scheme::{FileKind, ParsedFile, SchemeReader, WrapperKind};
 
     struct Fixture {
         bytes: Vec<u8>,
@@ -821,9 +879,23 @@ mod tests {
     }
 
     #[test]
+    fn recursively_dispatches_raw_bundle_entries() {
+        let nested = compress_gzip(b"nested UnityRaw entry", 1024).unwrap();
+        let input = make_raw_bundle(4, &nested);
+        let bundle = SchemeReader::read(&input).unwrap();
+        assert_eq!(bundle.kind(), FileKind::UnityRaw);
+
+        let entry = bundle.dispatch_entry(0).unwrap();
+        assert_eq!(entry.kind(), FileKind::Resource);
+        assert_eq!(entry.bytes(), b"nested UnityRaw entry");
+        assert_eq!(entry.wrappers()[0].kind, WrapperKind::Gzip);
+        assert!(matches!(entry.parse().unwrap(), ParsedFile::Resource(_)));
+    }
+
+    #[test]
     fn decodes_the_last_unity_web_scene_chunk() {
-        let payload = b"compressed web resource";
-        let chunk = raw_metadata("WebData", payload);
+        let payload = compress_gzip(b"nested UnityWeb entry", 1024).unwrap();
+        let chunk = raw_metadata("WebData", &payload);
         let mut compressed = Vec::new();
         lzma_rs::lzma_compress(&mut std::io::Cursor::new(&chunk), &mut compressed).unwrap();
         compressed[5..13].copy_from_slice(&(chunk.len() as u64).to_le_bytes());
@@ -846,6 +918,14 @@ mod tests {
         assert_eq!(bundle.header.scenes.len(), 2);
         assert_eq!(bundle.entries[0].path, "WebData");
         assert_eq!(bundle.read_entry(0).unwrap(), payload);
+
+        let dispatched = SchemeReader::read(&fixture.bytes).unwrap();
+        assert_eq!(dispatched.kind(), FileKind::UnityWebBundle);
+        let entry = dispatched.dispatch_entry(0).unwrap();
+        assert_eq!(entry.kind(), FileKind::Resource);
+        assert_eq!(entry.bytes(), b"nested UnityWeb entry");
+        assert_eq!(entry.wrappers()[0].kind, WrapperKind::Gzip);
+        assert!(matches!(entry.parse().unwrap(), ParsedFile::Resource(_)));
 
         let limits = RawWebLimits {
             max_decompressed_chunk_bytes: chunk.len() - 1,
