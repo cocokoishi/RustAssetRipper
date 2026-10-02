@@ -152,3 +152,10 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Added source-priority detection for Windows, Linux, and macOS selected paths. Windows/Linux executable and _Data inputs normalize to their application root; Windows named/fallback Data directories, Linux named/fallback Data directories, and macOS Contents/Resources/Data plus Contents/Resources DataPath order are preserved.
 - Three synthetic tests cover executable and Data-folder selection, platform priority, fallback paths, ordered macOS paths, and missing/invalid selections. Full workspace tests passed 179 tests; warnings-denied Clippy, formatting, the 1,449-file baseline verifier, and diff check passed. No real-file or C# differential has run.
 - Next: port Android/OBB and iOS layout detection, then console and Web platform layouts; keep platform file collection and product input-flow integration visible as separate unfinished scopes.
+
+
+## Mobile, console, and Web platform roots
+
+- detect_platform_structure now follows local PlatformChecker priority across Windows, Linux, macOS, Android, iOS, Switch, PS4, WebGL, WebPlayer, Wii U, and Windows Phone. Android accepts one APK and optional OBB root, rejects duplicate roots, and emits APK then OBB DataPaths. Other added layouts cover iOS Payload apps, PS4 Media, Switch ExeFS/RomFS, WebGL Build/Development/Release, WebPlayer HTML/bundle pairs, Wii U content/Data, and the source Windows Phone predicate.
+- Seven synthetic platform tests pass. Full workspace tests passed 183 tests; warnings-denied Clippy, formatting, the 1,449-file baseline verifier, and diff check passed. The Windows Phone overlap test confirms Windows wins earlier in the source priority order. No real-file or C# differential has run.
+- Platform file collection, platform-specific assemblies/streaming assets, and application-flow integration remain unfinished; Phase 1 remains open.

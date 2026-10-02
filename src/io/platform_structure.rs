@@ -1,4 +1,4 @@
-//! Platform root and DataPath discovery for desktop Unity game layouts.
+//! Platform root and DataPath discovery for mounted Unity game layouts.
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -7,22 +7,34 @@ use std::io;
 use crate::io::filesystem::{SearchOption, VirtualFileSystem};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DesktopPlatform {
+pub enum PlatformKind {
     Windows,
     Linux,
     Mac,
+    Android,
+    Ios,
+    Switch,
+    Ps4,
+    WebGl,
+    WebPlayer,
+    WiiU,
+    WindowsPhone,
 }
 
-/// A source-shaped desktop root and ordered dependency DataPaths.
+pub type DesktopPlatform = PlatformKind;
+
+/// A source-shaped platform root and ordered dependency DataPaths.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlatformStructure {
-    pub platform: DesktopPlatform,
+    pub platform: PlatformKind,
     /// The selected input path that matched this structure.
     pub selected_path: String,
+    /// Every selected path consumed by the structure (Android can include an OBB root).
+    pub consumed_paths: Vec<String>,
     /// Normalized application root (the parent for executable and `_Data` selections).
     pub root_path: String,
-    pub name: String,
-    pub game_data_path: String,
+    pub name: Option<String>,
+    pub game_data_path: Option<String>,
     pub data_paths: Vec<String>,
 }
 
@@ -50,6 +62,50 @@ pub fn detect_desktop_platform(
     selected_paths: &[String],
     limits: PlatformStructureLimits,
 ) -> Result<Option<PlatformStructure>, PlatformStructureError> {
+    detect_platforms(
+        filesystem,
+        selected_paths,
+        limits,
+        &[
+            PlatformKind::Windows,
+            PlatformKind::Linux,
+            PlatformKind::Mac,
+        ],
+    )
+}
+
+/// Detect a local platform structure in `PlatformChecker` order.
+pub fn detect_platform_structure(
+    filesystem: &VirtualFileSystem,
+    selected_paths: &[String],
+    limits: PlatformStructureLimits,
+) -> Result<Option<PlatformStructure>, PlatformStructureError> {
+    detect_platforms(
+        filesystem,
+        selected_paths,
+        limits,
+        &[
+            PlatformKind::Windows,
+            PlatformKind::Linux,
+            PlatformKind::Mac,
+            PlatformKind::Android,
+            PlatformKind::Ios,
+            PlatformKind::Switch,
+            PlatformKind::Ps4,
+            PlatformKind::WebGl,
+            PlatformKind::WebPlayer,
+            PlatformKind::WiiU,
+            PlatformKind::WindowsPhone,
+        ],
+    )
+}
+
+fn detect_platforms(
+    filesystem: &VirtualFileSystem,
+    selected_paths: &[String],
+    limits: PlatformStructureLimits,
+    priority: &[PlatformKind],
+) -> Result<Option<PlatformStructure>, PlatformStructureError> {
     if selected_paths.len() > limits.max_selected_paths {
         return Err(PlatformStructureError::new(
             None,
@@ -75,16 +131,26 @@ pub fn detect_desktop_platform(
         normalized.push(normalize_selected_path(path, limits.max_path_bytes)?);
     }
 
-    for platform in [
-        DesktopPlatform::Windows,
-        DesktopPlatform::Linux,
-        DesktopPlatform::Mac,
-    ] {
+    for platform in priority {
+        if *platform == PlatformKind::Android {
+            if let Some(structure) = detect_android(filesystem, &normalized)? {
+                return Ok(Some(structure));
+            }
+            continue;
+        }
         for selected_path in &normalized {
             let detected = match platform {
-                DesktopPlatform::Windows => detect_windows(filesystem, selected_path)?,
-                DesktopPlatform::Linux => detect_linux(filesystem, selected_path)?,
-                DesktopPlatform::Mac => detect_mac(filesystem, selected_path)?,
+                PlatformKind::Windows => detect_windows(filesystem, selected_path)?,
+                PlatformKind::Linux => detect_linux(filesystem, selected_path)?,
+                PlatformKind::Mac => detect_mac(filesystem, selected_path)?,
+                PlatformKind::Ios => detect_ios(filesystem, selected_path)?,
+                PlatformKind::Switch => detect_switch(filesystem, selected_path)?,
+                PlatformKind::Ps4 => detect_ps4(filesystem, selected_path)?,
+                PlatformKind::WebGl => detect_webgl(filesystem, selected_path)?,
+                PlatformKind::WebPlayer => detect_web_player(filesystem, selected_path)?,
+                PlatformKind::WiiU => detect_wiiu(filesystem, selected_path)?,
+                PlatformKind::WindowsPhone => detect_windows_phone(filesystem, selected_path)?,
+                PlatformKind::Android => None,
             };
             if let Some(structure) = detected {
                 return Ok(Some(structure));
@@ -118,12 +184,13 @@ fn detect_windows(
         return Ok(None);
     };
     Ok(Some(PlatformStructure {
-        platform: DesktopPlatform::Windows,
+        platform: PlatformKind::Windows,
         selected_path: selected_path.to_owned(),
+        consumed_paths: vec![selected_path.to_owned()],
         root_path,
-        name,
+        name: Some(name),
         data_paths: vec![game_data_path.clone()],
-        game_data_path,
+        game_data_path: Some(game_data_path),
     }))
 }
 
@@ -199,12 +266,13 @@ fn detect_linux(
         return Ok(None);
     };
     Ok(Some(PlatformStructure {
-        platform: DesktopPlatform::Linux,
+        platform: PlatformKind::Linux,
         selected_path: selected_path.to_owned(),
+        consumed_paths: vec![selected_path.to_owned()],
         root_path,
-        name,
+        name: Some(name),
         data_paths: vec![game_data_path.clone()],
-        game_data_path,
+        game_data_path: Some(game_data_path),
     }))
 }
 
@@ -275,13 +343,300 @@ fn detect_mac(
         return Ok(None);
     }
     Ok(Some(PlatformStructure {
-        platform: DesktopPlatform::Mac,
+        platform: PlatformKind::Mac,
         selected_path: selected_path.to_owned(),
+        consumed_paths: vec![selected_path.to_owned()],
         root_path: selected_path.to_owned(),
-        name: file_stem(file_name(selected_path)).to_owned(),
-        game_data_path: game_data_path.clone(),
+        name: Some(file_stem(file_name(selected_path)).to_owned()),
+        game_data_path: Some(game_data_path.clone()),
         data_paths: vec![game_data_path, resource_path],
     }))
+}
+
+fn detect_android(
+    filesystem: &VirtualFileSystem,
+    selected_paths: &[String],
+) -> Result<Option<PlatformStructure>, PlatformStructureError> {
+    let mut apk_roots = Vec::new();
+    let mut obb_roots = Vec::new();
+    for path in selected_paths {
+        if !exists_directory(filesystem, path)? {
+            continue;
+        }
+        let marker = android_root_marker(filesystem, path)?;
+        let data_path = join_path(path, "assets/bin/Data");
+        if marker > 8 && exists_directory(filesystem, &data_path)? {
+            apk_roots.push(path.clone());
+        } else if marker == 8 && exists_directory(filesystem, &data_path)? {
+            obb_roots.push(path.clone());
+        }
+    }
+    if apk_roots.len() > 1 {
+        return Err(PlatformStructureError::new(
+            None,
+            PlatformStructureErrorKind::AmbiguousAndroidRoots {
+                role: "APK",
+                count: apk_roots.len(),
+            },
+        ));
+    }
+    if obb_roots.len() > 1 {
+        return Err(PlatformStructureError::new(
+            None,
+            PlatformStructureErrorKind::AmbiguousAndroidRoots {
+                role: "OBB",
+                count: obb_roots.len(),
+            },
+        ));
+    }
+    let Some(apk_root) = apk_roots.pop() else {
+        return Ok(None);
+    };
+    let apk_data = join_path(&apk_root, "assets/bin/Data");
+    let mut data_paths = vec![apk_data.clone()];
+    let mut consumed_paths = vec![apk_root.clone()];
+    if let Some(obb_root) = obb_roots.pop() {
+        data_paths.push(join_path(&obb_root, "assets/bin/Data"));
+        consumed_paths.push(obb_root);
+    }
+    Ok(Some(make_structure(
+        PlatformKind::Android,
+        &apk_root,
+        consumed_paths,
+        apk_root.clone(),
+        None,
+        Some(apk_data),
+        data_paths,
+    )))
+}
+
+fn android_root_marker(
+    filesystem: &VirtualFileSystem,
+    root_path: &str,
+) -> Result<u8, PlatformStructureError> {
+    let mut marker = 0u8;
+    for directory in top_level_directories(filesystem, root_path)? {
+        match file_name(&directory) {
+            "assets" => marker |= 8,
+            "META-INF" => marker |= 4,
+            "lib" => marker |= 2,
+            _ => {}
+        }
+    }
+    Ok(marker)
+}
+
+fn detect_ios(
+    filesystem: &VirtualFileSystem,
+    selected_path: &str,
+) -> Result<Option<PlatformStructure>, PlatformStructureError> {
+    if !exists_directory(filesystem, selected_path)? {
+        return Ok(None);
+    }
+    let payload_path = join_path(selected_path, "Payload");
+    if !exists_directory(filesystem, &payload_path)? {
+        return Ok(None);
+    }
+    for app_path in top_level_directories(filesystem, &payload_path)? {
+        let app_name = file_name(&app_path);
+        if !app_name.ends_with(".app") {
+            continue;
+        }
+        let game_data_path = join_path(&app_path, "Data");
+        if exists_directory(filesystem, &game_data_path)? {
+            return Ok(Some(make_structure(
+                PlatformKind::Ios,
+                selected_path,
+                vec![selected_path.to_owned()],
+                selected_path.to_owned(),
+                Some(file_stem(app_name).to_owned()),
+                Some(game_data_path.clone()),
+                vec![game_data_path],
+            )));
+        }
+    }
+    Ok(None)
+}
+
+fn detect_ps4(
+    filesystem: &VirtualFileSystem,
+    selected_path: &str,
+) -> Result<Option<PlatformStructure>, PlatformStructureError> {
+    if !exists_directory(filesystem, selected_path)? {
+        return Ok(None);
+    }
+    let has_executable = top_level_files(filesystem, selected_path)?
+        .iter()
+        .any(|path| file_name(path) == "eboot.bin");
+    let game_data_path = join_path(selected_path, "Media");
+    if !has_executable || !exists_directory(filesystem, &game_data_path)? {
+        return Ok(None);
+    }
+    Ok(Some(make_structure(
+        PlatformKind::Ps4,
+        selected_path,
+        vec![selected_path.to_owned()],
+        selected_path.to_owned(),
+        Some(file_name(selected_path).to_owned()),
+        Some(game_data_path.clone()),
+        vec![game_data_path],
+    )))
+}
+
+fn detect_switch(
+    filesystem: &VirtualFileSystem,
+    selected_path: &str,
+) -> Result<Option<PlatformStructure>, PlatformStructureError> {
+    if !exists_directory(filesystem, selected_path)?
+        || !exists_directory(filesystem, &join_path(selected_path, "exefs"))?
+    {
+        return Ok(None);
+    }
+    let game_data_path = join_path(selected_path, "romfs/Data");
+    if !exists_directory(filesystem, &game_data_path)? {
+        return Ok(None);
+    }
+    Ok(Some(make_structure(
+        PlatformKind::Switch,
+        selected_path,
+        vec![selected_path.to_owned()],
+        selected_path.to_owned(),
+        Some(file_name(selected_path).to_owned()),
+        Some(game_data_path.clone()),
+        vec![game_data_path],
+    )))
+}
+
+fn detect_wiiu(
+    filesystem: &VirtualFileSystem,
+    selected_path: &str,
+) -> Result<Option<PlatformStructure>, PlatformStructureError> {
+    let game_data_path = join_path(selected_path, "content/Data");
+    if !exists_directory(filesystem, &game_data_path)? {
+        return Ok(None);
+    }
+    Ok(Some(make_structure(
+        PlatformKind::WiiU,
+        selected_path,
+        vec![selected_path.to_owned()],
+        selected_path.to_owned(),
+        Some(file_name(selected_path).to_owned()),
+        Some(game_data_path.clone()),
+        vec![game_data_path],
+    )))
+}
+
+fn detect_windows_phone(
+    filesystem: &VirtualFileSystem,
+    selected_path: &str,
+) -> Result<Option<PlatformStructure>, PlatformStructureError> {
+    if !exists_directory(filesystem, selected_path)?
+        || !exists_directory(filesystem, &join_path(selected_path, "Assets"))?
+    {
+        return Ok(None);
+    }
+    let game_data_path = join_path(selected_path, "Data");
+    if !exists_directory(filesystem, &game_data_path)? {
+        return Ok(None);
+    }
+    let executables: Vec<String> = top_level_files(filesystem, selected_path)?
+        .into_iter()
+        .filter(|path| extension(file_name(path)) == ".exe")
+        .collect();
+    if executables.len() != 1 {
+        return Ok(None);
+    }
+    let name = file_stem(file_name(&executables[0])).to_owned();
+    Ok(Some(make_structure(
+        PlatformKind::WindowsPhone,
+        selected_path,
+        vec![selected_path.to_owned()],
+        selected_path.to_owned(),
+        Some(name),
+        Some(game_data_path.clone()),
+        vec![game_data_path],
+    )))
+}
+
+fn detect_webgl(
+    filesystem: &VirtualFileSystem,
+    selected_path: &str,
+) -> Result<Option<PlatformStructure>, PlatformStructureError> {
+    if !exists_directory(filesystem, selected_path)?
+        || !has_top_level_extension(filesystem, selected_path, ".html")?
+    {
+        return Ok(None);
+    }
+    for (directory, suffix) in [
+        ("Build", ".data.unityweb"),
+        ("Development", ".data"),
+        ("Release", ".datagz"),
+    ] {
+        let data_directory = join_path(selected_path, directory);
+        if exists_directory(filesystem, &data_directory)?
+            && has_top_level_suffix(filesystem, &data_directory, suffix)?
+        {
+            return Ok(Some(make_structure(
+                PlatformKind::WebGl,
+                selected_path,
+                vec![selected_path.to_owned()],
+                selected_path.to_owned(),
+                Some(file_name(selected_path).to_owned()),
+                Some(selected_path.to_owned()),
+                vec![selected_path.to_owned(), data_directory],
+            )));
+        }
+    }
+    Ok(None)
+}
+
+fn detect_web_player(
+    filesystem: &VirtualFileSystem,
+    selected_path: &str,
+) -> Result<Option<PlatformStructure>, PlatformStructureError> {
+    if !exists_directory(filesystem, selected_path)? {
+        return Ok(None);
+    }
+    for html_path in top_level_files(filesystem, selected_path)? {
+        let html_name = file_name(&html_path);
+        if extension(html_name) != ".html" {
+            continue;
+        }
+        let name = file_stem(html_name);
+        let bundle_path = join_path(selected_path, &format!("{name}.unity3d"));
+        if exists_file(filesystem, &bundle_path)? {
+            return Ok(Some(make_structure(
+                PlatformKind::WebPlayer,
+                selected_path,
+                vec![selected_path.to_owned()],
+                selected_path.to_owned(),
+                Some(name.to_owned()),
+                None,
+                vec![selected_path.to_owned()],
+            )));
+        }
+    }
+    Ok(None)
+}
+
+fn make_structure(
+    platform: PlatformKind,
+    selected_path: &str,
+    consumed_paths: Vec<String>,
+    root_path: String,
+    name: Option<String>,
+    game_data_path: Option<String>,
+    data_paths: Vec<String>,
+) -> PlatformStructure {
+    PlatformStructure {
+        platform,
+        selected_path: selected_path.to_owned(),
+        consumed_paths,
+        root_path,
+        name,
+        game_data_path,
+        data_paths,
+    }
 }
 
 fn exists_file(filesystem: &VirtualFileSystem, path: &str) -> Result<bool, PlatformStructureError> {
@@ -306,6 +661,35 @@ fn top_level_files(
     filesystem
         .enumerate_files(Some(root_path), "*", SearchOption::TopDirectoryOnly)
         .map_err(|source| PlatformStructureError::filesystem(root_path, source))
+}
+
+fn top_level_directories(
+    filesystem: &VirtualFileSystem,
+    root_path: &str,
+) -> Result<Vec<String>, PlatformStructureError> {
+    filesystem
+        .enumerate_directories(Some(root_path), "*", SearchOption::TopDirectoryOnly)
+        .map_err(|source| PlatformStructureError::filesystem(root_path, source))
+}
+
+fn has_top_level_extension(
+    filesystem: &VirtualFileSystem,
+    root_path: &str,
+    expected: &str,
+) -> Result<bool, PlatformStructureError> {
+    Ok(top_level_files(filesystem, root_path)?
+        .iter()
+        .any(|path| extension(file_name(path)) == expected))
+}
+
+fn has_top_level_suffix(
+    filesystem: &VirtualFileSystem,
+    root_path: &str,
+    suffix: &str,
+) -> Result<bool, PlatformStructureError> {
+    Ok(top_level_files(filesystem, root_path)?
+        .iter()
+        .any(|path| file_name(path).ends_with(suffix)))
 }
 
 fn normalize_selected_path(
@@ -398,6 +782,7 @@ impl PlatformStructureError {
 
 #[derive(Debug)]
 pub enum PlatformStructureErrorKind {
+    AmbiguousAndroidRoots { role: &'static str, count: usize },
     SelectedPathCountLimitExceeded { count: usize, limit: usize },
     SelectedPathTooLong { byte_count: usize, limit: usize },
     InvalidSelectedPath,
@@ -411,6 +796,12 @@ impl Display for PlatformStructureError {
             write!(f, "VFS path '{path}': ")?;
         }
         match &self.kind {
+            PlatformStructureErrorKind::AmbiguousAndroidRoots { role, count } => {
+                write!(
+                    f,
+                    "found {count} Android {role} roots; expected at most one"
+                )
+            }
             PlatformStructureErrorKind::SelectedPathCountLimitExceeded { count, limit } => {
                 write!(f, "selected {count} paths, exceeding limit {limit}")
             }
@@ -441,8 +832,8 @@ impl Error for PlatformStructureError {
 #[cfg(test)]
 mod tests {
     use super::{
-        detect_desktop_platform, DesktopPlatform, PlatformStructureErrorKind,
-        PlatformStructureLimits,
+        detect_desktop_platform, detect_platform_structure, DesktopPlatform, PlatformKind,
+        PlatformStructureErrorKind, PlatformStructureLimits,
     };
     use crate::io::filesystem::VirtualFileSystem;
 
@@ -474,7 +865,10 @@ mod tests {
         .unwrap();
         assert_eq!(from_executable.platform, DesktopPlatform::Windows);
         assert_eq!(from_executable.root_path, "/games");
-        assert_eq!(from_executable.game_data_path, "/games/Nova_Data");
+        assert_eq!(
+            from_executable.game_data_path.as_deref(),
+            Some("/games/Nova_Data")
+        );
 
         let from_data = detect_desktop_platform(
             &filesystem,
@@ -500,7 +894,7 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(linux.platform, DesktopPlatform::Linux);
-        assert_eq!(linux.game_data_path, "/linux/Data");
+        assert_eq!(linux.game_data_path.as_deref(), Some("/linux/Data"));
 
         insert_directory(&mut filesystem, "/App.app/Contents/Resources/Data");
         let mac = detect_desktop_platform(
@@ -554,5 +948,147 @@ mod tests {
         )
         .unwrap()
         .is_none());
+    }
+
+    #[test]
+    fn detects_android_apk_and_obb_with_source_ordered_data_paths() {
+        let mut filesystem = VirtualFileSystem::new();
+        insert_directory(&mut filesystem, "/apk/assets/bin/Data");
+        insert_directory(&mut filesystem, "/apk/lib/arm64-v8a");
+        insert_directory(&mut filesystem, "/apk/META-INF");
+        insert_directory(&mut filesystem, "/obb/assets/bin/Data");
+
+        let structure = detect_platform_structure(
+            &filesystem,
+            &["/obb".to_owned(), "/apk".to_owned()],
+            PlatformStructureLimits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(structure.platform, PlatformKind::Android);
+        assert_eq!(structure.selected_path, "/apk");
+        assert_eq!(structure.consumed_paths, ["/apk", "/obb"]);
+        assert_eq!(
+            structure.data_paths,
+            ["/apk/assets/bin/Data", "/obb/assets/bin/Data"]
+        );
+
+        insert_directory(&mut filesystem, "/apk2/assets/bin/Data");
+        insert_directory(&mut filesystem, "/apk2/META-INF");
+        let ambiguous = detect_platform_structure(
+            &filesystem,
+            &["/apk".to_owned(), "/apk2".to_owned()],
+            PlatformStructureLimits::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            ambiguous.kind,
+            PlatformStructureErrorKind::AmbiguousAndroidRoots {
+                role: "APK",
+                count: 2
+            }
+        ));
+    }
+
+    #[test]
+    fn detects_ios_and_console_game_data_roots() {
+        let mut filesystem = VirtualFileSystem::new();
+        insert_directory(&mut filesystem, "/ios/Payload/Example.app/Data");
+        let ios = detect_platform_structure(
+            &filesystem,
+            &["/ios".to_owned()],
+            PlatformStructureLimits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(ios.platform, PlatformKind::Ios);
+        assert_eq!(ios.name.as_deref(), Some("Example"));
+        assert_eq!(ios.data_paths, ["/ios/Payload/Example.app/Data"]);
+
+        insert_file(&mut filesystem, "/ps4/eboot.bin");
+        insert_directory(&mut filesystem, "/ps4/Media");
+        let ps4 = detect_platform_structure(
+            &filesystem,
+            &["/ps4".to_owned()],
+            PlatformStructureLimits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(ps4.platform, PlatformKind::Ps4);
+        assert_eq!(ps4.game_data_path.as_deref(), Some("/ps4/Media"));
+
+        insert_directory(&mut filesystem, "/switch/exefs");
+        insert_directory(&mut filesystem, "/switch/romfs/Data");
+        let switch = detect_platform_structure(
+            &filesystem,
+            &["/switch".to_owned()],
+            PlatformStructureLimits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(switch.platform, PlatformKind::Switch);
+        assert_eq!(switch.game_data_path.as_deref(), Some("/switch/romfs/Data"));
+
+        insert_directory(&mut filesystem, "/wiiu/content/Data");
+        let wiiu = detect_platform_structure(
+            &filesystem,
+            &["/wiiu".to_owned()],
+            PlatformStructureLimits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(wiiu.platform, PlatformKind::WiiU);
+        assert_eq!(wiiu.game_data_path.as_deref(), Some("/wiiu/content/Data"));
+    }
+
+    #[test]
+    fn detects_webgl_layout_precedence_and_web_player_bundle_roots() {
+        let mut filesystem = VirtualFileSystem::new();
+        insert_file(&mut filesystem, "/web/index.html");
+        insert_file(&mut filesystem, "/web/Build/player.data.unityweb");
+        insert_directory(&mut filesystem, "/web/Development");
+        insert_file(&mut filesystem, "/web/Development/player.data");
+        let webgl = detect_platform_structure(
+            &filesystem,
+            &["/web".to_owned()],
+            PlatformStructureLimits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(webgl.platform, PlatformKind::WebGl);
+        assert_eq!(webgl.data_paths, ["/web", "/web/Build"]);
+
+        insert_file(&mut filesystem, "/player/index.html");
+        insert_file(&mut filesystem, "/player/index.unity3d");
+        let web_player = detect_platform_structure(
+            &filesystem,
+            &["/player".to_owned()],
+            PlatformStructureLimits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(web_player.platform, PlatformKind::WebPlayer);
+        assert_eq!(web_player.name.as_deref(), Some("index"));
+        assert_eq!(web_player.game_data_path, None);
+        assert_eq!(web_player.data_paths, ["/player"]);
+    }
+
+    #[test]
+    fn preserves_windows_before_windows_phone_detection_priority() {
+        let mut filesystem = VirtualFileSystem::new();
+        insert_directory(&mut filesystem, "/phone/Assets");
+        insert_directory(&mut filesystem, "/phone/Data");
+        insert_file(&mut filesystem, "/phone/Game.exe");
+
+        // The source checker tests Windows before Windows Phone. Windows' generic `Data`
+        // fallback therefore wins for this overlapping shape.
+        let structure = detect_platform_structure(
+            &filesystem,
+            &["/phone".to_owned()],
+            PlatformStructureLimits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(structure.platform, PlatformKind::Windows);
     }
 }

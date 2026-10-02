@@ -207,3 +207,10 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Added VFS detection for Windows, Linux, and macOS roots, including Windows/Linux executable and _Data selections, named/fallback Data directories, and macOS Contents/Resources/Data and ordered DataPaths.
 - Three synthetic tests passed for Windows and Linux root resolution, macOS path ordering, detection priority, and invalid/missing selections. cargo test --workspace --locked passed 179 tests; warnings-denied Clippy, format check, 1,449-file baseline verification, and diff check passed.
 - Mobile, console, WebGL/WebPlayer/Windows Phone root detectors, platform file collection, and real-file/C# differential validation remain outstanding.
+
+
+## Mobile, console, and Web platform roots
+
+- Extended full-priority platform detection to Android APK/OBB, iOS, Switch, PS4, WebGL, WebPlayer, Wii U, and Windows Phone. It returns consumed paths, root/name, optional game data path, and ordered DataPaths; duplicate Android APK/OBB candidates are explicit errors.
+- Seven synthetic platform tests cover Android with OBB and duplicate rejection, iOS, PS4, Switch, Wii U, WebGL precedence, WebPlayer pairing, and Windows-before-Windows-Phone source priority. cargo test --workspace --locked passed 183 tests; warnings-denied Clippy, formatting, baseline verification (1,449 reference files), and diff check passed.
+- Full platform file collection and real-file/C# differential validation remain outstanding.
