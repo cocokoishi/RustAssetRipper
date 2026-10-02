@@ -80,11 +80,11 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 ## Direct parsed-container entry mounting
 
 - cargo fmt --all: exit 0; cargo fmt --all -- --check: exit 0.
-- cargo test --workspace --locked: exit 0; 132 unit tests passed, 0 failed, 0 doc tests.
+- cargo test --workspace --locked: exit 0; 134 unit tests passed, 0 failed, 0 doc tests.
 - cargo clippy --workspace --all-targets --locked -- -D warnings: exit 0.
 - tools/verify-baseline.ps1: exit 0; all 1,449 reference files match the manifest.
 - git diff --check: exit 0.
 - VirtualFileSystem can insert an already-owned readable SmartStream while creating missing parents, enforcing the total entry limit before mutation and rejecting duplicate paths without replacing existing content.
 - DispatchedFile::mount_container_entries mounts direct UnityFS, UnityRaw/UnityWeb, and WebData entry bytes beneath an optional virtual destination. It preflights entry count and aggregate declared bytes, rejects parent-directory path components, and reports exact partial progress if a later entry fails.
-- WebData synthetic tests cover nested path creation, exact mounted bytes, count and byte limits before mutation, duplicate-path collisions, partial reports, and path traversal rejection. UnityFS and Raw/Web mount branches compile but lack direct mount-specific fixtures. These fixtures do not establish real-file or C# differential compatibility.
+- WebData, UnityFS, UnityRaw, and UnityWeb synthetic tests cover direct entry path mounting and exact bytes. WebData tests additionally cover count and byte limits before mutation, duplicate-path collisions, partial reports, and path traversal rejection. These fixtures do not establish real-file or C# differential compatibility.
 - The initial test run had one fixture setup failure because the legacy write helper requires a pre-existing parent directory. The fixture now creates that directory first; the complete suite then passed.

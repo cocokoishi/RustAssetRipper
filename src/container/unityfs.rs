@@ -1356,7 +1356,8 @@ impl Display for UnityFsErrorKind {
 mod tests {
     use super::{UnityFsBundle, UnityFsErrorKind, UnityFsLimits};
     use crate::compression::wrappers::compress_gzip;
-    use crate::scheme::{FileKind, ParsedFile, SchemeReader, WrapperKind};
+    use crate::io::filesystem::VirtualFileSystem;
+    use crate::scheme::{ContainerMountLimits, FileKind, ParsedFile, SchemeReader, WrapperKind};
 
     fn push_i32(output: &mut Vec<u8>, value: i32) {
         output.extend_from_slice(&value.to_be_bytes());
@@ -1558,6 +1559,30 @@ mod tests {
             bundle.read_entry(0).unwrap(),
             std::borrow::Cow::Borrowed(_)
         ));
+    }
+
+    #[test]
+    fn mounts_unityfs_entries_using_the_parsed_node_paths() {
+        let payload = b"UnityFS direct mount payload";
+        let input = make_bundle(payload, 0, false, 0);
+        let dispatched = SchemeReader::read(&input).unwrap();
+        let mut filesystem = VirtualFileSystem::new();
+        let report = dispatched
+            .mount_container_entries(
+                &mut filesystem,
+                Some("/bundles/unityfs"),
+                ContainerMountLimits::default(),
+            )
+            .unwrap();
+
+        assert_eq!(report.mounted_entries, 1);
+        assert_eq!(report.mounted_bytes, payload.len() as u64);
+        assert_eq!(
+            filesystem
+                .read_all_bytes("/bundles/unityfs/data/file.bin", 128)
+                .unwrap(),
+            payload
+        );
     }
 
     #[test]

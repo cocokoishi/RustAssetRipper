@@ -757,7 +757,8 @@ impl Display for RawWebErrorKind {
 mod tests {
     use super::{RawWebBundle, RawWebKind, RawWebLimits, RawWebScene};
     use crate::compression::wrappers::compress_gzip;
-    use crate::scheme::{FileKind, ParsedFile, SchemeReader, WrapperKind};
+    use crate::io::filesystem::VirtualFileSystem;
+    use crate::scheme::{ContainerMountLimits, FileKind, ParsedFile, SchemeReader, WrapperKind};
 
     struct Fixture {
         bytes: Vec<u8>,
@@ -893,6 +894,30 @@ mod tests {
     }
 
     #[test]
+    fn mounts_unityraw_entries_using_the_parsed_directory_paths() {
+        let payload = b"UnityRaw direct mount payload";
+        let input = make_raw_bundle(4, payload);
+        let dispatched = SchemeReader::read(&input).unwrap();
+        let mut filesystem = VirtualFileSystem::new();
+        let report = dispatched
+            .mount_container_entries(
+                &mut filesystem,
+                Some("/bundles/raw"),
+                ContainerMountLimits::default(),
+            )
+            .unwrap();
+
+        assert_eq!(report.mounted_entries, 1);
+        assert_eq!(report.mounted_bytes, payload.len() as u64);
+        assert_eq!(
+            filesystem
+                .read_all_bytes("/bundles/raw/assets/data.bin", 128)
+                .unwrap(),
+            payload
+        );
+    }
+
+    #[test]
     fn decodes_the_last_unity_web_scene_chunk() {
         let payload = compress_gzip(b"nested UnityWeb entry", 1024).unwrap();
         let chunk = raw_metadata("WebData", &payload);
@@ -921,6 +946,23 @@ mod tests {
 
         let dispatched = SchemeReader::read(&fixture.bytes).unwrap();
         assert_eq!(dispatched.kind(), FileKind::UnityWebBundle);
+        let mut filesystem = VirtualFileSystem::new();
+        let report = dispatched
+            .mount_container_entries(
+                &mut filesystem,
+                Some("/bundles/web"),
+                ContainerMountLimits::default(),
+            )
+            .unwrap();
+        assert_eq!(report.mounted_entries, 1);
+        assert_eq!(report.mounted_bytes, payload.len() as u64);
+        assert_eq!(
+            filesystem
+                .read_all_bytes("/bundles/web/WebData", 1024)
+                .unwrap(),
+            payload
+        );
+
         let entry = dispatched.dispatch_entry(0).unwrap();
         assert_eq!(entry.kind(), FileKind::Resource);
         assert_eq!(entry.bytes(), b"nested UnityWeb entry");
