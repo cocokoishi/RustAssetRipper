@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
+use std::io::{Read, Seek, SeekFrom};
 
 use crate::compression::wrappers::{
     decompress_brotli, decompress_gzip, has_brotli_file_signature, has_gzip_magic,
@@ -43,6 +44,7 @@ pub struct WrapperLayer {
 /// Limits for wrapper recursion and the source parsers called by the dispatcher.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SchemeReaderLimits {
+    pub max_input_bytes: usize,
     pub max_wrapper_depth: usize,
     pub max_decompressed_bytes_per_layer: usize,
     pub max_total_decompressed_bytes: usize,
@@ -54,6 +56,7 @@ pub struct SchemeReaderLimits {
 impl Default for SchemeReaderLimits {
     fn default() -> Self {
         Self {
+            max_input_bytes: 2 * 1024 * 1024 * 1024,
             max_wrapper_depth: 16,
             max_decompressed_bytes_per_layer: 512 * 1024 * 1024,
             max_total_decompressed_bytes: 2 * 1024 * 1024 * 1024,
@@ -204,6 +207,41 @@ impl SchemeReader {
             || is_serialized_file(input)
     }
 
+    /// Read a complete seekable logical file, such as a file assembled from split parts, into
+    /// bounded storage and dispatch it from its beginning.
+    pub fn read_stream<R: Read + Seek>(
+        stream: &mut R,
+        limits: SchemeReaderLimits,
+    ) -> Result<DispatchedFile<'static>, SchemeError> {
+        let stream_length = stream
+            .seek(SeekFrom::End(0))
+            .map_err(|error| SchemeError::new(SchemeErrorKind::StreamInput(error)))?;
+        if stream_length > u64::try_from(limits.max_input_bytes).unwrap_or(u64::MAX) {
+            return Err(SchemeError::new(SchemeErrorKind::InputSizeLimitExceeded {
+                requested: stream_length,
+                limit: limits.max_input_bytes,
+            }));
+        }
+        let length = usize::try_from(stream_length).map_err(|_| {
+            SchemeError::new(SchemeErrorKind::InputLengthNotRepresentable {
+                length: stream_length,
+            })
+        })?;
+        stream
+            .seek(SeekFrom::Start(0))
+            .map_err(|error| SchemeError::new(SchemeErrorKind::StreamInput(error)))?;
+
+        let mut contents = Vec::new();
+        contents.try_reserve_exact(length).map_err(|_| {
+            SchemeError::new(SchemeErrorKind::InputAllocationFailed { requested: length })
+        })?;
+        contents.resize(length, 0);
+        stream
+            .read_exact(&mut contents)
+            .map_err(|error| SchemeError::new(SchemeErrorKind::StreamInput(error)))?;
+        Self::read_cow_with_limits(Cow::Owned(contents), limits)
+    }
+
     pub fn read_with_limits(
         input: &[u8],
         limits: SchemeReaderLimits,
@@ -215,6 +253,12 @@ impl SchemeReader {
         mut contents: Cow<'a, [u8]>,
         limits: SchemeReaderLimits,
     ) -> Result<DispatchedFile<'a>, SchemeError> {
+        if contents.len() > limits.max_input_bytes {
+            return Err(SchemeError::new(SchemeErrorKind::InputSizeLimitExceeded {
+                requested: u64::try_from(contents.len()).unwrap_or(u64::MAX),
+                limit: limits.max_input_bytes,
+            }));
+        }
         let mut wrappers = Vec::new();
         let mut total_decompressed = 0usize;
 
@@ -394,6 +438,7 @@ impl Display for SchemeError {
 impl Error for SchemeError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match &self.kind {
+            SchemeErrorKind::StreamInput(error) => Some(error),
             SchemeErrorKind::WrapperDecode { source, .. } => Some(source),
             SchemeErrorKind::UnityFs(error) => Some(error),
             SchemeErrorKind::RawWeb(error) => Some(error),
@@ -406,6 +451,17 @@ impl Error for SchemeError {
 
 #[derive(Debug)]
 pub enum SchemeErrorKind {
+    InputSizeLimitExceeded {
+        requested: u64,
+        limit: usize,
+    },
+    InputLengthNotRepresentable {
+        length: u64,
+    },
+    InputAllocationFailed {
+        requested: usize,
+    },
+    StreamInput(std::io::Error),
     WrapperDepthExceeded {
         limit: usize,
     },
@@ -441,6 +497,18 @@ pub enum SchemeErrorKind {
 impl Display for SchemeErrorKind {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InputSizeLimitExceeded { requested, limit } => write!(
+                formatter,
+                "input stream has {requested} bytes, exceeding configured limit {limit}"
+            ),
+            Self::InputLengthNotRepresentable { length } => write!(
+                formatter,
+                "input stream length {length} cannot be represented on this platform"
+            ),
+            Self::InputAllocationFailed { requested } => {
+                write!(formatter, "could not allocate {requested} input bytes")
+            }
+            Self::StreamInput(error) => write!(formatter, "input stream: {error}"),
             Self::WrapperDepthExceeded { limit } => {
                 write!(formatter, "compressed wrapper nesting exceeds limit {limit}")
             }
@@ -489,6 +557,7 @@ mod tests {
     use crate::compression::wrappers::{
         compress_gzip, decompress_brotli, has_brotli_file_signature,
     };
+    use std::io::{Cursor, Seek, SeekFrom};
 
     fn write_bits(bytes: &mut Vec<u8>, bit_position: &mut usize, value: u32, count: usize) {
         for bit in 0..count {
@@ -578,6 +647,35 @@ mod tests {
         assert!(matches!(
             file.parse().unwrap(),
             super::ParsedFile::Resource(_)
+        ));
+    }
+
+    #[test]
+    fn dispatches_a_complete_seekable_stream_from_its_start() {
+        let input = compress_gzip(b"stream payload", 1024).unwrap();
+        let mut stream = Cursor::new(input);
+        stream.seek(SeekFrom::End(0)).unwrap();
+
+        let file = SchemeReader::read_stream(&mut stream, SchemeReaderLimits::default()).unwrap();
+        assert_eq!(file.kind(), FileKind::Resource);
+        assert_eq!(file.bytes(), b"stream payload");
+        assert_eq!(file.wrappers()[0].kind, WrapperKind::Gzip);
+    }
+
+    #[test]
+    fn enforces_the_input_limit_before_allocating_stream_contents() {
+        let mut stream = Cursor::new(b"too many input bytes".to_vec());
+        let error = SchemeReader::read_stream(
+            &mut stream,
+            SchemeReaderLimits {
+                max_input_bytes: 4,
+                ..SchemeReaderLimits::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            SchemeErrorKind::InputSizeLimitExceeded { limit: 4, .. }
         ));
     }
 
