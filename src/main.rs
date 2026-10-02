@@ -18,7 +18,7 @@ use assetripper::processing::scene_collections::{
     map_streamed_scene_bundle_paths, plan_scene_definition, resolve_scene_collection_path,
     scene_manager_kind, BuildSettingsScenePathSet, SceneBundleMappingLimits,
     SceneBundlePathMappingSource, SceneDefinitionPlanLimits, SceneGuidWords, SceneManagerKind,
-    StreamedSceneBundleMetadata,
+    StreamedSceneBundleMetadata, WorkspaceSceneDefinitionLimits, WorkspaceSceneDefinitions,
 };
 use assetripper::processing::scene_metadata::{
     decode_build_settings_scene_paths_from_parts, BuildSettingsSceneLimits,
@@ -792,6 +792,14 @@ fn print_workspace_summary_to<W: io::Write>(
     } else {
         BuildSettingsScenePathSet::Missing
     };
+    let scene_count = scene_collection_flags
+        .iter()
+        .filter(|&&is_scene| is_scene)
+        .count();
+    let mut scene_definition_plans = Vec::new();
+    scene_definition_plans
+        .try_reserve_exact(scene_count)
+        .map_err(|_| invalid_data("could not reserve workspace scene definitions"))?;
     for (file_index, file) in workspace.files().iter().enumerate() {
         if !scene_collection_flags[file_index] {
             continue;
@@ -850,10 +858,30 @@ fn print_workspace_summary_to<W: io::Write>(
             scene_guid_words_by_file[file_index],
             SceneDefinitionPlanLimits::default(),
         )?;
+        scene_definition_plans.push(scene_plan);
+    }
+
+    let scene_definitions = WorkspaceSceneDefinitions::from_plans(
+        scene_definition_plans,
+        workspace.files().len(),
+        WorkspaceSceneDefinitionLimits::default(),
+    )?;
+    writeln!(
+        output,
+        "SceneDefinitions: {}",
+        scene_definitions.definitions().len()
+    )?;
+    for (scene_index, scene_definition) in scene_definitions.definitions().iter().enumerate() {
+        let scene_plan = &scene_definition.plan;
         writeln!(
             output,
-            "      SceneDefinition plan: name={:?}, path={:?} ({})",
+            "      SceneDefinition model {scene_index}: name={:?}, path={:?} ({})",
             scene_plan.name, scene_plan.path, scene_plan.path_source
+        )?;
+        writeln!(
+            output,
+            "        collection files: {:?}",
+            scene_definition.collection_file_indices()
         )?;
         writeln!(
             output,
@@ -1678,8 +1706,9 @@ mod tests {
             "effective scene path: Assets/Scenes/BundleScene (streamed-scene override; assignments=1, conflicting=false)"
         ));
         assert!(summary.contains(
-            "SceneDefinition plan: name=\"BundleScene\", path=\"Assets/Scenes/BundleScene\" (streamed-scene AssetBundle)"
+            "SceneDefinition model 0: name=\"BundleScene\", path=\"Assets/Scenes/BundleScene\" (streamed-scene AssetBundle)"
         ));
+        assert!(summary.contains("collection files: [0]"));
         assert!(summary
             .contains("scene GUID: preserve [0x00000001, 0x00000002, 0x00000003, 0x00000004]"));
     }

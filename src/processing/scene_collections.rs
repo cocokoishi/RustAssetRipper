@@ -966,6 +966,247 @@ pub struct SceneDefinitionPlan {
     pub guid: SceneDefinitionGuidPlan,
 }
 
+/// Workspace representation of one source `SceneDefinition` and its collection membership.
+/// The GUID remains a plan so zero or missing input GUIDs are not replaced before export.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceSceneDefinition {
+    pub plan: SceneDefinitionPlan,
+    collection_file_indices: Vec<usize>,
+}
+
+impl WorkspaceSceneDefinition {
+    pub fn collection_file_indices(&self) -> &[usize] {
+        &self.collection_file_indices
+    }
+}
+
+/// Scene definitions indexed by workspace collection identity, with source `AddCollection`
+/// ownership checks for future generated or derived collections.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceSceneDefinitions {
+    definitions: Vec<WorkspaceSceneDefinition>,
+    scene_by_collection: Vec<Option<usize>>,
+    collection_assignment_count: usize,
+    limits: WorkspaceSceneDefinitionLimits,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorkspaceSceneDefinitionLimits {
+    pub max_scene_definitions: usize,
+    pub max_collection_assignments: usize,
+    pub max_workspace_collections: usize,
+}
+
+impl Default for WorkspaceSceneDefinitionLimits {
+    fn default() -> Self {
+        Self {
+            max_scene_definitions: 1_000_000,
+            max_collection_assignments: 1_000_000,
+            max_workspace_collections: 1_000_000,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WorkspaceSceneDefinitionError {
+    AllocationFailed {
+        resource: &'static str,
+        requested: usize,
+    },
+    SceneCountLimitExceeded {
+        count: usize,
+        limit: usize,
+    },
+    CollectionAssignmentLimitExceeded {
+        count: usize,
+        limit: usize,
+    },
+    WorkspaceCollectionLimitExceeded {
+        count: usize,
+        limit: usize,
+    },
+    SceneIndexOutOfBounds {
+        index: usize,
+        count: usize,
+    },
+    CollectionFileIndexOutOfBounds {
+        index: usize,
+        count: usize,
+    },
+    CollectionAlreadyAssigned {
+        collection_file_index: usize,
+        scene_index: usize,
+    },
+}
+
+impl Display for WorkspaceSceneDefinitionError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AllocationFailed {
+                resource,
+                requested,
+            } => write!(f, "could not allocate {requested} entries for {resource}"),
+            Self::SceneCountLimitExceeded { count, limit } => write!(
+                f,
+                "SceneDefinition count {count} exceeds limit {limit}"
+            ),
+            Self::CollectionAssignmentLimitExceeded { count, limit } => write!(
+                f,
+                "SceneDefinition collection assignment count {count} exceeds limit {limit}"
+            ),
+            Self::WorkspaceCollectionLimitExceeded { count, limit } => write!(
+                f,
+                "workspace collection count {count} exceeds limit {limit}"
+            ),
+            Self::SceneIndexOutOfBounds { index, count } => {
+                write!(f, "SceneDefinition index {index} is outside {count} definitions")
+            }
+            Self::CollectionFileIndexOutOfBounds { index, count } => write!(
+                f,
+                "workspace collection index {index} is outside {count} collections"
+            ),
+            Self::CollectionAlreadyAssigned {
+                collection_file_index,
+                scene_index,
+            } => write!(
+                f,
+                "workspace collection {collection_file_index} already belongs to SceneDefinition {scene_index}"
+            ),
+        }
+    }
+}
+
+impl Error for WorkspaceSceneDefinitionError {}
+
+impl WorkspaceSceneDefinitions {
+    pub fn from_plans(
+        plans: Vec<SceneDefinitionPlan>,
+        workspace_collection_count: usize,
+        limits: WorkspaceSceneDefinitionLimits,
+    ) -> Result<Self, WorkspaceSceneDefinitionError> {
+        if plans.len() > limits.max_scene_definitions {
+            return Err(WorkspaceSceneDefinitionError::SceneCountLimitExceeded {
+                count: plans.len(),
+                limit: limits.max_scene_definitions,
+            });
+        }
+        if plans.len() > limits.max_collection_assignments {
+            return Err(
+                WorkspaceSceneDefinitionError::CollectionAssignmentLimitExceeded {
+                    count: plans.len(),
+                    limit: limits.max_collection_assignments,
+                },
+            );
+        }
+        if workspace_collection_count > limits.max_workspace_collections {
+            return Err(
+                WorkspaceSceneDefinitionError::WorkspaceCollectionLimitExceeded {
+                    count: workspace_collection_count,
+                    limit: limits.max_workspace_collections,
+                },
+            );
+        }
+
+        let mut definitions = Vec::new();
+        definitions.try_reserve_exact(plans.len()).map_err(|_| {
+            WorkspaceSceneDefinitionError::AllocationFailed {
+                resource: "workspace scene definitions",
+                requested: plans.len(),
+            }
+        })?;
+        definitions.extend(plans.into_iter().map(|plan| WorkspaceSceneDefinition {
+            plan,
+            collection_file_indices: Vec::new(),
+        }));
+
+        let mut scene_by_collection = Vec::new();
+        scene_by_collection
+            .try_reserve_exact(workspace_collection_count)
+            .map_err(|_| WorkspaceSceneDefinitionError::AllocationFailed {
+                resource: "workspace collection-to-scene index",
+                requested: workspace_collection_count,
+            })?;
+        scene_by_collection.resize(workspace_collection_count, None);
+
+        let mut result = Self {
+            definitions,
+            scene_by_collection,
+            collection_assignment_count: 0,
+            limits,
+        };
+        for scene_index in 0..result.definitions.len() {
+            let collection_file_index = result.definitions[scene_index].plan.collection_file_index;
+            result.add_collection(scene_index, collection_file_index)?;
+        }
+        Ok(result)
+    }
+
+    pub fn definitions(&self) -> &[WorkspaceSceneDefinition] {
+        &self.definitions
+    }
+
+    pub fn scene_index_for_collection(&self, collection_file_index: usize) -> Option<usize> {
+        self.scene_by_collection
+            .get(collection_file_index)
+            .copied()
+            .flatten()
+    }
+
+    /// Adds a collection to one scene, matching `SceneDefinition.AddCollection` ownership rules.
+    pub fn add_collection(
+        &mut self,
+        scene_index: usize,
+        collection_file_index: usize,
+    ) -> Result<(), WorkspaceSceneDefinitionError> {
+        let scene_count = self.definitions.len();
+        let Some(scene) = self.definitions.get_mut(scene_index) else {
+            return Err(WorkspaceSceneDefinitionError::SceneIndexOutOfBounds {
+                index: scene_index,
+                count: scene_count,
+            });
+        };
+        let collection_count = self.scene_by_collection.len();
+        let Some(assigned_scene) = self.scene_by_collection.get(collection_file_index) else {
+            return Err(
+                WorkspaceSceneDefinitionError::CollectionFileIndexOutOfBounds {
+                    index: collection_file_index,
+                    count: collection_count,
+                },
+            );
+        };
+        if let Some(existing_scene_index) = assigned_scene {
+            return Err(WorkspaceSceneDefinitionError::CollectionAlreadyAssigned {
+                collection_file_index,
+                scene_index: *existing_scene_index,
+            });
+        }
+        let requested_assignments = self.collection_assignment_count.checked_add(1).ok_or(
+            WorkspaceSceneDefinitionError::CollectionAssignmentLimitExceeded {
+                count: usize::MAX,
+                limit: self.limits.max_collection_assignments,
+            },
+        )?;
+        if requested_assignments > self.limits.max_collection_assignments {
+            return Err(
+                WorkspaceSceneDefinitionError::CollectionAssignmentLimitExceeded {
+                    count: requested_assignments,
+                    limit: self.limits.max_collection_assignments,
+                },
+            );
+        }
+        scene.collection_file_indices.try_reserve(1).map_err(|_| {
+            WorkspaceSceneDefinitionError::AllocationFailed {
+                resource: "SceneDefinition collection indexes",
+                requested: scene.collection_file_indices.len().saturating_add(1),
+            }
+        })?;
+        self.scene_by_collection[collection_file_index] = Some(scene_index);
+        scene.collection_file_indices.push(collection_file_index);
+        self.collection_assignment_count = requested_assignments;
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SceneDefinitionPlanLimits {
     pub max_collection_name_bytes: usize,
@@ -1314,7 +1555,8 @@ mod tests {
         SceneDefinitionPathSource, SceneDefinitionPlanError, SceneDefinitionPlanLimits,
         SceneGuidError, SceneGuidGenerationReason, SceneGuidWords, SceneManagerKind,
         StreamedSceneBundleDecodeError, StreamedSceneBundleMetadata,
-        StreamedSceneBundlePathMappings,
+        StreamedSceneBundlePathMappings, WorkspaceSceneDefinitionError,
+        WorkspaceSceneDefinitionLimits, WorkspaceSceneDefinitions,
     };
 
     #[test]
@@ -1501,6 +1743,68 @@ mod tests {
             SceneDefinitionGuidPlan::GenerateAtExport(SceneGuidGenerationReason::ZeroInInput)
         );
         assert!(SceneGuidWords { data: [0; 4] }.is_zero());
+    }
+
+    #[test]
+    fn workspace_scene_definitions_preserve_collection_ownership() {
+        let status = SceneCollectionPathStatus::BuildSettingsMissing;
+        let plans = vec![
+            plan_scene_definition(
+                1,
+                "level0",
+                &status,
+                None,
+                None,
+                SceneDefinitionPlanLimits::default(),
+            )
+            .unwrap(),
+            plan_scene_definition(
+                4,
+                "level1",
+                &status,
+                None,
+                Some(SceneGuidWords { data: [1, 2, 3, 4] }),
+                SceneDefinitionPlanLimits::default(),
+            )
+            .unwrap(),
+        ];
+        let mut definitions = WorkspaceSceneDefinitions::from_plans(
+            plans,
+            8,
+            WorkspaceSceneDefinitionLimits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(definitions.scene_index_for_collection(1), Some(0));
+        assert_eq!(definitions.scene_index_for_collection(4), Some(1));
+        assert_eq!(definitions.scene_index_for_collection(7), None);
+        assert_eq!(definitions.definitions()[0].collection_file_indices(), [1]);
+        definitions.add_collection(0, 3).unwrap();
+        assert_eq!(
+            definitions.definitions()[0].collection_file_indices(),
+            [1, 3]
+        );
+        assert_eq!(definitions.scene_index_for_collection(3), Some(0));
+        assert_eq!(
+            definitions.add_collection(1, 3),
+            Err(WorkspaceSceneDefinitionError::CollectionAlreadyAssigned {
+                collection_file_index: 3,
+                scene_index: 0,
+            })
+        );
+        assert_eq!(
+            definitions.add_collection(0, 8),
+            Err(
+                WorkspaceSceneDefinitionError::CollectionFileIndexOutOfBounds {
+                    index: 8,
+                    count: 8,
+                }
+            )
+        );
+        assert_eq!(
+            definitions.add_collection(2, 6),
+            Err(WorkspaceSceneDefinitionError::SceneIndexOutOfBounds { index: 2, count: 2 })
+        );
     }
 
     #[test]
