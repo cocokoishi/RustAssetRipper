@@ -239,6 +239,40 @@ impl SerializedValue {
         Ok(Some(&first.value))
     }
 
+    /// Finds a field in this struct and nested `Base` structs without discarding duplicates.
+    ///
+    /// Unity TypeTrees may encode inherited object fields below a field named `Base`; following
+    /// only that chain avoids searching unrelated nested resource records or array elements.
+    pub fn unique_field_in_base_chain(
+        &self,
+        name: &str,
+    ) -> Result<Option<&SerializedValue>, SerializedValueLookupError> {
+        if !matches!(self, Self::Struct(_)) {
+            return Err(SerializedValueLookupError::NotStruct);
+        }
+        let mut scope = self;
+        let mut found = None;
+        while let Self::Struct(_) = scope {
+            if let Some(value) = scope.unique_field(name)? {
+                if found.is_some() {
+                    return Err(SerializedValueLookupError::DuplicateField {
+                        name: name.to_owned(),
+                        match_count: 2,
+                    });
+                }
+                found = Some(value);
+            }
+            let Some(base) = scope.unique_field("Base")? else {
+                break;
+            };
+            if !matches!(base, Self::Struct(_)) {
+                break;
+            }
+            scope = base;
+        }
+        Ok(found)
+    }
+
     /// Returns the ordered elements when this value is an array.
     pub fn array_elements(&self) -> Option<&[SerializedValue]> {
         match self {
@@ -1702,6 +1736,42 @@ mod tests {
         assert_eq!(
             SerializedValue::Bool(true).unique_field("value"),
             Err(SerializedValueLookupError::NotStruct)
+        );
+    }
+
+    #[test]
+    fn inherited_field_lookup_follows_only_base_structs_and_detects_duplicates() {
+        let inherited = SerializedValue::Struct(vec![super::SerializedFieldValue {
+            name: "Base".to_owned(),
+            value: SerializedValue::Struct(vec![super::SerializedFieldValue {
+                name: "m_Name".to_owned(),
+                value: SerializedValue::StringBytes(b"child".to_vec()),
+            }]),
+        }]);
+        assert_eq!(
+            inherited.unique_field_in_base_chain("m_Name").unwrap(),
+            Some(&SerializedValue::StringBytes(b"child".to_vec()))
+        );
+
+        let duplicate = SerializedValue::Struct(vec![
+            super::SerializedFieldValue {
+                name: "m_Name".to_owned(),
+                value: SerializedValue::StringBytes(b"derived".to_vec()),
+            },
+            super::SerializedFieldValue {
+                name: "Base".to_owned(),
+                value: SerializedValue::Struct(vec![super::SerializedFieldValue {
+                    name: "m_Name".to_owned(),
+                    value: SerializedValue::StringBytes(b"base".to_vec()),
+                }]),
+            },
+        ]);
+        assert_eq!(
+            duplicate.unique_field_in_base_chain("m_Name"),
+            Err(SerializedValueLookupError::DuplicateField {
+                name: "m_Name".to_owned(),
+                match_count: 2,
+            })
         );
     }
 

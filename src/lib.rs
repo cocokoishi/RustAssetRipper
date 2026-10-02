@@ -8,5 +8,6 @@
 pub mod compression;
 pub mod container;
 pub mod io;
+pub mod processing;
 pub mod scheme;
 pub mod serialized_file;

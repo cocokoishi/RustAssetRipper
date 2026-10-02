@@ -287,3 +287,13 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Synthetic tests cover unique and missing fields, duplicate-name errors, array order, PPtr identity, and non-struct diagnostics.
 - `cargo fmt --all`: exit 0. `cargo test --workspace --locked --quiet`: exit 0; 203 library tests and 4 binary tests passed, 0 failed, 0 doc tests.
 - Warnings-denied workspace Clippy, formatting check, baseline verification (1,449 source files unchanged), and `git diff --check` passed. No real Unity file or source-runtime differential was run; generated object classes and complete processors remain unimplemented.
+
+
+## Initial scene relationship model
+
+- Added a bounded file-scoped scene graph for object identity records and selected GameObject/Transform/RectTransform fields. GameObjects retain raw `m_Name` bytes and active state; `m_Component`, `m_GameObject`, `m_Father`, and ordered `m_Children` pointers become explicit typed relationships.
+- Local PathIDs resolve through a sorted index. Null, missing, duplicate, external-table, and invalid-FileID results remain separate. Required-field omissions, duplicate fields, wrong value shapes, and object payload decode errors remain explicit issues. The builder does not load external dependencies or reconcile father/child inconsistencies.
+- Synthetic root tests cover relationship order and classifications, nested `Base` fields, malformed data, duplicate/incomplete root sets, duplicate object PathIDs, limits, and modern object class IDs derived from resolved serialized types. A complete generated generation-10 SerializedFile with a GameObject TypeTree exercises `SceneGraph::build` end to end.
+- The first full-file fixture attempt failed because the fixture incorrectly emitted an enable-TypeTree flag for generation 10; the decoder correctly treated those bytes as part of the type count. The fixture now follows generation 10's implicit TypeTree-present rule, and the focused integration case passes.
+- `cargo test --workspace --locked --quiet`: exit 0; 210 library tests and 4 binary tests passed, 0 failed, 0 doc tests. Warnings-denied workspace Clippy, formatting check, baseline verification (1,449 reference files unchanged), and `git diff --check` passed.
+- This does not validate an actual Unity-produced file or AssetRipper runtime behavior. Transform full-file coverage, scene roots, Prefabs, external multi-file target resolution, transform values, and export remain incomplete.
