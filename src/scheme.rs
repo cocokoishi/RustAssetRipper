@@ -140,12 +140,24 @@ pub struct ContainerMountReport {
     pub container_scopes: Vec<String>,
     /// Aggregate bytes in `container_scopes` paths.
     pub container_scope_path_bytes: u64,
+    /// Source container hierarchy in traversal order. Parent indexes refer to this vector; a
+    /// child records the parent entry that contained it, while `scope_index` links to the
+    /// corresponding virtual root when one was assigned.
+    pub container_bundles: Vec<MountedContainerBundle>,
     /// SerializedFile leaves in source entry traversal order. `container_scope_index` indexes
     /// `container_scopes`; filtering these records by scope preserves that container's direct
     /// SerializedFile order even when traversal visits nested containers between direct leaves.
     pub serialized_files: Vec<MountedSerializedFile>,
     /// Aggregate bytes in `serialized_files` virtual paths.
     pub serialized_file_path_bytes: u64,
+}
+
+/// One source FileContainer in the recursively mounted SerializedBundle tree.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MountedContainerBundle {
+    pub scope_index: Option<usize>,
+    pub parent_bundle_index: Option<usize>,
+    pub parent_entry_index: Option<usize>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -274,6 +286,15 @@ pub enum ContainerMountErrorKind {
     ContainerScopeAllocationFailed {
         requested: usize,
     },
+    ContainerBundleCountOverflow,
+    ContainerBundleAllocationFailed {
+        requested: usize,
+    },
+    ContainerBundleParentIndexOutOfBounds {
+        index: usize,
+        count: usize,
+    },
+    ContainerBundleParentMetadataMismatch,
     SerializedFilePathSizeOverflow,
     SerializedFilePathLimitExceeded {
         requested: u64,
@@ -565,7 +586,7 @@ impl<'a> DispatchedFile<'a> {
             scope_serialized_file_counts: Vec::new(),
             report: ContainerMountReport::default(),
         };
-        self.mount_container_tree_at(destination_root, 0, &mut state)?;
+        self.mount_container_tree_at(destination_root, 0, None, None, &mut state)?;
         Ok(state.report)
     }
 
@@ -573,9 +594,17 @@ impl<'a> DispatchedFile<'a> {
         &self,
         destination_root: Option<&str>,
         depth: usize,
+        parent_bundle_index: Option<usize>,
+        parent_entry_index: Option<usize>,
         state: &mut ContainerTreeMountState<'_>,
     ) -> Result<(), ContainerMountError> {
         let container_scope_index = record_container_scope(destination_root, state)?;
+        let container_bundle_index = record_container_bundle(
+            container_scope_index,
+            parent_bundle_index,
+            parent_entry_index,
+            state,
+        )?;
         if depth > state.limits.max_depth {
             return Err(ContainerMountError::new(
                 state.report.clone(),
@@ -616,7 +645,15 @@ impl<'a> DispatchedFile<'a> {
                             )
                         },
                     )?;
-                    mount_tree_child(child, path, index, container_scope_index, depth, state)?;
+                    mount_tree_child(
+                        child,
+                        path,
+                        index,
+                        container_scope_index,
+                        container_bundle_index,
+                        depth,
+                        state,
+                    )?;
                 }
             }
             ParsedFile::RawWeb(bundle) => {
@@ -645,7 +682,15 @@ impl<'a> DispatchedFile<'a> {
                                     ContainerMountErrorKind::Scheme(error),
                                 )
                             })?;
-                    mount_tree_child(child, path, index, container_scope_index, depth, state)?;
+                    mount_tree_child(
+                        child,
+                        path,
+                        index,
+                        container_scope_index,
+                        container_bundle_index,
+                        depth,
+                        state,
+                    )?;
                 }
             }
             ParsedFile::WebData(web_file) => {
@@ -677,7 +722,15 @@ impl<'a> DispatchedFile<'a> {
                                     ContainerMountErrorKind::Scheme(error),
                                 )
                             })?;
-                    mount_tree_child(child, path, index, container_scope_index, depth, state)?;
+                    mount_tree_child(
+                        child,
+                        path,
+                        index,
+                        container_scope_index,
+                        container_bundle_index,
+                        depth,
+                        state,
+                    )?;
                 }
             }
             ParsedFile::SerializedFile(_) | ParsedFile::Resource(_) => {
@@ -875,6 +928,20 @@ impl Display for ContainerMountErrorKind {
             Self::ContainerScopeAllocationFailed { requested } => write!(
                 formatter,
                 "could not reserve {requested} bytes for container-scope metadata"
+            ),
+            Self::ContainerBundleCountOverflow => {
+                formatter.write_str("container bundle count overflows usize")
+            }
+            Self::ContainerBundleAllocationFailed { requested } => write!(
+                formatter,
+                "could not reserve space for {requested} container bundle records"
+            ),
+            Self::ContainerBundleParentIndexOutOfBounds { index, count } => write!(
+                formatter,
+                "container bundle parent index {index} is outside {count} recorded bundles"
+            ),
+            Self::ContainerBundleParentMetadataMismatch => formatter.write_str(
+                "container bundle parent index and parent entry index must either both be present or both be absent",
             ),
             Self::SerializedFilePathSizeOverflow => {
                 formatter.write_str("SerializedFile path byte count overflows u64")
@@ -1257,11 +1324,74 @@ fn record_container_scope(
     Ok(Some(scope_index))
 }
 
+fn record_container_bundle(
+    scope_index: Option<usize>,
+    parent_bundle_index: Option<usize>,
+    parent_entry_index: Option<usize>,
+    state: &mut ContainerTreeMountState<'_>,
+) -> Result<usize, ContainerMountError> {
+    if parent_bundle_index.is_some() != parent_entry_index.is_some() {
+        return Err(ContainerMountError::new(
+            state.report.clone(),
+            ContainerMountErrorKind::ContainerBundleParentMetadataMismatch,
+        ));
+    }
+    if let Some(parent_index) = parent_bundle_index {
+        if parent_index >= state.report.container_bundles.len() {
+            return Err(ContainerMountError::new(
+                state.report.clone(),
+                ContainerMountErrorKind::ContainerBundleParentIndexOutOfBounds {
+                    index: parent_index,
+                    count: state.report.container_bundles.len(),
+                },
+            ));
+        }
+    }
+    if let Some(scope_index) = scope_index {
+        if scope_index >= state.report.container_scopes.len() {
+            return Err(ContainerMountError::new(
+                state.report.clone(),
+                ContainerMountErrorKind::ContainerScopeIndexOutOfBounds {
+                    index: scope_index,
+                    count: state.report.container_scopes.len(),
+                },
+            ));
+        }
+    }
+    let requested_count = state
+        .report
+        .container_bundles
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| {
+            ContainerMountError::new(
+                state.report.clone(),
+                ContainerMountErrorKind::ContainerBundleCountOverflow,
+            )
+        })?;
+    state.report.container_bundles.try_reserve(1).map_err(|_| {
+        ContainerMountError::new(
+            state.report.clone(),
+            ContainerMountErrorKind::ContainerBundleAllocationFailed {
+                requested: requested_count,
+            },
+        )
+    })?;
+    let bundle_index = state.report.container_bundles.len();
+    state.report.container_bundles.push(MountedContainerBundle {
+        scope_index,
+        parent_bundle_index,
+        parent_entry_index,
+    });
+    Ok(bundle_index)
+}
+
 fn mount_tree_child<'a>(
     child: DispatchedFile<'a>,
     entry_path: String,
     entry_index: usize,
     container_scope_index: Option<usize>,
+    container_bundle_index: usize,
     parent_depth: usize,
     state: &mut ContainerTreeMountState<'_>,
 ) -> Result<(), ContainerMountError> {
@@ -1313,7 +1443,13 @@ fn mount_tree_child<'a>(
                 ));
             }
             state.active_nested_bytes = requested_active_bytes;
-            let result = child.mount_container_tree_at(Some(&entry_path), depth, state);
+            let result = child.mount_container_tree_at(
+                Some(&entry_path),
+                depth,
+                Some(container_bundle_index),
+                Some(entry_index),
+                state,
+            );
             state.active_nested_bytes -= child_owned_bytes;
             result
         }
@@ -2550,8 +2686,8 @@ impl Display for SchemeErrorKind {
 mod tests {
     use super::{
         BatchMountErrorKind, BatchMountLimits, ContainerMountErrorKind, ContainerMountLimits,
-        FileKind, MountedSerializedFile, PathMountInput, SchemeErrorKind, SchemeReader,
-        SchemeReaderLimits, WrapperKind,
+        FileKind, MountedContainerBundle, MountedSerializedFile, PathMountInput, SchemeErrorKind,
+        SchemeReader, SchemeReaderLimits, WrapperKind,
     };
     use crate::compression::wrappers::{
         compress_gzip, decompress_brotli, has_brotli_file_signature,
@@ -2907,6 +3043,26 @@ mod tests {
             ]
         );
         assert_eq!(
+            report.container_bundles,
+            [
+                MountedContainerBundle {
+                    scope_index: Some(0),
+                    parent_bundle_index: None,
+                    parent_entry_index: None,
+                },
+                MountedContainerBundle {
+                    scope_index: Some(1),
+                    parent_bundle_index: Some(0),
+                    parent_entry_index: Some(0),
+                },
+                MountedContainerBundle {
+                    scope_index: Some(2),
+                    parent_bundle_index: Some(0),
+                    parent_entry_index: Some(1),
+                },
+            ]
+        );
+        assert_eq!(
             filesystem
                 .read_all_bytes("/tree/plain-container/leaf.bin", 64)
                 .unwrap(),
@@ -2942,6 +3098,21 @@ mod tests {
             .unwrap();
 
         assert_eq!(report.container_scopes, ["/tree", "/tree/nested.bundle"]);
+        assert_eq!(
+            report.container_bundles,
+            [
+                MountedContainerBundle {
+                    scope_index: Some(0),
+                    parent_bundle_index: None,
+                    parent_entry_index: None,
+                },
+                MountedContainerBundle {
+                    scope_index: Some(1),
+                    parent_bundle_index: Some(0),
+                    parent_entry_index: Some(1),
+                },
+            ]
+        );
         assert_eq!(
             report.serialized_files,
             [
