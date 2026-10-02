@@ -279,3 +279,11 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - `cargo fmt --all`: exit 0. `cargo test --workspace --locked --quiet`: exit 0; 201 library tests and 4 binary tests passed, 0 failed, 0 doc tests.
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo fmt --all -- --check`, `tools/verify-baseline.ps1`, and `git diff --check`: exit 0; all 1,449 reference files remain unchanged.
 - No real Unity file or source-runtime differential was used for this API; full runtime-class construction and processing remain incomplete.
+
+
+## Typed serialized-value access
+
+- `SerializedValue` exposes ordered struct fields, ordered array elements, and the original PPtr fileID/PathID pair. Unique-field access distinguishes a missing name, a non-struct value, and duplicate field names without selecting an arbitrary duplicate.
+- Synthetic tests cover unique and missing fields, duplicate-name errors, array order, PPtr identity, and non-struct diagnostics.
+- `cargo fmt --all`: exit 0. `cargo test --workspace --locked --quiet`: exit 0; 203 library tests and 4 binary tests passed, 0 failed, 0 doc tests.
+- Warnings-denied workspace Clippy, formatting check, baseline verification (1,449 source files unchanged), and `git diff --check` passed. No real Unity file or source-runtime differential was run; generated object classes and complete processors remain unimplemented.

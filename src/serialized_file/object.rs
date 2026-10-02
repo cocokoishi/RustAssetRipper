@@ -205,6 +205,77 @@ pub enum SerializedValue {
     },
 }
 
+impl SerializedValue {
+    /// Returns the ordered fields when this value is a struct.
+    pub fn struct_fields(&self) -> Option<&[SerializedFieldValue]> {
+        match self {
+            Self::Struct(fields) => Some(fields),
+            _ => None,
+        }
+    }
+
+    /// Finds a field only when its name is unique in this struct.
+    ///
+    /// Duplicate names are preserved by TypeTree decoding and reported instead of silently
+    /// selecting one. Non-struct values are also reported distinctly from a missing field.
+    pub fn unique_field(
+        &self,
+        name: &str,
+    ) -> Result<Option<&SerializedValue>, SerializedValueLookupError> {
+        let Self::Struct(fields) = self else {
+            return Err(SerializedValueLookupError::NotStruct);
+        };
+        let mut matching = fields.iter().filter(|field| field.name == name);
+        let Some(first) = matching.next() else {
+            return Ok(None);
+        };
+        if matching.next().is_some() {
+            let match_count = fields.iter().filter(|field| field.name == name).count();
+            return Err(SerializedValueLookupError::DuplicateField {
+                name: name.to_owned(),
+                match_count,
+            });
+        }
+        Ok(Some(&first.value))
+    }
+
+    /// Returns the ordered elements when this value is an array.
+    pub fn array_elements(&self) -> Option<&[SerializedValue]> {
+        match self {
+            Self::Array(values) => Some(values),
+            _ => None,
+        }
+    }
+
+    /// Returns the raw file-table index and PathID when this value is a PPtr.
+    pub fn pptr(&self) -> Option<(i32, i64)> {
+        match self {
+            Self::PPtr { file_id, path_id } => Some((*file_id, *path_id)),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SerializedValueLookupError {
+    NotStruct,
+    DuplicateField { name: String, match_count: usize },
+}
+
+impl Display for SerializedValueLookupError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotStruct => f.write_str("field lookup requires a struct value"),
+            Self::DuplicateField { name, match_count } => write!(
+                f,
+                "field '{name}' occurs {match_count} times in the decoded struct"
+            ),
+        }
+    }
+}
+
+impl Error for SerializedValueLookupError {}
+
 impl SerializedFileMetadata {
     /// Decode one object's payload using its resolved serialized type and TypeTree.
     ///
@@ -1581,11 +1652,58 @@ impl Display for ObjectDecodeErrorKind {
 
 #[cfg(test)]
 mod tests {
-    use super::{ObjectDecodeErrorKind, SerializedValue};
+    use super::{
+        ObjectDecodeErrorKind, SerializedFieldValue, SerializedValue, SerializedValueLookupError,
+    };
     use crate::io::binary::Endian;
     use crate::serialized_file::format_version::FormatVersion;
     use crate::serialized_file::header::SerializedFileHeader;
     use crate::serialized_file::metadata::{SerializedFileMetadata, TypeTree, TypeTreeNode};
+
+    #[test]
+    fn structured_values_support_unique_fields_arrays_and_pointer_identity() {
+        let value = SerializedValue::Struct(vec![SerializedFieldValue {
+            name: "target".to_owned(),
+            value: SerializedValue::PPtr {
+                file_id: 2,
+                path_id: 41,
+            },
+        }]);
+        let target = value.unique_field("target").unwrap().unwrap();
+        assert_eq!(target.pptr(), Some((2, 41)));
+        assert_eq!(value.unique_field("missing").unwrap(), None);
+        assert_eq!(value.array_elements(), None);
+        assert_eq!(target.struct_fields(), None);
+
+        let array = SerializedValue::Array(vec![SerializedValue::U8(7)]);
+        assert_eq!(array.array_elements().unwrap(), &[SerializedValue::U8(7)]);
+        assert_eq!(array.pptr(), None);
+    }
+
+    #[test]
+    fn structured_field_lookup_rejects_duplicate_names_and_non_structs() {
+        let duplicate = SerializedValue::Struct(vec![
+            SerializedFieldValue {
+                name: "value".to_owned(),
+                value: SerializedValue::I32(1),
+            },
+            SerializedFieldValue {
+                name: "value".to_owned(),
+                value: SerializedValue::I32(2),
+            },
+        ]);
+        assert_eq!(
+            duplicate.unique_field("value"),
+            Err(SerializedValueLookupError::DuplicateField {
+                name: "value".to_owned(),
+                match_count: 2,
+            })
+        );
+        assert_eq!(
+            SerializedValue::Bool(true).unique_field("value"),
+            Err(SerializedValueLookupError::NotStruct)
+        );
+    }
 
     fn node(
         level: u8,

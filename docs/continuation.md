@@ -201,6 +201,7 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 ## File-scoped object graph navigation
 
 - `ObjectReferenceGraph::object_indices_for_path_id` returns every matching object-table index, so duplicate PathIDs stay distinct. Per-file and multi-file graph APIs now expose outgoing edges by source object; the multi-file graph also exposes normalized file-scoped object identities and incoming uniquely resolved edges.
+- `SerializedValue` now exposes ordered struct fields and array elements, PPtr identity, and exact-name unique-field lookup. Duplicate field names and non-struct lookups return explicit errors so later resource and scene processors cannot silently choose an arbitrary field.
 - Caller file indexes disambiguate duplicate normalized file names, and object-table indexes disambiguate duplicate PathIDs. Incoming-edge lookup scans the already bounded reference list rather than allocating a second graph-sized index.
 - Synthetic tests cover duplicate identity lookup, normalized file identity, invalid object indexes, and incoming/outgoing edges. Validation results are recorded in `docs/validation-log.md`.
 - Next: build runtime object classes and field-to-object relationships from source-generated schemas, then add explicit no-TypeTree and managed-reference paths. Full Unity object construction, resource handlers, exporters, product UI, and the Phase 1 gate remain incomplete; user AssetBundles and UABEA remain uninspected.
