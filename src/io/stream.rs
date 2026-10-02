@@ -1,8 +1,10 @@
 //! Seekable views used to read logical files from byte ranges or split file parts.
 
 use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::fs::OpenOptions;
+use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// A stream that supports both sequential reads and repositioning.
@@ -107,9 +109,18 @@ impl FileRangeStream {
     }
 
     pub fn from_file(file: File, base_offset: u64, length: u64) -> io::Result<Self> {
-        validate_file_range(file.metadata()?.len(), base_offset, length)?;
+        Self::from_shared_file(Arc::new(Mutex::new(file)), base_offset, length)
+    }
+
+    fn from_shared_file(file: Arc<Mutex<File>>, base_offset: u64, length: u64) -> io::Result<Self> {
+        let file_length = file
+            .lock()
+            .map_err(|_| io::Error::other("file range handle mutex was poisoned"))?
+            .metadata()?
+            .len();
+        validate_file_range(file_length, base_offset, length)?;
         Ok(Self {
-            file: Arc::new(Mutex::new(file)),
+            file,
             base_offset,
             length,
             position: 0,
@@ -178,6 +189,516 @@ fn validate_file_range(file_length: u64, offset: u64, length: u64) -> io::Result
         ));
     }
     Ok(())
+}
+
+const DEFAULT_MAX_PARTIAL_COPY_BYTES: usize = 512 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SmartStreamType {
+    Null,
+    Memory,
+    File,
+}
+
+#[derive(Clone)]
+pub struct SmartStream {
+    inner: Option<Arc<SmartStreamShared>>,
+    stream_type: SmartStreamType,
+}
+
+struct SmartStreamShared {
+    backend: Mutex<SmartStreamBackend>,
+    can_read: bool,
+    can_write: bool,
+}
+
+enum SmartStreamBackend {
+    Memory(Cursor<Vec<u8>>),
+    File(Arc<Mutex<File>>),
+    Range(FileRangeStream),
+    Temporary(TemporaryFile),
+}
+
+struct TemporaryFile {
+    file: Option<File>,
+    path: PathBuf,
+}
+
+impl TemporaryFile {
+    fn file_mut(&mut self) -> io::Result<&mut File> {
+        self.file
+            .as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "temporary file is closed"))
+    }
+}
+
+impl Drop for TemporaryFile {
+    fn drop(&mut self) {
+        drop(self.file.take());
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+impl Read for SmartStreamBackend {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::Memory(cursor) => cursor.read(buffer),
+            Self::File(file) => file
+                .lock()
+                .map_err(|_| io::Error::other("smart file mutex was poisoned"))?
+                .read(buffer),
+            Self::Range(range) => range.read(buffer),
+            Self::Temporary(file) => file.file_mut()?.read(buffer),
+        }
+    }
+}
+
+impl Write for SmartStreamBackend {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Memory(cursor) => cursor.write(buffer),
+            Self::File(file) => file
+                .lock()
+                .map_err(|_| io::Error::other("smart file mutex was poisoned"))?
+                .write(buffer),
+            Self::Range(_) => Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "file range stream is read-only",
+            )),
+            Self::Temporary(file) => file.file_mut()?.write(buffer),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Memory(cursor) => cursor.flush(),
+            Self::File(file) => file
+                .lock()
+                .map_err(|_| io::Error::other("smart file mutex was poisoned"))?
+                .flush(),
+            Self::Range(_) => Ok(()),
+            Self::Temporary(file) => file.file_mut()?.flush(),
+        }
+    }
+}
+
+impl Seek for SmartStreamBackend {
+    fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
+        match self {
+            Self::Memory(cursor) => cursor.seek(from),
+            Self::File(file) => file
+                .lock()
+                .map_err(|_| io::Error::other("smart file mutex was poisoned"))?
+                .seek(from),
+            Self::Range(range) => range.seek(from),
+            Self::Temporary(file) => file.file_mut()?.seek(from),
+        }
+    }
+}
+
+impl SmartStream {
+    pub fn create_null() -> Self {
+        Self {
+            inner: None,
+            stream_type: SmartStreamType::Null,
+        }
+    }
+
+    pub fn create_memory() -> Self {
+        Self::new(
+            SmartStreamBackend::Memory(Cursor::new(Vec::new())),
+            SmartStreamType::Memory,
+            true,
+            true,
+        )
+    }
+
+    pub fn from_memory(bytes: Vec<u8>) -> Self {
+        Self::new(
+            SmartStreamBackend::Memory(Cursor::new(bytes)),
+            SmartStreamType::Memory,
+            true,
+            false,
+        )
+    }
+
+    pub fn from_memory_range(
+        bytes: &[u8],
+        offset: u64,
+        length: u64,
+        writable: bool,
+    ) -> io::Result<Self> {
+        let source_length = u64::try_from(bytes.len()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "memory source length is too large",
+            )
+        })?;
+        validate_file_range(source_length, offset, length)?;
+        let offset = usize::try_from(offset).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "memory range offset is too large",
+            )
+        })?;
+        let length = usize::try_from(length).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "memory range length is too large",
+            )
+        })?;
+        let mut range = Vec::new();
+        range.try_reserve_exact(length).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::OutOfMemory,
+                "could not allocate memory range",
+            )
+        })?;
+        range.extend_from_slice(&bytes[offset..offset + length]);
+        Ok(Self::new(
+            SmartStreamBackend::Memory(Cursor::new(range)),
+            SmartStreamType::Memory,
+            true,
+            writable,
+        ))
+    }
+
+    pub fn open_read(path: impl AsRef<Path>) -> io::Result<Self> {
+        Ok(Self::new(
+            SmartStreamBackend::File(Arc::new(Mutex::new(File::open(path)?))),
+            SmartStreamType::File,
+            true,
+            false,
+        ))
+    }
+
+    pub fn create_temp() -> io::Result<Self> {
+        static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+        let directory = std::env::temp_dir();
+        for _ in 0..128 {
+            let id = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+            let path = directory.join(format!("assetripper-{}-{id}.tmp", std::process::id()));
+            match OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(file) => {
+                    return Ok(Self::new(
+                        SmartStreamBackend::Temporary(TemporaryFile {
+                            file: Some(file),
+                            path,
+                        }),
+                        SmartStreamType::File,
+                        true,
+                        true,
+                    ));
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "could not create a unique temporary stream file",
+        ))
+    }
+
+    fn new(
+        backend: SmartStreamBackend,
+        stream_type: SmartStreamType,
+        can_read: bool,
+        can_write: bool,
+    ) -> Self {
+        Self {
+            inner: Some(Arc::new(SmartStreamShared {
+                backend: Mutex::new(backend),
+                can_read,
+                can_write,
+            })),
+            stream_type,
+        }
+    }
+
+    pub fn create_reference(&self) -> Self {
+        self.clone()
+    }
+
+    pub fn assign(&mut self, source: &Self) {
+        self.free_reference();
+        self.inner = source.inner.as_ref().map(Arc::clone);
+        self.stream_type = source.stream_type;
+    }
+
+    pub fn move_from(&mut self, source: &mut Self) {
+        self.free_reference();
+        self.inner = source.inner.take();
+        self.stream_type = std::mem::replace(&mut source.stream_type, SmartStreamType::Null);
+    }
+
+    pub fn free_reference(&mut self) {
+        self.inner = None;
+        self.stream_type = SmartStreamType::Null;
+    }
+
+    pub fn is_null(&self) -> bool {
+        self.inner.is_none()
+    }
+
+    pub fn ref_count(&self) -> usize {
+        self.inner.as_ref().map_or(0, Arc::strong_count)
+    }
+
+    pub fn stream_type(&self) -> SmartStreamType {
+        self.stream_type
+    }
+
+    pub fn can_read(&self) -> bool {
+        self.inner.as_ref().is_some_and(|inner| inner.can_read)
+    }
+
+    pub fn can_write(&self) -> bool {
+        self.inner.as_ref().is_some_and(|inner| inner.can_write)
+    }
+
+    pub fn can_seek(&self) -> bool {
+        !self.is_null()
+    }
+
+    pub fn length(&self) -> io::Result<u64> {
+        let Some(_) = self.inner else {
+            return Ok(0);
+        };
+        let mut backend = self.lock_backend()?;
+        let position = backend.seek(SeekFrom::Current(0))?;
+        let length = backend.seek(SeekFrom::End(0));
+        let restore = backend.seek(SeekFrom::Start(position));
+        match (length, restore) {
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Ok(length), Ok(_)) => Ok(length),
+        }
+    }
+
+    pub fn position(&self) -> io::Result<u64> {
+        match self.inner {
+            None => Ok(0),
+            Some(_) => self.lock_backend()?.seek(SeekFrom::Current(0)),
+        }
+    }
+
+    pub fn set_len(&self, length: u64) -> io::Result<()> {
+        let mut backend = self.lock_backend()?;
+        if !self.can_write() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "stream is not writable",
+            ));
+        }
+        match &mut *backend {
+            SmartStreamBackend::Memory(cursor) => {
+                let length = usize::try_from(length).map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "memory stream length cannot fit in address space",
+                    )
+                })?;
+                let bytes = cursor.get_mut();
+                if length > bytes.len() {
+                    bytes.try_reserve(length - bytes.len()).map_err(|_| {
+                        io::Error::new(io::ErrorKind::OutOfMemory, "could not grow memory stream")
+                    })?;
+                }
+                bytes.resize(length, 0);
+                Ok(())
+            }
+            SmartStreamBackend::File(file) => file
+                .lock()
+                .map_err(|_| io::Error::other("smart file mutex was poisoned"))?
+                .set_len(length),
+            SmartStreamBackend::Range(_) => Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "file range stream is read-only",
+            )),
+            SmartStreamBackend::Temporary(file) => file.file_mut()?.set_len(length),
+        }
+    }
+
+    pub fn to_vec(&self, maximum_bytes: usize) -> io::Result<Vec<u8>> {
+        self.ensure_non_null()?;
+        if !self.can_read() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "stream is not readable",
+            ));
+        }
+        let mut backend = self.lock_backend()?;
+        let original_position = backend.seek(SeekFrom::Current(0))?;
+        let result = (|| {
+            let length = backend.seek(SeekFrom::End(0))?;
+            if length > u64::try_from(maximum_bytes).unwrap_or(u64::MAX) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("stream length {length} exceeds copy limit {maximum_bytes}"),
+                ));
+            }
+            let length = usize::try_from(length).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "stream length is too large")
+            })?;
+            backend.seek(SeekFrom::Start(0))?;
+            let mut output = Vec::new();
+            output.try_reserve_exact(length).map_err(|_| {
+                io::Error::new(io::ErrorKind::OutOfMemory, "could not allocate stream copy")
+            })?;
+            output.resize(length, 0);
+            backend.read_exact(&mut output)?;
+            Ok(output)
+        })();
+        let restore = backend.seek(SeekFrom::Start(original_position));
+        match (result, restore) {
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Ok(output), Ok(_)) => Ok(output),
+        }
+    }
+
+    pub fn create_partial(&self, offset: u64, length: u64) -> io::Result<Self> {
+        self.create_partial_with_limit(offset, length, DEFAULT_MAX_PARTIAL_COPY_BYTES)
+    }
+
+    pub fn create_partial_with_limit(
+        &self,
+        offset: u64,
+        length: u64,
+        maximum_copy_bytes: usize,
+    ) -> io::Result<Self> {
+        self.ensure_non_null()?;
+        if !self.can_read() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "stream is not readable",
+            ));
+        }
+        let mut backend = self.lock_backend()?;
+        if let SmartStreamBackend::File(file) = &*backend {
+            let range = FileRangeStream::from_shared_file(Arc::clone(file), offset, length)?;
+            return Ok(Self::new(
+                SmartStreamBackend::Range(range),
+                SmartStreamType::File,
+                true,
+                false,
+            ));
+        }
+        if let SmartStreamBackend::Range(range) = &*backend {
+            let partial = range.subrange(offset, length)?;
+            return Ok(Self::new(
+                SmartStreamBackend::Range(partial),
+                SmartStreamType::File,
+                true,
+                false,
+            ));
+        }
+        if length > u64::try_from(maximum_copy_bytes).unwrap_or(u64::MAX) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("partial stream length {length} exceeds copy limit {maximum_copy_bytes}"),
+            ));
+        }
+        let length_usize = usize::try_from(length).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "partial stream is too large")
+        })?;
+        let original_position = backend.seek(SeekFrom::Current(0))?;
+        let result = (|| {
+            let source_length = backend.seek(SeekFrom::End(0))?;
+            validate_file_range(source_length, offset, length)?;
+            backend.seek(SeekFrom::Start(offset))?;
+            let mut output = Vec::new();
+            output.try_reserve_exact(length_usize).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::OutOfMemory,
+                    "could not allocate partial stream",
+                )
+            })?;
+            output.resize(length_usize, 0);
+            backend.read_exact(&mut output)?;
+            Ok(output)
+        })();
+        let restore = backend.seek(SeekFrom::Start(original_position));
+        let bytes = match (result, restore) {
+            (Err(error), _) => return Err(error),
+            (Ok(_), Err(error)) => return Err(error),
+            (Ok(bytes), Ok(_)) => bytes,
+        };
+        Ok(Self::from_memory(bytes))
+    }
+
+    fn lock_backend(&self) -> io::Result<std::sync::MutexGuard<'_, SmartStreamBackend>> {
+        let inner = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "null smart stream"))?;
+        inner
+            .backend
+            .lock()
+            .map_err(|_| io::Error::other("smart stream mutex was poisoned"))
+    }
+
+    fn ensure_non_null(&self) -> io::Result<()> {
+        if self.is_null() {
+            Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "null smart stream",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Default for SmartStream {
+    fn default() -> Self {
+        Self::create_null()
+    }
+}
+
+impl Read for SmartStream {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.ensure_non_null()?;
+        if !self.can_read() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "stream is not readable",
+            ));
+        }
+        self.lock_backend()?.read(buffer)
+    }
+}
+
+impl Write for SmartStream {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.ensure_non_null()?;
+        if !self.can_write() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "stream is not writable",
+            ));
+        }
+        self.lock_backend()?.write(buffer)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self.inner {
+            None => Ok(()),
+            Some(_) => self.lock_backend()?.flush(),
+        }
+    }
+}
+
+impl Seek for SmartStream {
+    fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
+        self.lock_backend()?.seek(from)
+    }
 }
 
 /// A logical file composed of ordered, seekable streams such as `.split0`, `.split1`, etc.
@@ -478,11 +999,11 @@ fn seek_target(position: u64, length: u64, from: SeekFrom) -> io::Result<u64> {
 mod tests {
     use super::{
         logical_file_name, logical_file_path, open_logical_file, FileRangeStream, MultiFileStream,
-        PartialStream,
+        PartialStream, SmartStream, SmartStreamBackend, SmartStreamType,
     };
     use crate::compression::wrappers::compress_gzip;
     use crate::scheme::{FileKind, SchemeReader, SchemeReaderLimits};
-    use std::io::{Cursor, Read, Seek, SeekFrom};
+    use std::io::{Cursor, Read, Seek, SeekFrom, Write};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -668,5 +1189,116 @@ mod tests {
         let file = std::fs::File::open(&path).unwrap();
         assert!(FileRangeStream::from_file(file, 2, 2).is_err());
         remove_test_files(&directory, &["ranges.bin"]);
+    }
+
+    #[test]
+    fn smart_stream_null_and_memory_modes_report_capabilities() {
+        let mut null = SmartStream::create_null();
+        assert!(null.is_null());
+        assert_eq!(null.ref_count(), 0);
+        assert_eq!(null.stream_type(), SmartStreamType::Null);
+        assert!(!null.can_read());
+        assert!(!null.can_write());
+        assert!(!null.can_seek());
+        assert_eq!(null.length().unwrap(), 0);
+        assert_eq!(null.position().unwrap(), 0);
+        null.flush().unwrap();
+        assert_eq!(
+            null.read(&mut [0]).unwrap_err().kind(),
+            std::io::ErrorKind::NotConnected
+        );
+
+        let memory = SmartStream::from_memory(b"data".to_vec());
+        assert!(!memory.is_null());
+        assert_eq!(memory.stream_type(), SmartStreamType::Memory);
+        assert!(memory.can_read());
+        assert!(!memory.can_write());
+        assert!(memory.can_seek());
+        assert_eq!(memory.length().unwrap(), 4);
+        assert!(SmartStream::create_memory().can_write());
+        let range = SmartStream::from_memory_range(b"abcdef", 2, 2, true).unwrap();
+        assert!(range.can_write());
+        assert_eq!(range.to_vec(2).unwrap(), b"cd");
+    }
+
+    #[test]
+    fn smart_stream_references_share_position_and_release_ownership() {
+        let mut first = SmartStream::from_memory(b"abcd".to_vec());
+        let mut second = first.create_reference();
+        assert_eq!(first.ref_count(), 2);
+        let mut byte = [0; 1];
+        assert_eq!(first.read(&mut byte).unwrap(), 1);
+        assert_eq!(&byte, b"a");
+        assert_eq!(second.read(&mut byte).unwrap(), 1);
+        assert_eq!(&byte, b"b");
+
+        let mut moved = SmartStream::create_null();
+        moved.move_from(&mut second);
+        assert!(second.is_null());
+        assert_eq!(moved.ref_count(), 2);
+        moved.free_reference();
+        assert_eq!(moved.stream_type(), SmartStreamType::Null);
+        assert_eq!(first.ref_count(), 1);
+    }
+
+    #[test]
+    fn smart_stream_copy_and_partial_operations_preserve_source_position() {
+        let mut source = SmartStream::create_memory();
+        source.write_all(b"abcdef").unwrap();
+        source.seek(SeekFrom::Start(4)).unwrap();
+        assert_eq!(source.to_vec(6).unwrap(), b"abcdef");
+        assert_eq!(source.position().unwrap(), 4);
+
+        let partial = source.create_partial_with_limit(1, 3, 3).unwrap();
+        assert_eq!(source.position().unwrap(), 4);
+        assert_eq!(partial.to_vec(3).unwrap(), b"bcd");
+        assert!(source.create_partial_with_limit(0, 4, 3).is_err());
+        assert!(source.create_partial_with_limit(5, 2, 2).is_err());
+
+        source.set_len(3).unwrap();
+        assert_eq!(source.to_vec(3).unwrap(), b"abc");
+        assert_eq!(source.position().unwrap(), 4);
+    }
+
+    #[test]
+    fn smart_stream_file_partial_keeps_its_shared_handle_after_parent_drop() {
+        let directory = create_test_directory("smart-file-partial");
+        let path = directory.join("input.bin");
+        std::fs::write(&path, b"abcdef").unwrap();
+        let source = SmartStream::open_read(&path).unwrap();
+        let partial = source.create_partial_with_limit(1, 4, 0).unwrap();
+        assert_eq!(partial.stream_type(), SmartStreamType::File);
+        assert!(!partial.can_write());
+        let nested = partial.create_partial_with_limit(1, 2, 0).unwrap();
+        assert_eq!(nested.stream_type(), SmartStreamType::File);
+        assert_eq!(nested.to_vec(2).unwrap(), b"cd");
+        drop(source);
+
+        assert_eq!(partial.to_vec(4).unwrap(), b"bcde");
+        drop(partial);
+        remove_test_files(&directory, &["input.bin"]);
+    }
+
+    #[test]
+    fn temporary_smart_stream_is_removed_after_its_last_reference() {
+        let mut owner = SmartStream::create_temp().unwrap();
+        let path = {
+            let inner = owner.inner.as_ref().unwrap();
+            let backend = inner.backend.lock().unwrap();
+            let SmartStreamBackend::Temporary(file) = &*backend else {
+                panic!("temporary constructor returned a different backend");
+            };
+            file.path.clone()
+        };
+        owner.write_all(b"temporary bytes").unwrap();
+        owner.seek(SeekFrom::Start(0)).unwrap();
+        let mut reference = owner.create_reference();
+        drop(owner);
+        assert!(path.exists());
+        let mut bytes = [0; 9];
+        assert_eq!(reference.read(&mut bytes).unwrap(), 9);
+        assert_eq!(&bytes, b"temporary");
+        drop(reference);
+        assert!(!path.exists());
     }
 }
