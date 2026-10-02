@@ -33,7 +33,10 @@ use assetripper::serialized_file::file::SerializedFile;
 use assetripper::serialized_file::metadata::ObjectInfo;
 use assetripper::serialized_file::object::ObjectDecodeLimits;
 use assetripper::serialized_file::object_workspace::{ObjectWorkspace, ObjectWorkspaceLimits};
-use assetripper::serialized_file::reference_graph::MultiFileReferenceGraphLimits;
+use assetripper::serialized_file::reference_graph::{
+    MultiFileObjectReference, MultiFilePPtrResolution, MultiFileReferenceGraph,
+    MultiFileReferenceGraphLimits,
+};
 use assetripper::serialized_file::workspace::{
     SerializedFileDependencyReport, SerializedFileWorkspace, SerializedFileWorkspaceLimits,
     WorkspaceSerializedBundle,
@@ -45,6 +48,7 @@ const MAX_TOTAL_STREAMED_SCENE_BUNDLE_ENTRIES: usize = 1_000_000;
 const MAX_TOTAL_STREAMED_SCENE_BUNDLE_STRING_BYTES: usize = 256 * 1024 * 1024;
 const MAX_TOTAL_STREAMED_SCENE_PATH_MAPPINGS: usize = 1_000_000;
 const MAX_OBJECT_DECODE_DIAGNOSTICS: usize = 128;
+const MAX_REFERENCE_GRAPH_DIAGNOSTICS: usize = 128;
 
 struct StreamedSceneBundleWorkItem {
     owner_file_index: usize,
@@ -279,6 +283,102 @@ fn print_workspace_summary(
     print_workspace_summary_to(&mut io::sink(), filesystem, workspace, dependencies)
 }
 
+fn print_reference_graph_summary_to<W: io::Write>(
+    output: &mut W,
+    workspace: &SerializedFileWorkspace,
+    graph: &MultiFileReferenceGraph<'_>,
+) -> Result<(), Box<dyn Error>> {
+    let mut null_references = 0usize;
+    let mut resolved_references = 0usize;
+    let mut unresolved_references = 0usize;
+    for reference in graph.references() {
+        let count = match &reference.resolution {
+            MultiFilePPtrResolution::Null => &mut null_references,
+            MultiFilePPtrResolution::Object { .. } => &mut resolved_references,
+            _ => &mut unresolved_references,
+        };
+        *count = count
+            .checked_add(1)
+            .ok_or_else(|| invalid_data("reference resolution count overflows"))?;
+    }
+    let scan_issue_count = workspace
+        .files()
+        .iter()
+        .try_fold(0usize, |total, file| {
+            total.checked_add(file.reference_graph.issues().len())
+        })
+        .ok_or_else(|| invalid_data("reference graph issue count overflows"))?;
+    let diagnostic_count = unresolved_references
+        .checked_add(scan_issue_count)
+        .ok_or_else(|| invalid_data("reference graph diagnostic count overflows"))?;
+
+    writeln!(
+        output,
+        "TypeTree reference graph: {} recognized PPtrs, {null_references} null, {resolved_references} uniquely resolved, {unresolved_references} unresolved; {scan_issue_count} per-file scan issues; complete={}",
+        graph.references().len(),
+        graph.is_complete()
+    )?;
+
+    let mut diagnostics = 0usize;
+    for reference in graph.references().iter().filter(|reference| {
+        !matches!(
+            &reference.resolution,
+            MultiFilePPtrResolution::Null | MultiFilePPtrResolution::Object { .. }
+        )
+    }) {
+        if diagnostics >= MAX_REFERENCE_GRAPH_DIAGNOSTICS {
+            break;
+        }
+        let source_file = workspace
+            .files()
+            .get(reference.source_file_index)
+            .ok_or_else(|| invalid_data("reference graph source file index is invalid"))?;
+        write_unresolved_reference_diagnostic(output, source_file, reference)?;
+        diagnostics += 1;
+    }
+    if diagnostics < MAX_REFERENCE_GRAPH_DIAGNOSTICS {
+        'file_issues: for (file_index, file) in workspace.files().iter().enumerate() {
+            for issue in file.reference_graph.issues() {
+                if diagnostics >= MAX_REFERENCE_GRAPH_DIAGNOSTICS {
+                    break 'file_issues;
+                }
+                writeln!(
+                    output,
+                    "  Reference scan issue: file {file_index} {:?} (name {:?}): {issue:?}",
+                    file.virtual_path, file.file_name
+                )?;
+                diagnostics += 1;
+            }
+        }
+    }
+    if diagnostic_count > diagnostics {
+        writeln!(
+            output,
+            "  {} additional reference diagnostics are not listed; summary counts include them",
+            diagnostic_count - diagnostics
+        )?;
+    }
+    Ok(())
+}
+
+fn write_unresolved_reference_diagnostic<W: io::Write>(
+    output: &mut W,
+    source_file: &assetripper::serialized_file::workspace::LoadedSerializedFile,
+    reference: &MultiFileObjectReference<'_>,
+) -> io::Result<()> {
+    writeln!(
+        output,
+        "  Unresolved PPtr: file {} {:?} (name {:?}), object {}, PathID {}, field {:?}: {:?}",
+        reference.source_file_index,
+        source_file.virtual_path,
+        source_file.file_name,
+        reference.source_object_index,
+        reference.source_path_id,
+        reference.field_path,
+        reference.resolution
+    )
+}
+
 fn print_workspace_summary_to<W: io::Write>(
     output: &mut W,
     filesystem: &VirtualFileSystem,
@@ -300,17 +400,7 @@ fn print_workspace_summary_to<W: io::Write>(
         *source_order = order;
     }
 
-    let has_scene_objects = workspace.files().iter().any(|file| {
-        file.metadata
-            .objects
-            .iter()
-            .any(|object| matches!(workspace_object_class_id(object), Some(1 | 4 | 224)))
-    });
-    let multi_file_graph = if has_scene_objects {
-        Some(workspace.reference_graph(MultiFileReferenceGraphLimits::default())?)
-    } else {
-        None
-    };
+    let multi_file_graph = workspace.reference_graph(MultiFileReferenceGraphLimits::default())?;
     let mut scene_collection_flags = Vec::new();
     scene_collection_flags
         .try_reserve_exact(workspace.files().len())
@@ -343,6 +433,7 @@ fn print_workspace_summary_to<W: io::Write>(
         object_report.undecoded_objects,
         object_report.total_undecoded_raw_bytes
     )?;
+    print_reference_graph_summary_to(output, workspace, &multi_file_graph)?;
     let mut decode_diagnostics = 0usize;
     for object in decoded_objects
         .objects()
@@ -563,13 +654,10 @@ fn print_workspace_summary_to<W: io::Write>(
             };
             let parsed_file = SerializedFile::parse(file_bytes)?;
             let mut scene_graph = SceneGraph::build(&parsed_file, SceneGraphLimits::default())?;
-            let reference_graph = multi_file_graph
-                .as_ref()
-                .ok_or_else(|| invalid_data("multi-file reference graph was not built"))?;
             scene_graph.resolve_with_multi_file_graph(
                 file_index,
                 &file.file_name,
-                reference_graph,
+                &multi_file_graph,
             )?;
             let root_discovery =
                 scene_graph.discover_local_roots(SceneRootDiscoveryLimits::default())?;
@@ -1346,6 +1434,13 @@ mod tests {
     }
 
     fn make_generation_10_file_with_externals(external_names: &[&str]) -> Vec<u8> {
+        make_generation_10_file_with_pointer_path_id(external_names, 42)
+    }
+
+    fn make_generation_10_file_with_pointer_path_id(
+        external_names: &[&str],
+        pointer_path_id: i32,
+    ) -> Vec<u8> {
         let mut string_buffer = Vec::new();
         let root_type = push_type_tree_string(&mut string_buffer, "Root");
         let empty_name = push_type_tree_string(&mut string_buffer, "");
@@ -1395,7 +1490,7 @@ mod tests {
         let mut payload = Vec::new();
         put_i32_le(&mut payload, 0x1234_5678);
         put_i32_le(&mut payload, 0);
-        put_i32_le(&mut payload, 42);
+        put_i32_le(&mut payload, pointer_path_id);
         let file_size = data_offset + payload.len();
         let mut file = Vec::with_capacity(file_size);
         file.extend_from_slice(&i32::try_from(metadata.len()).unwrap().to_be_bytes());
@@ -1685,12 +1780,56 @@ mod tests {
         let summary = String::from_utf8(output).unwrap();
         assert!(summary
             .contains("Object payload decode: 2/2 decoded, 0 undecoded, 0 raw fallback bytes"));
+        assert!(summary.contains("TypeTree reference graph:"));
         assert!(
             summary.contains("SceneGUID words: [0x01234567, 0x89abcdef, 0x00000003, 0x00000004]")
         );
         assert!(summary.contains(
             "Scene path mapping for collection \"level0\": Assets/Scenes/Main (BuildSettings index 0, duplicate path=false)"
         ));
+    }
+
+    #[test]
+    fn reference_graph_summary_distinguishes_null_resolved_and_unresolved_pointers() {
+        for (pointer_path_id, expected_counts, complete) in [
+            (0, "1 null, 0 uniquely resolved, 0 unresolved", true),
+            (42, "0 null, 1 uniquely resolved, 0 unresolved", true),
+            (99, "0 null, 0 uniquely resolved, 1 unresolved", false),
+        ] {
+            let mut filesystem = VirtualFileSystem::new();
+            insert_vfs_file(
+                &mut filesystem,
+                "/game/main.assets",
+                &make_generation_10_file_with_pointer_path_id(&[], pointer_path_id),
+            );
+            let workspace =
+                assetripper::serialized_file::workspace::SerializedFileWorkspace::load_from_vfs(
+                    &filesystem,
+                    &[assetripper::io::dependency::DependencyFilePath {
+                        file_name: "main.assets".to_owned(),
+                        virtual_path: "/game/main.assets".to_owned(),
+                    }],
+                    assetripper::serialized_file::workspace::SerializedFileWorkspaceLimits::default(
+                    ),
+                )
+                .unwrap();
+            let graph = workspace
+                .reference_graph(
+                    assetripper::serialized_file::reference_graph::MultiFileReferenceGraphLimits::default(),
+                )
+                .unwrap();
+            let mut output = Vec::new();
+            super::print_reference_graph_summary_to(&mut output, &workspace, &graph).unwrap();
+            let summary = String::from_utf8(output).unwrap();
+            assert!(summary.contains(expected_counts), "{summary}");
+            assert!(
+                summary.contains(&format!("complete={complete}")),
+                "{summary}"
+            );
+            if pointer_path_id == 99 {
+                assert!(summary.contains("MissingLocalObject { path_id: 99 }"));
+            }
+        }
     }
 
     #[test]
