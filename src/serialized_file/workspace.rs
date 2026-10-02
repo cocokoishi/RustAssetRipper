@@ -12,8 +12,8 @@ use crate::io::dependency::{
 use crate::io::filesystem::{SearchOption, VirtualFileSystem};
 use crate::io::special_names::fix_file_identifier;
 use crate::scheme::{
-    ContainerMountError, ContainerMountLimits, DispatchedFile, FileKind, ParsedFile, SchemeError,
-    SchemeReader, SchemeReaderLimits,
+    ContainerMountError, ContainerMountLimits, DispatchedFile, FileKind, MountedSerializedFile,
+    ParsedFile, SchemeError, SchemeReader, SchemeReaderLimits,
 };
 
 use super::header::SerializedFileHeader;
@@ -89,6 +89,10 @@ pub struct LoadedSerializedFile {
     pub virtual_path: String,
     /// Deepest source container virtual root containing this SerializedFile, if any.
     pub container_scope: Option<String>,
+    /// Source entry index inside `container_scope`, if this file came from a container.
+    pub container_entry_index: Option<usize>,
+    /// Zero-based collection order among direct SerializedFiles in `container_scope`.
+    pub container_collection_index: Option<usize>,
     pub header: SerializedFileHeader,
     pub metadata: SerializedFileMetadata,
     pub reference_graph: ObjectReferenceGraph,
@@ -114,6 +118,7 @@ pub(crate) struct PreExpandedContainer {
     pub virtual_path: String,
     pub serialized_files_loaded: usize,
     pub container_scopes: Vec<String>,
+    pub serialized_files: Vec<MountedSerializedFile>,
 }
 
 pub(crate) struct SerializedFileDependencyLoadOptions<'a> {
@@ -443,6 +448,8 @@ impl SerializedFileWorkspace {
                 file_name: input.file_name.clone(),
                 virtual_path: input.virtual_path.clone(),
                 container_scope: None,
+                container_entry_index: None,
+                container_collection_index: None,
                 header,
                 metadata,
                 reference_graph,
@@ -632,6 +639,16 @@ impl SerializedFileWorkspace {
             workspace.report,
             None,
         )?;
+        let initial_container_file_order = build_mounted_file_order_index(
+            preexpanded_containers.iter().map(|container| {
+                (
+                    container.container_scopes.as_slice(),
+                    container.serialized_files.as_slice(),
+                )
+            }),
+            limits.max_files,
+            workspace.report,
+        )?;
         let mut total_bundle_scope_bytes = 0usize;
         for file in &mut workspace.files {
             attach_container_scope(
@@ -641,6 +658,7 @@ impl SerializedFileWorkspace {
                 limits,
                 workspace.report,
             )?;
+            attach_container_file_order(file, &initial_container_file_order, workspace.report)?;
         }
         let mut next_mount_namespace = 0usize;
         let mut source_file_index = 0usize;
@@ -954,6 +972,14 @@ impl SerializedFileWorkspace {
                                             workspace.report,
                                             Some(&candidate.virtual_path),
                                         )?;
+                                        let container_file_order = build_mounted_file_order_index(
+                                            std::iter::once((
+                                                mount_report.container_scopes.as_slice(),
+                                                mount_report.serialized_files.as_slice(),
+                                            )),
+                                            bounded_mount_limits.max_entries,
+                                            workspace.report,
+                                        )?;
                                         let first_loaded_file_index = workspace.files.len();
                                         total_container_entries = total_container_entries
                                             .checked_add(mount_report.mounted_entries)
@@ -1129,6 +1155,11 @@ impl SerializedFileWorkspace {
                                                 &scope_index,
                                                 &mut total_bundle_scope_bytes,
                                                 limits,
+                                                workspace.report,
+                                            )?;
+                                            attach_container_file_order(
+                                                file,
+                                                &container_file_order,
                                                 workspace.report,
                                             )?;
                                         }
@@ -1317,6 +1348,116 @@ fn dependency_registry(
 
 fn file_name_from_virtual_path(path: &str) -> String {
     path.rsplit('/').next().unwrap_or_default().to_owned()
+}
+
+#[derive(Clone, Copy)]
+struct ContainerFileOrder<'a> {
+    scope: Option<&'a str>,
+    entry_index: usize,
+    collection_index: Option<usize>,
+}
+
+fn build_mounted_file_order_index<'a>(
+    mounts: impl IntoIterator<Item = (&'a [String], &'a [MountedSerializedFile])>,
+    record_limit: usize,
+    report: SerializedFileWorkspaceReport,
+) -> Result<HashMap<&'a str, ContainerFileOrder<'a>>, Box<SerializedFileWorkspaceError>> {
+    let mut order_index = HashMap::new();
+    let mut record_count = 0usize;
+    for (container_scopes, serialized_files) in mounts {
+        for serialized_file in serialized_files {
+            record_count = record_count.checked_add(1).ok_or_else(|| {
+                workspace_error(
+                    report,
+                    Some(&serialized_file.virtual_path),
+                    SerializedFileWorkspaceErrorKind::MountedFileOrderCountOverflow,
+                )
+            })?;
+            if record_count > record_limit {
+                return Err(workspace_error(
+                    report,
+                    Some(&serialized_file.virtual_path),
+                    SerializedFileWorkspaceErrorKind::MountedFileOrderCountLimitExceeded {
+                        count: record_count,
+                        limit: record_limit,
+                    },
+                ));
+            }
+            let scope = match serialized_file.container_scope_index {
+                Some(scope_index) => Some(
+                    container_scopes
+                        .get(scope_index)
+                        .ok_or_else(|| {
+                            workspace_error(
+                                report,
+                                Some(&serialized_file.virtual_path),
+                                SerializedFileWorkspaceErrorKind::MountedFileScopeIndexOutOfBounds {
+                                    index: scope_index,
+                                    count: container_scopes.len(),
+                                },
+                            )
+                        })?
+                        .as_str(),
+                ),
+                None => None,
+            };
+            if scope.is_some() != serialized_file.collection_index.is_some() {
+                return Err(workspace_error(
+                    report,
+                    Some(&serialized_file.virtual_path),
+                    SerializedFileWorkspaceErrorKind::InvalidMountedFileCollectionOrder,
+                ));
+            }
+            order_index.try_reserve(1).map_err(|_| {
+                workspace_error(
+                    report,
+                    Some(&serialized_file.virtual_path),
+                    SerializedFileWorkspaceErrorKind::AllocationFailed {
+                        resource: "mounted SerializedFile order index",
+                        requested: record_count,
+                    },
+                )
+            })?;
+            if order_index
+                .insert(
+                    serialized_file.virtual_path.as_str(),
+                    ContainerFileOrder {
+                        scope,
+                        entry_index: serialized_file.entry_index,
+                        collection_index: serialized_file.collection_index,
+                    },
+                )
+                .is_some()
+            {
+                return Err(workspace_error(
+                    report,
+                    Some(&serialized_file.virtual_path),
+                    SerializedFileWorkspaceErrorKind::DuplicateMountedFileOrderPath,
+                ));
+            }
+        }
+    }
+    Ok(order_index)
+}
+
+fn attach_container_file_order(
+    file: &mut LoadedSerializedFile,
+    order_index: &HashMap<&str, ContainerFileOrder<'_>>,
+    report: SerializedFileWorkspaceReport,
+) -> Result<(), Box<SerializedFileWorkspaceError>> {
+    let Some(order) = order_index.get(file.virtual_path.as_str()) else {
+        return Ok(());
+    };
+    if order.scope != file.container_scope.as_deref() {
+        return Err(workspace_error(
+            report,
+            Some(&file.virtual_path),
+            SerializedFileWorkspaceErrorKind::MountedFileScopeMismatch,
+        ));
+    }
+    file.container_entry_index = Some(order.entry_index);
+    file.container_collection_index = order.collection_index;
+    Ok(())
 }
 
 fn build_container_scope_index<'a>(
@@ -1696,6 +1837,18 @@ pub enum SerializedFileWorkspaceErrorKind {
         limit: usize,
     },
     DuplicateContainerScopePath,
+    MountedFileOrderCountOverflow,
+    MountedFileOrderCountLimitExceeded {
+        count: usize,
+        limit: usize,
+    },
+    MountedFileScopeIndexOutOfBounds {
+        index: usize,
+        count: usize,
+    },
+    InvalidMountedFileCollectionOrder,
+    DuplicateMountedFileOrderPath,
+    MountedFileScopeMismatch,
     BundleScopeByteCountOverflow,
     TotalBundleScopeBytesLimitExceeded {
         byte_count: usize,
@@ -1847,6 +2000,26 @@ impl Display for SerializedFileWorkspaceErrorKind {
             ),
             Self::DuplicateContainerScopePath => {
                 f.write_str("container scope path occurs more than once")
+            }
+            Self::MountedFileOrderCountOverflow => {
+                f.write_str("mounted SerializedFile order record count overflows")
+            }
+            Self::MountedFileOrderCountLimitExceeded { count, limit } => write!(
+                f,
+                "mounted SerializedFile order record count {count} exceeds limit {limit}"
+            ),
+            Self::MountedFileScopeIndexOutOfBounds { index, count } => write!(
+                f,
+                "mounted SerializedFile scope index {index} is outside {count} reported scopes"
+            ),
+            Self::InvalidMountedFileCollectionOrder => f.write_str(
+                "mounted SerializedFile collection order does not match its container scope",
+            ),
+            Self::DuplicateMountedFileOrderPath => {
+                f.write_str("mounted SerializedFile path occurs more than once in order metadata")
+            }
+            Self::MountedFileScopeMismatch => {
+                f.write_str("mounted SerializedFile scope differs from its order metadata")
             }
             Self::BundleScopeByteCountOverflow => {
                 f.write_str("loaded bundle-scope byte count overflows")
@@ -2144,6 +2317,8 @@ mod tests {
 
         assert_eq!(workspace.files().len(), 1);
         assert_eq!(workspace.files()[0].container_scope, None);
+        assert_eq!(workspace.files()[0].container_entry_index, None);
+        assert_eq!(workspace.files()[0].container_collection_index, None);
         assert_eq!(workspace.files()[0].header.format_version.raw(), 10);
         assert_eq!(workspace.files()[0].metadata.objects[0].path_id, 42);
         assert!(workspace.files()[0].reference_graph.is_complete());
@@ -2213,8 +2388,10 @@ mod tests {
         let nested_leaf = make_generation_10_file();
         let nested_webdata = make_webdata_fixture(&[("inner.assets", &nested_leaf)]);
         let webdata = make_webdata_fixture(&[
+            ("z-first.assets", &serialized_leaf),
             ("shared.assets", &serialized_leaf),
             ("nested.bundle", &nested_webdata),
+            ("a-last.assets", &serialized_leaf),
         ]);
         insert_file(
             &mut filesystem,
@@ -2239,7 +2416,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(loaded.workspace.files().len(), 3);
+        assert_eq!(loaded.workspace.files().len(), 5);
         assert_eq!(loaded.initial_container_expansions.len(), 1);
         assert_eq!(
             loaded.initial_container_expansions[0].kind,
@@ -2247,8 +2424,16 @@ mod tests {
         );
         assert_eq!(
             loaded.initial_container_expansions[0].serialized_files_found,
-            2
+            4
         );
+        let first_direct_file = loaded
+            .workspace
+            .files()
+            .iter()
+            .find(|file| file.virtual_path.ends_with("/z-first.assets"))
+            .unwrap();
+        assert_eq!(first_direct_file.container_entry_index, Some(0));
+        assert_eq!(first_direct_file.container_collection_index, Some(0));
         let direct_file = loaded
             .workspace
             .files()
@@ -2259,6 +2444,16 @@ mod tests {
             direct_file.container_scope.as_deref(),
             Some("/.assetripper/import/initial/0")
         );
+        assert_eq!(direct_file.container_entry_index, Some(1));
+        assert_eq!(direct_file.container_collection_index, Some(1));
+        let last_direct_file = loaded
+            .workspace
+            .files()
+            .iter()
+            .find(|file| file.virtual_path.ends_with("/a-last.assets"))
+            .unwrap();
+        assert_eq!(last_direct_file.container_entry_index, Some(3));
+        assert_eq!(last_direct_file.container_collection_index, Some(2));
         let nested_file = loaded
             .workspace
             .files()
@@ -2269,6 +2464,8 @@ mod tests {
             nested_file.container_scope.as_deref(),
             Some("/.assetripper/import/initial/0/nested.bundle")
         );
+        assert_eq!(nested_file.container_entry_index, Some(0));
+        assert_eq!(nested_file.container_collection_index, Some(0));
         assert!(matches!(
             loaded.dependencies.requests[0].outcome,
             SerializedFileDependencyOutcome::AlreadyLoaded { .. }
@@ -2277,7 +2474,7 @@ mod tests {
             loaded.dependencies.requests[1].outcome,
             SerializedFileDependencyOutcome::ContainerAlreadyExpanded {
                 virtual_path: "/game/Game_Data/data.unity3d".to_owned(),
-                serialized_files_loaded: 2,
+                serialized_files_loaded: 4,
                 matching_serialized_files: 0,
             }
         );
@@ -2507,6 +2704,8 @@ mod tests {
             workspace.files()[1].container_scope.as_deref(),
             Some("/__assetripper_dependency_mount_0")
         );
+        assert_eq!(workspace.files()[1].container_entry_index, Some(0));
+        assert_eq!(workspace.files()[1].container_collection_index, Some(0));
         assert!(dependency_report.is_complete());
         assert_eq!(
             dependency_report.requests[0].outcome,

@@ -589,6 +589,7 @@ fn import_initial_platform_files(
                     virtual_path: entry.virtual_path.clone(),
                     serialized_files_loaded: serialized_files_found,
                     container_scopes: mount_report.container_scopes,
+                    serialized_files: mount_report.serialized_files,
                 });
                 expansions.push(PlatformContainerExpansionReport {
                     source_file: entry.clone(),
