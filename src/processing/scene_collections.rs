@@ -896,6 +896,279 @@ pub struct SceneGuidWords {
     pub data: [u32; 4],
 }
 
+impl SceneGuidWords {
+    pub const fn is_zero(self) -> bool {
+        self.data[0] == 0 && self.data[1] == 0 && self.data[2] == 0 && self.data[3] == 0
+    }
+}
+
+/// Source path choice used when planning one baseline SceneDefinition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SceneDefinitionPathSource {
+    StreamedSceneBundle,
+    BuildSettings { scene_index: usize },
+    CollectionNameFallback,
+}
+
+impl Display for SceneDefinitionPathSource {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::StreamedSceneBundle => f.write_str("streamed-scene AssetBundle"),
+            Self::BuildSettings { scene_index } => {
+                write!(f, "BuildSettings scene index {scene_index}")
+            }
+            Self::CollectionNameFallback => f.write_str("SceneDefinition.FromName fallback"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SceneGuidGenerationReason {
+    MissingFromInput,
+    ZeroInInput,
+}
+
+/// Scene GUID handling that mirrors SceneDefinition's zero-GUID randomization without inventing
+/// a random value during inspection or planning.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SceneDefinitionGuidPlan {
+    Preserve(SceneGuidWords),
+    GenerateAtExport(SceneGuidGenerationReason),
+}
+
+impl Display for SceneDefinitionGuidPlan {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Preserve(guid) => write!(
+                f,
+                "preserve [0x{:08x}, 0x{:08x}, 0x{:08x}, 0x{:08x}]",
+                guid.data[0], guid.data[1], guid.data[2], guid.data[3]
+            ),
+            Self::GenerateAtExport(SceneGuidGenerationReason::MissingFromInput) => {
+                f.write_str("generate at export (SceneGUID absent)")
+            }
+            Self::GenerateAtExport(SceneGuidGenerationReason::ZeroInInput) => {
+                f.write_str("generate at export (input SceneGUID is zero)")
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SceneDefinitionPlan {
+    /// Stable identity of the source collection within this loaded workspace.
+    pub collection_file_index: usize,
+    /// Collection name after the baseline FileBase.NameFixed normalization.
+    pub collection_name: String,
+    pub name: String,
+    pub path: String,
+    pub path_source: SceneDefinitionPathSource,
+    pub guid: SceneDefinitionGuidPlan,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SceneDefinitionPlanLimits {
+    pub max_collection_name_bytes: usize,
+    pub max_scene_name_bytes: usize,
+    pub max_scene_path_bytes: usize,
+}
+
+impl Default for SceneDefinitionPlanLimits {
+    fn default() -> Self {
+        Self {
+            max_collection_name_bytes: 1024 * 1024,
+            max_scene_name_bytes: 16 * 1024 * 1024,
+            max_scene_path_bytes: 16 * 1024 * 1024,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SceneDefinitionPlanError {
+    CollectionNameLimitExceeded {
+        length: usize,
+        limit: usize,
+    },
+    SceneNameLimitExceeded {
+        length: usize,
+        limit: usize,
+    },
+    ScenePathLimitExceeded {
+        length: usize,
+        limit: usize,
+    },
+    LengthOverflow {
+        resource: &'static str,
+    },
+    AllocationFailed {
+        resource: &'static str,
+        requested: usize,
+    },
+}
+
+impl Display for SceneDefinitionPlanError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CollectionNameLimitExceeded { length, limit } => write!(
+                f,
+                "scene collection name is {length} bytes; limit is {limit}"
+            ),
+            Self::SceneNameLimitExceeded { length, limit } => {
+                write!(
+                    f,
+                    "SceneDefinition name is {length} bytes; limit is {limit}"
+                )
+            }
+            Self::ScenePathLimitExceeded { length, limit } => {
+                write!(f, "scene path is {length} bytes; limit is {limit}")
+            }
+            Self::LengthOverflow { resource } => {
+                write!(f, "{resource} length overflows usize")
+            }
+            Self::AllocationFailed {
+                resource,
+                requested,
+            } => {
+                write!(f, "could not allocate {requested} bytes for {resource}")
+            }
+        }
+    }
+}
+
+impl Error for SceneDefinitionPlanError {}
+
+/// Build the same name/path choice as SceneDefinitionProcessor while leaving zero GUID creation
+/// for the eventual exporter. Streamed-scene paths override BuildSettings paths; unresolved
+/// BuildSettings metadata follows the source `FromName` fallback.
+pub fn plan_scene_definition(
+    collection_file_index: usize,
+    raw_collection_name: &str,
+    build_settings_path: &SceneCollectionPathStatus,
+    streamed_scene_path: Option<&str>,
+    scene_guid: Option<SceneGuidWords>,
+    limits: SceneDefinitionPlanLimits,
+) -> Result<SceneDefinitionPlan, SceneDefinitionPlanError> {
+    if raw_collection_name.len() > limits.max_collection_name_bytes {
+        return Err(SceneDefinitionPlanError::CollectionNameLimitExceeded {
+            length: raw_collection_name.len(),
+            limit: limits.max_collection_name_bytes,
+        });
+    }
+    let collection_name = fix_file_identifier(raw_collection_name);
+    if collection_name.len() > limits.max_collection_name_bytes {
+        return Err(SceneDefinitionPlanError::CollectionNameLimitExceeded {
+            length: collection_name.len(),
+            limit: limits.max_collection_name_bytes,
+        });
+    }
+
+    let (path, path_source) = if let Some(path) = streamed_scene_path {
+        (
+            copy_scene_string(path, "streamed-scene path", limits)?,
+            SceneDefinitionPathSource::StreamedSceneBundle,
+        )
+    } else if let SceneCollectionPathStatus::Resolved {
+        scene_index, path, ..
+    } = build_settings_path
+    {
+        (
+            copy_scene_string(path, "BuildSettings scene path", limits)?,
+            SceneDefinitionPathSource::BuildSettings {
+                scene_index: *scene_index,
+            },
+        )
+    } else {
+        let path_length = "Assets/Scenes/"
+            .len()
+            .checked_add(collection_name.len())
+            .ok_or(SceneDefinitionPlanError::LengthOverflow {
+                resource: "fallback scene path",
+            })?;
+        if path_length > limits.max_scene_path_bytes {
+            return Err(SceneDefinitionPlanError::ScenePathLimitExceeded {
+                length: path_length,
+                limit: limits.max_scene_path_bytes,
+            });
+        }
+        let mut path = String::new();
+        path.try_reserve_exact(path_length).map_err(|_| {
+            SceneDefinitionPlanError::AllocationFailed {
+                resource: "fallback scene path",
+                requested: path_length,
+            }
+        })?;
+        path.push_str("Assets/Scenes/");
+        path.push_str(&collection_name);
+        (path, SceneDefinitionPathSource::CollectionNameFallback)
+    };
+
+    let name_source = match path_source {
+        SceneDefinitionPathSource::CollectionNameFallback => collection_name.as_str(),
+        SceneDefinitionPathSource::StreamedSceneBundle
+        | SceneDefinitionPathSource::BuildSettings { .. } => {
+            path.rsplit(['/', '\\']).next().unwrap_or_default()
+        }
+    };
+    let name = copy_scene_name(name_source, limits.max_scene_name_bytes)?;
+    let guid = match scene_guid {
+        Some(guid) if !guid.is_zero() => SceneDefinitionGuidPlan::Preserve(guid),
+        Some(_) => {
+            SceneDefinitionGuidPlan::GenerateAtExport(SceneGuidGenerationReason::ZeroInInput)
+        }
+        None => {
+            SceneDefinitionGuidPlan::GenerateAtExport(SceneGuidGenerationReason::MissingFromInput)
+        }
+    };
+
+    Ok(SceneDefinitionPlan {
+        collection_file_index,
+        collection_name,
+        name,
+        path,
+        path_source,
+        guid,
+    })
+}
+
+fn copy_scene_string(
+    value: &str,
+    resource: &'static str,
+    limits: SceneDefinitionPlanLimits,
+) -> Result<String, SceneDefinitionPlanError> {
+    if value.len() > limits.max_scene_path_bytes {
+        return Err(SceneDefinitionPlanError::ScenePathLimitExceeded {
+            length: value.len(),
+            limit: limits.max_scene_path_bytes,
+        });
+    }
+    try_copy_scene_string(value, resource)
+}
+
+fn copy_scene_name(value: &str, limit: usize) -> Result<String, SceneDefinitionPlanError> {
+    if value.len() > limit {
+        return Err(SceneDefinitionPlanError::SceneNameLimitExceeded {
+            length: value.len(),
+            limit,
+        });
+    }
+    try_copy_scene_string(value, "SceneDefinition name")
+}
+
+fn try_copy_scene_string(
+    value: &str,
+    resource: &'static str,
+) -> Result<String, SceneDefinitionPlanError> {
+    let mut copy = String::new();
+    copy.try_reserve_exact(value.len()).map_err(|_| {
+        SceneDefinitionPlanError::AllocationFailed {
+            resource,
+            requested: value.len(),
+        }
+    })?;
+    copy.push_str(value);
+    Ok(copy)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SceneGuidError {
     FieldLookup {
@@ -1034,10 +1307,12 @@ mod tests {
     use super::{
         extract_occlusion_scene_guid, extract_streamed_scene_bundle_metadata,
         map_container_paths_to_scene_collections, map_scene_hashes_to_collections,
-        map_streamed_scene_bundle_paths, resolve_scene_collection_path, scene_manager_kind,
-        streamed_scene_project_path, BuildSettingsScenePathSet, SceneBundleMappingError,
-        SceneBundleMappingLimits, SceneBundlePathMapping, SceneBundlePathMappingSource,
-        SceneCollectionPathStatus, SceneGuidError, SceneGuidWords, SceneManagerKind,
+        map_streamed_scene_bundle_paths, plan_scene_definition, resolve_scene_collection_path,
+        scene_manager_kind, streamed_scene_project_path, BuildSettingsScenePathSet,
+        SceneBundleMappingError, SceneBundleMappingLimits, SceneBundlePathMapping,
+        SceneBundlePathMappingSource, SceneCollectionPathStatus, SceneDefinitionGuidPlan,
+        SceneDefinitionPathSource, SceneDefinitionPlanError, SceneDefinitionPlanLimits,
+        SceneGuidError, SceneGuidGenerationReason, SceneGuidWords, SceneManagerKind,
         StreamedSceneBundleDecodeError, StreamedSceneBundleMetadata,
         StreamedSceneBundlePathMappings,
     };
@@ -1122,6 +1397,149 @@ mod tests {
             Err(SceneGuidError::GuidWordHasWrongType {
                 word_index: 1,
                 actual: "i32"
+            })
+        );
+    }
+
+    #[test]
+    fn scene_definition_plan_applies_streamed_build_and_name_precedence() {
+        let build_path = SceneCollectionPathStatus::Resolved {
+            scene_index: 3,
+            path: "Assets/Build/BuildName".to_owned(),
+            duplicate_path: false,
+        };
+        let streamed = plan_scene_definition(
+            17,
+            "LIBRARY/Level0.assets",
+            &build_path,
+            Some("Assets/Streamed/BundleScene"),
+            None,
+            SceneDefinitionPlanLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(streamed.collection_file_index, 17);
+        assert_eq!(streamed.collection_name, "level0.assets");
+        assert_eq!(streamed.name, "BundleScene");
+        assert_eq!(streamed.path, "Assets/Streamed/BundleScene");
+        assert_eq!(
+            streamed.path_source,
+            SceneDefinitionPathSource::StreamedSceneBundle
+        );
+        assert_eq!(
+            streamed.guid,
+            SceneDefinitionGuidPlan::GenerateAtExport(SceneGuidGenerationReason::MissingFromInput)
+        );
+
+        let build_settings = plan_scene_definition(
+            17,
+            "level0.assets",
+            &build_path,
+            None,
+            None,
+            SceneDefinitionPlanLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(build_settings.name, "BuildName");
+        assert_eq!(build_settings.path, "Assets/Build/BuildName");
+        assert_eq!(
+            build_settings.path_source,
+            SceneDefinitionPathSource::BuildSettings { scene_index: 3 }
+        );
+
+        let windows_separator = plan_scene_definition(
+            17,
+            "level0.assets",
+            &SceneCollectionPathStatus::Resolved {
+                scene_index: 4,
+                path: r"Assets\Build\WindowsName".to_owned(),
+                duplicate_path: false,
+            },
+            None,
+            None,
+            SceneDefinitionPlanLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(windows_separator.name, "WindowsName");
+
+        let name_fallback = plan_scene_definition(
+            17,
+            "LIBRARY/Level0.assets",
+            &SceneCollectionPathStatus::BuildSettingsMissing,
+            None,
+            None,
+            SceneDefinitionPlanLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(name_fallback.name, "level0.assets");
+        assert_eq!(name_fallback.path, "Assets/Scenes/level0.assets");
+        assert_eq!(
+            name_fallback.path_source,
+            SceneDefinitionPathSource::CollectionNameFallback
+        );
+    }
+
+    #[test]
+    fn scene_definition_plan_preserves_nonzero_guid_and_defers_zero_guid_generation() {
+        let status = SceneCollectionPathStatus::BuildSettingsMissing;
+        let limits = SceneDefinitionPlanLimits::default();
+        let nonzero = SceneGuidWords { data: [1, 2, 0, 4] };
+        let preserved =
+            plan_scene_definition(0, "CAB-Scene", &status, None, Some(nonzero), limits).unwrap();
+        assert_eq!(preserved.guid, SceneDefinitionGuidPlan::Preserve(nonzero));
+
+        let zero = plan_scene_definition(
+            0,
+            "CAB-Scene",
+            &status,
+            None,
+            Some(SceneGuidWords { data: [0; 4] }),
+            limits,
+        )
+        .unwrap();
+        assert_eq!(
+            zero.guid,
+            SceneDefinitionGuidPlan::GenerateAtExport(SceneGuidGenerationReason::ZeroInInput)
+        );
+        assert!(SceneGuidWords { data: [0; 4] }.is_zero());
+    }
+
+    #[test]
+    fn scene_definition_plan_bounds_names_and_paths() {
+        let status = SceneCollectionPathStatus::Resolved {
+            scene_index: 0,
+            path: "Assets/Scenes/TooLong".to_owned(),
+            duplicate_path: false,
+        };
+        let path_limits = SceneDefinitionPlanLimits {
+            max_collection_name_bytes: 32,
+            max_scene_name_bytes: 32,
+            max_scene_path_bytes: 8,
+        };
+        assert_eq!(
+            plan_scene_definition(0, "level0", &status, None, None, path_limits),
+            Err(SceneDefinitionPlanError::ScenePathLimitExceeded {
+                length: "Assets/Scenes/TooLong".len(),
+                limit: 8,
+            })
+        );
+
+        let name_limits = SceneDefinitionPlanLimits {
+            max_collection_name_bytes: 32,
+            max_scene_name_bytes: 3,
+            max_scene_path_bytes: 64,
+        };
+        assert_eq!(
+            plan_scene_definition(
+                0,
+                "x",
+                &SceneCollectionPathStatus::BuildSettingsMissing,
+                Some("Assets/Scenes/Main"),
+                None,
+                name_limits,
+            ),
+            Err(SceneDefinitionPlanError::SceneNameLimitExceeded {
+                length: "Main".len(),
+                limit: 3,
             })
         );
     }

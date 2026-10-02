@@ -15,9 +15,10 @@ use assetripper::processing::scene::SceneRootDiscoveryLimits;
 use assetripper::processing::scene::{SceneGraph, SceneGraphLimits};
 use assetripper::processing::scene_collections::{
     extract_occlusion_scene_guid, extract_streamed_scene_bundle_metadata,
-    map_streamed_scene_bundle_paths, resolve_scene_collection_path, scene_manager_kind,
-    BuildSettingsScenePathSet, SceneBundleMappingLimits, SceneBundlePathMappingSource,
-    SceneManagerKind, StreamedSceneBundleMetadata,
+    map_streamed_scene_bundle_paths, plan_scene_definition, resolve_scene_collection_path,
+    scene_manager_kind, BuildSettingsScenePathSet, SceneBundleMappingLimits,
+    SceneBundlePathMappingSource, SceneDefinitionPlanLimits, SceneGuidWords, SceneManagerKind,
+    StreamedSceneBundleMetadata,
 };
 use assetripper::processing::scene_metadata::{
     decode_build_settings_scene_paths_from_parts, BuildSettingsSceneLimits,
@@ -299,6 +300,11 @@ fn print_workspace_summary_to<W: io::Write>(
             .iter()
             .any(|object| scene_manager_kind(workspace_object_class_id(object)).is_some())
     }));
+    let mut scene_guid_words_by_file = Vec::new();
+    scene_guid_words_by_file
+        .try_reserve_exact(workspace.files().len())
+        .map_err(|_| invalid_data("could not reserve scene GUID index"))?;
+    scene_guid_words_by_file.resize(workspace.files().len(), None::<SceneGuidWords>);
     let mut streamed_scene_bundle_work = Vec::new();
     let mut total_streamed_scene_bundle_objects = 0usize;
     let mut total_streamed_scene_bundle_entries = 0usize;
@@ -364,14 +370,17 @@ fn print_workspace_summary_to<W: io::Write>(
                     })?;
                     let payload = parsed_file.decode_object_payload(object_index)?;
                     match extract_occlusion_scene_guid(&payload.root)? {
-                        Some(scene_guid) => writeln!(
-                            output,
-                            "        SceneGUID words: [0x{:08x}, 0x{:08x}, 0x{:08x}, 0x{:08x}]",
-                            scene_guid.data[0],
-                            scene_guid.data[1],
-                            scene_guid.data[2],
-                            scene_guid.data[3]
-                        )?,
+                        Some(scene_guid) => {
+                            scene_guid_words_by_file[file_index] = Some(scene_guid);
+                            writeln!(
+                                output,
+                                "        SceneGUID words: [0x{:08x}, 0x{:08x}, 0x{:08x}, 0x{:08x}]",
+                                scene_guid.data[0],
+                                scene_guid.data[1],
+                                scene_guid.data[2],
+                                scene_guid.data[3]
+                            )?;
+                        }
                         None => writeln!(output, "        SceneGUID: absent from this TypeTree")?,
                     }
                 }
@@ -763,7 +772,9 @@ fn print_workspace_summary_to<W: io::Write>(
             "    Scene path mapping for collection {:?}: {status}",
             collection_name
         )?;
-        if let Some(assignments) = streamed_scene_path_assignments.get(&file_index) {
+        let streamed_scene_path = if let Some(assignments) =
+            streamed_scene_path_assignments.get(&file_index)
+        {
             for assignment in assignments {
                 writeln!(
                     output,
@@ -786,7 +797,31 @@ fn print_workspace_summary_to<W: io::Write>(
                     conflicting
                 )?;
             }
-        }
+            assignments
+                .last()
+                .map(|assignment| assignment.path.as_str())
+        } else {
+            None
+        };
+        let scene_plan = plan_scene_definition(
+            file_index,
+            collection_name,
+            &status,
+            streamed_scene_path,
+            scene_guid_words_by_file[file_index],
+            SceneDefinitionPlanLimits::default(),
+        )?;
+        writeln!(
+            output,
+            "      SceneDefinition plan: name={:?}, path={:?} ({})",
+            scene_plan.name, scene_plan.path, scene_plan.path_source
+        )?;
+        writeln!(
+            output,
+            "        collection identity: {:?} (workspace file {})",
+            scene_plan.collection_name, scene_plan.collection_file_index
+        )?;
+        writeln!(output, "        scene GUID: {}", scene_plan.guid)?;
     }
     writeln!(
         output,
@@ -1518,6 +1553,11 @@ mod tests {
         assert!(summary.contains(
             "effective scene path: Assets/Scenes/BundleScene (streamed-scene override; assignments=1, conflicting=false)"
         ));
+        assert!(summary.contains(
+            "SceneDefinition plan: name=\"BundleScene\", path=\"Assets/Scenes/BundleScene\" (streamed-scene AssetBundle)"
+        ));
+        assert!(summary
+            .contains("scene GUID: preserve [0x00000001, 0x00000002, 0x00000003, 0x00000004]"));
     }
 
     #[test]
