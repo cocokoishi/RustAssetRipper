@@ -83,6 +83,8 @@ pub struct ContainerMountLimits {
     pub max_depth: usize,
     /// Maximum aggregate owned bytes retained for nested containers during traversal.
     pub max_active_nested_bytes: u64,
+    /// Maximum aggregate path bytes retained for the nested container-scope report.
+    pub max_total_container_scope_path_bytes: u64,
 }
 
 impl Default for ContainerMountLimits {
@@ -92,6 +94,7 @@ impl Default for ContainerMountLimits {
             max_total_output_bytes: 2 * 1024 * 1024 * 1024,
             max_depth: 64,
             max_active_nested_bytes: 1024 * 1024 * 1024,
+            max_total_container_scope_path_bytes: 64 * 1024 * 1024,
         }
     }
 }
@@ -130,6 +133,10 @@ pub struct ContainerMountReport {
     pub mounted_entries: usize,
     /// Total bytes in files inserted into the virtual filesystem.
     pub mounted_bytes: u64,
+    /// Virtual roots of the source containers visited, in traversal order.
+    pub container_scopes: Vec<String>,
+    /// Aggregate bytes in `container_scopes` paths.
+    pub container_scope_path_bytes: u64,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -210,12 +217,13 @@ struct ContainerTreeMountState<'a> {
     limits: ContainerMountLimits,
     visited_entries: usize,
     active_nested_bytes: u64,
+    container_scope_path_bytes: u64,
     report: ContainerMountReport,
 }
 
 #[derive(Debug)]
 pub struct ContainerMountError {
-    pub partial_report: ContainerMountReport,
+    pub partial_report: Box<ContainerMountReport>,
     pub kind: ContainerMountErrorKind,
 }
 
@@ -237,6 +245,15 @@ pub enum ContainerMountErrorKind {
         entry_index: usize,
         requested_total: u64,
         limit: u64,
+    },
+    ContainerScopePathSizeOverflow,
+    ContainerScopePathLimitExceeded {
+        requested: u64,
+        limit: u64,
+    },
+    ContainerScopeCountOverflow,
+    ContainerScopeAllocationFailed {
+        requested: usize,
     },
     TotalOutputLimitExceeded {
         entry_index: usize,
@@ -505,6 +522,7 @@ impl<'a> DispatchedFile<'a> {
             limits,
             visited_entries: 0,
             active_nested_bytes: 0,
+            container_scope_path_bytes: 0,
             report: ContainerMountReport::default(),
         };
         self.mount_container_tree_at(destination_root, 0, &mut state)?;
@@ -517,6 +535,7 @@ impl<'a> DispatchedFile<'a> {
         depth: usize,
         state: &mut ContainerTreeMountState<'_>,
     ) -> Result<(), ContainerMountError> {
+        record_container_scope(destination_root, state)?;
         if depth > state.limits.max_depth {
             return Err(ContainerMountError::new(
                 state.report.clone(),
@@ -636,7 +655,7 @@ impl<'a> DispatchedFile<'a> {
 impl ContainerMountError {
     fn new(partial_report: ContainerMountReport, kind: ContainerMountErrorKind) -> Self {
         Self {
-            partial_report,
+            partial_report: Box::new(partial_report),
             kind,
         }
     }
@@ -802,6 +821,20 @@ impl Display for ContainerMountErrorKind {
             } => write!(
                 formatter,
                 "nested container entry {entry_index} would retain {requested_total} owned bytes, exceeding active-container limit {limit}"
+            ),
+            Self::ContainerScopePathSizeOverflow => {
+                formatter.write_str("container-scope path byte count overflows u64")
+            }
+            Self::ContainerScopePathLimitExceeded { requested, limit } => write!(
+                formatter,
+                "container-scope paths use {requested} bytes, exceeding scope limit {limit}"
+            ),
+            Self::ContainerScopeCountOverflow => {
+                formatter.write_str("container-scope count overflows usize")
+            }
+            Self::ContainerScopeAllocationFailed { requested } => write!(
+                formatter,
+                "could not reserve {requested} bytes for container-scope metadata"
             ),
             Self::TotalOutputLimitExceeded {
                 entry_index,
@@ -1061,6 +1094,74 @@ fn preflight_tree_entry_count(
         ));
     }
     state.visited_entries = requested;
+    Ok(())
+}
+
+fn record_container_scope(
+    virtual_path: Option<&str>,
+    state: &mut ContainerTreeMountState<'_>,
+) -> Result<(), ContainerMountError> {
+    let Some(virtual_path) = virtual_path else {
+        return Ok(());
+    };
+    let path_bytes = u64::try_from(virtual_path.len()).map_err(|_| {
+        ContainerMountError::new(
+            state.report.clone(),
+            ContainerMountErrorKind::ContainerScopePathSizeOverflow,
+        )
+    })?;
+    let requested_bytes = state
+        .container_scope_path_bytes
+        .checked_add(path_bytes)
+        .ok_or_else(|| {
+            ContainerMountError::new(
+                state.report.clone(),
+                ContainerMountErrorKind::ContainerScopePathSizeOverflow,
+            )
+        })?;
+    if requested_bytes > state.limits.max_total_container_scope_path_bytes {
+        return Err(ContainerMountError::new(
+            state.report.clone(),
+            ContainerMountErrorKind::ContainerScopePathLimitExceeded {
+                requested: requested_bytes,
+                limit: state.limits.max_total_container_scope_path_bytes,
+            },
+        ));
+    }
+    let requested_scopes = state
+        .report
+        .container_scopes
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| {
+            ContainerMountError::new(
+                state.report.clone(),
+                ContainerMountErrorKind::ContainerScopeCountOverflow,
+            )
+        })?;
+    state.report.container_scopes.try_reserve(1).map_err(|_| {
+        ContainerMountError::new(
+            state.report.clone(),
+            ContainerMountErrorKind::ContainerScopeAllocationFailed {
+                requested: requested_scopes,
+            },
+        )
+    })?;
+    let mut owned_path = String::new();
+    owned_path
+        .try_reserve_exact(virtual_path.len())
+        .map_err(|_| {
+            ContainerMountError::new(
+                state.report.clone(),
+                ContainerMountErrorKind::ContainerScopeAllocationFailed {
+                    requested: virtual_path.len(),
+                },
+            )
+        })?;
+    owned_path.push_str(virtual_path);
+    state.report.container_scopes.push(owned_path);
+    state.container_scope_path_bytes = requested_bytes;
+    state.report.container_scope_path_bytes = requested_bytes;
     Ok(())
 }
 
@@ -1677,6 +1778,7 @@ impl SchemeReader {
                         ContainerMountReport {
                             mounted_entries: report.mounted_entries,
                             mounted_bytes: report.mounted_bytes,
+                            ..ContainerMountReport::default()
                         },
                         ContainerMountErrorKind::FileSystem {
                             entry_index: report.mounted_entries,
@@ -2567,6 +2669,14 @@ mod tests {
         assert_eq!(report.mounted_entries, 2);
         assert_eq!(report.mounted_bytes, 22);
         assert_eq!(
+            report.container_scopes,
+            [
+                "/tree",
+                "/tree/plain-container",
+                "/tree/wrapped-container.gz"
+            ]
+        );
+        assert_eq!(
             filesystem
                 .read_all_bytes("/tree/plain-container/leaf.bin", 64)
                 .unwrap(),
@@ -3080,6 +3190,27 @@ mod tests {
         ));
         assert_eq!(error.partial_report.mounted_entries, 0);
         assert_eq!(count_limited.count(), 1);
+
+        let mut scope_path_limited = VirtualFileSystem::new();
+        let error = file
+            .mount_container_tree(
+                &mut scope_path_limited,
+                Some("/tree"),
+                ContainerMountLimits {
+                    max_total_container_scope_path_bytes: 4,
+                    ..ContainerMountLimits::default()
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error.kind,
+            ContainerMountErrorKind::ContainerScopePathLimitExceeded {
+                requested: 5,
+                limit: 4
+            }
+        ));
+        assert!(error.partial_report.container_scopes.is_empty());
+        assert_eq!(scope_path_limited.count(), 1);
 
         let mut depth_limited = VirtualFileSystem::new();
         let error = file

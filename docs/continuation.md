@@ -262,3 +262,9 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - A generated minimal class ID 142 SerializedFile fixture now exercises TypeTree decoding through field extraction and verifies the null `Container.second.asset` PPtr. Unity Technologies UnityDataTools documents the corresponding scene-bundle field and pair shapes: https://github.com/Unity-Technologies/UnityDataTools/blob/main/Documentation/assetbundle-format.md. The fixture is partial and synthetic, not a Unity-produced file.
 - The frozen local AssetRipper tree references generated `IAssetBundle` accessors but omits the emitted class ID 142 schema; the expected field names and pair layout are therefore not yet verified against a class 142 TypeTree. No actual class 142 SerializedFile object was used. No bundle grouping or path override application exists yet, and Phase 1 remains open.
 - Next: carry source container/bundle identity through the workspace and apply scene overrides to the right collections; extend validation across additional class 142 schema generations. User AssetBundles and UABEA remain uninspected.
+
+## Recursive container scope identities
+
+- Recursive container mounting now reports each source container's virtual root, including nested/wrapped containers, in traversal order. This recovers boundaries that would otherwise be lost when SerializedFiles are flattened into a VFS.
+- Per-traversal scope strings are bounded at 64 MiB; report reservations are fallible. Synthetic tests cover root/nested order and limit failures.
+- Next: carry each loaded SerializedFile's deepest container-scope identity through initial and dependency workspace loading, then group class ID 142 and scene collections by that identity. No bundle or user sample content was inspected.
