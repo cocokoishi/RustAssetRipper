@@ -164,6 +164,8 @@ pub struct MountedContainerBundle {
 pub struct MountedSerializedFile {
     pub virtual_path: String,
     pub container_scope_index: Option<usize>,
+    /// Local index of the owning container node in this mount report.
+    pub container_bundle_index: Option<usize>,
     pub entry_index: usize,
     /// Zero-based order among this source container's direct SerializedFiles.
     pub collection_index: Option<usize>,
@@ -248,7 +250,7 @@ struct ContainerTreeMountState<'a> {
     visited_entries: usize,
     active_nested_bytes: u64,
     container_scope_path_bytes: u64,
-    scope_serialized_file_counts: Vec<usize>,
+    bundle_serialized_file_counts: Vec<usize>,
     report: ContainerMountReport,
 }
 
@@ -290,6 +292,9 @@ pub enum ContainerMountErrorKind {
     ContainerBundleAllocationFailed {
         requested: usize,
     },
+    ContainerBundleCollectionIndexAllocationFailed {
+        requested: usize,
+    },
     ContainerBundleParentIndexOutOfBounds {
         index: usize,
         count: usize,
@@ -305,9 +310,6 @@ pub enum ContainerMountErrorKind {
     },
     SerializedFileEntryCountOverflow,
     SerializedFileEntryAllocationFailed {
-        requested: usize,
-    },
-    ContainerScopeIndexAllocationFailed {
         requested: usize,
     },
     ContainerScopeIndexOutOfBounds {
@@ -583,7 +585,7 @@ impl<'a> DispatchedFile<'a> {
             visited_entries: 0,
             active_nested_bytes: 0,
             container_scope_path_bytes: 0,
-            scope_serialized_file_counts: Vec::new(),
+            bundle_serialized_file_counts: Vec::new(),
             report: ContainerMountReport::default(),
         };
         self.mount_container_tree_at(destination_root, 0, None, None, &mut state)?;
@@ -936,6 +938,10 @@ impl Display for ContainerMountErrorKind {
                 formatter,
                 "could not reserve space for {requested} container bundle records"
             ),
+            Self::ContainerBundleCollectionIndexAllocationFailed { requested } => write!(
+                formatter,
+                "could not reserve collection-order counters for {requested} container bundles"
+            ),
             Self::ContainerBundleParentIndexOutOfBounds { index, count } => write!(
                 formatter,
                 "container bundle parent index {index} is outside {count} recorded bundles"
@@ -960,10 +966,6 @@ impl Display for ContainerMountErrorKind {
             Self::SerializedFileEntryAllocationFailed { requested } => write!(
                 formatter,
                 "could not reserve space for {requested} SerializedFile entry records"
-            ),
-            Self::ContainerScopeIndexAllocationFailed { requested } => write!(
-                formatter,
-                "could not reserve {requested} container-scope collection counters"
             ),
             Self::ContainerScopeIndexOutOfBounds { index, count } => write!(
                 formatter,
@@ -1283,27 +1285,6 @@ fn record_container_scope(
             },
         )
     })?;
-    let requested_counters = state
-        .scope_serialized_file_counts
-        .len()
-        .checked_add(1)
-        .ok_or_else(|| {
-            ContainerMountError::new(
-                state.report.clone(),
-                ContainerMountErrorKind::ContainerScopeCountOverflow,
-            )
-        })?;
-    state
-        .scope_serialized_file_counts
-        .try_reserve(1)
-        .map_err(|_| {
-            ContainerMountError::new(
-                state.report.clone(),
-                ContainerMountErrorKind::ContainerScopeIndexAllocationFailed {
-                    requested: requested_counters,
-                },
-            )
-        })?;
     let mut owned_path = String::new();
     owned_path
         .try_reserve_exact(virtual_path.len())
@@ -1318,7 +1299,6 @@ fn record_container_scope(
     owned_path.push_str(virtual_path);
     let scope_index = state.report.container_scopes.len();
     state.report.container_scopes.push(owned_path);
-    state.scope_serialized_file_counts.push(0);
     state.container_scope_path_bytes = requested_bytes;
     state.report.container_scope_path_bytes = requested_bytes;
     Ok(Some(scope_index))
@@ -1377,12 +1357,34 @@ fn record_container_bundle(
             },
         )
     })?;
+    let requested_collection_counters = state
+        .bundle_serialized_file_counts
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| {
+            ContainerMountError::new(
+                state.report.clone(),
+                ContainerMountErrorKind::ContainerBundleCountOverflow,
+            )
+        })?;
+    state
+        .bundle_serialized_file_counts
+        .try_reserve(1)
+        .map_err(|_| {
+            ContainerMountError::new(
+                state.report.clone(),
+                ContainerMountErrorKind::ContainerBundleCollectionIndexAllocationFailed {
+                    requested: requested_collection_counters,
+                },
+            )
+        })?;
     let bundle_index = state.report.container_bundles.len();
     state.report.container_bundles.push(MountedContainerBundle {
         scope_index,
         parent_bundle_index,
         parent_entry_index,
     });
+    state.bundle_serialized_file_counts.push(0);
     Ok(bundle_index)
 }
 
@@ -1459,6 +1461,7 @@ fn mount_tree_child<'a>(
                     &entry_path,
                     entry_index,
                     container_scope_index,
+                    container_bundle_index,
                     state,
                 )?)
             } else {
@@ -1475,12 +1478,8 @@ fn mount_tree_child<'a>(
             if let Some(serialized_file) = serialized_file {
                 state.report.serialized_file_path_bytes = serialized_file.total_path_bytes;
                 state.report.serialized_files.push(serialized_file.record);
-                if let (Some(scope_index), Some(next_count)) = (
-                    container_scope_index,
-                    serialized_file.next_scope_collection_count,
-                ) {
-                    state.scope_serialized_file_counts[scope_index] = next_count;
-                }
+                state.bundle_serialized_file_counts[container_bundle_index] =
+                    serialized_file.next_bundle_collection_count;
             }
             Ok(())
         }
@@ -1490,13 +1489,14 @@ fn mount_tree_child<'a>(
 struct PendingMountedSerializedFile {
     record: MountedSerializedFile,
     total_path_bytes: u64,
-    next_scope_collection_count: Option<usize>,
+    next_bundle_collection_count: usize,
 }
 
 fn prepare_mounted_serialized_file(
     virtual_path: &str,
     entry_index: usize,
     container_scope_index: Option<usize>,
+    container_bundle_index: usize,
     state: &mut ContainerTreeMountState<'_>,
 ) -> Result<PendingMountedSerializedFile, ContainerMountError> {
     let limits = state.limits;
@@ -1555,38 +1555,35 @@ fn prepare_mounted_serialized_file(
             )
         })?;
     owned_path.push_str(virtual_path);
-    let (collection_index, next_scope_collection_count) = if let Some(scope_index) =
-        container_scope_index
-    {
-        let Some(collection_index) = state.scope_serialized_file_counts.get(scope_index).copied()
-        else {
-            return Err(ContainerMountError::new(
-                state.report.clone(),
-                ContainerMountErrorKind::ContainerScopeIndexOutOfBounds {
-                    index: scope_index,
-                    count: state.scope_serialized_file_counts.len(),
-                },
-            ));
-        };
-        let next_count = collection_index.checked_add(1).ok_or_else(|| {
-            ContainerMountError::new(
-                state.report.clone(),
-                ContainerMountErrorKind::ContainerCollectionIndexOverflow,
-            )
-        })?;
-        (Some(collection_index), Some(next_count))
-    } else {
-        (None, None)
+    let Some(collection_index) = state
+        .bundle_serialized_file_counts
+        .get(container_bundle_index)
+        .copied()
+    else {
+        return Err(ContainerMountError::new(
+            state.report.clone(),
+            ContainerMountErrorKind::ContainerBundleParentIndexOutOfBounds {
+                index: container_bundle_index,
+                count: state.bundle_serialized_file_counts.len(),
+            },
+        ));
     };
+    let next_bundle_collection_count = collection_index.checked_add(1).ok_or_else(|| {
+        ContainerMountError::new(
+            state.report.clone(),
+            ContainerMountErrorKind::ContainerCollectionIndexOverflow,
+        )
+    })?;
     Ok(PendingMountedSerializedFile {
         record: MountedSerializedFile {
             virtual_path: owned_path,
             container_scope_index,
+            container_bundle_index: Some(container_bundle_index),
             entry_index,
-            collection_index,
+            collection_index: Some(collection_index),
         },
         total_path_bytes,
-        next_scope_collection_count,
+        next_bundle_collection_count,
     })
 }
 
@@ -3119,18 +3116,21 @@ mod tests {
                 MountedSerializedFile {
                     virtual_path: "/tree/z-first.asset".to_owned(),
                     container_scope_index: Some(0),
+                    container_bundle_index: Some(0),
                     entry_index: 0,
                     collection_index: Some(0),
                 },
                 MountedSerializedFile {
                     virtual_path: "/tree/nested.bundle/inside.asset".to_owned(),
                     container_scope_index: Some(1),
+                    container_bundle_index: Some(1),
                     entry_index: 0,
                     collection_index: Some(0),
                 },
                 MountedSerializedFile {
                     virtual_path: "/tree/a-second.asset".to_owned(),
                     container_scope_index: Some(0),
+                    container_bundle_index: Some(0),
                     entry_index: 2,
                     collection_index: Some(1),
                 },
