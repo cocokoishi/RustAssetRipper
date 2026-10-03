@@ -688,3 +688,11 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - The overlay does not compact or rewrite source component slots. Its aggregate bound defaults to 40,000,000 source-plus-generated slots.
 - A synthetic fixture contains one original null component entry and verifies its PPtr stays at index 0 while the generated Transform is appended at index 1. Full suite: 301 library and 10 CLI tests passed; warnings-denied Clippy, format, the 1,449-file baseline verifier, and diff checks passed.
 - No serialized source array was mutated, and the generated PPtr's ProcessedBundle dependency-table file index is not assigned yet. No user bundle or UABEA data was accessed; Phase 1 remains incomplete.
+
+## Processed collection constructor dependency indexes (2026-10-02)
+
+- The local AssetCollection baseline keeps itself at Dependencies[0]. AddDependency returns the existing collection index when present, otherwise appends the compatible collection; ForceCreatePPtr uses that index and the target PathID. The processed virtual collections begin with only themselves.
+- Added ordered processed-collection dependency tables for constructor-assigned generated Transform.GameObject and generated PrefabInstance.RootGameObject PPtrs. First source collection touch gets FileID 1; repeated references reuse that index. The plan retains the target source file index and PathID alongside the computed PPtr.
+- Missing Prefab Transforms, Generated Prefabs, and scene-generated collections mark their current generated pointer dependency indexes complete. Prefab Hierarchies are explicitly incomplete because their AssetGroup membership, Root/Prefab, and list references have not yet been reconstructed.
+- Synthetic tests verify source-file first-touch order, deduplication, per-collection fileID numbering, target PathIDs, and dependency limits. Full suite: 303 library and 10 CLI tests passed; warnings-denied Clippy, format, 1,449-file baseline verification, and diff checks passed.
+- The generated GameObject component overlay's reverse PPtr into the processed collection is not assigned yet; source SerializedAssetCollection dependency tables must retain existing identifiers before appending it. No source arrays or external files were modified. Phase 1 remains incomplete.

@@ -1282,11 +1282,12 @@ fn print_workspace_summary_to<W: io::Write>(
     )?;
     writeln!(
         output,
-        "PrefabProcessor generated-asset allocation plan: complete={}, {} collections, {} assets, {} GameObject component-pair appends{}",
+        "PrefabProcessor generated-asset allocation plan: complete={}, {} collections, {} assets, {} GameObject component-pair appends, {} constructor PPtrs{}",
         processed_prefab_assets.is_complete(),
         processed_prefab_assets.collections().len(),
         processed_prefab_assets.asset_count(),
         processed_prefab_assets.component_additions().len(),
+        processed_prefab_assets.constructor_pointers().len(),
         processed_prefab_assets
             .incomplete_reason()
             .map(|reason| format!(", no IDs assigned: {reason}"))
@@ -1305,11 +1306,13 @@ fn print_workspace_summary_to<W: io::Write>(
             };
             writeln!(
                 output,
-                "  generated collection {} {:?} {:?}: {} assets, {path_id_range}",
+                "  generated collection {} {:?} {:?}: {} assets, {path_id_range}, {} dependency entries (indexes complete={})",
                 collection.collection_index,
                 collection.kind,
                 collection.name,
-                collection.assets.len()
+                collection.assets.len(),
+                collection.dependencies.len(),
+                collection.dependency_indices_complete
             )?;
         }
     }

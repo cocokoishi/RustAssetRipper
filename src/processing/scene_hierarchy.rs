@@ -5781,6 +5781,46 @@ mod tests {
             SceneRelationshipTarget::Null
         );
         assert_eq!(component_overlay.generated_component, component_addition);
+        assert_eq!(allocations.constructor_pointers().len(), 2);
+        assert_eq!(
+            allocations.constructor_pointers()[0].field,
+            crate::processing::prefab_processing::WorkspaceGeneratedPointerField::TransformGameObject
+        );
+        assert_eq!(allocations.constructor_pointers()[0].file_id, 1);
+        assert_eq!(
+            allocations.constructor_pointers()[0].path_id,
+            game_object.path_id
+        );
+        assert_eq!(allocations.constructor_pointers()[0].target, game_object);
+        assert_eq!(
+            allocations.constructor_pointers()[1].field,
+            crate::processing::prefab_processing::WorkspaceGeneratedPointerField::PrefabInstanceRootGameObject
+        );
+        assert_eq!(allocations.constructor_pointers()[1].file_id, 1);
+        assert_eq!(
+            allocations.constructor_pointers()[1].path_id,
+            game_object.path_id
+        );
+        assert_eq!(allocations.constructor_pointers()[1].target, game_object);
+        for collection_index in [1, 2] {
+            let dependencies = &allocations.collections()[collection_index].dependencies;
+            assert_eq!(dependencies.len(), 2);
+            assert_eq!(dependencies[0].file_id, 0);
+            assert_eq!(
+                dependencies[0].target,
+                crate::processing::prefab_processing::WorkspaceProcessedDependencyTarget::ProcessedCollection {
+                    collection_index
+                }
+            );
+            assert_eq!(dependencies[1].file_id, 1);
+            assert_eq!(
+                dependencies[1].target,
+                crate::processing::prefab_processing::WorkspaceProcessedDependencyTarget::SerializedFileCollection {
+                    file_index: 0
+                }
+            );
+        }
+        assert!(!allocations.collections()[0].dependency_indices_complete);
         assert_eq!(allocations.collections()[1].assets[0].identity.path_id, 1);
         assert_eq!(allocations.collections()[0].assets[0].identity.path_id, 1);
     }

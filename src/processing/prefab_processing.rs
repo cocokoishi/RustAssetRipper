@@ -598,7 +598,39 @@ pub struct WorkspaceProcessedAssetCollectionPlan {
     pub kind: WorkspaceProcessedCollectionKind,
     pub name: String,
     pub assets: Vec<WorkspaceProcessedPrefabAsset>,
+    /// Dependency indexes known from generated constructor-time PPtr assignments, including self at fileID 0.
+    pub dependencies: Vec<WorkspaceProcessedCollectionDependency>,
+    /// False when this collection has other baseline PPtr fields not yet replayed by Rust.
+    pub dependency_indices_complete: bool,
     next_path_id: i64,
+    source_dependency_index: HashMap<usize, i32>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkspaceProcessedDependencyTarget {
+    ProcessedCollection { collection_index: usize },
+    SerializedFileCollection { file_index: usize },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorkspaceProcessedCollectionDependency {
+    pub file_id: i32,
+    pub target: WorkspaceProcessedDependencyTarget,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkspaceGeneratedPointerField {
+    TransformGameObject,
+    PrefabInstanceRootGameObject,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorkspaceGeneratedConstructorPointer {
+    pub source_asset: WorkspaceProcessedAssetIdentity,
+    pub field: WorkspaceGeneratedPointerField,
+    pub file_id: i32,
+    pub path_id: i64,
+    pub target: WorkspaceSceneObjectIdentity,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -607,6 +639,9 @@ pub struct WorkspaceProcessedPrefabAssetPlanLimits {
     pub max_assets: usize,
     pub max_component_additions: usize,
     pub max_component_overlay_slots: usize,
+    pub max_dependency_entries: usize,
+    pub max_dependencies_per_collection: usize,
+    pub max_constructor_pointers: usize,
     pub max_missing_transform_candidates: usize,
     pub max_total_collection_name_bytes: usize,
 }
@@ -618,6 +653,9 @@ impl Default for WorkspaceProcessedPrefabAssetPlanLimits {
             max_assets: 20_000_000,
             max_component_additions: 20_000_000,
             max_component_overlay_slots: 40_000_000,
+            max_dependency_entries: 20_000_000,
+            max_dependencies_per_collection: 1_000_000,
+            max_constructor_pointers: 20_000_000,
             max_missing_transform_candidates: 20_000_000,
             max_total_collection_name_bytes: 64 * 1024 * 1024,
         }
@@ -636,6 +674,8 @@ pub struct WorkspaceProcessedPrefabAssetPlan {
     component_additions: Vec<WorkspaceGeneratedComponentAddition>,
     component_list_overlays: Vec<WorkspaceGameObjectComponentListOverlay>,
     component_overlay_slot_count: usize,
+    constructor_pointers: Vec<WorkspaceGeneratedConstructorPointer>,
+    dependency_entry_count: usize,
     asset_count: usize,
     total_collection_name_bytes: usize,
 }
@@ -659,6 +699,10 @@ impl WorkspaceProcessedPrefabAssetPlan {
 
     pub fn component_list_overlays(&self) -> &[WorkspaceGameObjectComponentListOverlay] {
         &self.component_list_overlays
+    }
+
+    pub fn constructor_pointers(&self) -> &[WorkspaceGeneratedConstructorPointer] {
+        &self.constructor_pointers
     }
 
     pub fn asset_count(&self) -> usize {
@@ -793,6 +837,8 @@ pub fn plan_workspace_processed_prefab_assets(
         component_additions: Vec::new(),
         component_list_overlays: Vec::new(),
         component_overlay_slot_count: 0,
+        constructor_pointers: Vec::new(),
+        dependency_entry_count: 0,
         asset_count: 0,
         total_collection_name_bytes: 0,
     };
@@ -863,6 +909,23 @@ pub fn plan_workspace_processed_prefab_assets(
             WorkspaceProcessedPrefabAssetKind::GeneratedTransform {
                 game_object,
                 default_values,
+            },
+            limits,
+        )?;
+        let game_object_file_id = add_processed_source_file_dependency(
+            &mut plan,
+            collection_index,
+            game_object.file_index,
+            limits,
+        )?;
+        add_generated_constructor_pointer(
+            &mut plan,
+            WorkspaceGeneratedConstructorPointer {
+                source_asset: transform_asset,
+                field: WorkspaceGeneratedPointerField::TransformGameObject,
+                file_id: game_object_file_id,
+                path_id: game_object.path_id,
+                target: game_object,
             },
             limits,
         )?;
@@ -1009,6 +1072,23 @@ pub fn plan_workspace_processed_prefab_assets(
                     },
                     limits,
                 )?;
+                let root_file_id = add_processed_source_file_dependency(
+                    &mut plan,
+                    generated_prefabs,
+                    root_game_object.file_index,
+                    limits,
+                )?;
+                add_generated_constructor_pointer(
+                    &mut plan,
+                    WorkspaceGeneratedConstructorPointer {
+                        source_asset: prefab_instance,
+                        field: WorkspaceGeneratedPointerField::PrefabInstanceRootGameObject,
+                        file_id: root_file_id,
+                        path_id: root_game_object.path_id,
+                        target: *root_game_object,
+                    },
+                    limits,
+                )?;
                 add_processed_asset(
                     &mut plan,
                     prefab_hierarchies,
@@ -1035,6 +1115,8 @@ fn incomplete_processed_asset_plan(reason: &str) -> WorkspaceProcessedPrefabAsse
         component_additions: Vec::new(),
         component_list_overlays: Vec::new(),
         component_overlay_slot_count: 0,
+        constructor_pointers: Vec::new(),
+        dependency_entry_count: 0,
         asset_count: 0,
         total_collection_name_bytes: 0,
     }
@@ -1077,6 +1159,25 @@ fn add_processed_collection(
             requested,
         }
     })?;
+    if limits.max_dependencies_per_collection == 0 {
+        return Err(WorkspacePrefabProcessingError::ResourceLimitExceeded {
+            resource: "processed collection dependency entries",
+            requested: 1,
+            limit: limits.max_dependencies_per_collection,
+        });
+    }
+    let requested_dependency_entries = plan.dependency_entry_count.checked_add(1).ok_or(
+        WorkspacePrefabProcessingError::CountOverflow {
+            resource: "processed collection dependency entries",
+        },
+    )?;
+    if requested_dependency_entries > limits.max_dependency_entries {
+        return Err(WorkspacePrefabProcessingError::ResourceLimitExceeded {
+            resource: "processed collection dependency entries",
+            requested: requested_dependency_entries,
+            limit: limits.max_dependency_entries,
+        });
+    }
     let mut owned_name = String::new();
     owned_name.try_reserve_exact(name.len()).map_err(|_| {
         WorkspacePrefabProcessingError::AllocationFailed {
@@ -1086,16 +1187,136 @@ fn add_processed_collection(
     })?;
     owned_name.push_str(name);
     let collection_index = plan.collections.len();
+    let mut dependencies = Vec::new();
+    dependencies.try_reserve_exact(1).map_err(|_| {
+        WorkspacePrefabProcessingError::AllocationFailed {
+            resource: "processed collection dependency entries",
+            requested: 1,
+        }
+    })?;
+    dependencies.push(WorkspaceProcessedCollectionDependency {
+        file_id: 0,
+        target: WorkspaceProcessedDependencyTarget::ProcessedCollection { collection_index },
+    });
     plan.collections
         .push(WorkspaceProcessedAssetCollectionPlan {
             collection_index,
+            dependency_indices_complete: kind
+                != WorkspaceProcessedCollectionKind::PrefabHierarchies,
             kind,
             name: owned_name,
             assets: Vec::new(),
+            dependencies,
             next_path_id: 0,
+            source_dependency_index: HashMap::new(),
         });
     plan.total_collection_name_bytes = requested_name_bytes;
+    plan.dependency_entry_count = requested_dependency_entries;
     Ok(collection_index)
+}
+
+fn add_processed_source_file_dependency(
+    plan: &mut WorkspaceProcessedPrefabAssetPlan,
+    collection_index: usize,
+    source_file_index: usize,
+    limits: WorkspaceProcessedPrefabAssetPlanLimits,
+) -> Result<i32, WorkspacePrefabProcessingError> {
+    let collection = plan.collections.get_mut(collection_index).ok_or_else(|| {
+        processed_asset_operation_error(format!(
+            "processed asset collection index {collection_index} is unavailable"
+        ))
+    })?;
+    if let Some(&file_id) = collection.source_dependency_index.get(&source_file_index) {
+        return Ok(file_id);
+    }
+    let requested_collection_entries = collection.dependencies.len().checked_add(1).ok_or(
+        WorkspacePrefabProcessingError::CountOverflow {
+            resource: "processed collection dependency entries",
+        },
+    )?;
+    if requested_collection_entries > limits.max_dependencies_per_collection {
+        return Err(WorkspacePrefabProcessingError::ResourceLimitExceeded {
+            resource: "processed collection dependency entries",
+            requested: requested_collection_entries,
+            limit: limits.max_dependencies_per_collection,
+        });
+    }
+    let requested_total_entries = plan.dependency_entry_count.checked_add(1).ok_or(
+        WorkspacePrefabProcessingError::CountOverflow {
+            resource: "processed collection dependency entries",
+        },
+    )?;
+    if requested_total_entries > limits.max_dependency_entries {
+        return Err(WorkspacePrefabProcessingError::ResourceLimitExceeded {
+            resource: "processed collection dependency entries",
+            requested: requested_total_entries,
+            limit: limits.max_dependency_entries,
+        });
+    }
+    let file_id = i32::try_from(collection.dependencies.len()).map_err(|_| {
+        WorkspacePrefabProcessingError::CountOverflow {
+            resource: "processed collection PPtr FileID",
+        }
+    })?;
+    collection.dependencies.try_reserve(1).map_err(|_| {
+        WorkspacePrefabProcessingError::AllocationFailed {
+            resource: "processed collection dependency entries",
+            requested: requested_collection_entries,
+        }
+    })?;
+    collection
+        .source_dependency_index
+        .try_reserve(1)
+        .map_err(|_| WorkspacePrefabProcessingError::AllocationFailed {
+            resource: "processed collection dependency lookup",
+            requested: requested_collection_entries - 1,
+        })?;
+    collection
+        .dependencies
+        .push(WorkspaceProcessedCollectionDependency {
+            file_id,
+            target: WorkspaceProcessedDependencyTarget::SerializedFileCollection {
+                file_index: source_file_index,
+            },
+        });
+    collection
+        .source_dependency_index
+        .insert(source_file_index, file_id);
+    plan.dependency_entry_count = requested_total_entries;
+    Ok(file_id)
+}
+
+fn add_generated_constructor_pointer(
+    plan: &mut WorkspaceProcessedPrefabAssetPlan,
+    pointer: WorkspaceGeneratedConstructorPointer,
+    limits: WorkspaceProcessedPrefabAssetPlanLimits,
+) -> Result<(), WorkspacePrefabProcessingError> {
+    if pointer.path_id == 0 || pointer.target.path_id != pointer.path_id {
+        return Err(processed_asset_operation_error(format!(
+            "generated {:?} pointer for collection {} PathID {} has a null or mismatched target",
+            pointer.field, pointer.source_asset.collection_index, pointer.source_asset.path_id
+        )));
+    }
+    let requested = plan.constructor_pointers.len().checked_add(1).ok_or(
+        WorkspacePrefabProcessingError::CountOverflow {
+            resource: "generated constructor-time PPtrs",
+        },
+    )?;
+    if requested > limits.max_constructor_pointers {
+        return Err(WorkspacePrefabProcessingError::ResourceLimitExceeded {
+            resource: "generated constructor-time PPtrs",
+            requested,
+            limit: limits.max_constructor_pointers,
+        });
+    }
+    plan.constructor_pointers.try_reserve(1).map_err(|_| {
+        WorkspacePrefabProcessingError::AllocationFailed {
+            resource: "generated constructor-time PPtrs",
+            requested,
+        }
+    })?;
+    plan.constructor_pointers.push(pointer);
+    Ok(())
 }
 
 fn ensure_scene_processed_collection(
@@ -1486,5 +1707,100 @@ fn hierarchy_walk_error(
             limit,
         },
         other => operation_error("GameObject FetchHierarchy", other),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_plan() -> WorkspaceProcessedPrefabAssetPlan {
+        WorkspaceProcessedPrefabAssetPlan {
+            complete: true,
+            incomplete_reason: None,
+            collections: Vec::new(),
+            component_additions: Vec::new(),
+            component_list_overlays: Vec::new(),
+            component_overlay_slot_count: 0,
+            constructor_pointers: Vec::new(),
+            dependency_entry_count: 0,
+            asset_count: 0,
+            total_collection_name_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn processed_collection_dependency_indexes_follow_first_touch_order_and_deduplicate() {
+        let mut plan = empty_plan();
+        let limits = WorkspaceProcessedPrefabAssetPlanLimits::default();
+        let collection_index = add_processed_collection(
+            &mut plan,
+            WorkspaceProcessedCollectionKind::GeneratedPrefabs,
+            "Generated Prefabs",
+            limits,
+        )
+        .unwrap();
+
+        assert_eq!(
+            add_processed_source_file_dependency(&mut plan, collection_index, 9, limits).unwrap(),
+            1
+        );
+        assert_eq!(
+            add_processed_source_file_dependency(&mut plan, collection_index, 4, limits).unwrap(),
+            2
+        );
+        assert_eq!(
+            add_processed_source_file_dependency(&mut plan, collection_index, 9, limits).unwrap(),
+            1
+        );
+        assert_eq!(
+            plan.collections[collection_index].dependencies,
+            vec![
+                WorkspaceProcessedCollectionDependency {
+                    file_id: 0,
+                    target: WorkspaceProcessedDependencyTarget::ProcessedCollection {
+                        collection_index,
+                    },
+                },
+                WorkspaceProcessedCollectionDependency {
+                    file_id: 1,
+                    target: WorkspaceProcessedDependencyTarget::SerializedFileCollection {
+                        file_index: 9,
+                    },
+                },
+                WorkspaceProcessedCollectionDependency {
+                    file_id: 2,
+                    target: WorkspaceProcessedDependencyTarget::SerializedFileCollection {
+                        file_index: 4,
+                    },
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn processed_collection_dependency_index_budget_is_enforced() {
+        let mut plan = empty_plan();
+        let limits = WorkspaceProcessedPrefabAssetPlanLimits {
+            max_dependencies_per_collection: 2,
+            ..Default::default()
+        };
+        let collection_index = add_processed_collection(
+            &mut plan,
+            WorkspaceProcessedCollectionKind::MissingPrefabTransforms,
+            "Missing Prefab Transforms",
+            limits,
+        )
+        .unwrap();
+        add_processed_source_file_dependency(&mut plan, collection_index, 0, limits).unwrap();
+
+        assert!(matches!(
+            add_processed_source_file_dependency(&mut plan, collection_index, 1, limits),
+            Err(WorkspacePrefabProcessingError::ResourceLimitExceeded {
+                resource: "processed collection dependency entries",
+                requested: 3,
+                limit: 2,
+            })
+        ));
     }
 }
