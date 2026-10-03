@@ -2380,6 +2380,7 @@ fn baseline_type_scoped_field_aliases(type_name: &str) -> &'static [(&'static st
         &[("m_Index", "m_OffsetInConstantBuffer")];
     const VERTEX_DATA_ALIASES: &[(&str, &str)] = &[("m_DataSize", "m_Data")];
     const COMPUTE_SHADER_VARIANT_ALIASES: &[(&str, &str)] = &[("m_Kernels", "m_KernelParents")];
+    const SHADER_ALIASES: &[(&str, &str)] = &[("m_SubProgramBlob", "m_CompressedBlob")];
 
     match type_name {
         "AnimationClip" => ANIMATION_CLIP_ALIASES,
@@ -2405,6 +2406,7 @@ fn baseline_type_scoped_field_aliases(type_name: &str) -> &'static [(&'static st
         }
         "VertexData" => VERTEX_DATA_ALIASES,
         "ComputeShaderPlatformVariant" => COMPUTE_SHADER_VARIANT_ALIASES,
+        "Shader" => SHADER_ALIASES,
         _ => &[],
     }
 }
@@ -2412,7 +2414,7 @@ fn baseline_type_scoped_field_aliases(type_name: &str) -> &'static [(&'static st
 fn has_conditional_field_aliases(type_name: &str) -> bool {
     matches!(
         type_name,
-        "ParticleSystem" | "ShapeModule" | "ClipMuscleConstant" | "Xform" | "ValueArray"
+        "ParticleSystem" | "ShapeModule" | "ClipMuscleConstant" | "Xform" | "ValueArray" | "Mesh"
     )
 }
 
@@ -2444,6 +2446,7 @@ fn baseline_type_scoped_field_alias(
         }),
         ("ShapeModule", "m_Arc") if field_type != "float" => Some("m_ArcParameter"),
         ("ShapeModule", "m_Radius") if field_type != "float" => Some("m_RadiusParameter"),
+        ("Mesh", "m_Shapes") if field_type == "vector" => Some("m_ShapesList"),
         _ => baseline_type_scoped_field_aliases(parent_type)
             .iter()
             .find(|(source_name, _)| *source_name == field_name)
@@ -4516,6 +4519,84 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn mesh_shape_and_shader_blob_aliases_follow_baseline_rules() {
+        let type_tree = TypeTree {
+            nodes: vec![
+                type_tree_node(0, "GameObject", "Base", 0),
+                type_tree_node(1, "vector", "m_Shapes", 0),
+                type_tree_node(1, "Mesh", "m_Mesh", 0),
+                type_tree_node(2, "vector", "m_Shapes", 0),
+                type_tree_node(1, "Mesh", "m_NonVectorMesh", 0),
+                type_tree_node(2, "SInt32", "m_Shapes", 0),
+                type_tree_node(1, "Shader", "m_Shader", 0),
+                type_tree_node(2, "SInt32", "m_SubProgramBlob", 0),
+            ],
+            string_buffer: Vec::new(),
+        };
+        let hints = UnityYamlObjectConversionHints::from_type_tree(
+            &type_tree,
+            version(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            hints
+                .field_name_aliases
+                .get("m_Mesh.m_Shapes")
+                .map(String::as_str),
+            Some("m_ShapesList")
+        );
+        assert!(!hints
+            .field_name_aliases
+            .contains_key("m_NonVectorMesh.m_Shapes"));
+        assert!(!hints.field_name_aliases.contains_key("m_Shapes"));
+        assert_eq!(
+            hints
+                .field_name_aliases
+                .get("m_Shader.m_SubProgramBlob")
+                .map(String::as_str),
+            Some("m_CompressedBlob")
+        );
+
+        let value = SerializedValue::Struct(vec![
+            field("m_Shapes", SerializedValue::I32(77)),
+            field(
+                "m_Mesh",
+                SerializedValue::Struct(vec![field(
+                    "m_Shapes",
+                    SerializedValue::Array(vec![SerializedValue::I32(1)]),
+                )]),
+            ),
+            field(
+                "m_NonVectorMesh",
+                SerializedValue::Struct(vec![field("m_Shapes", SerializedValue::I32(8))]),
+            ),
+            field(
+                "m_Shader",
+                SerializedValue::Struct(vec![field("m_SubProgramBlob", SerializedValue::I32(9))]),
+            ),
+        ]);
+        let document = convert_with_object_hints(&value, &hints, |_| {
+            unreachable!("the generated Mesh/Shader fixture has no PPtrs")
+        })
+        .unwrap();
+        let output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[document],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        for expected in [
+            "m_Shapes: 77",
+            "m_ShapesList:",
+            "m_Shapes: 8",
+            "m_CompressedBlob: 9",
+        ] {
+            assert!(output.contains(expected), "missing {expected}");
+        }
+        assert!(!output.contains("m_SubProgramBlob:"));
     }
 
     #[test]
