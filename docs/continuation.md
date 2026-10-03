@@ -13,6 +13,14 @@ Phase 1: full Rust port of the local AssetRipper source baseline. The Phase 1 ga
 - The workspace inventory uses the harmless Chinese aliases 青岚雅苑 and 松风竹庭; exact input names are omitted. Later validation read and replayed sample contents, and the inventory remains incomplete and unfrozen. UABEA remains unread; the GOAL §25 gate remains OPEN.
 - Reference identity recorded in `docs/baseline.md`: AssetRipper 2.0.0, `net10.0`, 51 solution projects, including 8 test projects and 6 source generators. Full feature/dependency/platform/option audit remains incomplete.
 
+## Latest increment and next implementation
+
+- Added `export-file-yaml <serialized-file-index> <new-output-yaml> <input-file> [input-file ...]` in `src/main.rs`. It writes YAML-exportable objects from one selected SerializedFile in object-table order, resolves streamed resources through explicit root/Mixed DataPaths, and maps uniquely resolved intra-file PPtrs using source PathIDs.
+- Before writing, the command requires a complete TypeTree reference scan for every object. Missing, ambiguous, unresolved, and cross-file references fail without creating output. It reports the baseline ImageTexture-without-data omission and never replaces an existing output file.
+- Validation: 457 library tests and 21 CLI tests passed; warnings-denied Clippy, format check, CLI help invocation, 1,449-file baseline verifier, and `git diff --check` passed. See `docs/validation-log.md` and `docs/feature-parity.md`.
+- Known boundary: source PathIDs and SerializedFile object-table order are not yet proven equivalent to baseline scene `ExportableAssets` IDs and YAML ordering. This is a one-file YAML path, not complete project export; no `.meta` output or cross-file collection GUID generation exists.
+- Next: trace baseline `SceneExportCollection` YAML order and scene export-ID assignment, then connect Rust SceneDefinition/hierarchy plans to the ordered workspace YAML collection executor. Keep generated assets and foreign-file pointer handling explicit; do not claim project export parity until `.meta` identity and cross-file references are represented.
+
 ## Implemented in the Rust worktree
 
 - Bounded endian-aware binary reader with checked slices, absolute offsets, alignment, strings, and contextual errors.
