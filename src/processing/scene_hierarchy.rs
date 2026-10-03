@@ -5781,6 +5781,16 @@ mod tests {
             SceneRelationshipTarget::Null
         );
         assert_eq!(component_overlay.generated_component, component_addition);
+        assert_eq!(allocations.source_dependency_appends().len(), 1);
+        let source_dependency_append = allocations.source_dependency_appends()[0];
+        assert_eq!(source_dependency_append.source_file_index, 0);
+        assert_eq!(source_dependency_append.target_collection_index, 2);
+        assert_eq!(source_dependency_append.first_component_owner, game_object);
+        assert_eq!(
+            source_dependency_append.target_asset,
+            missing_transform_collection.assets[0].identity
+        );
+        assert_eq!(source_dependency_append.file_id, None);
         assert_eq!(allocations.constructor_pointers().len(), 2);
         assert_eq!(
             allocations.constructor_pointers()[0].field,
