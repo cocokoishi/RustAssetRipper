@@ -728,3 +728,10 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Synthetic tests verify direct and `Data`-wrapped layer values, both historical/current LayerArray names, target identity for layer 0, array bounds, and source append ordering. With three external identifiers, the AnimatorController, LightingData, and Prefab dependency requests receive FileIDs 4, 5, and 6.
 - `cargo test --workspace --locked --quiet`: exit 0, 312 library and 10 CLI tests passed (0 doc tests). `cargo clippy --workspace --all-targets --locked -- -D warnings` and `cargo fmt --all -- --check` pass; `tools/verify-baseline.ps1` confirms 1,449 reference files unchanged; `git diff --check` passes.
 - No user AssetBundle, UABEA, or Unity-produced input was used. The generated StateMachine PathID, source PPtr serialization, source dependency table mutation, typed GameObject component writeback, and generated Prefab serialization/export remain incomplete; Phase 1 remains open.
+
+## Bounded SerializedValue tree mutation (2026-10-02)
+
+- Added a unique mutable field lookup through nested `Base` structs. It rejects duplicate direct names, duplicate matches across the inheritance chain, and malformed mutation paths; field-path allocation is fallible.
+- Added bounded, fallible array append and mutable array-slice access. A synthetic component array keeps its null and existing cross-file PPtr slots at indexes 0 and 1, appends a new PPtr at index 2, rejects a fourth element at the configured limit without changing the array, and rejects duplicate inherited field names.
+- `cargo test --workspace --locked --quiet`: exit 0, 314 library and 10 CLI tests passed (0 doc tests). `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo fmt --all -- --check`, `tools/verify-baseline.ps1` (1,449 reference files unchanged), and `git diff --check`: exit 0.
+- This is only an in-memory typed-value edit. It does not encode TypeTree object bytes, adjust object sizes or metadata, or export generated components. No user AssetBundle, UABEA, or Unity-produced input was used; Phase 1 remains open.

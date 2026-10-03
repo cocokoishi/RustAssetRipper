@@ -426,3 +426,11 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - This target is still symbolic: generated AnimatorController assets and their allocation sequence are not modeled, so no output StateMachine PathID or serializable source PPtr is claimed.
 - Synthetic tests cover direct and `Data`-wrapped LayerConstant values, current and historical array names, valid/invalid indexes, and target identity plus FileIDs 4/5/6 after three external identifiers. Verification passed: 312 library and 10 CLI tests, warnings-denied Clippy, format check, 1,449-file baseline verifier, and `git diff --check`.
 - Next: inspect the baseline's complete `AnimatorStateMachineContext`/`VirtualAnimationFactory` allocation order; model enough of the generated AnimatorController collection to resolve this symbolic target; then serialize the source dependency table and layer PPtr while retaining the typed component overlay work.
+
+## Bounded SerializedValue tree mutation
+
+- Current phase: Phase 1; gate not passed. This increment follows pushed revision `d7beaa9cc126393fef3ed105d926bc5337cb8f87`. Only `cocokoishi/RustAssetRipper` is an authorized cloud write target; the local AssetRipper baseline remains read-only. No UABEA or user AssetBundle content was accessed.
+- Added mutable unique field lookup through nested `Base` structs, fallible array append with a caller-provided element limit, and mutable ordered array access. Duplicate/ambiguous base fields and capacity/limit failures remain errors.
+- Tests verify a null source PPtr and an existing cross-file PPtr remain in indexes 0 and 1, a new PPtr appends at index 2, a failed append leaves the array unchanged, and duplicate inherited field matches are rejected. Verification passed: 314 library and 10 CLI tests, warnings-denied Clippy, format check, 1,449-file baseline verifier, and `git diff --check`.
+- The values remain in memory: there is no TypeTree object encoder, SerializedFile metadata/object-size rebuild, or export path yet. Phase 1 remains open.
+- Next: implement a bounded TypeTree-backed object payload encoder that preserves serialized field order, PPtrs, array shape, endianness, alignment, raw leaves, and trailing bytes; then verify exact fixture bytes and semantic decode behavior before using it for component writeback.

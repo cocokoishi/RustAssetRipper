@@ -273,12 +273,118 @@ impl SerializedValue {
         Ok(found)
     }
 
+    /// Finds one field in this struct and nested `Base` structs for a controlled value update.
+    /// Duplicate fields and duplicate matches across the base chain are rejected.
+    pub fn unique_field_in_base_chain_mut(
+        &mut self,
+        name: &str,
+    ) -> Result<Option<&mut SerializedValue>, SerializedValueMutationError> {
+        if !matches!(self, Self::Struct(_)) {
+            return Err(SerializedValueMutationError::NotStruct);
+        }
+
+        let mut current_path = Vec::<usize>::new();
+        let mut found_path = None::<Vec<usize>>;
+        let mut current: &SerializedValue = self;
+        while let Self::Struct(fields) = current {
+            if let Some(field_index) = unique_field_index(fields, name)? {
+                if found_path.is_some() {
+                    return Err(SerializedValueMutationError::DuplicateField {
+                        name: name.to_owned(),
+                        match_count: 2,
+                    });
+                }
+                let path_length = current_path
+                    .len()
+                    .checked_add(1)
+                    .ok_or(SerializedValueMutationError::FieldPathDepthOverflow)?;
+                let mut path = Vec::new();
+                path.try_reserve_exact(path_length).map_err(|_| {
+                    SerializedValueMutationError::AllocationFailed {
+                        requested: path_length,
+                    }
+                })?;
+                path.extend_from_slice(&current_path);
+                path.push(field_index);
+                found_path = Some(path);
+            }
+
+            let Some(base_index) = unique_field_index(fields, "Base")? else {
+                break;
+            };
+            let base = &fields[base_index].value;
+            if !matches!(base, Self::Struct(_)) {
+                break;
+            }
+            let requested_path_depth = current_path
+                .len()
+                .checked_add(1)
+                .ok_or(SerializedValueMutationError::FieldPathDepthOverflow)?;
+            current_path.try_reserve(1).map_err(|_| {
+                SerializedValueMutationError::AllocationFailed {
+                    requested: requested_path_depth,
+                }
+            })?;
+            current_path.push(base_index);
+            current = base;
+        }
+
+        let Some(path) = found_path else {
+            return Ok(None);
+        };
+        let mut target = self;
+        for field_index in path {
+            let Self::Struct(fields) = target else {
+                return Err(SerializedValueMutationError::InvalidFieldPath);
+            };
+            let Some(field) = fields.get_mut(field_index) else {
+                return Err(SerializedValueMutationError::InvalidFieldPath);
+            };
+            target = &mut field.value;
+        }
+        Ok(Some(target))
+    }
+
     /// Returns the ordered elements when this value is an array.
     pub fn array_elements(&self) -> Option<&[SerializedValue]> {
         match self {
             Self::Array(values) => Some(values),
             _ => None,
         }
+    }
+
+    /// Returns the array elements mutably while leaving their order and values intact.
+    pub fn array_elements_mut(&mut self) -> Option<&mut [SerializedValue]> {
+        match self {
+            Self::Array(values) => Some(values.as_mut_slice()),
+            _ => None,
+        }
+    }
+
+    /// Appends one value to an array after checking both the caller's element bound and capacity.
+    pub fn push_array_element_bounded(
+        &mut self,
+        value: SerializedValue,
+        maximum_elements: usize,
+    ) -> Result<(), SerializedValueMutationError> {
+        let Self::Array(values) = self else {
+            return Err(SerializedValueMutationError::NotArray);
+        };
+        let requested = values
+            .len()
+            .checked_add(1)
+            .ok_or(SerializedValueMutationError::ArrayElementCountOverflow)?;
+        if requested > maximum_elements {
+            return Err(SerializedValueMutationError::ArrayElementLimitExceeded {
+                requested,
+                limit: maximum_elements,
+            });
+        }
+        values
+            .try_reserve(1)
+            .map_err(|_| SerializedValueMutationError::AllocationFailed { requested })?;
+        values.push(value);
+        Ok(())
     }
 
     /// Returns the raw file-table index and PathID when this value is a PPtr.
@@ -288,6 +394,27 @@ impl SerializedValue {
             _ => None,
         }
     }
+}
+
+fn unique_field_index(
+    fields: &[SerializedFieldValue],
+    name: &str,
+) -> Result<Option<usize>, SerializedValueMutationError> {
+    let mut matching = fields
+        .iter()
+        .enumerate()
+        .filter(|(_, field)| field.name == name);
+    let Some((index, _)) = matching.next() else {
+        return Ok(None);
+    };
+    if matching.next().is_some() {
+        let match_count = fields.iter().filter(|field| field.name == name).count();
+        return Err(SerializedValueMutationError::DuplicateField {
+            name: name.to_owned(),
+            match_count,
+        });
+    }
+    Ok(Some(index))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -309,6 +436,44 @@ impl Display for SerializedValueLookupError {
 }
 
 impl Error for SerializedValueLookupError {}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SerializedValueMutationError {
+    NotStruct,
+    NotArray,
+    DuplicateField { name: String, match_count: usize },
+    FieldPathDepthOverflow,
+    InvalidFieldPath,
+    ArrayElementCountOverflow,
+    ArrayElementLimitExceeded { requested: usize, limit: usize },
+    AllocationFailed { requested: usize },
+}
+
+impl Display for SerializedValueMutationError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotStruct => f.write_str("field mutation requires a struct value"),
+            Self::NotArray => f.write_str("array append requires an array value"),
+            Self::DuplicateField { name, match_count } => write!(
+                f,
+                "field '{name}' occurs {match_count} times along the decoded base chain"
+            ),
+            Self::FieldPathDepthOverflow => f.write_str("field path depth overflows usize"),
+            Self::InvalidFieldPath => f.write_str("decoded field path changed during mutation"),
+            Self::ArrayElementCountOverflow => f.write_str("array element count overflows usize"),
+            Self::ArrayElementLimitExceeded { requested, limit } => write!(
+                f,
+                "array append would create {requested} elements, exceeding the limit of {limit}"
+            ),
+            Self::AllocationFailed { requested } => write!(
+                f,
+                "could not reserve capacity for {requested} serialized value entries"
+            ),
+        }
+    }
+}
+
+impl Error for SerializedValueMutationError {}
 
 impl SerializedFileMetadata {
     /// Decode one object's payload using its resolved serialized type and TypeTree.
@@ -1773,6 +1938,102 @@ mod tests {
                 match_count: 2,
             })
         );
+    }
+
+    #[test]
+    fn inherited_component_array_mutation_preserves_source_slots_and_checks_bounds() {
+        let mut root = SerializedValue::Struct(vec![super::SerializedFieldValue {
+            name: "Base".to_owned(),
+            value: SerializedValue::Struct(vec![super::SerializedFieldValue {
+                name: "m_Component".to_owned(),
+                value: SerializedValue::Array(vec![
+                    SerializedValue::PPtr {
+                        file_id: 0,
+                        path_id: 0,
+                    },
+                    SerializedValue::PPtr {
+                        file_id: 2,
+                        path_id: 41,
+                    },
+                ]),
+            }]),
+        }]);
+
+        let components = root
+            .unique_field_in_base_chain_mut("m_Component")
+            .unwrap()
+            .unwrap();
+        components
+            .push_array_element_bounded(
+                SerializedValue::PPtr {
+                    file_id: 3,
+                    path_id: 99,
+                },
+                3,
+            )
+            .unwrap();
+        assert!(matches!(
+            components.push_array_element_bounded(
+                SerializedValue::PPtr {
+                    file_id: 4,
+                    path_id: 100,
+                },
+                3
+            ),
+            Err(
+                super::SerializedValueMutationError::ArrayElementLimitExceeded {
+                    requested: 4,
+                    limit: 3,
+                }
+            )
+        ));
+
+        let components = root
+            .unique_field_in_base_chain("m_Component")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            components.array_elements().unwrap(),
+            &[
+                SerializedValue::PPtr {
+                    file_id: 0,
+                    path_id: 0,
+                },
+                SerializedValue::PPtr {
+                    file_id: 2,
+                    path_id: 41,
+                },
+                SerializedValue::PPtr {
+                    file_id: 3,
+                    path_id: 99,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn inherited_field_mutation_rejects_duplicate_matches() {
+        let mut root = SerializedValue::Struct(vec![
+            super::SerializedFieldValue {
+                name: "m_Component".to_owned(),
+                value: SerializedValue::Array(Vec::new()),
+            },
+            super::SerializedFieldValue {
+                name: "Base".to_owned(),
+                value: SerializedValue::Struct(vec![super::SerializedFieldValue {
+                    name: "m_Component".to_owned(),
+                    value: SerializedValue::Array(Vec::new()),
+                }]),
+            },
+        ]);
+
+        assert!(matches!(
+            root.unique_field_in_base_chain_mut("m_Component"),
+            Err(super::SerializedValueMutationError::DuplicateField {
+                name,
+                match_count: 2,
+            }) if name == "m_Component"
+        ));
     }
 
     fn node(
