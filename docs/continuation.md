@@ -699,7 +699,7 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Added a generated two-file SerializedFile fixture whose TypeTree dictionary contains a PPtr value. The test checks the exact `m_Targets[0].second` edge resolves to file 1/object 0, then verifies that workspace YAML maps the target through its exported fileID and collection GUID/type.
 - Focused integration test passed; full workspace passed with 398 library tests, 10 CLI tests, and 0 doc tests. Warnings-denied Clippy, format check, baseline verifier (1,449 files unchanged), and `git diff --check` all passed.
 - Still incomplete: the fixture is synthetic and there is no Unity-produced input or direct C# runtime differential. No-TypeTree dictionary schemas, generated class walkers, and Phase 1 remain open; Phase 2 remains locked.
-- PropertyName scalar handling is completed below. Next inspect the remaining generated type transformations, starting with the editor `ExposedReferenceTable.m_References` sequence rule.
+- PropertyName scalar handling and the editor ExposedReferenceTable sequence rule are completed below. Next inventory the remaining generated type transformations in the local baseline.
 
 ## PropertyName scalar YAML and Utf8String payloads
 
@@ -707,4 +707,12 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Ported the baseline PropertyName conversion for both raw TypeTree `string` wrappers and generated `PropertyName` nodes. Int32 IDs become decimal YAML string scalars; UTF-8 IDs preserve their text. The SerializedFile reader/writer now decode and re-encode the matching `Utf8String` array-of-char form with alignment.
 - Focused conversion, wildcard-path, malformed-schema/value, and Utf8String round-trip checks passed. Full workspace passed with 402 library tests, 10 CLI tests, and 0 doc tests; warnings-denied Clippy, format, baseline verifier (1,449 files unchanged), and diff checks all passed.
 - Still incomplete: synthetic fixtures only; no Unity-produced input or direct C# runtime differential. Other generated TypeTree transformations and Phase 1 remain open; Phase 2 remains locked.
-- Next: port the baseline editor `ExposedReferenceTable.m_References` sequence policy from `Pass002_RenameSubnodes` and validate it with separate editor/release shaped fixtures.
+- The Editor `ExposedReferenceTable.m_References` policy is completed below; next inventory the remaining generated type transformations in the local baseline.
+
+## Editor ExposedReferenceTable sequence YAML
+
+- Current phase: Phase 1; gate not passed. This increment builds from pushed revision `caf409535e0fd78f579379c9986df48771c26de5`. Only `cocokoishi/RustAssetRipper`'s canonical repository is a push target; no other remote repository, UABEA, or user AssetBundle content was accessed.
+- Ported the baseline Editor transformation: an array-shaped `m_References` field owned by `ExposedReferenceTable` is serialized as a block sequence, including when its raw TypeTree node says `map`. `Pass108_WalkMethods.GetName` uses the original field name, so the YAML key remains `m_References`. Other string-key maps keep their dictionary mapping representation.
+- Synthetic tests verify sequence entries, ordinary dictionary preservation, and empty sequence output. Full workspace passed with 403 library tests, 10 CLI tests, and 0 doc tests; warnings-denied Clippy, format, baseline verifier (1,449 files unchanged), and diff checks all passed.
+- Still incomplete: no Unity-produced fixture or direct C# runtime differential; other generated type transformations and Phase 1 remain open; Phase 2 remains locked.
+- Next: inventory the remaining `Pass002_RenameSubnodes` behaviors against current TypeTree hint handling and select the next unported YAML transformation.

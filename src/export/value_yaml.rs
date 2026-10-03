@@ -89,6 +89,8 @@ pub struct UnityYamlObjectConversionHints {
     pub empty_array_kinds: HashMap<String, UnityYamlEmptyArrayKind>,
     /// Paths may contain [*] where a TypeTree struct appears as an array element.
     pub flow_mapped_struct_paths: HashSet<String>,
+    /// Paths emitted as lists even when their TypeTree shape is a dictionary.
+    pub force_block_sequence_paths: HashSet<String>,
     /// TypeTree fields marked `IgnoreInMetaFiles`, using [*] for array elements.
     pub importer_excluded_field_paths: HashSet<String>,
     /// Dictionary representation derived from TypeTree `map` and `pair` nodes.
@@ -809,6 +811,31 @@ impl<'a> UnityYamlTypeTreeLayout<'a> {
             )?);
         }
 
+        if node_type == "ExposedReferenceTable" {
+            for child_index in self.child_indices(node_index)? {
+                let child = self.node(child_index)?;
+                if child.name.as_deref() == Some("m_References")
+                    && self.array_element_node(child_index)?.is_some()
+                {
+                    let sequence_path = child_field_path(
+                        field_path,
+                        "m_References",
+                        budget.limits.max_field_path_bytes,
+                    )?;
+                    if !hints.force_block_sequence_paths.contains(&sequence_path) {
+                        hints
+                            .force_block_sequence_paths
+                            .try_reserve(1)
+                            .map_err(|_| UnityYamlObjectConversionError::AllocationFailed {
+                                resource: "Unity YAML block-sequence override paths",
+                                requested: hints.force_block_sequence_paths.len().saturating_add(1),
+                            })?;
+                        hints.force_block_sequence_paths.insert(sequence_path);
+                    }
+                }
+            }
+        }
+
         let array_element_node = self.array_element_node(node_index)?;
         if node_type == "map" && array_element_node.is_none() {
             return Err(UnityYamlObjectConversionError::InvalidTypeTree {
@@ -817,7 +844,7 @@ impl<'a> UnityYamlTypeTreeLayout<'a> {
             });
         }
         if let Some(element_node) = array_element_node {
-            if node_type == "map" {
+            if node_type == "map" && !hints.force_block_sequence_paths.contains(field_path) {
                 let representation =
                     self.dictionary_representation(node_index, element_node, unity_version)?;
                 if let Some(previous) = hints.dictionary_representations.get(field_path) {
@@ -1311,6 +1338,21 @@ fn dictionary_representation_for_path(
         .copied())
 }
 
+fn force_block_sequence_for_path(
+    field_path: &str,
+    hints: &UnityYamlObjectConversionHints,
+    limits: UnityYamlObjectConversionLimits,
+) -> Result<bool, UnityYamlObjectConversionError> {
+    if hints.force_block_sequence_paths.contains(field_path) {
+        return Ok(true);
+    }
+    if !field_path.contains('[') {
+        return Ok(false);
+    }
+    let canonical_path = canonical_array_path(field_path, limits.max_field_path_bytes)?;
+    Ok(hints.force_block_sequence_paths.contains(&canonical_path))
+}
+
 fn guid_schema_for_path<'a>(
     field_path: &str,
     hints: &'a UnityYamlObjectConversionHints,
@@ -1547,21 +1589,24 @@ fn convert_array<F>(
 where
     F: FnMut(UnityYamlPPtrRequest<'_>) -> ProjectPointerResolution,
 {
-    if let Some(representation) = dictionary_representation_for_path(field_path, hints, limits)? {
-        return convert_dictionary(
-            items,
-            field_path,
-            depth,
-            representation,
-            source,
-            hints,
-            field_mode,
-            unity_version,
-            missing_reference_guid,
-            limits,
-            budget,
-            resolve_pointer,
-        );
+    if !force_block_sequence_for_path(field_path, hints, limits)? {
+        if let Some(representation) = dictionary_representation_for_path(field_path, hints, limits)?
+        {
+            return convert_dictionary(
+                items,
+                field_path,
+                depth,
+                representation,
+                source,
+                hints,
+                field_mode,
+                unity_version,
+                missing_reference_guid,
+                limits,
+                budget,
+                resolve_pointer,
+            );
+        }
     }
 
     if items.is_empty() {
@@ -3143,6 +3188,111 @@ mod tests {
         )
         .unwrap();
         assert_eq!(legacy_output.matches("    data:").count(), 2);
+    }
+
+    #[test]
+    fn exposed_reference_table_entries_use_block_sequences_instead_of_keyed_maps() {
+        let exposed_tree = TypeTree {
+            nodes: vec![
+                type_tree_node(0, "ExposedReferenceTable", "Base", 0),
+                type_tree_node(1, "map", "m_References", 0),
+                type_tree_node(2, "Array", "Array", 0),
+                type_tree_node(3, "SInt32", "size", 0),
+                type_tree_node(3, "pair", "data", 0),
+                type_tree_node(4, "string", "first", 0),
+                type_tree_node(5, "Array", "Array", 0),
+                type_tree_node(6, "SInt32", "size", 0),
+                type_tree_node(6, "char", "data", 0),
+                type_tree_node(4, "SInt32", "second", 0),
+            ],
+            string_buffer: Vec::new(),
+        };
+        let exposed_hints = UnityYamlObjectConversionHints::from_type_tree(
+            &exposed_tree,
+            version(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        assert!(exposed_hints
+            .force_block_sequence_paths
+            .contains("m_References"));
+        assert!(!exposed_hints
+            .dictionary_representations
+            .contains_key("m_References"));
+        assert_eq!(
+            exposed_hints.empty_array_kinds.get("m_References"),
+            Some(&UnityYamlEmptyArrayKind::BlockSequence)
+        );
+
+        let entries = SerializedValue::Array(vec![
+            SerializedValue::Struct(vec![
+                field("first", SerializedValue::StringBytes(b"Player".to_vec())),
+                field("second", SerializedValue::I32(9)),
+            ]),
+            SerializedValue::Struct(vec![
+                field(
+                    "first",
+                    SerializedValue::StringBytes(b"Object.Name".to_vec()),
+                ),
+                field("second", SerializedValue::I32(14)),
+            ]),
+        ]);
+        let exposed_value = SerializedValue::Struct(vec![field("m_References", entries.clone())]);
+        let exposed_document = convert_with_object_hints(&exposed_value, &exposed_hints, |_| {
+            unreachable!("the synthetic table has no PPtrs")
+        })
+        .unwrap();
+        let exposed_yaml = object_field(&exposed_document, "m_References");
+        let UnityYamlNodeKind::Sequence { style, items } = &exposed_yaml.kind else {
+            panic!("editor exposed references are a YAML sequence")
+        };
+        assert_eq!(*style, UnityYamlSequenceStyle::Block);
+        assert_eq!(items.len(), 2);
+        assert!(matches!(items[0].kind, UnityYamlNodeKind::Mapping { .. }));
+
+        let mut ordinary_tree = exposed_tree.clone();
+        ordinary_tree.nodes[0].type_name = Some("GameObject".to_owned());
+        let ordinary_hints = UnityYamlObjectConversionHints::from_type_tree(
+            &ordinary_tree,
+            version(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        assert!(!ordinary_hints
+            .force_block_sequence_paths
+            .contains("m_References"));
+        assert_eq!(
+            ordinary_hints
+                .dictionary_representations
+                .get("m_References"),
+            Some(&UnityYamlDictionaryRepresentation::KeyedMapping)
+        );
+        let ordinary_value = SerializedValue::Struct(vec![field("m_References", entries)]);
+        let ordinary_document = convert_with_object_hints(&ordinary_value, &ordinary_hints, |_| {
+            unreachable!("the synthetic dictionary has no PPtrs")
+        })
+        .unwrap();
+        let ordinary_yaml = object_field(&ordinary_document, "m_References");
+        let UnityYamlNodeKind::Mapping { entries, .. } = &ordinary_yaml.kind else {
+            panic!("ordinary string-key dictionaries remain YAML mappings")
+        };
+        assert_eq!(entries.len(), 2);
+
+        let empty = SerializedValue::Struct(vec![field(
+            "m_References",
+            SerializedValue::Array(Vec::new()),
+        )]);
+        let empty_document = convert_with_object_hints(&empty, &exposed_hints, |_| {
+            unreachable!("the empty table has no PPtrs")
+        })
+        .unwrap();
+        assert_eq!(
+            object_field(&empty_document, "m_References").kind,
+            UnityYamlNodeKind::Sequence {
+                style: UnityYamlSequenceStyle::Block,
+                items: Vec::new(),
+            }
+        );
     }
 
     #[test]
