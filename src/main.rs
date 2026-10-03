@@ -1,9 +1,22 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::ffi::OsString;
-use std::io;
-use std::path::PathBuf;
+use std::fs::OpenOptions;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
+use assetripper::export::pointer_map::{
+    ExportCollectionPointerMetadata, ExportPointerMapLimits, ExportedAssetPointerEntry,
+    ProjectExportPointerMap, UnityProjectAssetType,
+};
+use assetripper::export::scene_collection::{ExportAssetCollectionIdentity, ExportAssetIdentity};
+use assetripper::export::streamed_assets::StreamedYamlAssetLimits;
+use assetripper::export::unity_yaml::{write_unity_yaml_documents, UnityYamlWriteLimits};
+use assetripper::export::value_yaml::UnityYamlObjectConversionLimits;
+use assetripper::export::workspace_yaml::{
+    workspace_object_to_unity_yaml_document_with_streamed_resources,
+    WorkspaceStreamedYamlResourceContext,
+};
 use assetripper::io::dependency::DependencyIndexLimits;
 use assetripper::io::filesystem::VirtualFileSystem;
 use assetripper::io::game_structure::{MixedGameStructure, MixedGameStructureLimits};
@@ -41,8 +54,8 @@ use assetripper::processing::scene_metadata::{
 };
 use assetripper::resource::{
     resolve_streamed_resource_info, scan_streamed_resource_infos, ResolvedResourceFile,
-    RootResourceCatalogLimits, RootResourceFileCatalog, StreamedResourceInfo,
-    StreamedResourceResolution, StreamedResourceScanLimits,
+    RootResourceCatalogLimits, RootResourceFileCatalog, StreamedResourceContentLimits,
+    StreamedResourceInfo, StreamedResourceResolution, StreamedResourceScanLimits,
 };
 use assetripper::scheme::{
     BatchMountLimits, BatchMountReport, ContainerMountLimits, PathMountInput, SchemeReader,
@@ -123,6 +136,9 @@ fn run(arguments: impl Iterator<Item = OsString>) -> Result<(), Box<dyn Error>> 
         println!("assetripper-rs {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
+    if command == "export-object-yaml" {
+        return export_object_yaml_from_arguments(arguments);
+    }
     if command != "inspect" && command != "inspect-files" {
         print_usage();
         return Err(invalid_input(format!("unknown command '{command}'")));
@@ -149,6 +165,193 @@ fn run(arguments: impl Iterator<Item = OsString>) -> Result<(), Box<dyn Error>> 
     } else {
         inspect_directories(&input_paths)
     }
+}
+
+fn export_object_yaml_from_arguments(
+    arguments: impl Iterator<Item = OsString>,
+) -> Result<(), Box<dyn Error>> {
+    let mut arguments = arguments;
+    let serialized_file_index =
+        parse_required_argument::<usize>(arguments.next(), "SerializedFile index")?;
+    let path_id = parse_required_argument::<i64>(arguments.next(), "object PathID")?;
+    let output_path = arguments
+        .next()
+        .map(PathBuf::from)
+        .ok_or_else(|| invalid_input("export-object-yaml requires an output YAML path"))?;
+    let mut input_files = Vec::new();
+    for argument in arguments {
+        if input_files.len() >= MAX_INPUT_PATHS {
+            return Err(invalid_input(format!(
+                "input path count exceeds {MAX_INPUT_PATHS}"
+            )));
+        }
+        input_files.push(PathBuf::from(argument));
+    }
+    if input_files.is_empty() {
+        return Err(invalid_input(
+            "export-object-yaml requires at least one explicitly selected input file",
+        ));
+    }
+    let stdout = io::stdout();
+    let mut output = stdout.lock();
+    export_object_yaml_to(
+        &input_files,
+        serialized_file_index,
+        path_id,
+        &output_path,
+        &mut output,
+    )
+}
+
+fn parse_required_argument<T>(
+    argument: Option<OsString>,
+    description: &'static str,
+) -> Result<T, Box<dyn Error>>
+where
+    T: std::str::FromStr,
+{
+    let argument = argument
+        .ok_or_else(|| invalid_input(format!("export-object-yaml requires {description}")))?;
+    let argument = argument
+        .into_string()
+        .map_err(|_| invalid_input(format!("{description} must be valid UTF-8")))?;
+    argument
+        .parse()
+        .map_err(|_| invalid_input(format!("invalid {description} '{argument}'")))
+}
+
+fn export_object_yaml_to<W: io::Write>(
+    input_files: &[PathBuf],
+    serialized_file_index: usize,
+    path_id: i64,
+    output_path: &Path,
+    status_output: &mut W,
+) -> Result<(), Box<dyn Error>> {
+    let (mut filesystem, selected_paths, mount_report) = mount_input_files(input_files)?;
+    let mixed = MixedGameStructure::from_vfs_paths(
+        &filesystem,
+        &selected_paths,
+        MixedGameStructureLimits::default(),
+    )?;
+    let root_resources = RootResourceFileCatalog::from_mounted_explicit_resource_files(
+        &filesystem,
+        &mount_report.explicit_root_resource_files,
+        RootResourceCatalogLimits::default(),
+    )?;
+    if mixed.serialized_file_inputs.is_empty() {
+        return Err(invalid_input(
+            "the selected files contain no recognized SerializedFile input",
+        ));
+    }
+    let (workspace, _) = SerializedFileWorkspace::load_from_vfs_with_dependencies(
+        &mut filesystem,
+        &mixed.serialized_file_inputs,
+        &mixed.registered_files,
+        &mixed.data_paths,
+        SerializedFileWorkspaceLimits::default(),
+        DependencyIndexLimits::default(),
+        ContainerMountLimits::default(),
+    )?;
+    let file = workspace
+        .files()
+        .get(serialized_file_index)
+        .ok_or_else(|| {
+            invalid_input(format!(
+                "SerializedFile index {serialized_file_index} is out of range for {} loaded files",
+                workspace.files().len()
+            ))
+        })?;
+    let mut matching_objects = file
+        .metadata
+        .objects
+        .iter()
+        .enumerate()
+        .filter(|(_, object)| object.path_id == path_id);
+    let (object_index, _) = matching_objects.next().ok_or_else(|| {
+        invalid_input(format!(
+            "SerializedFile {serialized_file_index} has no object with PathID {path_id}"
+        ))
+    })?;
+    if matching_objects.next().is_some() {
+        return Err(invalid_data_owned(format!(
+            "SerializedFile {serialized_file_index} has multiple objects with PathID {path_id}"
+        ))
+        .into());
+    }
+
+    let objects =
+        ObjectWorkspace::load_from_vfs(&filesystem, &workspace, ObjectWorkspaceLimits::default())?;
+    let object = objects
+        .get(serialized_file_index, object_index)
+        .ok_or_else(|| invalid_data("selected workspace object is missing"))?;
+    let class_id = object
+        .class_id
+        .map(i32::from)
+        .ok_or_else(|| invalid_data("selected object has no class ID"))?;
+    let source = ExportAssetIdentity {
+        collection: ExportAssetCollectionIdentity::SerializedFile {
+            file_index: serialized_file_index,
+        },
+        object_index,
+        path_id,
+        class_id,
+    };
+    let const_collection_index = 0;
+    let const_file_id = 1;
+    let pointer_map = ProjectExportPointerMap::new(
+        &[ExportedAssetPointerEntry {
+            asset: source,
+            file_id: const_file_id,
+            collection_index: const_collection_index,
+        }],
+        &[ExportCollectionPointerMetadata {
+            collection_index: const_collection_index,
+            // This one-object YAML probe writes no Unity .meta file or foreign collection GUID.
+            guid: [0; 16],
+            asset_type: UnityProjectAssetType::Serialized,
+        }],
+        ExportPointerMapLimits::default(),
+    )?;
+    let reference_graph = workspace.reference_graph(MultiFileReferenceGraphLimits::default())?;
+    let provider = PlatformResourceProvider::with_mixed_data_paths(None, Some(&mixed.data_paths));
+    let resource_context = WorkspaceStreamedYamlResourceContext {
+        filesystem: &filesystem,
+        root_catalog: &root_resources,
+        provider: &provider,
+        content_limits: StreamedResourceContentLimits::default(),
+        staging_limits: StreamedYamlAssetLimits::default(),
+    };
+    let Some(document) = workspace_object_to_unity_yaml_document_with_streamed_resources(
+        &workspace,
+        &reference_graph,
+        &pointer_map,
+        object,
+        source,
+        const_file_id,
+        const_collection_index,
+        None,
+        UnityYamlObjectConversionLimits::default(),
+        &resource_context,
+    )?
+    else {
+        writeln!(
+            status_output,
+            "Skipped SerializedFile {serialized_file_index} PathID {path_id}: the baseline YAML exporter omits image textures without usable inline or streamed data."
+        )?;
+        return Ok(());
+    };
+    let yaml = write_unity_yaml_documents(&[document], UnityYamlWriteLimits::default())?;
+    let mut destination = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output_path)?;
+    destination.write_all(yaml.as_bytes())?;
+    writeln!(
+        status_output,
+        "Wrote one YAML object from SerializedFile {serialized_file_index} PathID {path_id} to {:?}.",
+        output_path
+    )?;
+    Ok(())
 }
 
 fn inspect_explicit_files(input_files: &[PathBuf]) -> Result<(), Box<dyn Error>> {
@@ -2103,7 +2306,7 @@ fn invalid_data_owned(message: String) -> io::Error {
 
 fn print_usage() {
     println!(
-        "Usage:\n  assetripper-rs inspect <input-directory> [input-directory ...]\n  assetripper-rs inspect-files <input-file> [input-file ...]\n  assetripper-rs --help\n  assetripper-rs --version\n\n`inspect` mounts directories into isolated VFS roots. `inspect-files` dispatches explicitly selected file paths, registers top-level ResourceFiles as GameBundle root inputs, and reports the parsed SerializedFiles."
+        "Usage:\n  assetripper-rs inspect <input-directory> [input-directory ...]\n  assetripper-rs inspect-files <input-file> [input-file ...]\n  assetripper-rs export-object-yaml <serialized-file-index> <path-id> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs --help\n  assetripper-rs --version\n\n`inspect` mounts directories into isolated VFS roots. `inspect-files` dispatches explicitly selected file paths, registers top-level ResourceFiles as GameBundle root inputs, and reports the parsed SerializedFiles. `export-object-yaml` writes one decoded object as YAML, resolving streamed Mesh and image-texture bytes from the selected input files; it creates a new output file and fails if that path already exists. It is a single-object YAML path, not a complete Unity project export."
     );
 }
 
@@ -2551,6 +2754,99 @@ mod tests {
         file
     }
 
+    fn make_streamed_image_texture_file() -> Vec<u8> {
+        make_streamed_image_texture_file_with_stream("texture.resS", 3)
+    }
+
+    fn make_streamed_image_texture_file_with_stream(
+        stream_path: &str,
+        stream_size: u32,
+    ) -> Vec<u8> {
+        let mut string_buffer = Vec::new();
+        let root_type = push_type_tree_string(&mut string_buffer, "ImageTexture");
+        let empty_name = push_type_tree_string(&mut string_buffer, "");
+        let streaming_info_type = push_type_tree_string(&mut string_buffer, "StreamingInfo");
+        let stream_data_name = push_type_tree_string(&mut string_buffer, "m_StreamData_C189");
+        let string_type = push_type_tree_string(&mut string_buffer, "string");
+        let path_name = push_type_tree_string(&mut string_buffer, "path");
+        let array_type = push_type_tree_string(&mut string_buffer, "Array");
+        let size_name = push_type_tree_string(&mut string_buffer, "size");
+        let int_type = push_type_tree_string(&mut string_buffer, "int");
+        let data_name = push_type_tree_string(&mut string_buffer, "data");
+        let char_type = push_type_tree_string(&mut string_buffer, "char");
+        let offset_type = push_type_tree_string(&mut string_buffer, "UInt64");
+        let offset_name = push_type_tree_string(&mut string_buffer, "offset");
+        let uint32_type = push_type_tree_string(&mut string_buffer, "UInt32");
+        let typeless_data_type = push_type_tree_string(&mut string_buffer, "TypelessData");
+        let inline_data_name = push_type_tree_string(&mut string_buffer, "m_ImageData_C189");
+        let uint8_type = push_type_tree_string(&mut string_buffer, "UInt8");
+
+        let mut metadata = Vec::new();
+        metadata.extend_from_slice(b"2019.4.0f1\0");
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 1);
+        put_i32_le(&mut metadata, 189);
+        put_i32_le(&mut metadata, 11);
+        put_i32_le(&mut metadata, i32::try_from(string_buffer.len()).unwrap());
+        for (level, type_offset, name_offset, byte_size, index) in [
+            (0, root_type, empty_name, -1, 0),
+            (1, streaming_info_type, stream_data_name, -1, 1),
+            (2, string_type, path_name, -1, 2),
+            (3, array_type, array_type, -1, 3),
+            (4, int_type, size_name, 4, 4),
+            (4, char_type, data_name, 1, 5),
+            (2, offset_type, offset_name, 8, 6),
+            (2, uint32_type, size_name, 4, 7),
+            (1, typeless_data_type, inline_data_name, -1, 8),
+            (2, int_type, size_name, 4, 9),
+            (2, uint8_type, data_name, 1, 10),
+        ] {
+            put_node(
+                &mut metadata,
+                level,
+                type_offset,
+                name_offset,
+                byte_size,
+                index,
+            );
+        }
+        metadata.extend_from_slice(&string_buffer);
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 1);
+
+        let mut payload = Vec::new();
+        put_i32_le(&mut payload, i32::try_from(stream_path.len()).unwrap());
+        payload.extend_from_slice(stream_path.as_bytes());
+        let padding = (4 - payload.len() % 4) % 4;
+        payload.resize(payload.len() + padding, 0);
+        payload.extend_from_slice(&2u64.to_le_bytes());
+        put_u32_le(&mut payload, stream_size);
+        put_i32_le(&mut payload, 0);
+
+        put_i32_le(&mut metadata, 77);
+        put_i32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, i32::try_from(payload.len()).unwrap());
+        put_i32_le(&mut metadata, 189);
+        put_u16_le(&mut metadata, 189);
+        put_u16_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 0);
+        metadata.push(0);
+
+        let data_offset = 20 + metadata.len();
+        let file_size = data_offset + payload.len();
+        let mut file = Vec::with_capacity(file_size);
+        file.extend_from_slice(&i32::try_from(metadata.len()).unwrap().to_be_bytes());
+        file.extend_from_slice(&u32::try_from(file_size).unwrap().to_be_bytes());
+        file.extend_from_slice(&10i32.to_be_bytes());
+        file.extend_from_slice(&u32::try_from(data_offset).unwrap().to_be_bytes());
+        file.push(0);
+        file.extend_from_slice(&[0; 3]);
+        file.extend_from_slice(&metadata);
+        file.extend_from_slice(&payload);
+        file
+    }
+
     fn make_build_settings_file(scene_paths: &[&str]) -> Vec<u8> {
         make_build_settings_file_with_path_id(scene_paths, 42)
     }
@@ -2832,6 +3128,104 @@ mod tests {
         ));
         assert!(summary.contains("complete=true"));
         assert!(!summary.contains("StreamingInfo diagnostic:"));
+        drop(input);
+    }
+
+    #[test]
+    fn export_object_yaml_writes_streamed_image_texture_and_refuses_overwrite() {
+        let directory = TestInputDirectory::new_root();
+        let serialized_path = directory.join("main.assets");
+        let resource_path = directory.join("texture.resS");
+        let output_path = directory.join("image-texture.yaml");
+        fs::write(&serialized_path, make_streamed_image_texture_file()).unwrap();
+        fs::write(&resource_path, b"0123456789").unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![
+                serialized_path.clone(),
+                resource_path.clone(),
+                output_path.clone(),
+            ],
+            subdirectories: Vec::new(),
+        };
+
+        let mut status = Vec::new();
+        super::export_object_yaml_to(
+            &[serialized_path.clone(), resource_path.clone()],
+            0,
+            77,
+            &output_path,
+            &mut status,
+        )
+        .unwrap();
+        let yaml = fs::read_to_string(&output_path).unwrap();
+        assert!(yaml.contains("--- !u!189 &1"));
+        assert!(yaml.contains("m_ImageData_C189: 323334"));
+        assert!(yaml.contains("offset: 0"));
+        assert!(yaml.contains("size: 0"));
+        assert!(!yaml.contains("texture.resS"));
+        assert!(String::from_utf8(status)
+            .unwrap()
+            .contains("Wrote one YAML object from SerializedFile 0 PathID 77"));
+
+        let original_yaml = yaml;
+        let error = super::export_object_yaml_to(
+            &[serialized_path, resource_path],
+            0,
+            77,
+            &output_path,
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<io::Error>().unwrap().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(fs::read_to_string(&output_path).unwrap(), original_yaml);
+        drop(input);
+    }
+
+    #[test]
+    fn export_object_yaml_reports_missing_streamed_resource_without_creating_output() {
+        let directory = TestInputDirectory::new_root();
+        let serialized_path = directory.join("main.assets");
+        let output_path = directory.join("image-texture.yaml");
+        fs::write(&serialized_path, make_streamed_image_texture_file()).unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![serialized_path.clone(), output_path.clone()],
+            subdirectories: Vec::new(),
+        };
+
+        let result =
+            super::export_object_yaml_to(&[serialized_path], 0, 77, &output_path, &mut Vec::new());
+        assert!(result.is_err());
+        assert!(!output_path.exists());
+        drop(input);
+    }
+
+    #[test]
+    fn export_object_yaml_skips_image_texture_without_data_without_creating_output() {
+        let directory = TestInputDirectory::new_root();
+        let serialized_path = directory.join("main.assets");
+        let output_path = directory.join("image-texture.yaml");
+        fs::write(
+            &serialized_path,
+            make_streamed_image_texture_file_with_stream("", 3),
+        )
+        .unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![serialized_path.clone(), output_path.clone()],
+            subdirectories: Vec::new(),
+        };
+
+        let mut status = Vec::new();
+        super::export_object_yaml_to(&[serialized_path], 0, 77, &output_path, &mut status).unwrap();
+        assert!(String::from_utf8(status)
+            .unwrap()
+            .contains("Skipped SerializedFile 0 PathID 77"));
+        assert!(!output_path.exists());
         drop(input);
     }
 
