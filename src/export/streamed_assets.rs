@@ -211,6 +211,7 @@ pub fn prepare_streamed_yaml_asset(
         }
     })?;
     if !info.is_set() {
+        clear_streaming_info(root, stream_field)?;
         return Ok(StreamedYamlAssetPreparation::StreamUnset);
     }
 
@@ -668,6 +669,48 @@ mod tests {
                 offset: 0,
                 size: 0,
             }
+        );
+    }
+
+    #[test]
+    fn unset_stream_metadata_is_cleared_before_yaml_staging() {
+        let mut root = texture_payload(
+            SerializedValue::Bytes(b"xyz".to_vec()),
+            SerializedValue::U64(17),
+        );
+        let stream = root
+            .unique_field_in_base_chain_mut("m_StreamData_C189")
+            .unwrap()
+            .unwrap();
+        let path = stream
+            .unique_field_in_base_chain_mut("path")
+            .unwrap()
+            .unwrap();
+        *path = SerializedValue::StringBytes(Vec::new());
+
+        assert_eq!(
+            prepare_streamed_yaml_asset(
+                &mut root,
+                StreamedYamlAssetKind::ImageTexture,
+                None,
+                StreamedYamlAssetLimits::default(),
+            )
+            .unwrap(),
+            StreamedYamlAssetPreparation::StreamUnset
+        );
+        assert_eq!(
+            streamed_info(&root, "m_StreamData_C189"),
+            crate::resource::StreamedResourceInfo {
+                path: String::new(),
+                offset: 0,
+                size: 0,
+            }
+        );
+        assert_eq!(
+            root.unique_field_in_base_chain("m_ImageData_C189")
+                .unwrap()
+                .unwrap(),
+            &SerializedValue::Bytes(b"xyz".to_vec())
         );
     }
 
