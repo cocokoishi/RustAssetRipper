@@ -55,6 +55,24 @@ pub struct WorkspaceSceneComponentCandidate {
     pub evidence: WorkspaceSceneComponentEvidence,
 }
 
+/// One source GameObject and the ordered range of its `m_Component` relationship indexes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceSceneGameObjectHierarchy {
+    game_object: WorkspaceSceneObjectIdentity,
+    component_relationship_start: usize,
+    component_relationship_end: usize,
+}
+
+impl WorkspaceSceneGameObjectHierarchy {
+    pub fn game_object(&self) -> WorkspaceSceneObjectIdentity {
+        self.game_object
+    }
+
+    pub fn component_relationship_count(&self) -> usize {
+        self.component_relationship_end - self.component_relationship_start
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WorkspaceGeneratedTransformDefaults {
     pub local_position: SceneVector3,
@@ -263,6 +281,8 @@ pub struct WorkspaceSceneCollectionHierarchy {
     collection_file_index: usize,
     scene_objects: Vec<SceneObjectRecord>,
     relationships: Vec<SceneRelationship>,
+    game_object_hierarchies: Vec<WorkspaceSceneGameObjectHierarchy>,
+    game_object_component_relationship_indices: Vec<usize>,
     graph_issues: Vec<SceneGraphIssue>,
     scene_assets: Vec<WorkspaceSceneAssetIdentity>,
     component_candidates: Vec<WorkspaceSceneComponentCandidate>,
@@ -303,6 +323,49 @@ impl WorkspaceSceneCollectionHierarchy {
 
     pub fn relationships(&self) -> &[SceneRelationship] {
         &self.relationships
+    }
+
+    pub fn game_object_hierarchies(&self) -> &[WorkspaceSceneGameObjectHierarchy] {
+        &self.game_object_hierarchies
+    }
+
+    /// Return a GameObject's `m_Component` edges in serialized array order.
+    pub fn game_object_component_relationships<'a>(
+        &'a self,
+        hierarchy_index: usize,
+    ) -> Result<impl Iterator<Item = &'a SceneRelationship> + 'a, WorkspaceSceneHierarchyError>
+    {
+        let hierarchy = self.game_object_hierarchies.get(hierarchy_index).ok_or(
+            WorkspaceSceneHierarchyError::GameObjectHierarchyIndexOutOfBounds {
+                hierarchy_index,
+                hierarchy_count: self.game_object_hierarchies.len(),
+            },
+        )?;
+        let range = self
+            .game_object_component_relationship_indices
+            .get(hierarchy.component_relationship_start..hierarchy.component_relationship_end)
+            .ok_or(
+                WorkspaceSceneHierarchyError::InvalidGameObjectComponentRelationshipRange {
+                    hierarchy_index,
+                    start: hierarchy.component_relationship_start,
+                    end: hierarchy.component_relationship_end,
+                    index_count: self.game_object_component_relationship_indices.len(),
+                },
+            )?;
+        for &relationship_index in range {
+            if self.relationships.get(relationship_index).is_none() {
+                return Err(
+                    WorkspaceSceneHierarchyError::InvalidGameObjectComponentRelationshipIndex {
+                        hierarchy_index,
+                        relationship_index,
+                        relationship_count: self.relationships.len(),
+                    },
+                );
+            }
+        }
+        Ok(range
+            .iter()
+            .map(|&relationship_index| &self.relationships[relationship_index]))
     }
 
     pub fn graph_issues(&self) -> &[SceneGraphIssue] {
@@ -447,6 +510,30 @@ pub enum WorkspaceSceneHierarchyError {
         relationship_index: usize,
         object_index: usize,
     },
+    DuplicateGameObjectHierarchy {
+        file_index: usize,
+        object_index: usize,
+    },
+    GameObjectComponentRelationshipSourceMissing {
+        file_index: usize,
+        relationship_index: usize,
+        object_index: usize,
+    },
+    GameObjectHierarchyIndexOutOfBounds {
+        hierarchy_index: usize,
+        hierarchy_count: usize,
+    },
+    InvalidGameObjectComponentRelationshipRange {
+        hierarchy_index: usize,
+        start: usize,
+        end: usize,
+        index_count: usize,
+    },
+    InvalidGameObjectComponentRelationshipIndex {
+        hierarchy_index: usize,
+        relationship_index: usize,
+        relationship_count: usize,
+    },
     InvalidComponentTarget {
         source_file_index: usize,
         target_file_index: usize,
@@ -530,6 +617,45 @@ impl Display for WorkspaceSceneHierarchyError {
             } => write!(
                 f,
                 "scene relationship {relationship_index} source object {file_index}:{object_index} is invalid"
+            ),
+            Self::DuplicateGameObjectHierarchy {
+                file_index,
+                object_index,
+            } => write!(
+                f,
+                "scene collection {file_index} contains GameObject {object_index} more than once"
+            ),
+            Self::GameObjectComponentRelationshipSourceMissing {
+                file_index,
+                relationship_index,
+                object_index,
+            } => write!(
+                f,
+                "GameObject component relationship {relationship_index} in collection {file_index} has no indexed GameObject source at object {object_index}"
+            ),
+            Self::GameObjectHierarchyIndexOutOfBounds {
+                hierarchy_index,
+                hierarchy_count,
+            } => write!(
+                f,
+                "GameObject hierarchy index {hierarchy_index} is outside {hierarchy_count} entries"
+            ),
+            Self::InvalidGameObjectComponentRelationshipRange {
+                hierarchy_index,
+                start,
+                end,
+                index_count,
+            } => write!(
+                f,
+                "GameObject hierarchy {hierarchy_index} component relationship range {start}..{end} is outside {index_count} indexes"
+            ),
+            Self::InvalidGameObjectComponentRelationshipIndex {
+                hierarchy_index,
+                relationship_index,
+                relationship_count,
+            } => write!(
+                f,
+                "GameObject hierarchy {hierarchy_index} references relationship {relationship_index}, but only {relationship_count} relationships exist"
             ),
             Self::InvalidComponentTarget {
                 source_file_index,
@@ -787,6 +913,13 @@ impl WorkspaceSceneHierarchyBuilder {
             relationships.push(copy_scene_relationship(relationship)?);
         }
 
+        let (game_object_hierarchies, game_object_component_relationship_indices) =
+            build_game_object_component_relationship_index(
+                file_index,
+                &scene_assets,
+                &relationships,
+            )?;
+
         let mut graph_issues = Vec::new();
         graph_issues
             .try_reserve_exact(scene_graph.issues().len())
@@ -802,6 +935,8 @@ impl WorkspaceSceneHierarchyBuilder {
             collection_file_index: file_index,
             scene_objects: objects,
             relationships,
+            game_object_hierarchies,
+            game_object_component_relationship_indices,
             graph_issues,
             scene_assets,
             component_candidates,
@@ -880,6 +1015,106 @@ impl WorkspaceSceneHierarchyBuilder {
         }
         Ok(WorkspaceSceneHierarchies { scenes })
     }
+}
+
+fn build_game_object_component_relationship_index(
+    collection_file_index: usize,
+    scene_assets: &[WorkspaceSceneAssetIdentity],
+    relationships: &[SceneRelationship],
+) -> Result<(Vec<WorkspaceSceneGameObjectHierarchy>, Vec<usize>), WorkspaceSceneHierarchyError> {
+    let game_object_count = scene_assets
+        .iter()
+        .filter(|asset| asset.category == WorkspaceSceneAssetCategory::GameObject)
+        .count();
+    let mut game_objects = Vec::new();
+    game_objects
+        .try_reserve_exact(game_object_count)
+        .map_err(|_| WorkspaceSceneHierarchyError::AllocationFailed {
+            resource: "SceneDefinition GameObject hierarchy indexes",
+            requested: game_object_count,
+        })?;
+    for asset in scene_assets
+        .iter()
+        .filter(|asset| asset.category == WorkspaceSceneAssetCategory::GameObject)
+    {
+        game_objects.push(WorkspaceSceneGameObjectHierarchy {
+            game_object: asset.identity,
+            component_relationship_start: 0,
+            component_relationship_end: 0,
+        });
+    }
+    game_objects.sort_unstable_by_key(|hierarchy| hierarchy.game_object.object_index);
+    for pair in game_objects.windows(2) {
+        if pair[0].game_object.object_index == pair[1].game_object.object_index {
+            return Err(WorkspaceSceneHierarchyError::DuplicateGameObjectHierarchy {
+                file_index: collection_file_index,
+                object_index: pair[0].game_object.object_index,
+            });
+        }
+    }
+
+    let component_relationship_count = relationships
+        .iter()
+        .filter(|relationship| relationship.kind == SceneRelationshipKind::GameObjectComponent)
+        .count();
+    let mut component_relationship_indices = Vec::new();
+    component_relationship_indices
+        .try_reserve_exact(component_relationship_count)
+        .map_err(|_| WorkspaceSceneHierarchyError::AllocationFailed {
+            resource: "GameObject component relationship indexes",
+            requested: component_relationship_count,
+        })?;
+    component_relationship_indices.extend(relationships.iter().enumerate().filter_map(
+        |(relationship_index, relationship)| {
+            (relationship.kind == SceneRelationshipKind::GameObjectComponent)
+                .then_some(relationship_index)
+        },
+    ));
+    component_relationship_indices.sort_unstable_by_key(|&relationship_index| {
+        (
+            relationships[relationship_index].source_object_index,
+            relationship_index,
+        )
+    });
+
+    let mut relationship_cursor = 0usize;
+    for hierarchy in &mut game_objects {
+        let object_index = hierarchy.game_object.object_index;
+        if let Some(&relationship_index) = component_relationship_indices.get(relationship_cursor) {
+            let relationship = &relationships[relationship_index];
+            if relationship.source_object_index < object_index {
+                return Err(
+                    WorkspaceSceneHierarchyError::GameObjectComponentRelationshipSourceMissing {
+                        file_index: collection_file_index,
+                        relationship_index,
+                        object_index: relationship.source_object_index,
+                    },
+                );
+            }
+        }
+
+        hierarchy.component_relationship_start = relationship_cursor;
+        while let Some(&relationship_index) =
+            component_relationship_indices.get(relationship_cursor)
+        {
+            if relationships[relationship_index].source_object_index != object_index {
+                break;
+            }
+            relationship_cursor += 1;
+        }
+        hierarchy.component_relationship_end = relationship_cursor;
+    }
+    if let Some(&relationship_index) = component_relationship_indices.get(relationship_cursor) {
+        return Err(
+            WorkspaceSceneHierarchyError::GameObjectComponentRelationshipSourceMissing {
+                file_index: collection_file_index,
+                relationship_index,
+                object_index: relationships[relationship_index].source_object_index,
+            },
+        );
+    }
+
+    Ok((game_objects, component_relationship_indices))
 }
 
 fn classify_scene_collection_objects(

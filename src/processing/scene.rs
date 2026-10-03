@@ -3292,6 +3292,20 @@ mod tests {
         component: Option<(i32, i32)>,
         external_path: Option<&str>,
     ) -> Vec<u8> {
+        match component {
+            Some(component) => {
+                make_game_object_file_with_components(name, path_id, &[component], external_path)
+            }
+            None => make_game_object_file_with_components(name, path_id, &[], external_path),
+        }
+    }
+
+    fn make_game_object_file_with_components(
+        name: &str,
+        path_id: i32,
+        components: &[(i32, i32)],
+        external_path: Option<&str>,
+    ) -> Vec<u8> {
         let mut strings = Vec::new();
         let root_type = push_tree_string(&mut strings, "GameObject");
         let empty = push_tree_string(&mut strings, "");
@@ -3353,12 +3367,10 @@ mod tests {
         let name_padding = (4 - name.len() % 4) % 4;
         payload.resize(payload.len() + name_padding, 0);
         payload.push(1);
-        if let Some((file_id, target_path_id)) = component {
-            put_i32_le(&mut payload, 1);
+        put_i32_le(&mut payload, i32::try_from(components.len()).unwrap());
+        for &(file_id, target_path_id) in components {
             put_i32_le(&mut payload, file_id);
             put_i32_le(&mut payload, target_path_id);
-        } else {
-            put_i32_le(&mut payload, 0);
         }
         put_i32_le(&mut metadata, i32::try_from(payload.len()).unwrap());
         put_i32_le(&mut metadata, 1);
@@ -4328,8 +4340,12 @@ mod tests {
             MultiFileReferenceGraph, NamedObjectReferenceGraph, ObjectReferenceGraph,
         };
 
-        let source_bytes =
-            make_game_object_file("SceneObject", 42, Some((1, 99)), Some("shared.assets"));
+        let source_bytes = make_game_object_file_with_components(
+            "SceneObject",
+            42,
+            &[(1, 99), (0, 0)],
+            Some("shared.assets"),
+        );
         let target_bytes =
             make_transform_file_with_hierarchy(99, 0, 0, &[], &["main.assets"], false);
         let source_file = SerializedFile::parse(&source_bytes).unwrap();
@@ -4474,7 +4490,45 @@ mod tests {
                 evidence: crate::processing::scene_hierarchy::WorkspaceSceneComponentEvidence::GameObjectComponentReference,
             }
         );
-        assert_eq!(collections[0].relationships().len(), 1);
+        assert_eq!(collections[0].relationships().len(), 2);
+        assert_eq!(collections[0].game_object_hierarchies().len(), 1);
+        assert_eq!(
+            collections[0].game_object_hierarchies()[0].game_object(),
+            crate::processing::scene_hierarchy::WorkspaceSceneObjectIdentity {
+                file_index: 0,
+                object_index: 0,
+                path_id: 42,
+                class_id: Some(1),
+            }
+        );
+        assert_eq!(
+            collections[0].game_object_hierarchies()[0].component_relationship_count(),
+            2
+        );
+        let ordered_components: Vec<_> = collections[0]
+            .game_object_component_relationships(0)
+            .unwrap()
+            .collect();
+        assert_eq!(ordered_components.len(), 2);
+        assert_eq!(ordered_components[0].field_path, "m_Component[0]");
+        assert_eq!(ordered_components[0].file_id, 1);
+        assert_eq!(ordered_components[0].path_id, 99);
+        assert_eq!(
+            ordered_components[0].target,
+            SceneRelationshipTarget::WorkspaceObject {
+                file_index: 1,
+                object_index: 0,
+            }
+        );
+        assert_eq!(ordered_components[1].field_path, "m_Component[1]");
+        assert_eq!(ordered_components[1].target, SceneRelationshipTarget::Null);
+        assert!(matches!(
+            collections[0].game_object_component_relationships(1),
+            Err(crate::processing::scene_hierarchy::WorkspaceSceneHierarchyError::GameObjectHierarchyIndexOutOfBounds {
+                hierarchy_index: 1,
+                hierarchy_count: 1,
+            })
+        ));
         assert_eq!(collections[0].roots().roots().len(), 1);
         assert_eq!(
             collections[0].roots().roots()[0].transform_file_index,
