@@ -1,11 +1,12 @@
 //! Bounded conversion from decoded SerializedValue trees to Unity YAML object documents.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::str;
 
 use crate::processing::scene_naming::SceneUnityVersion;
+use crate::serialized_file::metadata::{TypeTree, TypeTreeNode};
 use crate::serialized_file::object::{SerializedFieldValue, SerializedValue};
 
 use super::pointer_map::ProjectPointerResolution;
@@ -14,6 +15,8 @@ use super::unity_yaml::{
     project_pointer_to_unity_yaml, UnityYamlDocument, UnityYamlMappingStyle, UnityYamlNode,
     UnityYamlNodeBuildError, UnityYamlScalar, UnityYamlSequenceStyle, UnityYamlWriteError,
 };
+
+const TRANSFER_USING_FLOW_MAPPING_STYLE: u32 = 0x0020_0000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UnityYamlEmptyArrayKind {
@@ -24,9 +27,37 @@ pub enum UnityYamlEmptyArrayKind {
     FlowSequence,
 }
 
+/// TypeTree-derived serialization choices needed by the YAML walker.
+///
+/// Empty arrays have no element values from which to infer their representation. Flow-mapped
+/// structs also need the TypeTree transfer flag because SerializedValue does not retain schema
+/// metadata.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct UnityYamlObjectConversionHints {
+    pub empty_array_kinds: HashMap<String, UnityYamlEmptyArrayKind>,
+    /// Paths may contain [*] where a TypeTree struct appears as an array element.
+    pub flow_mapped_struct_paths: HashSet<String>,
+}
+
+impl UnityYamlObjectConversionHints {
+    /// Build YAML representation hints from the same TypeTree flags and array shapes used to
+    /// decode the SerializedValue tree.
+    pub fn from_type_tree(
+        type_tree: &TypeTree,
+        limits: UnityYamlObjectConversionLimits,
+    ) -> Result<Self, UnityYamlObjectConversionError> {
+        let layout = UnityYamlTypeTreeLayout::new(type_tree, limits)?;
+        let mut hints = Self::default();
+        let mut budget = ConversionBudget { visited: 0, limits };
+        layout.collect_hints(0, "", 0, &mut hints, &mut budget)?;
+        Ok(hints)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UnityYamlObjectConversionLimits {
     pub max_values: usize,
+    pub max_type_tree_nodes: usize,
     pub max_depth: usize,
     pub max_field_path_bytes: usize,
     pub max_generated_scalar_bytes: usize,
@@ -36,6 +67,7 @@ impl Default for UnityYamlObjectConversionLimits {
     fn default() -> Self {
         Self {
             max_values: 20_000_000,
+            max_type_tree_nodes: 1_000_000,
             max_depth: 256,
             max_field_path_bytes: 1024 * 1024,
             max_generated_scalar_bytes: 512 * 1024 * 1024,
@@ -79,6 +111,10 @@ pub enum UnityYamlObjectConversionError {
     },
     InvalidUtf8String {
         field_path: String,
+    },
+    InvalidTypeTree {
+        node_index: usize,
+        reason: &'static str,
     },
     HexScalarLimitExceeded {
         requested: usize,
@@ -135,6 +171,9 @@ impl Display for UnityYamlObjectConversionError {
             Self::InvalidUtf8String { field_path } => {
                 write!(f, "Unity string at {field_path:?} is not valid UTF-8")
             }
+            Self::InvalidTypeTree { node_index, reason } => {
+                write!(f, "invalid Unity TypeTree node {node_index}: {reason}")
+            }
             Self::HexScalarLimitExceeded {
                 requested,
                 limit,
@@ -164,6 +203,293 @@ impl Error for UnityYamlObjectConversionError {
     }
 }
 
+struct UnityYamlTypeTreeLayout<'a> {
+    type_tree: &'a TypeTree,
+    first_child: Vec<Option<usize>>,
+    next_sibling: Vec<Option<usize>>,
+}
+
+impl<'a> UnityYamlTypeTreeLayout<'a> {
+    fn new(
+        type_tree: &'a TypeTree,
+        limits: UnityYamlObjectConversionLimits,
+    ) -> Result<Self, UnityYamlObjectConversionError> {
+        let count = type_tree.nodes.len();
+        if count == 0 {
+            return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                node_index: 0,
+                reason: "tree has no root node",
+            });
+        }
+        if count > limits.max_type_tree_nodes {
+            return Err(UnityYamlObjectConversionError::ValueLimitExceeded {
+                requested: count,
+                limit: limits.max_type_tree_nodes,
+            });
+        }
+        if type_tree.nodes[0].level != 0 {
+            return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                node_index: 0,
+                reason: "root node level is not zero",
+            });
+        }
+
+        let mut first_child = Vec::new();
+        first_child.try_reserve_exact(count).map_err(|_| {
+            UnityYamlObjectConversionError::AllocationFailed {
+                resource: "TypeTree first-child index",
+                requested: count,
+            }
+        })?;
+        first_child.resize(count, None);
+
+        let mut next_sibling = Vec::new();
+        next_sibling.try_reserve_exact(count).map_err(|_| {
+            UnityYamlObjectConversionError::AllocationFailed {
+                resource: "TypeTree sibling index",
+                requested: count,
+            }
+        })?;
+        next_sibling.resize(count, None);
+
+        let mut last_child = Vec::new();
+        last_child.try_reserve_exact(count).map_err(|_| {
+            UnityYamlObjectConversionError::AllocationFailed {
+                resource: "TypeTree last-child index",
+                requested: count,
+            }
+        })?;
+        last_child.resize(count, None);
+
+        let stack_capacity = count.min(limits.max_depth.saturating_add(1));
+        let mut parents = Vec::new();
+        parents.try_reserve_exact(stack_capacity).map_err(|_| {
+            UnityYamlObjectConversionError::AllocationFailed {
+                resource: "TypeTree parent stack",
+                requested: stack_capacity,
+            }
+        })?;
+        parents.push(0);
+
+        for (node_index, node) in type_tree.nodes.iter().enumerate().skip(1) {
+            let level = usize::from(node.level);
+            if level == 0 {
+                return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                    node_index,
+                    reason: "tree contains more than one root",
+                });
+            }
+            if level > limits.max_depth {
+                return Err(UnityYamlObjectConversionError::DepthLimitExceeded {
+                    requested: level,
+                    limit: limits.max_depth,
+                });
+            }
+            if level > parents.len() {
+                return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                    node_index,
+                    reason: "node level skips its parent",
+                });
+            }
+            parents.truncate(level);
+            let parent_index =
+                *parents
+                    .get(level - 1)
+                    .ok_or(UnityYamlObjectConversionError::InvalidTypeTree {
+                        node_index,
+                        reason: "node has no parent",
+                    })?;
+            if let Some(previous) = last_child[parent_index] {
+                next_sibling[previous] = Some(node_index);
+            } else {
+                first_child[parent_index] = Some(node_index);
+            }
+            last_child[parent_index] = Some(node_index);
+            parents.push(node_index);
+        }
+
+        Ok(Self {
+            type_tree,
+            first_child,
+            next_sibling,
+        })
+    }
+
+    fn node(&self, node_index: usize) -> Result<&TypeTreeNode, UnityYamlObjectConversionError> {
+        self.type_tree.nodes.get(node_index).ok_or(
+            UnityYamlObjectConversionError::InvalidTypeTree {
+                node_index,
+                reason: "node index is outside the tree",
+            },
+        )
+    }
+
+    fn type_name(&self, node_index: usize) -> Result<&str, UnityYamlObjectConversionError> {
+        self.node(node_index)?.type_name.as_deref().ok_or(
+            UnityYamlObjectConversionError::InvalidTypeTree {
+                node_index,
+                reason: "type name is unresolved",
+            },
+        )
+    }
+
+    fn child_indices(
+        &self,
+        node_index: usize,
+    ) -> Result<Vec<usize>, UnityYamlObjectConversionError> {
+        let mut children = Vec::new();
+        let mut child = *self.first_child.get(node_index).ok_or(
+            UnityYamlObjectConversionError::InvalidTypeTree {
+                node_index,
+                reason: "node index is outside the tree",
+            },
+        )?;
+        while let Some(child_index) = child {
+            children.try_reserve(1).map_err(|_| {
+                UnityYamlObjectConversionError::AllocationFailed {
+                    resource: "TypeTree direct children",
+                    requested: children.len().saturating_add(1),
+                }
+            })?;
+            children.push(child_index);
+            child = self.next_sibling[child_index];
+        }
+        Ok(children)
+    }
+
+    fn array_element_node(
+        &self,
+        node_index: usize,
+    ) -> Result<Option<usize>, UnityYamlObjectConversionError> {
+        let node_type = self.type_name(node_index)?;
+        if matches!(node_type, "Array" | "TypelessData") {
+            if node_type == "TypelessData" {
+                return Ok(None);
+            }
+            return self.array_shape_data_node(node_index);
+        }
+
+        let children = self.child_indices(node_index)?;
+        if children.len() != 1 {
+            return Ok(None);
+        }
+        let array_node = children[0];
+        let Some(data_node) = self.array_shape_data_node(array_node)? else {
+            return Ok(None);
+        };
+        let child = self.node(array_node)?;
+        let is_vector = matches!(node_type, "vector" | "staticvector" | "set" | "map");
+        let is_named_vector = if child.name.as_deref() == Some("Array") {
+            let element_type = self.type_name(data_node)?;
+            element_type == node_type
+                || matches!(element_type, "Generic Mono" | "managedReferenceArrayItem")
+        } else {
+            false
+        };
+        Ok((is_vector || is_named_vector).then_some(data_node))
+    }
+
+    fn array_shape_data_node(
+        &self,
+        array_node: usize,
+    ) -> Result<Option<usize>, UnityYamlObjectConversionError> {
+        if self.type_name(array_node)? != "Array" {
+            return Ok(None);
+        }
+        let children = self.child_indices(array_node)?;
+        if children.len() != 2
+            || self.node(children[0])?.name.as_deref() != Some("size")
+            || self.node(children[1])?.name.as_deref() != Some("data")
+            || self.first_child[children[0]].is_some()
+        {
+            return Ok(None);
+        }
+        Ok(Some(children[1]))
+    }
+
+    fn collect_hints(
+        &self,
+        node_index: usize,
+        field_path: &str,
+        depth: usize,
+        hints: &mut UnityYamlObjectConversionHints,
+        budget: &mut ConversionBudget,
+    ) -> Result<(), UnityYamlObjectConversionError> {
+        budget.visit(depth)?;
+        let node = self.node(node_index)?;
+        let node_type = self.type_name(node_index)?;
+
+        if let Some(element_node) = self.array_element_node(node_index)? {
+            let element_type = self.type_name(element_node)?;
+            let kind = if is_integer_type_tree_type(element_type) {
+                UnityYamlEmptyArrayKind::IntegerHex
+            } else {
+                UnityYamlEmptyArrayKind::BlockSequence
+            };
+            if let Some(previous) = hints.empty_array_kinds.get(field_path) {
+                if *previous != kind {
+                    return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                        node_index,
+                        reason: "ambiguous arrays share one serialized field path",
+                    });
+                }
+            } else {
+                hints.empty_array_kinds.try_reserve(1).map_err(|_| {
+                    UnityYamlObjectConversionError::AllocationFailed {
+                        resource: "Unity YAML array schema hints",
+                        requested: hints.empty_array_kinds.len().saturating_add(1),
+                    }
+                })?;
+                hints.empty_array_kinds.insert(
+                    try_copy_string(field_path, "Unity YAML array hint path")?,
+                    kind,
+                );
+            }
+
+            let element_path = wildcard_element_path(field_path, budget.limits)?;
+            return self.collect_hints(element_node, &element_path, depth + 1, hints, budget);
+        }
+
+        if node_type == "TypelessData" || node_type == "string" || node_type.starts_with("PPtr<") {
+            return Ok(());
+        }
+
+        if node.meta_flags & TRANSFER_USING_FLOW_MAPPING_STYLE != 0 {
+            hints.flow_mapped_struct_paths.try_reserve(1).map_err(|_| {
+                UnityYamlObjectConversionError::AllocationFailed {
+                    resource: "Unity YAML flow mapping hints",
+                    requested: hints.flow_mapped_struct_paths.len().saturating_add(1),
+                }
+            })?;
+            hints.flow_mapped_struct_paths.insert(try_copy_string(
+                field_path,
+                "Unity YAML flow mapping hint path",
+            )?);
+        }
+
+        let mut child = *self.first_child.get(node_index).ok_or(
+            UnityYamlObjectConversionError::InvalidTypeTree {
+                node_index,
+                reason: "node index is outside the tree",
+            },
+        )?;
+        while let Some(child_index) = child {
+            let child_node = self.node(child_index)?;
+            let field_name = child_node.name.as_deref().ok_or(
+                UnityYamlObjectConversionError::InvalidTypeTree {
+                    node_index: child_index,
+                    reason: "field name is unresolved",
+                },
+            )?;
+            let child_path =
+                child_field_path(field_path, field_name, budget.limits.max_field_path_bytes)?;
+            self.collect_hints(child_index, &child_path, depth + 1, hints, budget)?;
+            child = self.next_sibling[child_index];
+        }
+        Ok(())
+    }
+}
+
 /// Convert one already-decoded object value into a Unity YAML object document.
 ///
 /// `SerializedValue` retains ordered fields and PPtrs but not the TypeTree schema. Callers supply
@@ -179,7 +505,7 @@ pub fn serialized_object_value_to_unity_yaml_document<F>(
     file_id: i64,
     stripped: bool,
     root: &SerializedValue,
-    empty_array_hints: &HashMap<String, UnityYamlEmptyArrayKind>,
+    hints: &UnityYamlObjectConversionHints,
     unity_version: SceneUnityVersion,
     missing_reference_guid: Option<[u8; 16]>,
     limits: UnityYamlObjectConversionLimits,
@@ -194,7 +520,11 @@ where
     let mut budget = ConversionBudget { visited: 0, limits };
     budget.visit(0)?;
 
-    let mut body = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    let mut body = UnityYamlNode::mapping(if is_flow_mapped_path("", hints, limits)? {
+        UnityYamlMappingStyle::Flow
+    } else {
+        UnityYamlMappingStyle::Block
+    });
     body.insert_field(
         "serializedVersion",
         UnityYamlNode::scalar(UnityYamlScalar::Signed(i64::from(serialized_version))),
@@ -206,7 +536,7 @@ where
         "",
         1,
         source,
-        empty_array_hints,
+        hints,
         unity_version,
         missing_reference_guid,
         limits,
@@ -224,7 +554,7 @@ fn append_struct_fields<F>(
     parent_path: &str,
     depth: usize,
     source: ExportAssetIdentity,
-    empty_array_hints: &HashMap<String, UnityYamlEmptyArrayKind>,
+    hints: &UnityYamlObjectConversionHints,
     unity_version: SceneUnityVersion,
     missing_reference_guid: Option<[u8; 16]>,
     limits: UnityYamlObjectConversionLimits,
@@ -245,7 +575,7 @@ where
                     &field_path,
                     depth + 1,
                     source,
-                    empty_array_hints,
+                    hints,
                     unity_version,
                     missing_reference_guid,
                     limits,
@@ -260,7 +590,7 @@ where
             &field_path,
             depth,
             source,
-            empty_array_hints,
+            hints,
             unity_version,
             missing_reference_guid,
             limits,
@@ -281,7 +611,7 @@ fn convert_value<F>(
     field_path: &str,
     depth: usize,
     source: ExportAssetIdentity,
-    empty_array_hints: &HashMap<String, UnityYamlEmptyArrayKind>,
+    hints: &UnityYamlObjectConversionHints,
     unity_version: SceneUnityVersion,
     missing_reference_guid: Option<[u8; 16]>,
     limits: UnityYamlObjectConversionLimits,
@@ -340,7 +670,7 @@ where
             field_path,
             depth,
             source,
-            empty_array_hints,
+            hints,
             unity_version,
             missing_reference_guid,
             limits,
@@ -348,14 +678,19 @@ where
             resolve_pointer,
         )?,
         SerializedValue::Struct(fields) => {
-            let mut mapping = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+            let mut mapping =
+                UnityYamlNode::mapping(if is_flow_mapped_path(field_path, hints, limits)? {
+                    UnityYamlMappingStyle::Flow
+                } else {
+                    UnityYamlMappingStyle::Block
+                });
             append_struct_fields(
                 &mut mapping,
                 fields,
                 field_path,
                 depth + 1,
                 source,
-                empty_array_hints,
+                hints,
                 unity_version,
                 missing_reference_guid,
                 limits,
@@ -397,7 +732,7 @@ fn convert_array<F>(
     field_path: &str,
     depth: usize,
     source: ExportAssetIdentity,
-    empty_array_hints: &HashMap<String, UnityYamlEmptyArrayKind>,
+    hints: &UnityYamlObjectConversionHints,
     unity_version: SceneUnityVersion,
     missing_reference_guid: Option<[u8; 16]>,
     limits: UnityYamlObjectConversionLimits,
@@ -408,11 +743,13 @@ where
     F: FnMut(UnityYamlPPtrRequest<'_>) -> ProjectPointerResolution,
 {
     if items.is_empty() {
-        let kind = empty_array_hints.get(field_path).copied().ok_or_else(|| {
-            UnityYamlObjectConversionError::MissingEmptyArrayHint {
+        let kind = hints
+            .empty_array_kinds
+            .get(field_path)
+            .copied()
+            .ok_or_else(|| UnityYamlObjectConversionError::MissingEmptyArrayHint {
                 field_path: field_path.to_owned(),
-            }
-        })?;
+            })?;
         return match kind {
             UnityYamlEmptyArrayKind::IntegerHex => Ok(UnityYamlNode::plain_string(String::new())),
             UnityYamlEmptyArrayKind::BlockSequence => {
@@ -427,7 +764,7 @@ where
         };
     }
 
-    if let Some(kind) = empty_array_hints.get(field_path) {
+    if let Some(kind) = hints.empty_array_kinds.get(field_path) {
         if *kind == UnityYamlEmptyArrayKind::IntegerHex {
             return convert_integer_array(items, field_path, depth, limits, budget);
         }
@@ -435,7 +772,7 @@ where
         return convert_integer_array(items, field_path, depth, limits, budget);
     }
 
-    let style = match empty_array_hints.get(field_path) {
+    let style = match hints.empty_array_kinds.get(field_path) {
         Some(UnityYamlEmptyArrayKind::BlockCurveSequence) => UnityYamlSequenceStyle::BlockCurve,
         Some(UnityYamlEmptyArrayKind::FlowSequence) => UnityYamlSequenceStyle::Flow,
         _ => UnityYamlSequenceStyle::Block,
@@ -449,7 +786,7 @@ where
                 &element_path,
                 depth + 1,
                 source,
-                empty_array_hints,
+                hints,
                 unity_version,
                 missing_reference_guid,
                 limits,
@@ -583,6 +920,118 @@ const fn hex_digit(nibble: u8) -> char {
     } else {
         (b'a' + (nibble - 10)) as char
     }
+}
+
+fn is_integer_type_tree_type(type_name: &str) -> bool {
+    matches!(
+        type_name,
+        "bool"
+            | "char"
+            | "SInt8"
+            | "UInt8"
+            | "SInt16"
+            | "UInt16"
+            | "SInt32"
+            | "UInt32"
+            | "SInt64"
+            | "UInt64"
+            | "FileSize"
+            | "signed char"
+            | "unsigned char"
+            | "short"
+            | "unsigned short"
+            | "int"
+            | "unsigned int"
+            | "long long"
+            | "unsigned long long"
+            | "Type*"
+    )
+}
+
+fn wildcard_element_path(
+    parent: &str,
+    limits: UnityYamlObjectConversionLimits,
+) -> Result<String, UnityYamlObjectConversionError> {
+    let requested = parent.len().checked_add(3).ok_or(
+        UnityYamlObjectConversionError::FieldPathLimitExceeded {
+            requested: usize::MAX,
+            limit: limits.max_field_path_bytes,
+        },
+    )?;
+    if requested > limits.max_field_path_bytes {
+        return Err(UnityYamlObjectConversionError::FieldPathLimitExceeded {
+            requested,
+            limit: limits.max_field_path_bytes,
+        });
+    }
+    let mut path = String::new();
+    path.try_reserve_exact(requested).map_err(|_| {
+        UnityYamlObjectConversionError::AllocationFailed {
+            resource: "Unity YAML array schema path",
+            requested,
+        }
+    })?;
+    path.push_str(parent);
+    path.push_str("[*]");
+    Ok(path)
+}
+
+fn is_flow_mapped_path(
+    path: &str,
+    hints: &UnityYamlObjectConversionHints,
+    limits: UnityYamlObjectConversionLimits,
+) -> Result<bool, UnityYamlObjectConversionError> {
+    if hints.flow_mapped_struct_paths.contains(path) {
+        return Ok(true);
+    }
+    if !path.contains('[') {
+        return Ok(false);
+    }
+    let canonical_path = canonical_array_path(path, limits.max_field_path_bytes)?;
+    Ok(hints.flow_mapped_struct_paths.contains(&canonical_path))
+}
+
+fn canonical_array_path(
+    path: &str,
+    max_bytes: usize,
+) -> Result<String, UnityYamlObjectConversionError> {
+    let mut canonical = String::new();
+    canonical.try_reserve_exact(path.len()).map_err(|_| {
+        UnityYamlObjectConversionError::AllocationFailed {
+            resource: "Unity YAML canonical field path",
+            requested: path.len(),
+        }
+    })?;
+    let bytes = path.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'[' {
+            let mut digit_end = index + 1;
+            while digit_end < bytes.len() && bytes[digit_end].is_ascii_digit() {
+                digit_end += 1;
+            }
+            if digit_end > index + 1 && bytes.get(digit_end) == Some(&b']') {
+                canonical.push_str("[*]");
+                index = digit_end + 1;
+                continue;
+            }
+        }
+        let Some(character) = path[index..].chars().next() else {
+            return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                node_index: 0,
+                reason: "field path is not valid UTF-8",
+            });
+        };
+        canonical.push(character);
+        index += character.len_utf8();
+    }
+    if canonical.len() > max_bytes {
+        return Err(UnityYamlObjectConversionError::FieldPathLimitExceeded {
+            requested: canonical.len(),
+            limit: max_bytes,
+        });
+    }
+    Ok(canonical)
 }
 
 fn child_field_path(
@@ -733,6 +1182,22 @@ mod tests {
         }
     }
 
+    fn type_tree_node(level: u8, type_name: &str, name: &str, meta_flags: u32) -> TypeTreeNode {
+        TypeTreeNode {
+            level,
+            version: 1,
+            type_flags: 0,
+            type_string_offset: None,
+            name_string_offset: None,
+            type_name: Some(type_name.to_owned()),
+            name: Some(name.to_owned()),
+            byte_size: -1,
+            index: 0,
+            meta_flags,
+            reference_type_hash: None,
+        }
+    }
+
     fn version() -> SceneUnityVersion {
         SceneUnityVersion::parse("2022.3.1f1").unwrap()
     }
@@ -740,6 +1205,21 @@ mod tests {
     fn convert<F>(
         root: &SerializedValue,
         hints: &HashMap<String, UnityYamlEmptyArrayKind>,
+        resolver: F,
+    ) -> Result<UnityYamlDocument, UnityYamlObjectConversionError>
+    where
+        F: FnMut(UnityYamlPPtrRequest<'_>) -> ProjectPointerResolution,
+    {
+        let hints = UnityYamlObjectConversionHints {
+            empty_array_kinds: hints.clone(),
+            ..UnityYamlObjectConversionHints::default()
+        };
+        convert_with_object_hints(root, &hints, resolver)
+    }
+
+    fn convert_with_object_hints<F>(
+        root: &SerializedValue,
+        hints: &UnityYamlObjectConversionHints,
         resolver: F,
     ) -> Result<UnityYamlDocument, UnityYamlObjectConversionError>
     where
@@ -867,6 +1347,142 @@ mod tests {
         )
         .unwrap();
         assert!(output.contains("m_Children: []"));
+    }
+
+    #[test]
+    fn type_tree_hints_drive_flow_structs_and_empty_array_shapes() {
+        let type_tree = TypeTree {
+            nodes: vec![
+                type_tree_node(0, "GameObject", "Base", 0),
+                type_tree_node(1, "Color", "m_Color", TRANSFER_USING_FLOW_MAPPING_STYLE),
+                type_tree_node(2, "float", "r", 0),
+                type_tree_node(1, "vector", "m_Colors", 0),
+                type_tree_node(2, "Array", "Array", 0),
+                type_tree_node(3, "SInt32", "size", 0),
+                type_tree_node(3, "Color", "data", TRANSFER_USING_FLOW_MAPPING_STYLE),
+                type_tree_node(4, "float", "r", 0),
+                type_tree_node(1, "vector", "m_Bits", 0),
+                type_tree_node(2, "Array", "Array", 0),
+                type_tree_node(3, "SInt32", "size", 0),
+                type_tree_node(3, "UInt8", "data", 0),
+            ],
+            string_buffer: Vec::new(),
+        };
+        let hints = UnityYamlObjectConversionHints::from_type_tree(
+            &type_tree,
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            hints.empty_array_kinds.get("m_Colors"),
+            Some(&UnityYamlEmptyArrayKind::BlockSequence)
+        );
+        assert_eq!(
+            hints.empty_array_kinds.get("m_Bits"),
+            Some(&UnityYamlEmptyArrayKind::IntegerHex)
+        );
+        assert!(hints.flow_mapped_struct_paths.contains("m_Color"));
+        assert!(hints.flow_mapped_struct_paths.contains("m_Colors[*]"));
+
+        let populated = SerializedValue::Struct(vec![
+            field(
+                "m_Color",
+                SerializedValue::Struct(vec![field("r", SerializedValue::F32(0.25))]),
+            ),
+            field(
+                "m_Colors",
+                SerializedValue::Array(vec![SerializedValue::Struct(vec![field(
+                    "r",
+                    SerializedValue::F32(0.5),
+                )])]),
+            ),
+        ]);
+        let document = convert_with_object_hints(&populated, &hints, |_| {
+            unreachable!("the synthetic color values contain no PPtrs")
+        })
+        .unwrap();
+        let output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[document],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        assert!(output.contains("m_Color: {r: 0.25}"));
+        assert!(output.contains("m_Colors:\n  - {r: 0.5}"));
+
+        let empty =
+            SerializedValue::Struct(vec![field("m_Colors", SerializedValue::Array(Vec::new()))]);
+        let document = convert_with_object_hints(&empty, &hints, |_| {
+            unreachable!("the synthetic empty array contains no PPtrs")
+        })
+        .unwrap();
+        let output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[document],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        assert!(output.contains("m_Colors: []"));
+    }
+
+    #[test]
+    fn type_tree_hints_apply_root_flow_mapping_and_reject_invalid_levels() {
+        let type_tree = TypeTree {
+            nodes: vec![
+                type_tree_node(0, "GameObject", "Base", TRANSFER_USING_FLOW_MAPPING_STYLE),
+                type_tree_node(1, "string", "m_Name", 0),
+            ],
+            string_buffer: Vec::new(),
+        };
+        let hints = UnityYamlObjectConversionHints::from_type_tree(
+            &type_tree,
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        assert!(hints.flow_mapped_struct_paths.contains(""));
+        let value = SerializedValue::Struct(vec![field(
+            "m_Name",
+            SerializedValue::StringBytes(b"Avatar".to_vec()),
+        )]);
+        let document = convert_with_object_hints(&value, &hints, |_| {
+            unreachable!("the synthetic name contains no PPtrs")
+        })
+        .unwrap();
+        let output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[document],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        assert!(output.contains("GameObject: {serializedVersion: 6, m_Name: Avatar}"));
+
+        let invalid = TypeTree {
+            nodes: vec![
+                type_tree_node(0, "Root", "Base", 0),
+                type_tree_node(2, "int", "m_Value", 0),
+            ],
+            string_buffer: Vec::new(),
+        };
+        assert!(matches!(
+            UnityYamlObjectConversionHints::from_type_tree(
+                &invalid,
+                UnityYamlObjectConversionLimits::default()
+            ),
+            Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                node_index: 1,
+                reason: "node level skips its parent"
+            })
+        ));
+        assert!(matches!(
+            UnityYamlObjectConversionHints::from_type_tree(
+                &type_tree,
+                UnityYamlObjectConversionLimits {
+                    max_type_tree_nodes: 1,
+                    ..UnityYamlObjectConversionLimits::default()
+                }
+            ),
+            Err(UnityYamlObjectConversionError::ValueLimitExceeded {
+                requested: 2,
+                limit: 1
+            })
+        ));
     }
 
     #[test]
