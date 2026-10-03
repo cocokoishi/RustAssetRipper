@@ -907,3 +907,11 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Verified with the full workspace (444 library, 13 CLI, 0 doc tests), warnings-denied Clippy, format check, the 1,449-file baseline verifier, and git diff --check. No Unity-produced streaming fixture or C# differential has run.
 - Still incomplete: generated per-version field extraction, actual Texture2D/Mesh and other resource exporter consumers, full AssetRipper product parity, the Phase 1 gate, and all Phase 2 sample validation.
 - Next: trace the source Texture2D and Mesh streaming-resource consumers to their versioned generated fields, then connect the Rust materialization API to those asset export paths with synthetic end-to-end SerializedFile fixtures.
+
+## UInt32 SerializedFile StreamingInfo resolution (2026-10-03)
+
+- Current phase: Phase 1; gate not passed. Local `main` is `432936d`; its tree is verified on `cocokoishi/RustAssetripper/main` at remote commit `5468ebda280d0f7f498d02b7f71262e0ce2a482f`. Local `origin/main` metadata still lags; query the live remote ref before each write.
+- Added a generated SerializedFile TypeTree fixture with a UInt32 `StreamingInfo.offset` leaf and an `inspect-files` end-to-end test resolving the selected explicit root `texture.resS` range. Verification passed: 444 library tests, 14 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and `git diff --check`.
+- Baseline source tracing confirms Texture2D/ImageTexture and Mesh YAML export stage streamed bytes into inline payload fields, clear streaming metadata while serializing, then restore the source fields. Rust currently offers bounded content materialization and audit APIs, but no Texture2D/Mesh exporter consumes them.
+- No Unity-produced TypeTree or direct C# runtime differential was run. No user AssetBundle or UABEA content has been inspected. Export integration, generated per-version asset fields, complete Phase 1 parity, and all Phase 2 validation remain incomplete.
+- Next: trace the Rust asset model and export pipeline, then integrate bounded StreamingInfo materialization into the corresponding texture and mesh export paths with synthetic SerializedFile fixtures.
