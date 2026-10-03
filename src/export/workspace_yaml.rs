@@ -1358,6 +1358,31 @@ mod tests {
         make_generation_10_object_file_with_external(1, 42, &tree, &payload, "shared.assets")
     }
 
+    fn make_game_object_with_external_pptr_dictionary() -> Vec<u8> {
+        let tree = [
+            (0, 1, "GameObject", "", -1),
+            (1, 1, "map", "m_Targets", -1),
+            (2, 1, "Array", "Array", -1),
+            (3, 1, "SInt32", "size", 4),
+            (3, 1, "pair", "data", -1),
+            (4, 1, "string", "first", -1),
+            (5, 1, "Array", "Array", -1),
+            (6, 1, "SInt32", "size", 4),
+            (6, 1, "char", "data", 2),
+            (4, 1, "PPtr<GameObject>", "second", 12),
+            (5, 1, "SInt32", "m_FileID", 4),
+            (5, 1, "SInt64", "m_PathID", 8),
+        ];
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&1_i32.to_le_bytes()); // one dictionary entry
+        payload.extend_from_slice(&6_i32.to_le_bytes()); // string length
+        payload.extend_from_slice(b"target");
+        payload.extend_from_slice(&[0; 2]); // align string data to four bytes
+        payload.extend_from_slice(&1_i32.to_le_bytes()); // first external file
+        payload.extend_from_slice(&GAME_OBJECT_PATH_ID.to_le_bytes());
+        make_generation_10_object_file_with_external(1, 51, &tree, &payload, "target.assets")
+    }
+
     fn make_mesh_renderer_with_external_game_object() -> Vec<u8> {
         let tree = [
             (0, 1, "MeshRenderer", "", -1),
@@ -1822,6 +1847,89 @@ mod tests {
         assert!(mesh_renderer_yaml.contains(
             "m_GameObject: {fileID: 42, guid: 71717171717171717171717171717171, type: 2}"
         ));
+    }
+
+    #[test]
+    fn pptr_dictionary_values_resolve_and_emit_exported_collection_pointer() {
+        const SOURCE_PATH_ID: i64 = 51;
+        const TARGET_COLLECTION_INDEX: usize = COLLECTION_INDEX + 1;
+        const TARGET_FILE_ID: i64 = 142;
+
+        let dictionary_bytes = make_game_object_with_external_pptr_dictionary();
+        let target_bytes = make_game_object_and_transform_file(TRANSFORM_PATH_ID);
+        let source_files = [
+            ("main.assets", dictionary_bytes.as_slice()),
+            ("target.assets", target_bytes.as_slice()),
+        ];
+        let (filesystem, workspace) = load_workspace_files(&source_files);
+        let objects = ObjectWorkspace::load_from_vfs(
+            &filesystem,
+            &workspace,
+            ObjectWorkspaceLimits::default(),
+        )
+        .unwrap();
+        assert!(objects.report().is_complete());
+
+        let reference_graph = workspace
+            .reference_graph(MultiFileReferenceGraphLimits::default())
+            .unwrap();
+        assert!(reference_graph.is_complete());
+        let dictionary_edges: Vec<_> = reference_graph.references_from_object(0, 0).collect();
+        assert_eq!(dictionary_edges.len(), 1);
+        assert_eq!(dictionary_edges[0].field_path, "m_Targets[0].second");
+        assert_eq!(dictionary_edges[0].file_id, 1);
+        assert_eq!(dictionary_edges[0].path_id, GAME_OBJECT_PATH_ID);
+        assert_eq!(
+            dictionary_edges[0].resolution,
+            MultiFilePPtrResolution::Object {
+                target_file_index: 1,
+                target_object_index: 0,
+            }
+        );
+
+        let target_asset = ExportAssetIdentity {
+            collection: ExportAssetCollectionIdentity::SerializedFile { file_index: 1 },
+            object_index: 0,
+            path_id: GAME_OBJECT_PATH_ID,
+            class_id: 1,
+        };
+        let pointer_map = ProjectExportPointerMap::new(
+            &[ExportedAssetPointerEntry {
+                asset: target_asset,
+                file_id: TARGET_FILE_ID,
+                collection_index: TARGET_COLLECTION_INDEX,
+            }],
+            &[ExportCollectionPointerMetadata {
+                collection_index: TARGET_COLLECTION_INDEX,
+                guid: [0x82; 16],
+                asset_type: UnityProjectAssetType::Serialized,
+            }],
+            ExportPointerMapLimits::default(),
+        )
+        .unwrap();
+        let document = workspace_object_to_unity_yaml_document(
+            &workspace,
+            &reference_graph,
+            &pointer_map,
+            &objects.objects()[0],
+            asset(0, SOURCE_PATH_ID, 1),
+            SOURCE_PATH_ID,
+            COLLECTION_INDEX,
+            None,
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        let yaml = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[document],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+
+        assert!(yaml.contains("--- !u!1 &51"), "{yaml}");
+        assert!(
+            yaml.contains("target: {fileID: 142, guid: 82828282828282828282828282828282, type: 2}"),
+            "{yaml}"
+        );
     }
 
     #[test]

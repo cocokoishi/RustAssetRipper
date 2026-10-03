@@ -691,4 +691,12 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Added TypeTree-derived `map` and `pair` handling. Primitive/string/GUID keys emit YAML mappings; complex keys use the Unity 5.4 version branch between pair sequences and legacy repeated `data` mappings. Primitive dictionary keys use baseline `ToString()` formatting. Malformed TypeTree and pair values fail with field context.
 - Focused dictionary tests and full verification passed: 397 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and diff checks.
 - Still incomplete: no Unity-produced fixture or direct C# runtime differential; no-TypeTree dictionary schemas and remaining generated class walkers stay open; Phase 1 remains incomplete.
-- Next: exercise PPtr-valued dictionary entries through workspace reference resolution and exported pointer mappings, then continue remaining generated per-class field policies.
+- The PPtr-valued dictionary integration follow-up is completed below; next continue remaining generated per-class field policies.
+
+## PPtr-valued dictionary reference and YAML mapping
+
+- Current phase: Phase 1; gate not passed. This increment builds from pushed revision `8b938c941600618d7a3eb3c1375a76e2a79c7f34`. Only `cocokoishi/RustAssetRipper`'s canonical repository is a push target; no other remote repository, UABEA, or user AssetBundle content was accessed.
+- Added a generated two-file SerializedFile fixture whose TypeTree dictionary contains a PPtr value. The test checks the exact `m_Targets[0].second` edge resolves to file 1/object 0, then verifies that workspace YAML maps the target through its exported fileID and collection GUID/type.
+- Focused integration test passed; full workspace passed with 398 library tests, 10 CLI tests, and 0 doc tests. Warnings-denied Clippy, format check, baseline verifier (1,449 files unchanged), and `git diff --check` all passed.
+- Still incomplete: the fixture is synthetic and there is no Unity-produced input or direct C# runtime differential. No-TypeTree dictionary schemas, generated class walkers, and Phase 1 remain open; Phase 2 remains locked.
+- Next: inspect and port the next generated per-class field-order/serialization policy from the local baseline, then add a focused generated-fixture regression test.
