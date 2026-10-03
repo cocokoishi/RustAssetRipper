@@ -511,6 +511,40 @@ impl SmartStream {
         }
     }
 
+    /// Reads exactly into `buffer` from an absolute byte offset without changing the shared
+    /// stream position. The seek and read are performed under one backend lock.
+    pub fn read_exact_at(&self, offset: u64, buffer: &mut [u8]) -> io::Result<()> {
+        self.ensure_non_null()?;
+        if !self.can_read() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "stream is not readable",
+            ));
+        }
+        let buffer_length = u64::try_from(buffer.len()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "read length does not fit in u64",
+            )
+        })?;
+        offset.checked_add(buffer_length).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "absolute read range overflows")
+        })?;
+
+        let mut backend = self.lock_backend()?;
+        let original_position = backend.seek(SeekFrom::Current(0))?;
+        let result = (|| {
+            backend.seek(SeekFrom::Start(offset))?;
+            backend.read_exact(buffer)
+        })();
+        let restore = backend.seek(SeekFrom::Start(original_position));
+        match (result, restore) {
+            (Err(error), _) => Err(error),
+            (Ok(()), Err(error)) => Err(error),
+            (Ok(()), Ok(_)) => Ok(()),
+        }
+    }
+
     pub fn set_len(&self, length: u64) -> io::Result<()> {
         let mut backend = self.lock_backend()?;
         if !self.can_write() {
@@ -1312,6 +1346,30 @@ mod tests {
         source.set_len(3).unwrap();
         assert_eq!(source.to_vec(3).unwrap(), b"abc");
         assert_eq!(source.position().unwrap(), 4);
+    }
+
+    #[test]
+    fn smart_stream_read_exact_at_preserves_position_on_success_and_failure() {
+        let mut stream = SmartStream::from_memory(b"abcdef".to_vec());
+        stream.seek(SeekFrom::Start(4)).unwrap();
+
+        let mut bytes = [0; 2];
+        stream.read_exact_at(1, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"bc");
+        assert_eq!(stream.position().unwrap(), 4);
+
+        let mut out_of_bounds = [0; 3];
+        assert!(stream.read_exact_at(5, &mut out_of_bounds).is_err());
+        assert_eq!(stream.position().unwrap(), 4);
+
+        assert_eq!(
+            stream
+                .read_exact_at(u64::MAX, &mut [0; 1])
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert_eq!(stream.position().unwrap(), 4);
     }
 
     #[test]

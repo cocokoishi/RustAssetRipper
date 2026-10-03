@@ -10,5 +10,6 @@ pub mod container;
 pub mod export;
 pub mod io;
 pub mod processing;
+pub mod resource;
 pub mod scheme;
 pub mod serialized_file;
