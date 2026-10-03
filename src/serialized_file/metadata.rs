@@ -34,6 +34,21 @@ impl SerializedFileMetadata {
         file_bytes: &[u8],
         header: &SerializedFileHeader,
     ) -> Result<Self, SerializedFileMetadataError> {
+        Self::parse_file_inner(file_bytes, header, false).map(|(metadata, _)| metadata)
+    }
+
+    pub(super) fn parse_file_with_object_layouts(
+        file_bytes: &[u8],
+        header: &SerializedFileHeader,
+    ) -> Result<(Self, Vec<ObjectRecordLayout>), SerializedFileMetadataError> {
+        Self::parse_file_inner(file_bytes, header, true)
+    }
+
+    fn parse_file_inner(
+        file_bytes: &[u8],
+        header: &SerializedFileHeader,
+        collect_object_record_layouts: bool,
+    ) -> Result<(Self, Vec<ObjectRecordLayout>), SerializedFileMetadataError> {
         header
             .validate_for_file_size(file_bytes.len())
             .map_err(SerializedFileMetadataError::from_header)?;
@@ -90,9 +105,37 @@ impl SerializedFileMetadata {
             None
         };
 
-        let objects = read_array(&mut reader, "object records", 4, |reader, index| {
-            read_object_info(reader, generation, &types, header, index)
-        })?;
+        let (objects, object_record_layouts) = if collect_object_record_layouts {
+            read_array_with_sidecar(
+                &mut reader,
+                "object records",
+                4,
+                "object record layouts",
+                |reader, index| {
+                    read_object_info(
+                        reader,
+                        generation,
+                        &types,
+                        header,
+                        prefix.metadata_offset,
+                        index,
+                    )
+                },
+            )?
+        } else {
+            let objects = read_array(&mut reader, "object records", 4, |reader, index| {
+                read_object_info(
+                    reader,
+                    generation,
+                    &types,
+                    header,
+                    prefix.metadata_offset,
+                    index,
+                )
+                .map(|(object, _)| object)
+            })?;
+            (objects, Vec::new())
+        };
 
         let script_types = if generation.has_script_types() {
             read_array(
@@ -145,19 +188,31 @@ impl SerializedFileMetadata {
                 )
             })?;
 
-        Ok(Self {
-            prefix,
-            types,
-            long_file_id,
-            objects,
-            script_types,
-            externals,
-            reference_types,
-            user_information,
-            trailing_metadata,
-            consumed_bytes,
-        })
+        Ok((
+            Self {
+                prefix,
+                types,
+                long_file_id,
+                objects,
+                script_types,
+                externals,
+                reference_types,
+                user_information,
+                trailing_metadata,
+                consumed_bytes,
+            },
+            object_record_layouts,
+        ))
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct ObjectRecordLayout {
+    pub path_id: i64,
+    /// Byte offset relative to the beginning of this SerializedFile's metadata region.
+    pub data_offset_field_offset: usize,
+    /// Byte offset relative to the beginning of this SerializedFile's metadata region.
+    pub data_size_field_offset: usize,
 }
 
 /// One serialized class/type definition in the metadata table.
@@ -830,8 +885,9 @@ fn read_object_info(
     generation: FormatVersion,
     types: &[SerializedType],
     header: &SerializedFileHeader,
+    metadata_start: usize,
     index: usize,
-) -> Result<ObjectInfo, SerializedFileMetadataError> {
+) -> Result<(ObjectInfo, ObjectRecordLayout), SerializedFileMetadataError> {
     let context = format!("object record {index}");
     let path_id = if generation.raw() >= 14 {
         reader
@@ -841,6 +897,13 @@ fn read_object_info(
     } else {
         i64::from(read_i32(reader, &format!("{context} PathID"))?)
     };
+    let data_offset_field_offset =
+        reader.offset().checked_sub(metadata_start).ok_or_else(|| {
+            SerializedFileMetadataError::new(
+                reader.offset(),
+                SerializedFileMetadataErrorKind::LayoutOverflow("object offset field location"),
+            )
+        })?;
     let byte_start = if generation.has_large_file_support() {
         let value = read_i64(reader, &format!("{context} data offset"))?;
         u64::try_from(value).map_err(|_| {
@@ -852,6 +915,12 @@ fn read_object_info(
     } else {
         u64::from(read_u32(reader, &format!("{context} data offset"))?)
     };
+    let data_size_field_offset = reader.offset().checked_sub(metadata_start).ok_or_else(|| {
+        SerializedFileMetadataError::new(
+            reader.offset(),
+            SerializedFileMetadataErrorKind::LayoutOverflow("object size field location"),
+        )
+    })?;
     let raw_byte_size = read_i32(reader, &format!("{context} data size"))?;
     let byte_size = u32::try_from(raw_byte_size).map_err(|_| {
         SerializedFileMetadataError::new(
@@ -947,22 +1016,31 @@ fn read_object_info(
         find_type_index(types, raw_type_id, is_stripped, reader.offset(), index)?
     };
 
-    Ok(ObjectInfo {
-        path_id,
-        byte_start,
-        byte_size,
-        serialized_type_index,
-        raw_type_id: resolved_type_index
-            .map(|type_index| types[type_index].raw_type_id)
-            .unwrap_or(raw_type_id),
-        class_id,
-        script_type_index: script_type_index
-            .or_else(|| resolved_type_index.map(|type_index| types[type_index].script_type_index)),
-        is_destroyed,
-        is_stripped: is_stripped
-            .or_else(|| resolved_type_index.map(|type_index| types[type_index].is_stripped_type)),
-        resolved_type_index,
-    })
+    Ok((
+        ObjectInfo {
+            path_id,
+            byte_start,
+            byte_size,
+            serialized_type_index,
+            raw_type_id: resolved_type_index
+                .map(|type_index| types[type_index].raw_type_id)
+                .unwrap_or(raw_type_id),
+            class_id,
+            script_type_index: script_type_index.or_else(|| {
+                resolved_type_index.map(|type_index| types[type_index].script_type_index)
+            }),
+            is_destroyed,
+            is_stripped: is_stripped.or_else(|| {
+                resolved_type_index.map(|type_index| types[type_index].is_stripped_type)
+            }),
+            resolved_type_index,
+        },
+        ObjectRecordLayout {
+            path_id,
+            data_offset_field_offset,
+            data_size_field_offset,
+        },
+    ))
 }
 
 fn find_type_index(
@@ -1128,6 +1206,27 @@ fn read_array<T>(
         items.push(read_item(reader, index)?);
     }
     Ok(items)
+}
+
+fn read_array_with_sidecar<T, U>(
+    reader: &mut BinaryReader<'_>,
+    field: &str,
+    minimum_item_size: usize,
+    sidecar_field: &str,
+    mut read_item: impl FnMut(
+        &mut BinaryReader<'_>,
+        usize,
+    ) -> Result<(T, U), SerializedFileMetadataError>,
+) -> Result<(Vec<T>, Vec<U>), SerializedFileMetadataError> {
+    let count = read_nonnegative_count(reader, field, minimum_item_size)?;
+    let mut items = reserve_vec(count, reader.offset(), field)?;
+    let mut sidecar = reserve_vec(count, reader.offset(), sidecar_field)?;
+    for index in 0..count {
+        let (item, associated) = read_item(reader, index)?;
+        items.push(item);
+        sidecar.push(associated);
+    }
+    Ok((items, sidecar))
 }
 
 fn reserve_vec<T>(

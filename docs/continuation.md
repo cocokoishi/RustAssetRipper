@@ -442,3 +442,10 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Verification passed: 320 library and 10 CLI tests; warnings-denied Clippy; format check; 1,449-file baseline verification; `git diff --check`.
 - Still incomplete: this writes only one object payload. It does not rewrite enclosing SerializedFile object sizes/offsets/metadata/header, nor support managed-reference payloads. No source-runtime differential has been run; Phase 1 remains open.
 - Next: build a bounded SerializedFile rewrite path around the payload encoder, recalculating object sizes and data offsets while preserving versioned metadata/header details; then use it for the typed component and dependency writeback work.
+## Complete SerializedFile payload replacement (2026-10-03)
+
+- Current phase: Phase 1; gate not passed. This increment starts from pushed revision `9d2784422f967d11ac8824f5f23c66dcae1120ac`. Only `cocokoishi/RustAssetRipper` is an authorized cloud write target; the local AssetRipper baseline remains read-only. No UABEA or user AssetBundle content was accessed.
+- Added a complete-file replacement path that retains input metadata bytes, tracks object-record field positions, rewrites object payload ranges in source table order, patches generation-specific offsets/sizes and headers, and preserves source alignment. Tests cover metadata-at-end generation 8, ordinary generation 10 with two objects and changed later offsets, generation-22 extended header fields, and semantic reparse.
+- Verification passed: 323 library and 10 CLI tests; warnings-denied Clippy; format check; 1,449-file baseline verification; `git diff --check`.
+- Still incomplete: object records and metadata tables cannot yet be added or removed. This path does not update type/script/external/reference/dependency tables. No source-runtime differential has run; Phase 1 remains open.
+- Next: implement bounded object-record insertion using the captured metadata layout, first reusing existing serialized type entries and preserving all existing records and auxiliary metadata tables; then connect the typed GameObject component and generated-object dependency plans.
