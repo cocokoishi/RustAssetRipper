@@ -140,12 +140,27 @@ pub struct WorkspaceResourceFile {
     pub container_resource_index: usize,
 }
 
+/// A ResourceFile passed explicitly as a root GameBundle input rather than mounted from a Bundle.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceRootResourceFile {
+    pub virtual_path: String,
+    pub name: String,
+}
+
+/// Identifies whether a ResourceFile match came from a mounted Bundle or an explicit root input.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkspaceResolvedResourceFile {
+    MountedBundle { resource_index: usize },
+    ExplicitRoot { resource_index: usize },
+}
+
 /// A malformed workspace reference encountered while resolving a bundled ResourceFile.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WorkspaceResourceLookupError {
     BundleIndexOutOfBounds { index: usize, count: usize },
     ParentBundleIndexOutOfBounds { index: usize, count: usize },
     ResourceFileIndexOutOfBounds { index: usize, count: usize },
+    RootResourceFileIndexOutOfBounds { index: usize, count: usize },
     BundleParentCycle,
 }
 
@@ -163,6 +178,10 @@ impl Display for WorkspaceResourceLookupError {
             Self::ResourceFileIndexOutOfBounds { index, count } => write!(
                 formatter,
                 "resource lookup ResourceFile index {index} is outside {count} resources"
+            ),
+            Self::RootResourceFileIndexOutOfBounds { index, count } => write!(
+                formatter,
+                "resource lookup root ResourceFile index {index} is outside {count} inputs"
             ),
             Self::BundleParentCycle => formatter
                 .write_str("resource lookup encountered a cycle in the container bundle hierarchy"),
@@ -1654,6 +1673,33 @@ impl SerializedFileWorkspace {
         source_bundle_index: Option<usize>,
         requested_name: &str,
     ) -> Result<Option<usize>, WorkspaceResourceLookupError> {
+        match self.resolve_bundled_or_root_resource_file(
+            source_bundle_index,
+            requested_name,
+            &[],
+        )? {
+            Some(WorkspaceResolvedResourceFile::MountedBundle { resource_index }) => {
+                Ok(Some(resource_index))
+            }
+            Some(WorkspaceResolvedResourceFile::ExplicitRoot { resource_index }) => Err(
+                WorkspaceResourceLookupError::RootResourceFileIndexOutOfBounds {
+                    index: resource_index,
+                    count: 0,
+                },
+            ),
+            None => Ok(None),
+        }
+    }
+
+    /// Resolves mounted bundle resources together with direct GameBundle ResourceFile inputs.
+    /// Explicit root resources are checked at the GameBundle scope before its child Bundles,
+    /// matching `Bundle.ResolveResource`'s current-scope resource-before-child order.
+    pub fn resolve_bundled_or_root_resource_file(
+        &self,
+        source_bundle_index: Option<usize>,
+        requested_name: &str,
+        root_resources: &[WorkspaceRootResourceFile],
+    ) -> Result<Option<WorkspaceResolvedResourceFile>, WorkspaceResourceLookupError> {
         if requested_name.is_empty() {
             return Ok(None);
         }
@@ -1674,7 +1720,9 @@ impl SerializedFileWorkspace {
                 if let Some(resource_index) =
                     self.find_resource_in_bundle(bundle_index, &fixed_name)?
                 {
-                    return Ok(Some(resource_index));
+                    return Ok(Some(WorkspaceResolvedResourceFile::MountedBundle {
+                        resource_index,
+                    }));
                 }
                 for (child_index, child) in self.container_bundles.iter().enumerate() {
                     if child.parent_bundle_index != Some(bundle_index)
@@ -1685,10 +1733,21 @@ impl SerializedFileWorkspace {
                     if let Some(resource_index) =
                         self.find_resource_in_bundle(child_index, &fixed_name)?
                     {
-                        return Ok(Some(resource_index));
+                        return Ok(Some(WorkspaceResolvedResourceFile::MountedBundle {
+                            resource_index,
+                        }));
                     }
                 }
             } else {
+                if let Some((resource_index, _)) = root_resources
+                    .iter()
+                    .enumerate()
+                    .find(|(_, resource)| fix_file_identifier(&resource.name) == fixed_name)
+                {
+                    return Ok(Some(WorkspaceResolvedResourceFile::ExplicitRoot {
+                        resource_index,
+                    }));
+                }
                 for (child_index, child) in self.container_bundles.iter().enumerate() {
                     if child.parent_bundle_index.is_some()
                         || Some(child_index) == excluded_child_bundle
@@ -1698,7 +1757,9 @@ impl SerializedFileWorkspace {
                     if let Some(resource_index) =
                         self.find_resource_in_bundle(child_index, &fixed_name)?
                     {
-                        return Ok(Some(resource_index));
+                        return Ok(Some(WorkspaceResolvedResourceFile::MountedBundle {
+                            resource_index,
+                        }));
                     }
                 }
                 return Ok(None);
@@ -3950,6 +4011,139 @@ mod tests {
             .unwrap(),
             ResolvedResourceFile::Missing {
                 unavailable_data_paths: vec!["/platform/missing".to_owned()],
+            }
+        );
+    }
+
+    #[test]
+    fn explicit_root_resource_precedes_root_sibling_bundle_and_external_provider() {
+        use super::{WorkspaceResourceFile, WorkspaceRootResourceFile};
+        use crate::io::platform_structure::PlatformResourceProvider;
+        use crate::resource::{
+            resolve_resource_file, resolve_resource_file_with_root_catalog,
+            ExplicitRootResourceInput, ResolvedResourceFile, RootResourceCatalogLimits,
+            RootResourceFileCatalog,
+        };
+        use crate::scheme::{SchemeReader, SchemeReaderLimits};
+
+        let workspace = SerializedFileWorkspace {
+            container_bundles: vec![
+                WorkspaceSerializedBundle {
+                    scope_path: Some("/source".to_owned()),
+                    parent_bundle_index: None,
+                    parent_entry_index: None,
+                    direct_collection_file_indices: Vec::new(),
+                    direct_resource_file_indices: Vec::new(),
+                },
+                WorkspaceSerializedBundle {
+                    scope_path: Some("/sibling".to_owned()),
+                    parent_bundle_index: None,
+                    parent_entry_index: None,
+                    direct_collection_file_indices: Vec::new(),
+                    direct_resource_file_indices: vec![0],
+                },
+            ],
+            resource_files: vec![WorkspaceResourceFile {
+                virtual_path: "/sibling/shared.resS".to_owned(),
+                name: "shared.resS".to_owned(),
+                container_bundle_index: 1,
+                container_entry_index: 0,
+                container_resource_index: 0,
+            }],
+            ..SerializedFileWorkspace::default()
+        };
+        let mut filesystem = VirtualFileSystem::new();
+        for path in [
+            "/sibling/shared.resS",
+            "/explicit/shared.resS",
+            "/platform/shared.resS",
+        ] {
+            let parent = path.rsplit_once('/').unwrap().0;
+            filesystem
+                .create_directory(Some(parent))
+                .unwrap_or_else(|error| {
+                    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+                });
+            filesystem.write_all_bytes(path, b"resource bytes").unwrap();
+        }
+        let dispatched =
+            SchemeReader::read_with_limits(b"explicit resource", SchemeReaderLimits::default())
+                .unwrap();
+        let root_inputs = [ExplicitRootResourceInput {
+            file_name: "SHARED.resS",
+            virtual_path: "/explicit/shared.resS",
+            dispatched_file: &dispatched,
+        }];
+        let root_catalog = RootResourceFileCatalog::from_explicit_resource_inputs(
+            &filesystem,
+            &root_inputs,
+            RootResourceCatalogLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            root_catalog.files(),
+            [WorkspaceRootResourceFile {
+                name: "SHARED.resS".to_owned(),
+                virtual_path: "/explicit/shared.resS".to_owned(),
+            }]
+        );
+        let platform = PlatformStructure {
+            platform: PlatformKind::Windows,
+            selected_path: "/platform".to_owned(),
+            consumed_paths: vec!["/platform".to_owned()],
+            root_path: "/platform".to_owned(),
+            name: Some("Game".to_owned()),
+            game_data_path: None,
+            data_paths: vec!["/platform".to_owned()],
+        };
+        let provider = PlatformResourceProvider::new(Some(&platform), None);
+
+        assert_eq!(
+            resolve_resource_file(
+                &filesystem,
+                &workspace,
+                Some(0),
+                "shared.resS",
+                &provider,
+                crate::io::platform_structure::PlatformStructureLimits::default(),
+            )
+            .unwrap(),
+            ResolvedResourceFile::Bundled {
+                resource_index: 0,
+                virtual_path: "/sibling/shared.resS",
+            },
+            "the legacy bundle-only lookup reaches the sibling after the owner branch"
+        );
+        assert_eq!(
+            resolve_resource_file_with_root_catalog(
+                &filesystem,
+                &workspace,
+                Some(0),
+                "shared.resS",
+                &root_catalog,
+                &provider,
+                crate::io::platform_structure::PlatformStructureLimits::default(),
+            )
+            .unwrap(),
+            ResolvedResourceFile::ExplicitRoot {
+                resource_index: 0,
+                virtual_path: "/explicit/shared.resS",
+            },
+            "GameBundle root resources precede sibling Bundles and the external provider"
+        );
+        assert_eq!(
+            resolve_resource_file_with_root_catalog(
+                &filesystem,
+                &workspace,
+                Some(0),
+                "other.resS",
+                &root_catalog,
+                &provider,
+                crate::io::platform_structure::PlatformStructureLimits::default(),
+            )
+            .unwrap(),
+            ResolvedResourceFile::Missing {
+                unavailable_data_paths: Vec::new(),
             }
         );
     }

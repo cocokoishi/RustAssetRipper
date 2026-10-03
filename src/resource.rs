@@ -9,8 +9,12 @@ use crate::io::platform_structure::{
     PlatformResourceSource, PlatformStructureLimits,
 };
 use crate::io::stream::SmartStream;
+use crate::scheme::{DispatchedFile, FileKind};
 use crate::serialized_file::object::{SerializedValue, SerializedValueLookupError};
-use crate::serialized_file::workspace::{SerializedFileWorkspace, WorkspaceResourceLookupError};
+use crate::serialized_file::workspace::{
+    SerializedFileWorkspace, WorkspaceResolvedResourceFile, WorkspaceResourceLookupError,
+    WorkspaceRootResourceFile,
+};
 
 const UNITY_STREAM_OFFSET_MAX: u64 = i64::MAX as u64;
 
@@ -30,6 +34,10 @@ pub enum ResolvedResourceFile<'a> {
         resource_index: usize,
         virtual_path: &'a str,
     },
+    ExplicitRoot {
+        resource_index: usize,
+        virtual_path: &'a str,
+    },
     External {
         virtual_path: String,
         source: PlatformResourceSource,
@@ -41,10 +49,271 @@ pub enum ResolvedResourceFile<'a> {
     },
 }
 
+/// Explicit root inputs must already have been dispatched as Resource files by `SchemeReader`.
+pub struct ExplicitRootResourceInput<'a, 'contents> {
+    pub file_name: &'a str,
+    pub virtual_path: &'a str,
+    pub dispatched_file: &'a DispatchedFile<'contents>,
+}
+
+/// Bounds for registering explicit root ResourceFiles separately from scanned DataPath files.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RootResourceCatalogLimits {
+    pub max_files: usize,
+    pub max_file_name_bytes: usize,
+    pub max_virtual_path_bytes: usize,
+    pub max_total_file_name_bytes: usize,
+    pub max_total_virtual_path_bytes: usize,
+}
+
+impl Default for RootResourceCatalogLimits {
+    fn default() -> Self {
+        Self {
+            max_files: 1_000_000,
+            max_file_name_bytes: 1024 * 1024,
+            max_virtual_path_bytes: 1024 * 1024,
+            max_total_file_name_bytes: 64 * 1024 * 1024,
+            max_total_virtual_path_bytes: 64 * 1024 * 1024,
+        }
+    }
+}
+
+/// Ordered root GameBundle ResourceFiles from explicitly selected paths.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RootResourceFileCatalog {
+    files: Vec<WorkspaceRootResourceFile>,
+}
+
+impl RootResourceFileCatalog {
+    /// Builds an ordered catalog from already-dispatched root input files. Platform inventory
+    /// candidates must not be passed here; those are searched through `PlatformResourceProvider`.
+    pub fn from_explicit_resource_inputs(
+        filesystem: &VirtualFileSystem,
+        inputs: &[ExplicitRootResourceInput<'_, '_>],
+        limits: RootResourceCatalogLimits,
+    ) -> Result<Self, RootResourceCatalogError> {
+        if inputs.len() > limits.max_files {
+            return Err(RootResourceCatalogError::FileCountLimitExceeded {
+                count: inputs.len(),
+                limit: limits.max_files,
+            });
+        }
+        let mut files = Vec::new();
+        files.try_reserve_exact(inputs.len()).map_err(|_| {
+            RootResourceCatalogError::AllocationFailed {
+                requested: inputs.len(),
+            }
+        })?;
+        let mut total_name_bytes = 0usize;
+        let mut total_path_bytes = 0usize;
+        for (input_index, input) in inputs.iter().enumerate() {
+            if input.dispatched_file.kind() != FileKind::Resource {
+                return Err(RootResourceCatalogError::NotResourceFile {
+                    input_index,
+                    kind: input.dispatched_file.kind(),
+                });
+            }
+            if input.file_name.is_empty() || input.virtual_path.is_empty() {
+                return Err(RootResourceCatalogError::EmptyNameOrPath { input_index });
+            }
+            if input.file_name.len() > limits.max_file_name_bytes {
+                return Err(RootResourceCatalogError::FileNameTooLong {
+                    input_index,
+                    byte_count: input.file_name.len(),
+                    limit: limits.max_file_name_bytes,
+                });
+            }
+            if input.virtual_path.len() > limits.max_virtual_path_bytes {
+                return Err(RootResourceCatalogError::VirtualPathTooLong {
+                    input_index,
+                    byte_count: input.virtual_path.len(),
+                    limit: limits.max_virtual_path_bytes,
+                });
+            }
+            total_name_bytes = total_name_bytes.checked_add(input.file_name.len()).ok_or(
+                RootResourceCatalogError::AggregateSizeOverflow {
+                    resource: "explicit root ResourceFile names",
+                },
+            )?;
+            if total_name_bytes > limits.max_total_file_name_bytes {
+                return Err(RootResourceCatalogError::AggregateSizeLimitExceeded {
+                    resource: "explicit root ResourceFile names",
+                    byte_count: total_name_bytes,
+                    limit: limits.max_total_file_name_bytes,
+                });
+            }
+            total_path_bytes = total_path_bytes
+                .checked_add(input.virtual_path.len())
+                .ok_or(RootResourceCatalogError::AggregateSizeOverflow {
+                    resource: "explicit root ResourceFile paths",
+                })?;
+            if total_path_bytes > limits.max_total_virtual_path_bytes {
+                return Err(RootResourceCatalogError::AggregateSizeLimitExceeded {
+                    resource: "explicit root ResourceFile paths",
+                    byte_count: total_path_bytes,
+                    limit: limits.max_total_virtual_path_bytes,
+                });
+            }
+            let exists = filesystem
+                .logical_file_exists(input.virtual_path)
+                .map_err(|source| RootResourceCatalogError::FileSystem {
+                    input_index,
+                    virtual_path: input.virtual_path.to_owned(),
+                    source,
+                })?;
+            if !exists {
+                return Err(RootResourceCatalogError::FileNotFound {
+                    input_index,
+                    virtual_path: input.virtual_path.to_owned(),
+                });
+            }
+            files.push(WorkspaceRootResourceFile {
+                name: clone_catalog_string(input.file_name, input.file_name.len())?,
+                virtual_path: clone_catalog_string(input.virtual_path, input.virtual_path.len())?,
+            });
+        }
+        Ok(Self { files })
+    }
+
+    pub fn files(&self) -> &[WorkspaceRootResourceFile] {
+        &self.files
+    }
+}
+
+/// Errors while registering explicitly selected root ResourceFiles.
+#[derive(Debug)]
+pub enum RootResourceCatalogError {
+    FileCountLimitExceeded {
+        count: usize,
+        limit: usize,
+    },
+    NotResourceFile {
+        input_index: usize,
+        kind: FileKind,
+    },
+    EmptyNameOrPath {
+        input_index: usize,
+    },
+    FileNameTooLong {
+        input_index: usize,
+        byte_count: usize,
+        limit: usize,
+    },
+    VirtualPathTooLong {
+        input_index: usize,
+        byte_count: usize,
+        limit: usize,
+    },
+    AggregateSizeOverflow {
+        resource: &'static str,
+    },
+    AggregateSizeLimitExceeded {
+        resource: &'static str,
+        byte_count: usize,
+        limit: usize,
+    },
+    AllocationFailed {
+        requested: usize,
+    },
+    FileNotFound {
+        input_index: usize,
+        virtual_path: String,
+    },
+    FileSystem {
+        input_index: usize,
+        virtual_path: String,
+        source: io::Error,
+    },
+}
+
+impl fmt::Display for RootResourceCatalogError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::FileCountLimitExceeded { count, limit } => write!(
+                formatter,
+                "explicit root ResourceFile count {count} exceeds limit {limit}"
+            ),
+            Self::NotResourceFile { input_index, kind } => write!(
+                formatter,
+                "explicit root input {input_index} dispatched as {kind:?}, not Resource"
+            ),
+            Self::EmptyNameOrPath { input_index } => write!(
+                formatter,
+                "explicit root ResourceFile input {input_index} has an empty name or path"
+            ),
+            Self::FileNameTooLong {
+                input_index,
+                byte_count,
+                limit,
+            } => write!(
+                formatter,
+                "explicit root ResourceFile name at input {input_index} has {byte_count} bytes, exceeding {limit}"
+            ),
+            Self::VirtualPathTooLong {
+                input_index,
+                byte_count,
+                limit,
+            } => write!(
+                formatter,
+                "explicit root ResourceFile path at input {input_index} has {byte_count} bytes, exceeding {limit}"
+            ),
+            Self::AggregateSizeOverflow { resource } => {
+                write!(formatter, "aggregate byte count for {resource} overflows")
+            }
+            Self::AggregateSizeLimitExceeded {
+                resource,
+                byte_count,
+                limit,
+            } => write!(
+                formatter,
+                "{resource} use {byte_count} bytes, exceeding limit {limit}"
+            ),
+            Self::AllocationFailed { requested } => write!(
+                formatter,
+                "could not allocate metadata for {requested} explicit root ResourceFiles"
+            ),
+            Self::FileNotFound {
+                input_index,
+                virtual_path,
+            } => write!(
+                formatter,
+                "explicit root ResourceFile input {input_index} is missing at '{virtual_path}'"
+            ),
+            Self::FileSystem {
+                input_index,
+                virtual_path,
+                source,
+            } => write!(
+                formatter,
+                "could not inspect explicit root ResourceFile input {input_index} at '{virtual_path}': {source}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RootResourceCatalogError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::FileSystem { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
+
+fn clone_catalog_string(value: &str, requested: usize) -> Result<String, RootResourceCatalogError> {
+    let mut result = String::new();
+    result
+        .try_reserve_exact(requested)
+        .map_err(|_| RootResourceCatalogError::AllocationFailed { requested })?;
+    result.push_str(value);
+    Ok(result)
+}
+
 /// Errors from the ordered bundle-scope and external-provider ResourceFile lookup.
 #[derive(Debug)]
 pub enum ResourceFileResolveError {
     Bundle(WorkspaceResourceLookupError),
+    ExplicitRootResourceIndexOutOfBounds { index: usize, count: usize },
     ExternalProvider(PlatformResourceLookupError),
 }
 
@@ -54,6 +323,10 @@ impl fmt::Display for ResourceFileResolveError {
             Self::Bundle(source) => {
                 write!(formatter, "bundle ResourceFile lookup failed: {source}")
             }
+            Self::ExplicitRootResourceIndexOutOfBounds { index, count } => write!(
+                formatter,
+                "explicit root ResourceFile index {index} is outside {count} inputs"
+            ),
             Self::ExternalProvider(source) => {
                 write!(formatter, "external ResourceFile lookup failed: {source}")
             }
@@ -65,6 +338,7 @@ impl std::error::Error for ResourceFileResolveError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Bundle(source) => Some(source),
+            Self::ExplicitRootResourceIndexOutOfBounds { .. } => None,
             Self::ExternalProvider(source) => Some(source),
         }
     }
@@ -266,27 +540,92 @@ pub fn resolve_resource_file<'a>(
             unavailable_data_paths: Vec::new(),
         });
     }
-    let bundled_resource_index = workspace
+    let Some(resource_index) = workspace
         .resolve_bundled_resource_file(source_bundle_index, original_name)
-        .map_err(ResourceFileResolveError::Bundle)?;
-    if let Some(resource_index) = bundled_resource_index {
-        let resource = workspace
-            .resource_files()
-            .get(resource_index)
-            .ok_or_else(|| {
-                ResourceFileResolveError::Bundle(
-                    WorkspaceResourceLookupError::ResourceFileIndexOutOfBounds {
-                        index: resource_index,
-                        count: workspace.resource_files().len(),
-                    },
-                )
-            })?;
-        return Ok(ResolvedResourceFile::Bundled {
-            resource_index,
-            virtual_path: &resource.virtual_path,
+        .map_err(ResourceFileResolveError::Bundle)?
+    else {
+        return resolve_external_resource_file(filesystem, original_name, provider, limits);
+    };
+    let resource = workspace
+        .resource_files()
+        .get(resource_index)
+        .ok_or_else(|| {
+            ResourceFileResolveError::Bundle(
+                WorkspaceResourceLookupError::ResourceFileIndexOutOfBounds {
+                    index: resource_index,
+                    count: workspace.resource_files().len(),
+                },
+            )
+        })?;
+    Ok(ResolvedResourceFile::Bundled {
+        resource_index,
+        virtual_path: &resource.virtual_path,
+    })
+}
+
+/// Resolves an explicit GameBundle root ResourceFile between mounted Bundle resources and the
+/// external Platform/Mixed provider.
+pub fn resolve_resource_file_with_root_catalog<'a>(
+    filesystem: &VirtualFileSystem,
+    workspace: &'a SerializedFileWorkspace,
+    source_bundle_index: Option<usize>,
+    original_name: &str,
+    root_catalog: &'a RootResourceFileCatalog,
+    provider: &PlatformResourceProvider<'_>,
+    limits: PlatformStructureLimits,
+) -> Result<ResolvedResourceFile<'a>, ResourceFileResolveError> {
+    if original_name.is_empty() {
+        return Ok(ResolvedResourceFile::Missing {
+            unavailable_data_paths: Vec::new(),
         });
     }
+    let bundled_resource = workspace
+        .resolve_bundled_or_root_resource_file(
+            source_bundle_index,
+            original_name,
+            root_catalog.files(),
+        )
+        .map_err(ResourceFileResolveError::Bundle)?;
+    match bundled_resource {
+        Some(WorkspaceResolvedResourceFile::MountedBundle { resource_index }) => {
+            let resource = workspace
+                .resource_files()
+                .get(resource_index)
+                .ok_or_else(|| {
+                    ResourceFileResolveError::Bundle(
+                        WorkspaceResourceLookupError::ResourceFileIndexOutOfBounds {
+                            index: resource_index,
+                            count: workspace.resource_files().len(),
+                        },
+                    )
+                })?;
+            Ok(ResolvedResourceFile::Bundled {
+                resource_index,
+                virtual_path: &resource.virtual_path,
+            })
+        }
+        Some(WorkspaceResolvedResourceFile::ExplicitRoot { resource_index }) => {
+            let resource = root_catalog.files().get(resource_index).ok_or(
+                ResourceFileResolveError::ExplicitRootResourceIndexOutOfBounds {
+                    index: resource_index,
+                    count: root_catalog.files().len(),
+                },
+            )?;
+            Ok(ResolvedResourceFile::ExplicitRoot {
+                resource_index,
+                virtual_path: &resource.virtual_path,
+            })
+        }
+        None => resolve_external_resource_file(filesystem, original_name, provider, limits),
+    }
+}
 
+fn resolve_external_resource_file(
+    filesystem: &VirtualFileSystem,
+    original_name: &str,
+    provider: &PlatformResourceProvider<'_>,
+    limits: PlatformStructureLimits,
+) -> Result<ResolvedResourceFile<'static>, ResourceFileResolveError> {
     match provider
         .find_resource(filesystem, original_name, limits)
         .map_err(ResourceFileResolveError::ExternalProvider)?
@@ -624,11 +963,15 @@ mod tests {
     use super::{
         check_streamed_resource_integrity, extract_streamed_resource_info,
         open_streamed_resource_range, read_streamed_resource_bytes,
-        read_streamed_resource_info_bytes, InvalidStreamedResourceRange, StreamedResourceError,
-        StreamedResourceInfo, StreamedResourceInfoError, StreamedResourceLimits,
+        read_streamed_resource_info_bytes, ExplicitRootResourceInput, InvalidStreamedResourceRange,
+        RootResourceCatalogError, RootResourceCatalogLimits, RootResourceFileCatalog,
+        StreamedResourceError, StreamedResourceInfo, StreamedResourceInfoError,
+        StreamedResourceLimits,
     };
     use crate::io::filesystem::VirtualFileSystem;
+    use crate::scheme::{FileKind, SchemeReader, SchemeReaderLimits};
     use crate::serialized_file::object::{SerializedFieldValue, SerializedValue};
+    use crate::serialized_file::workspace::WorkspaceRootResourceFile;
 
     fn filesystem_with_resource() -> VirtualFileSystem {
         let mut filesystem = VirtualFileSystem::new();
@@ -654,6 +997,117 @@ mod tests {
                 value: SerializedValue::U32(12),
             },
         ])
+    }
+
+    #[test]
+    fn explicit_root_resource_catalog_preserves_order_and_validates_inputs() {
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem.create_directory(Some("/root")).unwrap();
+        filesystem
+            .write_all_bytes("/root/first.resS", b"first")
+            .unwrap();
+        filesystem
+            .write_all_bytes("/root/second.resS", b"second")
+            .unwrap();
+        let first_dispatch =
+            SchemeReader::read_with_limits(b"first resource", SchemeReaderLimits::default())
+                .unwrap();
+        let second_dispatch =
+            SchemeReader::read_with_limits(b"second resource", SchemeReaderLimits::default())
+                .unwrap();
+        assert_eq!(first_dispatch.kind(), FileKind::Resource);
+
+        let inputs = [
+            ExplicitRootResourceInput {
+                file_name: "SHARED.resS",
+                virtual_path: "/root/first.resS",
+                dispatched_file: &first_dispatch,
+            },
+            ExplicitRootResourceInput {
+                file_name: "shared.ress",
+                virtual_path: "/root/second.resS",
+                dispatched_file: &second_dispatch,
+            },
+        ];
+        let catalog = RootResourceFileCatalog::from_explicit_resource_inputs(
+            &filesystem,
+            &inputs,
+            RootResourceCatalogLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            catalog.files(),
+            [
+                WorkspaceRootResourceFile {
+                    name: "SHARED.resS".to_owned(),
+                    virtual_path: "/root/first.resS".to_owned(),
+                },
+                WorkspaceRootResourceFile {
+                    name: "shared.ress".to_owned(),
+                    virtual_path: "/root/second.resS".to_owned(),
+                },
+            ]
+        );
+        assert!(matches!(
+            RootResourceFileCatalog::from_explicit_resource_inputs(
+                &filesystem,
+                &inputs,
+                RootResourceCatalogLimits {
+                    max_files: 1,
+                    ..RootResourceCatalogLimits::default()
+                },
+            ),
+            Err(RootResourceCatalogError::FileCountLimitExceeded { count: 2, limit: 1 })
+        ));
+        assert!(matches!(
+            RootResourceFileCatalog::from_explicit_resource_inputs(
+                &filesystem,
+                &inputs,
+                RootResourceCatalogLimits {
+                    max_total_file_name_bytes: 21,
+                    ..RootResourceCatalogLimits::default()
+                },
+            ),
+            Err(RootResourceCatalogError::AggregateSizeLimitExceeded {
+                resource: "explicit root ResourceFile names",
+                byte_count: 22,
+                limit: 21,
+            })
+        ));
+
+        let mut bundle_bytes = vec![0; 32];
+        bundle_bytes[..7].copy_from_slice(b"UnityFS");
+        let bundle_dispatch =
+            SchemeReader::read_with_limits(&bundle_bytes, SchemeReaderLimits::default()).unwrap();
+        let wrong_kind = [ExplicitRootResourceInput {
+            file_name: "wrong.resS",
+            virtual_path: "/root/first.resS",
+            dispatched_file: &bundle_dispatch,
+        }];
+        assert!(matches!(
+            RootResourceFileCatalog::from_explicit_resource_inputs(
+                &filesystem,
+                &wrong_kind,
+                RootResourceCatalogLimits::default(),
+            ),
+            Err(RootResourceCatalogError::NotResourceFile {
+                input_index: 0,
+                kind: FileKind::UnityFs,
+            })
+        ));
+        let missing = [ExplicitRootResourceInput {
+            file_name: "missing.resS",
+            virtual_path: "/root/missing.resS",
+            dispatched_file: &first_dispatch,
+        }];
+        assert!(matches!(
+            RootResourceFileCatalog::from_explicit_resource_inputs(
+                &filesystem,
+                &missing,
+                RootResourceCatalogLimits::default(),
+            ),
+            Err(RootResourceCatalogError::FileNotFound { input_index: 0, .. })
+        ));
     }
 
     #[test]
