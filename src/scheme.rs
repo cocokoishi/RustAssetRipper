@@ -89,6 +89,8 @@ pub struct ContainerMountLimits {
     pub max_total_serialized_file_path_bytes: u64,
     /// Maximum aggregate ResourceFile path bytes retained for bundle-resource metadata.
     pub max_total_resource_file_path_bytes: u64,
+    /// Maximum aggregate original ResourceFile name bytes retained for bundle-resource lookup.
+    pub max_total_resource_file_name_bytes: u64,
 }
 
 impl Default for ContainerMountLimits {
@@ -101,6 +103,7 @@ impl Default for ContainerMountLimits {
             max_total_container_scope_path_bytes: 64 * 1024 * 1024,
             max_total_serialized_file_path_bytes: 64 * 1024 * 1024,
             max_total_resource_file_path_bytes: 64 * 1024 * 1024,
+            max_total_resource_file_name_bytes: 64 * 1024 * 1024,
         }
     }
 }
@@ -158,6 +161,8 @@ pub struct ContainerMountReport {
     pub resource_files: Vec<MountedResourceFile>,
     /// Aggregate bytes in `resource_files` virtual paths.
     pub resource_file_path_bytes: u64,
+    /// Aggregate bytes in original source names for `resource_files`.
+    pub resource_file_name_bytes: u64,
 }
 
 /// One source FileContainer in the recursively mounted SerializedBundle tree.
@@ -183,6 +188,8 @@ pub struct MountedSerializedFile {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MountedResourceFile {
     pub virtual_path: String,
+    /// Original path/name from the source container entry, without the VFS mount root.
+    pub name: String,
     pub container_scope_index: Option<usize>,
     /// Local index of the owning container node in this mount report.
     pub container_bundle_index: usize,
@@ -273,6 +280,7 @@ struct ContainerTreeMountState<'a> {
     bundle_serialized_file_counts: Vec<usize>,
     bundle_resource_file_counts: Vec<usize>,
     resource_file_path_bytes: u64,
+    resource_file_name_bytes: u64,
     report: ContainerMountReport,
 }
 
@@ -348,6 +356,14 @@ pub enum ContainerMountErrorKind {
         limit: u64,
     },
     ResourceFilePathAllocationFailed {
+        requested: usize,
+    },
+    ResourceFileNameSizeOverflow,
+    ResourceFileNameLimitExceeded {
+        requested: u64,
+        limit: u64,
+    },
+    ResourceFileNameAllocationFailed {
         requested: usize,
     },
     ResourceFileEntryCountOverflow,
@@ -626,6 +642,7 @@ impl<'a> DispatchedFile<'a> {
             bundle_serialized_file_counts: Vec::new(),
             bundle_resource_file_counts: Vec::new(),
             resource_file_path_bytes: 0,
+            resource_file_name_bytes: 0,
             report: ContainerMountReport::default(),
         };
         self.mount_container_tree_at(destination_root, 0, None, None, &mut state)?;
@@ -689,8 +706,11 @@ impl<'a> DispatchedFile<'a> {
                     )?;
                     mount_tree_child(
                         child,
-                        path,
-                        index,
+                        ContainerTreeEntry {
+                            virtual_path: path,
+                            source_name: node.path.as_str(),
+                            entry_index: index,
+                        },
                         container_scope_index,
                         container_bundle_index,
                         depth,
@@ -726,8 +746,11 @@ impl<'a> DispatchedFile<'a> {
                             })?;
                     mount_tree_child(
                         child,
-                        path,
-                        index,
+                        ContainerTreeEntry {
+                            virtual_path: path,
+                            source_name: entry.path.as_str(),
+                            entry_index: index,
+                        },
                         container_scope_index,
                         container_bundle_index,
                         depth,
@@ -766,8 +789,11 @@ impl<'a> DispatchedFile<'a> {
                             })?;
                     mount_tree_child(
                         child,
-                        path,
-                        index,
+                        ContainerTreeEntry {
+                            virtual_path: path,
+                            source_name: entry.name.as_str(),
+                            entry_index: index,
+                        },
                         container_scope_index,
                         container_bundle_index,
                         depth,
@@ -1028,6 +1054,17 @@ impl Display for ContainerMountErrorKind {
             Self::ResourceFilePathAllocationFailed { requested } => write!(
                 formatter,
                 "could not reserve {requested} bytes for ResourceFile path metadata"
+            ),
+            Self::ResourceFileNameSizeOverflow => {
+                formatter.write_str("ResourceFile name byte count overflows u64")
+            }
+            Self::ResourceFileNameLimitExceeded { requested, limit } => write!(
+                formatter,
+                "original ResourceFile names use {requested} bytes, exceeding metadata limit {limit}"
+            ),
+            Self::ResourceFileNameAllocationFailed { requested } => write!(
+                formatter,
+                "could not reserve {requested} bytes for original ResourceFile name metadata"
             ),
             Self::ResourceFileEntryCountOverflow => {
                 formatter.write_str("ResourceFile entry metadata count overflows usize")
@@ -1475,15 +1512,25 @@ fn record_container_bundle(
     Ok(bundle_index)
 }
 
-fn mount_tree_child<'a>(
-    child: DispatchedFile<'a>,
-    entry_path: String,
+struct ContainerTreeEntry<'a> {
+    virtual_path: String,
+    source_name: &'a str,
     entry_index: usize,
+}
+
+fn mount_tree_child<'a, 'b>(
+    child: DispatchedFile<'a>,
+    entry: ContainerTreeEntry<'b>,
     container_scope_index: Option<usize>,
     container_bundle_index: usize,
     parent_depth: usize,
     state: &mut ContainerTreeMountState<'_>,
 ) -> Result<(), ContainerMountError> {
+    let ContainerTreeEntry {
+        virtual_path: entry_path,
+        source_name: resource_name,
+        entry_index,
+    } = entry;
     match child.kind {
         FileKind::UnityFs
         | FileKind::UnityRaw
@@ -1557,6 +1604,7 @@ fn mount_tree_child<'a>(
             let resource_file = if child.kind == FileKind::Resource {
                 Some(prepare_mounted_resource_file(
                     &entry_path,
+                    resource_name,
                     entry_index,
                     container_scope_index,
                     container_bundle_index,
@@ -1582,6 +1630,8 @@ fn mount_tree_child<'a>(
             if let Some(resource_file) = resource_file {
                 state.resource_file_path_bytes = resource_file.total_path_bytes;
                 state.report.resource_file_path_bytes = resource_file.total_path_bytes;
+                state.resource_file_name_bytes = resource_file.total_name_bytes;
+                state.report.resource_file_name_bytes = resource_file.total_name_bytes;
                 state.report.resource_files.push(resource_file.record);
                 state.bundle_resource_file_counts[container_bundle_index] =
                     resource_file.next_bundle_resource_count;
@@ -1695,11 +1745,13 @@ fn prepare_mounted_serialized_file(
 struct PendingMountedResourceFile {
     record: MountedResourceFile,
     total_path_bytes: u64,
+    total_name_bytes: u64,
     next_bundle_resource_count: usize,
 }
 
 fn prepare_mounted_resource_file(
     virtual_path: &str,
+    resource_name: &str,
     entry_index: usize,
     container_scope_index: Option<usize>,
     container_bundle_index: usize,
@@ -1761,6 +1813,42 @@ fn prepare_mounted_resource_file(
             )
         })?;
     owned_path.push_str(virtual_path);
+    let name_bytes = u64::try_from(resource_name.len()).map_err(|_| {
+        ContainerMountError::new(
+            state.report.clone(),
+            ContainerMountErrorKind::ResourceFileNameSizeOverflow,
+        )
+    })?;
+    let total_name_bytes = state
+        .resource_file_name_bytes
+        .checked_add(name_bytes)
+        .ok_or_else(|| {
+            ContainerMountError::new(
+                state.report.clone(),
+                ContainerMountErrorKind::ResourceFileNameSizeOverflow,
+            )
+        })?;
+    if total_name_bytes > limits.max_total_resource_file_name_bytes {
+        return Err(ContainerMountError::new(
+            state.report.clone(),
+            ContainerMountErrorKind::ResourceFileNameLimitExceeded {
+                requested: total_name_bytes,
+                limit: limits.max_total_resource_file_name_bytes,
+            },
+        ));
+    }
+    let mut owned_name = String::new();
+    owned_name
+        .try_reserve_exact(resource_name.len())
+        .map_err(|_| {
+            ContainerMountError::new(
+                state.report.clone(),
+                ContainerMountErrorKind::ResourceFileNameAllocationFailed {
+                    requested: resource_name.len(),
+                },
+            )
+        })?;
+    owned_name.push_str(resource_name);
     let Some(resource_index) = state
         .bundle_resource_file_counts
         .get(container_bundle_index)
@@ -1783,12 +1871,14 @@ fn prepare_mounted_resource_file(
     Ok(PendingMountedResourceFile {
         record: MountedResourceFile {
             virtual_path: owned_path,
+            name: owned_name,
             container_scope_index,
             container_bundle_index,
             entry_index,
             resource_index,
         },
         total_path_bytes,
+        total_name_bytes,
         next_bundle_resource_count,
     })
 }
@@ -3361,6 +3451,7 @@ mod tests {
             ("z-first.resource", b"first resource"),
             ("nested.bundle", &nested),
             ("a-second.ress", b"second resource"),
+            ("archive:/textures/shared.ress", b"archive resource"),
         ]);
         let file = SchemeReader::read(&input).unwrap();
         let mut filesystem = VirtualFileSystem::new();
@@ -3377,6 +3468,7 @@ mod tests {
             [
                 MountedResourceFile {
                     virtual_path: "/tree/z-first.resource".to_owned(),
+                    name: "z-first.resource".to_owned(),
                     container_scope_index: Some(0),
                     container_bundle_index: 0,
                     entry_index: 0,
@@ -3384,6 +3476,7 @@ mod tests {
                 },
                 MountedResourceFile {
                     virtual_path: "/tree/nested.bundle/nested.resS".to_owned(),
+                    name: "nested.resS".to_owned(),
                     container_scope_index: Some(1),
                     container_bundle_index: 1,
                     entry_index: 0,
@@ -3391,10 +3484,19 @@ mod tests {
                 },
                 MountedResourceFile {
                     virtual_path: "/tree/a-second.ress".to_owned(),
+                    name: "a-second.ress".to_owned(),
                     container_scope_index: Some(0),
                     container_bundle_index: 0,
                     entry_index: 2,
                     resource_index: 1,
+                },
+                MountedResourceFile {
+                    virtual_path: "/tree/archive:/textures/shared.ress".to_owned(),
+                    name: "archive:/textures/shared.ress".to_owned(),
+                    container_scope_index: Some(0),
+                    container_bundle_index: 0,
+                    entry_index: 3,
+                    resource_index: 2,
                 },
             ]
         );
@@ -3403,7 +3505,18 @@ mod tests {
             u64::try_from(
                 "/tree/z-first.resource".len()
                     + "/tree/nested.bundle/nested.resS".len()
-                    + "/tree/a-second.ress".len(),
+                    + "/tree/a-second.ress".len()
+                    + "/tree/archive:/textures/shared.ress".len(),
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            report.resource_file_name_bytes,
+            u64::try_from(
+                "z-first.resource".len()
+                    + "nested.resS".len()
+                    + "a-second.ress".len()
+                    + "archive:/textures/shared.ress".len(),
             )
             .unwrap()
         );
@@ -3441,6 +3554,33 @@ mod tests {
         assert_eq!(error.partial_report.mounted_entries, 0);
         assert!(error.partial_report.resource_files.is_empty());
         assert_eq!(error.partial_report.resource_file_path_bytes, 0);
+    }
+
+    #[test]
+    fn original_resource_file_names_obey_their_aggregate_bound() {
+        let input = webdata_fixture(&[("long.bin", b"resource")]);
+        let file = SchemeReader::read(&input).unwrap();
+        let mut filesystem = VirtualFileSystem::new();
+        let error = file
+            .mount_container_tree(
+                &mut filesystem,
+                Some("/tree"),
+                ContainerMountLimits {
+                    max_total_resource_file_name_bytes: 4,
+                    ..ContainerMountLimits::default()
+                },
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            error.kind,
+            ContainerMountErrorKind::ResourceFileNameLimitExceeded {
+                requested: 8,
+                limit: 4
+            }
+        ));
+        assert!(error.partial_report.resource_files.is_empty());
+        assert_eq!(error.partial_report.resource_file_name_bytes, 0);
     }
 
     #[test]

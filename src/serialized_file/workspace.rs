@@ -44,6 +44,7 @@ pub struct SerializedFileWorkspaceLimits {
     pub max_total_bundle_scope_bytes: usize,
     pub max_total_bundle_node_path_bytes: usize,
     pub max_total_bundle_resource_file_path_bytes: usize,
+    pub max_total_bundle_resource_file_name_bytes: usize,
     pub max_total_objects: usize,
     pub max_total_reference_edges: usize,
     pub scheme: SchemeReaderLimits,
@@ -67,6 +68,7 @@ impl Default for SerializedFileWorkspaceLimits {
             max_total_bundle_scope_bytes: 64 * 1024 * 1024,
             max_total_bundle_node_path_bytes: 64 * 1024 * 1024,
             max_total_bundle_resource_file_path_bytes: 64 * 1024 * 1024,
+            max_total_bundle_resource_file_name_bytes: 64 * 1024 * 1024,
             max_total_objects: 20_000_000,
             max_total_reference_edges: 5_000_000,
             scheme: SchemeReaderLimits::default(),
@@ -84,6 +86,7 @@ pub struct SerializedFileWorkspaceReport {
     pub total_file_name_bytes: usize,
     pub total_objects: usize,
     pub total_reference_edges: usize,
+    pub bundle_resource_file_name_bytes: usize,
 }
 
 /// One fully parsed SerializedFile with its header, owned metadata, and per-file PPtr graph.
@@ -130,10 +133,44 @@ pub struct WorkspaceSerializedBundle {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceResourceFile {
     pub virtual_path: String,
+    /// Original source container entry name, before the workspace mount root was added.
+    pub name: String,
     pub container_bundle_index: usize,
     pub container_entry_index: usize,
     pub container_resource_index: usize,
 }
+
+/// A malformed workspace reference encountered while resolving a bundled ResourceFile.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WorkspaceResourceLookupError {
+    BundleIndexOutOfBounds { index: usize, count: usize },
+    ParentBundleIndexOutOfBounds { index: usize, count: usize },
+    ResourceFileIndexOutOfBounds { index: usize, count: usize },
+    BundleParentCycle,
+}
+
+impl Display for WorkspaceResourceLookupError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BundleIndexOutOfBounds { index, count } => write!(
+                formatter,
+                "resource lookup bundle index {index} is outside {count} bundles"
+            ),
+            Self::ParentBundleIndexOutOfBounds { index, count } => write!(
+                formatter,
+                "resource lookup parent bundle index {index} is outside {count} bundles"
+            ),
+            Self::ResourceFileIndexOutOfBounds { index, count } => write!(
+                formatter,
+                "resource lookup ResourceFile index {index} is outside {count} resources"
+            ),
+            Self::BundleParentCycle => formatter
+                .write_str("resource lookup encountered a cycle in the container bundle hierarchy"),
+        }
+    }
+}
+
+impl Error for WorkspaceResourceLookupError {}
 
 struct SourceBundleCollectionLookup<'a> {
     workspace: &'a SerializedFileWorkspace,
@@ -1609,6 +1646,112 @@ impl SerializedFileWorkspace {
         &self.resource_files
     }
 
+    /// Finds a ResourceFile in the source bundle hierarchy using `Bundle.ResolveResource`
+    /// precedence. `source_bundle_index == None` represents the root GameBundle. This searches
+    /// mounted bundle resources only; a GameBundle external provider is a separate step.
+    pub fn resolve_bundled_resource_file(
+        &self,
+        source_bundle_index: Option<usize>,
+        requested_name: &str,
+    ) -> Result<Option<usize>, WorkspaceResourceLookupError> {
+        if requested_name.is_empty() {
+            return Ok(None);
+        }
+        if let Some(index) = source_bundle_index {
+            if index >= self.container_bundles.len() {
+                return Err(WorkspaceResourceLookupError::BundleIndexOutOfBounds {
+                    index,
+                    count: self.container_bundles.len(),
+                });
+            }
+        }
+
+        let fixed_name = fix_file_identifier(requested_name);
+        let mut current_bundle_index = source_bundle_index;
+        let mut excluded_child_bundle = None;
+        for _ in 0..=self.container_bundles.len() {
+            if let Some(bundle_index) = current_bundle_index {
+                if let Some(resource_index) =
+                    self.find_resource_in_bundle(bundle_index, &fixed_name)?
+                {
+                    return Ok(Some(resource_index));
+                }
+                for (child_index, child) in self.container_bundles.iter().enumerate() {
+                    if child.parent_bundle_index != Some(bundle_index)
+                        || Some(child_index) == excluded_child_bundle
+                    {
+                        continue;
+                    }
+                    if let Some(resource_index) =
+                        self.find_resource_in_bundle(child_index, &fixed_name)?
+                    {
+                        return Ok(Some(resource_index));
+                    }
+                }
+            } else {
+                for (child_index, child) in self.container_bundles.iter().enumerate() {
+                    if child.parent_bundle_index.is_some()
+                        || Some(child_index) == excluded_child_bundle
+                    {
+                        continue;
+                    }
+                    if let Some(resource_index) =
+                        self.find_resource_in_bundle(child_index, &fixed_name)?
+                    {
+                        return Ok(Some(resource_index));
+                    }
+                }
+                return Ok(None);
+            }
+
+            let Some(bundle_index) = current_bundle_index else {
+                return Ok(None);
+            };
+            let bundle = self.container_bundles.get(bundle_index).ok_or(
+                WorkspaceResourceLookupError::BundleIndexOutOfBounds {
+                    index: bundle_index,
+                    count: self.container_bundles.len(),
+                },
+            )?;
+            if let Some(parent_index) = bundle.parent_bundle_index {
+                if parent_index >= self.container_bundles.len() {
+                    return Err(WorkspaceResourceLookupError::ParentBundleIndexOutOfBounds {
+                        index: parent_index,
+                        count: self.container_bundles.len(),
+                    });
+                }
+            }
+            excluded_child_bundle = Some(bundle_index);
+            current_bundle_index = bundle.parent_bundle_index;
+        }
+        Err(WorkspaceResourceLookupError::BundleParentCycle)
+    }
+
+    fn find_resource_in_bundle(
+        &self,
+        bundle_index: usize,
+        fixed_name: &str,
+    ) -> Result<Option<usize>, WorkspaceResourceLookupError> {
+        let bundle = self.container_bundles.get(bundle_index).ok_or(
+            WorkspaceResourceLookupError::BundleIndexOutOfBounds {
+                index: bundle_index,
+                count: self.container_bundles.len(),
+            },
+        )?;
+        for &resource_index in &bundle.direct_resource_file_indices {
+            let resource = self.resource_files.get(resource_index).ok_or(
+                WorkspaceResourceLookupError::ResourceFileIndexOutOfBounds {
+                    index: resource_index,
+                    count: self.resource_files.len(),
+                },
+            )?;
+            if fix_file_identifier(&resource.name) == fixed_name {
+                return Ok(Some(resource_index));
+            }
+        }
+        Ok(None)
+    }
+
     /// Returns workspace indexes for direct collections in one mounted container, ordered as
     /// `SerializedBundle.Collections` is ordered by the source baseline.
     pub fn ordered_collection_file_indices(
@@ -2425,6 +2568,7 @@ fn append_mounted_container_bundles(
             )
         })?;
     let mut next_resource_path_bytes = *total_resource_file_path_bytes;
+    let mut next_resource_name_bytes = workspace.report.bundle_resource_file_name_bytes;
     for (bundle_index, actual_index, resource_file) in ordered_resource_files {
         let expected_index = resource_file_count_by_bundle[bundle_index];
         if actual_index != expected_index {
@@ -2471,6 +2615,25 @@ fn append_mounted_container_bundles(
                 },
             ));
         }
+        next_resource_name_bytes = next_resource_name_bytes
+            .checked_add(resource_file.name.len())
+            .ok_or_else(|| {
+                workspace_error(
+                    workspace.report,
+                    Some(&resource_file.virtual_path),
+                    SerializedFileWorkspaceErrorKind::BundleResourceNameByteCountOverflow,
+                )
+            })?;
+        if next_resource_name_bytes > limits.max_total_bundle_resource_file_name_bytes {
+            return Err(workspace_error(
+                workspace.report,
+                Some(&resource_file.virtual_path),
+                SerializedFileWorkspaceErrorKind::TotalBundleResourceFileNameBytesLimitExceeded {
+                    byte_count: next_resource_name_bytes,
+                    limit: limits.max_total_bundle_resource_file_name_bytes,
+                },
+            ));
+        }
         let mut owned_path = String::new();
         owned_path
             .try_reserve_exact(resource_file.virtual_path.len())
@@ -2485,6 +2648,20 @@ fn append_mounted_container_bundles(
                 )
             })?;
         owned_path.push_str(&resource_file.virtual_path);
+        let mut owned_name = String::new();
+        owned_name
+            .try_reserve_exact(resource_file.name.len())
+            .map_err(|_| {
+                workspace_error(
+                    workspace.report,
+                    Some(&resource_file.virtual_path),
+                    SerializedFileWorkspaceErrorKind::AllocationFailed {
+                        resource: "workspace ResourceFile source name",
+                        requested: resource_file.name.len(),
+                    },
+                )
+            })?;
+        owned_name.push_str(&resource_file.name);
         let global_bundle_index = base_index.checked_add(bundle_index).ok_or_else(|| {
             workspace_error(
                 workspace.report,
@@ -2505,6 +2682,7 @@ fn append_mounted_container_bundles(
             })?;
         new_resource_files.push(WorkspaceResourceFile {
             virtual_path: owned_path,
+            name: owned_name,
             container_bundle_index: global_bundle_index,
             container_entry_index: resource_file.entry_index,
             container_resource_index: resource_file.resource_index,
@@ -2704,6 +2882,7 @@ fn append_mounted_container_bundles(
     workspace.resource_files.extend(new_resource_files);
     *total_node_path_bytes = next_node_path_bytes;
     *total_resource_file_path_bytes = next_resource_path_bytes;
+    workspace.report.bundle_resource_file_name_bytes = next_resource_name_bytes;
     Ok(())
 }
 
@@ -2853,6 +3032,9 @@ fn remaining_workspace_limits(
         max_total_reference_edges: limits
             .max_total_reference_edges
             .saturating_sub(report.total_reference_edges),
+        max_total_bundle_resource_file_name_bytes: limits
+            .max_total_bundle_resource_file_name_bytes
+            .saturating_sub(report.bundle_resource_file_name_bytes),
         ..limits
     }
 }
@@ -2908,6 +3090,11 @@ fn append_workspace(
         .total_reference_edges
         .checked_add(additional.report.total_reference_edges)
         .ok_or(SerializedFileWorkspaceErrorKind::ReferenceCountOverflow)?;
+    let bundle_resource_file_name_bytes = workspace
+        .report
+        .bundle_resource_file_name_bytes
+        .checked_add(additional.report.bundle_resource_file_name_bytes)
+        .ok_or(SerializedFileWorkspaceErrorKind::BundleResourceNameByteCountOverflow)?;
     workspace.report = SerializedFileWorkspaceReport {
         input_files,
         completed_files,
@@ -2916,6 +3103,7 @@ fn append_workspace(
         total_file_name_bytes,
         total_objects,
         total_reference_edges,
+        bundle_resource_file_name_bytes,
     };
     workspace.files.append(&mut additional.files);
     Ok(())
@@ -3148,7 +3336,12 @@ pub enum SerializedFileWorkspaceErrorKind {
     },
     ResourceFileCountOverflow,
     BundleResourcePathByteCountOverflow,
+    BundleResourceNameByteCountOverflow,
     TotalBundleResourceFilePathBytesLimitExceeded {
+        byte_count: usize,
+        limit: usize,
+    },
+    TotalBundleResourceFileNameBytesLimitExceeded {
         byte_count: usize,
         limit: usize,
     },
@@ -3373,9 +3566,16 @@ impl Display for SerializedFileWorkspaceErrorKind {
             Self::BundleResourcePathByteCountOverflow => {
                 f.write_str("mounted bundle ResourceFile path byte count overflows")
             }
+            Self::BundleResourceNameByteCountOverflow => {
+                f.write_str("mounted bundle ResourceFile name byte count overflows")
+            }
             Self::TotalBundleResourceFilePathBytesLimitExceeded { byte_count, limit } => write!(
                 f,
                 "mounted bundle ResourceFile paths use {byte_count} bytes, exceeding limit {limit}"
+            ),
+            Self::TotalBundleResourceFileNameBytesLimitExceeded { byte_count, limit } => write!(
+                f,
+                "mounted bundle ResourceFile names use {byte_count} bytes, exceeding limit {limit}"
             ),
             Self::DuplicateMountedResourceFilePath => {
                 f.write_str("mounted ResourceFile path occurs more than once in bundle metadata")
@@ -3496,6 +3696,135 @@ mod tests {
     use crate::serialized_file::reference_graph::{
         MultiFilePPtrResolution, MultiFileReferenceGraphLimits, ObjectReferenceGraph,
     };
+
+    #[test]
+    fn bundled_resource_resolution_matches_bundle_scope_order_and_name_rules() {
+        use super::WorkspaceResourceFile;
+
+        let workspace = SerializedFileWorkspace {
+            container_bundles: vec![
+                WorkspaceSerializedBundle {
+                    scope_path: Some("/root".to_owned()),
+                    parent_bundle_index: None,
+                    parent_entry_index: None,
+                    direct_collection_file_indices: Vec::new(),
+                    direct_resource_file_indices: vec![0],
+                },
+                WorkspaceSerializedBundle {
+                    scope_path: Some("/root/first".to_owned()),
+                    parent_bundle_index: Some(0),
+                    parent_entry_index: Some(1),
+                    direct_collection_file_indices: Vec::new(),
+                    direct_resource_file_indices: vec![1],
+                },
+                WorkspaceSerializedBundle {
+                    scope_path: Some("/root/second".to_owned()),
+                    parent_bundle_index: Some(0),
+                    parent_entry_index: Some(2),
+                    direct_collection_file_indices: Vec::new(),
+                    direct_resource_file_indices: vec![2, 4],
+                },
+                WorkspaceSerializedBundle {
+                    scope_path: Some("/root/first/nested".to_owned()),
+                    parent_bundle_index: Some(1),
+                    parent_entry_index: Some(4),
+                    direct_collection_file_indices: Vec::new(),
+                    direct_resource_file_indices: vec![3],
+                },
+            ],
+            resource_files: vec![
+                WorkspaceResourceFile {
+                    virtual_path: "/root/from-parent.resS".to_owned(),
+                    name: "from-parent.resS".to_owned(),
+                    container_bundle_index: 0,
+                    container_entry_index: 0,
+                    container_resource_index: 0,
+                },
+                WorkspaceResourceFile {
+                    virtual_path: "/root/first/archive:/textures/Shared.resS".to_owned(),
+                    name: "archive:/textures/Shared.resS".to_owned(),
+                    container_bundle_index: 1,
+                    container_entry_index: 0,
+                    container_resource_index: 0,
+                },
+                WorkspaceResourceFile {
+                    virtual_path: "/root/second/from-parent.resS".to_owned(),
+                    name: "from-parent.resS".to_owned(),
+                    container_bundle_index: 2,
+                    container_entry_index: 0,
+                    container_resource_index: 0,
+                },
+                WorkspaceResourceFile {
+                    virtual_path: "/root/first/nested/archive:/other/Shared.resS".to_owned(),
+                    name: "archive:/other/Shared.resS".to_owned(),
+                    container_bundle_index: 3,
+                    container_entry_index: 0,
+                    container_resource_index: 0,
+                },
+                WorkspaceResourceFile {
+                    virtual_path: "/root/second/sibling.resS".to_owned(),
+                    name: "sibling.resS".to_owned(),
+                    container_bundle_index: 2,
+                    container_entry_index: 1,
+                    container_resource_index: 1,
+                },
+            ],
+            ..SerializedFileWorkspace::default()
+        };
+
+        assert_eq!(
+            workspace
+                .resolve_bundled_resource_file(Some(1), "ARCHIVE:/request/SHARED.ress")
+                .unwrap(),
+            Some(1),
+            "the current bundle's direct resource precedes its child bundle"
+        );
+        let resolved_resource = workspace
+            .resolve_bundled_resource_file(Some(1), "ARCHIVE:/request/SHARED.ress")
+            .unwrap()
+            .unwrap();
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem
+            .create_directory(Some("/root/first/archive:/textures"))
+            .unwrap();
+        filesystem
+            .write_all_bytes(
+                &workspace.resource_files[resolved_resource].virtual_path,
+                b"012345",
+            )
+            .unwrap();
+        assert_eq!(
+            crate::resource::read_streamed_resource_bytes(
+                &filesystem,
+                &workspace.resource_files[resolved_resource].virtual_path,
+                1,
+                3,
+                crate::resource::StreamedResourceLimits::default(),
+            )
+            .unwrap(),
+            Some(b"123".to_vec())
+        );
+        assert_eq!(
+            workspace
+                .resolve_bundled_resource_file(Some(1), "from-parent.resS")
+                .unwrap(),
+            Some(0),
+            "the parent bundle's direct resource precedes a sibling child"
+        );
+        assert_eq!(
+            workspace
+                .resolve_bundled_resource_file(Some(1), "sibling.resS")
+                .unwrap(),
+            Some(4),
+            "the parent's other direct child is searched after its own resources"
+        );
+        assert_eq!(
+            workspace
+                .resolve_bundled_resource_file(Some(1), "archive:/missing/nope.resS")
+                .unwrap(),
+            None
+        );
+    }
 
     fn put_u16_le(output: &mut Vec<u8>, value: u16) {
         output.extend_from_slice(&value.to_le_bytes());
@@ -4412,6 +4741,13 @@ mod tests {
                 "/.assetripper/import/initial/0/nested.bundle/inner.resS",
             ]
         );
+        assert_eq!(
+            workspace_resources
+                .iter()
+                .map(|resource| resource.name.as_str())
+                .collect::<Vec<_>>(),
+            ["z-resource.resS", "a-resource.resource", "inner.resS"]
+        );
         assert_eq!(workspace_resources[0].container_bundle_index, 0);
         assert_eq!(workspace_resources[0].container_entry_index, 4);
         assert_eq!(workspace_resources[0].container_resource_index, 0);
@@ -4473,6 +4809,7 @@ mod tests {
         let mounted_files = [];
         let mounted_resources = [MountedResourceFile {
             virtual_path: "/root/stream.resS".to_owned(),
+            name: "stream.resS".to_owned(),
             container_scope_index: Some(0),
             container_bundle_index: 0,
             entry_index: 0,
@@ -4602,6 +4939,52 @@ mod tests {
     }
 
     #[test]
+    fn workspace_resource_source_names_obey_their_aggregate_bound() {
+        let scopes = ["/root".to_owned()];
+        let bundles = [MountedContainerBundle {
+            scope_index: Some(0),
+            parent_bundle_index: None,
+            parent_entry_index: None,
+        }];
+        let mounted_resources = [MountedResourceFile {
+            virtual_path: "/root/stream.resS".to_owned(),
+            name: "stream.resS".to_owned(),
+            container_scope_index: Some(0),
+            container_bundle_index: 0,
+            entry_index: 0,
+            resource_index: 0,
+        }];
+        let mut workspace = SerializedFileWorkspace::default();
+        let error = append_mounted_container_bundles(
+            &mut workspace,
+            super::MountedContainerBundleInput {
+                container_scopes: &scopes,
+                mounted_bundles: &bundles,
+                serialized_files: &[],
+                resource_files: &mounted_resources,
+                loaded_paths: &std::collections::HashMap::new(),
+                limits: SerializedFileWorkspaceLimits {
+                    max_total_bundle_resource_file_name_bytes: 4,
+                    ..SerializedFileWorkspaceLimits::default()
+                },
+                bundle_count_limit: 1,
+            },
+            &mut 0,
+            &mut 0,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error.kind,
+            SerializedFileWorkspaceErrorKind::TotalBundleResourceFileNameBytesLimitExceeded {
+                byte_count: 11,
+                limit: 4
+            }
+        ));
+        assert_eq!(error.report.bundle_resource_file_name_bytes, 0);
+    }
+
+    #[test]
     fn pathless_container_root_keeps_its_direct_collection_membership() {
         let mut filesystem = VirtualFileSystem::new();
         insert_file(&mut filesystem, "/first.asset", &make_generation_10_file());
@@ -4628,6 +5011,7 @@ mod tests {
         }];
         let mounted_resources = [MountedResourceFile {
             virtual_path: "/resource.resS".to_owned(),
+            name: "resource.resS".to_owned(),
             container_scope_index: None,
             container_bundle_index: 0,
             entry_index: 1,
@@ -4841,6 +5225,7 @@ mod tests {
             workspace.resource_files(),
             [super::WorkspaceResourceFile {
                 virtual_path: "/__assetripper_dependency_mount_0/stream.resS".to_owned(),
+                name: "stream.resS".to_owned(),
                 container_bundle_index: 0,
                 container_entry_index: 1,
                 container_resource_index: 0,
