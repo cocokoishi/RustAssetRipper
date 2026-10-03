@@ -629,3 +629,11 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Targeted end-to-end verification passed. Full workspace verification passed: 387 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and `git diff --check`.
 - Still incomplete: no original Unity-produced fixture or C# runtime differential; component classes without proven TypeTree ancestry; Scene YAML writing; processed assets; Prefab membership/export; and Phase 1 product completeness. Phase 2 remains locked.
 - Next: wire source Scene ID assignments into the per-class YAML walk/export path while preserving the distinction between serialized source objects and generated processed assets.
+
+## Scene component ID planning through YAML export
+
+- Current phase: Phase 1; gate not passed. This increment builds from pushed revision `95e61a081ff9e9af2b729c641c92ce8dbbb8ee84`. Only `cocokoishi/RustAssetRipper` is a write/push target. No UABEA, user AssetBundle content, or other remote repository was accessed.
+- Added a workspace-level MeshRenderer fixture. The TypeTree-derived Scene membership produces a PathID-preserving ID assignment, the assignment is registered in the project pointer map, and the Scene YAML executor emits the serialized component document under `!u!23 &9001` with its true-null `m_GameObject` unchanged.
+- Targeted integration and full verification passed: 388 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and `git diff --check`.
+- Still incomplete: the same pipeline has not yet exercised a mapped non-null PPtr; this is not a Unity runtime differential. Processed-asset YAML, Prefab project output, and Phase 1 completeness remain open. Phase 2 remains locked.
+- Next: build a generated two-object Scene fixture (GameObject and MeshRenderer) with reciprocal non-null PPtrs, then verify both objects' planned IDs and emitted YAML references through the same workspace executor.
