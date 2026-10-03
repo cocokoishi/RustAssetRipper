@@ -44,6 +44,7 @@ impl Default for StreamedYamlAssetLimits {
 pub enum StreamedYamlAssetPreparation {
     NoStreamField,
     StreamUnset,
+    ImageTextureWithoutData,
     ExistingInlineData {
         resource: StreamedResourceInfo,
     },
@@ -211,7 +212,14 @@ pub fn prepare_streamed_yaml_asset(
         }
     })?;
     if !info.is_set() {
+        let image_texture_without_data = match asset_kind {
+            StreamedYamlAssetKind::Mesh => false,
+            StreamedYamlAssetKind::ImageTexture => image_texture_inline_data_is_empty(root)?,
+        };
         clear_streaming_info(root, stream_field)?;
+        if image_texture_without_data {
+            return Ok(StreamedYamlAssetPreparation::ImageTextureWithoutData);
+        }
         return Ok(StreamedYamlAssetPreparation::StreamUnset);
     }
 
@@ -316,6 +324,10 @@ pub fn prepare_streamed_yaml_asset(
             actual: content.len(),
         });
     }
+    if content.is_empty() && asset_kind == StreamedYamlAssetKind::ImageTexture {
+        clear_streaming_info(root, stream_field)?;
+        return Ok(StreamedYamlAssetPreparation::ImageTextureWithoutData);
+    }
 
     let mut owned_content = Vec::new();
     owned_content
@@ -369,6 +381,43 @@ pub fn prepare_streamed_yaml_asset(
         resource: info,
         byte_count: content.len(),
     })
+}
+
+fn image_texture_inline_data_is_empty(
+    root: &SerializedValue,
+) -> Result<bool, StreamedYamlAssetError> {
+    let field = unique_field_name(
+        root,
+        &["m_ImageData", "m_ImageData_C28", "m_ImageData_C189"],
+        "image-texture byte-data",
+    )?
+    .ok_or(StreamedYamlAssetError::InlineFieldMissing {
+        asset_kind: StreamedYamlAssetKind::ImageTexture,
+    })?;
+    let value = root
+        .unique_field_in_base_chain(field)
+        .map_err(|source| StreamedYamlAssetError::FieldLookup { field, source })?
+        .ok_or(StreamedYamlAssetError::InlineFieldMissing {
+            asset_kind: StreamedYamlAssetKind::ImageTexture,
+        })?;
+    match value {
+        SerializedValue::Bytes(bytes) => Ok(bytes.is_empty()),
+        SerializedValue::Array(values)
+            if values
+                .iter()
+                .all(|value| matches!(value, SerializedValue::U8(_))) =>
+        {
+            Ok(values.is_empty())
+        }
+        SerializedValue::Array(_) => Err(StreamedYamlAssetError::InlineFieldWrongType {
+            field,
+            actual: "a non-byte array",
+        }),
+        value => Err(StreamedYamlAssetError::InlineFieldWrongType {
+            field,
+            actual: serialized_value_kind(value),
+        }),
+    }
 }
 
 fn stream_field_names(asset_kind: StreamedYamlAssetKind) -> &'static [&'static str] {
@@ -711,6 +760,66 @@ mod tests {
                 .unwrap()
                 .unwrap(),
             &SerializedValue::Bytes(b"xyz".to_vec())
+        );
+    }
+
+    #[test]
+    fn unset_image_texture_without_inline_bytes_is_marked_for_skip() {
+        let mut root =
+            texture_payload(SerializedValue::Bytes(Vec::new()), SerializedValue::U64(17));
+        let stream = root
+            .unique_field_in_base_chain_mut("m_StreamData_C189")
+            .unwrap()
+            .unwrap();
+        let path = stream
+            .unique_field_in_base_chain_mut("path")
+            .unwrap()
+            .unwrap();
+        *path = SerializedValue::StringBytes(Vec::new());
+
+        assert_eq!(
+            prepare_streamed_yaml_asset(
+                &mut root,
+                StreamedYamlAssetKind::ImageTexture,
+                None,
+                StreamedYamlAssetLimits::default(),
+            )
+            .unwrap(),
+            StreamedYamlAssetPreparation::ImageTextureWithoutData
+        );
+        assert_eq!(
+            streamed_info(&root, "m_StreamData_C189"),
+            crate::resource::StreamedResourceInfo {
+                path: String::new(),
+                offset: 0,
+                size: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn zero_length_image_texture_stream_is_marked_for_skip() {
+        let mut root =
+            texture_payload(SerializedValue::Bytes(Vec::new()), SerializedValue::U64(17));
+        let stream = root
+            .unique_field_in_base_chain_mut("m_StreamData_C189")
+            .unwrap()
+            .unwrap();
+        let size = stream
+            .unique_field_in_base_chain_mut("size")
+            .unwrap()
+            .unwrap();
+        *size = SerializedValue::U32(0);
+
+        assert_eq!(
+            prepare_streamed_yaml_asset(
+                &mut root,
+                StreamedYamlAssetKind::ImageTexture,
+                Some(&[]),
+                StreamedYamlAssetLimits::default(),
+            )
+            .unwrap(),
+            StreamedYamlAssetPreparation::ImageTextureWithoutData
         );
     }
 
