@@ -613,3 +613,11 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Full verification passed: 384 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format; baseline verifier (1,449 files); and diff checks.
 - Still incomplete: generated component/interface classification beyond the proven cases, hidden-asset filtering, processed Scene assets, Prefab collection discovery/IDs, generated per-class YAML walkers, and full project writing. No C# runtime differential has run. Phase 1 remains incomplete; Phase 2 remains locked.
 - Next: inspect the baseline's generated type/interface mapping for the remaining component candidate classes, add independent classification fixtures, then connect complete Scene membership and assignments to generated YAML walking.
+
+## TypeTree component inheritance classification
+
+- Current phase: Phase 1; gate not passed. This increment builds from pushed revision `05818901fad6f86622d0f369f0d450bad4cfe33e`. Only `cocokoishi/RustAssetRipper` is a write/push target. The local AssetRipper baseline was read-only; no UABEA, user AssetBundle content, or other remote repository was accessed.
+- Added resolved TypeTree access for multi-file object identities and used the TypeTree `Base` chain as source-derived `IComponent` evidence in Scene membership. Duplicate Base branches or a Base node without a type name stay explicitly ambiguous; an absent Base node supplies no component evidence. The existing class 114 non-null `m_GameObject` rule remains independently represented.
+- Synthetic ancestry and lookup tests plus the full workspace verification passed: 386 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and `git diff --check`.
+- Still incomplete: classifications for objects without an unambiguous TypeTree ancestry or another proven baseline path; generated processed assets; hidden-asset filtering; Prefab discovery/IDs; generated per-class YAML walkers; and full project writing. No C# runtime differential has run. Phase 1 remains open and Phase 2 remains locked.
+- Next: create an independent generated SerializedFile fixture exercising TypeTree-to-Base classification through Scene membership and ID planning, then connect complete Scene assignments to YAML export.

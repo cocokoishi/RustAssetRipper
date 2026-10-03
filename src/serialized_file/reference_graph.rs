@@ -5,7 +5,7 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
 use super::file::{SerializedFile, SerializedFileError};
-use super::metadata::{FileIdentifier, SerializedFileMetadata};
+use super::metadata::{FileIdentifier, SerializedFileMetadata, TypeTree};
 use super::object::{ObjectDecodeLimits, SerializedValue};
 use super::references::PPtrResolution;
 
@@ -728,6 +728,14 @@ impl<'a> MultiFileReferenceGraph<'a> {
             .or_else(|| object.resolved_type_index.map(|_| object.raw_type_id))
     }
 
+    /// Returns the resolved serialized TypeTree used to scan this object, when one is present.
+    pub fn object_type_tree(&self, file_index: usize, object_index: usize) -> Option<&TypeTree> {
+        let metadata = self.file_metadata.get(file_index)?;
+        let object = metadata.objects.get(object_index)?;
+        let type_index = object.resolved_type_index?;
+        metadata.types.get(type_index)?.type_tree.as_ref()
+    }
+
     /// Returns whether a loaded object's TypeTree reference scan was complete.
     pub fn object_scan_is_complete(&self, file_index: usize, object_index: usize) -> Option<bool> {
         Some(
@@ -1314,7 +1322,9 @@ mod tests {
         ReferenceGraphLimits, SerializedObjectReference, WalkIssue,
     };
     use crate::io::binary::Endian;
-    use crate::serialized_file::metadata::{FileIdentifier, ObjectInfo, SerializedFileMetadata};
+    use crate::serialized_file::metadata::{
+        FileIdentifier, ObjectInfo, SerializedFileMetadata, SerializedType, TypeTree, TypeTreeNode,
+    };
     use crate::serialized_file::metadata_prefix::SerializedFileMetadataPrefix;
     use crate::serialized_file::object::{SerializedFieldValue, SerializedValue};
     use crate::serialized_file::references::PPtrResolution;
@@ -1397,6 +1407,49 @@ mod tests {
             path_id,
         });
         graph
+    }
+
+    #[test]
+    fn multi_file_reference_graph_exposes_an_objects_resolved_type_tree() {
+        let type_tree = TypeTree {
+            nodes: vec![TypeTreeNode {
+                level: 0,
+                version: 1,
+                type_flags: 0,
+                type_string_offset: None,
+                name_string_offset: None,
+                type_name: Some("Transform".to_owned()),
+                name: Some(String::new()),
+                byte_size: -1,
+                index: 0,
+                meta_flags: 0,
+                reference_type_hash: None,
+            }],
+            string_buffer: Vec::new(),
+        };
+        let mut source_metadata = metadata(&[10]);
+        source_metadata.types.push(SerializedType {
+            raw_type_id: 4,
+            type_id_for_hash: 4,
+            is_stripped_type: false,
+            script_type_index: -1,
+            script_id: None,
+            old_type_hash: None,
+            type_tree: Some(type_tree.clone()),
+            type_dependencies: Vec::new(),
+        });
+        source_metadata.objects[0].resolved_type_index = Some(0);
+        let source_graph = empty_graph(&[10]);
+        let files = [NamedObjectReferenceGraph {
+            file_name: "scene.assets",
+            metadata: &source_metadata,
+            graph: &source_graph,
+        }];
+        let references = MultiFileReferenceGraph::build(&files).unwrap();
+
+        assert_eq!(references.object_type_tree(0, 0), Some(&type_tree));
+        assert_eq!(references.object_type_tree(0, 1), None);
+        assert_eq!(references.object_type_tree(1, 0), None);
     }
 
     #[test]

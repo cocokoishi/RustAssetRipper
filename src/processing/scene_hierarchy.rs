@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
+use crate::serialized_file::metadata::TypeTree;
 use crate::serialized_file::reference_graph::MultiFileReferenceGraph;
 
 use super::scene::{
@@ -48,6 +49,8 @@ pub struct WorkspaceSceneAssetIdentity {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkspaceSceneComponentEvidence {
     TransformClassId,
+    TypeTreeComponentBase,
+    AmbiguousTypeTreeBase,
     GameObjectComponentReference,
     GameObjectPointerFieldNull,
     GameObjectPointerField,
@@ -1398,6 +1401,7 @@ impl WorkspaceSceneHierarchyScene {
             for candidate in collection.component_candidates() {
                 match candidate.evidence {
                     WorkspaceSceneComponentEvidence::TransformClassId
+                    | WorkspaceSceneComponentEvidence::TypeTreeComponentBase
                     | WorkspaceSceneComponentEvidence::GameObjectComponentReference => {
                         let Some(&rank) = collection_ranks.get(&candidate.identity.file_index)
                         else {
@@ -1471,6 +1475,16 @@ impl WorkspaceSceneHierarchyScene {
                             })?;
                             weak_components.push((candidate.identity, candidate.evidence));
                         }
+                    }
+                    WorkspaceSceneComponentEvidence::AmbiguousTypeTreeBase => {
+                        push_membership_issue(
+                            &mut membership.issues,
+                            WorkspaceSceneHierarchyMembershipIssue::UnclassifiedComponentCandidate {
+                                identity: candidate.identity,
+                                evidence: candidate.evidence,
+                            },
+                            limits.max_issues,
+                        )?;
                     }
                 }
             }
@@ -4537,6 +4551,63 @@ enum TransformRelationshipRange {
     GameObject,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TypeTreeComponentBaseClassification {
+    Component,
+    NotComponent,
+    Unavailable,
+    Ambiguous,
+}
+
+fn classify_type_tree_component_base(
+    type_tree: Option<&TypeTree>,
+) -> TypeTreeComponentBaseClassification {
+    let Some(type_tree) = type_tree else {
+        return TypeTreeComponentBaseClassification::Unavailable;
+    };
+    let Some(root) = type_tree.nodes.first() else {
+        return TypeTreeComponentBaseClassification::Ambiguous;
+    };
+    if root.level != 0 {
+        return TypeTreeComponentBaseClassification::Ambiguous;
+    }
+    if root.type_name.as_deref() == Some("Component") {
+        return TypeTreeComponentBaseClassification::Component;
+    }
+
+    let mut parent_index = 0usize;
+    for _ in 0..type_tree.nodes.len() {
+        let parent = &type_tree.nodes[parent_index];
+        let Some(child_level) = parent.level.checked_add(1) else {
+            return TypeTreeComponentBaseClassification::Ambiguous;
+        };
+        let mut base_index = None;
+        for child_index in (parent_index + 1)..type_tree.nodes.len() {
+            let child = &type_tree.nodes[child_index];
+            if child.level <= parent.level {
+                break;
+            }
+            if child.level == child_level
+                && child.name.as_deref() == Some("Base")
+                && base_index.replace(child_index).is_some()
+            {
+                return TypeTreeComponentBaseClassification::Ambiguous;
+            }
+        }
+        let Some(base_index) = base_index else {
+            return TypeTreeComponentBaseClassification::NotComponent;
+        };
+        let Some(base_type_name) = type_tree.nodes[base_index].type_name.as_deref() else {
+            return TypeTreeComponentBaseClassification::Ambiguous;
+        };
+        if base_type_name == "Component" {
+            return TypeTreeComponentBaseClassification::Component;
+        }
+        parent_index = base_index;
+    }
+    TypeTreeComponentBaseClassification::Ambiguous
+}
+
 struct ClassifiedSceneCollectionObjects {
     scene_assets: Vec<WorkspaceSceneAssetIdentity>,
     lighting_data_asset_field_object_indices: Vec<usize>,
@@ -4626,7 +4697,16 @@ fn classify_scene_collection_objects(
                 .references_from_object(file_index, object.object_index)
                 .filter(|reference| is_game_object_pointer_path(reference.field_path))
                 .count();
-            count.checked_add(pointer_field_count)
+            let type_tree_candidate_count = usize::from(matches!(
+                classify_type_tree_component_base(
+                    references.object_type_tree(file_index, object.object_index,)
+                ),
+                TypeTreeComponentBaseClassification::Component
+                    | TypeTreeComponentBaseClassification::Ambiguous
+            ));
+            pointer_field_count
+                .checked_add(type_tree_candidate_count)
+                .and_then(|additional| count.checked_add(additional))
         })
         .ok_or(WorkspaceSceneHierarchyError::CountOverflow {
             resource: "scene component candidate",
@@ -4676,6 +4756,29 @@ fn classify_scene_collection_objects(
         if scene_asset_category(class_id).is_none()
             && !matches!(class_id, Some(TRANSFORM_CLASS_ID | RECT_TRANSFORM_CLASS_ID))
         {
+            let type_tree_evidence = match classify_type_tree_component_base(
+                references.object_type_tree(file_index, object.object_index),
+            ) {
+                TypeTreeComponentBaseClassification::Component => {
+                    Some(WorkspaceSceneComponentEvidence::TypeTreeComponentBase)
+                }
+                TypeTreeComponentBaseClassification::Ambiguous => {
+                    Some(WorkspaceSceneComponentEvidence::AmbiguousTypeTreeBase)
+                }
+                TypeTreeComponentBaseClassification::NotComponent
+                | TypeTreeComponentBaseClassification::Unavailable => None,
+            };
+            if let Some(evidence) = type_tree_evidence {
+                let identity = scene_object_identity(
+                    file_index,
+                    object.object_index,
+                    object.path_id,
+                    class_id,
+                    references,
+                )?;
+                component_candidates.push(WorkspaceSceneComponentCandidate { identity, evidence });
+            }
+
             for reference in references.references_from_object(file_index, object.object_index) {
                 if !is_game_object_pointer_path(reference.field_path) {
                     continue;
@@ -4927,9 +5030,11 @@ fn is_game_object_pointer_path(field_path: &str) -> bool {
 const fn component_evidence_order(evidence: WorkspaceSceneComponentEvidence) -> u8 {
     match evidence {
         WorkspaceSceneComponentEvidence::TransformClassId => 0,
-        WorkspaceSceneComponentEvidence::GameObjectComponentReference => 1,
-        WorkspaceSceneComponentEvidence::GameObjectPointerFieldNull => 2,
-        WorkspaceSceneComponentEvidence::GameObjectPointerField => 3,
+        WorkspaceSceneComponentEvidence::TypeTreeComponentBase => 1,
+        WorkspaceSceneComponentEvidence::GameObjectComponentReference => 2,
+        WorkspaceSceneComponentEvidence::GameObjectPointerFieldNull => 3,
+        WorkspaceSceneComponentEvidence::GameObjectPointerField => 4,
+        WorkspaceSceneComponentEvidence::AmbiguousTypeTreeBase => 5,
     }
 }
 
@@ -5195,6 +5300,7 @@ mod tests {
         SceneDefinitionGuidPlan, SceneDefinitionPathSource, SceneDefinitionPlan,
         SceneGuidGenerationReason, SceneManagerKind,
     };
+    use crate::serialized_file::metadata::TypeTreeNode;
 
     fn identity(
         file_index: usize,
@@ -5287,6 +5393,67 @@ mod tests {
         assert_eq!(
             candidates,
             vec![direct, null_back_reference, back_reference]
+        );
+    }
+
+    #[test]
+    fn type_tree_base_chain_classifies_component_inheritance_without_guessing() {
+        let tree = |nodes: &[(u8, &str, Option<&str>)]| TypeTree {
+            nodes: nodes
+                .iter()
+                .map(|(level, name, type_name)| TypeTreeNode {
+                    level: *level,
+                    version: 1,
+                    type_flags: 0,
+                    type_string_offset: None,
+                    name_string_offset: None,
+                    type_name: type_name.map(str::to_owned),
+                    name: Some((*name).to_owned()),
+                    byte_size: -1,
+                    index: 0,
+                    meta_flags: 0,
+                    reference_type_hash: None,
+                })
+                .collect(),
+            string_buffer: Vec::new(),
+        };
+        let mesh_renderer = tree(&[
+            (0, "", Some("MeshRenderer")),
+            (1, "Base", Some("Renderer")),
+            (2, "Base", Some("Component")),
+            (3, "m_GameObject", Some("PPtr<GameObject>")),
+        ]);
+        let scriptable_object = tree(&[
+            (0, "", Some("ExampleAsset")),
+            (1, "Base", Some("ScriptableObject")),
+            (2, "Base", Some("Object")),
+        ]);
+        let duplicate_base = tree(&[
+            (0, "", Some("MalformedAsset")),
+            (1, "Base", Some("Component")),
+            (1, "Base", Some("Object")),
+        ]);
+        let missing_base_type = tree(&[(0, "", Some("MalformedAsset")), (1, "Base", None)]);
+
+        assert_eq!(
+            classify_type_tree_component_base(Some(&mesh_renderer)),
+            TypeTreeComponentBaseClassification::Component
+        );
+        assert_eq!(
+            classify_type_tree_component_base(Some(&scriptable_object)),
+            TypeTreeComponentBaseClassification::NotComponent
+        );
+        assert_eq!(
+            classify_type_tree_component_base(Some(&duplicate_base)),
+            TypeTreeComponentBaseClassification::Ambiguous
+        );
+        assert_eq!(
+            classify_type_tree_component_base(Some(&missing_base_type)),
+            TypeTreeComponentBaseClassification::Ambiguous
+        );
+        assert_eq!(
+            classify_type_tree_component_base(None),
+            TypeTreeComponentBaseClassification::Unavailable
         );
     }
 
@@ -5468,7 +5635,8 @@ mod tests {
         let manager = identity(5, 2, 52, SceneManagerKind::RenderSettings.class_id());
         let scene_roots = identity(5, 3, 53, SCENE_ROOTS_CLASS_ID);
         let transform = identity(5, 4, 54, TRANSFORM_CLASS_ID);
-        let mono_behaviour = identity(5, 5, 55, MONO_BEHAVIOUR_CLASS_ID);
+        let renderer = identity(5, 5, 55, 23);
+        let mono_behaviour = identity(5, 6, 56, MONO_BEHAVIOUR_CLASS_ID);
         let mut collection = empty_collection_graph(5);
         collection.scene_assets = vec![
             WorkspaceSceneAssetIdentity {
@@ -5496,6 +5664,10 @@ mod tests {
                 evidence: WorkspaceSceneComponentEvidence::TransformClassId,
             },
             WorkspaceSceneComponentCandidate {
+                identity: renderer,
+                evidence: WorkspaceSceneComponentEvidence::TypeTreeComponentBase,
+            },
+            WorkspaceSceneComponentCandidate {
                 identity: mono_behaviour,
                 evidence: WorkspaceSceneComponentEvidence::GameObjectPointerField,
             },
@@ -5521,14 +5693,14 @@ mod tests {
                 .iter()
                 .map(|assignment| assignment.asset.object_index)
                 .collect::<Vec<_>>(),
-            [0, 4, 5, 1, 2, 3]
+            [0, 4, 5, 6, 1, 2, 3]
         );
         assert_eq!(
             assignments
                 .iter()
                 .map(|assignment| assignment.file_id)
                 .collect::<Vec<_>>(),
-            [50, 54, 55, 51, 52, 53]
+            [50, 54, 55, 56, 51, 52, 53]
         );
         let yaml_order = crate::export::scene_collection::order_scene_yaml_assignments(
             &assignments,
@@ -5540,7 +5712,7 @@ mod tests {
                 .iter()
                 .map(|assignment| assignment.asset.object_index)
                 .collect::<Vec<_>>(),
-            [2, 0, 4, 5, 1, 3]
+            [2, 0, 4, 5, 6, 1, 3]
         );
     }
 
