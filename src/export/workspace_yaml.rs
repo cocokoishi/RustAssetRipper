@@ -16,7 +16,8 @@ use super::pointer_map::{
 };
 use super::prefab_collection::PrefabExportIdAssignment;
 use super::scene_collection::{
-    ExportAssetCollectionIdentity, ExportAssetIdentity, SceneExportIdAssignment,
+    order_scene_yaml_assignments, ExportAssetCollectionIdentity, ExportAssetIdentity,
+    SceneExportIdAssignment, SceneYamlAssetOrderError, SceneYamlAssetOrderLimits,
 };
 use super::unity_yaml::{
     write_unity_yaml_documents, UnityYamlDocument, UnityYamlWriteError, UnityYamlWriteLimits,
@@ -166,6 +167,38 @@ pub fn workspace_assignments_to_unity_yaml<A: UnityYamlCollectionAssignment>(
         .map_err(UnityYamlWorkspaceCollectionError::YamlWrite)
 }
 
+/// Order hierarchy-listed Scene assignments using the baseline manager-first stable comparator,
+/// then execute them through the workspace YAML collection writer.
+#[allow(clippy::too_many_arguments)]
+pub fn workspace_scene_assignments_to_unity_yaml(
+    workspace: &SerializedFileWorkspace,
+    objects: &crate::serialized_file::object_workspace::ObjectWorkspace,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+    pointer_map: &ProjectExportPointerMap,
+    assignments_in_hierarchy_order: &[SceneExportIdAssignment],
+    current_collection_index: usize,
+    missing_reference_guid: Option<[u8; 16]>,
+    limits: UnityYamlWorkspaceCollectionLimits,
+) -> Result<String, UnityYamlWorkspaceCollectionError> {
+    let ordered_assignments = order_scene_yaml_assignments(
+        assignments_in_hierarchy_order,
+        SceneYamlAssetOrderLimits {
+            max_assets: limits.max_documents,
+        },
+    )
+    .map_err(UnityYamlWorkspaceCollectionError::SceneOrder)?;
+    workspace_assignments_to_unity_yaml(
+        workspace,
+        objects,
+        reference_graph,
+        pointer_map,
+        &ordered_assignments,
+        current_collection_index,
+        missing_reference_guid,
+        limits,
+    )
+}
+
 #[derive(Debug)]
 pub enum UnityYamlWorkspaceCollectionError {
     DocumentLimitExceeded {
@@ -176,6 +209,7 @@ pub enum UnityYamlWorkspaceCollectionError {
         resource: &'static str,
         requested: usize,
     },
+    SceneOrder(SceneYamlAssetOrderError),
     DuplicateAssetIdentity {
         assignment_index: usize,
         asset: ExportAssetIdentity,
@@ -210,6 +244,7 @@ impl Display for UnityYamlWorkspaceCollectionError {
                 resource,
                 requested,
             } => write!(f, "could not allocate {requested} entries for {resource}"),
+            Self::SceneOrder(source) => Display::fmt(source, f),
             Self::DuplicateAssetIdentity {
                 assignment_index,
                 asset,
@@ -254,6 +289,7 @@ impl Error for UnityYamlWorkspaceCollectionError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::ObjectExport { source, .. } => Some(source),
+            Self::SceneOrder(source) => Some(source),
             Self::YamlWrite(source) => Some(source),
             _ => None,
         }
@@ -1196,6 +1232,42 @@ mod tests {
         assert!(transform_position < game_object_position);
         assert!(output.contains("m_GameObject: {fileID: 42}"));
         assert!(output.contains("component: {fileID: 43}"));
+    }
+
+    #[test]
+    fn scene_executor_applies_scene_ordering_before_writing() {
+        let (filesystem, workspace) = load_workspaces(TRANSFORM_PATH_ID);
+        let objects = ObjectWorkspace::load_from_vfs(
+            &filesystem,
+            &workspace,
+            ObjectWorkspaceLimits::default(),
+        )
+        .unwrap();
+        let reference_graph = workspace
+            .reference_graph(MultiFileReferenceGraphLimits::default())
+            .unwrap();
+        let assignments = [
+            SceneExportIdAssignment {
+                asset: asset(0, GAME_OBJECT_PATH_ID, 1),
+                file_id: GAME_OBJECT_PATH_ID,
+            },
+            SceneExportIdAssignment {
+                asset: asset(1, TRANSFORM_PATH_ID, 4),
+                file_id: TRANSFORM_PATH_ID,
+            },
+        ];
+        let output = workspace_scene_assignments_to_unity_yaml(
+            &workspace,
+            &objects,
+            &reference_graph,
+            &pointer_map(),
+            &assignments,
+            COLLECTION_INDEX,
+            None,
+            UnityYamlWorkspaceCollectionLimits::default(),
+        )
+        .unwrap();
+        assert!(output.find("--- !u!1 &42").unwrap() < output.find("--- !u!4 &43").unwrap());
     }
 
     #[test]

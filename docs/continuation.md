@@ -596,3 +596,11 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Full verification passed: 376 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format; baseline verifier (1,449 files); and `git diff --check`.
 - Still incomplete: discover and baseline-sort Scene/Prefab membership; generate YAML for processed assets; complete per-class editor walking, field filtering, special class policies, `.meta` generation, and product-level output routing. Phase 1 remains incomplete; Phase 2 remains locked.
 - Next: wire SceneHierarchyObject membership and its separate ID-assignment/YAML order into the collection executor; keep processed assets as explicit errors until their generated class walkers and typed export representation exist.
+
+## Baseline Scene YAML assignment ordering
+
+- Current phase: Phase 1; gate not passed. This increment builds from pushed revision `30f694ef7acccef42ca60a29581e8fd696fd6503`. Only `cocokoishi/RustAssetRipper` is a write/push target; no other remote repository, UABEA, or user AssetBundle content was accessed.
+- Source inspection confirmed the `SceneExportCollection.Compare` rule. Added `order_scene_yaml_assignments` and routed Scene-specific workspace export through it: recognized managers sort first by class ID, then stable ties and non-manager assets retain caller order.
+- Full verification passed: 379 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format; baseline verifier (1,449 files); and `git diff --check`.
+- Still incomplete: derive the actual hierarchy membership and input order from `WorkspaceSceneHierarchies`, include hidden/filter rules, and provide generated-asset YAML walking. The comparator has no C# runtime differential. Phase 1 remains incomplete; Phase 2 remains locked.
+- Next: build a bounded adapter from one `WorkspaceSceneHierarchyScene` plus its scene collections into GameObjects, Components, PrefabInstances, managers, and optional SceneRoots, keeping every ambiguous or unsupported classification explicit.

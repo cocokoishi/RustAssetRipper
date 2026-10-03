@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
+use crate::processing::scene_collections::scene_manager_kind;
 use crate::processing::scene_naming::SceneUnityVersion;
 
 use super::ids::get_pseudo_random_export_id;
@@ -245,6 +246,75 @@ pub fn plan_scene_export_ids(
     Ok(assignments)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SceneYamlAssetOrderLimits {
+    pub max_assets: usize,
+}
+
+impl Default for SceneYamlAssetOrderLimits {
+    fn default() -> Self {
+        Self {
+            max_assets: 20_000_000,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SceneYamlAssetOrderError {
+    AssetLimitExceeded { count: usize, limit: usize },
+    AllocationFailed { requested: usize },
+}
+
+impl Display for SceneYamlAssetOrderError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AssetLimitExceeded { count, limit } => write!(
+                f,
+                "Scene YAML collection has {count} assets, exceeding limit {limit}"
+            ),
+            Self::AllocationFailed { requested } => write!(
+                f,
+                "could not allocate a Scene YAML ordering for {requested} assets"
+            ),
+        }
+    }
+}
+
+impl Error for SceneYamlAssetOrderError {}
+
+/// Apply the stable ordering used by `SceneExportCollection.Compare` to already selected,
+/// hierarchy-ordered Scene assignments. LevelGameManager assets sort first by class ID; all
+/// other pairs compare equal and therefore retain their input order.
+pub fn order_scene_yaml_assignments(
+    assignments_in_hierarchy_order: &[SceneExportIdAssignment],
+    limits: SceneYamlAssetOrderLimits,
+) -> Result<Vec<SceneExportIdAssignment>, SceneYamlAssetOrderError> {
+    if assignments_in_hierarchy_order.len() > limits.max_assets {
+        return Err(SceneYamlAssetOrderError::AssetLimitExceeded {
+            count: assignments_in_hierarchy_order.len(),
+            limit: limits.max_assets,
+        });
+    }
+    let mut ordered = Vec::new();
+    ordered
+        .try_reserve_exact(assignments_in_hierarchy_order.len())
+        .map_err(|_| SceneYamlAssetOrderError::AllocationFailed {
+            requested: assignments_in_hierarchy_order.len(),
+        })?;
+    ordered.extend_from_slice(assignments_in_hierarchy_order);
+    ordered.sort_by(|left, right| {
+        let left_is_manager = scene_manager_kind(Some(left.asset.class_id)).is_some();
+        let right_is_manager = scene_manager_kind(Some(right.asset.class_id)).is_some();
+        match (left_is_manager, right_is_manager) {
+            (true, true) => left.asset.class_id.cmp(&right.asset.class_id),
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            (false, false) => std::cmp::Ordering::Equal,
+        }
+    });
+    Ok(ordered)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -424,6 +494,84 @@ mod tests {
             ),
             Err(SceneExportIdPlanError::DuplicateAssetIdentity { asset: duplicate })
                 if duplicate == conflicting_metadata
+        ));
+    }
+
+    #[test]
+    fn scene_yaml_order_moves_managers_first_and_stably_sorts_manager_class_ids() {
+        let assignments = [
+            SceneExportIdAssignment {
+                asset: source(0, 0, 10, 1),
+                file_id: 10,
+            },
+            SceneExportIdAssignment {
+                asset: source(0, 1, 11, 196),
+                file_id: 11,
+            },
+            SceneExportIdAssignment {
+                asset: source(0, 2, 12, 4),
+                file_id: 12,
+            },
+            SceneExportIdAssignment {
+                asset: source(0, 3, 13, 104),
+                file_id: 13,
+            },
+            SceneExportIdAssignment {
+                asset: source(0, 4, 14, 29),
+                file_id: 14,
+            },
+            SceneExportIdAssignment {
+                asset: source(0, 5, 15, 157),
+                file_id: 15,
+            },
+        ];
+
+        let ordered =
+            order_scene_yaml_assignments(&assignments, SceneYamlAssetOrderLimits::default())
+                .unwrap();
+        assert_eq!(
+            ordered
+                .iter()
+                .map(|entry| entry.file_id)
+                .collect::<Vec<_>>(),
+            [14, 13, 15, 11, 10, 12]
+        );
+    }
+
+    #[test]
+    fn scene_yaml_order_preserves_same_class_manager_and_nonmanager_input_order() {
+        let assignments = [
+            SceneExportIdAssignment {
+                asset: source(0, 0, 10, 1),
+                file_id: 10,
+            },
+            SceneExportIdAssignment {
+                asset: source(0, 1, 11, 4),
+                file_id: 11,
+            },
+            SceneExportIdAssignment {
+                asset: source(0, 2, 12, 104),
+                file_id: 12,
+            },
+            SceneExportIdAssignment {
+                asset: source(0, 3, 13, 104),
+                file_id: 13,
+            },
+        ];
+
+        let ordered =
+            order_scene_yaml_assignments(&assignments, SceneYamlAssetOrderLimits::default())
+                .unwrap();
+        assert_eq!(
+            ordered
+                .iter()
+                .map(|entry| entry.file_id)
+                .collect::<Vec<_>>(),
+            [12, 13, 10, 11]
+        );
+        assert!(matches!(
+            order_scene_yaml_assignments(&assignments, SceneYamlAssetOrderLimits { max_assets: 3 }),
+            Err(SceneYamlAssetOrderError::AssetLimitExceeded { count: 4, limit: 3 })
         ));
     }
 }
