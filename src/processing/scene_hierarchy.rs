@@ -955,8 +955,27 @@ impl WorkspaceSceneCollectionHierarchy {
             .map(|&relationship_index| &self.relationships[relationship_index]))
     }
 
+    /// Returns one source GameObject's ordered component-array relationships after identity checks.
+    pub fn game_object_component_relationships_for_identity<'a>(
+        &'a self,
+        game_object: WorkspaceSceneObjectIdentity,
+    ) -> Result<impl Iterator<Item = &'a SceneRelationship> + 'a, WorkspaceSceneHierarchyError>
+    {
+        let hierarchy_index = self.game_object_hierarchy_index(game_object)?;
+        self.game_object_component_relationships(hierarchy_index)
+    }
+
     /// Returns the serialized GameObject component-array length for a verified source identity.
     pub fn game_object_component_slot_count(
+        &self,
+        game_object: WorkspaceSceneObjectIdentity,
+    ) -> Result<usize, WorkspaceSceneHierarchyError> {
+        Ok(self
+            .game_object_component_relationships_for_identity(game_object)?
+            .count())
+    }
+
+    fn game_object_hierarchy_index(
         &self,
         game_object: WorkspaceSceneObjectIdentity,
     ) -> Result<usize, WorkspaceSceneHierarchyError> {
@@ -988,9 +1007,7 @@ impl WorkspaceSceneCollectionHierarchy {
                 path_id: game_object.path_id,
             });
         }
-        Ok(self
-            .game_object_component_relationships(hierarchy_index)?
-            .count())
+        Ok(hierarchy_index)
     }
 
     pub fn transform_hierarchies(&self) -> &[WorkspaceSceneTransformHierarchy] {
@@ -5753,6 +5770,17 @@ mod tests {
             component_addition.component_asset,
             missing_transform_collection.assets[0].identity
         );
+        let component_overlay = &allocations.component_list_overlays()[0];
+        assert_eq!(component_overlay.game_object, game_object);
+        assert_eq!(component_overlay.source_slots.len(), 1);
+        assert_eq!(component_overlay.source_slots[0].source_array_index, 0);
+        assert_eq!(component_overlay.source_slots[0].file_id, 0);
+        assert_eq!(component_overlay.source_slots[0].path_id, 0);
+        assert_eq!(
+            component_overlay.source_slots[0].target,
+            SceneRelationshipTarget::Null
+        );
+        assert_eq!(component_overlay.generated_component, component_addition);
         assert_eq!(allocations.collections()[1].assets[0].identity.path_id, 1);
         assert_eq!(allocations.collections()[0].assets[0].identity.path_id, 1);
     }

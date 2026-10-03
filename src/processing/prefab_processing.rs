@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
+use super::scene::SceneRelationshipTarget;
 use super::scene_hierarchy::{
     default_workspace_generated_transform_values, WorkspaceGameObjectHierarchyEntry,
     WorkspaceGameObjectHierarchyEntryKind, WorkspaceGameObjectHierarchyWalk,
@@ -575,6 +576,22 @@ pub struct WorkspaceGeneratedComponentAddition {
     pub component_asset: WorkspaceProcessedAssetIdentity,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceSourceGameObjectComponentSlot {
+    pub source_array_index: usize,
+    pub file_id: i32,
+    pub path_id: i64,
+    pub target: SceneRelationshipTarget,
+}
+
+/// A non-mutating view of the source component slots and the generated Transform append.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceGameObjectComponentListOverlay {
+    pub game_object: WorkspaceSceneObjectIdentity,
+    pub source_slots: Vec<WorkspaceSourceGameObjectComponentSlot>,
+    pub generated_component: WorkspaceGeneratedComponentAddition,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorkspaceProcessedAssetCollectionPlan {
     pub collection_index: usize,
@@ -589,6 +606,7 @@ pub struct WorkspaceProcessedPrefabAssetPlanLimits {
     pub max_collections: usize,
     pub max_assets: usize,
     pub max_component_additions: usize,
+    pub max_component_overlay_slots: usize,
     pub max_missing_transform_candidates: usize,
     pub max_total_collection_name_bytes: usize,
 }
@@ -599,6 +617,7 @@ impl Default for WorkspaceProcessedPrefabAssetPlanLimits {
             max_collections: 1_000_000,
             max_assets: 20_000_000,
             max_component_additions: 20_000_000,
+            max_component_overlay_slots: 40_000_000,
             max_missing_transform_candidates: 20_000_000,
             max_total_collection_name_bytes: 64 * 1024 * 1024,
         }
@@ -615,6 +634,8 @@ pub struct WorkspaceProcessedPrefabAssetPlan {
     incomplete_reason: Option<String>,
     collections: Vec<WorkspaceProcessedAssetCollectionPlan>,
     component_additions: Vec<WorkspaceGeneratedComponentAddition>,
+    component_list_overlays: Vec<WorkspaceGameObjectComponentListOverlay>,
+    component_overlay_slot_count: usize,
     asset_count: usize,
     total_collection_name_bytes: usize,
 }
@@ -634,6 +655,10 @@ impl WorkspaceProcessedPrefabAssetPlan {
 
     pub fn component_additions(&self) -> &[WorkspaceGeneratedComponentAddition] {
         &self.component_additions
+    }
+
+    pub fn component_list_overlays(&self) -> &[WorkspaceGameObjectComponentListOverlay] {
+        &self.component_list_overlays
     }
 
     pub fn asset_count(&self) -> usize {
@@ -766,6 +791,8 @@ pub fn plan_workspace_processed_prefab_assets(
         incomplete_reason: None,
         collections: Vec::new(),
         component_additions: Vec::new(),
+        component_list_overlays: Vec::new(),
+        component_overlay_slot_count: 0,
         asset_count: 0,
         total_collection_name_bytes: 0,
     };
@@ -848,6 +875,45 @@ pub fn plan_workspace_processed_prefab_assets(
         let appended_index = graph
             .game_object_component_slot_count(game_object)
             .map_err(|error| processed_asset_operation_error(error.to_string()))?;
+        let mut source_slots = Vec::new();
+        source_slots
+            .try_reserve_exact(appended_index)
+            .map_err(|_| WorkspacePrefabProcessingError::AllocationFailed {
+                resource: "source GameObject component slots for overlay",
+                requested: appended_index,
+            })?;
+        for (source_array_index, relationship) in graph
+            .game_object_component_relationships_for_identity(game_object)
+            .map_err(|error| processed_asset_operation_error(error.to_string()))?
+            .enumerate()
+        {
+            source_slots.push(WorkspaceSourceGameObjectComponentSlot {
+                source_array_index,
+                file_id: relationship.file_id,
+                path_id: relationship.path_id,
+                target: relationship.target.clone(),
+            });
+        }
+        if source_slots.len() != appended_index {
+            return Err(processed_asset_operation_error(format!(
+                "GameObject {}:{} component slot count changed during overlay planning",
+                game_object.file_index, game_object.object_index
+            )));
+        }
+        let requested_overlay_slots = plan
+            .component_overlay_slot_count
+            .checked_add(appended_index)
+            .and_then(|count| count.checked_add(1))
+            .ok_or(WorkspacePrefabProcessingError::CountOverflow {
+                resource: "GameObject component overlay slots",
+            })?;
+        if requested_overlay_slots > limits.max_component_overlay_slots {
+            return Err(WorkspacePrefabProcessingError::ResourceLimitExceeded {
+                resource: "GameObject component overlay slots",
+                requested: requested_overlay_slots,
+                limit: limits.max_component_overlay_slots,
+            });
+        }
         let requested_additions = plan.component_additions.len().checked_add(1).ok_or(
             WorkspacePrefabProcessingError::CountOverflow {
                 resource: "generated GameObject component additions",
@@ -866,13 +932,26 @@ pub fn plan_workspace_processed_prefab_assets(
                 requested: requested_additions,
             }
         })?;
-        plan.component_additions
-            .push(WorkspaceGeneratedComponentAddition {
+        plan.component_list_overlays.try_reserve(1).map_err(|_| {
+            WorkspacePrefabProcessingError::AllocationFailed {
+                resource: "GameObject component list overlays",
+                requested: requested_additions,
+            }
+        })?;
+        let addition = WorkspaceGeneratedComponentAddition {
+            game_object,
+            component_class_id: 4,
+            appended_index,
+            component_asset: transform_asset,
+        };
+        plan.component_additions.push(addition);
+        plan.component_list_overlays
+            .push(WorkspaceGameObjectComponentListOverlay {
                 game_object,
-                component_class_id: 4,
-                appended_index,
-                component_asset: transform_asset,
+                source_slots,
+                generated_component: addition,
             });
+        plan.component_overlay_slot_count = requested_overlay_slots;
     }
     if let Some((file_index, object_index)) = missing_transforms.keys().copied().min() {
         return Err(processed_asset_operation_error(format!(
@@ -954,6 +1033,8 @@ fn incomplete_processed_asset_plan(reason: &str) -> WorkspaceProcessedPrefabAsse
         incomplete_reason: Some(reason.to_owned()),
         collections: Vec::new(),
         component_additions: Vec::new(),
+        component_list_overlays: Vec::new(),
+        component_overlay_slot_count: 0,
         asset_count: 0,
         total_collection_name_bytes: 0,
     }

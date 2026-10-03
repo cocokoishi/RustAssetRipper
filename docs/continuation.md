@@ -374,3 +374,11 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Verification: full suite passed 301 library and 10 CLI tests; warnings-denied Clippy, format check, 1,449-file baseline verification, and git diff check passed. No Unity or reference-tool differential was run.
 - Still missing: mutation/materialization of source component arrays, generated asset serialized fields, dependency-table PPtr indexes, versioned IPrefabMarker behavior, AssetGroup MainAsset/hidden membership, and scene/prefab YAML plus meta export. The component append record is not a completed mutation or export.
 - Next: model source component arrays as a checked overlay keyed by GameObject identity, preserving every source slot and appending generated Transform pointers; then resolve serialized PPtr file indexes from ProcessedBundle collection dependencies.
+
+## Generated Transform component-array overlay
+
+- Current phase: Phase 1; gate not passed. This increment follows pushed commit b0045c8495f7c6d4ed4f033150f074bae50abbe5. Only RustAssetRipper is a write target.
+- Added WorkspaceSceneCollectionHierarchy::game_object_component_relationships_for_identity, which verifies the source GameObject identity and returns its component slots in serialized array order. The processed plan now retains an overlay for each missing-Transform GameObject: original zero-based slot order, original fileID/PathID, null or resolved target state, and a separate generated Transform append linked to its processed collection identity.
+- A null source PPtr remains a slot. The synthetic fixture verifies source slot 0 is preserved and the generated component is appended at slot 1. Full verification passed: 301 library and 10 CLI tests, warnings-denied Clippy, format check, baseline verifier (1,449 files unchanged), and git diff check.
+- This is still a non-mutating overlay. It does not write back GameObject m_Component values or decide the generated Transform's serialized PPtr fileID. Existing source PPtrs retain their original file scope in the overlay.
+- Next: port AssetCollection.AddDependency/ForceCreatePPtr for processed collections so generated Transform references receive correct output collection file indexes while source PPtrs keep their source collection scope. Then materialize this overlay as a version-aware serialized GameObject value.
