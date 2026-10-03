@@ -3955,6 +3955,153 @@ mod tests {
         assert_eq!(generated.bytes, expected);
     }
 
+    #[test]
+    fn generated_transform_yaml_resolves_its_constructor_pointer_to_a_local_scene_id() {
+        let (plan, asset, game_object) = generated_transform_plan();
+        let metadata = transform_metadata(true, true);
+        let generated = materialize_planned_generated_transform_payload(
+            &plan,
+            asset,
+            &metadata,
+            0,
+            ObjectDefaultValueLimits::default(),
+            ObjectEncodeLimits::default(),
+        )
+        .unwrap();
+        let constructor_pointer = plan.constructor_pointers()[0];
+        let target_asset = crate::export::scene_collection::ExportAssetIdentity {
+            collection:
+                crate::export::scene_collection::ExportAssetCollectionIdentity::SerializedFile {
+                    file_index: game_object.file_index,
+                },
+            object_index: game_object.object_index,
+            path_id: game_object.path_id,
+            class_id: 1,
+        };
+        let generated_asset = crate::export::scene_collection::ExportAssetIdentity {
+            collection: crate::export::scene_collection::ExportAssetCollectionIdentity::
+                ProcessedCollection {
+                    collection_index: asset.collection_index,
+                },
+            object_index: 0,
+            path_id: asset.path_id,
+            class_id: asset.class_id,
+        };
+        let collection_index = 55;
+        let pointer_map = crate::export::pointer_map::ProjectExportPointerMap::new(
+            &[
+                crate::export::pointer_map::ExportedAssetPointerEntry {
+                    asset: target_asset,
+                    file_id: game_object.path_id,
+                    collection_index,
+                },
+                crate::export::pointer_map::ExportedAssetPointerEntry {
+                    asset: generated_asset,
+                    file_id: 123,
+                    collection_index,
+                },
+            ],
+            &[
+                crate::export::pointer_map::ExportCollectionPointerMetadata {
+                    collection_index,
+                    guid: [0x55; 16],
+                    asset_type: crate::export::pointer_map::UnityProjectAssetType::Serialized,
+                },
+            ],
+            crate::export::pointer_map::ExportPointerMapLimits::default(),
+        )
+        .unwrap();
+
+        let document =
+            crate::export::workspace_yaml::generated_transform_payload_to_unity_yaml_document(
+                &generated,
+                &metadata,
+                generated_asset,
+                123,
+                constructor_pointer,
+                &pointer_map,
+                collection_index,
+                None,
+                crate::export::value_yaml::UnityYamlObjectConversionLimits::default(),
+            )
+            .unwrap();
+        let yaml = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[document],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+
+        assert!(yaml.contains("--- !u!4 &123"), "{yaml}");
+        assert!(
+            yaml.contains(&format!(
+                "m_GameObject: {{fileID: {}}}",
+                game_object.path_id
+            )),
+            "{yaml}"
+        );
+        assert!(yaml.contains("m_LocalPosition:"), "{yaml}");
+        assert!(yaml.contains("m_LocalScale:"), "{yaml}");
+        assert!(!yaml.contains("guid:"), "{yaml}");
+
+        let mut wrong_class_metadata = metadata.clone();
+        wrong_class_metadata.types[0]
+            .type_tree
+            .as_mut()
+            .unwrap()
+            .nodes[0]
+            .type_name = Some("NotTransform".to_owned());
+        assert!(matches!(
+            crate::export::workspace_yaml::generated_transform_payload_to_unity_yaml_document(
+                &generated,
+                &wrong_class_metadata,
+                generated_asset,
+                123,
+                constructor_pointer,
+                &pointer_map,
+                collection_index,
+                None,
+                crate::export::value_yaml::UnityYamlObjectConversionLimits::default(),
+            ),
+            Err(crate::export::workspace_yaml::UnityYamlWorkspaceExportError::
+                GeneratedTransformInvariant { .. })
+        ));
+
+        let mut wrong_pointer = generated.clone();
+        *wrong_pointer
+            .root
+            .unique_field_in_base_chain_mut("m_Father")
+            .unwrap()
+            .unwrap() = SerializedValue::PPtr {
+            file_id: constructor_pointer.file_id,
+            path_id: constructor_pointer.path_id,
+        };
+        wrong_pointer.bytes = metadata
+            .encode_object_payload_for_type(
+                metadata.objects.len(),
+                wrong_pointer.type_index,
+                &wrong_pointer.root,
+                &[],
+                ObjectEncodeLimits::default(),
+            )
+            .unwrap();
+        assert!(matches!(
+            crate::export::workspace_yaml::generated_transform_payload_to_unity_yaml_document(
+                &wrong_pointer,
+                &metadata,
+                generated_asset,
+                123,
+                constructor_pointer,
+                &pointer_map,
+                collection_index,
+                None,
+                crate::export::value_yaml::UnityYamlObjectConversionLimits::default(),
+            ),
+            Err(crate::export::workspace_yaml::UnityYamlWorkspaceExportError::
+                GeneratedTransformInvariant { message, .. })
+                if message.contains("unexpected non-null Transform PPtr")
+        ));
+    }
+
     fn vector3_value(x: f32, y: f32, z: f32) -> SerializedValue {
         SerializedValue::Struct(vec![
             SerializedFieldValue {
