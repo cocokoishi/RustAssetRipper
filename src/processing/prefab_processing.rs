@@ -4,7 +4,10 @@ use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
-use crate::serialized_file::object::{ParsedObjectPayload, SerializedValue};
+use crate::serialized_file::metadata::SerializedFileMetadata;
+use crate::serialized_file::object::{
+    ObjectDefaultValueLimits, ObjectEncodeLimits, ParsedObjectPayload, SerializedValue,
+};
 use crate::serialized_file::object_workspace::ObjectWorkspace;
 
 use super::scene::SceneRelationshipTarget;
@@ -593,6 +596,380 @@ pub struct WorkspaceGameObjectComponentListOverlay {
     pub game_object: WorkspaceSceneObjectIdentity,
     pub source_slots: Vec<WorkspaceSourceGameObjectComponentSlot>,
     pub generated_component: WorkspaceGeneratedComponentAddition,
+}
+
+/// Typed root and encoded bytes for one planned, newly generated Transform.
+///
+/// The caller can place `root` into a `SerializedObjectInsertion` when creating the generated
+/// collection file. The bytes are returned as direct evidence that the selected existing type
+/// entry can encode this value; they do not create the collection or its object record.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorkspaceGeneratedTransformPayload {
+    pub asset: WorkspaceProcessedAssetIdentity,
+    pub type_index: usize,
+    pub root: SerializedValue,
+    pub bytes: Vec<u8>,
+}
+
+/// Materialize the planned Transform constructor values against an existing serialized type.
+///
+/// This applies the source `TransformExtensions.InitializeDefault` values and the checked
+/// `GameObject_C4P` dependency from the processed-asset plan. The selected type must be an
+/// existing class-ID-4 TypeTree; this does not synthesize a missing serialized type entry.
+pub fn materialize_planned_generated_transform_payload(
+    plan: &WorkspaceProcessedPrefabAssetPlan,
+    asset_identity: WorkspaceProcessedAssetIdentity,
+    metadata: &SerializedFileMetadata,
+    type_index: usize,
+    default_limits: ObjectDefaultValueLimits,
+    encode_limits: ObjectEncodeLimits,
+) -> Result<WorkspaceGeneratedTransformPayload, WorkspacePrefabProcessingError> {
+    if !plan.is_complete() {
+        return Err(processed_asset_operation_error(
+            "PrefabProcessor asset allocation plan is incomplete".to_owned(),
+        ));
+    }
+    if asset_identity.class_id != TRANSFORM_CLASS_ID {
+        return Err(processed_asset_operation_error(format!(
+            "generated asset class ID {} is not Transform class ID {TRANSFORM_CLASS_ID}",
+            asset_identity.class_id
+        )));
+    }
+    let collection = plan
+        .collections
+        .get(asset_identity.collection_index)
+        .ok_or_else(|| {
+            processed_asset_operation_error(format!(
+                "generated Transform collection {} is unavailable",
+                asset_identity.collection_index
+            ))
+        })?;
+    let mut matching_assets = collection
+        .assets
+        .iter()
+        .filter(|asset| asset.identity == asset_identity);
+    let asset = matching_assets.next().ok_or_else(|| {
+        processed_asset_operation_error(format!(
+            "generated Transform {:?} is absent from its planned collection",
+            asset_identity
+        ))
+    })?;
+    if matching_assets.next().is_some() {
+        return Err(processed_asset_operation_error(format!(
+            "generated Transform {:?} occurs more than once in its planned collection",
+            asset_identity
+        )));
+    }
+    let WorkspaceProcessedPrefabAssetKind::GeneratedTransform {
+        game_object,
+        default_values,
+    } = &asset.kind
+    else {
+        return Err(processed_asset_operation_error(format!(
+            "planned asset {:?} is not a generated Transform",
+            asset_identity
+        )));
+    };
+
+    let mut matching_pointers = plan.constructor_pointers.iter().filter(|pointer| {
+        pointer.source_asset == asset_identity
+            && pointer.field == WorkspaceGeneratedPointerField::TransformGameObject
+    });
+    let constructor_pointer = matching_pointers.next().ok_or_else(|| {
+        generated_transform_materialization_error(
+            *game_object,
+            "planned Transform has no GameObject constructor PPtr",
+        )
+    })?;
+    if matching_pointers.next().is_some() {
+        return Err(generated_transform_materialization_error(
+            *game_object,
+            "planned Transform has duplicate GameObject constructor PPtrs",
+        ));
+    }
+    if constructor_pointer.target != *game_object
+        || constructor_pointer.path_id != game_object.path_id
+        || constructor_pointer.file_id <= 0
+    {
+        return Err(generated_transform_materialization_error(
+            *game_object,
+            "planned GameObject constructor PPtr disagrees with the generated asset kind",
+        ));
+    }
+    let matching_dependencies = collection
+        .dependencies
+        .iter()
+        .filter(|dependency| dependency.file_id == constructor_pointer.file_id);
+    let mut matching_dependencies = matching_dependencies;
+    let Some(dependency) = matching_dependencies.next() else {
+        return Err(generated_transform_materialization_error(
+            *game_object,
+            "planned GameObject FileID is absent from the generated collection dependency table",
+        ));
+    };
+    if matching_dependencies.next().is_some()
+        || dependency.target
+            != (WorkspaceProcessedDependencyTarget::SerializedFileCollection {
+                file_index: game_object.file_index,
+            })
+    {
+        return Err(generated_transform_materialization_error(
+            *game_object,
+            "planned GameObject FileID does not uniquely target its source SerializedFile",
+        ));
+    }
+
+    let serialized_type = metadata.types.get(type_index).ok_or_else(|| {
+        generated_transform_materialization_error(
+            *game_object,
+            &format!(
+                "Transform type index {type_index} is outside the {}-entry type table",
+                metadata.types.len()
+            ),
+        )
+    })?;
+    if serialized_type.raw_type_id != TRANSFORM_CLASS_ID {
+        return Err(generated_transform_materialization_error(
+            *game_object,
+            &format!(
+                "serialized type {type_index} has class ID {}, expected {TRANSFORM_CLASS_ID}",
+                serialized_type.raw_type_id
+            ),
+        ));
+    }
+    let object_index = metadata.objects.len();
+    let mut root = metadata
+        .default_object_value_for_type(object_index, type_index, default_limits)
+        .map_err(|error| {
+            generated_transform_materialization_error(*game_object, &error.to_string())
+        })?;
+
+    set_transform_vector3(
+        &mut root,
+        *game_object,
+        "m_LocalPosition",
+        default_values.local_position,
+    )?;
+    set_transform_quaternion(
+        &mut root,
+        *game_object,
+        "m_LocalRotation",
+        default_values.local_rotation,
+    )?;
+    set_transform_vector3(
+        &mut root,
+        *game_object,
+        "m_LocalScale",
+        default_values.local_scale,
+    )?;
+    set_transform_i32(
+        &mut root,
+        *game_object,
+        "m_RootOrder",
+        default_values.root_order,
+    )?;
+    if let Some(euler_hint) = root
+        .unique_field_in_base_chain_mut("m_LocalEulerAnglesHint")
+        .map_err(|error| {
+            generated_transform_materialization_error(*game_object, &error.to_string())
+        })?
+    {
+        set_vector3_components(
+            euler_hint,
+            *game_object,
+            "m_LocalEulerAnglesHint",
+            default_values.local_euler_angles_hint_if_present,
+        )?;
+    }
+    let game_object_field = root
+        .unique_field_in_base_chain_mut("m_GameObject")
+        .map_err(|error| {
+            generated_transform_materialization_error(*game_object, &error.to_string())
+        })?
+        .ok_or_else(|| {
+            generated_transform_materialization_error(
+                *game_object,
+                "Transform TypeTree has no m_GameObject field",
+            )
+        })?;
+    match game_object_field {
+        SerializedValue::PPtr { file_id, path_id } => {
+            *file_id = constructor_pointer.file_id;
+            *path_id = constructor_pointer.path_id;
+        }
+        other => {
+            return Err(generated_transform_materialization_error(
+                *game_object,
+                &format!(
+                    "Transform m_GameObject has value shape {} instead of PPtr",
+                    component_value_kind(other)
+                ),
+            ));
+        }
+    }
+
+    let bytes = metadata
+        .encode_object_payload_for_type(object_index, type_index, &root, &[], encode_limits)
+        .map_err(|error| {
+            generated_transform_materialization_error(*game_object, &error.to_string())
+        })?;
+    Ok(WorkspaceGeneratedTransformPayload {
+        asset: asset_identity,
+        type_index,
+        root,
+        bytes,
+    })
+}
+
+fn set_transform_vector3(
+    root: &mut SerializedValue,
+    game_object: WorkspaceSceneObjectIdentity,
+    field_name: &str,
+    value: super::scene::SceneVector3,
+) -> Result<(), WorkspacePrefabProcessingError> {
+    let vector = root
+        .unique_field_in_base_chain_mut(field_name)
+        .map_err(|error| {
+            generated_transform_materialization_error(game_object, &error.to_string())
+        })?
+        .ok_or_else(|| {
+            generated_transform_materialization_error(
+                game_object,
+                &format!("Transform TypeTree has no {field_name} field"),
+            )
+        })?;
+    set_vector3_components(vector, game_object, field_name, value)
+}
+
+fn set_vector3_components(
+    vector: &mut SerializedValue,
+    game_object: WorkspaceSceneObjectIdentity,
+    field_name: &str,
+    value: super::scene::SceneVector3,
+) -> Result<(), WorkspacePrefabProcessingError> {
+    for (name, component) in [("x", value.x), ("y", value.y), ("z", value.z)] {
+        let field_path = format!("{field_name}.{name}");
+        let field = vector
+            .unique_field_in_base_chain_mut(name)
+            .map_err(|error| {
+                generated_transform_materialization_error(game_object, &error.to_string())
+            })?
+            .ok_or_else(|| {
+                generated_transform_materialization_error(
+                    game_object,
+                    &format!("Transform TypeTree has no {field_path} field"),
+                )
+            })?;
+        match field {
+            SerializedValue::F32(current) => *current = component,
+            other => {
+                return Err(generated_transform_materialization_error(
+                    game_object,
+                    &format!(
+                        "Transform {field_path} has value shape {} instead of f32",
+                        component_value_kind(other)
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn set_transform_quaternion(
+    root: &mut SerializedValue,
+    game_object: WorkspaceSceneObjectIdentity,
+    field_name: &str,
+    value: super::scene::SceneQuaternion,
+) -> Result<(), WorkspacePrefabProcessingError> {
+    let quaternion = root
+        .unique_field_in_base_chain_mut(field_name)
+        .map_err(|error| {
+            generated_transform_materialization_error(game_object, &error.to_string())
+        })?
+        .ok_or_else(|| {
+            generated_transform_materialization_error(
+                game_object,
+                &format!("Transform TypeTree has no {field_name} field"),
+            )
+        })?;
+    for (name, component) in [
+        ("x", value.x),
+        ("y", value.y),
+        ("z", value.z),
+        ("w", value.w),
+    ] {
+        let field_path = format!("{field_name}.{name}");
+        let field = quaternion
+            .unique_field_in_base_chain_mut(name)
+            .map_err(|error| {
+                generated_transform_materialization_error(game_object, &error.to_string())
+            })?
+            .ok_or_else(|| {
+                generated_transform_materialization_error(
+                    game_object,
+                    &format!("Transform TypeTree has no {field_path} field"),
+                )
+            })?;
+        match field {
+            SerializedValue::F32(current) => *current = component,
+            other => {
+                return Err(generated_transform_materialization_error(
+                    game_object,
+                    &format!(
+                        "Transform {field_path} has value shape {} instead of f32",
+                        component_value_kind(other)
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn set_transform_i32(
+    root: &mut SerializedValue,
+    game_object: WorkspaceSceneObjectIdentity,
+    field_name: &str,
+    value: i32,
+) -> Result<(), WorkspacePrefabProcessingError> {
+    let field = root
+        .unique_field_in_base_chain_mut(field_name)
+        .map_err(|error| {
+            generated_transform_materialization_error(game_object, &error.to_string())
+        })?
+        .ok_or_else(|| {
+            generated_transform_materialization_error(
+                game_object,
+                &format!("Transform TypeTree has no {field_name} field"),
+            )
+        })?;
+    match field {
+        SerializedValue::I32(current) => {
+            *current = value;
+            Ok(())
+        }
+        other => Err(generated_transform_materialization_error(
+            game_object,
+            &format!(
+                "Transform {field_name} has value shape {} instead of i32",
+                component_value_kind(other)
+            ),
+        )),
+    }
+}
+
+fn generated_transform_materialization_error(
+    game_object: WorkspaceSceneObjectIdentity,
+    message: &str,
+) -> WorkspacePrefabProcessingError {
+    WorkspacePrefabProcessingError::WorkspaceOperationFailed {
+        operation: "generated Transform payload materialization",
+        message: format!(
+            "source GameObject file {} object {} PathID {}: {message}",
+            game_object.file_index, game_object.object_index, game_object.path_id
+        ),
+    }
 }
 
 /// Materialize one checked component-list overlay as an edited GameObject payload.
@@ -2519,6 +2896,9 @@ fn hierarchy_walk_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::io::binary::Endian;
+    use crate::serialized_file::metadata::{SerializedType, TypeTree, TypeTreeNode};
+    use crate::serialized_file::metadata_prefix::SerializedFileMetadataPrefix;
     use crate::serialized_file::object::SerializedFieldValue;
 
     fn empty_plan() -> WorkspaceProcessedPrefabAssetPlan {
@@ -2537,6 +2917,155 @@ mod tests {
             asset_count: 0,
             total_collection_name_bytes: 0,
         }
+    }
+
+    fn tree_node(level: u8, name: &str, type_name: &str, byte_size: i32) -> TypeTreeNode {
+        TypeTreeNode {
+            level,
+            version: 1,
+            type_flags: 0,
+            type_string_offset: None,
+            name_string_offset: None,
+            type_name: Some(type_name.to_owned()),
+            name: Some(name.to_owned()),
+            byte_size,
+            index: 0,
+            meta_flags: 0,
+            reference_type_hash: None,
+        }
+    }
+
+    fn transform_metadata(
+        include_euler_hint: bool,
+        include_root_order: bool,
+    ) -> SerializedFileMetadata {
+        let mut nodes = vec![
+            tree_node(0, "", "Transform", -1),
+            tree_node(1, "Base", "Component", -1),
+            tree_node(2, "m_GameObject", "PPtr<GameObject>", 12),
+            tree_node(3, "m_FileID", "SInt32", 4),
+            tree_node(3, "m_PathID", "SInt64", 8),
+            tree_node(1, "m_Father", "PPtr<Transform>", 12),
+            tree_node(2, "m_FileID", "SInt32", 4),
+            tree_node(2, "m_PathID", "SInt64", 8),
+            tree_node(1, "m_Children", "vector", -1),
+            tree_node(2, "Array", "Array", -1),
+            tree_node(3, "size", "int", 4),
+            tree_node(3, "data", "PPtr<Transform>", 12),
+            tree_node(4, "m_FileID", "SInt32", 4),
+            tree_node(4, "m_PathID", "SInt64", 8),
+        ];
+        if include_root_order {
+            nodes.push(tree_node(1, "m_RootOrder", "int", 4));
+        }
+        if include_euler_hint {
+            nodes.extend([
+                tree_node(1, "m_LocalEulerAnglesHint", "Vector3f", -1),
+                tree_node(2, "x", "float", 4),
+                tree_node(2, "y", "float", 4),
+                tree_node(2, "z", "float", 4),
+            ]);
+        }
+        nodes.extend([
+            tree_node(1, "m_LocalPosition", "Vector3f", -1),
+            tree_node(2, "x", "float", 4),
+            tree_node(2, "y", "float", 4),
+            tree_node(2, "z", "float", 4),
+            tree_node(1, "m_LocalRotation", "Quaternionf", -1),
+            tree_node(2, "x", "float", 4),
+            tree_node(2, "y", "float", 4),
+            tree_node(2, "z", "float", 4),
+            tree_node(2, "w", "float", 4),
+            tree_node(1, "m_LocalScale", "Vector3f", -1),
+            tree_node(2, "x", "float", 4),
+            tree_node(2, "y", "float", 4),
+            tree_node(2, "z", "float", 4),
+        ]);
+        SerializedFileMetadata {
+            prefix: SerializedFileMetadataPrefix {
+                metadata_offset: 0,
+                metadata_size: 0,
+                body_endian: Endian::Little,
+                unity_version_text: Some("2019.4.31f1".to_owned()),
+                target_platform: Some(0),
+                has_type_tree: true,
+                consumed_bytes: 0,
+            },
+            types: vec![SerializedType {
+                raw_type_id: TRANSFORM_CLASS_ID,
+                type_id_for_hash: TRANSFORM_CLASS_ID,
+                is_stripped_type: false,
+                script_type_index: -1,
+                script_id: None,
+                old_type_hash: None,
+                type_tree: Some(TypeTree {
+                    nodes,
+                    string_buffer: Vec::new(),
+                }),
+                type_dependencies: Vec::new(),
+            }],
+            long_file_id: None,
+            objects: Vec::new(),
+            script_types: Vec::new(),
+            externals: Vec::new(),
+            reference_types: Vec::new(),
+            user_information: None,
+            trailing_metadata: Vec::new(),
+            consumed_bytes: 0,
+        }
+    }
+
+    fn generated_transform_plan() -> (
+        WorkspaceProcessedPrefabAssetPlan,
+        WorkspaceProcessedAssetIdentity,
+        WorkspaceSceneObjectIdentity,
+    ) {
+        let mut plan = empty_plan();
+        let limits = WorkspaceProcessedPrefabAssetPlanLimits::default();
+        let collection_index = add_processed_collection(
+            &mut plan,
+            WorkspaceProcessedCollectionKind::MissingPrefabTransforms,
+            "Missing Prefab Transforms",
+            limits,
+        )
+        .unwrap();
+        let game_object = WorkspaceSceneObjectIdentity {
+            file_index: 3,
+            object_index: 7,
+            path_id: 99,
+            class_id: Some(1),
+        };
+        let asset = add_processed_asset(
+            &mut plan,
+            collection_index,
+            TRANSFORM_CLASS_ID,
+            WorkspaceProcessedPrefabAssetKind::GeneratedTransform {
+                game_object,
+                default_values: default_workspace_generated_transform_values(),
+            },
+            limits,
+        )
+        .unwrap();
+        let file_id = add_processed_source_file_dependency(
+            &mut plan,
+            collection_index,
+            game_object.file_index,
+            limits,
+        )
+        .unwrap();
+        add_generated_constructor_pointer(
+            &mut plan,
+            WorkspaceGeneratedConstructorPointer {
+                source_asset: asset,
+                field: WorkspaceGeneratedPointerField::TransformGameObject,
+                file_id,
+                path_id: game_object.path_id,
+                target: game_object,
+            },
+            limits,
+        )
+        .unwrap();
+        (plan, asset, game_object)
     }
 
     #[test]
@@ -3320,5 +3849,191 @@ mod tests {
                 .len(),
             0
         );
+    }
+
+    #[test]
+    fn materializes_generated_transform_defaults_and_planned_game_object_pointer() {
+        let (plan, asset, game_object) = generated_transform_plan();
+        let metadata = transform_metadata(true, true);
+
+        let generated = materialize_planned_generated_transform_payload(
+            &plan,
+            asset,
+            &metadata,
+            0,
+            ObjectDefaultValueLimits::default(),
+            ObjectEncodeLimits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(generated.asset, asset);
+        assert_eq!(generated.type_index, 0);
+        assert_eq!(
+            generated
+                .root
+                .unique_field_in_base_chain("m_GameObject")
+                .unwrap()
+                .unwrap()
+                .pptr(),
+            Some((1, game_object.path_id))
+        );
+        assert_eq!(
+            generated.root.unique_field("m_Father").unwrap(),
+            Some(&SerializedValue::PPtr {
+                file_id: 0,
+                path_id: 0,
+            })
+        );
+        assert_eq!(
+            generated.root.unique_field("m_Children").unwrap(),
+            Some(&SerializedValue::Array(Vec::new()))
+        );
+        assert_eq!(
+            generated.root.unique_field("m_RootOrder").unwrap(),
+            Some(&SerializedValue::I32(0))
+        );
+        assert_eq!(
+            generated
+                .root
+                .unique_field("m_LocalEulerAnglesHint")
+                .unwrap(),
+            Some(&vector3_value(0.0, 0.0, 0.0))
+        );
+        assert_eq!(
+            generated.root.unique_field("m_LocalPosition").unwrap(),
+            Some(&vector3_value(0.0, 0.0, 0.0))
+        );
+        assert_eq!(
+            generated.root.unique_field("m_LocalRotation").unwrap(),
+            Some(&SerializedValue::Struct(vec![
+                SerializedFieldValue {
+                    name: "x".to_owned(),
+                    value: SerializedValue::F32(0.0),
+                },
+                SerializedFieldValue {
+                    name: "y".to_owned(),
+                    value: SerializedValue::F32(0.0),
+                },
+                SerializedFieldValue {
+                    name: "z".to_owned(),
+                    value: SerializedValue::F32(0.0),
+                },
+                SerializedFieldValue {
+                    name: "w".to_owned(),
+                    value: SerializedValue::F32(1.0),
+                },
+            ]))
+        );
+        assert_eq!(
+            generated.root.unique_field("m_LocalScale").unwrap(),
+            Some(&vector3_value(1.0, 1.0, 1.0))
+        );
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&1i32.to_le_bytes());
+        expected.extend_from_slice(&game_object.path_id.to_le_bytes());
+        expected.extend_from_slice(&0i32.to_le_bytes());
+        expected.extend_from_slice(&0i64.to_le_bytes());
+        expected.extend_from_slice(&0i32.to_le_bytes()); // m_Children size
+        expected.extend_from_slice(&0i32.to_le_bytes()); // m_RootOrder
+        for value in [0.0f32, 0.0, 0.0] {
+            // Euler hint
+            expected.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in [0.0f32, 0.0, 0.0] {
+            // Local position
+            expected.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in [0.0f32, 0.0, 0.0, 1.0] {
+            // Local rotation
+            expected.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in [1.0f32, 1.0, 1.0] {
+            // Local scale
+            expected.extend_from_slice(&value.to_le_bytes());
+        }
+        assert_eq!(generated.bytes, expected);
+    }
+
+    fn vector3_value(x: f32, y: f32, z: f32) -> SerializedValue {
+        SerializedValue::Struct(vec![
+            SerializedFieldValue {
+                name: "x".to_owned(),
+                value: SerializedValue::F32(x),
+            },
+            SerializedFieldValue {
+                name: "y".to_owned(),
+                value: SerializedValue::F32(y),
+            },
+            SerializedFieldValue {
+                name: "z".to_owned(),
+                value: SerializedValue::F32(z),
+            },
+        ])
+    }
+
+    #[test]
+    fn generated_transform_accepts_optional_euler_hint_but_requires_unconditional_fields() {
+        let (plan, asset, _) = generated_transform_plan();
+        let without_euler_hint = transform_metadata(false, true);
+        let generated = materialize_planned_generated_transform_payload(
+            &plan,
+            asset,
+            &without_euler_hint,
+            0,
+            ObjectDefaultValueLimits::default(),
+            ObjectEncodeLimits::default(),
+        )
+        .unwrap();
+        assert!(generated
+            .root
+            .unique_field("m_LocalEulerAnglesHint")
+            .unwrap()
+            .is_none());
+
+        let without_root_order = transform_metadata(false, false);
+        let error = materialize_planned_generated_transform_payload(
+            &plan,
+            asset,
+            &without_root_order,
+            0,
+            ObjectDefaultValueLimits::default(),
+            ObjectEncodeLimits::default(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("no m_RootOrder field"));
+    }
+
+    #[test]
+    fn generated_transform_rejects_wrong_type_and_dependency_identity() {
+        let (plan, asset, _) = generated_transform_plan();
+        let mut wrong_type = transform_metadata(true, true);
+        wrong_type.types[0].raw_type_id = 224;
+        let wrong_type_error = materialize_planned_generated_transform_payload(
+            &plan,
+            asset,
+            &wrong_type,
+            0,
+            ObjectDefaultValueLimits::default(),
+            ObjectEncodeLimits::default(),
+        )
+        .unwrap_err();
+        assert!(wrong_type_error.to_string().contains("expected 4"));
+
+        let mut wrong_dependency = plan.clone();
+        wrong_dependency.collections[asset.collection_index].dependencies[1].target =
+            WorkspaceProcessedDependencyTarget::SerializedFileCollection { file_index: 4 };
+        let dependency_error = materialize_planned_generated_transform_payload(
+            &wrong_dependency,
+            asset,
+            &transform_metadata(true, true),
+            0,
+            ObjectDefaultValueLimits::default(),
+            ObjectEncodeLimits::default(),
+        )
+        .unwrap_err();
+        assert!(dependency_error
+            .to_string()
+            .contains("does not uniquely target its source SerializedFile"));
     }
 }

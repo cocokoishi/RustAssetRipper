@@ -488,4 +488,12 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Added `SerializedFileMetadata::default_object_value_for_type` with limits for TypeTree nodes, materialized values, allocation bytes, and depth. It produces schema-shaped generic defaults and rejects malformed string/array/PPtr nodes and managed-reference layouts.
 - Synthetic Transform-shaped values encode successfully. Full workspace verification passed: 335 library and 10 CLI tests; warnings-denied Clippy; format check; baseline verifier (1,449 files); and `git diff --check`.
 - Still incomplete: this generic builder does not apply Transform's nonzero Unity defaults or GameObject link, allocate absent types, or create complete Prefab/Unity project output. Phase 1 remains open; Phase 2 remains locked.
-- Next: assign the source Transform defaults and planned GameObject PPtr to the generated TypeTree value, verify and encode the typed Transform payload, then integrate it with the already implemented GameObject component append and external-file writer.
+- Next: connect this Transform root to `SerializedObjectInsertion` and the ordered `rewrite_with_changes` path. Before a complete generated collection edit is possible, establish how generated collection type tables, source dependency records, and collection path/GUID identity are created.
+
+## Generated Transform typed-payload materialization
+
+- Current phase: Phase 1; gate not passed. This increment starts from pushed revision `072fdc945ebc16db25a3ced94be5c42129f18051`. Only `cocokoishi/RustAssetRipper` is a write/push target; the local AssetRipper baseline remains read-only. No UABEA or user AssetBundle content was accessed.
+- Added `materialize_planned_generated_transform_payload`. It validates the completed asset plan and dependency identity, requires an existing class-ID-4 TypeTree, applies the baseline Transform defaults and planned GameObject PPtr, and returns both a typed root and bounded encoded bytes.
+- Synthetic evidence verifies exact bytes, inherited GameObject field lookup, null father, empty children, optional Euler hint, and rejection of wrong type/dependency or missing required fields. Full verification passed: 338 library and 10 CLI tests, warnings-denied Clippy, format, 1,449-file baseline verification, and `git diff --check`.
+- Still incomplete: no generated collection SerializedFile or new type-table entry is created, and source dependency table values still need to be materialized. Phase 1 remains open; Phase 2 remains locked.
+- Next: establish source-derived output collection path/GUID and type-table generation behavior, then join Transform insertion, source GameObject payload replacement, and external dependency record append in a complete-file rewrite.
