@@ -1202,7 +1202,7 @@ fn print_workspace_summary_to<W: io::Write>(
                 .count();
             writeln!(
                 output,
-                "        hierarchy file {}: {} GameObjects, {} Transforms, {} scene assets ({} managers, {} PrefabInstances, {} SceneRoots), {} component candidates ({} Transform IDs, {} GameObject edges, {} m_GameObject fields), {} relationships, {} roots, {} graph issues, {} root issues, {} reciprocal issues, scene graph complete={}, reference scans complete={}, overall complete={}",
+                "        hierarchy file {}: {} GameObjects, {} Transforms, {} scene assets ({} managers, {} PrefabInstances, {} SceneRoots), {} component candidates ({} Transform IDs, {} GameObject edges, {} m_GameObject fields), {} missing Transform plans, {} relationships, {} roots, {} graph issues, {} root issues, {} reciprocal issues, scene graph complete={}, reference scans complete={}, overall complete={}",
                 collection_hierarchy.collection_file_index(),
                 collection_hierarchy.game_object_count(),
                 collection_hierarchy.transform_count(),
@@ -1214,6 +1214,7 @@ fn print_workspace_summary_to<W: io::Write>(
                 transform_candidate_count,
                 component_edge_candidate_count,
                 game_object_field_candidate_count,
+                collection_hierarchy.missing_transform_plans().len(),
                 collection_hierarchy.relationships().len(),
                 collection_hierarchy.roots().roots().len(),
                 collection_hierarchy.graph_issues().len(),
@@ -2103,7 +2104,7 @@ mod tests {
         assert!(summary
             .contains("scene GUID: preserve [0x00000001, 0x00000002, 0x00000003, 0x00000004]"));
         assert!(summary.contains(
-            "hierarchy file 0: 0 GameObjects, 0 Transforms, 1 scene assets (1 managers, 0 PrefabInstances, 0 SceneRoots), 0 component candidates (0 Transform IDs, 0 GameObject edges, 0 m_GameObject fields), 0 relationships, 0 roots, 0 graph issues, 0 root issues, 0 reciprocal issues, scene graph complete=true, reference scans complete=true, overall complete=true"
+            "hierarchy file 0: 0 GameObjects, 0 Transforms, 1 scene assets (1 managers, 0 PrefabInstances, 0 SceneRoots), 0 component candidates (0 Transform IDs, 0 GameObject edges, 0 m_GameObject fields), 0 missing Transform plans, 0 relationships, 0 roots, 0 graph issues, 0 root issues, 0 reciprocal issues, scene graph complete=true, reference scans complete=true, overall complete=true"
         ));
     }
 

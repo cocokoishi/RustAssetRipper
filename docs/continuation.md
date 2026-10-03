@@ -30,6 +30,7 @@ Phase 1: full Rust port of the local AssetRipper source baseline. The Phase 1 ga
 - Workspace collection traversal now follows source stack reversal and recursive container collection order. Scene inspection selects the last encountered BuildSettings object and walks streamed-scene AssetBundles by that collection order; root input order remains deterministic in Rust because the source root registration uses a runtime-dependent HashSet order.
 - Scene plans are now materialized as bounded `WorkspaceSceneDefinition` models with ordered workspace collection membership and unique collection ownership. The models still reference SerializedFile indexes; actual typed AssetCollection objects and concrete GUID generation remain open.
 - `WorkspaceSceneHierarchies` now inventories source `SceneHierarchyObject.Create` categories by file/object/PathID for GameObjects, LevelGameManager classes, PrefabInstances, and SceneRoots. Transform IDs, resolved GameObject component edges, and non-null inherited `m_GameObject` PPtrs are recorded as evidence-labeled component candidates; generated component classes are not yet materialized.
+- `WorkspaceSceneCollectionHierarchy` records source-derived missing-Transform plans for SceneDefinition GameObjects classified with `NoTransformComponent`, including zero position, identity rotation, unit scale, root order zero, and a conditional zero Euler hint. These plans preserve source identity but do not create a generated Unity object or output PathID; non-scene GameObjects remain outside this scene-owned model.
 - The selected BuildSettings list is copied into a bounded EditorBuildSettings workspace model, preserving path order and duplicates and enabling every scene entry. The Unity `Generated Settings` collection and asset serializer remain unimplemented.
 - `EditorSettingsExtensions.SetToDefaults` values now have a semantic Rust defaults model with explicit capability switches for optional Collab and AssetPipeline fields; it is not yet wired to target-version schema selection or generated-asset construction.
 - Compression wrappers: GZip magic detection, bounded concatenated-member decoding, and bounded GZip writing are implemented. Brotli signature parsing follows RFC 7932 metadata length semantics and bounded Brotli decoding. An RFC-constructed marked stream exposed an off-by-one in the local source detector; the Rust detector has a regression fix, recorded in `docs/differential-findings.md`. Fixtures cover GZip member/checksum behavior, limits, Brotli marker detection and decoding for WBITS 10–24, and nested dispatch. No C# or Unity-produced wrapper differential has run.
@@ -47,7 +48,7 @@ Phase 1: full Rust port of the local AssetRipper source baseline. The Phase 1 ga
 ## Latest verification
 
 - `cargo fmt --all -- --check`: exit 0.
-- `cargo test --workspace --locked --quiet`: exit 0; 278 library tests, 10 binary tests, 0 doc tests passed.
+- `cargo test --workspace --locked --quiet`: exit 0; 279 library tests, 10 binary tests, 0 doc tests passed.
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`: exit 0.
 - `cargo run --locked --quiet -- --help` and `--version`: exit 0.
 - `cargo tree --locked`: exit 0; the dependency graph is recorded in `docs/dependencies-and-licenses.md`.

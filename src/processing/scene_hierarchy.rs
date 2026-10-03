@@ -6,9 +6,9 @@ use std::fmt::{self, Display, Formatter};
 use crate::serialized_file::reference_graph::MultiFileReferenceGraph;
 
 use super::scene::{
-    SceneGraph, SceneGraphIssue, SceneObjectRecord, SceneRelationship, SceneRelationshipKind,
-    SceneRelationshipTarget, SceneRootReason, WorkspaceSceneHierarchyAudit,
-    WorkspaceSceneRootDiscovery,
+    SceneGraph, SceneGraphIssue, SceneObjectRecord, SceneQuaternion, SceneRelationship,
+    SceneRelationshipKind, SceneRelationshipTarget, SceneRootReason, SceneVector3,
+    WorkspaceSceneHierarchyAudit, WorkspaceSceneRootDiscovery,
 };
 use super::scene_collections::{
     scene_manager_kind, SceneDefinitionPlan, SceneManagerKind, WorkspaceSceneDefinitions,
@@ -55,6 +55,25 @@ pub struct WorkspaceSceneComponentCandidate {
     pub evidence: WorkspaceSceneComponentEvidence,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WorkspaceGeneratedTransformDefaults {
+    pub local_position: SceneVector3,
+    pub local_rotation: SceneQuaternion,
+    pub local_scale: SceneVector3,
+    pub root_order: i32,
+    /// Applied only when the selected Unity Transform schema has this optional field.
+    pub local_euler_angles_hint_if_present: SceneVector3,
+}
+
+/// Source-derived default Transform values planned for a scene GameObject with no Transform.
+///
+/// This records the input-side processing action. It does not allocate a Unity object or PathID.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorkspaceMissingTransformPlan {
+    pub game_object: WorkspaceSceneObjectIdentity,
+    pub default_values: WorkspaceGeneratedTransformDefaults,
+}
+
 /// Aggregate limits for SceneDefinition-owned recovered scene graphs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WorkspaceSceneHierarchyLimits {
@@ -98,6 +117,7 @@ pub struct WorkspaceSceneCollectionHierarchy {
     graph_issues: Vec<SceneGraphIssue>,
     scene_assets: Vec<WorkspaceSceneAssetIdentity>,
     component_candidates: Vec<WorkspaceSceneComponentCandidate>,
+    missing_transform_plans: Vec<WorkspaceMissingTransformPlan>,
     source_graph_complete: bool,
     source_reference_scans_complete: bool,
     roots: WorkspaceSceneRootDiscovery,
@@ -146,6 +166,10 @@ impl WorkspaceSceneCollectionHierarchy {
 
     pub fn component_candidates(&self) -> &[WorkspaceSceneComponentCandidate] {
         &self.component_candidates
+    }
+
+    pub fn missing_transform_plans(&self) -> &[WorkspaceMissingTransformPlan] {
+        &self.missing_transform_plans
     }
 
     pub fn source_graph_complete(&self) -> bool {
@@ -451,6 +475,8 @@ impl WorkspaceSceneHierarchyBuilder {
             });
         let (scene_assets, component_candidates) =
             classify_scene_collection_objects(file_index, scene_graph, references)?;
+        let missing_transform_plans =
+            build_missing_transform_plans(file_index, &roots, references)?;
         let scene_objects = scene_graph
             .objects()
             .iter()
@@ -535,14 +561,15 @@ impl WorkspaceSceneHierarchyBuilder {
         let scene_asset_record_count = scene_assets
             .len()
             .checked_add(component_candidates.len())
+            .and_then(|count| count.checked_add(missing_transform_plans.len()))
             .ok_or(WorkspaceSceneHierarchyError::CountOverflow {
-            resource: "scene asset records",
-        })?;
+                resource: "scene asset and generated-transform records",
+            })?;
         let next_scene_asset_record_count = checked_charge(
             self.scene_asset_record_count,
             scene_asset_record_count,
             self.limits.max_scene_asset_records,
-            "scene asset records",
+            "scene asset and generated-transform records",
         )?;
         let next_relationship_count = checked_charge(
             self.relationship_count,
@@ -614,6 +641,7 @@ impl WorkspaceSceneHierarchyBuilder {
             graph_issues,
             scene_assets,
             component_candidates,
+            missing_transform_plans,
             source_graph_complete: scene_graph.is_complete(),
             source_reference_scans_complete,
             roots,
@@ -925,6 +953,84 @@ fn scene_object_identity(
         path_id: identity.path_id,
         class_id,
     })
+}
+
+fn build_missing_transform_plans(
+    file_index: usize,
+    roots: &WorkspaceSceneRootDiscovery,
+    references: &MultiFileReferenceGraph<'_>,
+) -> Result<Vec<WorkspaceMissingTransformPlan>, WorkspaceSceneHierarchyError> {
+    let plan_count = roots
+        .roots()
+        .iter()
+        .filter(|root| root.reason == SceneRootReason::NoTransformComponent)
+        .count();
+    let mut plans = Vec::new();
+    plans.try_reserve_exact(plan_count).map_err(|_| {
+        WorkspaceSceneHierarchyError::AllocationFailed {
+            resource: "missing scene Transform plans",
+            requested: plan_count,
+        }
+    })?;
+    for root in roots
+        .roots()
+        .iter()
+        .filter(|root| root.reason == SceneRootReason::NoTransformComponent)
+    {
+        let is_game_object = references
+            .object_class_id(file_index, root.game_object_index)
+            .is_some_and(|class_id| class_id == GAME_OBJECT_CLASS_ID);
+        if root.source_file_index != file_index || !is_game_object {
+            return Err(WorkspaceSceneHierarchyError::InvalidRootIdentity {
+                file_index,
+                object_index: root.game_object_index,
+            });
+        }
+        let Some(source_identity) = references.object_identity(file_index, root.game_object_index)
+        else {
+            return Err(WorkspaceSceneHierarchyError::InvalidRootIdentity {
+                file_index,
+                object_index: root.game_object_index,
+            });
+        };
+        plans.push(WorkspaceMissingTransformPlan {
+            game_object: WorkspaceSceneObjectIdentity {
+                file_index,
+                object_index: root.game_object_index,
+                path_id: source_identity.path_id,
+                class_id: Some(GAME_OBJECT_CLASS_ID),
+            },
+            default_values: default_injected_transform_values(),
+        });
+    }
+    Ok(plans)
+}
+
+fn default_injected_transform_values() -> WorkspaceGeneratedTransformDefaults {
+    WorkspaceGeneratedTransformDefaults {
+        local_position: SceneVector3 {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        },
+        local_rotation: SceneQuaternion {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            w: 1.0,
+        },
+        local_scale: SceneVector3 {
+            x: 1.0,
+            y: 1.0,
+            z: 1.0,
+        },
+        root_order: 0,
+        local_euler_angles_hint_if_present: SceneVector3 {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        },
+    }
 }
 
 fn is_game_object_pointer_path(field_path: &str) -> bool {

@@ -3114,10 +3114,10 @@ impl Error for SceneGraphBuildError {}
 mod tests {
     use super::{
         reference_field_path_matches, MultiFileReferenceGraph, SceneGraph, SceneGraphIssueKind,
-        SceneGraphLimits, SceneHierarchyIssueKind, SceneQuaternion, SceneRectTransformValues,
-        SceneRelationshipKind, SceneRelationshipTarget, SceneRootDiscoveryIssueKind,
-        SceneRootDiscoveryLimits, SceneRootReason, SceneTransformValues, SceneVector2,
-        SceneVector3,
+        SceneGraphLimits, SceneHierarchyAuditLimits, SceneHierarchyIssueKind, SceneQuaternion,
+        SceneRectTransformValues, SceneRelationshipKind, SceneRelationshipTarget,
+        SceneRootDiscoveryIssueKind, SceneRootDiscoveryLimits, SceneRootReason,
+        SceneTransformValues, SceneVector2, SceneVector3,
     };
     use crate::io::binary::Endian;
     use crate::serialized_file::file::SerializedFile;
@@ -4425,7 +4425,7 @@ mod tests {
                 &multi_file_graph,
             ),
             Err(crate::processing::scene_hierarchy::WorkspaceSceneHierarchyError::ResourceLimitExceeded {
-                resource: "scene asset records",
+                resource: "scene asset and generated-transform records",
                 requested: 2,
                 limit: 1,
             })
@@ -4481,6 +4481,133 @@ mod tests {
             Some(1)
         );
         assert!(collections[0].is_complete());
+    }
+
+    #[test]
+    fn scene_definition_plans_source_defaults_for_a_missing_game_object_transform() {
+        use crate::serialized_file::reference_graph::{
+            MultiFileReferenceGraph, NamedObjectReferenceGraph, ObjectReferenceGraph,
+        };
+
+        let bytes = make_game_object_file("NoTransform", 42, None, None);
+        let file = SerializedFile::parse(&bytes).unwrap();
+        let object_references = ObjectReferenceGraph::build(&file).unwrap();
+        let named_file = NamedObjectReferenceGraph {
+            file_name: "scene.assets",
+            metadata: &file.metadata,
+            graph: &object_references,
+        };
+        let references = MultiFileReferenceGraph::build(&[named_file]).unwrap();
+        let mut scene_graph = SceneGraph::build(&file, SceneGraphLimits::default()).unwrap();
+        let roots = scene_graph
+            .discover_workspace_roots(
+                0,
+                "scene.assets",
+                &references,
+                SceneRootDiscoveryLimits::default(),
+            )
+            .unwrap();
+        assert_eq!(roots.roots().len(), 1);
+        assert_eq!(
+            roots.roots()[0].reason,
+            SceneRootReason::NoTransformComponent
+        );
+        let audit = scene_graph
+            .audit_workspace_transform_links(
+                0,
+                "scene.assets",
+                &references,
+                SceneHierarchyAuditLimits::default(),
+            )
+            .unwrap();
+        let plan = crate::processing::scene_collections::plan_scene_definition(
+            0,
+            "scene.assets",
+            &crate::processing::scene_collections::SceneCollectionPathStatus::BuildSettingsMissing,
+            None,
+            None,
+            crate::processing::scene_collections::SceneDefinitionPlanLimits::default(),
+        )
+        .unwrap();
+        let definitions =
+            crate::processing::scene_collections::WorkspaceSceneDefinitions::from_plans(
+                vec![plan],
+                1,
+                crate::processing::scene_collections::WorkspaceSceneDefinitionLimits::default(),
+            )
+            .unwrap();
+        let mut bounded_builder =
+            crate::processing::scene_hierarchy::WorkspaceSceneHierarchyBuilder::new(
+                1,
+                crate::processing::scene_hierarchy::WorkspaceSceneHierarchyLimits {
+                    max_scene_asset_records: 1,
+                    ..crate::processing::scene_hierarchy::WorkspaceSceneHierarchyLimits::default()
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            bounded_builder.add_collection_graph(
+                0,
+                &scene_graph,
+                roots.clone(),
+                audit.clone(),
+                &references,
+            ),
+            Err(crate::processing::scene_hierarchy::WorkspaceSceneHierarchyError::ResourceLimitExceeded {
+                resource: "scene asset and generated-transform records",
+                requested: 2,
+                limit: 1,
+            })
+        ));
+        assert!(!bounded_builder.contains_collection_graph(0));
+        let mut builder = crate::processing::scene_hierarchy::WorkspaceSceneHierarchyBuilder::new(
+            1,
+            crate::processing::scene_hierarchy::WorkspaceSceneHierarchyLimits::default(),
+        )
+        .unwrap();
+        builder
+            .add_collection_graph(0, &scene_graph, roots, audit, &references)
+            .unwrap();
+
+        let hierarchy = builder.finish(&definitions).unwrap();
+        let plans = hierarchy.scenes()[0].collections()[0].missing_transform_plans();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(
+            plans[0].game_object,
+            crate::processing::scene_hierarchy::WorkspaceSceneObjectIdentity {
+                file_index: 0,
+                object_index: 0,
+                path_id: 42,
+                class_id: Some(1),
+            }
+        );
+        assert_eq!(
+            plans[0].default_values,
+            crate::processing::scene_hierarchy::WorkspaceGeneratedTransformDefaults {
+                local_position: SceneVector3 {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                local_rotation: SceneQuaternion {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                    w: 1.0,
+                },
+                local_scale: SceneVector3 {
+                    x: 1.0,
+                    y: 1.0,
+                    z: 1.0,
+                },
+                root_order: 0,
+                local_euler_angles_hint_if_present: SceneVector3 {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+            }
+        );
     }
 
     #[test]
