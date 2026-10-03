@@ -5,7 +5,8 @@ use crate::io::binary::Endian;
 
 use super::super::format_version::FormatVersion;
 use super::super::metadata::{
-    ObjectInfo, ObjectRecordLayout, ObjectRecordTableLayout, SerializedType,
+    ExternalFileTableLayout, FileIdentifier, ObjectInfo, ObjectRecordLayout,
+    ObjectRecordTableLayout, SerializedFileMetadata, SerializedType,
 };
 use super::super::object::{
     ObjectEncodeError, ObjectEncodeLimits, ParsedObjectPayload, SerializedValue,
@@ -24,6 +25,12 @@ struct MetadataInsertionContext {
     output_limit: usize,
 }
 
+#[derive(Clone, Copy)]
+struct MetadataInsertions<'a> {
+    objects: &'a [SerializedObjectInsertion],
+    external_files: &'a [SerializedExternalFileInsertion],
+}
+
 /// Bounds for rebuilding one complete SerializedFile after object payload edits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SerializedFileRewriteLimits {
@@ -31,6 +38,7 @@ pub struct SerializedFileRewriteLimits {
     pub max_objects: usize,
     pub max_replacements: usize,
     pub max_insertions: usize,
+    pub max_external_file_insertions: usize,
     pub object_payload_limits: ObjectEncodeLimits,
 }
 
@@ -41,6 +49,7 @@ impl Default for SerializedFileRewriteLimits {
             max_objects: 5_000_000,
             max_replacements: 1_000_000,
             max_insertions: 1_000_000,
+            max_external_file_insertions: 1_000_000,
             object_payload_limits: ObjectEncodeLimits::default(),
         }
     }
@@ -55,6 +64,12 @@ pub struct SerializedObjectInsertion {
     pub object: ObjectInfo,
     pub root: SerializedValue,
     pub trailing_bytes: Vec<u8>,
+}
+
+/// One new external SerializedFile dependency record.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SerializedExternalFileInsertion {
+    pub file_identifier: FileIdentifier,
 }
 
 /// Error produced while rebuilding a SerializedFile around edited object payloads.
@@ -136,6 +151,30 @@ pub enum SerializedFileRewriteErrorKind {
     InsertionPathIdUnrepresentable {
         path_id: i64,
         width: usize,
+    },
+    ExternalFileInsertionLimitExceeded {
+        requested: usize,
+        limit: usize,
+    },
+    ExternalFileCountLimitExceeded {
+        requested: usize,
+        limit: usize,
+    },
+    ExternalFileCountMismatch {
+        metadata: usize,
+        serialized: i32,
+    },
+    InvalidExternalFileTableLayout {
+        count_field_offset: usize,
+        records_start_offset: usize,
+        records_end_offset: usize,
+        metadata_size: usize,
+    },
+    ExternalFileFieldMismatch {
+        field: &'static str,
+    },
+    ExternalFileStringContainsNul {
+        field: &'static str,
     },
     ObjectRecordCountMismatch {
         objects: usize,
@@ -247,6 +286,33 @@ impl Display for SerializedFileRewriteErrorKind {
                 f,
                 "inserted PathID {path_id} does not fit the {width}-byte field"
             ),
+            Self::ExternalFileInsertionLimitExceeded { requested, limit } => write!(
+                f,
+                "external-file insertion count {requested} exceeds the limit of {limit}"
+            ),
+            Self::ExternalFileCountLimitExceeded { requested, limit } => write!(
+                f,
+                "external-file count {requested} exceeds the limit of {limit}"
+            ),
+            Self::ExternalFileCountMismatch { metadata, serialized } => write!(
+                f,
+                "metadata has {metadata} external files but the serialized count is {serialized}"
+            ),
+            Self::InvalidExternalFileTableLayout {
+                count_field_offset,
+                records_start_offset,
+                records_end_offset,
+                metadata_size,
+            } => write!(
+                f,
+                "external-file count at {count_field_offset} and record range {records_start_offset}..{records_end_offset} are inconsistent with {metadata_size}-byte metadata"
+            ),
+            Self::ExternalFileFieldMismatch { field } => {
+                write!(f, "external-file {field} does not match the format generation")
+            }
+            Self::ExternalFileStringContainsNul { field } => {
+                write!(f, "external-file {field} contains an embedded NUL byte")
+            }
             Self::ObjectRecordCountMismatch { objects, layouts } => write!(
                 f,
                 "metadata has {objects} objects but the parsed input has {layouts} object-record layouts"
@@ -346,6 +412,21 @@ impl SerializedFile<'_> {
         insertions: &[SerializedObjectInsertion],
         limits: SerializedFileRewriteLimits,
     ) -> Result<Vec<u8>, SerializedFileRewriteError> {
+        self.rewrite_with_changes(replacements, insertions, &[], limits)
+    }
+
+    /// Rebuild the file with payload edits, object insertions, and external-file table appends.
+    ///
+    /// External identifiers are inserted after existing external records and before any
+    /// following reference-type or user-information metadata. Generation-specific identifier
+    /// fields are validated and encoded from `FileIdentifier`.
+    pub fn rewrite_with_changes(
+        &self,
+        replacements: &[(usize, ParsedObjectPayload)],
+        insertions: &[SerializedObjectInsertion],
+        external_file_insertions: &[SerializedExternalFileInsertion],
+        limits: SerializedFileRewriteLimits,
+    ) -> Result<Vec<u8>, SerializedFileRewriteError> {
         let total_object_count = self
             .metadata
             .objects
@@ -386,6 +467,37 @@ impl SerializedFile<'_> {
                 },
             ));
         }
+        let total_external_file_count = self
+            .metadata
+            .externals
+            .len()
+            .checked_add(external_file_insertions.len())
+            .ok_or_else(|| {
+                rewrite_error(
+                    None,
+                    SerializedFileRewriteErrorKind::LengthOverflow {
+                        resource: "rewritten external-file count",
+                    },
+                )
+            })?;
+        if external_file_insertions.len() > limits.max_external_file_insertions {
+            return Err(rewrite_error(
+                None,
+                SerializedFileRewriteErrorKind::ExternalFileInsertionLimitExceeded {
+                    requested: external_file_insertions.len(),
+                    limit: limits.max_external_file_insertions,
+                },
+            ));
+        }
+        if total_external_file_count > i32::MAX as usize {
+            return Err(rewrite_error(
+                None,
+                SerializedFileRewriteErrorKind::ExternalFileCountLimitExceeded {
+                    requested: total_external_file_count,
+                    limit: i32::MAX as usize,
+                },
+            ));
+        }
         if total_object_count > i32::MAX as usize {
             return Err(SerializedFileRewriteError::new(
                 None,
@@ -395,7 +507,7 @@ impl SerializedFile<'_> {
                 },
             ));
         }
-        if replacements.is_empty() && insertions.is_empty() {
+        if replacements.is_empty() && insertions.is_empty() && external_file_insertions.is_empty() {
             return copy_input(self.input(), limits.max_output_file_bytes);
         }
 
@@ -450,6 +562,9 @@ impl SerializedFile<'_> {
                     },
                 ));
             }
+        }
+        for insertion in external_file_insertions {
+            validate_external_file_identifier(insertion, version)?;
         }
 
         let mut ordered_replacements = Vec::new();
@@ -546,33 +661,45 @@ impl SerializedFile<'_> {
             version,
             self.metadata.prefix.body_endian,
         )?;
-        let (rewritten_metadata_owned, object_record_layouts) = if insertions.is_empty() {
-            let mut layouts = Vec::new();
-            layouts
-                .try_reserve_exact(self.object_record_layout.records.len())
-                .map_err(|_| {
-                    allocation_error(
-                        "rewritten object record layouts",
-                        self.object_record_layout.records.len(),
-                    )
-                })?;
-            layouts.extend_from_slice(&self.object_record_layout.records);
-            (None, layouts)
-        } else {
-            let (metadata, layouts) = build_metadata_with_insertions(
-                metadata_bytes,
-                &self.object_record_layout,
-                self.metadata.objects.len(),
-                insertions,
-                MetadataInsertionContext {
-                    version,
-                    endian: self.metadata.prefix.body_endian,
-                    metadata_file_offset: metadata_start,
-                    output_limit: limits.max_output_file_bytes,
-                },
-            )?;
-            (Some(metadata), layouts)
+        validate_external_file_table_layout(
+            &self.external_file_table_layout,
+            self.metadata.externals.len(),
+            metadata_bytes,
+            self.metadata.prefix.body_endian,
+        )?;
+        let metadata_insertions = MetadataInsertions {
+            objects: insertions,
+            external_files: external_file_insertions,
         };
+        let (rewritten_metadata_owned, object_record_layouts) =
+            if insertions.is_empty() && external_file_insertions.is_empty() {
+                let mut layouts = Vec::new();
+                layouts
+                    .try_reserve_exact(self.object_record_layout.records.len())
+                    .map_err(|_| {
+                        allocation_error(
+                            "rewritten object record layouts",
+                            self.object_record_layout.records.len(),
+                        )
+                    })?;
+                layouts.extend_from_slice(&self.object_record_layout.records);
+                (None, layouts)
+            } else {
+                let (metadata, layouts) = build_metadata_with_insertions(
+                    metadata_bytes,
+                    &self.object_record_layout,
+                    &self.external_file_table_layout,
+                    &self.metadata,
+                    metadata_insertions,
+                    MetadataInsertionContext {
+                        version,
+                        endian: self.metadata.prefix.body_endian,
+                        metadata_file_offset: metadata_start,
+                        output_limit: limits.max_output_file_bytes,
+                    },
+                )?;
+                (Some(metadata), layouts)
+            };
         let rewritten_metadata = rewritten_metadata_owned
             .as_deref()
             .unwrap_or(metadata_bytes);
@@ -947,9 +1074,10 @@ fn validate_insertion_type(
 
 fn build_metadata_with_insertions(
     source: &[u8],
-    table: &ObjectRecordTableLayout,
-    object_count: usize,
-    insertions: &[SerializedObjectInsertion],
+    object_table: &ObjectRecordTableLayout,
+    external_file_table: &ExternalFileTableLayout,
+    metadata: &SerializedFileMetadata,
+    insertions: MetadataInsertions<'_>,
     context: MetadataInsertionContext,
 ) -> Result<(Vec<u8>, Vec<ObjectRecordLayout>), SerializedFileRewriteError> {
     let MetadataInsertionContext {
@@ -958,15 +1086,21 @@ fn build_metadata_with_insertions(
         metadata_file_offset,
         output_limit,
     } = context;
-    let inserted_count = insertions.len();
-    let total_count = object_count.checked_add(inserted_count).ok_or_else(|| {
-        rewrite_error(
-            None,
-            SerializedFileRewriteErrorKind::LengthOverflow {
-                resource: "object record count",
-            },
-        )
-    })?;
+    let object_insertions = insertions.objects;
+    let external_insertions = insertions.external_files;
+    let inserted_count = object_insertions.len();
+    let total_count = metadata
+        .objects
+        .len()
+        .checked_add(inserted_count)
+        .ok_or_else(|| {
+            rewrite_error(
+                None,
+                SerializedFileRewriteErrorKind::LengthOverflow {
+                    resource: "object record count",
+                },
+            )
+        })?;
     let serialized_count = i32::try_from(total_count).map_err(|_| {
         rewrite_error(
             None,
@@ -981,11 +1115,11 @@ fn build_metadata_with_insertions(
     inserted_layouts
         .try_reserve_exact(inserted_count)
         .map_err(|_| allocation_error("inserted object record layouts", inserted_count))?;
-    for (insertion_index, insertion) in insertions.iter().enumerate() {
-        let object_index = object_count + insertion_index;
+    for (insertion_index, insertion) in object_insertions.iter().enumerate() {
+        let object_index = metadata.objects.len() + insertion_index;
         if version.raw() >= 14 {
             let absolute_position = metadata_file_offset
-                .checked_add(table.records_end_offset)
+                .checked_add(object_table.records_end_offset)
                 .and_then(|value| value.checked_add(inserted_records.len()))
                 .ok_or_else(|| {
                     rewrite_error(
@@ -1030,7 +1164,7 @@ fn build_metadata_with_insertions(
             )?;
         }
 
-        let data_offset_field_offset = table
+        let data_offset_field_offset = object_table
             .records_end_offset
             .checked_add(inserted_records.len())
             .ok_or_else(|| {
@@ -1052,7 +1186,7 @@ fn build_metadata_with_insertions(
             output_limit,
             Some(object_index),
         )?;
-        let data_size_field_offset = table
+        let data_size_field_offset = object_table
             .records_end_offset
             .checked_add(inserted_records.len())
             .ok_or_else(|| {
@@ -1171,9 +1305,99 @@ fn build_metadata_with_insertions(
         });
     }
 
+    let total_external_file_count = metadata
+        .externals
+        .len()
+        .checked_add(external_insertions.len())
+        .ok_or_else(|| {
+            rewrite_error(
+                None,
+                SerializedFileRewriteErrorKind::LengthOverflow {
+                    resource: "external-file record count",
+                },
+            )
+        })?;
+    let serialized_external_file_count =
+        i32::try_from(total_external_file_count).map_err(|_| {
+            rewrite_error(
+                None,
+                SerializedFileRewriteErrorKind::ExternalFileCountLimitExceeded {
+                    requested: total_external_file_count,
+                    limit: i32::MAX as usize,
+                },
+            )
+        })?;
+    let mut inserted_external_records = Vec::new();
+    for insertion in external_insertions {
+        let identifier = &insertion.file_identifier;
+        if version.raw() >= 6 {
+            let asset_path = identifier.asset_path.as_deref().ok_or_else(|| {
+                rewrite_error(
+                    None,
+                    SerializedFileRewriteErrorKind::ExternalFileFieldMismatch {
+                        field: "asset path presence",
+                    },
+                )
+            })?;
+            append_metadata_bytes(
+                &mut inserted_external_records,
+                asset_path.as_bytes(),
+                output_limit,
+                None,
+            )?;
+            append_metadata_bytes(&mut inserted_external_records, &[0], output_limit, None)?;
+        }
+        if version.raw() >= 5 {
+            let guid = identifier.guid.as_ref().ok_or_else(|| {
+                rewrite_error(
+                    None,
+                    SerializedFileRewriteErrorKind::ExternalFileFieldMismatch {
+                        field: "GUID presence",
+                    },
+                )
+            })?;
+            for word in guid {
+                append_metadata_bytes(
+                    &mut inserted_external_records,
+                    &encode_u32(*word, endian),
+                    output_limit,
+                    None,
+                )?;
+            }
+            let file_type = identifier.file_type.ok_or_else(|| {
+                rewrite_error(
+                    None,
+                    SerializedFileRewriteErrorKind::ExternalFileFieldMismatch {
+                        field: "asset type presence",
+                    },
+                )
+            })?;
+            append_metadata_bytes(
+                &mut inserted_external_records,
+                &encode_i32(file_type, endian),
+                output_limit,
+                None,
+            )?;
+        }
+        append_metadata_bytes(
+            &mut inserted_external_records,
+            identifier.path_name_origin.as_bytes(),
+            output_limit,
+            None,
+        )?;
+        append_metadata_bytes(&mut inserted_external_records, &[0], output_limit, None)?;
+    }
+
+    if object_table.records_end_offset > external_file_table.count_field_offset {
+        return Err(invalid_external_file_table_layout(
+            external_file_table,
+            source.len(),
+        ));
+    }
     let metadata_size = source
         .len()
         .checked_add(inserted_records.len())
+        .and_then(|size| size.checked_add(inserted_external_records.len()))
         .ok_or_else(|| {
             rewrite_error(
                 None,
@@ -1195,21 +1419,38 @@ fn build_metadata_with_insertions(
     metadata
         .try_reserve_exact(metadata_size)
         .map_err(|_| allocation_error("rewritten metadata", metadata_size))?;
-    let records_end = table.records_end_offset;
-    metadata.extend_from_slice(&source[..records_end]);
+    let object_records_end = object_table.records_end_offset;
+    let external_records_end = external_file_table.records_end_offset;
+    metadata.extend_from_slice(&source[..object_records_end]);
     metadata.extend_from_slice(&inserted_records);
-    metadata.extend_from_slice(&source[records_end..]);
-    let count_end = table
+    metadata.extend_from_slice(&source[object_records_end..external_records_end]);
+    metadata.extend_from_slice(&inserted_external_records);
+    metadata.extend_from_slice(&source[external_records_end..]);
+    let count_end = object_table
         .count_field_offset
         .checked_add(4)
-        .ok_or_else(|| invalid_object_table_layout(table, source.len()))?;
+        .ok_or_else(|| invalid_object_table_layout(object_table, source.len()))?;
     let rewritten_metadata_size = metadata.len();
     let count_field = metadata
-        .get_mut(table.count_field_offset..count_end)
-        .ok_or_else(|| invalid_object_table_layout(table, rewritten_metadata_size))?;
+        .get_mut(object_table.count_field_offset..count_end)
+        .ok_or_else(|| invalid_object_table_layout(object_table, rewritten_metadata_size))?;
     count_field.copy_from_slice(&encode_i32(serialized_count, endian));
 
-    let layout_count = table
+    let shifted_external_count_field = external_file_table
+        .count_field_offset
+        .checked_add(inserted_records.len())
+        .ok_or_else(|| invalid_external_file_table_layout(external_file_table, source.len()))?;
+    let external_count_end = shifted_external_count_field.checked_add(4).ok_or_else(|| {
+        invalid_external_file_table_layout(external_file_table, rewritten_metadata_size)
+    })?;
+    let external_count_field = metadata
+        .get_mut(shifted_external_count_field..external_count_end)
+        .ok_or_else(|| {
+            invalid_external_file_table_layout(external_file_table, rewritten_metadata_size)
+        })?;
+    external_count_field.copy_from_slice(&encode_i32(serialized_external_file_count, endian));
+
+    let layout_count = object_table
         .records
         .len()
         .checked_add(inserted_layouts.len())
@@ -1225,7 +1466,7 @@ fn build_metadata_with_insertions(
     layouts
         .try_reserve_exact(layout_count)
         .map_err(|_| allocation_error("rewritten object record layouts", layout_count))?;
-    layouts.extend_from_slice(&table.records);
+    layouts.extend_from_slice(&object_table.records);
     layouts.extend(inserted_layouts);
     Ok((metadata, layouts))
 }
@@ -1325,6 +1566,103 @@ fn validate_object_record_table_layout(
                 ));
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_external_file_table_layout(
+    layout: &ExternalFileTableLayout,
+    external_count: usize,
+    metadata_bytes: &[u8],
+    endian: Endian,
+) -> Result<(), SerializedFileRewriteError> {
+    let metadata_size = metadata_bytes.len();
+    let Some(count_field_end) = layout.count_field_offset.checked_add(4) else {
+        return Err(invalid_external_file_table_layout(layout, metadata_size));
+    };
+    if count_field_end > metadata_size
+        || layout.records_start_offset < count_field_end
+        || layout.records_end_offset < layout.records_start_offset
+        || layout.records_end_offset > metadata_size
+    {
+        return Err(invalid_external_file_table_layout(layout, metadata_size));
+    }
+    let count_bytes: [u8; 4] = metadata_bytes[layout.count_field_offset..count_field_end]
+        .try_into()
+        .map_err(|_| invalid_external_file_table_layout(layout, metadata_size))?;
+    let serialized_count = match endian {
+        Endian::Little => i32::from_le_bytes(count_bytes),
+        Endian::Big => i32::from_be_bytes(count_bytes),
+    };
+    if usize::try_from(serialized_count).ok() != Some(external_count) {
+        return Err(rewrite_error(
+            None,
+            SerializedFileRewriteErrorKind::ExternalFileCountMismatch {
+                metadata: external_count,
+                serialized: serialized_count,
+            },
+        ));
+    }
+    Ok(())
+}
+
+fn invalid_external_file_table_layout(
+    layout: &ExternalFileTableLayout,
+    metadata_size: usize,
+) -> SerializedFileRewriteError {
+    rewrite_error(
+        None,
+        SerializedFileRewriteErrorKind::InvalidExternalFileTableLayout {
+            count_field_offset: layout.count_field_offset,
+            records_start_offset: layout.records_start_offset,
+            records_end_offset: layout.records_end_offset,
+            metadata_size,
+        },
+    )
+}
+
+fn validate_external_file_identifier(
+    insertion: &SerializedExternalFileInsertion,
+    version: FormatVersion,
+) -> Result<(), SerializedFileRewriteError> {
+    let identifier = &insertion.file_identifier;
+    if (version.raw() >= 6) != identifier.asset_path.is_some() {
+        return Err(rewrite_error(
+            None,
+            SerializedFileRewriteErrorKind::ExternalFileFieldMismatch {
+                field: "asset path presence",
+            },
+        ));
+    }
+    if (version.raw() >= 5) != identifier.guid.is_some()
+        || (version.raw() >= 5) != identifier.file_type.is_some()
+    {
+        return Err(rewrite_error(
+            None,
+            SerializedFileRewriteErrorKind::ExternalFileFieldMismatch {
+                field: "GUID or asset type presence",
+            },
+        ));
+    }
+    if identifier
+        .asset_path
+        .as_deref()
+        .is_some_and(|value| value.as_bytes().contains(&0))
+    {
+        return Err(rewrite_error(
+            None,
+            SerializedFileRewriteErrorKind::ExternalFileStringContainsNul {
+                field: "asset path",
+            },
+        ));
+    }
+    if identifier.path_name_origin.as_bytes().contains(&0) {
+        return Err(rewrite_error(
+            None,
+            SerializedFileRewriteErrorKind::ExternalFileStringContainsNul {
+                field: "path name origin",
+            },
+        ));
     }
     Ok(())
 }
@@ -1738,14 +2076,17 @@ fn allocation_error(resource: &'static str, requested: usize) -> SerializedFileR
 mod tests {
     use super::{
         build_metadata_with_insertions, patch_header, patch_object_records, serialized_header_size,
-        MetadataInsertionContext, SerializedObjectInsertion,
+        MetadataInsertionContext, MetadataInsertions, SerializedExternalFileInsertion,
+        SerializedObjectInsertion,
     };
     use crate::io::binary::Endian;
     use crate::serialized_file::format_version::FormatVersion;
     use crate::serialized_file::header::SerializedFileHeader;
     use crate::serialized_file::metadata::{
-        ObjectInfo, ObjectRecordLayout, ObjectRecordTableLayout,
+        ExternalFileTableLayout, FileIdentifier, ObjectInfo, ObjectRecordLayout,
+        ObjectRecordTableLayout, SerializedFileMetadata,
     };
+    use crate::serialized_file::metadata_prefix::SerializedFileMetadataPrefix;
     use crate::serialized_file::object::SerializedValue;
 
     fn make_insertion(version: FormatVersion, path_id: i64) -> SerializedObjectInsertion {
@@ -1826,19 +2167,65 @@ mod tests {
             (FormatVersion::RefactorTypeData, 20, 4, 0),
             (FormatVersion::LargeFilesSupport, 24, 8, 0),
         ] {
-            let source = [0, 0, 0, 0, 0xca, 0xfe];
+            let source = [0, 0, 0, 0, 0, 0, 0, 0, 0xca, 0xfe];
             let table = ObjectRecordTableLayout {
                 count_field_offset: 0,
                 records_start_offset: 4,
                 records_end_offset: 4,
                 records: Vec::new(),
             };
+            let external_table = ExternalFileTableLayout {
+                count_field_offset: 4,
+                records_start_offset: 8,
+                records_end_offset: 8,
+            };
+            let identifier = FileIdentifier {
+                asset_path: Some("Assets/Generated.asset".to_owned()),
+                guid: Some([0x0102_0304, 0x1112_1314, 0x2122_2324, 0x3132_3334]),
+                file_type: Some(7),
+                path_name_origin: "Library/Generated.asset".to_owned(),
+            };
+            let mut expected_external_record =
+                identifier.asset_path.as_ref().unwrap().as_bytes().to_vec();
+            expected_external_record.push(0);
+            for word in identifier.guid.unwrap() {
+                expected_external_record.extend_from_slice(&word.to_be_bytes());
+            }
+            expected_external_record.extend_from_slice(&7_i32.to_be_bytes());
+            expected_external_record.extend_from_slice(identifier.path_name_origin.as_bytes());
+            expected_external_record.push(0);
+            let metadata = SerializedFileMetadata {
+                prefix: SerializedFileMetadataPrefix {
+                    metadata_offset: 0,
+                    metadata_size: source.len(),
+                    body_endian: Endian::Big,
+                    unity_version_text: None,
+                    target_platform: None,
+                    has_type_tree: true,
+                    consumed_bytes: 0,
+                },
+                types: Vec::new(),
+                long_file_id: None,
+                objects: Vec::new(),
+                script_types: Vec::new(),
+                externals: Vec::new(),
+                reference_types: Vec::new(),
+                user_information: None,
+                trailing_metadata: Vec::new(),
+                consumed_bytes: 0,
+            };
             let insertion = make_insertion(version, 0x0102_0304_0506_0708);
             let (metadata, layouts) = build_metadata_with_insertions(
                 &source,
                 &table,
-                0,
-                &[insertion],
+                &external_table,
+                &metadata,
+                MetadataInsertions {
+                    objects: &[insertion],
+                    external_files: &[SerializedExternalFileInsertion {
+                        file_identifier: identifier,
+                    }],
+                },
                 MetadataInsertionContext {
                     version,
                     endian: Endian::Big,
@@ -1849,8 +2236,26 @@ mod tests {
             .unwrap();
 
             assert_eq!(&metadata[..4], &1_i32.to_be_bytes());
-            assert_eq!(metadata.len(), source.len() + expected_record_size);
-            assert_eq!(&metadata[4 + expected_record_size..], &[0xca, 0xfe]);
+            let external_count_field = 4 + expected_record_size;
+            assert_eq!(
+                i32::from_be_bytes(
+                    metadata[external_count_field..external_count_field + 4]
+                        .try_into()
+                        .unwrap()
+                ),
+                1
+            );
+            let external_record_start = external_count_field + 4;
+            let external_record_end = external_record_start + expected_external_record.len();
+            assert_eq!(
+                &metadata[external_record_start..external_record_end],
+                expected_external_record
+            );
+            assert_eq!(
+                metadata.len(),
+                source.len() + expected_record_size + expected_external_record.len()
+            );
+            assert_eq!(&metadata[external_record_end..], &[0xca, 0xfe]);
             assert_eq!(layouts.len(), 1);
             let layout = layouts[0];
             assert_eq!(layout.path_id, 0x0102_0304_0506_0708);

@@ -37,27 +37,26 @@ impl SerializedFileMetadata {
         Self::parse_file_inner(file_bytes, header, false).map(|(metadata, _)| metadata)
     }
 
-    pub(super) fn parse_file_with_object_layouts(
+    pub(super) fn parse_file_with_rewrite_layouts(
         file_bytes: &[u8],
         header: &SerializedFileHeader,
-    ) -> Result<(Self, ObjectRecordTableLayout), SerializedFileMetadataError> {
-        let (metadata, layout) = Self::parse_file_inner(file_bytes, header, true)?;
-        let layout = layout.ok_or_else(|| {
+    ) -> Result<(Self, SerializedFileMetadataRewriteLayouts), SerializedFileMetadataError> {
+        let (metadata, layouts) = Self::parse_file_inner(file_bytes, header, true)?;
+        let layouts = layouts.ok_or_else(|| {
             SerializedFileMetadataError::new(
                 metadata.prefix.metadata_offset,
-                SerializedFileMetadataErrorKind::LayoutOverflow(
-                    "missing tracked object record table layout",
-                ),
+                SerializedFileMetadataErrorKind::LayoutOverflow("missing tracked rewrite layouts"),
             )
         })?;
-        Ok((metadata, layout))
+        Ok((metadata, layouts))
     }
 
     fn parse_file_inner(
         file_bytes: &[u8],
         header: &SerializedFileHeader,
-        collect_object_record_layouts: bool,
-    ) -> Result<(Self, Option<ObjectRecordTableLayout>), SerializedFileMetadataError> {
+        collect_rewrite_layouts: bool,
+    ) -> Result<(Self, Option<SerializedFileMetadataRewriteLayouts>), SerializedFileMetadataError>
+    {
         header
             .validate_for_file_size(file_bytes.len())
             .map_err(SerializedFileMetadataError::from_header)?;
@@ -114,7 +113,7 @@ impl SerializedFileMetadata {
             None
         };
 
-        let (objects, object_record_layout) = if collect_object_record_layouts {
+        let (objects, object_record_layout) = if collect_rewrite_layouts {
             let parsed = read_array_with_sidecar(
                 &mut reader,
                 "object records",
@@ -167,9 +166,23 @@ impl SerializedFileMetadata {
             Vec::new()
         };
 
-        let externals = read_array(&mut reader, "external files", 1, |reader, index| {
-            read_file_identifier(reader, generation, index)
-        })?;
+        let (externals, external_file_table_layout) = if collect_rewrite_layouts {
+            let array = read_array_with_boundaries(
+                &mut reader,
+                "external files",
+                1,
+                prefix.metadata_offset,
+                |reader, index| read_file_identifier(reader, generation, index),
+            )?;
+            (array.items, Some(array.layout))
+        } else {
+            (
+                read_array(&mut reader, "external files", 1, |reader, index| {
+                    read_file_identifier(reader, generation, index)
+                })?,
+                None,
+            )
+        };
 
         let reference_types = if generation.has_ref_types() {
             read_array(&mut reader, "reference types", 4, |reader, index| {
@@ -206,6 +219,23 @@ impl SerializedFileMetadata {
                     SerializedFileMetadataErrorKind::LayoutOverflow("consumed byte count"),
                 )
             })?;
+        let rewrite_layouts = match (object_record_layout, external_file_table_layout) {
+            (Some(object_records), Some(external_files)) => {
+                Some(SerializedFileMetadataRewriteLayouts {
+                    object_records,
+                    external_files,
+                })
+            }
+            (None, None) => None,
+            _ => {
+                return Err(SerializedFileMetadataError::new(
+                    tables_offset,
+                    SerializedFileMetadataErrorKind::LayoutOverflow(
+                        "incomplete SerializedFile rewrite table layouts",
+                    ),
+                ));
+            }
+        };
 
         Ok((
             Self {
@@ -220,7 +250,7 @@ impl SerializedFileMetadata {
                 trailing_metadata,
                 consumed_bytes,
             },
-            object_record_layout,
+            rewrite_layouts,
         ))
     }
 }
@@ -243,6 +273,19 @@ pub(super) struct ObjectRecordTableLayout {
     /// Byte offset immediately after the final object record relative to the metadata region.
     pub records_end_offset: usize,
     pub records: Vec<ObjectRecordLayout>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct ExternalFileTableLayout {
+    pub count_field_offset: usize,
+    pub records_start_offset: usize,
+    pub records_end_offset: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct SerializedFileMetadataRewriteLayouts {
+    pub object_records: ObjectRecordTableLayout,
+    pub external_files: ExternalFileTableLayout,
 }
 
 /// One serialized class/type definition in the metadata table.
@@ -1236,6 +1279,51 @@ fn read_array<T>(
         items.push(read_item(reader, index)?);
     }
     Ok(items)
+}
+
+struct ArrayWithBoundaries<T> {
+    items: Vec<T>,
+    layout: ExternalFileTableLayout,
+}
+
+fn read_array_with_boundaries<T>(
+    reader: &mut BinaryReader<'_>,
+    field: &str,
+    minimum_item_size: usize,
+    metadata_start: usize,
+    mut read_item: impl FnMut(&mut BinaryReader<'_>, usize) -> Result<T, SerializedFileMetadataError>,
+) -> Result<ArrayWithBoundaries<T>, SerializedFileMetadataError> {
+    let count_field_offset = reader.offset().checked_sub(metadata_start).ok_or_else(|| {
+        SerializedFileMetadataError::new(
+            reader.offset(),
+            SerializedFileMetadataErrorKind::LayoutOverflow("array count field location"),
+        )
+    })?;
+    let count = read_nonnegative_count(reader, field, minimum_item_size)?;
+    let records_start_offset = reader.offset().checked_sub(metadata_start).ok_or_else(|| {
+        SerializedFileMetadataError::new(
+            reader.offset(),
+            SerializedFileMetadataErrorKind::LayoutOverflow("array record table start"),
+        )
+    })?;
+    let mut items = reserve_vec(count, reader.offset(), field)?;
+    for index in 0..count {
+        items.push(read_item(reader, index)?);
+    }
+    let records_end_offset = reader.offset().checked_sub(metadata_start).ok_or_else(|| {
+        SerializedFileMetadataError::new(
+            reader.offset(),
+            SerializedFileMetadataErrorKind::LayoutOverflow("array record table end"),
+        )
+    })?;
+    Ok(ArrayWithBoundaries {
+        items,
+        layout: ExternalFileTableLayout {
+            count_field_offset,
+            records_start_offset,
+            records_end_offset,
+        },
+    })
 }
 
 struct ArrayWithSidecar<T, U> {

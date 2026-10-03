@@ -3,14 +3,15 @@ use std::fmt::{self, Display, Formatter};
 
 use super::header::{HeaderError, SerializedFileHeader};
 use super::metadata::{
-    ObjectRecordTableLayout, SerializedFileMetadata, SerializedFileMetadataError,
+    ExternalFileTableLayout, ObjectRecordTableLayout, SerializedFileMetadata,
+    SerializedFileMetadataError,
 };
 use super::object::{ObjectDecodeError, ObjectDecodeLimits, ParsedObjectPayload};
 
 mod writer;
 pub use writer::{
-    SerializedFileRewriteError, SerializedFileRewriteErrorKind, SerializedFileRewriteLimits,
-    SerializedObjectInsertion,
+    SerializedExternalFileInsertion, SerializedFileRewriteError, SerializedFileRewriteErrorKind,
+    SerializedFileRewriteLimits, SerializedObjectInsertion,
 };
 
 /// A read-only view of one complete Unity SerializedFile.
@@ -21,6 +22,7 @@ pub use writer::{
 pub struct SerializedFile<'a> {
     input: &'a [u8],
     object_record_layout: ObjectRecordTableLayout,
+    external_file_table_layout: ExternalFileTableLayout,
     pub header: SerializedFileHeader,
     pub metadata: SerializedFileMetadata,
 }
@@ -30,12 +32,13 @@ impl<'a> SerializedFile<'a> {
     pub fn parse(input: &'a [u8]) -> Result<Self, SerializedFileError> {
         let header =
             SerializedFileHeader::parse(input).map_err(SerializedFileError::from_header)?;
-        let (metadata, object_record_layout) =
-            SerializedFileMetadata::parse_file_with_object_layouts(input, &header)
+        let (metadata, rewrite_layouts) =
+            SerializedFileMetadata::parse_file_with_rewrite_layouts(input, &header)
                 .map_err(SerializedFileError::from_metadata)?;
         Ok(Self {
             input,
-            object_record_layout,
+            object_record_layout: rewrite_layouts.object_records,
+            external_file_table_layout: rewrite_layouts.external_files,
             header,
             metadata,
         })
@@ -138,10 +141,11 @@ pub enum SerializedFileErrorKind {
 #[cfg(test)]
 mod tests {
     use super::{
-        SerializedFile, SerializedFileErrorKind, SerializedFileRewriteErrorKind,
-        SerializedFileRewriteLimits, SerializedObjectInsertion,
+        SerializedExternalFileInsertion, SerializedFile, SerializedFileErrorKind,
+        SerializedFileRewriteErrorKind, SerializedFileRewriteLimits, SerializedObjectInsertion,
     };
     use crate::serialized_file::format_version::FormatVersion;
+    use crate::serialized_file::metadata::FileIdentifier;
     use crate::serialized_file::object::SerializedValue;
 
     fn put_u16_le(output: &mut Vec<u8>, value: u16) {
@@ -732,6 +736,131 @@ mod tests {
         assert!(matches!(
             unrepresentable.kind(),
             SerializedFileRewriteErrorKind::InsertionPathIdUnrepresentable { width: 4, .. }
+        ));
+    }
+
+    #[test]
+    fn appends_external_file_records_alone_and_with_object_records() {
+        let input = make_generation_10_file();
+        let parsed = SerializedFile::parse(&input).unwrap();
+        let identifier = FileIdentifier {
+            asset_path: Some("Assets/Generated.asset".to_owned()),
+            guid: Some([0x0102_0304, 0x1112_1314, 0x2122_2324, 0x3132_3334]),
+            file_type: Some(7),
+            path_name_origin: "Library/Generated.asset".to_owned(),
+        };
+        let external_insertion = SerializedExternalFileInsertion {
+            file_identifier: identifier.clone(),
+        };
+
+        let external_only = parsed
+            .rewrite_with_changes(
+                &[],
+                &[],
+                std::slice::from_ref(&external_insertion),
+                SerializedFileRewriteLimits::default(),
+            )
+            .unwrap();
+        let external_only_file = SerializedFile::parse(&external_only).unwrap();
+        assert_eq!(
+            external_only_file.metadata.externals.as_slice(),
+            std::slice::from_ref(&identifier)
+        );
+        assert_eq!(
+            external_only_file.metadata.user_information.as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            external_only_file.header.file_size as usize,
+            external_only.len()
+        );
+
+        let mut object = parsed.metadata.objects[0].clone();
+        object.path_id = 126;
+        let object_insertion = SerializedObjectInsertion {
+            object,
+            root: parsed.decode_object_payload(0).unwrap().root,
+            trailing_bytes: Vec::new(),
+        };
+        let combined = parsed
+            .rewrite_with_changes(
+                &[],
+                &[object_insertion],
+                std::slice::from_ref(&external_insertion),
+                SerializedFileRewriteLimits::default(),
+            )
+            .unwrap();
+        let combined_file = SerializedFile::parse(&combined).unwrap();
+        assert_eq!(combined_file.metadata.objects.len(), 2);
+        assert_eq!(combined_file.metadata.objects[1].path_id, 126);
+        assert_eq!(combined_file.metadata.externals, [identifier]);
+        assert_eq!(combined_file.metadata.user_information.as_deref(), Some(""));
+        assert_eq!(combined_file.header.file_size as usize, combined.len());
+    }
+
+    #[test]
+    fn rejects_external_file_schema_nuls_and_insertion_limits() {
+        let input = make_generation_10_file();
+        let parsed = SerializedFile::parse(&input).unwrap();
+        let valid = FileIdentifier {
+            asset_path: Some("Assets/Generated.asset".to_owned()),
+            guid: Some([0; 4]),
+            file_type: Some(0),
+            path_name_origin: "Library/Generated.asset".to_owned(),
+        };
+        let insertion = |file_identifier| SerializedExternalFileInsertion { file_identifier };
+
+        let limited = parsed
+            .rewrite_with_changes(
+                &[],
+                &[],
+                &[insertion(valid.clone())],
+                SerializedFileRewriteLimits {
+                    max_external_file_insertions: 0,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(
+            limited.kind(),
+            SerializedFileRewriteErrorKind::ExternalFileInsertionLimitExceeded {
+                requested: 1,
+                limit: 0
+            }
+        ));
+
+        let mut wrong_schema = valid.clone();
+        wrong_schema.asset_path = None;
+        let schema_error = parsed
+            .rewrite_with_changes(
+                &[],
+                &[],
+                &[insertion(wrong_schema)],
+                SerializedFileRewriteLimits::default(),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            schema_error.kind(),
+            SerializedFileRewriteErrorKind::ExternalFileFieldMismatch {
+                field: "asset path presence"
+            }
+        ));
+
+        let mut embedded_nul = valid;
+        embedded_nul.path_name_origin.push('\0');
+        let nul_error = parsed
+            .rewrite_with_changes(
+                &[],
+                &[],
+                &[insertion(embedded_nul)],
+                SerializedFileRewriteLimits::default(),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            nul_error.kind(),
+            SerializedFileRewriteErrorKind::ExternalFileStringContainsNul {
+                field: "path name origin"
+            }
         ));
     }
 }
