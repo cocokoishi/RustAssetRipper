@@ -538,3 +538,11 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - The planner models marker-dependent Prefab emission, modern PrefabInstance hiding, and `GenerateMetaPtrForPrefab` fileID/GUID/AssetType. Full verification passed: 355 library tests, 10 CLI tests, warnings-denied Clippy, format check, baseline verifier (1,449 files), and `git diff --check`.
 - Still incomplete: discover/classify actual Prefab hierarchy assets, integrate Prefab registrations into the project pointer map, serialize the selected assets to baseline-compatible YAML, and write complete version-specific importer/meta data. Phase 1 remains open; Phase 2 remains locked.
 - Next: add explicit Scene/Prefab collection registration adapters that feed the pointer map, then implement YAML document ID/reference serialization.
+
+## Scene/Prefab pointer-map registration adapters
+
+- Current phase: Phase 1; gate not passed. This increment starts from pushed revision `dbb35cec2bf8928dfe6963bcbe4379b587703e6b`. Only `cocokoishi/RustAssetRipper` is a write/push target; the local AssetRipper baseline remains read-only. No UABEA or user AssetBundle content was accessed.
+- Added `ProjectExportPointerMapBuilder::register_scene_collection` and `register_prefab_collection`. They import the ID assignments from both planners, bind output collection GUID/AssetType, and build the shared scope-aware PPtr map.
+- Synthetic adapter coverage verifies local Prefab and cross-collection Scene pointer output, rejects zero GUID and collection limit overrun. Full verification passed: 357 library tests, 10 CLI tests, warnings-denied Clippy, format check, baseline verifier (1,449 files), and `git diff --check`.
+- Still incomplete: discover/classify actual collections and remaining export collection families, connect resolved input PPtrs to these plans, write Unity YAML documents and complete importer `.meta` files. Phase 1 remains open; Phase 2 remains locked.
+- Next: implement source-derived YAML document reference emission using the shared pointer map, preserving unresolved evidence instead of converting failures to null.

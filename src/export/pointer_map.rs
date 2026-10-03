@@ -7,7 +7,8 @@ use std::fmt::{self, Display, Formatter};
 use crate::serialized_file::reference_graph::MultiFilePPtrResolution;
 
 use super::ids::{get_main_export_id, ExportIdError};
-use super::scene_collection::{ExportAssetIdentity, ExportAssetObjectKey};
+use super::prefab_collection::PrefabExportIdAssignment;
+use super::scene_collection::{ExportAssetIdentity, ExportAssetObjectKey, SceneExportIdAssignment};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ExportCollectionPointerMetadata {
@@ -59,6 +60,8 @@ impl Default for ExportPointerMapLimits {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExportPointerMapError {
+    AssetCountOverflow,
+    CollectionCountOverflow,
     AssetLimitExceeded {
         requested: usize,
         limit: usize,
@@ -80,6 +83,7 @@ pub enum ExportPointerMapError {
     MissingCollectionMetadata {
         collection_index: usize,
     },
+    ZeroCollectionGuid,
     InvalidUnresolvedReferenceStatus,
     AllocationFailed {
         resource: &'static str,
@@ -91,6 +95,10 @@ pub enum ExportPointerMapError {
 impl Display for ExportPointerMapError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
+            Self::AssetCountOverflow => f.write_str("project export asset count overflowed"),
+            Self::CollectionCountOverflow => {
+                f.write_str("project export collection count overflowed")
+            }
             Self::AssetLimitExceeded { requested, limit } => write!(
                 f,
                 "project export pointer map has {requested} assets, exceeding limit {limit}"
@@ -117,6 +125,9 @@ impl Display for ExportPointerMapError {
                 f,
                 "project export asset references collection {collection_index} without metadata"
             ),
+            Self::ZeroCollectionGuid => {
+                f.write_str("Scene/Prefab export collection GUID must not be zero")
+            }
             Self::InvalidUnresolvedReferenceStatus => f.write_str(
                 "an unresolved project pointer cannot carry a null or uniquely resolved status",
             ),
@@ -189,6 +200,129 @@ pub enum ProjectPointerResolution {
 pub struct ProjectExportPointerMap {
     assets: HashMap<ExportAssetObjectKey, ExportedAssetPointerEntry>,
     collections: HashMap<usize, ExportCollectionPointerMetadata>,
+}
+
+/// Collects Scene and Prefab plans and converts their IDs into one project pointer map.
+pub struct ProjectExportPointerMapBuilder {
+    limits: ExportPointerMapLimits,
+    assets: Vec<ExportedAssetPointerEntry>,
+    collections: Vec<ExportCollectionPointerMetadata>,
+}
+
+impl ProjectExportPointerMapBuilder {
+    pub fn new(limits: ExportPointerMapLimits) -> Self {
+        Self {
+            limits,
+            assets: Vec::new(),
+            collections: Vec::new(),
+        }
+    }
+
+    pub fn register_scene_collection(
+        &mut self,
+        collection_index: usize,
+        guid: [u8; 16],
+        assignments: &[SceneExportIdAssignment],
+    ) -> Result<(), ExportPointerMapError> {
+        if guid == [0; 16] {
+            return Err(ExportPointerMapError::ZeroCollectionGuid);
+        }
+        self.reserve_collection(
+            ExportCollectionPointerMetadata {
+                collection_index,
+                guid,
+                asset_type: UnityProjectAssetType::Serialized,
+            },
+            assignments.len(),
+        )?;
+        self.assets.extend(
+            assignments
+                .iter()
+                .map(|assignment| ExportedAssetPointerEntry {
+                    asset: assignment.asset,
+                    file_id: assignment.file_id,
+                    collection_index,
+                }),
+        );
+        Ok(())
+    }
+
+    pub fn register_prefab_collection(
+        &mut self,
+        collection_index: usize,
+        guid: [u8; 16],
+        asset_type: UnityProjectAssetType,
+        assignments: &[PrefabExportIdAssignment],
+    ) -> Result<(), ExportPointerMapError> {
+        if guid == [0; 16] {
+            return Err(ExportPointerMapError::ZeroCollectionGuid);
+        }
+        self.reserve_collection(
+            ExportCollectionPointerMetadata {
+                collection_index,
+                guid,
+                asset_type,
+            },
+            assignments.len(),
+        )?;
+        self.assets.extend(
+            assignments
+                .iter()
+                .map(|assignment| ExportedAssetPointerEntry {
+                    asset: assignment.asset,
+                    file_id: assignment.file_id,
+                    collection_index,
+                }),
+        );
+        Ok(())
+    }
+
+    pub fn build(self) -> Result<ProjectExportPointerMap, ExportPointerMapError> {
+        ProjectExportPointerMap::new(&self.assets, &self.collections, self.limits)
+    }
+
+    fn reserve_collection(
+        &mut self,
+        metadata: ExportCollectionPointerMetadata,
+        additional_assets: usize,
+    ) -> Result<(), ExportPointerMapError> {
+        let requested_collections = self
+            .collections
+            .len()
+            .checked_add(1)
+            .ok_or(ExportPointerMapError::CollectionCountOverflow)?;
+        if requested_collections > self.limits.max_collections {
+            return Err(ExportPointerMapError::CollectionLimitExceeded {
+                requested: requested_collections,
+                limit: self.limits.max_collections,
+            });
+        }
+        let requested_assets = self
+            .assets
+            .len()
+            .checked_add(additional_assets)
+            .ok_or(ExportPointerMapError::AssetCountOverflow)?;
+        if requested_assets > self.limits.max_assets {
+            return Err(ExportPointerMapError::AssetLimitExceeded {
+                requested: requested_assets,
+                limit: self.limits.max_assets,
+            });
+        }
+        self.collections
+            .try_reserve(1)
+            .map_err(|_| ExportPointerMapError::AllocationFailed {
+                resource: "project export collection registry",
+                requested: requested_collections,
+            })?;
+        self.assets.try_reserve(additional_assets).map_err(|_| {
+            ExportPointerMapError::AllocationFailed {
+                resource: "project export asset registry",
+                requested: requested_assets,
+            }
+        })?;
+        self.collections.push(metadata);
+        Ok(())
+    }
 }
 
 impl ProjectExportPointerMap {
@@ -370,6 +504,84 @@ mod tests {
             ExportPointerMapLimits::default(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn pointer_map_builder_registers_scene_and_prefab_plans() {
+        let scene_asset = asset(0, 0, 10, 1);
+        let prefab_asset = asset(1, 0, 20, 1001);
+        let prefab_child = asset(1, 1, 21, 1);
+        let scene_assignments = [SceneExportIdAssignment {
+            asset: scene_asset,
+            file_id: 10,
+        }];
+        let prefab_assignments = [
+            PrefabExportIdAssignment {
+                asset: prefab_asset,
+                file_id: 100_100_000,
+                is_main_asset: true,
+            },
+            PrefabExportIdAssignment {
+                asset: prefab_child,
+                file_id: 1_000_001,
+                is_main_asset: false,
+            },
+        ];
+        let mut builder = ProjectExportPointerMapBuilder::new(ExportPointerMapLimits::default());
+        builder
+            .register_scene_collection(7, [0x77; 16], &scene_assignments)
+            .unwrap();
+        builder
+            .register_prefab_collection(
+                8,
+                [0x88; 16],
+                UnityProjectAssetType::Meta,
+                &prefab_assignments,
+            )
+            .unwrap();
+        let map = builder.build().unwrap();
+
+        assert_eq!(
+            map.resolve(ProjectPointerRequest::ResolvedAsset(scene_asset), 8),
+            Ok(ProjectPointerResolution::Mapped(UnityMetaPointer {
+                file_id: 10,
+                guid: ExportPointerGuid::Collection([0x77; 16]),
+                asset_type: UnityProjectAssetType::Serialized,
+            }))
+        );
+        assert_eq!(
+            map.resolve(ProjectPointerRequest::ResolvedAsset(prefab_child), 8),
+            Ok(ProjectPointerResolution::Mapped(UnityMetaPointer {
+                file_id: 1_000_001,
+                guid: ExportPointerGuid::None,
+                asset_type: UnityProjectAssetType::Serialized,
+            }))
+        );
+    }
+
+    #[test]
+    fn pointer_map_builder_rejects_zero_guids_and_collection_limits() {
+        let assignment = SceneExportIdAssignment {
+            asset: asset(0, 0, 10, 1),
+            file_id: 10,
+        };
+        let mut zero_guid = ProjectExportPointerMapBuilder::new(ExportPointerMapLimits::default());
+        assert_eq!(
+            zero_guid.register_scene_collection(0, [0; 16], &[assignment]),
+            Err(ExportPointerMapError::ZeroCollectionGuid)
+        );
+
+        let mut limit = ProjectExportPointerMapBuilder::new(ExportPointerMapLimits {
+            max_assets: 1,
+            max_collections: 0,
+        });
+        assert_eq!(
+            limit.register_scene_collection(0, [0x33; 16], &[assignment]),
+            Err(ExportPointerMapError::CollectionLimitExceeded {
+                requested: 1,
+                limit: 0,
+            })
+        );
     }
 
     #[test]
