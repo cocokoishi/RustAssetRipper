@@ -1981,6 +1981,38 @@ mod tests {
         assert!(yaml.contains("offset: 0"));
         assert!(yaml.contains("size: 0"));
         assert!(!yaml.contains("texture.resS"));
+
+        let assignment = SceneExportIdAssignment {
+            asset: identity,
+            file_id: 77,
+        };
+        let collection_yaml = workspace_assignments_to_unity_yaml_with_streamed_resources(
+            &workspace,
+            &objects,
+            &reference_graph,
+            &pointer_map,
+            &[assignment],
+            COLLECTION_INDEX,
+            None,
+            UnityYamlWorkspaceCollectionLimits::default(),
+            &context,
+        )
+        .unwrap();
+        assert!(collection_yaml.contains("m_ImageData_C189: 323334"));
+        let scene_yaml = workspace_scene_assignments_to_unity_yaml_with_streamed_resources(
+            &workspace,
+            &objects,
+            &reference_graph,
+            &pointer_map,
+            &[assignment],
+            COLLECTION_INDEX,
+            None,
+            UnityYamlWorkspaceCollectionLimits::default(),
+            &context,
+        )
+        .unwrap();
+        assert!(scene_yaml.contains("m_ImageData_C189: 323334"));
+
         let payload = objects.objects()[0].payload.as_ref().unwrap();
         assert_eq!(
             crate::resource::extract_streamed_resource_info(
@@ -2110,6 +2142,29 @@ mod tests {
             content_limits: StreamedResourceContentLimits::default(),
             staging_limits: StreamedYamlAssetLimits::default(),
         };
+
+        let no_context_error = workspace_object_to_unity_yaml_document(
+            &workspace,
+            &reference_graph,
+            &pointer_map,
+            &objects.objects()[0],
+            identity,
+            77,
+            COLLECTION_INDEX,
+            None,
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap_err();
+        match no_context_error {
+            UnityYamlWorkspaceExportError::StreamedAssetPreparation { source, .. } => {
+                assert!(matches!(
+                    *source,
+                    StreamedYamlAssetError::StreamContentRequired { resource }
+                        if resource.path == "texture.resS" && resource.offset == 2 && resource.size == 3
+                ))
+            }
+            other => panic!("expected missing resource context error, got {other}"),
+        }
 
         let copy_limited_context = WorkspaceStreamedYamlResourceContext {
             staging_limits: StreamedYamlAssetLimits {
