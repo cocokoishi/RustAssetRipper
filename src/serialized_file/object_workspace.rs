@@ -297,6 +297,20 @@ impl ObjectWorkspace {
         &self.objects
     }
 
+    /// Find an object by its stable workspace file/object-table indexes.
+    ///
+    /// Objects are stored in ascending file index and then object index order by
+    /// `load_from_vfs`, so this lookup does not depend on PathID uniqueness.
+    pub fn get(&self, file_index: usize, object_index: usize) -> Option<&WorkspaceObject> {
+        let position = self
+            .objects
+            .binary_search_by_key(&(file_index, object_index), |object| {
+                (object.file_index, object.object_index)
+            })
+            .ok()?;
+        self.objects.get(position)
+    }
+
     pub fn report(&self) -> ObjectWorkspaceReport {
         self.report
     }

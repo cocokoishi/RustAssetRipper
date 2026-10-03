@@ -1,5 +1,6 @@
 //! Unity YAML export bridge for objects decoded from a SerializedFile workspace.
 
+use std::collections::HashSet;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::str;
@@ -13,12 +14,251 @@ use super::pointer_map::{
     ExportPointerMapError, ProjectExportPointerMap, ProjectPointerRequest,
     ProjectPointerResolution, UnresolvedProjectPointer,
 };
-use super::scene_collection::{ExportAssetCollectionIdentity, ExportAssetIdentity};
-use super::unity_yaml::UnityYamlDocument;
+use super::prefab_collection::PrefabExportIdAssignment;
+use super::scene_collection::{
+    ExportAssetCollectionIdentity, ExportAssetIdentity, SceneExportIdAssignment,
+};
+use super::unity_yaml::{
+    write_unity_yaml_documents, UnityYamlDocument, UnityYamlWriteError, UnityYamlWriteLimits,
+};
 use super::value_yaml::{
     serialized_object_value_to_unity_yaml_document, UnityYamlObjectConversionError,
     UnityYamlObjectConversionHints, UnityYamlObjectConversionLimits, UnityYamlPPtrRequest,
 };
+
+/// A typed Scene or Prefab export-ID assignment usable by the YAML collection executor.
+pub trait UnityYamlCollectionAssignment {
+    fn asset(&self) -> ExportAssetIdentity;
+    fn file_id(&self) -> i64;
+}
+
+impl UnityYamlCollectionAssignment for SceneExportIdAssignment {
+    fn asset(&self) -> ExportAssetIdentity {
+        self.asset
+    }
+
+    fn file_id(&self) -> i64 {
+        self.file_id
+    }
+}
+
+impl UnityYamlCollectionAssignment for PrefabExportIdAssignment {
+    fn asset(&self) -> ExportAssetIdentity {
+        self.asset
+    }
+
+    fn file_id(&self) -> i64 {
+        self.file_id
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UnityYamlWorkspaceCollectionLimits {
+    pub max_documents: usize,
+    pub object_conversion: UnityYamlObjectConversionLimits,
+    pub yaml_write: UnityYamlWriteLimits,
+}
+
+impl Default for UnityYamlWorkspaceCollectionLimits {
+    fn default() -> Self {
+        Self {
+            max_documents: 1_000_000,
+            object_conversion: UnityYamlObjectConversionLimits::default(),
+            yaml_write: UnityYamlWriteLimits::default(),
+        }
+    }
+}
+
+/// Execute one ordered Scene or Prefab YAML collection using workspace-decoded source objects.
+///
+/// Assignment order is preserved exactly. Callers provide the baseline `ExportableAssets` order;
+/// processed objects without a workspace payload fail explicitly until their generated YAML
+/// walkers are connected.
+#[allow(clippy::too_many_arguments)]
+pub fn workspace_assignments_to_unity_yaml<A: UnityYamlCollectionAssignment>(
+    workspace: &SerializedFileWorkspace,
+    objects: &crate::serialized_file::object_workspace::ObjectWorkspace,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+    pointer_map: &ProjectExportPointerMap,
+    assignments_in_yaml_order: &[A],
+    current_collection_index: usize,
+    missing_reference_guid: Option<[u8; 16]>,
+    limits: UnityYamlWorkspaceCollectionLimits,
+) -> Result<String, UnityYamlWorkspaceCollectionError> {
+    let document_count = assignments_in_yaml_order.len();
+    if document_count > limits.max_documents {
+        return Err(UnityYamlWorkspaceCollectionError::DocumentLimitExceeded {
+            count: document_count,
+            limit: limits.max_documents,
+        });
+    }
+
+    let mut seen_assets = HashSet::new();
+    seen_assets.try_reserve(document_count).map_err(|_| {
+        UnityYamlWorkspaceCollectionError::AllocationFailed {
+            resource: "workspace YAML asset identity index",
+            requested: document_count,
+        }
+    })?;
+    let mut seen_file_ids = HashSet::new();
+    seen_file_ids.try_reserve(document_count).map_err(|_| {
+        UnityYamlWorkspaceCollectionError::AllocationFailed {
+            resource: "workspace YAML document fileID index",
+            requested: document_count,
+        }
+    })?;
+    let mut documents = Vec::new();
+    documents.try_reserve_exact(document_count).map_err(|_| {
+        UnityYamlWorkspaceCollectionError::AllocationFailed {
+            resource: "workspace YAML documents",
+            requested: document_count,
+        }
+    })?;
+
+    for (assignment_index, assignment) in assignments_in_yaml_order.iter().enumerate() {
+        let asset = assignment.asset();
+        if !seen_assets.insert(asset.object_key()) {
+            return Err(UnityYamlWorkspaceCollectionError::DuplicateAssetIdentity {
+                assignment_index,
+                asset,
+            });
+        }
+        let file_id = assignment.file_id();
+        if !seen_file_ids.insert(file_id) {
+            return Err(UnityYamlWorkspaceCollectionError::DuplicateDocumentFileId {
+                assignment_index,
+                file_id,
+            });
+        }
+        let ExportAssetCollectionIdentity::SerializedFile { file_index } = asset.collection else {
+            return Err(
+                UnityYamlWorkspaceCollectionError::ProcessedAssetRequiresGeneratedWalker {
+                    assignment_index,
+                    asset,
+                },
+            );
+        };
+        let object = objects.get(file_index, asset.object_index).ok_or(
+            UnityYamlWorkspaceCollectionError::WorkspaceObjectMissing {
+                assignment_index,
+                asset,
+            },
+        )?;
+        let document = workspace_object_to_unity_yaml_document(
+            workspace,
+            reference_graph,
+            pointer_map,
+            object,
+            asset,
+            file_id,
+            current_collection_index,
+            missing_reference_guid,
+            limits.object_conversion,
+        )
+        .map_err(|source| UnityYamlWorkspaceCollectionError::ObjectExport {
+            assignment_index,
+            source: Box::new(source),
+        })?;
+        documents.push(document);
+    }
+
+    write_unity_yaml_documents(&documents, limits.yaml_write)
+        .map_err(UnityYamlWorkspaceCollectionError::YamlWrite)
+}
+
+#[derive(Debug)]
+pub enum UnityYamlWorkspaceCollectionError {
+    DocumentLimitExceeded {
+        count: usize,
+        limit: usize,
+    },
+    AllocationFailed {
+        resource: &'static str,
+        requested: usize,
+    },
+    DuplicateAssetIdentity {
+        assignment_index: usize,
+        asset: ExportAssetIdentity,
+    },
+    DuplicateDocumentFileId {
+        assignment_index: usize,
+        file_id: i64,
+    },
+    ProcessedAssetRequiresGeneratedWalker {
+        assignment_index: usize,
+        asset: ExportAssetIdentity,
+    },
+    WorkspaceObjectMissing {
+        assignment_index: usize,
+        asset: ExportAssetIdentity,
+    },
+    ObjectExport {
+        assignment_index: usize,
+        source: Box<UnityYamlWorkspaceExportError>,
+    },
+    YamlWrite(UnityYamlWriteError),
+}
+
+impl Display for UnityYamlWorkspaceCollectionError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DocumentLimitExceeded { count, limit } => write!(
+                f,
+                "workspace YAML collection has {count} documents, exceeding limit {limit}"
+            ),
+            Self::AllocationFailed {
+                resource,
+                requested,
+            } => write!(f, "could not allocate {requested} entries for {resource}"),
+            Self::DuplicateAssetIdentity {
+                assignment_index,
+                asset,
+            } => write!(
+                f,
+                "workspace YAML assignment {assignment_index} duplicates asset identity {asset:?}"
+            ),
+            Self::DuplicateDocumentFileId {
+                assignment_index,
+                file_id,
+            } => write!(
+                f,
+                "workspace YAML assignment {assignment_index} duplicates document fileID {file_id}"
+            ),
+            Self::ProcessedAssetRequiresGeneratedWalker {
+                assignment_index,
+                asset,
+            } => write!(
+                f,
+                "workspace YAML assignment {assignment_index} is a processed asset without a generated YAML walker: {asset:?}"
+            ),
+            Self::WorkspaceObjectMissing {
+                assignment_index,
+                asset,
+            } => write!(
+                f,
+                "workspace YAML assignment {assignment_index} has no decoded source object: {asset:?}"
+            ),
+            Self::ObjectExport {
+                assignment_index,
+                source,
+            } => write!(
+                f,
+                "workspace YAML assignment {assignment_index} failed object conversion: {source}"
+            ),
+            Self::YamlWrite(source) => Display::fmt(source, f),
+        }
+    }
+}
+
+impl Error for UnityYamlWorkspaceCollectionError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::ObjectExport { source, .. } => Some(source),
+            Self::YamlWrite(source) => Some(source),
+            _ => None,
+        }
+    }
+}
 
 /// Convert one workspace-decoded SerializedFile object into the project YAML form.
 ///
@@ -913,6 +1153,92 @@ mod tests {
         assert!(output.contains("serializedVersion: 6"));
         assert!(output.contains("component: {fileID: 43}"));
         assert!(output.contains("m_GameObject: {fileID: 42}"));
+    }
+
+    #[test]
+    fn collection_executor_writes_documents_in_supplied_yaml_order() {
+        let (filesystem, workspace) = load_workspaces(TRANSFORM_PATH_ID);
+        let objects = ObjectWorkspace::load_from_vfs(
+            &filesystem,
+            &workspace,
+            ObjectWorkspaceLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(objects.get(0, 0).unwrap().path_id, GAME_OBJECT_PATH_ID);
+        assert_eq!(objects.get(0, 1).unwrap().path_id, TRANSFORM_PATH_ID);
+        assert!(objects.get(1, 0).is_none());
+        let reference_graph = workspace
+            .reference_graph(MultiFileReferenceGraphLimits::default())
+            .unwrap();
+        let assignments = [
+            SceneExportIdAssignment {
+                asset: asset(1, TRANSFORM_PATH_ID, 4),
+                file_id: TRANSFORM_PATH_ID,
+            },
+            SceneExportIdAssignment {
+                asset: asset(0, GAME_OBJECT_PATH_ID, 1),
+                file_id: GAME_OBJECT_PATH_ID,
+            },
+        ];
+        let output = workspace_assignments_to_unity_yaml(
+            &workspace,
+            &objects,
+            &reference_graph,
+            &pointer_map(),
+            &assignments,
+            COLLECTION_INDEX,
+            None,
+            UnityYamlWorkspaceCollectionLimits::default(),
+        )
+        .unwrap();
+        let transform_position = output.find("--- !u!4 &43").unwrap();
+        let game_object_position = output.find("--- !u!1 &42").unwrap();
+        assert!(transform_position < game_object_position);
+        assert!(output.contains("m_GameObject: {fileID: 42}"));
+        assert!(output.contains("component: {fileID: 43}"));
+    }
+
+    #[test]
+    fn collection_executor_reports_processed_assets_without_a_generated_walker() {
+        let (filesystem, workspace) = load_workspaces(TRANSFORM_PATH_ID);
+        let objects = ObjectWorkspace::load_from_vfs(
+            &filesystem,
+            &workspace,
+            ObjectWorkspaceLimits::default(),
+        )
+        .unwrap();
+        let reference_graph = workspace
+            .reference_graph(MultiFileReferenceGraphLimits::default())
+            .unwrap();
+        let processed = SceneExportIdAssignment {
+            asset: ExportAssetIdentity {
+                collection: ExportAssetCollectionIdentity::ProcessedCollection {
+                    collection_index: 5,
+                },
+                object_index: 0,
+                path_id: 1,
+                class_id: 4,
+            },
+            file_id: 123,
+        };
+        assert!(matches!(
+            workspace_assignments_to_unity_yaml(
+                &workspace,
+                &objects,
+                &reference_graph,
+                &pointer_map(),
+                &[processed],
+                COLLECTION_INDEX,
+                None,
+                UnityYamlWorkspaceCollectionLimits::default(),
+            ),
+            Err(
+                UnityYamlWorkspaceCollectionError::ProcessedAssetRequiresGeneratedWalker {
+                    assignment_index: 0,
+                    ..
+                }
+            )
+        ));
     }
 
     #[test]
