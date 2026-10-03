@@ -98,6 +98,7 @@ pub struct UnityYamlObjectConversionHints {
     pub hash128_schemas: HashMap<String, UnityYamlHash128Schema>,
     pub guid_schemas: HashMap<String, UnityYamlGuidSchema>,
     pub property_name_schemas: HashMap<String, UnityYamlPropertyNameSchema>,
+    pub scene_object_identifier_schemas: HashMap<String, UnityYamlSceneObjectIdentifierSchema>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -123,6 +124,12 @@ pub enum UnityYamlPropertyNameValueKind {
 pub struct UnityYamlPropertyNameSchema {
     pub value_field_name: String,
     pub value_kind: UnityYamlPropertyNameValueKind,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UnityYamlSceneObjectIdentifierSchema {
+    pub target_object_field_name: String,
+    pub target_prefab_field_name: String,
 }
 
 impl UnityYamlObjectConversionHints {
@@ -237,6 +244,10 @@ pub enum UnityYamlObjectConversionError {
         actual: usize,
     },
     InvalidPropertyNameValue {
+        field_path: String,
+        field_name: String,
+    },
+    InvalidSceneObjectIdentifierValue {
         field_path: String,
         field_name: String,
     },
@@ -358,6 +369,13 @@ impl Display for UnityYamlObjectConversionError {
             } => write!(
                 f,
                 "PropertyName value field {field_name:?} at {field_path:?} is missing, duplicated, or has an unsupported value"
+            ),
+            Self::InvalidSceneObjectIdentifierValue {
+                field_path,
+                field_name,
+            } => write!(
+                f,
+                "SceneObjectIdentifier field {field_name:?} at {field_path:?} is missing, duplicated, or not a signed file ID"
             ),
             Self::HexScalarLimitExceeded {
                 requested,
@@ -751,6 +769,92 @@ impl<'a> UnityYamlTypeTreeLayout<'a> {
         }))
     }
 
+    fn scene_object_identifier_schema(
+        &self,
+        node_index: usize,
+    ) -> Result<UnityYamlSceneObjectIdentifierSchema, UnityYamlObjectConversionError> {
+        let children = self.child_indices(node_index)?;
+        let mut target_object_field = None;
+        let mut target_prefab_field = None;
+        for child_index in children {
+            let child = self.node(child_index)?;
+            let field_name =
+                child
+                    .name
+                    .as_deref()
+                    .ok_or(UnityYamlObjectConversionError::InvalidTypeTree {
+                        node_index: child_index,
+                        reason: "SceneObjectIdentifier field name is unresolved",
+                    })?;
+            let normalized_name = field_name.strip_prefix("m_").unwrap_or(field_name);
+            let target_field = if normalized_name.eq_ignore_ascii_case("TargetObject") {
+                &mut target_object_field
+            } else if normalized_name.eq_ignore_ascii_case("TargetPrefab") {
+                &mut target_prefab_field
+            } else {
+                continue;
+            };
+            if target_field.replace(child_index).is_some() {
+                return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                    node_index: child_index,
+                    reason: "SceneObjectIdentifier target field is duplicated",
+                });
+            }
+        }
+
+        let target_object_index =
+            target_object_field.ok_or(UnityYamlObjectConversionError::InvalidTypeTree {
+                node_index,
+                reason: "SceneObjectIdentifier TargetObject field is missing",
+            })?;
+        let target_prefab_index =
+            target_prefab_field.ok_or(UnityYamlObjectConversionError::InvalidTypeTree {
+                node_index,
+                reason: "SceneObjectIdentifier TargetPrefab field is missing",
+            })?;
+        let target_object_node = self.node(target_object_index)?;
+        let target_prefab_node = self.node(target_prefab_index)?;
+        if !is_signed_file_id_type_tree_type(self.type_name(target_object_index)?)
+            || self.first_child[target_object_index].is_some()
+        {
+            return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                node_index: target_object_index,
+                reason: "SceneObjectIdentifier TargetObject is not a signed 64-bit field",
+            });
+        }
+        if !is_signed_file_id_type_tree_type(self.type_name(target_prefab_index)?)
+            || self.first_child[target_prefab_index].is_some()
+        {
+            return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                node_index: target_prefab_index,
+                reason: "SceneObjectIdentifier TargetPrefab is not a signed 64-bit field",
+            });
+        }
+
+        let target_object_field_name = target_object_node.name.as_deref().ok_or(
+            UnityYamlObjectConversionError::InvalidTypeTree {
+                node_index: target_object_index,
+                reason: "SceneObjectIdentifier TargetObject field name is unresolved",
+            },
+        )?;
+        let target_prefab_field_name = target_prefab_node.name.as_deref().ok_or(
+            UnityYamlObjectConversionError::InvalidTypeTree {
+                node_index: target_prefab_index,
+                reason: "SceneObjectIdentifier TargetPrefab field name is unresolved",
+            },
+        )?;
+        Ok(UnityYamlSceneObjectIdentifierSchema {
+            target_object_field_name: try_copy_string(
+                target_object_field_name,
+                "SceneObjectIdentifier TargetObject field name",
+            )?,
+            target_prefab_field_name: try_copy_string(
+                target_prefab_field_name,
+                "SceneObjectIdentifier TargetPrefab field name",
+            )?,
+        })
+    }
+
     fn dictionary_representation(
         &self,
         node_index: usize,
@@ -954,6 +1058,34 @@ impl<'a> UnityYamlTypeTreeLayout<'a> {
             return Ok(());
         }
 
+        if node_type == "SceneObjectIdentifier" {
+            let schema = self.scene_object_identifier_schema(node_index)?;
+            if let Some(previous) = hints.scene_object_identifier_schemas.get(field_path) {
+                if *previous != schema {
+                    return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                        node_index,
+                        reason: "ambiguous SceneObjectIdentifier schemas share one serialized field path",
+                    });
+                }
+            } else {
+                hints
+                    .scene_object_identifier_schemas
+                    .try_reserve(1)
+                    .map_err(|_| UnityYamlObjectConversionError::AllocationFailed {
+                        resource: "Unity YAML SceneObjectIdentifier schema hints",
+                        requested: hints
+                            .scene_object_identifier_schemas
+                            .len()
+                            .saturating_add(1),
+                    })?;
+                hints.scene_object_identifier_schemas.insert(
+                    try_copy_string(field_path, "Unity YAML SceneObjectIdentifier schema path")?,
+                    schema,
+                );
+            }
+            return Ok(());
+        }
+
         let explicit_property_name = node_type == "PropertyName";
         if explicit_property_name || node_type == "string" {
             if let Some(schema) = self.property_name_schema(node_index, explicit_property_name)? {
@@ -1059,7 +1191,14 @@ where
     let mut budget = ConversionBudget { visited: 0, limits };
     budget.visit(0)?;
 
-    let mut body = if let Some(schema) = hash128_schema_for_path("", hints, limits)? {
+    let scene_object_identifier_schema = if field_mode == UnityYamlObjectFieldMode::ProjectAsset {
+        scene_object_identifier_schema_for_path("", hints, limits)?
+    } else {
+        None
+    };
+    let mut body = if let Some(schema) = scene_object_identifier_schema {
+        convert_scene_object_identifier_value(fields, schema, "", 0, &mut budget)?
+    } else if let Some(schema) = hash128_schema_for_path("", hints, limits)? {
         convert_hash128_value(fields, schema, "", 0, limits, &mut budget)?
     } else {
         let mut body = UnityYamlNode::mapping(if is_flow_mapped_path("", hints, limits)? {
@@ -1247,7 +1386,15 @@ where
             resolve_pointer,
         )?,
         SerializedValue::Struct(fields) => {
-            if let Some(schema) = property_name_schema_for_path(field_path, hints, limits)? {
+            let scene_object_identifier_schema =
+                if field_mode == UnityYamlObjectFieldMode::ProjectAsset {
+                    scene_object_identifier_schema_for_path(field_path, hints, limits)?
+                } else {
+                    None
+                };
+            if let Some(schema) = scene_object_identifier_schema {
+                convert_scene_object_identifier_value(fields, schema, field_path, depth, budget)?
+            } else if let Some(schema) = property_name_schema_for_path(field_path, hints, limits)? {
                 convert_property_name_value(fields, schema, field_path, depth, budget)?
             } else if let Some(schema) = hash128_schema_for_path(field_path, hints, limits)? {
                 convert_hash128_value(fields, schema, field_path, depth, limits, budget)?
@@ -1381,6 +1528,21 @@ fn property_name_schema_for_path<'a>(
     }
     let canonical_path = canonical_array_path(field_path, limits.max_field_path_bytes)?;
     Ok(hints.property_name_schemas.get(&canonical_path))
+}
+
+fn scene_object_identifier_schema_for_path<'a>(
+    field_path: &str,
+    hints: &'a UnityYamlObjectConversionHints,
+    limits: UnityYamlObjectConversionLimits,
+) -> Result<Option<&'a UnityYamlSceneObjectIdentifierSchema>, UnityYamlObjectConversionError> {
+    if let Some(schema) = hints.scene_object_identifier_schemas.get(field_path) {
+        return Ok(Some(schema));
+    }
+    if !field_path.contains('[') {
+        return Ok(None);
+    }
+    let canonical_path = canonical_array_path(field_path, limits.max_field_path_bytes)?;
+    Ok(hints.scene_object_identifier_schemas.get(&canonical_path))
 }
 
 fn convert_hash128_value(
@@ -1569,6 +1731,74 @@ fn convert_property_name_value(
             field_path: field_path.to_owned(),
             field_name: schema.value_field_name.clone(),
         }),
+    }
+}
+
+fn convert_scene_object_identifier_value(
+    fields: &[SerializedFieldValue],
+    schema: &UnityYamlSceneObjectIdentifierSchema,
+    field_path: &str,
+    depth: usize,
+    budget: &mut ConversionBudget,
+) -> Result<UnityYamlNode, UnityYamlObjectConversionError> {
+    let target_object = scene_object_identifier_file_id(
+        fields,
+        &schema.target_object_field_name,
+        field_path,
+        depth,
+        budget,
+    )?;
+    let target_prefab = scene_object_identifier_file_id(
+        fields,
+        &schema.target_prefab_field_name,
+        field_path,
+        depth,
+        budget,
+    )?;
+    let mut mapping = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    mapping
+        .insert_field(
+            "targetObject",
+            UnityYamlNode::scalar(UnityYamlScalar::Signed(target_object)),
+        )
+        .map_err(UnityYamlObjectConversionError::NodeBuild)?;
+    mapping
+        .insert_field(
+            "targetPrefab",
+            UnityYamlNode::scalar(UnityYamlScalar::Signed(target_prefab)),
+        )
+        .map_err(UnityYamlObjectConversionError::NodeBuild)?;
+    Ok(mapping)
+}
+
+fn scene_object_identifier_file_id(
+    fields: &[SerializedFieldValue],
+    field_name: &str,
+    field_path: &str,
+    depth: usize,
+    budget: &mut ConversionBudget,
+) -> Result<i64, UnityYamlObjectConversionError> {
+    let mut matching_value = None;
+    for field in fields.iter().filter(|field| field.name == field_name) {
+        if matching_value.is_some() {
+            return Err(
+                UnityYamlObjectConversionError::InvalidSceneObjectIdentifierValue {
+                    field_path: field_path.to_owned(),
+                    field_name: field_name.to_owned(),
+                },
+            );
+        }
+        matching_value = Some(&field.value);
+    }
+    budget.visit(depth + 1)?;
+    match matching_value {
+        Some(SerializedValue::I64(value)) => Ok(*value),
+        _ => Err(
+            UnityYamlObjectConversionError::InvalidSceneObjectIdentifierValue {
+                field_path: field_path.to_owned(),
+                field_name: field_name.to_owned(),
+            },
+        ),
     }
 }
 
@@ -2197,6 +2427,10 @@ fn is_integer_type_tree_type(type_name: &str) -> bool {
     )
 }
 
+fn is_signed_file_id_type_tree_type(type_name: &str) -> bool {
+    matches!(type_name, "SInt64" | "long long")
+}
+
 fn is_valid_dictionary_key_type_tree_type(type_name: &str) -> bool {
     type_name == "GUID"
         || matches!(type_name, "string" | "Utf8String" | "float" | "double")
@@ -2545,6 +2779,40 @@ mod tests {
             ],
             string_buffer: Vec::new(),
         }
+    }
+
+    fn scene_object_identifier_type_tree(array_element: bool) -> TypeTree {
+        let mut nodes = if array_element {
+            vec![
+                type_tree_node(0, "GameObject", "Base", 0),
+                type_tree_node(1, "vector", "m_Identifiers", 0),
+                type_tree_node(2, "Array", "Array", 0),
+                type_tree_node(3, "SInt32", "size", 0),
+                type_tree_node(3, "SceneObjectIdentifier", "data", 0),
+            ]
+        } else {
+            vec![
+                type_tree_node(0, "GameObject", "Base", 0),
+                type_tree_node(1, "SceneObjectIdentifier", "m_Identifier", 0),
+            ]
+        };
+        let field_level = if array_element { 4 } else { 2 };
+        nodes.push(type_tree_node(field_level, "SInt64", "TargetObject", 0));
+        nodes.push(type_tree_node(field_level, "SInt64", "TargetPrefab", 0));
+        TypeTree {
+            nodes,
+            string_buffer: Vec::new(),
+        }
+    }
+
+    fn scene_object_identifier_value(target_object: i64, target_prefab: i64) -> SerializedValue {
+        SerializedValue::Struct(vec![field(
+            "m_Identifier",
+            SerializedValue::Struct(vec![
+                field("TargetObject", SerializedValue::I64(target_object)),
+                field("TargetPrefab", SerializedValue::I64(target_prefab)),
+            ]),
+        )])
     }
 
     fn guid_value_struct() -> SerializedValue {
@@ -3892,6 +4160,121 @@ mod tests {
             items[0].kind,
             UnityYamlNodeKind::Scalar(UnityYamlScalar::String("73".to_owned()))
         );
+    }
+
+    #[test]
+    fn scene_object_identifier_uses_project_yaml_target_field_names() {
+        let type_tree = scene_object_identifier_type_tree(false);
+        let hints = UnityYamlObjectConversionHints::from_type_tree(
+            &type_tree,
+            version(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            hints.scene_object_identifier_schemas.get("m_Identifier"),
+            Some(&UnityYamlSceneObjectIdentifierSchema {
+                target_object_field_name: "TargetObject".to_owned(),
+                target_prefab_field_name: "TargetPrefab".to_owned(),
+            })
+        );
+
+        let document =
+            convert_with_object_hints(&scene_object_identifier_value(123, -456), &hints, |_| {
+                unreachable!("SceneObjectIdentifier contains no PPtrs")
+            })
+            .unwrap();
+        let output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[document],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        assert!(
+            output.contains("m_Identifier:\n    targetObject: 123\n    targetPrefab: -456"),
+            "{output:?}"
+        );
+        assert!(!output.contains("TargetObject"));
+        assert!(!output.contains("TargetPrefab"));
+    }
+
+    #[test]
+    fn scene_object_identifier_array_hints_match_wildcard_elements() {
+        let type_tree = scene_object_identifier_type_tree(true);
+        let hints = UnityYamlObjectConversionHints::from_type_tree(
+            &type_tree,
+            version(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        assert!(hints
+            .scene_object_identifier_schemas
+            .contains_key("m_Identifiers[*]"));
+
+        let value = SerializedValue::Struct(vec![field(
+            "m_Identifiers",
+            SerializedValue::Array(vec![SerializedValue::Struct(vec![
+                field("TargetObject", SerializedValue::I64(73)),
+                field("TargetPrefab", SerializedValue::I64(84)),
+            ])]),
+        )]);
+        let document = convert_with_object_hints(&value, &hints, |_| {
+            unreachable!("SceneObjectIdentifier contains no PPtrs")
+        })
+        .unwrap();
+        let output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[document],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        assert!(output.contains("m_Identifiers:\n  - targetObject: 73\n    targetPrefab: 84"));
+    }
+
+    #[test]
+    fn malformed_scene_object_identifier_schema_and_value_are_rejected() {
+        let malformed = TypeTree {
+            nodes: vec![
+                type_tree_node(0, "GameObject", "Base", 0),
+                type_tree_node(1, "SceneObjectIdentifier", "m_Identifier", 0),
+                type_tree_node(2, "SInt32", "TargetObject", 0),
+                type_tree_node(2, "SInt64", "TargetPrefab", 0),
+            ],
+            string_buffer: Vec::new(),
+        };
+        assert!(matches!(
+            UnityYamlObjectConversionHints::from_type_tree(
+                &malformed,
+                version(),
+                UnityYamlObjectConversionLimits::default()
+            ),
+            Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                reason: "SceneObjectIdentifier TargetObject is not a signed 64-bit field",
+                ..
+            })
+        ));
+
+        let type_tree = scene_object_identifier_type_tree(false);
+        let hints = UnityYamlObjectConversionHints::from_type_tree(
+            &type_tree,
+            version(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        let invalid_value = SerializedValue::Struct(vec![field(
+            "m_Identifier",
+            SerializedValue::Struct(vec![
+                field("TargetObject", SerializedValue::U64(123)),
+                field("TargetPrefab", SerializedValue::I64(456)),
+            ]),
+        )]);
+        assert!(matches!(
+            convert_with_object_hints(&invalid_value, &hints, |_| {
+                unreachable!("SceneObjectIdentifier contains no PPtrs")
+            }),
+            Err(UnityYamlObjectConversionError::InvalidSceneObjectIdentifierValue {
+                field_path,
+                field_name,
+            }) if field_path == "m_Identifier" && field_name == "TargetObject"
+        ));
     }
 
     #[test]

@@ -716,3 +716,11 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Synthetic tests verify sequence entries, ordinary dictionary preservation, and empty sequence output. Full workspace passed with 403 library tests, 10 CLI tests, and 0 doc tests; warnings-denied Clippy, format, baseline verifier (1,449 files unchanged), and diff checks all passed.
 - Still incomplete: no Unity-produced fixture or direct C# runtime differential; other generated type transformations and Phase 1 remain open; Phase 2 remains locked.
 - Next: inventory the remaining `Pass002_RenameSubnodes` behaviors against current TypeTree hint handling and select the next unported YAML transformation.
+
+## SceneObjectIdentifier raw YAML fallback
+
+- Current phase: Phase 1; gate not passed. This increment builds from pushed revision `d03b25fbf8a6e56263fe06efd777c05bdac0bee5`. Only `cocokoishi/RustAssetRipper`'s canonical repository is a write/push target. No other remote repository, UABEA, or user AssetBundle content was accessed.
+- Added TypeTree schema hints for signed 64-bit `TargetObject` and `TargetPrefab` fields. ProjectAsset YAML conversion emits the baseline `targetObject` and `targetPrefab` keys, including for array elements; malformed schemas and decoded values fail with context.
+- Focused tests passed: `cargo test --locked --lib scene_object_identifier -- --nocapture` (3 tests). Full workspace passed: 406 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and `git diff --check`.
+- Still incomplete: baseline-injected `TargetObjectReference` and `TargetPrefabReference` precedence depends on processing/link resolution, which is not connected to the Rust YAML path. Evidence is synthetic only; no Unity-produced fixture or C# runtime differential. Phase 1 remains open and Phase 2 remains locked.
+- Next: inventory the remaining `Pass002_RenameSubnodes` transformations against current YAML hints, then implement the next independently testable source behavior.
