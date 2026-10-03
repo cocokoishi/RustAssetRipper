@@ -2313,6 +2313,11 @@ fn baseline_type_scoped_field_aliases(type_name: &str) -> &'static [(&'static st
         &[("m_BuildTargetSettings", "m_PlatformSettings")];
     const BUILD_TARGET_SHADER_SETTINGS_ALIASES: &[(&str, &str)] =
         &[("m_ShaderSettings", "m_Settings")];
+    const BINDING_ALIASES: &[(&str, &str)] = &[("m_Set", "m_EncodedData")];
+    const CONSTANT_BUFFER_PARAMETER_ALIASES: &[(&str, &str)] =
+        &[("m_Index", "m_OffsetInConstantBuffer")];
+    const VERTEX_DATA_ALIASES: &[(&str, &str)] = &[("m_DataSize", "m_Data")];
+    const COMPUTE_SHADER_VARIANT_ALIASES: &[(&str, &str)] = &[("m_Kernels", "m_KernelParents")];
 
     match type_name {
         "AnimationClip" => ANIMATION_CLIP_ALIASES,
@@ -2332,6 +2337,12 @@ fn baseline_type_scoped_field_aliases(type_name: &str) -> &'static [(&'static st
         "GraphicsSettings" => GRAPHICS_SETTINGS_ALIASES,
         "TextureImporter" => TEXTURE_IMPORTER_ALIASES,
         "BuildTargetShaderSettings" => BUILD_TARGET_SHADER_SETTINGS_ALIASES,
+        "Binding" => BINDING_ALIASES,
+        "MatrixParameter" | "StructParameter" | "VectorParameter" => {
+            CONSTANT_BUFFER_PARAMETER_ALIASES
+        }
+        "VertexData" => VERTEX_DATA_ALIASES,
+        "ComputeShaderPlatformVariant" => COMPUTE_SHADER_VARIANT_ALIASES,
         _ => &[],
     }
 }
@@ -3936,6 +3947,100 @@ mod tests {
         assert!(!output.contains("m_BuildTargetShaderSettings:"));
         assert!(!output.contains("m_AlbedoSwatchInfos:"));
         assert!(!output.contains("m_PlatformSettings: 77"));
+    }
+
+    #[test]
+    fn buffer_vertex_compute_yaml_aliases_are_type_scoped() {
+        let type_tree = TypeTree {
+            nodes: vec![
+                type_tree_node(0, "GameObject", "Base", 0),
+                type_tree_node(1, "SInt32", "m_Index", 0),
+                type_tree_node(1, "Binding", "m_Binding", 0),
+                type_tree_node(2, "SInt32", "m_Set", 0),
+                type_tree_node(1, "MatrixParameter", "m_Matrix", 0),
+                type_tree_node(2, "SInt32", "m_Index", 0),
+                type_tree_node(1, "StructParameter", "m_Struct", 0),
+                type_tree_node(2, "SInt32", "m_Index", 0),
+                type_tree_node(1, "VectorParameter", "m_Vector", 0),
+                type_tree_node(2, "SInt32", "m_Index", 0),
+                type_tree_node(1, "VertexData", "m_Vertex", 0),
+                type_tree_node(2, "SInt32", "m_DataSize", 0),
+                type_tree_node(1, "ComputeShaderPlatformVariant", "m_Compute", 0),
+                type_tree_node(2, "SInt32", "m_Kernels", 0),
+            ],
+            string_buffer: Vec::new(),
+        };
+        let hints = UnityYamlObjectConversionHints::from_type_tree(
+            &type_tree,
+            version(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        for (path, alias) in [
+            ("m_Binding.m_Set", "m_EncodedData"),
+            ("m_Matrix.m_Index", "m_OffsetInConstantBuffer"),
+            ("m_Struct.m_Index", "m_OffsetInConstantBuffer"),
+            ("m_Vector.m_Index", "m_OffsetInConstantBuffer"),
+            ("m_Vertex.m_DataSize", "m_Data"),
+            ("m_Compute.m_Kernels", "m_KernelParents"),
+        ] {
+            assert_eq!(
+                hints.field_name_aliases.get(path).map(String::as_str),
+                Some(alias)
+            );
+        }
+
+        let value = SerializedValue::Struct(vec![
+            field("m_Index", SerializedValue::I32(99)),
+            field(
+                "m_Binding",
+                SerializedValue::Struct(vec![field("m_Set", SerializedValue::I32(1))]),
+            ),
+            field(
+                "m_Matrix",
+                SerializedValue::Struct(vec![field("m_Index", SerializedValue::I32(2))]),
+            ),
+            field(
+                "m_Struct",
+                SerializedValue::Struct(vec![field("m_Index", SerializedValue::I32(3))]),
+            ),
+            field(
+                "m_Vector",
+                SerializedValue::Struct(vec![field("m_Index", SerializedValue::I32(4))]),
+            ),
+            field(
+                "m_Vertex",
+                SerializedValue::Struct(vec![field("m_DataSize", SerializedValue::I32(5))]),
+            ),
+            field(
+                "m_Compute",
+                SerializedValue::Struct(vec![field("m_Kernels", SerializedValue::I32(6))]),
+            ),
+        ]);
+        let document = convert_with_object_hints(&value, &hints, |_| {
+            unreachable!("the generated shader settings fixture has no PPtrs")
+        })
+        .unwrap();
+        let output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[document],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        for expected in [
+            "m_Index: 99",
+            "m_EncodedData: 1",
+            "m_OffsetInConstantBuffer: 2",
+            "m_OffsetInConstantBuffer: 3",
+            "m_OffsetInConstantBuffer: 4",
+            "m_Data: 5",
+            "m_KernelParents: 6",
+        ] {
+            assert!(output.contains(expected), "missing {expected}");
+        }
+        assert!(!output.contains("m_Set:"));
+        assert!(!output.contains("m_DataSize:"));
+        assert!(!output.contains("m_Kernels:"));
+        assert!(!output.contains("m_Index: 2"));
     }
 
     #[test]
