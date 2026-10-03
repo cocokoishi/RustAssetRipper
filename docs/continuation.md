@@ -449,3 +449,10 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Verification passed: 323 library and 10 CLI tests; warnings-denied Clippy; format check; 1,449-file baseline verification; `git diff --check`.
 - Still incomplete: object records and metadata tables cannot yet be added or removed. This path does not update type/script/external/reference/dependency tables. No source-runtime differential has run; Phase 1 remains open.
 - Next: implement bounded object-record insertion using the captured metadata layout, first reusing existing serialized type entries and preserving all existing records and auxiliary metadata tables; then connect the typed GameObject component and generated-object dependency plans.
+## Object-record table layout provenance (2026-10-03)
+
+- Current phase: Phase 1; gate not passed. This increment starts from pushed revision `7735475cfe32315339a13bfbcfce302ccb86dc0e`. Only `cocokoishi/RustAssetRipper` is an authorized cloud write target; the local AssetRipper baseline remains read-only. No UABEA or user AssetBundle content was accessed.
+- Captured the object-count field, exact record interval, record identities, and payload offset/size field locations during complete-file parsing. Rewrite validation now confirms count, table bounds, and patch fields before output mutation; metadata-only parsing keeps its existing allocation profile.
+- Verification passed: 323 library and 10 CLI tests; warnings-denied Clippy; format check; 1,449-file baseline verification; diff check.
+- Still incomplete: there is no object insertion/removal, and no writer for type/script/external/reference/dependency metadata tables. Phase 1 remains open.
+- Next: use the captured insertion point to add a bounded object-record append path that can reference existing serialized types while preserving source record order and all following metadata bytes.

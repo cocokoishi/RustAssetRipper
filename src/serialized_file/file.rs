@@ -2,7 +2,9 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
 use super::header::{HeaderError, SerializedFileHeader};
-use super::metadata::{ObjectRecordLayout, SerializedFileMetadata, SerializedFileMetadataError};
+use super::metadata::{
+    ObjectRecordTableLayout, SerializedFileMetadata, SerializedFileMetadataError,
+};
 use super::object::{ObjectDecodeError, ObjectDecodeLimits, ParsedObjectPayload};
 
 mod writer;
@@ -17,7 +19,7 @@ pub use writer::{
 #[derive(Debug)]
 pub struct SerializedFile<'a> {
     input: &'a [u8],
-    object_record_layouts: Vec<ObjectRecordLayout>,
+    object_record_layout: ObjectRecordTableLayout,
     pub header: SerializedFileHeader,
     pub metadata: SerializedFileMetadata,
 }
@@ -27,12 +29,12 @@ impl<'a> SerializedFile<'a> {
     pub fn parse(input: &'a [u8]) -> Result<Self, SerializedFileError> {
         let header =
             SerializedFileHeader::parse(input).map_err(SerializedFileError::from_header)?;
-        let (metadata, object_record_layouts) =
+        let (metadata, object_record_layout) =
             SerializedFileMetadata::parse_file_with_object_layouts(input, &header)
                 .map_err(SerializedFileError::from_metadata)?;
         Ok(Self {
             input,
-            object_record_layouts,
+            object_record_layout,
             header,
             metadata,
         })
@@ -312,9 +314,22 @@ mod tests {
         assert_eq!(parsed.header.format_version, FormatVersion::Unknown10);
         assert_eq!(parsed.metadata.types.len(), 1);
         assert_eq!(parsed.metadata.objects[0].path_id, 42);
-        assert_eq!(parsed.object_record_layouts.len(), 1);
-        let record_layout = parsed.object_record_layouts[0];
+        assert_eq!(parsed.object_record_layout.records.len(), 1);
+        let table_layout = &parsed.object_record_layout;
+        let record_layout = table_layout.records[0];
         let metadata_start = parsed.metadata.prefix.metadata_offset;
+        let count_position = metadata_start + table_layout.count_field_offset;
+        let records_start = metadata_start + table_layout.records_start_offset;
+        let records_end = metadata_start + table_layout.records_end_offset;
+        assert_eq!(
+            i32::from_le_bytes(
+                input[count_position..count_position + 4]
+                    .try_into()
+                    .unwrap()
+            ),
+            1
+        );
+        assert!(records_start < records_end);
         let data_offset_position = metadata_start + record_layout.data_offset_field_offset;
         let data_size_position = metadata_start + record_layout.data_size_field_offset;
         assert_eq!(

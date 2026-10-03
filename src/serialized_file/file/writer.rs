@@ -4,7 +4,7 @@ use std::fmt::{self, Display, Formatter};
 use crate::io::binary::Endian;
 
 use super::super::format_version::FormatVersion;
-use super::super::metadata::ObjectRecordLayout;
+use super::super::metadata::{ObjectRecordLayout, ObjectRecordTableLayout};
 use super::super::object::{ObjectEncodeError, ObjectEncodeLimits, ParsedObjectPayload};
 use super::SerializedFile;
 
@@ -97,6 +97,18 @@ pub enum SerializedFileRewriteErrorKind {
         objects: usize,
         layouts: usize,
     },
+    InvalidObjectRecordTableLayout {
+        count_field_offset: usize,
+        records_start_offset: usize,
+        records_end_offset: usize,
+        metadata_size: usize,
+    },
+    ObjectRecordFieldOutsideTable {
+        field_offset: usize,
+        field_width: usize,
+        records_start_offset: usize,
+        records_end_offset: usize,
+    },
     ObjectRecordIdentityMismatch {
         record_path_id: i64,
         metadata_path_id: i64,
@@ -175,6 +187,25 @@ impl Display for SerializedFileRewriteErrorKind {
             Self::ObjectRecordCountMismatch { objects, layouts } => write!(
                 f,
                 "metadata has {objects} objects but the parsed input has {layouts} object-record layouts"
+            ),
+            Self::InvalidObjectRecordTableLayout {
+                count_field_offset,
+                records_start_offset,
+                records_end_offset,
+                metadata_size,
+            } => write!(
+                f,
+                "object count at {count_field_offset} and record range {records_start_offset}..{records_end_offset} are inconsistent with {metadata_size}-byte metadata"
+            ),
+            Self::ObjectRecordFieldOutsideTable {
+                field_offset,
+                field_width,
+                records_start_offset,
+                records_end_offset,
+            } => write!(
+                f,
+                "object-record field {field_offset}..{} is outside record range {records_start_offset}..{records_end_offset}",
+                field_offset.saturating_add(*field_width)
             ),
             Self::ObjectRecordIdentityMismatch { record_path_id, metadata_path_id } => write!(
                 f,
@@ -261,12 +292,12 @@ impl SerializedFile<'_> {
             return copy_input(self.input(), limits.max_output_file_bytes);
         }
 
-        if self.metadata.objects.len() != self.object_record_layouts.len() {
+        if self.metadata.objects.len() != self.object_record_layout.records.len() {
             return Err(SerializedFileRewriteError::new(
                 None,
                 SerializedFileRewriteErrorKind::ObjectRecordCountMismatch {
                     objects: self.metadata.objects.len(),
-                    layouts: self.object_record_layouts.len(),
+                    layouts: self.object_record_layout.records.len(),
                 },
             ));
         }
@@ -274,7 +305,7 @@ impl SerializedFile<'_> {
             .metadata
             .objects
             .iter()
-            .zip(&self.object_record_layouts)
+            .zip(&self.object_record_layout.records)
         {
             if object.path_id != layout.path_id {
                 return Err(SerializedFileRewriteError::new(
@@ -375,6 +406,13 @@ impl SerializedFile<'_> {
                     },
                 )
             })?;
+        validate_object_record_table_layout(
+            &self.object_record_layout,
+            self.metadata.objects.len(),
+            metadata_bytes,
+            version,
+            self.metadata.prefix.body_endian,
+        )?;
         let input_data_start = self.header.data_offset;
         let input_data_end = if version.metadata_at_end() {
             u64::try_from(metadata_start).map_err(|_| {
@@ -582,7 +620,7 @@ impl SerializedFile<'_> {
             &mut output,
             metadata_output_offset,
             metadata_bytes.len(),
-            &self.object_record_layouts,
+            &self.object_record_layout.records,
             &object_records,
             version,
             self.metadata.prefix.body_endian,
@@ -600,6 +638,93 @@ impl SerializedFile<'_> {
         )?;
         Ok(output)
     }
+}
+
+fn validate_object_record_table_layout(
+    layout: &ObjectRecordTableLayout,
+    object_count: usize,
+    metadata_bytes: &[u8],
+    version: FormatVersion,
+    endian: Endian,
+) -> Result<(), SerializedFileRewriteError> {
+    let table = layout;
+    let metadata_size = metadata_bytes.len();
+    let Some(count_field_end) = table.count_field_offset.checked_add(4) else {
+        return Err(invalid_object_table_layout(table, metadata_size));
+    };
+    if count_field_end > metadata_size
+        || table.records_start_offset < count_field_end
+        || table.records_end_offset < table.records_start_offset
+        || table.records_end_offset > metadata_size
+    {
+        return Err(invalid_object_table_layout(table, metadata_size));
+    }
+    let count_bytes: [u8; 4] = metadata_bytes[table.count_field_offset..count_field_end]
+        .try_into()
+        .map_err(|_| invalid_object_table_layout(table, metadata_size))?;
+    let serialized_count = match endian {
+        Endian::Little => i32::from_le_bytes(count_bytes),
+        Endian::Big => i32::from_be_bytes(count_bytes),
+    };
+    if usize::try_from(serialized_count).ok() != Some(object_count)
+        || layout.records.len() != object_count
+    {
+        return Err(SerializedFileRewriteError::new(
+            None,
+            SerializedFileRewriteErrorKind::ObjectRecordCountMismatch {
+                objects: object_count,
+                layouts: layout.records.len(),
+            },
+        ));
+    }
+
+    let offset_width = if version.has_large_file_support() {
+        8
+    } else {
+        4
+    };
+    for (object_index, record) in layout.records.iter().enumerate() {
+        for (field_offset, field_width) in [
+            (record.data_offset_field_offset, offset_width),
+            (record.data_size_field_offset, 4),
+        ] {
+            let field_end = field_offset.checked_add(field_width).ok_or_else(|| {
+                rewrite_error(
+                    Some(object_index),
+                    SerializedFileRewriteErrorKind::LengthOverflow {
+                        resource: "object record field range",
+                    },
+                )
+            })?;
+            if field_offset < table.records_start_offset || field_end > table.records_end_offset {
+                return Err(rewrite_error(
+                    Some(object_index),
+                    SerializedFileRewriteErrorKind::ObjectRecordFieldOutsideTable {
+                        field_offset,
+                        field_width,
+                        records_start_offset: table.records_start_offset,
+                        records_end_offset: table.records_end_offset,
+                    },
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn invalid_object_table_layout(
+    table: &ObjectRecordTableLayout,
+    metadata_size: usize,
+) -> SerializedFileRewriteError {
+    SerializedFileRewriteError::new(
+        None,
+        SerializedFileRewriteErrorKind::InvalidObjectRecordTableLayout {
+            count_field_offset: table.count_field_offset,
+            records_start_offset: table.records_start_offset,
+            records_end_offset: table.records_end_offset,
+            metadata_size,
+        },
+    )
 }
 
 fn patch_object_records(

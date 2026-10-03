@@ -40,15 +40,24 @@ impl SerializedFileMetadata {
     pub(super) fn parse_file_with_object_layouts(
         file_bytes: &[u8],
         header: &SerializedFileHeader,
-    ) -> Result<(Self, Vec<ObjectRecordLayout>), SerializedFileMetadataError> {
-        Self::parse_file_inner(file_bytes, header, true)
+    ) -> Result<(Self, ObjectRecordTableLayout), SerializedFileMetadataError> {
+        let (metadata, layout) = Self::parse_file_inner(file_bytes, header, true)?;
+        let layout = layout.ok_or_else(|| {
+            SerializedFileMetadataError::new(
+                metadata.prefix.metadata_offset,
+                SerializedFileMetadataErrorKind::LayoutOverflow(
+                    "missing tracked object record table layout",
+                ),
+            )
+        })?;
+        Ok((metadata, layout))
     }
 
     fn parse_file_inner(
         file_bytes: &[u8],
         header: &SerializedFileHeader,
         collect_object_record_layouts: bool,
-    ) -> Result<(Self, Vec<ObjectRecordLayout>), SerializedFileMetadataError> {
+    ) -> Result<(Self, Option<ObjectRecordTableLayout>), SerializedFileMetadataError> {
         header
             .validate_for_file_size(file_bytes.len())
             .map_err(SerializedFileMetadataError::from_header)?;
@@ -105,12 +114,13 @@ impl SerializedFileMetadata {
             None
         };
 
-        let (objects, object_record_layouts) = if collect_object_record_layouts {
-            read_array_with_sidecar(
+        let (objects, object_record_layout) = if collect_object_record_layouts {
+            let parsed = read_array_with_sidecar(
                 &mut reader,
                 "object records",
                 4,
                 "object record layouts",
+                prefix.metadata_offset,
                 |reader, index| {
                     read_object_info(
                         reader,
@@ -121,7 +131,16 @@ impl SerializedFileMetadata {
                         index,
                     )
                 },
-            )?
+            )?;
+            (
+                parsed.items,
+                Some(ObjectRecordTableLayout {
+                    count_field_offset: parsed.count_field_offset,
+                    records_start_offset: parsed.records_start_offset,
+                    records_end_offset: parsed.records_end_offset,
+                    records: parsed.sidecar,
+                }),
+            )
         } else {
             let objects = read_array(&mut reader, "object records", 4, |reader, index| {
                 read_object_info(
@@ -134,7 +153,7 @@ impl SerializedFileMetadata {
                 )
                 .map(|(object, _)| object)
             })?;
-            (objects, Vec::new())
+            (objects, None)
         };
 
         let script_types = if generation.has_script_types() {
@@ -201,7 +220,7 @@ impl SerializedFileMetadata {
                 trailing_metadata,
                 consumed_bytes,
             },
-            object_record_layouts,
+            object_record_layout,
         ))
     }
 }
@@ -213,6 +232,17 @@ pub(super) struct ObjectRecordLayout {
     pub data_offset_field_offset: usize,
     /// Byte offset relative to the beginning of this SerializedFile's metadata region.
     pub data_size_field_offset: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct ObjectRecordTableLayout {
+    /// Byte offset of the signed record count relative to the metadata region.
+    pub count_field_offset: usize,
+    /// Byte offset of the first object record relative to the metadata region.
+    pub records_start_offset: usize,
+    /// Byte offset immediately after the final object record relative to the metadata region.
+    pub records_end_offset: usize,
+    pub records: Vec<ObjectRecordLayout>,
 }
 
 /// One serialized class/type definition in the metadata table.
@@ -1208,17 +1238,38 @@ fn read_array<T>(
     Ok(items)
 }
 
+struct ArrayWithSidecar<T, U> {
+    items: Vec<T>,
+    sidecar: Vec<U>,
+    count_field_offset: usize,
+    records_start_offset: usize,
+    records_end_offset: usize,
+}
+
 fn read_array_with_sidecar<T, U>(
     reader: &mut BinaryReader<'_>,
     field: &str,
     minimum_item_size: usize,
     sidecar_field: &str,
+    metadata_start: usize,
     mut read_item: impl FnMut(
         &mut BinaryReader<'_>,
         usize,
     ) -> Result<(T, U), SerializedFileMetadataError>,
-) -> Result<(Vec<T>, Vec<U>), SerializedFileMetadataError> {
+) -> Result<ArrayWithSidecar<T, U>, SerializedFileMetadataError> {
+    let count_field_offset = reader.offset().checked_sub(metadata_start).ok_or_else(|| {
+        SerializedFileMetadataError::new(
+            reader.offset(),
+            SerializedFileMetadataErrorKind::LayoutOverflow("object count field location"),
+        )
+    })?;
     let count = read_nonnegative_count(reader, field, minimum_item_size)?;
+    let records_start_offset = reader.offset().checked_sub(metadata_start).ok_or_else(|| {
+        SerializedFileMetadataError::new(
+            reader.offset(),
+            SerializedFileMetadataErrorKind::LayoutOverflow("object record table start"),
+        )
+    })?;
     let mut items = reserve_vec(count, reader.offset(), field)?;
     let mut sidecar = reserve_vec(count, reader.offset(), sidecar_field)?;
     for index in 0..count {
@@ -1226,7 +1277,19 @@ fn read_array_with_sidecar<T, U>(
         items.push(item);
         sidecar.push(associated);
     }
-    Ok((items, sidecar))
+    let records_end_offset = reader.offset().checked_sub(metadata_start).ok_or_else(|| {
+        SerializedFileMetadataError::new(
+            reader.offset(),
+            SerializedFileMetadataErrorKind::LayoutOverflow("object record table end"),
+        )
+    })?;
+    Ok(ArrayWithSidecar {
+        items,
+        sidecar,
+        count_field_offset,
+        records_start_offset,
+        records_end_offset,
+    })
 }
 
 fn reserve_vec<T>(
