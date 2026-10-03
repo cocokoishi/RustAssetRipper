@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
-use crate::io::stream::SmartStream;
+use crate::io::stream::{MultiFileStream, SmartStream};
 
 /// Resource limits for paths and entries held by [`VirtualFileSystem`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -267,6 +267,107 @@ impl VirtualFileSystem {
             .ok_or_else(|| not_found(format!("file '{full_path}' not found")))
     }
 
+    /// Opens a direct file or joins a contiguous `.splitN` group from this virtual filesystem.
+    pub fn open_logical_file(&self, path: &str) -> io::Result<SmartStream> {
+        let normalized = normalize_path(Some(path), self.limits)?;
+        let split_base = logical_split_base(&normalized);
+        let base_path = split_base.unwrap_or(&normalized);
+        if split_base.is_none() {
+            match self.open_file(&normalized) {
+                Ok(stream) => return Ok(stream),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+
+        let split_parts = self.find_contiguous_split_parts(base_path)?;
+        if split_parts.is_empty() {
+            return Err(not_found(format!("logical file '{base_path}' not found")));
+        }
+        let mut streams = Vec::new();
+        streams.try_reserve_exact(split_parts.len()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::OutOfMemory,
+                "could not allocate logical file stream parts",
+            )
+        })?;
+        for part_path in split_parts {
+            streams.push(self.open_file(&part_path)?);
+        }
+        let multi = MultiFileStream::new_with_max_parts(streams, self.limits.max_entries)?;
+        SmartStream::from_reader(Box::new(multi))
+    }
+
+    /// Checks whether a direct file or a contiguous `.splitN` group exists.
+    pub fn logical_file_exists(&self, path: &str) -> io::Result<bool> {
+        let normalized = normalize_path(Some(path), self.limits)?;
+        let split_base = logical_split_base(&normalized);
+        let base_path = split_base.unwrap_or(&normalized);
+        if split_base.is_none() && self.file_exists(Some(&normalized))? {
+            return Ok(true);
+        }
+        match self.find_contiguous_split_parts(base_path) {
+            Ok(parts) => Ok(!parts.is_empty()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn find_contiguous_split_parts(&self, base_path: &str) -> io::Result<Vec<String>> {
+        let (directory, base_name) = base_path
+            .rsplit_once('/')
+            .map_or((None, base_path), |(directory, name)| {
+                ((!directory.is_empty()).then_some(directory), name)
+            });
+        if base_name.is_empty() {
+            return Err(invalid_path("logical file path cannot be empty"));
+        }
+        let siblings = self.enumerate_files(directory, "*", SearchOption::TopDirectoryOnly)?;
+        let split_prefix = format!("{base_name}.split");
+        let mut indexed_parts = Vec::<(usize, String)>::new();
+        for sibling in siblings {
+            let Some(file_name) = sibling.rsplit('/').next() else {
+                continue;
+            };
+            let Some(suffix) = file_name.strip_prefix(&split_prefix) else {
+                continue;
+            };
+            if suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+                continue;
+            }
+            let index = suffix.parse::<usize>().map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("split part index in '{sibling}' exceeds the address space"),
+                )
+            })?;
+            indexed_parts.try_reserve(1).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::OutOfMemory,
+                    "could not allocate logical file part index",
+                )
+            })?;
+            indexed_parts.push((index, sibling));
+        }
+        indexed_parts.sort_unstable_by_key(|(index, _)| *index);
+        for (expected, (actual, _)) in indexed_parts.iter().enumerate() {
+            if *actual != expected {
+                return Err(not_found(format!(
+                    "logical file '{base_path}' is missing split part {expected}"
+                )));
+            }
+        }
+        let mut paths = Vec::new();
+        paths.try_reserve_exact(indexed_parts.len()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::OutOfMemory,
+                "could not allocate logical file paths",
+            )
+        })?;
+        paths.extend(indexed_parts.into_iter().map(|(_, path)| path));
+        Ok(paths)
+    }
+
     /// Deletes a file if present. Existing open stream references remain usable.
     pub fn delete_file(&mut self, path: &str) -> io::Result<bool> {
         let normalized = normalize_path(Some(path), self.limits)?;
@@ -503,6 +604,18 @@ fn join_virtual_path(parent: &str, name: &str) -> String {
     }
 }
 
+fn logical_split_base(path: &str) -> Option<&str> {
+    let file_name = path.rsplit('/').next()?;
+    let (base_name, suffix) = file_name.rsplit_once(".split")?;
+    if base_name.is_empty()
+        || suffix.is_empty()
+        || !suffix.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    path.get(..path.len().checked_sub(suffix.len() + ".split".len())?)
+}
+
 fn file_extension_pattern(pattern: &str) -> io::Result<&str> {
     if pattern == "*" {
         return Ok("");
@@ -571,6 +684,53 @@ mod tests {
                 .unwrap(),
             ["/assets", "/assets/textures"]
         );
+    }
+
+    #[test]
+    fn logical_files_join_contiguous_split_parts_and_prefer_direct_files() {
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem.create_directory(Some("/data")).unwrap();
+        filesystem
+            .write_all_bytes("/data/stream.resS.split0", b"first ")
+            .unwrap();
+        filesystem
+            .write_all_bytes("/data/stream.resS.split1", b"second")
+            .unwrap();
+        filesystem
+            .write_all_bytes("/data/direct.resS", b"direct")
+            .unwrap();
+        filesystem
+            .write_all_bytes("/data/direct.resS.split0", b"split")
+            .unwrap();
+        filesystem
+            .write_all_bytes("/data/gap.resS.split0", b"first")
+            .unwrap();
+        filesystem
+            .write_all_bytes("/data/gap.resS.split2", b"third")
+            .unwrap();
+
+        let mut stream = filesystem.open_logical_file("/data/stream.resS").unwrap();
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"first second");
+        assert!(filesystem
+            .logical_file_exists("/data/stream.resS.split1")
+            .unwrap());
+
+        let mut direct = filesystem.open_logical_file("/data/direct.resS").unwrap();
+        direct.seek(SeekFrom::Start(0)).unwrap();
+        let mut direct_bytes = Vec::new();
+        direct.read_to_end(&mut direct_bytes).unwrap();
+        assert_eq!(direct_bytes, b"direct");
+        assert!(!filesystem.logical_file_exists("/data/gap.resS").unwrap());
+        let gap_error = match filesystem.open_logical_file("/data/gap.resS") {
+            Ok(_) => panic!("a gapped split group must not open"),
+            Err(error) => error,
+        };
+        assert_eq!(gap_error.kind(), std::io::ErrorKind::NotFound);
+        assert!(!filesystem
+            .logical_file_exists("/data/missing.resS")
+            .unwrap());
     }
 
     #[test]

@@ -5,6 +5,7 @@ use std::fmt::{self, Display, Formatter};
 use std::io;
 
 use crate::io::filesystem::{SearchOption, VirtualFileSystem};
+use crate::io::special_names::fix_resource_path;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PlatformKind {
@@ -36,6 +37,238 @@ pub struct PlatformStructure {
     pub name: Option<String>,
     pub game_data_path: Option<String>,
     pub data_paths: Vec<String>,
+}
+
+/// Identifies which source structure supplied a platform resource.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlatformResourceSource {
+    Platform,
+    Mixed,
+}
+
+/// A platform-resource lookup result. Missing DataPaths are retained as diagnostics.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PlatformResourceLookup {
+    Found {
+        virtual_path: String,
+        source: PlatformResourceSource,
+        data_path_index: usize,
+        unavailable_data_paths: Vec<String>,
+    },
+    Missing {
+        unavailable_data_paths: Vec<String>,
+    },
+}
+
+/// Searches platform DataPaths first, then the optional MixedStructure paths.
+pub struct PlatformResourceProvider<'a> {
+    pub platform: Option<&'a PlatformStructure>,
+    pub mixed: Option<&'a PlatformStructure>,
+}
+
+impl<'a> PlatformResourceProvider<'a> {
+    pub fn new(
+        platform: Option<&'a PlatformStructure>,
+        mixed: Option<&'a PlatformStructure>,
+    ) -> Self {
+        Self { platform, mixed }
+    }
+
+    /// Looks for `original_name` in each source DataPath in order. This applies the baseline
+    /// provider's `FixResourcePath` behavior, then returns the first direct or split-file match.
+    pub fn find_resource(
+        &self,
+        filesystem: &VirtualFileSystem,
+        original_name: &str,
+        limits: PlatformStructureLimits,
+    ) -> Result<PlatformResourceLookup, PlatformResourceLookupError> {
+        if original_name.len() > limits.max_path_bytes {
+            return Err(PlatformResourceLookupError::PathTooLong {
+                byte_count: original_name.len(),
+                limit: limits.max_path_bytes,
+            });
+        }
+        let resource_name = fix_resource_path(original_name);
+        validate_resource_name(&resource_name, limits.max_path_bytes)?;
+        let mut unavailable_data_paths = Vec::new();
+
+        for (source, structure) in [
+            (PlatformResourceSource::Platform, self.platform),
+            (PlatformResourceSource::Mixed, self.mixed),
+        ] {
+            let Some(structure) = structure else {
+                continue;
+            };
+            if structure.data_paths.len() > limits.max_selected_paths {
+                return Err(PlatformResourceLookupError::DataPathCountLimitExceeded {
+                    count: structure.data_paths.len(),
+                    limit: limits.max_selected_paths,
+                });
+            }
+            for (data_path_index, data_path) in structure.data_paths.iter().enumerate() {
+                let root = normalize_resource_root(data_path, limits.max_path_bytes)?;
+                let candidate_path =
+                    join_resource_path(&root, &resource_name, limits.max_path_bytes)?;
+                let root_exists = filesystem.directory_exists(Some(&root)).map_err(|source| {
+                    PlatformResourceLookupError::FileSystem {
+                        virtual_path: root.clone(),
+                        source,
+                    }
+                })?;
+                if !root_exists {
+                    push_unavailable_data_path(
+                        &mut unavailable_data_paths,
+                        data_path,
+                        limits.max_selected_paths,
+                    )?;
+                    continue;
+                }
+                let resource_exists =
+                    filesystem
+                        .logical_file_exists(&candidate_path)
+                        .map_err(|source| PlatformResourceLookupError::FileSystem {
+                            virtual_path: candidate_path.clone(),
+                            source,
+                        })?;
+                if resource_exists {
+                    return Ok(PlatformResourceLookup::Found {
+                        virtual_path: candidate_path,
+                        source,
+                        data_path_index,
+                        unavailable_data_paths,
+                    });
+                }
+            }
+        }
+
+        Ok(PlatformResourceLookup::Missing {
+            unavailable_data_paths,
+        })
+    }
+}
+
+fn validate_resource_name(
+    name: &str,
+    maximum_bytes: usize,
+) -> Result<(), PlatformResourceLookupError> {
+    if name.is_empty() || name.len() > maximum_bytes {
+        return Err(PlatformResourceLookupError::InvalidResourceName {
+            name: name.to_owned(),
+        });
+    }
+    if name.starts_with('/')
+        || name.starts_with('\\')
+        || name
+            .split(['/', '\\'])
+            .any(|component| matches!(component, "." | ".."))
+    {
+        return Err(PlatformResourceLookupError::InvalidResourceName {
+            name: name.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn normalize_resource_root(
+    root: &str,
+    maximum_bytes: usize,
+) -> Result<String, PlatformResourceLookupError> {
+    if root.len() > maximum_bytes {
+        return Err(PlatformResourceLookupError::PathTooLong {
+            byte_count: root.len(),
+            limit: maximum_bytes,
+        });
+    }
+    let requested_bytes = root
+        .len()
+        .checked_add(1)
+        .ok_or(PlatformResourceLookupError::PathSizeOverflow)?;
+    let mut normalized = String::new();
+    normalized.try_reserve_exact(requested_bytes).map_err(|_| {
+        PlatformResourceLookupError::AllocationFailed {
+            requested: requested_bytes,
+        }
+    })?;
+    normalized.push('/');
+    let mut is_first = true;
+    for component in root
+        .split(['/', '\\'])
+        .filter(|component| !component.is_empty())
+    {
+        if matches!(component, "." | "..") {
+            return Err(PlatformResourceLookupError::InvalidDataPath {
+                data_path: root.to_owned(),
+            });
+        }
+        if !is_first {
+            normalized.push('/');
+        }
+        normalized.push_str(component);
+        is_first = false;
+    }
+    Ok(normalized)
+}
+
+fn join_resource_path(
+    root: &str,
+    resource_name: &str,
+    maximum_bytes: usize,
+) -> Result<String, PlatformResourceLookupError> {
+    let separator_bytes = usize::from(root != "/");
+    let path_bytes = root
+        .len()
+        .checked_add(separator_bytes)
+        .and_then(|bytes| bytes.checked_add(resource_name.len()))
+        .ok_or(PlatformResourceLookupError::PathSizeOverflow)?;
+    if path_bytes > maximum_bytes {
+        return Err(PlatformResourceLookupError::PathTooLong {
+            byte_count: path_bytes,
+            limit: maximum_bytes,
+        });
+    }
+    let mut path = String::new();
+    path.try_reserve_exact(path_bytes).map_err(|_| {
+        PlatformResourceLookupError::AllocationFailed {
+            requested: path_bytes,
+        }
+    })?;
+    if root == "/" {
+        path.push('/');
+    } else {
+        path.push_str(root.trim_end_matches('/'));
+        path.push('/');
+    }
+    path.push_str(resource_name);
+    Ok(path)
+}
+
+fn push_unavailable_data_path(
+    output: &mut Vec<String>,
+    data_path: &str,
+    maximum_paths: usize,
+) -> Result<(), PlatformResourceLookupError> {
+    if output.len() >= maximum_paths {
+        return Err(
+            PlatformResourceLookupError::UnavailableDataPathCountLimitExceeded {
+                count: output.len().saturating_add(1),
+                limit: maximum_paths,
+            },
+        );
+    }
+    output
+        .try_reserve(1)
+        .map_err(|_| PlatformResourceLookupError::AllocationFailed {
+            requested: output.len().saturating_add(1),
+        })?;
+    let mut path = String::new();
+    path.try_reserve_exact(data_path.len()).map_err(|_| {
+        PlatformResourceLookupError::AllocationFailed {
+            requested: data_path.len(),
+        }
+    })?;
+    path.push_str(data_path);
+    output.push(path);
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -762,6 +995,88 @@ fn file_stem(filename: &str) -> &str {
 }
 
 #[derive(Debug)]
+pub enum PlatformResourceLookupError {
+    InvalidResourceName {
+        name: String,
+    },
+    InvalidDataPath {
+        data_path: String,
+    },
+    DataPathCountLimitExceeded {
+        count: usize,
+        limit: usize,
+    },
+    UnavailableDataPathCountLimitExceeded {
+        count: usize,
+        limit: usize,
+    },
+    PathTooLong {
+        byte_count: usize,
+        limit: usize,
+    },
+    PathSizeOverflow,
+    AllocationFailed {
+        requested: usize,
+    },
+    FileSystem {
+        virtual_path: String,
+        source: io::Error,
+    },
+}
+
+impl Display for PlatformResourceLookupError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidResourceName { name } => {
+                write!(
+                    f,
+                    "resource name '{name}' is empty, rooted, or traverses a parent path"
+                )
+            }
+            Self::InvalidDataPath { data_path } => {
+                write!(
+                    f,
+                    "platform DataPath '{data_path}' contains a parent path component"
+                )
+            }
+            Self::DataPathCountLimitExceeded { count, limit } => write!(
+                f,
+                "platform DataPath count {count} exceeds resource lookup limit {limit}"
+            ),
+            Self::UnavailableDataPathCountLimitExceeded { count, limit } => write!(
+                f,
+                "unavailable DataPath count {count} exceeds diagnostic limit {limit}"
+            ),
+            Self::PathTooLong { byte_count, limit } => write!(
+                f,
+                "platform resource path has {byte_count} bytes, exceeding limit {limit}"
+            ),
+            Self::PathSizeOverflow => f.write_str("platform resource path size overflows"),
+            Self::AllocationFailed { requested } => write!(
+                f,
+                "could not allocate metadata for a {requested}-byte resource lookup"
+            ),
+            Self::FileSystem {
+                virtual_path,
+                source,
+            } => write!(
+                f,
+                "could not inspect resource path '{virtual_path}': {source}"
+            ),
+        }
+    }
+}
+
+impl Error for PlatformResourceLookupError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::FileSystem { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct PlatformStructureError {
     pub virtual_path: Option<String>,
     pub kind: PlatformStructureErrorKind,
@@ -833,7 +1148,8 @@ impl Error for PlatformStructureError {
 mod tests {
     use super::{
         detect_desktop_platform, detect_platform_structure, DesktopPlatform, PlatformKind,
-        PlatformStructureErrorKind, PlatformStructureLimits,
+        PlatformResourceLookup, PlatformResourceProvider, PlatformResourceSource,
+        PlatformStructure, PlatformStructureErrorKind, PlatformStructureLimits,
     };
     use crate::io::filesystem::VirtualFileSystem;
 
@@ -848,6 +1164,94 @@ mod tests {
 
     fn insert_directory(filesystem: &mut VirtualFileSystem, path: &str) {
         filesystem.create_directory(Some(path)).unwrap();
+    }
+
+    fn resource_structure(paths: &[&str]) -> PlatformStructure {
+        PlatformStructure {
+            platform: PlatformKind::Windows,
+            selected_path: "/game".to_owned(),
+            consumed_paths: vec!["/game".to_owned()],
+            root_path: "/game".to_owned(),
+            name: Some("Game".to_owned()),
+            game_data_path: None,
+            data_paths: paths.iter().map(|path| (*path).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn external_resource_lookup_uses_ordered_platform_then_mixed_paths_and_split_files() {
+        let mut filesystem = VirtualFileSystem::new();
+        insert_file(&mut filesystem, "/platform/second/tex.resS");
+        insert_file(&mut filesystem, "/platform/second/same.resS");
+        insert_file(&mut filesystem, "/mixed/split.resS.split0");
+        insert_file(&mut filesystem, "/mixed/split.resS.split1");
+        insert_file(&mut filesystem, "/mixed/same.resS");
+
+        let platform = resource_structure(&["/platform/missing", "/platform/second"]);
+        let mixed = resource_structure(&["/mixed"]);
+        let provider = PlatformResourceProvider::new(Some(&platform), Some(&mixed));
+        assert_eq!(
+            provider
+                .find_resource(
+                    &filesystem,
+                    "archive:/container/tex.resS",
+                    PlatformStructureLimits::default(),
+                )
+                .unwrap(),
+            PlatformResourceLookup::Found {
+                virtual_path: "/platform/second/tex.resS".to_owned(),
+                source: PlatformResourceSource::Platform,
+                data_path_index: 1,
+                unavailable_data_paths: vec!["/platform/missing".to_owned()],
+            }
+        );
+        assert_eq!(
+            provider
+                .find_resource(&filesystem, "same.resS", PlatformStructureLimits::default(),)
+                .unwrap(),
+            PlatformResourceLookup::Found {
+                virtual_path: "/platform/second/same.resS".to_owned(),
+                source: PlatformResourceSource::Platform,
+                data_path_index: 1,
+                unavailable_data_paths: vec!["/platform/missing".to_owned()],
+            }
+        );
+        assert_eq!(
+            provider
+                .find_resource(
+                    &filesystem,
+                    "split.resS",
+                    PlatformStructureLimits::default(),
+                )
+                .unwrap(),
+            PlatformResourceLookup::Found {
+                virtual_path: "/mixed/split.resS".to_owned(),
+                source: PlatformResourceSource::Mixed,
+                data_path_index: 0,
+                unavailable_data_paths: vec!["/platform/missing".to_owned()],
+            }
+        );
+    }
+
+    #[test]
+    fn external_resource_lookup_keeps_not_found_and_unavailable_paths_distinct() {
+        let mut filesystem = VirtualFileSystem::new();
+        insert_directory(&mut filesystem, "/game/data");
+        let platform = resource_structure(&["/missing", "/game/data"]);
+        let provider = PlatformResourceProvider::new(Some(&platform), None);
+
+        assert_eq!(
+            provider
+                .find_resource(
+                    &filesystem,
+                    "absent.resS",
+                    PlatformStructureLimits::default(),
+                )
+                .unwrap(),
+            PlatformResourceLookup::Missing {
+                unavailable_data_paths: vec!["/missing".to_owned()],
+            }
+        );
     }
 
     #[test]

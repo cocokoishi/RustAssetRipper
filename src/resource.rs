@@ -285,7 +285,7 @@ fn open_resource_stream(
     filesystem: &VirtualFileSystem,
     path: &str,
 ) -> Result<SmartStream, StreamedResourceError> {
-    filesystem.open_file(path).map_err(|error| {
+    filesystem.open_logical_file(path).map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
             StreamedResourceError::ResourceNotFound {
                 path: path.to_owned(),
@@ -345,6 +345,33 @@ mod tests {
         assert_eq!(source_stream.stream_position().unwrap(), 7);
         assert!(
             check_streamed_resource_integrity(&filesystem, "/bundle/shared.resS", 3, 4).unwrap()
+        );
+    }
+
+    #[test]
+    fn reads_streamed_resources_from_contiguous_split_files() {
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem.create_directory(Some("/bundle")).unwrap();
+        filesystem
+            .write_all_bytes("/bundle/chunk.resS.split0", b"012")
+            .unwrap();
+        filesystem
+            .write_all_bytes("/bundle/chunk.resS.split1", b"345")
+            .unwrap();
+
+        assert_eq!(
+            read_streamed_resource_bytes(
+                &filesystem,
+                "/bundle/chunk.resS",
+                2,
+                3,
+                StreamedResourceLimits::default(),
+            )
+            .unwrap(),
+            Some(b"234".to_vec())
+        );
+        assert!(
+            check_streamed_resource_integrity(&filesystem, "/bundle/chunk.resS", 2, 3).unwrap()
         );
     }
 
