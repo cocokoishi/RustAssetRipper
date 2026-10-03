@@ -7,11 +7,17 @@ use std::str;
 
 use crate::io::filesystem::VirtualFileSystem;
 use crate::io::platform_structure::PlatformResourceProvider;
+use crate::processing::prefab_processing::{
+    WorkspaceGeneratedConstructorPointer, WorkspaceGeneratedPointerField,
+    WorkspaceGeneratedTransformPayload,
+};
 use crate::processing::scene_naming::SceneUnityVersion;
 use crate::resource::{
     resolve_and_read_streamed_resource_info, RootResourceFileCatalog, StreamedResourceContentError,
     StreamedResourceContentLimits, StreamedResourceContentResolution,
 };
+use crate::serialized_file::metadata::SerializedFileMetadata;
+use crate::serialized_file::object::ObjectEncodeLimits;
 use crate::serialized_file::object_workspace::WorkspaceObject;
 use crate::serialized_file::reference_graph::{MultiFilePPtrResolution, MultiFileReferenceGraph};
 use crate::serialized_file::workspace::SerializedFileWorkspace;
@@ -912,6 +918,10 @@ pub enum UnityYamlWorkspaceExportError {
     ProcessedObjectIdentity {
         source: ExportAssetIdentity,
     },
+    GeneratedTransformInvariant {
+        source: ExportAssetIdentity,
+        message: String,
+    },
     ImageTextureSkippedWithoutContent {
         source: ExportAssetIdentity,
     },
@@ -1065,6 +1075,10 @@ impl Display for UnityYamlWorkspaceExportError {
             Self::ProcessedObjectIdentity { source } => {
                 write!(f, "workspace YAML source is not a SerializedFile object: {source:?}")
             }
+            Self::GeneratedTransformInvariant { source, message } => write!(
+                f,
+                "generated Transform YAML export failed for {source:?}: {message}"
+            ),
             Self::ImageTextureSkippedWithoutContent { source } => write!(
                 f,
                 "baseline YAML export skips image texture {source:?} because it has no inline or streamed data"
@@ -1303,6 +1317,200 @@ impl Error for UnityYamlWorkspaceExportError {
             _ => None,
         }
     }
+}
+
+/// Convert a materialized PrefabProcessor Transform into a Scene YAML document.
+///
+/// The processed collection's constructor PPtr is resolved through its planned dependency
+/// FileID and then the project export pointer map. Only the planned non-null `m_GameObject`
+/// pointer is accepted; default null PPtrs remain null and any other non-null pointer fails.
+#[allow(clippy::too_many_arguments)]
+pub fn generated_transform_payload_to_unity_yaml_document(
+    payload: &WorkspaceGeneratedTransformPayload,
+    metadata: &SerializedFileMetadata,
+    source: ExportAssetIdentity,
+    file_id: i64,
+    constructor_pointer: WorkspaceGeneratedConstructorPointer,
+    pointer_map: &ProjectExportPointerMap,
+    current_collection_index: usize,
+    missing_reference_guid: Option<[u8; 16]>,
+    limits: UnityYamlObjectConversionLimits,
+) -> Result<UnityYamlDocument, UnityYamlWorkspaceExportError> {
+    let invariant_error = |message: String| {
+        UnityYamlWorkspaceExportError::GeneratedTransformInvariant { source, message }
+    };
+    if payload.asset.class_id != 4
+        || source.class_id != 4
+        || source.collection
+            != (ExportAssetCollectionIdentity::ProcessedCollection {
+                collection_index: payload.asset.collection_index,
+            })
+        || source.path_id != payload.asset.path_id
+        || constructor_pointer.source_asset != payload.asset
+        || constructor_pointer.field != WorkspaceGeneratedPointerField::TransformGameObject
+        || constructor_pointer.file_id <= 0
+        || constructor_pointer.path_id != constructor_pointer.target.path_id
+        || constructor_pointer.target.class_id != Some(1)
+    {
+        return Err(invariant_error(
+            "export identity or constructor PPtr does not match the planned Transform".to_owned(),
+        ));
+    }
+
+    let serialized_type = metadata.types.get(payload.type_index).ok_or_else(|| {
+        invariant_error(format!(
+            "Transform type index {} is outside the {}-entry type table",
+            payload.type_index,
+            metadata.types.len()
+        ))
+    })?;
+    if serialized_type.raw_type_id != 4 {
+        return Err(invariant_error(format!(
+            "serialized type {} has class ID {}, expected Transform class ID 4",
+            payload.type_index, serialized_type.raw_type_id
+        )));
+    }
+    let type_tree = serialized_type.type_tree.as_ref().ok_or_else(|| {
+        invariant_error(format!(
+            "Transform type {} has no TypeTree",
+            payload.type_index
+        ))
+    })?;
+    let type_root = type_tree.nodes.first().ok_or_else(|| {
+        invariant_error(format!(
+            "Transform type {} has an empty TypeTree",
+            payload.type_index
+        ))
+    })?;
+    let class_name = type_root.type_name.as_deref().ok_or_else(|| {
+        invariant_error("Transform TypeTree root has no resolved class name".to_owned())
+    })?;
+    if class_name != "Transform" {
+        return Err(invariant_error(format!(
+            "class-ID-4 TypeTree root is named {class_name:?}, expected \"Transform\""
+        )));
+    }
+    let unity_version_text = metadata.prefix.unity_version_text.as_deref();
+    let unity_version = unity_version_text
+        .and_then(SceneUnityVersion::parse)
+        .ok_or_else(|| {
+            invariant_error(format!(
+                "Transform type has no parseable Unity version: {unity_version_text:?}"
+            ))
+        })?;
+
+    let game_object_pointer = payload
+        .root
+        .unique_field_in_base_chain("m_GameObject")
+        .map_err(|error| invariant_error(error.to_string()))?
+        .ok_or_else(|| invariant_error("Transform has no m_GameObject field".to_owned()))?;
+    if game_object_pointer.pptr()
+        != Some((constructor_pointer.file_id, constructor_pointer.path_id))
+    {
+        return Err(invariant_error(
+            "Transform m_GameObject value differs from the planned constructor PPtr".to_owned(),
+        ));
+    }
+
+    let encoded = metadata
+        .encode_object_payload_for_type(
+            metadata.objects.len(),
+            payload.type_index,
+            &payload.root,
+            &[],
+            ObjectEncodeLimits::default(),
+        )
+        .map_err(|error| invariant_error(error.to_string()))?;
+    if encoded != payload.bytes {
+        return Err(invariant_error(
+            "materialized Transform bytes do not match its typed value".to_owned(),
+        ));
+    }
+
+    let hints = UnityYamlObjectConversionHints::from_type_tree(type_tree, unity_version, limits)
+        .map_err(UnityYamlWorkspaceExportError::Conversion)?;
+    let target_asset = ExportAssetIdentity {
+        collection: ExportAssetCollectionIdentity::SerializedFile {
+            file_index: constructor_pointer.target.file_index,
+        },
+        object_index: constructor_pointer.target.object_index,
+        path_id: constructor_pointer.target.path_id,
+        class_id: 1,
+    };
+    let mut found_game_object_pointer = false;
+    let mut pointer_error = None;
+    let document = serialized_object_value_to_unity_yaml_document(
+        source,
+        class_name,
+        type_root.version,
+        file_id,
+        false,
+        &payload.root,
+        &hints,
+        UnityYamlObjectFieldMode::ProjectAsset,
+        unity_version,
+        missing_reference_guid,
+        limits,
+        |request: UnityYamlPPtrRequest<'_>| {
+            if request.source != source {
+                pointer_error = Some(invariant_error(
+                    "YAML walker changed the generated Transform identity".to_owned(),
+                ));
+                return ProjectPointerResolution::Null;
+            }
+            if request.file_id == 0 && request.path_id == 0 {
+                return match pointer_map
+                    .resolve(ProjectPointerRequest::Null, current_collection_index)
+                {
+                    Ok(resolution) => resolution,
+                    Err(error) => {
+                        pointer_error = Some(UnityYamlWorkspaceExportError::PointerMap(error));
+                        ProjectPointerResolution::Null
+                    }
+                };
+            }
+            let field_name = request.field_path.rsplit('.').next().unwrap_or_default();
+            if field_name != "m_GameObject"
+                || request.file_id != constructor_pointer.file_id
+                || request.path_id != constructor_pointer.path_id
+                || found_game_object_pointer
+            {
+                pointer_error = Some(invariant_error(format!(
+                    "unexpected non-null Transform PPtr at {:?}: FileID {} PathID {}",
+                    request.field_path, request.file_id, request.path_id
+                )));
+                return ProjectPointerResolution::Null;
+            }
+            found_game_object_pointer = true;
+            match pointer_map.resolve(
+                ProjectPointerRequest::ResolvedAsset(target_asset),
+                current_collection_index,
+            ) {
+                Ok(ProjectPointerResolution::Mapped(pointer)) => {
+                    ProjectPointerResolution::Mapped(pointer)
+                }
+                Ok(_) => {
+                    pointer_error = Some(invariant_error(
+                        "planned GameObject has no exported project pointer".to_owned(),
+                    ));
+                    ProjectPointerResolution::Null
+                }
+                Err(error) => {
+                    pointer_error = Some(UnityYamlWorkspaceExportError::PointerMap(error));
+                    ProjectPointerResolution::Null
+                }
+            }
+        },
+    );
+    if let Some(error) = pointer_error {
+        return Err(error);
+    }
+    if !found_game_object_pointer {
+        return Err(invariant_error(
+            "YAML walker did not encounter the planned m_GameObject PPtr".to_owned(),
+        ));
+    }
+    document.map_err(UnityYamlWorkspaceExportError::Conversion)
 }
 
 #[cfg(test)]
