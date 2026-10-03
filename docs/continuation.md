@@ -888,7 +888,7 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 
 ## Explicit GameBundle root ResourceFiles
 
-- Current phase: Phase 1; gate not passed. This work builds on local commit `41ff640146ae6c3709aeb9c56629a305b9cf6b74`; remote `origin/main` was read-only verified at `d21a9164701dcc1e921f690c4e40926e8d3771f5`. The validated root-input increment remains local until safe push authentication is available.
+- Current phase: Phase 1; gate not passed. Root-input work is committed locally as `a7c36b501bc54d410f8709ec2ca9785c2732c680`, based on `41ff640146ae6c3709aeb9c56629a305b9cf6b74`. Remote `origin/main` was read-only verified at `d21a9164701dcc1e921f690c4e40926e8d3771f5`; two local commits are awaiting safe push authentication.
 - Added a bounded, ordered catalog that accepts only explicitly selected inputs already dispatched as Resource files and validates their VFS paths. The catalog remains distinct from Platform inventory's DataPath candidates. Root-aware lookup checks explicit GameBundle resources before root sibling Bundles and the Platform/Mixed provider.
 - Focused tests and full workspace passed: 439 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and `git diff --check`. No Unity-produced fixture or direct C# runtime differential was run.
 - Source audit: platform collection does not add loose DataPath resources to `GameBundle.Resources`; it searches those lazily through `IResourceProvider`. Explicit top-level paths are the separate root-resource case. The new catalog is not yet wired to a CLI/UI file-import workflow.
