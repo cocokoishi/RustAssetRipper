@@ -245,12 +245,8 @@ pub fn prepare_streamed_yaml_asset(
         }
         StreamedYamlAssetKind::ImageTexture => (
             None,
-            unique_field_name(
-                root,
-                &["m_ImageData", "m_ImageData_C28", "m_ImageData_C189"],
-                "image-texture byte-data",
-            )?
-            .ok_or(StreamedYamlAssetError::InlineFieldMissing { asset_kind })?,
+            unique_field_name(root, &["m_ImageData_C189"], "image-texture byte-data")?
+                .ok_or(StreamedYamlAssetError::InlineFieldMissing { asset_kind })?,
         ),
     };
     let inline_value = match inline_parent {
@@ -386,14 +382,11 @@ pub fn prepare_streamed_yaml_asset(
 fn image_texture_inline_data_is_empty(
     root: &SerializedValue,
 ) -> Result<bool, StreamedYamlAssetError> {
-    let field = unique_field_name(
-        root,
-        &["m_ImageData", "m_ImageData_C28", "m_ImageData_C189"],
-        "image-texture byte-data",
-    )?
-    .ok_or(StreamedYamlAssetError::InlineFieldMissing {
-        asset_kind: StreamedYamlAssetKind::ImageTexture,
-    })?;
+    let field = unique_field_name(root, &["m_ImageData_C189"], "image-texture byte-data")?.ok_or(
+        StreamedYamlAssetError::InlineFieldMissing {
+            asset_kind: StreamedYamlAssetKind::ImageTexture,
+        },
+    )?;
     let value = root
         .unique_field_in_base_chain(field)
         .map_err(|source| StreamedYamlAssetError::FieldLookup { field, source })?
@@ -423,9 +416,7 @@ fn image_texture_inline_data_is_empty(
 fn stream_field_names(asset_kind: StreamedYamlAssetKind) -> &'static [&'static str] {
     match asset_kind {
         StreamedYamlAssetKind::Mesh => &["m_StreamData"],
-        StreamedYamlAssetKind::ImageTexture => {
-            &["m_StreamData_C189", "m_StreamData_C28", "m_StreamData"]
-        }
+        StreamedYamlAssetKind::ImageTexture => &["m_StreamData_C189"],
     }
 }
 
@@ -579,8 +570,8 @@ fn serialized_value_kind(value: &SerializedValue) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        prepare_streamed_yaml_asset, StreamedYamlAssetError, StreamedYamlAssetKind,
-        StreamedYamlAssetLimits, StreamedYamlAssetPreparation,
+        has_streamed_yaml_asset_field, prepare_streamed_yaml_asset, StreamedYamlAssetError,
+        StreamedYamlAssetKind, StreamedYamlAssetLimits, StreamedYamlAssetPreparation,
     };
     use crate::resource::extract_streamed_resource_info;
     use crate::serialized_file::object::{SerializedFieldValue, SerializedValue};
@@ -618,6 +609,113 @@ mod tests {
             field("m_StreamData_C189", stream("texture.resS", offset, 3)),
             field("m_ImageData_C189", inline),
         ])
+    }
+
+    #[test]
+    fn image_texture_class_189_route_ignores_texture2d_and_unsuffixed_fields() {
+        let mut root =
+            texture_payload(SerializedValue::Bytes(Vec::new()), SerializedValue::U64(11));
+        let SerializedValue::Struct(fields) = &mut root else {
+            unreachable!();
+        };
+        fields.extend([
+            field(
+                "m_StreamData_C28",
+                stream("texture2d.resS", SerializedValue::U64(31), 4),
+            ),
+            field(
+                "m_ImageData_C28",
+                SerializedValue::Bytes(b"texture2d".to_vec()),
+            ),
+            field(
+                "m_StreamData",
+                stream("legacy.resS", SerializedValue::U32(47), 5),
+            ),
+            field(
+                "m_ImageData",
+                SerializedValue::Bytes(b"unsuffixed".to_vec()),
+            ),
+        ]);
+
+        assert!(has_streamed_yaml_asset_field(&root, StreamedYamlAssetKind::ImageTexture).unwrap());
+        assert_eq!(
+            prepare_streamed_yaml_asset(
+                &mut root,
+                StreamedYamlAssetKind::ImageTexture,
+                Some(b"abc"),
+                StreamedYamlAssetLimits::default(),
+            )
+            .unwrap(),
+            StreamedYamlAssetPreparation::Materialized {
+                resource: crate::resource::StreamedResourceInfo {
+                    path: "texture.resS".to_owned(),
+                    offset: 11,
+                    size: 3,
+                },
+                byte_count: 3,
+            }
+        );
+        assert_eq!(
+            root.unique_field_in_base_chain("m_ImageData_C189")
+                .unwrap()
+                .unwrap(),
+            &SerializedValue::Bytes(b"abc".to_vec())
+        );
+        assert_eq!(
+            root.unique_field_in_base_chain("m_ImageData_C28")
+                .unwrap()
+                .unwrap(),
+            &SerializedValue::Bytes(b"texture2d".to_vec())
+        );
+        assert_eq!(
+            root.unique_field_in_base_chain("m_ImageData")
+                .unwrap()
+                .unwrap(),
+            &SerializedValue::Bytes(b"unsuffixed".to_vec())
+        );
+        assert_eq!(
+            streamed_info(&root, "m_StreamData_C28"),
+            crate::resource::StreamedResourceInfo {
+                path: "texture2d.resS".to_owned(),
+                offset: 31,
+                size: 4,
+            }
+        );
+        assert_eq!(
+            streamed_info(&root, "m_StreamData"),
+            crate::resource::StreamedResourceInfo {
+                path: "legacy.resS".to_owned(),
+                offset: 47,
+                size: 5,
+            }
+        );
+    }
+
+    #[test]
+    fn image_texture_route_does_not_treat_texture2d_fields_as_class_189_fields() {
+        let source = SerializedValue::Struct(vec![
+            field(
+                "m_StreamData_C28",
+                stream("texture2d.resS", SerializedValue::U64(31), 4),
+            ),
+            field("m_ImageData_C28", SerializedValue::Bytes(Vec::new())),
+        ]);
+        let mut staged = source.clone();
+
+        assert!(
+            !has_streamed_yaml_asset_field(&source, StreamedYamlAssetKind::ImageTexture).unwrap()
+        );
+        assert_eq!(
+            prepare_streamed_yaml_asset(
+                &mut staged,
+                StreamedYamlAssetKind::ImageTexture,
+                Some(b"data"),
+                StreamedYamlAssetLimits::default(),
+            )
+            .unwrap(),
+            StreamedYamlAssetPreparation::NoStreamField
+        );
+        assert_eq!(staged, source);
     }
 
     fn streamed_info(
