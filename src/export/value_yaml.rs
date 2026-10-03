@@ -12,8 +12,9 @@ use crate::serialized_file::object::{SerializedFieldValue, SerializedValue};
 use super::pointer_map::ProjectPointerResolution;
 use super::scene_collection::ExportAssetIdentity;
 use super::unity_yaml::{
-    project_pointer_to_unity_yaml, UnityYamlDocument, UnityYamlMappingStyle, UnityYamlNode,
-    UnityYamlNodeBuildError, UnityYamlScalar, UnityYamlSequenceStyle, UnityYamlWriteError,
+    format_unity_guid_words, project_pointer_to_unity_yaml, UnityYamlDocument,
+    UnityYamlMappingStyle, UnityYamlNode, UnityYamlNodeBuildError, UnityYamlScalar,
+    UnityYamlSequenceStyle, UnityYamlWriteError,
 };
 
 const TRANSFER_USING_FLOW_MAPPING_STYLE: u32 = 0x0020_0000;
@@ -38,6 +39,7 @@ pub struct UnityYamlObjectConversionHints {
     /// Paths may contain [*] where a TypeTree struct appears as an array element.
     pub flow_mapped_struct_paths: HashSet<String>,
     pub hash128_schemas: HashMap<String, UnityYamlHash128Schema>,
+    pub guid_schemas: HashMap<String, UnityYamlGuidSchema>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -45,6 +47,12 @@ pub struct UnityYamlHash128Schema {
     pub serialized_version: i32,
     /// TypeTree byte fields in their serialized order.
     pub byte_field_names: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UnityYamlGuidSchema {
+    /// Four TypeTree words in UnityGuid constructor order.
+    pub word_field_names: [String; 4],
 }
 
 impl UnityYamlObjectConversionHints {
@@ -135,6 +143,16 @@ pub enum UnityYamlObjectConversionError {
         field_name: String,
         field_index: usize,
     },
+    GuidFieldCount {
+        field_path: String,
+        expected: usize,
+        actual: usize,
+    },
+    InvalidGuidWord {
+        field_path: String,
+        field_name: String,
+        word_index: usize,
+    },
     HexScalarLimitExceeded {
         requested: usize,
         limit: usize,
@@ -208,6 +226,22 @@ impl Display for UnityYamlObjectConversionError {
             } => write!(
                 f,
                 "Hash128 byte {field_index} ({field_name:?}) at {field_path:?} is missing, duplicated, or not an unsigned byte"
+            ),
+            Self::GuidFieldCount {
+                field_path,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "GUID at {field_path:?} has {actual} fields; expected {expected}"
+            ),
+            Self::InvalidGuidWord {
+                field_path,
+                field_name,
+                word_index,
+            } => write!(
+                f,
+                "GUID word {word_index} ({field_name:?}) at {field_path:?} is missing, duplicated, or not an unsigned 32-bit value"
             ),
             Self::HexScalarLimitExceeded {
                 requested,
@@ -494,6 +528,63 @@ impl<'a> UnityYamlTypeTreeLayout<'a> {
         })
     }
 
+    fn guid_schema(
+        &self,
+        node_index: usize,
+    ) -> Result<UnityYamlGuidSchema, UnityYamlObjectConversionError> {
+        const WORD_NAMES: [&str; 4] = ["m_Data_0_", "m_Data_1_", "m_Data_2_", "m_Data_3_"];
+        let children = self.child_indices(node_index)?;
+        if children.len() != WORD_NAMES.len() {
+            return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                node_index,
+                reason: "GUID does not contain exactly four data words",
+            });
+        }
+
+        let mut word_field_names = Vec::new();
+        word_field_names
+            .try_reserve_exact(WORD_NAMES.len())
+            .map_err(|_| UnityYamlObjectConversionError::AllocationFailed {
+                resource: "GUID TypeTree field names",
+                requested: WORD_NAMES.len(),
+            })?;
+        for expected_name in &WORD_NAMES {
+            let mut matching_child = None;
+            for &child_index in &children {
+                if self.node(child_index)?.name.as_deref() == Some(*expected_name) {
+                    if matching_child.is_some() {
+                        return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                            node_index: child_index,
+                            reason: "GUID word field name is duplicated",
+                        });
+                    }
+                    matching_child = Some(child_index);
+                }
+            }
+            let child_index =
+                matching_child.ok_or(UnityYamlObjectConversionError::InvalidTypeTree {
+                    node_index,
+                    reason: "GUID data word field is missing",
+                })?;
+            if !is_unsigned_word_type_tree_type(self.type_name(child_index)?)
+                || self.first_child[child_index].is_some()
+            {
+                return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                    node_index: child_index,
+                    reason: "GUID data word is not an unsigned 32-bit leaf",
+                });
+            }
+            word_field_names.push(try_copy_string(expected_name, "GUID TypeTree field name")?);
+        }
+        let word_field_names = word_field_names.try_into().map_err(|_| {
+            UnityYamlObjectConversionError::InvalidTypeTree {
+                node_index,
+                reason: "GUID does not contain exactly four data words",
+            }
+        })?;
+        Ok(UnityYamlGuidSchema { word_field_names })
+    }
+
     fn collect_hints(
         &self,
         node_index: usize,
@@ -563,6 +654,30 @@ impl<'a> UnityYamlTypeTreeLayout<'a> {
                 })?;
                 hints.hash128_schemas.insert(
                     try_copy_string(field_path, "Unity YAML Hash128 schema path")?,
+                    schema,
+                );
+            }
+            return Ok(());
+        }
+
+        if node_type == "GUID" {
+            let schema = self.guid_schema(node_index)?;
+            if let Some(previous) = hints.guid_schemas.get(field_path) {
+                if *previous != schema {
+                    return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                        node_index,
+                        reason: "ambiguous GUID schemas share one serialized field path",
+                    });
+                }
+            } else {
+                hints.guid_schemas.try_reserve(1).map_err(|_| {
+                    UnityYamlObjectConversionError::AllocationFailed {
+                        resource: "Unity YAML GUID schema hints",
+                        requested: hints.guid_schemas.len().saturating_add(1),
+                    }
+                })?;
+                hints.guid_schemas.insert(
+                    try_copy_string(field_path, "Unity YAML GUID schema path")?,
                     schema,
                 );
             }
@@ -811,6 +926,8 @@ where
         SerializedValue::Struct(fields) => {
             if let Some(schema) = hash128_schema_for_path(field_path, hints, limits)? {
                 convert_hash128_value(fields, schema, field_path, depth, limits, budget)?
+            } else if let Some(schema) = guid_schema_for_path(field_path, hints, limits)? {
+                convert_guid_value(fields, schema, field_path, depth, budget)?
             } else {
                 let mut mapping =
                     UnityYamlNode::mapping(if is_flow_mapped_path(field_path, hints, limits)? {
@@ -874,6 +991,21 @@ fn hash128_schema_for_path<'a>(
     }
     let canonical_path = canonical_array_path(field_path, limits.max_field_path_bytes)?;
     Ok(hints.hash128_schemas.get(&canonical_path))
+}
+
+fn guid_schema_for_path<'a>(
+    field_path: &str,
+    hints: &'a UnityYamlObjectConversionHints,
+    limits: UnityYamlObjectConversionLimits,
+) -> Result<Option<&'a UnityYamlGuidSchema>, UnityYamlObjectConversionError> {
+    if let Some(schema) = hints.guid_schemas.get(field_path) {
+        return Ok(Some(schema));
+    }
+    if !field_path.contains('[') {
+        return Ok(None);
+    }
+    let canonical_path = canonical_array_path(field_path, limits.max_field_path_bytes)?;
+    Ok(hints.guid_schemas.get(&canonical_path))
 }
 
 fn convert_hash128_value(
@@ -962,6 +1094,55 @@ fn convert_hash128_value(
         }
     }
     Ok(mapping)
+}
+
+fn convert_guid_value(
+    fields: &[SerializedFieldValue],
+    schema: &UnityYamlGuidSchema,
+    field_path: &str,
+    depth: usize,
+    budget: &mut ConversionBudget,
+) -> Result<UnityYamlNode, UnityYamlObjectConversionError> {
+    if fields.len() != schema.word_field_names.len() {
+        return Err(UnityYamlObjectConversionError::GuidFieldCount {
+            field_path: field_path.to_owned(),
+            expected: schema.word_field_names.len(),
+            actual: fields.len(),
+        });
+    }
+
+    let mut words = [0u32; 4];
+    for (word_index, field_name) in schema.word_field_names.iter().enumerate() {
+        budget.visit(depth + 1)?;
+        let mut matching_value = None;
+        for field in fields.iter().filter(|field| field.name == *field_name) {
+            if matching_value.is_some() {
+                return Err(UnityYamlObjectConversionError::InvalidGuidWord {
+                    field_path: field_path.to_owned(),
+                    field_name: field_name.clone(),
+                    word_index,
+                });
+            }
+            matching_value = Some(&field.value);
+        }
+        let Some(SerializedValue::U32(value)) = matching_value else {
+            return Err(UnityYamlObjectConversionError::InvalidGuidWord {
+                field_path: field_path.to_owned(),
+                field_name: field_name.clone(),
+                word_index,
+            });
+        };
+        words[word_index] = *value;
+    }
+
+    let mut serialized_guid = [0u8; 16];
+    for (word_index, word) in words.into_iter().enumerate() {
+        let start = word_index * 4;
+        serialized_guid[start..start + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    Ok(UnityYamlNode::string(format_unity_guid_words(
+        serialized_guid,
+    )))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1188,6 +1369,10 @@ fn is_integer_type_tree_type(type_name: &str) -> bool {
 
 fn is_unsigned_byte_type_tree_type(type_name: &str) -> bool {
     matches!(type_name, "UInt8" | "byte" | "unsigned char")
+}
+
+fn is_unsigned_word_type_tree_type(type_name: &str) -> bool {
+    matches!(type_name, "UInt32" | "uint" | "unsigned int")
 }
 
 fn wildcard_element_path(
@@ -1472,6 +1657,58 @@ mod tests {
             })
             .collect();
         SerializedValue::Struct(vec![field("m_Hash", SerializedValue::Struct(fields))])
+    }
+
+    fn guid_type_tree(array_element: bool) -> TypeTree {
+        let mut nodes = if array_element {
+            vec![
+                type_tree_node(0, "GameObject", "Base", 0),
+                type_tree_node(1, "vector", "m_Guids", 0),
+                type_tree_node(2, "Array", "Array", 0),
+                type_tree_node(3, "SInt32", "size", 0),
+                type_tree_node(3, "GUID", "data", 0),
+            ]
+        } else {
+            vec![
+                type_tree_node(0, "GameObject", "Base", 0),
+                type_tree_node(1, "GUID", "m_Guid", 0),
+            ]
+        };
+        let field_level = if array_element { 4 } else { 2 };
+        for index in 0..4 {
+            nodes.push(type_tree_node(
+                field_level,
+                "UInt32",
+                &format!("m_Data_{index}_"),
+                0,
+            ));
+        }
+        TypeTree {
+            nodes,
+            string_buffer: Vec::new(),
+        }
+    }
+
+    fn guid_value_struct() -> SerializedValue {
+        let words = [0x0102_0304, 0x1112_1314, 0x2122_2324, 0x3132_3334];
+        SerializedValue::Struct(
+            words
+                .into_iter()
+                .enumerate()
+                .map(|(index, word)| field(&format!("m_Data_{index}_"), SerializedValue::U32(word)))
+                .collect(),
+        )
+    }
+
+    fn guid_value(array_element: bool) -> SerializedValue {
+        if array_element {
+            SerializedValue::Struct(vec![field(
+                "m_Guids",
+                SerializedValue::Array(vec![guid_value_struct()]),
+            )])
+        } else {
+            SerializedValue::Struct(vec![field("m_Guid", guid_value_struct())])
+        }
     }
 
     fn version() -> SceneUnityVersion {
@@ -1875,6 +2112,99 @@ mod tests {
             }),
             Err(UnityYamlObjectConversionError::InvalidHash128Byte { field_index: 7, .. })
         ));
+    }
+
+    #[test]
+    fn guid_structs_emit_unity_guid_strings_and_validate_the_four_words() {
+        let type_tree = guid_type_tree(false);
+        let hints = UnityYamlObjectConversionHints::from_type_tree(
+            &type_tree,
+            version(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            hints
+                .guid_schemas
+                .get("m_Guid")
+                .map(|schema| schema.word_field_names.as_slice()),
+            Some(
+                [
+                    "m_Data_0_".to_owned(),
+                    "m_Data_1_".to_owned(),
+                    "m_Data_2_".to_owned(),
+                    "m_Data_3_".to_owned(),
+                ]
+                .as_slice()
+            )
+        );
+        let document = convert_with_object_hints(&guid_value(false), &hints, |_| {
+            unreachable!("GUID contains no PPtrs")
+        })
+        .unwrap();
+        let output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[document],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        assert!(output.contains("m_Guid: 01020304111213142122232431323334"));
+
+        let missing_word = SerializedValue::Struct(vec![field(
+            "m_Guid",
+            SerializedValue::Struct(vec![
+                field("m_Data_0_", SerializedValue::U32(1)),
+                field("m_Data_1_", SerializedValue::U32(2)),
+                field("m_Data_2_", SerializedValue::U32(3)),
+            ]),
+        )]);
+        assert!(matches!(
+            convert_with_object_hints(&missing_word, &hints, |_| {
+                unreachable!("GUID contains no PPtrs")
+            }),
+            Err(UnityYamlObjectConversionError::GuidFieldCount {
+                expected: 4,
+                actual: 3,
+                ..
+            })
+        ));
+
+        let wrong_word = SerializedValue::Struct(vec![field(
+            "m_Guid",
+            SerializedValue::Struct(vec![
+                field("m_Data_0_", SerializedValue::U32(1)),
+                field("m_Data_1_", SerializedValue::U32(2)),
+                field("m_Data_2_", SerializedValue::U64(3)),
+                field("m_Data_3_", SerializedValue::U32(4)),
+            ]),
+        )]);
+        assert!(matches!(
+            convert_with_object_hints(&wrong_word, &hints, |_| {
+                unreachable!("GUID contains no PPtrs")
+            }),
+            Err(UnityYamlObjectConversionError::InvalidGuidWord { word_index: 2, .. })
+        ));
+    }
+
+    #[test]
+    fn guid_type_tree_hints_resolve_each_array_element_by_schema_path() {
+        let type_tree = guid_type_tree(true);
+        let hints = UnityYamlObjectConversionHints::from_type_tree(
+            &type_tree,
+            version(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        assert!(hints.guid_schemas.contains_key("m_Guids[*]"));
+        let document = convert_with_object_hints(&guid_value(true), &hints, |_| {
+            unreachable!("GUID array contains no PPtrs")
+        })
+        .unwrap();
+        let output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[document],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        assert!(output.contains("m_Guids:\n  - 01020304111213142122232431323334"));
     }
 
     #[test]
