@@ -1303,10 +1303,7 @@ where
             budget,
             resolve_pointer,
         )?;
-        let field_name = try_copy_string(
-            baseline_yaml_field_name(&field.name),
-            "Unity YAML field name",
-        )?;
+        let field_name = baseline_yaml_field_name(&field.name)?;
         destination
             .insert_field(field_name, value)
             .map_err(UnityYamlObjectConversionError::NodeBuild)?;
@@ -2210,15 +2207,57 @@ fn importer_field_is_excluded(
     Ok(false)
 }
 
-fn baseline_yaml_field_name(field_name: &str) -> &str {
-    match field_name {
-        "m_Image_data" => "m_ImageData",
-        "m_TextureFormat" => "m_Format",
-        "m_TextureDimension" => "m_Dimension",
-        "m_ObjectHideFlags" => "m_HideFlags",
-        "m_Val" => "m_Value",
-        _ => field_name,
+fn baseline_yaml_field_name(field_name: &str) -> Result<String, UnityYamlObjectConversionError> {
+    let replacement = match field_name {
+        "m_Image_data" => Some("m_ImageData"),
+        "m_TextureFormat" => Some("m_Format"),
+        "m_TextureDimension" => Some("m_Dimension"),
+        "m_ObjectHideFlags" => Some("m_HideFlags"),
+        "m_Val" => Some("m_Value"),
+        _ => None,
+    };
+    if let Some(replacement) = replacement {
+        return try_copy_string(replacement, "Unity baseline YAML field name");
     }
+
+    for (source_prefix, output_prefix) in [
+        ("m_Dst", "m_Destination"),
+        ("m_Dest", "m_Destination"),
+        ("m_Src", "m_Source"),
+    ] {
+        let Some(suffix) = field_name.strip_prefix(source_prefix) else {
+            continue;
+        };
+        if !baseline_prefix_has_uppercase_initial(suffix) {
+            continue;
+        }
+        let requested = output_prefix.len().checked_add(suffix.len()).ok_or(
+            UnityYamlObjectConversionError::AllocationFailed {
+                resource: "Unity baseline YAML field name",
+                requested: usize::MAX,
+            },
+        )?;
+        let mut output_name = String::new();
+        output_name.try_reserve_exact(requested).map_err(|_| {
+            UnityYamlObjectConversionError::AllocationFailed {
+                resource: "Unity baseline YAML field name",
+                requested,
+            }
+        })?;
+        output_name.push_str(output_prefix);
+        output_name.push_str(suffix);
+        return Ok(output_name);
+    }
+
+    try_copy_string(field_name, "Unity baseline YAML field name")
+}
+
+fn baseline_prefix_has_uppercase_initial(suffix: &str) -> bool {
+    suffix
+        .encode_utf16()
+        .next()
+        .and_then(|unit| char::from_u32(u32::from(unit)))
+        .is_some_and(char::is_uppercase)
 }
 
 fn stripped_field_allowlist(class_id: i32, stripped: bool) -> Option<&'static [&'static str]> {
@@ -3040,13 +3079,22 @@ mod tests {
     }
 
     #[test]
-    fn baseline_global_field_names_are_emitted_as_yaml_aliases() {
+    fn baseline_global_and_prefix_field_names_are_emitted_as_yaml_aliases() {
         let root = SerializedValue::Struct(vec![
             field("m_Image_data", SerializedValue::U8(7)),
             field("m_TextureFormat", SerializedValue::I32(10)),
             field("m_TextureDimension", SerializedValue::I32(2)),
             field("m_ObjectHideFlags", SerializedValue::U32(1)),
             field("m_Val", SerializedValue::I32(-4)),
+            field("m_DstPosition", SerializedValue::I32(11)),
+            field("m_DestRotation", SerializedValue::I32(12)),
+            field("m_SrcScale", SerializedValue::I32(13)),
+            field("m_DstÉtage", SerializedValue::I32(17)),
+            field("m_Dst𝐀", SerializedValue::I32(19)),
+            field("m_Dstposition", SerializedValue::I32(14)),
+            field("m_Dst", SerializedValue::I32(15)),
+            field("m_Dest", SerializedValue::I32(16)),
+            field("m_Destination", SerializedValue::I32(18)),
         ]);
         let document =
             convert_with_object_hints(&root, &UnityYamlObjectConversionHints::default(), |_| {
@@ -3059,15 +3107,24 @@ mod tests {
         )
         .unwrap();
 
-        assert!(output.contains(
-            "m_ImageData: 7\n  m_Format: 10\n  m_Dimension: 2\n  m_HideFlags: 1\n  m_Value: -4"
-        ));
+        assert!(output.contains(concat!(
+            "m_ImageData: 7\n  m_Format: 10\n  m_Dimension: 2\n",
+            "  m_HideFlags: 1\n  m_Value: -4\n",
+            "  m_DestinationPosition: 11\n  m_DestinationRotation: 12\n",
+            "  m_SourceScale: 13\n  m_DestinationÉtage: 17\n  m_Dst𝐀: 19\n",
+            "  m_Dstposition: 14\n  m_Dst: 15\n  m_Dest: 16\n",
+            "  m_Destination: 18"
+        )));
         for serialized_name in [
             "m_Image_data",
             "m_TextureFormat",
             "m_TextureDimension",
             "m_ObjectHideFlags",
             "m_Val",
+            "m_DstPosition",
+            "m_DestRotation",
+            "m_SrcScale",
+            "m_DstÉtage",
         ] {
             assert!(
                 !output.contains(&format!("  {serialized_name}:")),

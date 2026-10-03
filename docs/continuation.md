@@ -732,3 +732,11 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Focused alias test and the full workspace passed: 407 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and `git diff --check`.
 - Still incomplete: no Unity-produced fixture or direct C# runtime differential; `m_Dst*`, `m_Dest*`, and `m_Src*` conversions and context-dependent Pass002 rules remain open. Phase 1 remains incomplete; Phase 2 remains locked.
 - Next: inventory those prefix renames and implement them with boundary tests for suffix casing and short/nonmatching names.
+
+## Baseline YAML field prefix aliases
+
+- Current phase: Phase 1; gate not passed. This increment builds from pushed revision `3dd1e58af41c6aa0aac703f8f1047f8224ce6fcc`. Only `cocokoishi/RustAssetRipper`'s canonical repository is a write/push target. No other remote repository, UABEA, or user AssetBundle content was accessed.
+- Added `m_Dst*`/`m_Dest*` to `m_Destination*` and `m_Src*` to `m_Source*` when the next UTF-16 code unit is uppercase, matching baseline `char.IsUpper`; source suffix spelling is retained. Empty/lowercase suffixes stay unchanged, and the short-prefix paths avoid out-of-range panics.
+- Focused prefix test and the full workspace passed: 407 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and `git diff --check`.
+- Still incomplete: evidence is synthetic only, with no Unity-produced fixture or direct C# runtime differential. Other context-dependent `Pass002_RenameSubnodes` rules remain unported. Phase 1 remains incomplete; Phase 2 remains locked.
+- Next: inspect the next field-specific conversion in `Pass002_RenameSubnodes`, prioritizing rules whose input and output shapes are fully represented in the existing serialized TypeTree/value model.
