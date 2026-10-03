@@ -724,3 +724,11 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Focused tests passed: `cargo test --locked --lib scene_object_identifier -- --nocapture` (3 tests). Full workspace passed: 406 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and `git diff --check`.
 - Still incomplete: baseline-injected `TargetObjectReference` and `TargetPrefabReference` precedence depends on processing/link resolution, which is not connected to the Rust YAML path. Evidence is synthetic only; no Unity-produced fixture or C# runtime differential. Phase 1 remains open and Phase 2 remains locked.
 - Next: inventory the remaining `Pass002_RenameSubnodes` transformations against current YAML hints, then implement the next independently testable source behavior.
+
+## Baseline global YAML field aliases
+
+- Current phase: Phase 1; gate not passed. This increment builds from pushed revision `786656ef4d9f2cf7c71581bc09cf546859e4fe0e`. Only `cocokoishi/RustAssetRipper`'s canonical repository is a write/push target. No other remote repository, UABEA, or user AssetBundle content was accessed.
+- Added the five unconditional `Pass002_RenameSubnodes.DoSecondaryRenaming` field aliases: `m_Image_data` → `m_ImageData`, `m_TextureFormat` → `m_Format`, `m_TextureDimension` → `m_Dimension`, `m_ObjectHideFlags` → `m_HideFlags`, and `m_Val` → `m_Value`. Source field names remain in filter/allowlist and TypeTree path checks.
+- Focused alias test and the full workspace passed: 407 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and `git diff --check`.
+- Still incomplete: no Unity-produced fixture or direct C# runtime differential; `m_Dst*`, `m_Dest*`, and `m_Src*` conversions and context-dependent Pass002 rules remain open. Phase 1 remains incomplete; Phase 2 remains locked.
+- Next: inventory those prefix renames and implement them with boundary tests for suffix casing and short/nonmatching names.

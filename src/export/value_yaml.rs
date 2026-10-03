@@ -1303,7 +1303,10 @@ where
             budget,
             resolve_pointer,
         )?;
-        let field_name = try_copy_string(&field.name, "Unity YAML field name")?;
+        let field_name = try_copy_string(
+            baseline_yaml_field_name(&field.name),
+            "Unity YAML field name",
+        )?;
         destination
             .insert_field(field_name, value)
             .map_err(UnityYamlObjectConversionError::NodeBuild)?;
@@ -2207,6 +2210,17 @@ fn importer_field_is_excluded(
     Ok(false)
 }
 
+fn baseline_yaml_field_name(field_name: &str) -> &str {
+    match field_name {
+        "m_Image_data" => "m_ImageData",
+        "m_TextureFormat" => "m_Format",
+        "m_TextureDimension" => "m_Dimension",
+        "m_ObjectHideFlags" => "m_HideFlags",
+        "m_Val" => "m_Value",
+        _ => field_name,
+    }
+}
+
 fn stripped_field_allowlist(class_id: i32, stripped: bool) -> Option<&'static [&'static str]> {
     stripped.then_some(stripped_fields_for_class_id(class_id))
 }
@@ -3001,7 +3015,8 @@ mod tests {
             crate::export::unity_yaml::UnityYamlWriteLimits::default(),
         )
         .unwrap();
-        assert!(full_text.contains("m_ObjectHideFlags: 1"));
+        assert!(full_text.contains("m_HideFlags: 1"));
+        assert!(!full_text.contains("m_ObjectHideFlags"));
         assert!(full_text.contains("m_EditorOnly: 2"));
         assert!(full_text.contains("m_ItemEditorOnly: 4"));
 
@@ -3022,6 +3037,43 @@ mod tests {
         assert!(!importer_text.contains("m_ItemEditorOnly"));
         assert!(importer_text.contains("m_Keep: 3"));
         assert!(importer_text.contains("m_ItemKeep: 5"));
+    }
+
+    #[test]
+    fn baseline_global_field_names_are_emitted_as_yaml_aliases() {
+        let root = SerializedValue::Struct(vec![
+            field("m_Image_data", SerializedValue::U8(7)),
+            field("m_TextureFormat", SerializedValue::I32(10)),
+            field("m_TextureDimension", SerializedValue::I32(2)),
+            field("m_ObjectHideFlags", SerializedValue::U32(1)),
+            field("m_Val", SerializedValue::I32(-4)),
+        ]);
+        let document =
+            convert_with_object_hints(&root, &UnityYamlObjectConversionHints::default(), |_| {
+                unreachable!("the generated fixture has no PPtrs")
+            })
+            .unwrap();
+        let output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[document],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+
+        assert!(output.contains(
+            "m_ImageData: 7\n  m_Format: 10\n  m_Dimension: 2\n  m_HideFlags: 1\n  m_Value: -4"
+        ));
+        for serialized_name in [
+            "m_Image_data",
+            "m_TextureFormat",
+            "m_TextureDimension",
+            "m_ObjectHideFlags",
+            "m_Val",
+        ] {
+            assert!(
+                !output.contains(&format!("  {serialized_name}:")),
+                "found {serialized_name}"
+            );
+        }
     }
 
     #[test]
@@ -3679,8 +3731,7 @@ mod tests {
             observed,
             [(7, "m_Component[0].component".to_owned(), 2, 77)]
         );
-        assert!(text
-            .contains("serializedVersion: 6\n  m_ObjectHideFlags: 0\n  m_Source: {fileID: 0}\n"));
+        assert!(text.contains("serializedVersion: 6\n  m_HideFlags: 0\n  m_Source: {fileID: 0}\n"));
         assert!(text.contains("  m_Component:\n  - component: {fileID: 2345}\n"));
         assert!(text.contains("  m_Name: Avatar\n"));
     }
