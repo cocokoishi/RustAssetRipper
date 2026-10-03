@@ -1,6 +1,6 @@
 //! Identity-level reconstruction of AssetRipper's workspace PrefabProcessor order.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
@@ -22,6 +22,7 @@ pub struct WorkspacePrefabProcessingLimits {
     pub max_events: usize,
     pub max_processed_game_objects: usize,
     pub max_total_hierarchy_entries: usize,
+    pub max_source_collection_file_indices: usize,
     pub get_root: WorkspaceGetRootGameObjectLimits,
     pub hierarchy_walk: WorkspaceGameObjectHierarchyWalkLimits,
 }
@@ -32,6 +33,7 @@ impl Default for WorkspacePrefabProcessingLimits {
             max_events: 20_000_000,
             max_processed_game_objects: 20_000_000,
             max_total_hierarchy_entries: 20_000_000,
+            max_source_collection_file_indices: 1_000_000,
             get_root: WorkspaceGetRootGameObjectLimits::default(),
             hierarchy_walk: WorkspaceGameObjectHierarchyWalkLimits::default(),
         }
@@ -142,6 +144,7 @@ pub enum WorkspacePrefabProcessingEvent {
 pub struct WorkspacePrefabProcessingPlan {
     events: Vec<WorkspacePrefabProcessingEvent>,
     processed_game_objects: Vec<WorkspaceSceneObjectIdentity>,
+    source_collection_file_indices: Vec<usize>,
     hierarchy_entry_count: usize,
     complete: bool,
     stopped_on_incomplete_hierarchy: bool,
@@ -150,6 +153,11 @@ pub struct WorkspacePrefabProcessingPlan {
 impl WorkspacePrefabProcessingPlan {
     pub fn events(&self) -> &[WorkspacePrefabProcessingEvent] {
         &self.events
+    }
+
+    /// Collection traversal order supplied to `GameBundle.FetchAssets()` replay.
+    pub fn source_collection_file_indices(&self) -> &[usize] {
+        &self.source_collection_file_indices
     }
 
     /// GameObjects enter this list in the order the source processor first adds them to its set.
@@ -308,10 +316,25 @@ pub fn plan_workspace_prefab_processing(
     collection_file_indices: &[usize],
     limits: WorkspacePrefabProcessingLimits,
 ) -> Result<WorkspacePrefabProcessingPlan, WorkspacePrefabProcessingError> {
+    if collection_file_indices.len() > limits.max_source_collection_file_indices {
+        return Err(WorkspacePrefabProcessingError::ResourceLimitExceeded {
+            resource: "Prefab processing source collection indexes",
+            requested: collection_file_indices.len(),
+            limit: limits.max_source_collection_file_indices,
+        });
+    }
     let mut plan = WorkspacePrefabProcessingPlan {
         complete: true,
         ..WorkspacePrefabProcessingPlan::default()
     };
+    plan.source_collection_file_indices
+        .try_reserve_exact(collection_file_indices.len())
+        .map_err(|_| WorkspacePrefabProcessingError::AllocationFailed {
+            resource: "Prefab processing source collection indexes",
+            requested: collection_file_indices.len(),
+        })?;
+    plan.source_collection_file_indices
+        .extend_from_slice(collection_file_indices);
     let mut processed_set = HashSet::<(usize, usize)>::new();
 
     for (scene_index, scene) in workspace.scenes().iter().enumerate() {
@@ -495,6 +518,551 @@ pub fn plan_workspace_prefab_processing(
     }
 
     Ok(plan)
+}
+
+/// The source `ProcessedBundle.AddNewProcessedCollection` order used by PrefabProcessor.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WorkspaceProcessedCollectionKind {
+    PrefabHierarchies,
+    GeneratedPrefabs,
+    MissingPrefabTransforms,
+    SceneGeneratedAssets { scene_index: usize },
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct WorkspaceProcessedAssetIdentity {
+    pub collection_index: usize,
+    pub path_id: i64,
+    pub class_id: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum WorkspaceProcessedPrefabReference {
+    Existing(WorkspaceSceneObjectIdentity),
+    Generated(WorkspaceProcessedAssetIdentity),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum WorkspaceProcessedPrefabAssetKind {
+    SceneHierarchy {
+        scene_index: usize,
+    },
+    GeneratedTransform {
+        game_object: WorkspaceSceneObjectIdentity,
+        default_values: WorkspaceGeneratedTransformDefaults,
+    },
+    GeneratedPrefabInstance {
+        root_game_object: WorkspaceSceneObjectIdentity,
+    },
+    PrefabHierarchy {
+        root_game_object: WorkspaceSceneObjectIdentity,
+        prefab: WorkspaceProcessedPrefabReference,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorkspaceProcessedPrefabAsset {
+    pub identity: WorkspaceProcessedAssetIdentity,
+    pub kind: WorkspaceProcessedPrefabAssetKind,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorkspaceProcessedAssetCollectionPlan {
+    pub collection_index: usize,
+    pub kind: WorkspaceProcessedCollectionKind,
+    pub name: String,
+    pub assets: Vec<WorkspaceProcessedPrefabAsset>,
+    next_path_id: i64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorkspaceProcessedPrefabAssetPlanLimits {
+    pub max_collections: usize,
+    pub max_assets: usize,
+    pub max_missing_transform_candidates: usize,
+    pub max_total_collection_name_bytes: usize,
+}
+
+impl Default for WorkspaceProcessedPrefabAssetPlanLimits {
+    fn default() -> Self {
+        Self {
+            max_collections: 1_000_000,
+            max_assets: 20_000_000,
+            max_missing_transform_candidates: 20_000_000,
+            max_total_collection_name_bytes: 64 * 1024 * 1024,
+        }
+    }
+}
+
+/// Ordered, identity-only PathID assignments for PrefabProcessor's virtual collections.
+///
+/// This does not create Unity objects, mutate the source graph, or serialize generated assets.
+/// If source processing or any selected collection graph is incomplete, no PathIDs are claimed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorkspaceProcessedPrefabAssetPlan {
+    complete: bool,
+    incomplete_reason: Option<String>,
+    collections: Vec<WorkspaceProcessedAssetCollectionPlan>,
+    asset_count: usize,
+    total_collection_name_bytes: usize,
+}
+
+impl WorkspaceProcessedPrefabAssetPlan {
+    pub fn is_complete(&self) -> bool {
+        self.complete
+    }
+
+    pub fn incomplete_reason(&self) -> Option<&str> {
+        self.incomplete_reason.as_deref()
+    }
+
+    pub fn collections(&self) -> &[WorkspaceProcessedAssetCollectionPlan] {
+        &self.collections
+    }
+
+    pub fn asset_count(&self) -> usize {
+        self.asset_count
+    }
+}
+
+/// Replays the source-created collection and asset order after an identity-level PrefabProcessor
+/// plan. PathIDs start at one independently in each ProcessedAssetCollection, as in the baseline.
+pub fn plan_workspace_processed_prefab_assets(
+    workspace: &WorkspaceSceneHierarchies,
+    processing: &WorkspacePrefabProcessingPlan,
+    limits: WorkspaceProcessedPrefabAssetPlanLimits,
+) -> Result<WorkspaceProcessedPrefabAssetPlan, WorkspacePrefabProcessingError> {
+    if !processing.is_complete() {
+        return Ok(incomplete_processed_asset_plan(
+            "PrefabProcessor identity plan is incomplete; generated PathID order is indeterminate",
+        ));
+    }
+
+    let mut graphs_by_file = HashMap::new();
+    let graph_count = workspace
+        .scenes()
+        .iter()
+        .flat_map(|scene| scene.collections())
+        .count()
+        .checked_add(workspace.non_scene_collections().len())
+        .ok_or(WorkspacePrefabProcessingError::CountOverflow {
+            resource: "scene hierarchy collection graphs",
+        })?;
+    graphs_by_file.try_reserve(graph_count).map_err(|_| {
+        WorkspacePrefabProcessingError::AllocationFailed {
+            resource: "Prefab allocation source collection index",
+            requested: graph_count,
+        }
+    })?;
+    let mut scene_index_by_file = HashMap::new();
+    scene_index_by_file.try_reserve(graph_count).map_err(|_| {
+        WorkspacePrefabProcessingError::AllocationFailed {
+            resource: "Prefab allocation scene ownership index",
+            requested: graph_count,
+        }
+    })?;
+    for (scene_index, scene) in workspace.scenes().iter().enumerate() {
+        for graph in scene.collections() {
+            let file_index = graph.collection_file_index();
+            if graphs_by_file.insert(file_index, graph).is_some()
+                || scene_index_by_file
+                    .insert(file_index, scene_index)
+                    .is_some()
+            {
+                return Err(processed_asset_operation_error(format!(
+                    "collection file {file_index} belongs to more than one hierarchy graph"
+                )));
+            }
+        }
+    }
+    for graph in workspace.non_scene_collections() {
+        let file_index = graph.collection_file_index();
+        if graphs_by_file.insert(file_index, graph).is_some() {
+            return Err(processed_asset_operation_error(format!(
+                "collection file {file_index} belongs to more than one hierarchy graph"
+            )));
+        }
+    }
+
+    let collection_file_indices = processing.source_collection_file_indices();
+    let mut seen_collection_files = HashSet::new();
+    seen_collection_files
+        .try_reserve(collection_file_indices.len())
+        .map_err(|_| WorkspacePrefabProcessingError::AllocationFailed {
+            resource: "Prefab allocation collection membership set",
+            requested: collection_file_indices.len(),
+        })?;
+    let mut missing_transforms = HashMap::new();
+    for &file_index in collection_file_indices {
+        if !seen_collection_files.insert(file_index) {
+            return Err(processed_asset_operation_error(format!(
+                "source collection order contains duplicate file index {file_index}"
+            )));
+        }
+        let Some(graph) = graphs_by_file.get(&file_index).copied() else {
+            return Ok(incomplete_processed_asset_plan(&format!(
+                "source collection file {file_index} has no recovered hierarchy graph; generated PathID order is indeterminate"
+            )));
+        };
+        if !graph.is_complete() {
+            return Ok(incomplete_processed_asset_plan(&format!(
+                "collection file {file_index} has an incomplete scene hierarchy graph"
+            )));
+        }
+        let requested = missing_transforms
+            .len()
+            .checked_add(graph.missing_transform_plans().len())
+            .ok_or(WorkspacePrefabProcessingError::CountOverflow {
+                resource: "missing Transform allocation candidates",
+            })?;
+        if requested > limits.max_missing_transform_candidates {
+            return Err(WorkspacePrefabProcessingError::ResourceLimitExceeded {
+                resource: "missing Transform allocation candidates",
+                requested,
+                limit: limits.max_missing_transform_candidates,
+            });
+        }
+        missing_transforms
+            .try_reserve(graph.missing_transform_plans().len())
+            .map_err(|_| WorkspacePrefabProcessingError::AllocationFailed {
+                resource: "missing Transform allocation candidates",
+                requested,
+            })?;
+        for transform in graph.missing_transform_plans() {
+            let key = (
+                transform.game_object.file_index,
+                transform.game_object.object_index,
+            );
+            if missing_transforms
+                .insert(key, (transform.game_object, transform.default_values))
+                .is_some()
+            {
+                return Err(processed_asset_operation_error(format!(
+                    "GameObject {}:{} has duplicate missing-Transform plans",
+                    key.0, key.1
+                )));
+            }
+        }
+    }
+
+    let mut plan = WorkspaceProcessedPrefabAssetPlan {
+        complete: true,
+        incomplete_reason: None,
+        collections: Vec::new(),
+        asset_count: 0,
+        total_collection_name_bytes: 0,
+    };
+    let prefab_hierarchies = add_processed_collection(
+        &mut plan,
+        WorkspaceProcessedCollectionKind::PrefabHierarchies,
+        "Prefab Hierarchies",
+        limits,
+    )?;
+    let generated_prefabs = add_processed_collection(
+        &mut plan,
+        WorkspaceProcessedCollectionKind::GeneratedPrefabs,
+        "Generated Prefabs",
+        limits,
+    )?;
+    let missing_prefab_transforms = add_processed_collection(
+        &mut plan,
+        WorkspaceProcessedCollectionKind::MissingPrefabTransforms,
+        "Missing Prefab Transforms",
+        limits,
+    )?;
+
+    let mut scene_collection_by_index = Vec::new();
+    scene_collection_by_index
+        .try_reserve_exact(workspace.scenes().len())
+        .map_err(|_| WorkspacePrefabProcessingError::AllocationFailed {
+            resource: "per-scene generated collection index",
+            requested: workspace.scenes().len(),
+        })?;
+    scene_collection_by_index.resize(workspace.scenes().len(), None);
+
+    // AddMissingTransforms runs before SceneHierarchyObject creation and follows FetchAssets order.
+    for asset in workspace.scene_asset_identities_in_collection_order(collection_file_indices) {
+        if asset.category != WorkspaceSceneAssetCategory::GameObject {
+            continue;
+        }
+        let key = (asset.identity.file_index, asset.identity.object_index);
+        let Some((game_object, default_values)) = missing_transforms.remove(&key) else {
+            continue;
+        };
+        if game_object != asset.identity {
+            return Err(processed_asset_operation_error(format!(
+                "missing-Transform identity for {}:{} disagrees with source collection order",
+                key.0, key.1
+            )));
+        }
+        let collection_index = if let Some(&scene_index) = scene_index_by_file.get(&key.0) {
+            let scene = workspace.scenes().get(scene_index).ok_or_else(|| {
+                processed_asset_operation_error(format!(
+                    "collection file {} maps to missing SceneDefinition {scene_index}",
+                    key.0
+                ))
+            })?;
+            ensure_scene_processed_collection(
+                &mut plan,
+                &mut scene_collection_by_index,
+                scene_index,
+                &scene.plan.name,
+                limits,
+            )?
+        } else {
+            missing_prefab_transforms
+        };
+        add_processed_asset(
+            &mut plan,
+            collection_index,
+            4,
+            WorkspaceProcessedPrefabAssetKind::GeneratedTransform {
+                game_object,
+                default_values,
+            },
+            limits,
+        )?;
+    }
+    if let Some((file_index, object_index)) = missing_transforms.keys().copied().min() {
+        return Err(processed_asset_operation_error(format!(
+            "missing-Transform GameObject {file_index}:{object_index} is absent from source FetchAssets order"
+        )));
+    }
+
+    // SceneHierarchyObject.Create allocates one SceneAsset per SceneDefinition after missing transforms.
+    for (scene_index, scene) in workspace.scenes().iter().enumerate() {
+        let collection_index = ensure_scene_processed_collection(
+            &mut plan,
+            &mut scene_collection_by_index,
+            scene_index,
+            &scene.plan.name,
+            limits,
+        )?;
+        add_processed_asset(
+            &mut plan,
+            collection_index,
+            1032,
+            WorkspaceProcessedPrefabAssetKind::SceneHierarchy { scene_index },
+            limits,
+        )?;
+    }
+
+    // Existing PrefabHierarchy objects and generated prefabs are interleaved by source events.
+    for event in processing.events() {
+        match event {
+            WorkspacePrefabProcessingEvent::ExistingPrefabHierarchyCreated {
+                prefab_instance,
+                root_game_object,
+                ..
+            } => {
+                add_processed_asset(
+                    &mut plan,
+                    prefab_hierarchies,
+                    1001,
+                    WorkspaceProcessedPrefabAssetKind::PrefabHierarchy {
+                        root_game_object: *root_game_object,
+                        prefab: WorkspaceProcessedPrefabReference::Existing(*prefab_instance),
+                    },
+                    limits,
+                )?;
+            }
+            WorkspacePrefabProcessingEvent::GeneratedPrefabHierarchyCreated {
+                root_game_object,
+                ..
+            } => {
+                let prefab_instance = add_processed_asset(
+                    &mut plan,
+                    generated_prefabs,
+                    1001,
+                    WorkspaceProcessedPrefabAssetKind::GeneratedPrefabInstance {
+                        root_game_object: *root_game_object,
+                    },
+                    limits,
+                )?;
+                add_processed_asset(
+                    &mut plan,
+                    prefab_hierarchies,
+                    1001,
+                    WorkspaceProcessedPrefabAssetKind::PrefabHierarchy {
+                        root_game_object: *root_game_object,
+                        prefab: WorkspaceProcessedPrefabReference::Generated(prefab_instance),
+                    },
+                    limits,
+                )?;
+            }
+            _ => {}
+        }
+    }
+
+    Ok(plan)
+}
+
+fn incomplete_processed_asset_plan(reason: &str) -> WorkspaceProcessedPrefabAssetPlan {
+    WorkspaceProcessedPrefabAssetPlan {
+        complete: false,
+        incomplete_reason: Some(reason.to_owned()),
+        collections: Vec::new(),
+        asset_count: 0,
+        total_collection_name_bytes: 0,
+    }
+}
+
+fn add_processed_collection(
+    plan: &mut WorkspaceProcessedPrefabAssetPlan,
+    kind: WorkspaceProcessedCollectionKind,
+    name: &str,
+    limits: WorkspaceProcessedPrefabAssetPlanLimits,
+) -> Result<usize, WorkspacePrefabProcessingError> {
+    let requested = plan.collections.len().checked_add(1).ok_or(
+        WorkspacePrefabProcessingError::CountOverflow {
+            resource: "processed asset collections",
+        },
+    )?;
+    if requested > limits.max_collections {
+        return Err(WorkspacePrefabProcessingError::ResourceLimitExceeded {
+            resource: "processed asset collections",
+            requested,
+            limit: limits.max_collections,
+        });
+    }
+    let requested_name_bytes = plan
+        .total_collection_name_bytes
+        .checked_add(name.len())
+        .ok_or(WorkspacePrefabProcessingError::CountOverflow {
+            resource: "processed asset collection names",
+        })?;
+    if requested_name_bytes > limits.max_total_collection_name_bytes {
+        return Err(WorkspacePrefabProcessingError::ResourceLimitExceeded {
+            resource: "processed asset collection name bytes",
+            requested: requested_name_bytes,
+            limit: limits.max_total_collection_name_bytes,
+        });
+    }
+    plan.collections.try_reserve(1).map_err(|_| {
+        WorkspacePrefabProcessingError::AllocationFailed {
+            resource: "processed asset collections",
+            requested,
+        }
+    })?;
+    let mut owned_name = String::new();
+    owned_name.try_reserve_exact(name.len()).map_err(|_| {
+        WorkspacePrefabProcessingError::AllocationFailed {
+            resource: "processed asset collection name",
+            requested: name.len(),
+        }
+    })?;
+    owned_name.push_str(name);
+    let collection_index = plan.collections.len();
+    plan.collections
+        .push(WorkspaceProcessedAssetCollectionPlan {
+            collection_index,
+            kind,
+            name: owned_name,
+            assets: Vec::new(),
+            next_path_id: 0,
+        });
+    plan.total_collection_name_bytes = requested_name_bytes;
+    Ok(collection_index)
+}
+
+fn ensure_scene_processed_collection(
+    plan: &mut WorkspaceProcessedPrefabAssetPlan,
+    scene_collection_by_index: &mut [Option<usize>],
+    scene_index: usize,
+    scene_name: &str,
+    limits: WorkspaceProcessedPrefabAssetPlanLimits,
+) -> Result<usize, WorkspacePrefabProcessingError> {
+    let scene_count = scene_collection_by_index.len();
+    let slot = scene_collection_by_index
+        .get_mut(scene_index)
+        .ok_or_else(|| {
+            processed_asset_operation_error(format!(
+                "SceneDefinition index {scene_index} is outside {} scenes",
+                scene_count
+            ))
+        })?;
+    if let Some(collection_index) = *slot {
+        return Ok(collection_index);
+    }
+    const SUFFIX: &str = " (Generated Assets)";
+    let name_length = scene_name.len().checked_add(SUFFIX.len()).ok_or(
+        WorkspacePrefabProcessingError::CountOverflow {
+            resource: "scene generated collection name",
+        },
+    )?;
+    let mut name = String::new();
+    name.try_reserve_exact(name_length).map_err(|_| {
+        WorkspacePrefabProcessingError::AllocationFailed {
+            resource: "scene generated collection name",
+            requested: name_length,
+        }
+    })?;
+    name.push_str(scene_name);
+    name.push_str(SUFFIX);
+    let collection_index = add_processed_collection(
+        plan,
+        WorkspaceProcessedCollectionKind::SceneGeneratedAssets { scene_index },
+        &name,
+        limits,
+    )?;
+    *slot = Some(collection_index);
+    Ok(collection_index)
+}
+
+fn add_processed_asset(
+    plan: &mut WorkspaceProcessedPrefabAssetPlan,
+    collection_index: usize,
+    class_id: i32,
+    kind: WorkspaceProcessedPrefabAssetKind,
+    limits: WorkspaceProcessedPrefabAssetPlanLimits,
+) -> Result<WorkspaceProcessedAssetIdentity, WorkspacePrefabProcessingError> {
+    let requested_count =
+        plan.asset_count
+            .checked_add(1)
+            .ok_or(WorkspacePrefabProcessingError::CountOverflow {
+                resource: "generated processed assets",
+            })?;
+    if requested_count > limits.max_assets {
+        return Err(WorkspacePrefabProcessingError::ResourceLimitExceeded {
+            resource: "generated processed assets",
+            requested: requested_count,
+            limit: limits.max_assets,
+        });
+    }
+    let collection = plan.collections.get_mut(collection_index).ok_or_else(|| {
+        processed_asset_operation_error(format!(
+            "processed asset collection index {collection_index} is unavailable"
+        ))
+    })?;
+    let path_id = collection.next_path_id.checked_add(1).ok_or(
+        WorkspacePrefabProcessingError::CountOverflow {
+            resource: "processed collection PathID",
+        },
+    )?;
+    collection.assets.try_reserve(1).map_err(|_| {
+        WorkspacePrefabProcessingError::AllocationFailed {
+            resource: "processed collection assets",
+            requested: collection.assets.len().saturating_add(1),
+        }
+    })?;
+    let identity = WorkspaceProcessedAssetIdentity {
+        collection_index,
+        path_id,
+        class_id,
+    };
+    collection
+        .assets
+        .push(WorkspaceProcessedPrefabAsset { identity, kind });
+    collection.next_path_id = path_id;
+    plan.asset_count = requested_count;
+    Ok(identity)
+}
+
+fn processed_asset_operation_error(message: String) -> WorkspacePrefabProcessingError {
+    WorkspacePrefabProcessingError::WorkspaceOperationFailed {
+        operation: "processed prefab asset allocation planning",
+        message,
+    }
 }
 
 fn fetch_hierarchy(

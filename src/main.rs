@@ -12,8 +12,9 @@ use assetripper::io::platform_file_inventory::{
 };
 use assetripper::io::platform_structure::{detect_platform_structure, PlatformStructureLimits};
 use assetripper::processing::prefab_processing::{
-    plan_workspace_prefab_processing, WorkspacePrefabProcessingEvent,
-    WorkspacePrefabProcessingLimits,
+    plan_workspace_prefab_processing, plan_workspace_processed_prefab_assets,
+    WorkspacePrefabProcessingEvent, WorkspacePrefabProcessingLimits,
+    WorkspaceProcessedPrefabAssetPlanLimits,
 };
 use assetripper::processing::project_settings::{
     EditorBuildSettingsLimits, EditorBuildSettingsModel,
@@ -1252,6 +1253,11 @@ fn print_workspace_summary_to<W: io::Write>(
         &source_collection_file_indices,
         WorkspacePrefabProcessingLimits::default(),
     )?;
+    let processed_prefab_assets = plan_workspace_processed_prefab_assets(
+        &scene_hierarchies,
+        &prefab_processing_plan,
+        WorkspaceProcessedPrefabAssetPlanLimits::default(),
+    )?;
     let prefab_processing_report = prefab_processing_plan.report();
     let incomplete_hierarchy_count = prefab_processing_report
         .existing_hierarchy_failures
@@ -1274,6 +1280,38 @@ fn print_workspace_summary_to<W: io::Write>(
         prefab_processing_report.complete,
         prefab_processing_report.stopped_on_incomplete_hierarchy
     )?;
+    writeln!(
+        output,
+        "PrefabProcessor generated-asset PathID allocation plan: complete={}, {} collections, {} assets{}",
+        processed_prefab_assets.is_complete(),
+        processed_prefab_assets.collections().len(),
+        processed_prefab_assets.asset_count(),
+        processed_prefab_assets
+            .incomplete_reason()
+            .map(|reason| format!(", no IDs assigned: {reason}"))
+            .unwrap_or_default()
+    )?;
+    if processed_prefab_assets.is_complete() {
+        for collection in processed_prefab_assets.collections() {
+            let path_id_range = match (collection.assets.first(), collection.assets.last()) {
+                (Some(first), Some(last)) => {
+                    format!(
+                        "PathID {}..={}",
+                        first.identity.path_id, last.identity.path_id
+                    )
+                }
+                _ => "no assigned PathIDs".to_owned(),
+            };
+            writeln!(
+                output,
+                "  generated collection {} {:?} {:?}: {} assets, {path_id_range}",
+                collection.collection_index,
+                collection.kind,
+                collection.name,
+                collection.assets.len()
+            )?;
+        }
+    }
     let mut prefab_processing_diagnostics = 0usize;
     for event in prefab_processing_plan.events() {
         if prefab_processing_diagnostics >= MAX_GENERATED_TRANSFORM_DIAGNOSTICS {

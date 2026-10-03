@@ -4388,7 +4388,10 @@ fn try_copy_string(
 mod tests {
     use super::*;
     use crate::processing::prefab_processing::{
-        plan_workspace_prefab_processing, WorkspacePrefabProcessingEvent,
+        plan_workspace_prefab_processing, plan_workspace_processed_prefab_assets,
+        WorkspacePrefabProcessingEvent, WorkspaceProcessedCollectionKind,
+        WorkspaceProcessedPrefabAssetKind, WorkspaceProcessedPrefabAssetPlanLimits,
+        WorkspaceProcessedPrefabReference,
     };
     use crate::processing::scene_collections::{
         SceneDefinitionGuidPlan, SceneDefinitionPathSource, SceneDefinitionPlan,
@@ -5531,5 +5534,162 @@ mod tests {
                 limit: 2,
             })
         ));
+    }
+
+    #[test]
+    fn processed_prefab_asset_plan_uses_independent_collection_path_id_sequences() {
+        let workspace = workspace_hierarchy_fixture(false);
+        let processing = plan_workspace_prefab_processing(
+            &workspace,
+            &[0, 1],
+            crate::processing::prefab_processing::WorkspacePrefabProcessingLimits::default(),
+        )
+        .unwrap();
+        assert!(processing.is_complete());
+        assert_eq!(processing.source_collection_file_indices(), &[0, 1]);
+
+        let allocations = plan_workspace_processed_prefab_assets(
+            &workspace,
+            &processing,
+            WorkspaceProcessedPrefabAssetPlanLimits::default(),
+        )
+        .unwrap();
+        assert!(
+            allocations.is_complete(),
+            "{:?}",
+            allocations.incomplete_reason()
+        );
+        assert_eq!(allocations.asset_count(), 2);
+        assert_eq!(allocations.collections().len(), 3);
+        assert_eq!(
+            allocations.collections()[0].kind,
+            WorkspaceProcessedCollectionKind::PrefabHierarchies
+        );
+        assert_eq!(
+            allocations.collections()[1].kind,
+            WorkspaceProcessedCollectionKind::GeneratedPrefabs
+        );
+        assert_eq!(
+            allocations.collections()[2].kind,
+            WorkspaceProcessedCollectionKind::MissingPrefabTransforms
+        );
+
+        let generated_prefab = &allocations.collections()[1].assets[0];
+        assert_eq!(generated_prefab.identity.path_id, 1);
+        assert_eq!(generated_prefab.identity.class_id, 1001);
+        let hierarchy = &allocations.collections()[0].assets[0];
+        assert_eq!(hierarchy.identity.path_id, 1);
+        assert_eq!(hierarchy.identity.class_id, 1001);
+        assert!(matches!(
+            hierarchy.kind,
+            WorkspaceProcessedPrefabAssetKind::PrefabHierarchy {
+                prefab: WorkspaceProcessedPrefabReference::Generated(identity),
+                ..
+            } if identity == generated_prefab.identity
+        ));
+    }
+
+    #[test]
+    fn incomplete_prefab_processing_does_not_claim_generated_path_ids() {
+        let workspace = workspace_hierarchy_fixture(true);
+        let processing = plan_workspace_prefab_processing(
+            &workspace,
+            &[0, 1],
+            crate::processing::prefab_processing::WorkspacePrefabProcessingLimits::default(),
+        )
+        .unwrap();
+        assert!(!processing.is_complete());
+
+        let allocations = plan_workspace_processed_prefab_assets(
+            &workspace,
+            &processing,
+            WorkspaceProcessedPrefabAssetPlanLimits::default(),
+        )
+        .unwrap();
+        assert!(!allocations.is_complete());
+        assert!(allocations.collections().is_empty());
+        assert_eq!(allocations.asset_count(), 0);
+        assert!(allocations
+            .incomplete_reason()
+            .unwrap()
+            .contains("identity plan is incomplete"));
+    }
+
+    #[test]
+    fn generated_transform_gets_its_source_collection_path_id_before_prefab_assets() {
+        let game_object = identity(0, 0, 1, GAME_OBJECT_CLASS_ID);
+        let collection = WorkspaceSceneCollectionHierarchy {
+            collection_file_index: 0,
+            scene_objects: Vec::new(),
+            relationships: Vec::new(),
+            game_object_hierarchies: vec![WorkspaceSceneGameObjectHierarchy {
+                game_object,
+                component_relationship_start: 0,
+                component_relationship_end: 0,
+            }],
+            game_object_component_relationship_indices: Vec::new(),
+            prefab_root_relationship_index: Vec::new(),
+            transform_hierarchies: Vec::new(),
+            transform_parent_relationship_indices: Vec::new(),
+            transform_child_relationship_indices: Vec::new(),
+            transform_game_object_relationship_indices: Vec::new(),
+            graph_issues: Vec::new(),
+            scene_assets: vec![WorkspaceSceneAssetIdentity {
+                identity: game_object,
+                category: WorkspaceSceneAssetCategory::GameObject,
+            }],
+            component_candidates: Vec::new(),
+            missing_transform_plans: vec![WorkspaceMissingTransformPlan {
+                game_object,
+                default_values: default_workspace_generated_transform_values(),
+            }],
+            source_graph_complete: true,
+            source_reference_scans_complete: true,
+            roots: WorkspaceSceneRootDiscovery::default(),
+            hierarchy_audit: WorkspaceSceneHierarchyAudit::default(),
+        };
+        let workspace = WorkspaceSceneHierarchies {
+            scenes: Vec::new(),
+            non_scene_collections: vec![collection],
+            collection_graph_index: vec![WorkspaceSceneCollectionGraphIndexEntry {
+                file_index: 0,
+                scene_index: None,
+                collection_index: 0,
+            }],
+        };
+        let processing = plan_workspace_prefab_processing(
+            &workspace,
+            &[0],
+            crate::processing::prefab_processing::WorkspacePrefabProcessingLimits::default(),
+        )
+        .unwrap();
+        assert!(processing.is_complete());
+
+        let allocations = plan_workspace_processed_prefab_assets(
+            &workspace,
+            &processing,
+            WorkspaceProcessedPrefabAssetPlanLimits::default(),
+        )
+        .unwrap();
+        assert!(
+            allocations.is_complete(),
+            "{:?}",
+            allocations.incomplete_reason()
+        );
+        assert_eq!(allocations.asset_count(), 3);
+        let missing_transform_collection = &allocations.collections()[2];
+        assert_eq!(missing_transform_collection.assets.len(), 1);
+        assert_eq!(missing_transform_collection.assets[0].identity.path_id, 1);
+        assert_eq!(missing_transform_collection.assets[0].identity.class_id, 4);
+        assert!(matches!(
+            missing_transform_collection.assets[0].kind,
+            WorkspaceProcessedPrefabAssetKind::GeneratedTransform {
+                game_object: actual,
+                default_values,
+            } if actual == game_object
+                && default_values == default_workspace_generated_transform_values()
+        ));
+        assert_eq!(allocations.collections()[1].assets[0].identity.path_id, 1);
+        assert_eq!(allocations.collections()[0].assets[0].identity.path_id, 1);
     }
 }
