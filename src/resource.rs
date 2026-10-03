@@ -1,6 +1,7 @@
 //! Bounded access to byte ranges stored in Unity ResourceFiles.
 
 use std::fmt;
+use std::fmt::Write as FmtWrite;
 use std::io;
 
 use crate::io::filesystem::VirtualFileSystem;
@@ -25,6 +26,30 @@ pub struct StreamedResourceLimits {
     pub max_range_copy_bytes: usize,
     /// Maximum byte count returned by [`read_streamed_resource_bytes`].
     pub max_materialized_bytes: usize,
+}
+
+/// Work and diagnostic-path bounds for finding nested StreamingInfo values in one decoded object.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StreamedResourceScanLimits {
+    pub max_value_nodes: usize,
+    pub max_candidates: usize,
+    pub max_resource_path_bytes: usize,
+    pub max_total_resource_path_bytes: usize,
+    pub max_single_field_path_bytes: usize,
+    pub max_total_field_path_bytes: usize,
+}
+
+impl Default for StreamedResourceScanLimits {
+    fn default() -> Self {
+        Self {
+            max_value_nodes: 10_000_000,
+            max_candidates: 1_000_000,
+            max_resource_path_bytes: 1024 * 1024,
+            max_total_resource_path_bytes: 64 * 1024 * 1024,
+            max_single_field_path_bytes: 1024 * 1024,
+            max_total_field_path_bytes: 64 * 1024 * 1024,
+        }
+    }
 }
 
 /// A ResourceFile selected from a mounted bundle or an external game DataPath.
@@ -405,6 +430,54 @@ impl std::error::Error for ResourceFileResolveError {
     }
 }
 
+/// Whether a decoded StreamingInfo is unset, unresolved, or points at a valid VFS range.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StreamedResourceResolution<'a> {
+    Unset,
+    Missing {
+        unavailable_data_paths: Vec<String>,
+    },
+    Resolved {
+        resource: ResolvedResourceFile<'a>,
+        range_is_valid: bool,
+    },
+}
+
+/// A resource name lookup or range-integrity error for decoded StreamingInfo.
+#[derive(Debug)]
+pub enum StreamedResourceResolutionError {
+    ResourceLookup(ResourceFileResolveError),
+    RangeIntegrity(StreamedResourceError),
+}
+
+impl fmt::Display for StreamedResourceResolutionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ResourceLookup(source) => {
+                write!(
+                    formatter,
+                    "StreamingInfo ResourceFile lookup failed: {source}"
+                )
+            }
+            Self::RangeIntegrity(source) => {
+                write!(
+                    formatter,
+                    "StreamingInfo range integrity check failed: {source}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for StreamedResourceResolutionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::ResourceLookup(source) => Some(source),
+            Self::RangeIntegrity(source) => Some(source),
+        }
+    }
+}
+
 /// The path, byte offset, and byte count decoded from a Unity `StreamingInfo` value.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StreamedResourceInfo {
@@ -485,6 +558,116 @@ impl std::error::Error for StreamedResourceInfoError {
     }
 }
 
+/// A decoded StreamingInfo together with its nested field location inside the object value.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocatedStreamedResourceInfo {
+    pub field_path: String,
+    pub info: StreamedResourceInfo,
+}
+
+/// Scan results with the amount of decoded value structure visited.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct StreamedResourceScanResult {
+    pub value_nodes_scanned: usize,
+    pub values: Vec<LocatedStreamedResourceInfo>,
+}
+
+/// A malformed or over-budget nested StreamingInfo scan.
+#[derive(Debug)]
+pub enum StreamedResourceScanError {
+    ValueNodeCountOverflow,
+    ValueNodeLimitExceeded {
+        count: usize,
+        limit: usize,
+    },
+    CandidateCountLimitExceeded {
+        count: usize,
+        limit: usize,
+    },
+    FieldPathByteCountOverflow,
+    ResourcePathByteCountOverflow,
+    ResourcePathTooLong {
+        byte_count: usize,
+        limit: usize,
+    },
+    TotalResourcePathBytesLimitExceeded {
+        byte_count: usize,
+        limit: usize,
+    },
+    FieldPathTooLong {
+        byte_count: usize,
+        limit: usize,
+    },
+    TotalFieldPathBytesLimitExceeded {
+        byte_count: usize,
+        limit: usize,
+    },
+    AllocationFailed {
+        resource: &'static str,
+        requested: usize,
+    },
+    InvalidInfo {
+        field_path: String,
+        source: StreamedResourceInfoError,
+    },
+}
+
+impl fmt::Display for StreamedResourceScanError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ValueNodeCountOverflow => {
+                formatter.write_str("StreamingInfo value-node count overflows")
+            }
+            Self::ValueNodeLimitExceeded { count, limit } => write!(
+                formatter,
+                "StreamingInfo scan visits {count} value nodes, exceeding limit {limit}"
+            ),
+            Self::CandidateCountLimitExceeded { count, limit } => write!(
+                formatter,
+                "StreamingInfo scan found {count} candidates, exceeding limit {limit}"
+            ),
+            Self::FieldPathByteCountOverflow => {
+                formatter.write_str("StreamingInfo field-path byte count overflows")
+            }
+            Self::ResourcePathByteCountOverflow => {
+                formatter.write_str("StreamingInfo resource-path byte count overflows")
+            }
+            Self::ResourcePathTooLong { byte_count, limit } => write!(
+                formatter,
+                "StreamingInfo resource path has {byte_count} bytes, exceeding limit {limit}"
+            ),
+            Self::TotalResourcePathBytesLimitExceeded { byte_count, limit } => write!(
+                formatter,
+                "aggregate StreamingInfo resource paths use {byte_count} bytes, exceeding limit {limit}"
+            ),
+            Self::FieldPathTooLong { byte_count, limit } => write!(
+                formatter,
+                "StreamingInfo field path has {byte_count} bytes, exceeding limit {limit}"
+            ),
+            Self::TotalFieldPathBytesLimitExceeded { byte_count, limit } => write!(
+                formatter,
+                "aggregate StreamingInfo field paths use {byte_count} bytes, exceeding limit {limit}"
+            ),
+            Self::AllocationFailed { resource, requested } => write!(
+                formatter,
+                "could not allocate {requested} entries for {resource}"
+            ),
+            Self::InvalidInfo { field_path, source } => {
+                write!(formatter, "malformed StreamingInfo at '{field_path}': {source}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for StreamedResourceScanError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidInfo { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
+
 /// Extracts Unity's `path`, `offset`, and `size` fields from a decoded StreamingInfo TypeTree.
 ///
 /// The serialized integer variant carries the baseline's `Has_Offset_UInt64` distinction:
@@ -539,6 +722,275 @@ pub fn extract_streamed_resource_info(
         }
     };
     Ok(StreamedResourceInfo { path, offset, size })
+}
+
+/// Finds decoded `StreamingInfo` structs nested anywhere in an object's TypeTree value.
+///
+/// A struct is treated as a candidate when it contains at least two of `path`, `offset`, and
+/// `size`, or when it is nested under a known StreamingInfo owner field. Candidate shape errors
+/// are returned with the field path instead of being skipped.
+pub fn scan_streamed_resource_infos(
+    root: &SerializedValue,
+    limits: StreamedResourceScanLimits,
+) -> Result<StreamedResourceScanResult, StreamedResourceScanError> {
+    let mut events = Vec::new();
+    events
+        .try_reserve(1)
+        .map_err(|_| scan_allocation_error("StreamingInfo traversal events", 1))?;
+    events.push(StreamInfoScanEvent::Visit {
+        value: root,
+        segment: None,
+        expected_info: false,
+    });
+    let mut field_path = Vec::new();
+    let mut located = Vec::new();
+    let mut value_node_count = 0usize;
+    let mut total_field_path_bytes = 0usize;
+    let mut total_resource_path_bytes = 0usize;
+
+    while let Some(event) = events.pop() {
+        match event {
+            StreamInfoScanEvent::LeavePath(previous_length) => field_path.truncate(previous_length),
+            StreamInfoScanEvent::Visit {
+                value,
+                segment,
+                expected_info,
+            } => {
+                let previous_path_length = field_path.len();
+                if let Some(segment) = segment {
+                    field_path.try_reserve(1).map_err(|_| {
+                        scan_allocation_error("StreamingInfo field path segments", 1)
+                    })?;
+                    field_path.push(segment);
+                }
+                value_node_count = value_node_count
+                    .checked_add(1)
+                    .ok_or(StreamedResourceScanError::ValueNodeCountOverflow)?;
+                if value_node_count > limits.max_value_nodes {
+                    return Err(StreamedResourceScanError::ValueNodeLimitExceeded {
+                        count: value_node_count,
+                        limit: limits.max_value_nodes,
+                    });
+                }
+                events
+                    .try_reserve(1)
+                    .map_err(|_| scan_allocation_error("StreamingInfo traversal events", 1))?;
+                events.push(StreamInfoScanEvent::LeavePath(previous_path_length));
+
+                match value {
+                    SerializedValue::Struct(fields) => {
+                        let relevant_field_count = streaming_info_field_count(fields);
+                        let is_candidate = relevant_field_count >= 2
+                            || (expected_info && relevant_field_count > 0);
+                        if is_candidate {
+                            let requested_candidates = located.len().checked_add(1).ok_or(
+                                StreamedResourceScanError::CandidateCountLimitExceeded {
+                                    count: usize::MAX,
+                                    limit: limits.max_candidates,
+                                },
+                            )?;
+                            if requested_candidates > limits.max_candidates {
+                                return Err(
+                                    StreamedResourceScanError::CandidateCountLimitExceeded {
+                                        count: requested_candidates,
+                                        limit: limits.max_candidates,
+                                    },
+                                );
+                            }
+                            let diagnostic_path = render_streamed_resource_field_path(
+                                &field_path,
+                                limits.max_single_field_path_bytes,
+                            )?;
+                            total_field_path_bytes = total_field_path_bytes
+                                .checked_add(diagnostic_path.len())
+                                .ok_or(StreamedResourceScanError::FieldPathByteCountOverflow)?;
+                            if total_field_path_bytes > limits.max_total_field_path_bytes {
+                                return Err(
+                                    StreamedResourceScanError::TotalFieldPathBytesLimitExceeded {
+                                        byte_count: total_field_path_bytes,
+                                        limit: limits.max_total_field_path_bytes,
+                                    },
+                                );
+                            }
+                            let info = extract_streamed_resource_info(value).map_err(|source| {
+                                StreamedResourceScanError::InvalidInfo {
+                                    field_path: diagnostic_path.clone(),
+                                    source,
+                                }
+                            })?;
+                            if info.path.len() > limits.max_resource_path_bytes {
+                                return Err(StreamedResourceScanError::ResourcePathTooLong {
+                                    byte_count: info.path.len(),
+                                    limit: limits.max_resource_path_bytes,
+                                });
+                            }
+                            total_resource_path_bytes = total_resource_path_bytes
+                                .checked_add(info.path.len())
+                                .ok_or(StreamedResourceScanError::ResourcePathByteCountOverflow)?;
+                            if total_resource_path_bytes > limits.max_total_resource_path_bytes {
+                                return Err(
+                                    StreamedResourceScanError::TotalResourcePathBytesLimitExceeded {
+                                        byte_count: total_resource_path_bytes,
+                                        limit: limits.max_total_resource_path_bytes,
+                                    },
+                                );
+                            }
+                            located.try_reserve(1).map_err(|_| {
+                                scan_allocation_error("located StreamingInfo values", 1)
+                            })?;
+                            located.push(LocatedStreamedResourceInfo {
+                                field_path: diagnostic_path,
+                                info,
+                            });
+                        } else {
+                            events.try_reserve(fields.len()).map_err(|_| {
+                                scan_allocation_error(
+                                    "StreamingInfo traversal events",
+                                    fields.len(),
+                                )
+                            })?;
+                            for field in fields.iter().rev() {
+                                events.push(StreamInfoScanEvent::Visit {
+                                    value: &field.value,
+                                    segment: Some(StreamInfoPathSegment::Field(&field.name)),
+                                    expected_info: is_streaming_info_owner_field(&field.name),
+                                });
+                            }
+                        }
+                    }
+                    SerializedValue::Array(values) => {
+                        events.try_reserve(values.len()).map_err(|_| {
+                            scan_allocation_error("StreamingInfo traversal events", values.len())
+                        })?;
+                        for (index, value) in values.iter().enumerate().rev() {
+                            events.push(StreamInfoScanEvent::Visit {
+                                value,
+                                segment: Some(StreamInfoPathSegment::Index(index)),
+                                expected_info,
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    Ok(StreamedResourceScanResult {
+        value_nodes_scanned: value_node_count,
+        values: located,
+    })
+}
+
+/// Convenience wrapper that returns only the located StreamingInfo values.
+pub fn find_streamed_resource_infos(
+    root: &SerializedValue,
+    limits: StreamedResourceScanLimits,
+) -> Result<Vec<LocatedStreamedResourceInfo>, StreamedResourceScanError> {
+    scan_streamed_resource_infos(root, limits).map(|result| result.values)
+}
+
+#[derive(Clone, Copy)]
+enum StreamInfoPathSegment<'a> {
+    Field(&'a str),
+    Index(usize),
+}
+
+enum StreamInfoScanEvent<'a> {
+    Visit {
+        value: &'a SerializedValue,
+        segment: Option<StreamInfoPathSegment<'a>>,
+        expected_info: bool,
+    },
+    LeavePath(usize),
+}
+
+fn streaming_info_field_count(
+    fields: &[crate::serialized_file::object::SerializedFieldValue],
+) -> usize {
+    let mut path = false;
+    let mut offset = false;
+    let mut size = false;
+    for field in fields {
+        match field.name.as_str() {
+            "path" => path = true,
+            "offset" => offset = true,
+            "size" => size = true,
+            _ => {}
+        }
+    }
+    usize::from(path) + usize::from(offset) + usize::from(size)
+}
+
+fn is_streaming_info_owner_field(field_name: &str) -> bool {
+    matches!(
+        field_name,
+        "m_StreamData"
+            | "m_StreamData_C28"
+            | "m_StreamData_C189"
+            | "m_StreamingInfo"
+            | "StreamingInfo"
+    )
+}
+
+fn render_streamed_resource_field_path(
+    segments: &[StreamInfoPathSegment<'_>],
+    limit: usize,
+) -> Result<String, StreamedResourceScanError> {
+    let mut byte_count = 0usize;
+    for (index, segment) in segments.iter().enumerate() {
+        let segment_bytes = match segment {
+            StreamInfoPathSegment::Field(name) => name
+                .len()
+                .checked_add(usize::from(index > 0))
+                .ok_or(StreamedResourceScanError::FieldPathByteCountOverflow)?,
+            StreamInfoPathSegment::Index(value) => {
+                let digits = if *value == 0 {
+                    1
+                } else {
+                    usize::try_from(value.ilog10() + 1).unwrap_or(usize::MAX)
+                };
+                digits
+                    .checked_add(2)
+                    .ok_or(StreamedResourceScanError::FieldPathByteCountOverflow)?
+            }
+        };
+        byte_count = byte_count
+            .checked_add(segment_bytes)
+            .ok_or(StreamedResourceScanError::FieldPathByteCountOverflow)?;
+    }
+    if segments.is_empty() {
+        byte_count = "<root>".len();
+    }
+    if byte_count > limit {
+        return Err(StreamedResourceScanError::FieldPathTooLong { byte_count, limit });
+    }
+    let mut path = String::new();
+    path.try_reserve_exact(byte_count)
+        .map_err(|_| scan_allocation_error("StreamingInfo diagnostic path", byte_count))?;
+    if segments.is_empty() {
+        path.push_str("<root>");
+    }
+    for segment in segments {
+        match segment {
+            StreamInfoPathSegment::Field(name) => {
+                if !path.is_empty() {
+                    path.push('.');
+                }
+                path.push_str(name);
+            }
+            StreamInfoPathSegment::Index(index) => {
+                write!(&mut path, "[{index}]").expect("writing to String cannot fail");
+            }
+        }
+    }
+    Ok(path)
+}
+
+fn scan_allocation_error(resource: &'static str, requested: usize) -> StreamedResourceScanError {
+    StreamedResourceScanError::AllocationFailed {
+        resource,
+        requested,
+    }
 }
 
 fn required_streaming_info_field<'a>(
@@ -708,6 +1160,58 @@ fn resolve_external_resource_file(
             unavailable_data_paths,
         }),
     }
+}
+
+/// Resolves one decoded StreamingInfo and checks its offset/size against the selected ResourceFile.
+///
+/// This performs no range allocation or content read. Empty paths preserve the source
+/// `StreamingInfo.IsSet` behavior, and a missing/unavailable provider result stays distinct from a
+/// resolved file whose byte range is invalid.
+pub fn resolve_streamed_resource_info<'a>(
+    filesystem: &VirtualFileSystem,
+    workspace: &'a SerializedFileWorkspace,
+    source_bundle_index: Option<usize>,
+    info: &StreamedResourceInfo,
+    root_catalog: &'a RootResourceFileCatalog,
+    provider: &PlatformResourceProvider<'_>,
+    limits: PlatformStructureLimits,
+) -> Result<StreamedResourceResolution<'a>, StreamedResourceResolutionError> {
+    if !info.is_set() {
+        return Ok(StreamedResourceResolution::Unset);
+    }
+    let resource = resolve_resource_file_with_root_catalog(
+        filesystem,
+        workspace,
+        source_bundle_index,
+        &info.path,
+        root_catalog,
+        provider,
+        limits,
+    )
+    .map_err(StreamedResourceResolutionError::ResourceLookup)?;
+    let resource_path = match &resource {
+        ResolvedResourceFile::Bundled { virtual_path, .. }
+        | ResolvedResourceFile::ExplicitRoot { virtual_path, .. } => *virtual_path,
+        ResolvedResourceFile::External { virtual_path, .. } => virtual_path,
+        ResolvedResourceFile::Missing {
+            unavailable_data_paths,
+        } => {
+            return Ok(StreamedResourceResolution::Missing {
+                unavailable_data_paths: unavailable_data_paths.clone(),
+            });
+        }
+    };
+    let range_is_valid = check_streamed_resource_integrity(
+        filesystem,
+        resource_path,
+        info.offset,
+        u64::from(info.size),
+    )
+    .map_err(StreamedResourceResolutionError::RangeIntegrity)?;
+    Ok(StreamedResourceResolution::Resolved {
+        resource,
+        range_is_valid,
+    })
 }
 
 impl Default for StreamedResourceLimits {
@@ -1023,11 +1527,13 @@ mod tests {
 
     use super::{
         check_streamed_resource_integrity, extract_streamed_resource_info,
-        open_streamed_resource_range, read_streamed_resource_bytes,
-        read_streamed_resource_info_bytes, ExplicitRootResourceInput, InvalidStreamedResourceRange,
-        RootResourceCatalogError, RootResourceCatalogLimits, RootResourceFileCatalog,
-        StreamedResourceError, StreamedResourceInfo, StreamedResourceInfoError,
-        StreamedResourceLimits,
+        find_streamed_resource_infos, open_streamed_resource_range, read_streamed_resource_bytes,
+        read_streamed_resource_info_bytes, resolve_streamed_resource_info,
+        ExplicitRootResourceInput, InvalidStreamedResourceRange, LocatedStreamedResourceInfo,
+        ResolvedResourceFile, RootResourceCatalogError, RootResourceCatalogLimits,
+        RootResourceFileCatalog, StreamedResourceError, StreamedResourceInfo,
+        StreamedResourceInfoError, StreamedResourceLimits, StreamedResourceResolution,
+        StreamedResourceScanError, StreamedResourceScanLimits,
     };
     use crate::io::filesystem::VirtualFileSystem;
     use crate::scheme::{FileKind, SchemeReader, SchemeReaderLimits};
@@ -1203,6 +1709,140 @@ mod tests {
         ))
         .unwrap()
         .is_set());
+    }
+
+    #[test]
+    fn nested_streaming_info_scan_preserves_field_paths_and_source_order() {
+        let root = SerializedValue::Struct(vec![
+            SerializedFieldValue {
+                name: "m_StreamData".to_owned(),
+                value: streaming_info_value(b"first.resS", SerializedValue::U32(3)),
+            },
+            SerializedFieldValue {
+                name: "m_Levels".to_owned(),
+                value: SerializedValue::Array(vec![SerializedValue::Struct(vec![
+                    SerializedFieldValue {
+                        name: "m_StreamData_C28".to_owned(),
+                        value: streaming_info_value(b"second.resS", SerializedValue::U64(9)),
+                    },
+                ])]),
+            },
+        ]);
+
+        let found =
+            find_streamed_resource_infos(&root, StreamedResourceScanLimits::default()).unwrap();
+        assert_eq!(
+            found,
+            [
+                LocatedStreamedResourceInfo {
+                    field_path: "m_StreamData".to_owned(),
+                    info: StreamedResourceInfo {
+                        path: "first.resS".to_owned(),
+                        offset: 3,
+                        size: 12,
+                    },
+                },
+                LocatedStreamedResourceInfo {
+                    field_path: "m_Levels[0].m_StreamData_C28".to_owned(),
+                    info: StreamedResourceInfo {
+                        path: "second.resS".to_owned(),
+                        offset: 9,
+                        size: 12,
+                    },
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn nested_streaming_info_scan_reports_malformed_owner_shapes_and_limits() {
+        let malformed = SerializedValue::Struct(vec![SerializedFieldValue {
+            name: "m_StreamData".to_owned(),
+            value: SerializedValue::Struct(vec![
+                SerializedFieldValue {
+                    name: "path".to_owned(),
+                    value: SerializedValue::StringBytes(b"broken.resS".to_vec()),
+                },
+                SerializedFieldValue {
+                    name: "offset".to_owned(),
+                    value: SerializedValue::U32(0),
+                },
+            ]),
+        }]);
+        assert!(matches!(
+            find_streamed_resource_infos(&malformed, StreamedResourceScanLimits::default()),
+            Err(StreamedResourceScanError::InvalidInfo {
+                field_path,
+                source: StreamedResourceInfoError::MissingField { field: "size" },
+            }) if field_path == "m_StreamData"
+        ));
+        let nested = SerializedValue::Struct(vec![SerializedFieldValue {
+            name: "nested".to_owned(),
+            value: SerializedValue::Struct(Vec::new()),
+        }]);
+        assert!(matches!(
+            find_streamed_resource_infos(
+                &nested,
+                StreamedResourceScanLimits {
+                    max_value_nodes: 1,
+                    ..StreamedResourceScanLimits::default()
+                },
+            ),
+            Err(StreamedResourceScanError::ValueNodeLimitExceeded { count: 2, limit: 1 })
+        ));
+    }
+
+    #[test]
+    fn decoded_streaming_info_resolves_explicit_root_and_checks_its_range() {
+        use crate::io::platform_structure::{PlatformResourceProvider, PlatformStructureLimits};
+        use crate::serialized_file::workspace::SerializedFileWorkspace;
+
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem.create_directory(Some("/explicit")).unwrap();
+        filesystem
+            .write_all_bytes("/explicit/root.resS", b"0123456789ab")
+            .unwrap();
+        let dispatched =
+            SchemeReader::read_with_limits(b"root resource", SchemeReaderLimits::default())
+                .unwrap();
+        let input = [ExplicitRootResourceInput {
+            file_name: "root.resS",
+            virtual_path: "/explicit/root.resS",
+            dispatched_file: &dispatched,
+        }];
+        let catalog = RootResourceFileCatalog::from_explicit_resource_inputs(
+            &filesystem,
+            &input,
+            RootResourceCatalogLimits::default(),
+        )
+        .unwrap();
+        let info = StreamedResourceInfo {
+            path: "root.resS".to_owned(),
+            offset: 2,
+            size: 4,
+        };
+        let workspace = SerializedFileWorkspace::default();
+        let provider = PlatformResourceProvider::new(None, None);
+        let resolution = resolve_streamed_resource_info(
+            &filesystem,
+            &workspace,
+            None,
+            &info,
+            &catalog,
+            &provider,
+            PlatformStructureLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            resolution,
+            StreamedResourceResolution::Resolved {
+                resource: ResolvedResourceFile::ExplicitRoot {
+                    resource_index: 0,
+                    virtual_path: "/explicit/root.resS",
+                },
+                range_is_valid: true,
+            }
+        );
     }
 
     #[test]
