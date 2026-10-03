@@ -7,7 +7,8 @@ use super::super::metadata::SerializedFileMetadata;
 use super::{
     array_base_is_primitive, array_node_for_value, array_shape, direct_children, field_aligns,
     is_string_node, minimum_encoded_size, pptr_shape, unity_version_aligns_arrays,
-    ParsedObjectPayload, SerializedValue, TypeTreeLayout,
+    ParsedObjectPayload, SerializedFieldValue, SerializedValue, TypeTreeLayout,
+    CHAR_PROPERTY_MASK_FLAG,
 };
 
 /// Bounds for encoding one TypeTree-backed SerializedFile object payload.
@@ -25,6 +26,29 @@ impl Default for ObjectEncodeLimits {
             max_encoded_payload_bytes: 256 * 1024 * 1024,
             max_array_elements: 16 * 1024 * 1024,
             max_string_bytes: 64 * 1024 * 1024,
+            max_type_tree_depth: 256,
+        }
+    }
+}
+
+/// Bounds for constructing a zero/default value tree from a SerializedFile TypeTree.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ObjectDefaultValueLimits {
+    /// Maximum TypeTree node count accepted before building a traversal layout.
+    pub max_type_tree_nodes: usize,
+    /// Maximum number of TypeTree-backed value nodes to materialize.
+    pub max_value_nodes: usize,
+    /// Maximum combined memory budget for value nodes, field names, and raw leaf bytes.
+    pub max_allocation_bytes: usize,
+    pub max_type_tree_depth: usize,
+}
+
+impl Default for ObjectDefaultValueLimits {
+    fn default() -> Self {
+        Self {
+            max_type_tree_nodes: 1_000_000,
+            max_value_nodes: 1_000_000,
+            max_allocation_bytes: 256 * 1024 * 1024,
             max_type_tree_depth: 256,
         }
     }
@@ -112,6 +136,18 @@ pub enum ObjectEncodeErrorKind {
         requested: usize,
         limit: usize,
     },
+    DefaultValueNodeLimitExceeded {
+        requested: usize,
+        limit: usize,
+    },
+    DefaultValueAllocationLimitExceeded {
+        requested: usize,
+        limit: usize,
+    },
+    DefaultTypeTreeNodeLimitExceeded {
+        requested: usize,
+        limit: usize,
+    },
     ZeroWidthArrayElement {
         count: usize,
     },
@@ -186,6 +222,18 @@ impl Display for ObjectEncodeErrorKind {
                 f,
                 "array has {requested} elements, exceeding the limit of {limit}"
             ),
+            Self::DefaultValueNodeLimitExceeded { requested, limit } => write!(
+                f,
+                "default value has {requested} nodes, exceeding the limit of {limit}"
+            ),
+            Self::DefaultValueAllocationLimitExceeded { requested, limit } => write!(
+                f,
+                "default value allocation would reach {requested} bytes, exceeding the limit of {limit}"
+            ),
+            Self::DefaultTypeTreeNodeLimitExceeded { requested, limit } => write!(
+                f,
+                "TypeTree has {requested} nodes, exceeding the default-value limit of {limit}"
+            ),
             Self::ZeroWidthArrayElement { count } => write!(
                 f,
                 "array has {count} elements whose TypeTree encoding has zero width"
@@ -211,6 +259,64 @@ impl Display for ObjectEncodeErrorKind {
 }
 
 impl SerializedFileMetadata {
+    /// Construct a bounded zero/default value tree for an existing serialized type entry.
+    ///
+    /// Primitive fields are zeroed, PPtrs are null, strings and arrays are empty, and unknown
+    /// fixed-size leaves are zero-filled. This is a schema-based constructor; callers still need
+    /// to set fields whose Unity defaults are nonzero (for example, Transform rotation and scale).
+    pub fn default_object_value_for_type(
+        &self,
+        object_index: usize,
+        type_index: usize,
+        limits: ObjectDefaultValueLimits,
+    ) -> Result<SerializedValue, ObjectEncodeError> {
+        let serialized_type = self.types.get(type_index).ok_or_else(|| {
+            ObjectEncodeError::new(
+                object_index,
+                "<object>",
+                ObjectEncodeErrorKind::InvalidResolvedTypeIndex {
+                    type_index,
+                    type_count: self.types.len(),
+                },
+            )
+        })?;
+        let type_tree = serialized_type.type_tree.as_ref().ok_or_else(|| {
+            ObjectEncodeError::new(
+                object_index,
+                "<object>",
+                ObjectEncodeErrorKind::MissingTypeTree,
+            )
+        })?;
+        if type_tree.nodes.is_empty() {
+            return Err(ObjectEncodeError::new(
+                object_index,
+                "<object>",
+                ObjectEncodeErrorKind::EmptyTypeTree,
+            ));
+        }
+        if type_tree.nodes.len() > limits.max_type_tree_nodes {
+            return Err(ObjectEncodeError::new(
+                object_index,
+                "<object>",
+                ObjectEncodeErrorKind::DefaultTypeTreeNodeLimitExceeded {
+                    requested: type_tree.nodes.len(),
+                    limit: limits.max_type_tree_nodes,
+                },
+            ));
+        }
+        let layout = TypeTreeLayout::new(type_tree, object_index, 0)
+            .map_err(|error| invalid_tree(object_index, "<object>", error))?;
+        let mut builder = DefaultValueBuilder {
+            type_tree: &layout,
+            object_index,
+            limits,
+            value_nodes: 0,
+            allocation_bytes: 0,
+        };
+        builder.validate_managed_reference_support()?;
+        builder.build_node(0, "<root>", 0)
+    }
+
     /// Encode one decoded object's typed root and retained trailing bytes.
     ///
     /// This writes only the object payload. It does not rebuild the enclosing SerializedFile's
@@ -354,6 +460,333 @@ impl SerializedFileMetadata {
         encoder.write_bytes("<trailing>", trailing_bytes)?;
         Ok(encoder.output)
     }
+}
+
+struct DefaultValueBuilder<'layout, 'tree> {
+    type_tree: &'layout TypeTreeLayout<'tree>,
+    object_index: usize,
+    limits: ObjectDefaultValueLimits,
+    value_nodes: usize,
+    allocation_bytes: usize,
+}
+
+impl DefaultValueBuilder<'_, '_> {
+    fn validate_managed_reference_support(&self) -> Result<(), ObjectEncodeError> {
+        for (node_index, node) in self.type_tree.nodes.iter().enumerate() {
+            let path = format!("TypeTree node {node_index}");
+            let children = self.children(node_index, &path)?;
+            let type_name = node.type_name.as_deref().unwrap_or("");
+            let field_name = node.name.as_deref().unwrap_or("");
+            let managed_reference_node =
+                matches!(type_name, "managedReference" | "managedRefArrayItem")
+                    && children.len() == 1
+                    && matches!(
+                        self.type_tree.nodes[children[0]].name.as_deref(),
+                        Some("rid" | "id")
+                    );
+            let registry_node = type_name == "ManagedReferencesRegistry"
+                && field_name == "references"
+                && children.len() > 1;
+            let dynamic_managed_data = type_name == "ReferencedObjectData" && field_name == "data";
+            if managed_reference_node || registry_node || dynamic_managed_data {
+                return Err(ObjectEncodeError::new(
+                    self.object_index,
+                    field_name,
+                    ObjectEncodeErrorKind::UnsupportedManagedReferences {
+                        type_name: type_name.to_owned(),
+                        field_name: field_name.to_owned(),
+                    },
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn build_node(
+        &mut self,
+        node_index: usize,
+        path: &str,
+        depth: usize,
+    ) -> Result<SerializedValue, ObjectEncodeError> {
+        if depth > self.limits.max_type_tree_depth {
+            return Err(self.invalid_tree(
+                path,
+                format!(
+                    "nesting depth {depth} exceeds the limit of {}",
+                    self.limits.max_type_tree_depth
+                ),
+            ));
+        }
+        self.charge_node(path)?;
+        self.charge_allocation(path, std::mem::size_of::<SerializedValue>())?;
+
+        let node = self.type_tree.nodes.get(node_index).ok_or_else(|| {
+            ObjectEncodeError::new(
+                self.object_index,
+                path,
+                ObjectEncodeErrorKind::InvalidTypeTree {
+                    message: format!("node index {node_index} is out of range"),
+                },
+            )
+        })?;
+        let type_name = node.type_name.as_deref().unwrap_or("");
+        let children = self.children(node_index, path)?;
+
+        if type_name == "string" {
+            if !is_string_node(self.type_tree, node_index, self.object_index, 0)
+                .map_err(|error| invalid_tree(self.object_index, path, error))?
+            {
+                return Err(self.invalid_tree(path, "string node has an invalid TypeTree shape"));
+            }
+            return Ok(SerializedValue::StringBytes(Vec::new()));
+        }
+
+        if type_name == "TypelessData" {
+            if array_shape(self.type_tree, node_index, self.object_index, 0)
+                .map_err(|error| invalid_tree(self.object_index, path, error))?
+                .is_none()
+            {
+                return Err(self.invalid_tree(
+                    path,
+                    "TypelessData node has an invalid TypeTree array shape",
+                ));
+            }
+            return Ok(SerializedValue::Bytes(Vec::new()));
+        }
+
+        if let Some(array_node_index) =
+            array_node_for_value(self.type_tree, node_index, self.object_index, 0)
+                .map_err(|error| invalid_tree(self.object_index, path, error))?
+        {
+            minimum_encoded_size(
+                self.type_tree,
+                array_node_index,
+                self.object_index,
+                0,
+                depth + 1,
+            )
+            .map_err(|error| invalid_tree(self.object_index, path, error))?;
+            return Ok(SerializedValue::Array(Vec::new()));
+        }
+        if matches!(type_name, "vector" | "staticvector" | "set" | "map") {
+            return Err(self.invalid_tree(path, "container node has an invalid array shape"));
+        }
+
+        if type_name.starts_with("PPtr<") {
+            let Some((file_id_node, path_id_node)) =
+                pptr_shape(self.type_tree, node_index, self.object_index, 0)
+                    .map_err(|error| invalid_tree(self.object_index, path, error))?
+            else {
+                return Err(self.invalid_tree(path, "PPtr node has an invalid component shape"));
+            };
+            let file_id_type = self.type_tree.nodes[file_id_node]
+                .type_name
+                .as_deref()
+                .unwrap_or("");
+            if !matches!(file_id_type, "int" | "SInt32" | "Type*") {
+                return Err(self.invalid_tree(path, "PPtr file ID node is not 32-bit"));
+            }
+            let path_id_type = self.type_tree.nodes[path_id_node]
+                .type_name
+                .as_deref()
+                .unwrap_or("");
+            if !matches!(
+                path_id_type,
+                "int" | "SInt32" | "Type*" | "SInt64" | "long long"
+            ) {
+                return Err(self.invalid_tree(path, "PPtr PathID node is not 32-bit or 64-bit"));
+            }
+            return Ok(SerializedValue::PPtr {
+                file_id: 0,
+                path_id: 0,
+            });
+        }
+
+        if let Some(value) = default_primitive(type_name, node.meta_flags) {
+            return Ok(value);
+        }
+
+        if !children.is_empty() {
+            let field_bytes = children
+                .len()
+                .checked_mul(std::mem::size_of::<SerializedFieldValue>())
+                .ok_or_else(|| {
+                    ObjectEncodeError::new(
+                        self.object_index,
+                        path,
+                        ObjectEncodeErrorKind::LengthOverflow {
+                            resource: "default struct field storage",
+                        },
+                    )
+                })?;
+            self.charge_allocation(path, field_bytes)?;
+            let mut fields = Vec::new();
+            fields.try_reserve_exact(children.len()).map_err(|_| {
+                ObjectEncodeError::new(
+                    self.object_index,
+                    path,
+                    ObjectEncodeErrorKind::AllocationFailed {
+                        resource: "default struct fields",
+                        requested: children.len(),
+                    },
+                )
+            })?;
+            for child_index in children {
+                let name = self.type_tree.nodes[child_index]
+                    .name
+                    .as_deref()
+                    .unwrap_or("");
+                self.charge_allocation(path, name.len())?;
+                let mut owned_name = String::new();
+                owned_name.try_reserve_exact(name.len()).map_err(|_| {
+                    ObjectEncodeError::new(
+                        self.object_index,
+                        path,
+                        ObjectEncodeErrorKind::AllocationFailed {
+                            resource: "default field name",
+                            requested: name.len(),
+                        },
+                    )
+                })?;
+                owned_name.push_str(name);
+                let child_path = child_path(path, name);
+                let value = self.build_node(child_index, &child_path, depth + 1)?;
+                fields.push(SerializedFieldValue {
+                    name: owned_name,
+                    value,
+                });
+            }
+            return Ok(SerializedValue::Struct(fields));
+        }
+
+        let size = usize::try_from(node.byte_size).map_err(|_| {
+            self.invalid_tree(
+                path,
+                format!(
+                    "unknown leaf '{type_name}' has invalid byte size {}",
+                    node.byte_size
+                ),
+            )
+        })?;
+        self.charge_allocation(path, size)?;
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(size).map_err(|_| {
+            ObjectEncodeError::new(
+                self.object_index,
+                path,
+                ObjectEncodeErrorKind::AllocationFailed {
+                    resource: "default raw leaf bytes",
+                    requested: size,
+                },
+            )
+        })?;
+        bytes.resize(size, 0);
+        self.charge_allocation(path, type_name.len())?;
+        let mut raw_type_name = String::new();
+        raw_type_name
+            .try_reserve_exact(type_name.len())
+            .map_err(|_| {
+                ObjectEncodeError::new(
+                    self.object_index,
+                    path,
+                    ObjectEncodeErrorKind::AllocationFailed {
+                        resource: "default raw leaf type name",
+                        requested: type_name.len(),
+                    },
+                )
+            })?;
+        raw_type_name.push_str(type_name);
+        Ok(SerializedValue::Raw {
+            type_name: raw_type_name,
+            bytes,
+        })
+    }
+
+    fn children(&self, node_index: usize, path: &str) -> Result<Vec<usize>, ObjectEncodeError> {
+        direct_children(self.type_tree, node_index, self.object_index, 0)
+            .map_err(|error| invalid_tree(self.object_index, path, error))
+    }
+
+    fn charge_node(&mut self, path: &str) -> Result<(), ObjectEncodeError> {
+        let requested = self.value_nodes.checked_add(1).ok_or_else(|| {
+            ObjectEncodeError::new(
+                self.object_index,
+                path,
+                ObjectEncodeErrorKind::LengthOverflow {
+                    resource: "default value node count",
+                },
+            )
+        })?;
+        if requested > self.limits.max_value_nodes {
+            return Err(ObjectEncodeError::new(
+                self.object_index,
+                path,
+                ObjectEncodeErrorKind::DefaultValueNodeLimitExceeded {
+                    requested,
+                    limit: self.limits.max_value_nodes,
+                },
+            ));
+        }
+        self.value_nodes = requested;
+        Ok(())
+    }
+
+    fn charge_allocation(&mut self, path: &str, amount: usize) -> Result<(), ObjectEncodeError> {
+        let requested = self.allocation_bytes.checked_add(amount).ok_or_else(|| {
+            ObjectEncodeError::new(
+                self.object_index,
+                path,
+                ObjectEncodeErrorKind::LengthOverflow {
+                    resource: "default value allocation budget",
+                },
+            )
+        })?;
+        if requested > self.limits.max_allocation_bytes {
+            return Err(ObjectEncodeError::new(
+                self.object_index,
+                path,
+                ObjectEncodeErrorKind::DefaultValueAllocationLimitExceeded {
+                    requested,
+                    limit: self.limits.max_allocation_bytes,
+                },
+            ));
+        }
+        self.allocation_bytes = requested;
+        Ok(())
+    }
+
+    fn invalid_tree(&self, path: &str, message: impl Into<String>) -> ObjectEncodeError {
+        ObjectEncodeError::new(
+            self.object_index,
+            path,
+            ObjectEncodeErrorKind::InvalidTypeTree {
+                message: message.into(),
+            },
+        )
+    }
+}
+
+fn default_primitive(type_name: &str, meta_flags: u32) -> Option<SerializedValue> {
+    Some(match type_name {
+        "bool" => SerializedValue::Bool(false),
+        "char" | "UInt8" => SerializedValue::U8(0),
+        "SInt8" => SerializedValue::I8(0),
+        "short" | "SInt16" => SerializedValue::I16(0),
+        "ushort" | "UInt16" | "unsigned short" => {
+            if meta_flags & CHAR_PROPERTY_MASK_FLAG != 0 {
+                SerializedValue::Char(0)
+            } else {
+                SerializedValue::U16(0)
+            }
+        }
+        "int" | "SInt32" | "Type*" => SerializedValue::I32(0),
+        "uint" | "UInt32" | "unsigned int" => SerializedValue::U32(0),
+        "SInt64" | "long long" => SerializedValue::I64(0),
+        "UInt64" | "FileSize" | "unsigned long long" => SerializedValue::U64(0),
+        "float" => SerializedValue::F32(0.0),
+        "double" => SerializedValue::F64(0.0),
+        _ => return None,
+    })
 }
 
 struct PayloadEncoder<'layout, 'tree> {
@@ -1026,7 +1459,11 @@ fn encode_u64_bytes(value: u64, endian: Endian) -> [u8; 8] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::serialized_file::metadata::{TypeTree, TypeTreeNode};
+    use crate::io::binary::Endian;
+    use crate::serialized_file::metadata::{
+        SerializedFileMetadata, SerializedType, TypeTree, TypeTreeNode,
+    };
+    use crate::serialized_file::metadata_prefix::SerializedFileMetadataPrefix;
     use crate::serialized_file::object::SerializedFieldValue;
 
     fn node(level: u8, name: &str, type_name: &str, byte_size: i32) -> TypeTreeNode {
@@ -1042,6 +1479,38 @@ mod tests {
             index: 0,
             meta_flags: 0,
             reference_type_hash: None,
+        }
+    }
+
+    fn metadata_with_tree(tree: TypeTree) -> SerializedFileMetadata {
+        SerializedFileMetadata {
+            prefix: SerializedFileMetadataPrefix {
+                metadata_offset: 0,
+                metadata_size: 0,
+                body_endian: Endian::Little,
+                unity_version_text: Some("2022.3.1f1".to_owned()),
+                target_platform: Some(0),
+                has_type_tree: true,
+                consumed_bytes: 0,
+            },
+            types: vec![SerializedType {
+                raw_type_id: 4,
+                type_id_for_hash: 4,
+                is_stripped_type: false,
+                script_type_index: -1,
+                script_id: None,
+                old_type_hash: None,
+                type_tree: Some(tree),
+                type_dependencies: Vec::new(),
+            }],
+            long_file_id: None,
+            objects: Vec::new(),
+            script_types: Vec::new(),
+            externals: Vec::new(),
+            reference_types: Vec::new(),
+            user_information: None,
+            trailing_metadata: Vec::new(),
+            consumed_bytes: 0,
         }
     }
 
@@ -1199,5 +1668,191 @@ mod tests {
         encoder.encode_root(&value, "Root").unwrap();
 
         assert_eq!(encoder.output, [0xaa, 0xbb, 7, 0]);
+    }
+
+    #[test]
+    fn constructs_bounded_type_tree_defaults_and_encodes_them() {
+        let tree = TypeTree {
+            nodes: vec![
+                node(0, "", "Transform", -1),
+                node(1, "m_GameObject", "PPtr<GameObject>", 12),
+                node(2, "m_FileID", "SInt32", 4),
+                node(2, "m_PathID", "SInt64", 8),
+                node(1, "m_LocalRotation", "Quaternion", -1),
+                node(2, "x", "float", 4),
+                node(2, "y", "float", 4),
+                node(2, "z", "float", 4),
+                node(2, "w", "float", 4),
+                node(1, "m_Name", "string", -1),
+                node(2, "Array", "Array", -1),
+                node(3, "size", "int", 4),
+                node(3, "data", "char", 1),
+                node(1, "m_Bytes", "TypelessData", -1),
+                node(2, "size", "int", 4),
+                node(2, "data", "UInt8", 1),
+                node(1, "m_Children", "vector", -1),
+                node(2, "Array", "Array", -1),
+                node(3, "size", "int", 4),
+                node(3, "data", "PPtr<Transform>", 12),
+                node(4, "m_FileID", "SInt32", 4),
+                node(4, "m_PathID", "SInt64", 8),
+                node(1, "m_Opaque", "OpaqueRecord", 3),
+            ],
+            string_buffer: Vec::new(),
+        };
+        let metadata = metadata_with_tree(tree);
+
+        let value = metadata
+            .default_object_value_for_type(0, 0, ObjectDefaultValueLimits::default())
+            .unwrap();
+
+        assert_eq!(
+            value.unique_field("m_GameObject").unwrap(),
+            Some(&SerializedValue::PPtr {
+                file_id: 0,
+                path_id: 0,
+            })
+        );
+        assert_eq!(
+            value.unique_field("m_Name").unwrap(),
+            Some(&SerializedValue::StringBytes(Vec::new()))
+        );
+        assert_eq!(
+            value.unique_field("m_Bytes").unwrap(),
+            Some(&SerializedValue::Bytes(Vec::new()))
+        );
+        assert_eq!(
+            value.unique_field("m_Children").unwrap(),
+            Some(&SerializedValue::Array(Vec::new()))
+        );
+        assert_eq!(
+            value.unique_field("m_Opaque").unwrap(),
+            Some(&SerializedValue::Raw {
+                type_name: "OpaqueRecord".to_owned(),
+                bytes: vec![0; 3],
+            })
+        );
+        let payload = metadata
+            .encode_object_payload_for_type(0, 0, &value, &[], ObjectEncodeLimits::default())
+            .unwrap();
+        assert_eq!(payload.len(), 12 + 16 + 4 + 4 + 4 + 3);
+    }
+
+    #[test]
+    fn default_value_builder_enforces_node_and_allocation_limits() {
+        let metadata = metadata_with_tree(TypeTree {
+            nodes: vec![node(0, "", "OpaqueRecord", 16)],
+            string_buffer: Vec::new(),
+        });
+
+        let type_tree_error = metadata
+            .default_object_value_for_type(
+                0,
+                0,
+                ObjectDefaultValueLimits {
+                    max_type_tree_nodes: 0,
+                    ..ObjectDefaultValueLimits::default()
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(
+            type_tree_error.kind(),
+            ObjectEncodeErrorKind::DefaultTypeTreeNodeLimitExceeded {
+                requested: 1,
+                limit: 0
+            }
+        ));
+
+        let node_error = metadata
+            .default_object_value_for_type(
+                0,
+                0,
+                ObjectDefaultValueLimits {
+                    max_value_nodes: 0,
+                    ..ObjectDefaultValueLimits::default()
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(
+            node_error.kind(),
+            ObjectEncodeErrorKind::DefaultValueNodeLimitExceeded {
+                requested: 1,
+                limit: 0
+            }
+        ));
+
+        let allocation_error = metadata
+            .default_object_value_for_type(
+                0,
+                0,
+                ObjectDefaultValueLimits {
+                    max_allocation_bytes: 1,
+                    ..ObjectDefaultValueLimits::default()
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(
+            allocation_error.kind(),
+            ObjectEncodeErrorKind::DefaultValueAllocationLimitExceeded {
+                requested,
+                limit: 1
+            } if *requested > 1
+        ));
+    }
+
+    #[test]
+    fn default_value_builder_rejects_malformed_pptr_and_managed_reference_shapes() {
+        let malformed_pptr = metadata_with_tree(TypeTree {
+            nodes: vec![
+                node(0, "", "Root", -1),
+                node(1, "m_Target", "PPtr<GameObject>", 4),
+            ],
+            string_buffer: Vec::new(),
+        });
+        let error = malformed_pptr
+            .default_object_value_for_type(0, 0, ObjectDefaultValueLimits::default())
+            .unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            ObjectEncodeErrorKind::InvalidTypeTree { message }
+                if message.contains("PPtr node has an invalid component shape")
+        ));
+
+        let malformed_pptr_integer = metadata_with_tree(TypeTree {
+            nodes: vec![
+                node(0, "", "Root", -1),
+                node(1, "m_Target", "PPtr<GameObject>", 8),
+                node(2, "m_FileID", "float", 4),
+                node(2, "m_PathID", "SInt32", 4),
+            ],
+            string_buffer: Vec::new(),
+        });
+        let error = malformed_pptr_integer
+            .default_object_value_for_type(0, 0, ObjectDefaultValueLimits::default())
+            .unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            ObjectEncodeErrorKind::InvalidTypeTree { message }
+                if message.contains("PPtr file ID node is not 32-bit")
+        ));
+
+        let managed_reference = metadata_with_tree(TypeTree {
+            nodes: vec![
+                node(0, "", "Root", -1),
+                node(1, "m_Reference", "managedReference", 8),
+                node(2, "rid", "SInt64", 8),
+            ],
+            string_buffer: Vec::new(),
+        });
+        let error = managed_reference
+            .default_object_value_for_type(0, 0, ObjectDefaultValueLimits::default())
+            .unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            ObjectEncodeErrorKind::UnsupportedManagedReferences {
+                type_name,
+                field_name,
+            } if type_name == "managedReference" && field_name == "m_Reference"
+        ));
     }
 }

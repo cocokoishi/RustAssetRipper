@@ -13,7 +13,9 @@ const CHAR_PROPERTY_MASK_FLAG: u32 = 0x0200_0000;
 const MAX_TYPE_TREE_DEPTH: usize = 256;
 
 mod writer;
-pub use writer::{ObjectEncodeError, ObjectEncodeErrorKind, ObjectEncodeLimits};
+pub use writer::{
+    ObjectDefaultValueLimits, ObjectEncodeError, ObjectEncodeErrorKind, ObjectEncodeLimits,
+};
 
 /// Per-object bounds for dynamic TypeTree decoding. Callers can raise these limits when
 /// processing trusted large assets or lower them for untrusted input.
