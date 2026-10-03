@@ -5,6 +5,11 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
 use crate::processing::scene_collections::scene_manager_kind;
+use crate::processing::scene_hierarchy::{
+    WorkspaceSceneHierarchyMembershipError, WorkspaceSceneHierarchyMembershipIssue,
+    WorkspaceSceneHierarchyMembershipLimits, WorkspaceSceneHierarchyScene,
+    WorkspaceSceneObjectIdentity,
+};
 use crate::processing::scene_naming::SceneUnityVersion;
 
 use super::ids::get_pseudo_random_export_id;
@@ -150,6 +155,135 @@ pub fn order_scene_hierarchy_assets(
     ordered.extend(groups.scene_roots);
     Ok(ordered)
 }
+
+/// Build the Scene ID plan directly from one source SceneDefinition hierarchy.
+///
+/// This adapter refuses incomplete or ambiguously classified membership. It converts the
+/// hierarchy's source category groups to export identities, concatenates them in baseline
+/// `SceneHierarchyObject.Assets` order, then assigns fileIDs using the requested Unity version.
+pub fn plan_workspace_scene_export_ids(
+    scene: &WorkspaceSceneHierarchyScene,
+    unity_version: SceneUnityVersion,
+    membership_limits: WorkspaceSceneHierarchyMembershipLimits,
+    order_limits: SceneHierarchyAssetOrderLimits,
+    plan_limits: SceneExportIdPlanLimits,
+) -> Result<Vec<SceneExportIdAssignment>, WorkspaceSceneExportPlanError> {
+    let membership = scene
+        .asset_membership(membership_limits)
+        .map_err(WorkspaceSceneExportPlanError::Membership)?;
+    if !membership.is_complete() {
+        let mut issues = Vec::new();
+        issues
+            .try_reserve_exact(membership.issues().len())
+            .map_err(|_| WorkspaceSceneExportPlanError::AllocationFailed {
+                resource: "incomplete Scene hierarchy membership diagnostics",
+                requested: membership.issues().len(),
+            })?;
+        issues.extend_from_slice(membership.issues());
+        return Err(WorkspaceSceneExportPlanError::IncompleteMembership { issues });
+    }
+
+    let game_objects = workspace_identities_to_export_assets(membership.game_objects())?;
+    let components = workspace_identities_to_export_assets(membership.components())?;
+    let prefab_instances = workspace_identities_to_export_assets(membership.prefab_instances())?;
+    let managers = workspace_identities_to_export_assets(membership.managers())?;
+    let scene_roots = membership
+        .scene_roots()
+        .map(workspace_identity_to_export_asset)
+        .transpose()?;
+    let assets = order_scene_hierarchy_assets(
+        SceneHierarchyAssetGroups {
+            game_objects: &game_objects,
+            components: &components,
+            prefab_instances: &prefab_instances,
+            managers: &managers,
+            scene_roots,
+        },
+        order_limits,
+    )
+    .map_err(WorkspaceSceneExportPlanError::AssetOrder)?;
+    plan_scene_export_ids(&assets, unity_version, plan_limits)
+        .map_err(WorkspaceSceneExportPlanError::IdPlan)
+}
+
+fn workspace_identities_to_export_assets(
+    identities: &[WorkspaceSceneObjectIdentity],
+) -> Result<Vec<ExportAssetIdentity>, WorkspaceSceneExportPlanError> {
+    let mut assets = Vec::new();
+    assets.try_reserve_exact(identities.len()).map_err(|_| {
+        WorkspaceSceneExportPlanError::AllocationFailed {
+            resource: "Scene hierarchy export identities",
+            requested: identities.len(),
+        }
+    })?;
+    for &identity in identities {
+        assets.push(workspace_identity_to_export_asset(identity)?);
+    }
+    Ok(assets)
+}
+
+fn workspace_identity_to_export_asset(
+    identity: WorkspaceSceneObjectIdentity,
+) -> Result<ExportAssetIdentity, WorkspaceSceneExportPlanError> {
+    let Some(class_id) = identity.class_id else {
+        return Err(WorkspaceSceneExportPlanError::MissingClassId { identity });
+    };
+    Ok(ExportAssetIdentity {
+        collection: ExportAssetCollectionIdentity::SerializedFile {
+            file_index: identity.file_index,
+        },
+        object_index: identity.object_index,
+        path_id: identity.path_id,
+        class_id,
+    })
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WorkspaceSceneExportPlanError {
+    Membership(WorkspaceSceneHierarchyMembershipError),
+    IncompleteMembership {
+        issues: Vec<WorkspaceSceneHierarchyMembershipIssue>,
+    },
+    MissingClassId {
+        identity: WorkspaceSceneObjectIdentity,
+    },
+    AssetOrder(SceneHierarchyAssetOrderError),
+    IdPlan(SceneExportIdPlanError),
+    AllocationFailed {
+        resource: &'static str,
+        requested: usize,
+    },
+}
+
+impl Display for WorkspaceSceneExportPlanError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Membership(error) => {
+                write!(f, "could not build Scene hierarchy membership: {error}")
+            }
+            Self::IncompleteMembership { issues } => write!(
+                f,
+                "Scene hierarchy membership has {} unresolved classification/scan issue(s)",
+                issues.len()
+            ),
+            Self::MissingClassId { identity } => write!(
+                f,
+                "Scene hierarchy asset {}:{} has no class ID for export planning",
+                identity.file_index, identity.object_index
+            ),
+            Self::AssetOrder(error) => write!(f, "could not order Scene hierarchy assets: {error}"),
+            Self::IdPlan(error) => write!(f, "could not assign Scene export IDs: {error}"),
+            Self::AllocationFailed {
+                resource,
+                requested,
+            } => {
+                write!(f, "could not allocate {requested} entries for {resource}")
+            }
+        }
+    }
+}
+
+impl Error for WorkspaceSceneExportPlanError {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SceneExportIdPlanError {

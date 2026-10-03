@@ -604,3 +604,12 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Full verification passed: 379 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format; baseline verifier (1,449 files); and `git diff --check`.
 - Still incomplete: derive the actual hierarchy membership and input order from `WorkspaceSceneHierarchies`, include hidden/filter rules, and provide generated-asset YAML walking. The comparator has no C# runtime differential. Phase 1 remains incomplete; Phase 2 remains locked.
 - Next: build a bounded adapter from one `WorkspaceSceneHierarchyScene` plus its scene collections into GameObjects, Components, PrefabInstances, managers, and optional SceneRoots, keeping every ambiguous or unsupported classification explicit.
+
+## Bounded Scene membership and export-ID planning
+
+- Current phase: Phase 1; gate not passed. This increment starts from pushed revision `e1cb05ee27f30f4f1c49c9062dd4f9f03b5f7299`. Only RustAssetRipper is a write/push target; the local AssetRipper source was read-only. No UABEA or user AssetBundle content was accessed.
+- Added `WorkspaceSceneHierarchyScene::asset_membership` and `plan_workspace_scene_export_ids`. Scene members are collected in source collection/object order, grouped in baseline category order, and assigned serialized PathIDs. Distinct component evidence is preserved. MonoBehaviour class 114 requires non-null `m_GameObject`; an explicit null excludes it, while unavailable or conflicting evidence and incomplete input scans block ID planning.
+- Added synthetic checks for multiple collection order, components targeting another collection, category grouping, last SceneRoots, MonoBehaviour evidence, ambiguous candidates, incomplete scan/limit errors, ID ordering, and subsequent YAML manager ordering.
+- Full verification passed: 384 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format; baseline verifier (1,449 files); and diff checks.
+- Still incomplete: generated component/interface classification beyond the proven cases, hidden-asset filtering, processed Scene assets, Prefab collection discovery/IDs, generated per-class YAML walkers, and full project writing. No C# runtime differential has run. Phase 1 remains incomplete; Phase 2 remains locked.
+- Next: inspect the baseline's generated type/interface mapping for the remaining component candidate classes, add independent classification fixtures, then connect complete Scene membership and assignments to generated YAML walking.
