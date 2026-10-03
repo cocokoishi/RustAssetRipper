@@ -555,3 +555,11 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Full verification passed: 363 library tests, 10 CLI tests, warnings-denied Clippy, format check, baseline verifier (1,449 files), and `git diff --check`.
 - Still incomplete: actual Unity object walkers do not populate the YAML tree; object field transforms, importer filtering, complete `.meta` documents, GUID constant integration, and project file writing remain open. Phase 1 remains open; Phase 2 remains locked.
 - Next: port a constrained built-in object's editor YAML walk to the node tree, beginning with GameObject/Component references and carrying class/version metadata instead of emitting TypeTree bytes as substitutes.
+
+## Bounded SerializedValue to Unity YAML object conversion
+
+- Current phase: Phase 1; gate not passed. This increment starts from pushed revision 0513ef83e3ea4a5dd36a32bc11ff75b5a73a7c00. Only RustAssetRipper is a write/push target; the local AssetRipper reference remains read-only. No other remote repository, UABEA, or user AssetBundle content was accessed.
+- Added src/export/value_yaml.rs to convert decoded ordered SerializedValue trees into bounded Unity YAML object documents. It handles primitive values, UTF-8 strings, byte arrays, struct/sequence trees, inherited Base flattening, serializedVersion, null pointers, and caller-resolved PPtrs. Empty-array hints select baseline numeric-hex, block, curve-block, or flow output.
+- Focused converter tests (3), workspace tests (366 library, 10 CLI, 0 docs), warnings-denied Clippy, format check, baseline verifier (1,449 files), and git diff --check all passed.
+- Still incomplete: this generic conversion is not the generated class/version editor walker. Field-specific policies, Hash128/GUID handling, importer filtering, stripped-field rules, baseline MissingReference GUID sourcing, collection discovery, and writing complete project assets remain open. Phase 1 remains open; Phase 2 remains locked.
+- Next: inspect the baseline field conversion policies and implement schema-aware field policy metadata, then connect one actual built-in object class to the existing pointer map and YAML writer with independent fixtures.
