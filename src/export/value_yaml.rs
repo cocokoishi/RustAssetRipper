@@ -2296,6 +2296,15 @@ fn baseline_type_scoped_field_aliases(type_name: &str) -> &'static [(&'static st
     const CONTROLLER_CONSTANT_ALIASES: &[(&str, &str)] = &[("m_HumanLayerArray", "m_LayerArray")];
     const STATE_MACHINE_CONSTANT_ALIASES: &[(&str, &str)] =
         &[("m_MotionSetCount", "m_SynchronizedLayerCount")];
+    const BUILD_SETTINGS_ALIASES: &[(&str, &str)] = &[("m_Levels", "m_Scenes")];
+    const HEIGHTMAP_ALIASES: &[(&str, &str)] = &[
+        (
+            "m_EnableSurfaceMaskTextureCompression",
+            "m_EnableHolesTextureCompression",
+        ),
+        ("m_SurfaceMask", "m_Holes"),
+        ("m_SurfaceMaskLOD", "m_HolesLOD"),
+    ];
 
     match type_name {
         "AnimationClip" => ANIMATION_CLIP_ALIASES,
@@ -2310,6 +2319,8 @@ fn baseline_type_scoped_field_aliases(type_name: &str) -> &'static [(&'static st
         "HumanLayerConstant" | "LayerConstant" => LAYER_CONSTANT_ALIASES,
         "ControllerConstant" => CONTROLLER_CONSTANT_ALIASES,
         "StateMachineConstant" => STATE_MACHINE_CONSTANT_ALIASES,
+        "BuildSettings" => BUILD_SETTINGS_ALIASES,
+        "Heightmap" => HEIGHTMAP_ALIASES,
         _ => &[],
     }
 }
@@ -3746,6 +3757,93 @@ mod tests {
         assert!(!output.contains("m_HumanLayerArray:"));
         assert!(!output.contains("m_MotionSetCount: 6"));
         assert!(!output.contains("m_StateMachineMotionSetIndex:"));
+    }
+
+    #[test]
+    fn build_settings_and_heightmap_aliases_follow_type_paths() {
+        let type_tree = TypeTree {
+            nodes: vec![
+                type_tree_node(0, "GameObject", "Base", 0),
+                type_tree_node(1, "SInt32", "m_Levels", 0),
+                type_tree_node(1, "BuildSettings", "m_BuildSettings", 0),
+                type_tree_node(2, "vector", "m_Levels", 0),
+                type_tree_node(3, "Array", "Array", 0),
+                type_tree_node(4, "SInt32", "size", 0),
+                type_tree_node(4, "string", "data", 0),
+                type_tree_node(1, "Heightmap", "m_Heightmap", 0),
+                type_tree_node(2, "bool", "m_EnableSurfaceMaskTextureCompression", 0),
+                type_tree_node(2, "PPtr<Texture2D>", "m_SurfaceMask", 0),
+                type_tree_node(2, "SInt32", "m_SurfaceMaskLOD", 0),
+            ],
+            string_buffer: Vec::new(),
+        };
+        let hints = UnityYamlObjectConversionHints::from_type_tree(
+            &type_tree,
+            version(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        for (path, alias) in [
+            ("m_BuildSettings.m_Levels", "m_Scenes"),
+            (
+                "m_Heightmap.m_EnableSurfaceMaskTextureCompression",
+                "m_EnableHolesTextureCompression",
+            ),
+            ("m_Heightmap.m_SurfaceMask", "m_Holes"),
+            ("m_Heightmap.m_SurfaceMaskLOD", "m_HolesLOD"),
+        ] {
+            assert_eq!(
+                hints.field_name_aliases.get(path).map(String::as_str),
+                Some(alias)
+            );
+        }
+
+        let value = SerializedValue::Struct(vec![
+            field("m_Levels", SerializedValue::I32(123)),
+            field(
+                "m_BuildSettings",
+                SerializedValue::Struct(vec![field(
+                    "m_Levels",
+                    SerializedValue::Array(vec![SerializedValue::StringBytes(
+                        b"Assets/Scenes/Main.unity".to_vec(),
+                    )]),
+                )]),
+            ),
+            field(
+                "m_Heightmap",
+                SerializedValue::Struct(vec![
+                    field(
+                        "m_EnableSurfaceMaskTextureCompression",
+                        SerializedValue::Bool(true),
+                    ),
+                    field("m_SurfaceMask", null_pptr()),
+                    field("m_SurfaceMaskLOD", SerializedValue::I32(2)),
+                ]),
+            ),
+        ]);
+        let document = convert_with_object_hints(&value, &hints, |_| {
+            unreachable!("the generated texture pointer is null")
+        })
+        .unwrap();
+        let output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[document],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        for expected in [
+            "m_Levels: 123",
+            "m_Scenes:",
+            "Assets/Scenes/Main.unity",
+            "m_EnableHolesTextureCompression: 1",
+            "m_Holes: {fileID: 0}",
+            "m_HolesLOD: 2",
+        ] {
+            assert!(output.contains(expected), "missing {expected}");
+        }
+        assert!(!output.contains("m_EnableSurfaceMaskTextureCompression:"));
+        assert!(!output.contains("m_SurfaceMask:"));
+        assert!(!output.contains("m_SurfaceMaskLOD:"));
+        assert!(!output.contains("m_Levels:\n"));
     }
 
     #[test]
