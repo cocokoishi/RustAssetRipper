@@ -270,6 +270,20 @@ impl SerializedFileMetadata {
         type_index: usize,
         limits: ObjectDefaultValueLimits,
     ) -> Result<SerializedValue, ObjectEncodeError> {
+        self.default_value_for_type_tree_node(object_index, type_index, 0, limits)
+    }
+
+    /// Construct a bounded zero/default value for one node in an existing SerializedFile TypeTree.
+    ///
+    /// This supports schema-derived array element templates without materializing a parent object's
+    /// variable-length arrays. The node index addresses `SerializedType.type_tree.nodes` directly.
+    pub fn default_value_for_type_tree_node(
+        &self,
+        object_index: usize,
+        type_index: usize,
+        node_index: usize,
+        limits: ObjectDefaultValueLimits,
+    ) -> Result<SerializedValue, ObjectEncodeError> {
         let serialized_type = self.types.get(type_index).ok_or_else(|| {
             ObjectEncodeError::new(
                 object_index,
@@ -313,8 +327,8 @@ impl SerializedFileMetadata {
             value_nodes: 0,
             allocation_bytes: 0,
         };
-        builder.validate_managed_reference_support()?;
-        builder.build_node(0, "<root>", 0)
+        builder.validate_managed_reference_support_from(node_index)?;
+        builder.build_node(node_index, "<type-tree-node>", 0)
     }
 
     /// Encode one decoded object's typed root and retained trailing bytes.
@@ -471,8 +485,31 @@ struct DefaultValueBuilder<'layout, 'tree> {
 }
 
 impl DefaultValueBuilder<'_, '_> {
-    fn validate_managed_reference_support(&self) -> Result<(), ObjectEncodeError> {
-        for (node_index, node) in self.type_tree.nodes.iter().enumerate() {
+    fn validate_managed_reference_support_from(
+        &self,
+        root_node_index: usize,
+    ) -> Result<(), ObjectEncodeError> {
+        let root_level = self
+            .type_tree
+            .nodes
+            .get(root_node_index)
+            .ok_or_else(|| {
+                self.invalid_tree(
+                    "<type-tree-node>",
+                    format!("node index {root_node_index} is out of range"),
+                )
+            })?
+            .level;
+        for (node_index, node) in self
+            .type_tree
+            .nodes
+            .iter()
+            .enumerate()
+            .skip(root_node_index)
+        {
+            if node_index != root_node_index && node.level <= root_level {
+                break;
+            }
             let path = format!("TypeTree node {node_index}");
             let children = self.children(node_index, &path)?;
             let type_name = node.type_name.as_deref().unwrap_or("");
@@ -1736,6 +1773,35 @@ mod tests {
             .encode_object_payload_for_type(0, 0, &value, &[], ObjectEncodeLimits::default())
             .unwrap();
         assert_eq!(payload.len(), 12 + 16 + 4 + 4 + 4 + 3);
+    }
+
+    #[test]
+    fn constructs_array_element_template_from_its_type_tree_subtree() {
+        let metadata = metadata_with_tree(TypeTree {
+            nodes: vec![
+                node(0, "", "GameObject", -1),
+                node(1, "m_Component", "vector", -1),
+                node(2, "Array", "Array", -1),
+                node(3, "size", "int", 4),
+                node(3, "data", "ComponentPair", -1),
+                node(4, "component", "PPtr<Component>", 12),
+                node(5, "m_FileID", "SInt32", 4),
+                node(5, "m_PathID", "SInt64", 8),
+            ],
+            string_buffer: Vec::new(),
+        });
+
+        let template = metadata
+            .default_value_for_type_tree_node(0, 0, 4, ObjectDefaultValueLimits::default())
+            .unwrap();
+
+        assert_eq!(
+            template.unique_field("component").unwrap(),
+            Some(&SerializedValue::PPtr {
+                file_id: 0,
+                path_id: 0,
+            })
+        );
     }
 
     #[test]

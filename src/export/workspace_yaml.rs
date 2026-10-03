@@ -8,10 +8,12 @@ use std::str;
 use crate::io::filesystem::VirtualFileSystem;
 use crate::io::platform_structure::PlatformResourceProvider;
 use crate::processing::prefab_processing::{
+    materialize_planned_game_object_component_append,
     materialize_planned_generated_transform_payload, WorkspaceGeneratedConstructorPointer,
     WorkspaceGeneratedPointerField, WorkspaceGeneratedTransformPayload,
-    WorkspaceProcessedCollectionKind, WorkspaceProcessedPrefabAssetKind,
-    WorkspaceProcessedPrefabAssetPlan,
+    WorkspaceProcessedCollectionKind, WorkspaceProcessedDependencyTarget,
+    WorkspaceProcessedPrefabAssetKind, WorkspaceProcessedPrefabAssetPlan,
+    WorkspaceSourceDependencyAppendTarget, WorkspaceSourceDependencyPointerField,
 };
 use crate::processing::scene_naming::SceneUnityVersion;
 use crate::resource::{
@@ -19,7 +21,9 @@ use crate::resource::{
     StreamedResourceContentLimits, StreamedResourceContentResolution,
 };
 use crate::serialized_file::metadata::SerializedFileMetadata;
-use crate::serialized_file::object::{ObjectDefaultValueLimits, ObjectEncodeLimits};
+use crate::serialized_file::object::{
+    ObjectDefaultValueLimits, ObjectEncodeLimits, ParsedObjectPayload, SerializedValue,
+};
 use crate::serialized_file::object_workspace::WorkspaceObject;
 use crate::serialized_file::reference_graph::{MultiFilePPtrResolution, MultiFileReferenceGraph};
 use crate::serialized_file::workspace::SerializedFileWorkspace;
@@ -126,6 +130,19 @@ impl<'a> WorkspaceGeneratedTransformYamlContext<'a> {
             encode_limits: ObjectEncodeLimits::default(),
         }
     }
+}
+
+struct WorkspaceGeneratedComponentYamlPointer {
+    source: ExportAssetIdentity,
+    field_path: String,
+    file_id: i32,
+    path_id: i64,
+    target: ExportAssetIdentity,
+}
+
+struct WorkspaceGeneratedComponentYamlOverlay {
+    payload: ParsedObjectPayload,
+    pointer: WorkspaceGeneratedComponentYamlPointer,
 }
 
 /// Execute one ordered Scene or Prefab YAML collection using workspace-decoded source objects.
@@ -253,6 +270,18 @@ fn workspace_assignments_to_unity_yaml_with_context<A: UnityYamlCollectionAssign
                         asset,
                     },
                 )?;
+                let generated_component_overlay = generated_transforms
+                    .map(|context| {
+                        workspace_generated_component_yaml_overlay(
+                            workspace, object, asset, context,
+                        )
+                    })
+                    .transpose()
+                    .map_err(|source| UnityYamlWorkspaceCollectionError::ObjectExport {
+                        assignment_index,
+                        source: Box::new(source),
+                    })?
+                    .flatten();
                 workspace_object_to_unity_yaml_document_with_context(
                     workspace,
                     reference_graph,
@@ -264,6 +293,7 @@ fn workspace_assignments_to_unity_yaml_with_context<A: UnityYamlCollectionAssign
                     missing_reference_guid,
                     limits.object_conversion,
                     streamed_resources,
+                    generated_component_overlay.as_ref(),
                 )
                 .map_err(|source| {
                     UnityYamlWorkspaceCollectionError::ObjectExport {
@@ -695,6 +725,369 @@ impl Error for UnityYamlWorkspaceCollectionError {
     }
 }
 
+fn workspace_generated_component_yaml_overlay(
+    workspace: &SerializedFileWorkspace,
+    object: &WorkspaceObject,
+    source: ExportAssetIdentity,
+    context: &WorkspaceGeneratedTransformYamlContext<'_>,
+) -> Result<Option<WorkspaceGeneratedComponentYamlOverlay>, UnityYamlWorkspaceExportError> {
+    if source.class_id != 1 {
+        return Ok(None);
+    }
+    let invariant_error = |message: String| {
+        UnityYamlWorkspaceExportError::GeneratedComponentOverlayInvariant { source, message }
+    };
+    if !context.processed_assets.is_complete() {
+        return Err(invariant_error(format!(
+            "processed asset plan is incomplete: {}",
+            context
+                .processed_assets
+                .incomplete_reason()
+                .unwrap_or("no reason was recorded")
+        )));
+    }
+    if object.file_index
+        != match source.collection {
+            ExportAssetCollectionIdentity::SerializedFile { file_index } => file_index,
+            ExportAssetCollectionIdentity::ProcessedCollection { .. } => {
+                return Err(invariant_error(
+                    "GameObject overlay source has processed-collection scope".to_owned(),
+                ));
+            }
+        }
+        || object.object_index != source.object_index
+        || object.path_id != source.path_id
+    {
+        return Err(invariant_error(
+            "GameObject overlay source identity differs from its workspace object".to_owned(),
+        ));
+    }
+
+    let mut generated_collections =
+        context
+            .processed_assets
+            .collections()
+            .iter()
+            .filter(|collection| {
+                collection.kind
+                    == (WorkspaceProcessedCollectionKind::SceneGeneratedAssets {
+                        scene_index: context.scene_index,
+                    })
+            });
+    let scene_generated_collection = generated_collections.next().ok_or_else(|| {
+        invariant_error(format!(
+            "processed plan has no generated collection for Scene {}",
+            context.scene_index
+        ))
+    })?;
+    if generated_collections.next().is_some() {
+        return Err(invariant_error(format!(
+            "processed plan has multiple generated collections for Scene {}",
+            context.scene_index
+        )));
+    }
+    let generated_collection_index = scene_generated_collection.collection_index;
+    let mut matching_overlays = context
+        .processed_assets
+        .component_list_overlays()
+        .iter()
+        .filter(|overlay| {
+            overlay.game_object.file_index == object.file_index
+                && overlay.game_object.object_index == object.object_index
+                && overlay.game_object.path_id == source.path_id
+                && overlay.game_object.class_id == Some(1)
+                && overlay.generated_component.component_asset.collection_index
+                    == generated_collection_index
+        });
+    let Some(overlay) = matching_overlays.next() else {
+        return Ok(None);
+    };
+    if matching_overlays.next().is_some() {
+        return Err(invariant_error(
+            "source GameObject has duplicate generated-component overlays for the selected Scene"
+                .to_owned(),
+        ));
+    }
+    if overlay.generated_component.game_object != overlay.game_object
+        || overlay.generated_component.component_class_id != 4
+        || overlay.generated_component.component_asset.class_id != 4
+    {
+        return Err(invariant_error(
+            "generated component overlay identity or class is not a Transform".to_owned(),
+        ));
+    }
+
+    let generated_collection = context
+        .processed_assets
+        .collections()
+        .get(generated_collection_index)
+        .ok_or_else(|| {
+            invariant_error(format!(
+                "generated collection {generated_collection_index} is outside the processed plan"
+            ))
+        })?;
+    let mut matching_generated_assets = generated_collection
+        .assets
+        .iter()
+        .enumerate()
+        .filter(|(_, asset)| asset.identity == overlay.generated_component.component_asset);
+    let (generated_object_index, generated_asset) =
+        matching_generated_assets.next().ok_or_else(|| {
+            invariant_error("overlay Transform is absent from its generated collection".to_owned())
+        })?;
+    if matching_generated_assets.next().is_some()
+        || !matches!(
+            generated_asset.kind,
+            WorkspaceProcessedPrefabAssetKind::GeneratedTransform { game_object, .. }
+                if game_object == overlay.game_object
+        )
+    {
+        return Err(invariant_error(
+            "overlay target is not the uniquely planned Transform for this GameObject".to_owned(),
+        ));
+    }
+    let target_asset = ExportAssetIdentity {
+        collection: ExportAssetCollectionIdentity::ProcessedCollection {
+            collection_index: generated_collection_index,
+        },
+        object_index: generated_object_index,
+        path_id: generated_asset.identity.path_id,
+        class_id: generated_asset.identity.class_id,
+    };
+    let mut matching_constructor_pointers = context
+        .processed_assets
+        .constructor_pointers()
+        .iter()
+        .filter(|pointer| {
+            pointer.source_asset == generated_asset.identity
+                && pointer.field == WorkspaceGeneratedPointerField::TransformGameObject
+        });
+    let constructor_pointer = matching_constructor_pointers.next().ok_or_else(|| {
+        invariant_error("overlay Transform has no constructor GameObject PPtr".to_owned())
+    })?;
+    if matching_constructor_pointers.next().is_some()
+        || constructor_pointer.target != overlay.game_object
+        || constructor_pointer.path_id != overlay.game_object.path_id
+    {
+        return Err(invariant_error(
+            "overlay Transform constructor PPtr does not target its GameObject".to_owned(),
+        ));
+    }
+    let mut matching_dependencies = generated_collection
+        .dependencies
+        .iter()
+        .filter(|dependency| dependency.file_id == constructor_pointer.file_id);
+    let dependency = matching_dependencies.next().ok_or_else(|| {
+        invariant_error("overlay Transform source dependency is absent".to_owned())
+    })?;
+    if matching_dependencies.next().is_some()
+        || dependency.target
+            != (WorkspaceProcessedDependencyTarget::SerializedFileCollection {
+                file_index: overlay.game_object.file_index,
+            })
+    {
+        return Err(invariant_error(
+            "overlay Transform dependency does not uniquely target its GameObject file".to_owned(),
+        ));
+    }
+
+    let mut matching_dependency_appends = context
+        .processed_assets
+        .source_dependency_appends()
+        .iter()
+        .filter(|append| {
+            append.source_file_index == overlay.game_object.file_index
+                && append.pointer_field
+                    == WorkspaceSourceDependencyPointerField::GameObjectComponent
+                && append.target_collection
+                    == (WorkspaceSourceDependencyAppendTarget::PrefabProcessedCollection {
+                        collection_index: generated_collection_index,
+                    })
+        });
+    let dependency_append = matching_dependency_appends.next().ok_or_else(|| {
+        invariant_error("source collection has no generated-Transform dependency append".to_owned())
+    })?;
+    if matching_dependency_appends.next().is_some() {
+        return Err(invariant_error(
+            "source collection has duplicate generated-Transform dependency appends".to_owned(),
+        ));
+    }
+    let dependency_file_id = dependency_append.file_id.ok_or_else(|| {
+        invariant_error("generated-Transform dependency FileID is deferred".to_owned())
+    })?;
+    if dependency_file_id <= 0 {
+        return Err(invariant_error(format!(
+            "generated-Transform dependency FileID {dependency_file_id} is not positive"
+        )));
+    }
+
+    let file = workspace.files().get(object.file_index).ok_or(
+        UnityYamlWorkspaceExportError::MissingWorkspaceFile {
+            file_index: object.file_index,
+        },
+    )?;
+    let type_index =
+        object
+            .resolved_type_index
+            .ok_or(UnityYamlWorkspaceExportError::MissingResolvedType {
+                file_index: object.file_index,
+                object_index: object.object_index,
+            })?;
+    let serialized_type = file.metadata.types.get(type_index).ok_or(
+        UnityYamlWorkspaceExportError::InvalidResolvedType {
+            file_index: object.file_index,
+            object_index: object.object_index,
+            type_index,
+            type_count: file.metadata.types.len(),
+        },
+    )?;
+    if serialized_type.raw_type_id != 1 {
+        return Err(invariant_error(format!(
+            "GameObject object resolves to class ID {}, expected 1",
+            serialized_type.raw_type_id
+        )));
+    }
+    let type_tree = serialized_type.type_tree.as_ref().ok_or(
+        UnityYamlWorkspaceExportError::MissingTypeTree {
+            file_index: object.file_index,
+            object_index: object.object_index,
+            type_index,
+        },
+    )?;
+    let element_node_index =
+        game_object_component_element_node_index(type_tree).map_err(invariant_error)?;
+    let empty_element_template = file
+        .metadata
+        .default_value_for_type_tree_node(
+            object.object_index,
+            type_index,
+            element_node_index,
+            context.default_value_limits,
+        )
+        .map_err(|error| invariant_error(error.to_string()))?;
+    let field_path = generated_component_pointer_field_path(
+        &empty_element_template,
+        overlay.generated_component.appended_index,
+    )
+    .map_err(invariant_error)?;
+    let source_payload =
+        object
+            .payload
+            .as_ref()
+            .map_err(|error| UnityYamlWorkspaceExportError::ObjectDecode {
+                file_index: object.file_index,
+                object_index: object.object_index,
+                message: error.to_string(),
+            })?;
+    let edited_payload = materialize_planned_game_object_component_append(
+        context.processed_assets,
+        source_payload,
+        overlay,
+        Some(&empty_element_template),
+        context.encode_limits.max_array_elements,
+    )
+    .map_err(|error| invariant_error(error.to_string()))?;
+    Ok(Some(WorkspaceGeneratedComponentYamlOverlay {
+        payload: edited_payload,
+        pointer: WorkspaceGeneratedComponentYamlPointer {
+            source,
+            field_path,
+            file_id: dependency_file_id,
+            path_id: generated_asset.identity.path_id,
+            target: target_asset,
+        },
+    }))
+}
+
+fn game_object_component_element_node_index(
+    type_tree: &crate::serialized_file::metadata::TypeTree,
+) -> Result<usize, String> {
+    let mut component_nodes = type_tree
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| node.name.as_deref() == Some("m_Component"));
+    let (component_node_index, component_node) = component_nodes
+        .next()
+        .ok_or_else(|| "GameObject TypeTree has no m_Component field".to_owned())?;
+    if component_nodes.next().is_some() {
+        return Err("GameObject TypeTree has duplicate m_Component fields".to_owned());
+    }
+    if component_node.type_name.as_deref() != Some("vector") {
+        return Err(format!(
+            "GameObject m_Component has TypeTree type {:?}, expected vector",
+            component_node.type_name
+        ));
+    }
+    let array_node_index = type_tree_unique_direct_child(type_tree, component_node_index, "Array")?;
+    let array_node = &type_tree.nodes[array_node_index];
+    if array_node.type_name.as_deref() != Some("Array") {
+        return Err("GameObject m_Component Array node has an unexpected type".to_owned());
+    }
+    let size_node_index = type_tree_unique_direct_child(type_tree, array_node_index, "size")?;
+    let element_node_index = type_tree_unique_direct_child(type_tree, array_node_index, "data")?;
+    if size_node_index >= element_node_index {
+        return Err("GameObject m_Component TypeTree places data before size".to_owned());
+    }
+    Ok(element_node_index)
+}
+
+fn type_tree_unique_direct_child(
+    type_tree: &crate::serialized_file::metadata::TypeTree,
+    parent_index: usize,
+    child_name: &str,
+) -> Result<usize, String> {
+    let parent = type_tree
+        .nodes
+        .get(parent_index)
+        .ok_or_else(|| format!("TypeTree parent node {parent_index} is unavailable"))?;
+    let child_level = parent
+        .level
+        .checked_add(1)
+        .ok_or_else(|| format!("TypeTree node {parent_index} cannot have children"))?;
+    let mut found = None;
+    for (node_index, node) in type_tree.nodes.iter().enumerate().skip(parent_index + 1) {
+        if node.level <= parent.level {
+            break;
+        }
+        if node.level == child_level
+            && node.name.as_deref() == Some(child_name)
+            && found.replace(node_index).is_some()
+        {
+            return Err(format!(
+                "TypeTree node {parent_index} has duplicate direct children named {child_name:?}"
+            ));
+        }
+    }
+    found.ok_or_else(|| {
+        format!("TypeTree node {parent_index} has no direct child named {child_name:?}")
+    })
+}
+
+fn generated_component_pointer_field_path(
+    template: &SerializedValue,
+    appended_index: usize,
+) -> Result<String, String> {
+    let suffix = if template.pptr().is_some() {
+        String::new()
+    } else if template
+        .struct_fields()
+        .and_then(|fields| {
+            (fields.len() == 1 && fields[0].name == "component").then_some(&fields[0].value)
+        })
+        .and_then(SerializedValue::pptr)
+        .is_some()
+    {
+        ".component".to_owned()
+    } else {
+        return Err(
+            "GameObject m_Component element TypeTree is neither a PPtr nor a ComponentPair"
+                .to_owned(),
+        );
+    };
+    Ok(format!("m_Component[{appended_index}]{suffix}"))
+}
+
 /// Convert one workspace-decoded SerializedFile object into the project YAML form.
 ///
 /// The object identity, its TypeTree and version, reference scan, and project pointer map are all
@@ -722,6 +1115,7 @@ pub fn workspace_object_to_unity_yaml_document(
         current_collection_index,
         missing_reference_guid,
         limits,
+        None,
         None,
     )?
     else {
@@ -756,6 +1150,7 @@ pub fn workspace_object_to_unity_yaml_document_with_streamed_resources(
         missing_reference_guid,
         limits,
         Some(streamed_resources),
+        None,
     )
 }
 
@@ -771,6 +1166,7 @@ fn workspace_object_to_unity_yaml_document_with_context(
     missing_reference_guid: Option<[u8; 16]>,
     limits: UnityYamlObjectConversionLimits,
     streamed_resources: Option<&WorkspaceStreamedYamlResourceContext<'_, '_>>,
+    generated_component_overlay: Option<&WorkspaceGeneratedComponentYamlOverlay>,
 ) -> Result<Option<UnityYamlDocument>, UnityYamlWorkspaceExportError> {
     let file_index = match source.collection {
         ExportAssetCollectionIdentity::SerializedFile { file_index } => file_index,
@@ -840,6 +1236,28 @@ fn workspace_object_to_unity_yaml_document_with_context(
             payload_object_index: payload.object_index,
             payload_path_id: payload.path_id,
         });
+    }
+    if let Some(overlay) = generated_component_overlay {
+        if class_id != 1
+            || overlay.payload.object_index != payload.object_index
+            || overlay.payload.path_id != payload.path_id
+            || overlay.payload.type_name != payload.type_name
+            || overlay.payload.consumed_bytes != payload.consumed_bytes
+            || overlay.payload.trailing_bytes != payload.trailing_bytes
+            || overlay.pointer.source != source
+            || overlay.pointer.file_id <= 0
+            || overlay.pointer.path_id == 0
+            || overlay.pointer.target.class_id != 4
+            || !matches!(
+                overlay.pointer.target.collection,
+                ExportAssetCollectionIdentity::ProcessedCollection { .. }
+            )
+        {
+            return Err(UnityYamlWorkspaceExportError::GeneratedComponentOverlayInvariant {
+                source,
+                message: "edited GameObject payload or planned component pointer disagrees with the source identity".to_owned(),
+            });
+        }
     }
     if !payload.trailing_bytes.is_empty() {
         return Err(UnityYamlWorkspaceExportError::UnparsedTrailingPayload {
@@ -1052,9 +1470,13 @@ fn workspace_object_to_unity_yaml_document_with_context(
             streamed_export_root = Some(export_root);
         }
     }
-    let export_root = streamed_export_root.as_ref().unwrap_or(&payload.root);
+    let source_export_root = generated_component_overlay
+        .map(|overlay| &overlay.payload.root)
+        .unwrap_or(&payload.root);
+    let export_root = streamed_export_root.as_ref().unwrap_or(source_export_root);
 
     let mut pointer_error = None;
+    let mut generated_component_pointer_seen = false;
     let document = serialized_object_value_to_unity_yaml_document(
         source,
         &payload.type_name,
@@ -1070,6 +1492,20 @@ fn workspace_object_to_unity_yaml_document_with_context(
         missing_reference_guid,
         limits,
         |request| {
+            if let Some(overlay) = generated_component_overlay {
+                if request.source == overlay.pointer.source
+                    && request.field_path == overlay.pointer.field_path
+                {
+                    return resolve_generated_component_pointer(
+                        request,
+                        &overlay.pointer,
+                        pointer_map,
+                        current_collection_index,
+                        &mut generated_component_pointer_seen,
+                        &mut pointer_error,
+                    );
+                }
+            }
             resolve_workspace_pointer(
                 request,
                 reference_graph,
@@ -1082,9 +1518,62 @@ fn workspace_object_to_unity_yaml_document_with_context(
     if let Some(error) = pointer_error {
         return Err(error);
     }
+    if generated_component_overlay.is_some() && !generated_component_pointer_seen {
+        return Err(
+            UnityYamlWorkspaceExportError::GeneratedComponentOverlayInvariant {
+                source,
+                message: "generated component PPtr was not visited by the YAML walker".to_owned(),
+            },
+        );
+    }
     document
         .map(Some)
         .map_err(UnityYamlWorkspaceExportError::Conversion)
+}
+
+fn resolve_generated_component_pointer(
+    request: UnityYamlPPtrRequest<'_>,
+    planned: &WorkspaceGeneratedComponentYamlPointer,
+    pointer_map: &ProjectExportPointerMap,
+    current_collection_index: usize,
+    seen: &mut bool,
+    error: &mut Option<UnityYamlWorkspaceExportError>,
+) -> ProjectPointerResolution {
+    let invariant_error =
+        |message: String| UnityYamlWorkspaceExportError::GeneratedComponentOverlayInvariant {
+            source: planned.source,
+            message,
+        };
+    if request.file_id != planned.file_id || request.path_id != planned.path_id {
+        *error = Some(invariant_error(format!(
+            "planned component PPtr at {:?} has FileID/PathID ({}, {}), expected ({}, {})",
+            request.field_path, request.file_id, request.path_id, planned.file_id, planned.path_id
+        )));
+        return ProjectPointerResolution::Null;
+    }
+    if *seen {
+        *error = Some(invariant_error(
+            "planned generated component PPtr was visited more than once".to_owned(),
+        ));
+        return ProjectPointerResolution::Null;
+    }
+    *seen = true;
+    match pointer_map.resolve(
+        ProjectPointerRequest::ResolvedAsset(planned.target),
+        current_collection_index,
+    ) {
+        Ok(ProjectPointerResolution::Mapped(pointer)) => ProjectPointerResolution::Mapped(pointer),
+        Ok(_) => {
+            *error = Some(invariant_error(
+                "planned Transform has no exported project pointer".to_owned(),
+            ));
+            ProjectPointerResolution::Null
+        }
+        Err(error_source) => {
+            *error = Some(UnityYamlWorkspaceExportError::PointerMap(error_source));
+            ProjectPointerResolution::Null
+        }
+    }
 }
 
 fn resolve_workspace_pointer(
@@ -1202,6 +1691,10 @@ pub enum UnityYamlWorkspaceExportError {
         source: ExportAssetIdentity,
     },
     GeneratedTransformInvariant {
+        source: ExportAssetIdentity,
+        message: String,
+    },
+    GeneratedComponentOverlayInvariant {
         source: ExportAssetIdentity,
         message: String,
     },
@@ -1361,6 +1854,10 @@ impl Display for UnityYamlWorkspaceExportError {
             Self::GeneratedTransformInvariant { source, message } => write!(
                 f,
                 "generated Transform YAML export failed for {source:?}: {message}"
+            ),
+            Self::GeneratedComponentOverlayInvariant { source, message } => write!(
+                f,
+                "generated GameObject component overlay export failed for {source:?}: {message}"
             ),
             Self::ImageTextureSkippedWithoutContent { source } => write!(
                 f,
@@ -3764,7 +4261,7 @@ mod tests {
             &objects,
             &reference_graph,
             &pointer_map,
-            &[generated_transform],
+            &assignments,
             COLLECTION_INDEX,
             None,
             UnityYamlWorkspaceCollectionLimits::default(),
@@ -3774,6 +4271,13 @@ mod tests {
 
         assert!(output.contains(&format!("--- !u!4 &{}", generated_transform.file_id)));
         assert!(output.contains("m_GameObject: {fileID: 42}"), "{output}");
+        assert!(
+            output.contains(&format!(
+                "component: {{fileID: {}}}",
+                generated_transform.file_id
+            )),
+            "{output}"
+        );
         assert!(
             !output.contains("m_GameObject: {fileID: 42, guid:"),
             "{output}"
