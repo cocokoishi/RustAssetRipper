@@ -738,7 +738,7 @@ fn decode_node_value(
     })?;
     let type_name = node.type_name.as_deref().unwrap_or("");
 
-    if type_name == "string"
+    if matches!(type_name, "string" | "Utf8String")
         && is_string_node(type_tree, node_index, object_index, reader.offset())?
     {
         let length = read_i32(reader, &format!("{path} string byte length"))?;
@@ -1269,8 +1269,10 @@ fn array_base_is_primitive(
 ) -> Result<bool, ObjectDecodeError> {
     let mut current = node_index;
     for _ in 0..=MAX_TYPE_TREE_DEPTH {
-        if type_tree.nodes[current].type_name.as_deref() == Some("string")
-            && is_string_node(type_tree, current, object_index, offset)?
+        if matches!(
+            type_tree.nodes[current].type_name.as_deref(),
+            Some("string" | "Utf8String")
+        ) && is_string_node(type_tree, current, object_index, offset)?
         {
             return Ok(true);
         }
@@ -1321,7 +1323,7 @@ fn minimum_encoded_size(
             ObjectDecodeErrorKind::InvalidTypeTreeNodeIndex { node_index },
         )
     })?;
-    if node.type_name.as_deref() == Some("string")
+    if matches!(node.type_name.as_deref(), Some("string" | "Utf8String"))
         && is_string_node(type_tree, node_index, object_index, offset)?
     {
         return Ok(4);
@@ -2382,6 +2384,40 @@ mod tests {
         );
         assert_eq!(fields[1].value, SerializedValue::U32(0xaabb_ccdd));
         assert_eq!(object.consumed_bytes, payload.len());
+    }
+
+    #[test]
+    fn decodes_and_reencodes_utf8string_type_tree_nodes() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&5i32.to_le_bytes());
+        payload.extend_from_slice(b"track");
+        payload.extend_from_slice(&[0; 3]); // string alignment to a four-byte boundary
+        let (file, header, mut metadata) = make_file(&payload);
+        metadata.types[0].type_tree = Some(TypeTree {
+            nodes: vec![
+                node(0, "Root", "Root", -1, 0),
+                node(1, "m_Name", "Utf8String", -1, 0),
+                node(2, "Array", "Array", -1, 0),
+                node(3, "size", "int", 4, 0),
+                node(3, "data", "char", 1, 0),
+            ],
+            string_buffer: Vec::new(),
+        });
+
+        let object = metadata.decode_object_payload(&file, &header, 0).unwrap();
+        assert_eq!(
+            object.root,
+            SerializedValue::Struct(vec![super::SerializedFieldValue {
+                name: "m_Name".to_owned(),
+                value: SerializedValue::StringBytes(b"track".to_vec()),
+            }])
+        );
+        assert_eq!(
+            metadata
+                .encode_object_payload(&object, ObjectEncodeLimits::default())
+                .unwrap(),
+            payload
+        );
     }
 
     #[test]

@@ -532,7 +532,7 @@ impl DefaultValueBuilder<'_, '_> {
         let type_name = node.type_name.as_deref().unwrap_or("");
         let children = self.children(node_index, path)?;
 
-        if type_name == "string" {
+        if matches!(type_name, "string" | "Utf8String") {
             if !is_string_node(self.type_tree, node_index, self.object_index, 0)
                 .map_err(|error| invalid_tree(self.object_index, path, error))?
             {
@@ -885,7 +885,7 @@ impl PayloadEncoder<'_, '_> {
         })?;
         let type_name = node.type_name.as_deref().unwrap_or("");
 
-        if type_name == "string"
+        if matches!(type_name, "string" | "Utf8String")
             && is_string_node(
                 self.type_tree,
                 node_index,

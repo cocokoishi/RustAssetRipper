@@ -95,6 +95,7 @@ pub struct UnityYamlObjectConversionHints {
     pub dictionary_representations: HashMap<String, UnityYamlDictionaryRepresentation>,
     pub hash128_schemas: HashMap<String, UnityYamlHash128Schema>,
     pub guid_schemas: HashMap<String, UnityYamlGuidSchema>,
+    pub property_name_schemas: HashMap<String, UnityYamlPropertyNameSchema>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -108,6 +109,18 @@ pub struct UnityYamlHash128Schema {
 pub struct UnityYamlGuidSchema {
     /// Four TypeTree words in UnityGuid constructor order.
     pub word_field_names: [String; 4],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UnityYamlPropertyNameValueKind {
+    Int32,
+    Utf8String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UnityYamlPropertyNameSchema {
+    pub value_field_name: String,
+    pub value_kind: UnityYamlPropertyNameValueKind,
 }
 
 impl UnityYamlObjectConversionHints {
@@ -216,6 +229,15 @@ pub enum UnityYamlObjectConversionError {
         field_name: String,
         word_index: usize,
     },
+    PropertyNameFieldCount {
+        field_path: String,
+        expected: usize,
+        actual: usize,
+    },
+    InvalidPropertyNameValue {
+        field_path: String,
+        field_name: String,
+    },
     HexScalarLimitExceeded {
         requested: usize,
         limit: usize,
@@ -319,6 +341,21 @@ impl Display for UnityYamlObjectConversionError {
             } => write!(
                 f,
                 "GUID word {word_index} ({field_name:?}) at {field_path:?} is missing, duplicated, or not an unsigned 32-bit value"
+            ),
+            Self::PropertyNameFieldCount {
+                field_path,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "PropertyName at {field_path:?} has {actual} fields; expected {expected}"
+            ),
+            Self::InvalidPropertyNameValue {
+                field_path,
+                field_name,
+            } => write!(
+                f,
+                "PropertyName value field {field_name:?} at {field_path:?} is missing, duplicated, or has an unsupported value"
             ),
             Self::HexScalarLimitExceeded {
                 requested,
@@ -662,6 +699,56 @@ impl<'a> UnityYamlTypeTreeLayout<'a> {
         Ok(UnityYamlGuidSchema { word_field_names })
     }
 
+    fn property_name_schema(
+        &self,
+        node_index: usize,
+        explicit_property_name: bool,
+    ) -> Result<Option<UnityYamlPropertyNameSchema>, UnityYamlObjectConversionError> {
+        let children = self.child_indices(node_index)?;
+        if children.len() != 1 {
+            if explicit_property_name {
+                return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                    node_index,
+                    reason: "PropertyName must contain exactly one value field",
+                });
+            }
+            return Ok(None);
+        }
+
+        let child_index = children[0];
+        let child = self.node(child_index)?;
+        let field_name =
+            child
+                .name
+                .as_deref()
+                .ok_or(UnityYamlObjectConversionError::InvalidTypeTree {
+                    node_index: child_index,
+                    reason: "PropertyName value field name is unresolved",
+                })?;
+        let child_type = self.type_name(child_index)?;
+        let value_kind =
+            if matches!(child_type, "int" | "SInt32") && self.first_child[child_index].is_none() {
+                UnityYamlPropertyNameValueKind::Int32
+            } else if matches!(child_type, "string" | "Utf8String")
+                && is_string_type_tree_node(self, child_index)?
+            {
+                UnityYamlPropertyNameValueKind::Utf8String
+            } else {
+                if explicit_property_name {
+                    return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                        node_index: child_index,
+                        reason: "PropertyName value must be an Int32 or serialized UTF-8 string",
+                    });
+                }
+                return Ok(None);
+            };
+
+        Ok(Some(UnityYamlPropertyNameSchema {
+            value_field_name: try_copy_string(field_name, "PropertyName value field name")?,
+            value_kind,
+        }))
+    }
+
     fn dictionary_representation(
         &self,
         node_index: usize,
@@ -838,6 +925,33 @@ impl<'a> UnityYamlTypeTreeLayout<'a> {
                 );
             }
             return Ok(());
+        }
+
+        let explicit_property_name = node_type == "PropertyName";
+        if explicit_property_name || node_type == "string" {
+            if let Some(schema) = self.property_name_schema(node_index, explicit_property_name)? {
+                if let Some(previous) = hints.property_name_schemas.get(field_path) {
+                    if *previous != schema {
+                        return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                            node_index,
+                            reason:
+                                "ambiguous PropertyName schemas share one serialized field path",
+                        });
+                    }
+                } else {
+                    hints.property_name_schemas.try_reserve(1).map_err(|_| {
+                        UnityYamlObjectConversionError::AllocationFailed {
+                            resource: "Unity YAML PropertyName schema hints",
+                            requested: hints.property_name_schemas.len().saturating_add(1),
+                        }
+                    })?;
+                    hints.property_name_schemas.insert(
+                        try_copy_string(field_path, "Unity YAML PropertyName schema path")?,
+                        schema,
+                    );
+                }
+                return Ok(());
+            }
         }
 
         if node_type == "TypelessData" || node_type == "string" || node_type.starts_with("PPtr<") {
@@ -1106,7 +1220,9 @@ where
             resolve_pointer,
         )?,
         SerializedValue::Struct(fields) => {
-            if let Some(schema) = hash128_schema_for_path(field_path, hints, limits)? {
+            if let Some(schema) = property_name_schema_for_path(field_path, hints, limits)? {
+                convert_property_name_value(fields, schema, field_path, depth, budget)?
+            } else if let Some(schema) = hash128_schema_for_path(field_path, hints, limits)? {
                 convert_hash128_value(fields, schema, field_path, depth, limits, budget)?
             } else if let Some(schema) = guid_schema_for_path(field_path, hints, limits)? {
                 convert_guid_value(fields, schema, field_path, depth, budget)?
@@ -1208,6 +1324,21 @@ fn guid_schema_for_path<'a>(
     }
     let canonical_path = canonical_array_path(field_path, limits.max_field_path_bytes)?;
     Ok(hints.guid_schemas.get(&canonical_path))
+}
+
+fn property_name_schema_for_path<'a>(
+    field_path: &str,
+    hints: &'a UnityYamlObjectConversionHints,
+    limits: UnityYamlObjectConversionLimits,
+) -> Result<Option<&'a UnityYamlPropertyNameSchema>, UnityYamlObjectConversionError> {
+    if let Some(schema) = hints.property_name_schemas.get(field_path) {
+        return Ok(Some(schema));
+    }
+    if !field_path.contains('[') {
+        return Ok(None);
+    }
+    let canonical_path = canonical_array_path(field_path, limits.max_field_path_bytes)?;
+    Ok(hints.property_name_schemas.get(&canonical_path))
 }
 
 fn convert_hash128_value(
@@ -1345,6 +1476,58 @@ fn convert_guid_value(
     Ok(UnityYamlNode::string(format_unity_guid_words(
         serialized_guid,
     )))
+}
+
+fn convert_property_name_value(
+    fields: &[SerializedFieldValue],
+    schema: &UnityYamlPropertyNameSchema,
+    field_path: &str,
+    depth: usize,
+    budget: &mut ConversionBudget,
+) -> Result<UnityYamlNode, UnityYamlObjectConversionError> {
+    if fields.len() != 1 {
+        return Err(UnityYamlObjectConversionError::PropertyNameFieldCount {
+            field_path: field_path.to_owned(),
+            expected: 1,
+            actual: fields.len(),
+        });
+    }
+
+    budget.visit(depth + 1)?;
+    let mut matching_value = None;
+    for field in fields
+        .iter()
+        .filter(|field| field.name == schema.value_field_name)
+    {
+        if matching_value.is_some() {
+            return Err(UnityYamlObjectConversionError::InvalidPropertyNameValue {
+                field_path: field_path.to_owned(),
+                field_name: schema.value_field_name.clone(),
+            });
+        }
+        matching_value = Some(&field.value);
+    }
+
+    match (schema.value_kind, matching_value) {
+        (UnityYamlPropertyNameValueKind::Int32, Some(SerializedValue::I32(value))) => {
+            Ok(UnityYamlNode::string(value.to_string()))
+        }
+        (UnityYamlPropertyNameValueKind::Utf8String, Some(SerializedValue::StringBytes(bytes))) => {
+            let value = str::from_utf8(bytes).map_err(|_| {
+                UnityYamlObjectConversionError::InvalidUtf8String {
+                    field_path: field_path.to_owned(),
+                }
+            })?;
+            Ok(UnityYamlNode::string(try_copy_string(
+                value,
+                "Unity PropertyName string",
+            )?))
+        }
+        _ => Err(UnityYamlObjectConversionError::InvalidPropertyNameValue {
+            field_path: field_path.to_owned(),
+            field_name: schema.value_field_name.clone(),
+        }),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1928,6 +2111,21 @@ const fn hex_digit(nibble: u8) -> char {
     }
 }
 
+fn is_string_type_tree_node(
+    layout: &UnityYamlTypeTreeLayout<'_>,
+    node_index: usize,
+) -> Result<bool, UnityYamlObjectConversionError> {
+    let children = layout.child_indices(node_index)?;
+    if children.len() != 1 {
+        return Ok(false);
+    }
+    let Some(data_node) = layout.array_shape_data_node(children[0])? else {
+        return Ok(false);
+    };
+    Ok(matches!(layout.type_name(data_node)?, "char" | "UInt8")
+        && layout.first_child[data_node].is_none())
+}
+
 fn is_integer_type_tree_type(type_name: &str) -> bool {
     matches!(
         type_name,
@@ -2286,6 +2484,24 @@ mod tests {
         }
     }
 
+    fn property_name_type_tree() -> TypeTree {
+        TypeTree {
+            nodes: vec![
+                type_tree_node(0, "GameObject", "Base", 0),
+                // Raw serialized TypeTrees encode PropertyName as a string wrapper with one
+                // integer or Utf8String child; the baseline generator names it PropertyName.
+                type_tree_node(1, "string", "m_IntegerId", 0),
+                type_tree_node(2, "SInt32", "Id_Int32", 0),
+                type_tree_node(1, "string", "m_StringId", 0),
+                type_tree_node(2, "Utf8String", "Id_Utf8String", 0),
+                type_tree_node(3, "Array", "Array", 0),
+                type_tree_node(4, "SInt32", "size", 0),
+                type_tree_node(4, "char", "data", 0),
+            ],
+            string_buffer: Vec::new(),
+        }
+    }
+
     fn guid_value_struct() -> SerializedValue {
         let words = [0x0102_0304, 0x1112_1314, 0x2122_2324, 0x3132_3334];
         SerializedValue::Struct(
@@ -2306,6 +2522,29 @@ mod tests {
         } else {
             SerializedValue::Struct(vec![field("m_Guid", guid_value_struct())])
         }
+    }
+
+    fn object_field<'a>(document: &'a UnityYamlDocument, field_name: &str) -> &'a UnityYamlNode {
+        let UnityYamlNodeKind::Mapping {
+            entries: root_entries,
+            ..
+        } = &document.root.kind
+        else {
+            unreachable!("object root is a mapping")
+        };
+        let (_, body) = root_entries.first().expect("object body exists");
+        let UnityYamlNodeKind::Mapping { entries, .. } = &body.kind else {
+            unreachable!("object body is a mapping")
+        };
+        entries
+            .iter()
+            .find_map(|(key, value)| match &key.kind {
+                UnityYamlNodeKind::Scalar(
+                    UnityYamlScalar::PlainString(name) | UnityYamlScalar::String(name),
+                ) if name == field_name => Some(value),
+                _ => None,
+            })
+            .expect("object field exists")
     }
 
     fn version() -> SceneUnityVersion {
@@ -3396,6 +3635,135 @@ mod tests {
                 unreachable!("GUID contains no PPtrs")
             }),
             Err(UnityYamlObjectConversionError::InvalidGuidWord { word_index: 2, .. })
+        ));
+    }
+
+    #[test]
+    fn property_name_types_emit_integer_and_utf8_ids_as_yaml_strings() {
+        let type_tree = property_name_type_tree();
+        let hints = UnityYamlObjectConversionHints::from_type_tree(
+            &type_tree,
+            version(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            hints.property_name_schemas.get("m_IntegerId"),
+            Some(&UnityYamlPropertyNameSchema {
+                value_field_name: "Id_Int32".to_owned(),
+                value_kind: UnityYamlPropertyNameValueKind::Int32,
+            })
+        );
+        assert_eq!(
+            hints.property_name_schemas.get("m_StringId"),
+            Some(&UnityYamlPropertyNameSchema {
+                value_field_name: "Id_Utf8String".to_owned(),
+                value_kind: UnityYamlPropertyNameValueKind::Utf8String,
+            })
+        );
+
+        let value = SerializedValue::Struct(vec![
+            field(
+                "m_IntegerId",
+                SerializedValue::Struct(vec![field("Id_Int32", SerializedValue::I32(-42))]),
+            ),
+            field(
+                "m_StringId",
+                SerializedValue::Struct(vec![field(
+                    "Id_Utf8String",
+                    SerializedValue::StringBytes(b"Track/Object.Name".to_vec()),
+                )]),
+            ),
+        ]);
+        let document = convert_with_object_hints(&value, &hints, |_| {
+            unreachable!("PropertyName contains no PPtrs")
+        })
+        .unwrap();
+        assert_eq!(
+            &object_field(&document, "m_IntegerId").kind,
+            &UnityYamlNodeKind::Scalar(UnityYamlScalar::String("-42".to_owned()))
+        );
+        assert_eq!(
+            &object_field(&document, "m_StringId").kind,
+            &UnityYamlNodeKind::Scalar(UnityYamlScalar::String("Track/Object.Name".to_owned()))
+        );
+
+        let invalid_value = SerializedValue::Struct(vec![field(
+            "m_IntegerId",
+            SerializedValue::Struct(vec![field("Id_Int32", SerializedValue::U32(42))]),
+        )]);
+        assert!(matches!(
+            convert_with_object_hints(&invalid_value, &hints, |_| {
+                unreachable!("PropertyName contains no PPtrs")
+            }),
+            Err(UnityYamlObjectConversionError::InvalidPropertyNameValue {
+                field_path,
+                field_name,
+            }) if field_path == "m_IntegerId" && field_name == "Id_Int32"
+        ));
+    }
+
+    #[test]
+    fn property_name_array_hints_match_wildcard_elements() {
+        let type_tree = TypeTree {
+            nodes: vec![
+                type_tree_node(0, "GameObject", "Base", 0),
+                type_tree_node(1, "vector", "m_Ids", 0),
+                type_tree_node(2, "Array", "Array", 0),
+                type_tree_node(3, "SInt32", "size", 0),
+                type_tree_node(3, "string", "data", 0),
+                type_tree_node(4, "SInt32", "Id_Int32", 0),
+            ],
+            string_buffer: Vec::new(),
+        };
+        let hints = UnityYamlObjectConversionHints::from_type_tree(
+            &type_tree,
+            version(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        assert!(hints.property_name_schemas.contains_key("m_Ids[*]"));
+        let value = SerializedValue::Struct(vec![field(
+            "m_Ids",
+            SerializedValue::Array(vec![SerializedValue::Struct(vec![field(
+                "Id_Int32",
+                SerializedValue::I32(73),
+            )])]),
+        )]);
+        let document = convert_with_object_hints(&value, &hints, |_| {
+            unreachable!("PropertyName array contains no PPtrs")
+        })
+        .unwrap();
+        let array = object_field(&document, "m_Ids");
+        let UnityYamlNodeKind::Sequence { items, .. } = &array.kind else {
+            panic!("PropertyName arrays export as YAML sequences")
+        };
+        assert_eq!(
+            items[0].kind,
+            UnityYamlNodeKind::Scalar(UnityYamlScalar::String("73".to_owned()))
+        );
+    }
+
+    #[test]
+    fn malformed_property_name_type_tree_is_rejected() {
+        let malformed = TypeTree {
+            nodes: vec![
+                type_tree_node(0, "GameObject", "Base", 0),
+                type_tree_node(1, "PropertyName", "m_Id", 0),
+                type_tree_node(2, "float", "value", 0),
+            ],
+            string_buffer: Vec::new(),
+        };
+        assert!(matches!(
+            UnityYamlObjectConversionHints::from_type_tree(
+                &malformed,
+                version(),
+                UnityYamlObjectConversionLimits::default()
+            ),
+            Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                reason: "PropertyName value must be an Int32 or serialized UTF-8 string",
+                ..
+            })
         ));
     }
 
