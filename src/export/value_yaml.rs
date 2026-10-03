@@ -573,7 +573,7 @@ impl<'a> UnityYamlTypeTreeLayout<'a> {
             {
                 return Err(UnityYamlObjectConversionError::InvalidTypeTree {
                     node_index: child_index,
-                    reason: "ValueArray TypeTree field name is duplicated",
+                    reason: "TypeTree node contains a duplicate child field name",
                 });
             }
         }
@@ -2381,6 +2381,7 @@ fn baseline_type_scoped_field_aliases(type_name: &str) -> &'static [(&'static st
     const VERTEX_DATA_ALIASES: &[(&str, &str)] = &[("m_DataSize", "m_Data")];
     const COMPUTE_SHADER_VARIANT_ALIASES: &[(&str, &str)] = &[("m_Kernels", "m_KernelParents")];
     const SHADER_ALIASES: &[(&str, &str)] = &[("m_SubProgramBlob", "m_CompressedBlob")];
+    const GAME_OBJECT_ALIASES: &[(&str, &str)] = &[("m_Component", "m_Components")];
 
     match type_name {
         "AnimationClip" => ANIMATION_CLIP_ALIASES,
@@ -2407,6 +2408,7 @@ fn baseline_type_scoped_field_aliases(type_name: &str) -> &'static [(&'static st
         "VertexData" => VERTEX_DATA_ALIASES,
         "ComputeShaderPlatformVariant" => COMPUTE_SHADER_VARIANT_ALIASES,
         "Shader" => SHADER_ALIASES,
+        "GameObject" => GAME_OBJECT_ALIASES,
         _ => &[],
     }
 }
@@ -4597,6 +4599,58 @@ mod tests {
             assert!(output.contains(expected), "missing {expected}");
         }
         assert!(!output.contains("m_SubProgramBlob:"));
+    }
+
+    #[test]
+    fn game_object_component_array_uses_plural_baseline_field_name() {
+        let type_tree = TypeTree {
+            nodes: vec![
+                type_tree_node(0, "GameObject", "Base", 0),
+                type_tree_node(1, "vector", "m_Component", 0),
+                type_tree_node(1, "SomeStruct", "m_Unrelated", 0),
+                type_tree_node(2, "SInt32", "m_Component", 0),
+            ],
+            string_buffer: Vec::new(),
+        };
+        let hints = UnityYamlObjectConversionHints::from_type_tree(
+            &type_tree,
+            version(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            hints
+                .field_name_aliases
+                .get("m_Component")
+                .map(String::as_str),
+            Some("m_Components")
+        );
+        assert!(!hints
+            .field_name_aliases
+            .contains_key("m_Unrelated.m_Component"));
+
+        let value = SerializedValue::Struct(vec![
+            field(
+                "m_Component",
+                SerializedValue::Array(vec![SerializedValue::I32(123)]),
+            ),
+            field(
+                "m_Unrelated",
+                SerializedValue::Struct(vec![field("m_Component", SerializedValue::I32(456))]),
+            ),
+        ]);
+        let document = convert_with_object_hints(&value, &hints, |_| {
+            unreachable!("the generated GameObject fixture has no PPtrs")
+        })
+        .unwrap();
+        let output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[document],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        assert!(output.contains("m_Components:"));
+        assert!(output.contains("m_Component: 456"));
+        assert!(!output.contains("m_Component:\n"));
     }
 
     #[test]

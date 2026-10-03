@@ -836,3 +836,11 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Focused synthetic test and full workspace (419 library tests, 10 CLI tests, 0 doc tests), warnings-denied Clippy, format check, baseline verifier (1,449 files unchanged), and `git diff --check` passed. No Unity-produced fixture or direct C# runtime differential was run.
 - Still incomplete: Mesh blend-shape and Shader decoding/export, the remaining baseline transformations, and broad Phase 1 parity remain open. Phase 2 remains locked.
 - Next: continue the source audit for type-name and nested-layout transformations, tracing the required semantics into serialized value construction rather than claiming field aliases cover those paths.
+
+## GameObject component field alias
+
+- Current phase: Phase 1; gate not passed. This increment builds from pushed revision `cf99556c676474da385d67e183bad8b0d1e40a83`. Only `cocokoishi/RustAssetRipper`'s canonical repository is a write/push target. No other repository, UABEA, or user AssetBundle content was accessed.
+- Added the type-scoped direct `GameObject.m_Component` to `m_Components` field alias and a synthetic check that unrelated same-named fields stay unchanged.
+- An exploratory legacy `pair` element rewrite caused eight existing integration tests to fail because their TypeTrees omit `m_Component.m_Array`. The speculative pair rewrite was removed; no expectations were weakened. Final focused test, full workspace (420 library tests, 10 CLI tests, 0 doc tests), warnings-denied Clippy, format check, baseline verifier (1,449 files unchanged), and `git diff --check` all passed.
+- Still incomplete: legacy `pair` to `ComponentPair` member/type transforms, scene export parity, and broad Phase 1 coverage. No Unity-produced fixture or direct C# runtime differential was run. Phase 2 remains locked.
+- Next: inspect baseline TypeTree fixtures/source generation for the exact legacy GameObject component path, then model the nested remap without treating incomplete TypeTrees as complete evidence.
