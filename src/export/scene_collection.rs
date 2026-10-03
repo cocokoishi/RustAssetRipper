@@ -43,6 +43,97 @@ impl Default for SceneExportIdPlanLimits {
     }
 }
 
+/// The ordered membership groups exposed by the baseline `SceneHierarchyObject.Assets`.
+///
+/// The hierarchy's ID assignment order concatenates these groups; it is distinct from the
+/// separately sorted YAML document order used by `SceneExportCollection.ExportableAssets`.
+#[derive(Clone, Copy, Debug)]
+pub struct SceneHierarchyAssetGroups<'a> {
+    pub game_objects: &'a [ExportAssetIdentity],
+    pub components: &'a [ExportAssetIdentity],
+    pub prefab_instances: &'a [ExportAssetIdentity],
+    pub managers: &'a [ExportAssetIdentity],
+    pub scene_roots: Option<ExportAssetIdentity>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SceneHierarchyAssetOrderLimits {
+    pub max_assets: usize,
+}
+
+impl Default for SceneHierarchyAssetOrderLimits {
+    fn default() -> Self {
+        Self {
+            max_assets: 20_000_000,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SceneHierarchyAssetOrderError {
+    AssetCountOverflow,
+    AssetLimitExceeded { requested: usize, limit: usize },
+    AllocationFailed { requested: usize },
+}
+
+impl Display for SceneHierarchyAssetOrderError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AssetCountOverflow => f.write_str("Scene hierarchy asset count overflowed"),
+            Self::AssetLimitExceeded { requested, limit } => write!(
+                f,
+                "Scene hierarchy has {requested} assets, exceeding limit {limit}"
+            ),
+            Self::AllocationFailed { requested } => write!(
+                f,
+                "could not allocate an ordered Scene hierarchy list for {requested} assets"
+            ),
+        }
+    }
+}
+
+impl Error for SceneHierarchyAssetOrderError {}
+
+/// Build the ID-assignment sequence exposed by `SceneHierarchyObject.Assets`.
+///
+/// Membership group order follows `GameObjectHierarchyObject.Assets`, then the Scene-specific
+/// manager and optional `SceneRoots` entries. The baseline applies its YAML display comparator
+/// separately, so this helper does not sort, deduplicate, or omit hidden assets.
+pub fn order_scene_hierarchy_assets(
+    groups: SceneHierarchyAssetGroups<'_>,
+    limits: SceneHierarchyAssetOrderLimits,
+) -> Result<Vec<ExportAssetIdentity>, SceneHierarchyAssetOrderError> {
+    let mut requested = groups
+        .game_objects
+        .len()
+        .checked_add(groups.components.len())
+        .and_then(|count| count.checked_add(groups.prefab_instances.len()))
+        .and_then(|count| count.checked_add(groups.managers.len()))
+        .ok_or(SceneHierarchyAssetOrderError::AssetCountOverflow)?;
+    if groups.scene_roots.is_some() {
+        requested = requested
+            .checked_add(1)
+            .ok_or(SceneHierarchyAssetOrderError::AssetCountOverflow)?;
+    }
+    if requested > limits.max_assets {
+        return Err(SceneHierarchyAssetOrderError::AssetLimitExceeded {
+            requested,
+            limit: limits.max_assets,
+        });
+    }
+
+    let mut ordered = Vec::new();
+    ordered
+        .try_reserve_exact(requested)
+        .map_err(|_| SceneHierarchyAssetOrderError::AllocationFailed { requested })?;
+    ordered.extend_from_slice(groups.game_objects);
+    ordered.extend_from_slice(groups.components);
+    ordered.extend_from_slice(groups.prefab_instances);
+    ordered.extend_from_slice(groups.managers);
+    ordered.extend(groups.scene_roots);
+    Ok(ordered)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SceneExportIdPlanError {
     AssetLimitExceeded {
@@ -172,6 +263,64 @@ mod tests {
 
     fn version(value: &str) -> SceneUnityVersion {
         SceneUnityVersion::parse(value).unwrap()
+    }
+
+    #[test]
+    fn scene_hierarchy_asset_order_concatenates_baseline_membership_groups() {
+        let game_objects = [source(0, 0, 10, 1), source(0, 1, 11, 1)];
+        let components = [source(0, 2, 20, 4)];
+        let prefab_instances = [processed(1, 0, 1, 1001)];
+        let managers = [source(0, 3, 30, 3)];
+        let scene_roots = processed(1, 1, 2, 1660057539);
+
+        let ordered = order_scene_hierarchy_assets(
+            SceneHierarchyAssetGroups {
+                game_objects: &game_objects,
+                components: &components,
+                prefab_instances: &prefab_instances,
+                managers: &managers,
+                scene_roots: Some(scene_roots),
+            },
+            SceneHierarchyAssetOrderLimits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            ordered,
+            [
+                game_objects[0],
+                game_objects[1],
+                components[0],
+                prefab_instances[0],
+                managers[0],
+                scene_roots,
+            ]
+        );
+    }
+
+    #[test]
+    fn scene_hierarchy_asset_order_allows_absent_scene_roots_and_enforces_limit() {
+        let game_objects = [source(0, 0, 10, 1)];
+        let empty = [];
+        let groups = SceneHierarchyAssetGroups {
+            game_objects: &game_objects,
+            components: &empty,
+            prefab_instances: &empty,
+            managers: &empty,
+            scene_roots: None,
+        };
+
+        assert_eq!(
+            order_scene_hierarchy_assets(groups, SceneHierarchyAssetOrderLimits::default()),
+            Ok(game_objects.to_vec())
+        );
+        assert_eq!(
+            order_scene_hierarchy_assets(groups, SceneHierarchyAssetOrderLimits { max_assets: 0 }),
+            Err(SceneHierarchyAssetOrderError::AssetLimitExceeded {
+                requested: 1,
+                limit: 0,
+            })
+        );
     }
 
     #[test]

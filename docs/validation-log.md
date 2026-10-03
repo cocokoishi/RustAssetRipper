@@ -805,3 +805,9 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - The plan retains full collection/object identity, keeps caller order, rejects duplicate identities and collection-size overruns, and bounds the source-compatible 32-bit seed.
 - Synthetic tests cover mixed source/generated entries, same PathID values in different source files, generated-only seed order, Unity 5.4 and 2022 ID widths, duplicates, and limits. Full workspace verification passed: `cargo test --workspace --locked --quiet` (345 library tests, 10 CLI tests, 0 doc tests); warnings-denied Clippy; format check; baseline verifier (1,449 files); and `git diff --check`.
 - SceneHierarchyObject membership/order construction, PPtr export pointer resolution, Prefab collection rules, YAML document output, and GUID assignment remain open. Phase 1 remains incomplete and Phase 2 remains locked.
+
+## Scene hierarchy export membership order (2026-10-03)
+
+- Added `order_scene_hierarchy_assets` from the baseline `SceneHierarchyObject.Assets` sequence: GameObjects, Components, PrefabInstances, Managers, then optional SceneRoots. The API takes already classified identities and preserves order within each category; it deliberately does not apply the separate YAML export comparator or hidden-asset filter.
+- Synthetic tests cover exact category concatenation, absent SceneRoots, and asset-count bounds. Full workspace verification passed: `cargo test --workspace --locked --quiet` (347 library tests, 10 CLI tests, 0 doc tests); warnings-denied Clippy; format check; baseline verifier (1,449 files); and `git diff --check`.
+- Classification of scene source objects into these groups, PPtr-to-export-pointer resolution, Prefab export IDs, YAML writing, and GUID assignment remain open. No original AssetBundles or UABEA were accessed; Phase 1 remains incomplete and Phase 2 remains locked.

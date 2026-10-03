@@ -513,4 +513,12 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Added `plan_scene_export_ids` for an already ordered Scene export list. Source SerializedFile objects keep their PathID; processed collection objects receive class/version-specific pseudo-random IDs, with the seed advancing only for processed objects.
 - Synthetic checks cover mixed source/generated order, source file identity, Unity 5.4 and 2022 ID widths, duplicate identity, and collection size limits. Full verification passed: `cargo test --workspace --locked --quiet` (345 library tests, 10 CLI tests, 0 doc tests); warnings-denied Clippy; format check; baseline verifier (1,449 files); and `git diff --check`.
 - Still incomplete: construct exact membership/order from SceneHierarchyObject, resolve source/generated PPtrs to collection fileIDs/GUIDs, implement Prefab collection rules, YAML documents, and `.meta` GUIDs. Phase 1 remains open; Phase 2 remains locked.
-- Next: derive Scene/Prefab hierarchy membership and pointer resolution from baseline source, then implement a bounded source/generated pointer map before YAML writing.
+- Next: implement a bounded pointer map from multi-file object identities to export collection IDs, local/external MetaPtr behavior, and explicit missing-reference results.
+
+## Scene hierarchy export membership order
+
+- Current phase: Phase 1; gate not passed. This increment starts from pushed revision `0e58cd4e75838e7e8f8cd073529006c174556fa2`. Only `cocokoishi/RustAssetRipper` is a write/push target; the local AssetRipper baseline remains read-only. No UABEA or user AssetBundle content was accessed.
+- Added `order_scene_hierarchy_assets`, matching the hierarchy ID-assignment order `GameObjects → Components → PrefabInstances → Managers → optional SceneRoots`. The function checks count overflow, enforces a configurable bound, and reserves output memory fallibly.
+- Synthetic tests cover group order, absent SceneRoots, and the count limit. Full verification passed: 347 library tests, 10 CLI tests, warnings-denied Clippy, format check, baseline verifier (1,449 files), and `git diff --check`.
+- Still incomplete: classify source objects into these membership lists, perform baseline YAML manager ordering and hidden filtering, resolve PPtrs, implement Prefab IDs, YAML output, and GUIDs. Phase 1 remains open; Phase 2 remains locked.
+- Next: implement a bounded pointer map from multi-file object identities to export collection IDs, local/external MetaPtr behavior, and explicit missing-reference results.
