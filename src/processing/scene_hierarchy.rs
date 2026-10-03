@@ -64,6 +64,98 @@ pub struct WorkspaceSceneGameObjectHierarchy {
     component_relationship_end: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WorkspacePrefabRootRelationshipIndexEntry {
+    source_object_index: usize,
+    relationship_index: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WorkspacePrefabInstanceRootResolution {
+    /// The decoded object did not expose one well-formed `m_RootGameObject` PPtr field.
+    FieldUnavailable,
+    Null,
+    Resolved(WorkspaceSceneObjectIdentity),
+    UnresolvedTarget(SceneRelationshipTarget),
+    TargetIdentityUnavailable {
+        target_file_index: usize,
+        target_object_index: usize,
+        path_id: i64,
+    },
+    TargetIdentityPathMismatch {
+        expected_path_id: i64,
+        actual_path_id: i64,
+    },
+    TargetClassMismatch {
+        target: WorkspaceSceneObjectIdentity,
+        actual_class_id: Option<i32>,
+    },
+    DuplicateRootReferences {
+        match_count: usize,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WorkspacePrefabInstanceRootError {
+    NotPrefabInstance {
+        identity: WorkspaceSceneObjectIdentity,
+    },
+    MissingCollectionGraph {
+        file_index: usize,
+    },
+    MissingPrefabInstance {
+        identity: WorkspaceSceneObjectIdentity,
+    },
+    InvalidRelationshipIndex {
+        relationship_index: usize,
+        relationship_count: usize,
+    },
+    RelationshipIndexMismatch {
+        expected_object_index: usize,
+        relationship_index: usize,
+        actual_object_index: usize,
+        kind: SceneRelationshipKind,
+    },
+}
+
+impl Display for WorkspacePrefabInstanceRootError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotPrefabInstance { identity } => write!(
+                f,
+                "file {} object {} PathID {} is not a PrefabInstance",
+                identity.file_index, identity.object_index, identity.path_id
+            ),
+            Self::MissingCollectionGraph { file_index } => {
+                write!(f, "workspace file {file_index} has no retained hierarchy graph")
+            }
+            Self::MissingPrefabInstance { identity } => write!(
+                f,
+                "PrefabInstance file {} object {} PathID {} is absent from its collection graph",
+                identity.file_index, identity.object_index, identity.path_id
+            ),
+            Self::InvalidRelationshipIndex {
+                relationship_index,
+                relationship_count,
+            } => write!(
+                f,
+                "PrefabInstance root relationship index {relationship_index} is outside {relationship_count} relationships"
+            ),
+            Self::RelationshipIndexMismatch {
+                expected_object_index,
+                relationship_index,
+                actual_object_index,
+                kind,
+            } => write!(
+                f,
+                "PrefabInstance object {expected_object_index} root relationship index {relationship_index} points to object {actual_object_index} ({kind:?})"
+            ),
+        }
+    }
+}
+
+impl Error for WorkspacePrefabInstanceRootError {}
+
 impl WorkspaceSceneGameObjectHierarchy {
     pub fn game_object(&self) -> WorkspaceSceneObjectIdentity {
         self.game_object
@@ -468,6 +560,7 @@ pub struct WorkspaceSceneCollectionHierarchy {
     relationships: Vec<SceneRelationship>,
     game_object_hierarchies: Vec<WorkspaceSceneGameObjectHierarchy>,
     game_object_component_relationship_indices: Vec<usize>,
+    prefab_root_relationship_index: Vec<WorkspacePrefabRootRelationshipIndexEntry>,
     transform_hierarchies: Vec<WorkspaceSceneTransformHierarchy>,
     transform_child_relationship_indices: Vec<usize>,
     transform_game_object_relationship_indices: Vec<usize>,
@@ -515,6 +608,19 @@ impl WorkspaceSceneCollectionHierarchy {
 
     pub fn game_object_hierarchies(&self) -> &[WorkspaceSceneGameObjectHierarchy] {
         &self.game_object_hierarchies
+    }
+
+    fn prefab_root_relationships_for_object(
+        &self,
+        object_index: usize,
+    ) -> &[WorkspacePrefabRootRelationshipIndexEntry] {
+        let start = self
+            .prefab_root_relationship_index
+            .partition_point(|entry| entry.source_object_index < object_index);
+        let end = self
+            .prefab_root_relationship_index
+            .partition_point(|entry| entry.source_object_index <= object_index);
+        &self.prefab_root_relationship_index[start..end]
     }
 
     /// Return a GameObject's `m_Component` edges in serialized array order.
@@ -952,6 +1058,123 @@ impl WorkspaceSceneHierarchies {
             }
         }
         Ok(walk)
+    }
+
+    /// Returns PrefabInstance identities in workspace file and serialized object order.
+    pub fn prefab_instance_identities(
+        &self,
+    ) -> impl Iterator<Item = WorkspaceSceneObjectIdentity> + '_ {
+        self.collection_graph_index.iter().flat_map(move |entry| {
+            self.collection_graph_for_file(entry.file_index)
+                .into_iter()
+                .flat_map(|graph| graph.scene_assets.iter())
+                .filter_map(|asset| {
+                    (asset.category == WorkspaceSceneAssetCategory::PrefabInstance)
+                        .then_some(asset.identity)
+                })
+        })
+    }
+
+    /// Resolves one serialized `PrefabInstance.m_RootGameObject` edge against retained graphs.
+    /// A missing or malformed field remains `FieldUnavailable`; it is never converted to null.
+    pub fn resolve_prefab_instance_root(
+        &self,
+        prefab_instance: WorkspaceSceneObjectIdentity,
+    ) -> Result<WorkspacePrefabInstanceRootResolution, WorkspacePrefabInstanceRootError> {
+        if prefab_instance.class_id != Some(PREFAB_INSTANCE_CLASS_ID) {
+            return Err(WorkspacePrefabInstanceRootError::NotPrefabInstance {
+                identity: prefab_instance,
+            });
+        }
+        let Some(graph) = self.collection_graph_for_file(prefab_instance.file_index) else {
+            return Err(WorkspacePrefabInstanceRootError::MissingCollectionGraph {
+                file_index: prefab_instance.file_index,
+            });
+        };
+        let key = (prefab_instance.file_index, prefab_instance.object_index);
+        let has_prefab_instance = graph
+            .scene_assets
+            .binary_search_by_key(&key, |asset| {
+                (asset.identity.file_index, asset.identity.object_index)
+            })
+            .ok()
+            .and_then(|index| graph.scene_assets.get(index))
+            .filter(|asset| {
+                asset.category == WorkspaceSceneAssetCategory::PrefabInstance
+                    && asset.identity == prefab_instance
+            })
+            .is_some();
+        if !has_prefab_instance {
+            return Err(WorkspacePrefabInstanceRootError::MissingPrefabInstance {
+                identity: prefab_instance,
+            });
+        }
+        let relationships =
+            graph.prefab_root_relationships_for_object(prefab_instance.object_index);
+        if relationships.is_empty() {
+            return Ok(WorkspacePrefabInstanceRootResolution::FieldUnavailable);
+        }
+        if relationships.len() > 1 {
+            return Ok(
+                WorkspacePrefabInstanceRootResolution::DuplicateRootReferences {
+                    match_count: relationships.len(),
+                },
+            );
+        }
+        let relationship_index = relationships[0].relationship_index;
+        let Some(relationship) = graph.relationships.get(relationship_index) else {
+            return Err(WorkspacePrefabInstanceRootError::InvalidRelationshipIndex {
+                relationship_index,
+                relationship_count: graph.relationships.len(),
+            });
+        };
+        if relationship.source_object_index != prefab_instance.object_index
+            || relationship.kind != SceneRelationshipKind::PrefabInstanceRootGameObject
+            || relationship.source_path_id != prefab_instance.path_id
+        {
+            return Err(
+                WorkspacePrefabInstanceRootError::RelationshipIndexMismatch {
+                    expected_object_index: prefab_instance.object_index,
+                    relationship_index,
+                    actual_object_index: relationship.source_object_index,
+                    kind: relationship.kind,
+                },
+            );
+        }
+        let resolution = match resolve_relationship_identity(self, graph, relationship) {
+            RelationshipIdentityResolution::Null => WorkspacePrefabInstanceRootResolution::Null,
+            RelationshipIdentityResolution::Resolved(identity)
+                if identity.class_id == Some(GAME_OBJECT_CLASS_ID) =>
+            {
+                WorkspacePrefabInstanceRootResolution::Resolved(identity)
+            }
+            RelationshipIdentityResolution::Resolved(identity) => {
+                WorkspacePrefabInstanceRootResolution::TargetClassMismatch {
+                    target: identity,
+                    actual_class_id: identity.class_id,
+                }
+            }
+            RelationshipIdentityResolution::Unresolved(target) => {
+                WorkspacePrefabInstanceRootResolution::UnresolvedTarget(target)
+            }
+            RelationshipIdentityResolution::Unavailable {
+                target_file_index,
+                target_object_index,
+                path_id,
+            } => WorkspacePrefabInstanceRootResolution::TargetIdentityUnavailable {
+                target_file_index,
+                target_object_index,
+                path_id,
+            },
+            RelationshipIdentityResolution::PathMismatch {
+                identity,
+                expected_path_id,
+            } => WorkspacePrefabInstanceRootResolution::TargetIdentityPathMismatch {
+                expected_path_id,
+                actual_path_id: identity.path_id,
+            },
+        };
+        Ok(resolution)
     }
 
     pub fn scene_for_collection(
@@ -1803,6 +2026,11 @@ pub enum WorkspaceSceneHierarchyError {
         relationship_index: usize,
         object_index: usize,
     },
+    PrefabRootRelationshipSourceMissing {
+        file_index: usize,
+        relationship_index: usize,
+        object_index: usize,
+    },
     DuplicateGameObjectHierarchy {
         file_index: usize,
         object_index: usize,
@@ -1940,6 +2168,14 @@ impl Display for WorkspaceSceneHierarchyError {
             } => write!(
                 f,
                 "scene relationship {relationship_index} source object {file_index}:{object_index} is invalid"
+            ),
+            Self::PrefabRootRelationshipSourceMissing {
+                file_index,
+                relationship_index,
+                object_index,
+            } => write!(
+                f,
+                "PrefabInstance root relationship {relationship_index} in collection {file_index} has no matching PrefabInstance at object {object_index}"
             ),
             Self::DuplicateGameObjectHierarchy {
                 file_index,
@@ -2293,6 +2529,8 @@ impl WorkspaceSceneHierarchyBuilder {
             )?;
         let transform_index =
             build_transform_hierarchy_index(file_index, &component_candidates, &relationships)?;
+        let prefab_root_relationship_index =
+            build_prefab_root_relationship_index(file_index, &scene_assets, &relationships)?;
 
         let mut graph_issues = Vec::new();
         graph_issues
@@ -2311,6 +2549,7 @@ impl WorkspaceSceneHierarchyBuilder {
             relationships,
             game_object_hierarchies,
             game_object_component_relationship_indices,
+            prefab_root_relationship_index,
             transform_hierarchies: transform_index.transforms,
             transform_child_relationship_indices: transform_index.child_relationship_indices,
             transform_game_object_relationship_indices: transform_index
@@ -2522,6 +2761,57 @@ fn build_game_object_component_relationship_index(
     }
 
     Ok((game_objects, component_relationship_indices))
+}
+
+fn build_prefab_root_relationship_index(
+    collection_file_index: usize,
+    scene_assets: &[WorkspaceSceneAssetIdentity],
+    relationships: &[SceneRelationship],
+) -> Result<Vec<WorkspacePrefabRootRelationshipIndexEntry>, WorkspaceSceneHierarchyError> {
+    let relationship_count = relationships
+        .iter()
+        .filter(|relationship| {
+            relationship.kind == SceneRelationshipKind::PrefabInstanceRootGameObject
+        })
+        .count();
+    let mut index = Vec::new();
+    index.try_reserve_exact(relationship_count).map_err(|_| {
+        WorkspaceSceneHierarchyError::AllocationFailed {
+            resource: "PrefabInstance root relationship index",
+            requested: relationship_count,
+        }
+    })?;
+
+    for (relationship_index, relationship) in relationships.iter().enumerate() {
+        if relationship.kind != SceneRelationshipKind::PrefabInstanceRootGameObject {
+            continue;
+        }
+        let key = (collection_file_index, relationship.source_object_index);
+        let source = scene_assets
+            .binary_search_by_key(&key, |asset| {
+                (asset.identity.file_index, asset.identity.object_index)
+            })
+            .ok()
+            .and_then(|source_index| scene_assets.get(source_index));
+        if !source.is_some_and(|asset| {
+            asset.category == WorkspaceSceneAssetCategory::PrefabInstance
+                && asset.identity.path_id == relationship.source_path_id
+        }) {
+            return Err(
+                WorkspaceSceneHierarchyError::PrefabRootRelationshipSourceMissing {
+                    file_index: collection_file_index,
+                    relationship_index,
+                    object_index: relationship.source_object_index,
+                },
+            );
+        }
+        index.push(WorkspacePrefabRootRelationshipIndexEntry {
+            source_object_index: relationship.source_object_index,
+            relationship_index,
+        });
+    }
+    index.sort_unstable_by_key(|entry| (entry.source_object_index, entry.relationship_index));
+    Ok(index)
 }
 
 fn build_transform_hierarchy_index(
@@ -3411,6 +3701,7 @@ mod tests {
                 component_relationship_end: 4,
             }],
             game_object_component_relationship_indices: vec![0, 1, 2, 3],
+            prefab_root_relationship_index: Vec::new(),
             transform_hierarchies: vec![
                 WorkspaceSceneTransformHierarchy {
                     transform: first_transform,
@@ -3494,6 +3785,7 @@ mod tests {
                 component_relationship_end: 1,
             }],
             game_object_component_relationship_indices: vec![1],
+            prefab_root_relationship_index: Vec::new(),
             transform_hierarchies: vec![WorkspaceSceneTransformHierarchy {
                 transform: child_transform,
                 child_relationship_start: child_transform_child_range.start,
@@ -3536,6 +3828,72 @@ mod tests {
         }
     }
 
+    fn prefab_root_workspace(
+        target: Option<(i64, SceneRelationshipTarget)>,
+    ) -> (WorkspaceSceneHierarchies, WorkspaceSceneObjectIdentity) {
+        let prefab = identity(0, 0, 100, PREFAB_INSTANCE_CLASS_ID);
+        let root = identity(0, 1, 200, GAME_OBJECT_CLASS_ID);
+        let relationships = target
+            .map(|(path_id, target)| {
+                vec![relationship(
+                    prefab,
+                    SceneRelationshipKind::PrefabInstanceRootGameObject,
+                    "m_RootGameObject",
+                    path_id,
+                    target,
+                )]
+            })
+            .unwrap_or_default();
+        let prefab_root_relationship_index = if relationships.is_empty() {
+            Vec::new()
+        } else {
+            vec![WorkspacePrefabRootRelationshipIndexEntry {
+                source_object_index: prefab.object_index,
+                relationship_index: 0,
+            }]
+        };
+        let collection = WorkspaceSceneCollectionHierarchy {
+            collection_file_index: 0,
+            scene_objects: Vec::new(),
+            relationships,
+            game_object_hierarchies: Vec::new(),
+            game_object_component_relationship_indices: Vec::new(),
+            prefab_root_relationship_index,
+            transform_hierarchies: Vec::new(),
+            transform_child_relationship_indices: Vec::new(),
+            transform_game_object_relationship_indices: Vec::new(),
+            graph_issues: Vec::new(),
+            scene_assets: vec![
+                WorkspaceSceneAssetIdentity {
+                    identity: prefab,
+                    category: WorkspaceSceneAssetCategory::PrefabInstance,
+                },
+                WorkspaceSceneAssetIdentity {
+                    identity: root,
+                    category: WorkspaceSceneAssetCategory::GameObject,
+                },
+            ],
+            component_candidates: Vec::new(),
+            missing_transform_plans: Vec::new(),
+            source_graph_complete: true,
+            source_reference_scans_complete: true,
+            roots: WorkspaceSceneRootDiscovery::default(),
+            hierarchy_audit: WorkspaceSceneHierarchyAudit::default(),
+        };
+        (
+            WorkspaceSceneHierarchies {
+                scenes: Vec::new(),
+                non_scene_collections: vec![collection],
+                collection_graph_index: vec![WorkspaceSceneCollectionGraphIndexEntry {
+                    file_index: 0,
+                    scene_index: None,
+                    collection_index: 0,
+                }],
+            },
+            prefab,
+        )
+    }
+
     #[test]
     fn recognizes_source_scene_hierarchy_asset_class_ids() {
         assert_eq!(
@@ -3575,6 +3933,221 @@ mod tests {
             Some(WorkspaceSceneAssetCategory::SceneRoots)
         );
         assert_eq!(scene_asset_category(Some(114)), None);
+    }
+
+    #[test]
+    fn indexes_prefab_root_edges_only_for_matching_prefab_instances() {
+        let prefab = identity(0, 3, 30, PREFAB_INSTANCE_CLASS_ID);
+        let root = identity(0, 4, 40, GAME_OBJECT_CLASS_ID);
+        let relationships = vec![relationship(
+            prefab,
+            SceneRelationshipKind::PrefabInstanceRootGameObject,
+            "m_RootGameObject",
+            root.path_id,
+            SceneRelationshipTarget::LocalObject {
+                object_index: root.object_index,
+            },
+        )];
+        let assets = [WorkspaceSceneAssetIdentity {
+            identity: prefab,
+            category: WorkspaceSceneAssetCategory::PrefabInstance,
+        }];
+        assert_eq!(
+            build_prefab_root_relationship_index(0, &assets, &relationships).unwrap(),
+            vec![WorkspacePrefabRootRelationshipIndexEntry {
+                source_object_index: prefab.object_index,
+                relationship_index: 0,
+            }]
+        );
+        assert!(matches!(
+            build_prefab_root_relationship_index(0, &[], &relationships),
+            Err(
+                WorkspaceSceneHierarchyError::PrefabRootRelationshipSourceMissing {
+                    file_index: 0,
+                    relationship_index: 0,
+                    object_index: 3,
+                }
+            )
+        ));
+    }
+
+    #[test]
+    fn resolves_prefab_instance_root_in_workspace_file_order() {
+        let prefab = identity(0, 0, 100, PREFAB_INSTANCE_CLASS_ID);
+        let root = identity(1, 0, 200, GAME_OBJECT_CLASS_ID);
+        let prefab_relationship = relationship(
+            prefab,
+            SceneRelationshipKind::PrefabInstanceRootGameObject,
+            "m_RootGameObject",
+            root.path_id,
+            SceneRelationshipTarget::WorkspaceObject {
+                file_index: root.file_index,
+                object_index: root.object_index,
+            },
+        );
+        let prefab_collection = WorkspaceSceneCollectionHierarchy {
+            collection_file_index: 0,
+            scene_objects: Vec::new(),
+            relationships: vec![prefab_relationship],
+            game_object_hierarchies: Vec::new(),
+            game_object_component_relationship_indices: Vec::new(),
+            prefab_root_relationship_index: vec![WorkspacePrefabRootRelationshipIndexEntry {
+                source_object_index: prefab.object_index,
+                relationship_index: 0,
+            }],
+            transform_hierarchies: Vec::new(),
+            transform_child_relationship_indices: Vec::new(),
+            transform_game_object_relationship_indices: Vec::new(),
+            graph_issues: Vec::new(),
+            scene_assets: vec![WorkspaceSceneAssetIdentity {
+                identity: prefab,
+                category: WorkspaceSceneAssetCategory::PrefabInstance,
+            }],
+            component_candidates: Vec::new(),
+            missing_transform_plans: Vec::new(),
+            source_graph_complete: true,
+            source_reference_scans_complete: true,
+            roots: WorkspaceSceneRootDiscovery::default(),
+            hierarchy_audit: WorkspaceSceneHierarchyAudit::default(),
+        };
+        let root_collection = WorkspaceSceneCollectionHierarchy {
+            collection_file_index: 1,
+            scene_objects: Vec::new(),
+            relationships: Vec::new(),
+            game_object_hierarchies: Vec::new(),
+            game_object_component_relationship_indices: Vec::new(),
+            prefab_root_relationship_index: Vec::new(),
+            transform_hierarchies: Vec::new(),
+            transform_child_relationship_indices: Vec::new(),
+            transform_game_object_relationship_indices: Vec::new(),
+            graph_issues: Vec::new(),
+            scene_assets: vec![WorkspaceSceneAssetIdentity {
+                identity: root,
+                category: WorkspaceSceneAssetCategory::GameObject,
+            }],
+            component_candidates: Vec::new(),
+            missing_transform_plans: Vec::new(),
+            source_graph_complete: true,
+            source_reference_scans_complete: true,
+            roots: WorkspaceSceneRootDiscovery::default(),
+            hierarchy_audit: WorkspaceSceneHierarchyAudit::default(),
+        };
+        let workspace = WorkspaceSceneHierarchies {
+            scenes: Vec::new(),
+            non_scene_collections: vec![prefab_collection, root_collection],
+            collection_graph_index: vec![
+                WorkspaceSceneCollectionGraphIndexEntry {
+                    file_index: 0,
+                    scene_index: None,
+                    collection_index: 0,
+                },
+                WorkspaceSceneCollectionGraphIndexEntry {
+                    file_index: 1,
+                    scene_index: None,
+                    collection_index: 1,
+                },
+            ],
+        };
+
+        assert_eq!(
+            workspace.prefab_instance_identities().collect::<Vec<_>>(),
+            vec![prefab]
+        );
+        assert_eq!(
+            workspace.resolve_prefab_instance_root(prefab).unwrap(),
+            WorkspacePrefabInstanceRootResolution::Resolved(root)
+        );
+    }
+
+    #[test]
+    fn keeps_null_unresolved_and_missing_prefab_roots_distinct() {
+        let (null_workspace, prefab) =
+            prefab_root_workspace(Some((0, SceneRelationshipTarget::Null)));
+        assert_eq!(
+            null_workspace.resolve_prefab_instance_root(prefab).unwrap(),
+            WorkspacePrefabInstanceRootResolution::Null
+        );
+
+        let (unresolved_workspace, prefab) = prefab_root_workspace(Some((
+            404,
+            SceneRelationshipTarget::MissingLocalObject { path_id: 404 },
+        )));
+        assert_eq!(
+            unresolved_workspace
+                .resolve_prefab_instance_root(prefab)
+                .unwrap(),
+            WorkspacePrefabInstanceRootResolution::UnresolvedTarget(
+                SceneRelationshipTarget::MissingLocalObject { path_id: 404 }
+            )
+        );
+
+        let (missing_workspace, prefab) = prefab_root_workspace(None);
+        assert_eq!(
+            missing_workspace
+                .resolve_prefab_instance_root(prefab)
+                .unwrap(),
+            WorkspacePrefabInstanceRootResolution::FieldUnavailable
+        );
+    }
+
+    #[test]
+    fn keeps_wrong_class_path_mismatch_and_duplicate_prefab_roots_explicit() {
+        let (mut wrong_class_workspace, prefab) = prefab_root_workspace(Some((
+            200,
+            SceneRelationshipTarget::LocalObject { object_index: 1 },
+        )));
+        wrong_class_workspace.non_scene_collections[0].scene_assets[1]
+            .identity
+            .class_id = Some(23);
+        assert_eq!(
+            wrong_class_workspace
+                .resolve_prefab_instance_root(prefab)
+                .unwrap(),
+            WorkspacePrefabInstanceRootResolution::TargetClassMismatch {
+                target: identity(0, 1, 200, 23),
+                actual_class_id: Some(23),
+            }
+        );
+
+        let (path_mismatch_workspace, prefab) = prefab_root_workspace(Some((
+            201,
+            SceneRelationshipTarget::LocalObject { object_index: 1 },
+        )));
+        assert_eq!(
+            path_mismatch_workspace
+                .resolve_prefab_instance_root(prefab)
+                .unwrap(),
+            WorkspacePrefabInstanceRootResolution::TargetIdentityPathMismatch {
+                expected_path_id: 201,
+                actual_path_id: 200,
+            }
+        );
+
+        let (mut duplicate_workspace, prefab) = prefab_root_workspace(Some((
+            200,
+            SceneRelationshipTarget::LocalObject { object_index: 1 },
+        )));
+        duplicate_workspace.non_scene_collections[0]
+            .relationships
+            .push(relationship(
+                prefab,
+                SceneRelationshipKind::PrefabInstanceRootGameObject,
+                "m_RootGameObject",
+                200,
+                SceneRelationshipTarget::LocalObject { object_index: 1 },
+            ));
+        duplicate_workspace.non_scene_collections[0]
+            .prefab_root_relationship_index
+            .push(WorkspacePrefabRootRelationshipIndexEntry {
+                source_object_index: prefab.object_index,
+                relationship_index: 1,
+            });
+        assert_eq!(
+            duplicate_workspace
+                .resolve_prefab_instance_root(prefab)
+                .unwrap(),
+            WorkspacePrefabInstanceRootResolution::DuplicateRootReferences { match_count: 2 }
+        );
     }
 
     #[test]

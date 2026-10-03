@@ -26,8 +26,8 @@ use assetripper::processing::scene_collections::{
 };
 use assetripper::processing::scene_hierarchy::{
     WorkspaceGeneratedTransformPlanBuilder, WorkspaceGeneratedTransformPlanLimits,
-    WorkspaceSceneAssetCategory, WorkspaceSceneComponentEvidence, WorkspaceSceneHierarchyBuilder,
-    WorkspaceSceneHierarchyLimits,
+    WorkspacePrefabInstanceRootResolution, WorkspaceSceneAssetCategory,
+    WorkspaceSceneComponentEvidence, WorkspaceSceneHierarchyBuilder, WorkspaceSceneHierarchyLimits,
 };
 use assetripper::processing::scene_metadata::{
     decode_build_settings_scene_paths_from_parts, BuildSettingsSceneLimits,
@@ -640,11 +640,10 @@ fn print_workspace_summary_to<W: io::Write>(
             }
         }
 
-        let contains_scene_objects = file
-            .metadata
-            .objects
-            .iter()
-            .any(|object| matches!(workspace_object_class_id(object), Some(1 | 4 | 224)));
+        let contains_scene_objects =
+            file.metadata.objects.iter().any(|object| {
+                matches!(workspace_object_class_id(object), Some(1 | 4 | 224 | 1001))
+            });
         for (object_index, object) in file.metadata.objects.iter().enumerate() {
             let class_id = workspace_object_class_id(object);
             if class_id != Some(141) {
@@ -695,6 +694,11 @@ fn print_workspace_summary_to<W: io::Write>(
             };
             let parsed_file = SerializedFile::parse(file_bytes)?;
             let mut scene_graph = SceneGraph::build(&parsed_file, SceneGraphLimits::default())?;
+            scene_graph.resolve_with_multi_file_graph(
+                file_index,
+                &file.file_name,
+                &multi_file_graph,
+            )?;
             let root_discovery = scene_graph.discover_workspace_roots(
                 file_index,
                 &file.file_name,
@@ -1037,6 +1041,11 @@ fn print_workspace_summary_to<W: io::Write>(
         let bytes = filesystem.read_all_bytes(&file.virtual_path, maximum_bytes)?;
         let parsed_file = SerializedFile::parse(&bytes)?;
         let mut scene_graph = SceneGraph::build(&parsed_file, SceneGraphLimits::default())?;
+        scene_graph.resolve_with_multi_file_graph(
+            file_index,
+            &file.file_name,
+            &multi_file_graph,
+        )?;
         let roots = scene_graph.discover_workspace_roots(
             file_index,
             &file.file_name,
@@ -1195,6 +1204,40 @@ fn print_workspace_summary_to<W: io::Write>(
             scene_hierarchies.non_scene_collections().len() - MAX_GENERATED_TRANSFORM_DIAGNOSTICS
         )?;
     }
+    let mut prefab_root_counts = [0usize; 4];
+    let mut prefab_root_diagnostics = 0usize;
+    for prefab_instance in scene_hierarchies.prefab_instance_identities() {
+        let resolution = scene_hierarchies.resolve_prefab_instance_root(prefab_instance)?;
+        let count_index = match &resolution {
+            WorkspacePrefabInstanceRootResolution::Resolved(_) => 0,
+            WorkspacePrefabInstanceRootResolution::Null => 1,
+            WorkspacePrefabInstanceRootResolution::FieldUnavailable => 2,
+            _ => 3,
+        };
+        prefab_root_counts[count_index] = prefab_root_counts[count_index]
+            .checked_add(1)
+            .ok_or_else(|| invalid_data("PrefabInstance root count overflows usize"))?;
+        if count_index >= 2 && prefab_root_diagnostics < MAX_GENERATED_TRANSFORM_DIAGNOSTICS {
+            writeln!(
+                output,
+                "  PrefabInstance root file {} object {} PathID {}: {:?}",
+                prefab_instance.file_index,
+                prefab_instance.object_index,
+                prefab_instance.path_id,
+                resolution
+            )?;
+            prefab_root_diagnostics += 1;
+        }
+    }
+    writeln!(
+        output,
+        "PrefabInstance RootGameObject references: {} total, {} resolved, {} null, {} field unavailable, {} unresolved or invalid",
+        prefab_root_counts.iter().sum::<usize>(),
+        prefab_root_counts[0],
+        prefab_root_counts[1],
+        prefab_root_counts[2],
+        prefab_root_counts[3]
+    )?;
     writeln!(
         output,
         "SceneDefinitions: {}",

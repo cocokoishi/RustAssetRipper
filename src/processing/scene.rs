@@ -15,6 +15,7 @@ use crate::serialized_file::reference_graph::{
 const GAME_OBJECT_CLASS_ID: i32 = 1;
 const TRANSFORM_CLASS_ID: i32 = 4;
 const RECT_TRANSFORM_CLASS_ID: i32 = 224;
+const PREFAB_INSTANCE_CLASS_ID: i32 = 1001;
 
 /// Bounds for building one file-scoped scene relationship graph.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -103,6 +104,7 @@ pub enum SceneRelationshipKind {
     ComponentGameObject,
     TransformParent,
     TransformChild,
+    PrefabInstanceRootGameObject,
 }
 
 /// Explicit result of resolving one recovered scene pointer within its source file.
@@ -546,7 +548,8 @@ pub enum SceneGraphIssueKind {
     },
 }
 
-/// File-scoped scene nodes and relationships recovered from GameObject/Transform TypeTrees.
+/// File-scoped scene nodes and relationships recovered from GameObject, Transform, and
+/// PrefabInstance TypeTrees.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SceneGraph {
     objects: Vec<SceneObjectRecord>,
@@ -555,7 +558,7 @@ pub struct SceneGraph {
 }
 
 impl SceneGraph {
-    /// Decode GameObject, Transform, and RectTransform payloads from one parsed SerializedFile.
+    /// Decode GameObject, Transform, RectTransform, and PrefabInstance payloads from one file.
     ///
     /// Other object records remain in `objects` as potential relationship targets. This stage
     /// does not load external files or synthesize reciprocal relationships.
@@ -1912,6 +1915,9 @@ impl<'a> SceneGraphBuilder<'a> {
                 root,
                 class_id == Some(RECT_TRANSFORM_CLASS_ID),
             ),
+            Some(PREFAB_INSTANCE_CLASS_ID) => {
+                self.read_prefab_instance(object_index, path_id, root)
+            }
             _ => Ok(()),
         }
     }
@@ -2087,6 +2093,30 @@ impl<'a> SceneGraphBuilder<'a> {
                     pointer,
                 )?;
             }
+        }
+        Ok(())
+    }
+
+    fn read_prefab_instance(
+        &mut self,
+        object_index: usize,
+        path_id: i64,
+        root: &SerializedValue,
+    ) -> Result<(), SceneGraphBuildError> {
+        let Some(value) = self.unique_field(object_index, path_id, root, "m_RootGameObject")?
+        else {
+            return Ok(());
+        };
+        if let Some(pointer) =
+            self.pointer_value(object_index, path_id, "m_RootGameObject", value)?
+        {
+            self.push_relationship(
+                object_index,
+                path_id,
+                SceneRelationshipKind::PrefabInstanceRootGameObject,
+                "m_RootGameObject".to_owned(),
+                pointer,
+            )?;
         }
         Ok(())
     }
@@ -2584,6 +2614,7 @@ fn hierarchy_kind_rank(kind: SceneRelationshipKind) -> u8 {
         SceneRelationshipKind::ComponentGameObject => 1,
         SceneRelationshipKind::TransformParent => 2,
         SceneRelationshipKind::TransformChild => 3,
+        SceneRelationshipKind::PrefabInstanceRootGameObject => 4,
     }
 }
 
@@ -2742,7 +2773,12 @@ fn push_workspace_hierarchy_issue(
 fn is_scene_object_class(class_id: Option<i32>) -> bool {
     matches!(
         class_id,
-        Some(GAME_OBJECT_CLASS_ID | TRANSFORM_CLASS_ID | RECT_TRANSFORM_CLASS_ID)
+        Some(
+            GAME_OBJECT_CLASS_ID
+                | TRANSFORM_CLASS_ID
+                | RECT_TRANSFORM_CLASS_ID
+                | PREFAB_INSTANCE_CLASS_ID
+        )
     )
 }
 
@@ -3240,6 +3276,124 @@ mod tests {
         ]
     }
 
+    #[test]
+    fn reads_prefab_instance_root_game_object_pointer() {
+        let metadata = metadata(&[(100, 1001), (200, 1)]);
+        let roots = vec![
+            (
+                0,
+                Value::Struct(vec![field("m_RootGameObject", pptr(0, 200))]),
+            ),
+            (1, Value::Struct(game_object_fields("Root", Vec::new()))),
+        ];
+        let graph =
+            SceneGraph::from_decoded_roots(&metadata, &roots, SceneGraphLimits::default()).unwrap();
+
+        assert!(graph.is_complete(), "{:?}", graph.issues());
+        assert_eq!(graph.relationships().len(), 1);
+        let relationship = &graph.relationships()[0];
+        assert_eq!(
+            relationship.kind,
+            SceneRelationshipKind::PrefabInstanceRootGameObject
+        );
+        assert_eq!(relationship.field_path, "m_RootGameObject");
+        assert_eq!(relationship.file_id, 0);
+        assert_eq!(relationship.path_id, 200);
+        assert_eq!(
+            relationship.target,
+            SceneRelationshipTarget::LocalObject { object_index: 1 }
+        );
+    }
+
+    #[test]
+    fn distinguishes_null_and_missing_prefab_root_pointer_fields() {
+        let metadata = metadata(&[(100, 1001)]);
+        let null_graph = SceneGraph::from_decoded_roots(
+            &metadata,
+            &[(
+                0,
+                Value::Struct(vec![field("m_RootGameObject", pptr(0, 0))]),
+            )],
+            SceneGraphLimits::default(),
+        )
+        .unwrap();
+        assert!(null_graph.is_complete());
+        assert_eq!(null_graph.relationships().len(), 1);
+        assert_eq!(
+            null_graph.relationships()[0].target,
+            SceneRelationshipTarget::Null
+        );
+
+        let missing_graph = SceneGraph::from_decoded_roots(
+            &metadata,
+            &[(0, Value::Struct(Vec::new()))],
+            SceneGraphLimits::default(),
+        )
+        .unwrap();
+        assert!(!missing_graph.is_complete());
+        assert!(missing_graph.relationships().is_empty());
+        assert!(missing_graph.issues().iter().any(|issue| matches!(
+            &issue.kind,
+            SceneGraphIssueKind::MissingField { field_name }
+                if field_name == "m_RootGameObject"
+        )));
+    }
+
+    #[test]
+    fn resolves_serialized_prefab_root_pointer_across_loaded_files() {
+        let prefab_bytes = make_prefab_instance_file(100, 1, 42, Some("shared.assets"));
+        let root_bytes = make_game_object_file("Root", 42, None, None);
+        let prefab_file = SerializedFile::parse(&prefab_bytes).unwrap();
+        let root_file = SerializedFile::parse(&root_bytes).unwrap();
+        let prefab_reference_graph =
+            crate::serialized_file::reference_graph::ObjectReferenceGraph::build(&prefab_file)
+                .unwrap();
+        let root_reference_graph =
+            crate::serialized_file::reference_graph::ObjectReferenceGraph::build(&root_file)
+                .unwrap();
+        let files = [
+            crate::serialized_file::reference_graph::NamedObjectReferenceGraph {
+                file_name: "main.assets",
+                metadata: &prefab_file.metadata,
+                graph: &prefab_reference_graph,
+            },
+            crate::serialized_file::reference_graph::NamedObjectReferenceGraph {
+                file_name: "shared.assets",
+                metadata: &root_file.metadata,
+                graph: &root_reference_graph,
+            },
+        ];
+        let references = MultiFileReferenceGraph::build(&files).unwrap();
+        let mut scene = SceneGraph::build(&prefab_file, SceneGraphLimits::default()).unwrap();
+        assert_eq!(
+            scene.relationships().len(),
+            1,
+            "class={:?}; issues={:?}; decoded={:?}",
+            prefab_file.metadata.objects[0].class_id,
+            scene.issues(),
+            prefab_file.decode_object_payload(0).unwrap().root
+        );
+        assert_eq!(
+            scene.relationships()[0].target,
+            SceneRelationshipTarget::ExternalObject {
+                file_id: 1,
+                external_index: 0,
+                path_id: 42,
+            }
+        );
+
+        scene
+            .resolve_with_multi_file_graph(0, "main.assets", &references)
+            .unwrap();
+        assert_eq!(
+            scene.relationships()[0].target,
+            SceneRelationshipTarget::WorkspaceObject {
+                file_index: 1,
+                object_index: 0,
+            }
+        );
+    }
+
     fn put_u16_le(output: &mut Vec<u8>, value: u16) {
         output.extend_from_slice(&value.to_le_bytes());
     }
@@ -3381,6 +3535,81 @@ mod tests {
             metadata.push(0); // empty asset path
             metadata.extend_from_slice(&[0; 16]); // GUID
             put_i32_le(&mut metadata, 0); // asset type
+            metadata.extend_from_slice(external_path.as_bytes());
+            metadata.push(0);
+        }
+        metadata.push(0);
+
+        let header_size = 20usize;
+        let data_offset = header_size + metadata.len();
+        let file_size = data_offset + payload.len();
+        let mut file = Vec::with_capacity(file_size);
+        file.extend_from_slice(&i32::try_from(metadata.len()).unwrap().to_be_bytes());
+        file.extend_from_slice(&u32::try_from(file_size).unwrap().to_be_bytes());
+        file.extend_from_slice(&FormatVersion::Unknown10.raw().to_be_bytes());
+        file.extend_from_slice(&u32::try_from(data_offset).unwrap().to_be_bytes());
+        file.extend_from_slice(&[0, 0, 0, 0]);
+        file.extend_from_slice(&metadata);
+        file.extend_from_slice(&payload);
+        file
+    }
+
+    fn make_prefab_instance_file(
+        prefab_path_id: i32,
+        root_file_id: i32,
+        root_path_id: i64,
+        external_path: Option<&str>,
+    ) -> Vec<u8> {
+        let mut strings = Vec::new();
+        let root_type = push_tree_string(&mut strings, "PrefabInstance");
+        let empty = push_tree_string(&mut strings, "");
+        let root_game_object = push_tree_string(&mut strings, "m_RootGameObject");
+        let pptr_game_object = push_tree_string(&mut strings, "PPtr<GameObject>");
+        let file_id_field = push_tree_string(&mut strings, "m_FileID");
+        let file_id_type = push_tree_string(&mut strings, "SInt32");
+        let path_id_field = push_tree_string(&mut strings, "m_PathID");
+        let path_id_type = push_tree_string(&mut strings, "SInt64");
+
+        let mut metadata = Vec::new();
+        metadata.extend_from_slice(b"2019.4.0f1\0");
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 1);
+        put_i32_le(&mut metadata, 1001);
+        put_i32_le(&mut metadata, 4);
+        put_i32_le(&mut metadata, i32::try_from(strings.len()).unwrap());
+        for (level, type_offset, name_offset, byte_size, index) in [
+            (0, root_type, empty, -1, 0),
+            (1, pptr_game_object, root_game_object, -1, 1),
+            (2, file_id_type, file_id_field, 4, 2),
+            (2, path_id_type, path_id_field, 8, 3),
+        ] {
+            put_tree_node(
+                &mut metadata,
+                level,
+                type_offset,
+                name_offset,
+                byte_size,
+                index,
+            );
+        }
+        metadata.extend_from_slice(&strings);
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 1);
+        put_i32_le(&mut metadata, prefab_path_id);
+        put_u32_le(&mut metadata, 0);
+
+        let mut payload = Vec::new();
+        put_i32_le(&mut payload, root_file_id);
+        put_i64_le(&mut payload, root_path_id);
+        put_i32_le(&mut metadata, i32::try_from(payload.len()).unwrap());
+        put_i32_le(&mut metadata, 1001);
+        put_u16_le(&mut metadata, 1001);
+        put_u16_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, i32::from(external_path.is_some()));
+        if let Some(external_path) = external_path {
+            metadata.push(0);
+            metadata.extend_from_slice(&[0; 16]);
+            put_i32_le(&mut metadata, 0);
             metadata.extend_from_slice(external_path.as_bytes());
             metadata.push(0);
         }
