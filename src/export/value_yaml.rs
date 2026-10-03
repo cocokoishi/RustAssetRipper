@@ -18,6 +18,24 @@ use super::unity_yaml::{
 };
 
 const TRANSFER_USING_FLOW_MAPPING_STYLE: u32 = 0x0020_0000;
+const TRANSFER_IGNORE_IN_META_FILES: u32 = 0x0008_0000;
+
+const IMPORTER_FIELDS_TO_SKIP: &[&str] = &[
+    "m_ObjectHideFlags",
+    "m_ExtensionPtr",
+    "m_PrefabParentObject",
+    "m_CorrespondingSourceObject",
+    "m_PrefabInternal",
+    "m_PrefabAsset",
+    "m_PrefabInstance",
+];
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum UnityYamlObjectFieldMode {
+    #[default]
+    ProjectAsset,
+    AssetImporter,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UnityYamlEmptyArrayKind {
@@ -38,6 +56,8 @@ pub struct UnityYamlObjectConversionHints {
     pub empty_array_kinds: HashMap<String, UnityYamlEmptyArrayKind>,
     /// Paths may contain [*] where a TypeTree struct appears as an array element.
     pub flow_mapped_struct_paths: HashSet<String>,
+    /// TypeTree fields marked `IgnoreInMetaFiles`, using [*] for array elements.
+    pub importer_excluded_field_paths: HashSet<String>,
     pub hash128_schemas: HashMap<String, UnityYamlHash128Schema>,
     pub guid_schemas: HashMap<String, UnityYamlGuidSchema>,
 }
@@ -598,6 +618,20 @@ impl<'a> UnityYamlTypeTreeLayout<'a> {
         let node = self.node(node_index)?;
         let node_type = self.type_name(node_index)?;
 
+        if !field_path.is_empty() && node.meta_flags & TRANSFER_IGNORE_IN_META_FILES != 0 {
+            hints
+                .importer_excluded_field_paths
+                .try_reserve(1)
+                .map_err(|_| UnityYamlObjectConversionError::AllocationFailed {
+                    resource: "Unity YAML importer field paths",
+                    requested: hints.importer_excluded_field_paths.len().saturating_add(1),
+                })?;
+            hints.importer_excluded_field_paths.insert(try_copy_string(
+                field_path,
+                "Unity YAML importer field path",
+            )?);
+        }
+
         if let Some(element_node) = self.array_element_node(node_index)? {
             let element_type = self.type_name(element_node)?;
             let kind = if is_integer_type_tree_type(element_type) {
@@ -747,6 +781,7 @@ pub fn serialized_object_value_to_unity_yaml_document<F>(
     stripped: bool,
     root: &SerializedValue,
     hints: &UnityYamlObjectConversionHints,
+    field_mode: UnityYamlObjectFieldMode,
     unity_version: SceneUnityVersion,
     missing_reference_guid: Option<[u8; 16]>,
     limits: UnityYamlObjectConversionLimits,
@@ -781,6 +816,7 @@ where
             1,
             source,
             hints,
+            field_mode,
             unity_version,
             missing_reference_guid,
             limits,
@@ -801,6 +837,7 @@ fn append_struct_fields<F>(
     depth: usize,
     source: ExportAssetIdentity,
     hints: &UnityYamlObjectConversionHints,
+    field_mode: UnityYamlObjectFieldMode,
     unity_version: SceneUnityVersion,
     missing_reference_guid: Option<[u8; 16]>,
     limits: UnityYamlObjectConversionLimits,
@@ -812,6 +849,11 @@ where
 {
     for field in fields {
         let field_path = child_field_path(parent_path, &field.name, limits.max_field_path_bytes)?;
+        if field_mode == UnityYamlObjectFieldMode::AssetImporter
+            && importer_field_is_excluded(&field.name, &field_path, hints, limits)?
+        {
+            continue;
+        }
         if field.name == "Base" {
             if let SerializedValue::Struct(base_fields) = &field.value {
                 budget.visit(depth)?;
@@ -822,6 +864,7 @@ where
                     depth + 1,
                     source,
                     hints,
+                    field_mode,
                     unity_version,
                     missing_reference_guid,
                     limits,
@@ -837,6 +880,7 @@ where
             depth,
             source,
             hints,
+            field_mode,
             unity_version,
             missing_reference_guid,
             limits,
@@ -858,6 +902,7 @@ fn convert_value<F>(
     depth: usize,
     source: ExportAssetIdentity,
     hints: &UnityYamlObjectConversionHints,
+    field_mode: UnityYamlObjectFieldMode,
     unity_version: SceneUnityVersion,
     missing_reference_guid: Option<[u8; 16]>,
     limits: UnityYamlObjectConversionLimits,
@@ -917,6 +962,7 @@ where
             depth,
             source,
             hints,
+            field_mode,
             unity_version,
             missing_reference_guid,
             limits,
@@ -942,6 +988,7 @@ where
                     depth + 1,
                     source,
                     hints,
+                    field_mode,
                     unity_version,
                     missing_reference_guid,
                     limits,
@@ -1152,6 +1199,7 @@ fn convert_array<F>(
     depth: usize,
     source: ExportAssetIdentity,
     hints: &UnityYamlObjectConversionHints,
+    field_mode: UnityYamlObjectFieldMode,
     unity_version: SceneUnityVersion,
     missing_reference_guid: Option<[u8; 16]>,
     limits: UnityYamlObjectConversionLimits,
@@ -1206,6 +1254,7 @@ where
                 depth + 1,
                 source,
                 hints,
+                field_mode,
                 unity_version,
                 missing_reference_guid,
                 limits,
@@ -1215,6 +1264,26 @@ where
             .map_err(UnityYamlObjectConversionError::NodeBuild)?;
     }
     Ok(sequence)
+}
+
+fn importer_field_is_excluded(
+    field_name: &str,
+    field_path: &str,
+    hints: &UnityYamlObjectConversionHints,
+    limits: UnityYamlObjectConversionLimits,
+) -> Result<bool, UnityYamlObjectConversionError> {
+    if IMPORTER_FIELDS_TO_SKIP.contains(&field_name)
+        || hints.importer_excluded_field_paths.contains(field_path)
+    {
+        return Ok(true);
+    }
+    if field_path.contains('[') {
+        let canonical_path = canonical_array_path(field_path, limits.max_field_path_bytes)?;
+        return Ok(hints
+            .importer_excluded_field_paths
+            .contains(&canonical_path));
+    }
+    Ok(false)
 }
 
 fn convert_integer_array(
@@ -1738,6 +1807,23 @@ mod tests {
     where
         F: FnMut(UnityYamlPPtrRequest<'_>) -> ProjectPointerResolution,
     {
+        convert_with_object_field_mode(
+            root,
+            hints,
+            UnityYamlObjectFieldMode::ProjectAsset,
+            resolver,
+        )
+    }
+
+    fn convert_with_object_field_mode<F>(
+        root: &SerializedValue,
+        hints: &UnityYamlObjectConversionHints,
+        field_mode: UnityYamlObjectFieldMode,
+        resolver: F,
+    ) -> Result<UnityYamlDocument, UnityYamlObjectConversionError>
+    where
+        F: FnMut(UnityYamlPPtrRequest<'_>) -> ProjectPointerResolution,
+    {
         serialized_object_value_to_unity_yaml_document(
             source(),
             "GameObject",
@@ -1746,11 +1832,90 @@ mod tests {
             false,
             root,
             hints,
+            field_mode,
             version(),
             None,
             UnityYamlObjectConversionLimits::default(),
             resolver,
         )
+    }
+
+    #[test]
+    fn importer_yaml_omits_baseline_and_type_tree_ignored_fields() {
+        let type_tree = TypeTree {
+            nodes: vec![
+                type_tree_node(0, "GameObject", "Base", 0),
+                type_tree_node(1, "UInt32", "m_ObjectHideFlags", 0),
+                type_tree_node(1, "SInt32", "m_EditorOnly", TRANSFER_IGNORE_IN_META_FILES),
+                type_tree_node(1, "SInt32", "m_Keep", 0),
+                type_tree_node(1, "vector", "m_Items", 0),
+                type_tree_node(2, "Array", "Array", 0),
+                type_tree_node(3, "SInt32", "size", 0),
+                type_tree_node(3, "Item", "data", 0),
+                type_tree_node(
+                    4,
+                    "SInt32",
+                    "m_ItemEditorOnly",
+                    TRANSFER_IGNORE_IN_META_FILES,
+                ),
+                type_tree_node(4, "SInt32", "m_ItemKeep", 0),
+            ],
+            string_buffer: Vec::new(),
+        };
+        let hints = UnityYamlObjectConversionHints::from_type_tree(
+            &type_tree,
+            version(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        assert!(hints.importer_excluded_field_paths.contains("m_EditorOnly"));
+        assert!(hints
+            .importer_excluded_field_paths
+            .contains("m_Items[*].m_ItemEditorOnly"));
+
+        let value = SerializedValue::Struct(vec![
+            field("m_ObjectHideFlags", SerializedValue::U32(1)),
+            field("m_EditorOnly", SerializedValue::I32(2)),
+            field("m_Keep", SerializedValue::I32(3)),
+            field(
+                "m_Items",
+                SerializedValue::Array(vec![SerializedValue::Struct(vec![
+                    field("m_ItemEditorOnly", SerializedValue::I32(4)),
+                    field("m_ItemKeep", SerializedValue::I32(5)),
+                ])]),
+            ),
+        ]);
+
+        let full_document = convert_with_object_hints(&value, &hints, |_| {
+            unreachable!("the generated fixture has no PPtrs")
+        })
+        .unwrap();
+        let full_text = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[full_document],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        assert!(full_text.contains("m_ObjectHideFlags: 1"));
+        assert!(full_text.contains("m_EditorOnly: 2"));
+        assert!(full_text.contains("m_ItemEditorOnly: 4"));
+
+        let importer_document = convert_with_object_field_mode(
+            &value,
+            &hints,
+            UnityYamlObjectFieldMode::AssetImporter,
+            |_| unreachable!("the generated fixture has no PPtrs"),
+        )
+        .unwrap();
+        let importer_text = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[importer_document],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        assert!(!importer_text.contains("m_ObjectHideFlags"));
+        assert!(!importer_text.contains("m_EditorOnly"));
+        assert!(!importer_text.contains("m_ItemEditorOnly"));
+        assert!(importer_text.contains("m_Keep: 3"));
+        assert!(importer_text.contains("m_ItemKeep: 5"));
     }
 
     #[test]

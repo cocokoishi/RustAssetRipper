@@ -661,3 +661,11 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Targeted verification passed: `cargo test --locked --lib cross_file_component_pptrs_reach_separate_scene_yaml_collections -- --nocapture`. Full workspace verification passed: 391 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and `git diff --check`.
 - Still incomplete: no Unity-produced fixture or runtime differential; processed-asset walkers, Prefab output, complete product routing, and Phase 1 completeness remain open. Phase 2 remains locked.
 - Next: continue the parity matrix's open export paths, starting with baseline-generated per-class Scene YAML walkers and required field policies; keep each increment verified and promptly pushed.
+
+## Importer YAML field filtering
+
+- Current phase: Phase 1; gate not passed. This increment builds from pushed revision `3322c7ec6a80e2272bf9f760f7a68c5df9900e6f`. Only `cocokoishi/RustAssetRipper`'s canonical GitHub repository is a push target. No UABEA, user AssetBundle content, or other remote repository was accessed.
+- Implemented explicit ProjectAsset/AssetImporter field modes. TypeTree `IgnoreInMetaFiles` hints are collected as field paths (including array-element wildcards); importer mode additionally applies the seven fixed names from the baseline. Workspace Scene/Prefab YAML continues to select ProjectAsset explicitly.
+- Targeted test passed; full workspace verification passed: 392 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and diff checks.
+- Still incomplete: no end-to-end `.meta` importer route, stripped-field handling, original Unity-produced fixture, or Unity runtime differential. Phase 1 remains open and Phase 2 remains locked.
+- Next: inspect the baseline stripped-field selection rules and identify a generated-fixture-backed rule that can be integrated into the existing TypeTree YAML converter.

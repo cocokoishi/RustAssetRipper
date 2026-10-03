@@ -24,7 +24,8 @@ use super::unity_yaml::{
 };
 use super::value_yaml::{
     serialized_object_value_to_unity_yaml_document, UnityYamlObjectConversionError,
-    UnityYamlObjectConversionHints, UnityYamlObjectConversionLimits, UnityYamlPPtrRequest,
+    UnityYamlObjectConversionHints, UnityYamlObjectConversionLimits, UnityYamlObjectFieldMode,
+    UnityYamlPPtrRequest,
 };
 
 /// A typed Scene or Prefab export-ID assignment usable by the YAML collection executor.
@@ -483,6 +484,7 @@ pub fn workspace_object_to_unity_yaml_document(
         stripped,
         &payload.root,
         &hints,
+        UnityYamlObjectFieldMode::ProjectAsset,
         unity_version,
         missing_reference_guid,
         limits,
