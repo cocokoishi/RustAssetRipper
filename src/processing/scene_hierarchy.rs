@@ -1396,6 +1396,19 @@ impl WorkspaceSceneHierarchies {
         })
     }
 
+    /// Returns recognized scene asset identities in caller-supplied collection traversal order.
+    /// Assets inside each collection retain serialized object-table order.
+    pub fn scene_asset_identities_in_collection_order<'a>(
+        &'a self,
+        collection_file_indices: &'a [usize],
+    ) -> impl Iterator<Item = WorkspaceSceneAssetIdentity> + 'a {
+        collection_file_indices.iter().flat_map(move |&file_index| {
+            self.collection_graph_for_file(file_index)
+                .into_iter()
+                .flat_map(|graph| graph.scene_assets.iter().copied())
+        })
+    }
+
     /// Returns PrefabInstance identities in the supplied source collection traversal order.
     ///
     /// Each collection's assets retain serialized object-table order. The caller supplies the
@@ -1405,15 +1418,11 @@ impl WorkspaceSceneHierarchies {
         &'a self,
         collection_file_indices: &'a [usize],
     ) -> impl Iterator<Item = WorkspaceSceneObjectIdentity> + 'a {
-        collection_file_indices.iter().flat_map(move |&file_index| {
-            self.collection_graph_for_file(file_index)
-                .into_iter()
-                .flat_map(|graph| graph.scene_assets.iter())
-                .filter_map(|asset| {
-                    (asset.category == WorkspaceSceneAssetCategory::PrefabInstance)
-                        .then_some(asset.identity)
-                })
-        })
+        self.scene_asset_identities_in_collection_order(collection_file_indices)
+            .filter_map(|asset| {
+                (asset.category == WorkspaceSceneAssetCategory::PrefabInstance)
+                    .then_some(asset.identity)
+            })
     }
 
     /// Follows the source `GameObjectExtensions.GetRoot` rule: select the first Transform in
@@ -4119,6 +4128,12 @@ fn default_injected_transform_values() -> WorkspaceGeneratedTransformDefaults {
     }
 }
 
+/// Returns the baseline `TransformExtensions.InitializeDefault` values for missing-Transform
+/// planning. No generated Unity object or PathID is allocated by this function.
+pub fn default_workspace_generated_transform_values() -> WorkspaceGeneratedTransformDefaults {
+    default_injected_transform_values()
+}
+
 fn is_game_object_pointer_path(field_path: &str) -> bool {
     let mut path = field_path;
     loop {
@@ -4372,7 +4387,13 @@ fn try_copy_string(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::processing::scene_collections::SceneManagerKind;
+    use crate::processing::prefab_processing::{
+        plan_workspace_prefab_processing, WorkspacePrefabProcessingEvent,
+    };
+    use crate::processing::scene_collections::{
+        SceneDefinitionGuidPlan, SceneDefinitionPathSource, SceneDefinitionPlan,
+        SceneGuidGenerationReason, SceneManagerKind,
+    };
 
     fn identity(
         file_index: usize,
@@ -5222,6 +5243,292 @@ mod tests {
             Err(WorkspaceGetRootGameObjectError::ParentDepthLimitExceeded {
                 requested: 2,
                 limit: 1,
+            })
+        ));
+    }
+
+    #[test]
+    fn prefab_processing_seeds_scene_objects_before_existing_instances() {
+        let mut workspace = workspace_hierarchy_fixture(false);
+        let root = identity(0, 0, 1, GAME_OBJECT_CLASS_ID);
+        let child = identity(1, 1, 11, GAME_OBJECT_CLASS_ID);
+        let prefab = identity(1, 2, 12, PREFAB_INSTANCE_CLASS_ID);
+        let null_prefab = identity(1, 3, 13, PREFAB_INSTANCE_CLASS_ID);
+        let missing_root_prefab = identity(1, 4, 14, PREFAB_INSTANCE_CLASS_ID);
+
+        let child_collection = &mut workspace.non_scene_collections[1];
+        child_collection.relationships.push(relationship(
+            prefab,
+            SceneRelationshipKind::PrefabInstanceRootGameObject,
+            "m_RootGameObject",
+            child.path_id,
+            SceneRelationshipTarget::LocalObject {
+                object_index: child.object_index,
+            },
+        ));
+        child_collection.relationships.push(relationship(
+            null_prefab,
+            SceneRelationshipKind::PrefabInstanceRootGameObject,
+            "m_RootGameObject",
+            0,
+            SceneRelationshipTarget::Null,
+        ));
+        child_collection.prefab_root_relationship_index = vec![
+            WorkspacePrefabRootRelationshipIndexEntry {
+                source_object_index: prefab.object_index,
+                relationship_index: 3,
+            },
+            WorkspacePrefabRootRelationshipIndexEntry {
+                source_object_index: null_prefab.object_index,
+                relationship_index: 4,
+            },
+        ];
+        child_collection
+            .scene_assets
+            .push(WorkspaceSceneAssetIdentity {
+                identity: prefab,
+                category: WorkspaceSceneAssetCategory::PrefabInstance,
+            });
+        child_collection
+            .scene_assets
+            .push(WorkspaceSceneAssetIdentity {
+                identity: null_prefab,
+                category: WorkspaceSceneAssetCategory::PrefabInstance,
+            });
+        child_collection
+            .scene_assets
+            .push(WorkspaceSceneAssetIdentity {
+                identity: missing_root_prefab,
+                category: WorkspaceSceneAssetCategory::PrefabInstance,
+            });
+
+        let scene_collection = workspace.non_scene_collections.remove(0);
+        workspace.scenes.push(WorkspaceSceneHierarchyScene {
+            plan: SceneDefinitionPlan {
+                collection_file_index: 0,
+                collection_name: "scene".to_owned(),
+                name: "scene".to_owned(),
+                path: "Assets/Scenes/scene".to_owned(),
+                path_source: SceneDefinitionPathSource::CollectionNameFallback,
+                guid: SceneDefinitionGuidPlan::GenerateAtExport(
+                    SceneGuidGenerationReason::MissingFromInput,
+                ),
+            },
+            collections: vec![scene_collection],
+        });
+        workspace.collection_graph_index[0] = WorkspaceSceneCollectionGraphIndexEntry {
+            file_index: 0,
+            scene_index: Some(0),
+            collection_index: 0,
+        };
+        workspace.collection_graph_index[1].collection_index = 0;
+
+        let plan =
+            plan_workspace_prefab_processing(&workspace, &[1, 0], Default::default()).unwrap();
+        assert!(!plan.is_complete());
+        assert_eq!(plan.processed_game_objects(), &[root, child]);
+        assert!(matches!(
+            plan.events()[0],
+            WorkspacePrefabProcessingEvent::SceneGameObjectMarked {
+                scene_index: 0,
+                game_object,
+                newly_marked: true,
+            } if game_object == root
+        ));
+        assert!(matches!(
+            plan.events()[1],
+            WorkspacePrefabProcessingEvent::ExistingPrefabHierarchyCreated {
+                prefab_instance,
+                root_game_object,
+                set_prefab_internal: true,
+                ..
+            } if prefab_instance == prefab && root_game_object == child
+        ));
+        assert!(matches!(
+            plan.events()[2],
+            WorkspacePrefabProcessingEvent::ExistingPrefabInstanceNullRoot {
+                prefab_instance,
+            } if prefab_instance == null_prefab
+        ));
+        assert!(matches!(
+            plan.events()[3],
+            WorkspacePrefabProcessingEvent::ExistingPrefabInstanceRootUnavailable {
+                prefab_instance,
+                resolution: WorkspacePrefabInstanceRootResolution::FieldUnavailable,
+            } if prefab_instance == missing_root_prefab
+        ));
+        assert!(matches!(
+            plan.events()[4],
+            WorkspacePrefabProcessingEvent::RemainingGameObjectSkippedAlreadyProcessed {
+                game_object,
+            } if game_object == child
+        ));
+        assert!(matches!(
+            plan.events()[5],
+            WorkspacePrefabProcessingEvent::RemainingGameObjectSkippedAlreadyProcessed {
+                game_object,
+            } if game_object == root
+        ));
+        let report = plan.report();
+        assert_eq!(report.existing_prefab_instances, 3);
+        assert_eq!(report.existing_prefab_hierarchies, 1);
+        assert_eq!(report.root_resolution_issues, 1);
+    }
+
+    #[test]
+    fn prefab_processing_uses_source_order_and_deduplicates_hierarchy_game_objects() {
+        let workspace = workspace_hierarchy_fixture(false);
+        let root = identity(0, 0, 1, GAME_OBJECT_CLASS_ID);
+        let child = identity(1, 1, 11, GAME_OBJECT_CLASS_ID);
+        let plan =
+            plan_workspace_prefab_processing(&workspace, &[1, 0], Default::default()).unwrap();
+
+        assert!(plan.is_complete());
+        assert_eq!(plan.processed_game_objects(), &[root, child]);
+        assert!(matches!(
+            &plan.events()[0],
+            WorkspacePrefabProcessingEvent::GeneratedPrefabHierarchyCreated {
+                source_game_object,
+                root_game_object,
+                hierarchy,
+                ..
+            } if *source_game_object == child
+                && *root_game_object == root
+                && hierarchy.is_complete()
+        ));
+        assert!(matches!(
+            plan.events()[1],
+            WorkspacePrefabProcessingEvent::RemainingGameObjectSkippedAlreadyProcessed {
+                game_object,
+            } if game_object == root
+        ));
+        assert_eq!(plan.hierarchy_entry_count(), 6);
+    }
+
+    #[test]
+    fn prefab_hierarchy_plan_inserts_missing_transform_after_source_components() {
+        let mut workspace = workspace_hierarchy_fixture(false);
+        let root_graph = &mut workspace.non_scene_collections[0];
+        root_graph.game_object_hierarchies[0].component_relationship_end = 2;
+        root_graph
+            .game_object_component_relationship_indices
+            .truncate(2);
+        let root = identity(0, 0, 1, GAME_OBJECT_CLASS_ID);
+        let plan =
+            plan_workspace_prefab_processing(&workspace, &[0, 1], Default::default()).unwrap();
+
+        assert!(plan.is_complete());
+        assert_eq!(plan.report().generated_transform_components, 1);
+        let WorkspacePrefabProcessingEvent::GeneratedPrefabHierarchyCreated { hierarchy, .. } =
+            &plan.events()[0]
+        else {
+            panic!("expected a generated hierarchy event")
+        };
+        assert_eq!(hierarchy.entries().len(), 3);
+        assert!(matches!(
+            hierarchy.entries()[0],
+            crate::processing::prefab_processing::WorkspacePrefabHierarchyPlanEntry::Source(
+                WorkspaceGameObjectHierarchyEntry {
+                    identity,
+                    kind: WorkspaceGameObjectHierarchyEntryKind::GameObject,
+                }
+            ) if identity == root
+        ));
+        assert!(matches!(
+            hierarchy.entries()[1],
+            crate::processing::prefab_processing::WorkspacePrefabHierarchyPlanEntry::Source(
+                WorkspaceGameObjectHierarchyEntry {
+                    identity: component_identity,
+                    kind: WorkspaceGameObjectHierarchyEntryKind::Component,
+                }
+            ) if component_identity == identity(0, 3, 4, 23)
+        ));
+        assert!(matches!(
+            &hierarchy.entries()[2],
+            crate::processing::prefab_processing::WorkspacePrefabHierarchyPlanEntry::GeneratedTransform {
+                game_object,
+                default_values,
+            } if *game_object == root
+                && default_values.local_scale.x == 1.0
+                && default_values.local_rotation.w == 1.0
+        ));
+    }
+
+    #[test]
+    fn prefab_processing_stops_after_an_incomplete_hierarchy_walk() {
+        let mut workspace = workspace_hierarchy_fixture(false);
+        workspace.non_scene_collections[1].source_reference_scans_complete = false;
+        let root = identity(0, 0, 1, GAME_OBJECT_CLASS_ID);
+        let plan =
+            plan_workspace_prefab_processing(&workspace, &[0, 1], Default::default()).unwrap();
+
+        assert!(!plan.is_complete());
+        assert!(plan.stopped_on_incomplete_hierarchy());
+        assert_eq!(plan.processed_game_objects(), &[root]);
+        assert!(matches!(
+            &plan.events()[0],
+            WorkspacePrefabProcessingEvent::GeneratedPrefabHierarchyIncomplete {
+                root_game_object,
+                hierarchy,
+                ..
+            } if *root_game_object == root && !hierarchy.is_complete()
+        ));
+        assert_eq!(plan.events().len(), 1);
+    }
+
+    #[test]
+    fn prefab_processing_enforces_event_and_hierarchy_entry_limits() {
+        let workspace = workspace_hierarchy_fixture(false);
+        assert!(matches!(
+            plan_workspace_prefab_processing(
+                &workspace,
+                &[0, 1],
+                crate::processing::prefab_processing::WorkspacePrefabProcessingLimits {
+                    max_events: 0,
+                    ..Default::default()
+                }
+            ),
+            Err(crate::processing::prefab_processing::WorkspacePrefabProcessingError::ResourceLimitExceeded {
+                resource: "Prefab processing events",
+                requested: 1,
+                limit: 0,
+            })
+        ));
+        assert!(matches!(
+            plan_workspace_prefab_processing(
+                &workspace,
+                &[0, 1],
+                crate::processing::prefab_processing::WorkspacePrefabProcessingLimits {
+                    max_total_hierarchy_entries: 1,
+                    ..Default::default()
+                }
+            ),
+            Err(crate::processing::prefab_processing::WorkspacePrefabProcessingError::ResourceLimitExceeded {
+                resource: "GameObject hierarchy entries",
+                requested: 2,
+                limit: 1,
+            })
+        ));
+
+        let mut missing_transform_workspace = workspace_hierarchy_fixture(false);
+        missing_transform_workspace.non_scene_collections[0].game_object_hierarchies[0]
+            .component_relationship_end = 2;
+        missing_transform_workspace.non_scene_collections[0]
+            .game_object_component_relationship_indices
+            .truncate(2);
+        assert!(matches!(
+            plan_workspace_prefab_processing(
+                &missing_transform_workspace,
+                &[0, 1],
+                crate::processing::prefab_processing::WorkspacePrefabProcessingLimits {
+                    max_total_hierarchy_entries: 2,
+                    ..Default::default()
+                }
+            ),
+            Err(crate::processing::prefab_processing::WorkspacePrefabProcessingError::ResourceLimitExceeded {
+                resource: "Prefab hierarchy plan entries",
+                requested: 3,
+                limit: 2,
             })
         ));
     }

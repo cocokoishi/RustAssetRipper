@@ -11,6 +11,10 @@ use assetripper::io::platform_file_inventory::{
     PlatformFileInventoryLimits, PlatformFileInventoryOptions, PlatformWorkspaceLoadOptions,
 };
 use assetripper::io::platform_structure::{detect_platform_structure, PlatformStructureLimits};
+use assetripper::processing::prefab_processing::{
+    plan_workspace_prefab_processing, WorkspacePrefabProcessingEvent,
+    WorkspacePrefabProcessingLimits,
+};
 use assetripper::processing::project_settings::{
     EditorBuildSettingsLimits, EditorBuildSettingsModel,
 };
@@ -1243,6 +1247,92 @@ fn print_workspace_summary_to<W: io::Write>(
         prefab_root_counts[2],
         prefab_root_counts[3]
     )?;
+    let prefab_processing_plan = plan_workspace_prefab_processing(
+        &scene_hierarchies,
+        &source_collection_file_indices,
+        WorkspacePrefabProcessingLimits::default(),
+    )?;
+    let prefab_processing_report = prefab_processing_plan.report();
+    let incomplete_hierarchy_count = prefab_processing_report
+        .existing_hierarchy_failures
+        .checked_add(prefab_processing_report.generated_hierarchy_failures)
+        .ok_or_else(|| invalid_data("Prefab hierarchy failure count overflows usize"))?;
+    writeln!(
+        output,
+        "PrefabProcessor identity plan: {} scene GameObjects, {} existing PrefabInstances, {} existing hierarchies, {} existing instances skipped, {} generated hierarchies, {} virtual Transform entries in planned hierarchies, {} remaining GameObjects skipped, {} processed GameObjects, {} hierarchy entries, {} root issues, {} incomplete hierarchies, complete={}, stopped={}",
+        prefab_processing_report.scene_game_object_records,
+        prefab_processing_report.existing_prefab_instances,
+        prefab_processing_report.existing_prefab_hierarchies,
+        prefab_processing_report.existing_prefab_instances_skipped,
+        prefab_processing_report.generated_prefab_hierarchies,
+        prefab_processing_report.generated_transform_components,
+        prefab_processing_report.remaining_game_objects_skipped,
+        prefab_processing_report.processed_game_objects,
+        prefab_processing_report.hierarchy_entries,
+        prefab_processing_report.root_resolution_issues,
+        incomplete_hierarchy_count,
+        prefab_processing_report.complete,
+        prefab_processing_report.stopped_on_incomplete_hierarchy
+    )?;
+    let mut prefab_processing_diagnostics = 0usize;
+    for event in prefab_processing_plan.events() {
+        if prefab_processing_diagnostics >= MAX_GENERATED_TRANSFORM_DIAGNOSTICS {
+            break;
+        }
+        let diagnostic = match event {
+            WorkspacePrefabProcessingEvent::ExistingPrefabInstanceRootUnavailable {
+                prefab_instance,
+                resolution,
+            } => Some(format!(
+                "PrefabInstance {}:{} PathID {} root is indeterminate: {:?}",
+                prefab_instance.file_index,
+                prefab_instance.object_index,
+                prefab_instance.path_id,
+                resolution
+            )),
+            WorkspacePrefabProcessingEvent::RemainingGameObjectRootUnavailable {
+                game_object,
+                root_walk,
+            } => Some(format!(
+                "GameObject {}:{} PathID {} GetRoot is indeterminate: {:?}",
+                game_object.file_index,
+                game_object.object_index,
+                game_object.path_id,
+                root_walk.issue
+            )),
+            WorkspacePrefabProcessingEvent::ExistingPrefabHierarchyIncomplete {
+                prefab_instance,
+                root_game_object,
+                hierarchy,
+                ..
+            } => Some(format!(
+                "PrefabInstance {}:{} root {}:{} hierarchy walk is incomplete: {:?}",
+                prefab_instance.file_index,
+                prefab_instance.object_index,
+                root_game_object.file_index,
+                root_game_object.object_index,
+                hierarchy.issues()
+            )),
+            WorkspacePrefabProcessingEvent::GeneratedPrefabHierarchyIncomplete {
+                source_game_object,
+                root_game_object,
+                hierarchy,
+                ..
+            } => Some(format!(
+                "GameObject {}:{} generated root {}:{} hierarchy walk is incomplete: {:?}",
+                source_game_object.file_index,
+                source_game_object.object_index,
+                root_game_object.file_index,
+                root_game_object.object_index,
+                hierarchy.issues()
+            )),
+            _ => None,
+        };
+        if let Some(diagnostic) = diagnostic {
+            writeln!(output, "  {diagnostic}")?;
+            prefab_processing_diagnostics += 1;
+        }
+    }
     writeln!(
         output,
         "SceneDefinitions: {}",
@@ -2224,6 +2314,12 @@ mod tests {
         assert!(
             summary.contains("Generated Prefab Transforms planned for non-scene GameObjects: 0")
         );
+        assert!(summary.contains(
+            "PrefabProcessor identity plan: 0 scene GameObjects, 0 existing PrefabInstances, 0 existing hierarchies, 0 existing instances skipped, 0 generated hierarchies, 0 virtual Transform entries in planned hierarchies, 0 remaining GameObjects skipped, 0 processed GameObjects, 0 hierarchy entries, 1 root issues, 0 incomplete hierarchies, complete=false, stopped=false"
+        ), "{summary}");
+        assert!(summary.contains(
+            "GetRoot is indeterminate: Some(IncompleteCollectionGraph { file_index: 2 })"
+        ));
         assert!(summary.contains(
             "hierarchy file 0: 0 GameObjects, 0 Transforms, 1 scene assets (1 managers, 0 PrefabInstances, 0 SceneRoots), 0 component candidates (0 Transform IDs, 0 GameObject edges, 0 m_GameObject fields), 0 missing Transform plans, 0 relationships, 0 roots, 0 graph issues, 0 root issues, 0 reciprocal issues, scene graph complete=true, reference scans complete=true, overall complete=true"
         ));
