@@ -156,6 +156,124 @@ impl Display for WorkspacePrefabInstanceRootError {
 
 impl Error for WorkspacePrefabInstanceRootError {}
 
+fn resolve_transform_game_object(
+    workspace: &WorkspaceSceneHierarchies,
+    transform: WorkspaceSceneObjectIdentity,
+    walk: &mut WorkspaceGetRootGameObjectWalk,
+) -> Result<Option<WorkspaceSceneObjectIdentity>, WorkspaceGetRootGameObjectError> {
+    let Some(graph) = workspace.collection_graph_for_file(transform.file_index) else {
+        walk.issue = Some(WorkspaceGetRootGameObjectIssue::MissingCollectionGraph);
+        return Ok(None);
+    };
+    if !graph.source_graph_complete() || !graph.source_reference_scans_complete() {
+        walk.issue = Some(WorkspaceGetRootGameObjectIssue::IncompleteCollectionGraph {
+            file_index: transform.file_index,
+        });
+        return Ok(None);
+    }
+    let Ok(transform_index) = graph
+        .transform_hierarchies
+        .binary_search_by_key(&transform.object_index, |hierarchy| {
+            hierarchy.transform.object_index
+        })
+    else {
+        walk.issue = Some(WorkspaceGetRootGameObjectIssue::MissingTransformHierarchy { transform });
+        return Ok(None);
+    };
+    if graph.transform_hierarchies[transform_index].transform != transform {
+        walk.issue = Some(WorkspaceGetRootGameObjectIssue::MissingTransformHierarchy { transform });
+        return Ok(None);
+    }
+    let owners = graph
+        .transform_game_object_relationships(transform_index)
+        .map_err(
+            |error| WorkspaceGetRootGameObjectError::GraphInvariantFailed {
+                message: error.to_string(),
+            },
+        )?;
+    let mut owners = owners.peekable();
+    let Some(owner) = owners.next() else {
+        walk.issue =
+            Some(WorkspaceGetRootGameObjectIssue::MissingTransformGameObjectField { transform });
+        return Ok(None);
+    };
+    let extra_owner_count = owners.count();
+    if extra_owner_count > 0 {
+        walk.issue = Some(
+            WorkspaceGetRootGameObjectIssue::DuplicateTransformGameObjectFields {
+                transform,
+                match_count: extra_owner_count + 1,
+            },
+        );
+        return Ok(None);
+    }
+    if owner.kind != SceneRelationshipKind::ComponentGameObject
+        || owner.source_object_index != transform.object_index
+        || owner.source_path_id != transform.path_id
+    {
+        return Err(WorkspaceGetRootGameObjectError::GraphInvariantFailed {
+            message: format!(
+                "Transform {}:{} owner index points to an unrelated relationship",
+                transform.file_index, transform.object_index
+            ),
+        });
+    }
+    match resolve_relationship_identity(workspace, graph, owner) {
+        RelationshipIdentityResolution::Null => Ok(None),
+        RelationshipIdentityResolution::Resolved(game_object)
+            if game_object.class_id == Some(GAME_OBJECT_CLASS_ID) =>
+        {
+            Ok(Some(game_object))
+        }
+        RelationshipIdentityResolution::Resolved(target) => {
+            walk.issue = Some(
+                WorkspaceGetRootGameObjectIssue::TransformGameObjectClassMismatch {
+                    transform,
+                    target,
+                },
+            );
+            Ok(None)
+        }
+        RelationshipIdentityResolution::Unresolved(target) => {
+            walk.issue = Some(
+                WorkspaceGetRootGameObjectIssue::UnresolvedTransformGameObject {
+                    transform,
+                    target,
+                },
+            );
+            Ok(None)
+        }
+        RelationshipIdentityResolution::Unavailable {
+            target_file_index,
+            target_object_index,
+            path_id,
+        } => {
+            walk.issue = Some(
+                WorkspaceGetRootGameObjectIssue::TransformGameObjectIdentityUnavailable {
+                    transform,
+                    target_file_index,
+                    target_object_index,
+                    path_id,
+                },
+            );
+            Ok(None)
+        }
+        RelationshipIdentityResolution::PathMismatch {
+            identity,
+            expected_path_id,
+        } => {
+            walk.issue = Some(
+                WorkspaceGetRootGameObjectIssue::TransformGameObjectPathIdMismatch {
+                    transform,
+                    expected_path_id,
+                    actual_path_id: identity.path_id,
+                },
+            );
+            Ok(None)
+        }
+    }
+}
+
 impl WorkspaceSceneGameObjectHierarchy {
     pub fn game_object(&self) -> WorkspaceSceneObjectIdentity {
         self.game_object
@@ -166,10 +284,12 @@ impl WorkspaceSceneGameObjectHierarchy {
     }
 }
 
-/// One source Transform and ordered indexes into its `m_Children` and `m_GameObject` PPtrs.
+/// One source Transform and ordered indexes into its `m_Father`, `m_Children`, and `m_GameObject` PPtrs.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceSceneTransformHierarchy {
     transform: WorkspaceSceneObjectIdentity,
+    parent_relationship_start: usize,
+    parent_relationship_end: usize,
     child_relationship_start: usize,
     child_relationship_end: usize,
     game_object_relationship_start: usize,
@@ -178,6 +298,7 @@ pub struct WorkspaceSceneTransformHierarchy {
 
 struct WorkspaceSceneTransformHierarchyIndex {
     transforms: Vec<WorkspaceSceneTransformHierarchy>,
+    parent_relationship_indices: Vec<usize>,
     child_relationship_indices: Vec<usize>,
     game_object_relationship_indices: Vec<usize>,
 }
@@ -189,6 +310,10 @@ impl WorkspaceSceneTransformHierarchy {
 
     pub fn child_relationship_count(&self) -> usize {
         self.child_relationship_end - self.child_relationship_start
+    }
+
+    pub fn parent_relationship_count(&self) -> usize {
+        self.parent_relationship_end - self.parent_relationship_start
     }
 
     pub fn game_object_relationship_count(&self) -> usize {
@@ -349,6 +474,173 @@ impl WorkspaceGameObjectHierarchyWalk {
         self.issues.is_empty()
     }
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorkspaceGetRootGameObjectLimits {
+    pub max_parent_depth: usize,
+}
+
+impl Default for WorkspaceGetRootGameObjectLimits {
+    fn default() -> Self {
+        Self {
+            max_parent_depth: 100_000,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkspaceGetRootGameObjectTermination {
+    NoTransformComponent,
+    NullFather,
+    ParentHasNullGameObject,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WorkspaceGetRootGameObjectIssue {
+    IncompleteCollectionGraph {
+        file_index: usize,
+    },
+    MissingCollectionGraph,
+    MissingGameObjectHierarchy,
+    UnresolvedComponentReference {
+        relationship_index: usize,
+        target: SceneRelationshipTarget,
+    },
+    ComponentIdentityUnavailable {
+        relationship_index: usize,
+        target_file_index: usize,
+        target_object_index: usize,
+        path_id: i64,
+    },
+    ComponentPathIdMismatch {
+        relationship_index: usize,
+        expected_path_id: i64,
+        actual_path_id: i64,
+    },
+    UnknownComponentClass {
+        relationship_index: usize,
+        component: WorkspaceSceneObjectIdentity,
+    },
+    MissingTransformHierarchy {
+        transform: WorkspaceSceneObjectIdentity,
+    },
+    MissingTransformParentField {
+        transform: WorkspaceSceneObjectIdentity,
+    },
+    DuplicateTransformParentFields {
+        transform: WorkspaceSceneObjectIdentity,
+        match_count: usize,
+    },
+    UnresolvedTransformParent {
+        transform: WorkspaceSceneObjectIdentity,
+        target: SceneRelationshipTarget,
+    },
+    TransformParentIdentityUnavailable {
+        transform: WorkspaceSceneObjectIdentity,
+        target_file_index: usize,
+        target_object_index: usize,
+        path_id: i64,
+    },
+    TransformParentPathIdMismatch {
+        transform: WorkspaceSceneObjectIdentity,
+        expected_path_id: i64,
+        actual_path_id: i64,
+    },
+    TransformParentClassMismatch {
+        target: WorkspaceSceneObjectIdentity,
+    },
+    MissingTransformGameObjectField {
+        transform: WorkspaceSceneObjectIdentity,
+    },
+    DuplicateTransformGameObjectFields {
+        transform: WorkspaceSceneObjectIdentity,
+        match_count: usize,
+    },
+    UnresolvedTransformGameObject {
+        transform: WorkspaceSceneObjectIdentity,
+        target: SceneRelationshipTarget,
+    },
+    TransformGameObjectIdentityUnavailable {
+        transform: WorkspaceSceneObjectIdentity,
+        target_file_index: usize,
+        target_object_index: usize,
+        path_id: i64,
+    },
+    TransformGameObjectPathIdMismatch {
+        transform: WorkspaceSceneObjectIdentity,
+        expected_path_id: i64,
+        actual_path_id: i64,
+    },
+    TransformGameObjectClassMismatch {
+        transform: WorkspaceSceneObjectIdentity,
+        target: WorkspaceSceneObjectIdentity,
+    },
+    TransformGameObjectNull {
+        transform: WorkspaceSceneObjectIdentity,
+    },
+    CycleDetected {
+        transform: WorkspaceSceneObjectIdentity,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceGetRootGameObjectWalk {
+    pub source_game_object: WorkspaceSceneObjectIdentity,
+    pub first_transform: Option<WorkspaceSceneObjectIdentity>,
+    pub transform_chain: Vec<WorkspaceSceneObjectIdentity>,
+    pub root_game_object: Option<WorkspaceSceneObjectIdentity>,
+    pub termination: Option<WorkspaceGetRootGameObjectTermination>,
+    pub issue: Option<WorkspaceGetRootGameObjectIssue>,
+}
+
+impl WorkspaceGetRootGameObjectWalk {
+    pub fn is_complete(&self) -> bool {
+        self.issue.is_none() && self.root_game_object.is_some() && self.termination.is_some()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WorkspaceGetRootGameObjectError {
+    AllocationFailed {
+        resource: &'static str,
+        requested: usize,
+    },
+    CountOverflow {
+        resource: &'static str,
+    },
+    ParentDepthLimitExceeded {
+        requested: usize,
+        limit: usize,
+    },
+    GraphInvariantFailed {
+        message: String,
+    },
+}
+
+impl Display for WorkspaceGetRootGameObjectError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AllocationFailed {
+                resource,
+                requested,
+            } => {
+                write!(f, "could not allocate {requested} entries for {resource}")
+            }
+            Self::CountOverflow { resource } => write!(f, "{resource} count overflows usize"),
+            Self::ParentDepthLimitExceeded { requested, limit } => {
+                write!(
+                    f,
+                    "Transform parent depth {requested} exceeds limit {limit}"
+                )
+            }
+            Self::GraphInvariantFailed { message } => {
+                write!(f, "scene graph invariant failed: {message}")
+            }
+        }
+    }
+}
+
+impl Error for WorkspaceGetRootGameObjectError {}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WorkspaceGeneratedTransformDefaults {
@@ -562,6 +854,7 @@ pub struct WorkspaceSceneCollectionHierarchy {
     game_object_component_relationship_indices: Vec<usize>,
     prefab_root_relationship_index: Vec<WorkspacePrefabRootRelationshipIndexEntry>,
     transform_hierarchies: Vec<WorkspaceSceneTransformHierarchy>,
+    transform_parent_relationship_indices: Vec<usize>,
     transform_child_relationship_indices: Vec<usize>,
     transform_game_object_relationship_indices: Vec<usize>,
     graph_issues: Vec<SceneGraphIssue>,
@@ -664,6 +957,34 @@ impl WorkspaceSceneCollectionHierarchy {
 
     pub fn transform_hierarchies(&self) -> &[WorkspaceSceneTransformHierarchy] {
         &self.transform_hierarchies
+    }
+
+    pub fn transform_parent_relationships<'a>(
+        &'a self,
+        hierarchy_index: usize,
+    ) -> Result<impl Iterator<Item = &'a SceneRelationship> + 'a, WorkspaceSceneHierarchyError>
+    {
+        let hierarchy = self.transform_hierarchies.get(hierarchy_index).ok_or(
+            WorkspaceSceneHierarchyError::TransformHierarchyIndexOutOfBounds {
+                hierarchy_index,
+                hierarchy_count: self.transform_hierarchies.len(),
+            },
+        )?;
+        let range = self
+            .transform_parent_relationship_indices
+            .get(hierarchy.parent_relationship_start..hierarchy.parent_relationship_end)
+            .ok_or(
+                WorkspaceSceneHierarchyError::InvalidTransformParentRelationshipRange {
+                    hierarchy_index,
+                    start: hierarchy.parent_relationship_start,
+                    end: hierarchy.parent_relationship_end,
+                    index_count: self.transform_parent_relationship_indices.len(),
+                },
+            )?;
+        self.validate_transform_relationship_indexes(hierarchy_index, range)?;
+        Ok(range
+            .iter()
+            .map(|&relationship_index| &self.relationships[relationship_index]))
     }
 
     pub fn transform_child_relationships<'a>(
@@ -1093,6 +1414,361 @@ impl WorkspaceSceneHierarchies {
                         .then_some(asset.identity)
                 })
         })
+    }
+
+    /// Follows the source `GameObjectExtensions.GetRoot` rule: select the first Transform in
+    /// `m_Component`, then follow `m_Father` while its target has a non-null `m_GameObject`.
+    /// A GameObject without a Transform resolves to itself, matching the state after the source
+    /// `AddMissingTransforms` pass has supplied its generated Transform.
+    pub fn get_root_game_object(
+        &self,
+        game_object: WorkspaceSceneObjectIdentity,
+        limits: WorkspaceGetRootGameObjectLimits,
+    ) -> Result<WorkspaceGetRootGameObjectWalk, WorkspaceGetRootGameObjectError> {
+        let mut walk = WorkspaceGetRootGameObjectWalk {
+            source_game_object: game_object,
+            first_transform: None,
+            transform_chain: Vec::new(),
+            root_game_object: None,
+            termination: None,
+            issue: None,
+        };
+        if game_object.class_id != Some(GAME_OBJECT_CLASS_ID) {
+            return Err(WorkspaceGetRootGameObjectError::GraphInvariantFailed {
+                message: format!(
+                    "source identity {}:{} is not a GameObject",
+                    game_object.file_index, game_object.object_index
+                ),
+            });
+        }
+        let Some(graph) = self.collection_graph_for_file(game_object.file_index) else {
+            walk.issue = Some(WorkspaceGetRootGameObjectIssue::MissingCollectionGraph);
+            return Ok(walk);
+        };
+        if !graph.source_graph_complete() || !graph.source_reference_scans_complete() {
+            walk.issue = Some(WorkspaceGetRootGameObjectIssue::IncompleteCollectionGraph {
+                file_index: game_object.file_index,
+            });
+            return Ok(walk);
+        }
+        let Ok(game_object_index) = graph
+            .game_object_hierarchies
+            .binary_search_by_key(&game_object.object_index, |hierarchy| {
+                hierarchy.game_object.object_index
+            })
+        else {
+            walk.issue = Some(WorkspaceGetRootGameObjectIssue::MissingGameObjectHierarchy);
+            return Ok(walk);
+        };
+        if graph.game_object_hierarchies[game_object_index].game_object != game_object {
+            walk.issue = Some(WorkspaceGetRootGameObjectIssue::MissingGameObjectHierarchy);
+            return Ok(walk);
+        }
+
+        let component_relationships = graph
+            .game_object_component_relationships(game_object_index)
+            .map_err(
+                |error| WorkspaceGetRootGameObjectError::GraphInvariantFailed {
+                    message: error.to_string(),
+                },
+            )?;
+        let mut selected_transform = None;
+        for (relationship_index, relationship) in component_relationships.enumerate() {
+            let relationship_index = graph
+                .game_object_component_relationship_indices
+                .get(
+                    graph.game_object_hierarchies[game_object_index].component_relationship_start
+                        + relationship_index,
+                )
+                .copied()
+                .ok_or_else(|| WorkspaceGetRootGameObjectError::GraphInvariantFailed {
+                    message: "GameObject component index range changed during iteration".to_owned(),
+                })?;
+            if relationship.kind != SceneRelationshipKind::GameObjectComponent
+                || relationship.source_object_index != game_object.object_index
+                || relationship.source_path_id != game_object.path_id
+            {
+                return Err(WorkspaceGetRootGameObjectError::GraphInvariantFailed {
+                    message: format!(
+                        "GameObject {}:{} component index points to an unrelated relationship",
+                        game_object.file_index, game_object.object_index
+                    ),
+                });
+            }
+            match resolve_relationship_identity(self, graph, relationship) {
+                RelationshipIdentityResolution::Null => {}
+                RelationshipIdentityResolution::Resolved(component)
+                    if matches!(
+                        component.class_id,
+                        Some(TRANSFORM_CLASS_ID | RECT_TRANSFORM_CLASS_ID)
+                    ) =>
+                {
+                    selected_transform = Some(component);
+                    break;
+                }
+                RelationshipIdentityResolution::Resolved(component)
+                    if component.class_id.is_some() => {}
+                RelationshipIdentityResolution::Resolved(component) => {
+                    walk.issue = Some(WorkspaceGetRootGameObjectIssue::UnknownComponentClass {
+                        relationship_index,
+                        component,
+                    });
+                    return Ok(walk);
+                }
+                RelationshipIdentityResolution::Unresolved(target) => {
+                    walk.issue = Some(
+                        WorkspaceGetRootGameObjectIssue::UnresolvedComponentReference {
+                            relationship_index,
+                            target,
+                        },
+                    );
+                    return Ok(walk);
+                }
+                RelationshipIdentityResolution::Unavailable {
+                    target_file_index,
+                    target_object_index,
+                    path_id,
+                } => {
+                    walk.issue = Some(
+                        WorkspaceGetRootGameObjectIssue::ComponentIdentityUnavailable {
+                            relationship_index,
+                            target_file_index,
+                            target_object_index,
+                            path_id,
+                        },
+                    );
+                    return Ok(walk);
+                }
+                RelationshipIdentityResolution::PathMismatch {
+                    identity,
+                    expected_path_id,
+                } => {
+                    walk.issue = Some(WorkspaceGetRootGameObjectIssue::ComponentPathIdMismatch {
+                        relationship_index,
+                        expected_path_id,
+                        actual_path_id: identity.path_id,
+                    });
+                    return Ok(walk);
+                }
+            }
+        }
+
+        let Some(first_transform) = selected_transform else {
+            walk.root_game_object = Some(game_object);
+            walk.termination = Some(WorkspaceGetRootGameObjectTermination::NoTransformComponent);
+            return Ok(walk);
+        };
+        walk.first_transform = Some(first_transform);
+        walk.transform_chain.try_reserve(1).map_err(|_| {
+            WorkspaceGetRootGameObjectError::AllocationFailed {
+                resource: "GetRoot Transform chain",
+                requested: 1,
+            }
+        })?;
+        walk.transform_chain.push(first_transform);
+        let mut visited = HashSet::new();
+        visited
+            .try_reserve(1)
+            .map_err(|_| WorkspaceGetRootGameObjectError::AllocationFailed {
+                resource: "GetRoot Transform cycle set",
+                requested: 1,
+            })?;
+        visited.insert(WorkspaceObjectKey::from(first_transform));
+        let mut current_transform = first_transform;
+
+        loop {
+            if walk.transform_chain.len() > limits.max_parent_depth {
+                return Err(WorkspaceGetRootGameObjectError::ParentDepthLimitExceeded {
+                    requested: walk.transform_chain.len(),
+                    limit: limits.max_parent_depth,
+                });
+            }
+            let Some(current_graph) = self.collection_graph_for_file(current_transform.file_index)
+            else {
+                walk.issue = Some(WorkspaceGetRootGameObjectIssue::MissingCollectionGraph);
+                return Ok(walk);
+            };
+            if !current_graph.source_graph_complete()
+                || !current_graph.source_reference_scans_complete()
+            {
+                walk.issue = Some(WorkspaceGetRootGameObjectIssue::IncompleteCollectionGraph {
+                    file_index: current_transform.file_index,
+                });
+                return Ok(walk);
+            }
+            let Ok(transform_index) = current_graph
+                .transform_hierarchies
+                .binary_search_by_key(&current_transform.object_index, |hierarchy| {
+                    hierarchy.transform.object_index
+                })
+            else {
+                walk.issue = Some(WorkspaceGetRootGameObjectIssue::MissingTransformHierarchy {
+                    transform: current_transform,
+                });
+                return Ok(walk);
+            };
+            if current_graph.transform_hierarchies[transform_index].transform != current_transform {
+                walk.issue = Some(WorkspaceGetRootGameObjectIssue::MissingTransformHierarchy {
+                    transform: current_transform,
+                });
+                return Ok(walk);
+            }
+            let parent_relationships = current_graph
+                .transform_parent_relationships(transform_index)
+                .map_err(
+                    |error| WorkspaceGetRootGameObjectError::GraphInvariantFailed {
+                        message: error.to_string(),
+                    },
+                )?;
+            let mut parent_relationships = parent_relationships.peekable();
+            let Some(parent_relationship) = parent_relationships.next() else {
+                walk.issue = Some(
+                    WorkspaceGetRootGameObjectIssue::MissingTransformParentField {
+                        transform: current_transform,
+                    },
+                );
+                return Ok(walk);
+            };
+            let extra_parent_count = parent_relationships.count();
+            if extra_parent_count > 0 {
+                walk.issue = Some(
+                    WorkspaceGetRootGameObjectIssue::DuplicateTransformParentFields {
+                        transform: current_transform,
+                        match_count: extra_parent_count + 1,
+                    },
+                );
+                return Ok(walk);
+            }
+            if parent_relationship.kind != SceneRelationshipKind::TransformParent
+                || parent_relationship.source_object_index != current_transform.object_index
+                || parent_relationship.source_path_id != current_transform.path_id
+            {
+                return Err(WorkspaceGetRootGameObjectError::GraphInvariantFailed {
+                    message: format!(
+                        "Transform {}:{} parent index points to an unrelated relationship",
+                        current_transform.file_index, current_transform.object_index
+                    ),
+                });
+            }
+            let parent_transform =
+                match resolve_relationship_identity(self, current_graph, parent_relationship) {
+                    RelationshipIdentityResolution::Null => {
+                        walk.termination = Some(WorkspaceGetRootGameObjectTermination::NullFather);
+                        None
+                    }
+                    RelationshipIdentityResolution::Resolved(parent)
+                        if matches!(
+                            parent.class_id,
+                            Some(TRANSFORM_CLASS_ID | RECT_TRANSFORM_CLASS_ID)
+                        ) =>
+                    {
+                        match resolve_transform_game_object(self, parent, &mut walk)? {
+                            Some(_) => Some(parent),
+                            None if walk.issue.is_none() => {
+                                walk.termination = Some(
+                                    WorkspaceGetRootGameObjectTermination::ParentHasNullGameObject,
+                                );
+                                None
+                            }
+                            None => return Ok(walk),
+                        }
+                    }
+                    RelationshipIdentityResolution::Resolved(target) => {
+                        walk.issue = Some(
+                            WorkspaceGetRootGameObjectIssue::TransformParentClassMismatch {
+                                target,
+                            },
+                        );
+                        return Ok(walk);
+                    }
+                    RelationshipIdentityResolution::Unresolved(target) => {
+                        walk.issue =
+                            Some(WorkspaceGetRootGameObjectIssue::UnresolvedTransformParent {
+                                transform: current_transform,
+                                target,
+                            });
+                        return Ok(walk);
+                    }
+                    RelationshipIdentityResolution::Unavailable {
+                        target_file_index,
+                        target_object_index,
+                        path_id,
+                    } => {
+                        walk.issue = Some(
+                            WorkspaceGetRootGameObjectIssue::TransformParentIdentityUnavailable {
+                                transform: current_transform,
+                                target_file_index,
+                                target_object_index,
+                                path_id,
+                            },
+                        );
+                        return Ok(walk);
+                    }
+                    RelationshipIdentityResolution::PathMismatch {
+                        identity,
+                        expected_path_id,
+                    } => {
+                        walk.issue = Some(
+                            WorkspaceGetRootGameObjectIssue::TransformParentPathIdMismatch {
+                                transform: current_transform,
+                                expected_path_id,
+                                actual_path_id: identity.path_id,
+                            },
+                        );
+                        return Ok(walk);
+                    }
+                };
+
+            let Some(parent_transform) = parent_transform else {
+                break;
+            };
+            let key = WorkspaceObjectKey::from(parent_transform);
+            if visited.contains(&key) {
+                walk.issue = Some(WorkspaceGetRootGameObjectIssue::CycleDetected {
+                    transform: parent_transform,
+                });
+                return Ok(walk);
+            }
+            let requested_depth = walk.transform_chain.len().checked_add(1).ok_or(
+                WorkspaceGetRootGameObjectError::CountOverflow {
+                    resource: "GetRoot Transform chain",
+                },
+            )?;
+            if requested_depth > limits.max_parent_depth {
+                return Err(WorkspaceGetRootGameObjectError::ParentDepthLimitExceeded {
+                    requested: requested_depth,
+                    limit: limits.max_parent_depth,
+                });
+            }
+            walk.transform_chain.try_reserve(1).map_err(|_| {
+                WorkspaceGetRootGameObjectError::AllocationFailed {
+                    resource: "GetRoot Transform chain",
+                    requested: requested_depth,
+                }
+            })?;
+            visited.try_reserve(1).map_err(|_| {
+                WorkspaceGetRootGameObjectError::AllocationFailed {
+                    resource: "GetRoot Transform cycle set",
+                    requested: visited.len().saturating_add(1),
+                }
+            })?;
+            visited.insert(key);
+            walk.transform_chain.push(parent_transform);
+            current_transform = parent_transform;
+        }
+
+        if walk.issue.is_none() {
+            if let Some(terminal_transform) = walk.transform_chain.last().copied() {
+                walk.root_game_object =
+                    resolve_transform_game_object(self, terminal_transform, &mut walk)?;
+                if walk.root_game_object.is_none() && walk.issue.is_none() {
+                    walk.issue = Some(WorkspaceGetRootGameObjectIssue::TransformGameObjectNull {
+                        transform: terminal_transform,
+                    });
+                }
+            }
+        }
+        Ok(walk)
     }
 
     /// Resolves one serialized `PrefabInstance.m_RootGameObject` edge against retained graphs.
@@ -2088,6 +2764,12 @@ pub enum WorkspaceSceneHierarchyError {
         hierarchy_index: usize,
         hierarchy_count: usize,
     },
+    InvalidTransformParentRelationshipRange {
+        hierarchy_index: usize,
+        start: usize,
+        end: usize,
+        index_count: usize,
+    },
     InvalidTransformChildRelationshipRange {
         hierarchy_index: usize,
         start: usize,
@@ -2257,6 +2939,15 @@ impl Display for WorkspaceSceneHierarchyError {
             } => write!(
                 f,
                 "Transform hierarchy index {hierarchy_index} is outside {hierarchy_count} entries"
+            ),
+            Self::InvalidTransformParentRelationshipRange {
+                hierarchy_index,
+                start,
+                end,
+                index_count,
+            } => write!(
+                f,
+                "Transform hierarchy {hierarchy_index} parent relationship range {start}..{end} is outside {index_count} indexes"
             ),
             Self::InvalidTransformChildRelationshipRange {
                 hierarchy_index,
@@ -2571,6 +3262,7 @@ impl WorkspaceSceneHierarchyBuilder {
             game_object_component_relationship_indices,
             prefab_root_relationship_index,
             transform_hierarchies: transform_index.transforms,
+            transform_parent_relationship_indices: transform_index.parent_relationship_indices,
             transform_child_relationship_indices: transform_index.child_relationship_indices,
             transform_game_object_relationship_indices: transform_index
                 .game_object_relationship_indices,
@@ -2868,6 +3560,8 @@ fn build_transform_hierarchy_index(
         }
         transforms.push(WorkspaceSceneTransformHierarchy {
             transform: candidate.identity,
+            parent_relationship_start: 0,
+            parent_relationship_end: 0,
             child_relationship_start: 0,
             child_relationship_end: 0,
             game_object_relationship_start: 0,
@@ -2884,6 +3578,10 @@ fn build_transform_hierarchy_index(
         }
     }
 
+    let parent_relationship_count = relationships
+        .iter()
+        .filter(|relationship| relationship.kind == SceneRelationshipKind::TransformParent)
+        .count();
     let child_relationship_count = relationships
         .iter()
         .filter(|relationship| relationship.kind == SceneRelationshipKind::TransformChild)
@@ -2900,6 +3598,13 @@ fn build_transform_hierarchy_index(
         })
         .count();
 
+    let mut parent_relationship_indices = Vec::new();
+    parent_relationship_indices
+        .try_reserve_exact(parent_relationship_count)
+        .map_err(|_| WorkspaceSceneHierarchyError::AllocationFailed {
+            resource: "Transform parent relationship indexes",
+            requested: parent_relationship_count,
+        })?;
     let mut child_relationship_indices = Vec::new();
     child_relationship_indices
         .try_reserve_exact(child_relationship_count)
@@ -2917,6 +3622,23 @@ fn build_transform_hierarchy_index(
 
     for (relationship_index, relationship) in relationships.iter().enumerate() {
         match relationship.kind {
+            SceneRelationshipKind::TransformParent => {
+                if transforms
+                    .binary_search_by_key(&relationship.source_object_index, |hierarchy| {
+                        hierarchy.transform.object_index
+                    })
+                    .is_err()
+                {
+                    return Err(
+                        WorkspaceSceneHierarchyError::InvalidTransformHierarchySource {
+                            file_index: collection_file_index,
+                            relationship_index,
+                            object_index: relationship.source_object_index,
+                        },
+                    );
+                }
+                parent_relationship_indices.push(relationship_index);
+            }
             SceneRelationshipKind::TransformChild => {
                 if transforms
                     .binary_search_by_key(&relationship.source_object_index, |hierarchy| {
@@ -2947,6 +3669,12 @@ fn build_transform_hierarchy_index(
         }
     }
 
+    parent_relationship_indices.sort_unstable_by_key(|&relationship_index| {
+        (
+            relationships[relationship_index].source_object_index,
+            relationship_index,
+        )
+    });
     child_relationship_indices.sort_unstable_by_key(|&relationship_index| {
         (
             relationships[relationship_index].source_object_index,
@@ -2962,20 +3690,28 @@ fn build_transform_hierarchy_index(
     assign_transform_relationship_ranges(
         collection_file_index,
         &mut transforms,
+        &parent_relationship_indices,
+        relationships,
+        TransformRelationshipRange::Parent,
+    )?;
+    assign_transform_relationship_ranges(
+        collection_file_index,
+        &mut transforms,
         &child_relationship_indices,
         relationships,
-        true,
+        TransformRelationshipRange::Children,
     )?;
     assign_transform_relationship_ranges(
         collection_file_index,
         &mut transforms,
         &game_object_relationship_indices,
         relationships,
-        false,
+        TransformRelationshipRange::GameObject,
     )?;
 
     Ok(WorkspaceSceneTransformHierarchyIndex {
         transforms,
+        parent_relationship_indices,
         child_relationship_indices,
         game_object_relationship_indices,
     })
@@ -2986,7 +3722,7 @@ fn assign_transform_relationship_ranges(
     transforms: &mut [WorkspaceSceneTransformHierarchy],
     relationship_indices: &[usize],
     relationships: &[SceneRelationship],
-    children: bool,
+    range_kind: TransformRelationshipRange,
 ) -> Result<(), WorkspaceSceneHierarchyError> {
     let mut relationship_cursor = 0usize;
     for hierarchy in transforms {
@@ -3010,12 +3746,19 @@ fn assign_transform_relationship_ranges(
             }
             relationship_cursor += 1;
         }
-        if children {
-            hierarchy.child_relationship_start = start;
-            hierarchy.child_relationship_end = relationship_cursor;
-        } else {
-            hierarchy.game_object_relationship_start = start;
-            hierarchy.game_object_relationship_end = relationship_cursor;
+        match range_kind {
+            TransformRelationshipRange::Parent => {
+                hierarchy.parent_relationship_start = start;
+                hierarchy.parent_relationship_end = relationship_cursor;
+            }
+            TransformRelationshipRange::Children => {
+                hierarchy.child_relationship_start = start;
+                hierarchy.child_relationship_end = relationship_cursor;
+            }
+            TransformRelationshipRange::GameObject => {
+                hierarchy.game_object_relationship_start = start;
+                hierarchy.game_object_relationship_end = relationship_cursor;
+            }
         }
     }
     if let Some(&relationship_index) = relationship_indices.get(relationship_cursor) {
@@ -3028,6 +3771,13 @@ fn assign_transform_relationship_ranges(
         );
     }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum TransformRelationshipRange {
+    Parent,
+    Children,
+    GameObject,
 }
 
 fn classify_scene_collection_objects(
@@ -3710,6 +4460,27 @@ mod tests {
                 root.path_id,
                 SceneRelationshipTarget::LocalObject { object_index: 0 },
             ),
+            relationship(
+                first_transform,
+                SceneRelationshipKind::ComponentGameObject,
+                "m_GameObject",
+                root.path_id,
+                SceneRelationshipTarget::LocalObject { object_index: 0 },
+            ),
+            relationship(
+                first_transform,
+                SceneRelationshipKind::TransformParent,
+                "m_Father",
+                0,
+                SceneRelationshipTarget::Null,
+            ),
+            relationship(
+                last_transform,
+                SceneRelationshipKind::TransformParent,
+                "m_Father",
+                0,
+                SceneRelationshipTarget::Null,
+            ),
         ];
         let root_collection = WorkspaceSceneCollectionHierarchy {
             collection_file_index: 0,
@@ -3725,21 +4496,26 @@ mod tests {
             transform_hierarchies: vec![
                 WorkspaceSceneTransformHierarchy {
                     transform: first_transform,
+                    parent_relationship_start: 0,
+                    parent_relationship_end: 1,
                     child_relationship_start: 0,
                     child_relationship_end: 0,
                     game_object_relationship_start: 0,
-                    game_object_relationship_end: 0,
+                    game_object_relationship_end: 1,
                 },
                 WorkspaceSceneTransformHierarchy {
                     transform: last_transform,
+                    parent_relationship_start: 1,
+                    parent_relationship_end: 2,
                     child_relationship_start: 0,
                     child_relationship_end: 1,
-                    game_object_relationship_start: 0,
+                    game_object_relationship_start: 1,
                     game_object_relationship_end: 1,
                 },
             ],
+            transform_parent_relationship_indices: vec![7, 8],
             transform_child_relationship_indices: vec![4],
-            transform_game_object_relationship_indices: vec![5],
+            transform_game_object_relationship_indices: vec![6, 5],
             graph_issues: Vec::new(),
             scene_assets: vec![WorkspaceSceneAssetIdentity {
                 identity: root,
@@ -3781,6 +4557,16 @@ mod tests {
                 child_transform.path_id,
                 SceneRelationshipTarget::LocalObject { object_index: 0 },
             ),
+            relationship(
+                child_transform,
+                SceneRelationshipKind::TransformParent,
+                "m_Father",
+                first_transform.path_id,
+                SceneRelationshipTarget::WorkspaceObject {
+                    file_index: 0,
+                    object_index: 1,
+                },
+            ),
         ];
         let child_transform_child_range = if cycle {
             child_relationships.push(relationship(
@@ -3794,7 +4580,7 @@ mod tests {
         } else {
             0..0
         };
-        let child_transform_child_indexes = if cycle { vec![2] } else { Vec::new() };
+        let child_transform_child_indexes = if cycle { vec![3] } else { Vec::new() };
         let child_collection = WorkspaceSceneCollectionHierarchy {
             collection_file_index: 1,
             scene_objects: Vec::new(),
@@ -3808,11 +4594,14 @@ mod tests {
             prefab_root_relationship_index: Vec::new(),
             transform_hierarchies: vec![WorkspaceSceneTransformHierarchy {
                 transform: child_transform,
+                parent_relationship_start: 0,
+                parent_relationship_end: 1,
                 child_relationship_start: child_transform_child_range.start,
                 child_relationship_end: child_transform_child_range.end,
                 game_object_relationship_start: 0,
                 game_object_relationship_end: 1,
             }],
+            transform_parent_relationship_indices: vec![2],
             transform_child_relationship_indices: child_transform_child_indexes,
             transform_game_object_relationship_indices: vec![0],
             graph_issues: Vec::new(),
@@ -3880,6 +4669,7 @@ mod tests {
             game_object_component_relationship_indices: Vec::new(),
             prefab_root_relationship_index,
             transform_hierarchies: Vec::new(),
+            transform_parent_relationship_indices: Vec::new(),
             transform_child_relationship_indices: Vec::new(),
             transform_game_object_relationship_indices: Vec::new(),
             graph_issues: Vec::new(),
@@ -4016,6 +4806,7 @@ mod tests {
                 relationship_index: 0,
             }],
             transform_hierarchies: Vec::new(),
+            transform_parent_relationship_indices: Vec::new(),
             transform_child_relationship_indices: Vec::new(),
             transform_game_object_relationship_indices: Vec::new(),
             graph_issues: Vec::new(),
@@ -4038,6 +4829,7 @@ mod tests {
             game_object_component_relationship_indices: Vec::new(),
             prefab_root_relationship_index: Vec::new(),
             transform_hierarchies: Vec::new(),
+            transform_parent_relationship_indices: Vec::new(),
             transform_child_relationship_indices: Vec::new(),
             transform_game_object_relationship_indices: Vec::new(),
             graph_issues: Vec::new(),
@@ -4314,6 +5106,123 @@ mod tests {
                     limit: 2,
                 }
             )
+        ));
+    }
+
+    #[test]
+    fn get_root_uses_first_transform_and_follows_cross_file_fathers() {
+        let workspace = workspace_hierarchy_fixture(false);
+        let root = identity(0, 0, 1, GAME_OBJECT_CLASS_ID);
+        let first_transform = identity(0, 1, 2, TRANSFORM_CLASS_ID);
+        let child = identity(1, 1, 11, GAME_OBJECT_CLASS_ID);
+        let child_transform = identity(1, 0, 10, TRANSFORM_CLASS_ID);
+
+        let root_walk = workspace
+            .get_root_game_object(root, WorkspaceGetRootGameObjectLimits::default())
+            .unwrap();
+        assert!(root_walk.is_complete());
+        assert_eq!(root_walk.first_transform, Some(first_transform));
+        assert_eq!(root_walk.transform_chain, vec![first_transform]);
+        assert_eq!(root_walk.root_game_object, Some(root));
+        assert_eq!(
+            root_walk.termination,
+            Some(WorkspaceGetRootGameObjectTermination::NullFather)
+        );
+
+        let child_walk = workspace
+            .get_root_game_object(child, WorkspaceGetRootGameObjectLimits::default())
+            .unwrap();
+        assert!(child_walk.is_complete());
+        assert_eq!(child_walk.first_transform, Some(child_transform));
+        assert_eq!(
+            child_walk.transform_chain,
+            vec![child_transform, first_transform]
+        );
+        assert_eq!(child_walk.root_game_object, Some(root));
+    }
+
+    #[test]
+    fn get_root_handles_added_transform_and_reports_unresolved_or_cyclic_fathers() {
+        let mut no_transform_workspace = workspace_hierarchy_fixture(false);
+        let root_graph = &mut no_transform_workspace.non_scene_collections[0];
+        root_graph.game_object_hierarchies[0].component_relationship_end = 2;
+        root_graph
+            .game_object_component_relationship_indices
+            .truncate(2);
+        let root = identity(0, 0, 1, GAME_OBJECT_CLASS_ID);
+        let no_transform = no_transform_workspace
+            .get_root_game_object(root, WorkspaceGetRootGameObjectLimits::default())
+            .unwrap();
+        assert!(no_transform.is_complete());
+        assert_eq!(no_transform.root_game_object, Some(root));
+        assert_eq!(
+            no_transform.termination,
+            Some(WorkspaceGetRootGameObjectTermination::NoTransformComponent)
+        );
+
+        let mut unresolved_workspace = workspace_hierarchy_fixture(false);
+        unresolved_workspace.non_scene_collections[1].relationships[2].path_id = 404;
+        unresolved_workspace.non_scene_collections[1].relationships[2].target =
+            SceneRelationshipTarget::MissingLocalObject { path_id: 404 };
+        let child = identity(1, 1, 11, GAME_OBJECT_CLASS_ID);
+        let unresolved = unresolved_workspace
+            .get_root_game_object(child, WorkspaceGetRootGameObjectLimits::default())
+            .unwrap();
+        assert!(matches!(
+            unresolved.issue,
+            Some(WorkspaceGetRootGameObjectIssue::UnresolvedTransformParent {
+                transform,
+                target: SceneRelationshipTarget::MissingLocalObject { path_id: 404 },
+            }) if transform == identity(1, 0, 10, TRANSFORM_CLASS_ID)
+        ));
+
+        let mut null_parent_owner_workspace = workspace_hierarchy_fixture(false);
+        null_parent_owner_workspace.non_scene_collections[0].relationships[6].target =
+            SceneRelationshipTarget::Null;
+        let null_parent_owner = null_parent_owner_workspace
+            .get_root_game_object(child, WorkspaceGetRootGameObjectLimits::default())
+            .unwrap();
+        assert!(null_parent_owner.is_complete());
+        assert_eq!(null_parent_owner.root_game_object, Some(child));
+        assert_eq!(
+            null_parent_owner.termination,
+            Some(WorkspaceGetRootGameObjectTermination::ParentHasNullGameObject)
+        );
+
+        let mut cycle_workspace = workspace_hierarchy_fixture(false);
+        let first_transform = identity(0, 1, 2, TRANSFORM_CLASS_ID);
+        cycle_workspace.non_scene_collections[0].relationships[7].path_id = 10;
+        cycle_workspace.non_scene_collections[0].relationships[7].target =
+            SceneRelationshipTarget::WorkspaceObject {
+                file_index: 1,
+                object_index: 0,
+            };
+        let cycle = cycle_workspace
+            .get_root_game_object(child, WorkspaceGetRootGameObjectLimits::default())
+            .unwrap();
+        assert!(matches!(
+            cycle.issue,
+            Some(WorkspaceGetRootGameObjectIssue::CycleDetected { transform })
+                if transform == identity(1, 0, 10, TRANSFORM_CLASS_ID)
+        ));
+        assert!(cycle.transform_chain.contains(&first_transform));
+    }
+
+    #[test]
+    fn get_root_enforces_parent_depth_limit() {
+        let workspace = workspace_hierarchy_fixture(false);
+        let child = identity(1, 1, 11, GAME_OBJECT_CLASS_ID);
+        assert!(matches!(
+            workspace.get_root_game_object(
+                child,
+                WorkspaceGetRootGameObjectLimits {
+                    max_parent_depth: 1,
+                }
+            ),
+            Err(WorkspaceGetRootGameObjectError::ParentDepthLimitExceeded {
+                requested: 2,
+                limit: 1,
+            })
         ));
     }
 }
