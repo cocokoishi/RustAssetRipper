@@ -758,15 +758,13 @@ fn print_workspace_summary_to<W: io::Write>(
                     )?;
                 }
             }
-            if scene_collection_flags[file_index] {
-                scene_hierarchy_builder.add_collection_graph(
-                    file_index,
-                    &scene_graph,
-                    root_discovery,
-                    hierarchy_audit,
-                    &multi_file_graph,
-                )?;
-            }
+            scene_hierarchy_builder.add_collection_graph(
+                file_index,
+                &scene_graph,
+                root_discovery,
+                hierarchy_audit,
+                &multi_file_graph,
+            )?;
         }
 
         if file
@@ -1165,6 +1163,36 @@ fn print_workspace_summary_to<W: io::Write>(
             output,
             "  {} additional missing-Transform plans are not listed",
             non_scene_transform_plans.plans().len() - MAX_GENERATED_TRANSFORM_DIAGNOSTICS
+        )?;
+    }
+    writeln!(
+        output,
+        "Non-scene hierarchy collection graphs: {}",
+        scene_hierarchies.non_scene_collections().len()
+    )?;
+    for collection in scene_hierarchies
+        .non_scene_collections()
+        .iter()
+        .take(MAX_GENERATED_TRANSFORM_DIAGNOSTICS)
+    {
+        writeln!(
+            output,
+            "  hierarchy file {}: {} GameObjects, {} Transforms, {} component candidates, {} roots, {} root issues, {} relationships, complete={}",
+            collection.collection_file_index(),
+            collection.game_object_count(),
+            collection.transform_count(),
+            collection.component_candidates().len(),
+            collection.roots().roots().len(),
+            collection.roots().issues().len(),
+            collection.relationships().len(),
+            collection.is_complete()
+        )?;
+    }
+    if scene_hierarchies.non_scene_collections().len() > MAX_GENERATED_TRANSFORM_DIAGNOSTICS {
+        writeln!(
+            output,
+            "  {} additional non-scene hierarchy graphs are not listed",
+            scene_hierarchies.non_scene_collections().len() - MAX_GENERATED_TRANSFORM_DIAGNOSTICS
         )?;
     }
     writeln!(
@@ -1948,6 +1976,7 @@ mod tests {
         let directory = TestInputDirectory::new_root();
         let scene_file = directory.join("level0");
         let build_settings_file = directory.join("globalgamemanagers");
+        let prefab_file = directory.join("prefab.assets");
         fs::write(
             &scene_file,
             make_occlusion_settings_file([0x0123_4567, 0x89ab_cdef, 3, 4]),
@@ -1958,9 +1987,10 @@ mod tests {
             make_build_settings_file(&["Assets/Scenes/Main.unity"]),
         )
         .unwrap();
+        fs::write(&prefab_file, make_generation_10_file()).unwrap();
         let input = TestInputDirectory {
             directory,
-            files: vec![scene_file, build_settings_file],
+            files: vec![scene_file, build_settings_file, prefab_file],
             subdirectories: Vec::new(),
         };
         let (mut filesystem, selected_paths, _) =
@@ -1987,8 +2017,8 @@ mod tests {
             .unwrap();
         let summary = String::from_utf8(output).unwrap();
         assert!(summary
-            .contains("Object payload decode: 2/2 decoded, 0 undecoded, 0 raw fallback bytes"));
-        assert!(summary.contains("Workspace collections: 2 (2 objects, 0 external identifiers)"));
+            .contains("Object payload decode: 3/3 decoded, 0 undecoded, 0 raw fallback bytes"));
+        assert!(summary.contains("Workspace collections: 3 (3 objects, 0 external identifiers)"));
         assert!(summary.contains("TypeTree reference graph:"));
         assert!(
             summary.contains("SceneGUID words: [0x01234567, 0x89abcdef, 0x00000003, 0x00000004]")
@@ -1996,6 +2026,8 @@ mod tests {
         assert!(summary.contains(
             "Scene path mapping for collection \"level0\": Assets/Scenes/Main (BuildSettings index 0, duplicate path=false)"
         ));
+        assert!(summary.contains("Non-scene hierarchy collection graphs: 1"));
+        assert!(summary.contains(": 1 GameObjects, 0 Transforms,"));
     }
 
     #[test]

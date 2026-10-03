@@ -4422,6 +4422,32 @@ mod tests {
         ));
         assert!(!bounded.contains_collection_graph(0));
 
+        let graph_limited = crate::processing::scene_hierarchy::WorkspaceSceneHierarchyLimits {
+            max_workspace_collection_graphs: 0,
+            ..crate::processing::scene_hierarchy::WorkspaceSceneHierarchyLimits::default()
+        };
+        let mut bounded_graphs =
+            crate::processing::scene_hierarchy::WorkspaceSceneHierarchyBuilder::new(
+                2,
+                graph_limited,
+            )
+            .unwrap();
+        assert!(matches!(
+            bounded_graphs.add_collection_graph(
+                0,
+                &scene_graph,
+                roots.clone(),
+                audit.clone(),
+                &multi_file_graph,
+            ),
+            Err(crate::processing::scene_hierarchy::WorkspaceSceneHierarchyError::ResourceLimitExceeded {
+                resource: "workspace hierarchy collection graphs",
+                requested: 1,
+                limit: 0,
+            })
+        ));
+        assert!(!bounded_graphs.contains_collection_graph(0));
+
         let asset_limited = crate::processing::scene_hierarchy::WorkspaceSceneHierarchyLimits {
             max_scene_asset_records: 1,
             ..crate::processing::scene_hierarchy::WorkspaceSceneHierarchyLimits::default()
@@ -4447,6 +4473,40 @@ mod tests {
             })
         ));
         assert!(!bounded_assets.contains_collection_graph(0));
+
+        let non_scene_definitions =
+            crate::processing::scene_collections::WorkspaceSceneDefinitions::from_plans(
+                Vec::new(),
+                2,
+                crate::processing::scene_collections::WorkspaceSceneDefinitionLimits::default(),
+            )
+            .unwrap();
+        let mut non_scene_builder =
+            crate::processing::scene_hierarchy::WorkspaceSceneHierarchyBuilder::new(
+                2,
+                crate::processing::scene_hierarchy::WorkspaceSceneHierarchyLimits::default(),
+            )
+            .unwrap();
+        non_scene_builder
+            .add_collection_graph(
+                0,
+                &scene_graph,
+                roots.clone(),
+                audit.clone(),
+                &multi_file_graph,
+            )
+            .unwrap();
+        let non_scene_hierarchies = non_scene_builder.finish(&non_scene_definitions).unwrap();
+        assert!(non_scene_hierarchies.scenes().is_empty());
+        assert_eq!(non_scene_hierarchies.non_scene_collections().len(), 1);
+        assert_eq!(
+            non_scene_hierarchies.non_scene_collections()[0].collection_file_index(),
+            0
+        );
+        assert_eq!(
+            non_scene_hierarchies.non_scene_collections()[0].game_object_count(),
+            1
+        );
 
         let mut builder = crate::processing::scene_hierarchy::WorkspaceSceneHierarchyBuilder::new(
             2,

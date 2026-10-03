@@ -246,7 +246,7 @@ impl WorkspaceGeneratedTransformPlanBuilder {
 pub struct WorkspaceSceneHierarchyLimits {
     pub max_workspace_files: usize,
     pub max_scene_definitions: usize,
-    pub max_scene_collections: usize,
+    pub max_workspace_collection_graphs: usize,
     pub max_scene_objects: usize,
     pub max_scene_asset_records: usize,
     pub max_relationships: usize,
@@ -260,7 +260,7 @@ impl Default for WorkspaceSceneHierarchyLimits {
         Self {
             max_workspace_files: 1_000_000,
             max_scene_definitions: 1_000_000,
-            max_scene_collections: 1_000_000,
+            max_workspace_collection_graphs: 1_000_000,
             max_scene_objects: 20_000_000,
             max_scene_asset_records: 20_000_000,
             max_relationships: 5_000_000,
@@ -271,7 +271,7 @@ impl Default for WorkspaceSceneHierarchyLimits {
     }
 }
 
-/// A recovered scene-collection graph attached to one loaded SerializedFile collection.
+/// A recovered hierarchy graph attached to one loaded SerializedFile collection.
 ///
 /// This retains the scene parser's known GameObject/Transform objects, every recognized scene
 /// PPtr, root discovery, and hierarchy audit diagnostics. It does not claim that unrecognized
@@ -426,11 +426,16 @@ impl WorkspaceSceneHierarchyScene {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct WorkspaceSceneHierarchies {
     scenes: Vec<WorkspaceSceneHierarchyScene>,
+    non_scene_collections: Vec<WorkspaceSceneCollectionHierarchy>,
 }
 
 impl WorkspaceSceneHierarchies {
     pub fn scenes(&self) -> &[WorkspaceSceneHierarchyScene] {
         &self.scenes
+    }
+
+    pub fn non_scene_collections(&self) -> &[WorkspaceSceneCollectionHierarchy] {
+        &self.non_scene_collections
     }
 
     pub fn scene_for_collection(
@@ -444,11 +449,11 @@ impl WorkspaceSceneHierarchies {
     }
 }
 
-/// Incrementally compacts scene graphs so the inspect path does not retain full per-file indexes.
+/// Incrementally compacts hierarchy graphs so inspect does not retain full per-file indexes.
 pub struct WorkspaceSceneHierarchyBuilder {
     collection_graphs: Vec<Option<WorkspaceSceneCollectionHierarchy>>,
     limits: WorkspaceSceneHierarchyLimits,
-    scene_collection_count: usize,
+    collection_graph_count: usize,
     scene_object_count: usize,
     scene_asset_record_count: usize,
     relationship_count: usize,
@@ -491,9 +496,6 @@ pub enum WorkspaceSceneHierarchyError {
         file_index: usize,
     },
     DuplicateGeneratedTransformSource {
-        file_index: usize,
-    },
-    UnassignedCollectionGraph {
         file_index: usize,
     },
     MissingCollectionGraph {
@@ -590,10 +592,6 @@ impl Display for WorkspaceSceneHierarchyError {
             Self::DuplicateGeneratedTransformSource { file_index } => write!(
                 f,
                 "workspace file {file_index} supplied generated-transform candidates more than once"
-            ),
-            Self::UnassignedCollectionGraph { file_index } => write!(
-                f,
-                "scene graph for workspace file {file_index} is not assigned to a SceneDefinition"
             ),
             Self::MissingCollectionGraph {
                 scene_index,
@@ -716,7 +714,7 @@ impl WorkspaceSceneHierarchyBuilder {
         Ok(Self {
             collection_graphs,
             limits,
-            scene_collection_count: 0,
+            collection_graph_count: 0,
             scene_object_count: 0,
             scene_asset_record_count: 0,
             relationship_count: 0,
@@ -836,11 +834,11 @@ impl WorkspaceSceneHierarchyBuilder {
                 resource: "scene diagnostics",
             })?;
 
-        let next_scene_collection_count = checked_charge(
-            self.scene_collection_count,
+        let next_collection_graph_count = checked_charge(
+            self.collection_graph_count,
             1,
-            self.limits.max_scene_collections,
-            "scene collection graphs",
+            self.limits.max_workspace_collection_graphs,
+            "workspace hierarchy collection graphs",
         )?;
         let next_scene_object_count = checked_charge(
             self.scene_object_count,
@@ -947,7 +945,7 @@ impl WorkspaceSceneHierarchyBuilder {
             hierarchy_audit,
         };
         self.collection_graphs[file_index] = Some(snapshot);
-        self.scene_collection_count = next_scene_collection_count;
+        self.collection_graph_count = next_collection_graph_count;
         self.scene_object_count = next_scene_object_count;
         self.scene_asset_record_count = next_scene_asset_record_count;
         self.relationship_count = next_relationship_count;
@@ -961,6 +959,14 @@ impl WorkspaceSceneHierarchyBuilder {
         mut self,
         definitions: &WorkspaceSceneDefinitions,
     ) -> Result<WorkspaceSceneHierarchies, WorkspaceSceneHierarchyError> {
+        if definitions.workspace_collection_count() != self.collection_graphs.len() {
+            return Err(
+                WorkspaceSceneHierarchyError::WorkspaceDefinitionCollectionCountMismatch {
+                    expected: self.collection_graphs.len(),
+                    actual: definitions.workspace_collection_count(),
+                },
+            );
+        }
         if definitions.definitions().len() > self.limits.max_scene_definitions {
             return Err(WorkspaceSceneHierarchyError::SceneCountLimitExceeded {
                 count: definitions.definitions().len(),
@@ -1005,15 +1011,30 @@ impl WorkspaceSceneHierarchyBuilder {
                 collections,
             });
         }
-        if let Some((file_index, _)) = self
+        let non_scene_collection_count = self
             .collection_graphs
             .iter()
-            .enumerate()
-            .find(|(_, graph)| graph.is_some())
-        {
-            return Err(WorkspaceSceneHierarchyError::UnassignedCollectionGraph { file_index });
+            .filter(|graph| graph.is_some())
+            .count();
+        let mut non_scene_collections = Vec::new();
+        non_scene_collections
+            .try_reserve_exact(non_scene_collection_count)
+            .map_err(|_| WorkspaceSceneHierarchyError::AllocationFailed {
+                resource: "non-scene hierarchy collection graphs",
+                requested: non_scene_collection_count,
+            })?;
+        for graph in self.collection_graphs.iter_mut().flatten() {
+            // Non-scene generated-transform plans are exposed through the workspace-wide
+            // Missing Prefab Transforms result, not duplicated in this input graph snapshot.
+            graph.missing_transform_plans.clear();
         }
-        Ok(WorkspaceSceneHierarchies { scenes })
+        for graph in self.collection_graphs.into_iter().flatten() {
+            non_scene_collections.push(graph);
+        }
+        Ok(WorkspaceSceneHierarchies {
+            scenes,
+            non_scene_collections,
+        })
     }
 }
 
