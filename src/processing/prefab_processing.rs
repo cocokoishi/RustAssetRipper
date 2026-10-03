@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
-use crate::serialized_file::object::SerializedValue;
+use crate::serialized_file::object::{ParsedObjectPayload, SerializedValue};
 use crate::serialized_file::object_workspace::ObjectWorkspace;
 
 use super::scene::SceneRelationshipTarget;
@@ -593,6 +593,263 @@ pub struct WorkspaceGameObjectComponentListOverlay {
     pub game_object: WorkspaceSceneObjectIdentity,
     pub source_slots: Vec<WorkspaceSourceGameObjectComponentSlot>,
     pub generated_component: WorkspaceGeneratedComponentAddition,
+}
+
+/// Materialize one checked component-list overlay as an edited GameObject payload.
+///
+/// Existing component values and their order are retained. The appended element reuses the
+/// source element shape, or an explicit TypeTree-derived template when the source array is empty.
+/// This edits only the decoded payload; callers must also write the planned external dependency
+/// entry before treating the resulting PPtr as a complete SerializedFile edit.
+pub fn materialize_game_object_component_append(
+    source_payload: &ParsedObjectPayload,
+    overlay: &WorkspaceGameObjectComponentListOverlay,
+    component_file_id: i32,
+    empty_element_template: Option<&SerializedValue>,
+    max_component_elements: usize,
+) -> Result<ParsedObjectPayload, WorkspacePrefabProcessingError> {
+    let game_object = overlay.game_object;
+    if source_payload.object_index != game_object.object_index
+        || source_payload.path_id != game_object.path_id
+        || overlay.generated_component.game_object != game_object
+        || overlay.generated_component.component_class_id != 4
+        || overlay.generated_component.component_asset.class_id != 4
+        || overlay.generated_component.appended_index != overlay.source_slots.len()
+    {
+        return Err(component_materialization_error(
+            game_object,
+            "payload or generated Transform identity does not match the component overlay",
+        ));
+    }
+
+    let component_array = source_payload
+        .root
+        .unique_field_in_base_chain("m_Component")
+        .map_err(|error| component_materialization_error(game_object, &error.to_string()))?
+        .ok_or_else(|| {
+            component_materialization_error(game_object, "GameObject has no m_Component field")
+        })?;
+    let source_elements = component_array.array_elements().ok_or_else(|| {
+        component_materialization_error(game_object, "m_Component is not an array")
+    })?;
+    if source_elements.len() != overlay.source_slots.len() {
+        return Err(component_materialization_error(
+            game_object,
+            &format!(
+                "m_Component has {} entries, overlay describes {}",
+                source_elements.len(),
+                overlay.source_slots.len()
+            ),
+        ));
+    }
+    for (index, (element, slot)) in source_elements
+        .iter()
+        .zip(&overlay.source_slots)
+        .enumerate()
+    {
+        if slot.source_array_index != index {
+            return Err(component_materialization_error(
+                game_object,
+                &format!(
+                    "overlay slot {} is stored at array index {index}",
+                    slot.source_array_index
+                ),
+            ));
+        }
+        let pointer = component_pair_pointer(element).map_err(|message| {
+            component_materialization_error(
+                game_object,
+                &format!("source m_Component[{index}] {message}"),
+            )
+        })?;
+        if pointer != (slot.file_id, slot.path_id) {
+            return Err(component_materialization_error(
+                game_object,
+                &format!(
+                    "source m_Component[{index}] PPtr ({}, {}) differs from overlay PPtr ({}, {})",
+                    pointer.0, pointer.1, slot.file_id, slot.path_id
+                ),
+            ));
+        }
+    }
+
+    let mut appended_element = if let Some(last) = source_elements.last() {
+        last.clone()
+    } else {
+        empty_element_template.cloned().ok_or_else(|| {
+            component_materialization_error(
+                game_object,
+                "empty m_Component array requires a TypeTree-derived element template",
+            )
+        })?
+    };
+    replace_component_pair_pointer(
+        &mut appended_element,
+        component_file_id,
+        overlay.generated_component.component_asset.path_id,
+    )
+    .map_err(|message| component_materialization_error(game_object, &message))?;
+
+    let mut edited = source_payload.clone();
+    let array = edited
+        .root
+        .unique_field_in_base_chain_mut("m_Component")
+        .map_err(|error| component_materialization_error(game_object, &error.to_string()))?
+        .ok_or_else(|| {
+            component_materialization_error(game_object, "GameObject has no m_Component field")
+        })?;
+    array
+        .push_array_element_bounded(appended_element, max_component_elements)
+        .map_err(|error| component_materialization_error(game_object, &error.to_string()))?;
+    Ok(edited)
+}
+
+/// Materialize a component append using the FileID assigned by the completed Prefab plan.
+pub fn materialize_planned_game_object_component_append(
+    plan: &WorkspaceProcessedPrefabAssetPlan,
+    source_payload: &ParsedObjectPayload,
+    overlay: &WorkspaceGameObjectComponentListOverlay,
+    empty_element_template: Option<&SerializedValue>,
+    max_component_elements: usize,
+) -> Result<ParsedObjectPayload, WorkspacePrefabProcessingError> {
+    let game_object = overlay.game_object;
+    if !plan.is_complete() {
+        return Err(component_materialization_error(
+            game_object,
+            "PrefabProcessor asset allocation plan is incomplete",
+        ));
+    }
+    let collection_index = overlay.generated_component.component_asset.collection_index;
+    let mut matching_appends = plan.source_dependency_appends.iter().filter(|append| {
+        append.source_file_index == game_object.file_index
+            && append.pointer_field == WorkspaceSourceDependencyPointerField::GameObjectComponent
+            && append.target_collection
+                == (WorkspaceSourceDependencyAppendTarget::PrefabProcessedCollection {
+                    collection_index,
+                })
+    });
+    let append = matching_appends.next().ok_or_else(|| {
+        component_materialization_error(
+            game_object,
+            "Prefab plan has no source dependency append for the generated collection",
+        )
+    })?;
+    if matching_appends.next().is_some() {
+        return Err(component_materialization_error(
+            game_object,
+            "Prefab plan has duplicate source dependency appends for the generated collection",
+        ));
+    }
+    let component_file_id = append.file_id.ok_or_else(|| {
+        component_materialization_error(
+            game_object,
+            "source dependency FileID is deferred or unavailable",
+        )
+    })?;
+    materialize_game_object_component_append(
+        source_payload,
+        overlay,
+        component_file_id,
+        empty_element_template,
+        max_component_elements,
+    )
+}
+
+fn component_pair_pointer(value: &SerializedValue) -> Result<(i32, i64), String> {
+    if let Some(pointer) = value.pptr() {
+        return Ok(pointer);
+    }
+    let fields = value.struct_fields().ok_or_else(|| {
+        format!(
+            "has unsupported value shape {}",
+            component_value_kind(value)
+        )
+    })?;
+    if fields.len() != 1 {
+        return Err("has a ComponentPair value with fields besides component".to_owned());
+    }
+    let mut component_fields = fields.iter().filter(|field| field.name == "component");
+    let component = component_fields
+        .next()
+        .ok_or_else(|| "has no component field".to_owned())?;
+    if component_fields.next().is_some() {
+        return Err("has duplicate component fields".to_owned());
+    }
+    component
+        .value
+        .pptr()
+        .ok_or_else(|| "component field is not a PPtr".to_owned())
+}
+
+fn replace_component_pair_pointer(
+    value: &mut SerializedValue,
+    file_id: i32,
+    path_id: i64,
+) -> Result<(), String> {
+    if matches!(value, SerializedValue::PPtr { .. }) {
+        *value = SerializedValue::PPtr { file_id, path_id };
+        return Ok(());
+    }
+    let fields = match value {
+        SerializedValue::Struct(fields) => fields,
+        _ => {
+            return Err(format!(
+                "template has unsupported value shape {}",
+                component_value_kind(value)
+            ));
+        }
+    };
+    if fields.len() != 1 {
+        return Err("template has fields besides ComponentPair.component".to_owned());
+    }
+    let mut component_fields = fields.iter_mut().filter(|field| field.name == "component");
+    let component = component_fields
+        .next()
+        .ok_or_else(|| "template has no component field".to_owned())?;
+    if component_fields.next().is_some() {
+        return Err("template has duplicate component fields".to_owned());
+    }
+    if !matches!(component.value, SerializedValue::PPtr { .. }) {
+        return Err("template component field is not a PPtr".to_owned());
+    }
+    component.value = SerializedValue::PPtr { file_id, path_id };
+    Ok(())
+}
+
+fn component_value_kind(value: &SerializedValue) -> &'static str {
+    match value {
+        SerializedValue::Bool(_) => "bool",
+        SerializedValue::I8(_) => "i8",
+        SerializedValue::U8(_) => "u8",
+        SerializedValue::I16(_) => "i16",
+        SerializedValue::U16(_) => "u16",
+        SerializedValue::Char(_) => "char",
+        SerializedValue::I32(_) => "i32",
+        SerializedValue::U32(_) => "u32",
+        SerializedValue::I64(_) => "i64",
+        SerializedValue::U64(_) => "u64",
+        SerializedValue::F32(_) => "f32",
+        SerializedValue::F64(_) => "f64",
+        SerializedValue::StringBytes(_) => "string",
+        SerializedValue::Bytes(_) => "bytes",
+        SerializedValue::Array(_) => "array",
+        SerializedValue::Struct(_) => "struct",
+        SerializedValue::PPtr { .. } => "PPtr",
+        SerializedValue::Raw { .. } => "raw",
+    }
+}
+
+fn component_materialization_error(
+    game_object: WorkspaceSceneObjectIdentity,
+    message: &str,
+) -> WorkspacePrefabProcessingError {
+    WorkspacePrefabProcessingError::WorkspaceOperationFailed {
+        operation: "GameObject component-list materialization",
+        message: format!(
+            "file {} object {} PathID {}: {message}",
+            game_object.file_index, game_object.object_index, game_object.path_id
+        ),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2773,6 +3030,295 @@ mod tests {
         assert_eq!(
             animator_controller_requires_source_dependency(&mistyped_layer_index),
             None
+        );
+    }
+
+    #[test]
+    fn materializes_game_object_component_append_without_changing_source_slots() {
+        let game_object = WorkspaceSceneObjectIdentity {
+            file_index: 3,
+            object_index: 2,
+            path_id: 10,
+            class_id: Some(1),
+        };
+        let original_elements = vec![
+            SerializedValue::PPtr {
+                file_id: 0,
+                path_id: 0,
+            },
+            SerializedValue::PPtr {
+                file_id: 2,
+                path_id: 88,
+            },
+        ];
+        let source_slots = vec![
+            WorkspaceSourceGameObjectComponentSlot {
+                source_array_index: 0,
+                file_id: 0,
+                path_id: 0,
+                target: SceneRelationshipTarget::Null,
+            },
+            WorkspaceSourceGameObjectComponentSlot {
+                source_array_index: 1,
+                file_id: 2,
+                path_id: 88,
+                target: SceneRelationshipTarget::MissingLocalObject { path_id: 88 },
+            },
+        ];
+        let generated_component = WorkspaceGeneratedComponentAddition {
+            game_object,
+            component_class_id: 4,
+            appended_index: 2,
+            component_asset: WorkspaceProcessedAssetIdentity {
+                collection_index: 5,
+                path_id: 200,
+                class_id: 4,
+            },
+        };
+        let overlay = WorkspaceGameObjectComponentListOverlay {
+            game_object,
+            source_slots,
+            generated_component,
+        };
+        let source_payload = ParsedObjectPayload {
+            object_index: game_object.object_index,
+            path_id: game_object.path_id,
+            type_name: "GameObject".to_owned(),
+            root: SerializedValue::Struct(vec![SerializedFieldValue {
+                name: "Base".to_owned(),
+                value: SerializedValue::Struct(vec![SerializedFieldValue {
+                    name: "m_Component".to_owned(),
+                    value: SerializedValue::Array(original_elements.clone()),
+                }]),
+            }]),
+            consumed_bytes: 16,
+            trailing_bytes: vec![0xaa],
+            allocated_bytes: 64,
+        };
+
+        let edited =
+            materialize_game_object_component_append(&source_payload, &overlay, 3, None, 3)
+                .unwrap();
+        let component_array = edited
+            .root
+            .unique_field_in_base_chain("m_Component")
+            .unwrap()
+            .unwrap()
+            .array_elements()
+            .unwrap();
+        assert_eq!(&component_array[..2], original_elements);
+        assert_eq!(
+            component_array[2].pptr(),
+            Some((3, generated_component.component_asset.path_id))
+        );
+        assert_eq!(edited.trailing_bytes, [0xaa]);
+
+        let wrapper_payload = ParsedObjectPayload {
+            root: SerializedValue::Struct(vec![SerializedFieldValue {
+                name: "m_Component".to_owned(),
+                value: SerializedValue::Array(vec![SerializedValue::Struct(vec![
+                    SerializedFieldValue {
+                        name: "component".to_owned(),
+                        value: SerializedValue::PPtr {
+                            file_id: 0,
+                            path_id: 13,
+                        },
+                    },
+                ])]),
+            }]),
+            ..source_payload.clone()
+        };
+        let wrapper_overlay = WorkspaceGameObjectComponentListOverlay {
+            source_slots: vec![WorkspaceSourceGameObjectComponentSlot {
+                source_array_index: 0,
+                file_id: 0,
+                path_id: 13,
+                target: SceneRelationshipTarget::LocalObject { object_index: 4 },
+            }],
+            generated_component: WorkspaceGeneratedComponentAddition {
+                appended_index: 1,
+                ..generated_component
+            },
+            ..overlay.clone()
+        };
+        let wrapper_edited = materialize_game_object_component_append(
+            &wrapper_payload,
+            &wrapper_overlay,
+            3,
+            None,
+            2,
+        )
+        .unwrap();
+        assert_eq!(
+            wrapper_edited
+                .root
+                .unique_field_in_base_chain("m_Component")
+                .unwrap()
+                .unwrap()
+                .array_elements()
+                .unwrap()[1]
+                .unique_field("component")
+                .unwrap()
+                .unwrap()
+                .pptr(),
+            Some((3, generated_component.component_asset.path_id))
+        );
+    }
+
+    #[test]
+    fn planned_materialization_uses_only_assigned_source_dependency_file_ids() {
+        let game_object = WorkspaceSceneObjectIdentity {
+            file_index: 3,
+            object_index: 1,
+            path_id: 12,
+            class_id: Some(1),
+        };
+        let generated_component = WorkspaceGeneratedComponentAddition {
+            game_object,
+            component_class_id: 4,
+            appended_index: 1,
+            component_asset: WorkspaceProcessedAssetIdentity {
+                collection_index: 5,
+                path_id: 201,
+                class_id: 4,
+            },
+        };
+        let overlay = WorkspaceGameObjectComponentListOverlay {
+            game_object,
+            source_slots: vec![WorkspaceSourceGameObjectComponentSlot {
+                source_array_index: 0,
+                file_id: 0,
+                path_id: 0,
+                target: SceneRelationshipTarget::Null,
+            }],
+            generated_component,
+        };
+        let source_payload = ParsedObjectPayload {
+            object_index: game_object.object_index,
+            path_id: game_object.path_id,
+            type_name: "GameObject".to_owned(),
+            root: SerializedValue::Struct(vec![SerializedFieldValue {
+                name: "m_Component".to_owned(),
+                value: SerializedValue::Array(vec![SerializedValue::PPtr {
+                    file_id: 0,
+                    path_id: 0,
+                }]),
+            }]),
+            consumed_bytes: 12,
+            trailing_bytes: Vec::new(),
+            allocated_bytes: 32,
+        };
+        let mut plan = empty_plan();
+        plan.source_dependency_appends
+            .push(WorkspaceSourceCollectionDependencyAppend {
+                source_file_index: game_object.file_index,
+                target_collection:
+                    WorkspaceSourceDependencyAppendTarget::PrefabProcessedCollection {
+                        collection_index: generated_component.component_asset.collection_index,
+                    },
+                pointer_field: WorkspaceSourceDependencyPointerField::GameObjectComponent,
+                first_source_owner: game_object,
+                target_asset: Some(generated_component.component_asset),
+                target_animator_state_machine: None,
+                file_id: Some(7),
+            });
+
+        let edited = materialize_planned_game_object_component_append(
+            &plan,
+            &source_payload,
+            &overlay,
+            None,
+            2,
+        )
+        .unwrap();
+        assert_eq!(
+            edited
+                .root
+                .unique_field_in_base_chain("m_Component")
+                .unwrap()
+                .unwrap()
+                .array_elements()
+                .unwrap()[1]
+                .pptr(),
+            Some((7, 201))
+        );
+
+        plan.source_dependency_appends[0].file_id = None;
+        let deferred = materialize_planned_game_object_component_append(
+            &plan,
+            &source_payload,
+            &overlay,
+            None,
+            2,
+        )
+        .unwrap_err();
+        assert!(deferred
+            .to_string()
+            .contains("FileID is deferred or unavailable"));
+    }
+
+    #[test]
+    fn requires_a_typed_template_for_empty_component_arrays_and_checks_limits() {
+        let game_object = WorkspaceSceneObjectIdentity {
+            file_index: 1,
+            object_index: 0,
+            path_id: 22,
+            class_id: Some(1),
+        };
+        let overlay = WorkspaceGameObjectComponentListOverlay {
+            game_object,
+            source_slots: Vec::new(),
+            generated_component: WorkspaceGeneratedComponentAddition {
+                game_object,
+                component_class_id: 4,
+                appended_index: 0,
+                component_asset: WorkspaceProcessedAssetIdentity {
+                    collection_index: 2,
+                    path_id: 1,
+                    class_id: 4,
+                },
+            },
+        };
+        let payload = ParsedObjectPayload {
+            object_index: 0,
+            path_id: 22,
+            type_name: "GameObject".to_owned(),
+            root: SerializedValue::Struct(vec![SerializedFieldValue {
+                name: "m_Component".to_owned(),
+                value: SerializedValue::Array(Vec::new()),
+            }]),
+            consumed_bytes: 0,
+            trailing_bytes: Vec::new(),
+            allocated_bytes: 0,
+        };
+        let missing_template =
+            materialize_game_object_component_append(&payload, &overlay, 1, None, 1).unwrap_err();
+        assert!(missing_template
+            .to_string()
+            .contains("TypeTree-derived element template"));
+
+        let too_many = materialize_game_object_component_append(
+            &payload,
+            &overlay,
+            1,
+            Some(&SerializedValue::PPtr {
+                file_id: 0,
+                path_id: 0,
+            }),
+            0,
+        )
+        .unwrap_err();
+        assert!(too_many.to_string().contains("exceeding the limit of 0"));
+        assert_eq!(
+            payload
+                .root
+                .unique_field_in_base_chain("m_Component")
+                .unwrap()
+                .unwrap()
+                .array_elements()
+                .unwrap()
+                .len(),
+            0
         );
     }
 }
