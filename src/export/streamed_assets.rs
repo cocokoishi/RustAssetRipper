@@ -27,12 +27,14 @@ pub enum StreamedYamlAssetKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StreamedYamlAssetLimits {
     pub max_inline_bytes: usize,
+    pub max_source_value_copy_bytes: usize,
 }
 
 impl Default for StreamedYamlAssetLimits {
     fn default() -> Self {
         Self {
             max_inline_bytes: STREAMED_CONTENT_LIMIT,
+            max_source_value_copy_bytes: STREAMED_CONTENT_LIMIT,
         }
     }
 }
@@ -89,6 +91,10 @@ pub enum StreamedYamlAssetError {
         size: usize,
         limit: usize,
     },
+    SourceValueCopyLimitExceeded {
+        size: usize,
+        limit: usize,
+    },
     AllocationFailed {
         requested: usize,
     },
@@ -140,6 +146,10 @@ impl Display for StreamedYamlAssetError {
             Self::InlineByteLimitExceeded { size, limit } => write!(
                 formatter,
                 "streamed YAML content has {size} bytes, exceeding inline limit {limit}"
+            ),
+            Self::SourceValueCopyLimitExceeded { size, limit } => write!(
+                formatter,
+                "decoded streamed asset needs an estimated {size}-byte temporary value copy, exceeding limit {limit}"
             ),
             Self::AllocationFailed { requested } => write!(
                 formatter,
@@ -374,6 +384,14 @@ fn find_stream_field(
     asset_kind: StreamedYamlAssetKind,
 ) -> Result<Option<&'static str>, StreamedYamlAssetError> {
     unique_field_name(root, stream_field_names(asset_kind), "StreamingInfo")
+}
+
+/// Checks whether a supported streamed-resource field exists without copying the decoded payload.
+pub fn has_streamed_yaml_asset_field(
+    root: &SerializedValue,
+    asset_kind: StreamedYamlAssetKind,
+) -> Result<bool, StreamedYamlAssetError> {
+    find_stream_field(root, asset_kind).map(|field| field.is_some())
 }
 
 fn unique_field_name(
@@ -689,7 +707,8 @@ mod tests {
                 StreamedYamlAssetKind::ImageTexture,
                 Some(b"abc"),
                 StreamedYamlAssetLimits {
-                    max_inline_bytes: 2
+                    max_inline_bytes: 2,
+                    ..StreamedYamlAssetLimits::default()
                 },
             ),
             Err(StreamedYamlAssetError::InlineByteLimitExceeded { size: 3, limit: 2 })
