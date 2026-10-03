@@ -418,3 +418,11 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Verification passed: 312 library and 10 CLI tests, warnings-denied Clippy, format check, 1,449-file baseline verifier, and `git diff --check`.
 - Still incomplete: serialize the AnimatorController layer PPtrs and ordered source dependency-table edits; write the typed GameObject component overlay; finish generated Prefab assets and export. No end-to-end source TypeTree sample was used for this synthetic inventory, and Phase 1 remains open.
 - Next: represent the AnimatorController source append as a first-class ordered dependency operation tied to its first generated StateMachine target, then materialize source SerializedValue PPtrs and dependency tables without dropping existing entries.
+
+## First-class AnimatorController source dependency append
+
+- Current phase: Phase 1; gate not passed. This increment follows pushed revision `a0da81f13288e12c7576ef81705533ddc5cda8d7`. Only `cocokoishi/RustAssetRipper` is an authorized cloud write target; the local AssetRipper baseline remains read-only. No UABEA or user AssetBundle content was accessed.
+- The inventory now retains the source AnimatorController identity, source layer index 0, and the referenced `StateMachineArray` index. A typed AnimatorController source dependency append is emitted before LightingData and Prefab requests, so source FileIDs follow the exact modeled processor order.
+- This target is still symbolic: generated AnimatorController assets and their allocation sequence are not modeled, so no output StateMachine PathID or serializable source PPtr is claimed.
+- Synthetic tests cover direct and `Data`-wrapped LayerConstant values, current and historical array names, valid/invalid indexes, and target identity plus FileIDs 4/5/6 after three external identifiers. Verification passed: 312 library and 10 CLI tests, warnings-denied Clippy, format check, 1,449-file baseline verifier, and `git diff --check`.
+- Next: inspect the baseline's complete `AnimatorStateMachineContext`/`VirtualAnimationFactory` allocation order; model enough of the generated AnimatorController collection to resolve this symbolic target; then serialize the source dependency table and layer PPtr while retaining the typed component overlay work.
