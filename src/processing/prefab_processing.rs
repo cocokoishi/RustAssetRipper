@@ -566,6 +566,15 @@ pub struct WorkspaceProcessedPrefabAsset {
     pub kind: WorkspaceProcessedPrefabAssetKind,
 }
 
+/// Source `GameObjectExtensions.AddComponent` insertion for a generated Transform.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorkspaceGeneratedComponentAddition {
+    pub game_object: WorkspaceSceneObjectIdentity,
+    pub component_class_id: i32,
+    pub appended_index: usize,
+    pub component_asset: WorkspaceProcessedAssetIdentity,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorkspaceProcessedAssetCollectionPlan {
     pub collection_index: usize,
@@ -579,6 +588,7 @@ pub struct WorkspaceProcessedAssetCollectionPlan {
 pub struct WorkspaceProcessedPrefabAssetPlanLimits {
     pub max_collections: usize,
     pub max_assets: usize,
+    pub max_component_additions: usize,
     pub max_missing_transform_candidates: usize,
     pub max_total_collection_name_bytes: usize,
 }
@@ -588,6 +598,7 @@ impl Default for WorkspaceProcessedPrefabAssetPlanLimits {
         Self {
             max_collections: 1_000_000,
             max_assets: 20_000_000,
+            max_component_additions: 20_000_000,
             max_missing_transform_candidates: 20_000_000,
             max_total_collection_name_bytes: 64 * 1024 * 1024,
         }
@@ -603,6 +614,7 @@ pub struct WorkspaceProcessedPrefabAssetPlan {
     complete: bool,
     incomplete_reason: Option<String>,
     collections: Vec<WorkspaceProcessedAssetCollectionPlan>,
+    component_additions: Vec<WorkspaceGeneratedComponentAddition>,
     asset_count: usize,
     total_collection_name_bytes: usize,
 }
@@ -618,6 +630,10 @@ impl WorkspaceProcessedPrefabAssetPlan {
 
     pub fn collections(&self) -> &[WorkspaceProcessedAssetCollectionPlan] {
         &self.collections
+    }
+
+    pub fn component_additions(&self) -> &[WorkspaceGeneratedComponentAddition] {
+        &self.component_additions
     }
 
     pub fn asset_count(&self) -> usize {
@@ -749,6 +765,7 @@ pub fn plan_workspace_processed_prefab_assets(
         complete: true,
         incomplete_reason: None,
         collections: Vec::new(),
+        component_additions: Vec::new(),
         asset_count: 0,
         total_collection_name_bytes: 0,
     };
@@ -812,7 +829,7 @@ pub fn plan_workspace_processed_prefab_assets(
         } else {
             missing_prefab_transforms
         };
-        add_processed_asset(
+        let transform_asset = add_processed_asset(
             &mut plan,
             collection_index,
             4,
@@ -822,6 +839,40 @@ pub fn plan_workspace_processed_prefab_assets(
             },
             limits,
         )?;
+        let graph = graphs_by_file.get(&key.0).copied().ok_or_else(|| {
+            processed_asset_operation_error(format!(
+                "missing-Transform GameObject collection {} disappeared during allocation",
+                key.0
+            ))
+        })?;
+        let appended_index = graph
+            .game_object_component_slot_count(game_object)
+            .map_err(|error| processed_asset_operation_error(error.to_string()))?;
+        let requested_additions = plan.component_additions.len().checked_add(1).ok_or(
+            WorkspacePrefabProcessingError::CountOverflow {
+                resource: "generated GameObject component additions",
+            },
+        )?;
+        if requested_additions > limits.max_component_additions {
+            return Err(WorkspacePrefabProcessingError::ResourceLimitExceeded {
+                resource: "generated GameObject component additions",
+                requested: requested_additions,
+                limit: limits.max_component_additions,
+            });
+        }
+        plan.component_additions.try_reserve(1).map_err(|_| {
+            WorkspacePrefabProcessingError::AllocationFailed {
+                resource: "generated GameObject component additions",
+                requested: requested_additions,
+            }
+        })?;
+        plan.component_additions
+            .push(WorkspaceGeneratedComponentAddition {
+                game_object,
+                component_class_id: 4,
+                appended_index,
+                component_asset: transform_asset,
+            });
     }
     if let Some((file_index, object_index)) = missing_transforms.keys().copied().min() {
         return Err(processed_asset_operation_error(format!(
@@ -902,6 +953,7 @@ fn incomplete_processed_asset_plan(reason: &str) -> WorkspaceProcessedPrefabAsse
         complete: false,
         incomplete_reason: Some(reason.to_owned()),
         collections: Vec::new(),
+        component_additions: Vec::new(),
         asset_count: 0,
         total_collection_name_bytes: 0,
     }

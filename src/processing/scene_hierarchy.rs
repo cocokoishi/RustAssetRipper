@@ -955,6 +955,44 @@ impl WorkspaceSceneCollectionHierarchy {
             .map(|&relationship_index| &self.relationships[relationship_index]))
     }
 
+    /// Returns the serialized GameObject component-array length for a verified source identity.
+    pub fn game_object_component_slot_count(
+        &self,
+        game_object: WorkspaceSceneObjectIdentity,
+    ) -> Result<usize, WorkspaceSceneHierarchyError> {
+        if game_object.file_index != self.collection_file_index
+            || game_object.class_id != Some(GAME_OBJECT_CLASS_ID)
+        {
+            return Err(WorkspaceSceneHierarchyError::InvalidSourceIdentity {
+                file_index: game_object.file_index,
+                object_index: game_object.object_index,
+                path_id: game_object.path_id,
+            });
+        }
+        let hierarchy_index = self
+            .game_object_hierarchies
+            .binary_search_by_key(&game_object.object_index, |hierarchy| {
+                hierarchy.game_object.object_index
+            })
+            .map_err(
+                |_| WorkspaceSceneHierarchyError::MissingGameObjectHierarchy {
+                    file_index: game_object.file_index,
+                    object_index: game_object.object_index,
+                },
+            )?;
+        let hierarchy = &self.game_object_hierarchies[hierarchy_index];
+        if hierarchy.game_object != game_object {
+            return Err(WorkspaceSceneHierarchyError::InvalidSourceIdentity {
+                file_index: game_object.file_index,
+                object_index: game_object.object_index,
+                path_id: game_object.path_id,
+            });
+        }
+        Ok(self
+            .game_object_component_relationships(hierarchy_index)?
+            .count())
+    }
+
     pub fn transform_hierarchies(&self) -> &[WorkspaceSceneTransformHierarchy] {
         &self.transform_hierarchies
     }
@@ -2749,6 +2787,10 @@ pub enum WorkspaceSceneHierarchyError {
         hierarchy_index: usize,
         hierarchy_count: usize,
     },
+    MissingGameObjectHierarchy {
+        file_index: usize,
+        object_index: usize,
+    },
     InvalidGameObjectComponentRelationshipRange {
         hierarchy_index: usize,
         start: usize,
@@ -2909,6 +2951,13 @@ impl Display for WorkspaceSceneHierarchyError {
             } => write!(
                 f,
                 "GameObject hierarchy index {hierarchy_index} is outside {hierarchy_count} entries"
+            ),
+            Self::MissingGameObjectHierarchy {
+                file_index,
+                object_index,
+            } => write!(
+                f,
+                "collection {file_index} has no component list for GameObject {object_index}"
             ),
             Self::InvalidGameObjectComponentRelationshipRange {
                 hierarchy_index,
@@ -5621,13 +5670,19 @@ mod tests {
         let collection = WorkspaceSceneCollectionHierarchy {
             collection_file_index: 0,
             scene_objects: Vec::new(),
-            relationships: Vec::new(),
+            relationships: vec![relationship(
+                game_object,
+                SceneRelationshipKind::GameObjectComponent,
+                "m_Component[0]",
+                0,
+                SceneRelationshipTarget::Null,
+            )],
             game_object_hierarchies: vec![WorkspaceSceneGameObjectHierarchy {
                 game_object,
                 component_relationship_start: 0,
-                component_relationship_end: 0,
+                component_relationship_end: 1,
             }],
-            game_object_component_relationship_indices: Vec::new(),
+            game_object_component_relationship_indices: vec![0],
             prefab_root_relationship_index: Vec::new(),
             transform_hierarchies: Vec::new(),
             transform_parent_relationship_indices: Vec::new(),
@@ -5689,6 +5744,15 @@ mod tests {
             } if actual == game_object
                 && default_values == default_workspace_generated_transform_values()
         ));
+        assert_eq!(allocations.component_additions().len(), 1);
+        let component_addition = allocations.component_additions()[0];
+        assert_eq!(component_addition.game_object, game_object);
+        assert_eq!(component_addition.component_class_id, 4);
+        assert_eq!(component_addition.appended_index, 1);
+        assert_eq!(
+            component_addition.component_asset,
+            missing_transform_collection.assets[0].identity
+        );
         assert_eq!(allocations.collections()[1].assets[0].identity.path_id, 1);
         assert_eq!(allocations.collections()[0].assets[0].identity.path_id, 1);
     }
