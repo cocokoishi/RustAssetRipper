@@ -8,8 +8,10 @@ use std::str;
 use crate::io::filesystem::VirtualFileSystem;
 use crate::io::platform_structure::PlatformResourceProvider;
 use crate::processing::prefab_processing::{
-    WorkspaceGeneratedConstructorPointer, WorkspaceGeneratedPointerField,
-    WorkspaceGeneratedTransformPayload,
+    materialize_planned_generated_transform_payload, WorkspaceGeneratedConstructorPointer,
+    WorkspaceGeneratedPointerField, WorkspaceGeneratedTransformPayload,
+    WorkspaceProcessedCollectionKind, WorkspaceProcessedPrefabAssetKind,
+    WorkspaceProcessedPrefabAssetPlan,
 };
 use crate::processing::scene_naming::SceneUnityVersion;
 use crate::resource::{
@@ -17,7 +19,7 @@ use crate::resource::{
     StreamedResourceContentLimits, StreamedResourceContentResolution,
 };
 use crate::serialized_file::metadata::SerializedFileMetadata;
-use crate::serialized_file::object::ObjectEncodeLimits;
+use crate::serialized_file::object::{ObjectDefaultValueLimits, ObjectEncodeLimits};
 use crate::serialized_file::object_workspace::WorkspaceObject;
 use crate::serialized_file::reference_graph::{MultiFilePPtrResolution, MultiFileReferenceGraph};
 use crate::serialized_file::workspace::SerializedFileWorkspace;
@@ -97,6 +99,35 @@ pub struct WorkspaceStreamedYamlResourceContext<'a, 'provider> {
     pub staging_limits: StreamedYamlAssetLimits,
 }
 
+/// Type metadata and processed-asset plan needed to execute generated Transform assignments.
+#[derive(Clone, Copy)]
+pub struct WorkspaceGeneratedTransformYamlContext<'a> {
+    pub processed_assets: &'a WorkspaceProcessedPrefabAssetPlan,
+    pub scene_index: usize,
+    pub metadata: &'a SerializedFileMetadata,
+    pub transform_type_index: usize,
+    pub default_value_limits: ObjectDefaultValueLimits,
+    pub encode_limits: ObjectEncodeLimits,
+}
+
+impl<'a> WorkspaceGeneratedTransformYamlContext<'a> {
+    pub fn new(
+        processed_assets: &'a WorkspaceProcessedPrefabAssetPlan,
+        scene_index: usize,
+        metadata: &'a SerializedFileMetadata,
+        transform_type_index: usize,
+    ) -> Self {
+        Self {
+            processed_assets,
+            scene_index,
+            metadata,
+            transform_type_index,
+            default_value_limits: ObjectDefaultValueLimits::default(),
+            encode_limits: ObjectEncodeLimits::default(),
+        }
+    }
+}
+
 /// Execute one ordered Scene or Prefab YAML collection using workspace-decoded source objects.
 ///
 /// Assignment order is preserved exactly. Callers provide the baseline `ExportableAssets` order;
@@ -122,6 +153,7 @@ pub fn workspace_assignments_to_unity_yaml<A: UnityYamlCollectionAssignment>(
         current_collection_index,
         missing_reference_guid,
         limits,
+        None,
         None,
     )
 }
@@ -151,6 +183,7 @@ pub fn workspace_assignments_to_unity_yaml_with_streamed_resources<
         missing_reference_guid,
         limits,
         Some(streamed_resources),
+        None,
     )
 }
 
@@ -165,6 +198,7 @@ fn workspace_assignments_to_unity_yaml_with_context<A: UnityYamlCollectionAssign
     missing_reference_guid: Option<[u8; 16]>,
     limits: UnityYamlWorkspaceCollectionLimits,
     streamed_resources: Option<&WorkspaceStreamedYamlResourceContext<'_, '_>>,
+    generated_transforms: Option<&WorkspaceGeneratedTransformYamlContext<'_>>,
 ) -> Result<String, UnityYamlWorkspaceCollectionError> {
     let document_count = assignments_in_yaml_order.len();
     if document_count > limits.max_documents {
@@ -211,36 +245,62 @@ fn workspace_assignments_to_unity_yaml_with_context<A: UnityYamlCollectionAssign
                 file_id,
             });
         }
-        let ExportAssetCollectionIdentity::SerializedFile { file_index } = asset.collection else {
-            return Err(
-                UnityYamlWorkspaceCollectionError::ProcessedAssetRequiresGeneratedWalker {
-                    assignment_index,
+        let document = match asset.collection {
+            ExportAssetCollectionIdentity::SerializedFile { file_index } => {
+                let object = objects.get(file_index, asset.object_index).ok_or(
+                    UnityYamlWorkspaceCollectionError::WorkspaceObjectMissing {
+                        assignment_index,
+                        asset,
+                    },
+                )?;
+                workspace_object_to_unity_yaml_document_with_context(
+                    workspace,
+                    reference_graph,
+                    pointer_map,
+                    object,
                     asset,
-                },
-            );
+                    file_id,
+                    current_collection_index,
+                    missing_reference_guid,
+                    limits.object_conversion,
+                    streamed_resources,
+                )
+                .map_err(|source| {
+                    UnityYamlWorkspaceCollectionError::ObjectExport {
+                        assignment_index,
+                        source: Box::new(source),
+                    }
+                })?
+            }
+            ExportAssetCollectionIdentity::ProcessedCollection { .. } => {
+                let Some(generated_transforms) = generated_transforms else {
+                    return Err(
+                        UnityYamlWorkspaceCollectionError::ProcessedAssetRequiresGeneratedWalker {
+                            assignment_index,
+                            asset,
+                        },
+                    );
+                };
+                let document = workspace_generated_transform_assignment_to_unity_yaml_document(
+                    workspace,
+                    reference_graph,
+                    pointer_map,
+                    asset,
+                    file_id,
+                    current_collection_index,
+                    missing_reference_guid,
+                    limits.object_conversion,
+                    generated_transforms,
+                )
+                .map_err(|source| {
+                    UnityYamlWorkspaceCollectionError::ObjectExport {
+                        assignment_index,
+                        source: Box::new(source),
+                    }
+                })?;
+                Some(document)
+            }
         };
-        let object = objects.get(file_index, asset.object_index).ok_or(
-            UnityYamlWorkspaceCollectionError::WorkspaceObjectMissing {
-                assignment_index,
-                asset,
-            },
-        )?;
-        let document = workspace_object_to_unity_yaml_document_with_context(
-            workspace,
-            reference_graph,
-            pointer_map,
-            object,
-            asset,
-            file_id,
-            current_collection_index,
-            missing_reference_guid,
-            limits.object_conversion,
-            streamed_resources,
-        )
-        .map_err(|source| UnityYamlWorkspaceCollectionError::ObjectExport {
-            assignment_index,
-            source: Box::new(source),
-        })?;
         if let Some(document) = document {
             documents.push(document);
         }
@@ -248,6 +308,160 @@ fn workspace_assignments_to_unity_yaml_with_context<A: UnityYamlCollectionAssign
 
     write_unity_yaml_documents(&documents, limits.yaml_write)
         .map_err(UnityYamlWorkspaceCollectionError::YamlWrite)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn workspace_generated_transform_assignment_to_unity_yaml_document(
+    workspace: &SerializedFileWorkspace,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+    pointer_map: &ProjectExportPointerMap,
+    source: ExportAssetIdentity,
+    file_id: i64,
+    current_collection_index: usize,
+    missing_reference_guid: Option<[u8; 16]>,
+    limits: UnityYamlObjectConversionLimits,
+    context: &WorkspaceGeneratedTransformYamlContext<'_>,
+) -> Result<UnityYamlDocument, UnityYamlWorkspaceExportError> {
+    let invariant_error = |message: String| {
+        UnityYamlWorkspaceExportError::GeneratedTransformInvariant { source, message }
+    };
+    if !context.processed_assets.is_complete() {
+        return Err(invariant_error(format!(
+            "processed asset plan is incomplete: {}",
+            context
+                .processed_assets
+                .incomplete_reason()
+                .unwrap_or("no reason was recorded")
+        )));
+    }
+    let ExportAssetCollectionIdentity::ProcessedCollection { collection_index } = source.collection
+    else {
+        return Err(invariant_error(
+            "generated Transform assignment has SerializedFile collection scope".to_owned(),
+        ));
+    };
+    let collection = context
+        .processed_assets
+        .collections()
+        .get(collection_index)
+        .ok_or_else(|| {
+            invariant_error(format!(
+                "processed collection {collection_index} is absent from the asset plan"
+            ))
+        })?;
+    if collection.collection_index != collection_index
+        || collection.kind
+            != (WorkspaceProcessedCollectionKind::SceneGeneratedAssets {
+                scene_index: context.scene_index,
+            })
+    {
+        return Err(invariant_error(format!(
+            "processed collection {collection_index} is not the generated collection for Scene {}",
+            context.scene_index
+        )));
+    }
+    let asset = collection.assets.get(source.object_index).ok_or_else(|| {
+        invariant_error(format!(
+            "processed collection {collection_index} has no planned asset at object index {}",
+            source.object_index
+        ))
+    })?;
+    if asset.identity.collection_index != collection_index
+        || asset.identity.path_id != source.path_id
+        || asset.identity.class_id != source.class_id
+    {
+        return Err(invariant_error(
+            "processed asset identity disagrees with the YAML assignment".to_owned(),
+        ));
+    }
+    let WorkspaceProcessedPrefabAssetKind::GeneratedTransform { game_object, .. } = &asset.kind
+    else {
+        return Err(invariant_error(format!(
+            "processed asset {}:{} is not a generated Transform",
+            collection_index, source.object_index
+        )));
+    };
+    let mut constructor_pointers = context
+        .processed_assets
+        .constructor_pointers()
+        .iter()
+        .filter(|pointer| {
+            pointer.source_asset == asset.identity
+                && pointer.field == WorkspaceGeneratedPointerField::TransformGameObject
+        });
+    let constructor_pointer = constructor_pointers.next().copied().ok_or_else(|| {
+        invariant_error("planned Transform has no constructor GameObject PPtr".to_owned())
+    })?;
+    if constructor_pointers.next().is_some() {
+        return Err(invariant_error(
+            "planned Transform has duplicate constructor GameObject PPtrs".to_owned(),
+        ));
+    }
+    if constructor_pointer.target != *game_object {
+        return Err(invariant_error(
+            "constructor PPtr target disagrees with the generated Transform plan".to_owned(),
+        ));
+    }
+
+    let target_file = workspace
+        .files()
+        .get(game_object.file_index)
+        .ok_or_else(|| {
+            invariant_error(format!(
+                "planned GameObject file {} is absent from the workspace",
+                game_object.file_index
+            ))
+        })?;
+    let target_object = target_file
+        .metadata
+        .objects
+        .get(game_object.object_index)
+        .ok_or_else(|| {
+            invariant_error(format!(
+                "planned GameObject object {} is absent from file {}",
+                game_object.object_index, game_object.file_index
+            ))
+        })?;
+    if target_object.path_id != game_object.path_id || target_object.raw_type_id != 1 {
+        return Err(invariant_error(
+            "planned GameObject identity disagrees with its SerializedFile object record"
+                .to_owned(),
+        ));
+    }
+    let reference_identity = reference_graph
+        .object_identity(game_object.file_index, game_object.object_index)
+        .ok_or_else(|| {
+            invariant_error("reference graph has no planned GameObject identity".to_owned())
+        })?;
+    if reference_identity.path_id != game_object.path_id
+        || reference_graph.object_class_id(game_object.file_index, game_object.object_index)
+            != Some(1)
+    {
+        return Err(invariant_error(
+            "planned GameObject identity disagrees with the reference graph".to_owned(),
+        ));
+    }
+
+    let payload = materialize_planned_generated_transform_payload(
+        context.processed_assets,
+        asset.identity,
+        context.metadata,
+        context.transform_type_index,
+        context.default_value_limits,
+        context.encode_limits,
+    )
+    .map_err(|error| invariant_error(error.to_string()))?;
+    generated_transform_payload_to_unity_yaml_document(
+        &payload,
+        context.metadata,
+        source,
+        file_id,
+        constructor_pointer,
+        pointer_map,
+        current_collection_index,
+        missing_reference_guid,
+        limits,
+    )
 }
 
 /// Order hierarchy-listed Scene assignments using the baseline manager-first stable comparator,
@@ -312,6 +526,75 @@ pub fn workspace_scene_assignments_to_unity_yaml_with_streamed_resources(
         missing_reference_guid,
         limits,
         streamed_resources,
+    )
+}
+
+/// Order and export Scene YAML assignments with the planned generated Transform walker.
+#[allow(clippy::too_many_arguments)]
+pub fn workspace_scene_assignments_to_unity_yaml_with_generated_transforms(
+    workspace: &SerializedFileWorkspace,
+    objects: &crate::serialized_file::object_workspace::ObjectWorkspace,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+    pointer_map: &ProjectExportPointerMap,
+    assignments_in_hierarchy_order: &[SceneExportIdAssignment],
+    current_collection_index: usize,
+    missing_reference_guid: Option<[u8; 16]>,
+    limits: UnityYamlWorkspaceCollectionLimits,
+    generated_transforms: &WorkspaceGeneratedTransformYamlContext<'_>,
+) -> Result<String, UnityYamlWorkspaceCollectionError> {
+    let ordered_assignments = order_scene_yaml_assignments(
+        assignments_in_hierarchy_order,
+        SceneYamlAssetOrderLimits {
+            max_assets: limits.max_documents,
+        },
+    )
+    .map_err(UnityYamlWorkspaceCollectionError::SceneOrder)?;
+    workspace_assignments_to_unity_yaml_with_context(
+        workspace,
+        objects,
+        reference_graph,
+        pointer_map,
+        &ordered_assignments,
+        current_collection_index,
+        missing_reference_guid,
+        limits,
+        None,
+        Some(generated_transforms),
+    )
+}
+
+/// Scene YAML export with both streamed asset staging and generated Transform support.
+#[allow(clippy::too_many_arguments)]
+pub fn workspace_scene_assignments_to_unity_yaml_with_streamed_resources_and_generated_transforms(
+    workspace: &SerializedFileWorkspace,
+    objects: &crate::serialized_file::object_workspace::ObjectWorkspace,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+    pointer_map: &ProjectExportPointerMap,
+    assignments_in_hierarchy_order: &[SceneExportIdAssignment],
+    current_collection_index: usize,
+    missing_reference_guid: Option<[u8; 16]>,
+    limits: UnityYamlWorkspaceCollectionLimits,
+    streamed_resources: &WorkspaceStreamedYamlResourceContext<'_, '_>,
+    generated_transforms: &WorkspaceGeneratedTransformYamlContext<'_>,
+) -> Result<String, UnityYamlWorkspaceCollectionError> {
+    let ordered_assignments = order_scene_yaml_assignments(
+        assignments_in_hierarchy_order,
+        SceneYamlAssetOrderLimits {
+            max_assets: limits.max_documents,
+        },
+    )
+    .map_err(UnityYamlWorkspaceCollectionError::SceneOrder)?;
+    workspace_assignments_to_unity_yaml_with_context(
+        workspace,
+        objects,
+        reference_graph,
+        pointer_map,
+        &ordered_assignments,
+        current_collection_index,
+        missing_reference_guid,
+        limits,
+        Some(streamed_resources),
+        Some(generated_transforms),
     )
 }
 
@@ -1527,6 +1810,8 @@ mod tests {
     use crate::resource::{ExplicitRootResourceInput, RootResourceCatalogLimits};
     use crate::scheme::{SchemeReader, SchemeReaderLimits};
     use crate::serialized_file::file::SerializedFile;
+    use crate::serialized_file::metadata::{SerializedType, TypeTree, TypeTreeNode};
+    use crate::serialized_file::metadata_prefix::SerializedFileMetadataPrefix;
     use crate::serialized_file::object_workspace::{ObjectWorkspace, ObjectWorkspaceLimits};
     use crate::serialized_file::reference_graph::{
         MultiFileReferenceGraph, MultiFileReferenceGraphLimits,
@@ -1801,6 +2086,25 @@ mod tests {
         files: &[(&str, &[u8])],
         reference_graph: &MultiFileReferenceGraph<'_>,
     ) -> Vec<SceneExportIdAssignment> {
+        let hierarchies = scene_hierarchies_for_workspace(files, reference_graph);
+        crate::export::scene_collection::plan_workspace_scene_export_ids(
+            &hierarchies.scenes()[0],
+            SceneUnityVersion {
+                major: 2019,
+                minor: 4,
+                patch: 0,
+            },
+            crate::processing::scene_hierarchy::WorkspaceSceneHierarchyMembershipLimits::default(),
+            crate::export::scene_collection::SceneHierarchyAssetOrderLimits::default(),
+            crate::export::scene_collection::SceneExportIdPlanLimits::default(),
+        )
+        .unwrap()
+    }
+
+    fn scene_hierarchies_for_workspace(
+        files: &[(&str, &[u8])],
+        reference_graph: &MultiFileReferenceGraph<'_>,
+    ) -> crate::processing::scene_hierarchy::WorkspaceSceneHierarchies {
         let (first_file_name, _) = files.first().unwrap();
         let plan = crate::processing::scene_collections::plan_scene_definition(
             0,
@@ -1858,19 +2162,7 @@ mod tests {
                 .add_collection_graph(file_index, &scene_graph, roots, audit, reference_graph)
                 .unwrap();
         }
-        let hierarchies = hierarchy_builder.finish(&definitions).unwrap();
-        crate::export::scene_collection::plan_workspace_scene_export_ids(
-            &hierarchies.scenes()[0],
-            SceneUnityVersion {
-                major: 2019,
-                minor: 4,
-                patch: 0,
-            },
-            crate::processing::scene_hierarchy::WorkspaceSceneHierarchyMembershipLimits::default(),
-            crate::export::scene_collection::SceneHierarchyAssetOrderLimits::default(),
-            crate::export::scene_collection::SceneExportIdPlanLimits::default(),
-        )
-        .unwrap()
+        hierarchy_builder.finish(&definitions).unwrap()
     }
 
     fn make_game_object_and_transform_file(component_path_id: i64) -> Vec<u8> {
@@ -1938,6 +2230,133 @@ mod tests {
         file.extend_from_slice(&game_object_payload);
         file.extend_from_slice(&transform_payload);
         file
+    }
+
+    fn make_game_object_without_transform_file() -> Vec<u8> {
+        let game_object_tree = [
+            (0, 6, "GameObject", "", -1),
+            (1, 1, "string", "m_Name", -1),
+            (2, 1, "Array", "Array", -1),
+            (3, 1, "int", "size", 4),
+            (3, 1, "char", "data", 1),
+            (1, 1, "bool", "m_IsActive", 1),
+            (1, 1, "vector", "m_Component", -1),
+            (2, 1, "Array", "Array", -1),
+            (3, 1, "int", "size", 4),
+            (3, 1, "ComponentPair", "data", -1),
+            (4, 1, "PPtr<Transform>", "component", 12),
+            (5, 1, "SInt32", "m_FileID", 4),
+            (5, 1, "SInt64", "m_PathID", 8),
+        ];
+        let mut metadata = b"2019.4.0f1\0".to_vec();
+        metadata.extend_from_slice(&0u32.to_le_bytes());
+        metadata.extend_from_slice(&1i32.to_le_bytes());
+        write_type_tree(&mut metadata, 1, &game_object_tree);
+        metadata.extend_from_slice(&0u32.to_le_bytes()); // generation-10 long FileID flag
+        metadata.extend_from_slice(&1i32.to_le_bytes());
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&4i32.to_le_bytes());
+        payload.extend_from_slice(b"Root");
+        payload.push(1); // active GameObject
+        payload.extend_from_slice(&0i32.to_le_bytes()); // empty m_Component array
+        write_object_record(&mut metadata, GAME_OBJECT_PATH_ID, 0, payload.len(), 1, 1);
+        metadata.extend_from_slice(&0i32.to_le_bytes()); // external files
+        metadata.push(0); // user information string
+
+        let data_offset = 20 + metadata.len();
+        let file_size = data_offset + payload.len();
+        let mut file = Vec::with_capacity(file_size);
+        file.extend_from_slice(&(metadata.len() as u32).to_be_bytes());
+        file.extend_from_slice(&(file_size as u32).to_be_bytes());
+        file.extend_from_slice(&10i32.to_be_bytes());
+        file.extend_from_slice(&(data_offset as u32).to_be_bytes());
+        file.push(0);
+        file.extend_from_slice(&[0; 3]);
+        file.extend_from_slice(&metadata);
+        file.extend_from_slice(&payload);
+        file
+    }
+
+    fn generated_transform_metadata() -> SerializedFileMetadata {
+        let node = |level, name: &str, type_name: &str, byte_size| TypeTreeNode {
+            level,
+            version: 1,
+            type_flags: 0,
+            type_string_offset: None,
+            name_string_offset: None,
+            type_name: Some(type_name.to_owned()),
+            name: Some(name.to_owned()),
+            byte_size,
+            index: 0,
+            meta_flags: 0,
+            reference_type_hash: None,
+        };
+        let nodes = vec![
+            node(0, "", "Transform", -1),
+            node(1, "Base", "Component", -1),
+            node(2, "m_GameObject", "PPtr<GameObject>", 12),
+            node(3, "m_FileID", "SInt32", 4),
+            node(3, "m_PathID", "SInt64", 8),
+            node(1, "m_Father", "PPtr<Transform>", 12),
+            node(2, "m_FileID", "SInt32", 4),
+            node(2, "m_PathID", "SInt64", 8),
+            node(1, "m_Children", "vector", -1),
+            node(2, "Array", "Array", -1),
+            node(3, "size", "int", 4),
+            node(3, "data", "PPtr<Transform>", 12),
+            node(4, "m_FileID", "SInt32", 4),
+            node(4, "m_PathID", "SInt64", 8),
+            node(1, "m_RootOrder", "int", 4),
+            node(1, "m_LocalEulerAnglesHint", "Vector3f", -1),
+            node(2, "x", "float", 4),
+            node(2, "y", "float", 4),
+            node(2, "z", "float", 4),
+            node(1, "m_LocalPosition", "Vector3f", -1),
+            node(2, "x", "float", 4),
+            node(2, "y", "float", 4),
+            node(2, "z", "float", 4),
+            node(1, "m_LocalRotation", "Quaternionf", -1),
+            node(2, "x", "float", 4),
+            node(2, "y", "float", 4),
+            node(2, "z", "float", 4),
+            node(2, "w", "float", 4),
+            node(1, "m_LocalScale", "Vector3f", -1),
+            node(2, "x", "float", 4),
+            node(2, "y", "float", 4),
+            node(2, "z", "float", 4),
+        ];
+        SerializedFileMetadata {
+            prefix: SerializedFileMetadataPrefix {
+                metadata_offset: 0,
+                metadata_size: 0,
+                body_endian: crate::io::binary::Endian::Little,
+                unity_version_text: Some("2019.4.31f1".to_owned()),
+                target_platform: Some(0),
+                has_type_tree: true,
+                consumed_bytes: 0,
+            },
+            types: vec![SerializedType {
+                raw_type_id: 4,
+                type_id_for_hash: 4,
+                is_stripped_type: false,
+                script_type_index: -1,
+                script_id: None,
+                old_type_hash: None,
+                type_tree: Some(TypeTree {
+                    nodes,
+                    string_buffer: Vec::new(),
+                }),
+                type_dependencies: Vec::new(),
+            }],
+            long_file_id: None,
+            objects: Vec::new(),
+            script_types: Vec::new(),
+            externals: Vec::new(),
+            reference_types: Vec::new(),
+            user_information: None,
+            trailing_metadata: Vec::new(),
+            consumed_bytes: 0,
+        }
     }
 
     fn make_mesh_renderer_component_file() -> Vec<u8> {
@@ -3258,6 +3677,111 @@ mod tests {
                 }
             )
         ));
+    }
+
+    #[test]
+    fn scene_executor_writes_a_planned_generated_transform_document() {
+        let bytes = make_game_object_without_transform_file();
+        let (filesystem, workspace) = load_workspace_bytes(&bytes);
+        let objects = ObjectWorkspace::load_from_vfs(
+            &filesystem,
+            &workspace,
+            ObjectWorkspaceLimits::default(),
+        )
+        .unwrap();
+        assert!(objects.report().is_complete());
+        let reference_graph = workspace
+            .reference_graph(MultiFileReferenceGraphLimits::default())
+            .unwrap();
+        assert!(reference_graph.is_complete());
+
+        let hierarchies =
+            scene_hierarchies_for_workspace(&[("main.assets", &bytes)], &reference_graph);
+        let processing = crate::processing::prefab_processing::plan_workspace_prefab_processing(
+            &hierarchies,
+            &[0],
+            Default::default(),
+        )
+        .unwrap();
+        assert!(processing.is_complete());
+        let processed_assets =
+            crate::processing::prefab_processing::plan_workspace_processed_prefab_assets(
+                &hierarchies,
+                &processing,
+                &[0],
+                &Default::default(),
+                crate::processing::prefab_processing::WorkspaceProcessedPrefabAssetPlanLimits::default(),
+            )
+            .unwrap();
+        assert!(
+            processed_assets.is_complete(),
+            "{:?}",
+            processed_assets.incomplete_reason()
+        );
+
+        let assignments = crate::export::scene_collection::
+            plan_workspace_scene_export_ids_with_processed_assets(
+                &hierarchies.scenes()[0],
+                0,
+                &processed_assets,
+                SceneUnityVersion {
+                    major: 2019,
+                    minor: 4,
+                    patch: 0,
+                },
+                crate::processing::scene_hierarchy::WorkspaceSceneHierarchyMembershipLimits::default(),
+                crate::export::scene_collection::SceneHierarchyAssetOrderLimits::default(),
+                crate::export::scene_collection::SceneExportIdPlanLimits::default(),
+            )
+            .unwrap();
+        let generated_transform = assignments
+            .iter()
+            .find(|assignment| {
+                assignment.asset.class_id == 4
+                    && matches!(
+                        assignment.asset.collection,
+                        ExportAssetCollectionIdentity::ProcessedCollection { .. }
+                    )
+            })
+            .copied()
+            .expect("scene export planner should include the synthesized Transform");
+
+        let mut pointer_map_builder =
+            ProjectExportPointerMapBuilder::new(ExportPointerMapLimits::default());
+        pointer_map_builder
+            .register_scene_collection(COLLECTION_INDEX, [0x71; 16], &assignments)
+            .unwrap();
+        let pointer_map = pointer_map_builder.build().unwrap();
+        let transform_metadata = generated_transform_metadata();
+        let generated_context = WorkspaceGeneratedTransformYamlContext::new(
+            &processed_assets,
+            0,
+            &transform_metadata,
+            0,
+        );
+        let output = workspace_scene_assignments_to_unity_yaml_with_generated_transforms(
+            &workspace,
+            &objects,
+            &reference_graph,
+            &pointer_map,
+            &[generated_transform],
+            COLLECTION_INDEX,
+            None,
+            UnityYamlWorkspaceCollectionLimits::default(),
+            &generated_context,
+        )
+        .unwrap();
+
+        assert!(output.contains(&format!("--- !u!4 &{}", generated_transform.file_id)));
+        assert!(output.contains("m_GameObject: {fileID: 42}"), "{output}");
+        assert!(
+            !output.contains("m_GameObject: {fileID: 42, guid:"),
+            "{output}"
+        );
+        assert!(
+            output.contains("m_LocalScale:\n    x: 1\n    y: 1\n    z: 1"),
+            "{output}"
+        );
     }
 
     #[test]
