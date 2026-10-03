@@ -5,7 +5,13 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::str;
 
+use crate::io::filesystem::VirtualFileSystem;
+use crate::io::platform_structure::PlatformResourceProvider;
 use crate::processing::scene_naming::SceneUnityVersion;
+use crate::resource::{
+    resolve_and_read_streamed_resource_info, RootResourceFileCatalog, StreamedResourceContentError,
+    StreamedResourceContentLimits, StreamedResourceContentResolution,
+};
 use crate::serialized_file::object_workspace::WorkspaceObject;
 use crate::serialized_file::reference_graph::{MultiFilePPtrResolution, MultiFileReferenceGraph};
 use crate::serialized_file::workspace::SerializedFileWorkspace;
@@ -18,6 +24,10 @@ use super::prefab_collection::PrefabExportIdAssignment;
 use super::scene_collection::{
     order_scene_yaml_assignments, ExportAssetCollectionIdentity, ExportAssetIdentity,
     SceneExportIdAssignment, SceneYamlAssetOrderError, SceneYamlAssetOrderLimits,
+};
+use super::streamed_assets::{
+    has_streamed_yaml_asset_field, prepare_streamed_yaml_asset, StreamedYamlAssetError,
+    StreamedYamlAssetKind, StreamedYamlAssetLimits, StreamedYamlAssetPreparation,
 };
 use super::unity_yaml::{
     write_unity_yaml_documents, UnityYamlDocument, UnityYamlWriteError, UnityYamlWriteLimits,
@@ -71,6 +81,16 @@ impl Default for UnityYamlWorkspaceCollectionLimits {
     }
 }
 
+/// Resource lookup inputs for streamed Mesh and image-texture YAML export.
+#[derive(Clone, Copy)]
+pub struct WorkspaceStreamedYamlResourceContext<'a, 'provider> {
+    pub filesystem: &'a VirtualFileSystem,
+    pub root_catalog: &'a RootResourceFileCatalog,
+    pub provider: &'a PlatformResourceProvider<'provider>,
+    pub content_limits: StreamedResourceContentLimits,
+    pub staging_limits: StreamedYamlAssetLimits,
+}
+
 /// Execute one ordered Scene or Prefab YAML collection using workspace-decoded source objects.
 ///
 /// Assignment order is preserved exactly. Callers provide the baseline `ExportableAssets` order;
@@ -86,6 +106,59 @@ pub fn workspace_assignments_to_unity_yaml<A: UnityYamlCollectionAssignment>(
     current_collection_index: usize,
     missing_reference_guid: Option<[u8; 16]>,
     limits: UnityYamlWorkspaceCollectionLimits,
+) -> Result<String, UnityYamlWorkspaceCollectionError> {
+    workspace_assignments_to_unity_yaml_with_context(
+        workspace,
+        objects,
+        reference_graph,
+        pointer_map,
+        assignments_in_yaml_order,
+        current_collection_index,
+        missing_reference_guid,
+        limits,
+        None,
+    )
+}
+
+/// Execute a YAML collection while resolving and embedding streamed Mesh/texture content.
+#[allow(clippy::too_many_arguments)]
+pub fn workspace_assignments_to_unity_yaml_with_streamed_resources<
+    A: UnityYamlCollectionAssignment,
+>(
+    workspace: &SerializedFileWorkspace,
+    objects: &crate::serialized_file::object_workspace::ObjectWorkspace,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+    pointer_map: &ProjectExportPointerMap,
+    assignments_in_yaml_order: &[A],
+    current_collection_index: usize,
+    missing_reference_guid: Option<[u8; 16]>,
+    limits: UnityYamlWorkspaceCollectionLimits,
+    streamed_resources: &WorkspaceStreamedYamlResourceContext<'_, '_>,
+) -> Result<String, UnityYamlWorkspaceCollectionError> {
+    workspace_assignments_to_unity_yaml_with_context(
+        workspace,
+        objects,
+        reference_graph,
+        pointer_map,
+        assignments_in_yaml_order,
+        current_collection_index,
+        missing_reference_guid,
+        limits,
+        Some(streamed_resources),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn workspace_assignments_to_unity_yaml_with_context<A: UnityYamlCollectionAssignment>(
+    workspace: &SerializedFileWorkspace,
+    objects: &crate::serialized_file::object_workspace::ObjectWorkspace,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+    pointer_map: &ProjectExportPointerMap,
+    assignments_in_yaml_order: &[A],
+    current_collection_index: usize,
+    missing_reference_guid: Option<[u8; 16]>,
+    limits: UnityYamlWorkspaceCollectionLimits,
+    streamed_resources: Option<&WorkspaceStreamedYamlResourceContext<'_, '_>>,
 ) -> Result<String, UnityYamlWorkspaceCollectionError> {
     let document_count = assignments_in_yaml_order.len();
     if document_count > limits.max_documents {
@@ -146,7 +219,7 @@ pub fn workspace_assignments_to_unity_yaml<A: UnityYamlCollectionAssignment>(
                 asset,
             },
         )?;
-        let document = workspace_object_to_unity_yaml_document(
+        let document = workspace_object_to_unity_yaml_document_with_context(
             workspace,
             reference_graph,
             pointer_map,
@@ -156,6 +229,7 @@ pub fn workspace_assignments_to_unity_yaml<A: UnityYamlCollectionAssignment>(
             current_collection_index,
             missing_reference_guid,
             limits.object_conversion,
+            streamed_resources,
         )
         .map_err(|source| UnityYamlWorkspaceCollectionError::ObjectExport {
             assignment_index,
@@ -197,6 +271,39 @@ pub fn workspace_scene_assignments_to_unity_yaml(
         current_collection_index,
         missing_reference_guid,
         limits,
+    )
+}
+
+/// Order and export Scene assignments with bounded streamed Mesh/texture resolution.
+#[allow(clippy::too_many_arguments)]
+pub fn workspace_scene_assignments_to_unity_yaml_with_streamed_resources(
+    workspace: &SerializedFileWorkspace,
+    objects: &crate::serialized_file::object_workspace::ObjectWorkspace,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+    pointer_map: &ProjectExportPointerMap,
+    assignments_in_hierarchy_order: &[SceneExportIdAssignment],
+    current_collection_index: usize,
+    missing_reference_guid: Option<[u8; 16]>,
+    limits: UnityYamlWorkspaceCollectionLimits,
+    streamed_resources: &WorkspaceStreamedYamlResourceContext<'_, '_>,
+) -> Result<String, UnityYamlWorkspaceCollectionError> {
+    let ordered_assignments = order_scene_yaml_assignments(
+        assignments_in_hierarchy_order,
+        SceneYamlAssetOrderLimits {
+            max_assets: limits.max_documents,
+        },
+    )
+    .map_err(UnityYamlWorkspaceCollectionError::SceneOrder)?;
+    workspace_assignments_to_unity_yaml_with_streamed_resources(
+        workspace,
+        objects,
+        reference_graph,
+        pointer_map,
+        &ordered_assignments,
+        current_collection_index,
+        missing_reference_guid,
+        limits,
+        streamed_resources,
     )
 }
 
@@ -313,6 +420,61 @@ pub fn workspace_object_to_unity_yaml_document(
     current_collection_index: usize,
     missing_reference_guid: Option<[u8; 16]>,
     limits: UnityYamlObjectConversionLimits,
+) -> Result<UnityYamlDocument, UnityYamlWorkspaceExportError> {
+    workspace_object_to_unity_yaml_document_with_context(
+        workspace,
+        reference_graph,
+        pointer_map,
+        object,
+        source,
+        file_id,
+        current_collection_index,
+        missing_reference_guid,
+        limits,
+        None,
+    )
+}
+
+/// Convert one workspace object while resolving streamed data for Mesh and image-texture YAML.
+#[allow(clippy::too_many_arguments)]
+pub fn workspace_object_to_unity_yaml_document_with_streamed_resources(
+    workspace: &SerializedFileWorkspace,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+    pointer_map: &ProjectExportPointerMap,
+    object: &WorkspaceObject,
+    source: ExportAssetIdentity,
+    file_id: i64,
+    current_collection_index: usize,
+    missing_reference_guid: Option<[u8; 16]>,
+    limits: UnityYamlObjectConversionLimits,
+    streamed_resources: &WorkspaceStreamedYamlResourceContext<'_, '_>,
+) -> Result<UnityYamlDocument, UnityYamlWorkspaceExportError> {
+    workspace_object_to_unity_yaml_document_with_context(
+        workspace,
+        reference_graph,
+        pointer_map,
+        object,
+        source,
+        file_id,
+        current_collection_index,
+        missing_reference_guid,
+        limits,
+        Some(streamed_resources),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn workspace_object_to_unity_yaml_document_with_context(
+    workspace: &SerializedFileWorkspace,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+    pointer_map: &ProjectExportPointerMap,
+    object: &WorkspaceObject,
+    source: ExportAssetIdentity,
+    file_id: i64,
+    current_collection_index: usize,
+    missing_reference_guid: Option<[u8; 16]>,
+    limits: UnityYamlObjectConversionLimits,
+    streamed_resources: Option<&WorkspaceStreamedYamlResourceContext<'_, '_>>,
 ) -> Result<UnityYamlDocument, UnityYamlWorkspaceExportError> {
     let file_index = match source.collection {
         ExportAssetCollectionIdentity::SerializedFile { file_index } => file_index,
@@ -467,6 +629,125 @@ pub fn workspace_object_to_unity_yaml_document(
         });
     }
 
+    let mut streamed_export_root = None;
+    if let Some(asset_kind) = match class_id {
+        43 => Some(StreamedYamlAssetKind::Mesh),
+        28 | 189 => Some(StreamedYamlAssetKind::ImageTexture),
+        _ => None,
+    } {
+        let staging_limits = streamed_resources
+            .map(|context| context.staging_limits)
+            .unwrap_or_default();
+        let has_stream =
+            has_streamed_yaml_asset_field(&payload.root, asset_kind).map_err(|source| {
+                UnityYamlWorkspaceExportError::StreamedAssetPreparation {
+                    file_index,
+                    object_index: object.object_index,
+                    source: Box::new(source),
+                }
+            })?;
+        if has_stream {
+            if payload.allocated_bytes > staging_limits.max_source_value_copy_bytes {
+                return Err(UnityYamlWorkspaceExportError::StreamedAssetPreparation {
+                    file_index,
+                    object_index: object.object_index,
+                    source: Box::new(StreamedYamlAssetError::SourceValueCopyLimitExceeded {
+                        size: payload.allocated_bytes,
+                        limit: staging_limits.max_source_value_copy_bytes,
+                    }),
+                });
+            }
+            let mut export_root = payload.root.clone();
+            match prepare_streamed_yaml_asset(&mut export_root, asset_kind, None, staging_limits) {
+                Ok(
+                    StreamedYamlAssetPreparation::NoStreamField
+                    | StreamedYamlAssetPreparation::StreamUnset
+                    | StreamedYamlAssetPreparation::ExistingInlineData { .. },
+                ) => {}
+                Ok(StreamedYamlAssetPreparation::Materialized { .. }) => {
+                    return Err(UnityYamlWorkspaceExportError::StreamedAssetInvariant {
+                        file_index,
+                        object_index: object.object_index,
+                        message: "staging reported materialization without supplied bytes"
+                            .to_owned(),
+                    });
+                }
+                Err(StreamedYamlAssetError::StreamContentRequired { resource }) => {
+                    let Some(context) = streamed_resources else {
+                        return Err(UnityYamlWorkspaceExportError::StreamedAssetPreparation {
+                            file_index,
+                            object_index: object.object_index,
+                            source: Box::new(StreamedYamlAssetError::StreamContentRequired {
+                                resource: resource.clone(),
+                            }),
+                        });
+                    };
+                    let resolution = resolve_and_read_streamed_resource_info(
+                        context.filesystem,
+                        workspace,
+                        file.container_bundle_index,
+                        &resource,
+                        context.root_catalog,
+                        context.provider,
+                        context.content_limits,
+                    )
+                    .map_err(|source| {
+                        UnityYamlWorkspaceExportError::StreamedResourceResolution {
+                            file_index,
+                            object_index: object.object_index,
+                            path: resource.path.clone(),
+                            source: Box::new(source),
+                        }
+                    })?;
+                    let bytes = match resolution {
+                        StreamedResourceContentResolution::Resolved { bytes, .. } => bytes,
+                        StreamedResourceContentResolution::Missing {
+                            unavailable_data_paths,
+                        } => {
+                            return Err(UnityYamlWorkspaceExportError::StreamedResourceMissing {
+                                file_index,
+                                object_index: object.object_index,
+                                path: resource.path,
+                                unavailable_data_paths,
+                            });
+                        }
+                        StreamedResourceContentResolution::Unset => {
+                            return Err(
+                                UnityYamlWorkspaceExportError::StreamedResourceUnexpectedUnset {
+                                    file_index,
+                                    object_index: object.object_index,
+                                    path: resource.path,
+                                },
+                            );
+                        }
+                    };
+                    prepare_streamed_yaml_asset(
+                        &mut export_root,
+                        asset_kind,
+                        Some(&bytes),
+                        context.staging_limits,
+                    )
+                    .map_err(|source| {
+                        UnityYamlWorkspaceExportError::StreamedAssetPreparation {
+                            file_index,
+                            object_index: object.object_index,
+                            source: Box::new(source),
+                        }
+                    })?;
+                }
+                Err(source) => {
+                    return Err(UnityYamlWorkspaceExportError::StreamedAssetPreparation {
+                        file_index,
+                        object_index: object.object_index,
+                        source: Box::new(source),
+                    });
+                }
+            }
+            streamed_export_root = Some(export_root);
+        }
+    }
+    let export_root = streamed_export_root.as_ref().unwrap_or(&payload.root);
+
     let mut pointer_error = None;
     let document = serialized_object_value_to_unity_yaml_document(
         source,
@@ -476,7 +757,7 @@ pub fn workspace_object_to_unity_yaml_document(
         // SerializedFile's stripped bit selects a serialized type layout; the baseline YAML
         // marker comes from the owning hierarchy's StrippedAssets set, which is not wired here.
         false,
-        &payload.root,
+        export_root,
         &hints,
         UnityYamlObjectFieldMode::ProjectAsset,
         unity_version,
@@ -725,6 +1006,33 @@ pub enum UnityYamlWorkspaceExportError {
         file_index: usize,
         object_index: usize,
     },
+    StreamedAssetPreparation {
+        file_index: usize,
+        object_index: usize,
+        source: Box<StreamedYamlAssetError>,
+    },
+    StreamedResourceResolution {
+        file_index: usize,
+        object_index: usize,
+        path: String,
+        source: Box<StreamedResourceContentError>,
+    },
+    StreamedResourceMissing {
+        file_index: usize,
+        object_index: usize,
+        path: String,
+        unavailable_data_paths: Vec<String>,
+    },
+    StreamedResourceUnexpectedUnset {
+        file_index: usize,
+        object_index: usize,
+        path: String,
+    },
+    StreamedAssetInvariant {
+        file_index: usize,
+        object_index: usize,
+        message: String,
+    },
     PointerMap(ExportPointerMapError),
     Conversion(UnityYamlObjectConversionError),
 }
@@ -911,6 +1219,48 @@ impl Display for UnityYamlWorkspaceExportError {
                 f,
                 "reference graph has no class ID for target {file_index}:{object_index}"
             ),
+            Self::StreamedAssetPreparation {
+                file_index,
+                object_index,
+                source,
+            } => write!(
+                f,
+                "could not stage streamed asset {file_index}:{object_index} for YAML: {source}"
+            ),
+            Self::StreamedResourceResolution {
+                file_index,
+                object_index,
+                path,
+                source,
+            } => write!(
+                f,
+                "could not resolve streamed resource {path:?} for asset {file_index}:{object_index}: {source}"
+            ),
+            Self::StreamedResourceMissing {
+                file_index,
+                object_index,
+                path,
+                unavailable_data_paths,
+            } => write!(
+                f,
+                "streamed resource {path:?} is missing for asset {file_index}:{object_index}; unavailable DataPaths: {unavailable_data_paths:?}"
+            ),
+            Self::StreamedResourceUnexpectedUnset {
+                file_index,
+                object_index,
+                path,
+            } => write!(
+                f,
+                "streamed resource {path:?} became unset while exporting asset {file_index}:{object_index}"
+            ),
+            Self::StreamedAssetInvariant {
+                file_index,
+                object_index,
+                message,
+            } => write!(
+                f,
+                "streamed asset export invariant failed for {file_index}:{object_index}: {message}"
+            ),
             Self::PointerMap(source) => Display::fmt(source, f),
             Self::Conversion(source) => Display::fmt(source, f),
         }
@@ -922,6 +1272,8 @@ impl Error for UnityYamlWorkspaceExportError {
         match self {
             Self::PointerMap(source) => Some(source),
             Self::Conversion(source) => Some(source),
+            Self::StreamedAssetPreparation { source, .. } => Some(source),
+            Self::StreamedResourceResolution { source, .. } => Some(source),
             _ => None,
         }
     }
@@ -938,6 +1290,8 @@ mod tests {
     use crate::export::scene_collection::ExportAssetIdentity;
     use crate::io::dependency::DependencyFilePath;
     use crate::io::filesystem::VirtualFileSystem;
+    use crate::resource::{ExplicitRootResourceInput, RootResourceCatalogLimits};
+    use crate::scheme::{SchemeReader, SchemeReaderLimits};
     use crate::serialized_file::file::SerializedFile;
     use crate::serialized_file::object_workspace::{ObjectWorkspace, ObjectWorkspaceLimits};
     use crate::serialized_file::reference_graph::{
@@ -982,6 +1336,21 @@ mod tests {
             .unwrap()
     }
 
+    fn pointer_map_for_asset(asset: ExportAssetIdentity) -> ProjectExportPointerMap {
+        let assets = [ExportedAssetPointerEntry {
+            asset,
+            file_id: asset.path_id,
+            collection_index: COLLECTION_INDEX,
+        }];
+        let collections = [ExportCollectionPointerMetadata {
+            collection_index: COLLECTION_INDEX,
+            guid: [0x72; 16],
+            asset_type: UnityProjectAssetType::Serialized,
+        }];
+        ProjectExportPointerMap::new(&assets, &collections, ExportPointerMapLimits::default())
+            .unwrap()
+    }
+
     fn load_workspaces(target_path_id: i64) -> (VirtualFileSystem, SerializedFileWorkspace) {
         let bytes = make_game_object_and_transform_file(target_path_id);
         load_workspace_bytes(&bytes)
@@ -1012,6 +1381,121 @@ mod tests {
         )
         .unwrap();
         (filesystem, workspace)
+    }
+
+    fn explicit_root_resource_catalog(
+        filesystem: &VirtualFileSystem,
+        file_name: &str,
+        virtual_path: &str,
+    ) -> RootResourceFileCatalog {
+        let dispatched =
+            SchemeReader::read_with_limits(b"root resource", SchemeReaderLimits::default())
+                .unwrap();
+        let input = [ExplicitRootResourceInput {
+            file_name,
+            virtual_path,
+            dispatched_file: &dispatched,
+        }];
+        RootResourceFileCatalog::from_explicit_resource_inputs(
+            filesystem,
+            &input,
+            RootResourceCatalogLimits::default(),
+        )
+        .unwrap()
+    }
+
+    fn make_streamed_asset_file(class_id: i32, offset_is_u64: bool) -> Vec<u8> {
+        let (root_type, stream_field, inline_parent_type, inline_parent_name, inline_field) =
+            match class_id {
+                43 => (
+                    "Mesh",
+                    "m_StreamData",
+                    "VertexData",
+                    "m_VertexData",
+                    "m_DataSize",
+                ),
+                189 => (
+                    "ImageTexture",
+                    "m_StreamData_C189",
+                    "TypelessData",
+                    "m_ImageData_C189",
+                    "",
+                ),
+                _ => panic!("fixture supports Mesh and ImageTexture only"),
+            };
+        let mut tree = vec![
+            (0, 1, root_type, "", -1),
+            (1, 1, "StreamingInfo", stream_field, -1),
+            (2, 1, "string", "path", -1),
+            (3, 1, "Array", "Array", -1),
+            (4, 1, "int", "size", 4),
+            (4, 1, "char", "data", 1),
+            (
+                2,
+                1,
+                if offset_is_u64 { "UInt64" } else { "UInt32" },
+                "offset",
+                if offset_is_u64 { 8 } else { 4 },
+            ),
+            (2, 1, "UInt32", "size", 4),
+        ];
+        if class_id == 43 {
+            tree.extend([
+                (1, 1, inline_parent_type, inline_parent_name, -1),
+                (2, 1, "TypelessData", inline_field, -1),
+                (3, 1, "int", "size", 4),
+                (3, 1, "UInt8", "data", 1),
+            ]);
+        } else {
+            tree.extend([
+                (1, 1, inline_parent_type, inline_parent_name, -1),
+                (2, 1, "int", "size", 4),
+                (2, 1, "UInt8", "data", 1),
+            ]);
+        }
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&i32::try_from("texture.resS".len()).unwrap().to_le_bytes());
+        payload.extend_from_slice(b"texture.resS");
+        let padding = (4 - payload.len() % 4) % 4;
+        payload.resize(payload.len() + padding, 0);
+        if offset_is_u64 {
+            payload.extend_from_slice(&2u64.to_le_bytes());
+        } else {
+            payload.extend_from_slice(&2u32.to_le_bytes());
+        }
+        payload.extend_from_slice(&3u32.to_le_bytes());
+        payload.extend_from_slice(&0i32.to_le_bytes()); // empty inline TypelessData
+
+        let mut metadata = b"2019.4.0f1\0".to_vec();
+        metadata.extend_from_slice(&0u32.to_le_bytes()); // generation-10 long FileID flag
+        metadata.extend_from_slice(&1i32.to_le_bytes());
+        write_type_tree(&mut metadata, class_id, &tree);
+        metadata.extend_from_slice(&0u32.to_le_bytes()); // long FileID flag
+        metadata.extend_from_slice(&1i32.to_le_bytes());
+        write_object_record(
+            &mut metadata,
+            77,
+            0,
+            payload.len(),
+            class_id,
+            class_id as i16,
+        );
+        metadata.extend_from_slice(&0i32.to_le_bytes()); // external files
+        metadata.push(0); // user information string
+
+        let data_offset = 20 + metadata.len();
+        let file_size = data_offset + payload.len();
+        let mut file = Vec::with_capacity(file_size);
+        file.extend_from_slice(&(metadata.len() as u32).to_be_bytes());
+        file.extend_from_slice(&(file_size as u32).to_be_bytes());
+        file.extend_from_slice(&10i32.to_be_bytes());
+        file.extend_from_slice(&(data_offset as u32).to_be_bytes());
+        file.push(0);
+        file.extend_from_slice(&[0; 3]);
+        file.extend_from_slice(&metadata);
+        file.extend_from_slice(&payload);
+        file
     }
 
     fn plan_single_file_scene_assignments(
@@ -1445,6 +1929,251 @@ mod tests {
         output.extend_from_slice(&raw_type_id.to_le_bytes());
         output.extend_from_slice(&class_id.to_le_bytes());
         output.extend_from_slice(&0u16.to_le_bytes());
+    }
+
+    #[test]
+    fn workspace_yaml_export_resolves_and_embeds_streamed_image_texture_bytes() {
+        let source_bytes = make_streamed_asset_file(189, false);
+        let (mut filesystem, workspace) = load_workspace_bytes(&source_bytes);
+        filesystem
+            .write_all_bytes("/game/texture.resS", b"0123456789")
+            .unwrap();
+        let catalog =
+            explicit_root_resource_catalog(&filesystem, "texture.resS", "/game/texture.resS");
+        let objects = ObjectWorkspace::load_from_vfs(
+            &filesystem,
+            &workspace,
+            ObjectWorkspaceLimits::default(),
+        )
+        .unwrap();
+        let reference_graph = workspace
+            .reference_graph(MultiFileReferenceGraphLimits::default())
+            .unwrap();
+        assert!(reference_graph.is_complete());
+        let identity = asset(0, 77, 189);
+        let pointer_map = pointer_map_for_asset(identity);
+        let provider = PlatformResourceProvider::new(None, None);
+        let context = WorkspaceStreamedYamlResourceContext {
+            filesystem: &filesystem,
+            root_catalog: &catalog,
+            provider: &provider,
+            content_limits: StreamedResourceContentLimits::default(),
+            staging_limits: StreamedYamlAssetLimits::default(),
+        };
+
+        let document = workspace_object_to_unity_yaml_document_with_streamed_resources(
+            &workspace,
+            &reference_graph,
+            &pointer_map,
+            &objects.objects()[0],
+            identity,
+            77,
+            COLLECTION_INDEX,
+            None,
+            UnityYamlObjectConversionLimits::default(),
+            &context,
+        )
+        .unwrap();
+        let yaml =
+            write_unity_yaml_documents(&[document], UnityYamlWriteLimits::default()).unwrap();
+
+        assert!(yaml.contains("m_ImageData_C189: 323334"));
+        assert!(yaml.contains("offset: 0"));
+        assert!(yaml.contains("size: 0"));
+        assert!(!yaml.contains("texture.resS"));
+        let payload = objects.objects()[0].payload.as_ref().unwrap();
+        assert_eq!(
+            crate::resource::extract_streamed_resource_info(
+                payload
+                    .root
+                    .unique_field_in_base_chain("m_StreamData_C189")
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap()
+            .path,
+            "texture.resS"
+        );
+        assert_eq!(
+            payload
+                .root
+                .unique_field_in_base_chain("m_ImageData_C189")
+                .unwrap()
+                .unwrap(),
+            &crate::serialized_file::object::SerializedValue::Bytes(Vec::new())
+        );
+    }
+
+    #[test]
+    fn workspace_yaml_export_resolves_and_embeds_streamed_mesh_bytes() {
+        let source_bytes = make_streamed_asset_file(43, true);
+        let (mut filesystem, workspace) = load_workspace_bytes(&source_bytes);
+        filesystem
+            .write_all_bytes("/game/texture.resS", b"0123456789")
+            .unwrap();
+        let catalog =
+            explicit_root_resource_catalog(&filesystem, "texture.resS", "/game/texture.resS");
+        let objects = ObjectWorkspace::load_from_vfs(
+            &filesystem,
+            &workspace,
+            ObjectWorkspaceLimits::default(),
+        )
+        .unwrap();
+        let reference_graph = workspace
+            .reference_graph(MultiFileReferenceGraphLimits::default())
+            .unwrap();
+        assert!(reference_graph.is_complete());
+        let identity = asset(0, 77, 43);
+        let pointer_map = pointer_map_for_asset(identity);
+        let provider = PlatformResourceProvider::new(None, None);
+        let context = WorkspaceStreamedYamlResourceContext {
+            filesystem: &filesystem,
+            root_catalog: &catalog,
+            provider: &provider,
+            content_limits: StreamedResourceContentLimits::default(),
+            staging_limits: StreamedYamlAssetLimits::default(),
+        };
+
+        let document = workspace_object_to_unity_yaml_document_with_streamed_resources(
+            &workspace,
+            &reference_graph,
+            &pointer_map,
+            &objects.objects()[0],
+            identity,
+            77,
+            COLLECTION_INDEX,
+            None,
+            UnityYamlObjectConversionLimits::default(),
+            &context,
+        )
+        .unwrap();
+        let yaml =
+            write_unity_yaml_documents(&[document], UnityYamlWriteLimits::default()).unwrap();
+
+        assert!(yaml.contains("m_Data: 323334"));
+        assert!(yaml.contains("offset: 0"));
+        assert!(yaml.contains("size: 0"));
+        assert!(!yaml.contains("texture.resS"));
+        let payload = objects.objects()[0].payload.as_ref().unwrap();
+        assert_eq!(
+            crate::resource::extract_streamed_resource_info(
+                payload
+                    .root
+                    .unique_field_in_base_chain("m_StreamData")
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap()
+            .path,
+            "texture.resS"
+        );
+        assert_eq!(
+            payload
+                .root
+                .unique_field_in_base_chain("m_VertexData")
+                .unwrap()
+                .unwrap()
+                .unique_field_in_base_chain("m_DataSize")
+                .unwrap()
+                .unwrap(),
+            &crate::serialized_file::object::SerializedValue::Bytes(Vec::new())
+        );
+    }
+
+    #[test]
+    fn workspace_yaml_export_reports_missing_streamed_resource_without_null_or_empty_data() {
+        let source_bytes = make_streamed_asset_file(189, true);
+        let (filesystem, workspace) = load_workspace_bytes(&source_bytes);
+        let empty_inputs: [ExplicitRootResourceInput<'_, '_>; 0] = [];
+        let catalog = RootResourceFileCatalog::from_explicit_resource_inputs(
+            &filesystem,
+            &empty_inputs,
+            RootResourceCatalogLimits::default(),
+        )
+        .unwrap();
+        let objects = ObjectWorkspace::load_from_vfs(
+            &filesystem,
+            &workspace,
+            ObjectWorkspaceLimits::default(),
+        )
+        .unwrap();
+        let reference_graph = workspace
+            .reference_graph(MultiFileReferenceGraphLimits::default())
+            .unwrap();
+        let identity = asset(0, 77, 189);
+        let pointer_map = pointer_map_for_asset(identity);
+        let provider = PlatformResourceProvider::new(None, None);
+        let context = WorkspaceStreamedYamlResourceContext {
+            filesystem: &filesystem,
+            root_catalog: &catalog,
+            provider: &provider,
+            content_limits: StreamedResourceContentLimits::default(),
+            staging_limits: StreamedYamlAssetLimits::default(),
+        };
+
+        let copy_limited_context = WorkspaceStreamedYamlResourceContext {
+            staging_limits: StreamedYamlAssetLimits {
+                max_source_value_copy_bytes: 1,
+                ..StreamedYamlAssetLimits::default()
+            },
+            ..context
+        };
+        let copy_limit_error = workspace_object_to_unity_yaml_document_with_streamed_resources(
+            &workspace,
+            &reference_graph,
+            &pointer_map,
+            &objects.objects()[0],
+            identity,
+            77,
+            COLLECTION_INDEX,
+            None,
+            UnityYamlObjectConversionLimits::default(),
+            &copy_limited_context,
+        )
+        .unwrap_err();
+        match copy_limit_error {
+            UnityYamlWorkspaceExportError::StreamedAssetPreparation { source, .. } => {
+                assert!(matches!(
+                    *source,
+                    StreamedYamlAssetError::SourceValueCopyLimitExceeded {
+                        size,
+                        limit: 1
+                    } if size > 1
+                ))
+            }
+            other => panic!("expected source-copy bound, got {other}"),
+        }
+
+        assert!(matches!(
+            workspace_object_to_unity_yaml_document_with_streamed_resources(
+                &workspace,
+                &reference_graph,
+                &pointer_map,
+                &objects.objects()[0],
+                identity,
+                77,
+                COLLECTION_INDEX,
+                None,
+                UnityYamlObjectConversionLimits::default(),
+                &context,
+            ),
+            Err(UnityYamlWorkspaceExportError::StreamedResourceMissing {
+                path,
+                unavailable_data_paths,
+                ..
+            }) if path == "texture.resS" && unavailable_data_paths.is_empty()
+        ));
+        assert_eq!(
+            objects.objects()[0]
+                .payload
+                .as_ref()
+                .unwrap()
+                .root
+                .unique_field_in_base_chain("m_ImageData_C189")
+                .unwrap()
+                .unwrap(),
+            &crate::serialized_file::object::SerializedValue::Bytes(Vec::new())
+        );
     }
 
     #[test]
