@@ -685,3 +685,10 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Focused and full verification passed: `monobehaviour_structure_field_is_written_last`; 395 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and diff checks.
 - Still incomplete: no Unity-produced fixture or runtime differential; complete generated MonoBehaviour walkers, importer/project routing, and Phase 1 remain open.
 - Next: inspect the baseline dictionary walker and its Unity-version-dependent sequence/map policy; determine which parts can be carried by TypeTree metadata and which need generated class schema before implementation.
+## TypeTree-driven Unity dictionary YAML
+
+- Current phase: Phase 1; gate not passed. This increment builds from pushed revision `cff4e6c34f484da3f9a9e521f4b91f7e0dfc86dd`. Only `cocokoishi/RustAssetRipper`'s canonical GitHub repository is a push target. No UABEA, user AssetBundle content, or other remote repository was accessed.
+- Added TypeTree-derived `map` and `pair` handling. Primitive/string/GUID keys emit YAML mappings; complex keys use the Unity 5.4 version branch between pair sequences and legacy repeated `data` mappings. Primitive dictionary keys use baseline `ToString()` formatting. Malformed TypeTree and pair values fail with field context.
+- Focused dictionary tests and full verification passed: 397 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and diff checks.
+- Still incomplete: no Unity-produced fixture or direct C# runtime differential; no-TypeTree dictionary schemas and remaining generated class walkers stay open; Phase 1 remains incomplete.
+- Next: exercise PPtr-valued dictionary entries through workspace reference resolution and exported pointer mappings, then continue remaining generated per-class field policies.

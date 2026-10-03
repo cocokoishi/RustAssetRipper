@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
+use std::fmt::Write as _;
 use std::fmt::{self, Display, Formatter};
 use std::str;
 
@@ -68,6 +69,16 @@ pub enum UnityYamlEmptyArrayKind {
     FlowSequence,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UnityYamlDictionaryRepresentation {
+    /// Primitive, string, and GUID keys become YAML mapping keys.
+    KeyedMapping,
+    /// Older Unity versions serialize complex-key dictionaries as repeated `data` mappings.
+    LegacyPairMapping,
+    /// Unity 5.4+ uses a sequence of `first`/`second` pair mappings for complex keys.
+    PairSequence,
+}
+
 /// TypeTree-derived serialization choices needed by the YAML walker.
 ///
 /// Empty arrays have no element values from which to infer their representation. Flow-mapped
@@ -80,6 +91,8 @@ pub struct UnityYamlObjectConversionHints {
     pub flow_mapped_struct_paths: HashSet<String>,
     /// TypeTree fields marked `IgnoreInMetaFiles`, using [*] for array elements.
     pub importer_excluded_field_paths: HashSet<String>,
+    /// Dictionary representation derived from TypeTree `map` and `pair` nodes.
+    pub dictionary_representations: HashMap<String, UnityYamlDictionaryRepresentation>,
     pub hash128_schemas: HashMap<String, UnityYamlHash128Schema>,
     pub guid_schemas: HashMap<String, UnityYamlGuidSchema>,
 }
@@ -164,6 +177,14 @@ pub enum UnityYamlObjectConversionError {
         field_path: String,
         element_index: usize,
     },
+    InvalidDictionaryPair {
+        field_path: String,
+        element_index: usize,
+    },
+    InvalidDictionaryKey {
+        field_path: String,
+        element_index: usize,
+    },
     UnsupportedRawValue {
         field_path: String,
         type_name: String,
@@ -239,6 +260,20 @@ impl Display for UnityYamlObjectConversionError {
             } => write!(
                 f,
                 "integer-hex Unity array at {field_path:?} has a non-integer or inconsistent element at index {element_index}"
+            ),
+            Self::InvalidDictionaryPair {
+                field_path,
+                element_index,
+            } => write!(
+                f,
+                "Unity dictionary at {field_path:?} has a malformed first/second pair at index {element_index}"
+            ),
+            Self::InvalidDictionaryKey {
+                field_path,
+                element_index,
+            } => write!(
+                f,
+                "Unity dictionary at {field_path:?} has a key that cannot be represented as a scalar at index {element_index}"
             ),
             Self::UnsupportedRawValue {
                 field_path,
@@ -627,6 +662,39 @@ impl<'a> UnityYamlTypeTreeLayout<'a> {
         Ok(UnityYamlGuidSchema { word_field_names })
     }
 
+    fn dictionary_representation(
+        &self,
+        node_index: usize,
+        element_node: usize,
+        unity_version: SceneUnityVersion,
+    ) -> Result<UnityYamlDictionaryRepresentation, UnityYamlObjectConversionError> {
+        if self.type_name(node_index)? != "map" || self.type_name(element_node)? != "pair" {
+            return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                node_index,
+                reason: "map data node is not a pair",
+            });
+        }
+        let pair_fields = self.child_indices(element_node)?;
+        if pair_fields.len() != 2
+            || self.node(pair_fields[0])?.name.as_deref() != Some("first")
+            || self.node(pair_fields[1])?.name.as_deref() != Some("second")
+        {
+            return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                node_index: element_node,
+                reason: "map pair must contain ordered first and second fields",
+            });
+        }
+
+        if is_valid_dictionary_key_type_tree_type(self.type_name(pair_fields[0])?) {
+            Ok(UnityYamlDictionaryRepresentation::KeyedMapping)
+        } else if unity_version.major > 5 || (unity_version.major == 5 && unity_version.minor >= 4)
+        {
+            Ok(UnityYamlDictionaryRepresentation::PairSequence)
+        } else {
+            Ok(UnityYamlDictionaryRepresentation::LegacyPairMapping)
+        }
+    }
+
     fn collect_hints(
         &self,
         node_index: usize,
@@ -654,31 +722,63 @@ impl<'a> UnityYamlTypeTreeLayout<'a> {
             )?);
         }
 
-        if let Some(element_node) = self.array_element_node(node_index)? {
-            let element_type = self.type_name(element_node)?;
-            let kind = if is_integer_type_tree_type(element_type) {
-                UnityYamlEmptyArrayKind::IntegerHex
-            } else {
-                UnityYamlEmptyArrayKind::BlockSequence
-            };
-            if let Some(previous) = hints.empty_array_kinds.get(field_path) {
-                if *previous != kind {
-                    return Err(UnityYamlObjectConversionError::InvalidTypeTree {
-                        node_index,
-                        reason: "ambiguous arrays share one serialized field path",
-                    });
+        let array_element_node = self.array_element_node(node_index)?;
+        if node_type == "map" && array_element_node.is_none() {
+            return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                node_index,
+                reason: "map node has no valid Array/size/data shape",
+            });
+        }
+        if let Some(element_node) = array_element_node {
+            if node_type == "map" {
+                let representation =
+                    self.dictionary_representation(node_index, element_node, unity_version)?;
+                if let Some(previous) = hints.dictionary_representations.get(field_path) {
+                    if *previous != representation {
+                        return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                            node_index,
+                            reason: "ambiguous dictionaries share one serialized field path",
+                        });
+                    }
+                } else {
+                    hints
+                        .dictionary_representations
+                        .try_reserve(1)
+                        .map_err(|_| UnityYamlObjectConversionError::AllocationFailed {
+                            resource: "Unity YAML dictionary schema hints",
+                            requested: hints.dictionary_representations.len().saturating_add(1),
+                        })?;
+                    hints.dictionary_representations.insert(
+                        try_copy_string(field_path, "Unity YAML dictionary schema path")?,
+                        representation,
+                    );
                 }
             } else {
-                hints.empty_array_kinds.try_reserve(1).map_err(|_| {
-                    UnityYamlObjectConversionError::AllocationFailed {
-                        resource: "Unity YAML array schema hints",
-                        requested: hints.empty_array_kinds.len().saturating_add(1),
+                let element_type = self.type_name(element_node)?;
+                let kind = if is_integer_type_tree_type(element_type) {
+                    UnityYamlEmptyArrayKind::IntegerHex
+                } else {
+                    UnityYamlEmptyArrayKind::BlockSequence
+                };
+                if let Some(previous) = hints.empty_array_kinds.get(field_path) {
+                    if *previous != kind {
+                        return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                            node_index,
+                            reason: "ambiguous arrays share one serialized field path",
+                        });
                     }
-                })?;
-                hints.empty_array_kinds.insert(
-                    try_copy_string(field_path, "Unity YAML array hint path")?,
-                    kind,
-                );
+                } else {
+                    hints.empty_array_kinds.try_reserve(1).map_err(|_| {
+                        UnityYamlObjectConversionError::AllocationFailed {
+                            resource: "Unity YAML array schema hints",
+                            requested: hints.empty_array_kinds.len().saturating_add(1),
+                        }
+                    })?;
+                    hints.empty_array_kinds.insert(
+                        try_copy_string(field_path, "Unity YAML array hint path")?,
+                        kind,
+                    );
+                }
             }
 
             let element_path = wildcard_element_path(field_path, budget.limits)?;
@@ -1077,6 +1177,24 @@ fn hash128_schema_for_path<'a>(
     Ok(hints.hash128_schemas.get(&canonical_path))
 }
 
+fn dictionary_representation_for_path(
+    field_path: &str,
+    hints: &UnityYamlObjectConversionHints,
+    limits: UnityYamlObjectConversionLimits,
+) -> Result<Option<UnityYamlDictionaryRepresentation>, UnityYamlObjectConversionError> {
+    if let Some(representation) = hints.dictionary_representations.get(field_path) {
+        return Ok(Some(*representation));
+    }
+    if !field_path.contains('[') {
+        return Ok(None);
+    }
+    let canonical_path = canonical_array_path(field_path, limits.max_field_path_bytes)?;
+    Ok(hints
+        .dictionary_representations
+        .get(&canonical_path)
+        .copied())
+}
+
 fn guid_schema_for_path<'a>(
     field_path: &str,
     hints: &'a UnityYamlObjectConversionHints,
@@ -1246,6 +1364,23 @@ fn convert_array<F>(
 where
     F: FnMut(UnityYamlPPtrRequest<'_>) -> ProjectPointerResolution,
 {
+    if let Some(representation) = dictionary_representation_for_path(field_path, hints, limits)? {
+        return convert_dictionary(
+            items,
+            field_path,
+            depth,
+            representation,
+            source,
+            hints,
+            field_mode,
+            unity_version,
+            missing_reference_guid,
+            limits,
+            budget,
+            resolve_pointer,
+        );
+    }
+
     if items.is_empty() {
         let kind = hints
             .empty_array_kinds
@@ -1301,6 +1436,297 @@ where
             .map_err(UnityYamlObjectConversionError::NodeBuild)?;
     }
     Ok(sequence)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn convert_dictionary<F>(
+    items: &[SerializedValue],
+    field_path: &str,
+    depth: usize,
+    representation: UnityYamlDictionaryRepresentation,
+    source: ExportAssetIdentity,
+    hints: &UnityYamlObjectConversionHints,
+    field_mode: UnityYamlObjectFieldMode,
+    unity_version: SceneUnityVersion,
+    missing_reference_guid: Option<[u8; 16]>,
+    limits: UnityYamlObjectConversionLimits,
+    budget: &mut ConversionBudget,
+    resolve_pointer: &mut F,
+) -> Result<UnityYamlNode, UnityYamlObjectConversionError>
+where
+    F: FnMut(UnityYamlPPtrRequest<'_>) -> ProjectPointerResolution,
+{
+    let mut output = match representation {
+        UnityYamlDictionaryRepresentation::KeyedMapping
+        | UnityYamlDictionaryRepresentation::LegacyPairMapping => {
+            UnityYamlNode::mapping(UnityYamlMappingStyle::Block)
+        }
+        UnityYamlDictionaryRepresentation::PairSequence => {
+            UnityYamlNode::sequence(UnityYamlSequenceStyle::BlockCurve)
+        }
+    };
+
+    for (element_index, item) in items.iter().enumerate() {
+        let element_path =
+            indexed_field_path(field_path, element_index, limits.max_field_path_bytes)?;
+        let SerializedValue::Struct(pair_fields) = item else {
+            return Err(UnityYamlObjectConversionError::InvalidDictionaryPair {
+                field_path: field_path.to_owned(),
+                element_index,
+            });
+        };
+        let mut first = None;
+        let mut second = None;
+        for pair_field in pair_fields {
+            match pair_field.name.as_str() {
+                "first" if first.is_none() => first = Some(&pair_field.value),
+                "second" if second.is_none() => second = Some(&pair_field.value),
+                "first" | "second" => {
+                    return Err(UnityYamlObjectConversionError::InvalidDictionaryPair {
+                        field_path: field_path.to_owned(),
+                        element_index,
+                    });
+                }
+                _ => {}
+            }
+        }
+        if pair_fields.len() != 2 || first.is_none() || second.is_none() {
+            return Err(UnityYamlObjectConversionError::InvalidDictionaryPair {
+                field_path: field_path.to_owned(),
+                element_index,
+            });
+        }
+        budget.visit(depth + 1)?;
+        let Some(first) = first else {
+            return Err(UnityYamlObjectConversionError::InvalidDictionaryPair {
+                field_path: field_path.to_owned(),
+                element_index,
+            });
+        };
+        let Some(second) = second else {
+            return Err(UnityYamlObjectConversionError::InvalidDictionaryPair {
+                field_path: field_path.to_owned(),
+                element_index,
+            });
+        };
+
+        let first_path = child_field_path(&element_path, "first", limits.max_field_path_bytes)?;
+        let second_path = child_field_path(&element_path, "second", limits.max_field_path_bytes)?;
+        let first_node = if representation == UnityYamlDictionaryRepresentation::KeyedMapping {
+            if let Some(key) = primitive_dictionary_key(first, field_path, element_index)? {
+                budget.visit(depth + 2)?;
+                key
+            } else {
+                convert_value(
+                    first,
+                    &first_path,
+                    depth + 2,
+                    source,
+                    hints,
+                    field_mode,
+                    unity_version,
+                    missing_reference_guid,
+                    limits,
+                    budget,
+                    resolve_pointer,
+                )?
+            }
+        } else {
+            convert_value(
+                first,
+                &first_path,
+                depth + 2,
+                source,
+                hints,
+                field_mode,
+                unity_version,
+                missing_reference_guid,
+                limits,
+                budget,
+                resolve_pointer,
+            )?
+        };
+        let second_node = convert_value(
+            second,
+            &second_path,
+            depth + 2,
+            source,
+            hints,
+            field_mode,
+            unity_version,
+            missing_reference_guid,
+            limits,
+            budget,
+            resolve_pointer,
+        )?;
+
+        match representation {
+            UnityYamlDictionaryRepresentation::KeyedMapping => {
+                if !matches!(&first_node.kind, UnityYamlNodeKind::Scalar(_)) {
+                    return Err(UnityYamlObjectConversionError::InvalidDictionaryKey {
+                        field_path: field_path.to_owned(),
+                        element_index,
+                    });
+                }
+                output
+                    .insert(first_node, second_node)
+                    .map_err(UnityYamlObjectConversionError::NodeBuild)?;
+            }
+            UnityYamlDictionaryRepresentation::LegacyPairMapping
+            | UnityYamlDictionaryRepresentation::PairSequence => {
+                let mut pair = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+                pair.insert_field("first", first_node)
+                    .map_err(UnityYamlObjectConversionError::NodeBuild)?;
+                pair.insert_field("second", second_node)
+                    .map_err(UnityYamlObjectConversionError::NodeBuild)?;
+                if representation == UnityYamlDictionaryRepresentation::LegacyPairMapping {
+                    output
+                        .insert_field("data", pair)
+                        .map_err(UnityYamlObjectConversionError::NodeBuild)?;
+                } else {
+                    output
+                        .push(pair)
+                        .map_err(UnityYamlObjectConversionError::NodeBuild)?;
+                }
+            }
+        }
+    }
+
+    Ok(output)
+}
+
+fn primitive_dictionary_key(
+    value: &SerializedValue,
+    field_path: &str,
+    element_index: usize,
+) -> Result<Option<UnityYamlNode>, UnityYamlObjectConversionError> {
+    let key = match value {
+        SerializedValue::Bool(value) => Some(try_copy_string(
+            if *value { "True" } else { "False" },
+            "Unity dictionary boolean key",
+        )?),
+        SerializedValue::Char(value) => {
+            let Some(character) = char::from_u32(u32::from(*value)) else {
+                return Err(UnityYamlObjectConversionError::InvalidDictionaryKey {
+                    field_path: field_path.to_owned(),
+                    element_index,
+                });
+            };
+            let mut key = String::new();
+            key.try_reserve_exact(character.len_utf8()).map_err(|_| {
+                UnityYamlObjectConversionError::AllocationFailed {
+                    resource: "Unity dictionary character key",
+                    requested: character.len_utf8(),
+                }
+            })?;
+            key.push(character);
+            Some(key)
+        }
+        SerializedValue::I8(value) => Some(format_dictionary_numeric_key(
+            *value,
+            field_path,
+            element_index,
+        )?),
+        SerializedValue::U8(value) => Some(format_dictionary_numeric_key(
+            *value,
+            field_path,
+            element_index,
+        )?),
+        SerializedValue::I16(value) => Some(format_dictionary_numeric_key(
+            *value,
+            field_path,
+            element_index,
+        )?),
+        SerializedValue::U16(value) => Some(format_dictionary_numeric_key(
+            *value,
+            field_path,
+            element_index,
+        )?),
+        SerializedValue::I32(value) => Some(format_dictionary_numeric_key(
+            *value,
+            field_path,
+            element_index,
+        )?),
+        SerializedValue::U32(value) => Some(format_dictionary_numeric_key(
+            *value,
+            field_path,
+            element_index,
+        )?),
+        SerializedValue::I64(value) => Some(format_dictionary_numeric_key(
+            *value,
+            field_path,
+            element_index,
+        )?),
+        SerializedValue::U64(value) => Some(format_dictionary_numeric_key(
+            *value,
+            field_path,
+            element_index,
+        )?),
+        SerializedValue::F32(value) => Some(format_dictionary_float32_key(
+            *value,
+            field_path,
+            element_index,
+        )?),
+        SerializedValue::F64(value) => Some(format_dictionary_float64_key(
+            *value,
+            field_path,
+            element_index,
+        )?),
+        _ => None,
+    };
+    Ok(key.map(UnityYamlNode::string))
+}
+
+fn format_dictionary_numeric_key<T: Display>(
+    value: T,
+    field_path: &str,
+    element_index: usize,
+) -> Result<String, UnityYamlObjectConversionError> {
+    let mut key = String::new();
+    key.try_reserve_exact(64)
+        .map_err(|_| UnityYamlObjectConversionError::AllocationFailed {
+            resource: "Unity dictionary numeric key",
+            requested: 64,
+        })?;
+    write!(&mut key, "{value}").map_err(|_| {
+        UnityYamlObjectConversionError::InvalidDictionaryKey {
+            field_path: field_path.to_owned(),
+            element_index,
+        }
+    })?;
+    Ok(key)
+}
+
+fn format_dictionary_float32_key(
+    value: f32,
+    field_path: &str,
+    element_index: usize,
+) -> Result<String, UnityYamlObjectConversionError> {
+    if value.is_nan() {
+        try_copy_string("NaN", "Unity dictionary floating-point key")
+    } else if value == f32::INFINITY {
+        try_copy_string("Infinity", "Unity dictionary floating-point key")
+    } else if value == f32::NEG_INFINITY {
+        try_copy_string("-Infinity", "Unity dictionary floating-point key")
+    } else {
+        format_dictionary_numeric_key(value, field_path, element_index)
+    }
+}
+
+fn format_dictionary_float64_key(
+    value: f64,
+    field_path: &str,
+    element_index: usize,
+) -> Result<String, UnityYamlObjectConversionError> {
+    if value.is_nan() {
+        try_copy_string("NaN", "Unity dictionary floating-point key")
+    } else if value == f64::INFINITY {
+        try_copy_string("Infinity", "Unity dictionary floating-point key")
+    } else if value == f64::NEG_INFINITY {
+        try_copy_string("-Infinity", "Unity dictionary floating-point key")
+    } else {
+        format_dictionary_numeric_key(value, field_path, element_index)
+    }
 }
 
 fn importer_field_is_excluded(
@@ -1526,6 +1952,12 @@ fn is_integer_type_tree_type(type_name: &str) -> bool {
             | "unsigned long long"
             | "Type*"
     )
+}
+
+fn is_valid_dictionary_key_type_tree_type(type_name: &str) -> bool {
+    type_name == "GUID"
+        || matches!(type_name, "string" | "Utf8String" | "float" | "double")
+        || is_integer_type_tree_type(type_name)
 }
 
 fn is_unsigned_byte_type_tree_type(type_name: &str) -> bool {
@@ -2170,6 +2602,369 @@ mod tests {
         let non_mono_structure = non_mono_output.find("  m_Structure:").unwrap();
         let non_mono_after = non_mono_output.find("  m_After: 3").unwrap();
         assert!(non_mono_structure < non_mono_after);
+    }
+
+    #[test]
+    fn dictionary_yaml_uses_type_tree_keys_and_unity_version_shape() {
+        let string_map_tree = TypeTree {
+            nodes: vec![
+                type_tree_node(0, "GameObject", "Base", 0),
+                type_tree_node(1, "map", "m_StringMap", 0),
+                type_tree_node(2, "Array", "Array", 0),
+                type_tree_node(3, "SInt32", "size", 0),
+                type_tree_node(3, "pair", "data", 0),
+                type_tree_node(4, "string", "first", 0),
+                type_tree_node(4, "SInt32", "second", 0),
+            ],
+            string_buffer: Vec::new(),
+        };
+        let string_hints = UnityYamlObjectConversionHints::from_type_tree(
+            &string_map_tree,
+            version(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            string_hints.dictionary_representations.get("m_StringMap"),
+            Some(&UnityYamlDictionaryRepresentation::KeyedMapping)
+        );
+        let string_map = SerializedValue::Struct(vec![field(
+            "m_StringMap",
+            SerializedValue::Array(vec![
+                SerializedValue::Struct(vec![
+                    field("first", SerializedValue::StringBytes(b"One".to_vec())),
+                    field("second", SerializedValue::I32(1)),
+                ]),
+                SerializedValue::Struct(vec![
+                    field("first", SerializedValue::StringBytes(b"Two".to_vec())),
+                    field("second", SerializedValue::I32(2)),
+                ]),
+            ]),
+        )]);
+        let string_output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[convert_with_object_hints(&string_map, &string_hints, |_| {
+                unreachable!("the generated dictionary has no PPtrs")
+            })
+            .unwrap()],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        assert!(string_output.contains("    One: 1"));
+        assert!(string_output.contains("    Two: 2"));
+
+        let empty_string_map = SerializedValue::Struct(vec![field(
+            "m_StringMap",
+            SerializedValue::Array(Vec::new()),
+        )]);
+        let empty_string_output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[
+                convert_with_object_hints(&empty_string_map, &string_hints, |_| {
+                    unreachable!("the generated dictionary has no PPtrs")
+                })
+                .unwrap(),
+            ],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        assert!(empty_string_output.contains("m_StringMap: {}"));
+
+        let bool_map_tree = TypeTree {
+            nodes: vec![
+                type_tree_node(0, "GameObject", "Base", 0),
+                type_tree_node(1, "map", "m_BoolMap", 0),
+                type_tree_node(2, "Array", "Array", 0),
+                type_tree_node(3, "SInt32", "size", 0),
+                type_tree_node(3, "pair", "data", 0),
+                type_tree_node(4, "bool", "first", 0),
+                type_tree_node(4, "SInt32", "second", 0),
+            ],
+            string_buffer: Vec::new(),
+        };
+        let bool_hints = UnityYamlObjectConversionHints::from_type_tree(
+            &bool_map_tree,
+            version(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        let bool_map = SerializedValue::Struct(vec![field(
+            "m_BoolMap",
+            SerializedValue::Array(vec![
+                SerializedValue::Struct(vec![
+                    field("first", SerializedValue::Bool(true)),
+                    field("second", SerializedValue::I32(1)),
+                ]),
+                SerializedValue::Struct(vec![
+                    field("first", SerializedValue::Bool(false)),
+                    field("second", SerializedValue::I32(0)),
+                ]),
+            ]),
+        )]);
+        let bool_output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[convert_with_object_hints(&bool_map, &bool_hints, |_| {
+                unreachable!("the generated dictionary has no PPtrs")
+            })
+            .unwrap()],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        assert!(bool_output.contains("True: 1"));
+        assert!(bool_output.contains("False: 0"));
+
+        let mut integer_map_tree = bool_map_tree.clone();
+        integer_map_tree.nodes[5].type_name = Some("SInt32".to_owned());
+        let integer_hints = UnityYamlObjectConversionHints::from_type_tree(
+            &integer_map_tree,
+            version(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        let integer_map = SerializedValue::Struct(vec![field(
+            "m_BoolMap",
+            SerializedValue::Array(vec![
+                SerializedValue::Struct(vec![
+                    field("first", SerializedValue::I32(-2)),
+                    field("second", SerializedValue::I32(-20)),
+                ]),
+                SerializedValue::Struct(vec![
+                    field("first", SerializedValue::I32(3)),
+                    field("second", SerializedValue::I32(30)),
+                ]),
+            ]),
+        )]);
+        let integer_output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[
+                convert_with_object_hints(&integer_map, &integer_hints, |_| {
+                    unreachable!("the generated dictionary has no PPtrs")
+                })
+                .unwrap(),
+            ],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        assert!(integer_output.contains("-2: -20"));
+        assert!(integer_output.contains("3: 30"));
+
+        let char_map_tree = TypeTree {
+            nodes: vec![
+                type_tree_node(0, "GameObject", "Base", 0),
+                type_tree_node(1, "map", "m_CharMap", 0),
+                type_tree_node(2, "Array", "Array", 0),
+                type_tree_node(3, "SInt32", "size", 0),
+                type_tree_node(3, "pair", "data", 0),
+                type_tree_node(4, "char", "first", 0),
+                type_tree_node(4, "SInt32", "second", 0),
+            ],
+            string_buffer: Vec::new(),
+        };
+        let char_hints = UnityYamlObjectConversionHints::from_type_tree(
+            &char_map_tree,
+            version(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        let char_map = SerializedValue::Struct(vec![field(
+            "m_CharMap",
+            SerializedValue::Array(vec![SerializedValue::Struct(vec![
+                field("first", SerializedValue::Char(u16::from(b'A'))),
+                field("second", SerializedValue::I32(1)),
+            ])]),
+        )]);
+        let char_output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[convert_with_object_hints(&char_map, &char_hints, |_| {
+                unreachable!("the generated dictionary has no PPtrs")
+            })
+            .unwrap()],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        assert!(char_output.contains("A: 1"));
+
+        let guid_map_tree = TypeTree {
+            nodes: vec![
+                type_tree_node(0, "GameObject", "Base", 0),
+                type_tree_node(1, "map", "m_GuidMap", 0),
+                type_tree_node(2, "Array", "Array", 0),
+                type_tree_node(3, "SInt32", "size", 0),
+                type_tree_node(3, "pair", "data", 0),
+                type_tree_node(4, "GUID", "first", 0),
+                type_tree_node(5, "UInt32", "m_Data_0_", 0),
+                type_tree_node(5, "UInt32", "m_Data_1_", 0),
+                type_tree_node(5, "UInt32", "m_Data_2_", 0),
+                type_tree_node(5, "UInt32", "m_Data_3_", 0),
+                type_tree_node(4, "bool", "second", 0),
+            ],
+            string_buffer: Vec::new(),
+        };
+        let guid_hints = UnityYamlObjectConversionHints::from_type_tree(
+            &guid_map_tree,
+            version(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        let guid_map = SerializedValue::Struct(vec![field(
+            "m_GuidMap",
+            SerializedValue::Array(vec![SerializedValue::Struct(vec![
+                field("first", guid_value_struct()),
+                field("second", SerializedValue::Bool(true)),
+            ])]),
+        )]);
+        let guid_output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[convert_with_object_hints(&guid_map, &guid_hints, |_| {
+                unreachable!("the generated dictionary has no PPtrs")
+            })
+            .unwrap()],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        assert!(guid_output.contains("01020304111213142122232431323334: 1"));
+
+        let vector_map_tree = TypeTree {
+            nodes: vec![
+                type_tree_node(0, "GameObject", "Base", 0),
+                type_tree_node(1, "map", "m_VectorMap", 0),
+                type_tree_node(2, "Array", "Array", 0),
+                type_tree_node(3, "SInt32", "size", 0),
+                type_tree_node(3, "pair", "data", 0),
+                type_tree_node(4, "Vector3f", "first", 0),
+                type_tree_node(5, "float", "x", 0),
+                type_tree_node(5, "float", "y", 0),
+                type_tree_node(5, "float", "z", 0),
+                type_tree_node(4, "SInt32", "second", 0),
+            ],
+            string_buffer: Vec::new(),
+        };
+        let vector_map_value = SerializedValue::Struct(vec![field(
+            "m_VectorMap",
+            SerializedValue::Array(vec![
+                SerializedValue::Struct(vec![
+                    field(
+                        "first",
+                        SerializedValue::Struct(vec![
+                            field("x", SerializedValue::F32(1.0)),
+                            field("y", SerializedValue::F32(2.0)),
+                            field("z", SerializedValue::F32(3.0)),
+                        ]),
+                    ),
+                    field("second", SerializedValue::I32(4)),
+                ]),
+                SerializedValue::Struct(vec![
+                    field(
+                        "first",
+                        SerializedValue::Struct(vec![
+                            field("x", SerializedValue::F32(5.0)),
+                            field("y", SerializedValue::F32(6.0)),
+                            field("z", SerializedValue::F32(7.0)),
+                        ]),
+                    ),
+                    field("second", SerializedValue::I32(8)),
+                ]),
+            ]),
+        )]);
+        let modern_hints = UnityYamlObjectConversionHints::from_type_tree(
+            &vector_map_tree,
+            version(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            modern_hints.dictionary_representations.get("m_VectorMap"),
+            Some(&UnityYamlDictionaryRepresentation::PairSequence)
+        );
+        let modern_output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[
+                convert_with_object_hints(&vector_map_value, &modern_hints, |_| {
+                    unreachable!("the generated dictionary has no PPtrs")
+                })
+                .unwrap(),
+            ],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(modern_output.matches("  - first:").count(), 2);
+
+        let legacy_version = SceneUnityVersion::parse("5.3.8f1").unwrap();
+        let legacy_hints = UnityYamlObjectConversionHints::from_type_tree(
+            &vector_map_tree,
+            legacy_version,
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            legacy_hints.dictionary_representations.get("m_VectorMap"),
+            Some(&UnityYamlDictionaryRepresentation::LegacyPairMapping)
+        );
+        let legacy_output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[
+                convert_with_object_hints(&vector_map_value, &legacy_hints, |_| {
+                    unreachable!("the generated dictionary has no PPtrs")
+                })
+                .unwrap(),
+            ],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(legacy_output.matches("    data:").count(), 2);
+    }
+
+    #[test]
+    fn malformed_dictionary_pair_shapes_fail_with_context() {
+        let type_tree = TypeTree {
+            nodes: vec![
+                type_tree_node(0, "GameObject", "Base", 0),
+                type_tree_node(1, "map", "m_Map", 0),
+                type_tree_node(2, "Array", "Array", 0),
+                type_tree_node(3, "SInt32", "size", 0),
+                type_tree_node(3, "pair", "data", 0),
+                type_tree_node(4, "string", "first", 0),
+                type_tree_node(4, "SInt32", "second", 0),
+            ],
+            string_buffer: Vec::new(),
+        };
+        let hints = UnityYamlObjectConversionHints::from_type_tree(
+            &type_tree,
+            version(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        let malformed = SerializedValue::Struct(vec![field(
+            "m_Map",
+            SerializedValue::Array(vec![SerializedValue::Struct(vec![field(
+                "first",
+                SerializedValue::StringBytes(b"key".to_vec()),
+            )])]),
+        )]);
+        assert!(matches!(
+            convert_with_object_hints(&malformed, &hints, |_| {
+                unreachable!("the malformed dictionary has no PPtrs")
+            }),
+            Err(UnityYamlObjectConversionError::InvalidDictionaryPair {
+                field_path,
+                element_index: 0,
+            }) if field_path == "m_Map"
+        ));
+
+        let malformed_tree = TypeTree {
+            nodes: vec![
+                type_tree_node(0, "GameObject", "Base", 0),
+                type_tree_node(1, "map", "m_Map", 0),
+                type_tree_node(2, "Array", "Array", 0),
+                type_tree_node(3, "SInt32", "size", 0),
+                type_tree_node(3, "pair", "data", 0),
+                type_tree_node(4, "string", "first", 0),
+            ],
+            string_buffer: Vec::new(),
+        };
+        assert!(matches!(
+            UnityYamlObjectConversionHints::from_type_tree(
+                &malformed_tree,
+                version(),
+                UnityYamlObjectConversionLimits::default(),
+            ),
+            Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                reason: "map pair must contain ordered first and second fields",
+                ..
+            })
+        ));
     }
 
     #[test]
