@@ -4,13 +4,25 @@ use std::fmt::{self, Display, Formatter};
 use crate::io::binary::Endian;
 
 use super::super::format_version::FormatVersion;
-use super::super::metadata::{ObjectRecordLayout, ObjectRecordTableLayout};
-use super::super::object::{ObjectEncodeError, ObjectEncodeLimits, ParsedObjectPayload};
+use super::super::metadata::{
+    ObjectInfo, ObjectRecordLayout, ObjectRecordTableLayout, SerializedType,
+};
+use super::super::object::{
+    ObjectEncodeError, ObjectEncodeLimits, ParsedObjectPayload, SerializedValue,
+};
 use super::SerializedFile;
 
 const OBJECT_ALIGNMENT: usize = 8;
 const DATA_ALIGNMENT: usize = 16;
 const MAX_HEADER_SIZE: usize = 48;
+
+#[derive(Clone, Copy)]
+struct MetadataInsertionContext {
+    version: FormatVersion,
+    endian: Endian,
+    metadata_file_offset: usize,
+    output_limit: usize,
+}
 
 /// Bounds for rebuilding one complete SerializedFile after object payload edits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -18,6 +30,7 @@ pub struct SerializedFileRewriteLimits {
     pub max_output_file_bytes: usize,
     pub max_objects: usize,
     pub max_replacements: usize,
+    pub max_insertions: usize,
     pub object_payload_limits: ObjectEncodeLimits,
 }
 
@@ -27,9 +40,21 @@ impl Default for SerializedFileRewriteLimits {
             max_output_file_bytes: 2 * 1024 * 1024 * 1024,
             max_objects: 5_000_000,
             max_replacements: 1_000_000,
+            max_insertions: 1_000_000,
             object_payload_limits: ObjectEncodeLimits::default(),
         }
     }
+}
+
+/// A new serialized object that uses an existing type-table entry.
+///
+/// `ObjectInfo.byte_start` and `byte_size` are ignored and computed by the writer. The remaining
+/// serialized identity fields must match the active file-generation layout.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SerializedObjectInsertion {
+    pub object: ObjectInfo,
+    pub root: SerializedValue,
+    pub trailing_bytes: Vec<u8>,
 }
 
 /// Error produced while rebuilding a SerializedFile around edited object payloads.
@@ -86,6 +111,10 @@ pub enum SerializedFileRewriteErrorKind {
         requested: usize,
         limit: usize,
     },
+    InsertionLimitExceeded {
+        requested: usize,
+        limit: usize,
+    },
     ReplacementIndexOutOfRange {
         object_count: usize,
     },
@@ -93,6 +122,21 @@ pub enum SerializedFileRewriteErrorKind {
         replacement_index: usize,
     },
     DuplicateReplacement,
+    DuplicateObjectPathId {
+        path_id: i64,
+    },
+    InsertionTypeUnresolved,
+    InsertionTypeIndexOutOfRange {
+        type_index: usize,
+        type_count: usize,
+    },
+    InsertionTypeMismatch {
+        field: &'static str,
+    },
+    InsertionPathIdUnrepresentable {
+        path_id: i64,
+        width: usize,
+    },
     ObjectRecordCountMismatch {
         objects: usize,
         layouts: usize,
@@ -176,6 +220,10 @@ impl Display for SerializedFileRewriteErrorKind {
                 f,
                 "replacement count {requested} exceeds the limit of {limit}"
             ),
+            Self::InsertionLimitExceeded { requested, limit } => write!(
+                f,
+                "insertion count {requested} exceeds the limit of {limit}"
+            ),
             Self::ReplacementIndexOutOfRange { object_count } => {
                 write!(f, "replacement index is outside the {object_count}-object table")
             }
@@ -184,6 +232,21 @@ impl Display for SerializedFileRewriteErrorKind {
                 "replacement for table index {replacement_index} carries a different object index"
             ),
             Self::DuplicateReplacement => f.write_str("replacement list contains a duplicate object index"),
+            Self::DuplicateObjectPathId { path_id } => {
+                write!(f, "object PathID {path_id} is duplicated")
+            }
+            Self::InsertionTypeUnresolved => f.write_str("inserted object type is unresolved"),
+            Self::InsertionTypeIndexOutOfRange { type_index, type_count } => write!(
+                f,
+                "inserted object type index {type_index} is outside the {type_count}-entry type table"
+            ),
+            Self::InsertionTypeMismatch { field } => {
+                write!(f, "inserted object's {field} does not match the file type table")
+            }
+            Self::InsertionPathIdUnrepresentable { path_id, width } => write!(
+                f,
+                "inserted PathID {path_id} does not fit the {width}-byte field"
+            ),
             Self::ObjectRecordCountMismatch { objects, layouts } => write!(
                 f,
                 "metadata has {objects} objects but the parsed input has {layouts} object-record layouts"
@@ -270,11 +333,37 @@ impl SerializedFile<'_> {
         replacements: &[(usize, ParsedObjectPayload)],
         limits: SerializedFileRewriteLimits,
     ) -> Result<Vec<u8>, SerializedFileRewriteError> {
-        if self.metadata.objects.len() > limits.max_objects {
+        self.rewrite_with_insertions(replacements, &[], limits)
+    }
+
+    /// Rebuild the file with object payload replacements and new records using existing types.
+    ///
+    /// Inserted objects are appended after the original object table and their payloads are
+    /// placed after all original payloads. Metadata after the object table is preserved exactly.
+    pub fn rewrite_with_insertions(
+        &self,
+        replacements: &[(usize, ParsedObjectPayload)],
+        insertions: &[SerializedObjectInsertion],
+        limits: SerializedFileRewriteLimits,
+    ) -> Result<Vec<u8>, SerializedFileRewriteError> {
+        let total_object_count = self
+            .metadata
+            .objects
+            .len()
+            .checked_add(insertions.len())
+            .ok_or_else(|| {
+                rewrite_error(
+                    None,
+                    SerializedFileRewriteErrorKind::LengthOverflow {
+                        resource: "rewritten object count",
+                    },
+                )
+            })?;
+        if total_object_count > limits.max_objects {
             return Err(SerializedFileRewriteError::new(
                 None,
                 SerializedFileRewriteErrorKind::ObjectLimitExceeded {
-                    requested: self.metadata.objects.len(),
+                    requested: total_object_count,
                     limit: limits.max_objects,
                 },
             ));
@@ -288,7 +377,25 @@ impl SerializedFile<'_> {
                 },
             ));
         }
-        if replacements.is_empty() {
+        if insertions.len() > limits.max_insertions {
+            return Err(SerializedFileRewriteError::new(
+                None,
+                SerializedFileRewriteErrorKind::InsertionLimitExceeded {
+                    requested: insertions.len(),
+                    limit: limits.max_insertions,
+                },
+            ));
+        }
+        if total_object_count > i32::MAX as usize {
+            return Err(SerializedFileRewriteError::new(
+                None,
+                SerializedFileRewriteErrorKind::ObjectLimitExceeded {
+                    requested: total_object_count,
+                    limit: i32::MAX as usize,
+                },
+            ));
+        }
+        if replacements.is_empty() && insertions.is_empty() {
             return copy_input(self.input(), limits.max_output_file_bytes);
         }
 
@@ -313,6 +420,33 @@ impl SerializedFile<'_> {
                     SerializedFileRewriteErrorKind::ObjectRecordIdentityMismatch {
                         record_path_id: layout.path_id,
                         metadata_path_id: object.path_id,
+                    },
+                ));
+            }
+        }
+
+        let version = self.header.format_version;
+        if !insertions.is_empty() {
+            let mut path_ids = Vec::new();
+            path_ids
+                .try_reserve_exact(total_object_count)
+                .map_err(|_| allocation_error("object PathID index", total_object_count))?;
+            path_ids.extend(self.metadata.objects.iter().map(|object| object.path_id));
+            for (insertion_index, insertion) in insertions.iter().enumerate() {
+                validate_insertion_type(
+                    insertion,
+                    &self.metadata.types,
+                    version,
+                    self.metadata.objects.len() + insertion_index,
+                )?;
+                path_ids.push(insertion.object.path_id);
+            }
+            path_ids.sort_unstable();
+            if let Some(duplicate) = path_ids.windows(2).find(|pair| pair[0] == pair[1]) {
+                return Err(rewrite_error(
+                    None,
+                    SerializedFileRewriteErrorKind::DuplicateObjectPathId {
+                        path_id: duplicate[0],
                     },
                 ));
             }
@@ -352,7 +486,6 @@ impl SerializedFile<'_> {
             ));
         }
 
-        let version = self.header.format_version;
         let expected_header_size = serialized_header_size(version);
         if self.header.header_size != expected_header_size {
             return Err(SerializedFileRewriteError::new(
@@ -413,6 +546,36 @@ impl SerializedFile<'_> {
             version,
             self.metadata.prefix.body_endian,
         )?;
+        let (rewritten_metadata_owned, object_record_layouts) = if insertions.is_empty() {
+            let mut layouts = Vec::new();
+            layouts
+                .try_reserve_exact(self.object_record_layout.records.len())
+                .map_err(|_| {
+                    allocation_error(
+                        "rewritten object record layouts",
+                        self.object_record_layout.records.len(),
+                    )
+                })?;
+            layouts.extend_from_slice(&self.object_record_layout.records);
+            (None, layouts)
+        } else {
+            let (metadata, layouts) = build_metadata_with_insertions(
+                metadata_bytes,
+                &self.object_record_layout,
+                self.metadata.objects.len(),
+                insertions,
+                MetadataInsertionContext {
+                    version,
+                    endian: self.metadata.prefix.body_endian,
+                    metadata_file_offset: metadata_start,
+                    output_limit: limits.max_output_file_bytes,
+                },
+            )?;
+            (Some(metadata), layouts)
+        };
+        let rewritten_metadata = rewritten_metadata_owned
+            .as_deref()
+            .unwrap_or(metadata_bytes);
         let input_data_start = self.header.data_offset;
         let input_data_end = if version.metadata_at_end() {
             u64::try_from(metadata_start).map_err(|_| {
@@ -458,7 +621,7 @@ impl SerializedFile<'_> {
         } else {
             append_output(
                 &mut output,
-                metadata_bytes,
+                rewritten_metadata,
                 limits.max_output_file_bytes,
                 None,
             )?;
@@ -474,10 +637,8 @@ impl SerializedFile<'_> {
         let output_data_start = output.len();
         let mut object_records = Vec::new();
         object_records
-            .try_reserve_exact(self.metadata.objects.len())
-            .map_err(|_| {
-                allocation_error("rewritten object record index", self.metadata.objects.len())
-            })?;
+            .try_reserve_exact(total_object_count)
+            .map_err(|_| allocation_error("rewritten object record index", total_object_count))?;
 
         let mut replacement_cursor = 0;
         for (object_index, object) in self.metadata.objects.iter().enumerate() {
@@ -604,13 +765,91 @@ impl SerializedFile<'_> {
             )?;
         }
 
+        for (insertion_index, insertion) in insertions.iter().enumerate() {
+            let object_index = self.metadata.objects.len() + insertion_index;
+            let type_index = insertion.object.resolved_type_index.ok_or_else(|| {
+                rewrite_error(
+                    Some(object_index),
+                    SerializedFileRewriteErrorKind::InsertionTypeUnresolved,
+                )
+            })?;
+            let payload_bytes = self
+                .metadata
+                .encode_object_payload_for_type(
+                    object_index,
+                    type_index,
+                    &insertion.root,
+                    &insertion.trailing_bytes,
+                    limits.object_payload_limits,
+                )
+                .map_err(|error| {
+                    rewrite_error(
+                        Some(object_index),
+                        SerializedFileRewriteErrorKind::ObjectEncode(error),
+                    )
+                })?;
+            let object_offset = output.len().checked_sub(output_data_start).ok_or_else(|| {
+                rewrite_error(
+                    Some(object_index),
+                    SerializedFileRewriteErrorKind::LengthOverflow {
+                        resource: "inserted object offset",
+                    },
+                )
+            })?;
+            let object_offset = u64::try_from(object_offset).map_err(|_| {
+                rewrite_error(
+                    Some(object_index),
+                    SerializedFileRewriteErrorKind::LengthOverflow {
+                        resource: "inserted object offset",
+                    },
+                )
+            })?;
+            let object_size = i32::try_from(payload_bytes.len()).map_err(|_| {
+                rewrite_error(
+                    Some(object_index),
+                    SerializedFileRewriteErrorKind::ObjectSizeUnrepresentable {
+                        size: payload_bytes.len(),
+                    },
+                )
+            })?;
+            let offset_width = if version.has_large_file_support() {
+                8
+            } else {
+                4
+            };
+            if (offset_width == 4 && u32::try_from(object_offset).is_err())
+                || (offset_width == 8 && i64::try_from(object_offset).is_err())
+            {
+                return Err(rewrite_error(
+                    Some(object_index),
+                    SerializedFileRewriteErrorKind::ObjectOffsetUnrepresentable {
+                        offset: object_offset,
+                        width: offset_width,
+                    },
+                ));
+            }
+            object_records.push((object_offset, object_size));
+            append_output(
+                &mut output,
+                &payload_bytes,
+                limits.max_output_file_bytes,
+                Some(object_index),
+            )?;
+            align_output(
+                &mut output,
+                OBJECT_ALIGNMENT,
+                limits.max_output_file_bytes,
+                Some(object_index),
+            )?;
+        }
+
         let metadata_output_offset = if let Some(offset) = metadata_output_offset {
             offset
         } else {
             let offset = output.len();
             append_output(
                 &mut output,
-                metadata_bytes,
+                rewritten_metadata,
                 limits.max_output_file_bytes,
                 None,
             )?;
@@ -619,8 +858,8 @@ impl SerializedFile<'_> {
         patch_object_records(
             &mut output,
             metadata_output_offset,
-            metadata_bytes.len(),
-            &self.object_record_layout.records,
+            rewritten_metadata.len(),
+            &object_record_layouts,
             &object_records,
             version,
             self.metadata.prefix.body_endian,
@@ -631,13 +870,391 @@ impl SerializedFile<'_> {
             &mut output,
             self.header.format_version,
             self.metadata.prefix.body_endian,
-            metadata_bytes.len(),
+            rewritten_metadata.len(),
             file_size,
             output_data_start,
             expected_header_size,
         )?;
         Ok(output)
     }
+}
+
+fn validate_insertion_type(
+    insertion: &SerializedObjectInsertion,
+    types: &[SerializedType],
+    version: FormatVersion,
+    object_index: usize,
+) -> Result<(), SerializedFileRewriteError> {
+    let object = &insertion.object;
+    if version.raw() < 14 && i32::try_from(object.path_id).is_err() {
+        return Err(rewrite_error(
+            Some(object_index),
+            SerializedFileRewriteErrorKind::InsertionPathIdUnrepresentable {
+                path_id: object.path_id,
+                width: 4,
+            },
+        ));
+    }
+    let type_index = object.resolved_type_index.ok_or_else(|| {
+        rewrite_error(
+            Some(object_index),
+            SerializedFileRewriteErrorKind::InsertionTypeUnresolved,
+        )
+    })?;
+    let serialized_type = types.get(type_index).ok_or_else(|| {
+        rewrite_error(
+            Some(object_index),
+            SerializedFileRewriteErrorKind::InsertionTypeIndexOutOfRange {
+                type_index,
+                type_count: types.len(),
+            },
+        )
+    })?;
+    let mismatch = |field| {
+        rewrite_error(
+            Some(object_index),
+            SerializedFileRewriteErrorKind::InsertionTypeMismatch { field },
+        )
+    };
+    if object.raw_type_id != serialized_type.raw_type_id {
+        return Err(mismatch("raw type ID"));
+    }
+    if version.raw() >= 17 {
+        let serialized_type_index =
+            i32::try_from(type_index).map_err(|_| mismatch("type index"))?;
+        if object.serialized_type_index != Some(serialized_type_index) {
+            return Err(mismatch("serialized type index"));
+        }
+    } else if object.serialized_type_index.is_some() {
+        return Err(mismatch("serialized type index"));
+    }
+    if (version.raw() < 16) != object.class_id.is_some() {
+        return Err(mismatch("class ID field"));
+    }
+    if (11..17).contains(&version.raw()) && object.script_type_index.is_none() {
+        return Err(mismatch("script type index field"));
+    }
+    if (version.raw() < 11) != object.is_destroyed.is_some() {
+        return Err(mismatch("destroyed field"));
+    }
+    if (15..17).contains(&version.raw())
+        && object.is_stripped != Some(serialized_type.is_stripped_type)
+    {
+        return Err(mismatch("stripped flag"));
+    }
+    Ok(())
+}
+
+fn build_metadata_with_insertions(
+    source: &[u8],
+    table: &ObjectRecordTableLayout,
+    object_count: usize,
+    insertions: &[SerializedObjectInsertion],
+    context: MetadataInsertionContext,
+) -> Result<(Vec<u8>, Vec<ObjectRecordLayout>), SerializedFileRewriteError> {
+    let MetadataInsertionContext {
+        version,
+        endian,
+        metadata_file_offset,
+        output_limit,
+    } = context;
+    let inserted_count = insertions.len();
+    let total_count = object_count.checked_add(inserted_count).ok_or_else(|| {
+        rewrite_error(
+            None,
+            SerializedFileRewriteErrorKind::LengthOverflow {
+                resource: "object record count",
+            },
+        )
+    })?;
+    let serialized_count = i32::try_from(total_count).map_err(|_| {
+        rewrite_error(
+            None,
+            SerializedFileRewriteErrorKind::ObjectLimitExceeded {
+                requested: total_count,
+                limit: i32::MAX as usize,
+            },
+        )
+    })?;
+    let mut inserted_records = Vec::new();
+    let mut inserted_layouts = Vec::new();
+    inserted_layouts
+        .try_reserve_exact(inserted_count)
+        .map_err(|_| allocation_error("inserted object record layouts", inserted_count))?;
+    for (insertion_index, insertion) in insertions.iter().enumerate() {
+        let object_index = object_count + insertion_index;
+        if version.raw() >= 14 {
+            let absolute_position = metadata_file_offset
+                .checked_add(table.records_end_offset)
+                .and_then(|value| value.checked_add(inserted_records.len()))
+                .ok_or_else(|| {
+                    rewrite_error(
+                        Some(object_index),
+                        SerializedFileRewriteErrorKind::LengthOverflow {
+                            resource: "inserted object record alignment",
+                        },
+                    )
+                })?;
+            let padding = (4 - (absolute_position & 3)) & 3;
+            append_metadata_bytes(
+                &mut inserted_records,
+                &[0; 3][..padding],
+                output_limit,
+                Some(object_index),
+            )?;
+        }
+
+        let path_id = &insertion.object.path_id;
+        if version.raw() >= 14 {
+            append_metadata_bytes(
+                &mut inserted_records,
+                &encode_i64(*path_id, endian),
+                output_limit,
+                Some(object_index),
+            )?;
+        } else {
+            let path_id = i32::try_from(*path_id).map_err(|_| {
+                rewrite_error(
+                    Some(object_index),
+                    SerializedFileRewriteErrorKind::InsertionPathIdUnrepresentable {
+                        path_id: *path_id,
+                        width: 4,
+                    },
+                )
+            })?;
+            append_metadata_bytes(
+                &mut inserted_records,
+                &encode_i32(path_id, endian),
+                output_limit,
+                Some(object_index),
+            )?;
+        }
+
+        let data_offset_field_offset = table
+            .records_end_offset
+            .checked_add(inserted_records.len())
+            .ok_or_else(|| {
+                rewrite_error(
+                    Some(object_index),
+                    SerializedFileRewriteErrorKind::LengthOverflow {
+                        resource: "inserted data offset field location",
+                    },
+                )
+            })?;
+        let offset_width = if version.has_large_file_support() {
+            8
+        } else {
+            4
+        };
+        append_metadata_bytes(
+            &mut inserted_records,
+            &[0; 8][..offset_width],
+            output_limit,
+            Some(object_index),
+        )?;
+        let data_size_field_offset = table
+            .records_end_offset
+            .checked_add(inserted_records.len())
+            .ok_or_else(|| {
+                rewrite_error(
+                    Some(object_index),
+                    SerializedFileRewriteErrorKind::LengthOverflow {
+                        resource: "inserted data size field location",
+                    },
+                )
+            })?;
+        append_metadata_bytes(
+            &mut inserted_records,
+            &encode_i32(0, endian),
+            output_limit,
+            Some(object_index),
+        )?;
+
+        if version.raw() >= 17 {
+            let type_index = insertion.object.resolved_type_index.ok_or_else(|| {
+                rewrite_error(
+                    Some(object_index),
+                    SerializedFileRewriteErrorKind::InsertionTypeUnresolved,
+                )
+            })?;
+            let type_index = i32::try_from(type_index).map_err(|_| {
+                rewrite_error(
+                    Some(object_index),
+                    SerializedFileRewriteErrorKind::InsertionTypeIndexOutOfRange {
+                        type_index,
+                        type_count: i32::MAX as usize,
+                    },
+                )
+            })?;
+            append_metadata_bytes(
+                &mut inserted_records,
+                &encode_i32(type_index, endian),
+                output_limit,
+                Some(object_index),
+            )?;
+        } else {
+            append_metadata_bytes(
+                &mut inserted_records,
+                &encode_i32(insertion.object.raw_type_id, endian),
+                output_limit,
+                Some(object_index),
+            )?;
+        }
+        if version.raw() < 16 {
+            let class_id = insertion.object.class_id.ok_or_else(|| {
+                rewrite_error(
+                    Some(object_index),
+                    SerializedFileRewriteErrorKind::InsertionTypeMismatch {
+                        field: "class ID field",
+                    },
+                )
+            })?;
+            append_metadata_bytes(
+                &mut inserted_records,
+                &encode_i16(class_id, endian),
+                output_limit,
+                Some(object_index),
+            )?;
+        }
+        if (11..17).contains(&version.raw()) {
+            let script_type_index = insertion.object.script_type_index.ok_or_else(|| {
+                rewrite_error(
+                    Some(object_index),
+                    SerializedFileRewriteErrorKind::InsertionTypeMismatch {
+                        field: "script type index field",
+                    },
+                )
+            })?;
+            append_metadata_bytes(
+                &mut inserted_records,
+                &encode_i16(script_type_index, endian),
+                output_limit,
+                Some(object_index),
+            )?;
+        }
+        if version.raw() < 11 {
+            let destroyed = insertion.object.is_destroyed.ok_or_else(|| {
+                rewrite_error(
+                    Some(object_index),
+                    SerializedFileRewriteErrorKind::InsertionTypeMismatch {
+                        field: "destroyed field",
+                    },
+                )
+            })?;
+            append_metadata_bytes(
+                &mut inserted_records,
+                &encode_u16(destroyed, endian),
+                output_limit,
+                Some(object_index),
+            )?;
+        }
+        if (15..17).contains(&version.raw()) {
+            let stripped = insertion.object.is_stripped.ok_or_else(|| {
+                rewrite_error(
+                    Some(object_index),
+                    SerializedFileRewriteErrorKind::InsertionTypeMismatch {
+                        field: "stripped flag field",
+                    },
+                )
+            })?;
+            append_metadata_bytes(
+                &mut inserted_records,
+                &[u8::from(stripped)],
+                output_limit,
+                Some(object_index),
+            )?;
+        }
+        inserted_layouts.push(ObjectRecordLayout {
+            path_id: insertion.object.path_id,
+            data_offset_field_offset,
+            data_size_field_offset,
+        });
+    }
+
+    let metadata_size = source
+        .len()
+        .checked_add(inserted_records.len())
+        .ok_or_else(|| {
+            rewrite_error(
+                None,
+                SerializedFileRewriteErrorKind::LengthOverflow {
+                    resource: "rewritten metadata",
+                },
+            )
+        })?;
+    if metadata_size > output_limit {
+        return Err(rewrite_error(
+            None,
+            SerializedFileRewriteErrorKind::OutputLimitExceeded {
+                requested: metadata_size,
+                limit: output_limit,
+            },
+        ));
+    }
+    let mut metadata = Vec::new();
+    metadata
+        .try_reserve_exact(metadata_size)
+        .map_err(|_| allocation_error("rewritten metadata", metadata_size))?;
+    let records_end = table.records_end_offset;
+    metadata.extend_from_slice(&source[..records_end]);
+    metadata.extend_from_slice(&inserted_records);
+    metadata.extend_from_slice(&source[records_end..]);
+    let count_end = table
+        .count_field_offset
+        .checked_add(4)
+        .ok_or_else(|| invalid_object_table_layout(table, source.len()))?;
+    let rewritten_metadata_size = metadata.len();
+    let count_field = metadata
+        .get_mut(table.count_field_offset..count_end)
+        .ok_or_else(|| invalid_object_table_layout(table, rewritten_metadata_size))?;
+    count_field.copy_from_slice(&encode_i32(serialized_count, endian));
+
+    let layout_count = table
+        .records
+        .len()
+        .checked_add(inserted_layouts.len())
+        .ok_or_else(|| {
+            rewrite_error(
+                None,
+                SerializedFileRewriteErrorKind::LengthOverflow {
+                    resource: "rewritten object record layouts",
+                },
+            )
+        })?;
+    let mut layouts = Vec::new();
+    layouts
+        .try_reserve_exact(layout_count)
+        .map_err(|_| allocation_error("rewritten object record layouts", layout_count))?;
+    layouts.extend_from_slice(&table.records);
+    layouts.extend(inserted_layouts);
+    Ok((metadata, layouts))
+}
+
+fn append_metadata_bytes(
+    output: &mut Vec<u8>,
+    bytes: &[u8],
+    limit: usize,
+    object_index: Option<usize>,
+) -> Result<(), SerializedFileRewriteError> {
+    let requested = output.len().checked_add(bytes.len()).ok_or_else(|| {
+        rewrite_error(
+            object_index,
+            SerializedFileRewriteErrorKind::LengthOverflow {
+                resource: "inserted object record bytes",
+            },
+        )
+    })?;
+    if requested > limit {
+        return Err(rewrite_error(
+            object_index,
+            SerializedFileRewriteErrorKind::OutputLimitExceeded { requested, limit },
+        ));
+    }
+    output
+        .try_reserve(bytes.len())
+        .map_err(|_| allocation_error("inserted object record bytes", requested))?;
+    output.extend_from_slice(bytes);
+    Ok(())
 }
 
 fn validate_object_record_table_layout(
@@ -1079,6 +1696,20 @@ fn encode_i32(value: i32, endian: Endian) -> [u8; 4] {
     }
 }
 
+fn encode_i16(value: i16, endian: Endian) -> [u8; 2] {
+    match endian {
+        Endian::Little => value.to_le_bytes(),
+        Endian::Big => value.to_be_bytes(),
+    }
+}
+
+fn encode_u16(value: u16, endian: Endian) -> [u8; 2] {
+    match endian {
+        Endian::Little => value.to_le_bytes(),
+        Endian::Big => value.to_be_bytes(),
+    }
+}
+
 fn encode_i64(value: i64, endian: Endian) -> [u8; 8] {
     match endian {
         Endian::Little => value.to_le_bytes(),
@@ -1105,11 +1736,36 @@ fn allocation_error(resource: &'static str, requested: usize) -> SerializedFileR
 
 #[cfg(test)]
 mod tests {
-    use super::{patch_header, patch_object_records, serialized_header_size};
+    use super::{
+        build_metadata_with_insertions, patch_header, patch_object_records, serialized_header_size,
+        MetadataInsertionContext, SerializedObjectInsertion,
+    };
     use crate::io::binary::Endian;
     use crate::serialized_file::format_version::FormatVersion;
     use crate::serialized_file::header::SerializedFileHeader;
-    use crate::serialized_file::metadata::ObjectRecordLayout;
+    use crate::serialized_file::metadata::{
+        ObjectInfo, ObjectRecordLayout, ObjectRecordTableLayout,
+    };
+    use crate::serialized_file::object::SerializedValue;
+
+    fn make_insertion(version: FormatVersion, path_id: i64) -> SerializedObjectInsertion {
+        SerializedObjectInsertion {
+            object: ObjectInfo {
+                path_id,
+                byte_start: 123,
+                byte_size: 456,
+                serialized_type_index: (version.raw() >= 17).then_some(0),
+                raw_type_id: 1,
+                class_id: (version.raw() < 16).then_some(1),
+                script_type_index: (11..17).contains(&version.raw()).then_some(0),
+                is_destroyed: (version.raw() < 11).then_some(0),
+                is_stripped: (15..17).contains(&version.raw()).then_some(false),
+                resolved_type_index: Some(0),
+            },
+            root: SerializedValue::I32(7),
+            trailing_bytes: Vec::new(),
+        }
+    }
 
     #[test]
     fn writes_extended_generation_22_header_and_64_bit_object_offsets() {
@@ -1160,5 +1816,66 @@ mod tests {
             i32::from_be_bytes(metadata_bytes[8..12].try_into().unwrap()),
             13
         );
+    }
+
+    #[test]
+    fn writes_inserted_record_fields_for_aligned_and_extended_generations() {
+        for (version, expected_record_size, offset_width, expected_type_field) in [
+            (FormatVersion::Unknown14, 24, 4, 1),
+            (FormatVersion::SupportsStrippedObject, 25, 4, 1),
+            (FormatVersion::RefactorTypeData, 20, 4, 0),
+            (FormatVersion::LargeFilesSupport, 24, 8, 0),
+        ] {
+            let source = [0, 0, 0, 0, 0xca, 0xfe];
+            let table = ObjectRecordTableLayout {
+                count_field_offset: 0,
+                records_start_offset: 4,
+                records_end_offset: 4,
+                records: Vec::new(),
+            };
+            let insertion = make_insertion(version, 0x0102_0304_0506_0708);
+            let (metadata, layouts) = build_metadata_with_insertions(
+                &source,
+                &table,
+                0,
+                &[insertion],
+                MetadataInsertionContext {
+                    version,
+                    endian: Endian::Big,
+                    metadata_file_offset: 20,
+                    output_limit: 1024,
+                },
+            )
+            .unwrap();
+
+            assert_eq!(&metadata[..4], &1_i32.to_be_bytes());
+            assert_eq!(metadata.len(), source.len() + expected_record_size);
+            assert_eq!(&metadata[4 + expected_record_size..], &[0xca, 0xfe]);
+            assert_eq!(layouts.len(), 1);
+            let layout = layouts[0];
+            assert_eq!(layout.path_id, 0x0102_0304_0506_0708);
+            assert_eq!(layout.data_offset_field_offset, 12);
+            assert_eq!(layout.data_size_field_offset, 12 + offset_width);
+            assert_eq!(
+                &metadata[layout.data_offset_field_offset
+                    ..layout.data_offset_field_offset + offset_width],
+                &[0; 8][..offset_width]
+            );
+            assert_eq!(
+                i32::from_be_bytes(
+                    metadata[layout.data_size_field_offset..layout.data_size_field_offset + 4]
+                        .try_into()
+                        .unwrap()
+                ),
+                0
+            );
+            let type_field_offset = layout.data_size_field_offset + 4;
+            let actual_type_field = i32::from_be_bytes(
+                metadata[type_field_offset..type_field_offset + 4]
+                    .try_into()
+                    .unwrap(),
+            );
+            assert_eq!(actual_type_field, expected_type_field);
+        }
     }
 }

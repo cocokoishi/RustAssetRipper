@@ -246,9 +246,51 @@ impl SerializedFileMetadata {
                 ObjectEncodeErrorKind::ObjectTypeUnresolved,
             )
         })?;
+        self.encode_payload_for_type_with_capacity_hint(
+            payload.object_index,
+            type_index,
+            &payload.root,
+            payload.consumed_bytes,
+            &payload.trailing_bytes,
+            limits,
+        )
+    }
+
+    /// Encode a new typed payload using an existing serialized type-table entry.
+    ///
+    /// This is useful when creating an object record whose class already has a serialized type
+    /// in the file. The caller supplies the object index to use in diagnostics; this method does
+    /// not check that the index already exists in the object table.
+    pub fn encode_object_payload_for_type(
+        &self,
+        object_index: usize,
+        type_index: usize,
+        root: &SerializedValue,
+        trailing_bytes: &[u8],
+        limits: ObjectEncodeLimits,
+    ) -> Result<Vec<u8>, ObjectEncodeError> {
+        self.encode_payload_for_type_with_capacity_hint(
+            object_index,
+            type_index,
+            root,
+            0,
+            trailing_bytes,
+            limits,
+        )
+    }
+
+    fn encode_payload_for_type_with_capacity_hint(
+        &self,
+        object_index: usize,
+        type_index: usize,
+        value: &SerializedValue,
+        consumed_bytes_hint: usize,
+        trailing_bytes: &[u8],
+        limits: ObjectEncodeLimits,
+    ) -> Result<Vec<u8>, ObjectEncodeError> {
         let serialized_type = self.types.get(type_index).ok_or_else(|| {
             ObjectEncodeError::new(
-                payload.object_index,
+                object_index,
                 "<object>",
                 ObjectEncodeErrorKind::InvalidResolvedTypeIndex {
                     type_index,
@@ -258,26 +300,26 @@ impl SerializedFileMetadata {
         })?;
         let type_tree = serialized_type.type_tree.as_ref().ok_or_else(|| {
             ObjectEncodeError::new(
-                payload.object_index,
+                object_index,
                 "<object>",
                 ObjectEncodeErrorKind::MissingTypeTree,
             )
         })?;
         let root = type_tree.nodes.first().ok_or_else(|| {
             ObjectEncodeError::new(
-                payload.object_index,
+                object_index,
                 "<object>",
                 ObjectEncodeErrorKind::EmptyTypeTree,
             )
         })?;
-        let layout = TypeTreeLayout::new(type_tree, payload.object_index, 0)
-            .map_err(|error| invalid_tree(payload.object_index, "<object>", error))?;
-        if payload.trailing_bytes.len() > limits.max_encoded_payload_bytes {
+        let layout = TypeTreeLayout::new(type_tree, object_index, 0)
+            .map_err(|error| invalid_tree(object_index, "<object>", error))?;
+        if trailing_bytes.len() > limits.max_encoded_payload_bytes {
             return Err(ObjectEncodeError::new(
-                payload.object_index,
+                object_index,
                 "<object>",
                 ObjectEncodeErrorKind::EncodedPayloadLimitExceeded {
-                    requested: payload.trailing_bytes.len(),
+                    requested: trailing_bytes.len(),
                     limit: limits.max_encoded_payload_bytes,
                 },
             ));
@@ -285,16 +327,14 @@ impl SerializedFileMetadata {
         // The decoded size is only a capacity hint: callers may shrink an array before encoding.
         // Cap the hint so a caller-controlled `consumed_bytes` value cannot trigger a huge eager
         // allocation, then let checked writes grow the buffer as needed.
-        let capacity_hint = payload
-            .consumed_bytes
-            .saturating_add(payload.trailing_bytes.len());
+        let capacity_hint = consumed_bytes_hint.saturating_add(trailing_bytes.len());
         let requested_capacity = capacity_hint
             .min(limits.max_encoded_payload_bytes)
             .min(1024 * 1024);
         let mut output = Vec::new();
         output.try_reserve_exact(requested_capacity).map_err(|_| {
             ObjectEncodeError::new(
-                payload.object_index,
+                object_index,
                 "<object>",
                 ObjectEncodeErrorKind::AllocationFailed {
                     resource: "object payload buffer",
@@ -306,12 +346,12 @@ impl SerializedFileMetadata {
             type_tree: &layout,
             endian: self.prefix.body_endian,
             arrays_align: unity_version_aligns_arrays(self.prefix.unity_version_text.as_deref()),
-            object_index: payload.object_index,
+            object_index,
             limits,
             output,
         };
-        encoder.encode_root(&payload.root, root.type_name.as_deref().unwrap_or(""))?;
-        encoder.write_bytes("<trailing>", &payload.trailing_bytes)?;
+        encoder.encode_root(value, root.type_name.as_deref().unwrap_or(""))?;
+        encoder.write_bytes("<trailing>", trailing_bytes)?;
         Ok(encoder.output)
     }
 }

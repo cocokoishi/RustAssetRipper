@@ -10,6 +10,7 @@ use super::object::{ObjectDecodeError, ObjectDecodeLimits, ParsedObjectPayload};
 mod writer;
 pub use writer::{
     SerializedFileRewriteError, SerializedFileRewriteErrorKind, SerializedFileRewriteLimits,
+    SerializedObjectInsertion,
 };
 
 /// A read-only view of one complete Unity SerializedFile.
@@ -138,7 +139,7 @@ pub enum SerializedFileErrorKind {
 mod tests {
     use super::{
         SerializedFile, SerializedFileErrorKind, SerializedFileRewriteErrorKind,
-        SerializedFileRewriteLimits,
+        SerializedFileRewriteLimits, SerializedObjectInsertion,
     };
     use crate::serialized_file::format_version::FormatVersion;
     use crate::serialized_file::object::SerializedValue;
@@ -536,5 +537,201 @@ mod tests {
             }])
         );
         assert_eq!(decoded.trailing_bytes, [0xa1, 0xb2, 0xc3, 0xd4, 0xe5]);
+    }
+
+    #[test]
+    fn inserts_object_into_pre_generation_9_file_with_metadata_at_end() {
+        let input = make_generation_8_file();
+        let parsed = SerializedFile::parse(&input).unwrap();
+        let mut object = parsed.metadata.objects[0].clone();
+        object.path_id = 84;
+        let insertion = SerializedObjectInsertion {
+            object,
+            root: SerializedValue::Struct(vec![super::super::object::SerializedFieldValue {
+                name: "m_Value".to_owned(),
+                value: SerializedValue::I32(0x0102_0304),
+            }]),
+            trailing_bytes: Vec::new(),
+        };
+
+        let output = parsed
+            .rewrite_with_insertions(&[], &[insertion], SerializedFileRewriteLimits::default())
+            .unwrap();
+        let rewritten = SerializedFile::parse(&output).unwrap();
+        assert_eq!(rewritten.header.format_version, FormatVersion::Unknown8);
+        assert_eq!(rewritten.metadata.objects.len(), 2);
+        assert_eq!(rewritten.metadata.objects[1].path_id, 84);
+        assert_eq!(rewritten.metadata.objects[1].byte_start, 8);
+        assert_eq!(rewritten.metadata.objects[1].byte_size, 4);
+        assert_eq!(rewritten.metadata.prefix.metadata_offset, 32);
+        let decoded = rewritten.decode_object_payload(1).unwrap();
+        assert_eq!(
+            decoded
+                .root
+                .unique_field_in_base_chain("m_Value")
+                .unwrap()
+                .unwrap(),
+            &SerializedValue::I32(0x0102_0304)
+        );
+    }
+
+    #[test]
+    fn inserts_object_record_payload_and_preserves_following_metadata() {
+        let input = make_generation_10_file();
+        let parsed = SerializedFile::parse(&input).unwrap();
+        let source_metadata_start = parsed.metadata.prefix.metadata_offset;
+        let source_metadata_end = source_metadata_start + parsed.header.metadata_size as usize;
+        let source_metadata = &input[source_metadata_start..source_metadata_end];
+        let insertion_offset = parsed.object_record_layout.records_end_offset;
+        let mut object = parsed.metadata.objects[0].clone();
+        object.path_id = 126;
+        object.byte_start = 999; // The writer computes both data fields.
+        object.byte_size = 1;
+        let insertion = SerializedObjectInsertion {
+            object,
+            root: SerializedValue::Struct(vec![
+                super::super::object::SerializedFieldValue {
+                    name: "m_Value".to_owned(),
+                    value: SerializedValue::I32(0x2468_ace0),
+                },
+                super::super::object::SerializedFieldValue {
+                    name: "m_Target".to_owned(),
+                    value: SerializedValue::PPtr {
+                        file_id: 0,
+                        path_id: 126,
+                    },
+                },
+            ]),
+            trailing_bytes: vec![0xde, 0xad],
+        };
+
+        let output = parsed
+            .rewrite_with_insertions(&[], &[insertion], SerializedFileRewriteLimits::default())
+            .unwrap();
+        let rewritten = SerializedFile::parse(&output).unwrap();
+        assert_eq!(rewritten.metadata.objects.len(), 2);
+        assert_eq!(rewritten.metadata.objects[1].path_id, 126);
+        assert_eq!(rewritten.metadata.objects[1].byte_start, 16);
+        assert_eq!(rewritten.metadata.objects[1].byte_size, 14);
+        let decoded = rewritten.decode_object_payload(1).unwrap();
+        assert_eq!(decoded.object_index, 1);
+        assert_eq!(decoded.path_id, 126);
+        assert_eq!(decoded.type_name, "Root");
+        assert_eq!(decoded.consumed_bytes, 12);
+        assert_eq!(
+            decoded.root,
+            SerializedValue::Struct(vec![
+                super::super::object::SerializedFieldValue {
+                    name: "m_Value".to_owned(),
+                    value: SerializedValue::I32(0x2468_ace0),
+                },
+                super::super::object::SerializedFieldValue {
+                    name: "m_Target".to_owned(),
+                    value: SerializedValue::PPtr {
+                        file_id: 0,
+                        path_id: 126,
+                    },
+                },
+            ])
+        );
+        assert_eq!(decoded.trailing_bytes, [0xde, 0xad]);
+        let rewritten_metadata_start = rewritten.metadata.prefix.metadata_offset;
+        let rewritten_metadata_end =
+            rewritten_metadata_start + rewritten.header.metadata_size as usize;
+        let rewritten_metadata = &output[rewritten_metadata_start..rewritten_metadata_end];
+        assert_eq!(
+            i32::from_le_bytes(
+                rewritten_metadata[rewritten.object_record_layout.count_field_offset
+                    ..rewritten.object_record_layout.count_field_offset + 4]
+                    .try_into()
+                    .unwrap()
+            ),
+            2
+        );
+        let inserted_record_size = rewritten.object_record_layout.records_end_offset
+            - parsed.object_record_layout.records_end_offset;
+        assert_eq!(inserted_record_size, 20);
+        assert_eq!(
+            &rewritten_metadata[rewritten.object_record_layout.records_end_offset..],
+            &source_metadata[insertion_offset..]
+        );
+        assert_eq!(
+            &output
+                [rewritten.header.data_offset as usize..rewritten.header.data_offset as usize + 12],
+            &input[parsed.header.data_offset as usize..parsed.header.data_offset as usize + 12]
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_object_insertions_before_rewriting() {
+        let input = make_generation_10_file();
+        let parsed = SerializedFile::parse(&input).unwrap();
+        let make_insertion = |path_id| {
+            let mut object = parsed.metadata.objects[0].clone();
+            object.path_id = path_id;
+            SerializedObjectInsertion {
+                object,
+                root: parsed.decode_object_payload(0).unwrap().root,
+                trailing_bytes: Vec::new(),
+            }
+        };
+
+        let duplicate = parsed
+            .rewrite_with_insertions(
+                &[],
+                &[make_insertion(42)],
+                SerializedFileRewriteLimits::default(),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            duplicate.kind(),
+            SerializedFileRewriteErrorKind::DuplicateObjectPathId { path_id: 42 }
+        ));
+
+        let limited = parsed
+            .rewrite_with_insertions(
+                &[],
+                &[make_insertion(126)],
+                SerializedFileRewriteLimits {
+                    max_insertions: 0,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(
+            limited.kind(),
+            SerializedFileRewriteErrorKind::InsertionLimitExceeded {
+                requested: 1,
+                limit: 0
+            }
+        ));
+
+        let mut mismatched_type = make_insertion(126);
+        mismatched_type.object.raw_type_id = 2;
+        let mismatch = parsed
+            .rewrite_with_insertions(
+                &[],
+                &[mismatched_type],
+                SerializedFileRewriteLimits::default(),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            mismatch.kind(),
+            SerializedFileRewriteErrorKind::InsertionTypeMismatch {
+                field: "raw type ID"
+            }
+        ));
+
+        let unrepresentable = parsed
+            .rewrite_with_insertions(
+                &[],
+                &[make_insertion(i64::from(i32::MAX) + 1)],
+                SerializedFileRewriteLimits::default(),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            unrepresentable.kind(),
+            SerializedFileRewriteErrorKind::InsertionPathIdUnrepresentable { width: 4, .. }
+        ));
     }
 }
