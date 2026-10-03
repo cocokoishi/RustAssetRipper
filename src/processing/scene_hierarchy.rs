@@ -7492,4 +7492,103 @@ mod tests {
         assert_eq!(appends[1].first_source_owner, game_object);
         assert_eq!(appends[1].file_id, Some(5));
     }
+
+    #[test]
+    fn scene_export_plan_includes_generated_transforms_and_keeps_yaml_sort_separate() {
+        let game_object = identity(0, 0, 100, GAME_OBJECT_CLASS_ID);
+        let render_settings = identity(0, 1, 102, SceneManagerKind::RenderSettings.class_id());
+        let mut collection = empty_collection_graph(0);
+        collection.scene_assets = vec![
+            WorkspaceSceneAssetIdentity {
+                identity: game_object,
+                category: WorkspaceSceneAssetCategory::GameObject,
+            },
+            WorkspaceSceneAssetIdentity {
+                identity: render_settings,
+                category: WorkspaceSceneAssetCategory::LevelGameManager(
+                    SceneManagerKind::RenderSettings,
+                ),
+            },
+        ];
+        collection.game_object_hierarchies = vec![WorkspaceSceneGameObjectHierarchy {
+            game_object,
+            component_relationship_start: 0,
+            component_relationship_end: 0,
+        }];
+        collection.missing_transform_plans = vec![WorkspaceMissingTransformPlan {
+            game_object,
+            default_values: default_workspace_generated_transform_values(),
+        }];
+        let scene = WorkspaceSceneHierarchyScene {
+            plan: scene_definition_plan(0),
+            collections: vec![collection],
+        };
+        let workspace = WorkspaceSceneHierarchies {
+            scenes: vec![scene],
+            non_scene_collections: Vec::new(),
+            collection_graph_index: vec![WorkspaceSceneCollectionGraphIndexEntry {
+                file_index: 0,
+                scene_index: Some(0),
+                collection_index: 0,
+            }],
+        };
+        let processing =
+            plan_workspace_prefab_processing(&workspace, &[0], Default::default()).unwrap();
+        assert!(processing.is_complete());
+        let processed_assets = plan_workspace_processed_prefab_assets(
+            &workspace,
+            &processing,
+            &[3],
+            &Default::default(),
+            WorkspaceProcessedPrefabAssetPlanLimits::default(),
+        )
+        .unwrap();
+        assert!(processed_assets.is_complete());
+
+        let unity_version = crate::processing::scene_naming::SceneUnityVersion {
+            major: 2019,
+            minor: 4,
+            patch: 0,
+        };
+        let hierarchy_order =
+            crate::export::scene_collection::plan_workspace_scene_export_ids_with_processed_assets(
+                &workspace.scenes()[0],
+                0,
+                &processed_assets,
+                unity_version,
+                WorkspaceSceneHierarchyMembershipLimits::default(),
+                crate::export::scene_collection::SceneHierarchyAssetOrderLimits::default(),
+                crate::export::scene_collection::SceneExportIdPlanLimits::default(),
+            )
+            .unwrap();
+        assert_eq!(hierarchy_order.len(), 3);
+        assert_eq!(hierarchy_order[0].asset.path_id, game_object.path_id);
+        assert_eq!(
+            hierarchy_order[1].asset.collection,
+            crate::export::scene_collection::ExportAssetCollectionIdentity::ProcessedCollection {
+                collection_index: 3
+            }
+        );
+        assert_eq!(hierarchy_order[1].asset.object_index, 0);
+        assert_eq!(hierarchy_order[1].asset.class_id, TRANSFORM_CLASS_ID);
+        assert_eq!(
+            hierarchy_order[1].file_id,
+            crate::export::ids::get_pseudo_random_export_id(TRANSFORM_CLASS_ID, 0, unity_version)
+        );
+        assert_eq!(hierarchy_order[2].asset.path_id, render_settings.path_id);
+
+        let yaml_order = crate::export::scene_collection::order_scene_yaml_assignments(
+            &hierarchy_order,
+            crate::export::scene_collection::SceneYamlAssetOrderLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(yaml_order.len(), 3);
+        assert_eq!(yaml_order[0].asset.path_id, render_settings.path_id);
+        assert_eq!(yaml_order[1].asset.path_id, game_object.path_id);
+        assert_eq!(
+            yaml_order[2].asset.collection,
+            hierarchy_order[1].asset.collection
+        );
+        assert_eq!(yaml_order[2].file_id, hierarchy_order[1].file_id);
+    }
 }
