@@ -1363,17 +1363,24 @@ mod tests {
     }
 
     fn pointer_map_for_asset(asset: ExportAssetIdentity) -> ProjectExportPointerMap {
-        let assets = [ExportedAssetPointerEntry {
-            asset,
-            file_id: asset.path_id,
-            collection_index: COLLECTION_INDEX,
-        }];
+        pointer_map_for_assets(&[asset])
+    }
+
+    fn pointer_map_for_assets(assets: &[ExportAssetIdentity]) -> ProjectExportPointerMap {
+        let entries = assets
+            .iter()
+            .map(|&asset| ExportedAssetPointerEntry {
+                asset,
+                file_id: asset.path_id,
+                collection_index: COLLECTION_INDEX,
+            })
+            .collect::<Vec<_>>();
         let collections = [ExportCollectionPointerMetadata {
             collection_index: COLLECTION_INDEX,
             guid: [0x72; 16],
             asset_type: UnityProjectAssetType::Serialized,
         }];
-        ProjectExportPointerMap::new(&assets, &collections, ExportPointerMapLimits::default())
+        ProjectExportPointerMap::new(&entries, &collections, ExportPointerMapLimits::default())
             .unwrap()
     }
 
@@ -1414,17 +1421,34 @@ mod tests {
         file_name: &str,
         virtual_path: &str,
     ) -> RootResourceFileCatalog {
-        let dispatched =
-            SchemeReader::read_with_limits(b"root resource", SchemeReaderLimits::default())
-                .unwrap();
-        let input = [ExplicitRootResourceInput {
-            file_name,
-            virtual_path,
-            dispatched_file: &dispatched,
-        }];
+        explicit_root_resource_catalog_for_files(filesystem, &[(file_name, virtual_path)])
+    }
+
+    fn explicit_root_resource_catalog_for_files(
+        filesystem: &VirtualFileSystem,
+        resources: &[(&str, &str)],
+    ) -> RootResourceFileCatalog {
+        let dispatched = resources
+            .iter()
+            .map(|_| {
+                SchemeReader::read_with_limits(b"root resource", SchemeReaderLimits::default())
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let inputs = resources
+            .iter()
+            .zip(&dispatched)
+            .map(
+                |(&(file_name, virtual_path), dispatched_file)| ExplicitRootResourceInput {
+                    file_name,
+                    virtual_path,
+                    dispatched_file,
+                },
+            )
+            .collect::<Vec<_>>();
         RootResourceFileCatalog::from_explicit_resource_inputs(
             filesystem,
-            &input,
+            &inputs,
             RootResourceCatalogLimits::default(),
         )
         .unwrap()
@@ -1447,6 +1471,22 @@ mod tests {
         offset_is_u64: bool,
         stream_path: &str,
         stream_size: u32,
+    ) -> Vec<u8> {
+        make_streamed_asset_file_with_inline_data(
+            class_id,
+            offset_is_u64,
+            stream_path,
+            stream_size,
+            &[],
+        )
+    }
+
+    fn make_streamed_asset_file_with_inline_data(
+        class_id: i32,
+        offset_is_u64: bool,
+        stream_path: &str,
+        stream_size: u32,
+        inline_data: &[u8],
     ) -> Vec<u8> {
         let (root_type, stream_field, inline_parent_type, inline_parent_name, inline_field) =
             match class_id {
@@ -1508,7 +1548,8 @@ mod tests {
             payload.extend_from_slice(&2u32.to_le_bytes());
         }
         payload.extend_from_slice(&stream_size.to_le_bytes());
-        payload.extend_from_slice(&0i32.to_le_bytes()); // empty inline TypelessData
+        payload.extend_from_slice(&i32::try_from(inline_data.len()).unwrap().to_le_bytes());
+        payload.extend_from_slice(inline_data);
 
         let mut metadata = b"2019.4.0f1\0".to_vec();
         metadata.extend_from_slice(&0u32.to_le_bytes()); // generation-10 long FileID flag
@@ -2148,6 +2189,143 @@ mod tests {
             assert!(!yaml.contains("--- !u!189"));
             assert!(!yaml.contains("ImageTexture:"));
         }
+    }
+
+    #[test]
+    fn workspace_yaml_collection_preserves_multi_asset_order_and_streamed_bytes() {
+        let first_bytes =
+            make_streamed_asset_file_with_inline_data(189, false, "first.resS", 3, b"ORIG");
+        let second_bytes = make_streamed_asset_file_with_stream_info(189, false, "second.resS", 3);
+        let source_files = [
+            ("first.assets", first_bytes.as_slice()),
+            ("second.assets", second_bytes.as_slice()),
+        ];
+        let (mut filesystem, workspace) = load_workspace_files(&source_files);
+        filesystem
+            .write_all_bytes("/game/second.resS", b"yyXYZ!")
+            .unwrap();
+        let catalog =
+            explicit_root_resource_catalog(&filesystem, "second.resS", "/game/second.resS");
+        let objects = ObjectWorkspace::load_from_vfs(
+            &filesystem,
+            &workspace,
+            ObjectWorkspaceLimits::default(),
+        )
+        .unwrap();
+        let reference_graph = workspace
+            .reference_graph(MultiFileReferenceGraphLimits::default())
+            .unwrap();
+        assert!(reference_graph.is_complete());
+
+        let first = asset(0, 77, 189);
+        let second = ExportAssetIdentity {
+            collection: ExportAssetCollectionIdentity::SerializedFile { file_index: 1 },
+            object_index: 0,
+            path_id: 77,
+            class_id: 189,
+        };
+        let pointer_map = pointer_map_for_assets(&[first, second]);
+        let provider = PlatformResourceProvider::new(None, None);
+        let context = WorkspaceStreamedYamlResourceContext {
+            filesystem: &filesystem,
+            root_catalog: &catalog,
+            provider: &provider,
+            content_limits: StreamedResourceContentLimits::default(),
+            staging_limits: StreamedYamlAssetLimits::default(),
+        };
+        let assignments = [
+            SceneExportIdAssignment {
+                asset: second,
+                file_id: 202,
+            },
+            SceneExportIdAssignment {
+                asset: first,
+                file_id: 101,
+            },
+        ];
+
+        let collection_yaml = workspace_assignments_to_unity_yaml_with_streamed_resources(
+            &workspace,
+            &objects,
+            &reference_graph,
+            &pointer_map,
+            &assignments,
+            COLLECTION_INDEX,
+            None,
+            UnityYamlWorkspaceCollectionLimits::default(),
+            &context,
+        )
+        .unwrap();
+        assert_yaml_asset_order_and_streamed_bytes(&collection_yaml);
+
+        let scene_yaml = workspace_scene_assignments_to_unity_yaml_with_streamed_resources(
+            &workspace,
+            &objects,
+            &reference_graph,
+            &pointer_map,
+            &assignments,
+            COLLECTION_INDEX,
+            None,
+            UnityYamlWorkspaceCollectionLimits::default(),
+            &context,
+        )
+        .unwrap();
+        assert_yaml_asset_order_and_streamed_bytes(&scene_yaml);
+
+        let first_payload = objects.objects()[0].payload.as_ref().unwrap();
+        assert_eq!(
+            crate::resource::extract_streamed_resource_info(
+                first_payload
+                    .root
+                    .unique_field_in_base_chain("m_StreamData_C189")
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap()
+            .path,
+            "first.resS"
+        );
+        assert_eq!(
+            first_payload
+                .root
+                .unique_field_in_base_chain("m_ImageData_C189")
+                .unwrap()
+                .unwrap(),
+            &crate::serialized_file::object::SerializedValue::Bytes(b"ORIG".to_vec())
+        );
+
+        let second_payload = objects.objects()[1].payload.as_ref().unwrap();
+        assert_eq!(
+            crate::resource::extract_streamed_resource_info(
+                second_payload
+                    .root
+                    .unique_field_in_base_chain("m_StreamData_C189")
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap()
+            .path,
+            "second.resS"
+        );
+        assert_eq!(
+            second_payload
+                .root
+                .unique_field_in_base_chain("m_ImageData_C189")
+                .unwrap()
+                .unwrap(),
+            &crate::serialized_file::object::SerializedValue::Bytes(Vec::new())
+        );
+    }
+
+    fn assert_yaml_asset_order_and_streamed_bytes(yaml: &str) {
+        let second_start = yaml.find("--- !u!189 &202").unwrap();
+        let first_start = yaml.find("--- !u!189 &101").unwrap();
+        assert!(second_start < first_start);
+        assert_eq!(yaml.matches("--- !u!189").count(), 2);
+        assert!(yaml[second_start..first_start].contains("m_ImageData_C189: 58595a"));
+        assert!(yaml[first_start..].contains("m_ImageData_C189: 4f524947"));
+        assert!(!yaml.contains("first.resS"));
+        assert!(!yaml.contains("second.resS"));
     }
 
     #[test]
