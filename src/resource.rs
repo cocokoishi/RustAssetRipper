@@ -478,7 +478,56 @@ impl std::error::Error for StreamedResourceResolutionError {
     }
 }
 
-/// The path, byte offset, and byte count decoded from a Unity `StreamingInfo` value.
+/// A bounded byte range selected from a ResourceFile for a decoded StreamingInfo.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StreamedResourceContentResolution<'a> {
+    Unset,
+    Missing {
+        unavailable_data_paths: Vec<String>,
+    },
+    Resolved {
+        resource: ResolvedResourceFile<'a>,
+        bytes: Vec<u8>,
+    },
+}
+
+/// A lookup or bounded read failure while materializing a decoded StreamingInfo.
+#[derive(Debug)]
+pub enum StreamedResourceContentError {
+    ResourceLookup(ResourceFileResolveError),
+    Read(StreamedResourceError),
+    UnexpectedUnsetAfterLookup,
+}
+
+impl fmt::Display for StreamedResourceContentError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ResourceLookup(source) => {
+                write!(
+                    formatter,
+                    "StreamingInfo ResourceFile lookup failed: {source}"
+                )
+            }
+            Self::Read(source) => {
+                write!(formatter, "StreamingInfo byte-range read failed: {source}")
+            }
+            Self::UnexpectedUnsetAfterLookup => formatter
+                .write_str("a set StreamingInfo became unset after its ResourceFile was resolved"),
+        }
+    }
+}
+
+impl std::error::Error for StreamedResourceContentError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::ResourceLookup(source) => Some(source),
+            Self::Read(source) => Some(source),
+            Self::UnexpectedUnsetAfterLookup => None,
+        }
+    }
+}
+
+/// The path, byte offset, and byte count decoded from a Unity resource stream field.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StreamedResourceInfo {
     pub path: String,
@@ -1214,6 +1263,51 @@ pub fn resolve_streamed_resource_info<'a>(
     })
 }
 
+/// Resolves a decoded StreamingInfo through its owner scopes and reads its bounded byte range.
+///
+/// Missing resources and unset streams remain distinct results. A resolved resource whose range
+/// is invalid, too large to materialize, or unreadable returns a contextual error.
+pub fn resolve_and_read_streamed_resource_info<'a>(
+    filesystem: &VirtualFileSystem,
+    workspace: &'a SerializedFileWorkspace,
+    source_bundle_index: Option<usize>,
+    info: &StreamedResourceInfo,
+    root_catalog: &'a RootResourceFileCatalog,
+    provider: &PlatformResourceProvider<'_>,
+    limits: StreamedResourceContentLimits,
+) -> Result<StreamedResourceContentResolution<'a>, StreamedResourceContentError> {
+    if !info.is_set() {
+        return Ok(StreamedResourceContentResolution::Unset);
+    }
+    let resource = resolve_resource_file_with_root_catalog(
+        filesystem,
+        workspace,
+        source_bundle_index,
+        &info.path,
+        root_catalog,
+        provider,
+        limits.resource_lookup,
+    )
+    .map_err(StreamedResourceContentError::ResourceLookup)?;
+    let resource_path = match &resource {
+        ResolvedResourceFile::Bundled { virtual_path, .. }
+        | ResolvedResourceFile::ExplicitRoot { virtual_path, .. } => *virtual_path,
+        ResolvedResourceFile::External { virtual_path, .. } => virtual_path,
+        ResolvedResourceFile::Missing {
+            unavailable_data_paths,
+        } => {
+            return Ok(StreamedResourceContentResolution::Missing {
+                unavailable_data_paths: unavailable_data_paths.clone(),
+            });
+        }
+    };
+    let bytes =
+        read_streamed_resource_info_bytes(filesystem, resource_path, info, limits.range_read)
+            .map_err(StreamedResourceContentError::Read)?
+            .ok_or(StreamedResourceContentError::UnexpectedUnsetAfterLookup)?;
+    Ok(StreamedResourceContentResolution::Resolved { resource, bytes })
+}
+
 impl Default for StreamedResourceLimits {
     fn default() -> Self {
         Self {
@@ -1221,6 +1315,13 @@ impl Default for StreamedResourceLimits {
             max_materialized_bytes: 512 * 1024 * 1024,
         }
     }
+}
+
+/// Lookup and materialization bounds for resolving a decoded StreamingInfo to bytes.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct StreamedResourceContentLimits {
+    pub resource_lookup: PlatformStructureLimits,
+    pub range_read: StreamedResourceLimits,
 }
 
 /// Why a streamed-resource range cannot be used.
@@ -1528,12 +1629,13 @@ mod tests {
     use super::{
         check_streamed_resource_integrity, extract_streamed_resource_info,
         find_streamed_resource_infos, open_streamed_resource_range, read_streamed_resource_bytes,
-        read_streamed_resource_info_bytes, resolve_streamed_resource_info,
-        ExplicitRootResourceInput, InvalidStreamedResourceRange, LocatedStreamedResourceInfo,
-        ResolvedResourceFile, RootResourceCatalogError, RootResourceCatalogLimits,
-        RootResourceFileCatalog, StreamedResourceError, StreamedResourceInfo,
-        StreamedResourceInfoError, StreamedResourceLimits, StreamedResourceResolution,
-        StreamedResourceScanError, StreamedResourceScanLimits,
+        read_streamed_resource_info_bytes, resolve_and_read_streamed_resource_info,
+        resolve_streamed_resource_info, ExplicitRootResourceInput, InvalidStreamedResourceRange,
+        LocatedStreamedResourceInfo, ResolvedResourceFile, RootResourceCatalogError,
+        RootResourceCatalogLimits, RootResourceFileCatalog, StreamedResourceContentError,
+        StreamedResourceContentLimits, StreamedResourceContentResolution, StreamedResourceError,
+        StreamedResourceInfo, StreamedResourceInfoError, StreamedResourceLimits,
+        StreamedResourceResolution, StreamedResourceScanError, StreamedResourceScanLimits,
     };
     use crate::io::filesystem::VirtualFileSystem;
     use crate::scheme::{FileKind, SchemeReader, SchemeReaderLimits};
@@ -1843,6 +1945,149 @@ mod tests {
                 range_is_valid: true,
             }
         );
+        assert_eq!(
+            resolve_and_read_streamed_resource_info(
+                &filesystem,
+                &workspace,
+                None,
+                &info,
+                &catalog,
+                &provider,
+                StreamedResourceContentLimits::default(),
+            )
+            .unwrap(),
+            StreamedResourceContentResolution::Resolved {
+                resource: ResolvedResourceFile::ExplicitRoot {
+                    resource_index: 0,
+                    virtual_path: "/explicit/root.resS",
+                },
+                bytes: b"2345".to_vec(),
+            }
+        );
+    }
+
+    #[test]
+    fn streamed_resource_content_keeps_unset_missing_and_read_errors_distinct() {
+        use crate::io::platform_structure::PlatformResourceProvider;
+        use crate::serialized_file::workspace::SerializedFileWorkspace;
+
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem.create_directory(Some("/explicit")).unwrap();
+        filesystem
+            .write_all_bytes("/explicit/root.resS", b"0123456789ab")
+            .unwrap();
+        let dispatched =
+            SchemeReader::read_with_limits(b"root resource", SchemeReaderLimits::default())
+                .unwrap();
+        let input = [ExplicitRootResourceInput {
+            file_name: "root.resS",
+            virtual_path: "/explicit/root.resS",
+            dispatched_file: &dispatched,
+        }];
+        let catalog = RootResourceFileCatalog::from_explicit_resource_inputs(
+            &filesystem,
+            &input,
+            RootResourceCatalogLimits::default(),
+        )
+        .unwrap();
+        let workspace = SerializedFileWorkspace::default();
+        let provider = PlatformResourceProvider::new(None, None);
+        let content_limits = StreamedResourceContentLimits::default();
+
+        let unset = StreamedResourceInfo {
+            path: String::new(),
+            offset: 0,
+            size: 0,
+        };
+        assert_eq!(
+            resolve_and_read_streamed_resource_info(
+                &filesystem,
+                &workspace,
+                None,
+                &unset,
+                &catalog,
+                &provider,
+                content_limits,
+            )
+            .unwrap(),
+            StreamedResourceContentResolution::Unset
+        );
+
+        let missing = StreamedResourceInfo {
+            path: "not-selected.resS".to_owned(),
+            offset: 0,
+            size: 4,
+        };
+        assert_eq!(
+            resolve_and_read_streamed_resource_info(
+                &filesystem,
+                &workspace,
+                None,
+                &missing,
+                &catalog,
+                &provider,
+                content_limits,
+            )
+            .unwrap(),
+            StreamedResourceContentResolution::Missing {
+                unavailable_data_paths: Vec::new(),
+            }
+        );
+
+        let outside = StreamedResourceInfo {
+            path: "root.resS".to_owned(),
+            offset: 10,
+            size: 4,
+        };
+        assert!(matches!(
+            resolve_and_read_streamed_resource_info(
+                &filesystem,
+                &workspace,
+                None,
+                &outside,
+                &catalog,
+                &provider,
+                content_limits,
+            ),
+            Err(StreamedResourceContentError::Read(
+                StreamedResourceError::RangeOutsideResource {
+                    offset: 10,
+                    size: 4,
+                    resource_size: 12,
+                    ..
+                }
+            ))
+        ));
+
+        let over_limit = StreamedResourceInfo {
+            path: "root.resS".to_owned(),
+            offset: 0,
+            size: 4,
+        };
+        assert!(matches!(
+            resolve_and_read_streamed_resource_info(
+                &filesystem,
+                &workspace,
+                None,
+                &over_limit,
+                &catalog,
+                &provider,
+                StreamedResourceContentLimits {
+                    range_read: StreamedResourceLimits {
+                        max_materialized_bytes: 3,
+                        ..content_limits.range_read
+                    },
+                    ..content_limits
+                },
+            ),
+            Err(StreamedResourceContentError::Read(
+                StreamedResourceError::MaterializationLimitExceeded {
+                    size: 4,
+                    limit: 3,
+                    ..
+                }
+            ))
+        ));
     }
 
     #[test]
