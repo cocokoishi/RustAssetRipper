@@ -853,6 +853,9 @@ where
     if stripped {
         retain_stripped_yaml_fields(&mut body, source.class_id)?;
     }
+    if source.class_id == 114 {
+        move_mapping_field_to_end(&mut body, "m_Structure")?;
+    }
     UnityYamlDocument::object(source.class_id, file_id, class_name, body, stripped)
         .map_err(UnityYamlObjectConversionError::NodeBuild)
 }
@@ -1348,6 +1351,30 @@ fn retain_stripped_yaml_fields(
         ) => allowed_fields.contains(&name.as_str()),
         _ => false,
     });
+    Ok(())
+}
+
+fn move_mapping_field_to_end(
+    mapping: &mut UnityYamlNode,
+    field_name: &str,
+) -> Result<(), UnityYamlObjectConversionError> {
+    let UnityYamlNodeKind::Mapping { entries, .. } = &mut mapping.kind else {
+        return Err(UnityYamlObjectConversionError::NodeBuild(
+            UnityYamlNodeBuildError::NotAMapping,
+        ));
+    };
+    let field_index = entries.iter().position(|(key, _)| {
+        matches!(
+            &key.kind,
+            UnityYamlNodeKind::Scalar(
+                UnityYamlScalar::String(name) | UnityYamlScalar::PlainString(name)
+            ) if name == field_name
+        )
+    });
+    if let Some(field_index) = field_index {
+        let field = entries.remove(field_index);
+        entries.push(field);
+    }
     Ok(())
 }
 
@@ -2097,6 +2124,52 @@ mod tests {
         assert!(!output.contains("serializedVersion"));
         assert!(!output.contains("m_ObjectHideFlags"));
         assert!(!output.contains("m_CustomData"));
+    }
+
+    #[test]
+    fn monobehaviour_structure_field_is_written_last() {
+        let value = SerializedValue::Struct(vec![
+            field("m_Before", SerializedValue::I32(1)),
+            field(
+                "m_Structure",
+                SerializedValue::Struct(vec![field("m_Value", SerializedValue::I32(2))]),
+            ),
+            field("m_After", SerializedValue::I32(3)),
+        ]);
+        let output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[convert_object_with_options(
+                source_with_class_id(114),
+                &value,
+                &UnityYamlObjectConversionHints::default(),
+                UnityYamlObjectFieldMode::ProjectAsset,
+                false,
+                |_| unreachable!("the generated fixture has no PPtrs"),
+            )
+            .unwrap()],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        let before = output.find("  m_Before: 1").unwrap();
+        let after = output.find("  m_After: 3").unwrap();
+        let structure = output.find("  m_Structure:").unwrap();
+        assert!(before < after && after < structure);
+
+        let non_mono_output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[convert_object_with_options(
+                source(),
+                &value,
+                &UnityYamlObjectConversionHints::default(),
+                UnityYamlObjectFieldMode::ProjectAsset,
+                false,
+                |_| unreachable!("the generated fixture has no PPtrs"),
+            )
+            .unwrap()],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        let non_mono_structure = non_mono_output.find("  m_Structure:").unwrap();
+        let non_mono_after = non_mono_output.find("  m_After: 3").unwrap();
+        assert!(non_mono_structure < non_mono_after);
     }
 
     #[test]

@@ -677,3 +677,11 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Targeted stripped GameObject and MonoBehaviour tests plus the cross-file Scene YAML regression passed. Full workspace verification passed: 394 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and diff checks.
 - Still incomplete: the source hierarchy's `StrippedAssets` membership has not been wired to workspace export; no Unity-produced fixture or runtime differential; Phase 1 remains open.
 - Next: trace the source-to-export path for hierarchy stripped membership and expose that result explicitly in Rust Scene/Prefab assignments instead of deriving it from SerializedFile type flags.
+
+## MonoBehaviour m_Structure YAML ordering
+
+- Current phase: Phase 1; gate not passed. This increment builds from pushed revision `1d9b23af2cfdeec90d60e59697256625eb03adff`. Only `cocokoishi/RustAssetRipper`'s canonical GitHub repository is a push target. No UABEA, user AssetBundle content, or other remote repository was accessed.
+- Added the baseline `m_Structure`-last rule for MonoBehaviour class ID 114 and preserved input order for other classes. Stripped objects still use their allowlist first, so this field is naturally absent when not allowed.
+- Focused and full verification passed: `monobehaviour_structure_field_is_written_last`; 395 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and diff checks.
+- Still incomplete: no Unity-produced fixture or runtime differential; complete generated MonoBehaviour walkers, importer/project routing, and Phase 1 remain open.
+- Next: inspect the baseline dictionary walker and its Unity-version-dependent sequence/map policy; determine which parts can be carried by TypeTree metadata and which need generated class schema before implementation.
