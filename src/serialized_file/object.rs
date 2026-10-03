@@ -12,6 +12,9 @@ const ALIGN_BYTES_FLAG: u32 = 0x4000;
 const CHAR_PROPERTY_MASK_FLAG: u32 = 0x0200_0000;
 const MAX_TYPE_TREE_DEPTH: usize = 256;
 
+mod writer;
+pub use writer::{ObjectEncodeError, ObjectEncodeErrorKind, ObjectEncodeLimits};
+
 /// Per-object bounds for dynamic TypeTree decoding. Callers can raise these limits when
 /// processing trusted large assets or lower them for untrusted input.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1852,7 +1855,8 @@ impl Display for ObjectDecodeErrorKind {
 #[cfg(test)]
 mod tests {
     use super::{
-        ObjectDecodeErrorKind, SerializedFieldValue, SerializedValue, SerializedValueLookupError,
+        ObjectDecodeErrorKind, ObjectEncodeErrorKind, ObjectEncodeLimits, SerializedFieldValue,
+        SerializedValue, SerializedValueLookupError,
     };
     use crate::io::binary::Endian;
     use crate::serialized_file::format_version::FormatVersion;
@@ -2157,6 +2161,74 @@ mod tests {
     }
 
     #[test]
+    fn encodes_typed_object_fields_and_retains_trailing_bytes_in_both_endian_modes() {
+        let little_endian_payload = [0x78, 0x56, 0x34, 0x12, 1, 0xaa];
+        let (file, header, metadata) = make_file(&little_endian_payload);
+        let mut object = metadata.decode_object_payload(&file, &header, 0).unwrap();
+        assert_eq!(
+            metadata
+                .encode_object_payload(&object, ObjectEncodeLimits::default())
+                .unwrap(),
+            little_endian_payload
+        );
+
+        *object
+            .root
+            .unique_field_in_base_chain_mut("m_Number")
+            .unwrap()
+            .unwrap() = SerializedValue::I32(0x0102_0304);
+        let encoded = metadata
+            .encode_object_payload(&object, ObjectEncodeLimits::default())
+            .unwrap();
+        assert_eq!(encoded, [0x04, 0x03, 0x02, 0x01, 1, 0xaa]);
+        let data_range = metadata.objects[0].data_range(&header).unwrap();
+        let data_start = usize::try_from(data_range.start).unwrap();
+        let mut edited_file = file.clone();
+        edited_file[data_start..data_start + encoded.len()].copy_from_slice(&encoded);
+        let decoded = metadata
+            .decode_object_payload(&edited_file, &header, 0)
+            .unwrap();
+        assert_eq!(
+            decoded.root,
+            SerializedValue::Struct(vec![
+                super::SerializedFieldValue {
+                    name: "m_Number".to_owned(),
+                    value: SerializedValue::I32(0x0102_0304),
+                },
+                super::SerializedFieldValue {
+                    name: "m_Flag".to_owned(),
+                    value: SerializedValue::Bool(true),
+                },
+            ])
+        );
+        assert_eq!(decoded.trailing_bytes, [0xaa]);
+        let error = metadata
+            .encode_object_payload(
+                &object,
+                ObjectEncodeLimits {
+                    max_encoded_payload_bytes: 4,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            ObjectEncodeErrorKind::EncodedPayloadLimitExceeded { limit: 4, .. }
+        ));
+
+        let big_endian_payload = [0x12, 0x34, 0x56, 0x78, 1, 0xaa];
+        let (file, header, mut metadata) = make_file(&big_endian_payload);
+        metadata.prefix.body_endian = Endian::Big;
+        let object = metadata.decode_object_payload(&file, &header, 0).unwrap();
+        assert_eq!(
+            metadata
+                .encode_object_payload(&object, ObjectEncodeLimits::default())
+                .unwrap(),
+            big_endian_payload
+        );
+    }
+
+    #[test]
     fn rejects_negative_array_counts_and_missing_type_trees() {
         let (file, header, mut metadata) = make_file(&[0xff, 0xff, 0xff, 0xff]);
         metadata.types[0].type_tree = Some(TypeTree {
@@ -2231,6 +2303,45 @@ mod tests {
         assert_eq!(fields[1].value, SerializedValue::Bool(true));
         assert_eq!(object.consumed_bytes, payload.len());
         assert!(object.trailing_bytes.is_empty());
+
+        let mut shortened = metadata.decode_object_payload(&file, &header, 0).unwrap();
+        *shortened
+            .root
+            .unique_field_in_base_chain_mut("m_Bytes")
+            .unwrap()
+            .unwrap() = SerializedValue::Array(Vec::new());
+        let encoded = metadata
+            .encode_object_payload(
+                &shortened,
+                ObjectEncodeLimits {
+                    max_encoded_payload_bytes: 5,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(encoded, [0, 0, 0, 0, 1]);
+        let data_start =
+            usize::try_from(metadata.objects[0].data_range(&header).unwrap().start).unwrap();
+        let mut edited_file = file.clone();
+        edited_file[data_start..data_start + encoded.len()].copy_from_slice(&encoded);
+        let mut edited_metadata = metadata.clone();
+        edited_metadata.objects[0].byte_size = encoded.len() as u32;
+        let decoded = edited_metadata
+            .decode_object_payload(&edited_file, &header, 0)
+            .unwrap();
+        assert_eq!(
+            decoded.root,
+            SerializedValue::Struct(vec![
+                super::SerializedFieldValue {
+                    name: "m_Bytes".to_owned(),
+                    value: SerializedValue::Array(Vec::new()),
+                },
+                super::SerializedFieldValue {
+                    name: "m_Active".to_owned(),
+                    value: SerializedValue::Bool(true),
+                },
+            ])
+        );
     }
 
     #[test]
@@ -2254,6 +2365,12 @@ mod tests {
         });
 
         let object = metadata.decode_object_payload(&file, &header, 0).unwrap();
+        assert_eq!(
+            metadata
+                .encode_object_payload(&object, ObjectEncodeLimits::default())
+                .unwrap(),
+            payload
+        );
         let SerializedValue::Struct(fields) = object.root else {
             panic!("expected a structured root value");
         };
@@ -2280,6 +2397,12 @@ mod tests {
         });
 
         let object = metadata.decode_object_payload(&file, &header, 0).unwrap();
+        assert_eq!(
+            metadata
+                .encode_object_payload(&object, ObjectEncodeLimits::default())
+                .unwrap(),
+            payload
+        );
         let SerializedValue::Struct(fields) = object.root else {
             panic!("expected a structured root value");
         };

@@ -434,3 +434,11 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Tests verify a null source PPtr and an existing cross-file PPtr remain in indexes 0 and 1, a new PPtr appends at index 2, a failed append leaves the array unchanged, and duplicate inherited field matches are rejected. Verification passed: 314 library and 10 CLI tests, warnings-denied Clippy, format check, 1,449-file baseline verifier, and `git diff --check`.
 - The values remain in memory: there is no TypeTree object encoder, SerializedFile metadata/object-size rebuild, or export path yet. Phase 1 remains open.
 - Next: implement a bounded TypeTree-backed object payload encoder that preserves serialized field order, PPtrs, array shape, endianness, alignment, raw leaves, and trailing bytes; then verify exact fixture bytes and semantic decode behavior before using it for component writeback.
+
+## Bounded TypeTree object payload encoder (2026-10-03)
+
+- Current phase: Phase 1; gate not passed. This increment starts from pushed revision `76706a0cfd16d4377b76406b01724370440e6ba0`. Only `cocokoishi/RustAssetRipper` is an authorized cloud write target; the local AssetRipper baseline remains read-only. No UABEA or user AssetBundle content was accessed.
+- Added `SerializedFileMetadata::encode_object_payload` for TypeTree-decoded values. It writes ordered fields, 32/64-bit PPtrs, versioned arrays and alignment, strings, raw leaves, and trailing bytes with bounded output and fallible allocation. Mutation tests verify exact bytes and semantic decode; shrinking an array can produce a valid smaller payload under a tighter cap. Zero-width nonempty arrays are rejected.
+- Verification passed: 320 library and 10 CLI tests; warnings-denied Clippy; format check; 1,449-file baseline verification; `git diff --check`.
+- Still incomplete: this writes only one object payload. It does not rewrite enclosing SerializedFile object sizes/offsets/metadata/header, nor support managed-reference payloads. No source-runtime differential has been run; Phase 1 remains open.
+- Next: build a bounded SerializedFile rewrite path around the payload encoder, recalculating object sizes and data offsets while preserving versioned metadata/header details; then use it for the typed component and dependency writeback work.
