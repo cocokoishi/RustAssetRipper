@@ -2269,10 +2269,22 @@ fn baseline_type_scoped_field_aliases(type_name: &str) -> &'static [(&'static st
     const ANIMATION_CLIP_ALIASES: &[(&str, &str)] =
         &[("m_AnimationClipSettings", "m_MuscleClipInfo")];
     const GENERIC_BINDING_ALIASES: &[(&str, &str)] = &[("m_TypeID", "m_ClassID")];
+    const ANIMATOR_CONTROLLER_ALIASES: &[(&str, &str)] = &[
+        ("m_AnimatorEvents", "m_AnimatorParameters"),
+        ("m_Layers", "m_AnimatorLayers"),
+    ];
+    const ANIMATOR_CONTROLLER_LAYER_ALIASES: &[(&str, &str)] = &[("m_HumanMask", "m_Mask")];
+    const BLEND_TREE_ALIASES: &[(&str, &str)] = &[
+        ("m_BlendEvent", "m_BlendParameter"),
+        ("m_BlendEventY", "m_BlendParameterY"),
+    ];
 
     match type_name {
         "AnimationClip" => ANIMATION_CLIP_ALIASES,
         "GenericBinding" => GENERIC_BINDING_ALIASES,
+        "AnimatorController" => ANIMATOR_CONTROLLER_ALIASES,
+        "AnimatorControllerLayer" => ANIMATOR_CONTROLLER_LAYER_ALIASES,
+        "BlendTree" => BLEND_TREE_ALIASES,
         _ => &[],
     }
 }
@@ -3392,6 +3404,126 @@ mod tests {
         .unwrap();
         assert!(unrelated_output.contains("m_TypeID: 17"));
         assert!(!unrelated_output.contains("m_ClassID: 17"));
+    }
+
+    #[test]
+    fn animator_controller_layer_and_blend_tree_aliases_are_type_scoped() {
+        let controller_type_tree = TypeTree {
+            nodes: vec![
+                type_tree_node(0, "AnimatorController", "Base", 0),
+                type_tree_node(1, "vector", "m_AnimatorEvents", 0),
+                type_tree_node(2, "Array", "Array", 0),
+                type_tree_node(3, "SInt32", "size", 0),
+                type_tree_node(3, "AnimatorEvent", "data", 0),
+                type_tree_node(1, "vector", "m_Layers", 0),
+                type_tree_node(2, "Array", "Array", 0),
+                type_tree_node(3, "SInt32", "size", 0),
+                type_tree_node(3, "AnimatorControllerLayer", "data", 0),
+                type_tree_node(4, "PPtr<AvatarMask>", "m_HumanMask", 0),
+            ],
+            string_buffer: Vec::new(),
+        };
+        let controller_hints = UnityYamlObjectConversionHints::from_type_tree(
+            &controller_type_tree,
+            version(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            controller_hints
+                .field_name_aliases
+                .get("m_AnimatorEvents")
+                .map(String::as_str),
+            Some("m_AnimatorParameters")
+        );
+        assert_eq!(
+            controller_hints
+                .field_name_aliases
+                .get("m_Layers")
+                .map(String::as_str),
+            Some("m_AnimatorLayers")
+        );
+        assert_eq!(
+            controller_hints
+                .field_name_aliases
+                .get("m_Layers[*].m_HumanMask")
+                .map(String::as_str),
+            Some("m_Mask")
+        );
+        let controller_value = SerializedValue::Struct(vec![
+            field(
+                "m_AnimatorEvents",
+                SerializedValue::Array(vec![SerializedValue::Struct(Vec::new())]),
+            ),
+            field(
+                "m_Layers",
+                SerializedValue::Array(vec![SerializedValue::Struct(vec![field(
+                    "m_HumanMask",
+                    null_pptr(),
+                )])]),
+            ),
+        ]);
+        let controller_document =
+            convert_with_object_hints(&controller_value, &controller_hints, |_| {
+                unreachable!("the generated null-mask fixture has no non-null PPtrs")
+            })
+            .unwrap();
+        let controller_output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[controller_document],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        assert!(controller_output.contains("m_AnimatorParameters:"));
+        assert!(controller_output.contains("m_AnimatorLayers:"));
+        assert!(controller_output.contains("m_Mask: {fileID: 0}"));
+        assert!(!controller_output.contains("m_AnimatorEvents:"));
+        assert!(!controller_output.contains("m_Layers:"));
+        assert!(!controller_output.contains("m_HumanMask:"));
+
+        let blend_tree_type_tree = TypeTree {
+            nodes: vec![
+                type_tree_node(0, "BlendTree", "Base", 0),
+                type_tree_node(1, "string", "m_BlendEvent", 0),
+                type_tree_node(2, "Array", "Array", 0),
+                type_tree_node(3, "SInt32", "size", 0),
+                type_tree_node(3, "char", "data", 0),
+                type_tree_node(1, "string", "m_BlendEventY", 0),
+                type_tree_node(2, "Array", "Array", 0),
+                type_tree_node(3, "SInt32", "size", 0),
+                type_tree_node(3, "char", "data", 0),
+            ],
+            string_buffer: Vec::new(),
+        };
+        let blend_tree_hints = UnityYamlObjectConversionHints::from_type_tree(
+            &blend_tree_type_tree,
+            version(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        let blend_tree_value = SerializedValue::Struct(vec![
+            field(
+                "m_BlendEvent",
+                SerializedValue::StringBytes(b"Horizontal".to_vec()),
+            ),
+            field(
+                "m_BlendEventY",
+                SerializedValue::StringBytes(b"Vertical".to_vec()),
+            ),
+        ]);
+        let blend_tree_document =
+            convert_with_object_hints(&blend_tree_value, &blend_tree_hints, |_| {
+                unreachable!("BlendTree parameters contain no PPtrs")
+            })
+            .unwrap();
+        let blend_tree_output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[blend_tree_document],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        assert!(blend_tree_output.contains("m_BlendParameter: Horizontal"));
+        assert!(blend_tree_output.contains("m_BlendParameterY: Vertical"));
+        assert!(!blend_tree_output.contains("m_BlendEvent:"));
+        assert!(!blend_tree_output.contains("m_BlendEventY:"));
     }
 
     #[test]
