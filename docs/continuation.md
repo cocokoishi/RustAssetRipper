@@ -488,12 +488,21 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Added `SerializedFileMetadata::default_object_value_for_type` with limits for TypeTree nodes, materialized values, allocation bytes, and depth. It produces schema-shaped generic defaults and rejects malformed string/array/PPtr nodes and managed-reference layouts.
 - Synthetic Transform-shaped values encode successfully. Full workspace verification passed: 335 library and 10 CLI tests; warnings-denied Clippy; format check; baseline verifier (1,449 files); and `git diff --check`.
 - Still incomplete: this generic builder does not apply Transform's nonzero Unity defaults or GameObject link, allocate absent types, or create complete Prefab/Unity project output. Phase 1 remains open; Phase 2 remains locked.
-- Next: connect this Transform root to `SerializedObjectInsertion` and the ordered `rewrite_with_changes` path. Before a complete generated collection edit is possible, establish how generated collection type tables, source dependency records, and collection path/GUID identity are created.
+- Next: build project-export collections and route source/generated PPtrs through export IDs, then write Scene and Prefab Unity YAML. Processed collections are virtual in-memory assets in the baseline; their final output does not use the complete SerializedFile rewrite path.
 
 ## Generated Transform typed-payload materialization
 
 - Current phase: Phase 1; gate not passed. This increment starts from pushed revision `072fdc945ebc16db25a3ced94be5c42129f18051`. Only `cocokoishi/RustAssetRipper` is a write/push target; the local AssetRipper baseline remains read-only. No UABEA or user AssetBundle content was accessed.
 - Added `materialize_planned_generated_transform_payload`. It validates the completed asset plan and dependency identity, requires an existing class-ID-4 TypeTree, applies the baseline Transform defaults and planned GameObject PPtr, and returns both a typed root and bounded encoded bytes.
 - Synthetic evidence verifies exact bytes, inherited GameObject field lookup, null father, empty children, optional Euler hint, and rejection of wrong type/dependency or missing required fields. Full verification passed: 338 library and 10 CLI tests, warnings-denied Clippy, format, 1,449-file baseline verification, and `git diff --check`.
-- Still incomplete: no generated collection SerializedFile or new type-table entry is created, and source dependency table values still need to be materialized. Phase 1 remains open; Phase 2 remains locked.
-- Next: establish source-derived output collection path/GUID and type-table generation behavior, then join Transform insertion, source GameObject payload replacement, and external dependency record append in a complete-file rewrite.
+- Still incomplete: this typed payload is not connected to project Scene/Prefab YAML output. Processed collections are virtual assets, and their references are mapped to YAML export IDs and GUIDs later. Phase 1 remains open; Phase 2 remains locked.
+- Next: port source/generated asset export identity and PPtr resolution for Scene/Prefab export collections, then add Unity YAML document and `.meta` generation.
+
+## Unity project export ID rules
+
+- Current phase: Phase 1; gate not passed. This increment starts from pushed revision `32285a421b61f449f70f1f5e478a17e831dfc6b7`. Only `cocokoishi/RustAssetRipper` is a write/push target; the local AssetRipper baseline remains read-only. No UABEA or user AssetBundle content was accessed.
+- Source inspection traced `ProcessedAssetCollection.CreateAsset` to collection-local in-memory PathIDs and traced `SceneExportCollection`/`PrefabExportCollection` to Unity YAML output with mapped export IDs. The binary SerializedFile table writer does not create the baseline's processed collections.
+- Added `src/export/ids.rs` for main and pseudo-random export IDs, including empty-input xxHash32/64, Unity 5.5 width selection, class prefixes, and source overflow behavior.
+- Verification covers reference hash vectors, main-ID error cases, class/version thresholds, and both million-seed uniqueness probes. Full suite: 342 library and 10 CLI tests; warnings-denied Clippy, format, 1,449-file baseline verifier, and diff check.
+- Still incomplete: export collection construction, PPtr target mapping, YAML serialization, and `.meta` GUID assignment. Phase 1 remains open; Phase 2 remains locked.
+- Next: model source/generated assets assigned to Scene and Prefab export collections and resolve every reference to local IDs or collection GUIDs.

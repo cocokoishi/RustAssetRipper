@@ -7,6 +7,7 @@
 
 pub mod compression;
 pub mod container;
+pub mod export;
 pub mod io;
 pub mod processing;
 pub mod scheme;
