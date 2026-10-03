@@ -10,7 +10,9 @@ use assetripper::io::game_structure::{MixedGameStructure, MixedGameStructureLimi
 use assetripper::io::platform_file_inventory::{
     PlatformFileInventoryLimits, PlatformFileInventoryOptions, PlatformWorkspaceLoadOptions,
 };
-use assetripper::io::platform_structure::{detect_platform_structure, PlatformStructureLimits};
+use assetripper::io::platform_structure::{
+    detect_platform_structure, PlatformResourceProvider, PlatformStructureLimits,
+};
 use assetripper::processing::prefab_processing::{
     animator_controller_source_dependency_inventory, plan_workspace_prefab_processing,
     plan_workspace_processed_prefab_assets, WorkspacePrefabProcessingEvent,
@@ -37,7 +39,11 @@ use assetripper::processing::scene_hierarchy::{
 use assetripper::processing::scene_metadata::{
     decode_build_settings_scene_paths_from_parts, BuildSettingsSceneLimits,
 };
-use assetripper::resource::{RootResourceCatalogLimits, RootResourceFileCatalog};
+use assetripper::resource::{
+    resolve_streamed_resource_info, scan_streamed_resource_infos, ResolvedResourceFile,
+    RootResourceCatalogLimits, RootResourceFileCatalog, StreamedResourceInfo,
+    StreamedResourceResolution, StreamedResourceScanLimits,
+};
 use assetripper::scheme::{
     BatchMountLimits, BatchMountReport, ContainerMountLimits, PathMountInput, SchemeReader,
     SchemeReaderLimits,
@@ -48,7 +54,9 @@ use assetripper::serialized_file::collection_workspace::{
 use assetripper::serialized_file::file::SerializedFile;
 use assetripper::serialized_file::metadata::ObjectInfo;
 use assetripper::serialized_file::object::ObjectDecodeLimits;
-use assetripper::serialized_file::object_workspace::{ObjectWorkspace, ObjectWorkspaceLimits};
+use assetripper::serialized_file::object_workspace::{
+    ObjectWorkspace, ObjectWorkspaceLimits, WorkspaceObject,
+};
 use assetripper::serialized_file::reference_graph::{
     MultiFileObjectReference, MultiFilePPtrResolution, MultiFileReferenceGraph,
     MultiFileReferenceGraphLimits,
@@ -66,6 +74,15 @@ const MAX_TOTAL_STREAMED_SCENE_PATH_MAPPINGS: usize = 1_000_000;
 const MAX_OBJECT_DECODE_DIAGNOSTICS: usize = 128;
 const MAX_REFERENCE_GRAPH_DIAGNOSTICS: usize = 128;
 const MAX_GENERATED_TRANSFORM_DIAGNOSTICS: usize = 128;
+const MAX_STREAMED_RESOURCE_DIAGNOSTICS: usize = 128;
+const MAX_TOTAL_STREAMED_RESOURCE_VALUE_NODES: usize = 50_000_000;
+const MAX_TOTAL_STREAMED_RESOURCE_CANDIDATES: usize = 1_000_000;
+const MAX_TOTAL_STREAMED_RESOURCE_PATH_BYTES: usize = 64 * 1024 * 1024;
+
+struct StreamedResourceSummaryContext<'a> {
+    root_catalog: &'a RootResourceFileCatalog,
+    provider: PlatformResourceProvider<'a>,
+}
 
 struct StreamedSceneBundleWorkItem {
     owner_file_index: usize,
@@ -181,7 +198,17 @@ fn inspect_explicit_files_to<W: io::Write>(
         "explicit file import: {} logical inputs, {} mounted leaves, {} output bytes",
         mount_report.discovered_inputs, mount_report.mounted_entries, mount_report.mounted_bytes
     )?;
-    print_workspace_summary_to(output, &filesystem, &workspace, &dependencies)?;
+    let resource_context = StreamedResourceSummaryContext {
+        root_catalog: &root_resources,
+        provider: PlatformResourceProvider::with_mixed_data_paths(None, Some(&mixed.data_paths)),
+    };
+    print_workspace_summary_with_streamed_resources_to(
+        output,
+        &filesystem,
+        &workspace,
+        &dependencies,
+        &resource_context,
+    )?;
     Ok(())
 }
 
@@ -264,7 +291,17 @@ fn inspect_directories(input_directories: &[PathBuf]) -> Result<(), Box<dyn Erro
             "platform directory import: {} logical files, {} source bytes",
             total_mount_report.discovered_inputs, total_mount_report.discovered_source_bytes
         );
-        print_workspace_summary(&filesystem, &loaded.workspace, &loaded.dependencies)?;
+        let root_catalog = RootResourceFileCatalog::default();
+        let resource_context = StreamedResourceSummaryContext {
+            root_catalog: &root_catalog,
+            provider: PlatformResourceProvider::new(Some(&structure), None),
+        };
+        print_workspace_summary_with_streamed_resources(
+            &filesystem,
+            &loaded.workspace,
+            &loaded.dependencies,
+            &resource_context,
+        )?;
         return Ok(());
     }
 
@@ -301,7 +338,17 @@ fn inspect_directories(input_directories: &[PathBuf]) -> Result<(), Box<dyn Erro
         total_mount_report.mounted_entries,
         total_mount_report.mounted_bytes
     );
-    print_workspace_summary(&filesystem, &workspace, &dependencies)?;
+    let root_catalog = RootResourceFileCatalog::default();
+    let resource_context = StreamedResourceSummaryContext {
+        root_catalog: &root_catalog,
+        provider: PlatformResourceProvider::with_mixed_data_paths(None, Some(&mixed.data_paths)),
+    };
+    print_workspace_summary_with_streamed_resources(
+        &filesystem,
+        &workspace,
+        &dependencies,
+        &resource_context,
+    )?;
     Ok(())
 }
 
@@ -384,26 +431,6 @@ fn mount_input_directories(
     }
 
     Ok((filesystem, selected_paths, total_mount_report))
-}
-
-#[cfg(not(test))]
-fn print_workspace_summary(
-    filesystem: &VirtualFileSystem,
-    workspace: &SerializedFileWorkspace,
-    dependencies: &SerializedFileDependencyReport,
-) -> Result<(), Box<dyn Error>> {
-    let stdout = io::stdout();
-    let mut output = stdout.lock();
-    print_workspace_summary_to(&mut output, filesystem, workspace, dependencies)
-}
-
-#[cfg(test)]
-fn print_workspace_summary(
-    filesystem: &VirtualFileSystem,
-    workspace: &SerializedFileWorkspace,
-    dependencies: &SerializedFileDependencyReport,
-) -> Result<(), Box<dyn Error>> {
-    print_workspace_summary_to(&mut io::sink(), filesystem, workspace, dependencies)
 }
 
 fn print_reference_graph_summary_to<W: io::Write>(
@@ -502,11 +529,354 @@ fn write_unresolved_reference_diagnostic<W: io::Write>(
     )
 }
 
+fn print_streamed_resource_summary_to<W: io::Write>(
+    output: &mut W,
+    filesystem: &VirtualFileSystem,
+    workspace: &SerializedFileWorkspace,
+    decoded_objects: &ObjectWorkspace,
+    context: &StreamedResourceSummaryContext<'_>,
+) -> Result<(), Box<dyn Error>> {
+    let mut total_value_nodes = 0usize;
+    let mut total_candidates = 0usize;
+    let mut total_resource_path_bytes = 0usize;
+    let mut unscannable_objects = 0usize;
+    let mut scan_errors = 0usize;
+    let mut unset = 0usize;
+    let mut missing = 0usize;
+    let mut resolved_bundle = 0usize;
+    let mut resolved_root = 0usize;
+    let mut resolved_external = 0usize;
+    let mut invalid_ranges = 0usize;
+    let mut resolution_errors = 0usize;
+    let mut diagnostic_count = 0usize;
+    let mut listed_diagnostics = 0usize;
+
+    for object in decoded_objects.objects() {
+        let source_file = workspace
+            .files()
+            .get(object.file_index)
+            .ok_or_else(|| invalid_data("decoded object refers to an invalid workspace file"))?;
+        let payload = match &object.payload {
+            Ok(payload) => payload,
+            Err(_) => {
+                increment_streamed_resource_count(
+                    &mut unscannable_objects,
+                    "unscannable StreamingInfo object count",
+                )?;
+                continue;
+            }
+        };
+        let scan = match scan_streamed_resource_infos(
+            &payload.root,
+            StreamedResourceScanLimits::default(),
+        ) {
+            Ok(scan) => scan,
+            Err(error) => {
+                increment_streamed_resource_count(
+                    &mut scan_errors,
+                    "StreamingInfo scan error count",
+                )?;
+                increment_streamed_resource_count(
+                    &mut diagnostic_count,
+                    "StreamingInfo diagnostic count",
+                )?;
+                if listed_diagnostics < MAX_STREAMED_RESOURCE_DIAGNOSTICS {
+                    write_streamed_resource_diagnostic(
+                        output,
+                        source_file,
+                        object,
+                        None,
+                        None,
+                        &error.to_string(),
+                    )?;
+                    listed_diagnostics += 1;
+                }
+                continue;
+            }
+        };
+        total_value_nodes = total_value_nodes
+            .checked_add(scan.value_nodes_scanned)
+            .ok_or_else(|| invalid_data("aggregate StreamingInfo value-node count overflows"))?;
+        if total_value_nodes > MAX_TOTAL_STREAMED_RESOURCE_VALUE_NODES {
+            return Err(invalid_data_owned(format!(
+                "aggregate StreamingInfo scan visits {total_value_nodes} value nodes, exceeding limit {MAX_TOTAL_STREAMED_RESOURCE_VALUE_NODES}"
+            ))
+            .into());
+        }
+        total_candidates = total_candidates
+            .checked_add(scan.values.len())
+            .ok_or_else(|| invalid_data("aggregate StreamingInfo candidate count overflows"))?;
+        if total_candidates > MAX_TOTAL_STREAMED_RESOURCE_CANDIDATES {
+            return Err(invalid_data_owned(format!(
+                "aggregate StreamingInfo scan found {total_candidates} candidates, exceeding limit {MAX_TOTAL_STREAMED_RESOURCE_CANDIDATES}"
+            ))
+            .into());
+        }
+        let object_path_bytes = scan.values.iter().try_fold(0usize, |total, located| {
+            total.checked_add(located.info.path.len())
+        });
+        let object_path_bytes = object_path_bytes.ok_or_else(|| {
+            invalid_data("aggregate StreamingInfo resource-path byte count overflows")
+        })?;
+        total_resource_path_bytes = total_resource_path_bytes
+            .checked_add(object_path_bytes)
+            .ok_or_else(|| {
+                invalid_data("aggregate StreamingInfo resource-path byte count overflows")
+            })?;
+        if total_resource_path_bytes > MAX_TOTAL_STREAMED_RESOURCE_PATH_BYTES {
+            return Err(invalid_data_owned(format!(
+                "aggregate StreamingInfo resource paths use {total_resource_path_bytes} bytes, exceeding limit {MAX_TOTAL_STREAMED_RESOURCE_PATH_BYTES}"
+            ))
+            .into());
+        }
+
+        for located in &scan.values {
+            let resolution = resolve_streamed_resource_info(
+                filesystem,
+                workspace,
+                source_file.container_bundle_index,
+                &located.info,
+                context.root_catalog,
+                &context.provider,
+                PlatformStructureLimits::default(),
+            );
+            match resolution {
+                Ok(StreamedResourceResolution::Unset) => {
+                    increment_streamed_resource_count(&mut unset, "unset StreamingInfo count")?;
+                }
+                Ok(StreamedResourceResolution::Missing {
+                    unavailable_data_paths,
+                }) => {
+                    increment_streamed_resource_count(
+                        &mut missing,
+                        "missing StreamingInfo resource count",
+                    )?;
+                    increment_streamed_resource_count(
+                        &mut diagnostic_count,
+                        "StreamingInfo diagnostic count",
+                    )?;
+                    if listed_diagnostics < MAX_STREAMED_RESOURCE_DIAGNOSTICS {
+                        let outcome = format!(
+                            "resource missing; {} DataPaths were unavailable",
+                            unavailable_data_paths.len()
+                        );
+                        write_streamed_resource_diagnostic(
+                            output,
+                            source_file,
+                            object,
+                            Some(&located.field_path),
+                            Some(&located.info),
+                            &outcome,
+                        )?;
+                        listed_diagnostics += 1;
+                    }
+                }
+                Ok(StreamedResourceResolution::Resolved {
+                    resource,
+                    range_is_valid: true,
+                }) => {
+                    let count = match resource {
+                        ResolvedResourceFile::Bundled { .. } => &mut resolved_bundle,
+                        ResolvedResourceFile::ExplicitRoot { .. } => &mut resolved_root,
+                        ResolvedResourceFile::External { .. } => &mut resolved_external,
+                        ResolvedResourceFile::Missing { .. } => {
+                            return Err(invalid_data(
+                                "resolved StreamingInfo contains a missing resource result",
+                            )
+                            .into());
+                        }
+                    };
+                    increment_streamed_resource_count(count, "resolved StreamingInfo range count")?;
+                }
+                Ok(StreamedResourceResolution::Resolved {
+                    resource: _,
+                    range_is_valid: false,
+                }) => {
+                    increment_streamed_resource_count(
+                        &mut invalid_ranges,
+                        "invalid StreamingInfo range count",
+                    )?;
+                    increment_streamed_resource_count(
+                        &mut diagnostic_count,
+                        "StreamingInfo diagnostic count",
+                    )?;
+                    if listed_diagnostics < MAX_STREAMED_RESOURCE_DIAGNOSTICS {
+                        write_streamed_resource_diagnostic(
+                            output,
+                            source_file,
+                            object,
+                            Some(&located.field_path),
+                            Some(&located.info),
+                            "resource resolved but offset/size exceeds its byte length",
+                        )?;
+                        listed_diagnostics += 1;
+                    }
+                }
+                Err(error) => {
+                    increment_streamed_resource_count(
+                        &mut resolution_errors,
+                        "StreamingInfo resolution error count",
+                    )?;
+                    increment_streamed_resource_count(
+                        &mut diagnostic_count,
+                        "StreamingInfo diagnostic count",
+                    )?;
+                    if listed_diagnostics < MAX_STREAMED_RESOURCE_DIAGNOSTICS {
+                        let outcome = error.to_string();
+                        write_streamed_resource_diagnostic(
+                            output,
+                            source_file,
+                            object,
+                            Some(&located.field_path),
+                            Some(&located.info),
+                            &outcome,
+                        )?;
+                        listed_diagnostics += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    let complete = unscannable_objects == 0
+        && scan_errors == 0
+        && missing == 0
+        && invalid_ranges == 0
+        && resolution_errors == 0;
+    writeln!(
+        output,
+        "StreamingInfo resources: {total_candidates} candidates, {unset} unset, {resolved_bundle} bundle ranges, {resolved_root} explicit root ranges, {resolved_external} external ranges, {missing} missing, {invalid_ranges} invalid ranges, {resolution_errors} resolution errors, {scan_errors} scan errors, {unscannable_objects} undecoded objects; scanned {total_value_nodes} value nodes and {total_resource_path_bytes} path bytes; complete={complete}"
+    )?;
+    if diagnostic_count > listed_diagnostics {
+        writeln!(
+            output,
+            "  {} additional StreamingInfo diagnostics are not listed; summary counts include them",
+            diagnostic_count - listed_diagnostics
+        )?;
+    }
+    Ok(())
+}
+
+fn increment_streamed_resource_count(
+    count: &mut usize,
+    description: &str,
+) -> Result<(), Box<dyn Error>> {
+    *count = count
+        .checked_add(1)
+        .ok_or_else(|| invalid_data_owned(format!("{description} overflows")))?;
+    Ok(())
+}
+
+fn write_streamed_resource_diagnostic<W: io::Write>(
+    output: &mut W,
+    source_file: &assetripper::serialized_file::workspace::LoadedSerializedFile,
+    object: &WorkspaceObject,
+    field_path: Option<&str>,
+    info: Option<&StreamedResourceInfo>,
+    outcome: &str,
+) -> io::Result<()> {
+    let file_path = bounded_diagnostic_text(&source_file.virtual_path, 256);
+    let file_name = bounded_diagnostic_text(&source_file.file_name, 256);
+    match (field_path, info) {
+        (Some(field_path), Some(info)) => writeln!(
+            output,
+            "  StreamingInfo diagnostic: file {} {:?} (name {:?}), object {}, PathID {}, field {:?}, path {:?} (truncated={}), offset={}, size={}: {}",
+            object.file_index,
+            file_path.text,
+            file_name.text,
+            object.object_index,
+            object.path_id,
+            bounded_diagnostic_text(field_path, 256).text,
+            bounded_diagnostic_text(&info.path, 256).text,
+            bounded_diagnostic_text(&info.path, 256).truncated,
+            info.offset,
+            info.size,
+            outcome
+        ),
+        _ => writeln!(
+            output,
+            "  StreamingInfo scan diagnostic: file {} {:?} (name {:?}), object {}, PathID {}: {}",
+            object.file_index,
+            file_path.text,
+            file_name.text,
+            object.object_index,
+            object.path_id,
+            outcome
+        ),
+    }
+}
+
+struct BoundedDiagnosticText<'a> {
+    text: &'a str,
+    truncated: bool,
+}
+
+fn bounded_diagnostic_text(value: &str, max_bytes: usize) -> BoundedDiagnosticText<'_> {
+    let mut end = value.len().min(max_bytes);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    BoundedDiagnosticText {
+        text: &value[..end],
+        truncated: end < value.len(),
+    }
+}
+
+#[cfg(test)]
 fn print_workspace_summary_to<W: io::Write>(
     output: &mut W,
     filesystem: &VirtualFileSystem,
     workspace: &SerializedFileWorkspace,
     dependencies: &SerializedFileDependencyReport,
+) -> Result<(), Box<dyn Error>> {
+    print_workspace_summary_with_optional_resources_to(
+        output,
+        filesystem,
+        workspace,
+        dependencies,
+        None,
+    )
+}
+
+fn print_workspace_summary_with_streamed_resources_to<W: io::Write>(
+    output: &mut W,
+    filesystem: &VirtualFileSystem,
+    workspace: &SerializedFileWorkspace,
+    dependencies: &SerializedFileDependencyReport,
+    context: &StreamedResourceSummaryContext<'_>,
+) -> Result<(), Box<dyn Error>> {
+    print_workspace_summary_with_optional_resources_to(
+        output,
+        filesystem,
+        workspace,
+        dependencies,
+        Some(context),
+    )
+}
+
+fn print_workspace_summary_with_streamed_resources(
+    filesystem: &VirtualFileSystem,
+    workspace: &SerializedFileWorkspace,
+    dependencies: &SerializedFileDependencyReport,
+    context: &StreamedResourceSummaryContext<'_>,
+) -> Result<(), Box<dyn Error>> {
+    let stdout = io::stdout();
+    let mut output = stdout.lock();
+    print_workspace_summary_with_streamed_resources_to(
+        &mut output,
+        filesystem,
+        workspace,
+        dependencies,
+        context,
+    )
+}
+
+fn print_workspace_summary_with_optional_resources_to<W: io::Write>(
+    output: &mut W,
+    filesystem: &VirtualFileSystem,
+    workspace: &SerializedFileWorkspace,
+    dependencies: &SerializedFileDependencyReport,
+    resource_context: Option<&StreamedResourceSummaryContext<'_>>,
 ) -> Result<(), Box<dyn Error>> {
     let source_collection_file_indices = workspace.source_collection_file_indices()?;
     let mut source_collection_order_by_file = Vec::new();
@@ -555,6 +925,15 @@ fn print_workspace_summary_to<W: io::Write>(
     writeln!(output, "SerializedFiles: {}", workspace.files().len())?;
     let decoded_objects =
         ObjectWorkspace::load_from_vfs(filesystem, workspace, ObjectWorkspaceLimits::default())?;
+    if let Some(context) = resource_context {
+        print_streamed_resource_summary_to(
+            output,
+            filesystem,
+            workspace,
+            &decoded_objects,
+            context,
+        )?;
+    }
     let animator_controller_inventory = animator_controller_source_dependency_inventory(
         &decoded_objects,
         WorkspaceProcessedPrefabAssetPlanLimits::default(),
@@ -1718,6 +2097,10 @@ fn invalid_data(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
+fn invalid_data_owned(message: String) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
+}
+
 fn print_usage() {
     println!(
         "Usage:\n  assetripper-rs inspect <input-directory> [input-directory ...]\n  assetripper-rs inspect-files <input-file> [input-file ...]\n  assetripper-rs --help\n  assetripper-rs --version\n\n`inspect` mounts directories into isolated VFS roots. `inspect-files` dispatches explicitly selected file paths, registers top-level ResourceFiles as GameBundle root inputs, and reports the parsed SerializedFiles."
@@ -2070,6 +2453,84 @@ mod tests {
         file
     }
 
+    fn make_streaming_info_file(path: &str, offset: u64, size: u32) -> Vec<u8> {
+        let mut string_buffer = Vec::new();
+        let root_type = push_type_tree_string(&mut string_buffer, "Texture2D");
+        let empty_name = push_type_tree_string(&mut string_buffer, "");
+        let streaming_info_type = push_type_tree_string(&mut string_buffer, "StreamingInfo");
+        let stream_data_name = push_type_tree_string(&mut string_buffer, "m_StreamData");
+        let string_type = push_type_tree_string(&mut string_buffer, "string");
+        let path_name = push_type_tree_string(&mut string_buffer, "path");
+        let array_type = push_type_tree_string(&mut string_buffer, "Array");
+        let size_name = push_type_tree_string(&mut string_buffer, "size");
+        let int_type = push_type_tree_string(&mut string_buffer, "int");
+        let data_name = push_type_tree_string(&mut string_buffer, "data");
+        let char_type = push_type_tree_string(&mut string_buffer, "char");
+        let uint64_type = push_type_tree_string(&mut string_buffer, "UInt64");
+        let offset_name = push_type_tree_string(&mut string_buffer, "offset");
+        let uint32_type = push_type_tree_string(&mut string_buffer, "UInt32");
+
+        let mut metadata = Vec::new();
+        metadata.extend_from_slice(b"2019.4.0f1\0");
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 1);
+        put_i32_le(&mut metadata, 28);
+        put_i32_le(&mut metadata, 8);
+        put_i32_le(&mut metadata, i32::try_from(string_buffer.len()).unwrap());
+        for (level, type_offset, name_offset, byte_size, index) in [
+            (0, root_type, empty_name, -1, 0),
+            (1, streaming_info_type, stream_data_name, -1, 1),
+            (2, string_type, path_name, -1, 2),
+            (3, array_type, array_type, -1, 3),
+            (4, int_type, size_name, 4, 4),
+            (4, char_type, data_name, 1, 5),
+            (2, uint64_type, offset_name, 8, 6),
+            (2, uint32_type, size_name, 4, 7),
+        ] {
+            put_node(
+                &mut metadata,
+                level,
+                type_offset,
+                name_offset,
+                byte_size,
+                index,
+            );
+        }
+        metadata.extend_from_slice(&string_buffer);
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 1);
+        put_i32_le(&mut metadata, 42);
+        put_u32_le(&mut metadata, 0);
+
+        let mut payload = Vec::new();
+        put_i32_le(&mut payload, i32::try_from(path.len()).unwrap());
+        payload.extend_from_slice(path.as_bytes());
+        let padding = (4 - payload.len() % 4) % 4;
+        payload.resize(payload.len() + padding, 0);
+        payload.extend_from_slice(&offset.to_le_bytes());
+        put_u32_le(&mut payload, size);
+
+        put_i32_le(&mut metadata, i32::try_from(payload.len()).unwrap());
+        put_i32_le(&mut metadata, 28);
+        put_u16_le(&mut metadata, 28);
+        put_u16_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 0);
+        metadata.push(0);
+
+        let data_offset = 20usize + metadata.len();
+        let file_size = data_offset + payload.len();
+        let mut file = Vec::with_capacity(file_size);
+        file.extend_from_slice(&i32::try_from(metadata.len()).unwrap().to_be_bytes());
+        file.extend_from_slice(&u32::try_from(file_size).unwrap().to_be_bytes());
+        file.extend_from_slice(&10i32.to_be_bytes());
+        file.extend_from_slice(&u32::try_from(data_offset).unwrap().to_be_bytes());
+        file.push(0);
+        file.extend_from_slice(&[0; 3]);
+        file.extend_from_slice(&metadata);
+        file.extend_from_slice(&payload);
+        file
+    }
+
     fn make_build_settings_file(scene_paths: &[&str]) -> Vec<u8> {
         make_build_settings_file_with_path_id(scene_paths, 42)
     }
@@ -2322,6 +2783,65 @@ mod tests {
         assert!(second_resource_index < first_resource_index);
         assert!(!summary.contains("unselected.resS"));
         assert!(summary.contains("explicit file import: 3 logical inputs"));
+        drop(input);
+    }
+
+    #[test]
+    fn explicit_file_inspection_resolves_decoded_streaming_info_from_selected_root_resource() {
+        let directory = TestInputDirectory::new_root();
+        let serialized_path = directory.join("main.assets");
+        let resource_path = directory.join("texture.resS");
+        fs::write(
+            &serialized_path,
+            make_streaming_info_file("texture.resS", 2, 3),
+        )
+        .unwrap();
+        fs::write(&resource_path, b"0123456789").unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![serialized_path.clone(), resource_path.clone()],
+            subdirectories: Vec::new(),
+        };
+
+        let mut output = Vec::new();
+        super::inspect_explicit_files_to(&[serialized_path, resource_path], &mut output).unwrap();
+        let summary = String::from_utf8(output).unwrap();
+
+        assert!(summary.contains(
+            "StreamingInfo resources: 1 candidates, 0 unset, 0 bundle ranges, 1 explicit root ranges, 0 external ranges, 0 missing, 0 invalid ranges, 0 resolution errors, 0 scan errors, 0 undecoded objects"
+        ));
+        assert!(summary.contains("complete=true"));
+        assert!(!summary.contains("StreamingInfo diagnostic:"));
+        drop(input);
+    }
+
+    #[test]
+    fn explicit_file_inspection_keeps_unselected_sibling_resource_missing() {
+        let directory = TestInputDirectory::new_root();
+        let serialized_path = directory.join("main.assets");
+        let unselected_resource_path = directory.join("missing.resS");
+        fs::write(
+            &serialized_path,
+            make_streaming_info_file("missing.resS", 2, 3),
+        )
+        .unwrap();
+        fs::write(&unselected_resource_path, b"not mounted as an input").unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![serialized_path.clone(), unselected_resource_path],
+            subdirectories: Vec::new(),
+        };
+
+        let mut output = Vec::new();
+        super::inspect_explicit_files_to(&[serialized_path], &mut output).unwrap();
+        let summary = String::from_utf8(output).unwrap();
+
+        assert!(summary.contains(
+            "StreamingInfo resources: 1 candidates, 0 unset, 0 bundle ranges, 0 explicit root ranges, 0 external ranges, 1 missing"
+        ));
+        assert!(summary.contains("complete=false"));
+        assert!(summary.contains("path \"missing.resS\""));
+        assert!(summary.contains("resource missing"));
         drop(input);
     }
 

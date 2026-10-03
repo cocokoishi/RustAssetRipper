@@ -64,6 +64,7 @@ pub enum PlatformResourceLookup {
 pub struct PlatformResourceProvider<'a> {
     pub platform: Option<&'a PlatformStructure>,
     pub mixed: Option<&'a PlatformStructure>,
+    pub mixed_data_paths: Option<&'a [String]>,
 }
 
 impl<'a> PlatformResourceProvider<'a> {
@@ -71,7 +72,24 @@ impl<'a> PlatformResourceProvider<'a> {
         platform: Option<&'a PlatformStructure>,
         mixed: Option<&'a PlatformStructure>,
     ) -> Self {
-        Self { platform, mixed }
+        Self {
+            platform,
+            mixed,
+            mixed_data_paths: None,
+        }
+    }
+
+    /// Builds a provider from a platform structure and the DataPaths discovered by
+    /// MixedGameStructure, which does not itself carry platform metadata.
+    pub fn with_mixed_data_paths(
+        platform: Option<&'a PlatformStructure>,
+        mixed_data_paths: Option<&'a [String]>,
+    ) -> Self {
+        Self {
+            platform,
+            mixed: None,
+            mixed_data_paths,
+        }
     }
 
     /// Looks for `original_name` in each source DataPath in order. This applies the baseline
@@ -92,20 +110,29 @@ impl<'a> PlatformResourceProvider<'a> {
         validate_resource_name(&resource_name, limits.max_path_bytes)?;
         let mut unavailable_data_paths = Vec::new();
 
-        for (source, structure) in [
-            (PlatformResourceSource::Platform, self.platform),
-            (PlatformResourceSource::Mixed, self.mixed),
+        for (source, data_paths) in [
+            (
+                PlatformResourceSource::Platform,
+                self.platform
+                    .map(|structure| structure.data_paths.as_slice()),
+            ),
+            (
+                PlatformResourceSource::Mixed,
+                self.mixed
+                    .map(|structure| structure.data_paths.as_slice())
+                    .or(self.mixed_data_paths),
+            ),
         ] {
-            let Some(structure) = structure else {
+            let Some(data_paths) = data_paths else {
                 continue;
             };
-            if structure.data_paths.len() > limits.max_selected_paths {
+            if data_paths.len() > limits.max_selected_paths {
                 return Err(PlatformResourceLookupError::DataPathCountLimitExceeded {
-                    count: structure.data_paths.len(),
+                    count: data_paths.len(),
                     limit: limits.max_selected_paths,
                 });
             }
-            for (data_path_index, data_path) in structure.data_paths.iter().enumerate() {
+            for (data_path_index, data_path) in data_paths.iter().enumerate() {
                 let root = normalize_resource_root(data_path, limits.max_path_bytes)?;
                 let candidate_path =
                     join_resource_path(&root, &resource_name, limits.max_path_bytes)?;
@@ -1229,6 +1256,31 @@ mod tests {
                 source: PlatformResourceSource::Mixed,
                 data_path_index: 0,
                 unavailable_data_paths: vec!["/platform/missing".to_owned()],
+            }
+        );
+    }
+
+    #[test]
+    fn external_resource_lookup_accepts_mixed_game_structure_data_paths() {
+        let mut filesystem = VirtualFileSystem::new();
+        insert_file(&mut filesystem, "/mixed/resources/texture.resS");
+        let mixed_data_paths = vec!["/mixed/missing".to_owned(), "/mixed/resources".to_owned()];
+        let provider =
+            PlatformResourceProvider::with_mixed_data_paths(None, Some(&mixed_data_paths));
+
+        assert_eq!(
+            provider
+                .find_resource(
+                    &filesystem,
+                    "texture.resS",
+                    PlatformStructureLimits::default(),
+                )
+                .unwrap(),
+            PlatformResourceLookup::Found {
+                virtual_path: "/mixed/resources/texture.resS".to_owned(),
+                source: PlatformResourceSource::Mixed,
+                data_path_index: 1,
+                unavailable_data_paths: vec!["/mixed/missing".to_owned()],
             }
         );
     }

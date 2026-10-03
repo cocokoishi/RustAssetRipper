@@ -24,7 +24,7 @@ The reference source was read only. No build, export, or test output was written
 - The active toolchain is `rustc 1.98.1`, `cargo 1.98.1`, `stable-aarch64-pc-windows-msvc`. The Rust package now declares 1.87 as its minimum because `ruzstd` 0.9.0 requires it; that minimum version has not been tested.
 - The reference solution includes 8 test projects, but its tests remain unrun because `dotnet` is unavailable.
 - Current Rust verification is recorded in `validation-log.md`.
-- The Rust repository had no refs at initial identification. The active `main` branch now tracks the configured `origin/main`; validated Rust increments are committed and pushed there. No other repository is a write target.
+- The Rust repository had no refs at initial identification. The only cloud write target is the user-authorized cocokoishi/RustAssetRipper main branch. Verify the live remote ref through the authorized GitHub connection before each write because the workstation origin/main tracking ref can lag. Do not use or touch any other repository.
 
 ## Scope findings still open
 
