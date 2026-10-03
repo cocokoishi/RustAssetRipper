@@ -24,6 +24,22 @@ pub struct ExportAssetIdentity {
     pub class_id: i32,
 }
 
+/// Object identity is collection scope plus object-table index; PathID and class ID are attributes.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ExportAssetObjectKey {
+    pub collection: ExportAssetCollectionIdentity,
+    pub object_index: usize,
+}
+
+impl ExportAssetIdentity {
+    pub const fn object_key(self) -> ExportAssetObjectKey {
+        ExportAssetObjectKey {
+            collection: self.collection,
+            object_index: self.object_index,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SceneExportIdAssignment {
     pub asset: ExportAssetIdentity,
@@ -210,7 +226,7 @@ pub fn plan_scene_export_ids(
 
     let mut generated_seed = 0i32;
     for &asset in assets_in_export_order {
-        if !identities.insert(asset) {
+        if !identities.insert(asset.object_key()) {
             return Err(SceneExportIdPlanError::DuplicateAssetIdentity { asset });
         }
         let file_id = match asset.collection {
@@ -398,5 +414,16 @@ mod tests {
                 limit: 0,
             })
         );
+
+        let conflicting_metadata = source(1, 0, 23, 4);
+        assert!(matches!(
+            plan_scene_export_ids(
+                &[asset, conflicting_metadata],
+                version("2022.3.1f1"),
+                SceneExportIdPlanLimits::default()
+            ),
+            Err(SceneExportIdPlanError::DuplicateAssetIdentity { asset: duplicate })
+                if duplicate == conflicting_metadata
+        ));
     }
 }

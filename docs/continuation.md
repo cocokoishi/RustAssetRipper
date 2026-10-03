@@ -522,3 +522,11 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Synthetic tests cover group order, absent SceneRoots, and the count limit. Full verification passed: 347 library tests, 10 CLI tests, warnings-denied Clippy, format check, baseline verifier (1,449 files), and `git diff --check`.
 - Still incomplete: classify source objects into these membership lists, perform baseline YAML manager ordering and hidden filtering, resolve PPtrs, implement Prefab IDs, YAML output, and GUIDs. Phase 1 remains open; Phase 2 remains locked.
 - Next: implement a bounded pointer map from multi-file object identities to export collection IDs, local/external MetaPtr behavior, and explicit missing-reference results.
+
+## Project export PPtr mapping
+
+- Current phase: Phase 1; gate not passed. This increment starts from pushed revision `a746ddf0ef75e40bcea1d6074be23475f95a7395`. Only `cocokoishi/RustAssetRipper` is a write/push target; the local AssetRipper baseline remains read-only. No UABEA or user AssetBundle content was accessed.
+- Added bounded `ProjectExportPointerMap`, keyed by collection-scoped object-table key. It resolves mapped local pointers, external pointers with collection GUID/AssetType, null pointers, and explicit missing-export pointers. Input resolution failures remain structured and retain source file/object/field context and the serialized FileID/PathID pair.
+- Synthetic pointer tests and full verification passed: 351 library tests, 10 CLI tests, warnings-denied Clippy, format check, baseline verifier (1,449 files), and `git diff --check`.
+- Still incomplete: populate this registry from constructed Scene/Prefab export collections; classify source assets into hierarchy groups; implement Prefab-specific IDs, baseline YAML ordering/writing, and `.meta` GUID generation. Phase 1 remains open; Phase 2 remains locked.
+- Next: model PrefabExportCollection membership and generated IDs, then connect Scene/Prefab membership to the pointer registry.
