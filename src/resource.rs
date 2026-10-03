@@ -9,7 +9,7 @@ use crate::io::platform_structure::{
     PlatformResourceSource, PlatformStructureLimits,
 };
 use crate::io::stream::SmartStream;
-use crate::scheme::{DispatchedFile, FileKind};
+use crate::scheme::{DispatchedFile, FileKind, MountedExplicitResourceFile};
 use crate::serialized_file::object::{SerializedValue, SerializedValueLookupError};
 use crate::serialized_file::workspace::{
     SerializedFileWorkspace, WorkspaceResolvedResourceFile, WorkspaceResourceLookupError,
@@ -92,87 +92,35 @@ impl RootResourceFileCatalog {
         inputs: &[ExplicitRootResourceInput<'_, '_>],
         limits: RootResourceCatalogLimits,
     ) -> Result<Self, RootResourceCatalogError> {
-        if inputs.len() > limits.max_files {
-            return Err(RootResourceCatalogError::FileCountLimitExceeded {
-                count: inputs.len(),
-                limit: limits.max_files,
-            });
-        }
-        let mut files = Vec::new();
-        files.try_reserve_exact(inputs.len()).map_err(|_| {
-            RootResourceCatalogError::AllocationFailed {
-                requested: inputs.len(),
-            }
-        })?;
-        let mut total_name_bytes = 0usize;
-        let mut total_path_bytes = 0usize;
+        let mut builder = RootResourceCatalogBuilder::new(filesystem, inputs.len(), limits)?;
         for (input_index, input) in inputs.iter().enumerate() {
-            if input.dispatched_file.kind() != FileKind::Resource {
-                return Err(RootResourceCatalogError::NotResourceFile {
-                    input_index,
-                    kind: input.dispatched_file.kind(),
-                });
-            }
-            if input.file_name.is_empty() || input.virtual_path.is_empty() {
-                return Err(RootResourceCatalogError::EmptyNameOrPath { input_index });
-            }
-            if input.file_name.len() > limits.max_file_name_bytes {
-                return Err(RootResourceCatalogError::FileNameTooLong {
-                    input_index,
-                    byte_count: input.file_name.len(),
-                    limit: limits.max_file_name_bytes,
-                });
-            }
-            if input.virtual_path.len() > limits.max_virtual_path_bytes {
-                return Err(RootResourceCatalogError::VirtualPathTooLong {
-                    input_index,
-                    byte_count: input.virtual_path.len(),
-                    limit: limits.max_virtual_path_bytes,
-                });
-            }
-            total_name_bytes = total_name_bytes.checked_add(input.file_name.len()).ok_or(
-                RootResourceCatalogError::AggregateSizeOverflow {
-                    resource: "explicit root ResourceFile names",
-                },
+            builder.push(
+                input_index,
+                input.dispatched_file.kind(),
+                input.file_name,
+                input.virtual_path,
             )?;
-            if total_name_bytes > limits.max_total_file_name_bytes {
-                return Err(RootResourceCatalogError::AggregateSizeLimitExceeded {
-                    resource: "explicit root ResourceFile names",
-                    byte_count: total_name_bytes,
-                    limit: limits.max_total_file_name_bytes,
-                });
-            }
-            total_path_bytes = total_path_bytes
-                .checked_add(input.virtual_path.len())
-                .ok_or(RootResourceCatalogError::AggregateSizeOverflow {
-                    resource: "explicit root ResourceFile paths",
-                })?;
-            if total_path_bytes > limits.max_total_virtual_path_bytes {
-                return Err(RootResourceCatalogError::AggregateSizeLimitExceeded {
-                    resource: "explicit root ResourceFile paths",
-                    byte_count: total_path_bytes,
-                    limit: limits.max_total_virtual_path_bytes,
-                });
-            }
-            let exists = filesystem
-                .logical_file_exists(input.virtual_path)
-                .map_err(|source| RootResourceCatalogError::FileSystem {
-                    input_index,
-                    virtual_path: input.virtual_path.to_owned(),
-                    source,
-                })?;
-            if !exists {
-                return Err(RootResourceCatalogError::FileNotFound {
-                    input_index,
-                    virtual_path: input.virtual_path.to_owned(),
-                });
-            }
-            files.push(WorkspaceRootResourceFile {
-                name: clone_catalog_string(input.file_name, input.file_name.len())?,
-                virtual_path: clone_catalog_string(input.virtual_path, input.virtual_path.len())?,
-            });
         }
-        Ok(Self { files })
+        Ok(builder.finish())
+    }
+
+    /// Builds from path-list mount metadata. `SchemeReader::mount_paths` records this metadata
+    /// only for explicit inputs that it dispatched as `FileKind::Resource`.
+    pub fn from_mounted_explicit_resource_files(
+        filesystem: &VirtualFileSystem,
+        inputs: &[MountedExplicitResourceFile],
+        limits: RootResourceCatalogLimits,
+    ) -> Result<Self, RootResourceCatalogError> {
+        let mut builder = RootResourceCatalogBuilder::new(filesystem, inputs.len(), limits)?;
+        for (input_index, input) in inputs.iter().enumerate() {
+            builder.push(
+                input_index,
+                input.kind,
+                &input.file_name,
+                &input.virtual_path,
+            )?;
+        }
+        Ok(builder.finish())
     }
 
     pub fn files(&self) -> &[WorkspaceRootResourceFile] {
@@ -307,6 +255,119 @@ fn clone_catalog_string(value: &str, requested: usize) -> Result<String, RootRes
         .map_err(|_| RootResourceCatalogError::AllocationFailed { requested })?;
     result.push_str(value);
     Ok(result)
+}
+
+struct RootResourceCatalogBuilder<'a> {
+    filesystem: &'a VirtualFileSystem,
+    limits: RootResourceCatalogLimits,
+    files: Vec<WorkspaceRootResourceFile>,
+    total_name_bytes: usize,
+    total_path_bytes: usize,
+}
+
+impl<'a> RootResourceCatalogBuilder<'a> {
+    fn new(
+        filesystem: &'a VirtualFileSystem,
+        input_count: usize,
+        limits: RootResourceCatalogLimits,
+    ) -> Result<Self, RootResourceCatalogError> {
+        if input_count > limits.max_files {
+            return Err(RootResourceCatalogError::FileCountLimitExceeded {
+                count: input_count,
+                limit: limits.max_files,
+            });
+        }
+        let mut files = Vec::new();
+        files.try_reserve_exact(input_count).map_err(|_| {
+            RootResourceCatalogError::AllocationFailed {
+                requested: input_count,
+            }
+        })?;
+        Ok(Self {
+            filesystem,
+            limits,
+            files,
+            total_name_bytes: 0,
+            total_path_bytes: 0,
+        })
+    }
+
+    fn push(
+        &mut self,
+        input_index: usize,
+        kind: FileKind,
+        file_name: &str,
+        virtual_path: &str,
+    ) -> Result<(), RootResourceCatalogError> {
+        if kind != FileKind::Resource {
+            return Err(RootResourceCatalogError::NotResourceFile { input_index, kind });
+        }
+        if file_name.is_empty() || virtual_path.is_empty() {
+            return Err(RootResourceCatalogError::EmptyNameOrPath { input_index });
+        }
+        if file_name.len() > self.limits.max_file_name_bytes {
+            return Err(RootResourceCatalogError::FileNameTooLong {
+                input_index,
+                byte_count: file_name.len(),
+                limit: self.limits.max_file_name_bytes,
+            });
+        }
+        if virtual_path.len() > self.limits.max_virtual_path_bytes {
+            return Err(RootResourceCatalogError::VirtualPathTooLong {
+                input_index,
+                byte_count: virtual_path.len(),
+                limit: self.limits.max_virtual_path_bytes,
+            });
+        }
+        self.total_name_bytes = self.total_name_bytes.checked_add(file_name.len()).ok_or(
+            RootResourceCatalogError::AggregateSizeOverflow {
+                resource: "explicit root ResourceFile names",
+            },
+        )?;
+        if self.total_name_bytes > self.limits.max_total_file_name_bytes {
+            return Err(RootResourceCatalogError::AggregateSizeLimitExceeded {
+                resource: "explicit root ResourceFile names",
+                byte_count: self.total_name_bytes,
+                limit: self.limits.max_total_file_name_bytes,
+            });
+        }
+        self.total_path_bytes = self
+            .total_path_bytes
+            .checked_add(virtual_path.len())
+            .ok_or(RootResourceCatalogError::AggregateSizeOverflow {
+                resource: "explicit root ResourceFile paths",
+            })?;
+        if self.total_path_bytes > self.limits.max_total_virtual_path_bytes {
+            return Err(RootResourceCatalogError::AggregateSizeLimitExceeded {
+                resource: "explicit root ResourceFile paths",
+                byte_count: self.total_path_bytes,
+                limit: self.limits.max_total_virtual_path_bytes,
+            });
+        }
+        let exists = self
+            .filesystem
+            .logical_file_exists(virtual_path)
+            .map_err(|source| RootResourceCatalogError::FileSystem {
+                input_index,
+                virtual_path: virtual_path.to_owned(),
+                source,
+            })?;
+        if !exists {
+            return Err(RootResourceCatalogError::FileNotFound {
+                input_index,
+                virtual_path: virtual_path.to_owned(),
+            });
+        }
+        self.files.push(WorkspaceRootResourceFile {
+            name: clone_catalog_string(file_name, file_name.len())?,
+            virtual_path: clone_catalog_string(virtual_path, virtual_path.len())?,
+        });
+        Ok(())
+    }
+
+    fn finish(self) -> RootResourceFileCatalog {
+        RootResourceFileCatalog { files: self.files }
+    }
 }
 
 /// Errors from the ordered bundle-scope and external-provider ResourceFile lookup.

@@ -206,6 +206,16 @@ pub struct BatchMountReport {
     pub completed_inputs: usize,
     pub mounted_entries: usize,
     pub mounted_bytes: u64,
+    /// Explicit path-list inputs dispatched as root ResourceFiles, in caller input order.
+    pub explicit_root_resource_files: Box<Vec<MountedExplicitResourceFile>>,
+}
+
+/// A top-level path-list input classified as a ResourceFile by `SchemeReader` and mounted in VFS.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MountedExplicitResourceFile {
+    pub file_name: String,
+    pub virtual_path: String,
+    pub kind: FileKind,
 }
 
 /// One explicitly selected local path and its virtual destination root.
@@ -223,6 +233,7 @@ struct BatchInputRequest {
     source_bytes: u64,
     standalone_destination: Option<String>,
     container_destination: Option<String>,
+    explicit_path: bool,
 }
 
 #[derive(Debug)]
@@ -2182,8 +2193,22 @@ impl SchemeReader {
                 source_bytes,
                 standalone_destination: input.destination_root.clone(),
                 container_destination: input.destination_root.clone(),
+                explicit_path: true,
             });
         }
+
+        report
+            .explicit_root_resource_files
+            .try_reserve_exact(inputs.len())
+            .map_err(|_| {
+                BatchMountError::new(
+                    report.clone(),
+                    None,
+                    BatchMountErrorKind::InputListAllocationFailed {
+                        requested: inputs.len(),
+                    },
+                )
+            })?;
 
         Self::mount_batch_requests(
             requests,
@@ -2272,6 +2297,7 @@ impl SchemeReader {
                 source_bytes: input.source_bytes,
                 standalone_destination,
                 container_destination,
+                explicit_path: false,
             });
         }
 
@@ -2528,6 +2554,40 @@ impl SchemeReader {
             } else {
                 input.standalone_destination.as_deref()
             };
+            let explicit_root_resource_file =
+                if input.explicit_path && dispatched.kind() == FileKind::Resource {
+                    let file_name = logical_file_name(&input.path).ok_or_else(|| {
+                        BatchMountError::new(
+                            report.clone(),
+                            Some(input.path.clone()),
+                            BatchMountErrorKind::InputMount(Box::new(ContainerMountError::new(
+                                ContainerMountReport::default(),
+                                ContainerMountErrorKind::InputPathHasNoFileName,
+                            ))),
+                        )
+                    })?;
+                    let virtual_path = checked_container_entry_path(
+                        filesystem,
+                        destination,
+                        &file_name,
+                        0,
+                        &ContainerMountReport::default(),
+                    )
+                    .map_err(|error| {
+                        BatchMountError::new(
+                            report.clone(),
+                            Some(input.path.clone()),
+                            BatchMountErrorKind::InputMount(Box::new(error)),
+                        )
+                    })?;
+                    Some(MountedExplicitResourceFile {
+                        file_name,
+                        virtual_path,
+                        kind: dispatched.kind(),
+                    })
+                } else {
+                    None
+                };
             let remaining_output = batch_limits
                 .max_total_output_bytes
                 .checked_sub(report.mounted_bytes)
@@ -2560,6 +2620,9 @@ impl SchemeReader {
                             BatchMountErrorKind::ReportOverflow,
                         )
                     })?;
+                    if let Some(resource_file) = explicit_root_resource_file {
+                        report.explicit_root_resource_files.push(resource_file);
+                    }
                     report.completed_inputs =
                         report.completed_inputs.checked_add(1).ok_or_else(|| {
                             BatchMountError::new(
@@ -2979,8 +3042,9 @@ impl Display for SchemeErrorKind {
 mod tests {
     use super::{
         BatchMountErrorKind, BatchMountLimits, ContainerMountErrorKind, ContainerMountLimits,
-        FileKind, MountedContainerBundle, MountedResourceFile, MountedSerializedFile,
-        PathMountInput, SchemeErrorKind, SchemeReader, SchemeReaderLimits, WrapperKind,
+        FileKind, MountedContainerBundle, MountedExplicitResourceFile, MountedResourceFile,
+        MountedSerializedFile, PathMountInput, SchemeErrorKind, SchemeReader, SchemeReaderLimits,
+        WrapperKind,
     };
     use crate::compression::wrappers::{
         compress_gzip, decompress_brotli, has_brotli_file_signature,
@@ -4007,6 +4071,18 @@ mod tests {
         let resource_virtual_path = format!(
             "/explicit/{}",
             resource_path.file_name().unwrap().to_string_lossy()
+        );
+        assert_eq!(
+            report.explicit_root_resource_files,
+            Box::new(vec![MountedExplicitResourceFile {
+                file_name: resource_path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+                virtual_path: resource_virtual_path.clone(),
+                kind: FileKind::Resource,
+            }])
         );
         assert_eq!(
             filesystem

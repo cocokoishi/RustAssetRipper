@@ -37,8 +37,10 @@ use assetripper::processing::scene_hierarchy::{
 use assetripper::processing::scene_metadata::{
     decode_build_settings_scene_paths_from_parts, BuildSettingsSceneLimits,
 };
+use assetripper::resource::{RootResourceCatalogLimits, RootResourceFileCatalog};
 use assetripper::scheme::{
-    BatchMountLimits, BatchMountReport, ContainerMountLimits, SchemeReader, SchemeReaderLimits,
+    BatchMountLimits, BatchMountReport, ContainerMountLimits, PathMountInput, SchemeReader,
+    SchemeReaderLimits,
 };
 use assetripper::serialized_file::collection_workspace::{
     WorkspaceAssetCollections, WorkspaceCollectionLimits,
@@ -56,7 +58,7 @@ use assetripper::serialized_file::workspace::{
     WorkspaceSerializedBundle,
 };
 
-const MAX_INPUT_DIRECTORIES: usize = 100_000;
+const MAX_INPUT_PATHS: usize = 100_000;
 const MAX_STREAMED_SCENE_BUNDLE_OBJECTS: usize = 1_000_000;
 const MAX_TOTAL_STREAMED_SCENE_BUNDLE_ENTRIES: usize = 1_000_000;
 const MAX_TOTAL_STREAMED_SCENE_BUNDLE_STRING_BYTES: usize = 256 * 1024 * 1024;
@@ -104,26 +106,132 @@ fn run(arguments: impl Iterator<Item = OsString>) -> Result<(), Box<dyn Error>> 
         println!("assetripper-rs {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
-    if command != "inspect" {
+    if command != "inspect" && command != "inspect-files" {
         print_usage();
         return Err(invalid_input(format!("unknown command '{command}'")));
     }
 
-    let mut input_directories = Vec::new();
+    let mut input_paths = Vec::new();
     for argument in arguments {
-        if input_directories.len() >= MAX_INPUT_DIRECTORIES {
+        if input_paths.len() >= MAX_INPUT_PATHS {
             return Err(invalid_input(format!(
-                "input directory count exceeds {MAX_INPUT_DIRECTORIES}"
+                "input path count exceeds {MAX_INPUT_PATHS}"
             )));
         }
-        input_directories.push(PathBuf::from(argument));
+        input_paths.push(PathBuf::from(argument));
     }
-    if input_directories.is_empty() {
+    if input_paths.is_empty() {
         print_usage();
-        return Err(invalid_input("inspect requires at least one directory"));
+        return Err(invalid_input(format!(
+            "{command} requires at least one input"
+        )));
     }
 
-    inspect_directories(&input_directories)
+    if command == "inspect-files" {
+        inspect_explicit_files(&input_paths)
+    } else {
+        inspect_directories(&input_paths)
+    }
+}
+
+fn inspect_explicit_files(input_files: &[PathBuf]) -> Result<(), Box<dyn Error>> {
+    let stdout = io::stdout();
+    let mut output = stdout.lock();
+    inspect_explicit_files_to(input_files, &mut output)
+}
+
+fn inspect_explicit_files_to<W: io::Write>(
+    input_files: &[PathBuf],
+    output: &mut W,
+) -> Result<(), Box<dyn Error>> {
+    let (mut filesystem, selected_paths, mount_report) = mount_input_files(input_files)?;
+    let mixed = MixedGameStructure::from_vfs_paths(
+        &filesystem,
+        &selected_paths,
+        MixedGameStructureLimits::default(),
+    )?;
+    let root_resources = RootResourceFileCatalog::from_mounted_explicit_resource_files(
+        &filesystem,
+        &mount_report.explicit_root_resource_files,
+        RootResourceCatalogLimits::default(),
+    )?;
+    print_explicit_root_resource_catalog_to(output, &root_resources)?;
+
+    if mixed.serialized_file_inputs.is_empty() {
+        if root_resources.files().is_empty() {
+            return Err(invalid_input(
+                "the selected files contain no recognized SerializedFile or root ResourceFile inputs",
+            ));
+        }
+        writeln!(output, "No SerializedFile inputs were selected.")?;
+        return Ok(());
+    }
+
+    let (workspace, dependencies) = SerializedFileWorkspace::load_from_vfs_with_dependencies(
+        &mut filesystem,
+        &mixed.serialized_file_inputs,
+        &mixed.registered_files,
+        &mixed.data_paths,
+        SerializedFileWorkspaceLimits::default(),
+        DependencyIndexLimits::default(),
+        ContainerMountLimits::default(),
+    )?;
+    writeln!(
+        output,
+        "explicit file import: {} logical inputs, {} mounted leaves, {} output bytes",
+        mount_report.discovered_inputs, mount_report.mounted_entries, mount_report.mounted_bytes
+    )?;
+    print_workspace_summary_to(output, &filesystem, &workspace, &dependencies)?;
+    Ok(())
+}
+
+fn print_explicit_root_resource_catalog_to<W: io::Write>(
+    output: &mut W,
+    catalog: &RootResourceFileCatalog,
+) -> Result<(), io::Error> {
+    writeln!(
+        output,
+        "Explicit GameBundle root ResourceFiles: {}",
+        catalog.files().len()
+    )?;
+    for (index, resource) in catalog.files().iter().enumerate() {
+        writeln!(
+            output,
+            "  root resource[{index}]: name={:?}, virtual_path={:?}",
+            resource.name, resource.virtual_path
+        )?;
+    }
+    Ok(())
+}
+
+fn mount_input_files(
+    input_files: &[PathBuf],
+) -> Result<(VirtualFileSystem, Vec<String>, BatchMountReport), Box<dyn Error>> {
+    let mut filesystem = VirtualFileSystem::new();
+    let mut mount_inputs = Vec::new();
+    mount_inputs
+        .try_reserve_exact(input_files.len())
+        .map_err(|_| invalid_input("could not allocate the explicit input path list"))?;
+    let mut selected_paths = Vec::new();
+    selected_paths
+        .try_reserve_exact(input_files.len())
+        .map_err(|_| invalid_input("could not allocate the selected VFS path list"))?;
+    for (index, path) in input_files.iter().enumerate() {
+        let destination_root = format!("/explicit/{index}");
+        mount_inputs.push(PathMountInput {
+            path: path.clone(),
+            destination_root: Some(destination_root.clone()),
+        });
+        selected_paths.push(destination_root);
+    }
+    let mount_report = SchemeReader::mount_paths(
+        &mount_inputs,
+        &mut filesystem,
+        SchemeReaderLimits::default(),
+        ContainerMountLimits::default(),
+        BatchMountLimits::default(),
+    )?;
+    Ok((filesystem, selected_paths, mount_report))
 }
 
 fn inspect_directories(input_directories: &[PathBuf]) -> Result<(), Box<dyn Error>> {
@@ -1568,6 +1676,10 @@ fn merge_mount_report(
     total: &mut BatchMountReport,
     next: &BatchMountReport,
 ) -> Result<(), io::Error> {
+    total
+        .explicit_root_resource_files
+        .try_reserve(next.explicit_root_resource_files.len())
+        .map_err(|_| invalid_data("explicit ResourceFile metadata allocation failed"))?;
     total.directory_entries_scanned = total
         .directory_entries_scanned
         .checked_add(next.directory_entries_scanned)
@@ -1592,6 +1704,9 @@ fn merge_mount_report(
         .mounted_bytes
         .checked_add(next.mounted_bytes)
         .ok_or_else(|| invalid_data("mounted output byte count overflows"))?;
+    total
+        .explicit_root_resource_files
+        .extend_from_slice(&next.explicit_root_resource_files);
     Ok(())
 }
 
@@ -1605,7 +1720,7 @@ fn invalid_data(message: &'static str) -> io::Error {
 
 fn print_usage() {
     println!(
-        "Usage:\n  assetripper-rs inspect <input-directory> [input-directory ...]\n  assetripper-rs --help\n  assetripper-rs --version\n\nMounts each directory into an isolated VFS root, detects platform or mixed inputs, and reports the parsed SerializedFiles."
+        "Usage:\n  assetripper-rs inspect <input-directory> [input-directory ...]\n  assetripper-rs inspect-files <input-file> [input-file ...]\n  assetripper-rs --help\n  assetripper-rs --version\n\n`inspect` mounts directories into isolated VFS roots. `inspect-files` dispatches explicitly selected file paths, registers top-level ResourceFiles as GameBundle root inputs, and reports the parsed SerializedFiles."
     );
 }
 
@@ -2137,6 +2252,7 @@ mod tests {
             completed_inputs: 1,
             mounted_entries: 3,
             mounted_bytes: 12,
+            ..BatchMountReport::default()
         };
         let next = BatchMountReport {
             directory_entries_scanned: 4,
@@ -2145,6 +2261,7 @@ mod tests {
             completed_inputs: 3,
             mounted_entries: 5,
             mounted_bytes: 30,
+            ..BatchMountReport::default()
         };
         merge_mount_report(&mut total, &next).unwrap();
         assert_eq!(total.directory_entries_scanned, 5);
@@ -2159,6 +2276,53 @@ mod tests {
     fn directory_inspection_loads_a_synthetic_serialized_file() {
         let input = TestInputDirectory::new();
         super::inspect_directories(std::slice::from_ref(&input.directory)).unwrap();
+    }
+
+    #[test]
+    fn explicit_file_inspection_registers_only_selected_resource_inputs_as_roots() {
+        let directory = TestInputDirectory::new_root();
+        let serialized_path = directory.join("main.assets");
+        let second_resource_path = directory.join("second.resS");
+        let selected_resource_path = directory.join("direct.resS");
+        let unselected_resource_path = directory.join("unselected.resS");
+        fs::write(&serialized_path, make_generation_10_file()).unwrap();
+        fs::write(&second_resource_path, b"second explicit root stream").unwrap();
+        fs::write(&selected_resource_path, b"explicit root stream").unwrap();
+        fs::write(&unselected_resource_path, b"not an explicit input").unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![
+                serialized_path.clone(),
+                second_resource_path.clone(),
+                selected_resource_path.clone(),
+                unselected_resource_path,
+            ],
+            subdirectories: Vec::new(),
+        };
+
+        let mut output = Vec::new();
+        super::inspect_explicit_files_to(
+            &[
+                serialized_path,
+                second_resource_path,
+                selected_resource_path,
+            ],
+            &mut output,
+        )
+        .unwrap();
+        let summary = String::from_utf8(output).unwrap();
+
+        assert!(summary.contains("Explicit GameBundle root ResourceFiles: 2"));
+        let second_resource_index = summary
+            .find("root resource[0]: name=\"second.resS\"")
+            .unwrap();
+        let first_resource_index = summary
+            .find("root resource[1]: name=\"direct.resS\"")
+            .unwrap();
+        assert!(second_resource_index < first_resource_index);
+        assert!(!summary.contains("unselected.resS"));
+        assert!(summary.contains("explicit file import: 3 logical inputs"));
+        drop(input);
     }
 
     #[test]
