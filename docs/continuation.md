@@ -546,3 +546,12 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Synthetic adapter coverage verifies local Prefab and cross-collection Scene pointer output, rejects zero GUID and collection limit overrun. Full verification passed: 357 library tests, 10 CLI tests, warnings-denied Clippy, format check, baseline verifier (1,449 files), and `git diff --check`.
 - Still incomplete: discover/classify actual collections and remaining export collection families, connect resolved input PPtrs to these plans, write Unity YAML documents and complete importer `.meta` files. Phase 1 remains open; Phase 2 remains locked.
 - Next: implement source-derived YAML document reference emission using the shared pointer map, preserving unresolved evidence instead of converting failures to null.
+
+## Unity YAML document and PPtr primitives
+
+- Current phase: Phase 1; gate not passed. This increment starts from pushed revision `036005939485a4f3740583f9e64beeff7697a2af`. Only `cocokoishi/RustAssetRipper` is a write/push target; the local AssetRipper baseline remains read-only. No UABEA or user AssetBundle content was accessed.
+- Added bounded ordered YAML nodes and a stream writer for baseline directives, document tags/anchors, stripped markers, block/flow maps and sequences, scalar rules, and multi-document separators. Added MetaPtr conversion including old-Unity type fallback.
+- The project pointer bridge emits only known null/mapped/missing-export results; unresolved input pointers become contextual errors with original file/object/field and FileID/PathID evidence. MissingReference GUID is an explicit argument pending verification of the baseline constant.
+- Full verification passed: 363 library tests, 10 CLI tests, warnings-denied Clippy, format check, baseline verifier (1,449 files), and `git diff --check`.
+- Still incomplete: actual Unity object walkers do not populate the YAML tree; object field transforms, importer filtering, complete `.meta` documents, GUID constant integration, and project file writing remain open. Phase 1 remains open; Phase 2 remains locked.
+- Next: port a constrained built-in object's editor YAML walk to the node tree, beginning with GameObject/Component references and carrying class/version metadata instead of emitting TypeTree bytes as substitutes.
