@@ -4,7 +4,12 @@ use std::fmt;
 use std::io;
 
 use crate::io::filesystem::VirtualFileSystem;
+use crate::io::platform_structure::{
+    PlatformResourceLookup, PlatformResourceLookupError, PlatformResourceProvider,
+    PlatformResourceSource, PlatformStructureLimits,
+};
 use crate::io::stream::SmartStream;
+use crate::serialized_file::workspace::{SerializedFileWorkspace, WorkspaceResourceLookupError};
 
 const UNITY_STREAM_OFFSET_MAX: u64 = i64::MAX as u64;
 
@@ -15,6 +20,112 @@ pub struct StreamedResourceLimits {
     pub max_range_copy_bytes: usize,
     /// Maximum byte count returned by [`read_streamed_resource_bytes`].
     pub max_materialized_bytes: usize,
+}
+
+/// A ResourceFile selected from a mounted bundle or an external game DataPath.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ResolvedResourceFile<'a> {
+    Bundled {
+        resource_index: usize,
+        virtual_path: &'a str,
+    },
+    External {
+        virtual_path: String,
+        source: PlatformResourceSource,
+        data_path_index: usize,
+        unavailable_data_paths: Vec<String>,
+    },
+    Missing {
+        unavailable_data_paths: Vec<String>,
+    },
+}
+
+/// Errors from the ordered bundle-scope and external-provider ResourceFile lookup.
+#[derive(Debug)]
+pub enum ResourceFileResolveError {
+    Bundle(WorkspaceResourceLookupError),
+    ExternalProvider(PlatformResourceLookupError),
+}
+
+impl fmt::Display for ResourceFileResolveError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Bundle(source) => {
+                write!(formatter, "bundle ResourceFile lookup failed: {source}")
+            }
+            Self::ExternalProvider(source) => {
+                write!(formatter, "external ResourceFile lookup failed: {source}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ResourceFileResolveError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Bundle(source) => Some(source),
+            Self::ExternalProvider(source) => Some(source),
+        }
+    }
+}
+
+/// Resolves a ResourceFile using the baseline order: bundle hierarchy first, then the
+/// GameBundle's platform/mixed external provider.
+pub fn resolve_resource_file<'a>(
+    filesystem: &VirtualFileSystem,
+    workspace: &'a SerializedFileWorkspace,
+    source_bundle_index: Option<usize>,
+    original_name: &str,
+    provider: &PlatformResourceProvider<'_>,
+    limits: PlatformStructureLimits,
+) -> Result<ResolvedResourceFile<'a>, ResourceFileResolveError> {
+    if original_name.is_empty() {
+        return Ok(ResolvedResourceFile::Missing {
+            unavailable_data_paths: Vec::new(),
+        });
+    }
+    let bundled_resource_index = workspace
+        .resolve_bundled_resource_file(source_bundle_index, original_name)
+        .map_err(ResourceFileResolveError::Bundle)?;
+    if let Some(resource_index) = bundled_resource_index {
+        let resource = workspace
+            .resource_files()
+            .get(resource_index)
+            .ok_or_else(|| {
+                ResourceFileResolveError::Bundle(
+                    WorkspaceResourceLookupError::ResourceFileIndexOutOfBounds {
+                        index: resource_index,
+                        count: workspace.resource_files().len(),
+                    },
+                )
+            })?;
+        return Ok(ResolvedResourceFile::Bundled {
+            resource_index,
+            virtual_path: &resource.virtual_path,
+        });
+    }
+
+    match provider
+        .find_resource(filesystem, original_name, limits)
+        .map_err(ResourceFileResolveError::ExternalProvider)?
+    {
+        PlatformResourceLookup::Found {
+            virtual_path,
+            source,
+            data_path_index,
+            unavailable_data_paths,
+        } => Ok(ResolvedResourceFile::External {
+            virtual_path,
+            source,
+            data_path_index,
+            unavailable_data_paths,
+        }),
+        PlatformResourceLookup::Missing {
+            unavailable_data_paths,
+        } => Ok(ResolvedResourceFile::Missing {
+            unavailable_data_paths,
+        }),
+    }
 }
 
 impl Default for StreamedResourceLimits {

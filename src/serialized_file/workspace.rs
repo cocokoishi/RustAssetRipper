@@ -3826,6 +3826,134 @@ mod tests {
         );
     }
 
+    #[test]
+    fn unified_resource_resolution_prefers_bundle_then_platform_then_mixed_provider() {
+        use super::WorkspaceResourceFile;
+        use crate::io::platform_structure::{PlatformResourceProvider, PlatformResourceSource};
+        use crate::resource::{resolve_resource_file, ResolvedResourceFile};
+
+        let workspace = SerializedFileWorkspace {
+            container_bundles: vec![WorkspaceSerializedBundle {
+                scope_path: Some("/bundle".to_owned()),
+                parent_bundle_index: None,
+                parent_entry_index: None,
+                direct_collection_file_indices: Vec::new(),
+                direct_resource_file_indices: vec![0],
+            }],
+            resource_files: vec![WorkspaceResourceFile {
+                virtual_path: "/bundle/shared.resS".to_owned(),
+                name: "shared.resS".to_owned(),
+                container_bundle_index: 0,
+                container_entry_index: 0,
+                container_resource_index: 0,
+            }],
+            ..SerializedFileWorkspace::default()
+        };
+        let mut filesystem = VirtualFileSystem::new();
+        for (path, bytes) in [
+            ("/bundle/shared.resS", b"bundle".as_slice()),
+            ("/platform/shared.resS", b"platform".as_slice()),
+            ("/mixed/shared.resS", b"mixed".as_slice()),
+            ("/platform/external.resS", b"external".as_slice()),
+            ("/mixed/external.resS", b"mixed-external".as_slice()),
+            ("/mixed/mixed-only.resS", b"mixed-only".as_slice()),
+        ] {
+            let parent = path.rsplit_once('/').unwrap().0;
+            filesystem
+                .create_directory(Some(parent))
+                .unwrap_or_else(|error| {
+                    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+                });
+            filesystem.write_all_bytes(path, bytes).unwrap();
+        }
+        let platform = PlatformStructure {
+            platform: PlatformKind::Windows,
+            selected_path: "/platform".to_owned(),
+            consumed_paths: vec!["/platform".to_owned()],
+            root_path: "/platform".to_owned(),
+            name: Some("Game".to_owned()),
+            game_data_path: None,
+            data_paths: vec!["/platform/missing".to_owned(), "/platform".to_owned()],
+        };
+        let mixed = PlatformStructure {
+            platform: PlatformKind::Windows,
+            selected_path: "/mixed".to_owned(),
+            consumed_paths: vec!["/mixed".to_owned()],
+            root_path: "/mixed".to_owned(),
+            name: Some("Mixed".to_owned()),
+            game_data_path: None,
+            data_paths: vec!["/mixed".to_owned()],
+        };
+        let provider = PlatformResourceProvider::new(Some(&platform), Some(&mixed));
+
+        assert_eq!(
+            resolve_resource_file(
+                &filesystem,
+                &workspace,
+                None,
+                "shared.resS",
+                &provider,
+                crate::io::platform_structure::PlatformStructureLimits::default(),
+            )
+            .unwrap(),
+            ResolvedResourceFile::Bundled {
+                resource_index: 0,
+                virtual_path: "/bundle/shared.resS",
+            },
+            "mounted bundle resources precede both external providers"
+        );
+        assert_eq!(
+            resolve_resource_file(
+                &filesystem,
+                &workspace,
+                None,
+                "external.resS",
+                &provider,
+                crate::io::platform_structure::PlatformStructureLimits::default(),
+            )
+            .unwrap(),
+            ResolvedResourceFile::External {
+                virtual_path: "/platform/external.resS".to_owned(),
+                source: PlatformResourceSource::Platform,
+                data_path_index: 1,
+                unavailable_data_paths: vec!["/platform/missing".to_owned()],
+            },
+            "platform provider precedes Mixed when both contain the resource"
+        );
+        assert_eq!(
+            resolve_resource_file(
+                &filesystem,
+                &workspace,
+                None,
+                "mixed-only.resS",
+                &provider,
+                crate::io::platform_structure::PlatformStructureLimits::default(),
+            )
+            .unwrap(),
+            ResolvedResourceFile::External {
+                virtual_path: "/mixed/mixed-only.resS".to_owned(),
+                source: PlatformResourceSource::Mixed,
+                data_path_index: 0,
+                unavailable_data_paths: vec!["/platform/missing".to_owned()],
+            },
+            "Mixed is searched only after platform DataPaths"
+        );
+        assert_eq!(
+            resolve_resource_file(
+                &filesystem,
+                &workspace,
+                None,
+                "absent.resS",
+                &provider,
+                crate::io::platform_structure::PlatformStructureLimits::default(),
+            )
+            .unwrap(),
+            ResolvedResourceFile::Missing {
+                unavailable_data_paths: vec!["/platform/missing".to_owned()],
+            }
+        );
+    }
+
     fn put_u16_le(output: &mut Vec<u8>, value: u16) {
         output.extend_from_slice(&value.to_le_bytes());
     }

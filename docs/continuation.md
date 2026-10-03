@@ -868,3 +868,11 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Full workspace passed: 433 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and `git diff --check`. No Unity-produced fixture or direct C# runtime differential was run.
 - Still incomplete: full GameBundle resolution-chain integration, root standalone ResourceFiles, versioned UInt32/UInt64 `StreamingInfo.GetOffset` extraction, and generated asset field extraction/integration. Phase 1 remains incomplete; Phase 2 remains locked.
 - Next: add a unified resolver that applies bundle-scope precedence before invoking the optional Platform/Mixed external provider, with a synthetic test proving precedence and preserving missing/unavailable diagnostics.
+
+## Unified bundle and external ResourceFile resolution
+
+- Current phase: Phase 1; gate not passed. This increment builds from pushed revision `0b17449df5e9bad6f2bb2aa3b9fa04a24807a936`. The sole push target remains this repository's `origin/main`; no other repository, UABEA, or user AssetBundle content was accessed.
+- Added `resolve_resource_file` to apply mounted bundle lookup before external Platform/Mixed lookup and return the selected path and source metadata or missing/unavailable DataPath diagnostics. The resolver preserves empty-name behavior and propagates bundle/provider errors.
+- The focused integration test and full workspace passed: 434 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and `git diff --check`. No Unity-produced fixture or direct C# runtime differential was run.
+- Still incomplete: root standalone ResourceFiles, UInt32/UInt64 `StreamingInfo.GetOffset` field extraction, generated asset field extraction/integration, and broad Phase 1 parity. Phase 1 remains incomplete; Phase 2 remains locked.
+- Next: inspect baseline standalone ResourceFile discovery and mount ownership, then model root-level ResourceFiles without confusing them with nested Bundle entries; construct synthetic collision and missing-resource tests.
