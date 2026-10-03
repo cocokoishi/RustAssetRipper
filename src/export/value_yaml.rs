@@ -913,6 +913,14 @@ impl<'a> UnityYamlTypeTreeLayout<'a> {
                 let Some(alias) =
                     baseline_type_scoped_field_alias(node_type, field_name, child_type)
                 else {
+                    if let Some(reason) =
+                        unsupported_contextual_field_alias_reason(node_type, field_name, child_type)
+                    {
+                        return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                            node_index: child_index,
+                            reason,
+                        });
+                    }
                     continue;
                 };
                 let alias_path =
@@ -2348,7 +2356,10 @@ fn baseline_type_scoped_field_aliases(type_name: &str) -> &'static [(&'static st
 }
 
 fn has_conditional_field_aliases(type_name: &str) -> bool {
-    matches!(type_name, "ParticleSystem" | "ShapeModule")
+    matches!(
+        type_name,
+        "ParticleSystem" | "ShapeModule" | "ClipMuscleConstant" | "Xform"
+    )
 }
 
 fn baseline_type_scoped_field_alias(
@@ -2357,6 +2368,21 @@ fn baseline_type_scoped_field_alias(
     field_type: &str,
 ) -> Option<&'static str> {
     match (parent_type, field_name) {
+        ("ClipMuscleConstant", "m_AverageSpeed") => match field_type {
+            "Vector4Float" => Some("m_AverageSpeed4"),
+            "Vector3Float" => Some("m_AverageSpeed3"),
+            _ => None,
+        },
+        ("Xform", "m_T") => match field_type {
+            "Vector4Float" => Some("m_T4"),
+            "Vector3Float" => Some("m_T3"),
+            _ => None,
+        },
+        ("Xform", "m_S") => match field_type {
+            "Vector4Float" => Some("m_S4"),
+            "Vector3Float" => Some("m_S3"),
+            _ => None,
+        },
         ("ParticleSystem", "m_StartDelay") => Some(if field_type == "float" {
             "m_StartDelay_Single"
         } else {
@@ -2369,6 +2395,21 @@ fn baseline_type_scoped_field_alias(
             .find(|(source_name, _)| *source_name == field_name)
             .map(|(_, alias)| *alias),
     }
+}
+
+fn unsupported_contextual_field_alias_reason(
+    parent_type: &str,
+    field_name: &str,
+    field_type: &str,
+) -> Option<&'static str> {
+    let recognized_type = match (parent_type, field_name) {
+        ("ClipMuscleConstant", "m_AverageSpeed") => {
+            matches!(field_type, "Vector4Float" | "Vector3Float")
+        }
+        ("Xform", "m_T" | "m_S") => matches!(field_type, "Vector4Float" | "Vector3Float"),
+        _ => true,
+    };
+    (!recognized_type).then_some("unsupported child TypeTree type for baseline field alias")
 }
 
 fn baseline_yaml_field_name(field_name: &str) -> Result<String, UnityYamlObjectConversionError> {
@@ -4163,6 +4204,136 @@ mod tests {
         ] {
             assert!(output.contains(expected), "missing {expected}");
         }
+    }
+
+    #[test]
+    fn clip_muscle_and_xform_aliases_follow_vector_child_type() {
+        let type_tree = TypeTree {
+            nodes: vec![
+                type_tree_node(0, "GameObject", "Base", 0),
+                type_tree_node(1, "SInt32", "m_T", 0),
+                type_tree_node(1, "ClipMuscleConstant", "m_Clip", 0),
+                type_tree_node(2, "Vector3Float", "m_AverageSpeed", 0),
+                type_tree_node(3, "float", "x", 0),
+                type_tree_node(3, "float", "y", 0),
+                type_tree_node(3, "float", "z", 0),
+                type_tree_node(1, "Xform", "m_Xform4_3", 0),
+                type_tree_node(2, "Vector4Float", "m_T", 0),
+                type_tree_node(3, "float", "x", 0),
+                type_tree_node(3, "float", "y", 0),
+                type_tree_node(3, "float", "z", 0),
+                type_tree_node(3, "float", "w", 0),
+                type_tree_node(2, "Vector3Float", "m_S", 0),
+                type_tree_node(3, "float", "x", 0),
+                type_tree_node(3, "float", "y", 0),
+                type_tree_node(3, "float", "z", 0),
+                type_tree_node(1, "Xform", "m_Xform3_4", 0),
+                type_tree_node(2, "Vector3Float", "m_T", 0),
+                type_tree_node(3, "float", "x", 0),
+                type_tree_node(3, "float", "y", 0),
+                type_tree_node(3, "float", "z", 0),
+                type_tree_node(2, "Vector4Float", "m_S", 0),
+                type_tree_node(3, "float", "x", 0),
+                type_tree_node(3, "float", "y", 0),
+                type_tree_node(3, "float", "z", 0),
+                type_tree_node(3, "float", "w", 0),
+            ],
+            string_buffer: Vec::new(),
+        };
+        let hints = UnityYamlObjectConversionHints::from_type_tree(
+            &type_tree,
+            version(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        for (path, alias) in [
+            ("m_Clip.m_AverageSpeed", "m_AverageSpeed3"),
+            ("m_Xform4_3.m_T", "m_T4"),
+            ("m_Xform4_3.m_S", "m_S3"),
+            ("m_Xform3_4.m_T", "m_T3"),
+            ("m_Xform3_4.m_S", "m_S4"),
+        ] {
+            assert_eq!(
+                hints.field_name_aliases.get(path).map(String::as_str),
+                Some(alias)
+            );
+        }
+        assert!(!hints.field_name_aliases.contains_key("m_T"));
+
+        let vector3 = || {
+            SerializedValue::Struct(vec![
+                field("x", SerializedValue::F32(1.0)),
+                field("y", SerializedValue::F32(2.0)),
+                field("z", SerializedValue::F32(3.0)),
+            ])
+        };
+        let vector4 = || {
+            SerializedValue::Struct(vec![
+                field("x", SerializedValue::F32(1.0)),
+                field("y", SerializedValue::F32(2.0)),
+                field("z", SerializedValue::F32(3.0)),
+                field("w", SerializedValue::F32(4.0)),
+            ])
+        };
+        let value = SerializedValue::Struct(vec![
+            field("m_T", SerializedValue::I32(77)),
+            field(
+                "m_Clip",
+                SerializedValue::Struct(vec![field("m_AverageSpeed", vector3())]),
+            ),
+            field(
+                "m_Xform4_3",
+                SerializedValue::Struct(vec![field("m_T", vector4()), field("m_S", vector3())]),
+            ),
+            field(
+                "m_Xform3_4",
+                SerializedValue::Struct(vec![field("m_T", vector3()), field("m_S", vector4())]),
+            ),
+        ]);
+        let document = convert_with_object_hints(&value, &hints, |_| {
+            unreachable!("the generated vector fixture has no PPtrs")
+        })
+        .unwrap();
+        let output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[document],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        for expected in [
+            "m_T: 77",
+            "m_AverageSpeed3:",
+            "m_T4:",
+            "m_S3:",
+            "m_T3:",
+            "m_S4:",
+        ] {
+            assert!(output.contains(expected), "missing {expected}");
+        }
+        for serialized_name in ["m_AverageSpeed:", "m_T:", "m_S:"] {
+            assert!(
+                !output.contains(&format!("    {serialized_name}")),
+                "found old nested key {serialized_name}"
+            );
+        }
+
+        let unsupported = TypeTree {
+            nodes: vec![
+                type_tree_node(0, "Xform", "Base", 0),
+                type_tree_node(1, "SInt32", "m_T", 0),
+            ],
+            string_buffer: Vec::new(),
+        };
+        assert!(matches!(
+            UnityYamlObjectConversionHints::from_type_tree(
+                &unsupported,
+                version(),
+                UnityYamlObjectConversionLimits::default()
+            ),
+            Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                reason: "unsupported child TypeTree type for baseline field alias",
+                ..
+            })
+        ));
     }
 
     #[test]
