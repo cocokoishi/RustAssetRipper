@@ -1135,3 +1135,9 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Focused test streamed_resource_content_keeps_unset_missing_and_read_errors_distinct passed. The explicit-root range test also verifies exact returned bytes.
 - Full workspace passed: 444 library tests, 13 CLI tests, 0 doc tests. Clippy with warnings denied, format check, baseline verifier (1,449 files unchanged), and git diff --check passed.
 - No Unity-produced fixture or direct C# runtime differential was run. The byte API is not yet called by Texture2D/Mesh or other asset exporters; generated type integration and Phase 1 parity remain incomplete.
+
+## UInt32 StreamingInfo explicit-root SerializedFile fixture (2026-10-03)
+
+- Extended the generated SerializedFile fixture builder to encode `StreamingInfo.offset` as either UInt32 or UInt64. The new `inspect-files` CLI fixture exercises the UInt32 TypeTree leaf through object decoding, root ResourceFile resolution, and range validation against an explicitly selected `texture.resS` input.
+- Focused verification passed: `cargo test --locked explicit_file_inspection_resolves_uint32_streaming_info_offset_from_selected_root_resource` (exit 0; 1 CLI test). Full verification passed: `cargo test --workspace --locked --quiet` (exit 0; 444 library, 14 CLI, 0 doc tests); warnings-denied Clippy (exit 0); `cargo fmt --all -- --check` (exit 0); `tools/verify-baseline.ps1` (exit 0; 1,449 baseline files unchanged); and `git diff --check` (exit 0).
+- This remains generated synthetic evidence; no Unity-produced TypeTree or direct C# runtime differential was run. Texture/Mesh exporter consumption and generated per-version field integration remain incomplete. Phase 1 remains open; Phase 2 remains locked.

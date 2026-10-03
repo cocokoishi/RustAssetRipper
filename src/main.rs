@@ -2454,6 +2454,15 @@ mod tests {
     }
 
     fn make_streaming_info_file(path: &str, offset: u64, size: u32) -> Vec<u8> {
+        make_streaming_info_file_with_offset_width(path, offset, size, true)
+    }
+
+    fn make_streaming_info_file_with_offset_width(
+        path: &str,
+        offset: u64,
+        size: u32,
+        offset_is_u64: bool,
+    ) -> Vec<u8> {
         let mut string_buffer = Vec::new();
         let root_type = push_type_tree_string(&mut string_buffer, "Texture2D");
         let empty_name = push_type_tree_string(&mut string_buffer, "");
@@ -2466,7 +2475,8 @@ mod tests {
         let int_type = push_type_tree_string(&mut string_buffer, "int");
         let data_name = push_type_tree_string(&mut string_buffer, "data");
         let char_type = push_type_tree_string(&mut string_buffer, "char");
-        let uint64_type = push_type_tree_string(&mut string_buffer, "UInt64");
+        let offset_type_name = if offset_is_u64 { "UInt64" } else { "UInt32" };
+        let offset_type = push_type_tree_string(&mut string_buffer, offset_type_name);
         let offset_name = push_type_tree_string(&mut string_buffer, "offset");
         let uint32_type = push_type_tree_string(&mut string_buffer, "UInt32");
 
@@ -2484,7 +2494,13 @@ mod tests {
             (3, array_type, array_type, -1, 3),
             (4, int_type, size_name, 4, 4),
             (4, char_type, data_name, 1, 5),
-            (2, uint64_type, offset_name, 8, 6),
+            (
+                2,
+                offset_type,
+                offset_name,
+                if offset_is_u64 { 8 } else { 4 },
+                6,
+            ),
             (2, uint32_type, size_name, 4, 7),
         ] {
             put_node(
@@ -2507,7 +2523,11 @@ mod tests {
         payload.extend_from_slice(path.as_bytes());
         let padding = (4 - payload.len() % 4) % 4;
         payload.resize(payload.len() + padding, 0);
-        payload.extend_from_slice(&offset.to_le_bytes());
+        if offset_is_u64 {
+            payload.extend_from_slice(&offset.to_le_bytes());
+        } else {
+            put_u32_le(&mut payload, u32::try_from(offset).unwrap());
+        }
         put_u32_le(&mut payload, size);
 
         put_i32_le(&mut metadata, i32::try_from(payload.len()).unwrap());
@@ -2794,6 +2814,36 @@ mod tests {
         fs::write(
             &serialized_path,
             make_streaming_info_file("texture.resS", 2, 3),
+        )
+        .unwrap();
+        fs::write(&resource_path, b"0123456789").unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![serialized_path.clone(), resource_path.clone()],
+            subdirectories: Vec::new(),
+        };
+
+        let mut output = Vec::new();
+        super::inspect_explicit_files_to(&[serialized_path, resource_path], &mut output).unwrap();
+        let summary = String::from_utf8(output).unwrap();
+
+        assert!(summary.contains(
+            "StreamingInfo resources: 1 candidates, 0 unset, 0 bundle ranges, 1 explicit root ranges, 0 external ranges, 0 missing, 0 invalid ranges, 0 resolution errors, 0 scan errors, 0 undecoded objects"
+        ));
+        assert!(summary.contains("complete=true"));
+        assert!(!summary.contains("StreamingInfo diagnostic:"));
+        drop(input);
+    }
+
+    #[test]
+    fn explicit_file_inspection_resolves_uint32_streaming_info_offset_from_selected_root_resource()
+    {
+        let directory = TestInputDirectory::new_root();
+        let serialized_path = directory.join("main.assets");
+        let resource_path = directory.join("texture.resS");
+        fs::write(
+            &serialized_path,
+            make_streaming_info_file_with_offset_width("texture.resS", 2, 3, false),
         )
         .unwrap();
         fs::write(&resource_path, b"0123456789").unwrap();
