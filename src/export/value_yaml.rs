@@ -903,15 +903,15 @@ impl<'a> UnityYamlTypeTreeLayout<'a> {
         let node_type = self.type_name(node_index)?;
 
         let field_aliases = baseline_type_scoped_field_aliases(node_type);
-        if !field_aliases.is_empty() {
+        if !field_aliases.is_empty() || has_conditional_field_aliases(node_type) {
             for child_index in self.child_indices(node_index)? {
                 let child = self.node(child_index)?;
                 let Some(field_name) = child.name.as_deref() else {
                     continue;
                 };
-                let Some((_, alias)) = field_aliases
-                    .iter()
-                    .find(|(source_name, _)| *source_name == field_name)
+                let child_type = self.type_name(child_index)?;
+                let Some(alias) =
+                    baseline_type_scoped_field_alias(node_type, field_name, child_type)
                 else {
                     continue;
                 };
@@ -2344,6 +2344,30 @@ fn baseline_type_scoped_field_aliases(type_name: &str) -> &'static [(&'static st
         "VertexData" => VERTEX_DATA_ALIASES,
         "ComputeShaderPlatformVariant" => COMPUTE_SHADER_VARIANT_ALIASES,
         _ => &[],
+    }
+}
+
+fn has_conditional_field_aliases(type_name: &str) -> bool {
+    matches!(type_name, "ParticleSystem" | "ShapeModule")
+}
+
+fn baseline_type_scoped_field_alias(
+    parent_type: &str,
+    field_name: &str,
+    field_type: &str,
+) -> Option<&'static str> {
+    match (parent_type, field_name) {
+        ("ParticleSystem", "m_StartDelay") => Some(if field_type == "float" {
+            "m_StartDelay_Single"
+        } else {
+            "m_StartDelay_MinMaxCurve"
+        }),
+        ("ShapeModule", "m_Arc") if field_type != "float" => Some("m_ArcParameter"),
+        ("ShapeModule", "m_Radius") if field_type != "float" => Some("m_RadiusParameter"),
+        _ => baseline_type_scoped_field_aliases(parent_type)
+            .iter()
+            .find(|(source_name, _)| *source_name == field_name)
+            .map(|(_, alias)| *alias),
     }
 }
 
@@ -4041,6 +4065,104 @@ mod tests {
         assert!(!output.contains("m_DataSize:"));
         assert!(!output.contains("m_Kernels:"));
         assert!(!output.contains("m_Index: 2"));
+    }
+
+    #[test]
+    fn particle_and_shape_module_aliases_follow_child_type() {
+        let type_tree = TypeTree {
+            nodes: vec![
+                type_tree_node(0, "GameObject", "Base", 0),
+                type_tree_node(1, "SInt32", "m_StartDelay", 0),
+                type_tree_node(1, "SInt32", "m_Arc", 0),
+                type_tree_node(1, "ParticleSystem", "m_ParticleSingle", 0),
+                type_tree_node(2, "float", "m_StartDelay", 0),
+                type_tree_node(1, "ParticleSystem", "m_ParticleCurve", 0),
+                type_tree_node(2, "MinMaxCurve", "m_StartDelay", 0),
+                type_tree_node(1, "ShapeModule", "m_ShapeArcCurve", 0),
+                type_tree_node(2, "MinMaxCurve", "m_Arc", 0),
+                type_tree_node(2, "float", "m_Radius", 0),
+                type_tree_node(1, "ShapeModule", "m_ShapeRadiusCurve", 0),
+                type_tree_node(2, "float", "m_Arc", 0),
+                type_tree_node(2, "MinMaxCurve", "m_Radius", 0),
+            ],
+            string_buffer: Vec::new(),
+        };
+        let hints = UnityYamlObjectConversionHints::from_type_tree(
+            &type_tree,
+            version(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        for (path, alias) in [
+            ("m_ParticleSingle.m_StartDelay", "m_StartDelay_Single"),
+            ("m_ParticleCurve.m_StartDelay", "m_StartDelay_MinMaxCurve"),
+            ("m_ShapeArcCurve.m_Arc", "m_ArcParameter"),
+            ("m_ShapeRadiusCurve.m_Radius", "m_RadiusParameter"),
+        ] {
+            assert_eq!(
+                hints.field_name_aliases.get(path).map(String::as_str),
+                Some(alias)
+            );
+        }
+        assert!(!hints
+            .field_name_aliases
+            .contains_key("m_ShapeArcCurve.m_Radius"));
+        assert!(!hints
+            .field_name_aliases
+            .contains_key("m_ShapeRadiusCurve.m_Arc"));
+        assert!(!hints.field_name_aliases.contains_key("m_StartDelay"));
+        assert!(!hints.field_name_aliases.contains_key("m_Arc"));
+
+        let value = SerializedValue::Struct(vec![
+            field("m_StartDelay", SerializedValue::I32(9)),
+            field("m_Arc", SerializedValue::I32(8)),
+            field(
+                "m_ParticleSingle",
+                SerializedValue::Struct(vec![field("m_StartDelay", SerializedValue::F32(0.5))]),
+            ),
+            field(
+                "m_ParticleCurve",
+                SerializedValue::Struct(vec![field(
+                    "m_StartDelay",
+                    SerializedValue::Struct(Vec::new()),
+                )]),
+            ),
+            field(
+                "m_ShapeArcCurve",
+                SerializedValue::Struct(vec![
+                    field("m_Arc", SerializedValue::Struct(Vec::new())),
+                    field("m_Radius", SerializedValue::F32(2.0)),
+                ]),
+            ),
+            field(
+                "m_ShapeRadiusCurve",
+                SerializedValue::Struct(vec![
+                    field("m_Arc", SerializedValue::F32(3.0)),
+                    field("m_Radius", SerializedValue::Struct(Vec::new())),
+                ]),
+            ),
+        ]);
+        let document = convert_with_object_hints(&value, &hints, |_| {
+            unreachable!("ParticleSystem and ShapeModule fixtures contain no PPtrs")
+        })
+        .unwrap();
+        let output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[document],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        for expected in [
+            "m_StartDelay: 9",
+            "m_Arc: 8",
+            "m_StartDelay_Single: 0.5",
+            "m_StartDelay_MinMaxCurve: {}",
+            "m_ArcParameter: {}",
+            "m_Radius: 2",
+            "m_RadiusParameter: {}",
+            "m_Arc: 3",
+        ] {
+            assert!(output.contains(expected), "missing {expected}");
+        }
     }
 
     #[test]

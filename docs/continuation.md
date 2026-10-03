@@ -804,3 +804,11 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Focused test and full workspace passed: 415 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and `git diff --check`.
 - Still incomplete: synthetic evidence only. The ComputeShader owning-type remap and the actual shader/Mesh processing paths remain unimplemented; no Unity-produced fixture or direct C# runtime differential. Phase 1 remains incomplete; Phase 2 remains locked.
 - Next: inspect the remaining conditional Pass002 conversions that depend on child TypeTree shape, especially `ParticleSystem` start delay and `ShapeModule` curve parameters.
+
+## ParticleSystem and ShapeModule type-dependent YAML aliases
+
+- Current phase: Phase 1; gate not passed. This increment builds from pushed revision `90f7667f89456a3957f6b384cd1d98d9fd255894`. Only `cocokoishi/RustAssetRipper`'s canonical repository is a write/push target. No other remote repository, UABEA, or user AssetBundle content was accessed.
+- Added child-TypeTree-dependent aliases: `ParticleSystem.m_StartDelay` distinguishes `float` from curve storage; `ShapeModule.m_Arc` and `m_Radius` get parameter suffixes only for non-float children. Same-named fields under other parent nodes stay unchanged.
+- Focused conditional test and full workspace passed: 416 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and `git diff --check`.
+- Still incomplete: synthetic evidence only, with no Unity-produced TypeTree or direct C# runtime differential. Particle/Shape resource processing and full export remain open. Phase 1 remains incomplete; Phase 2 remains locked.
+- Next: inventory remaining conditional `Pass002_RenameSubnodes` rules and implement the next distinct type/value-shape branch with both matching and nonmatching tests.
