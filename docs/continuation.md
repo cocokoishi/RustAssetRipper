@@ -530,3 +530,11 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Synthetic pointer tests and full verification passed: 351 library tests, 10 CLI tests, warnings-denied Clippy, format check, baseline verifier (1,449 files), and `git diff --check`.
 - Still incomplete: populate this registry from constructed Scene/Prefab export collections; classify source assets into hierarchy groups; implement Prefab-specific IDs, baseline YAML ordering/writing, and `.meta` GUID generation. Phase 1 remains open; Phase 2 remains locked.
 - Next: model PrefabExportCollection membership and generated IDs, then connect Scene/Prefab membership to the pointer registry.
+
+## Prefab collection membership and IDs
+
+- Current phase: Phase 1; gate not passed. This increment starts from pushed revision `52c014f94eac0ce7d0a6fd84b03dd8bf612e7a97`. Only `cocokoishi/RustAssetRipper` is a write/push target; the local AssetRipper baseline remains read-only. No UABEA or user AssetBundle content was accessed.
+- Added a bounded Prefab collection planner. It assigns the main Prefab ID, follows `GameObjects → Components → PrefabInstances → Prefab → hierarchy helper` registration order, skips main/duplicate IDs like `AssetsExportCollection`, seeds generated IDs contiguously using each asset's own collection Unity version, and separately returns the visible hierarchy YAML order.
+- The planner models marker-dependent Prefab emission, modern PrefabInstance hiding, and `GenerateMetaPtrForPrefab` fileID/GUID/AssetType. Full verification passed: 355 library tests, 10 CLI tests, warnings-denied Clippy, format check, baseline verifier (1,449 files), and `git diff --check`.
+- Still incomplete: discover/classify actual Prefab hierarchy assets, integrate Prefab registrations into the project pointer map, serialize the selected assets to baseline-compatible YAML, and write complete version-specific importer/meta data. Phase 1 remains open; Phase 2 remains locked.
+- Next: add explicit Scene/Prefab collection registration adapters that feed the pointer map, then implement YAML document ID/reference serialization.
