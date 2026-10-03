@@ -621,3 +621,11 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Synthetic ancestry and lookup tests plus the full workspace verification passed: 386 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and `git diff --check`.
 - Still incomplete: classifications for objects without an unambiguous TypeTree ancestry or another proven baseline path; generated processed assets; hidden-asset filtering; Prefab discovery/IDs; generated per-class YAML walkers; and full project writing. No C# runtime differential has run. Phase 1 remains open and Phase 2 remains locked.
 - Next: create an independent generated SerializedFile fixture exercising TypeTree-to-Base classification through Scene membership and ID planning, then connect complete Scene assignments to YAML export.
+
+## Generated TypeTree component membership and Scene IDs
+
+- Current phase: Phase 1; gate not passed. This increment builds from pushed revision `0d8aa2e1b3c375736b310cd7fda58ee335519d4d`. Only `cocokoishi/RustAssetRipper` is a write/push target. No UABEA, user AssetBundle content, or other remote repository was accessed.
+- Added a generation-10 class-ID-23 MeshRenderer SerializedFile with a nested TypeTree Base chain and a valid null GameObject PPtr. The test drives parsing, reference scans, workspace hierarchy construction, component membership, and Scene ID planning; it verifies the component stays included and keeps PathID 9001.
+- Targeted end-to-end verification passed. Full workspace verification passed: 387 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and `git diff --check`.
+- Still incomplete: no original Unity-produced fixture or C# runtime differential; component classes without proven TypeTree ancestry; Scene YAML writing; processed assets; Prefab membership/export; and Phase 1 product completeness. Phase 2 remains locked.
+- Next: wire source Scene ID assignments into the per-class YAML walk/export path while preserving the distinction between serialized source objects and generated processed assets.

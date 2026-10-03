@@ -5300,7 +5300,100 @@ mod tests {
         SceneDefinitionGuidPlan, SceneDefinitionPathSource, SceneDefinitionPlan,
         SceneGuidGenerationReason, SceneManagerKind,
     };
+    use crate::serialized_file::file::SerializedFile;
+    use crate::serialized_file::format_version::FormatVersion;
     use crate::serialized_file::metadata::TypeTreeNode;
+    use crate::serialized_file::reference_graph::{
+        MultiFileReferenceGraph, NamedObjectReferenceGraph, ObjectReferenceGraph,
+    };
+
+    fn push_generated_scene_type_tree_string(buffer: &mut Vec<u8>, value: &str) -> u32 {
+        let offset = u32::try_from(buffer.len()).unwrap();
+        buffer.extend_from_slice(value.as_bytes());
+        buffer.push(0);
+        offset
+    }
+
+    fn put_generated_scene_type_tree_node(
+        output: &mut Vec<u8>,
+        level: u8,
+        type_offset: u32,
+        name_offset: u32,
+        byte_size: i32,
+        index: i32,
+    ) {
+        output.extend_from_slice(&1_u16.to_le_bytes());
+        output.push(level);
+        output.push(0);
+        output.extend_from_slice(&type_offset.to_le_bytes());
+        output.extend_from_slice(&name_offset.to_le_bytes());
+        output.extend_from_slice(&byte_size.to_le_bytes());
+        output.extend_from_slice(&index.to_le_bytes());
+        output.extend_from_slice(&0_u32.to_le_bytes());
+    }
+
+    fn generated_mesh_renderer_serialized_file() -> Vec<u8> {
+        const CLASS_ID: i32 = 23;
+
+        let mut strings = Vec::new();
+        let mesh_renderer_type =
+            push_generated_scene_type_tree_string(&mut strings, "MeshRenderer");
+        let empty_name = push_generated_scene_type_tree_string(&mut strings, "");
+        let renderer_type = push_generated_scene_type_tree_string(&mut strings, "Renderer");
+        let component_type = push_generated_scene_type_tree_string(&mut strings, "Component");
+        let base_name = push_generated_scene_type_tree_string(&mut strings, "Base");
+        let game_object_pointer_type =
+            push_generated_scene_type_tree_string(&mut strings, "PPtr<GameObject>");
+        let game_object_field = push_generated_scene_type_tree_string(&mut strings, "m_GameObject");
+        let int_type = push_generated_scene_type_tree_string(&mut strings, "int");
+        let file_id_field = push_generated_scene_type_tree_string(&mut strings, "m_FileID");
+        let path_id_field = push_generated_scene_type_tree_string(&mut strings, "m_PathID");
+
+        let mut metadata = b"2019.4.0f1\0".to_vec();
+        metadata.extend_from_slice(&0_u32.to_le_bytes());
+        metadata.extend_from_slice(&1_i32.to_le_bytes());
+        metadata.extend_from_slice(&CLASS_ID.to_le_bytes());
+        metadata.extend_from_slice(&6_i32.to_le_bytes());
+        metadata.extend_from_slice(&i32::try_from(strings.len()).unwrap().to_le_bytes());
+        put_generated_scene_type_tree_node(&mut metadata, 0, mesh_renderer_type, empty_name, -1, 0);
+        put_generated_scene_type_tree_node(&mut metadata, 1, renderer_type, base_name, -1, 1);
+        put_generated_scene_type_tree_node(&mut metadata, 2, component_type, base_name, -1, 2);
+        put_generated_scene_type_tree_node(
+            &mut metadata,
+            3,
+            game_object_pointer_type,
+            game_object_field,
+            -1,
+            3,
+        );
+        put_generated_scene_type_tree_node(&mut metadata, 4, int_type, file_id_field, 4, 4);
+        put_generated_scene_type_tree_node(&mut metadata, 4, int_type, path_id_field, 4, 5);
+        metadata.extend_from_slice(&strings);
+
+        metadata.extend_from_slice(&0_u32.to_le_bytes());
+        metadata.extend_from_slice(&1_i32.to_le_bytes());
+        metadata.extend_from_slice(&9001_i32.to_le_bytes());
+        metadata.extend_from_slice(&0_u32.to_le_bytes());
+        metadata.extend_from_slice(&8_i32.to_le_bytes());
+        metadata.extend_from_slice(&CLASS_ID.to_le_bytes());
+        metadata.extend_from_slice(&(CLASS_ID as i16).to_le_bytes());
+        metadata.extend_from_slice(&0_u16.to_le_bytes());
+        metadata.extend_from_slice(&0_i32.to_le_bytes());
+        metadata.push(0);
+
+        let header_size = 20_usize;
+        let data_offset = header_size + metadata.len();
+        let file_size = data_offset + 8;
+        let mut file = Vec::with_capacity(file_size);
+        file.extend_from_slice(&i32::try_from(metadata.len()).unwrap().to_be_bytes());
+        file.extend_from_slice(&u32::try_from(file_size).unwrap().to_be_bytes());
+        file.extend_from_slice(&FormatVersion::Unknown10.raw().to_be_bytes());
+        file.extend_from_slice(&u32::try_from(data_offset).unwrap().to_be_bytes());
+        file.extend_from_slice(&[0, 0, 0, 0]);
+        file.extend_from_slice(&metadata);
+        file.extend_from_slice(&[0; 8]);
+        file
+    }
 
     fn identity(
         file_index: usize,
@@ -5455,6 +5548,129 @@ mod tests {
             classify_type_tree_component_base(None),
             TypeTreeComponentBaseClassification::Unavailable
         );
+    }
+
+    #[test]
+    fn generated_serialized_file_type_tree_component_flows_into_scene_ids() {
+        const MESH_RENDERER_CLASS_ID: i32 = 23;
+
+        let bytes = generated_mesh_renderer_serialized_file();
+        let file = SerializedFile::parse(&bytes).unwrap();
+        assert_eq!(
+            file.metadata.objects[0].class_id,
+            Some(MESH_RENDERER_CLASS_ID as i16)
+        );
+        let object_graph = ObjectReferenceGraph::build(&file).unwrap();
+        let named_files = [NamedObjectReferenceGraph {
+            file_name: "scene.assets",
+            metadata: &file.metadata,
+            graph: &object_graph,
+        }];
+        let references = MultiFileReferenceGraph::build(&named_files).unwrap();
+        assert!(
+            references.is_complete(),
+            "object scan: {:?}; issues: {:?}",
+            references.object_scan_is_complete(0, 0),
+            object_graph.issues()
+        );
+        assert_eq!(references.object_type_tree(0, 0).unwrap().nodes.len(), 6);
+
+        let mut scene_graph =
+            SceneGraph::build(&file, crate::processing::scene::SceneGraphLimits::default())
+                .unwrap();
+        let roots = scene_graph
+            .discover_workspace_roots(
+                0,
+                "scene.assets",
+                &references,
+                crate::processing::scene::SceneRootDiscoveryLimits::default(),
+            )
+            .unwrap();
+        let audit = scene_graph
+            .audit_workspace_transform_links(
+                0,
+                "scene.assets",
+                &references,
+                crate::processing::scene::SceneHierarchyAuditLimits::default(),
+            )
+            .unwrap();
+        let plan = crate::processing::scene_collections::plan_scene_definition(
+            0,
+            "scene.assets",
+            &crate::processing::scene_collections::SceneCollectionPathStatus::BuildSettingsMissing,
+            None,
+            None,
+            crate::processing::scene_collections::SceneDefinitionPlanLimits::default(),
+        )
+        .unwrap();
+        let definitions =
+            crate::processing::scene_collections::WorkspaceSceneDefinitions::from_plans(
+                vec![plan],
+                1,
+                crate::processing::scene_collections::WorkspaceSceneDefinitionLimits::default(),
+            )
+            .unwrap();
+        let mut builder =
+            WorkspaceSceneHierarchyBuilder::new(1, WorkspaceSceneHierarchyLimits::default())
+                .unwrap();
+        builder
+            .add_collection_graph(0, &scene_graph, roots, audit, &references)
+            .unwrap();
+        let hierarchies = builder.finish(&definitions).unwrap();
+        let scene = &hierarchies.scenes()[0];
+        let candidates = scene.collections()[0].component_candidates();
+        assert_eq!(
+            candidates,
+            &[
+                WorkspaceSceneComponentCandidate {
+                    identity: identity(0, 0, 9001, MESH_RENDERER_CLASS_ID),
+                    evidence: WorkspaceSceneComponentEvidence::TypeTreeComponentBase,
+                },
+                WorkspaceSceneComponentCandidate {
+                    identity: identity(0, 0, 9001, MESH_RENDERER_CLASS_ID),
+                    evidence: WorkspaceSceneComponentEvidence::GameObjectPointerFieldNull,
+                },
+            ]
+        );
+
+        let membership = scene
+            .asset_membership(WorkspaceSceneHierarchyMembershipLimits::default())
+            .unwrap();
+        assert!(
+            membership.is_complete(),
+            "issues: {:?}",
+            membership.issues()
+        );
+        assert_eq!(
+            membership.components(),
+            &[identity(0, 0, 9001, MESH_RENDERER_CLASS_ID)]
+        );
+        let assignments = crate::export::scene_collection::plan_workspace_scene_export_ids(
+            scene,
+            crate::processing::scene_naming::SceneUnityVersion {
+                major: 2019,
+                minor: 4,
+                patch: 0,
+            },
+            WorkspaceSceneHierarchyMembershipLimits::default(),
+            crate::export::scene_collection::SceneHierarchyAssetOrderLimits::default(),
+            crate::export::scene_collection::SceneExportIdPlanLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(assignments.len(), 1);
+        assert_eq!(
+            assignments[0].asset,
+            crate::export::scene_collection::ExportAssetIdentity {
+                collection:
+                    crate::export::scene_collection::ExportAssetCollectionIdentity::SerializedFile {
+                        file_index: 0
+                    },
+                object_index: 0,
+                path_id: 9001,
+                class_id: MESH_RENDERER_CLASS_ID,
+            }
+        );
+        assert_eq!(assignments[0].file_id, 9001);
     }
 
     #[test]
