@@ -15,6 +15,7 @@ Phase 1: full Rust port of the local AssetRipper source baseline. The Phase 1 ga
 
 ## Latest increment and next implementation
 
+- Cloud checkpoint verified: local commit `163d04c8146615ac8624e75723ec12d7bcf39da4` has tree `49227b682551100ef694da75c4d5e5267c21f921`; remote commit `a5e5e345806c691cc232789e5a0b8a619f428613` on `main` has the same tree and parent `49c29343844ea8d859010e18c3dfce99db278bca`. The live branch ref and commit were read back, and `git diff --exit-code FETCH_HEAD HEAD` passed.
 - Added `export-file-yaml <serialized-file-index> <new-output-yaml> <input-file> [input-file ...]` in `src/main.rs`. It writes YAML-exportable objects from one selected SerializedFile in object-table order, resolves streamed resources through explicit root/Mixed DataPaths, and maps uniquely resolved intra-file PPtrs using source PathIDs.
 - Before writing, the command requires a complete TypeTree reference scan for every object. Missing, ambiguous, unresolved, and cross-file references fail without creating output. It reports the baseline ImageTexture-without-data omission and never replaces an existing output file.
 - Validation: 457 library tests and 21 CLI tests passed; warnings-denied Clippy, format check, CLI help invocation, 1,449-file baseline verifier, and `git diff --check` passed. See `docs/validation-log.md` and `docs/feature-parity.md`.
