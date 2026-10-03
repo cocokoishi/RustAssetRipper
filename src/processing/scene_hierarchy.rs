@@ -19,6 +19,7 @@ const GAME_OBJECT_CLASS_ID: i32 = 1;
 const TRANSFORM_CLASS_ID: i32 = 4;
 const RECT_TRANSFORM_CLASS_ID: i32 = 224;
 const PREFAB_INSTANCE_CLASS_ID: i32 = 1001;
+const LIGHTMAP_SETTINGS_CLASS_ID: i32 = 157;
 const SCENE_ROOTS_CLASS_ID: i32 = 1_660_057_539;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -859,6 +860,7 @@ pub struct WorkspaceSceneCollectionHierarchy {
     transform_game_object_relationship_indices: Vec<usize>,
     graph_issues: Vec<SceneGraphIssue>,
     scene_assets: Vec<WorkspaceSceneAssetIdentity>,
+    lighting_data_asset_field_object_indices: Vec<usize>,
     component_candidates: Vec<WorkspaceSceneComponentCandidate>,
     missing_transform_plans: Vec<WorkspaceMissingTransformPlan>,
     source_graph_complete: bool,
@@ -1125,6 +1127,12 @@ impl WorkspaceSceneCollectionHierarchy {
         &self.scene_assets
     }
 
+    pub fn has_lighting_data_asset_field(&self, object_index: usize) -> bool {
+        self.lighting_data_asset_field_object_indices
+            .binary_search(&object_index)
+            .is_ok()
+    }
+
     pub fn component_candidates(&self) -> &[WorkspaceSceneComponentCandidate] {
         &self.component_candidates
     }
@@ -1168,6 +1176,38 @@ pub struct WorkspaceSceneHierarchyScene {
 impl WorkspaceSceneHierarchyScene {
     pub fn collections(&self) -> &[WorkspaceSceneCollectionHierarchy] {
         &self.collections
+    }
+
+    /// Returns the first LightmapSettings object selected by LightingDataProcessor when it has
+    /// the versioned LightingDataAsset field and the scene also contains RenderSettings.
+    pub fn lighting_data_dependency_owner(&self) -> Option<WorkspaceSceneObjectIdentity> {
+        let mut has_render_settings = false;
+        let mut first_lightmap_settings = None;
+        for collection in &self.collections {
+            for asset in collection.scene_assets() {
+                match asset.category {
+                    WorkspaceSceneAssetCategory::LevelGameManager(
+                        SceneManagerKind::RenderSettings,
+                    ) => has_render_settings = true,
+                    WorkspaceSceneAssetCategory::LevelGameManager(
+                        SceneManagerKind::LightmapSettings,
+                    ) if first_lightmap_settings.is_none() => {
+                        first_lightmap_settings = Some((
+                            asset.identity,
+                            collection.has_lighting_data_asset_field(asset.identity.object_index),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if has_render_settings {
+            first_lightmap_settings
+                .filter(|(_, has_field)| *has_field)
+                .map(|(identity, _)| identity)
+        } else {
+            None
+        }
     }
 }
 
@@ -3156,8 +3196,13 @@ impl WorkspaceSceneHierarchyBuilder {
             (0..scene_graph.objects().len()).all(|object_index| {
                 references.object_scan_is_complete(file_index, object_index) == Some(true)
             });
-        let (scene_assets, component_candidates) =
+        let classification =
             classify_scene_collection_objects(file_index, scene_graph, references)?;
+        let ClassifiedSceneCollectionObjects {
+            scene_assets,
+            lighting_data_asset_field_object_indices,
+            component_candidates,
+        } = classification;
         let missing_transform_plans =
             build_missing_transform_plans(file_index, &roots, references)?;
         let scene_objects = scene_graph
@@ -3343,6 +3388,7 @@ impl WorkspaceSceneHierarchyBuilder {
                 .game_object_relationship_indices,
             graph_issues,
             scene_assets,
+            lighting_data_asset_field_object_indices,
             component_candidates,
             missing_transform_plans,
             source_graph_complete: scene_graph.is_complete(),
@@ -3855,17 +3901,17 @@ enum TransformRelationshipRange {
     GameObject,
 }
 
+struct ClassifiedSceneCollectionObjects {
+    scene_assets: Vec<WorkspaceSceneAssetIdentity>,
+    lighting_data_asset_field_object_indices: Vec<usize>,
+    component_candidates: Vec<WorkspaceSceneComponentCandidate>,
+}
+
 fn classify_scene_collection_objects(
     file_index: usize,
     scene_graph: &SceneGraph,
     references: &MultiFileReferenceGraph<'_>,
-) -> Result<
-    (
-        Vec<WorkspaceSceneAssetIdentity>,
-        Vec<WorkspaceSceneComponentCandidate>,
-    ),
-    WorkspaceSceneHierarchyError,
-> {
+) -> Result<ClassifiedSceneCollectionObjects, WorkspaceSceneHierarchyError> {
     let scene_asset_count = scene_graph
         .objects()
         .iter()
@@ -3884,6 +3930,27 @@ fn classify_scene_collection_objects(
         .map_err(|_| WorkspaceSceneHierarchyError::AllocationFailed {
             resource: "SceneHierarchyObject asset identities",
             requested: scene_asset_count,
+        })?;
+
+    let lighting_data_asset_field_object_count = scene_graph
+        .objects()
+        .iter()
+        .filter(|object| {
+            references
+                .object_class_id(file_index, object.object_index)
+                .or(object.class_id)
+                == Some(LIGHTMAP_SETTINGS_CLASS_ID)
+                && references
+                    .references_from_object(file_index, object.object_index)
+                    .any(|reference| is_lighting_data_asset_field_path(reference.field_path))
+        })
+        .count();
+    let mut lighting_data_asset_field_object_indices = Vec::new();
+    lighting_data_asset_field_object_indices
+        .try_reserve_exact(lighting_data_asset_field_object_count)
+        .map_err(|_| WorkspaceSceneHierarchyError::AllocationFailed {
+            resource: "LightmapSettings LightingDataAsset field index",
+            requested: lighting_data_asset_field_object_count,
         })?;
 
     let mut component_candidates = Vec::new();
@@ -3940,6 +4007,13 @@ fn classify_scene_collection_objects(
         let class_id = references
             .object_class_id(file_index, object.object_index)
             .or(object.class_id);
+        if class_id == Some(LIGHTMAP_SETTINGS_CLASS_ID)
+            && references
+                .references_from_object(file_index, object.object_index)
+                .any(|reference| is_lighting_data_asset_field_path(reference.field_path))
+        {
+            lighting_data_asset_field_object_indices.push(object.object_index);
+        }
         if let Some(category) = scene_asset_category(class_id) {
             let identity = scene_object_identity(
                 file_index,
@@ -4038,6 +4112,8 @@ fn classify_scene_collection_objects(
 
     scene_assets
         .sort_unstable_by_key(|asset| (asset.identity.file_index, asset.identity.object_index));
+    lighting_data_asset_field_object_indices.sort_unstable();
+    lighting_data_asset_field_object_indices.dedup();
     component_candidates.sort_unstable_by_key(|candidate| {
         (
             candidate.identity.file_index,
@@ -4051,7 +4127,18 @@ fn classify_scene_collection_objects(
             candidate.identity.object_index,
         )
     });
-    Ok((scene_assets, component_candidates))
+    Ok(ClassifiedSceneCollectionObjects {
+        scene_assets,
+        lighting_data_asset_field_object_indices,
+        component_candidates,
+    })
+}
+
+fn is_lighting_data_asset_field_path(field_path: &str) -> bool {
+    field_path
+        .rsplit('.')
+        .next()
+        .is_some_and(|field_name| field_name == "m_LightingDataAsset")
 }
 
 fn scene_asset_category(class_id: Option<i32>) -> Option<WorkspaceSceneAssetCategory> {
@@ -4457,7 +4544,8 @@ mod tests {
         plan_workspace_prefab_processing, plan_workspace_processed_prefab_assets,
         WorkspacePrefabProcessingEvent, WorkspaceProcessedCollectionKind,
         WorkspaceProcessedPrefabAssetKind, WorkspaceProcessedPrefabAssetPlanLimits,
-        WorkspaceProcessedPrefabReference,
+        WorkspaceProcessedPrefabReference, WorkspaceSourceDependencyAppendTarget,
+        WorkspaceSourceDependencyPointerField,
     };
     use crate::processing::scene_collections::{
         SceneDefinitionGuidPlan, SceneDefinitionPathSource, SceneDefinitionPlan,
@@ -4494,6 +4582,99 @@ mod tests {
             path_id,
             target,
         }
+    }
+
+    fn empty_collection_graph(file_index: usize) -> WorkspaceSceneCollectionHierarchy {
+        WorkspaceSceneCollectionHierarchy {
+            collection_file_index: file_index,
+            scene_objects: Vec::new(),
+            relationships: Vec::new(),
+            game_object_hierarchies: Vec::new(),
+            game_object_component_relationship_indices: Vec::new(),
+            prefab_root_relationship_index: Vec::new(),
+            transform_hierarchies: Vec::new(),
+            transform_parent_relationship_indices: Vec::new(),
+            transform_child_relationship_indices: Vec::new(),
+            transform_game_object_relationship_indices: Vec::new(),
+            graph_issues: Vec::new(),
+            scene_assets: Vec::new(),
+            lighting_data_asset_field_object_indices: Vec::new(),
+            component_candidates: Vec::new(),
+            missing_transform_plans: Vec::new(),
+            source_graph_complete: true,
+            source_reference_scans_complete: true,
+            roots: WorkspaceSceneRootDiscovery::default(),
+            hierarchy_audit: WorkspaceSceneHierarchyAudit::default(),
+        }
+    }
+
+    fn scene_definition_plan(file_index: usize) -> SceneDefinitionPlan {
+        SceneDefinitionPlan {
+            collection_file_index: file_index,
+            collection_name: "scene".to_owned(),
+            name: "scene".to_owned(),
+            path: "Assets/Scenes/scene".to_owned(),
+            path_source: SceneDefinitionPathSource::CollectionNameFallback,
+            guid: SceneDefinitionGuidPlan::GenerateAtExport(
+                SceneGuidGenerationReason::MissingFromInput,
+            ),
+        }
+    }
+
+    #[test]
+    fn lighting_data_dependency_owner_matches_first_lightmap_settings_and_render_settings() {
+        let first = identity(0, 0, 10, LIGHTMAP_SETTINGS_CLASS_ID);
+        let second = identity(0, 1, 11, LIGHTMAP_SETTINGS_CLASS_ID);
+        let render = identity(0, 2, 12, SceneManagerKind::RenderSettings.class_id());
+        let mut collection = empty_collection_graph(0);
+        collection.scene_assets = vec![
+            WorkspaceSceneAssetIdentity {
+                identity: first,
+                category: WorkspaceSceneAssetCategory::LevelGameManager(
+                    SceneManagerKind::LightmapSettings,
+                ),
+            },
+            WorkspaceSceneAssetIdentity {
+                identity: second,
+                category: WorkspaceSceneAssetCategory::LevelGameManager(
+                    SceneManagerKind::LightmapSettings,
+                ),
+            },
+            WorkspaceSceneAssetIdentity {
+                identity: render,
+                category: WorkspaceSceneAssetCategory::LevelGameManager(
+                    SceneManagerKind::RenderSettings,
+                ),
+            },
+        ];
+        collection.lighting_data_asset_field_object_indices = vec![second.object_index];
+        let mut scene = WorkspaceSceneHierarchyScene {
+            plan: scene_definition_plan(0),
+            collections: vec![collection],
+        };
+
+        // The source selects the first LightmapSettings; a later field-bearing instance is not used.
+        assert_eq!(scene.lighting_data_dependency_owner(), None);
+        scene.collections[0].lighting_data_asset_field_object_indices =
+            vec![first.object_index, second.object_index];
+        assert_eq!(scene.lighting_data_dependency_owner(), Some(first));
+        scene.collections[0].scene_assets.retain(|asset| {
+            asset.category
+                != WorkspaceSceneAssetCategory::LevelGameManager(SceneManagerKind::RenderSettings)
+        });
+        assert_eq!(scene.lighting_data_dependency_owner(), None);
+    }
+
+    #[test]
+    fn lighting_data_asset_field_match_uses_the_terminal_typed_field_name() {
+        assert!(is_lighting_data_asset_field_path("m_LightingDataAsset"));
+        assert!(is_lighting_data_asset_field_path(
+            "LightmapSettings.m_LightingDataAsset"
+        ));
+        assert!(!is_lighting_data_asset_field_path(
+            "m_LightingDataAssetBackup"
+        ));
+        assert!(!is_lighting_data_asset_field_path("m_LightmapData"));
     }
 
     fn workspace_hierarchy_fixture(cycle: bool) -> WorkspaceSceneHierarchies {
@@ -4607,6 +4788,7 @@ mod tests {
             transform_child_relationship_indices: vec![4],
             transform_game_object_relationship_indices: vec![6, 5],
             graph_issues: Vec::new(),
+            lighting_data_asset_field_object_indices: Vec::new(),
             scene_assets: vec![WorkspaceSceneAssetIdentity {
                 identity: root,
                 category: WorkspaceSceneAssetCategory::GameObject,
@@ -4695,6 +4877,7 @@ mod tests {
             transform_child_relationship_indices: child_transform_child_indexes,
             transform_game_object_relationship_indices: vec![0],
             graph_issues: Vec::new(),
+            lighting_data_asset_field_object_indices: Vec::new(),
             scene_assets: vec![WorkspaceSceneAssetIdentity {
                 identity: child_game_object,
                 category: WorkspaceSceneAssetCategory::GameObject,
@@ -4763,6 +4946,7 @@ mod tests {
             transform_child_relationship_indices: Vec::new(),
             transform_game_object_relationship_indices: Vec::new(),
             graph_issues: Vec::new(),
+            lighting_data_asset_field_object_indices: Vec::new(),
             scene_assets: vec![
                 WorkspaceSceneAssetIdentity {
                     identity: prefab,
@@ -4900,6 +5084,7 @@ mod tests {
             transform_child_relationship_indices: Vec::new(),
             transform_game_object_relationship_indices: Vec::new(),
             graph_issues: Vec::new(),
+            lighting_data_asset_field_object_indices: Vec::new(),
             scene_assets: vec![WorkspaceSceneAssetIdentity {
                 identity: prefab,
                 category: WorkspaceSceneAssetCategory::PrefabInstance,
@@ -4923,6 +5108,7 @@ mod tests {
             transform_child_relationship_indices: Vec::new(),
             transform_game_object_relationship_indices: Vec::new(),
             graph_issues: Vec::new(),
+            lighting_data_asset_field_object_indices: Vec::new(),
             scene_assets: vec![WorkspaceSceneAssetIdentity {
                 identity: root,
                 category: WorkspaceSceneAssetCategory::GameObject,
@@ -5617,6 +5803,8 @@ mod tests {
         let allocations = plan_workspace_processed_prefab_assets(
             &workspace,
             &processing,
+            &[0, 0],
+            &Default::default(),
             WorkspaceProcessedPrefabAssetPlanLimits::default(),
         )
         .unwrap();
@@ -5669,6 +5857,8 @@ mod tests {
         let allocations = plan_workspace_processed_prefab_assets(
             &workspace,
             &processing,
+            &[0, 0],
+            &Default::default(),
             WorkspaceProcessedPrefabAssetPlanLimits::default(),
         )
         .unwrap();
@@ -5706,6 +5896,7 @@ mod tests {
             transform_child_relationship_indices: Vec::new(),
             transform_game_object_relationship_indices: Vec::new(),
             graph_issues: Vec::new(),
+            lighting_data_asset_field_object_indices: Vec::new(),
             scene_assets: vec![WorkspaceSceneAssetIdentity {
                 identity: game_object,
                 category: WorkspaceSceneAssetCategory::GameObject,
@@ -5740,6 +5931,8 @@ mod tests {
         let allocations = plan_workspace_processed_prefab_assets(
             &workspace,
             &processing,
+            &[0],
+            &Default::default(),
             WorkspaceProcessedPrefabAssetPlanLimits::default(),
         )
         .unwrap();
@@ -5784,13 +5977,22 @@ mod tests {
         assert_eq!(allocations.source_dependency_appends().len(), 1);
         let source_dependency_append = allocations.source_dependency_appends()[0];
         assert_eq!(source_dependency_append.source_file_index, 0);
-        assert_eq!(source_dependency_append.target_collection_index, 2);
-        assert_eq!(source_dependency_append.first_component_owner, game_object);
+        assert_eq!(
+            source_dependency_append.target_collection,
+            crate::processing::prefab_processing::WorkspaceSourceDependencyAppendTarget::PrefabProcessedCollection {
+                collection_index: 2
+            }
+        );
+        assert_eq!(
+            source_dependency_append.pointer_field,
+            crate::processing::prefab_processing::WorkspaceSourceDependencyPointerField::GameObjectComponent
+        );
+        assert_eq!(source_dependency_append.first_source_owner, game_object);
         assert_eq!(
             source_dependency_append.target_asset,
-            missing_transform_collection.assets[0].identity
+            Some(missing_transform_collection.assets[0].identity)
         );
-        assert_eq!(source_dependency_append.file_id, None);
+        assert_eq!(source_dependency_append.file_id, Some(1));
         assert_eq!(allocations.constructor_pointers().len(), 2);
         assert_eq!(
             allocations.constructor_pointers()[0].field,
@@ -5833,5 +6035,88 @@ mod tests {
         assert!(!allocations.collections()[0].dependency_indices_complete);
         assert_eq!(allocations.collections()[1].assets[0].identity.path_id, 1);
         assert_eq!(allocations.collections()[0].assets[0].identity.path_id, 1);
+    }
+
+    #[test]
+    fn lighting_data_dependency_file_id_precedes_missing_transform_component_file_id() {
+        let game_object = identity(0, 0, 100, GAME_OBJECT_CLASS_ID);
+        let lightmap_settings = identity(0, 1, 101, LIGHTMAP_SETTINGS_CLASS_ID);
+        let render_settings = identity(0, 2, 102, SceneManagerKind::RenderSettings.class_id());
+        let mut collection = empty_collection_graph(0);
+        collection.scene_assets = vec![
+            WorkspaceSceneAssetIdentity {
+                identity: game_object,
+                category: WorkspaceSceneAssetCategory::GameObject,
+            },
+            WorkspaceSceneAssetIdentity {
+                identity: lightmap_settings,
+                category: WorkspaceSceneAssetCategory::LevelGameManager(
+                    SceneManagerKind::LightmapSettings,
+                ),
+            },
+            WorkspaceSceneAssetIdentity {
+                identity: render_settings,
+                category: WorkspaceSceneAssetCategory::LevelGameManager(
+                    SceneManagerKind::RenderSettings,
+                ),
+            },
+        ];
+        collection.lighting_data_asset_field_object_indices = vec![lightmap_settings.object_index];
+        collection.game_object_hierarchies = vec![WorkspaceSceneGameObjectHierarchy {
+            game_object,
+            component_relationship_start: 0,
+            component_relationship_end: 0,
+        }];
+        collection.missing_transform_plans = vec![WorkspaceMissingTransformPlan {
+            game_object,
+            default_values: default_workspace_generated_transform_values(),
+        }];
+        let scene = WorkspaceSceneHierarchyScene {
+            plan: scene_definition_plan(0),
+            collections: vec![collection],
+        };
+        let workspace = WorkspaceSceneHierarchies {
+            scenes: vec![scene],
+            non_scene_collections: Vec::new(),
+            collection_graph_index: vec![WorkspaceSceneCollectionGraphIndexEntry {
+                file_index: 0,
+                scene_index: Some(0),
+                collection_index: 0,
+            }],
+        };
+        let processing =
+            plan_workspace_prefab_processing(&workspace, &[0], Default::default()).unwrap();
+        assert!(processing.is_complete());
+        let allocations = plan_workspace_processed_prefab_assets(
+            &workspace,
+            &processing,
+            &[3],
+            &Default::default(),
+            WorkspaceProcessedPrefabAssetPlanLimits::default(),
+        )
+        .unwrap();
+        assert!(allocations.is_complete());
+
+        let appends = allocations.source_dependency_appends();
+        assert_eq!(appends.len(), 2);
+        assert_eq!(appends[0].source_file_index, 0);
+        assert_eq!(
+            appends[0].target_collection,
+            WorkspaceSourceDependencyAppendTarget::GeneratedLightingDataAssets
+        );
+        assert_eq!(
+            appends[0].pointer_field,
+            WorkspaceSourceDependencyPointerField::LightmapSettingsLightingDataAsset
+        );
+        assert_eq!(appends[0].first_source_owner, lightmap_settings);
+        assert_eq!(appends[0].file_id, Some(4));
+        assert_eq!(
+            appends[1].target_collection,
+            WorkspaceSourceDependencyAppendTarget::PrefabProcessedCollection {
+                collection_index: 3
+            }
+        );
+        assert_eq!(appends[1].first_source_owner, game_object);
+        assert_eq!(appends[1].file_id, Some(5));
     }
 }

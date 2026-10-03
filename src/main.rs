@@ -13,8 +13,8 @@ use assetripper::io::platform_file_inventory::{
 use assetripper::io::platform_structure::{detect_platform_structure, PlatformStructureLimits};
 use assetripper::processing::prefab_processing::{
     plan_workspace_prefab_processing, plan_workspace_processed_prefab_assets,
-    WorkspacePrefabProcessingEvent, WorkspacePrefabProcessingLimits,
-    WorkspaceProcessedPrefabAssetPlanLimits,
+    source_files_with_animator_controllers, WorkspacePrefabProcessingEvent,
+    WorkspacePrefabProcessingLimits, WorkspaceProcessedPrefabAssetPlanLimits,
 };
 use assetripper::processing::project_settings::{
     EditorBuildSettingsLimits, EditorBuildSettingsModel,
@@ -447,6 +447,10 @@ fn print_workspace_summary_to<W: io::Write>(
     writeln!(output, "SerializedFiles: {}", workspace.files().len())?;
     let decoded_objects =
         ObjectWorkspace::load_from_vfs(filesystem, workspace, ObjectWorkspaceLimits::default())?;
+    let animator_controller_source_files = source_files_with_animator_controllers(
+        &decoded_objects,
+        WorkspaceProcessedPrefabAssetPlanLimits::default(),
+    )?;
     let collection_models = WorkspaceAssetCollections::build(
         workspace,
         &decoded_objects,
@@ -1253,9 +1257,21 @@ fn print_workspace_summary_to<W: io::Write>(
         &source_collection_file_indices,
         WorkspacePrefabProcessingLimits::default(),
     )?;
+    let mut source_external_identifier_counts = Vec::new();
+    source_external_identifier_counts
+        .try_reserve_exact(workspace.files().len())
+        .map_err(|_| invalid_data("could not reserve source external identifier counts"))?;
+    source_external_identifier_counts.extend(
+        workspace
+            .files()
+            .iter()
+            .map(|file| file.metadata.externals.len()),
+    );
     let processed_prefab_assets = plan_workspace_processed_prefab_assets(
         &scene_hierarchies,
         &prefab_processing_plan,
+        &source_external_identifier_counts,
+        &animator_controller_source_files,
         WorkspaceProcessedPrefabAssetPlanLimits::default(),
     )?;
     let prefab_processing_report = prefab_processing_plan.report();
@@ -1282,7 +1298,7 @@ fn print_workspace_summary_to<W: io::Write>(
     )?;
     writeln!(
         output,
-        "PrefabProcessor generated-asset allocation plan: complete={}, {} collections, {} assets, {} GameObject component-pair appends, {} constructor PPtrs, {} source dependency appends with FileID deferred{}",
+        "PrefabProcessor generated-asset allocation plan: complete={}, {} collections, {} assets, {} GameObject component-pair appends, {} constructor PPtrs, {} source dependency appends ({} FileIDs assigned, {} deferred across {} source files){}",
         processed_prefab_assets.is_complete(),
         processed_prefab_assets.collections().len(),
         processed_prefab_assets.asset_count(),
@@ -1290,8 +1306,19 @@ fn print_workspace_summary_to<W: io::Write>(
         processed_prefab_assets.constructor_pointers().len(),
         processed_prefab_assets.source_dependency_appends().len(),
         processed_prefab_assets
+            .source_dependency_appends()
+            .iter()
+            .filter(|append| append.file_id.is_some())
+            .count(),
+        processed_prefab_assets
+            .source_dependency_appends()
+            .iter()
+            .filter(|append| append.file_id.is_none())
+            .count(),
+        processed_prefab_assets.deferred_source_dependency_file_count(),
+        processed_prefab_assets
             .incomplete_reason()
-            .map(|reason| format!(", no IDs assigned: {reason}"))
+            .map(|reason| format!(", incomplete: {reason}"))
             .unwrap_or_default()
     )?;
     if processed_prefab_assets.is_complete() {

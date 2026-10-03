@@ -4,6 +4,8 @@ use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
+use crate::serialized_file::object_workspace::ObjectWorkspace;
+
 use super::scene::SceneRelationshipTarget;
 use super::scene_hierarchy::{
     default_workspace_generated_transform_values, WorkspaceGameObjectHierarchyEntry,
@@ -633,15 +635,28 @@ pub struct WorkspaceGeneratedConstructorPointer {
     pub target: WorkspaceSceneObjectIdentity,
 }
 
-/// A source SerializedAssetCollection must reference the generated Transform collection.
-/// The final FileID depends on dependency additions made by processors before PrefabProcessor.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum WorkspaceSourceDependencyAppendTarget {
+    GeneratedLightingDataAssets,
+    PrefabProcessedCollection { collection_index: usize },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkspaceSourceDependencyPointerField {
+    LightmapSettingsLightingDataAsset,
+    GameObjectComponent,
+}
+
+/// One ordered dependency-table append performed while processing a source SerializedAssetCollection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WorkspaceSourceCollectionDependencyAppend {
     pub source_file_index: usize,
-    pub target_collection_index: usize,
-    pub first_component_owner: WorkspaceSceneObjectIdentity,
-    pub target_asset: WorkspaceProcessedAssetIdentity,
-    /// Deferred until the source collection's pre-PrefabProcessor dependency list is replayed.
+    pub target_collection: WorkspaceSourceDependencyAppendTarget,
+    pub pointer_field: WorkspaceSourceDependencyPointerField,
+    pub first_source_owner: WorkspaceSceneObjectIdentity,
+    /// Present when the generated asset identity is part of the Prefab plan.
+    pub target_asset: Option<WorkspaceProcessedAssetIdentity>,
+    /// Dependency FileIDs start after self and the original external table.
     pub file_id: Option<i32>,
 }
 
@@ -655,6 +670,7 @@ pub struct WorkspaceProcessedPrefabAssetPlanLimits {
     pub max_dependencies_per_collection: usize,
     pub max_constructor_pointers: usize,
     pub max_source_dependency_appends: usize,
+    pub max_source_dependency_entries_per_collection: usize,
     pub max_missing_transform_candidates: usize,
     pub max_total_collection_name_bytes: usize,
 }
@@ -670,6 +686,7 @@ impl Default for WorkspaceProcessedPrefabAssetPlanLimits {
             max_dependencies_per_collection: 1_000_000,
             max_constructor_pointers: 20_000_000,
             max_source_dependency_appends: 20_000_000,
+            max_source_dependency_entries_per_collection: 25_000_001,
             max_missing_transform_candidates: 20_000_000,
             max_total_collection_name_bytes: 64 * 1024 * 1024,
         }
@@ -691,6 +708,7 @@ pub struct WorkspaceProcessedPrefabAssetPlan {
     constructor_pointers: Vec<WorkspaceGeneratedConstructorPointer>,
     dependency_entry_count: usize,
     source_dependency_appends: Vec<WorkspaceSourceCollectionDependencyAppend>,
+    deferred_source_dependency_file_count: usize,
     asset_count: usize,
     total_collection_name_bytes: usize,
 }
@@ -724,6 +742,10 @@ impl WorkspaceProcessedPrefabAssetPlan {
         &self.source_dependency_appends
     }
 
+    pub fn deferred_source_dependency_file_count(&self) -> usize {
+        self.deferred_source_dependency_file_count
+    }
+
     pub fn asset_count(&self) -> usize {
         self.asset_count
     }
@@ -734,6 +756,8 @@ impl WorkspaceProcessedPrefabAssetPlan {
 pub fn plan_workspace_processed_prefab_assets(
     workspace: &WorkspaceSceneHierarchies,
     processing: &WorkspacePrefabProcessingPlan,
+    source_external_identifier_counts: &[usize],
+    animator_controller_source_files: &HashSet<usize>,
     limits: WorkspaceProcessedPrefabAssetPlanLimits,
 ) -> Result<WorkspaceProcessedPrefabAssetPlan, WorkspacePrefabProcessingError> {
     if !processing.is_complete() {
@@ -859,6 +883,7 @@ pub fn plan_workspace_processed_prefab_assets(
         constructor_pointers: Vec::new(),
         dependency_entry_count: 0,
         source_dependency_appends: Vec::new(),
+        deferred_source_dependency_file_count: 0,
         asset_count: 0,
         total_collection_name_bytes: 0,
     };
@@ -890,12 +915,35 @@ pub fn plan_workspace_processed_prefab_assets(
         })?;
     scene_collection_by_index.resize(workspace.scenes().len(), None);
     let mut source_dependency_append_keys = HashSet::new();
+    let requested_source_dependency_keys = missing_transforms
+        .len()
+        .checked_add(workspace.scenes().len())
+        .ok_or(WorkspacePrefabProcessingError::CountOverflow {
+            resource: "source processed-collection dependency append index",
+        })?;
     source_dependency_append_keys
-        .try_reserve(missing_transforms.len())
+        .try_reserve(requested_source_dependency_keys)
         .map_err(|_| WorkspacePrefabProcessingError::AllocationFailed {
             resource: "source processed-collection dependency append index",
-            requested: missing_transforms.len(),
+            requested: requested_source_dependency_keys,
         })?;
+
+    // LightingDataProcessor runs before PrefabProcessor. It creates the first generated asset
+    // collection referenced by a source collection and writes that PPtr to LightmapSettings.
+    for scene in workspace.scenes() {
+        let Some(owner) = scene.lighting_data_dependency_owner() else {
+            continue;
+        };
+        plan_source_dependency_append(
+            &mut plan,
+            &mut source_dependency_append_keys,
+            owner,
+            WorkspaceSourceDependencyAppendTarget::GeneratedLightingDataAssets,
+            WorkspaceSourceDependencyPointerField::LightmapSettingsLightingDataAsset,
+            None,
+            limits,
+        )?;
+    }
 
     // AddMissingTransforms runs before SceneHierarchyObject creation and follows FetchAssets order.
     for asset in workspace.scene_asset_identities_in_collection_order(collection_file_indices) {
@@ -1038,7 +1086,9 @@ pub fn plan_workspace_processed_prefab_assets(
             &mut plan,
             &mut source_dependency_append_keys,
             game_object,
-            transform_asset,
+            WorkspaceSourceDependencyAppendTarget::PrefabProcessedCollection { collection_index },
+            WorkspaceSourceDependencyPointerField::GameObjectComponent,
+            Some(transform_asset),
             limits,
         )?;
         plan.component_additions.push(addition);
@@ -1138,6 +1188,13 @@ pub fn plan_workspace_processed_prefab_assets(
         }
     }
 
+    assign_source_dependency_file_ids(
+        &mut plan,
+        source_external_identifier_counts,
+        animator_controller_source_files,
+        limits,
+    )?;
+
     Ok(plan)
 }
 
@@ -1152,6 +1209,7 @@ fn incomplete_processed_asset_plan(reason: &str) -> WorkspaceProcessedPrefabAsse
         constructor_pointers: Vec::new(),
         dependency_entry_count: 0,
         source_dependency_appends: Vec::new(),
+        deferred_source_dependency_file_count: 0,
         asset_count: 0,
         total_collection_name_bytes: 0,
     }
@@ -1356,12 +1414,14 @@ fn add_generated_constructor_pointer(
 
 fn plan_source_dependency_append(
     plan: &mut WorkspaceProcessedPrefabAssetPlan,
-    seen: &mut HashSet<(usize, usize)>,
+    seen: &mut HashSet<(usize, WorkspaceSourceDependencyAppendTarget)>,
     owner: WorkspaceSceneObjectIdentity,
-    target_asset: WorkspaceProcessedAssetIdentity,
+    target_collection: WorkspaceSourceDependencyAppendTarget,
+    pointer_field: WorkspaceSourceDependencyPointerField,
+    target_asset: Option<WorkspaceProcessedAssetIdentity>,
     limits: WorkspaceProcessedPrefabAssetPlanLimits,
 ) -> Result<(), WorkspacePrefabProcessingError> {
-    let key = (owner.file_index, target_asset.collection_index);
+    let key = (owner.file_index, target_collection);
     if !seen.insert(key) {
         return Ok(());
     }
@@ -1386,11 +1446,130 @@ fn plan_source_dependency_append(
     plan.source_dependency_appends
         .push(WorkspaceSourceCollectionDependencyAppend {
             source_file_index: owner.file_index,
-            target_collection_index: target_asset.collection_index,
-            first_component_owner: owner,
+            target_collection,
+            pointer_field,
+            first_source_owner: owner,
             target_asset,
             file_id: None,
         });
+    Ok(())
+}
+
+pub fn source_files_with_animator_controllers(
+    source_objects: &ObjectWorkspace,
+    limits: WorkspaceProcessedPrefabAssetPlanLimits,
+) -> Result<HashSet<usize>, WorkspacePrefabProcessingError> {
+    const ANIMATOR_CONTROLLER_CLASS_ID: i32 = 91;
+    let mut files = HashSet::new();
+    for object in source_objects.objects() {
+        if object.class_id.map(i32::from).unwrap_or(object.raw_type_id)
+            == ANIMATOR_CONTROLLER_CLASS_ID
+        {
+            if files.contains(&object.file_index) {
+                continue;
+            }
+            let requested = files.len().checked_add(1).ok_or(
+                WorkspacePrefabProcessingError::CountOverflow {
+                    resource: "AnimatorController source dependency file indexes",
+                },
+            )?;
+            if requested > limits.max_collections {
+                return Err(WorkspacePrefabProcessingError::ResourceLimitExceeded {
+                    resource: "AnimatorController source dependency file indexes",
+                    requested,
+                    limit: limits.max_collections,
+                });
+            }
+            files
+                .try_reserve(1)
+                .map_err(|_| WorkspacePrefabProcessingError::AllocationFailed {
+                    resource: "AnimatorController source dependency uncertainty index",
+                    requested,
+                })?;
+            files.insert(object.file_index);
+        }
+    }
+    Ok(files)
+}
+
+fn assign_source_dependency_file_ids(
+    plan: &mut WorkspaceProcessedPrefabAssetPlan,
+    source_external_identifier_counts: &[usize],
+    animator_controller_source_files: &HashSet<usize>,
+    limits: WorkspaceProcessedPrefabAssetPlanLimits,
+) -> Result<(), WorkspacePrefabProcessingError> {
+    plan.deferred_source_dependency_file_count = animator_controller_source_files.len();
+    if !animator_controller_source_files.is_empty() {
+        plan.complete = false;
+        plan.incomplete_reason = Some(format!(
+            "AnimatorController layer dependency writes are not modeled for {} source collection files; FileIDs in those collections are deferred",
+            animator_controller_source_files.len()
+        ));
+    }
+
+    let mut appended_count_by_file = HashMap::<usize, usize>::new();
+    appended_count_by_file
+        .try_reserve(plan.source_dependency_appends.len())
+        .map_err(|_| WorkspacePrefabProcessingError::AllocationFailed {
+            resource: "source dependency append order index",
+            requested: plan.source_dependency_appends.len(),
+        })?;
+
+    for append in &mut plan.source_dependency_appends {
+        let Some(&external_identifier_count) =
+            source_external_identifier_counts.get(append.source_file_index)
+        else {
+            return Err(WorkspacePrefabProcessingError::WorkspaceOperationFailed {
+                operation: "source dependency FileID assignment",
+                message: format!(
+                    "external identifier count is missing for source file {}",
+                    append.source_file_index
+                ),
+            });
+        };
+        if animator_controller_source_files.contains(&append.source_file_index) {
+            continue;
+        }
+        let prior_append_count = appended_count_by_file
+            .get(&append.source_file_index)
+            .copied()
+            .unwrap_or(0);
+        let initial_dependency_count = external_identifier_count.checked_add(1).ok_or(
+            WorkspacePrefabProcessingError::CountOverflow {
+                resource: "source collection dependency entries",
+            },
+        )?;
+        let dependency_file_id = initial_dependency_count
+            .checked_add(prior_append_count)
+            .ok_or(WorkspacePrefabProcessingError::CountOverflow {
+                resource: "source collection dependency FileID",
+            })?;
+        let resulting_dependency_count = dependency_file_id.checked_add(1).ok_or(
+            WorkspacePrefabProcessingError::CountOverflow {
+                resource: "source collection dependency entries",
+            },
+        )?;
+        if resulting_dependency_count > limits.max_source_dependency_entries_per_collection {
+            return Err(WorkspacePrefabProcessingError::ResourceLimitExceeded {
+                resource: "source collection dependency entries",
+                requested: resulting_dependency_count,
+                limit: limits.max_source_dependency_entries_per_collection,
+            });
+        }
+        append.file_id = Some(i32::try_from(dependency_file_id).map_err(|_| {
+            WorkspacePrefabProcessingError::CountOverflow {
+                resource: "source collection dependency FileID",
+            }
+        })?);
+        appended_count_by_file.insert(
+            append.source_file_index,
+            prior_append_count.checked_add(1).ok_or(
+                WorkspacePrefabProcessingError::CountOverflow {
+                    resource: "source collection dependency append order",
+                },
+            )?,
+        );
+    }
     Ok(())
 }
 
@@ -1800,6 +1979,7 @@ mod tests {
             constructor_pointers: Vec::new(),
             dependency_entry_count: 0,
             source_dependency_appends: Vec::new(),
+            deferred_source_dependency_file_count: 0,
             asset_count: 0,
             total_collection_name_bytes: 0,
         }
@@ -1901,18 +2081,147 @@ mod tests {
             path_id: 1,
             class_id: 4,
         };
+        let target_collection = WorkspaceSourceDependencyAppendTarget::PrefabProcessedCollection {
+            collection_index: 2,
+        };
         let limits = WorkspaceProcessedPrefabAssetPlanLimits::default();
 
-        plan_source_dependency_append(&mut plan, &mut seen, first_owner, target_asset, limits)
-            .unwrap();
-        plan_source_dependency_append(&mut plan, &mut seen, later_owner, target_asset, limits)
-            .unwrap();
+        plan_source_dependency_append(
+            &mut plan,
+            &mut seen,
+            first_owner,
+            target_collection,
+            WorkspaceSourceDependencyPointerField::GameObjectComponent,
+            Some(target_asset),
+            limits,
+        )
+        .unwrap();
+        plan_source_dependency_append(
+            &mut plan,
+            &mut seen,
+            later_owner,
+            target_collection,
+            WorkspaceSourceDependencyPointerField::GameObjectComponent,
+            Some(target_asset),
+            limits,
+        )
+        .unwrap();
 
         assert_eq!(plan.source_dependency_appends.len(), 1);
         assert_eq!(
-            plan.source_dependency_appends[0].first_component_owner,
+            plan.source_dependency_appends[0].first_source_owner,
             first_owner
         );
+        assert_eq!(
+            plan.source_dependency_appends[0].target_collection,
+            target_collection
+        );
         assert_eq!(plan.source_dependency_appends[0].file_id, None);
+    }
+
+    #[test]
+    fn source_dependency_file_ids_follow_prior_processor_appends_and_external_identifiers() {
+        let mut plan = empty_plan();
+        let mut seen = HashSet::new();
+        let lightmap_settings = WorkspaceSceneObjectIdentity {
+            file_index: 0,
+            object_index: 0,
+            path_id: 10,
+            class_id: Some(157),
+        };
+        let game_object = WorkspaceSceneObjectIdentity {
+            file_index: 0,
+            object_index: 1,
+            path_id: 11,
+            class_id: Some(1),
+        };
+        let limits = WorkspaceProcessedPrefabAssetPlanLimits::default();
+
+        plan_source_dependency_append(
+            &mut plan,
+            &mut seen,
+            lightmap_settings,
+            WorkspaceSourceDependencyAppendTarget::GeneratedLightingDataAssets,
+            WorkspaceSourceDependencyPointerField::LightmapSettingsLightingDataAsset,
+            None,
+            limits,
+        )
+        .unwrap();
+        plan_source_dependency_append(
+            &mut plan,
+            &mut seen,
+            game_object,
+            WorkspaceSourceDependencyAppendTarget::PrefabProcessedCollection {
+                collection_index: 2,
+            },
+            WorkspaceSourceDependencyPointerField::GameObjectComponent,
+            Some(WorkspaceProcessedAssetIdentity {
+                collection_index: 2,
+                path_id: 1,
+                class_id: 4,
+            }),
+            limits,
+        )
+        .unwrap();
+
+        assign_source_dependency_file_ids(&mut plan, &[3], &HashSet::new(), limits).unwrap();
+
+        assert_eq!(plan.source_dependency_appends[0].file_id, Some(4));
+        assert_eq!(plan.source_dependency_appends[1].file_id, Some(5));
+    }
+
+    #[test]
+    fn animator_controller_source_file_defers_all_later_dependency_file_ids() {
+        let mut plan = empty_plan();
+        let mut seen = HashSet::new();
+        let owner = WorkspaceSceneObjectIdentity {
+            file_index: 0,
+            object_index: 1,
+            path_id: 11,
+            class_id: Some(1),
+        };
+        plan_source_dependency_append(
+            &mut plan,
+            &mut seen,
+            owner,
+            WorkspaceSourceDependencyAppendTarget::GeneratedLightingDataAssets,
+            WorkspaceSourceDependencyPointerField::LightmapSettingsLightingDataAsset,
+            None,
+            WorkspaceProcessedPrefabAssetPlanLimits::default(),
+        )
+        .unwrap();
+        plan_source_dependency_append(
+            &mut plan,
+            &mut seen,
+            owner,
+            WorkspaceSourceDependencyAppendTarget::PrefabProcessedCollection {
+                collection_index: 2,
+            },
+            WorkspaceSourceDependencyPointerField::GameObjectComponent,
+            None,
+            WorkspaceProcessedPrefabAssetPlanLimits::default(),
+        )
+        .unwrap();
+        let mut animator_controller_source_files = HashSet::new();
+        animator_controller_source_files.insert(0);
+
+        assign_source_dependency_file_ids(
+            &mut plan,
+            &[3],
+            &animator_controller_source_files,
+            WorkspaceProcessedPrefabAssetPlanLimits::default(),
+        )
+        .unwrap();
+
+        assert!(!plan.is_complete());
+        assert_eq!(plan.deferred_source_dependency_file_count(), 1);
+        assert!(plan
+            .source_dependency_appends
+            .iter()
+            .all(|append| append.file_id.is_none()));
+        assert!(plan
+            .incomplete_reason()
+            .unwrap()
+            .contains("AnimatorController layer dependency writes"));
     }
 }
