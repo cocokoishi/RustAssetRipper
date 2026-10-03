@@ -902,19 +902,23 @@ impl<'a> UnityYamlTypeTreeLayout<'a> {
         let node = self.node(node_index)?;
         let node_type = self.type_name(node_index)?;
 
-        if node_type == "AnimationClip" {
+        let field_aliases = baseline_type_scoped_field_aliases(node_type);
+        if !field_aliases.is_empty() {
             for child_index in self.child_indices(node_index)? {
                 let child = self.node(child_index)?;
-                if child.name.as_deref() != Some("m_AnimationClipSettings") {
+                let Some(field_name) = child.name.as_deref() else {
                     continue;
-                }
-                let alias_path = child_field_path(
-                    field_path,
-                    "m_AnimationClipSettings",
-                    budget.limits.max_field_path_bytes,
-                )?;
+                };
+                let Some((_, alias)) = field_aliases
+                    .iter()
+                    .find(|(source_name, _)| *source_name == field_name)
+                else {
+                    continue;
+                };
+                let alias_path =
+                    child_field_path(field_path, field_name, budget.limits.max_field_path_bytes)?;
                 if let Some(previous) = hints.field_name_aliases.get(&alias_path) {
-                    if previous != "m_MuscleClipInfo" {
+                    if previous != alias {
                         return Err(UnityYamlObjectConversionError::InvalidTypeTree {
                             node_index: child_index,
                             reason: "ambiguous field aliases share one serialized field path",
@@ -929,7 +933,7 @@ impl<'a> UnityYamlTypeTreeLayout<'a> {
                     })?;
                     hints.field_name_aliases.insert(
                         alias_path,
-                        try_copy_string("m_MuscleClipInfo", "Unity YAML field-name alias")?,
+                        try_copy_string(alias, "Unity YAML field-name alias")?,
                     );
                 }
             }
@@ -2261,6 +2265,18 @@ fn importer_field_is_excluded(
     Ok(false)
 }
 
+fn baseline_type_scoped_field_aliases(type_name: &str) -> &'static [(&'static str, &'static str)] {
+    const ANIMATION_CLIP_ALIASES: &[(&str, &str)] =
+        &[("m_AnimationClipSettings", "m_MuscleClipInfo")];
+    const GENERIC_BINDING_ALIASES: &[(&str, &str)] = &[("m_TypeID", "m_ClassID")];
+
+    match type_name {
+        "AnimationClip" => ANIMATION_CLIP_ALIASES,
+        "GenericBinding" => GENERIC_BINDING_ALIASES,
+        _ => &[],
+    }
+}
+
 fn baseline_yaml_field_name(field_name: &str) -> Result<String, UnityYamlObjectConversionError> {
     let replacement = match field_name {
         "m_Image_data" => Some("m_ImageData"),
@@ -3300,6 +3316,82 @@ mod tests {
         .unwrap();
         assert!(other_output.contains("m_AnimationClipSettings:"));
         assert!(!other_output.contains("m_MuscleClipInfo:"));
+    }
+
+    #[test]
+    fn generic_binding_type_id_uses_type_tree_scoped_alias() {
+        let type_tree = TypeTree {
+            nodes: vec![
+                type_tree_node(0, "GameObject", "Base", 0),
+                type_tree_node(1, "vector", "m_Bindings", 0),
+                type_tree_node(2, "Array", "Array", 0),
+                type_tree_node(3, "SInt32", "size", 0),
+                type_tree_node(3, "GenericBinding", "data", 0),
+                type_tree_node(4, "SInt32", "m_TypeID", 0),
+            ],
+            string_buffer: Vec::new(),
+        };
+        let hints = UnityYamlObjectConversionHints::from_type_tree(
+            &type_tree,
+            version(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            hints
+                .field_name_aliases
+                .get("m_Bindings[*].m_TypeID")
+                .map(String::as_str),
+            Some("m_ClassID")
+        );
+
+        let value = SerializedValue::Struct(vec![field(
+            "m_Bindings",
+            SerializedValue::Array(vec![SerializedValue::Struct(vec![field(
+                "m_TypeID",
+                SerializedValue::I32(17),
+            )])]),
+        )]);
+        let document = convert_with_object_hints(&value, &hints, |_| {
+            unreachable!("GenericBinding contains no PPtrs")
+        })
+        .unwrap();
+        let output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[document],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        assert!(output.contains("m_ClassID: 17"));
+        assert!(!output.contains("m_TypeID:"));
+
+        let unrelated_type_tree = TypeTree {
+            nodes: vec![
+                type_tree_node(0, "GameObject", "Base", 0),
+                type_tree_node(1, "SInt32", "m_TypeID", 0),
+            ],
+            string_buffer: Vec::new(),
+        };
+        let unrelated_hints = UnityYamlObjectConversionHints::from_type_tree(
+            &unrelated_type_tree,
+            version(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        assert!(unrelated_hints.field_name_aliases.is_empty());
+        let unrelated_value =
+            SerializedValue::Struct(vec![field("m_TypeID", SerializedValue::I32(17))]);
+        let unrelated_document =
+            convert_with_object_hints(&unrelated_value, &unrelated_hints, |_| {
+                unreachable!("the generated fixture has no PPtrs")
+            })
+            .unwrap();
+        let unrelated_output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[unrelated_document],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        assert!(unrelated_output.contains("m_TypeID: 17"));
+        assert!(!unrelated_output.contains("m_ClassID: 17"));
     }
 
     #[test]

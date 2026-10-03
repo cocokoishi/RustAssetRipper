@@ -748,3 +748,11 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Focused test and full workspace passed: 408 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and `git diff --check`.
 - Still incomplete: synthetic evidence only, with no Unity-produced TypeTree or direct C# runtime differential. Other AnimationClip processing/export paths and many `Pass002_RenameSubnodes` transformations remain incomplete. Phase 1 remains open; Phase 2 remains locked.
 - Next: identify the next small TypeTree-scoped Pass002 rule and add negative coverage for identically named fields outside its owning type.
+
+## GenericBinding class ID YAML field alias
+
+- Current phase: Phase 1; gate not passed. This increment builds from pushed revision `1ae8f4f79fd0a5d05ebd30ac874c92d605d395ab`. Only `cocokoishi/RustAssetRipper`'s canonical repository is a write/push target. No other remote repository, UABEA, or user AssetBundle content was accessed.
+- Extended the TypeTree-scoped alias registry for `GenericBinding`: direct child `m_TypeID` now writes as `m_ClassID`; array wildcards apply, and same-named fields under other node types stay unchanged.
+- Focused test and full workspace passed: 409 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and `git diff --check`.
+- Still incomplete: synthetic evidence only, with no Unity-produced TypeTree or direct C# runtime differential. Remaining animation bindings and context-dependent Pass002 behavior remain open. Phase 1 remains incomplete; Phase 2 remains locked.
+- Next: continue auditing direct-child renames from `Pass002_RenameSubnodes` and group only those with the same unambiguous TypeTree ownership semantics.
