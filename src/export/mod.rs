@@ -6,3 +6,4 @@ pub mod prefab_collection;
 pub mod scene_collection;
 pub mod unity_yaml;
 pub mod value_yaml;
+pub mod workspace_yaml;

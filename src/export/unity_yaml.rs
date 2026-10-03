@@ -943,7 +943,7 @@ mod tests {
             field_path: "m_Material".to_owned(),
             serialized_file_id: 1,
             serialized_path_id: 88,
-            class_id: 21,
+            expected_class_id: Some(21),
             resolution: crate::serialized_file::reference_graph::MultiFilePPtrResolution::MissingDependency {
                 external_index: 0,
                 path_id: 88,

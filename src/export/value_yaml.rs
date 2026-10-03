@@ -2225,7 +2225,7 @@ mod tests {
                     field_path: request.field_path.to_owned(),
                     serialized_file_id: request.file_id,
                     serialized_path_id: request.path_id,
-                    class_id: 21,
+                    expected_class_id: Some(21),
                     resolution: crate::serialized_file::reference_graph::MultiFilePPtrResolution::MissingDependency {
                         external_index: 1,
                         path_id: request.path_id,

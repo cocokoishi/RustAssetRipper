@@ -170,7 +170,8 @@ pub struct UnresolvedProjectPointer {
     pub field_path: String,
     pub serialized_file_id: i32,
     pub serialized_path_id: i64,
-    pub class_id: i32,
+    /// The referenced class ID when the typed field provides one; `None` means it is unknown.
+    pub expected_class_id: Option<i32>,
     pub resolution: MultiFilePPtrResolution,
 }
 
@@ -651,7 +652,7 @@ mod tests {
             field_path: "m_Material".to_owned(),
             serialized_file_id: 2,
             serialized_path_id: 88,
-            class_id: 4,
+            expected_class_id: Some(4),
             resolution: unresolved,
         };
         assert_eq!(
@@ -672,7 +673,7 @@ mod tests {
                     field_path: "m_Material".to_owned(),
                     serialized_file_id: 2,
                     serialized_path_id: 0,
-                    class_id: 4,
+                    expected_class_id: Some(4),
                     resolution: MultiFilePPtrResolution::Null,
                 }),
                 3
