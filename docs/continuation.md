@@ -669,3 +669,11 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Targeted test passed; full workspace verification passed: 392 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and diff checks.
 - Still incomplete: no end-to-end `.meta` importer route, stripped-field handling, original Unity-produced fixture, or Unity runtime differential. Phase 1 remains open and Phase 2 remains locked.
 - Next: inspect the baseline stripped-field selection rules and identify a generated-fixture-backed rule that can be integrated into the existing TypeTree YAML converter.
+
+## Stripped-object YAML field allowlists
+
+- Current phase: Phase 1; gate not passed. This increment builds from pushed revision `c4625050566a93c16e8a236327a4f20cf50d1993`. Only `cocokoishi/RustAssetRipper`'s canonical GitHub repository is a push target. No UABEA, user AssetBundle content, or other remote repository was accessed.
+- Added explicit ordinary-asset and MonoBehaviour stripped YAML field allowlists from the baseline. The converter accepts an explicit stripped classification; workspace export no longer maps SerializedFile type-layout metadata to the output stripped marker.
+- Targeted stripped GameObject and MonoBehaviour tests plus the cross-file Scene YAML regression passed. Full workspace verification passed: 394 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and diff checks.
+- Still incomplete: the source hierarchy's `StrippedAssets` membership has not been wired to workspace export; no Unity-produced fixture or runtime differential; Phase 1 remains open.
+- Next: trace the source-to-export path for hierarchy stripped membership and expose that result explicitly in Rust Scene/Prefab assignments instead of deriving it from SerializedFile type flags.

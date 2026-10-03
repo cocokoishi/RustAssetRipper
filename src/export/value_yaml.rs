@@ -13,8 +13,8 @@ use super::pointer_map::ProjectPointerResolution;
 use super::scene_collection::ExportAssetIdentity;
 use super::unity_yaml::{
     format_unity_guid_words, project_pointer_to_unity_yaml, UnityYamlDocument,
-    UnityYamlMappingStyle, UnityYamlNode, UnityYamlNodeBuildError, UnityYamlScalar,
-    UnityYamlSequenceStyle, UnityYamlWriteError,
+    UnityYamlMappingStyle, UnityYamlNode, UnityYamlNodeBuildError, UnityYamlNodeKind,
+    UnityYamlScalar, UnityYamlSequenceStyle, UnityYamlWriteError,
 };
 
 const TRANSFER_USING_FLOW_MAPPING_STYLE: u32 = 0x0020_0000;
@@ -28,6 +28,28 @@ const IMPORTER_FIELDS_TO_SKIP: &[&str] = &[
     "m_PrefabInternal",
     "m_PrefabAsset",
     "m_PrefabInstance",
+];
+
+const STRIPPED_ASSET_ALLOWED_FIELDS: &[&str] = &[
+    "m_CorrespondingSourceObject",
+    "m_PrefabAsset",
+    "m_PrefabInstance",
+    "m_PrefabInternal",
+    "m_PrefabParentObject",
+];
+
+const STRIPPED_MONO_BEHAVIOUR_ALLOWED_FIELDS: &[&str] = &[
+    "m_CorrespondingSourceObject",
+    "m_EditorClassIdentifier",
+    "m_EditorHideFlags",
+    "m_Enabled",
+    "m_GameObject",
+    "m_Name",
+    "m_PrefabAsset",
+    "m_PrefabInstance",
+    "m_PrefabInternal",
+    "m_PrefabParentObject",
+    "m_Script",
 ];
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -796,7 +818,7 @@ where
     let mut budget = ConversionBudget { visited: 0, limits };
     budget.visit(0)?;
 
-    let body = if let Some(schema) = hash128_schema_for_path("", hints, limits)? {
+    let mut body = if let Some(schema) = hash128_schema_for_path("", hints, limits)? {
         convert_hash128_value(fields, schema, "", 0, limits, &mut budget)?
     } else {
         let mut body = UnityYamlNode::mapping(if is_flow_mapped_path("", hints, limits)? {
@@ -804,11 +826,13 @@ where
         } else {
             UnityYamlMappingStyle::Block
         });
-        body.insert_field(
-            "serializedVersion",
-            UnityYamlNode::scalar(UnityYamlScalar::Signed(i64::from(serialized_version))),
-        )
-        .map_err(UnityYamlObjectConversionError::NodeBuild)?;
+        if !stripped {
+            body.insert_field(
+                "serializedVersion",
+                UnityYamlNode::scalar(UnityYamlScalar::Signed(i64::from(serialized_version))),
+            )
+            .map_err(UnityYamlObjectConversionError::NodeBuild)?;
+        }
         append_struct_fields(
             &mut body,
             fields,
@@ -817,6 +841,7 @@ where
             source,
             hints,
             field_mode,
+            stripped_field_allowlist(source.class_id, stripped),
             unity_version,
             missing_reference_guid,
             limits,
@@ -825,6 +850,9 @@ where
         )?;
         body
     };
+    if stripped {
+        retain_stripped_yaml_fields(&mut body, source.class_id)?;
+    }
     UnityYamlDocument::object(source.class_id, file_id, class_name, body, stripped)
         .map_err(UnityYamlObjectConversionError::NodeBuild)
 }
@@ -838,6 +866,7 @@ fn append_struct_fields<F>(
     source: ExportAssetIdentity,
     hints: &UnityYamlObjectConversionHints,
     field_mode: UnityYamlObjectFieldMode,
+    stripped_fields: Option<&'static [&'static str]>,
     unity_version: SceneUnityVersion,
     missing_reference_guid: Option<[u8; 16]>,
     limits: UnityYamlObjectConversionLimits,
@@ -865,6 +894,7 @@ where
                     source,
                     hints,
                     field_mode,
+                    stripped_fields,
                     unity_version,
                     missing_reference_guid,
                     limits,
@@ -873,6 +903,9 @@ where
                 )?;
                 continue;
             }
+        }
+        if stripped_fields.is_some_and(|allowed| !allowed.contains(&field.name.as_str())) {
+            continue;
         }
         let value = convert_value(
             &field.value,
@@ -989,6 +1022,7 @@ where
                     source,
                     hints,
                     field_mode,
+                    None,
                     unity_version,
                     missing_reference_guid,
                     limits,
@@ -1284,6 +1318,37 @@ fn importer_field_is_excluded(
             .contains(&canonical_path));
     }
     Ok(false)
+}
+
+fn stripped_field_allowlist(class_id: i32, stripped: bool) -> Option<&'static [&'static str]> {
+    stripped.then_some(stripped_fields_for_class_id(class_id))
+}
+
+fn stripped_fields_for_class_id(class_id: i32) -> &'static [&'static str] {
+    if class_id == 114 {
+        STRIPPED_MONO_BEHAVIOUR_ALLOWED_FIELDS
+    } else {
+        STRIPPED_ASSET_ALLOWED_FIELDS
+    }
+}
+
+fn retain_stripped_yaml_fields(
+    body: &mut UnityYamlNode,
+    class_id: i32,
+) -> Result<(), UnityYamlObjectConversionError> {
+    let allowed_fields = stripped_fields_for_class_id(class_id);
+    let UnityYamlNodeKind::Mapping { entries, .. } = &mut body.kind else {
+        return Err(UnityYamlObjectConversionError::NodeBuild(
+            UnityYamlNodeBuildError::NotAMapping,
+        ));
+    };
+    entries.retain(|(key, _)| match &key.kind {
+        UnityYamlNodeKind::Scalar(
+            UnityYamlScalar::String(name) | UnityYamlScalar::PlainString(name),
+        ) => allowed_fields.contains(&name.as_str()),
+        _ => false,
+    });
+    Ok(())
 }
 
 fn convert_integer_array(
@@ -1663,11 +1728,15 @@ mod tests {
     use crate::serialized_file::object::SerializedFieldValue;
 
     fn source() -> ExportAssetIdentity {
+        source_with_class_id(1)
+    }
+
+    fn source_with_class_id(class_id: i32) -> ExportAssetIdentity {
         ExportAssetIdentity {
             collection: ExportAssetCollectionIdentity::SerializedFile { file_index: 2 },
             object_index: 7,
             path_id: 90,
-            class_id: 1,
+            class_id,
         }
     }
 
@@ -1824,12 +1893,31 @@ mod tests {
     where
         F: FnMut(UnityYamlPPtrRequest<'_>) -> ProjectPointerResolution,
     {
+        convert_object_with_options(source(), root, hints, field_mode, false, resolver)
+    }
+
+    fn convert_object_with_options<F>(
+        source: ExportAssetIdentity,
+        root: &SerializedValue,
+        hints: &UnityYamlObjectConversionHints,
+        field_mode: UnityYamlObjectFieldMode,
+        stripped: bool,
+        resolver: F,
+    ) -> Result<UnityYamlDocument, UnityYamlObjectConversionError>
+    where
+        F: FnMut(UnityYamlPPtrRequest<'_>) -> ProjectPointerResolution,
+    {
+        let class_name = if source.class_id == 114 {
+            "MonoBehaviour"
+        } else {
+            "GameObject"
+        };
         serialized_object_value_to_unity_yaml_document(
-            source(),
-            "GameObject",
+            source,
+            class_name,
             6,
             1_000_001,
-            false,
+            stripped,
             root,
             hints,
             field_mode,
@@ -1838,6 +1926,13 @@ mod tests {
             UnityYamlObjectConversionLimits::default(),
             resolver,
         )
+    }
+
+    fn null_pptr() -> SerializedValue {
+        SerializedValue::PPtr {
+            file_id: 0,
+            path_id: 0,
+        }
     }
 
     #[test]
@@ -1916,6 +2011,92 @@ mod tests {
         assert!(!importer_text.contains("m_ItemEditorOnly"));
         assert!(importer_text.contains("m_Keep: 3"));
         assert!(importer_text.contains("m_ItemKeep: 5"));
+    }
+
+    #[test]
+    fn stripped_asset_yaml_keeps_only_baseline_prefab_fields() {
+        let root = SerializedValue::Struct(vec![field(
+            "Base",
+            SerializedValue::Struct(vec![
+                field("m_CorrespondingSourceObject", null_pptr()),
+                field("m_PrefabAsset", null_pptr()),
+                field("m_PrefabInstance", null_pptr()),
+                field("m_PrefabInternal", null_pptr()),
+                field("m_PrefabParentObject", null_pptr()),
+                field("m_ObjectHideFlags", SerializedValue::U32(0)),
+                field(
+                    "m_Name",
+                    SerializedValue::StringBytes(b"not retained".to_vec()),
+                ),
+            ]),
+        )]);
+        let document = convert_object_with_options(
+            source(),
+            &root,
+            &UnityYamlObjectConversionHints::default(),
+            UnityYamlObjectFieldMode::ProjectAsset,
+            true,
+            |_| ProjectPointerResolution::Null,
+        )
+        .unwrap();
+        assert!(document.root.stripped);
+        let output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[document],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        assert!(output.contains("--- !u!1 &1000001 stripped"));
+        assert!(output.contains("m_CorrespondingSourceObject: {fileID: 0}"));
+        assert!(output.contains("m_PrefabAsset: {fileID: 0}"));
+        assert!(output.contains("m_PrefabInstance: {fileID: 0}"));
+        assert!(output.contains("m_PrefabInternal: {fileID: 0}"));
+        assert!(output.contains("m_PrefabParentObject: {fileID: 0}"));
+        assert!(!output.contains("serializedVersion"));
+        assert!(!output.contains("m_ObjectHideFlags"));
+        assert!(!output.contains("m_Name"));
+    }
+
+    #[test]
+    fn stripped_monobehaviour_yaml_keeps_baseline_identity_fields() {
+        let root = SerializedValue::Struct(vec![
+            field("m_CorrespondingSourceObject", null_pptr()),
+            field(
+                "m_EditorClassIdentifier",
+                SerializedValue::StringBytes(Vec::new()),
+            ),
+            field("m_EditorHideFlags", SerializedValue::I32(0)),
+            field("m_Enabled", SerializedValue::Bool(true)),
+            field("m_GameObject", null_pptr()),
+            field("m_Name", SerializedValue::StringBytes(Vec::new())),
+            field("m_PrefabAsset", null_pptr()),
+            field("m_PrefabInstance", null_pptr()),
+            field("m_PrefabInternal", null_pptr()),
+            field("m_PrefabParentObject", null_pptr()),
+            field("m_Script", null_pptr()),
+            field("m_ObjectHideFlags", SerializedValue::U32(0)),
+            field("m_CustomData", SerializedValue::I32(123)),
+        ]);
+        let document = convert_object_with_options(
+            source_with_class_id(114),
+            &root,
+            &UnityYamlObjectConversionHints::default(),
+            UnityYamlObjectFieldMode::ProjectAsset,
+            true,
+            |_| ProjectPointerResolution::Null,
+        )
+        .unwrap();
+        let output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[document],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        assert!(output.contains("--- !u!114 &1000001 stripped"));
+        for field_name in STRIPPED_MONO_BEHAVIOUR_ALLOWED_FIELDS {
+            assert!(output.contains(field_name), "missing {field_name}");
+        }
+        assert!(!output.contains("serializedVersion"));
+        assert!(!output.contains("m_ObjectHideFlags"));
+        assert!(!output.contains("m_CustomData"));
     }
 
     #[test]

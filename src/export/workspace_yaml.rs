@@ -366,14 +366,6 @@ pub fn workspace_object_to_unity_yaml_document(
             object_class_id: class_id,
         });
     }
-    let stripped =
-        object
-            .is_stripped
-            .ok_or(UnityYamlWorkspaceExportError::MissingStrippedState {
-                file_index,
-                object_index: object.object_index,
-            })?;
-
     let payload =
         object
             .payload
@@ -481,7 +473,9 @@ pub fn workspace_object_to_unity_yaml_document(
         &payload.type_name,
         type_root.version,
         file_id,
-        stripped,
+        // SerializedFile's stripped bit selects a serialized type layout; the baseline YAML
+        // marker comes from the owning hierarchy's StrippedAssets set, which is not wired here.
+        false,
         &payload.root,
         &hints,
         UnityYamlObjectFieldMode::ProjectAsset,
@@ -643,10 +637,6 @@ pub enum UnityYamlWorkspaceExportError {
         source_class_id: i32,
         object_class_id: i32,
     },
-    MissingStrippedState {
-        file_index: usize,
-        object_index: usize,
-    },
     ObjectDecode {
         file_index: usize,
         object_index: usize,
@@ -781,13 +771,6 @@ impl Display for UnityYamlWorkspaceExportError {
             } => write!(
                 f,
                 "export identity class ID {source_class_id} differs from decoded class ID {object_class_id}"
-            ),
-            Self::MissingStrippedState {
-                file_index,
-                object_index,
-            } => write!(
-                f,
-                "SerializedFile {file_index} object {object_index} has no resolved stripped state"
             ),
             Self::ObjectDecode {
                 file_index,
