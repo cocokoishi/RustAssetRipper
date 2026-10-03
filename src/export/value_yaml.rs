@@ -99,6 +99,7 @@ pub struct UnityYamlObjectConversionHints {
     pub guid_schemas: HashMap<String, UnityYamlGuidSchema>,
     pub property_name_schemas: HashMap<String, UnityYamlPropertyNameSchema>,
     pub scene_object_identifier_schemas: HashMap<String, UnityYamlSceneObjectIdentifierSchema>,
+    pub field_name_aliases: HashMap<String, String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -901,6 +902,39 @@ impl<'a> UnityYamlTypeTreeLayout<'a> {
         let node = self.node(node_index)?;
         let node_type = self.type_name(node_index)?;
 
+        if node_type == "AnimationClip" {
+            for child_index in self.child_indices(node_index)? {
+                let child = self.node(child_index)?;
+                if child.name.as_deref() != Some("m_AnimationClipSettings") {
+                    continue;
+                }
+                let alias_path = child_field_path(
+                    field_path,
+                    "m_AnimationClipSettings",
+                    budget.limits.max_field_path_bytes,
+                )?;
+                if let Some(previous) = hints.field_name_aliases.get(&alias_path) {
+                    if previous != "m_MuscleClipInfo" {
+                        return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                            node_index: child_index,
+                            reason: "ambiguous field aliases share one serialized field path",
+                        });
+                    }
+                } else {
+                    hints.field_name_aliases.try_reserve(1).map_err(|_| {
+                        UnityYamlObjectConversionError::AllocationFailed {
+                            resource: "Unity YAML field-name alias hints",
+                            requested: hints.field_name_aliases.len().saturating_add(1),
+                        }
+                    })?;
+                    hints.field_name_aliases.insert(
+                        alias_path,
+                        try_copy_string("m_MuscleClipInfo", "Unity YAML field-name alias")?,
+                    );
+                }
+            }
+        }
+
         if !field_path.is_empty() && node.meta_flags & TRANSFER_IGNORE_IN_META_FILES != 0 {
             hints
                 .importer_excluded_field_paths
@@ -1303,7 +1337,9 @@ where
             budget,
             resolve_pointer,
         )?;
-        let field_name = baseline_yaml_field_name(&field.name)?;
+        let contextual_field_name =
+            field_name_alias_for_path(&field_path, hints, limits)?.unwrap_or(field.name.as_str());
+        let field_name = baseline_yaml_field_name(contextual_field_name)?;
         destination
             .insert_field(field_name, value)
             .map_err(UnityYamlObjectConversionError::NodeBuild)?;
@@ -1528,6 +1564,24 @@ fn property_name_schema_for_path<'a>(
     }
     let canonical_path = canonical_array_path(field_path, limits.max_field_path_bytes)?;
     Ok(hints.property_name_schemas.get(&canonical_path))
+}
+
+fn field_name_alias_for_path<'a>(
+    field_path: &str,
+    hints: &'a UnityYamlObjectConversionHints,
+    limits: UnityYamlObjectConversionLimits,
+) -> Result<Option<&'a str>, UnityYamlObjectConversionError> {
+    if let Some(alias) = hints.field_name_aliases.get(field_path) {
+        return Ok(Some(alias));
+    }
+    if !field_path.contains('[') {
+        return Ok(None);
+    }
+    let canonical_path = canonical_array_path(field_path, limits.max_field_path_bytes)?;
+    Ok(hints
+        .field_name_aliases
+        .get(&canonical_path)
+        .map(String::as_str))
 }
 
 fn scene_object_identifier_schema_for_path<'a>(
@@ -2971,10 +3025,10 @@ mod tests {
     where
         F: FnMut(UnityYamlPPtrRequest<'_>) -> ProjectPointerResolution,
     {
-        let class_name = if source.class_id == 114 {
-            "MonoBehaviour"
-        } else {
-            "GameObject"
+        let class_name = match source.class_id {
+            74 => "AnimationClip",
+            114 => "MonoBehaviour",
+            _ => "GameObject",
         };
         serialized_object_value_to_unity_yaml_document(
             source,
@@ -3131,6 +3185,121 @@ mod tests {
                 "found {serialized_name}"
             );
         }
+    }
+
+    #[test]
+    fn animation_clip_settings_field_uses_type_tree_scoped_alias() {
+        let animation_clip_type_tree = TypeTree {
+            nodes: vec![
+                type_tree_node(0, "AnimationClip", "Base", 0),
+                type_tree_node(1, "AnimationClipSettings", "m_AnimationClipSettings", 0),
+                type_tree_node(2, "bool", "m_LoopTime", 0),
+            ],
+            string_buffer: Vec::new(),
+        };
+        let animation_clip_hints = UnityYamlObjectConversionHints::from_type_tree(
+            &animation_clip_type_tree,
+            version(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            animation_clip_hints
+                .field_name_aliases
+                .get("m_AnimationClipSettings")
+                .map(String::as_str),
+            Some("m_MuscleClipInfo")
+        );
+        let animation_clip_value = SerializedValue::Struct(vec![field(
+            "m_AnimationClipSettings",
+            SerializedValue::Struct(vec![field("m_LoopTime", SerializedValue::Bool(true))]),
+        )]);
+        let animation_clip_document = convert_object_with_options(
+            source_with_class_id(74),
+            &animation_clip_value,
+            &animation_clip_hints,
+            UnityYamlObjectFieldMode::ProjectAsset,
+            false,
+            |_| unreachable!("AnimationClip settings contain no PPtrs"),
+        )
+        .unwrap();
+        let animation_clip_output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[animation_clip_document],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        assert!(animation_clip_output.contains("m_MuscleClipInfo:"));
+        assert!(!animation_clip_output.contains("m_AnimationClipSettings:"));
+
+        let array_type_tree = TypeTree {
+            nodes: vec![
+                type_tree_node(0, "GameObject", "Base", 0),
+                type_tree_node(1, "vector", "m_Clips", 0),
+                type_tree_node(2, "Array", "Array", 0),
+                type_tree_node(3, "SInt32", "size", 0),
+                type_tree_node(3, "AnimationClip", "data", 0),
+                type_tree_node(4, "AnimationClipSettings", "m_AnimationClipSettings", 0),
+                type_tree_node(5, "bool", "m_LoopTime", 0),
+            ],
+            string_buffer: Vec::new(),
+        };
+        let array_hints = UnityYamlObjectConversionHints::from_type_tree(
+            &array_type_tree,
+            version(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            array_hints
+                .field_name_aliases
+                .get("m_Clips[*].m_AnimationClipSettings")
+                .map(String::as_str),
+            Some("m_MuscleClipInfo")
+        );
+        let array_value = SerializedValue::Struct(vec![field(
+            "m_Clips",
+            SerializedValue::Array(vec![SerializedValue::Struct(vec![field(
+                "m_AnimationClipSettings",
+                SerializedValue::Struct(vec![field("m_LoopTime", SerializedValue::Bool(false))]),
+            )])]),
+        )]);
+        let array_document = convert_with_object_hints(&array_value, &array_hints, |_| {
+            unreachable!("AnimationClip settings contain no PPtrs")
+        })
+        .unwrap();
+        let array_output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[array_document],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        assert!(array_output.contains("m_MuscleClipInfo:"));
+
+        let other_type_tree = TypeTree {
+            nodes: vec![
+                type_tree_node(0, "GameObject", "Base", 0),
+                type_tree_node(1, "AnimationClipSettings", "m_AnimationClipSettings", 0),
+                type_tree_node(2, "bool", "m_LoopTime", 0),
+            ],
+            string_buffer: Vec::new(),
+        };
+        let other_hints = UnityYamlObjectConversionHints::from_type_tree(
+            &other_type_tree,
+            version(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        assert!(other_hints.field_name_aliases.is_empty());
+        let other_document = convert_with_object_hints(&animation_clip_value, &other_hints, |_| {
+            unreachable!("the generated fixture has no PPtrs")
+        })
+        .unwrap();
+        let other_output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[other_document],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        assert!(other_output.contains("m_AnimationClipSettings:"));
+        assert!(!other_output.contains("m_MuscleClipInfo:"));
     }
 
     #[test]
