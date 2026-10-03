@@ -506,3 +506,11 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Verification covers reference hash vectors, main-ID error cases, class/version thresholds, and both million-seed uniqueness probes. Full suite: 342 library and 10 CLI tests; warnings-denied Clippy, format, 1,449-file baseline verifier, and diff check.
 - Still incomplete: export collection construction, PPtr target mapping, YAML serialization, and `.meta` GUID assignment. Phase 1 remains open; Phase 2 remains locked.
 - Next: model source/generated assets assigned to Scene and Prefab export collections and resolve every reference to local IDs or collection GUIDs.
+
+## Scene YAML collection export ID assignment
+
+- Current phase: Phase 1; gate not passed. This increment starts from pushed revision `701ec398e9c049577c48394401ea60b5a0686845`. Only `cocokoishi/RustAssetRipper` is a write/push target; the local AssetRipper baseline remains read-only. No UABEA or user AssetBundle content was accessed.
+- Added `plan_scene_export_ids` for an already ordered Scene export list. Source SerializedFile objects keep their PathID; processed collection objects receive class/version-specific pseudo-random IDs, with the seed advancing only for processed objects.
+- Synthetic checks cover mixed source/generated order, source file identity, Unity 5.4 and 2022 ID widths, duplicate identity, and collection size limits. Full verification passed: `cargo test --workspace --locked --quiet` (345 library tests, 10 CLI tests, 0 doc tests); warnings-denied Clippy; format check; baseline verifier (1,449 files); and `git diff --check`.
+- Still incomplete: construct exact membership/order from SceneHierarchyObject, resolve source/generated PPtrs to collection fileIDs/GUIDs, implement Prefab collection rules, YAML documents, and `.meta` GUIDs. Phase 1 remains open; Phase 2 remains locked.
+- Next: derive Scene/Prefab hierarchy membership and pointer resolution from baseline source, then implement a bounded source/generated pointer map before YAML writing.
