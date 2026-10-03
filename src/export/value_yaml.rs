@@ -37,6 +37,14 @@ pub struct UnityYamlObjectConversionHints {
     pub empty_array_kinds: HashMap<String, UnityYamlEmptyArrayKind>,
     /// Paths may contain [*] where a TypeTree struct appears as an array element.
     pub flow_mapped_struct_paths: HashSet<String>,
+    pub hash128_schemas: HashMap<String, UnityYamlHash128Schema>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UnityYamlHash128Schema {
+    pub serialized_version: i32,
+    /// TypeTree byte fields in their serialized order.
+    pub byte_field_names: Vec<String>,
 }
 
 impl UnityYamlObjectConversionHints {
@@ -44,12 +52,13 @@ impl UnityYamlObjectConversionHints {
     /// decode the SerializedValue tree.
     pub fn from_type_tree(
         type_tree: &TypeTree,
+        unity_version: SceneUnityVersion,
         limits: UnityYamlObjectConversionLimits,
     ) -> Result<Self, UnityYamlObjectConversionError> {
         let layout = UnityYamlTypeTreeLayout::new(type_tree, limits)?;
         let mut hints = Self::default();
         let mut budget = ConversionBudget { visited: 0, limits };
-        layout.collect_hints(0, "", 0, &mut hints, &mut budget)?;
+        layout.collect_hints(0, "", 0, unity_version, &mut hints, &mut budget)?;
         Ok(hints)
     }
 }
@@ -116,6 +125,16 @@ pub enum UnityYamlObjectConversionError {
         node_index: usize,
         reason: &'static str,
     },
+    Hash128FieldCount {
+        field_path: String,
+        expected: usize,
+        actual: usize,
+    },
+    InvalidHash128Byte {
+        field_path: String,
+        field_name: String,
+        field_index: usize,
+    },
     HexScalarLimitExceeded {
         requested: usize,
         limit: usize,
@@ -174,6 +193,22 @@ impl Display for UnityYamlObjectConversionError {
             Self::InvalidTypeTree { node_index, reason } => {
                 write!(f, "invalid Unity TypeTree node {node_index}: {reason}")
             }
+            Self::Hash128FieldCount {
+                field_path,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "Hash128 at {field_path:?} has {actual} fields; expected {expected}"
+            ),
+            Self::InvalidHash128Byte {
+                field_path,
+                field_name,
+                field_index,
+            } => write!(
+                f,
+                "Hash128 byte {field_index} ({field_name:?}) at {field_path:?} is missing, duplicated, or not an unsigned byte"
+            ),
             Self::HexScalarLimitExceeded {
                 requested,
                 limit,
@@ -407,11 +442,64 @@ impl<'a> UnityYamlTypeTreeLayout<'a> {
         Ok(Some(children[1]))
     }
 
+    fn hash128_schema(
+        &self,
+        node_index: usize,
+        unity_version: SceneUnityVersion,
+    ) -> Result<UnityYamlHash128Schema, UnityYamlObjectConversionError> {
+        let children = self.child_indices(node_index)?;
+        if children.len() != 16 {
+            return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                node_index,
+                reason: "Hash128 does not contain exactly 16 byte fields",
+            });
+        }
+        let mut byte_field_names = Vec::new();
+        byte_field_names.try_reserve_exact(16).map_err(|_| {
+            UnityYamlObjectConversionError::AllocationFailed {
+                resource: "Hash128 TypeTree field names",
+                requested: 16,
+            }
+        })?;
+        for child_index in children {
+            let field = self.node(child_index)?;
+            if !is_unsigned_byte_type_tree_type(self.type_name(child_index)?)
+                || self.first_child[child_index].is_some()
+            {
+                return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                    node_index: child_index,
+                    reason: "Hash128 field is not an unsigned-byte leaf",
+                });
+            }
+            let name =
+                field
+                    .name
+                    .as_deref()
+                    .ok_or(UnityYamlObjectConversionError::InvalidTypeTree {
+                        node_index: child_index,
+                        reason: "Hash128 byte field name is unresolved",
+                    })?;
+            if byte_field_names.iter().any(|existing| existing == name) {
+                return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                    node_index: child_index,
+                    reason: "Hash128 byte field names are duplicated",
+                });
+            }
+            byte_field_names.push(try_copy_string(name, "Hash128 TypeTree field name")?);
+        }
+        Ok(UnityYamlHash128Schema {
+            // Pass008_DivideAmbiguousPPtr repairs this stale TypeTree version at Unity 5.
+            serialized_version: if unity_version.major < 5 { 1 } else { 2 },
+            byte_field_names,
+        })
+    }
+
     fn collect_hints(
         &self,
         node_index: usize,
         field_path: &str,
         depth: usize,
+        unity_version: SceneUnityVersion,
         hints: &mut UnityYamlObjectConversionHints,
         budget: &mut ConversionBudget,
     ) -> Result<(), UnityYamlObjectConversionError> {
@@ -447,7 +535,38 @@ impl<'a> UnityYamlTypeTreeLayout<'a> {
             }
 
             let element_path = wildcard_element_path(field_path, budget.limits)?;
-            return self.collect_hints(element_node, &element_path, depth + 1, hints, budget);
+            return self.collect_hints(
+                element_node,
+                &element_path,
+                depth + 1,
+                unity_version,
+                hints,
+                budget,
+            );
+        }
+
+        if node_type == "Hash128" {
+            let schema = self.hash128_schema(node_index, unity_version)?;
+            if let Some(previous) = hints.hash128_schemas.get(field_path) {
+                if *previous != schema {
+                    return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                        node_index,
+                        reason: "ambiguous Hash128 schemas share one serialized field path",
+                    });
+                }
+            } else {
+                hints.hash128_schemas.try_reserve(1).map_err(|_| {
+                    UnityYamlObjectConversionError::AllocationFailed {
+                        resource: "Unity YAML Hash128 schema hints",
+                        requested: hints.hash128_schemas.len().saturating_add(1),
+                    }
+                })?;
+                hints.hash128_schemas.insert(
+                    try_copy_string(field_path, "Unity YAML Hash128 schema path")?,
+                    schema,
+                );
+            }
+            return Ok(());
         }
 
         if node_type == "TypelessData" || node_type == "string" || node_type.starts_with("PPtr<") {
@@ -483,7 +602,14 @@ impl<'a> UnityYamlTypeTreeLayout<'a> {
             )?;
             let child_path =
                 child_field_path(field_path, field_name, budget.limits.max_field_path_bytes)?;
-            self.collect_hints(child_index, &child_path, depth + 1, hints, budget)?;
+            self.collect_hints(
+                child_index,
+                &child_path,
+                depth + 1,
+                unity_version,
+                hints,
+                budget,
+            )?;
             child = self.next_sibling[child_index];
         }
         Ok(())
@@ -520,29 +646,34 @@ where
     let mut budget = ConversionBudget { visited: 0, limits };
     budget.visit(0)?;
 
-    let mut body = UnityYamlNode::mapping(if is_flow_mapped_path("", hints, limits)? {
-        UnityYamlMappingStyle::Flow
+    let body = if let Some(schema) = hash128_schema_for_path("", hints, limits)? {
+        convert_hash128_value(fields, schema, "", 0, limits, &mut budget)?
     } else {
-        UnityYamlMappingStyle::Block
-    });
-    body.insert_field(
-        "serializedVersion",
-        UnityYamlNode::scalar(UnityYamlScalar::Signed(i64::from(serialized_version))),
-    )
-    .map_err(UnityYamlObjectConversionError::NodeBuild)?;
-    append_struct_fields(
-        &mut body,
-        fields,
-        "",
-        1,
-        source,
-        hints,
-        unity_version,
-        missing_reference_guid,
-        limits,
-        &mut budget,
-        &mut resolve_pointer,
-    )?;
+        let mut body = UnityYamlNode::mapping(if is_flow_mapped_path("", hints, limits)? {
+            UnityYamlMappingStyle::Flow
+        } else {
+            UnityYamlMappingStyle::Block
+        });
+        body.insert_field(
+            "serializedVersion",
+            UnityYamlNode::scalar(UnityYamlScalar::Signed(i64::from(serialized_version))),
+        )
+        .map_err(UnityYamlObjectConversionError::NodeBuild)?;
+        append_struct_fields(
+            &mut body,
+            fields,
+            "",
+            1,
+            source,
+            hints,
+            unity_version,
+            missing_reference_guid,
+            limits,
+            &mut budget,
+            &mut resolve_pointer,
+        )?;
+        body
+    };
     UnityYamlDocument::object(source.class_id, file_id, class_name, body, stripped)
         .map_err(UnityYamlObjectConversionError::NodeBuild)
 }
@@ -678,26 +809,30 @@ where
             resolve_pointer,
         )?,
         SerializedValue::Struct(fields) => {
-            let mut mapping =
-                UnityYamlNode::mapping(if is_flow_mapped_path(field_path, hints, limits)? {
-                    UnityYamlMappingStyle::Flow
-                } else {
-                    UnityYamlMappingStyle::Block
-                });
-            append_struct_fields(
-                &mut mapping,
-                fields,
-                field_path,
-                depth + 1,
-                source,
-                hints,
-                unity_version,
-                missing_reference_guid,
-                limits,
-                budget,
-                resolve_pointer,
-            )?;
-            mapping
+            if let Some(schema) = hash128_schema_for_path(field_path, hints, limits)? {
+                convert_hash128_value(fields, schema, field_path, depth, limits, budget)?
+            } else {
+                let mut mapping =
+                    UnityYamlNode::mapping(if is_flow_mapped_path(field_path, hints, limits)? {
+                        UnityYamlMappingStyle::Flow
+                    } else {
+                        UnityYamlMappingStyle::Block
+                    });
+                append_struct_fields(
+                    &mut mapping,
+                    fields,
+                    field_path,
+                    depth + 1,
+                    source,
+                    hints,
+                    unity_version,
+                    missing_reference_guid,
+                    limits,
+                    budget,
+                    resolve_pointer,
+                )?;
+                mapping
+            }
         }
         SerializedValue::PPtr { file_id, path_id } => {
             let resolution = if *path_id == 0 {
@@ -724,6 +859,109 @@ where
         }
     };
     Ok(node)
+}
+
+fn hash128_schema_for_path<'a>(
+    field_path: &str,
+    hints: &'a UnityYamlObjectConversionHints,
+    limits: UnityYamlObjectConversionLimits,
+) -> Result<Option<&'a UnityYamlHash128Schema>, UnityYamlObjectConversionError> {
+    if let Some(schema) = hints.hash128_schemas.get(field_path) {
+        return Ok(Some(schema));
+    }
+    if !field_path.contains('[') {
+        return Ok(None);
+    }
+    let canonical_path = canonical_array_path(field_path, limits.max_field_path_bytes)?;
+    Ok(hints.hash128_schemas.get(&canonical_path))
+}
+
+fn convert_hash128_value(
+    fields: &[SerializedFieldValue],
+    schema: &UnityYamlHash128Schema,
+    field_path: &str,
+    depth: usize,
+    limits: UnityYamlObjectConversionLimits,
+    budget: &mut ConversionBudget,
+) -> Result<UnityYamlNode, UnityYamlObjectConversionError> {
+    const HASH128_BYTE_COUNT: usize = 16;
+    if schema.byte_field_names.len() != HASH128_BYTE_COUNT || fields.len() != HASH128_BYTE_COUNT {
+        return Err(UnityYamlObjectConversionError::Hash128FieldCount {
+            field_path: field_path.to_owned(),
+            expected: HASH128_BYTE_COUNT,
+            actual: fields.len(),
+        });
+    }
+
+    let mut bytes = [0u8; HASH128_BYTE_COUNT];
+    for (field_index, field_name) in schema.byte_field_names.iter().enumerate() {
+        budget.visit(depth + 1)?;
+        let mut matching_value = None;
+        for field in fields.iter().filter(|field| field.name == *field_name) {
+            if matching_value.is_some() {
+                return Err(UnityYamlObjectConversionError::InvalidHash128Byte {
+                    field_path: field_path.to_owned(),
+                    field_name: field_name.clone(),
+                    field_index,
+                });
+            }
+            matching_value = Some(&field.value);
+        }
+        let Some(SerializedValue::U8(value)) = matching_value else {
+            return Err(UnityYamlObjectConversionError::InvalidHash128Byte {
+                field_path: field_path.to_owned(),
+                field_name: field_name.clone(),
+                field_index,
+            });
+        };
+        bytes[field_index] = *value;
+    }
+
+    let mut mapping = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    mapping
+        .insert_field(
+            "serializedVersion",
+            UnityYamlNode::scalar(UnityYamlScalar::Signed(i64::from(
+                schema.serialized_version,
+            ))),
+        )
+        .map_err(UnityYamlObjectConversionError::NodeBuild)?;
+    if schema.serialized_version > 1 {
+        const HASH_STRING_LENGTH: usize = HASH128_BYTE_COUNT * 2;
+        if HASH_STRING_LENGTH > limits.max_generated_scalar_bytes {
+            return Err(UnityYamlObjectConversionError::HexScalarLimitExceeded {
+                requested: HASH_STRING_LENGTH,
+                limit: limits.max_generated_scalar_bytes,
+                field_path: field_path.to_owned(),
+            });
+        }
+        let mut hash = String::new();
+        hash.try_reserve_exact(HASH_STRING_LENGTH).map_err(|_| {
+            UnityYamlObjectConversionError::AllocationFailed {
+                resource: "Hash128 YAML string",
+                requested: HASH_STRING_LENGTH,
+            }
+        })?;
+        for chunk in bytes.chunks_exact(4) {
+            let word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            for shift in (0..8).rev() {
+                hash.push(hex_digit(((word >> (shift * 4)) & 0x0f) as u8));
+            }
+        }
+        mapping
+            .insert_field("Hash", UnityYamlNode::string(hash))
+            .map_err(UnityYamlObjectConversionError::NodeBuild)?;
+    } else {
+        for (field_index, value) in bytes.into_iter().enumerate() {
+            mapping
+                .insert_field(
+                    format!("bytes[{field_index}]"),
+                    UnityYamlNode::scalar(UnityYamlScalar::Unsigned(u64::from(value))),
+                )
+                .map_err(UnityYamlObjectConversionError::NodeBuild)?;
+        }
+    }
+    Ok(mapping)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -946,6 +1184,10 @@ fn is_integer_type_tree_type(type_name: &str) -> bool {
             | "unsigned long long"
             | "Type*"
     )
+}
+
+fn is_unsigned_byte_type_tree_type(type_name: &str) -> bool {
+    matches!(type_name, "UInt8" | "byte" | "unsigned char")
 }
 
 fn wildcard_element_path(
@@ -1198,6 +1440,40 @@ mod tests {
         }
     }
 
+    fn hash128_type_tree(serialized_version: i32) -> TypeTree {
+        let mut nodes = vec![
+            type_tree_node(0, "GameObject", "Base", 0),
+            type_tree_node(1, "Hash128", "m_Hash", 0),
+        ];
+        nodes[1].version = serialized_version;
+        for index in 0..16 {
+            let name = if index < 10 {
+                format!("m_Bytes__{index}")
+            } else {
+                format!("m_Bytes_{index}")
+            };
+            nodes.push(type_tree_node(2, "UInt8", &name, 0));
+        }
+        TypeTree {
+            nodes,
+            string_buffer: Vec::new(),
+        }
+    }
+
+    fn hash128_value() -> SerializedValue {
+        let fields = (0..16)
+            .map(|index| {
+                let name = if index < 10 {
+                    format!("m_Bytes__{index}")
+                } else {
+                    format!("m_Bytes_{index}")
+                };
+                field(&name, SerializedValue::U8(index as u8))
+            })
+            .collect();
+        SerializedValue::Struct(vec![field("m_Hash", SerializedValue::Struct(fields))])
+    }
+
     fn version() -> SceneUnityVersion {
         SceneUnityVersion::parse("2022.3.1f1").unwrap()
     }
@@ -1370,6 +1646,7 @@ mod tests {
         };
         let hints = UnityYamlObjectConversionHints::from_type_tree(
             &type_tree,
+            version(),
             UnityYamlObjectConversionLimits::default(),
         )
         .unwrap();
@@ -1434,6 +1711,7 @@ mod tests {
         };
         let hints = UnityYamlObjectConversionHints::from_type_tree(
             &type_tree,
+            version(),
             UnityYamlObjectConversionLimits::default(),
         )
         .unwrap();
@@ -1463,6 +1741,7 @@ mod tests {
         assert!(matches!(
             UnityYamlObjectConversionHints::from_type_tree(
                 &invalid,
+                version(),
                 UnityYamlObjectConversionLimits::default()
             ),
             Err(UnityYamlObjectConversionError::InvalidTypeTree {
@@ -1473,6 +1752,7 @@ mod tests {
         assert!(matches!(
             UnityYamlObjectConversionHints::from_type_tree(
                 &type_tree,
+                version(),
                 UnityYamlObjectConversionLimits {
                     max_type_tree_nodes: 1,
                     ..UnityYamlObjectConversionLimits::default()
@@ -1482,6 +1762,118 @@ mod tests {
                 requested: 2,
                 limit: 1
             })
+        ));
+    }
+
+    #[test]
+    fn hash128_uses_baseline_versioned_yaml_forms_and_requires_all_bytes() {
+        let value = hash128_value();
+        let modern_tree = hash128_type_tree(1);
+        let modern_hints = UnityYamlObjectConversionHints::from_type_tree(
+            &modern_tree,
+            version(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            modern_hints
+                .hash128_schemas
+                .get("m_Hash")
+                .map(|schema| schema.serialized_version),
+            Some(2)
+        );
+        let unity_5_hints = UnityYamlObjectConversionHints::from_type_tree(
+            &modern_tree,
+            SceneUnityVersion::parse("5.0.0f1").unwrap(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            unity_5_hints
+                .hash128_schemas
+                .get("m_Hash")
+                .map(|schema| schema.serialized_version),
+            Some(2)
+        );
+        let document = convert_with_object_hints(&value, &modern_hints, |_| {
+            unreachable!("Hash128 contains no PPtrs")
+        })
+        .unwrap();
+        let output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[document],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        assert!(output.contains("serializedVersion: 2"));
+        assert!(output.contains("Hash: 03020100070605040b0a09080f0e0d0c"));
+        assert!(!output.contains("m_Bytes__0"));
+
+        let old_tree = hash128_type_tree(1);
+        let old_hints = UnityYamlObjectConversionHints::from_type_tree(
+            &old_tree,
+            SceneUnityVersion::parse("4.7.0f1").unwrap(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            old_hints
+                .hash128_schemas
+                .get("m_Hash")
+                .map(|schema| schema.serialized_version),
+            Some(1)
+        );
+        let document = convert_with_object_hints(&value, &old_hints, |_| {
+            unreachable!("Hash128 contains no PPtrs")
+        })
+        .unwrap();
+        let output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[document],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        assert!(output.contains("serializedVersion: 1"));
+        assert!(output.contains("bytes[0]: 0"));
+        assert!(output.contains("bytes[15]: 15"));
+        assert!(!output.contains("Hash: 03020100070605040b0a09080f0e0d0c"));
+
+        let invalid = SerializedValue::Struct(vec![field(
+            "m_Hash",
+            SerializedValue::Struct(vec![field("m_Bytes__0", SerializedValue::I8(0))]),
+        )]);
+        assert!(matches!(
+            convert_with_object_hints(&invalid, &modern_hints, |_| {
+                unreachable!("Hash128 contains no PPtrs")
+            }),
+            Err(UnityYamlObjectConversionError::Hash128FieldCount {
+                expected: 16,
+                actual: 1,
+                ..
+            })
+        ));
+        let invalid_bytes = (0..16)
+            .map(|index| {
+                let name = if index < 10 {
+                    format!("m_Bytes__{index}")
+                } else {
+                    format!("m_Bytes_{index}")
+                };
+                let value = if index == 7 {
+                    SerializedValue::I8(index as i8)
+                } else {
+                    SerializedValue::U8(index as u8)
+                };
+                field(&name, value)
+            })
+            .collect();
+        let invalid = SerializedValue::Struct(vec![field(
+            "m_Hash",
+            SerializedValue::Struct(invalid_bytes),
+        )]);
+        assert!(matches!(
+            convert_with_object_hints(&invalid, &modern_hints, |_| {
+                unreachable!("Hash128 contains no PPtrs")
+            }),
+            Err(UnityYamlObjectConversionError::InvalidHash128Byte { field_index: 7, .. })
         ));
     }
 
