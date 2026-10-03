@@ -788,3 +788,11 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Focused test and full workspace passed: 413 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and `git diff --check`.
 - Still incomplete: synthetic evidence only, with no Unity-produced fixture or direct C# runtime differential. Scene selection, Heightmap resource semantics, and full export remain open. Phase 1 remains incomplete; Phase 2 remains locked.
 - Next: cover eligible graphics/importer setting aliases, then continue source audit of the remaining context-dependent transformations.
+
+## Graphics and texture importer YAML field aliases
+
+- Current phase: Phase 1; gate not passed. This increment builds from pushed revision `a55331dcc19cd32a3844755efdc7a8272b39baf6`. Only `cocokoishi/RustAssetRipper`'s canonical repository is a write/push target. No other remote repository, UABEA, or user AssetBundle content was accessed.
+- Added type-scoped output aliases for two `GraphicsSettings` fields, one `TextureImporter` field, and the legacy `BuildTargetShaderSettings.m_ShaderSettings` field. Same-named root fields remain unchanged.
+- Focused test and full workspace passed: 414 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and `git diff --check`.
+- Still incomplete: synthetic evidence only, no Unity-produced fixture/C# differential. The source `BuildTargetShaderSettings` to `TierSettings` type-name change and version collision handling remain unimplemented, along with complete graphics/importer workflows. Phase 1 remains incomplete; Phase 2 remains locked.
+- Next: audit remaining context-dependent Pass002 rules, retaining type, child-shape, and Unity-version conditions rather than flattening them into global aliases.

@@ -2305,6 +2305,14 @@ fn baseline_type_scoped_field_aliases(type_name: &str) -> &'static [(&'static st
         ("m_SurfaceMask", "m_Holes"),
         ("m_SurfaceMaskLOD", "m_HolesLOD"),
     ];
+    const GRAPHICS_SETTINGS_ALIASES: &[(&str, &str)] = &[
+        ("m_BuildTargetShaderSettings", "m_TierSettings"),
+        ("m_AlbedoSwatchInfos", "m_AlbedoSwitchInfos"),
+    ];
+    const TEXTURE_IMPORTER_ALIASES: &[(&str, &str)] =
+        &[("m_BuildTargetSettings", "m_PlatformSettings")];
+    const BUILD_TARGET_SHADER_SETTINGS_ALIASES: &[(&str, &str)] =
+        &[("m_ShaderSettings", "m_Settings")];
 
     match type_name {
         "AnimationClip" => ANIMATION_CLIP_ALIASES,
@@ -2321,6 +2329,9 @@ fn baseline_type_scoped_field_aliases(type_name: &str) -> &'static [(&'static st
         "StateMachineConstant" => STATE_MACHINE_CONSTANT_ALIASES,
         "BuildSettings" => BUILD_SETTINGS_ALIASES,
         "Heightmap" => HEIGHTMAP_ALIASES,
+        "GraphicsSettings" => GRAPHICS_SETTINGS_ALIASES,
+        "TextureImporter" => TEXTURE_IMPORTER_ALIASES,
+        "BuildTargetShaderSettings" => BUILD_TARGET_SHADER_SETTINGS_ALIASES,
         _ => &[],
     }
 }
@@ -3844,6 +3855,87 @@ mod tests {
         assert!(!output.contains("m_SurfaceMask:"));
         assert!(!output.contains("m_SurfaceMaskLOD:"));
         assert!(!output.contains("m_Levels:\n"));
+    }
+
+    #[test]
+    fn graphics_and_importer_setting_aliases_are_type_scoped() {
+        let type_tree = TypeTree {
+            nodes: vec![
+                type_tree_node(0, "GameObject", "Base", 0),
+                type_tree_node(1, "SInt32", "m_BuildTargetSettings", 0),
+                type_tree_node(1, "SInt32", "m_ShaderSettings", 0),
+                type_tree_node(1, "GraphicsSettings", "m_Graphics", 0),
+                type_tree_node(2, "SInt32", "m_BuildTargetShaderSettings", 0),
+                type_tree_node(2, "SInt32", "m_AlbedoSwatchInfos", 0),
+                type_tree_node(1, "TextureImporter", "m_Importer", 0),
+                type_tree_node(2, "SInt32", "m_BuildTargetSettings", 0),
+                type_tree_node(1, "BuildTargetShaderSettings", "m_LegacySettings", 0),
+                type_tree_node(2, "SInt32", "m_ShaderSettings", 0),
+            ],
+            string_buffer: Vec::new(),
+        };
+        let hints = UnityYamlObjectConversionHints::from_type_tree(
+            &type_tree,
+            version(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        for (path, alias) in [
+            ("m_Graphics.m_BuildTargetShaderSettings", "m_TierSettings"),
+            ("m_Graphics.m_AlbedoSwatchInfos", "m_AlbedoSwitchInfos"),
+            ("m_Importer.m_BuildTargetSettings", "m_PlatformSettings"),
+            ("m_LegacySettings.m_ShaderSettings", "m_Settings"),
+        ] {
+            assert_eq!(
+                hints.field_name_aliases.get(path).map(String::as_str),
+                Some(alias)
+            );
+        }
+
+        let value = SerializedValue::Struct(vec![
+            field("m_BuildTargetSettings", SerializedValue::I32(77)),
+            field("m_ShaderSettings", SerializedValue::I32(88)),
+            field(
+                "m_Graphics",
+                SerializedValue::Struct(vec![
+                    field("m_BuildTargetShaderSettings", SerializedValue::I32(1)),
+                    field("m_AlbedoSwatchInfos", SerializedValue::I32(2)),
+                ]),
+            ),
+            field(
+                "m_Importer",
+                SerializedValue::Struct(vec![field(
+                    "m_BuildTargetSettings",
+                    SerializedValue::I32(3),
+                )]),
+            ),
+            field(
+                "m_LegacySettings",
+                SerializedValue::Struct(vec![field("m_ShaderSettings", SerializedValue::I32(4))]),
+            ),
+        ]);
+        let document = convert_with_object_hints(&value, &hints, |_| {
+            unreachable!("the generated settings fixture has no PPtrs")
+        })
+        .unwrap();
+        let output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[document],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        for expected in [
+            "m_BuildTargetSettings: 77",
+            "m_ShaderSettings: 88",
+            "m_TierSettings: 1",
+            "m_AlbedoSwitchInfos: 2",
+            "m_PlatformSettings: 3",
+            "m_Settings: 4",
+        ] {
+            assert!(output.contains(expected), "missing {expected}");
+        }
+        assert!(!output.contains("m_BuildTargetShaderSettings:"));
+        assert!(!output.contains("m_AlbedoSwatchInfos:"));
+        assert!(!output.contains("m_PlatformSettings: 77"));
     }
 
     #[test]
