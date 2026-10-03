@@ -12,8 +12,8 @@ use assetripper::io::platform_file_inventory::{
 };
 use assetripper::io::platform_structure::{detect_platform_structure, PlatformStructureLimits};
 use assetripper::processing::prefab_processing::{
-    plan_workspace_prefab_processing, plan_workspace_processed_prefab_assets,
-    source_files_with_animator_controllers, WorkspacePrefabProcessingEvent,
+    animator_controller_source_dependency_inventory, plan_workspace_prefab_processing,
+    plan_workspace_processed_prefab_assets, WorkspacePrefabProcessingEvent,
     WorkspacePrefabProcessingLimits, WorkspaceProcessedPrefabAssetPlanLimits,
 };
 use assetripper::processing::project_settings::{
@@ -447,7 +447,7 @@ fn print_workspace_summary_to<W: io::Write>(
     writeln!(output, "SerializedFiles: {}", workspace.files().len())?;
     let decoded_objects =
         ObjectWorkspace::load_from_vfs(filesystem, workspace, ObjectWorkspaceLimits::default())?;
-    let animator_controller_source_files = source_files_with_animator_controllers(
+    let animator_controller_inventory = animator_controller_source_dependency_inventory(
         &decoded_objects,
         WorkspaceProcessedPrefabAssetPlanLimits::default(),
     )?;
@@ -464,6 +464,12 @@ fn print_workspace_summary_to<W: io::Write>(
         collection_report.collection_count,
         collection_report.object_count,
         collection_report.external_identifier_count
+    )?;
+    writeln!(
+        output,
+        "AnimatorController source dependencies: {} generated-collection appends modeled, {} source files deferred by incomplete TypeTree data",
+        animator_controller_inventory.modeled_append_count(),
+        animator_controller_inventory.deferred_file_count()
     )?;
     writeln!(
         output,
@@ -1271,7 +1277,7 @@ fn print_workspace_summary_to<W: io::Write>(
         &scene_hierarchies,
         &prefab_processing_plan,
         &source_external_identifier_counts,
-        &animator_controller_source_files,
+        &animator_controller_inventory,
         WorkspaceProcessedPrefabAssetPlanLimits::default(),
     )?;
     let prefab_processing_report = prefab_processing_plan.report();
@@ -1298,7 +1304,7 @@ fn print_workspace_summary_to<W: io::Write>(
     )?;
     writeln!(
         output,
-        "PrefabProcessor generated-asset allocation plan: complete={}, {} collections, {} assets, {} GameObject component-pair appends, {} constructor PPtrs, {} source dependency appends ({} FileIDs assigned, {} deferred across {} source files){}",
+        "PrefabProcessor generated-asset allocation plan: complete={}, {} collections, {} assets, {} GameObject component-pair appends, {} constructor PPtrs, {} source dependency appends ({} FileIDs assigned, {} deferred across {} source files; {} AnimatorController collection appends modeled){}",
         processed_prefab_assets.is_complete(),
         processed_prefab_assets.collections().len(),
         processed_prefab_assets.asset_count(),
@@ -1316,6 +1322,7 @@ fn print_workspace_summary_to<W: io::Write>(
             .filter(|append| append.file_id.is_none())
             .count(),
         processed_prefab_assets.deferred_source_dependency_file_count(),
+        processed_prefab_assets.modeled_animator_controller_dependency_append_count(),
         processed_prefab_assets
             .incomplete_reason()
             .map(|reason| format!(", incomplete: {reason}"))

@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
+use crate::serialized_file::object::SerializedValue;
 use crate::serialized_file::object_workspace::ObjectWorkspace;
 
 use super::scene::SceneRelationshipTarget;
@@ -708,6 +709,7 @@ pub struct WorkspaceProcessedPrefabAssetPlan {
     constructor_pointers: Vec<WorkspaceGeneratedConstructorPointer>,
     dependency_entry_count: usize,
     source_dependency_appends: Vec<WorkspaceSourceCollectionDependencyAppend>,
+    modeled_animator_controller_dependency_append_count: usize,
     deferred_source_dependency_file_count: usize,
     asset_count: usize,
     total_collection_name_bytes: usize,
@@ -746,6 +748,10 @@ impl WorkspaceProcessedPrefabAssetPlan {
         self.deferred_source_dependency_file_count
     }
 
+    pub fn modeled_animator_controller_dependency_append_count(&self) -> usize {
+        self.modeled_animator_controller_dependency_append_count
+    }
+
     pub fn asset_count(&self) -> usize {
         self.asset_count
     }
@@ -757,7 +763,7 @@ pub fn plan_workspace_processed_prefab_assets(
     workspace: &WorkspaceSceneHierarchies,
     processing: &WorkspacePrefabProcessingPlan,
     source_external_identifier_counts: &[usize],
-    animator_controller_source_files: &HashSet<usize>,
+    animator_controller_inventory: &AnimatorControllerSourceDependencyInventory,
     limits: WorkspaceProcessedPrefabAssetPlanLimits,
 ) -> Result<WorkspaceProcessedPrefabAssetPlan, WorkspacePrefabProcessingError> {
     if !processing.is_complete() {
@@ -883,6 +889,7 @@ pub fn plan_workspace_processed_prefab_assets(
         constructor_pointers: Vec::new(),
         dependency_entry_count: 0,
         source_dependency_appends: Vec::new(),
+        modeled_animator_controller_dependency_append_count: 0,
         deferred_source_dependency_file_count: 0,
         asset_count: 0,
         total_collection_name_bytes: 0,
@@ -1191,7 +1198,7 @@ pub fn plan_workspace_processed_prefab_assets(
     assign_source_dependency_file_ids(
         &mut plan,
         source_external_identifier_counts,
-        animator_controller_source_files,
+        animator_controller_inventory,
         limits,
     )?;
 
@@ -1209,6 +1216,7 @@ fn incomplete_processed_asset_plan(reason: &str) -> WorkspaceProcessedPrefabAsse
         constructor_pointers: Vec::new(),
         dependency_entry_count: 0,
         source_dependency_appends: Vec::new(),
+        modeled_animator_controller_dependency_append_count: 0,
         deferred_source_dependency_file_count: 0,
         asset_count: 0,
         total_collection_name_bytes: 0,
@@ -1455,57 +1463,186 @@ fn plan_source_dependency_append(
     Ok(())
 }
 
-pub fn source_files_with_animator_controllers(
+/// Ordered source-collection dependency effects from AnimatorControllerProcessor.
+///
+/// A source collection gets one dependency entry for the shared generated AnimatorController
+/// collection when at least one decoded controller has a non-empty layer array. Files with any
+/// controller whose relevant TypeTree data is unavailable or inconsistent remain deferred.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AnimatorControllerSourceDependencyInventory {
+    append_file_indices: HashSet<usize>,
+    deferred_file_indices: HashSet<usize>,
+}
+
+impl AnimatorControllerSourceDependencyInventory {
+    pub fn modeled_append_count(&self) -> usize {
+        self.append_file_indices.len()
+    }
+
+    pub fn deferred_file_count(&self) -> usize {
+        self.deferred_file_indices.len()
+    }
+}
+
+pub fn animator_controller_source_dependency_inventory(
     source_objects: &ObjectWorkspace,
     limits: WorkspaceProcessedPrefabAssetPlanLimits,
-) -> Result<HashSet<usize>, WorkspacePrefabProcessingError> {
+) -> Result<AnimatorControllerSourceDependencyInventory, WorkspacePrefabProcessingError> {
     const ANIMATOR_CONTROLLER_CLASS_ID: i32 = 91;
-    let mut files = HashSet::new();
+    let mut inventory = AnimatorControllerSourceDependencyInventory::default();
     for object in source_objects.objects() {
         if object.class_id.map(i32::from).unwrap_or(object.raw_type_id)
             == ANIMATOR_CONTROLLER_CLASS_ID
         {
-            if files.contains(&object.file_index) {
+            if inventory.deferred_file_indices.contains(&object.file_index) {
                 continue;
             }
-            let requested = files.len().checked_add(1).ok_or(
-                WorkspacePrefabProcessingError::CountOverflow {
-                    resource: "AnimatorController source dependency file indexes",
-                },
-            )?;
-            if requested > limits.max_collections {
-                return Err(WorkspacePrefabProcessingError::ResourceLimitExceeded {
-                    resource: "AnimatorController source dependency file indexes",
-                    requested,
-                    limit: limits.max_collections,
+            let requires_append =
+                object.payload.as_ref().ok().and_then(|payload| {
+                    animator_controller_requires_source_dependency(&payload.root)
                 });
+            match requires_append {
+                Some(true) => {
+                    insert_animator_controller_source_file(
+                        &mut inventory.append_file_indices,
+                        &inventory.deferred_file_indices,
+                        object.file_index,
+                        limits,
+                    )?;
+                }
+                Some(false) => {}
+                None => {
+                    inventory.append_file_indices.remove(&object.file_index);
+                    insert_animator_controller_source_file(
+                        &mut inventory.deferred_file_indices,
+                        &inventory.append_file_indices,
+                        object.file_index,
+                        limits,
+                    )?;
+                }
             }
-            files
-                .try_reserve(1)
-                .map_err(|_| WorkspacePrefabProcessingError::AllocationFailed {
-                    resource: "AnimatorController source dependency uncertainty index",
-                    requested,
-                })?;
-            files.insert(object.file_index);
         }
     }
-    Ok(files)
+    Ok(inventory)
+}
+
+fn insert_animator_controller_source_file(
+    destination: &mut HashSet<usize>,
+    other_effects: &HashSet<usize>,
+    file_index: usize,
+    limits: WorkspaceProcessedPrefabAssetPlanLimits,
+) -> Result<(), WorkspacePrefabProcessingError> {
+    if destination.contains(&file_index) {
+        return Ok(());
+    }
+    let requested = destination
+        .len()
+        .checked_add(other_effects.len())
+        .and_then(|count| count.checked_add(1))
+        .ok_or(WorkspacePrefabProcessingError::CountOverflow {
+            resource: "AnimatorController source dependency file indexes",
+        })?;
+    if requested > limits.max_collections {
+        return Err(WorkspacePrefabProcessingError::ResourceLimitExceeded {
+            resource: "AnimatorController source dependency file indexes",
+            requested,
+            limit: limits.max_collections,
+        });
+    }
+    destination
+        .try_reserve(1)
+        .map_err(|_| WorkspacePrefabProcessingError::AllocationFailed {
+            resource: "AnimatorController source dependency inventory",
+            requested,
+        })?;
+    destination.insert(file_index);
+    Ok(())
+}
+
+fn animator_controller_requires_source_dependency(root: &SerializedValue) -> Option<bool> {
+    let controller_constant = root.unique_field_in_base_chain("m_Controller").ok()??;
+    let layer_array =
+        unique_field_from_aliases(controller_constant, &["m_LayerArray", "m_HumanLayerArray"])?;
+    let layer_values = layer_array.array_elements()?;
+    let state_machine_array = controller_constant
+        .unique_field("m_StateMachineArray")
+        .ok()??;
+    let state_machine_values = state_machine_array.array_elements()?;
+
+    for layer_entry in layer_values {
+        let layer = unwrap_animator_layer_constant(layer_entry)?;
+        let state_machine_index = layer
+            .unique_field_in_base_chain("m_StateMachineIndex")
+            .ok()??;
+        let state_machine_index = serialized_nonnegative_index(state_machine_index)?;
+        if state_machine_index >= state_machine_values.len() {
+            return None;
+        }
+    }
+
+    Some(!layer_values.is_empty())
+}
+
+fn unique_field_from_aliases<'a>(
+    value: &'a SerializedValue,
+    aliases: &[&str],
+) -> Option<&'a SerializedValue> {
+    let mut found = None;
+    for alias in aliases {
+        if let Some(candidate) = value.unique_field(alias).ok()? {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(candidate);
+        }
+    }
+    found
+}
+
+fn unwrap_animator_layer_constant(value: &SerializedValue) -> Option<&SerializedValue> {
+    let capitalized_data = value.unique_field("Data").ok()?;
+    let lowercase_data = value.unique_field("data").ok()?;
+    let wrapped = match (capitalized_data, lowercase_data) {
+        (Some(data), None) | (None, Some(data)) => Some(data),
+        (None, None) => None,
+        (Some(_), Some(_)) => return None,
+    };
+    if let Some(layer) = wrapped {
+        if value
+            .unique_field_in_base_chain("m_StateMachineIndex")
+            .ok()?
+            .is_some()
+        {
+            return None;
+        }
+        Some(layer)
+    } else {
+        Some(value)
+    }
+}
+
+fn serialized_nonnegative_index(value: &SerializedValue) -> Option<usize> {
+    match value {
+        SerializedValue::U8(index) => Some(usize::from(*index)),
+        SerializedValue::U16(index) => Some(usize::from(*index)),
+        SerializedValue::U32(index) => usize::try_from(*index).ok(),
+        SerializedValue::U64(index) => usize::try_from(*index).ok(),
+        SerializedValue::I8(index) => usize::try_from(*index).ok(),
+        SerializedValue::I16(index) => usize::try_from(*index).ok(),
+        SerializedValue::I32(index) => usize::try_from(*index).ok(),
+        SerializedValue::I64(index) => usize::try_from(*index).ok(),
+        _ => None,
+    }
 }
 
 fn assign_source_dependency_file_ids(
     plan: &mut WorkspaceProcessedPrefabAssetPlan,
     source_external_identifier_counts: &[usize],
-    animator_controller_source_files: &HashSet<usize>,
+    animator_controller_inventory: &AnimatorControllerSourceDependencyInventory,
     limits: WorkspaceProcessedPrefabAssetPlanLimits,
 ) -> Result<(), WorkspacePrefabProcessingError> {
-    plan.deferred_source_dependency_file_count = animator_controller_source_files.len();
-    if !animator_controller_source_files.is_empty() {
-        plan.complete = false;
-        plan.incomplete_reason = Some(format!(
-            "AnimatorController layer dependency writes are not modeled for {} source collection files; FileIDs in those collections are deferred",
-            animator_controller_source_files.len()
-        ));
-    }
+    plan.modeled_animator_controller_dependency_append_count =
+        animator_controller_inventory.modeled_append_count();
 
     let mut appended_count_by_file = HashMap::<usize, usize>::new();
     appended_count_by_file
@@ -1515,6 +1652,7 @@ fn assign_source_dependency_file_ids(
             requested: plan.source_dependency_appends.len(),
         })?;
 
+    let mut deferred_source_files = HashSet::new();
     for append in &mut plan.source_dependency_appends {
         let Some(&external_identifier_count) =
             source_external_identifier_counts.get(append.source_file_index)
@@ -1527,7 +1665,24 @@ fn assign_source_dependency_file_ids(
                 ),
             });
         };
-        if animator_controller_source_files.contains(&append.source_file_index) {
+        if animator_controller_inventory
+            .deferred_file_indices
+            .contains(&append.source_file_index)
+        {
+            if !deferred_source_files.contains(&append.source_file_index) {
+                let requested = deferred_source_files.len().checked_add(1).ok_or(
+                    WorkspacePrefabProcessingError::CountOverflow {
+                        resource: "deferred source dependency files",
+                    },
+                )?;
+                deferred_source_files.try_reserve(1).map_err(|_| {
+                    WorkspacePrefabProcessingError::AllocationFailed {
+                        resource: "deferred source dependency file index",
+                        requested,
+                    }
+                })?;
+                deferred_source_files.insert(append.source_file_index);
+            }
             continue;
         }
         let prior_append_count = appended_count_by_file
@@ -1539,7 +1694,16 @@ fn assign_source_dependency_file_ids(
                 resource: "source collection dependency entries",
             },
         )?;
+        let animator_controller_append = usize::from(
+            animator_controller_inventory
+                .append_file_indices
+                .contains(&append.source_file_index),
+        );
         let dependency_file_id = initial_dependency_count
+            .checked_add(animator_controller_append)
+            .ok_or(WorkspacePrefabProcessingError::CountOverflow {
+                resource: "source collection dependency FileID",
+            })?
             .checked_add(prior_append_count)
             .ok_or(WorkspacePrefabProcessingError::CountOverflow {
                 resource: "source collection dependency FileID",
@@ -1569,6 +1733,14 @@ fn assign_source_dependency_file_ids(
                 },
             )?,
         );
+    }
+    plan.deferred_source_dependency_file_count = deferred_source_files.len();
+    if !deferred_source_files.is_empty() {
+        plan.complete = false;
+        plan.incomplete_reason = Some(format!(
+            "AnimatorController source dependency effects remain unknown in {} collection files that also require source dependency FileIDs; those FileIDs are deferred",
+            deferred_source_files.len()
+        ));
     }
     Ok(())
 }
@@ -1967,6 +2139,7 @@ fn hierarchy_walk_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::serialized_file::object::SerializedFieldValue;
 
     fn empty_plan() -> WorkspaceProcessedPrefabAssetPlan {
         WorkspaceProcessedPrefabAssetPlan {
@@ -1979,6 +2152,7 @@ mod tests {
             constructor_pointers: Vec::new(),
             dependency_entry_count: 0,
             source_dependency_appends: Vec::new(),
+            modeled_animator_controller_dependency_append_count: 0,
             deferred_source_dependency_file_count: 0,
             asset_count: 0,
             total_collection_name_bytes: 0,
@@ -2164,14 +2338,20 @@ mod tests {
         )
         .unwrap();
 
-        assign_source_dependency_file_ids(&mut plan, &[3], &HashSet::new(), limits).unwrap();
+        assign_source_dependency_file_ids(
+            &mut plan,
+            &[3],
+            &AnimatorControllerSourceDependencyInventory::default(),
+            limits,
+        )
+        .unwrap();
 
         assert_eq!(plan.source_dependency_appends[0].file_id, Some(4));
         assert_eq!(plan.source_dependency_appends[1].file_id, Some(5));
     }
 
     #[test]
-    fn animator_controller_source_file_defers_all_later_dependency_file_ids() {
+    fn unknown_animator_controller_effect_defers_only_requested_file_ids() {
         let mut plan = empty_plan();
         let mut seen = HashSet::new();
         let owner = WorkspaceSceneObjectIdentity {
@@ -2202,13 +2382,16 @@ mod tests {
             WorkspaceProcessedPrefabAssetPlanLimits::default(),
         )
         .unwrap();
-        let mut animator_controller_source_files = HashSet::new();
-        animator_controller_source_files.insert(0);
+        let mut animator_controller_inventory =
+            AnimatorControllerSourceDependencyInventory::default();
+        animator_controller_inventory
+            .deferred_file_indices
+            .insert(0);
 
         assign_source_dependency_file_ids(
             &mut plan,
             &[3],
-            &animator_controller_source_files,
+            &animator_controller_inventory,
             WorkspaceProcessedPrefabAssetPlanLimits::default(),
         )
         .unwrap();
@@ -2222,6 +2405,163 @@ mod tests {
         assert!(plan
             .incomplete_reason()
             .unwrap()
-            .contains("AnimatorController layer dependency writes"));
+            .contains("AnimatorController source dependency effects remain unknown"));
+    }
+
+    #[test]
+    fn animator_controller_dependency_appends_precede_lighting_data_and_prefab_file_ids() {
+        let mut plan = empty_plan();
+        let mut seen = HashSet::new();
+        let owner = WorkspaceSceneObjectIdentity {
+            file_index: 0,
+            object_index: 1,
+            path_id: 11,
+            class_id: Some(1),
+        };
+        plan_source_dependency_append(
+            &mut plan,
+            &mut seen,
+            owner,
+            WorkspaceSourceDependencyAppendTarget::GeneratedLightingDataAssets,
+            WorkspaceSourceDependencyPointerField::LightmapSettingsLightingDataAsset,
+            None,
+            WorkspaceProcessedPrefabAssetPlanLimits::default(),
+        )
+        .unwrap();
+        plan_source_dependency_append(
+            &mut plan,
+            &mut seen,
+            owner,
+            WorkspaceSourceDependencyAppendTarget::PrefabProcessedCollection {
+                collection_index: 2,
+            },
+            WorkspaceSourceDependencyPointerField::GameObjectComponent,
+            None,
+            WorkspaceProcessedPrefabAssetPlanLimits::default(),
+        )
+        .unwrap();
+        let mut animator_controller_inventory =
+            AnimatorControllerSourceDependencyInventory::default();
+        animator_controller_inventory.append_file_indices.insert(0);
+
+        assign_source_dependency_file_ids(
+            &mut plan,
+            &[3],
+            &animator_controller_inventory,
+            WorkspaceProcessedPrefabAssetPlanLimits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.modeled_animator_controller_dependency_append_count(),
+            1
+        );
+        assert_eq!(plan.source_dependency_appends[0].file_id, Some(5));
+        assert_eq!(plan.source_dependency_appends[1].file_id, Some(6));
+        assert!(plan.is_complete());
+    }
+
+    #[test]
+    fn animator_controller_layer_inventory_checks_array_aliases_and_indices() {
+        let controller =
+            |layer_array_name: &str, layer_indices: &[u32], state_machine_count: usize| {
+                let layers = layer_indices
+                    .iter()
+                    .map(|index| {
+                        SerializedValue::Struct(vec![SerializedFieldValue {
+                            name: "Data".to_owned(),
+                            value: SerializedValue::Struct(vec![SerializedFieldValue {
+                                name: "m_StateMachineIndex".to_owned(),
+                                value: SerializedValue::U32(*index),
+                            }]),
+                        }])
+                    })
+                    .collect();
+                SerializedValue::Struct(vec![SerializedFieldValue {
+                    name: "m_Controller".to_owned(),
+                    value: SerializedValue::Struct(vec![
+                        SerializedFieldValue {
+                            name: layer_array_name.to_owned(),
+                            value: SerializedValue::Array(layers),
+                        },
+                        SerializedFieldValue {
+                            name: "m_StateMachineArray".to_owned(),
+                            value: SerializedValue::Array(
+                                (0..state_machine_count)
+                                    .map(|_| SerializedValue::Struct(Vec::new()))
+                                    .collect(),
+                            ),
+                        },
+                    ]),
+                }])
+            };
+
+        assert_eq!(
+            animator_controller_requires_source_dependency(&controller("m_LayerArray", &[0, 1], 2)),
+            Some(true)
+        );
+        assert_eq!(
+            animator_controller_requires_source_dependency(&controller(
+                "m_HumanLayerArray",
+                &[],
+                1
+            )),
+            Some(false)
+        );
+        assert_eq!(
+            animator_controller_requires_source_dependency(&controller("m_LayerArray", &[1], 1)),
+            None
+        );
+    }
+
+    #[test]
+    fn animator_controller_layer_inventory_rejects_missing_ambiguous_and_mistyped_fields() {
+        let both_layer_arrays = SerializedValue::Struct(vec![SerializedFieldValue {
+            name: "m_Controller".to_owned(),
+            value: SerializedValue::Struct(vec![
+                SerializedFieldValue {
+                    name: "m_LayerArray".to_owned(),
+                    value: SerializedValue::Array(Vec::new()),
+                },
+                SerializedFieldValue {
+                    name: "m_HumanLayerArray".to_owned(),
+                    value: SerializedValue::Array(Vec::new()),
+                },
+                SerializedFieldValue {
+                    name: "m_StateMachineArray".to_owned(),
+                    value: SerializedValue::Array(Vec::new()),
+                },
+            ]),
+        }]);
+        assert_eq!(
+            animator_controller_requires_source_dependency(&both_layer_arrays),
+            None
+        );
+
+        let mistyped_layer_index = SerializedValue::Struct(vec![SerializedFieldValue {
+            name: "m_Controller".to_owned(),
+            value: SerializedValue::Struct(vec![
+                SerializedFieldValue {
+                    name: "m_LayerArray".to_owned(),
+                    value: SerializedValue::Array(vec![SerializedValue::Struct(vec![
+                        SerializedFieldValue {
+                            name: "Data".to_owned(),
+                            value: SerializedValue::Struct(vec![SerializedFieldValue {
+                                name: "m_StateMachineIndex".to_owned(),
+                                value: SerializedValue::StringBytes(b"0".to_vec()),
+                            }]),
+                        },
+                    ])]),
+                },
+                SerializedFieldValue {
+                    name: "m_StateMachineArray".to_owned(),
+                    value: SerializedValue::Array(vec![SerializedValue::Struct(Vec::new())]),
+                },
+            ]),
+        }]);
+        assert_eq!(
+            animator_controller_requires_source_dependency(&mistyped_layer_index),
+            None
+        );
     }
 }
