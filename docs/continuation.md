@@ -820,3 +820,11 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - The focused synthetic test, full workspace (417 library tests, 10 CLI tests, 0 doc tests), warnings-denied Clippy, format check, baseline verifier (1,449 files unchanged), and `git diff --check` passed. No Unity-produced fixture or direct C# runtime differential was run.
 - Still incomplete: `ClipMuscleConstant` owning-TypeName remapping, other generated transformations, and broad Phase 1 parity remain open. Phase 2 remains locked.
 - Next: audit remaining conditional `Pass002_RenameSubnodes` transformations, retaining owner TypeTree type, child shape, and Unity-version conditions; test matching and nonmatching branches.
+
+## ValueArray vector field aliases
+
+- Current phase: Phase 1; gate not passed. This increment builds from pushed revision `fdf63f46a7afa3b408b7ca02c49db0d8e1b571aa`. Only `cocokoishi/RustAssetRipper`'s canonical repository is a write/push target. No other repository, UABEA, or user AssetBundle content was accessed.
+- Added the `ValueArray` `m_PositionValues`/`m_ScaleValues` field aliases by inspecting the exact nested `m_Array.m_Data` TypeTree element type; Vector3Float and Vector4Float select the matching suffix. Malformed nested paths and unsupported element types fail explicitly.
+- The focused synthetic test, full workspace (418 library tests, 10 CLI tests, 0 doc tests), warnings-denied Clippy, format check, baseline verifier (1,449 files unchanged), and `git diff --check` passed. No Unity-produced fixture or direct C# runtime differential was run.
+- Still incomplete: animation value processing/export and the broad Phase 1 feature set remain open. Phase 2 remains locked.
+- Next: continue auditing unported `Pass002_RenameSubnodes` shape-dependent rules and type-name transformations; preserve TypeTree owner, nested field shape, and version conditions in each port.

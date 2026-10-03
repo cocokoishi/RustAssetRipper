@@ -561,6 +561,57 @@ impl<'a> UnityYamlTypeTreeLayout<'a> {
         Ok(children)
     }
 
+    fn unique_child_index_by_name(
+        &self,
+        node_index: usize,
+        field_name: &str,
+    ) -> Result<Option<usize>, UnityYamlObjectConversionError> {
+        let mut matching_child = None;
+        for child_index in self.child_indices(node_index)? {
+            if self.node(child_index)?.name.as_deref() == Some(field_name)
+                && matching_child.replace(child_index).is_some()
+            {
+                return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                    node_index: child_index,
+                    reason: "ValueArray TypeTree field name is duplicated",
+                });
+            }
+        }
+        Ok(matching_child)
+    }
+
+    fn value_array_field_alias(
+        &self,
+        field_node_index: usize,
+        field_name: &str,
+    ) -> Result<Option<&'static str>, UnityYamlObjectConversionError> {
+        let aliases = match field_name {
+            "m_PositionValues" => ("m_PositionValues3", "m_PositionValues4"),
+            "m_ScaleValues" => ("m_ScaleValues3", "m_ScaleValues4"),
+            _ => return Ok(None),
+        };
+        let array_node = self
+            .unique_child_index_by_name(field_node_index, "m_Array")?
+            .ok_or(UnityYamlObjectConversionError::InvalidTypeTree {
+                node_index: field_node_index,
+                reason: "ValueArray vector field has no m_Array child",
+            })?;
+        let data_node = self
+            .unique_child_index_by_name(array_node, "m_Data")?
+            .ok_or(UnityYamlObjectConversionError::InvalidTypeTree {
+                node_index: array_node,
+                reason: "ValueArray m_Array node has no m_Data child",
+            })?;
+        match self.type_name(data_node)? {
+            "Vector3Float" => Ok(Some(aliases.0)),
+            "Vector4Float" => Ok(Some(aliases.1)),
+            _ => Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                node_index: data_node,
+                reason: "unsupported ValueArray element TypeTree type",
+            }),
+        }
+    }
+
     fn array_element_node(
         &self,
         node_index: usize,
@@ -910,9 +961,12 @@ impl<'a> UnityYamlTypeTreeLayout<'a> {
                     continue;
                 };
                 let child_type = self.type_name(child_index)?;
-                let Some(alias) =
+                let alias = if node_type == "ValueArray" {
+                    self.value_array_field_alias(child_index, field_name)?
+                } else {
                     baseline_type_scoped_field_alias(node_type, field_name, child_type)
-                else {
+                };
+                let Some(alias) = alias else {
                     if let Some(reason) =
                         unsupported_contextual_field_alias_reason(node_type, field_name, child_type)
                     {
@@ -2358,7 +2412,7 @@ fn baseline_type_scoped_field_aliases(type_name: &str) -> &'static [(&'static st
 fn has_conditional_field_aliases(type_name: &str) -> bool {
     matches!(
         type_name,
-        "ParticleSystem" | "ShapeModule" | "ClipMuscleConstant" | "Xform"
+        "ParticleSystem" | "ShapeModule" | "ClipMuscleConstant" | "Xform" | "ValueArray"
     )
 }
 
@@ -4331,6 +4385,134 @@ mod tests {
             ),
             Err(UnityYamlObjectConversionError::InvalidTypeTree {
                 reason: "unsupported child TypeTree type for baseline field alias",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn value_array_aliases_follow_nested_vector_element_type() {
+        fn append_vector_array_field(
+            nodes: &mut Vec<TypeTreeNode>,
+            field_name: &str,
+            element_type: &str,
+        ) {
+            nodes.push(type_tree_node(2, "vector", field_name, 0));
+            nodes.push(type_tree_node(3, "Array", "m_Array", 0));
+            nodes.push(type_tree_node(4, "SInt32", "size", 0));
+            nodes.push(type_tree_node(4, element_type, "m_Data", 0));
+            for component in ["x", "y", "z"] {
+                nodes.push(type_tree_node(5, "float", component, 0));
+            }
+            if element_type == "Vector4Float" {
+                nodes.push(type_tree_node(5, "float", "w", 0));
+            }
+        }
+
+        let mut nodes = vec![
+            type_tree_node(0, "GameObject", "Base", 0),
+            type_tree_node(1, "SInt32", "m_PositionValues", 0),
+            type_tree_node(1, "ValueArray", "m_ThreeFour", 0),
+        ];
+        append_vector_array_field(&mut nodes, "m_PositionValues", "Vector3Float");
+        append_vector_array_field(&mut nodes, "m_ScaleValues", "Vector4Float");
+        nodes.push(type_tree_node(1, "ValueArray", "m_FourThree", 0));
+        append_vector_array_field(&mut nodes, "m_PositionValues", "Vector4Float");
+        append_vector_array_field(&mut nodes, "m_ScaleValues", "Vector3Float");
+        let type_tree = TypeTree {
+            nodes,
+            string_buffer: Vec::new(),
+        };
+        let hints = UnityYamlObjectConversionHints::from_type_tree(
+            &type_tree,
+            version(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        for (path, alias) in [
+            ("m_ThreeFour.m_PositionValues", "m_PositionValues3"),
+            ("m_ThreeFour.m_ScaleValues", "m_ScaleValues4"),
+            ("m_FourThree.m_PositionValues", "m_PositionValues4"),
+            ("m_FourThree.m_ScaleValues", "m_ScaleValues3"),
+        ] {
+            assert_eq!(
+                hints.field_name_aliases.get(path).map(String::as_str),
+                Some(alias)
+            );
+        }
+        assert!(!hints.field_name_aliases.contains_key("m_PositionValues"));
+
+        let vector3 = || {
+            SerializedValue::Struct(vec![
+                field("x", SerializedValue::F32(1.0)),
+                field("y", SerializedValue::F32(2.0)),
+                field("z", SerializedValue::F32(3.0)),
+            ])
+        };
+        let vector4 = || {
+            SerializedValue::Struct(vec![
+                field("x", SerializedValue::F32(1.0)),
+                field("y", SerializedValue::F32(2.0)),
+                field("z", SerializedValue::F32(3.0)),
+                field("w", SerializedValue::F32(4.0)),
+            ])
+        };
+        let value = SerializedValue::Struct(vec![
+            field("m_PositionValues", SerializedValue::I32(77)),
+            field(
+                "m_ThreeFour",
+                SerializedValue::Struct(vec![
+                    field("m_PositionValues", SerializedValue::Array(vec![vector3()])),
+                    field("m_ScaleValues", SerializedValue::Array(vec![vector4()])),
+                ]),
+            ),
+            field(
+                "m_FourThree",
+                SerializedValue::Struct(vec![
+                    field("m_PositionValues", SerializedValue::Array(vec![vector4()])),
+                    field("m_ScaleValues", SerializedValue::Array(vec![vector3()])),
+                ]),
+            ),
+        ]);
+        let document = convert_with_object_hints(&value, &hints, |_| {
+            unreachable!("the generated ValueArray fixture has no PPtrs")
+        })
+        .unwrap();
+        let output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[document],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        for expected in [
+            "m_PositionValues: 77",
+            "m_PositionValues3:",
+            "m_PositionValues4:",
+            "m_ScaleValues3:",
+            "m_ScaleValues4:",
+            "x: 1",
+            "w: 4",
+        ] {
+            assert!(output.contains(expected), "missing {expected}");
+        }
+
+        let unsupported = TypeTree {
+            nodes: vec![
+                type_tree_node(0, "ValueArray", "Base", 0),
+                type_tree_node(1, "vector", "m_PositionValues", 0),
+                type_tree_node(2, "Array", "m_Array", 0),
+                type_tree_node(3, "SInt32", "size", 0),
+                type_tree_node(3, "SInt32", "m_Data", 0),
+            ],
+            string_buffer: Vec::new(),
+        };
+        assert!(matches!(
+            UnityYamlObjectConversionHints::from_type_tree(
+                &unsupported,
+                version(),
+                UnityYamlObjectConversionLimits::default()
+            ),
+            Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                reason: "unsupported ValueArray element TypeTree type",
                 ..
             })
         ));
