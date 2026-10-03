@@ -632,7 +632,7 @@ fn workspace_object_to_unity_yaml_document_with_context(
     let mut streamed_export_root = None;
     if let Some(asset_kind) = match class_id {
         43 => Some(StreamedYamlAssetKind::Mesh),
-        28 | 189 => Some(StreamedYamlAssetKind::ImageTexture),
+        189 => Some(StreamedYamlAssetKind::ImageTexture),
         _ => None,
     } {
         let staging_limits = streamed_resources
