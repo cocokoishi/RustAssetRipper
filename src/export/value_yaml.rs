@@ -2278,6 +2278,17 @@ fn baseline_type_scoped_field_aliases(type_name: &str) -> &'static [(&'static st
         ("m_BlendEvent", "m_BlendParameter"),
         ("m_BlendEventY", "m_BlendParameterY"),
     ];
+    const LIGHTMAP_SETTINGS_ALIASES: &[(&str, &str)] =
+        &[("m_LightmapSnapshot", "m_LightingDataAsset")];
+    const TEXTURE_3D_ALIASES: &[(&str, &str)] = &[
+        ("m_DataSize", "m_CompleteImageSize"),
+        ("m_ImageCount", "m_Depth"),
+    ];
+    const MESH_RENDERER_ALIASES: &[(&str, &str)] = &[("m_StitchSeams", "m_StitchLightmapSeams")];
+    const PREFAB_ALIASES: &[(&str, &str)] = &[
+        ("m_IsPrefabParent", "m_IsPrefabAsset"),
+        ("m_ParentPrefab", "m_SourcePrefab"),
+    ];
 
     match type_name {
         "AnimationClip" => ANIMATION_CLIP_ALIASES,
@@ -2285,6 +2296,10 @@ fn baseline_type_scoped_field_aliases(type_name: &str) -> &'static [(&'static st
         "AnimatorController" => ANIMATOR_CONTROLLER_ALIASES,
         "AnimatorControllerLayer" => ANIMATOR_CONTROLLER_LAYER_ALIASES,
         "BlendTree" => BLEND_TREE_ALIASES,
+        "LightmapSettings" => LIGHTMAP_SETTINGS_ALIASES,
+        "Texture3D" => TEXTURE_3D_ALIASES,
+        "MeshRenderer" => MESH_RENDERER_ALIASES,
+        "Prefab" => PREFAB_ALIASES,
         _ => &[],
     }
 }
@@ -3524,6 +3539,105 @@ mod tests {
         assert!(blend_tree_output.contains("m_BlendParameterY: Vertical"));
         assert!(!blend_tree_output.contains("m_BlendEvent:"));
         assert!(!blend_tree_output.contains("m_BlendEventY:"));
+    }
+
+    #[test]
+    fn lightmap_texture3d_mesh_renderer_and_prefab_aliases_are_type_scoped() {
+        let type_tree = TypeTree {
+            nodes: vec![
+                type_tree_node(0, "GameObject", "Base", 0),
+                type_tree_node(1, "SInt32", "m_DataSize", 0),
+                type_tree_node(1, "LightmapSettings", "m_Lighting", 0),
+                type_tree_node(2, "PPtr<LightingDataAsset>", "m_LightmapSnapshot", 0),
+                type_tree_node(1, "Texture3D", "m_Texture", 0),
+                type_tree_node(2, "SInt32", "m_DataSize", 0),
+                type_tree_node(2, "SInt32", "m_ImageCount", 0),
+                type_tree_node(1, "MeshRenderer", "m_Renderer", 0),
+                type_tree_node(2, "bool", "m_StitchSeams", 0),
+                type_tree_node(1, "Prefab", "m_Prefab", 0),
+                type_tree_node(2, "bool", "m_IsPrefabParent", 0),
+                type_tree_node(2, "PPtr<Prefab>", "m_ParentPrefab", 0),
+            ],
+            string_buffer: Vec::new(),
+        };
+        let hints = UnityYamlObjectConversionHints::from_type_tree(
+            &type_tree,
+            version(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        for (path, alias) in [
+            ("m_Lighting.m_LightmapSnapshot", "m_LightingDataAsset"),
+            ("m_Texture.m_DataSize", "m_CompleteImageSize"),
+            ("m_Texture.m_ImageCount", "m_Depth"),
+            ("m_Renderer.m_StitchSeams", "m_StitchLightmapSeams"),
+            ("m_Prefab.m_IsPrefabParent", "m_IsPrefabAsset"),
+            ("m_Prefab.m_ParentPrefab", "m_SourcePrefab"),
+        ] {
+            assert_eq!(
+                hints.field_name_aliases.get(path).map(String::as_str),
+                Some(alias)
+            );
+        }
+
+        let value = SerializedValue::Struct(vec![
+            field("m_DataSize", SerializedValue::I32(777)),
+            field(
+                "m_Lighting",
+                SerializedValue::Struct(vec![field("m_LightmapSnapshot", null_pptr())]),
+            ),
+            field(
+                "m_Texture",
+                SerializedValue::Struct(vec![
+                    field("m_DataSize", SerializedValue::I32(2048)),
+                    field("m_ImageCount", SerializedValue::I32(8)),
+                ]),
+            ),
+            field(
+                "m_Renderer",
+                SerializedValue::Struct(vec![field("m_StitchSeams", SerializedValue::Bool(true))]),
+            ),
+            field(
+                "m_Prefab",
+                SerializedValue::Struct(vec![
+                    field("m_IsPrefabParent", SerializedValue::Bool(true)),
+                    field("m_ParentPrefab", null_pptr()),
+                ]),
+            ),
+        ]);
+        let document = convert_with_object_hints(&value, &hints, |_| {
+            unreachable!("the generated pointer fields are null")
+        })
+        .unwrap();
+        let output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[document],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        for expected in [
+            "m_DataSize: 777",
+            "m_LightingDataAsset: {fileID: 0}",
+            "m_CompleteImageSize: 2048",
+            "m_Depth: 8",
+            "m_StitchLightmapSeams: 1",
+            "m_IsPrefabAsset: 1",
+            "m_SourcePrefab: {fileID: 0}",
+        ] {
+            assert!(output.contains(expected), "missing {expected}");
+        }
+        for serialized_name in [
+            "m_LightmapSnapshot",
+            "m_ImageCount",
+            "m_StitchSeams",
+            "m_IsPrefabParent",
+            "m_ParentPrefab",
+        ] {
+            assert!(
+                !output.contains(&format!("{serialized_name}:")),
+                "found old key {serialized_name}"
+            );
+        }
+        assert!(!output.contains("m_DataSize: 2048"));
     }
 
     #[test]

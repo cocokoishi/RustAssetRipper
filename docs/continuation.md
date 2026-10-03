@@ -764,3 +764,11 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Focused alias test and full workspace passed: 410 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and `git diff --check`.
 - Still incomplete: synthetic values only, with no Unity-produced TypeTree fixture or direct C# runtime differential. Other controller/layer/tree fields and animation export behavior remain open. Phase 1 remains incomplete; Phase 2 remains locked.
 - Next: audit other direct-child rules that the shared TypeTree alias registry can represent, preserving each rule's owner type and any version or field-type predicate.
+
+## Lightmap, Texture3D, MeshRenderer, and Prefab YAML field aliases
+
+- Current phase: Phase 1; gate not passed. This increment builds from pushed revision `c5c839dac6e112289bff46ae74015eb0c6b7cb42`. Only `cocokoishi/RustAssetRipper`'s canonical repository is a write/push target. No other remote repository, UABEA, or user AssetBundle content was accessed.
+- Added TypeTree-scoped aliases for `LightmapSettings`, `Texture3D`, `MeshRenderer`, and legacy `Prefab`. Tests also prove that `m_DataSize` under another parent is unchanged.
+- Focused alias test and full workspace passed: 411 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and `git diff --check`.
+- Still incomplete: synthetic evidence only, with no Unity-produced fixture or direct C# runtime differential. Resource decoding, processing, and complete export paths remain open; Phase 1 remains incomplete and Phase 2 remains locked.
+- Next: continue through the remaining direct-child Pass002 renames, preserving each source node-type predicate and version/data-shape constraint.
