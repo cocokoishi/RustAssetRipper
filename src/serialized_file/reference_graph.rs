@@ -243,6 +243,16 @@ impl ObjectReferenceGraph {
         &self.issues
     }
 
+    /// True when this object's payload and every field visible to the reference scan were parsed.
+    pub fn object_scan_is_complete(&self, object_index: usize) -> bool {
+        object_index < self.object_count
+            && object_index < self.attempted_objects
+            && !self
+                .issues
+                .iter()
+                .any(|issue| reference_issue_object_index(issue) == object_index)
+    }
+
     /// Returns every object-table index with this PathID, preserving duplicate identities.
     pub fn object_indices_for_path_id(
         &self,
@@ -378,6 +388,16 @@ impl ObjectReferenceGraph {
             .map_err(|_| ReferenceGraphBuildError::allocation("reference scan issues", 1))?;
         self.issues.push(issue);
         Ok(())
+    }
+}
+
+fn reference_issue_object_index(issue: &ReferenceGraphIssue) -> usize {
+    match issue {
+        ReferenceGraphIssue::ObjectDecodeFailed { object_index, .. }
+        | ReferenceGraphIssue::UnparsedTrailingPayload { object_index, .. }
+        | ReferenceGraphIssue::UnparsedRawValue { object_index, .. }
+        | ReferenceGraphIssue::FieldPathLimitExceeded { object_index, .. }
+        | ReferenceGraphIssue::EdgeLimitExceeded { object_index, .. } => *object_index,
     }
 }
 
@@ -706,6 +726,15 @@ impl<'a> MultiFileReferenceGraph<'a> {
             .class_id
             .map(i32::from)
             .or_else(|| object.resolved_type_index.map(|_| object.raw_type_id))
+    }
+
+    /// Returns whether a loaded object's TypeTree reference scan was complete.
+    pub fn object_scan_is_complete(&self, file_index: usize, object_index: usize) -> Option<bool> {
+        Some(
+            self.file_graphs
+                .get(file_index)?
+                .object_scan_is_complete(object_index),
+        )
     }
 
     /// Returns references emitted by one file-scoped source object.

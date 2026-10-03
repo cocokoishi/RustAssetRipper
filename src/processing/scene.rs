@@ -189,6 +189,18 @@ pub struct SceneHierarchyIssue {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceSceneHierarchyIssue {
+    pub source_file_index: usize,
+    pub relationship_index: usize,
+    pub source_object_index: usize,
+    pub source_path_id: i64,
+    pub target_file_index: Option<usize>,
+    pub target_object_index: Option<usize>,
+    pub field_path: String,
+    pub kind: SceneHierarchyIssueKind,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SceneHierarchyIssueKind {
     TargetClassUnknown,
     TargetIsNotTransform {
@@ -205,6 +217,46 @@ pub enum SceneHierarchyIssueKind {
         counterpart_kind: SceneRelationshipKind,
         actual_target: SceneRelationshipTarget,
     },
+    UnresolvedTarget {
+        target: SceneRelationshipTarget,
+    },
+    SourceScanIncomplete,
+    CounterpartScanIncomplete,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SceneHierarchyAuditLimits {
+    pub max_relationships: usize,
+    pub max_issues: usize,
+}
+
+impl Default for SceneHierarchyAuditLimits {
+    fn default() -> Self {
+        Self {
+            max_relationships: 2_000_000,
+            max_issues: 100_000,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceSceneHierarchyAudit {
+    relationships_checked: usize,
+    issues: Vec<WorkspaceSceneHierarchyIssue>,
+}
+
+impl WorkspaceSceneHierarchyAudit {
+    pub fn relationships_checked(&self) -> usize {
+        self.relationships_checked
+    }
+
+    pub fn issues(&self) -> &[WorkspaceSceneHierarchyIssue] {
+        &self.issues
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.issues.is_empty()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -418,6 +470,17 @@ impl Error for SceneRootDiscoveryError {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SceneGraphAuditError {
+    CountOverflow {
+        resource: &'static str,
+    },
+    RelationshipLimitExceeded {
+        count: usize,
+        limit: usize,
+    },
+    IssueLimitExceeded {
+        count: usize,
+        limit: usize,
+    },
     AllocationFailed {
         resource: &'static str,
         requested: usize,
@@ -426,11 +489,25 @@ pub enum SceneGraphAuditError {
         relationship_index: usize,
         relationship_count: usize,
     },
+    ReferenceGraphMismatch {
+        message: String,
+    },
 }
 
 impl Display for SceneGraphAuditError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
+            Self::CountOverflow { resource } => {
+                write!(f, "scene graph audit count overflows for {resource}")
+            }
+            Self::RelationshipLimitExceeded { count, limit } => write!(
+                f,
+                "scene graph audit has {count} relationships, exceeding limit {limit}"
+            ),
+            Self::IssueLimitExceeded { count, limit } => write!(
+                f,
+                "scene graph audit has {count} issues, exceeding limit {limit}"
+            ),
             Self::AllocationFailed { resource, requested } => write!(
                 f,
                 "could not reserve {requested} entries for scene graph audit {resource}"
@@ -442,6 +519,9 @@ impl Display for SceneGraphAuditError {
                 f,
                 "scene graph audit index {relationship_index} is outside the {relationship_count} relationships"
             ),
+            Self::ReferenceGraphMismatch { message } => {
+                write!(f, "scene graph audit reference graph mismatch: {message}")
+            }
         }
     }
 }
@@ -1351,6 +1431,282 @@ impl SceneGraph {
             }
         }
         Ok(issues)
+    }
+
+    /// Audit reciprocal Transform parent/child pointers across every loaded SerializedFile.
+    ///
+    /// A missing reciprocal edge is reported only when the target object's reference scan is
+    /// complete. If its TypeTree payload or one of its fields could not be scanned, the result is
+    /// marked incomplete instead of claiming that the edge is absent.
+    pub fn audit_workspace_transform_links(
+        &mut self,
+        source_file_index: usize,
+        source_file_name: &str,
+        graph: &MultiFileReferenceGraph<'_>,
+        limits: SceneHierarchyAuditLimits,
+    ) -> Result<WorkspaceSceneHierarchyAudit, SceneGraphAuditError> {
+        self.resolve_with_multi_file_graph(source_file_index, source_file_name, graph)
+            .map_err(|source| SceneGraphAuditError::ReferenceGraphMismatch {
+                message: source.to_string(),
+            })?;
+
+        let relationship_count = self
+            .relationships
+            .iter()
+            .filter(|relationship| {
+                matches!(
+                    relationship.kind,
+                    SceneRelationshipKind::TransformParent | SceneRelationshipKind::TransformChild
+                )
+            })
+            .count();
+        if relationship_count > limits.max_relationships {
+            return Err(SceneGraphAuditError::RelationshipLimitExceeded {
+                count: relationship_count,
+                limit: limits.max_relationships,
+            });
+        }
+
+        let mut audit = WorkspaceSceneHierarchyAudit {
+            relationships_checked: 0,
+            issues: Vec::new(),
+        };
+        for (relationship_index, relationship) in self.relationships.iter().enumerate() {
+            let counterpart_kind = match relationship.kind {
+                SceneRelationshipKind::TransformParent => SceneRelationshipKind::TransformChild,
+                SceneRelationshipKind::TransformChild => SceneRelationshipKind::TransformParent,
+                _ => continue,
+            };
+            audit.relationships_checked = audit.relationships_checked.checked_add(1).ok_or(
+                SceneGraphAuditError::CountOverflow {
+                    resource: "workspace Transform relationships",
+                },
+            )?;
+
+            if graph.object_scan_is_complete(source_file_index, relationship.source_object_index)
+                != Some(true)
+            {
+                push_workspace_hierarchy_issue(
+                    &mut audit,
+                    limits.max_issues,
+                    WorkspaceSceneHierarchyIssue {
+                        source_file_index,
+                        relationship_index,
+                        source_object_index: relationship.source_object_index,
+                        source_path_id: relationship.source_path_id,
+                        target_file_index: None,
+                        target_object_index: None,
+                        field_path: relationship.field_path.clone(),
+                        kind: SceneHierarchyIssueKind::SourceScanIncomplete,
+                    },
+                )?;
+                continue;
+            }
+
+            if relationship.kind == SceneRelationshipKind::TransformParent
+                && relationship.target == SceneRelationshipTarget::Null
+            {
+                continue;
+            }
+
+            let (target_file_index, target_object_index) = match &relationship.target {
+                SceneRelationshipTarget::LocalObject { object_index } => {
+                    (source_file_index, *object_index)
+                }
+                SceneRelationshipTarget::WorkspaceObject {
+                    file_index,
+                    object_index,
+                } => (*file_index, *object_index),
+                target => {
+                    push_workspace_hierarchy_issue(
+                        &mut audit,
+                        limits.max_issues,
+                        WorkspaceSceneHierarchyIssue {
+                            source_file_index,
+                            relationship_index,
+                            source_object_index: relationship.source_object_index,
+                            source_path_id: relationship.source_path_id,
+                            target_file_index: None,
+                            target_object_index: None,
+                            field_path: relationship.field_path.clone(),
+                            kind: SceneHierarchyIssueKind::UnresolvedTarget {
+                                target: target.clone(),
+                            },
+                        },
+                    )?;
+                    continue;
+                }
+            };
+
+            let Some(target_class_id) =
+                graph.object_class_id(target_file_index, target_object_index)
+            else {
+                push_workspace_hierarchy_issue(
+                    &mut audit,
+                    limits.max_issues,
+                    WorkspaceSceneHierarchyIssue {
+                        source_file_index,
+                        relationship_index,
+                        source_object_index: relationship.source_object_index,
+                        source_path_id: relationship.source_path_id,
+                        target_file_index: Some(target_file_index),
+                        target_object_index: Some(target_object_index),
+                        field_path: relationship.field_path.clone(),
+                        kind: SceneHierarchyIssueKind::TargetClassUnknown,
+                    },
+                )?;
+                continue;
+            };
+            if !matches!(
+                target_class_id,
+                TRANSFORM_CLASS_ID | RECT_TRANSFORM_CLASS_ID
+            ) {
+                push_workspace_hierarchy_issue(
+                    &mut audit,
+                    limits.max_issues,
+                    WorkspaceSceneHierarchyIssue {
+                        source_file_index,
+                        relationship_index,
+                        source_object_index: relationship.source_object_index,
+                        source_path_id: relationship.source_path_id,
+                        target_file_index: Some(target_file_index),
+                        target_object_index: Some(target_object_index),
+                        field_path: relationship.field_path.clone(),
+                        kind: SceneHierarchyIssueKind::TargetIsNotTransform {
+                            class_id: target_class_id,
+                        },
+                    },
+                )?;
+                continue;
+            }
+
+            if graph.object_scan_is_complete(target_file_index, target_object_index) != Some(true) {
+                push_workspace_hierarchy_issue(
+                    &mut audit,
+                    limits.max_issues,
+                    WorkspaceSceneHierarchyIssue {
+                        source_file_index,
+                        relationship_index,
+                        source_object_index: relationship.source_object_index,
+                        source_path_id: relationship.source_path_id,
+                        target_file_index: Some(target_file_index),
+                        target_object_index: Some(target_object_index),
+                        field_path: relationship.field_path.clone(),
+                        kind: SceneHierarchyIssueKind::CounterpartScanIncomplete,
+                    },
+                )?;
+                continue;
+            }
+
+            let Some(target_identity) =
+                graph.object_identity(target_file_index, target_object_index)
+            else {
+                push_workspace_hierarchy_issue(
+                    &mut audit,
+                    limits.max_issues,
+                    WorkspaceSceneHierarchyIssue {
+                        source_file_index,
+                        relationship_index,
+                        source_object_index: relationship.source_object_index,
+                        source_path_id: relationship.source_path_id,
+                        target_file_index: Some(target_file_index),
+                        target_object_index: Some(target_object_index),
+                        field_path: relationship.field_path.clone(),
+                        kind: SceneHierarchyIssueKind::TargetClassUnknown,
+                    },
+                )?;
+                continue;
+            };
+            let mut counterpart_edges = graph
+                .references_from_object(target_file_index, target_object_index)
+                .filter(|reference| {
+                    if reference.source_path_id != target_identity.path_id {
+                        return false;
+                    }
+                    match counterpart_kind {
+                        SceneRelationshipKind::TransformParent => {
+                            reference_field_path_matches(reference, "m_Father")
+                        }
+                        SceneRelationshipKind::TransformChild => {
+                            reference_field_path_matches_array_element(reference, "m_Children")
+                        }
+                        _ => false,
+                    }
+                });
+            let Some(counterpart_edge) = counterpart_edges.next() else {
+                push_workspace_hierarchy_issue(
+                    &mut audit,
+                    limits.max_issues,
+                    WorkspaceSceneHierarchyIssue {
+                        source_file_index,
+                        relationship_index,
+                        source_object_index: relationship.source_object_index,
+                        source_path_id: relationship.source_path_id,
+                        target_file_index: Some(target_file_index),
+                        target_object_index: Some(target_object_index),
+                        field_path: relationship.field_path.clone(),
+                        kind: SceneHierarchyIssueKind::MissingReciprocal { counterpart_kind },
+                    },
+                )?;
+                continue;
+            };
+
+            let Some(_second_edge) = counterpart_edges.next() else {
+                if !matches!(
+                    counterpart_edge.resolution,
+                    MultiFilePPtrResolution::Object {
+                        target_file_index: actual_file_index,
+                        target_object_index: actual_object_index,
+                    } if actual_file_index == source_file_index
+                        && actual_object_index == relationship.source_object_index
+                ) {
+                    push_workspace_hierarchy_issue(
+                        &mut audit,
+                        limits.max_issues,
+                        WorkspaceSceneHierarchyIssue {
+                            source_file_index,
+                            relationship_index,
+                            source_object_index: relationship.source_object_index,
+                            source_path_id: relationship.source_path_id,
+                            target_file_index: Some(target_file_index),
+                            target_object_index: Some(target_object_index),
+                            field_path: relationship.field_path.clone(),
+                            kind: SceneHierarchyIssueKind::MismatchedReciprocalTarget {
+                                counterpart_kind,
+                                actual_target: scene_target_from_multi_file_resolution(
+                                    &counterpart_edge.resolution,
+                                    target_file_index,
+                                ),
+                            },
+                        },
+                    )?;
+                }
+                continue;
+            };
+            let match_count = counterpart_edges.count().checked_add(2).ok_or(
+                SceneGraphAuditError::CountOverflow {
+                    resource: "workspace reciprocal edge matches",
+                },
+            )?;
+            push_workspace_hierarchy_issue(
+                &mut audit,
+                limits.max_issues,
+                WorkspaceSceneHierarchyIssue {
+                    source_file_index,
+                    relationship_index,
+                    source_object_index: relationship.source_object_index,
+                    source_path_id: relationship.source_path_id,
+                    target_file_index: Some(target_file_index),
+                    target_object_index: Some(target_object_index),
+                    field_path: relationship.field_path.clone(),
+                    kind: SceneHierarchyIssueKind::DuplicateReciprocal {
+                        counterpart_kind,
+                        match_count,
+                    },
+                },
+            )?;
+        }
+        Ok(audit)
     }
 
     /// Resolve every scene edge through a cross-file graph built from the same ordered workspace.
@@ -2353,6 +2709,36 @@ fn push_workspace_scene_root_candidate(
     Ok(())
 }
 
+fn push_workspace_hierarchy_issue(
+    audit: &mut WorkspaceSceneHierarchyAudit,
+    limit: usize,
+    issue: WorkspaceSceneHierarchyIssue,
+) -> Result<(), SceneGraphAuditError> {
+    let requested =
+        audit
+            .issues
+            .len()
+            .checked_add(1)
+            .ok_or(SceneGraphAuditError::CountOverflow {
+                resource: "workspace hierarchy issues",
+            })?;
+    if requested > limit {
+        return Err(SceneGraphAuditError::IssueLimitExceeded {
+            count: requested,
+            limit,
+        });
+    }
+    audit
+        .issues
+        .try_reserve(1)
+        .map_err(|_| SceneGraphAuditError::AllocationFailed {
+            resource: "workspace hierarchy issues",
+            requested,
+        })?;
+    audit.issues.push(issue);
+    Ok(())
+}
+
 fn is_scene_object_class(class_id: Option<i32>) -> bool {
     matches!(
         class_id,
@@ -2393,6 +2779,26 @@ fn reference_field_path_matches(
             .strip_suffix(relationship_field_path)
             .and_then(|prefix| prefix.strip_suffix('.'))
             .is_some_and(|prefix| prefix.split('.').all(|segment| segment == "Base"))
+}
+
+fn reference_field_path_matches_array_element(
+    reference: &MultiFileObjectReference<'_>,
+    field_name: &str,
+) -> bool {
+    let mut path = reference.field_path;
+    while let Some(base_path) = path.strip_prefix("Base.") {
+        path = base_path;
+    }
+    let Some(element) = path
+        .strip_prefix(field_name)
+        .and_then(|value| value.strip_prefix('['))
+    else {
+        return false;
+    };
+    let Some((index, suffix)) = element.split_once(']') else {
+        return false;
+    };
+    !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit()) && suffix.is_empty()
 }
 
 fn scene_target_from_multi_file_resolution(
@@ -2991,6 +3397,24 @@ mod tests {
         father_file_id: i32,
         father_path_id: i64,
     ) -> Vec<u8> {
+        make_transform_file_with_hierarchy(
+            transform_path_id,
+            father_file_id,
+            father_path_id,
+            &[],
+            &[],
+            false,
+        )
+    }
+
+    fn make_transform_file_with_hierarchy(
+        transform_path_id: i32,
+        father_file_id: i32,
+        father_path_id: i64,
+        children: &[(i32, i64)],
+        external_names: &[&str],
+        include_unparsed_raw_leaf: bool,
+    ) -> Vec<u8> {
         let mut strings = Vec::new();
         let root_type = push_tree_string(&mut strings, "Transform");
         let empty = push_tree_string(&mut strings, "");
@@ -3014,6 +3438,8 @@ mod tests {
         let father_field = push_tree_string(&mut strings, "m_Father");
         let root_order_field = push_tree_string(&mut strings, "m_RootOrder");
         let euler_hint_field = push_tree_string(&mut strings, "m_LocalEulerAnglesHint");
+        let unknown_type = push_tree_string(&mut strings, "UnknownSerializedType");
+        let unknown_field = push_tree_string(&mut strings, "m_UnparsedTail");
         let x_field = push_tree_string(&mut strings, "x");
         let y_field = push_tree_string(&mut strings, "y");
         let z_field = push_tree_string(&mut strings, "z");
@@ -3057,6 +3483,9 @@ mod tests {
         add_node(2, float_type, x_field, 4);
         add_node(2, float_type, y_field, 4);
         add_node(2, float_type, z_field, 4);
+        if include_unparsed_raw_leaf {
+            add_node(1, unknown_type, unknown_field, 1);
+        }
 
         let mut metadata = Vec::new();
         metadata.extend_from_slice(b"2019.4.0f1\0");
@@ -3090,19 +3519,33 @@ mod tests {
         for value in [1.25, -2.0, 3.5, 2.0, 3.0, 4.0] {
             put_f32_le(&mut payload, value);
         }
-        put_i32_le(&mut payload, 0); // m_Children count
+        put_i32_le(&mut payload, i32::try_from(children.len()).unwrap());
+        for &(file_id, path_id) in children {
+            put_i32_le(&mut payload, file_id);
+            put_i64_le(&mut payload, path_id);
+        }
         put_i32_le(&mut payload, father_file_id); // m_Father file ID
         put_i64_le(&mut payload, father_path_id); // m_Father PathID
         put_i32_le(&mut payload, 7); // m_RootOrder
         for value in [10.0, 20.0, 30.0] {
             put_f32_le(&mut payload, value);
         }
+        if include_unparsed_raw_leaf {
+            payload.push(0x7f);
+        }
 
         put_i32_le(&mut metadata, i32::try_from(payload.len()).unwrap());
         put_i32_le(&mut metadata, 4);
         put_u16_le(&mut metadata, 4);
         put_u16_le(&mut metadata, 0);
-        put_i32_le(&mut metadata, 0); // external count
+        put_i32_le(&mut metadata, i32::try_from(external_names.len()).unwrap());
+        for external_name in external_names {
+            metadata.push(0); // asset path
+            metadata.extend_from_slice(&[0; 16]); // GUID
+            put_i32_le(&mut metadata, 0); // asset type
+            metadata.extend_from_slice(external_name.as_bytes());
+            metadata.push(0);
+        }
         metadata.push(0); // reference type count
 
         let header_size = 20usize;
@@ -3880,6 +4323,284 @@ mod tests {
     }
 
     #[test]
+    fn audits_reciprocal_transform_edges_across_serialized_files() {
+        let child_bytes =
+            make_transform_file_with_hierarchy(42, 1, 99, &[], &["parent.assets"], false);
+        let parent_bytes =
+            make_transform_file_with_hierarchy(99, 0, 0, &[(1, 42)], &["child.assets"], false);
+        let child_file = SerializedFile::parse(&child_bytes).unwrap();
+        let parent_file = SerializedFile::parse(&parent_bytes).unwrap();
+        let child_references =
+            crate::serialized_file::reference_graph::ObjectReferenceGraph::build(&child_file)
+                .unwrap();
+        let parent_references =
+            crate::serialized_file::reference_graph::ObjectReferenceGraph::build(&parent_file)
+                .unwrap();
+        let named_files = [
+            crate::serialized_file::reference_graph::NamedObjectReferenceGraph {
+                file_name: "child.assets",
+                metadata: &child_file.metadata,
+                graph: &child_references,
+            },
+            crate::serialized_file::reference_graph::NamedObjectReferenceGraph {
+                file_name: "parent.assets",
+                metadata: &parent_file.metadata,
+                graph: &parent_references,
+            },
+        ];
+        let references = MultiFileReferenceGraph::build(&named_files).unwrap();
+
+        let mut child_scene = SceneGraph::build(&child_file, SceneGraphLimits::default()).unwrap();
+        let child_audit = child_scene
+            .audit_workspace_transform_links(
+                0,
+                "child.assets",
+                &references,
+                super::SceneHierarchyAuditLimits::default(),
+            )
+            .unwrap();
+        assert_eq!(child_audit.relationships_checked(), 1);
+        assert!(child_audit.issues().is_empty());
+        assert!(child_audit.is_complete());
+
+        let mut parent_scene =
+            SceneGraph::build(&parent_file, SceneGraphLimits::default()).unwrap();
+        let parent_audit = parent_scene
+            .audit_workspace_transform_links(
+                1,
+                "parent.assets",
+                &references,
+                super::SceneHierarchyAuditLimits::default(),
+            )
+            .unwrap();
+        assert_eq!(parent_audit.relationships_checked(), 2);
+        assert!(parent_audit.issues().is_empty());
+        assert!(parent_audit.is_complete());
+    }
+
+    #[test]
+    fn reports_missing_cross_file_transform_reciprocal_without_inventing_a_match() {
+        let child_bytes =
+            make_transform_file_with_hierarchy(42, 1, 99, &[], &["parent.assets"], false);
+        let parent_bytes = make_transform_file_with_hierarchy(99, 0, 0, &[], &[], false);
+        let child_file = SerializedFile::parse(&child_bytes).unwrap();
+        let parent_file = SerializedFile::parse(&parent_bytes).unwrap();
+        let child_references =
+            crate::serialized_file::reference_graph::ObjectReferenceGraph::build(&child_file)
+                .unwrap();
+        let parent_references =
+            crate::serialized_file::reference_graph::ObjectReferenceGraph::build(&parent_file)
+                .unwrap();
+        let named_files = [
+            crate::serialized_file::reference_graph::NamedObjectReferenceGraph {
+                file_name: "child.assets",
+                metadata: &child_file.metadata,
+                graph: &child_references,
+            },
+            crate::serialized_file::reference_graph::NamedObjectReferenceGraph {
+                file_name: "parent.assets",
+                metadata: &parent_file.metadata,
+                graph: &parent_references,
+            },
+        ];
+        let references = MultiFileReferenceGraph::build(&named_files).unwrap();
+        let mut child_scene = SceneGraph::build(&child_file, SceneGraphLimits::default()).unwrap();
+
+        let audit = child_scene
+            .audit_workspace_transform_links(
+                0,
+                "child.assets",
+                &references,
+                super::SceneHierarchyAuditLimits::default(),
+            )
+            .unwrap();
+        assert_eq!(audit.relationships_checked(), 1);
+        assert_eq!(
+            audit.issues(),
+            &[super::WorkspaceSceneHierarchyIssue {
+                source_file_index: 0,
+                relationship_index: 1,
+                source_object_index: 0,
+                source_path_id: 42,
+                target_file_index: Some(1),
+                target_object_index: Some(0),
+                field_path: "m_Father".to_owned(),
+                kind: super::SceneHierarchyIssueKind::MissingReciprocal {
+                    counterpart_kind: SceneRelationshipKind::TransformChild,
+                },
+            }]
+        );
+        assert!(!audit.is_complete());
+    }
+
+    #[test]
+    fn workspace_transform_audit_enforces_relationship_and_issue_limits() {
+        let child_bytes =
+            make_transform_file_with_hierarchy(42, 1, 99, &[], &["parent.assets"], false);
+        let parent_bytes = make_transform_file_with_hierarchy(99, 0, 0, &[], &[], false);
+        let child_file = SerializedFile::parse(&child_bytes).unwrap();
+        let parent_file = SerializedFile::parse(&parent_bytes).unwrap();
+        let child_references =
+            crate::serialized_file::reference_graph::ObjectReferenceGraph::build(&child_file)
+                .unwrap();
+        let parent_references =
+            crate::serialized_file::reference_graph::ObjectReferenceGraph::build(&parent_file)
+                .unwrap();
+        let named_files = [
+            crate::serialized_file::reference_graph::NamedObjectReferenceGraph {
+                file_name: "child.assets",
+                metadata: &child_file.metadata,
+                graph: &child_references,
+            },
+            crate::serialized_file::reference_graph::NamedObjectReferenceGraph {
+                file_name: "parent.assets",
+                metadata: &parent_file.metadata,
+                graph: &parent_references,
+            },
+        ];
+        let references = MultiFileReferenceGraph::build(&named_files).unwrap();
+
+        let mut relationship_limited_scene =
+            SceneGraph::build(&child_file, SceneGraphLimits::default()).unwrap();
+        assert!(matches!(
+            relationship_limited_scene.audit_workspace_transform_links(
+                0,
+                "child.assets",
+                &references,
+                super::SceneHierarchyAuditLimits {
+                    max_relationships: 0,
+                    max_issues: 1,
+                },
+            ),
+            Err(super::SceneGraphAuditError::RelationshipLimitExceeded { count: 1, limit: 0 })
+        ));
+
+        let mut issue_limited_scene =
+            SceneGraph::build(&child_file, SceneGraphLimits::default()).unwrap();
+        assert!(matches!(
+            issue_limited_scene.audit_workspace_transform_links(
+                0,
+                "child.assets",
+                &references,
+                super::SceneHierarchyAuditLimits {
+                    max_relationships: 1,
+                    max_issues: 0,
+                },
+            ),
+            Err(super::SceneGraphAuditError::IssueLimitExceeded { count: 1, limit: 0 })
+        ));
+    }
+
+    #[test]
+    fn does_not_call_cross_file_reciprocal_missing_when_target_scan_is_incomplete() {
+        let child_bytes =
+            make_transform_file_with_hierarchy(42, 1, 99, &[], &["parent.assets"], false);
+        let parent_bytes = make_transform_file_with_hierarchy(99, 0, 0, &[], &[], true);
+        let child_file = SerializedFile::parse(&child_bytes).unwrap();
+        let parent_file = SerializedFile::parse(&parent_bytes).unwrap();
+        let child_references =
+            crate::serialized_file::reference_graph::ObjectReferenceGraph::build(&child_file)
+                .unwrap();
+        let parent_references =
+            crate::serialized_file::reference_graph::ObjectReferenceGraph::build(&parent_file)
+                .unwrap();
+        assert!(!parent_references.object_scan_is_complete(0));
+        let named_files = [
+            crate::serialized_file::reference_graph::NamedObjectReferenceGraph {
+                file_name: "child.assets",
+                metadata: &child_file.metadata,
+                graph: &child_references,
+            },
+            crate::serialized_file::reference_graph::NamedObjectReferenceGraph {
+                file_name: "parent.assets",
+                metadata: &parent_file.metadata,
+                graph: &parent_references,
+            },
+        ];
+        let references = MultiFileReferenceGraph::build(&named_files).unwrap();
+        let mut child_scene = SceneGraph::build(&child_file, SceneGraphLimits::default()).unwrap();
+
+        let audit = child_scene
+            .audit_workspace_transform_links(
+                0,
+                "child.assets",
+                &references,
+                super::SceneHierarchyAuditLimits::default(),
+            )
+            .unwrap();
+        assert_eq!(audit.relationships_checked(), 1);
+        assert_eq!(
+            audit.issues(),
+            &[super::WorkspaceSceneHierarchyIssue {
+                source_file_index: 0,
+                relationship_index: 1,
+                source_object_index: 0,
+                source_path_id: 42,
+                target_file_index: Some(1),
+                target_object_index: Some(0),
+                field_path: "m_Father".to_owned(),
+                kind: super::SceneHierarchyIssueKind::CounterpartScanIncomplete,
+            }]
+        );
+        assert!(!audit.is_complete());
+    }
+
+    #[test]
+    fn does_not_report_transform_audit_complete_when_source_scan_is_incomplete() {
+        let child_bytes =
+            make_transform_file_with_hierarchy(42, 1, 99, &[], &["parent.assets"], true);
+        let parent_bytes =
+            make_transform_file_with_hierarchy(99, 0, 0, &[(1, 42)], &["child.assets"], false);
+        let child_file = SerializedFile::parse(&child_bytes).unwrap();
+        let parent_file = SerializedFile::parse(&parent_bytes).unwrap();
+        let child_references =
+            crate::serialized_file::reference_graph::ObjectReferenceGraph::build(&child_file)
+                .unwrap();
+        let parent_references =
+            crate::serialized_file::reference_graph::ObjectReferenceGraph::build(&parent_file)
+                .unwrap();
+        assert!(!child_references.object_scan_is_complete(0));
+        let named_files = [
+            crate::serialized_file::reference_graph::NamedObjectReferenceGraph {
+                file_name: "child.assets",
+                metadata: &child_file.metadata,
+                graph: &child_references,
+            },
+            crate::serialized_file::reference_graph::NamedObjectReferenceGraph {
+                file_name: "parent.assets",
+                metadata: &parent_file.metadata,
+                graph: &parent_references,
+            },
+        ];
+        let references = MultiFileReferenceGraph::build(&named_files).unwrap();
+        let mut child_scene = SceneGraph::build(&child_file, SceneGraphLimits::default()).unwrap();
+
+        let audit = child_scene
+            .audit_workspace_transform_links(
+                0,
+                "child.assets",
+                &references,
+                super::SceneHierarchyAuditLimits::default(),
+            )
+            .unwrap();
+        assert_eq!(audit.relationships_checked(), 1);
+        assert_eq!(
+            audit.issues(),
+            &[super::WorkspaceSceneHierarchyIssue {
+                source_file_index: 0,
+                relationship_index: 1,
+                source_object_index: 0,
+                source_path_id: 42,
+                target_file_index: None,
+                target_object_index: None,
+                field_path: "m_Father".to_owned(),
+                kind: super::SceneHierarchyIssueKind::SourceScanIncomplete,
+            }]
+        );
+        assert!(!audit.is_complete());
+    }
+
+    #[test]
     fn matches_inherited_scene_reference_field_paths_without_matching_neighbors() {
         let reference = crate::serialized_file::reference_graph::MultiFileObjectReference {
             source_file_index: 0,
@@ -3899,6 +4620,35 @@ mod tests {
             "m_Component[1].component"
         ));
         assert!(!reference_field_path_matches(&reference, "component"));
+
+        for (field_path, expected) in [
+            ("Base.Base.m_Children[12]", true),
+            ("m_Children[0]", true),
+            ("m_Children[]", false),
+            ("m_Children[not-an-index]", false),
+            ("m_Children[0].unexpected", false),
+            ("m_Children[0]suffix", false),
+        ] {
+            let array_reference =
+                crate::serialized_file::reference_graph::MultiFileObjectReference {
+                    source_file_index: 0,
+                    source_object_index: 4,
+                    source_path_id: 42,
+                    field_path,
+                    file_id: 0,
+                    path_id: 99,
+                    resolution:
+                        crate::serialized_file::reference_graph::MultiFilePPtrResolution::Object {
+                            target_file_index: 0,
+                            target_object_index: 5,
+                        },
+                };
+            assert_eq!(
+                super::reference_field_path_matches_array_element(&array_reference, "m_Children"),
+                expected,
+                "unexpected array-field match for {field_path}"
+            );
+        }
     }
 
     #[test]

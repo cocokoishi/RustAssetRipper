@@ -14,8 +14,9 @@ use assetripper::io::platform_structure::{detect_platform_structure, PlatformStr
 use assetripper::processing::project_settings::{
     EditorBuildSettingsLimits, EditorBuildSettingsModel,
 };
-use assetripper::processing::scene::SceneRootDiscoveryLimits;
-use assetripper::processing::scene::{SceneGraph, SceneGraphLimits};
+use assetripper::processing::scene::{
+    SceneGraph, SceneGraphLimits, SceneHierarchyAuditLimits, SceneRootDiscoveryLimits,
+};
 use assetripper::processing::scene_collections::{
     extract_occlusion_scene_guid, extract_streamed_scene_bundle_metadata,
     map_streamed_scene_bundle_paths, plan_scene_definition, resolve_scene_collection_path,
@@ -686,7 +687,12 @@ fn print_workspace_summary_to<W: io::Write>(
                 &multi_file_graph,
                 SceneRootDiscoveryLimits::default(),
             )?;
-            let hierarchy_issues = scene_graph.audit_local_transform_links()?;
+            let hierarchy_audit = scene_graph.audit_workspace_transform_links(
+                file_index,
+                &file.file_name,
+                &multi_file_graph,
+                SceneHierarchyAuditLimits::default(),
+            )?;
             let game_object_count = scene_graph
                 .objects()
                 .iter()
@@ -706,10 +712,12 @@ fn print_workspace_summary_to<W: io::Write>(
             )?;
             writeln!(
                 output,
-                "    Workspace root candidates: {}, root issues: {}, local hierarchy issues: {}",
+                "    Workspace root candidates: {}, root issues: {}, Transform links checked: {}, workspace hierarchy issues: {}, audit complete={}",
                 root_discovery.roots().len(),
                 root_discovery.issues().len(),
-                hierarchy_issues.len()
+                hierarchy_audit.relationships_checked(),
+                hierarchy_audit.issues().len(),
+                hierarchy_audit.is_complete()
             )?;
             for root in root_discovery.roots() {
                 if let Some(object) = scene_graph.objects().get(root.game_object_index) {
