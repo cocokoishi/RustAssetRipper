@@ -18,13 +18,14 @@ On this workstation Cargo is installed under `%USERPROFILE%\.cargo\bin` but that
 
 ## Current command-line entry point
 
-The current partial CLI can mount one or more local input directories, detect a platform layout when possible, load recognized SerializedFiles and their external dependencies, and print a structural summary. Platform inputs retain their original file-backed containers for source-specific inventory and expansion; mixed inputs are recursively mounted before loading:
+The current partial CLI has two inspection paths. `inspect` mounts local input directories, detects a platform layout when possible, loads recognized SerializedFiles and their external dependencies, and prints a structural summary. `inspect-files` mounts explicitly selected local file paths in input order, registers top-level files dispatched as ResourceFiles as GameBundle root resources, then inspects any selected SerializedFiles:
 
 ```powershell
 cargo run -- inspect <input-directory> [input-directory ...]
+cargo run -- inspect-files <input-file> [input-file ...]
 ```
 
-`cargo run -- --help` and `cargo run -- --version` show command help and version. This is an import and inspection path only; it does not yet produce Unity projects or provide the source product's full options, exporters, or GUI.
+`cargo run -- --help` and `cargo run -- --version` show command help and version. This is an import and inspection path only; it does not yet produce Unity projects or provide the source product's full options, exporters, or GUI. Root ResourceFiles are registered and reported, but complete streamed-resource decoding and exporter integration remain unfinished.
 
 The source baseline and its local checksum manifest are documented in [baseline.md](docs/baseline.md). Port coverage is tracked in [feature-parity.md](docs/feature-parity.md).
 
