@@ -645,3 +645,11 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Focused workspace YAML tests and full verification passed: 389 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and `git diff --check`.
 - Still incomplete: no non-null cross-collection PPtr in this complete Scene/YAML path and no Unity runtime differential. Processed asset walkers, Prefab output, and Phase 1 completeness remain open. Phase 2 remains locked.
 - Next: verify cross-collection component pointers end to end through separate Scene collection assignments, ensuring the YAML output carries the registered GUID and asset type.
+
+## Cross-collection Scene PPtr mapping
+
+- Current phase: Phase 1; gate not passed. This increment builds from pushed revision `fa568d76a205dffc0db203a7a91b9c4391bcabb4`. Only `cocokoishi/RustAssetRipper` is a write/push target. No UABEA, user AssetBundle content, or other remote repository was accessed.
+- Registered the generated GameObject and MeshRenderer assignments in two Scene output collections. The executor writes each reciprocal pointer with the other collection's registered GUID, asset type 2, and destination fileID.
+- Targeted test and full verification passed: 390 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and `git diff --check`.
+- Still incomplete: source PPtrs in this fixture are local to one SerializedFile; actual cross-file inputs have not yet traversed this YAML executor. There is no Unity runtime differential. Processed-asset YAML, Prefab output, and Phase 1 completeness remain open. Phase 2 remains locked.
+- Next: build a two-file Generated SerializedFile workspace with reciprocal cross-file PPtrs and carry those resolved references through the same export-map/YAML path.

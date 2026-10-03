@@ -1580,6 +1580,68 @@ mod tests {
     }
 
     #[test]
+    fn scene_component_pointers_to_other_collections_emit_guid_and_type() {
+        let bytes = make_game_object_mesh_renderer_file();
+        let (filesystem, workspace) = load_workspace_bytes(&bytes);
+        let objects = ObjectWorkspace::load_from_vfs(
+            &filesystem,
+            &workspace,
+            ObjectWorkspaceLimits::default(),
+        )
+        .unwrap();
+        let reference_graph = workspace
+            .reference_graph(MultiFileReferenceGraphLimits::default())
+            .unwrap();
+        let assignments = plan_single_file_scene_assignments(&bytes, &reference_graph);
+        assert_eq!(assignments.len(), 2);
+
+        let mut pointer_map_builder =
+            ProjectExportPointerMapBuilder::new(ExportPointerMapLimits::default());
+        pointer_map_builder
+            .register_scene_collection(COLLECTION_INDEX, [0x71; 16], &assignments[..1])
+            .unwrap();
+        pointer_map_builder
+            .register_scene_collection(COLLECTION_INDEX + 1, [0x82; 16], &assignments[1..])
+            .unwrap();
+        let pointer_map = pointer_map_builder.build().unwrap();
+        let game_object_yaml = workspace_assignments_to_unity_yaml(
+            &workspace,
+            &objects,
+            &reference_graph,
+            &pointer_map,
+            &assignments[..1],
+            COLLECTION_INDEX,
+            None,
+            UnityYamlWorkspaceCollectionLimits::default(),
+        )
+        .unwrap();
+        let mesh_renderer_yaml = workspace_assignments_to_unity_yaml(
+            &workspace,
+            &objects,
+            &reference_graph,
+            &pointer_map,
+            &assignments[1..],
+            COLLECTION_INDEX + 1,
+            None,
+            UnityYamlWorkspaceCollectionLimits::default(),
+        )
+        .unwrap();
+
+        assert!(
+            game_object_yaml.contains(
+                "component: {fileID: 9001, guid: 82828282828282828282828282828282, type: 2}"
+            ),
+            "{game_object_yaml}"
+        );
+        assert!(
+            mesh_renderer_yaml.contains(
+                "m_GameObject: {fileID: 42, guid: 71717171717171717171717171717171, type: 2}"
+            ),
+            "{mesh_renderer_yaml}"
+        );
+    }
+
+    #[test]
     fn collection_executor_reports_processed_assets_without_a_generated_walker() {
         let (filesystem, workspace) = load_workspaces(TRANSFORM_PATH_ID);
         let objects = ObjectWorkspace::load_from_vfs(
