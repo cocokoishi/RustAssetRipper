@@ -6,14 +6,54 @@ use std::fmt::{self, Display, Formatter};
 use crate::serialized_file::reference_graph::MultiFileReferenceGraph;
 
 use super::scene::{
-    SceneGraph, SceneGraphIssue, SceneObjectRecord, SceneRelationship, SceneRootReason,
-    WorkspaceSceneHierarchyAudit, WorkspaceSceneRootDiscovery,
+    SceneGraph, SceneGraphIssue, SceneObjectRecord, SceneRelationship, SceneRelationshipKind,
+    SceneRelationshipTarget, SceneRootReason, WorkspaceSceneHierarchyAudit,
+    WorkspaceSceneRootDiscovery,
 };
-use super::scene_collections::{SceneDefinitionPlan, WorkspaceSceneDefinitions};
+use super::scene_collections::{
+    scene_manager_kind, SceneDefinitionPlan, SceneManagerKind, WorkspaceSceneDefinitions,
+};
 
 const GAME_OBJECT_CLASS_ID: i32 = 1;
 const TRANSFORM_CLASS_ID: i32 = 4;
 const RECT_TRANSFORM_CLASS_ID: i32 = 224;
+const PREFAB_INSTANCE_CLASS_ID: i32 = 1001;
+const SCENE_ROOTS_CLASS_ID: i32 = 1_660_057_539;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkspaceSceneAssetCategory {
+    GameObject,
+    LevelGameManager(SceneManagerKind),
+    PrefabInstance,
+    SceneRoots,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorkspaceSceneObjectIdentity {
+    pub file_index: usize,
+    pub object_index: usize,
+    pub path_id: i64,
+    pub class_id: Option<i32>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorkspaceSceneAssetIdentity {
+    pub identity: WorkspaceSceneObjectIdentity,
+    pub category: WorkspaceSceneAssetCategory,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkspaceSceneComponentEvidence {
+    TransformClassId,
+    GameObjectComponentReference,
+    GameObjectPointerField,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorkspaceSceneComponentCandidate {
+    pub identity: WorkspaceSceneObjectIdentity,
+    pub evidence: WorkspaceSceneComponentEvidence,
+}
 
 /// Aggregate limits for SceneDefinition-owned recovered scene graphs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -22,6 +62,7 @@ pub struct WorkspaceSceneHierarchyLimits {
     pub max_scene_definitions: usize,
     pub max_scene_collections: usize,
     pub max_scene_objects: usize,
+    pub max_scene_asset_records: usize,
     pub max_relationships: usize,
     pub max_issues: usize,
     pub max_total_name_bytes: usize,
@@ -35,6 +76,7 @@ impl Default for WorkspaceSceneHierarchyLimits {
             max_scene_definitions: 1_000_000,
             max_scene_collections: 1_000_000,
             max_scene_objects: 20_000_000,
+            max_scene_asset_records: 20_000_000,
             max_relationships: 5_000_000,
             max_issues: 500_000,
             max_total_name_bytes: 256 * 1024 * 1024,
@@ -54,6 +96,8 @@ pub struct WorkspaceSceneCollectionHierarchy {
     scene_objects: Vec<SceneObjectRecord>,
     relationships: Vec<SceneRelationship>,
     graph_issues: Vec<SceneGraphIssue>,
+    scene_assets: Vec<WorkspaceSceneAssetIdentity>,
+    component_candidates: Vec<WorkspaceSceneComponentCandidate>,
     source_graph_complete: bool,
     source_reference_scans_complete: bool,
     roots: WorkspaceSceneRootDiscovery,
@@ -94,6 +138,14 @@ impl WorkspaceSceneCollectionHierarchy {
 
     pub fn graph_issues(&self) -> &[SceneGraphIssue] {
         &self.graph_issues
+    }
+
+    pub fn scene_assets(&self) -> &[WorkspaceSceneAssetIdentity] {
+        &self.scene_assets
+    }
+
+    pub fn component_candidates(&self) -> &[WorkspaceSceneComponentCandidate] {
+        &self.component_candidates
     }
 
     pub fn source_graph_complete(&self) -> bool {
@@ -162,6 +214,7 @@ pub struct WorkspaceSceneHierarchyBuilder {
     limits: WorkspaceSceneHierarchyLimits,
     scene_collection_count: usize,
     scene_object_count: usize,
+    scene_asset_record_count: usize,
     relationship_count: usize,
     issue_count: usize,
     name_bytes: usize,
@@ -212,6 +265,11 @@ pub enum WorkspaceSceneHierarchyError {
     InvalidRelationshipSource {
         file_index: usize,
         relationship_index: usize,
+        object_index: usize,
+    },
+    InvalidComponentTarget {
+        source_file_index: usize,
+        target_file_index: usize,
         object_index: usize,
     },
     InvalidRootIdentity {
@@ -285,6 +343,14 @@ impl Display for WorkspaceSceneHierarchyError {
                 f,
                 "scene relationship {relationship_index} source object {file_index}:{object_index} is invalid"
             ),
+            Self::InvalidComponentTarget {
+                source_file_index,
+                target_file_index,
+                object_index,
+            } => write!(
+                f,
+                "scene collection {source_file_index} component edge targets invalid object {target_file_index}:{object_index}"
+            ),
             Self::InvalidRootIdentity {
                 file_index,
                 object_index,
@@ -338,6 +404,7 @@ impl WorkspaceSceneHierarchyBuilder {
             limits,
             scene_collection_count: 0,
             scene_object_count: 0,
+            scene_asset_record_count: 0,
             relationship_count: 0,
             issue_count: 0,
             name_bytes: 0,
@@ -382,6 +449,8 @@ impl WorkspaceSceneHierarchyBuilder {
             (0..scene_graph.objects().len()).all(|object_index| {
                 references.object_scan_is_complete(file_index, object_index) == Some(true)
             });
+        let (scene_assets, component_candidates) =
+            classify_scene_collection_objects(file_index, scene_graph, references)?;
         let scene_objects = scene_graph
             .objects()
             .iter()
@@ -463,6 +532,18 @@ impl WorkspaceSceneHierarchyBuilder {
             self.limits.max_scene_objects,
             "scene objects",
         )?;
+        let scene_asset_record_count = scene_assets
+            .len()
+            .checked_add(component_candidates.len())
+            .ok_or(WorkspaceSceneHierarchyError::CountOverflow {
+            resource: "scene asset records",
+        })?;
+        let next_scene_asset_record_count = checked_charge(
+            self.scene_asset_record_count,
+            scene_asset_record_count,
+            self.limits.max_scene_asset_records,
+            "scene asset records",
+        )?;
         let next_relationship_count = checked_charge(
             self.relationship_count,
             scene_graph.relationships().len(),
@@ -531,6 +612,8 @@ impl WorkspaceSceneHierarchyBuilder {
             scene_objects: objects,
             relationships,
             graph_issues,
+            scene_assets,
+            component_candidates,
             source_graph_complete: scene_graph.is_complete(),
             source_reference_scans_complete,
             roots,
@@ -539,6 +622,7 @@ impl WorkspaceSceneHierarchyBuilder {
         self.collection_graphs[file_index] = Some(snapshot);
         self.scene_collection_count = next_scene_collection_count;
         self.scene_object_count = next_scene_object_count;
+        self.scene_asset_record_count = next_scene_asset_record_count;
         self.relationship_count = next_relationship_count;
         self.issue_count = next_issue_count;
         self.name_bytes = next_name_bytes;
@@ -603,6 +687,264 @@ impl WorkspaceSceneHierarchyBuilder {
             return Err(WorkspaceSceneHierarchyError::UnassignedCollectionGraph { file_index });
         }
         Ok(WorkspaceSceneHierarchies { scenes })
+    }
+}
+
+fn classify_scene_collection_objects(
+    file_index: usize,
+    scene_graph: &SceneGraph,
+    references: &MultiFileReferenceGraph<'_>,
+) -> Result<
+    (
+        Vec<WorkspaceSceneAssetIdentity>,
+        Vec<WorkspaceSceneComponentCandidate>,
+    ),
+    WorkspaceSceneHierarchyError,
+> {
+    let scene_asset_count = scene_graph
+        .objects()
+        .iter()
+        .filter(|object| {
+            scene_asset_category(
+                references
+                    .object_class_id(file_index, object.object_index)
+                    .or(object.class_id),
+            )
+            .is_some()
+        })
+        .count();
+    let mut scene_assets = Vec::new();
+    scene_assets
+        .try_reserve_exact(scene_asset_count)
+        .map_err(|_| WorkspaceSceneHierarchyError::AllocationFailed {
+            resource: "SceneHierarchyObject asset identities",
+            requested: scene_asset_count,
+        })?;
+
+    let mut component_candidates = Vec::new();
+    let mut candidate_upper_bound = scene_graph
+        .objects()
+        .iter()
+        .filter(|object| {
+            matches!(
+                references
+                    .object_class_id(file_index, object.object_index)
+                    .or(object.class_id),
+                Some(TRANSFORM_CLASS_ID | RECT_TRANSFORM_CLASS_ID)
+            )
+        })
+        .count();
+    candidate_upper_bound = scene_graph
+        .relationships()
+        .iter()
+        .filter(|relationship| relationship.kind == SceneRelationshipKind::GameObjectComponent)
+        .try_fold(candidate_upper_bound, |count, _| count.checked_add(1))
+        .ok_or(WorkspaceSceneHierarchyError::CountOverflow {
+            resource: "scene component candidate",
+        })?;
+    for object in scene_graph.objects() {
+        let class_id = references
+            .object_class_id(file_index, object.object_index)
+            .or(object.class_id);
+        if scene_asset_category(class_id).is_some()
+            || matches!(class_id, Some(TRANSFORM_CLASS_ID | RECT_TRANSFORM_CLASS_ID))
+        {
+            continue;
+        }
+        if references
+            .references_from_object(file_index, object.object_index)
+            .any(|reference| {
+                reference.path_id != 0 && is_game_object_pointer_path(reference.field_path)
+            })
+        {
+            candidate_upper_bound = candidate_upper_bound.checked_add(1).ok_or(
+                WorkspaceSceneHierarchyError::CountOverflow {
+                    resource: "scene component candidate",
+                },
+            )?;
+        }
+    }
+    component_candidates
+        .try_reserve_exact(candidate_upper_bound)
+        .map_err(|_| WorkspaceSceneHierarchyError::AllocationFailed {
+            resource: "scene component candidate identities",
+            requested: candidate_upper_bound,
+        })?;
+
+    for object in scene_graph.objects() {
+        let class_id = references
+            .object_class_id(file_index, object.object_index)
+            .or(object.class_id);
+        if let Some(category) = scene_asset_category(class_id) {
+            let identity = scene_object_identity(
+                file_index,
+                object.object_index,
+                object.path_id,
+                class_id,
+                references,
+            )?;
+            scene_assets.push(WorkspaceSceneAssetIdentity { identity, category });
+        }
+        if matches!(class_id, Some(TRANSFORM_CLASS_ID | RECT_TRANSFORM_CLASS_ID)) {
+            let identity = scene_object_identity(
+                file_index,
+                object.object_index,
+                object.path_id,
+                class_id,
+                references,
+            )?;
+            component_candidates.push(WorkspaceSceneComponentCandidate {
+                identity,
+                evidence: WorkspaceSceneComponentEvidence::TransformClassId,
+            });
+        }
+
+        if scene_asset_category(class_id).is_none()
+            && !matches!(class_id, Some(TRANSFORM_CLASS_ID | RECT_TRANSFORM_CLASS_ID))
+        {
+            for reference in references.references_from_object(file_index, object.object_index) {
+                if reference.path_id == 0 || !is_game_object_pointer_path(reference.field_path) {
+                    continue;
+                }
+                let identity = scene_object_identity(
+                    file_index,
+                    object.object_index,
+                    object.path_id,
+                    class_id,
+                    references,
+                )?;
+                component_candidates.push(WorkspaceSceneComponentCandidate {
+                    identity,
+                    evidence: WorkspaceSceneComponentEvidence::GameObjectPointerField,
+                });
+                break;
+            }
+        }
+    }
+
+    for relationship in scene_graph
+        .relationships()
+        .iter()
+        .filter(|relationship| relationship.kind == SceneRelationshipKind::GameObjectComponent)
+    {
+        let (target_file_index, target_object_index) = match &relationship.target {
+            SceneRelationshipTarget::LocalObject { object_index } => (file_index, *object_index),
+            SceneRelationshipTarget::WorkspaceObject {
+                file_index,
+                object_index,
+            } => (*file_index, *object_index),
+            _ => continue,
+        };
+        let class_id = references.object_class_id(target_file_index, target_object_index);
+        if target_file_index == file_index
+            && matches!(class_id, Some(TRANSFORM_CLASS_ID | RECT_TRANSFORM_CLASS_ID))
+        {
+            continue;
+        }
+        let identity = scene_object_identity(
+            target_file_index,
+            target_object_index,
+            relationship.path_id,
+            class_id,
+            references,
+        )
+        .map_err(|error| match error {
+            WorkspaceSceneHierarchyError::InvalidSourceIdentity { .. } => {
+                WorkspaceSceneHierarchyError::InvalidComponentTarget {
+                    source_file_index: file_index,
+                    target_file_index,
+                    object_index: target_object_index,
+                }
+            }
+            other => other,
+        })?;
+        if identity.path_id != relationship.path_id {
+            return Err(WorkspaceSceneHierarchyError::InvalidComponentTarget {
+                source_file_index: file_index,
+                target_file_index,
+                object_index: target_object_index,
+            });
+        }
+        component_candidates.push(WorkspaceSceneComponentCandidate {
+            identity,
+            evidence: WorkspaceSceneComponentEvidence::GameObjectComponentReference,
+        });
+    }
+
+    scene_assets
+        .sort_unstable_by_key(|asset| (asset.identity.file_index, asset.identity.object_index));
+    component_candidates.sort_unstable_by_key(|candidate| {
+        (
+            candidate.identity.file_index,
+            candidate.identity.object_index,
+            component_evidence_order(candidate.evidence),
+        )
+    });
+    component_candidates.dedup_by_key(|candidate| {
+        (
+            candidate.identity.file_index,
+            candidate.identity.object_index,
+        )
+    });
+    Ok((scene_assets, component_candidates))
+}
+
+fn scene_asset_category(class_id: Option<i32>) -> Option<WorkspaceSceneAssetCategory> {
+    match class_id {
+        Some(GAME_OBJECT_CLASS_ID) => Some(WorkspaceSceneAssetCategory::GameObject),
+        Some(PREFAB_INSTANCE_CLASS_ID) => Some(WorkspaceSceneAssetCategory::PrefabInstance),
+        Some(SCENE_ROOTS_CLASS_ID) => Some(WorkspaceSceneAssetCategory::SceneRoots),
+        manager => scene_manager_kind(manager).map(WorkspaceSceneAssetCategory::LevelGameManager),
+    }
+}
+
+fn scene_object_identity(
+    file_index: usize,
+    object_index: usize,
+    path_id: i64,
+    class_id: Option<i32>,
+    references: &MultiFileReferenceGraph<'_>,
+) -> Result<WorkspaceSceneObjectIdentity, WorkspaceSceneHierarchyError> {
+    let Some(identity) = references.object_identity(file_index, object_index) else {
+        return Err(WorkspaceSceneHierarchyError::InvalidSourceIdentity {
+            file_index,
+            object_index,
+            path_id,
+        });
+    };
+    if identity.path_id != path_id {
+        return Err(WorkspaceSceneHierarchyError::InvalidSourceIdentity {
+            file_index,
+            object_index,
+            path_id,
+        });
+    }
+    Ok(WorkspaceSceneObjectIdentity {
+        file_index,
+        object_index,
+        path_id: identity.path_id,
+        class_id,
+    })
+}
+
+fn is_game_object_pointer_path(field_path: &str) -> bool {
+    let mut path = field_path;
+    loop {
+        if path == "m_GameObject" {
+            return true;
+        }
+        let Some(base) = path.strip_prefix("Base.") else {
+            return false;
+        };
+        path = base;
+    }
+}
+
+const fn component_evidence_order(evidence: WorkspaceSceneComponentEvidence) -> u8 {
+    match evidence {
+        WorkspaceSceneComponentEvidence::TransformClassId => 0,
+        WorkspaceSceneComponentEvidence::GameObjectComponentReference => 1,
+        WorkspaceSceneComponentEvidence::GameObjectPointerField => 2,
     }
 }
 
@@ -833,4 +1175,61 @@ fn try_copy_string(
     })?;
     copy.push_str(source);
     Ok(copy)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_game_object_pointer_path, scene_asset_category, WorkspaceSceneAssetCategory};
+    use crate::processing::scene_collections::SceneManagerKind;
+
+    #[test]
+    fn recognizes_source_scene_hierarchy_asset_class_ids() {
+        assert_eq!(
+            scene_asset_category(Some(1)),
+            Some(WorkspaceSceneAssetCategory::GameObject)
+        );
+        assert_eq!(
+            scene_asset_category(Some(29)),
+            Some(WorkspaceSceneAssetCategory::LevelGameManager(
+                SceneManagerKind::OcclusionCullingSettings
+            ))
+        );
+        assert_eq!(
+            scene_asset_category(Some(104)),
+            Some(WorkspaceSceneAssetCategory::LevelGameManager(
+                SceneManagerKind::RenderSettings
+            ))
+        );
+        assert_eq!(
+            scene_asset_category(Some(157)),
+            Some(WorkspaceSceneAssetCategory::LevelGameManager(
+                SceneManagerKind::LightmapSettings
+            ))
+        );
+        assert_eq!(
+            scene_asset_category(Some(196)),
+            Some(WorkspaceSceneAssetCategory::LevelGameManager(
+                SceneManagerKind::NavMeshSettings
+            ))
+        );
+        assert_eq!(
+            scene_asset_category(Some(1001)),
+            Some(WorkspaceSceneAssetCategory::PrefabInstance)
+        );
+        assert_eq!(
+            scene_asset_category(Some(1_660_057_539)),
+            Some(WorkspaceSceneAssetCategory::SceneRoots)
+        );
+        assert_eq!(scene_asset_category(Some(114)), None);
+    }
+
+    #[test]
+    fn component_pointer_field_match_is_limited_to_inherited_game_object_field() {
+        assert!(is_game_object_pointer_path("m_GameObject"));
+        assert!(is_game_object_pointer_path("Base.m_GameObject"));
+        assert!(is_game_object_pointer_path("Base.Base.m_GameObject"));
+        assert!(!is_game_object_pointer_path("Other.m_GameObject"));
+        assert!(!is_game_object_pointer_path("m_GameObject.child"));
+        assert!(!is_game_object_pointer_path("m_GameObject[0]"));
+    }
 }

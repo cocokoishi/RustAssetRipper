@@ -25,7 +25,8 @@ use assetripper::processing::scene_collections::{
     StreamedSceneBundleMetadata, WorkspaceSceneDefinitionLimits, WorkspaceSceneDefinitions,
 };
 use assetripper::processing::scene_hierarchy::{
-    WorkspaceSceneHierarchyBuilder, WorkspaceSceneHierarchyLimits,
+    WorkspaceSceneAssetCategory, WorkspaceSceneComponentEvidence, WorkspaceSceneHierarchyBuilder,
+    WorkspaceSceneHierarchyLimits,
 };
 use assetripper::processing::scene_metadata::{
     decode_build_settings_scene_paths_from_parts, BuildSettingsSceneLimits,
@@ -1156,12 +1157,63 @@ fn print_workspace_summary_to<W: io::Write>(
             .get(scene_index)
             .ok_or_else(|| invalid_data("SceneDefinition hierarchy model is unavailable"))?;
         for collection_hierarchy in scene_hierarchy.collections() {
+            let scene_asset_count = collection_hierarchy.scene_assets().len();
+            let manager_asset_count = collection_hierarchy
+                .scene_assets()
+                .iter()
+                .filter(|asset| {
+                    matches!(
+                        asset.category,
+                        WorkspaceSceneAssetCategory::LevelGameManager(_)
+                    )
+                })
+                .count();
+            let prefab_instance_count = collection_hierarchy
+                .scene_assets()
+                .iter()
+                .filter(|asset| asset.category == WorkspaceSceneAssetCategory::PrefabInstance)
+                .count();
+            let scene_roots_count = collection_hierarchy
+                .scene_assets()
+                .iter()
+                .filter(|asset| asset.category == WorkspaceSceneAssetCategory::SceneRoots)
+                .count();
+            let transform_candidate_count = collection_hierarchy
+                .component_candidates()
+                .iter()
+                .filter(|candidate| {
+                    candidate.evidence == WorkspaceSceneComponentEvidence::TransformClassId
+                })
+                .count();
+            let component_edge_candidate_count = collection_hierarchy
+                .component_candidates()
+                .iter()
+                .filter(|candidate| {
+                    candidate.evidence
+                        == WorkspaceSceneComponentEvidence::GameObjectComponentReference
+                })
+                .count();
+            let game_object_field_candidate_count = collection_hierarchy
+                .component_candidates()
+                .iter()
+                .filter(|candidate| {
+                    candidate.evidence == WorkspaceSceneComponentEvidence::GameObjectPointerField
+                })
+                .count();
             writeln!(
                 output,
-                "        hierarchy file {}: {} GameObjects, {} Transforms, {} relationships, {} roots, {} graph issues, {} root issues, {} reciprocal issues, scene graph complete={}, reference scans complete={}, overall complete={}",
+                "        hierarchy file {}: {} GameObjects, {} Transforms, {} scene assets ({} managers, {} PrefabInstances, {} SceneRoots), {} component candidates ({} Transform IDs, {} GameObject edges, {} m_GameObject fields), {} relationships, {} roots, {} graph issues, {} root issues, {} reciprocal issues, scene graph complete={}, reference scans complete={}, overall complete={}",
                 collection_hierarchy.collection_file_index(),
                 collection_hierarchy.game_object_count(),
                 collection_hierarchy.transform_count(),
+                scene_asset_count,
+                manager_asset_count,
+                prefab_instance_count,
+                scene_roots_count,
+                collection_hierarchy.component_candidates().len(),
+                transform_candidate_count,
+                component_edge_candidate_count,
+                game_object_field_candidate_count,
                 collection_hierarchy.relationships().len(),
                 collection_hierarchy.roots().roots().len(),
                 collection_hierarchy.graph_issues().len(),
@@ -2051,7 +2103,7 @@ mod tests {
         assert!(summary
             .contains("scene GUID: preserve [0x00000001, 0x00000002, 0x00000003, 0x00000004]"));
         assert!(summary.contains(
-            "hierarchy file 0: 0 GameObjects, 0 Transforms, 0 relationships, 0 roots, 0 graph issues, 0 root issues, 0 reciprocal issues, scene graph complete=true, reference scans complete=true, overall complete=true"
+            "hierarchy file 0: 0 GameObjects, 0 Transforms, 1 scene assets (1 managers, 0 PrefabInstances, 0 SceneRoots), 0 component candidates (0 Transform IDs, 0 GameObject edges, 0 m_GameObject fields), 0 relationships, 0 roots, 0 graph issues, 0 root issues, 0 reciprocal issues, scene graph complete=true, reference scans complete=true, overall complete=true"
         ));
     }
 

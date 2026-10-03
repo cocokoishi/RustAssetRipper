@@ -4406,6 +4406,32 @@ mod tests {
         ));
         assert!(!bounded.contains_collection_graph(0));
 
+        let asset_limited = crate::processing::scene_hierarchy::WorkspaceSceneHierarchyLimits {
+            max_scene_asset_records: 1,
+            ..crate::processing::scene_hierarchy::WorkspaceSceneHierarchyLimits::default()
+        };
+        let mut bounded_assets =
+            crate::processing::scene_hierarchy::WorkspaceSceneHierarchyBuilder::new(
+                2,
+                asset_limited,
+            )
+            .unwrap();
+        assert!(matches!(
+            bounded_assets.add_collection_graph(
+                0,
+                &scene_graph,
+                roots.clone(),
+                audit.clone(),
+                &multi_file_graph,
+            ),
+            Err(crate::processing::scene_hierarchy::WorkspaceSceneHierarchyError::ResourceLimitExceeded {
+                resource: "scene asset records",
+                requested: 2,
+                limit: 1,
+            })
+        ));
+        assert!(!bounded_assets.contains_collection_graph(0));
+
         let mut builder = crate::processing::scene_hierarchy::WorkspaceSceneHierarchyBuilder::new(
             2,
             crate::processing::scene_hierarchy::WorkspaceSceneHierarchyLimits::default(),
@@ -4421,6 +4447,33 @@ mod tests {
         assert_eq!(collections.len(), 1);
         assert_eq!(collections[0].game_object_count(), 1);
         assert_eq!(collections[0].transform_count(), 0);
+        assert_eq!(collections[0].scene_assets().len(), 1);
+        assert_eq!(
+            collections[0].scene_assets()[0],
+            crate::processing::scene_hierarchy::WorkspaceSceneAssetIdentity {
+                identity: crate::processing::scene_hierarchy::WorkspaceSceneObjectIdentity {
+                    file_index: 0,
+                    object_index: 0,
+                    path_id: 42,
+                    class_id: Some(1),
+                },
+                category:
+                    crate::processing::scene_hierarchy::WorkspaceSceneAssetCategory::GameObject,
+            }
+        );
+        assert_eq!(collections[0].component_candidates().len(), 1);
+        assert_eq!(
+            collections[0].component_candidates()[0],
+            crate::processing::scene_hierarchy::WorkspaceSceneComponentCandidate {
+                identity: crate::processing::scene_hierarchy::WorkspaceSceneObjectIdentity {
+                    file_index: 1,
+                    object_index: 0,
+                    path_id: 99,
+                    class_id: Some(4),
+                },
+                evidence: crate::processing::scene_hierarchy::WorkspaceSceneComponentEvidence::GameObjectComponentReference,
+            }
+        );
         assert_eq!(collections[0].relationships().len(), 1);
         assert_eq!(collections[0].roots().roots().len(), 1);
         assert_eq!(
