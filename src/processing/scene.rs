@@ -4512,6 +4512,24 @@ mod tests {
             roots.roots()[0].reason,
             SceneRootReason::NoTransformComponent
         );
+        let mut bounded_non_scene_builder =
+            crate::processing::scene_hierarchy::WorkspaceGeneratedTransformPlanBuilder::new(
+                1,
+                crate::processing::scene_hierarchy::WorkspaceGeneratedTransformPlanLimits {
+                    max_missing_transform_plans: 0,
+                    ..crate::processing::scene_hierarchy::WorkspaceGeneratedTransformPlanLimits::default()
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            bounded_non_scene_builder.add_file(0, &roots, &references),
+            Err(crate::processing::scene_hierarchy::WorkspaceSceneHierarchyError::ResourceLimitExceeded {
+                resource: "workspace missing-Transform plans",
+                requested: 1,
+                limit: 0,
+            })
+        ));
+        assert!(!bounded_non_scene_builder.contains_file(0));
         let audit = scene_graph
             .audit_workspace_transform_links(
                 0,
@@ -4536,6 +4554,44 @@ mod tests {
                 crate::processing::scene_collections::WorkspaceSceneDefinitionLimits::default(),
             )
             .unwrap();
+        let mut non_scene_plan_builder =
+            crate::processing::scene_hierarchy::WorkspaceGeneratedTransformPlanBuilder::new(
+                1,
+                crate::processing::scene_hierarchy::WorkspaceGeneratedTransformPlanLimits::default(
+                ),
+            )
+            .unwrap();
+        non_scene_plan_builder
+            .add_file(0, &roots, &references)
+            .unwrap();
+        assert!(non_scene_plan_builder.contains_file(0));
+        let no_scene_definitions =
+            crate::processing::scene_collections::WorkspaceSceneDefinitions::from_plans(
+                Vec::new(),
+                1,
+                crate::processing::scene_collections::WorkspaceSceneDefinitionLimits::default(),
+            )
+            .unwrap();
+        let non_scene_plans = non_scene_plan_builder
+            .finish(&no_scene_definitions)
+            .unwrap();
+        assert_eq!(non_scene_plans.plans().len(), 1);
+        assert_eq!(non_scene_plans.plans()[0].game_object.path_id, 42);
+
+        let mut scene_plan_builder =
+            crate::processing::scene_hierarchy::WorkspaceGeneratedTransformPlanBuilder::new(
+                1,
+                crate::processing::scene_hierarchy::WorkspaceGeneratedTransformPlanLimits::default(
+                ),
+            )
+            .unwrap();
+        scene_plan_builder.add_file(0, &roots, &references).unwrap();
+        assert!(scene_plan_builder
+            .finish(&definitions)
+            .unwrap()
+            .plans()
+            .is_empty());
+
         let mut bounded_builder =
             crate::processing::scene_hierarchy::WorkspaceSceneHierarchyBuilder::new(
                 1,

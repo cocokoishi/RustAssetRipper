@@ -25,6 +25,7 @@ use assetripper::processing::scene_collections::{
     StreamedSceneBundleMetadata, WorkspaceSceneDefinitionLimits, WorkspaceSceneDefinitions,
 };
 use assetripper::processing::scene_hierarchy::{
+    WorkspaceGeneratedTransformPlanBuilder, WorkspaceGeneratedTransformPlanLimits,
     WorkspaceSceneAssetCategory, WorkspaceSceneComponentEvidence, WorkspaceSceneHierarchyBuilder,
     WorkspaceSceneHierarchyLimits,
 };
@@ -57,6 +58,7 @@ const MAX_TOTAL_STREAMED_SCENE_BUNDLE_STRING_BYTES: usize = 256 * 1024 * 1024;
 const MAX_TOTAL_STREAMED_SCENE_PATH_MAPPINGS: usize = 1_000_000;
 const MAX_OBJECT_DECODE_DIAGNOSTICS: usize = 128;
 const MAX_REFERENCE_GRAPH_DIAGNOSTICS: usize = 128;
+const MAX_GENERATED_TRANSFORM_DIAGNOSTICS: usize = 128;
 
 struct StreamedSceneBundleWorkItem {
     owner_file_index: usize,
@@ -423,6 +425,10 @@ fn print_workspace_summary_to<W: io::Write>(
         workspace.files().len(),
         WorkspaceSceneHierarchyLimits::default(),
     )?;
+    let mut generated_transform_plan_builder = WorkspaceGeneratedTransformPlanBuilder::new(
+        workspace.files().len(),
+        WorkspaceGeneratedTransformPlanLimits::default(),
+    )?;
     let mut scene_guid_words_by_file = Vec::new();
     scene_guid_words_by_file
         .try_reserve_exact(workspace.files().len())
@@ -694,6 +700,11 @@ fn print_workspace_summary_to<W: io::Write>(
                 &file.file_name,
                 &multi_file_graph,
                 SceneRootDiscoveryLimits::default(),
+            )?;
+            generated_transform_plan_builder.add_file(
+                file_index,
+                &root_discovery,
+                &multi_file_graph,
             )?;
             let hierarchy_audit = scene_graph.audit_workspace_transform_links(
                 file_index,
@@ -1034,6 +1045,9 @@ fn print_workspace_summary_to<W: io::Write>(
             &multi_file_graph,
             SceneRootDiscoveryLimits::default(),
         )?;
+        if !generated_transform_plan_builder.contains_file(file_index) {
+            generated_transform_plan_builder.add_file(file_index, &roots, &multi_file_graph)?;
+        }
         let audit = scene_graph.audit_workspace_transform_links(
             file_index,
             &file.file_name,
@@ -1129,6 +1143,30 @@ fn print_workspace_summary_to<W: io::Write>(
         WorkspaceSceneDefinitionLimits::default(),
     )?;
     let scene_hierarchies = scene_hierarchy_builder.finish(&scene_definitions)?;
+    let non_scene_transform_plans = generated_transform_plan_builder.finish(&scene_definitions)?;
+    writeln!(
+        output,
+        "Generated Prefab Transforms planned for non-scene GameObjects: {}",
+        non_scene_transform_plans.plans().len()
+    )?;
+    for plan in non_scene_transform_plans
+        .plans()
+        .iter()
+        .take(MAX_GENERATED_TRANSFORM_DIAGNOSTICS)
+    {
+        writeln!(
+            output,
+            "  missing Transform: file {} object {} PathID {}",
+            plan.game_object.file_index, plan.game_object.object_index, plan.game_object.path_id
+        )?;
+    }
+    if non_scene_transform_plans.plans().len() > MAX_GENERATED_TRANSFORM_DIAGNOSTICS {
+        writeln!(
+            output,
+            "  {} additional missing-Transform plans are not listed",
+            non_scene_transform_plans.plans().len() - MAX_GENERATED_TRANSFORM_DIAGNOSTICS
+        )?;
+    }
     writeln!(
         output,
         "SceneDefinitions: {}",
@@ -2103,6 +2141,9 @@ mod tests {
         assert!(summary.contains("collection files: [0]"));
         assert!(summary
             .contains("scene GUID: preserve [0x00000001, 0x00000002, 0x00000003, 0x00000004]"));
+        assert!(
+            summary.contains("Generated Prefab Transforms planned for non-scene GameObjects: 0")
+        );
         assert!(summary.contains(
             "hierarchy file 0: 0 GameObjects, 0 Transforms, 1 scene assets (1 managers, 0 PrefabInstances, 0 SceneRoots), 0 component candidates (0 Transform IDs, 0 GameObject edges, 0 m_GameObject fields), 0 missing Transform plans, 0 relationships, 0 roots, 0 graph issues, 0 root issues, 0 reciprocal issues, scene graph complete=true, reference scans complete=true, overall complete=true"
         ));

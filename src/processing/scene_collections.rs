@@ -1145,6 +1145,10 @@ impl WorkspaceSceneDefinitions {
         &self.definitions
     }
 
+    pub fn workspace_collection_count(&self) -> usize {
+        self.scene_by_collection.len()
+    }
+
     pub fn scene_index_for_collection(&self, collection_file_index: usize) -> Option<usize> {
         self.scene_by_collection
             .get(collection_file_index)
