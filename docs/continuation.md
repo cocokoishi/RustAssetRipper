@@ -653,3 +653,11 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Targeted test and full verification passed: 390 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and `git diff --check`.
 - Still incomplete: source PPtrs in this fixture are local to one SerializedFile; actual cross-file inputs have not yet traversed this YAML executor. There is no Unity runtime differential. Processed-asset YAML, Prefab output, and Phase 1 completeness remain open. Phase 2 remains locked.
 - Next: build a two-file Generated SerializedFile workspace with reciprocal cross-file PPtrs and carry those resolved references through the same export-map/YAML path.
+
+## Cross-file Scene PPtrs through YAML export
+
+- Current phase: Phase 1; gate not passed. This increment builds from pushed revision `86c4d75c56c900b7307f58cfc818e7717eecd0db`. Only `cocokoishi/RustAssetRipper`'s canonical GitHub repository is a push target. No UABEA, user AssetBundle content, or other remote repository was accessed.
+- A generated two-file generation-10 workspace carries reciprocal source PPtrs across SerializedFiles through reference resolution, Scene membership, PathID-preserving ID planning, separate output collection mappings, and YAML emission. The test verifies destination GUIDs, Serialized asset type 2, and fileIDs 42/9001.
+- Targeted verification passed: `cargo test --locked --lib cross_file_component_pptrs_reach_separate_scene_yaml_collections -- --nocapture`. Full workspace verification passed: 391 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and `git diff --check`.
+- Still incomplete: no Unity-produced fixture or runtime differential; processed-asset walkers, Prefab output, complete product routing, and Phase 1 completeness remain open. Phase 2 remains locked.
+- Next: continue the parity matrix's open export paths, starting with baseline-generated per-class Scene YAML walkers and required field policies; keep each increment verified and promptly pushed.

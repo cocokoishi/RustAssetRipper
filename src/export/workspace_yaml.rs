@@ -1003,15 +1003,23 @@ mod tests {
     }
 
     fn load_workspace_bytes(bytes: &[u8]) -> (VirtualFileSystem, SerializedFileWorkspace) {
+        load_workspace_files(&[("main.assets", bytes)])
+    }
+
+    fn load_workspace_files(
+        files: &[(&str, &[u8])],
+    ) -> (VirtualFileSystem, SerializedFileWorkspace) {
         let mut filesystem = VirtualFileSystem::new();
         filesystem.create_directory(Some("/game")).unwrap();
-        filesystem
-            .write_all_bytes("/game/main.assets", bytes)
-            .unwrap();
-        let input = [DependencyFilePath {
-            file_name: "main.assets".to_owned(),
-            virtual_path: "/game/main.assets".to_owned(),
-        }];
+        let mut input = Vec::new();
+        for &(file_name, bytes) in files {
+            let virtual_path = format!("/game/{file_name}");
+            filesystem.write_all_bytes(&virtual_path, bytes).unwrap();
+            input.push(DependencyFilePath {
+                file_name: file_name.to_owned(),
+                virtual_path,
+            });
+        }
         let workspace = SerializedFileWorkspace::load_from_vfs(
             &filesystem,
             &input,
@@ -1025,34 +1033,17 @@ mod tests {
         bytes: &[u8],
         reference_graph: &MultiFileReferenceGraph<'_>,
     ) -> Vec<SceneExportIdAssignment> {
-        let serialized_file = SerializedFile::parse(bytes).unwrap();
-        let mut scene_graph = crate::processing::scene::SceneGraph::build(
-            &serialized_file,
-            crate::processing::scene::SceneGraphLimits::default(),
-        )
-        .unwrap();
-        scene_graph
-            .resolve_with_multi_file_graph(0, "main.assets", reference_graph)
-            .unwrap();
-        let roots = scene_graph
-            .discover_workspace_roots(
-                0,
-                "main.assets",
-                reference_graph,
-                crate::processing::scene::SceneRootDiscoveryLimits::default(),
-            )
-            .unwrap();
-        let audit = scene_graph
-            .audit_workspace_transform_links(
-                0,
-                "main.assets",
-                reference_graph,
-                crate::processing::scene::SceneHierarchyAuditLimits::default(),
-            )
-            .unwrap();
+        plan_scene_assignments_for_workspace(&[("main.assets", bytes)], reference_graph)
+    }
+
+    fn plan_scene_assignments_for_workspace(
+        files: &[(&str, &[u8])],
+        reference_graph: &MultiFileReferenceGraph<'_>,
+    ) -> Vec<SceneExportIdAssignment> {
+        let (first_file_name, _) = files.first().unwrap();
         let plan = crate::processing::scene_collections::plan_scene_definition(
             0,
-            "main.assets",
+            first_file_name,
             &crate::processing::scene_collections::SceneCollectionPathStatus::BuildSettingsMissing,
             None,
             None,
@@ -1062,19 +1053,50 @@ mod tests {
         let definitions =
             crate::processing::scene_collections::WorkspaceSceneDefinitions::from_plans(
                 vec![plan],
-                1,
+                files.len(),
                 crate::processing::scene_collections::WorkspaceSceneDefinitionLimits::default(),
             )
             .unwrap();
+        let mut definitions = definitions;
+        for file_index in 1..files.len() {
+            definitions.add_collection(0, file_index).unwrap();
+        }
         let mut hierarchy_builder =
             crate::processing::scene_hierarchy::WorkspaceSceneHierarchyBuilder::new(
-                1,
+                files.len(),
                 crate::processing::scene_hierarchy::WorkspaceSceneHierarchyLimits::default(),
             )
             .unwrap();
-        hierarchy_builder
-            .add_collection_graph(0, &scene_graph, roots, audit, reference_graph)
+        for (file_index, &(file_name, bytes)) in files.iter().enumerate() {
+            let serialized_file = SerializedFile::parse(bytes).unwrap();
+            let mut scene_graph = crate::processing::scene::SceneGraph::build(
+                &serialized_file,
+                crate::processing::scene::SceneGraphLimits::default(),
+            )
             .unwrap();
+            scene_graph
+                .resolve_with_multi_file_graph(file_index, file_name, reference_graph)
+                .unwrap();
+            let roots = scene_graph
+                .discover_workspace_roots(
+                    file_index,
+                    file_name,
+                    reference_graph,
+                    crate::processing::scene::SceneRootDiscoveryLimits::default(),
+                )
+                .unwrap();
+            let audit = scene_graph
+                .audit_workspace_transform_links(
+                    file_index,
+                    file_name,
+                    reference_graph,
+                    crate::processing::scene::SceneHierarchyAuditLimits::default(),
+                )
+                .unwrap();
+            hierarchy_builder
+                .add_collection_graph(file_index, &scene_graph, roots, audit, reference_graph)
+                .unwrap();
+        }
         let hierarchies = hierarchy_builder.finish(&definitions).unwrap();
         crate::export::scene_collection::plan_workspace_scene_export_ids(
             &hierarchies.scenes()[0],
@@ -1280,6 +1302,90 @@ mod tests {
         file.extend_from_slice(&game_object_payload);
         file.extend_from_slice(&mesh_renderer_payload);
         file
+    }
+
+    fn make_generation_10_object_file_with_external(
+        class_id: i32,
+        path_id: i64,
+        type_tree: &[(u8, i32, &str, &str, i32)],
+        payload: &[u8],
+        external_file_name: &str,
+    ) -> Vec<u8> {
+        let mut metadata = b"2019.4.0f1\0".to_vec();
+        metadata.extend_from_slice(&0_u32.to_le_bytes());
+        metadata.extend_from_slice(&1_i32.to_le_bytes());
+        write_type_tree(&mut metadata, class_id, type_tree);
+        metadata.extend_from_slice(&0_u32.to_le_bytes()); // generation-10 long FileID flag
+        metadata.extend_from_slice(&1_i32.to_le_bytes());
+        write_object_record(
+            &mut metadata,
+            path_id,
+            0,
+            payload.len(),
+            class_id,
+            class_id as i16,
+        );
+        metadata.extend_from_slice(&1_i32.to_le_bytes()); // external files
+        metadata.push(0); // empty asset path
+        metadata.extend_from_slice(&[0; 16]); // GUID
+        metadata.extend_from_slice(&0_i32.to_le_bytes()); // asset type
+        metadata.extend_from_slice(external_file_name.as_bytes());
+        metadata.push(0);
+        metadata.push(0); // user information string
+
+        let data_offset = 20 + metadata.len();
+        let file_size = data_offset + payload.len();
+        let mut file = Vec::with_capacity(file_size);
+        file.extend_from_slice(&(metadata.len() as u32).to_be_bytes());
+        file.extend_from_slice(&(file_size as u32).to_be_bytes());
+        file.extend_from_slice(&10_i32.to_be_bytes());
+        file.extend_from_slice(&(data_offset as u32).to_be_bytes());
+        file.push(0);
+        file.extend_from_slice(&[0; 3]);
+        file.extend_from_slice(&metadata);
+        file.extend_from_slice(payload);
+        file
+    }
+
+    fn make_game_object_with_external_component() -> Vec<u8> {
+        let tree = [
+            (0, 1, "GameObject", "", -1),
+            (1, 1, "string", "m_Name", -1),
+            (2, 1, "Array", "Array", -1),
+            (3, 1, "int", "size", 4),
+            (3, 1, "char", "data", 1),
+            (1, 1, "bool", "m_IsActive", 1),
+            (1, 1, "vector", "m_Component", -1),
+            (2, 1, "Array", "Array", -1),
+            (3, 1, "int", "size", 4),
+            (3, 1, "ComponentPair", "data", -1),
+            (4, 1, "PPtr<Component>", "component", 8),
+            (5, 1, "SInt32", "m_FileID", 4),
+            (5, 1, "SInt32", "m_PathID", 4),
+        ];
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&4_i32.to_le_bytes());
+        payload.extend_from_slice(b"Root");
+        payload.push(1);
+        payload.extend_from_slice(&1_i32.to_le_bytes());
+        payload.extend_from_slice(&1_i32.to_le_bytes());
+        payload.extend_from_slice(&9001_i32.to_le_bytes());
+        make_generation_10_object_file_with_external(1, 42, &tree, &payload, "shared.assets")
+    }
+
+    fn make_mesh_renderer_with_external_game_object() -> Vec<u8> {
+        let tree = [
+            (0, 1, "MeshRenderer", "", -1),
+            (1, 1, "Renderer", "Base", -1),
+            (2, 1, "Component", "Base", -1),
+            (3, 1, "PPtr<GameObject>", "m_GameObject", 8),
+            (4, 1, "SInt32", "m_FileID", 4),
+            (4, 1, "SInt32", "m_PathID", 4),
+        ];
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&1_i32.to_le_bytes());
+        payload.extend_from_slice(&42_i32.to_le_bytes());
+        make_generation_10_object_file_with_external(23, 9001, &tree, &payload, "main.assets")
     }
 
     fn write_type_tree(output: &mut Vec<u8>, class_id: i32, nodes: &[(u8, i32, &str, &str, i32)]) {
@@ -1639,6 +1745,98 @@ mod tests {
             ),
             "{mesh_renderer_yaml}"
         );
+    }
+
+    #[test]
+    fn cross_file_component_pptrs_reach_separate_scene_yaml_collections() {
+        let game_object_bytes = make_game_object_with_external_component();
+        let mesh_renderer_bytes = make_mesh_renderer_with_external_game_object();
+        let source_files = [
+            ("main.assets", game_object_bytes.as_slice()),
+            ("shared.assets", mesh_renderer_bytes.as_slice()),
+        ];
+        let (filesystem, workspace) = load_workspace_files(&source_files);
+        let objects = ObjectWorkspace::load_from_vfs(
+            &filesystem,
+            &workspace,
+            ObjectWorkspaceLimits::default(),
+        )
+        .unwrap();
+        assert!(objects.report().is_complete());
+        let reference_graph = workspace
+            .reference_graph(MultiFileReferenceGraphLimits::default())
+            .unwrap();
+        assert!(reference_graph.is_complete());
+        assert_eq!(reference_graph.file_object_count(0), Some(1));
+        assert_eq!(reference_graph.file_object_count(1), Some(1));
+        assert_eq!(reference_graph.references().len(), 2);
+        assert_eq!(
+            reference_graph.references()[0].resolution,
+            crate::serialized_file::reference_graph::MultiFilePPtrResolution::Object {
+                target_file_index: 1,
+                target_object_index: 0,
+            }
+        );
+        assert_eq!(
+            reference_graph.references()[1].resolution,
+            crate::serialized_file::reference_graph::MultiFilePPtrResolution::Object {
+                target_file_index: 0,
+                target_object_index: 0,
+            }
+        );
+
+        let assignments = plan_scene_assignments_for_workspace(&source_files, &reference_graph);
+        assert_eq!(assignments.len(), 2);
+        assert_eq!(assignments[0].asset.path_id, 42);
+        assert_eq!(assignments[1].asset.path_id, 9001);
+        assert_eq!(
+            assignments
+                .iter()
+                .map(|assignment| assignment.file_id)
+                .collect::<Vec<_>>(),
+            [42, 9001]
+        );
+
+        let mut pointer_map_builder =
+            ProjectExportPointerMapBuilder::new(ExportPointerMapLimits::default());
+        pointer_map_builder
+            .register_scene_collection(COLLECTION_INDEX, [0x71; 16], &assignments[..1])
+            .unwrap();
+        pointer_map_builder
+            .register_scene_collection(COLLECTION_INDEX + 1, [0x82; 16], &assignments[1..])
+            .unwrap();
+        let pointer_map = pointer_map_builder.build().unwrap();
+        let game_object_yaml = workspace_assignments_to_unity_yaml(
+            &workspace,
+            &objects,
+            &reference_graph,
+            &pointer_map,
+            &assignments[..1],
+            COLLECTION_INDEX,
+            None,
+            UnityYamlWorkspaceCollectionLimits::default(),
+        )
+        .unwrap();
+        let mesh_renderer_yaml = workspace_assignments_to_unity_yaml(
+            &workspace,
+            &objects,
+            &reference_graph,
+            &pointer_map,
+            &assignments[1..],
+            COLLECTION_INDEX + 1,
+            None,
+            UnityYamlWorkspaceCollectionLimits::default(),
+        )
+        .unwrap();
+
+        assert!(game_object_yaml.contains("--- !u!1 &42"));
+        assert!(mesh_renderer_yaml.contains("--- !u!23 &9001"));
+        assert!(game_object_yaml.contains(
+            "component: {fileID: 9001, guid: 82828282828282828282828282828282, type: 2}"
+        ));
+        assert!(mesh_renderer_yaml.contains(
+            "m_GameObject: {fileID: 42, guid: 71717171717171717171717171717171, type: 2}"
+        ));
     }
 
     #[test]
