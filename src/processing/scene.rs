@@ -239,7 +239,7 @@ impl Default for SceneHierarchyAuditLimits {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct WorkspaceSceneHierarchyAudit {
     relationships_checked: usize,
     issues: Vec<WorkspaceSceneHierarchyIssue>,
@@ -388,7 +388,7 @@ pub enum WorkspaceSceneRootDiscoveryIssueKind {
     },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct WorkspaceSceneRootDiscovery {
     roots: Vec<WorkspaceSceneRootCandidate>,
     issues: Vec<WorkspaceSceneRootDiscoveryIssue>,
