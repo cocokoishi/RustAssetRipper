@@ -772,3 +772,11 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Focused alias test and full workspace passed: 411 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and `git diff --check`.
 - Still incomplete: synthetic evidence only, with no Unity-produced fixture or direct C# runtime differential. Resource decoding, processing, and complete export paths remain open; Phase 1 remains incomplete and Phase 2 remains locked.
 - Next: continue through the remaining direct-child Pass002 renames, preserving each source node-type predicate and version/data-shape constraint.
+
+## Animation constant YAML field aliases
+
+- Current phase: Phase 1; gate not passed. This increment builds from pushed revision `9526dd9b9e37075c13ce14f246780ad4040ccf9a`. Only `cocokoishi/RustAssetRipper`'s canonical repository is a write/push target. No other remote repository, UABEA, or user AssetBundle content was accessed.
+- Added the source-scoped aliases for `HumanLayerConstant`/`LayerConstant`, `ControllerConstant`, and `StateMachineConstant` to the TypeTree alias registry. A same-named root field is verified to remain unchanged.
+- Focused animation-constant test and full workspace passed: 412 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and `git diff --check`.
+- Still incomplete: synthetic evidence only, with no Unity-produced TypeTree or direct C# runtime differential. Related animation constant processing/export and other Pass002 rules remain open. Phase 1 remains incomplete; Phase 2 remains locked.
+- Next: inspect the remaining Pass002 direct-child aliases, then cover eligible graphics/importer settings rules with owner-type and legacy-shape tests.

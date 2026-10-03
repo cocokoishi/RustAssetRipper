@@ -2289,6 +2289,13 @@ fn baseline_type_scoped_field_aliases(type_name: &str) -> &'static [(&'static st
         ("m_IsPrefabParent", "m_IsPrefabAsset"),
         ("m_ParentPrefab", "m_SourcePrefab"),
     ];
+    const LAYER_CONSTANT_ALIASES: &[(&str, &str)] = &[(
+        "m_StateMachineMotionSetIndex",
+        "m_StateMachineSynchronizedLayerIndex",
+    )];
+    const CONTROLLER_CONSTANT_ALIASES: &[(&str, &str)] = &[("m_HumanLayerArray", "m_LayerArray")];
+    const STATE_MACHINE_CONSTANT_ALIASES: &[(&str, &str)] =
+        &[("m_MotionSetCount", "m_SynchronizedLayerCount")];
 
     match type_name {
         "AnimationClip" => ANIMATION_CLIP_ALIASES,
@@ -2300,6 +2307,9 @@ fn baseline_type_scoped_field_aliases(type_name: &str) -> &'static [(&'static st
         "Texture3D" => TEXTURE_3D_ALIASES,
         "MeshRenderer" => MESH_RENDERER_ALIASES,
         "Prefab" => PREFAB_ALIASES,
+        "HumanLayerConstant" | "LayerConstant" => LAYER_CONSTANT_ALIASES,
+        "ControllerConstant" => CONTROLLER_CONSTANT_ALIASES,
+        "StateMachineConstant" => STATE_MACHINE_CONSTANT_ALIASES,
         _ => &[],
     }
 }
@@ -3638,6 +3648,104 @@ mod tests {
             );
         }
         assert!(!output.contains("m_DataSize: 2048"));
+    }
+
+    #[test]
+    fn animation_constant_field_aliases_follow_type_paths() {
+        let type_tree = TypeTree {
+            nodes: vec![
+                type_tree_node(0, "GameObject", "Base", 0),
+                type_tree_node(1, "SInt32", "m_MotionSetCount", 0),
+                type_tree_node(1, "HumanLayerConstant", "m_HumanLayer", 0),
+                type_tree_node(2, "SInt32", "m_StateMachineMotionSetIndex", 0),
+                type_tree_node(1, "LayerConstant", "m_Layer", 0),
+                type_tree_node(2, "SInt32", "m_StateMachineMotionSetIndex", 0),
+                type_tree_node(1, "ControllerConstant", "m_Controller", 0),
+                type_tree_node(2, "vector", "m_HumanLayerArray", 0),
+                type_tree_node(3, "Array", "Array", 0),
+                type_tree_node(4, "SInt32", "size", 0),
+                type_tree_node(4, "SInt32", "data", 0),
+                type_tree_node(1, "StateMachineConstant", "m_StateMachine", 0),
+                type_tree_node(2, "SInt32", "m_MotionSetCount", 0),
+            ],
+            string_buffer: Vec::new(),
+        };
+        let hints = UnityYamlObjectConversionHints::from_type_tree(
+            &type_tree,
+            version(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        for (path, alias) in [
+            (
+                "m_HumanLayer.m_StateMachineMotionSetIndex",
+                "m_StateMachineSynchronizedLayerIndex",
+            ),
+            (
+                "m_Layer.m_StateMachineMotionSetIndex",
+                "m_StateMachineSynchronizedLayerIndex",
+            ),
+            ("m_Controller.m_HumanLayerArray", "m_LayerArray"),
+            (
+                "m_StateMachine.m_MotionSetCount",
+                "m_SynchronizedLayerCount",
+            ),
+        ] {
+            assert_eq!(
+                hints.field_name_aliases.get(path).map(String::as_str),
+                Some(alias)
+            );
+        }
+
+        let value = SerializedValue::Struct(vec![
+            field("m_MotionSetCount", SerializedValue::I32(99)),
+            field(
+                "m_HumanLayer",
+                SerializedValue::Struct(vec![field(
+                    "m_StateMachineMotionSetIndex",
+                    SerializedValue::I32(3),
+                )]),
+            ),
+            field(
+                "m_Layer",
+                SerializedValue::Struct(vec![field(
+                    "m_StateMachineMotionSetIndex",
+                    SerializedValue::I32(4),
+                )]),
+            ),
+            field(
+                "m_Controller",
+                SerializedValue::Struct(vec![field(
+                    "m_HumanLayerArray",
+                    SerializedValue::Array(vec![SerializedValue::I32(5)]),
+                )]),
+            ),
+            field(
+                "m_StateMachine",
+                SerializedValue::Struct(vec![field("m_MotionSetCount", SerializedValue::I32(6))]),
+            ),
+        ]);
+        let document = convert_with_object_hints(&value, &hints, |_| {
+            unreachable!("animation constant fixture has no PPtrs")
+        })
+        .unwrap();
+        let output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[document],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        for expected in [
+            "m_MotionSetCount: 99",
+            "m_StateMachineSynchronizedLayerIndex: 3",
+            "m_StateMachineSynchronizedLayerIndex: 4",
+            "m_LayerArray:",
+            "m_SynchronizedLayerCount: 6",
+        ] {
+            assert!(output.contains(expected), "missing {expected}");
+        }
+        assert!(!output.contains("m_HumanLayerArray:"));
+        assert!(!output.contains("m_MotionSetCount: 6"));
+        assert!(!output.contains("m_StateMachineMotionSetIndex:"));
     }
 
     #[test]
