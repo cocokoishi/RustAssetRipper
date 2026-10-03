@@ -1083,10 +1083,13 @@ fn print_workspace_summary_to<W: io::Write>(
     scene_definition_plans
         .try_reserve_exact(scene_count)
         .map_err(|_| invalid_data("could not reserve workspace scene definitions"))?;
-    for (file_index, file) in workspace.files().iter().enumerate() {
+    for &file_index in &source_collection_file_indices {
         if !scene_collection_flags[file_index] {
             continue;
         }
+        let file = workspace.files().get(file_index).ok_or_else(|| {
+            invalid_data("source collection traversal returned an invalid file index")
+        })?;
         let collection_name = file
             .container_scope
             .as_deref()
@@ -1206,7 +1209,9 @@ fn print_workspace_summary_to<W: io::Write>(
     }
     let mut prefab_root_counts = [0usize; 4];
     let mut prefab_root_diagnostics = 0usize;
-    for prefab_instance in scene_hierarchies.prefab_instance_identities() {
+    for prefab_instance in scene_hierarchies
+        .prefab_instance_identities_in_collection_order(&source_collection_file_indices)
+    {
         let resolution = scene_hierarchies.resolve_prefab_instance_root(prefab_instance)?;
         let count_index = match &resolution {
             WorkspacePrefabInstanceRootResolution::Resolved(_) => 0,

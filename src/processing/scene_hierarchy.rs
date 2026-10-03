@@ -1060,12 +1060,32 @@ impl WorkspaceSceneHierarchies {
         Ok(walk)
     }
 
-    /// Returns PrefabInstance identities in workspace file and serialized object order.
+    /// Returns PrefabInstance identities in workspace file-index and serialized object order.
     pub fn prefab_instance_identities(
         &self,
     ) -> impl Iterator<Item = WorkspaceSceneObjectIdentity> + '_ {
         self.collection_graph_index.iter().flat_map(move |entry| {
             self.collection_graph_for_file(entry.file_index)
+                .into_iter()
+                .flat_map(|graph| graph.scene_assets.iter())
+                .filter_map(|asset| {
+                    (asset.category == WorkspaceSceneAssetCategory::PrefabInstance)
+                        .then_some(asset.identity)
+                })
+        })
+    }
+
+    /// Returns PrefabInstance identities in the supplied source collection traversal order.
+    ///
+    /// Each collection's assets retain serialized object-table order. The caller supplies the
+    /// `GameBundle.FetchAssets()` collection order; workspace file indices alone do not encode
+    /// that order for nested bundles.
+    pub fn prefab_instance_identities_in_collection_order<'a>(
+        &'a self,
+        collection_file_indices: &'a [usize],
+    ) -> impl Iterator<Item = WorkspaceSceneObjectIdentity> + 'a {
+        collection_file_indices.iter().flat_map(move |&file_index| {
+            self.collection_graph_for_file(file_index)
                 .into_iter()
                 .flat_map(|graph| graph.scene_assets.iter())
                 .filter_map(|asset| {
@@ -4056,6 +4076,39 @@ mod tests {
         assert_eq!(
             workspace.resolve_prefab_instance_root(prefab).unwrap(),
             WorkspacePrefabInstanceRootResolution::Resolved(root)
+        );
+    }
+
+    #[test]
+    fn enumerates_prefab_instances_in_supplied_source_collection_order() {
+        let (mut workspace, prefab_in_file_zero) =
+            prefab_root_workspace(Some((0, SceneRelationshipTarget::Null)));
+        let mut prefab_in_file_one = prefab_in_file_zero;
+        prefab_in_file_one.file_index = 1;
+        prefab_in_file_one.path_id = 101;
+
+        let mut file_one_collection = workspace.non_scene_collections[0].clone();
+        file_one_collection.collection_file_index = 1;
+        file_one_collection.scene_assets = vec![WorkspaceSceneAssetIdentity {
+            identity: prefab_in_file_one,
+            category: WorkspaceSceneAssetCategory::PrefabInstance,
+        }];
+        file_one_collection.relationships.clear();
+        file_one_collection.prefab_root_relationship_index.clear();
+        workspace.non_scene_collections.push(file_one_collection);
+        workspace
+            .collection_graph_index
+            .push(WorkspaceSceneCollectionGraphIndexEntry {
+                file_index: 1,
+                scene_index: None,
+                collection_index: 1,
+            });
+
+        assert_eq!(
+            workspace
+                .prefab_instance_identities_in_collection_order(&[1, 0])
+                .collect::<Vec<_>>(),
+            vec![prefab_in_file_one, prefab_in_file_zero]
         );
     }
 
