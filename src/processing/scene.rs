@@ -4323,6 +4323,114 @@ mod tests {
     }
 
     #[test]
+    fn scene_definition_owns_compacted_cross_file_hierarchy_data() {
+        use crate::serialized_file::reference_graph::{
+            MultiFileReferenceGraph, NamedObjectReferenceGraph, ObjectReferenceGraph,
+        };
+
+        let source_bytes =
+            make_game_object_file("SceneObject", 42, Some((1, 99)), Some("shared.assets"));
+        let target_bytes =
+            make_transform_file_with_hierarchy(99, 0, 0, &[], &["main.assets"], false);
+        let source_file = SerializedFile::parse(&source_bytes).unwrap();
+        let target_file = SerializedFile::parse(&target_bytes).unwrap();
+        let source_references = ObjectReferenceGraph::build(&source_file).unwrap();
+        let target_references = ObjectReferenceGraph::build(&target_file).unwrap();
+        let named_files = [
+            NamedObjectReferenceGraph {
+                file_name: "main.assets",
+                metadata: &source_file.metadata,
+                graph: &source_references,
+            },
+            NamedObjectReferenceGraph {
+                file_name: "shared.assets",
+                metadata: &target_file.metadata,
+                graph: &target_references,
+            },
+        ];
+        let multi_file_graph = MultiFileReferenceGraph::build(&named_files).unwrap();
+        let mut scene_graph = SceneGraph::build(&source_file, SceneGraphLimits::default()).unwrap();
+        let roots = scene_graph
+            .discover_workspace_roots(
+                0,
+                "main.assets",
+                &multi_file_graph,
+                SceneRootDiscoveryLimits::default(),
+            )
+            .unwrap();
+        let audit = scene_graph
+            .audit_workspace_transform_links(
+                0,
+                "main.assets",
+                &multi_file_graph,
+                super::SceneHierarchyAuditLimits::default(),
+            )
+            .unwrap();
+        let plan = crate::processing::scene_collections::plan_scene_definition(
+            0,
+            "main.assets",
+            &crate::processing::scene_collections::SceneCollectionPathStatus::BuildSettingsMissing,
+            None,
+            None,
+            crate::processing::scene_collections::SceneDefinitionPlanLimits::default(),
+        )
+        .unwrap();
+        let definitions =
+            crate::processing::scene_collections::WorkspaceSceneDefinitions::from_plans(
+                vec![plan],
+                2,
+                crate::processing::scene_collections::WorkspaceSceneDefinitionLimits::default(),
+            )
+            .unwrap();
+
+        let limited = crate::processing::scene_hierarchy::WorkspaceSceneHierarchyLimits {
+            max_scene_objects: 0,
+            ..crate::processing::scene_hierarchy::WorkspaceSceneHierarchyLimits::default()
+        };
+        let mut bounded =
+            crate::processing::scene_hierarchy::WorkspaceSceneHierarchyBuilder::new(2, limited)
+                .unwrap();
+        assert!(matches!(
+            bounded.add_collection_graph(
+                0,
+                &scene_graph,
+                roots.clone(),
+                audit.clone(),
+                &multi_file_graph,
+            ),
+            Err(crate::processing::scene_hierarchy::WorkspaceSceneHierarchyError::ResourceLimitExceeded {
+                resource: "scene objects",
+                requested: 1,
+                limit: 0,
+            })
+        ));
+        assert!(!bounded.contains_collection_graph(0));
+
+        let mut builder = crate::processing::scene_hierarchy::WorkspaceSceneHierarchyBuilder::new(
+            2,
+            crate::processing::scene_hierarchy::WorkspaceSceneHierarchyLimits::default(),
+        )
+        .unwrap();
+        builder
+            .add_collection_graph(0, &scene_graph, roots, audit, &multi_file_graph)
+            .unwrap();
+        let hierarchy = builder.finish(&definitions).unwrap();
+        assert_eq!(hierarchy.scenes().len(), 1);
+        assert_eq!(hierarchy.scenes()[0].plan.collection_file_index, 0);
+        let collections = hierarchy.scenes()[0].collections();
+        assert_eq!(collections.len(), 1);
+        assert_eq!(collections[0].game_object_count(), 1);
+        assert_eq!(collections[0].transform_count(), 0);
+        assert_eq!(collections[0].relationships().len(), 1);
+        assert_eq!(collections[0].roots().roots().len(), 1);
+        assert_eq!(
+            collections[0].roots().roots()[0].transform_file_index,
+            Some(1)
+        );
+        assert!(collections[0].is_complete());
+    }
+
+    #[test]
     fn audits_reciprocal_transform_edges_across_serialized_files() {
         let child_bytes =
             make_transform_file_with_hierarchy(42, 1, 99, &[], &["parent.assets"], false);

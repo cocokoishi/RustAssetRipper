@@ -24,6 +24,9 @@ use assetripper::processing::scene_collections::{
     SceneBundlePathMappingSource, SceneDefinitionPlanLimits, SceneGuidWords, SceneManagerKind,
     StreamedSceneBundleMetadata, WorkspaceSceneDefinitionLimits, WorkspaceSceneDefinitions,
 };
+use assetripper::processing::scene_hierarchy::{
+    WorkspaceSceneHierarchyBuilder, WorkspaceSceneHierarchyLimits,
+};
 use assetripper::processing::scene_metadata::{
     decode_build_settings_scene_paths_from_parts, BuildSettingsSceneLimits,
 };
@@ -415,6 +418,10 @@ fn print_workspace_summary_to<W: io::Write>(
             .iter()
             .any(|object| scene_manager_kind(workspace_object_class_id(object)).is_some())
     }));
+    let mut scene_hierarchy_builder = WorkspaceSceneHierarchyBuilder::new(
+        workspace.files().len(),
+        WorkspaceSceneHierarchyLimits::default(),
+    )?;
     let mut scene_guid_words_by_file = Vec::new();
     scene_guid_words_by_file
         .try_reserve_exact(workspace.files().len())
@@ -669,7 +676,7 @@ fn print_workspace_summary_to<W: io::Write>(
             }
         }
 
-        if contains_scene_objects {
+        if contains_scene_objects || scene_collection_flags[file_index] {
             if file_bytes.is_none() {
                 let maximum_bytes =
                     usize::try_from(SerializedFileWorkspaceLimits::default().max_file_bytes)
@@ -738,6 +745,15 @@ fn print_workspace_summary_to<W: io::Write>(
                         root.source_file_index, object.path_id, root.reason
                     )?;
                 }
+            }
+            if scene_collection_flags[file_index] {
+                scene_hierarchy_builder.add_collection_graph(
+                    file_index,
+                    &scene_graph,
+                    root_discovery,
+                    hierarchy_audit,
+                    &multi_file_graph,
+                )?;
             }
         }
 
@@ -997,6 +1013,41 @@ fn print_workspace_summary_to<W: io::Write>(
         }
     }
 
+    for (file_index, &is_scene_collection) in scene_collection_flags.iter().enumerate() {
+        if !is_scene_collection || scene_hierarchy_builder.contains_collection_graph(file_index) {
+            continue;
+        }
+        let file = workspace
+            .files()
+            .get(file_index)
+            .ok_or_else(|| invalid_data("scene collection file index is invalid"))?;
+        let maximum_bytes =
+            usize::try_from(SerializedFileWorkspaceLimits::default().max_file_bytes)
+                .unwrap_or(usize::MAX);
+        let bytes = filesystem.read_all_bytes(&file.virtual_path, maximum_bytes)?;
+        let parsed_file = SerializedFile::parse(&bytes)?;
+        let mut scene_graph = SceneGraph::build(&parsed_file, SceneGraphLimits::default())?;
+        let roots = scene_graph.discover_workspace_roots(
+            file_index,
+            &file.file_name,
+            &multi_file_graph,
+            SceneRootDiscoveryLimits::default(),
+        )?;
+        let audit = scene_graph.audit_workspace_transform_links(
+            file_index,
+            &file.file_name,
+            &multi_file_graph,
+            SceneHierarchyAuditLimits::default(),
+        )?;
+        scene_hierarchy_builder.add_collection_graph(
+            file_index,
+            &scene_graph,
+            roots,
+            audit,
+            &multi_file_graph,
+        )?;
+    }
+
     let scene_path_set = if let Some(paths) = build_settings_paths.as_deref() {
         BuildSettingsScenePathSet::Unique(paths)
     } else {
@@ -1076,6 +1127,7 @@ fn print_workspace_summary_to<W: io::Write>(
         workspace.files().len(),
         WorkspaceSceneDefinitionLimits::default(),
     )?;
+    let scene_hierarchies = scene_hierarchy_builder.finish(&scene_definitions)?;
     writeln!(
         output,
         "SceneDefinitions: {}",
@@ -1099,6 +1151,27 @@ fn print_workspace_summary_to<W: io::Write>(
             scene_plan.collection_name, scene_plan.collection_file_index
         )?;
         writeln!(output, "        scene GUID: {}", scene_plan.guid)?;
+        let scene_hierarchy = scene_hierarchies
+            .scenes()
+            .get(scene_index)
+            .ok_or_else(|| invalid_data("SceneDefinition hierarchy model is unavailable"))?;
+        for collection_hierarchy in scene_hierarchy.collections() {
+            writeln!(
+                output,
+                "        hierarchy file {}: {} GameObjects, {} Transforms, {} relationships, {} roots, {} graph issues, {} root issues, {} reciprocal issues, scene graph complete={}, reference scans complete={}, overall complete={}",
+                collection_hierarchy.collection_file_index(),
+                collection_hierarchy.game_object_count(),
+                collection_hierarchy.transform_count(),
+                collection_hierarchy.relationships().len(),
+                collection_hierarchy.roots().roots().len(),
+                collection_hierarchy.graph_issues().len(),
+                collection_hierarchy.roots().issues().len(),
+                collection_hierarchy.hierarchy_audit().issues().len(),
+                collection_hierarchy.source_graph_complete(),
+                collection_hierarchy.source_reference_scans_complete(),
+                collection_hierarchy.is_complete()
+            )?;
+        }
     }
     writeln!(
         output,
@@ -1977,6 +2050,9 @@ mod tests {
         assert!(summary.contains("collection files: [0]"));
         assert!(summary
             .contains("scene GUID: preserve [0x00000001, 0x00000002, 0x00000003, 0x00000004]"));
+        assert!(summary.contains(
+            "hierarchy file 0: 0 GameObjects, 0 Transforms, 0 relationships, 0 roots, 0 graph issues, 0 root issues, 0 reciprocal issues, scene graph complete=true, reference scans complete=true, overall complete=true"
+        ));
     }
 
     #[test]
