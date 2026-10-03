@@ -9,6 +9,7 @@ use crate::io::platform_structure::{
     PlatformResourceSource, PlatformStructureLimits,
 };
 use crate::io::stream::SmartStream;
+use crate::serialized_file::object::{SerializedValue, SerializedValueLookupError};
 use crate::serialized_file::workspace::{SerializedFileWorkspace, WorkspaceResourceLookupError};
 
 const UNITY_STREAM_OFFSET_MAX: u64 = i64::MAX as u64;
@@ -66,6 +67,187 @@ impl std::error::Error for ResourceFileResolveError {
             Self::Bundle(source) => Some(source),
             Self::ExternalProvider(source) => Some(source),
         }
+    }
+}
+
+/// The path, byte offset, and byte count decoded from a Unity `StreamingInfo` value.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamedResourceInfo {
+    pub path: String,
+    pub offset: u64,
+    pub size: u32,
+}
+
+impl StreamedResourceInfo {
+    /// Matches the source `StreamingInfo.IsSet` rule, which checks whether Path is nonempty.
+    pub fn is_set(&self) -> bool {
+        !self.path.is_empty()
+    }
+}
+
+/// Why a decoded value could not be interpreted using the `StreamingInfo` TypeTree shape.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StreamedResourceInfoError {
+    FieldLookup {
+        field: &'static str,
+        source: SerializedValueLookupError,
+    },
+    MissingField {
+        field: &'static str,
+    },
+    WrongFieldType {
+        field: &'static str,
+        expected: &'static str,
+        actual: &'static str,
+    },
+    InvalidUtf8Path {
+        valid_up_to: usize,
+        error_len: Option<usize>,
+    },
+    AllocationFailed {
+        requested: usize,
+    },
+}
+
+impl fmt::Display for StreamedResourceInfoError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::FieldLookup { field, source } => {
+                write!(formatter, "could not read StreamingInfo field '{field}': {source}")
+            }
+            Self::MissingField { field } => {
+                write!(formatter, "StreamingInfo is missing required field '{field}'")
+            }
+            Self::WrongFieldType {
+                field,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "StreamingInfo field '{field}' has type {actual}; expected {expected}"
+            ),
+            Self::InvalidUtf8Path {
+                valid_up_to,
+                error_len,
+            } => write!(
+                formatter,
+                "StreamingInfo path contains invalid UTF-8 at byte {valid_up_to} (invalid length {error_len:?})"
+            ),
+            Self::AllocationFailed { requested } => write!(
+                formatter,
+                "could not allocate {requested} bytes for StreamingInfo path"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for StreamedResourceInfoError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::FieldLookup { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
+
+/// Extracts Unity's `path`, `offset`, and `size` fields from a decoded StreamingInfo TypeTree.
+///
+/// The serialized integer variant carries the baseline's `Has_Offset_UInt64` distinction:
+/// 32-bit `offset` leaves become `U32`, while 64-bit leaves become `U64`.
+pub fn extract_streamed_resource_info(
+    value: &SerializedValue,
+) -> Result<StreamedResourceInfo, StreamedResourceInfoError> {
+    let path_value = required_streaming_info_field(value, "path")?;
+    let path_bytes = match path_value {
+        SerializedValue::StringBytes(bytes) => bytes,
+        other => {
+            return Err(wrong_streaming_info_type(
+                "path",
+                "UTF-8 string",
+                serialized_value_kind(other),
+            ));
+        }
+    };
+    let utf8_path = std::str::from_utf8(path_bytes).map_err(|error| {
+        StreamedResourceInfoError::InvalidUtf8Path {
+            valid_up_to: error.valid_up_to(),
+            error_len: error.error_len(),
+        }
+    })?;
+    let mut path = String::new();
+    path.try_reserve_exact(utf8_path.len()).map_err(|_| {
+        StreamedResourceInfoError::AllocationFailed {
+            requested: utf8_path.len(),
+        }
+    })?;
+    path.push_str(utf8_path);
+
+    let offset = match required_streaming_info_field(value, "offset")? {
+        SerializedValue::U32(offset) => u64::from(*offset),
+        SerializedValue::U64(offset) => *offset,
+        other => {
+            return Err(wrong_streaming_info_type(
+                "offset",
+                "UInt32 or UInt64",
+                serialized_value_kind(other),
+            ));
+        }
+    };
+    let size = match required_streaming_info_field(value, "size")? {
+        SerializedValue::U32(size) => *size,
+        other => {
+            return Err(wrong_streaming_info_type(
+                "size",
+                "UInt32",
+                serialized_value_kind(other),
+            ));
+        }
+    };
+    Ok(StreamedResourceInfo { path, offset, size })
+}
+
+fn required_streaming_info_field<'a>(
+    value: &'a SerializedValue,
+    field: &'static str,
+) -> Result<&'a SerializedValue, StreamedResourceInfoError> {
+    value
+        .unique_field(field)
+        .map_err(|source| StreamedResourceInfoError::FieldLookup { field, source })?
+        .ok_or(StreamedResourceInfoError::MissingField { field })
+}
+
+fn wrong_streaming_info_type(
+    field: &'static str,
+    expected: &'static str,
+    actual: &'static str,
+) -> StreamedResourceInfoError {
+    StreamedResourceInfoError::WrongFieldType {
+        field,
+        expected,
+        actual,
+    }
+}
+
+fn serialized_value_kind(value: &SerializedValue) -> &'static str {
+    match value {
+        SerializedValue::Bool(_) => "Bool",
+        SerializedValue::I8(_) => "Int8",
+        SerializedValue::U8(_) => "UInt8",
+        SerializedValue::I16(_) => "Int16",
+        SerializedValue::U16(_) => "UInt16",
+        SerializedValue::Char(_) => "Char",
+        SerializedValue::I32(_) => "Int32",
+        SerializedValue::U32(_) => "UInt32",
+        SerializedValue::I64(_) => "Int64",
+        SerializedValue::U64(_) => "UInt64",
+        SerializedValue::F32(_) => "Float32",
+        SerializedValue::F64(_) => "Float64",
+        SerializedValue::StringBytes(_) => "String",
+        SerializedValue::Bytes(_) => "ByteArray",
+        SerializedValue::Array(_) => "Array",
+        SerializedValue::Struct(_) => "Struct",
+        SerializedValue::PPtr { .. } => "PPtr",
+        SerializedValue::Raw { .. } => "Raw",
     }
 }
 
@@ -333,6 +515,25 @@ pub fn read_streamed_resource_bytes(
     Ok(Some(bytes))
 }
 
+/// Reads the bounded range described by a decoded `StreamingInfo` using its resolved VFS path.
+pub fn read_streamed_resource_info_bytes(
+    filesystem: &VirtualFileSystem,
+    resolved_resource_path: &str,
+    info: &StreamedResourceInfo,
+    limits: StreamedResourceLimits,
+) -> Result<Option<Vec<u8>>, StreamedResourceError> {
+    if !info.is_set() {
+        return Ok(None);
+    }
+    read_streamed_resource_bytes(
+        filesystem,
+        resolved_resource_path,
+        info.offset,
+        u64::from(info.size),
+        limits,
+    )
+}
+
 /// Checks a range without allocating or reading its contents.
 ///
 /// An empty path is considered valid and represents an object without an external stream, as in
@@ -421,11 +622,13 @@ mod tests {
     use std::io::{Read, Seek, SeekFrom};
 
     use super::{
-        check_streamed_resource_integrity, open_streamed_resource_range,
-        read_streamed_resource_bytes, InvalidStreamedResourceRange, StreamedResourceError,
-        StreamedResourceLimits,
+        check_streamed_resource_integrity, extract_streamed_resource_info,
+        open_streamed_resource_range, read_streamed_resource_bytes,
+        read_streamed_resource_info_bytes, InvalidStreamedResourceRange, StreamedResourceError,
+        StreamedResourceInfo, StreamedResourceInfoError, StreamedResourceLimits,
     };
     use crate::io::filesystem::VirtualFileSystem;
+    use crate::serialized_file::object::{SerializedFieldValue, SerializedValue};
 
     fn filesystem_with_resource() -> VirtualFileSystem {
         let mut filesystem = VirtualFileSystem::new();
@@ -434,6 +637,151 @@ mod tests {
             .write_all_bytes("/bundle/shared.resS", b"0123456789")
             .unwrap();
         filesystem
+    }
+
+    fn streaming_info_value(path: &[u8], offset: SerializedValue) -> SerializedValue {
+        SerializedValue::Struct(vec![
+            SerializedFieldValue {
+                name: "path".to_owned(),
+                value: SerializedValue::StringBytes(path.to_vec()),
+            },
+            SerializedFieldValue {
+                name: "offset".to_owned(),
+                value: offset,
+            },
+            SerializedFieldValue {
+                name: "size".to_owned(),
+                value: SerializedValue::U32(12),
+            },
+        ])
+    }
+
+    #[test]
+    fn streaming_info_extracts_both_baseline_offset_widths() {
+        assert_eq!(
+            extract_streamed_resource_info(&streaming_info_value(
+                b"archive:/data/shared.resS",
+                SerializedValue::U32(0xFEDC_BA98),
+            ))
+            .unwrap(),
+            StreamedResourceInfo {
+                path: "archive:/data/shared.resS".to_owned(),
+                offset: 0xFEDC_BA98,
+                size: 12,
+            }
+        );
+        assert_eq!(
+            extract_streamed_resource_info(&streaming_info_value(
+                b"shared.resS",
+                SerializedValue::U64(0x1_0000_0000),
+            ))
+            .unwrap(),
+            StreamedResourceInfo {
+                path: "shared.resS".to_owned(),
+                offset: 0x1_0000_0000,
+                size: 12,
+            }
+        );
+        assert!(!extract_streamed_resource_info(&streaming_info_value(
+            b"",
+            SerializedValue::U32(0),
+        ))
+        .unwrap()
+        .is_set());
+    }
+
+    #[test]
+    fn streaming_info_rejects_missing_duplicate_invalid_and_wrongly_typed_fields() {
+        assert_eq!(
+            extract_streamed_resource_info(&SerializedValue::Struct(vec![])).unwrap_err(),
+            StreamedResourceInfoError::MissingField { field: "path" }
+        );
+        assert!(matches!(
+            extract_streamed_resource_info(
+                &streaming_info_value(&[0xFF], SerializedValue::U32(0),)
+            ),
+            Err(StreamedResourceInfoError::InvalidUtf8Path { .. })
+        ));
+        assert!(matches!(
+            extract_streamed_resource_info(&streaming_info_value(
+                b"resource.resS",
+                SerializedValue::I64(5),
+            )),
+            Err(StreamedResourceInfoError::WrongFieldType {
+                field: "offset",
+                expected: "UInt32 or UInt64",
+                actual: "Int64",
+            })
+        ));
+        let duplicate_path = SerializedValue::Struct(vec![
+            SerializedFieldValue {
+                name: "path".to_owned(),
+                value: SerializedValue::StringBytes(b"one".to_vec()),
+            },
+            SerializedFieldValue {
+                name: "path".to_owned(),
+                value: SerializedValue::StringBytes(b"two".to_vec()),
+            },
+        ]);
+        assert!(matches!(
+            extract_streamed_resource_info(&duplicate_path),
+            Err(StreamedResourceInfoError::FieldLookup { field: "path", .. })
+        ));
+        let mut wrong_size = streaming_info_value(b"resource.resS", SerializedValue::U32(0));
+        let SerializedValue::Struct(fields) = &mut wrong_size else {
+            unreachable!();
+        };
+        fields
+            .iter_mut()
+            .find(|field| field.name == "size")
+            .unwrap()
+            .value = SerializedValue::U64(12);
+        assert!(matches!(
+            extract_streamed_resource_info(&wrong_size),
+            Err(StreamedResourceInfoError::WrongFieldType {
+                field: "size",
+                expected: "UInt32",
+                actual: "UInt64",
+            })
+        ));
+    }
+
+    #[test]
+    fn decoded_streaming_info_reads_its_range_from_the_resolved_resource_path() {
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem.create_directory(Some("/resolved")).unwrap();
+        filesystem
+            .write_all_bytes("/resolved/shared.resS", b"0123456789abcdefg")
+            .unwrap();
+        let info = extract_streamed_resource_info(&streaming_info_value(
+            b"archive:/bundle/shared.resS",
+            SerializedValue::U64(3),
+        ))
+        .unwrap();
+
+        assert_eq!(
+            read_streamed_resource_info_bytes(
+                &filesystem,
+                "/resolved/shared.resS",
+                &info,
+                StreamedResourceLimits::default(),
+            )
+            .unwrap(),
+            Some(b"3456789abcde".to_vec())
+        );
+        let empty_info =
+            extract_streamed_resource_info(&streaming_info_value(b"", SerializedValue::U32(0)))
+                .unwrap();
+        assert_eq!(
+            read_streamed_resource_info_bytes(
+                &filesystem,
+                "/resolved/missing.resS",
+                &empty_info,
+                StreamedResourceLimits::default(),
+            )
+            .unwrap(),
+            None
+        );
     }
 
     #[test]

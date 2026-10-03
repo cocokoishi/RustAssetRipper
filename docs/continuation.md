@@ -876,3 +876,12 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - The focused integration test and full workspace passed: 434 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and `git diff --check`. No Unity-produced fixture or direct C# runtime differential was run.
 - Still incomplete: root standalone ResourceFiles, UInt32/UInt64 `StreamingInfo.GetOffset` field extraction, generated asset field extraction/integration, and broad Phase 1 parity. Phase 1 remains incomplete; Phase 2 remains locked.
 - Next: inspect baseline standalone ResourceFile discovery and mount ownership, then model root-level ResourceFiles without confusing them with nested Bundle entries; construct synthetic collision and missing-resource tests.
+
+## StreamingInfo field extraction and range read
+
+- Current phase: Phase 1; gate not passed. Code work builds from `origin/main` revision `d21a9164701dcc1e921f690c4e40926e8d3771f5`; this increment is locally validated but not yet pushed. The only network write target remains this repository's canonical `origin/main`.
+- Added strict `path`/`offset`/`size` extraction from decoded TypeTree values, preserving both UInt32 and UInt64 offset layouts, source-compatible empty-path state, contextual type/UTF-8 errors, and a resolved-path bounded read adapter.
+- Full local verification passed: 437 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and `git diff --check`. No Unity-produced TypeTree or direct C# runtime differential was run.
+- Root ResourceFile audit finding: `GameStructure` passes `PlatformGameStructure.Files` into `GameBundle.FromPaths`; platform collection registers only primary SerializedFiles and compressed data bundles. Loose resources under DataPaths are resolved on demand by the external provider. Explicit ResourceFile paths passed directly to `GameBundle.FromPaths` become GameBundle root resources, but the current Rust workspace/CLI has no matching explicit-file import path.
+- Still incomplete: explicit root ResourceFile inputs and their precedence before child bundles/provider, generated per-version StreamingInfo field extraction wiring, and broad Phase 1 parity. Phase 2 remains locked.
+- Next: add an explicit root-resource input catalog to the Rust workspace resolver, keep it distinct from discovered Platform DataPath candidates, and verify root-before-child-before-external precedence with synthetic VFS fixtures.
