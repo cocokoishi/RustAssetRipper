@@ -680,13 +680,12 @@ fn print_workspace_summary_to<W: io::Write>(
             };
             let parsed_file = SerializedFile::parse(file_bytes)?;
             let mut scene_graph = SceneGraph::build(&parsed_file, SceneGraphLimits::default())?;
-            scene_graph.resolve_with_multi_file_graph(
+            let root_discovery = scene_graph.discover_workspace_roots(
                 file_index,
                 &file.file_name,
                 &multi_file_graph,
+                SceneRootDiscoveryLimits::default(),
             )?;
-            let root_discovery =
-                scene_graph.discover_local_roots(SceneRootDiscoveryLimits::default())?;
             let hierarchy_issues = scene_graph.audit_local_transform_links()?;
             let game_object_count = scene_graph
                 .objects()
@@ -707,17 +706,28 @@ fn print_workspace_summary_to<W: io::Write>(
             )?;
             writeln!(
                 output,
-                "    Local root candidates: {}, root issues: {}, hierarchy issues: {}",
+                "    Workspace root candidates: {}, root issues: {}, local hierarchy issues: {}",
                 root_discovery.roots().len(),
                 root_discovery.issues().len(),
                 hierarchy_issues.len()
             )?;
             for root in root_discovery.roots() {
                 if let Some(object) = scene_graph.objects().get(root.game_object_index) {
+                    let transform = match (root.transform_file_index, root.transform_index) {
+                        (Some(transform_file_index), Some(transform_index)) => {
+                            let path_id = multi_file_graph
+                                .object_identity(transform_file_index, transform_index)
+                                .map(|identity| identity.path_id);
+                            format!(
+                                "Transform file {transform_file_index} object {transform_index} PathID {path_id:?}"
+                            )
+                        }
+                        _ => "no Transform component".to_owned(),
+                    };
                     writeln!(
                         output,
-                        "      root candidate PathID {} ({:?})",
-                        object.path_id, root.reason
+                        "      root candidate file {} PathID {} ({transform}; {:?})",
+                        root.source_file_index, object.path_id, root.reason
                     )?;
                 }
             }

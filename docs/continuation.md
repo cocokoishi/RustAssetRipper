@@ -232,7 +232,7 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 
 ## CLI scene graph and root summary
 
-- inspect now discovers class IDs 1/4/224 in loaded workspace metadata, builds a bounded multi-file PPtr graph once, and for each matching file reads original VFS bytes, reparses the SerializedFile, resolves scene edges, discovers file-local root candidates, and audits local father/child links.
+- inspect now discovers class IDs 1/4/224 in loaded workspace metadata, builds a bounded multi-file PPtr graph once, and for each matching file reads original VFS bytes, reparses the SerializedFile, resolves scene edges, discovers workspace-aware root candidates including external Transforms, and audits local father/child links.
 - The summary prints GameObject/Transform counts, relationship count, decode completeness, and counts of root candidates and hierarchy issues. It prints candidate PathIDs and reasons. Errors remain command errors; malformed decoded object data is represented by SceneGraph issues.
 - Latest verification: cargo test --workspace --locked --quiet passed 231 library and 4 binary tests; warnings-denied workspace Clippy, format check, baseline verification (1,449 files unchanged), and git diff --check passed. The CLI smoke fixture has class ID 1 but a generic Root TypeTree, so the branch executes without validating GameObject fields or asserting printed scene output; component APIs have synthetic coverage.
 - Next: create a CLI-level scene fixture and assert the reported candidate and diagnostics, then continue identifying source scene collections from LevelGameManager classes and attach BuildSettings paths/SceneGUIDs and streamed-scene SceneHashes. Phase 1 remains open; no user AssetBundles or UABEA were inspected.
@@ -304,3 +304,13 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Verification is synthetic: 255 library tests and 8 CLI tests passed; warnings-denied Clippy, format, 1,449-file baseline verification, and diff check passed. No user AssetBundle or UABEA content was inspected.
 - FailedFiles and actual AssetCollection/SceneDefinition objects remain unmodeled. Resource bytes remain in the VFS; resource decoding/export and Unity runtime behavior are not implemented or verified.
 - Next: add an explicit serialized collection/object model over the parsed records, then materialize scene associations from decoded scene-manager objects. Continue with generated EditorBuildSettings, scene export, remaining baseline processors, and product entry points; Phase 1 remains open.
+
+
+## Workspace-aware cross-file scene root discovery
+
+- Current phase: Phase 1; gate not passed. Latest pushed revision before this increment: 184bb3bf12d61f74555943b503a1f1e6f39d8a4c. Only the RustAssetRipper repository is writable.
+- SceneGraph root discovery now uses the joined workspace reference graph to follow GameObject component pointers into other loaded SerializedFiles, identify external Transform/RectTransform classes, and inspect the selected Transform m_Father edge in its owning file. The CLI summary reports workspace-aware root candidates while reciprocal transform auditing remains file-local.
+- Synthetic generation-10 SerializedFiles verify that a GameObject with an external Transform whose father is null is a root, that a missing father target remains an issue instead of becoming a root, and that a same-named source graph with a different serialized PPtr pair is rejected. MultiFileObjectReference retains the serialized FileID/PathID pair for this identity check. No Unity-produced file, user AssetBundle, or UABEA was used.
+- Verification: cargo test --workspace --locked --quiet passed 270 library and 10 binary tests; warnings-denied Clippy, formatting, 1,449-file baseline verification, and git diff --check passed.
+- Remaining: root candidates are not yet assembled into scene exports; reciprocal parent/child auditing across files, scene object ownership, Prefab processing, and Unity project export remain open. Phase 1 remains open.
+- Next: extend reciprocal Transform hierarchy auditing across the workspace and connect scene object records to source SceneDefinition and export processing, keeping aggregate limits explicit.

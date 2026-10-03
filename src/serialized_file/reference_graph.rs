@@ -411,13 +411,15 @@ pub struct NamedObjectReferenceGraph<'a> {
     pub graph: &'a ObjectReferenceGraph,
 }
 
-/// One PPtr resolution across a set of loaded SerializedFiles.
+/// One PPtr resolution across a set of loaded SerializedFiles, retaining the serialized pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MultiFileObjectReference<'a> {
     pub source_file_index: usize,
     pub source_object_index: usize,
     pub source_path_id: i64,
     pub field_path: &'a str,
+    pub file_id: i32,
+    pub path_id: i64,
     pub resolution: MultiFilePPtrResolution,
 }
 
@@ -652,6 +654,8 @@ impl<'a> MultiFileReferenceGraph<'a> {
                     source_object_index: reference.source_object_index,
                     source_path_id: reference.source_path_id,
                     field_path: &reference.field_path,
+                    file_id: reference.file_id,
+                    path_id: reference.path_id,
                     resolution,
                 });
             }
@@ -689,6 +693,19 @@ impl<'a> MultiFileReferenceGraph<'a> {
             object_index,
             path_id,
         })
+    }
+
+    /// Returns the parsed class ID for a file-scoped object-table entry when it is known.
+    pub fn object_class_id(&self, file_index: usize, object_index: usize) -> Option<i32> {
+        let object = self
+            .file_metadata
+            .get(file_index)?
+            .objects
+            .get(object_index)?;
+        object
+            .class_id
+            .map(i32::from)
+            .or_else(|| object.resolved_type_index.map(|_| object.raw_type_id))
     }
 
     /// Returns references emitted by one file-scoped source object.
@@ -1443,6 +1460,8 @@ mod tests {
                 source_object_index: 0,
                 source_path_id: 11,
                 field_path: "m_Target",
+                file_id: 1,
+                path_id: 22,
                 resolution: MultiFilePPtrResolution::Object {
                     target_file_index: 1,
                     target_object_index: 0,
