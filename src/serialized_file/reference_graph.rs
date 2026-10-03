@@ -687,6 +687,11 @@ impl<'a> MultiFileReferenceGraph<'a> {
         self.normalized_file_names.len()
     }
 
+    /// Returns the number of object-table records for one loaded file.
+    pub fn file_object_count(&self, file_index: usize) -> Option<usize> {
+        Some(self.file_metadata.get(file_index)?.objects.len())
+    }
+
     pub fn normalized_file_names(&self) -> &[String] {
         &self.normalized_file_names
     }

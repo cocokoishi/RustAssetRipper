@@ -637,3 +637,11 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Targeted integration and full verification passed: 388 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and `git diff --check`.
 - Still incomplete: the same pipeline has not yet exercised a mapped non-null PPtr; this is not a Unity runtime differential. Processed-asset YAML, Prefab project output, and Phase 1 completeness remain open. Phase 2 remains locked.
 - Next: build a generated two-object Scene fixture (GameObject and MeshRenderer) with reciprocal non-null PPtrs, then verify both objects' planned IDs and emitted YAML references through the same workspace executor.
+
+## Reciprocal Scene component pointers through YAML
+
+- Current phase: Phase 1; gate not passed. This increment builds from pushed revision `52eef0b25a01ce1bd855f3562a54811f170036eb`. Only `cocokoishi/RustAssetRipper` is a write/push target. No UABEA, user AssetBundle content, or other remote repository was accessed.
+- Added a generated two-record GameObject/MeshRenderer file. Both non-null local PPtrs scan to the opposite object; Scene membership and ID planning retain PathIDs 42 and 9001, then the pointer map/YAML executor writes those IDs into the reciprocal fields. Added per-file object-count lookup to the reference graph for the Scene relationship join.
+- Focused workspace YAML tests and full verification passed: 389 library tests, 10 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and `git diff --check`.
+- Still incomplete: no non-null cross-collection PPtr in this complete Scene/YAML path and no Unity runtime differential. Processed asset walkers, Prefab output, and Phase 1 completeness remain open. Phase 2 remains locked.
+- Next: verify cross-collection component pointers end to end through separate Scene collection assignments, ensuring the YAML output carries the registered GUID and asset type.

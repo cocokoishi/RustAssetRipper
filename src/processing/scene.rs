@@ -1754,13 +1754,17 @@ impl SceneGraph {
                 });
             }
         }
-        if graph
-            .object_identity(source_file_index, self.objects.len())
-            .is_some()
-        {
+        let reference_object_count = graph.file_object_count(source_file_index).ok_or(
+            SceneGraphResolveError::SourceFileIndexOutOfBounds {
+                file_index: source_file_index,
+                file_count: graph.file_count(),
+            },
+        )?;
+        if reference_object_count != self.objects.len() {
             return Err(SceneGraphResolveError::ObjectCountMismatch {
                 file_index: source_file_index,
-                scene_count: self.objects.len(),
+                scene_graph_object_count: self.objects.len(),
+                reference_object_count,
             });
         }
 
@@ -2931,7 +2935,8 @@ pub enum SceneGraphResolveError {
     },
     ObjectCountMismatch {
         file_index: usize,
-        scene_count: usize,
+        scene_graph_object_count: usize,
+        reference_object_count: usize,
     },
     ReferenceFieldNotFound {
         relationship_index: usize,
@@ -2993,10 +2998,11 @@ impl Display for SceneGraphResolveError {
             ),
             Self::ObjectCountMismatch {
                 file_index,
-                scene_count,
+                scene_graph_object_count,
+                reference_object_count,
             } => write!(
                 f,
-                "scene graph file {file_index} has {scene_count} objects, but the reference graph contains additional objects"
+                "scene graph file {file_index} has {scene_graph_object_count} object records, but the reference graph has {reference_object_count}"
             ),
             Self::ReferenceFieldNotFound {
                 relationship_index,
