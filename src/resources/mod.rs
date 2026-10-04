@@ -5,5 +5,6 @@ pub mod packed_bit_vector;
 pub mod packed_float_vector;
 pub mod packed_quat_vector;
 pub mod shader_channel;
+pub mod sub_mesh_data;
 pub mod vertex_data_blob;
 pub mod vertex_data_extensions;

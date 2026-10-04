@@ -154,3 +154,10 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Added `src/resources/vertex_data_extensions.rs`: `GetStreams`/`GetStreamsInvariant`, `GetCurrentChannels`/`SetCurrentChannels`, `GetChannel` (both the explicit-channel and old fixed-stream layouts), `GetStreamStride`/`Size`/`Offset`, `GenerateVertices`, and `GenerateSkin`. A real `VertexData.Create` differential captured 140 rows across six versions as `src/resources/vertex_data_extensions_fixture.txt`.
 - This completes the vertex-data read path used by `MeshData.TryMakeFromMesh` and `SpriteMetaDataExtensions`. Still unported on this path: `SubMeshData`/mesh index buffer, bind-pose plumbing, and the actual mesh/sprite exporter wiring.
 - State: 715 library + 23 CLI tests, warnings-denied Clippy, format check, 1,449-file baseline verifier, and `git diff --check` all pass. Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+
+## 13. Checkpoint: sub-mesh data (2026-10-04)
+
+- Added `src/resources/sub_mesh_data.rs`: `SubMeshData.Create`/`CopyTo`, `SubMeshExtensions` topology and first-index helpers, `IndexFormatExtensions.Size`, `MeshData.IndexFormat`, the `MeshTopology` enum, and `Bounds.CalculateFromVertexArray`. A real `SubMesh.Create` differential captured 28 rows across six versions as `src/resources/sub_mesh_data_fixture.txt`.
+- Still unported on the mesh path: `MeshExtensions.GetProcessedIndexBuffer`/`SetProcessedIndexBuffer` (index-buffer byte/endian handling), `CalculateMeshMetric`, `GetChannelsData`, and the mesh exporter wiring. These can reuse `SubMeshData` and `VertexDataBlob`.
+- State: 717 library + 23 CLI tests, warnings-denied Clippy, format check, 1,449-file baseline verifier, and `git diff --check` all pass. Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
