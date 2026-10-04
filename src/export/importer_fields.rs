@@ -127,6 +127,12 @@ pub enum CreateImporterKind {
     GeneratedTexture,
     /// `ImporterFactory.GenerateIHVImporter` result (`IHVImageFormatImporter`).
     GeneratedIhv,
+    /// `SceneExportCollection.ExportScene`: `DefaultImporter` with bundle propagation.
+    Default,
+    /// `ScriptExportCollectionBase.OnScriptExported`: `MonoImporter` with truncated order.
+    Mono,
+    /// `ScriptExportCollection.OnAssemblyExported`: `PluginImporter` with platform entries.
+    Plugin,
 }
 
 /// One `CreateImporter` override in the frozen baseline.
