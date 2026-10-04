@@ -2,6 +2,7 @@
 
 pub mod animation_clip;
 pub mod animation_curve;
+pub mod animator_controller;
 pub mod animator_enums;
 pub mod avatar;
 pub mod avatar_constant;
@@ -21,6 +22,7 @@ pub mod muscle_clip_info;
 pub mod packed_bit_vector;
 pub mod packed_float_vector;
 pub mod packed_quat_vector;
+pub mod pptr;
 pub mod shader_channel;
 pub mod state_constant;
 pub mod state_machine_constant;
