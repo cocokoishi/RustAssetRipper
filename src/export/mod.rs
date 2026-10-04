@@ -12,6 +12,7 @@ pub mod ids;
 pub mod importer_fields;
 pub mod meta;
 pub mod meta_emission;
+pub mod multi_asset;
 pub mod pointer_map;
 pub mod post_export;
 pub mod prefab_collection;
