@@ -1018,3 +1018,11 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Next: connect the path table to project export and `.meta` handling, while continuing source-version branch audit. Push implementation checkpoints as soon as their validation passes, then verify the fetched `origin/main` tree against the local tree.
 
 - Cloud verification: local implementation commit `4e133c651ee9eaf3b443b6f4fb8504753a478b81` has tree `a390cccfad2a0d7351e6baf7604971bc3ade7a57`; non-forced remote `main` checkpoint `8a5d09626d01e2ac4087d01b66a04470e7e79bd9` has the same tree and parent `6a3eae77748e1004f2afbdf8e71c934e5269d02e`. `ls-remote`, fetch, and fetched-tree comparison all matched.
+
+## Unity .meta YAML envelope (2026-10-03)
+
+- Phase 1 remains active. Read-only source tracing covered Meta.ExportYamlDocument, ExportCollection.ExportMeta, YamlWriter format-key behavior, and boolean scalar output. No AssetBundle contents or UABEA inputs were accessed.
+- Added UnityMetaFile to build the source-ordered .meta root fields and serialize them with a new bounded standalone mapping writer. The envelope validates nonzero GUIDs, importer class identifiers, and plain mapping roots; emits folderAsset and license fields according to source options; formats importer m_ keys; and honors SOURCE_DATE_EPOCH with the baseline current-time fallback.
+- Focused tests passed: three meta_yaml tests plus the standalone mapping writer test. Full workspace passed: cargo test --workspace --locked --quiet (487 library, 23 CLI, 0 doc tests). Warnings-denied Clippy, format check, baseline verifier (1,449 files unchanged), and git diff check passed.
+- Scope is the .meta YAML envelope around an already-created importer mapping. Class-specific importer generation, association with project asset paths/GUIDs, filesystem output, and project-export integration are not implemented. No C# runtime differential or Unity-produced fixture ran; Phase 1 remains incomplete.
+- Next: trace the baseline importer factories and export-collection path/GUID ownership, then connect concrete importer generation and .meta sidecars to a bounded project output pipeline without calling the destructive reference exporter.
