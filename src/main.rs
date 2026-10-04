@@ -4101,6 +4101,175 @@ mod tests {
                 object_index: 1
             }
         );
+        let bundle_limit_error =
+            assetripper::processing::asset_bundle::apply_workspace_asset_bundle_paths(
+                &loaded.workspace,
+                &object_workspace,
+                &collection_workspace,
+                &plan,
+                assetripper::processing::asset_bundle::BundledAssetsExportMode::DirectExport,
+                assetripper::processing::asset_bundle::WorkspaceAssetExportPathTable::empty(),
+                assetripper::processing::asset_bundle::WorkspaceAssetExportPathLimits {
+                    max_bundles: 1,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(
+            bundle_limit_error,
+            assetripper::processing::asset_bundle::WorkspaceAssetBundlePathError::CountLimitExceeded {
+                resource: "AssetBundle path source records",
+                count: 2,
+                limit: 1,
+            }
+        ));
+        let target_file_index = plan.assignments[0].target_file_index;
+        let target_object_index = plan.assignments[0].target_object_index;
+        let bundle_source_file_index = plan.bundles[source_bundle].source_file_index;
+        let bundle_source_object_index = plan.bundles[source_bundle].source_object_index;
+
+        let (direct_paths, direct_report) =
+            assetripper::processing::asset_bundle::apply_workspace_asset_bundle_paths(
+                &loaded.workspace,
+                &object_workspace,
+                &collection_workspace,
+                &plan,
+                assetripper::processing::asset_bundle::BundledAssetsExportMode::DirectExport,
+                assetripper::processing::asset_bundle::WorkspaceAssetExportPathTable::empty(),
+                Default::default(),
+            )
+            .unwrap();
+        let direct_target = direct_paths
+            .get(target_file_index, target_object_index)
+            .expect("assigned target path metadata");
+        assert_eq!(
+            direct_target.asset_bundle_name.as_deref(),
+            Some("data.unity3d")
+        );
+        assert_eq!(
+            direct_target.original_path.as_deref(),
+            Some("Assets/Scenes/Other.unity")
+        );
+        assert_eq!(direct_report.assigned_bundle_names, 1);
+        assert_eq!(direct_report.assigned_original_paths, 1);
+
+        let retained_path = "Assets/Prior/Existing.asset";
+        let retained_directory = "Assets/Prior";
+        let prior_bundle_name = "prior.bundle";
+        let initial_paths =
+            assetripper::processing::asset_bundle::WorkspaceAssetExportPathTable::from_records(
+                vec![
+                    assetripper::processing::asset_bundle::WorkspaceAssetExportPath {
+                        file_index: target_file_index,
+                        object_index: target_object_index,
+                        path_id: plan.assignments[0].target_path_id,
+                        asset_bundle_name: Some(prior_bundle_name.to_owned()),
+                        original_path: Some(retained_path.to_owned()),
+                        original_directory: Some(retained_directory.to_owned()),
+                    },
+                ],
+                Default::default(),
+            )
+            .unwrap();
+        let (type_grouped_paths, type_grouped_report) =
+            assetripper::processing::asset_bundle::apply_workspace_asset_bundle_paths(
+                &loaded.workspace,
+                &object_workspace,
+                &collection_workspace,
+                &plan,
+                assetripper::processing::asset_bundle::BundledAssetsExportMode::GroupByAssetType,
+                initial_paths,
+                Default::default(),
+            )
+            .unwrap();
+        let type_grouped_target = type_grouped_paths
+            .get(target_file_index, target_object_index)
+            .expect("retained export path metadata");
+        assert_eq!(
+            type_grouped_target.asset_bundle_name.as_deref(),
+            Some("data.unity3d")
+        );
+        assert_eq!(
+            type_grouped_target.original_path.as_deref(),
+            Some(retained_path)
+        );
+        assert_eq!(
+            type_grouped_target.original_directory.as_deref(),
+            Some(retained_directory)
+        );
+        assert_eq!(
+            type_grouped_report.metadata_string_bytes,
+            "data.unity3d".len() + retained_path.len() + retained_directory.len()
+        );
+
+        let (grouped_paths, grouped_report) =
+            assetripper::processing::asset_bundle::apply_workspace_asset_bundle_paths(
+                &loaded.workspace,
+                &object_workspace,
+                &collection_workspace,
+                &plan,
+                assetripper::processing::asset_bundle::BundledAssetsExportMode::GroupByBundleName,
+                assetripper::processing::asset_bundle::WorkspaceAssetExportPathTable::empty(),
+                Default::default(),
+            )
+            .unwrap();
+        let grouped_target = grouped_paths
+            .get(target_file_index, target_object_index)
+            .expect("assigned target path metadata");
+        let group_path = format!(
+            "Assets/AssetBundles{}data.unity3d{}Scenes/Other.unity",
+            std::path::MAIN_SEPARATOR,
+            std::path::MAIN_SEPARATOR,
+        );
+        let group_directory = format!(
+            "Assets/AssetBundles{}data.unity3d{}Scenes",
+            std::path::MAIN_SEPARATOR,
+            std::path::MAIN_SEPARATOR,
+        );
+        assert_eq!(
+            grouped_target.original_path.as_deref(),
+            Some(group_path.as_str())
+        );
+        assert_eq!(
+            grouped_target.original_directory.as_deref(),
+            Some(group_directory.as_str())
+        );
+        let bundle_source = grouped_paths
+            .get(bundle_source_file_index, bundle_source_object_index)
+            .expect("GroupByBundleName collection default");
+        let group_type_directory = format!(
+            "Assets/AssetBundles{}data.unity3d{}AssetBundle",
+            std::path::MAIN_SEPARATOR,
+            std::path::MAIN_SEPARATOR,
+        );
+        assert_eq!(
+            bundle_source.original_directory.as_deref(),
+            Some(group_type_directory.as_str())
+        );
+        let scene_collection = collection_workspace
+            .collections()
+            .iter()
+            .find(|collection| collection.fixed_name == "cab-scene")
+            .expect("source container scene collection");
+        let scene_manager = object_workspace
+            .objects()
+            .get(scene_collection.object_range.start)
+            .expect("scene manager object");
+        let scene_manager_paths = grouped_paths
+            .get(scene_manager.file_index, scene_manager.object_index)
+            .expect("GroupByBundleName scene collection default");
+        let scene_group_directory = format!(
+            "Assets/AssetBundles{}data.unity3d{}OcclusionCullingSettings",
+            std::path::MAIN_SEPARATOR,
+            std::path::MAIN_SEPARATOR,
+        );
+        assert_eq!(
+            scene_manager_paths.original_directory.as_deref(),
+            Some(scene_group_directory.as_str())
+        );
+        assert_eq!(grouped_report.assigned_bundle_names, 1);
+        assert_eq!(grouped_report.assigned_original_paths, 1);
+        assert_eq!(grouped_report.assigned_collection_directories, 2);
     }
 
     #[test]
