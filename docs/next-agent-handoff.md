@@ -217,3 +217,10 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Added `src/resources/blend_tree_node.rs`: the `BlendTreeNodeConstantExtensions` accessors with version- and blend-type dispatch. A real `BlendTreeNodeConstant.Create` differential captured five versions and three blend types as `src/resources/blend_tree_node_fixture.txt`.
 - Next on the animator path: `TransitionConstantExtensions` (exit time, has-exit-time, interruption source, fixed duration) and `StateConstantExtensions` (id/name resolution, blend-tree detection), then the `ControllerConstant` layer lookups and the `Avatar`/`AnimatorController` assembly.
 - State: 727 library + 23 CLI tests, warnings-denied Clippy, format check, 1,449-file baseline verifier, and `git diff --check` all pass. Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+
+## 22. Checkpoint: transition constants (2026-10-04)
+
+- Added `src/resources/transition_constant.rs`: the `TransitionConstantExtensions` accessors with the old-versus-new layout fallbacks. A real `TransitionConstant.Create` differential captured six versions as `src/resources/transition_constant_fixture.txt`.
+- Next on the animator path: `StateConstantExtensions` (id/name resolution, blend-tree detection) and the `ControllerConstant` layer lookups, then the `Avatar` assembly.
+- State: 728 library + 23 CLI tests, warnings-denied Clippy, format check, 1,449-file baseline verifier, and `git diff --check` all pass. Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

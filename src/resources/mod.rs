@@ -14,6 +14,7 @@ pub mod packed_quat_vector;
 pub mod shader_channel;
 pub mod sub_mesh_data;
 pub mod tangent_mode;
+pub mod transition_constant;
 pub mod vector_extensions;
 pub mod vertex_data_blob;
 pub mod vertex_data_extensions;
