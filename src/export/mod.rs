@@ -1,6 +1,7 @@
 //! Unity project export primitives.
 
 pub mod asset_path;
+pub mod collection_kind;
 pub mod ids;
 pub mod meta;
 pub mod pointer_map;
