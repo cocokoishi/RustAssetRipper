@@ -12,6 +12,7 @@ pub mod compressed_animation_curve;
 pub mod compressed_mesh;
 pub mod constant_clip;
 pub mod controller_constant;
+pub mod curve_wrappers;
 pub mod dense_clip;
 pub mod keyframe;
 pub mod keyframe_quaternion;

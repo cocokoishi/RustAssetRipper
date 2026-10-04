@@ -267,3 +267,10 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Extended `src/resources/animation_curve.rs` with the keyframe-copy `SetValues` overloads and their target-presence `CopyValues` semantics, differentially verified across mixed versions.
 - Next on the animator path: the `QuaternionCurve`/`Vector3Curve`/`FloatCurve`/`PPtrCurve` `SetValues` wrappers, then the `AnimatorController` state-machine/state assembly and the `AnimationClip` export path.
 - State: 741 library + 23 CLI tests, warnings-denied Clippy, format check, 1,449-file baseline verifier, and `git diff --check` all pass. Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+
+## 29. Checkpoint: curve wrappers (2026-10-04)
+
+- Added `src/resources/curve_wrappers.rs` covering the four curve-wrapper `SetValues` extensions with the envelope reset and script pointer, differentially verified across four versions.
+- Next on the animator path: the `AnimatorController` state-machine/state assembly, then the `AnimationClip` export path.
+- State: 742 library + 23 CLI tests, warnings-denied Clippy, format check, 1,449-file baseline verifier, and `git diff --check` all pass. Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
