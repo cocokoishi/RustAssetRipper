@@ -1,1 +1,5 @@
 * text=auto eol=lf
+# Vendored baseline bytes: disable all line-ending conversion so committed blobs stay
+# byte-identical to the snapshot sources (patch texts carry CRLF by value).
+src/export/shader_data/*.txt -text
+src/export/shader_data/templates/*.txt -text
