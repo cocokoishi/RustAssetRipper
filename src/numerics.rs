@@ -19,6 +19,11 @@
 //!   row-vector order, with affine point transforms, transposes, fourth-row resets, and
 //!   component inverses (zero rotations map to identity). Matrix inversion runs in `f64`
 //!   and rounds once, so inverse comparisons use tolerance rather than bit identity.
+//! - Value types mirror their sources field-for-field: `Vector2i`/`Vector3i` integer
+//!   vectors (including the fall-through-to-Z member lookup and the throwing
+//!   member-by-value search), `BoneWeight1`/`BoneWeight4` weights with exact-sum
+//!   normalization rules, and `Color32`/`ColorFloat` conversions with truncating,
+//!   saturating byte mapping and NaN-propagating clamps.
 //! - `Vector3Extensions.Normalize` is dead code in the baseline: the extension method takes
 //!   its struct by value, so no caller ever observes the mutation (the snapshot has zero
 //!   callers, verified by whole-`Source` search). The Rust `normalized` returns the true
@@ -781,6 +786,411 @@ pub fn angle_from_3_points(p1: [f32; 2], p2: [f32; 2], p3: [f32; 2]) -> f32 {
     (360.0 * angle / (2.0 * std::f64::consts::PI)) as f32
 }
 
+/// An integer 2D vector mirroring `Vector2i`.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub struct Vector2i {
+    pub x: i32,
+    pub y: i32,
+}
+
+impl Vector2i {
+    /// `new Vector2i(x, y)`.
+    pub const fn new(x: i32, y: i32) -> Self {
+        Self { x, y }
+    }
+}
+
+impl core::fmt::Display for Vector2i {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(formatter, "[{}, {}]", self.x, self.y)
+    }
+}
+
+/// An integer 3D vector mirroring `Vector3i`.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub struct Vector3i {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+}
+
+/// No member holds the requested value.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct VectorMemberError {
+    pub value: i32,
+}
+
+impl core::fmt::Display for VectorMemberError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(formatter, "Member with value {} wasn't found", self.value)
+    }
+}
+
+impl std::error::Error for VectorMemberError {}
+
+impl Vector3i {
+    /// `new Vector3i(x, y, z)`.
+    pub const fn new(x: i32, y: i32, z: i32) -> Self {
+        Self { x, y, z }
+    }
+
+    /// The zero vector (`Vector3i.Zero`).
+    pub const ZERO: Self = Self { x: 0, y: 0, z: 0 };
+
+    /// `GetValueByMember`: wraps the index with `% 3`, then returns X, Y, or Z.
+    ///
+    /// Negative remainders fall through to Z exactly like the source, because only `0`
+    /// and `1` have dedicated branches.
+    pub fn get_value_by_member(self, member: i32) -> i32 {
+        match member % 3 {
+            0 => self.x,
+            1 => self.y,
+            _ => self.z,
+        }
+    }
+
+    /// `GetMemberByValue`: the first matching member index, else an error.
+    pub fn get_member_by_value(self, value: i32) -> Result<i32, VectorMemberError> {
+        if self.x == value {
+            Ok(0)
+        } else if self.y == value {
+            Ok(1)
+        } else if self.z == value {
+            Ok(2)
+        } else {
+            Err(VectorMemberError { value })
+        }
+    }
+
+    /// `ContainsValue`.
+    pub fn contains_value(self, value: i32) -> bool {
+        self.x == value || self.y == value || self.z == value
+    }
+}
+
+impl core::fmt::Display for Vector3i {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(formatter, "[{}, {}, {}]", self.x, self.y, self.z)
+    }
+}
+
+/// A single bone weight with its index, mirroring `BoneWeight1`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BoneWeight1 {
+    pub weight: f32,
+    pub index: i32,
+}
+
+impl BoneWeight1 {
+    /// `new BoneWeight1(weight, index)`.
+    pub const fn new(weight: f32, index: i32) -> Self {
+        Self { weight, index }
+    }
+}
+
+/// Four bone weights with indices, mirroring `BoneWeight4`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BoneWeight4 {
+    pub weights: [f32; 4],
+    pub indices: [i32; 4],
+}
+
+impl BoneWeight4 {
+    /// The lane count.
+    pub const COUNT: usize = 4;
+
+    /// `new BoneWeight4(weight0..3, index0..3)`.
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new(
+        weight0: f32,
+        weight1: f32,
+        weight2: f32,
+        weight3: f32,
+        index0: i32,
+        index1: i32,
+        index2: i32,
+        index3: i32,
+    ) -> Self {
+        Self {
+            weights: [weight0, weight1, weight2, weight3],
+            indices: [index0, index1, index2, index3],
+        }
+    }
+
+    /// Indexed weight access in source field order.
+    pub fn weight(self, lane: usize) -> f32 {
+        self.weights[lane]
+    }
+
+    /// Indexed bone-index access in source field order.
+    pub fn index(self, lane: usize) -> i32 {
+        self.indices[lane]
+    }
+
+    /// `AnyWeightsNegative`.
+    pub fn any_weights_negative(self) -> bool {
+        self.weights[0] < 0.0
+            || self.weights[1] < 0.0
+            || self.weights[2] < 0.0
+            || self.weights[3] < 0.0
+    }
+
+    /// `Sum`, accumulated left to right like the source.
+    pub fn sum(self) -> f32 {
+        self.weights[0] + self.weights[1] + self.weights[2] + self.weights[3]
+    }
+
+    /// `Normalized`: the exact float sum equals one.
+    pub fn is_normalized(self) -> bool {
+        self.sum() == 1.0
+    }
+
+    /// `NormalizeWeights`: empty weights become uniform; otherwise scale by `1 / sum`.
+    pub fn normalize_weights(self) -> Self {
+        let sum = self.sum();
+        if sum == 0.0 {
+            Self {
+                weights: [0.25, 0.25, 0.25, 0.25],
+                indices: self.indices,
+            }
+        } else {
+            let inverse = 1.0 / sum;
+            Self {
+                weights: [
+                    self.weights[0] * inverse,
+                    self.weights[1] * inverse,
+                    self.weights[2] * inverse,
+                    self.weights[3] * inverse,
+                ],
+                indices: self.indices,
+            }
+        }
+    }
+}
+
+impl core::fmt::Display for BoneWeight4 {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            formatter,
+            "BoneWeight4: {{ Weights = [{}, {}, {}, {}], Indices = [{}, {}, {}, {}] }}",
+            self.weights[0],
+            self.weights[1],
+            self.weights[2],
+            self.weights[3],
+            self.indices[0],
+            self.indices[1],
+            self.indices[2],
+            self.indices[3],
+        )
+    }
+}
+
+/// An RGBA color as four bytes, mirroring `Color32`.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub struct Color32 {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+    pub a: u8,
+}
+
+impl Color32 {
+    /// `new Color32(r, g, b, a)`.
+    pub const fn new(r: u8, g: u8, b: u8, a: u8) -> Self {
+        Self { r, g, b, a }
+    }
+
+    /// Opaque black.
+    pub const BLACK: Self = Self::new(0, 0, 0, 255);
+    /// Opaque white.
+    pub const WHITE: Self = Self::new(255, 255, 255, 255);
+
+    /// `Rgba`: the little-endian reinterpretation of the four bytes.
+    pub const fn rgba(self) -> u32 {
+        (self.r as u32) | ((self.g as u32) << 8) | ((self.b as u32) << 16) | ((self.a as u32) << 24)
+    }
+
+    /// `FromRgba`: the inverse reinterpretation.
+    pub const fn from_rgba(rgba: u32) -> Self {
+        Self {
+            r: (rgba & 0xFF) as u8,
+            g: ((rgba >> 8) & 0xFF) as u8,
+            b: ((rgba >> 16) & 0xFF) as u8,
+            a: ((rgba >> 24) & 0xFF) as u8,
+        }
+    }
+
+    /// `Color.FromArgb` payload: `(A << 24) | (R << 16) | (G << 8) | B`.
+    ///
+    /// The `System.Drawing.Color` wrapper itself stays out of the port; this exposes the
+    /// exact integer the source hands to it so drawing consumers can reuse it verbatim.
+    pub const fn to_argb_u32(self) -> u32 {
+        ((self.a as u32) << 24) | ((self.r as u32) << 16) | ((self.g as u32) << 8) | (self.b as u32)
+    }
+
+    /// `ConvertFloatToByte`: NaN and non-positive scales map to zero, scales at or above
+    /// the byte maximum saturate, and in-between values truncate toward zero.
+    pub fn float_to_byte(value: f32) -> u8 {
+        if value.is_nan() {
+            return 0;
+        }
+        let scaled = value * 255.0;
+        if scaled <= 0.0 {
+            0
+        } else if scaled >= 255.0 {
+            255
+        } else {
+            scaled as u8
+        }
+    }
+}
+
+impl From<Color32> for ColorFloat {
+    fn from(color: Color32) -> Self {
+        Self {
+            r: f32::from(color.r) / 255.0,
+            g: f32::from(color.g) / 255.0,
+            b: f32::from(color.b) / 255.0,
+            a: f32::from(color.a) / 255.0,
+        }
+    }
+}
+
+impl From<ColorFloat> for Color32 {
+    fn from(color: ColorFloat) -> Self {
+        Self {
+            r: Self::float_to_byte(color.r),
+            g: Self::float_to_byte(color.g),
+            b: Self::float_to_byte(color.b),
+            a: Self::float_to_byte(color.a),
+        }
+    }
+}
+
+impl core::fmt::Display for Color32 {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            formatter,
+            "[R:{} G:{} B:{} A:{}]",
+            self.r, self.g, self.b, self.a
+        )
+    }
+}
+
+/// An RGBA color as four floats, mirroring `ColorFloat`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ColorFloat {
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+    pub a: f32,
+}
+
+impl ColorFloat {
+    /// `new ColorFloat(r, g, b, a)`.
+    pub const fn new(r: f32, g: f32, b: f32, a: f32) -> Self {
+        Self { r, g, b, a }
+    }
+
+    /// Opaque black.
+    pub const BLACK: Self = Self::new(0.0, 0.0, 0.0, 1.0);
+    /// Opaque white.
+    pub const WHITE: Self = Self::new(1.0, 1.0, 1.0, 1.0);
+
+    /// `Clamp` to `0..=1` with source NaN propagation.
+    ///
+    /// `f32::clamp` propagates NaN inputs (verified against the probe, which yields NaN
+    /// for NaN lanes), so it matches the source `Math.Min(Math.Max(...))` chain here.
+    pub fn clamp(self) -> Self {
+        Self {
+            r: self.r.clamp(0.0, 1.0),
+            g: self.g.clamp(0.0, 1.0),
+            b: self.b.clamp(0.0, 1.0),
+            a: self.a.clamp(0.0, 1.0),
+        }
+    }
+
+    /// Component-wise addition.
+    #[allow(clippy::should_implement_trait)]
+    pub fn add(self, other: Self) -> Self {
+        Self {
+            r: self.r + other.r,
+            g: self.g + other.g,
+            b: self.b + other.b,
+            a: self.a + other.a,
+        }
+    }
+
+    /// Component-wise subtraction.
+    #[allow(clippy::should_implement_trait)]
+    pub fn sub(self, other: Self) -> Self {
+        Self {
+            r: self.r - other.r,
+            g: self.g - other.g,
+            b: self.b - other.b,
+            a: self.a - other.a,
+        }
+    }
+
+    /// Scalar multiplication.
+    pub fn mul_scalar(self, scalar: f32) -> Self {
+        Self {
+            r: self.r * scalar,
+            g: self.g * scalar,
+            b: self.b * scalar,
+            a: self.a * scalar,
+        }
+    }
+
+    /// Scalar division.
+    pub fn div_scalar(self, scalar: f32) -> Self {
+        Self {
+            r: self.r / scalar,
+            g: self.g / scalar,
+            b: self.b / scalar,
+            a: self.a / scalar,
+        }
+    }
+}
+
+impl core::ops::Add for ColorFloat {
+    type Output = Self;
+    fn add(self, other: Self) -> Self {
+        self.add(other)
+    }
+}
+
+impl core::ops::Sub for ColorFloat {
+    type Output = Self;
+    fn sub(self, other: Self) -> Self {
+        self.sub(other)
+    }
+}
+
+impl core::ops::Mul<f32> for ColorFloat {
+    type Output = Self;
+    fn mul(self, scalar: f32) -> Self {
+        self.mul_scalar(scalar)
+    }
+}
+
+impl core::ops::Div<f32> for ColorFloat {
+    type Output = Self;
+    fn div(self, scalar: f32) -> Self {
+        self.div_scalar(scalar)
+    }
+}
+
+impl core::fmt::Display for ColorFloat {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            formatter,
+            "[R:{:.2} G:{:.2} B:{:.2} A:{:.2}]",
+            self.r, self.g, self.b, self.a
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{angle_from_3_points, Quat, Vec3, GIMBAL_TEST_THRESHOLD, K_EPSILON};
@@ -1206,5 +1616,163 @@ mod tests {
         }
         .invert()
         .is_err());
+    }
+
+    // Float literals below mirror the reference `Color32Tests` decimals exactly; they round
+    // to the same `f32` values on both runtimes (verified by the passing round-trip assert).
+    #[test]
+    #[allow(clippy::excessive_precision)]
+    fn value_types_match_probed_runtime() {
+        use super::{BoneWeight1, BoneWeight4, Color32, ColorFloat, Vector2i, Vector3i};
+        // Packed-word layout matches shifts and the unsafe reinterpretation alike.
+        let color = Color32::new(0x0A, 0x14, 0x1E, 0x28);
+        assert_eq!(color.rgba(), 0x281E140A);
+        assert_eq!(Color32::from_rgba(0x281E140A), color);
+        assert_eq!(
+            Color32::new(33, 57, 199, 255).rgba(),
+            33 | (57 << 8) | (199 << 16) | (255 << 24)
+        );
+        assert_eq!(color.to_string(), "[R:10 G:20 B:30 A:40]");
+        assert_eq!(Color32::BLACK, Color32::new(0, 0, 0, 255));
+        assert_eq!(Color32::WHITE, Color32::new(255, 255, 255, 255));
+        // The drawing-color integer packs alpha first, exactly as probed.
+        assert_eq!(color.to_argb_u32(), 0x280A141E);
+        // Byte conversion truncates, saturates, and zeroes NaN, as probed.
+        for (input, expected) in [
+            (f32::NAN, 0),
+            (-0.5, 0),
+            (0.0, 0),
+            (0.001, 0),
+            (0.5, 127),
+            (0.999, 254),
+            (1.0, 255),
+            (1.5, 255),
+            (f32::INFINITY, 255),
+            (f32::NEG_INFINITY, 0),
+        ] {
+            assert_eq!(Color32::float_to_byte(input), expected, "{input}");
+        }
+        // Color32/float round-trips reproduce the probed float bits.
+        let float: ColorFloat = color.into();
+        assert_eq!(
+            [
+                float.r.to_bits(),
+                float.g.to_bits(),
+                float.b.to_bits(),
+                float.a.to_bits()
+            ],
+            [0x3D20A0A1, 0x3DA0A0A1, 0x3DF0F0F1, 0x3E20A0A1]
+        );
+        assert_eq!(float.to_string(), "[R:0.04 G:0.08 B:0.12 A:0.16]");
+        let back: Color32 =
+            ColorFloat::new(0.0392156877, 0.0784313753, 0.117647059, 0.156862751).into();
+        assert_eq!(back, Color32::new(10, 20, 30, 40));
+        // Arithmetic is component-wise single precision, pinned by probed bits.
+        let sum = ColorFloat::new(0.1, 0.2, 0.3, 0.4) + ColorFloat::new(0.5, 0.6, 0.7, 0.8);
+        assert_eq!(
+            [
+                sum.r.to_bits(),
+                sum.g.to_bits(),
+                sum.b.to_bits(),
+                sum.a.to_bits()
+            ],
+            [0x3F19999A, 0x3F4CCCCD, 0x3F800000, 0x3F99999A]
+        );
+        let difference = ColorFloat::new(5.0, 6.0, 7.0, 8.0) - ColorFloat::new(1.0, 2.0, 3.0, 4.0);
+        assert_eq!(difference, ColorFloat::new(4.0, 4.0, 4.0, 4.0));
+        let scaled = ColorFloat::new(0.1, 0.2, 0.3, 0.4) * 2.0;
+        assert_eq!(
+            [
+                scaled.r.to_bits(),
+                scaled.g.to_bits(),
+                scaled.b.to_bits(),
+                scaled.a.to_bits()
+            ],
+            [0x3E4CCCCD, 0x3ECCCCCD, 0x3F19999A, 0x3F4CCCCD]
+        );
+        let halved = ColorFloat::new(0.1, 0.2, 0.3, 0.4) / 2.0;
+        assert_eq!(
+            [
+                halved.r.to_bits(),
+                halved.g.to_bits(),
+                halved.b.to_bits(),
+                halved.a.to_bits()
+            ],
+            [0x3D4CCCCD, 0x3DCCCCCD, 0x3E19999A, 0x3E4CCCCD]
+        );
+        // Clamp propagates NaN and pins infinities/edges, as probed.
+        // NaN payloads differ across runtimes (.NET uses 0xFFC00000, Rust 0x7FC00000),
+        // so NaN is checked by predicate while all other lanes pin exact bits.
+        let nan_clamped = ColorFloat::new(f32::NAN, f32::NAN, f32::NAN, f32::NAN).clamp();
+        assert!(nan_clamped.r.is_nan());
+        assert!(nan_clamped.g.is_nan());
+        assert!(nan_clamped.b.is_nan());
+        assert!(nan_clamped.a.is_nan());
+        for (input, expected_bits) in [
+            (-0.1, 0x00000000),
+            (0.0, 0x00000000),
+            (0.3, 0x3E99999A),
+            (1.2, 0x3F800000),
+            (f32::INFINITY, 0x3F800000),
+            (f32::NEG_INFINITY, 0x00000000),
+        ] {
+            let clamped = ColorFloat::new(input, input, input, input).clamp();
+            assert_eq!(clamped.r.to_bits(), expected_bits, "{input}");
+            assert_eq!(clamped.g.to_bits(), expected_bits);
+            assert_eq!(clamped.b.to_bits(), expected_bits);
+            assert_eq!(clamped.a.to_bits(), expected_bits);
+        }
+        assert_eq!(
+            ColorFloat::new(-0.1, 1.2, 0.3, -1.3).clamp(),
+            ColorFloat::new(0.0, 1.0, 0.3, 0.0)
+        );
+        assert_eq!(ColorFloat::BLACK, ColorFloat::new(0.0, 0.0, 0.0, 1.0));
+        assert_eq!(ColorFloat::WHITE, ColorFloat::new(1.0, 1.0, 1.0, 1.0));
+        assert_eq!(
+            ColorFloat::BLACK.to_string(),
+            "[R:0.00 G:0.00 B:0.00 A:1.00]"
+        );
+        // Bone weights follow exact-sum rules and uniform fallback, as probed.
+        let default_normalized = BoneWeight4::default().normalize_weights();
+        assert_eq!(default_normalized.weights, [0.25, 0.25, 0.25, 0.25]);
+        assert!(default_normalized.is_normalized());
+        let full = BoneWeight4::new(1.0, 1.0, 1.0, 1.0, 4, 5, 6, 7).normalize_weights();
+        assert_eq!(full.weights, [0.25, 0.25, 0.25, 0.25]);
+        assert_eq!(full.indices, [4, 5, 6, 7]);
+        let unit = BoneWeight4::new(0.1, 0.2, 0.3, 0.4, 0, 1, 2, 3);
+        assert!(unit.is_normalized());
+        assert!(!unit.any_weights_negative());
+        assert_eq!(
+            unit.to_string(),
+            "BoneWeight4: { Weights = [0.1, 0.2, 0.3, 0.4], Indices = [0, 1, 2, 3] }"
+        );
+        let negative = BoneWeight4::new(-0.1, 0.2, 0.3, 0.4, 0, 1, 2, 3);
+        assert!(negative.any_weights_negative());
+        assert!(!negative.is_normalized());
+        assert_eq!(BoneWeight4::COUNT, 4);
+        assert_eq!(
+            BoneWeight1::new(0.5, 7),
+            BoneWeight1 {
+                weight: 0.5,
+                index: 7
+            }
+        );
+        // Integer vectors wrap, search, and display exactly like the source.
+        let vector = Vector3i::new(10, 20, 30);
+        assert_eq!(vector.get_value_by_member(0), 10);
+        assert_eq!(vector.get_value_by_member(1), 20);
+        assert_eq!(vector.get_value_by_member(2), 30);
+        assert_eq!(vector.get_value_by_member(3), 10);
+        assert_eq!(vector.get_value_by_member(-1), 30);
+        assert_eq!(vector.get_value_by_member(4), 20);
+        assert_eq!(vector.get_member_by_value(10), Ok(0));
+        assert_eq!(vector.get_member_by_value(20), Ok(1));
+        assert_eq!(vector.get_member_by_value(30), Ok(2));
+        assert!(vector.get_member_by_value(99).is_err());
+        assert!(vector.contains_value(20));
+        assert!(!vector.contains_value(99));
+        assert_eq!(vector.to_string(), "[10, 20, 30]");
+        assert_eq!(Vector3i::ZERO, Vector3i::new(0, 0, 0));
+        assert_eq!(Vector2i::new(3, -4).to_string(), "[3, -4]");
     }
 }
