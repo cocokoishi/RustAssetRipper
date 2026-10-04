@@ -13,5 +13,6 @@ pub mod numerics;
 pub mod processing;
 pub mod product;
 pub mod resource;
+pub mod resources;
 pub mod scheme;
 pub mod serialized_file;
