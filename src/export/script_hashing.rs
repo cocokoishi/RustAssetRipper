@@ -255,6 +255,37 @@ mod tests {
     }
 
     #[test]
+    fn md4_matches_reference_implementation_vectors() {
+        // Digests produced by the frozen baseline's own dependency
+        // (`AssetRipper.HashAlgorithms` 1.0.0, `MD4.HashData`) executed with .NET SDK 10.0.401
+        // from an isolated probe at `%LOCALAPPDATA%\Temp\opencode\md4diff`. Inputs cover the
+        // padding boundary (55 bytes fit one block, 56 need two), a full block, a multi-block
+        // patterned input, and a real script FileID preimage.
+        for (input, expected) in [
+            (vec![b'x'; 55], "92f32bb82c95ad10e8f87ae58ab06807"),
+            (vec![b'x'; 56], "374d5f08103b7092c83b4626ebceffab"),
+            (vec![b'y'; 64], "7b31cd9bcbd9a24b501d527e91129d61"),
+            (
+                (0..1000)
+                    .map(|i| ((i * 31 + 7) & 0xFF) as u8)
+                    .collect::<Vec<u8>>(),
+                "a1449ce09255ece450ace1589258503a",
+            ),
+        ] {
+            assert_eq!(hex(md4(&input)), expected, "length {}", input.len());
+        }
+        let preimage = b"s\0\0\0UnityEngineComponent".to_vec();
+        assert_eq!(preimage.len(), 24);
+        assert_eq!(hex(md4(&preimage)), "9917ea1b5bd0dcfcaf5d6c0d67808695");
+        // The preimage digest's little-endian head is the NUnit FileID for
+        // ("UnityEngine", "Component") asserted in the next test.
+        assert_eq!(
+            calculate_script_file_id(b"UnityEngine", b"Component", ScriptHashLimits::default()),
+            Ok(468_326_297)
+        );
+    }
+
+    #[test]
     fn script_file_ids_match_the_baseline_nunit_vectors() {
         // `AssetRipper.Tests/ScriptHashingTests.cs`: (namespace, name, expected FileID).
         for (namespace, name, expected) in [
