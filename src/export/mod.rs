@@ -2,6 +2,7 @@
 
 pub mod asset_path;
 pub mod collection_kind;
+pub mod guid_policy;
 pub mod ids;
 pub mod meta;
 pub mod pointer_map;
