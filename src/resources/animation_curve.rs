@@ -146,6 +146,88 @@ pub fn set_values_slopes(
     }
 }
 
+/// `CopyValues` of a source keyframe into a target-version keyframe: the target's own field
+/// presence decides which optional fields survive, and an absent source field reads as its default.
+fn copy_keyframe_for_version(version: UnityVersion, source: &KeyframeView) -> KeyframeView {
+    let presence = keyframe_presence(version);
+    KeyframeView {
+        time: source.time,
+        value: source.value,
+        in_slope: source.in_slope,
+        out_slope: source.out_slope,
+        in_weight: presence.in_weight.then(|| source.in_weight.unwrap_or(0.0)),
+        out_weight: presence
+            .out_weight
+            .then(|| source.out_weight.unwrap_or(0.0)),
+        tangent_mode: source.tangent_mode,
+        weighted_mode: presence
+            .weighted_mode
+            .then(|| source.weighted_mode.unwrap_or(0)),
+    }
+}
+
+/// `SetValues(version, keyframe)`: one copied keyframe.
+pub fn set_values_keyframe(
+    curve: &mut AnimationCurveView,
+    version: UnityVersion,
+    keyframe: &KeyframeView,
+) {
+    set_default_rotation_order_and_curve_loop_type(curve);
+    curve.curve.clear();
+    curve
+        .curve
+        .push(copy_keyframe_for_version(version, keyframe));
+}
+
+/// `SetValues(version, keyframe1, keyframe2)`.
+pub fn set_values_keyframe_pair(
+    curve: &mut AnimationCurveView,
+    version: UnityVersion,
+    keyframe1: &KeyframeView,
+    keyframe2: &KeyframeView,
+) {
+    set_default_rotation_order_and_curve_loop_type(curve);
+    curve.curve.clear();
+    curve
+        .curve
+        .push(copy_keyframe_for_version(version, keyframe1));
+    curve
+        .curve
+        .push(copy_keyframe_for_version(version, keyframe2));
+}
+
+/// `SetValues(version, IReadOnlyList<IKeyframe_Single>)`.
+pub fn set_values_keyframes(
+    curve: &mut AnimationCurveView,
+    version: UnityVersion,
+    keyframes: &[KeyframeView],
+) {
+    set_default_rotation_order_and_curve_loop_type(curve);
+    curve.curve = keyframes
+        .iter()
+        .map(|keyframe| copy_keyframe_for_version(version, keyframe))
+        .collect();
+}
+
+/// `SetValues(version, IReadOnlyList<IKeyframe_Single>, preInfinity, postInfinity)`.
+pub fn set_values_keyframes_enveloped(
+    curve: &mut AnimationCurveView,
+    version: UnityVersion,
+    keyframes: &[KeyframeView],
+    pre_infinity: i32,
+    post_infinity: i32,
+) {
+    curve.pre_infinity = pre_infinity;
+    curve.post_infinity = post_infinity;
+    if let Some(slot) = &mut curve.rotation_order {
+        *slot = ROTATION_ORDER_ZXY;
+    }
+    curve.curve = keyframes
+        .iter()
+        .map(|keyframe| copy_keyframe_for_version(version, keyframe))
+        .collect();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,5 +367,134 @@ mod tests {
             }
         }
         assert_eq!(rows, 24);
+    }
+
+    fn source_keyframe(source_version: UnityVersion) -> KeyframeView {
+        let presence = keyframe_presence(source_version);
+        KeyframeView {
+            time: 0.25,
+            value: 1.5,
+            in_slope: 2.5,
+            out_slope: 3.5,
+            in_weight: presence.in_weight.then_some(4.5),
+            out_weight: presence.out_weight.then_some(5.5),
+            tangent_mode: 0,
+            weighted_mode: presence.weighted_mode.then_some(0),
+        }
+    }
+
+    fn assert_envelope_and_keyframes(
+        line: &str,
+        curve: &AnimationCurveView,
+        envelope: &[&str],
+        keyframes: &[&str],
+    ) {
+        assert_eq!(
+            curve.pre_infinity,
+            envelope[0].parse::<i32>().unwrap(),
+            "{line}"
+        );
+        assert_eq!(
+            curve.post_infinity,
+            envelope[1].parse::<i32>().unwrap(),
+            "{line}"
+        );
+        assert_eq!(
+            curve.rotation_order.unwrap_or(0),
+            envelope[2].parse::<i32>().unwrap(),
+            "{line}"
+        );
+        assert_eq!(curve.curve.len(), keyframes.len(), "{line}");
+        for (keyframe, row) in curve.curve.iter().zip(keyframes) {
+            let values: Vec<&str> = row.split(',').collect();
+            assert_eq!(
+                keyframe.time.to_bits(),
+                values[0].parse::<u32>().unwrap(),
+                "{line}"
+            );
+            assert_eq!(
+                keyframe.value.to_bits(),
+                values[1].parse::<u32>().unwrap(),
+                "{line}"
+            );
+            assert_eq!(
+                keyframe.in_slope.to_bits(),
+                values[2].parse::<u32>().unwrap(),
+                "{line}"
+            );
+            assert_eq!(
+                keyframe.out_slope.to_bits(),
+                values[3].parse::<u32>().unwrap(),
+                "{line}"
+            );
+            let expected_in = values[4].parse::<i64>().unwrap();
+            if expected_in == -1 {
+                assert_eq!(keyframe.in_weight, None, "{line}");
+            } else {
+                assert_eq!(bits(keyframe.in_weight), expected_in as u32, "{line}");
+            }
+            let expected_out = values[5].parse::<i64>().unwrap();
+            if expected_out == -1 {
+                assert_eq!(keyframe.out_weight, None, "{line}");
+            } else {
+                assert_eq!(bits(keyframe.out_weight), expected_out as u32, "{line}");
+            }
+            assert_eq!(
+                keyframe.tangent_mode,
+                values[6].parse::<i32>().unwrap(),
+                "{line}"
+            );
+            let expected_weighted = values[7].parse::<i64>().unwrap();
+            if expected_weighted == -1 {
+                assert_eq!(keyframe.weighted_mode, None, "{line}");
+            } else {
+                assert_eq!(
+                    keyframe.weighted_mode,
+                    Some(expected_weighted as i32),
+                    "{line}"
+                );
+            }
+        }
+    }
+
+    /// Byte-for-byte differential against the reference `AnimationCurveExtensions` copy overloads
+    /// (probe `Temp/opencode/curve2probe`).
+    #[test]
+    fn animation_curve_copy_overloads_match_the_reference_runtime() {
+        let fixture = include_str!("animation_curve_copy_fixture.txt");
+        let mut rows = 0;
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let parts: Vec<&str> = line.split('|').collect();
+            assert_eq!(parts[0], "CC", "{line}");
+            let target = UnityVersion::parse(parts[1]).unwrap();
+            let source_version = UnityVersion::parse(parts[2]).unwrap();
+            let source = source_keyframe(source_version);
+            let mut curve = AnimationCurveView {
+                rotation_order: curve_presence(target).rotation_order.then_some(0),
+                ..AnimationCurveView::default()
+            };
+            match parts[3] {
+                "single" => set_values_keyframe(&mut curve, target, &source),
+                "pair" => set_values_keyframe_pair(&mut curve, target, &source, &source),
+                "list" => set_values_keyframes(&mut curve, target, &[source, source]),
+                "enveloped" => set_values_keyframes_enveloped(
+                    &mut curve,
+                    target,
+                    &[source],
+                    CURVE_LOOP_LINEAR,
+                    CURVE_LOOP_CONSTANT,
+                ),
+                other => panic!("unknown copy kind {other}"),
+            }
+            let envelope: Vec<&str> = parts[4].split(',').collect();
+            let keyframes: Vec<&str> = parts[5].split(';').collect();
+            assert_envelope_and_keyframes(line, &curve, &envelope, &keyframes);
+            rows += 1;
+        }
+        assert_eq!(rows, 16);
     }
 }

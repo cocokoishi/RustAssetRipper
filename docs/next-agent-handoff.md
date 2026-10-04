@@ -260,3 +260,10 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Confirmed a source quirk: `ValueConstant_5_5.TypeID` is inert (no backing field), so the legacy binding conversion degenerates to Animator bindings on 5.5+.
 - Next on the animator path: the `AnimatorController` state-machine/state assembly and the `AnimationClip` export path.
 - State: 740 library + 23 CLI tests, warnings-denied Clippy, format check, 1,449-file baseline verifier, and `git diff --check` all pass. Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+
+## 28. Checkpoint: animation-curve copy overloads (2026-10-04)
+
+- Extended `src/resources/animation_curve.rs` with the keyframe-copy `SetValues` overloads and their target-presence `CopyValues` semantics, differentially verified across mixed versions.
+- Next on the animator path: the `QuaternionCurve`/`Vector3Curve`/`FloatCurve`/`PPtrCurve` `SetValues` wrappers, then the `AnimatorController` state-machine/state assembly and the `AnimationClip` export path.
+- State: 741 library + 23 CLI tests, warnings-denied Clippy, format check, 1,449-file baseline verifier, and `git diff --check` all pass. Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
