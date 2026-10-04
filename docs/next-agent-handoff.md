@@ -203,3 +203,10 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Added `src/resources/compressed_animation_curve.rs`: `CompressedAnimationCurveExtensions.Unpack` composing the packed vectors with the quaternion keyframe slopes overload. A real `CompressedAnimationCurve` differential captured four versions as `src/resources/compressed_animation_curve_fixture.txt`.
 - Next on the animation path: the compressed `Vector3f`/single curve unpackers; `DenseClip`/`StreamedClip`/`ConstantClip` decoding; then the `FloatCurve`/`Vector3Curve`/`QuaternionCurve`/`PPtrCurve` binding list and `AnimationClip`/`Avatar`/`AnimatorController` assembly.
 - State: 725 library + 23 CLI tests, warnings-denied Clippy, format check, 1,449-file baseline verifier, and `git diff --check` all pass. Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+
+## 20. Checkpoint: MuscleClipInfo initialization (2026-10-04)
+
+- Added `src/resources/muscle_clip_info.rs`: both `MuscleClipInfoExtensions.Initialize` overloads. A real `MuscleClipInfo`/`MuscleClipConstant` differential captured five versions as `src/resources/muscle_clip_info_fixture.txt`.
+- Next on the animation path: the `AnimationClip` clip lists (`DenseClip`/`StreamedClip`/`ConstantClip` predicates and `SampleArray`/`Data` decoding), the binding curve list (`FloatCurve`/`Vector3Curve`/`QuaternionCurve`/`PPtrCurve`), then `Avatar`/`AnimatorController` assembly.
+- State: 726 library + 23 CLI tests, warnings-denied Clippy, format check, 1,449-file baseline verifier, and `git diff --check` all pass. Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
