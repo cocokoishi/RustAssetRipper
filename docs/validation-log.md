@@ -1408,3 +1408,10 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Five tests cover verbatim-vs-fixed naming asymmetry, collision suffixes, firstpass Plugins folders, empty-namespace folders, and ordinal case-sensitive extension stripping.
 - Two warnings-denied Clippy findings were fixed: a private cross-module separator made pub(crate), and an eight-argument helper regrouped into a request struct.
 - Final verification on Windows with Rust/Cargo 1.98.1: cargo fmt --all -- --check exit 0; cargo test --workspace --locked --quiet exit 0 (562 library, 23 CLI, 0 doc tests); cargo clippy --workspace --all-targets --locked -- -D warnings exit 0; tools/verify-baseline.ps1 exit 0 (1,449/1,449 reference files unchanged); git diff --check exit 0. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+## Web product surface (2026-10-04)
+
+- Audited the actual user-facing product: a single ASP.NET web app (GUI.Free only launches it) with POSIX arguments, 46 routes, and five post commands. Added src/product.rs with launch defaults, the full route table in registration order, command redirect rules, local-web-file prefixes, and the log/export name builders.
+- Four tests cover defaults (booleans at compile time), route counts with per-command POST coverage and the Model.glb outlier, redirect rules, and name builders. An initial miscount of AssetAPI endpoints (10, not 11) was caught by the count test and corrected in the test, not the table.
+- A warnings-denied Clippy assertions-on-constants finding moved the boolean default checks into compile-time asserts.
+- Final verification on Windows with Rust/Cargo 1.98.1: cargo fmt --all -- --check exit 0; cargo test --workspace --locked --quiet exit 0 (566 library, 23 CLI, 0 doc tests); cargo clippy --workspace --all-targets --locked -- -D warnings exit 0; tools/verify-baseline.ps1 exit 0 (1,449/1,449 reference files unchanged); git diff --check exit 0. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
