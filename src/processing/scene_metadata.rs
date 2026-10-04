@@ -362,8 +362,8 @@ mod tests {
         scene_path_from_build_settings_value, BuildSettingsSceneError, BuildSettingsSceneLimits,
     };
     use crate::processing::scene_collections::{
-        extract_streamed_scene_bundle_metadata, SceneBundleMappingLimits,
-        StreamedSceneBundleMetadata,
+        extract_asset_bundle_container_references, extract_streamed_scene_bundle_metadata,
+        AssetBundleContainerReference, SceneBundleMappingLimits, StreamedSceneBundleMetadata,
     };
     use crate::processing::scene_naming::{scene_path_for_collection, SceneUnityVersion};
     use crate::serialized_file::file::SerializedFile;
@@ -712,6 +712,18 @@ mod tests {
                 )]),
                 container_paths: Some(vec!["Assets/Scenes/Main.unity".to_owned()]),
             }
+        );
+        assert_eq!(
+            extract_asset_bundle_container_references(
+                &object.root,
+                SceneBundleMappingLimits::default(),
+            )
+            .unwrap(),
+            [AssetBundleContainerReference {
+                path: "Assets/Scenes/Main.unity".to_owned(),
+                file_id: 0,
+                path_id: 0,
+            }]
         );
 
         let container = object.root.unique_field("m_Container").unwrap().unwrap();
