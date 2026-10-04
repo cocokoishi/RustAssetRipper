@@ -379,7 +379,7 @@ mod tests {
         let bytes = fs::read(&report.path).unwrap();
         assert_eq!(
             bytes,
-            b"fileFormatVersion: 2\nguid: 00000001000000000000000000000000\nDefaultImporter: {}\n"
+            b"fileFormatVersion: 2\nguid: 10000000000000000000000000000000\nDefaultImporter: {}\n"
         );
         assert_eq!(report.byte_count, bytes.len());
         assert_eq!(fs::read(root.path().join("keep.txt")).unwrap(), b"keep");

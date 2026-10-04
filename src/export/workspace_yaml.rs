@@ -4207,13 +4207,13 @@ mod tests {
 
         assert!(
             game_object_yaml.contains(
-                "component: {fileID: 9001, guid: 82828282828282828282828282828282, type: 2}"
+                "component: {fileID: 9001, guid: 28282828282828282828282828282828, type: 2}"
             ),
             "{game_object_yaml}"
         );
         assert!(
             mesh_renderer_yaml.contains(
-                "m_GameObject: {fileID: 42, guid: 71717171717171717171717171717171, type: 2}"
+                "m_GameObject: {fileID: 42, guid: 17171717171717171717171717171717, type: 2}"
             ),
             "{mesh_renderer_yaml}"
         );
@@ -4304,10 +4304,10 @@ mod tests {
         assert!(game_object_yaml.contains("--- !u!1 &42"));
         assert!(mesh_renderer_yaml.contains("--- !u!23 &9001"));
         assert!(game_object_yaml.contains(
-            "component: {fileID: 9001, guid: 82828282828282828282828282828282, type: 2}"
+            "component: {fileID: 9001, guid: 28282828282828282828282828282828, type: 2}"
         ));
         assert!(mesh_renderer_yaml.contains(
-            "m_GameObject: {fileID: 42, guid: 71717171717171717171717171717171, type: 2}"
+            "m_GameObject: {fileID: 42, guid: 17171717171717171717171717171717, type: 2}"
         ));
     }
 
@@ -4389,7 +4389,7 @@ mod tests {
 
         assert!(yaml.contains("--- !u!1 &51"), "{yaml}");
         assert!(
-            yaml.contains("target: {fileID: 142, guid: 82828282828282828282828282828282, type: 2}"),
+            yaml.contains("target: {fileID: 142, guid: 28282828282828282828282828282828, type: 2}"),
             "{yaml}"
         );
     }

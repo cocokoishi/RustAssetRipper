@@ -437,10 +437,13 @@ pub fn project_pointer_to_unity_yaml(
 }
 
 fn format_unity_guid(bytes: [u8; 16]) -> String {
+    // `UnityGuid.ToString` emits each 32-bit word's nibbles from least significant to most
+    // significant, which is the canonical Unity GUID layout (e.g. the `unity default resources`
+    // GUID `0000000000000000e000000000000000`).
     let mut value = String::with_capacity(32);
     for word in bytes.chunks_exact(4) {
         let word = u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
-        for shift in (0..8).rev() {
+        for shift in 0..8 {
             let digit = ((word >> (shift * 4)) & 0x0f) as usize;
             value.push(b"0123456789abcdef"[digit] as char);
         }
@@ -936,6 +939,48 @@ mod tests {
         SceneUnityVersion::parse(value).unwrap()
     }
 
+    /// Differential against the external `UnityGuid.ToString` (probe `Temp/opencode/guidprobe2`).
+    /// The reference emits each 32-bit word's nibbles from least significant to most significant,
+    /// so a word tuple's string is the per-word reversal of its big-endian hex.
+    #[test]
+    fn unity_guid_string_matches_the_reference_runtime() {
+        let fixture = include_str!("guid_fixture.txt");
+        let mut rows = 0;
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let parts: Vec<&str> = line.split('|').collect();
+            let mut bytes = [0u8; 16];
+            match parts[0] {
+                "GUID" => {
+                    for (index, word) in parts[1..5].iter().enumerate() {
+                        bytes[index * 4..index * 4 + 4]
+                            .copy_from_slice(&word.parse::<u32>().unwrap().to_le_bytes());
+                    }
+                }
+                "SPAN" => {
+                    for (index, chunk) in parts[1].as_bytes().chunks_exact(2).enumerate() {
+                        let text = std::str::from_utf8(chunk).unwrap();
+                        bytes[index] = u8::from_str_radix(text, 16).unwrap();
+                    }
+                }
+                other => panic!("unknown guid fixture tag {other} in {line}"),
+            }
+            assert_eq!(format_unity_guid(bytes), parts[parts.len() - 1], "{line}");
+            rows += 1;
+        }
+        assert_eq!(rows, 4);
+        // The canonical `unity default resources` GUID.
+        let mut engine_bytes = [0u8; 16];
+        engine_bytes[8..12].copy_from_slice(&0x0Eu32.to_le_bytes());
+        assert_eq!(
+            format_unity_guid(engine_bytes),
+            "0000000000000000e000000000000000"
+        );
+    }
+
     #[test]
     fn writes_baseline_object_document_header_block_fields_and_quoted_strings() {
         let body = mapping(&[
@@ -1044,7 +1089,7 @@ mod tests {
 
         assert_eq!(
             write_unity_yaml_documents(&[document], UnityYamlWriteLimits::default()).unwrap(),
-            "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n--- !u!1 &1\nPointer:\n  m_Ptr: {fileID: 42, guid: 04030201080706050c0b0a09100f0e0d, type: 1}\n"
+            "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n--- !u!1 &1\nPointer:\n  m_Ptr: {fileID: 42, guid: 102030405060708090a0b0c0d0e0f001, type: 1}\n"
         );
     }
 

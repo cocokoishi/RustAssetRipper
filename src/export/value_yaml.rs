@@ -4997,7 +4997,7 @@ mod tests {
             crate::export::unity_yaml::UnityYamlWriteLimits::default(),
         )
         .unwrap();
-        assert!(guid_output.contains("01020304111213142122232431323334: 1"));
+        assert!(guid_output.contains("40302010413121114232221243332313: 1"));
 
         let vector_map_tree = TypeTree {
             nodes: vec![
@@ -5745,7 +5745,7 @@ mod tests {
             crate::export::unity_yaml::UnityYamlWriteLimits::default(),
         )
         .unwrap();
-        assert!(output.contains("m_Guid: 01020304111213142122232431323334"));
+        assert!(output.contains("m_Guid: 40302010413121114232221243332313"));
 
         let missing_word = SerializedValue::Struct(vec![field(
             "m_Guid",
@@ -6046,7 +6046,7 @@ mod tests {
             crate::export::unity_yaml::UnityYamlWriteLimits::default(),
         )
         .unwrap();
-        assert!(output.contains("m_Guids:\n  - 01020304111213142122232431323334"));
+        assert!(output.contains("m_Guids:\n  - 40302010413121114232221243332313"));
     }
 
     #[test]

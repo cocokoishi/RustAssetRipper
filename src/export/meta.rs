@@ -250,7 +250,7 @@ mod tests {
 
         assert_eq!(
             meta.to_yaml(UnityYamlWriteLimits::default()).unwrap(),
-            "fileFormatVersion: 2\nguid: 00000001785634120000000000000000\ntimeCreated: 1700000000\nlicenseType: Free\nTextureImporter:\n  serializedVersion: 6\n  m_alphaIsTransparency: 1\n"
+            "fileFormatVersion: 2\nguid: 10000000214365870000000000000000\ntimeCreated: 1700000000\nlicenseType: Free\nTextureImporter:\n  serializedVersion: 6\n  m_alphaIsTransparency: 1\n"
         );
     }
 
@@ -270,7 +270,7 @@ mod tests {
 
         assert_eq!(
             meta.to_yaml(UnityYamlWriteLimits::default()).unwrap(),
-            "fileFormatVersion: 2\nguid: 00000001000000000000000000000000\nfolderAsset: 1\nDefaultImporter: {}\n"
+            "fileFormatVersion: 2\nguid: 10000000000000000000000000000000\nfolderAsset: 1\nDefaultImporter: {}\n"
         );
     }
 
