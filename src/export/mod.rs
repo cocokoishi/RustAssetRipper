@@ -22,6 +22,7 @@ pub mod meta;
 pub mod meta_emission;
 pub mod mixer_export;
 pub mod multi_asset;
+pub mod path_id_map;
 pub mod pointer_map;
 pub mod post_export;
 pub mod prefab_collection;
