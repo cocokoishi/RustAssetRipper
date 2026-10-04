@@ -7,6 +7,7 @@ pub mod guid_policy;
 pub mod ids;
 pub mod meta;
 pub mod pointer_map;
+pub mod post_export;
 pub mod prefab_collection;
 pub mod project_order;
 pub mod project_output;
