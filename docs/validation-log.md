@@ -1545,3 +1545,9 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Added src/export/prefab_export.rs: first-wins gathering with hierarchy-self append, hierarchy-order exportable sets with file tracking, and pointer composition from class IDs, GUIDs, and legacy branches.
 - Three tests cover pointers, gathering with duplicates, and exportable sets. No Clippy findings.
 - Final verification on Windows with Rust/Cargo 1.98.1: cargo fmt --all -- --check exit 0; cargo test --workspace --locked --quiet exit 0 (644 library, 23 CLI, 0 doc tests); cargo clippy --workspace --all-targets --locked -- -D warnings exit 0; tools/verify-baseline.ps1 exit 0 (1,449/1,449 reference files unchanged); git diff --check exit 0. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+## Exporter registration re-audit (2026-10-04)
+
+- Re-audited `ProjectExporter.Overrides.cs` call-by-call against the 55-row table: order, inheritance flags (including the two non-inheriting real exporters and inheriting Skip dummies), gates, and final overrides all match; the earlier "53 + 2" count confirmed by recount.
+- Added the two remaining selection rules to registration.rs: the lightmap Exr-vs-configured image format mapping and the stored-vs-embedded engine source selection, with a new test.
+- Final verification on Windows with Rust/Cargo 1.98.1: cargo fmt --all -- --check exit 0; cargo test --workspace --locked --quiet exit 0 (645 library, 23 CLI, 0 doc tests); cargo clippy --workspace --all-targets --locked -- -D warnings exit 0; tools/verify-baseline.ps1 exit 0 (1,449/1,449 reference files unchanged); git diff --check exit 0. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.

@@ -25,6 +25,42 @@
 //! hierarchy, which the frozen snapshot does not contain; the table therefore records the stack
 //! without claiming resolution.
 
+use super::settings::ImageExportFormat;
+
+/// Which image format a non-YAML lightmap export converts through.
+///
+/// `LightmapTextureExportFormat.Exr` forces `ImageExportFormat.Exr`; the `Image` mode reuses
+/// the configured image format. (The `Yaml` mode never constructs this exporter, so it has
+/// no mapping here.)
+pub const fn lightmap_conversion_format(
+    is_exr_mode: bool,
+    configured: ImageExportFormat,
+) -> ImageExportFormat {
+    if is_exr_mode {
+        ImageExportFormat::Exr
+    } else {
+        configured
+    }
+}
+
+/// Which engine-asset source `DoFinalOverrides` registers.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum EngineAssetSource {
+    /// Stored `EngineResourceData` from the settings singleton.
+    StoredResourceData,
+    /// Version-matched data embedded in the exporter assembly.
+    EmbeddedData,
+}
+
+/// The `DoFinalOverrides` engine source: stored resource data wins when present.
+pub const fn engine_asset_source(has_stored_resource_data: bool) -> EngineAssetSource {
+    if has_stored_resource_data {
+        EngineAssetSource::StoredResourceData
+    } else {
+        EngineAssetSource::EmbeddedData
+    }
+}
+
 /// The configuration gate around one registration.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum RegistrationGate {
@@ -579,7 +615,11 @@ pub fn registrations_for_target(
 
 #[cfg(test)]
 mod tests {
-    use super::{registrations_for_target, RegistrationGate, EXPORTER_REGISTRATIONS};
+    use super::super::settings::ImageExportFormat;
+    use super::{
+        engine_asset_source, lightmap_conversion_format, registrations_for_target,
+        EngineAssetSource, RegistrationGate, EXPORTER_REGISTRATIONS,
+    };
 
     fn positions(target: &str) -> Vec<usize> {
         EXPORTER_REGISTRATIONS
@@ -684,6 +724,25 @@ mod tests {
             assert_eq!(registrations[1].dummy_is_empty_collection, Some(false));
             assert_eq!(registrations[1].dummy_is_meta_type, Some(false));
         }
+    }
+
+    #[test]
+    fn ctor_and_final_selection_rules_match_source_expressions() {
+        // The lightmap exporter converts through Exr in Exr mode, else the configured format.
+        assert_eq!(
+            lightmap_conversion_format(true, ImageExportFormat::Png),
+            ImageExportFormat::Exr
+        );
+        assert_eq!(
+            lightmap_conversion_format(false, ImageExportFormat::Jpeg),
+            ImageExportFormat::Jpeg
+        );
+        // Stored engine resource data wins; otherwise the version-matched embedded data.
+        assert_eq!(
+            engine_asset_source(true),
+            EngineAssetSource::StoredResourceData
+        );
+        assert_eq!(engine_asset_source(false), EngineAssetSource::EmbeddedData);
     }
 
     #[test]
