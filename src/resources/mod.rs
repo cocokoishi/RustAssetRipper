@@ -1,5 +1,6 @@
 //! Resource decoding and recovery primitives.
 
+pub mod animation_curve;
 pub mod compressed_mesh;
 pub mod keyframe;
 pub mod packed_bit_vector;

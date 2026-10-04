@@ -175,3 +175,10 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Added `src/resources/keyframe.rs`: `KeyframeExtensions.Float` `SetValues` (weight and slope overloads), `DefaultFloatWeight`, and the 2018.1 `InWeight`/`OutWeight`/`WeightedMode` presence gate. A real `Keyframe_Single.Create` differential captured eleven versions as `src/resources/keyframe_fixture.txt`.
 - Next on the animation path: the `AnimationCurveExtensions` `SetValues` overloads (the `animprobe` capture shows `PreInfinity`/`PostInfinity` always present and `RotationOrder` gated around 5.4), then `FloatCurve`/`AnimationClip` curve decoding and the `QuaternionCurve`/`Vector3Curve` variants.
 - State: 720 library + 23 CLI tests, warnings-denied Clippy, format check, 1,449-file baseline verifier, and `git diff --check` all pass. Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+
+## 16. Checkpoint: animation curve construction (2026-10-04)
+
+- Added `src/resources/animation_curve.rs`: the `AnimationCurveExtensions` single-float overloads (default loop/rotation envelope, default-value, two-value, slope builders) and the `CurveLoopTypes`/`RotationOrder` enum values. A real `AnimationCurve_Single.Create` differential captured eight versions as `src/resources/animation_curve_fixture.txt`.
+- Next on the animation path: the `Vector3f`/`Quaternionf` curve variants, the keyframe-list overloads, then the `FloatCurve`/`Vector3Curve`/`QuaternionCurve`/`PPtrCurve` bindings and `AnimationClip` clip decoding (`DenseClip`/`StreamedClip`/`ConstantClip`/compressed curves) and `MuscleClipInfo`.
+- State: 721 library + 23 CLI tests, warnings-denied Clippy, format check, 1,449-file baseline verifier, and `git diff --check` all pass. Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
