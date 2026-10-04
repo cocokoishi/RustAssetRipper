@@ -62,16 +62,20 @@ impl ExportAssetType {
     }
 }
 
-/// What one exporter answers from both `ToExportType` and `ToUnknownExportType`.
+/// What one exporter answers from `ToExportType` and `ToUnknownExportType`.
 ///
-/// `None` models `DeletedAssetsExporter`: `ToExportType` throws and `ToUnknownExportType`
-/// returns false, so the stack simply skips it.
+/// `None` on either method models refusal: `DeletedAssetsExporter` throws from `ToExportType`
+/// and returns false from `ToUnknownExportType`, while `EngineAssetsExporter` answers
+/// `Internal` from `ToExportType` but still returns false from `ToUnknownExportType`, so the
+/// type stack skips both.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ExporterExportType {
     /// The exporter type name.
     pub exporter: &'static str,
-    /// The shared answer of both type methods, or `None` when the exporter declines.
-    pub asset_type: Option<ExportAssetType>,
+    /// The `ToExportType` answer, or `None` when it throws.
+    pub to_export_type: Option<ExportAssetType>,
+    /// The `ToUnknownExportType` answer, or `None` when it returns false.
+    pub to_unknown_export_type: Option<ExportAssetType>,
 }
 
 /// Every concrete exporter in the snapshot with its pointer-type answer.
@@ -81,123 +85,154 @@ pub struct ExporterExportType {
 pub const EXPORTER_EXPORT_TYPES: &[ExporterExportType] = &[
     ExporterExportType {
         exporter: "AnimatorControllerExporter",
-        asset_type: Some(ExportAssetType::Serialized),
+        to_export_type: Some(ExportAssetType::Serialized),
+        to_unknown_export_type: Some(ExportAssetType::Serialized),
     },
     ExporterExportType {
         exporter: "AudioClipExporter",
-        asset_type: Some(ExportAssetType::Meta),
+        to_export_type: Some(ExportAssetType::Meta),
+        to_unknown_export_type: Some(ExportAssetType::Meta),
     },
     ExporterExportType {
         exporter: "AudioMixerExporter",
-        asset_type: Some(ExportAssetType::Serialized),
+        to_export_type: Some(ExportAssetType::Serialized),
+        to_unknown_export_type: Some(ExportAssetType::Serialized),
     },
     ExporterExportType {
         exporter: "DefaultYamlExporter",
-        asset_type: Some(ExportAssetType::Serialized),
+        to_export_type: Some(ExportAssetType::Serialized),
+        to_unknown_export_type: Some(ExportAssetType::Serialized),
     },
     ExporterExportType {
         exporter: "DeletedAssetsExporter",
-        asset_type: None,
+        to_export_type: None,
+        to_unknown_export_type: None,
     },
     ExporterExportType {
         exporter: "DummyShaderTextExporter",
-        asset_type: Some(ExportAssetType::Meta),
+        to_export_type: Some(ExportAssetType::Meta),
+        to_unknown_export_type: Some(ExportAssetType::Meta),
     },
     ExporterExportType {
         exporter: "EngineAssetsExporter",
-        asset_type: Some(ExportAssetType::Internal),
+        to_export_type: Some(ExportAssetType::Internal),
+        // Answers Internal but still returns false, so the type stack skips it.
+        to_unknown_export_type: None,
     },
     ExporterExportType {
         exporter: "FontAssetExporter",
-        asset_type: Some(ExportAssetType::Meta),
+        to_export_type: Some(ExportAssetType::Meta),
+        to_unknown_export_type: Some(ExportAssetType::Meta),
     },
     ExporterExportType {
         exporter: "LightmapTextureAssetExporter",
-        asset_type: Some(ExportAssetType::Meta),
+        to_export_type: Some(ExportAssetType::Meta),
+        to_unknown_export_type: Some(ExportAssetType::Meta),
     },
     ExporterExportType {
         exporter: "ManagerAssetExporter",
-        asset_type: Some(ExportAssetType::Serialized),
+        to_export_type: Some(ExportAssetType::Serialized),
+        to_unknown_export_type: Some(ExportAssetType::Serialized),
     },
     ExporterExportType {
         exporter: "MovieTextureAssetExporter",
-        asset_type: Some(ExportAssetType::Meta),
+        to_export_type: Some(ExportAssetType::Meta),
+        to_unknown_export_type: Some(ExportAssetType::Meta),
     },
     ExporterExportType {
         exporter: "NativeAudioExporter",
-        asset_type: Some(ExportAssetType::Meta),
+        to_export_type: Some(ExportAssetType::Meta),
+        to_unknown_export_type: Some(ExportAssetType::Meta),
     },
     ExporterExportType {
         exporter: "RawTextureExporter",
-        asset_type: Some(ExportAssetType::Meta),
+        to_export_type: Some(ExportAssetType::Meta),
+        to_unknown_export_type: Some(ExportAssetType::Meta),
     },
     ExporterExportType {
         exporter: "SceneAssetExporter",
-        asset_type: Some(ExportAssetType::Meta),
+        to_export_type: Some(ExportAssetType::Meta),
+        to_unknown_export_type: Some(ExportAssetType::Meta),
     },
     ExporterExportType {
         exporter: "SceneYamlExporter",
-        asset_type: Some(ExportAssetType::Serialized),
+        to_export_type: Some(ExportAssetType::Serialized),
+        to_unknown_export_type: Some(ExportAssetType::Serialized),
     },
     ExporterExportType {
         exporter: "ScriptExporter",
-        asset_type: Some(ExportAssetType::Meta),
+        to_export_type: Some(ExportAssetType::Meta),
+        to_unknown_export_type: Some(ExportAssetType::Meta),
     },
     ExporterExportType {
         exporter: "ScriptableObjectExporter",
-        asset_type: Some(ExportAssetType::Serialized),
+        to_export_type: Some(ExportAssetType::Serialized),
+        to_unknown_export_type: Some(ExportAssetType::Serialized),
     },
     ExporterExportType {
         exporter: "ScriptableObjectGroupExporter",
-        asset_type: Some(ExportAssetType::Serialized),
+        to_export_type: Some(ExportAssetType::Serialized),
+        to_unknown_export_type: Some(ExportAssetType::Serialized),
     },
     ExporterExportType {
         exporter: "SimpleShaderExporter",
-        asset_type: Some(ExportAssetType::Meta),
+        to_export_type: Some(ExportAssetType::Meta),
+        to_unknown_export_type: Some(ExportAssetType::Meta),
     },
     ExporterExportType {
         exporter: "TerrainYamlExporter",
-        asset_type: Some(ExportAssetType::Serialized),
+        to_export_type: Some(ExportAssetType::Serialized),
+        to_unknown_export_type: Some(ExportAssetType::Serialized),
     },
     ExporterExportType {
         exporter: "TextAssetExporter",
-        asset_type: Some(ExportAssetType::Meta),
+        to_export_type: Some(ExportAssetType::Meta),
+        to_unknown_export_type: Some(ExportAssetType::Meta),
     },
     ExporterExportType {
         exporter: "TextureArrayAssetExporter",
-        asset_type: Some(ExportAssetType::Meta),
+        to_export_type: Some(ExportAssetType::Meta),
+        to_unknown_export_type: Some(ExportAssetType::Meta),
     },
     ExporterExportType {
         exporter: "TextureAssetExporter",
-        asset_type: Some(ExportAssetType::Meta),
+        to_export_type: Some(ExportAssetType::Meta),
+        to_unknown_export_type: Some(ExportAssetType::Meta),
     },
     ExporterExportType {
         exporter: "UnknownObjectExporter",
-        asset_type: Some(ExportAssetType::Meta),
+        to_export_type: Some(ExportAssetType::Meta),
+        to_unknown_export_type: Some(ExportAssetType::Meta),
     },
     ExporterExportType {
         exporter: "UnreadableObjectExporter",
-        asset_type: Some(ExportAssetType::Meta),
+        to_export_type: Some(ExportAssetType::Meta),
+        to_unknown_export_type: Some(ExportAssetType::Meta),
     },
     ExporterExportType {
         exporter: "VideoClipExporter",
-        asset_type: Some(ExportAssetType::Meta),
+        to_export_type: Some(ExportAssetType::Meta),
+        to_unknown_export_type: Some(ExportAssetType::Meta),
     },
     ExporterExportType {
         exporter: "YamlAudioExporter",
-        asset_type: Some(ExportAssetType::Serialized),
+        to_export_type: Some(ExportAssetType::Serialized),
+        to_unknown_export_type: Some(ExportAssetType::Serialized),
     },
     ExporterExportType {
         exporter: "YamlShaderExporter",
-        asset_type: Some(ExportAssetType::Serialized),
+        to_export_type: Some(ExportAssetType::Serialized),
+        to_unknown_export_type: Some(ExportAssetType::Serialized),
     },
     ExporterExportType {
         exporter: "YamlSpriteExporter",
-        asset_type: Some(ExportAssetType::Serialized),
+        to_export_type: Some(ExportAssetType::Serialized),
+        to_unknown_export_type: Some(ExportAssetType::Serialized),
     },
     ExporterExportType {
         exporter: "YamlStreamedAssetExporter",
-        asset_type: Some(ExportAssetType::Serialized),
+        to_export_type: Some(ExportAssetType::Serialized),
+        to_unknown_export_type: Some(ExportAssetType::Serialized),
     },
 ];
 
@@ -213,12 +248,12 @@ pub const fn dummy_export_type(is_meta_type: bool) -> ExportAssetType {
     }
 }
 
-/// Look up one exporter's type answer by name.
-pub fn export_type_for(exporter: &str) -> Option<Option<ExportAssetType>> {
+/// Look up one exporter's type answers by name.
+pub fn export_type_for(exporter: &str) -> Option<ExporterExportType> {
     EXPORTER_EXPORT_TYPES
         .iter()
         .find(|entry| entry.exporter == exporter)
-        .map(|entry| entry.asset_type)
+        .copied()
 }
 
 /// Failure to resolve a pointer type: no exporter on the stack accepts the asset type.
@@ -339,7 +374,15 @@ mod tests {
 
     #[test]
     fn exporter_table_follows_base_class_answers() {
+        use super::ExporterExportType;
         assert_eq!(EXPORTER_EXPORT_TYPES.len(), 30);
+        fn both(exporter: &'static str, asset_type: ExportAssetType) -> ExporterExportType {
+            ExporterExportType {
+                exporter,
+                to_export_type: Some(asset_type),
+                to_unknown_export_type: Some(asset_type),
+            }
+        }
         // Yaml exporters serialize inline.
         for exporter in [
             "AnimatorControllerExporter",
@@ -357,7 +400,7 @@ mod tests {
         ] {
             assert_eq!(
                 export_type_for(exporter),
-                Some(Some(ExportAssetType::Serialized)),
+                Some(both(exporter, ExportAssetType::Serialized)),
                 "{exporter}"
             );
         }
@@ -378,7 +421,7 @@ mod tests {
         ] {
             assert_eq!(
                 export_type_for(exporter),
-                Some(Some(ExportAssetType::Meta)),
+                Some(both(exporter, ExportAssetType::Meta)),
                 "{exporter}"
             );
         }
@@ -391,16 +434,28 @@ mod tests {
         ] {
             assert_eq!(
                 export_type_for(exporter),
-                Some(Some(ExportAssetType::Meta)),
+                Some(both(exporter, ExportAssetType::Meta)),
                 "{exporter}"
             );
         }
+        // EngineAssetsExporter answers Internal but still declines the unknown-type walk.
         assert_eq!(
             export_type_for("EngineAssetsExporter"),
-            Some(Some(ExportAssetType::Internal))
+            Some(ExporterExportType {
+                exporter: "EngineAssetsExporter",
+                to_export_type: Some(ExportAssetType::Internal),
+                to_unknown_export_type: None,
+            })
         );
         // DeletedAssetsExporter never contributes a type.
-        assert_eq!(export_type_for("DeletedAssetsExporter"), Some(None));
+        assert_eq!(
+            export_type_for("DeletedAssetsExporter"),
+            Some(ExporterExportType {
+                exporter: "DeletedAssetsExporter",
+                to_export_type: None,
+                to_unknown_export_type: None,
+            })
+        );
         assert_eq!(export_type_for("NoSuchExporter"), None);
         // The dummy type follows isMetaType alone.
         assert_eq!(dummy_export_type(true), ExportAssetType::Meta);
