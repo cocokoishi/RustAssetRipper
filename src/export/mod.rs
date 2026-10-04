@@ -11,6 +11,7 @@ pub mod prefab_collection;
 pub mod project_order;
 pub mod project_output;
 pub mod project_plan;
+pub mod registration;
 pub mod scene_collection;
 pub mod script_hashing;
 pub mod streamed_assets;
