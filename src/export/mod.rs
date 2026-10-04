@@ -38,6 +38,7 @@ pub mod scene_member_order;
 pub mod script_export_flow;
 pub mod script_hashing;
 pub mod settings;
+pub mod shader_export;
 pub mod streamed_assets;
 pub mod unity_yaml;
 pub mod value_yaml;
