@@ -161,3 +161,10 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Added `src/resources/sub_mesh_data.rs`: `SubMeshData.Create`/`CopyTo`, `SubMeshExtensions` topology and first-index helpers, `IndexFormatExtensions.Size`, `MeshData.IndexFormat`, the `MeshTopology` enum, and `Bounds.CalculateFromVertexArray`. A real `SubMesh.Create` differential captured 28 rows across six versions as `src/resources/sub_mesh_data_fixture.txt`.
 - Still unported on the mesh path: `MeshExtensions.GetProcessedIndexBuffer`/`SetProcessedIndexBuffer` (index-buffer byte/endian handling), `CalculateMeshMetric`, `GetChannelsData`, and the mesh exporter wiring. These can reuse `SubMeshData` and `VertexDataBlob`.
 - State: 717 library + 23 CLI tests, warnings-denied Clippy, format check, 1,449-file baseline verifier, and `git diff --check` all pass. Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+
+## 14. Checkpoint: animation tangent modes (2026-10-04)
+
+- Added `src/resources/tangent_mode.rs`: the `TangentMode`/`TangentMode2`/`TangentMode5` mapping with the 5.5 branch. A real runtime differential captured all 256 values as `src/resources/tangent_mode_fixture.txt`.
+- Next on the animation path: `KeyframeExtensions.Float.SetValues` and the `AnimationCurveExtensions` `SetValues` overloads (the probe `Temp/opencode/animprobe` already captured keyframe/curve results; the `InWeight`/`OutWeight` fields are version-gated and need a precise presence gate before porting), then `FloatCurve`/`AnimationClip` curve decoding.
+- State: 719 library + 23 CLI tests, warnings-denied Clippy, format check, 1,449-file baseline verifier, and `git diff --check` all pass. Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
