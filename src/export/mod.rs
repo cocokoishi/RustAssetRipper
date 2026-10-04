@@ -27,6 +27,7 @@ pub mod registration;
 pub mod scene_collection;
 pub mod scene_helpers;
 pub mod scene_member_order;
+pub mod script_export_flow;
 pub mod script_hashing;
 pub mod settings;
 pub mod streamed_assets;
