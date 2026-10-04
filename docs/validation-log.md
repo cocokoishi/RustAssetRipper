@@ -1905,3 +1905,10 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Found the second instance of the GUID reversal: `serialized_file::metadata::FileIdentifier::get_file_path` formatted Meta GUIDs most-significant nibble first, whereas the reference `FileIdentifier.GetFilePath` returns `Guid.ToString()`.
 - Fixed it to the nibble-reversed form and updated the `io::dependency` Meta-identity test's registered name and expected string to the corrected value (`76543210fedcba9800000000ffffffff` for the words `(0x01234567, 0x89abcdef, 0, 0xffffffff)`).
 - Final verification on Windows with Rust/Cargo 1.98.1: cargo fmt --all -- --check exit 0; cargo test --workspace --locked exit 0 (747 library, 23 CLI, 0 doc tests); cargo clippy --workspace --all-targets --locked -- -D warnings exit 0; tools/verify-baseline.ps1 exit 0 (1,449/1,449 reference files unchanged); git diff --check exit 0. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+
+## Texture/Graphics format differentials (2026-10-04)
+
+- Added `src/resources/texture_format.rs` (`IsCrunched`/`IsDxt`/`IsRgb`) and `src/resources/graphics_format.rs` (`ToTextureFormat` with the `NotSupported`/`NotImplemented`/`ArgumentOutOfRange` errors).
+- Genuine original-runtime differential: probe `Temp/opencode/texprobe` enumerated all 91 `TextureFormat` and all 156 `GraphicsFormat` members and captured every classifier and mapping result (or thrown exception type). The rows are committed as `src/resources/texture_format_fixture.txt` (91) and `src/resources/graphics_format_fixture.txt` (156) and matched row-for-row; four aliased GraphicsFormat values collapse to one match arm.
+- Final verification on Windows with Rust/Cargo 1.98.1: cargo fmt --all -- --check exit 0; cargo test --workspace --locked exit 0 (749 library, 23 CLI, 0 doc tests); cargo clippy --workspace --all-targets --locked -- -D warnings exit 0; tools/verify-baseline.ps1 exit 0 (1,449/1,449 reference files unchanged); git diff --check exit 0. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.

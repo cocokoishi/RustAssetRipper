@@ -302,3 +302,10 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Found the second instance of the GUID reversal in `serialized_file::metadata::FileIdentifier::get_file_path` (the reference `FileIdentifier.GetFilePath` returns `Guid.ToString()`), fixed it to the nibble-reversed form, and corrected the `io::dependency` Meta-identity test.
 - Also verified that the sibling `Hash128` format (`HashHelper.ToString`, big-endian per little-endian word) is already correct in `serialized_file::metadata`; it uses the opposite nibble convention from GUID.
 - State: 747 library + 23 CLI tests, warnings-denied Clippy, format check, 1,449-file baseline verifier, and `git diff --check` all pass. Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+
+## 34. Checkpoint: texture and graphics format tables (2026-10-04)
+
+- Added `src/resources/texture_format.rs` and `src/resources/graphics_format.rs`, each with a full-enum original-runtime differential (91 and 156 rows).
+- These feed the texture exporter, which is still unported; the mapping tables are now pinned exactly.
+- State: 749 library + 23 CLI tests, warnings-denied Clippy, format check, 1,449-file baseline verifier, and `git diff --check` all pass. Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
