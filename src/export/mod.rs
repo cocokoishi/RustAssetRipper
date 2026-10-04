@@ -20,6 +20,7 @@ pub mod project_output;
 pub mod project_plan;
 pub mod registration;
 pub mod scene_collection;
+pub mod scene_member_order;
 pub mod script_hashing;
 pub mod settings;
 pub mod streamed_assets;
