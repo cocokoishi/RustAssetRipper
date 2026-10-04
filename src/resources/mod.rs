@@ -4,6 +4,7 @@ pub mod animation_curve;
 pub mod blend_tree_node;
 pub mod compressed_animation_curve;
 pub mod compressed_mesh;
+pub mod controller_constant;
 pub mod keyframe;
 pub mod keyframe_quaternion;
 pub mod keyframe_vector3;
