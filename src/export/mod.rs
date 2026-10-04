@@ -17,6 +17,7 @@ pub mod pointer_map;
 pub mod post_export;
 pub mod prefab_collection;
 pub mod primary_content;
+pub mod project_container;
 pub mod project_order;
 pub mod project_output;
 pub mod project_plan;
