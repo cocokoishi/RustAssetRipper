@@ -237,6 +237,7 @@ impl Default for UnityYamlWriteLimits {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UnityYamlWriteError {
     DocumentLimitExceeded { requested: usize, limit: usize },
+    RootMustBeMapping,
     NodeLimitExceeded { requested: usize, limit: usize },
     DepthLimitExceeded { requested: usize, limit: usize },
     IndentLimitExceeded { requested: usize, limit: usize },
@@ -254,6 +255,9 @@ impl Display for UnityYamlWriteError {
                 f,
                 "Unity YAML stream has {requested} documents, exceeding limit {limit}"
             ),
+            Self::RootMustBeMapping => {
+                f.write_str("a standalone Unity YAML mapping requires a mapping root")
+            }
             Self::NodeLimitExceeded { requested, limit } => {
                 write!(f, "Unity YAML stream has {requested} nodes, exceeding limit {limit}")
             }
@@ -327,6 +331,33 @@ pub fn write_unity_yaml_documents(
         separator = true;
     }
     // The baseline writes one final line feed directly, while a pending node newline is not flushed.
+    emitter.raw_str("\n")?;
+    Ok(emitter.output)
+}
+
+/// Write one standalone YAML mapping without Unity document headers or separators.
+///
+/// This is used for Unity sidecar files such as `.meta`; the node, depth, indentation, and output
+/// byte limits are the same as for serialized-object YAML.
+pub fn write_unity_yaml_mapping(
+    root: &UnityYamlNode,
+    limits: UnityYamlWriteLimits,
+) -> Result<String, UnityYamlWriteError> {
+    if root.node_type() != UnityYamlNodeType::Mapping {
+        return Err(UnityYamlWriteError::RootMustBeMapping);
+    }
+    let mut emitter = UnityYamlEmitter {
+        output: String::new(),
+        pending_whitespace: false,
+        pending_separator: false,
+        pending_line_break: false,
+        indent: 0,
+        node_count: 0,
+        limits,
+        format_keys: true,
+        is_key: false,
+    };
+    emitter.emit_node(root, 0)?;
     emitter.raw_str("\n")?;
     Ok(emitter.output)
 }
@@ -816,6 +847,25 @@ mod tests {
         assert_eq!(
             write_unity_yaml_documents(&[document], UnityYamlWriteLimits::default()).unwrap(),
             "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n--- !u!1 &100001\nGameObject:\n  serializedVersion: 6\n  m_Name: 'name: test'\n  m_Enabled: 1\n"
+        );
+    }
+
+    #[test]
+    fn writes_standalone_mapping_without_unity_stream_header() {
+        let root = mapping(&[(
+            "m_AlphaIsTransparency",
+            UnityYamlNode::scalar(UnityYamlScalar::Boolean(true)),
+        )]);
+        assert_eq!(
+            write_unity_yaml_mapping(&root, UnityYamlWriteLimits::default()).unwrap(),
+            "m_alphaIsTransparency: 1\n"
+        );
+        assert_eq!(
+            write_unity_yaml_mapping(
+                &UnityYamlNode::scalar(UnityYamlScalar::Signed(1)),
+                UnityYamlWriteLimits::default(),
+            ),
+            Err(UnityYamlWriteError::RootMustBeMapping)
         );
     }
 
