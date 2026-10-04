@@ -11,6 +11,7 @@ pub mod empty_script;
 pub mod export_extension;
 pub mod export_type;
 pub mod exporter_bases;
+pub mod exporter_match;
 pub mod guid_policy;
 pub mod ids;
 pub mod importer_fields;

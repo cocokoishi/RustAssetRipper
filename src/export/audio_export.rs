@@ -1,8 +1,8 @@
 //! Audio export decisions ported from the frozen baseline.
 //!
-//! Everything here is control flow and byte-level dispatch from snapshot text; the actual
-//! codec work (`Fmod5Sharp` rebuilds, `AudioConverter.OggToWav`, streamed-content reads)
-//! stays with its external owners:
+//! The mode enum itself lives in `settings`; everything here is control flow and
+//! byte-level dispatch from snapshot text; the actual codec work (`Fmod5Sharp` rebuilds,
+//! `AudioConverter.OggToWav`, streamed-content reads) stays with its external owners:
 //!
 //! - `AudioExportFormat` has four modes, but only `Default` and `PreferWav` are supported
 //!   export formats.
@@ -26,18 +26,7 @@
 //!   path computation stays caller-side; only the sidecar path rule and the
 //!   save/rewrite/restore discipline are pinned here.
 
-/// `AudioExportFormat` in declaration order.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum AudioExportFormat {
-    /// YAML asset plus `.resS` file; the safe fallback.
-    Yaml,
-    /// Native bytes, usually FSB; unusable in the Unity Editor.
-    Native,
-    /// Source compression, usually OGG; recommended.
-    Default,
-    /// Converts to WAV when possible.
-    PreferWav,
-}
+use super::settings::AudioExportFormat;
 
 /// `AudioClipExporter.IsSupportedExportFormat`: only `Default` and `PreferWav`.
 pub const fn is_supported_export_format(format: AudioExportFormat) -> bool {
@@ -314,9 +303,10 @@ mod tests {
         check_magic, classify_audio_data, compression_format_raw_extension, converts_ogg_to_wav,
         diagnostic_hex, diagnostic_printable, is_supported_export_format, native_audio_extension,
         plan_audio_clip_collection, plan_native_audio_export, plan_streamed_resource,
-        sound_type_raw_extension, tracker_extension, AudioDataKind, AudioDecodeFact,
-        AudioExportFormat, AudioRefusal, NativeAudioExport, StreamedResourcePlan, MOD_MAGICS,
+        sound_type_raw_extension, tracker_extension, AudioDataKind, AudioDecodeFact, AudioRefusal,
+        NativeAudioExport, StreamedResourcePlan, MOD_MAGICS,
     };
+    use crate::export::settings::AudioExportFormat;
 
     #[test]
     fn export_format_support_matches_is_supported_export_format() {
