@@ -14,6 +14,10 @@
 //! - The `PluginImporter` platform settings written by `ScriptExportCollection.OnAssemblyExported`.
 //! - The `PrefabExportCollection` importer branch: a legacy prefab marker selects the native
 //!   format importer, otherwise a `PrefabImporter`.
+//! - The `CreateImporter` dispatch table: the base `AssetExportCollection<T>` default plus all
+//!   nine overrides found by source search, with each collection mapped to its importer kind
+//!   and factory. Asset-copied fields and generated `Has_*` gates stay open; only the
+//!   dispatch shape and the unconditional literals below are pinned.
 //! - The `MonoImporter` execution-order narrowing: `(short)script.ExecutionOrder`, which wraps
 //!   exactly like Rust's `as` conversion because C# explicit conversions are unchecked by default.
 //!
@@ -99,6 +103,150 @@ pub mod plugin_importer {
     pub const DEFAULT_VALUE_INITIALIZED: (&str, &str) = ("DefaultValueInitialized", "true");
 }
 
+/// Which importer object a collection's `CreateImporter` override constructs.
+///
+/// Variant names are Rust descriptions; the `importer` strings in the table below carry the
+/// exact baseline importer type names.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum CreateImporterKind {
+    /// `AssetExportCollection<T>`: a fresh `NativeFormatImporter` carrying the main export ID.
+    NativeFormat,
+    /// `AudioExportCollection`: `AudioImporter` with asset-copied fields.
+    Audio,
+    /// `FontAssetExportCollection`: `TrueTypeFontImporter` with font-copied fields.
+    TrueTypeFont,
+    /// `TextAssetExportCollection`: a bare `TextScriptImporter` plus bundle propagation.
+    TextScript,
+    /// `VideoClipExportCollection`: `VideoClipImporter` with frame fields and `ImportAudio`.
+    VideoClip,
+    /// `PrefabExportCollection`: base native importer or a fresh `PrefabImporter`.
+    Prefab,
+    /// `ShaderExportCollection`: `ShaderImporter` with a gated texture-map copy.
+    Shader,
+    /// `ImporterFactory.GenerateTextureImporter` result (`TextureImporter`).
+    GeneratedTexture,
+    /// `ImporterFactory.GenerateIHVImporter` result (`IHVImageFormatImporter`).
+    GeneratedIhv,
+}
+
+/// One `CreateImporter` override in the frozen baseline.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct CreateImporterRegistration {
+    /// The exporting collection type name.
+    pub collection: &'static str,
+    /// The importer type name the override constructs.
+    pub importer: &'static str,
+    /// Which factory shape builds it.
+    pub kind: CreateImporterKind,
+    /// True when the override delegates to `ImporterFactory` instead of constructing directly.
+    pub via_importer_factory: bool,
+}
+
+/// Every `CreateImporter` override found by source search, in file-discovery order.
+///
+/// Subclasses without their own override (for example the concrete audio/texture collection
+/// subclasses) inherit the nearest row above; the table records only methods the snapshot
+/// actually declares.
+pub const CREATE_IMPORTER_TABLE: &[CreateImporterRegistration] = &[
+    CreateImporterRegistration {
+        collection: "AssetExportCollection<T>",
+        importer: "NativeFormatImporter",
+        kind: CreateImporterKind::NativeFormat,
+        via_importer_factory: false,
+    },
+    CreateImporterRegistration {
+        collection: "AudioExportCollection",
+        importer: "AudioImporter",
+        kind: CreateImporterKind::Audio,
+        via_importer_factory: false,
+    },
+    CreateImporterRegistration {
+        collection: "FontAssetExportCollection",
+        importer: "TrueTypeFontImporter",
+        kind: CreateImporterKind::TrueTypeFont,
+        via_importer_factory: false,
+    },
+    CreateImporterRegistration {
+        collection: "TextAssetExportCollection",
+        importer: "TextScriptImporter",
+        kind: CreateImporterKind::TextScript,
+        via_importer_factory: false,
+    },
+    CreateImporterRegistration {
+        collection: "VideoClipExportCollection",
+        importer: "VideoClipImporter",
+        kind: CreateImporterKind::VideoClip,
+        via_importer_factory: false,
+    },
+    CreateImporterRegistration {
+        collection: "PrefabExportCollection",
+        importer: "PrefabImporter",
+        kind: CreateImporterKind::Prefab,
+        via_importer_factory: false,
+    },
+    CreateImporterRegistration {
+        collection: "ShaderExportCollection",
+        importer: "ShaderImporter",
+        kind: CreateImporterKind::Shader,
+        via_importer_factory: false,
+    },
+    CreateImporterRegistration {
+        collection: "LightmapExportCollection",
+        importer: "TextureImporter",
+        kind: CreateImporterKind::GeneratedTexture,
+        via_importer_factory: true,
+    },
+    CreateImporterRegistration {
+        collection: "TextureArrayAssetExportCollection",
+        importer: "TextureImporter",
+        kind: CreateImporterKind::GeneratedTexture,
+        via_importer_factory: true,
+    },
+    CreateImporterRegistration {
+        collection: "TextureExportCollection",
+        importer: "TextureImporter",
+        kind: CreateImporterKind::GeneratedTexture,
+        via_importer_factory: true,
+    },
+];
+
+/// The `TextureExportCollection` convert flag selects between the two `ImporterFactory`
+/// entry points: a converting export uses `GenerateTextureImporter`, a non-converting one
+/// uses `GenerateIHVImporter` (which warns below Unity 5.6 and calls `SetToDefault`).
+pub fn select_texture_collection_importer(convert: bool) -> CreateImporterKind {
+    if convert {
+        CreateImporterKind::GeneratedTexture
+    } else {
+        CreateImporterKind::GeneratedIhv
+    }
+}
+
+/// Unconditional literals inside the font, video, and IHV importer paths.
+///
+/// Asset-copied values (font sizes, audio settings, video dimensions, texture data) and the
+/// numeric values of generated enums stay open; only the literal names and fixed booleans the
+/// snapshot spells out are pinned here.
+pub mod fixed_importer_literals {
+    /// `TrueTypeFontImporter.IncludeFontData` is always set to true.
+    pub const FONT_INCLUDE_FONT_DATA: bool = true;
+    /// `TrueTypeFontImporter.AscentCalculationModeE` literal name.
+    pub const FONT_ASCENT_CALCULATION_MODE: &str = "FaceAscender";
+    /// `TrueTypeFontImporter.ForceTextureCaseE` literal name.
+    pub const FONT_FORCE_TEXTURE_CASE: &str = "Dynamic";
+    /// `VideoClipImporter.ImportAudio` is always set to true.
+    pub const VIDEO_IMPORT_AUDIO: bool = true;
+    /// `VideoClipImporter.FrameCount` always equals the just-written `EndFrame`.
+    pub const VIDEO_FRAME_COUNT_EQUALS_END_FRAME: bool = true;
+    /// `GenerateIHVImporter` warns when the export version is below this Unity version.
+    pub const IHV_MINIMUM_VERSION: (u32, u32) = (5, 6);
+    /// `GenerateTextureImporter` platform-settings literal names.
+    pub const TEXTURE_RESIZE_ALGORITHM: &str = "Mitchell";
+    pub const TEXTURE_PLATFORM_FORMAT: &str = "Automatic";
+    pub const TEXTURE_PLATFORM_COMPRESSION: &str = "CompressedHQ";
+    /// `GenerateTextureImporter` swizzle order literal names.
+    pub const TEXTURE_SWIZZLE_ORDER: [&str; 4] = ["R", "G", "B", "A"];
+}
+
 #[cfg(test)]
 mod tests {
     use super::{plugin_importer, texture_importer};
@@ -171,6 +319,71 @@ mod tests {
         assert_eq!(
             plugin_importer::DEFAULT_VALUE_INITIALIZED,
             ("DefaultValueInitialized", "true")
+        );
+    }
+
+    #[test]
+    fn create_importer_table_covers_every_snapshot_override() {
+        use super::select_texture_collection_importer;
+        use super::{fixed_importer_literals, CreateImporterKind, CREATE_IMPORTER_TABLE};
+        // The base default plus the nine overrides found by source search.
+        assert_eq!(CREATE_IMPORTER_TABLE.len(), 10);
+        assert_eq!(
+            CREATE_IMPORTER_TABLE[0].collection,
+            "AssetExportCollection<T>"
+        );
+        assert_eq!(CREATE_IMPORTER_TABLE[0].importer, "NativeFormatImporter");
+        assert_eq!(
+            CREATE_IMPORTER_TABLE[0].kind,
+            CreateImporterKind::NativeFormat
+        );
+        // Only the texture collections delegate to ImporterFactory.
+        let factory_collections: Vec<&str> = CREATE_IMPORTER_TABLE
+            .iter()
+            .filter(|entry| entry.via_importer_factory)
+            .map(|entry| entry.collection)
+            .collect();
+        assert_eq!(
+            factory_collections,
+            [
+                "LightmapExportCollection",
+                "TextureArrayAssetExportCollection",
+                "TextureExportCollection"
+            ]
+        );
+        // The prefab row records the modern branch; the legacy branch reuses the base
+        // native importer through select_prefab_importer.
+        let prefab = CREATE_IMPORTER_TABLE
+            .iter()
+            .find(|entry| entry.collection == "PrefabExportCollection")
+            .unwrap();
+        assert_eq!(prefab.importer, "PrefabImporter");
+        // The texture convert flag selects between the two factory entry points.
+        assert_eq!(
+            select_texture_collection_importer(true),
+            CreateImporterKind::GeneratedTexture
+        );
+        assert_eq!(
+            select_texture_collection_importer(false),
+            CreateImporterKind::GeneratedIhv
+        );
+        // Fixed literals are pinned by name, not by generated numeric value.
+        let font_include_font_data = fixed_importer_literals::FONT_INCLUDE_FONT_DATA;
+        assert!(font_include_font_data);
+        assert_eq!(
+            fixed_importer_literals::FONT_ASCENT_CALCULATION_MODE,
+            "FaceAscender"
+        );
+        assert_eq!(fixed_importer_literals::FONT_FORCE_TEXTURE_CASE, "Dynamic");
+        let video_import_audio = fixed_importer_literals::VIDEO_IMPORT_AUDIO;
+        assert!(video_import_audio);
+        let frame_count_follows_end_frame =
+            fixed_importer_literals::VIDEO_FRAME_COUNT_EQUALS_END_FRAME;
+        assert!(frame_count_follows_end_frame);
+        assert_eq!(fixed_importer_literals::IHV_MINIMUM_VERSION, (5, 6));
+        assert_eq!(
+            fixed_importer_literals::TEXTURE_SWIZZLE_ORDER,
+            ["R", "G", "B", "A"]
         );
     }
 }

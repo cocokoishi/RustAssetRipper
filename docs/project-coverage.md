@@ -29,7 +29,7 @@ Reference identity: `AssetRipper/` snapshot, version prefix `2.0.0`, `net10.0`, 
 | AssetRipper.IO.Files | Containers, streams, VFS, FileSystem, SerializedFile IO | `container/*`, `io/*`, `scheme.rs`, `serialized_file/*` | 实现中 | Broad synthetic coverage; differentials and adapters open |
 | AssetRipper.Numerics | Math primitives (vectors, quaternions, transforms, ranges) | none | 未调查 | File list only; reference tests executed 65/65 as evidence of source health |
 | AssetRipper.Processing | Asset processors and processing configuration | `processing/pipeline.rs`, scene/prefab planners | 实现中 | Order verified; processor internals partial |
-| AssetRipper.SerializationLogic | Managed references, field/mono-type serialization | rejection paths in `serialized_file/object.rs` only | 未调查 | No recovery/decoding ported |
+| AssetRipper.SerializationLogic | Managed references, field/mono-type serialization | `serialized_file/managed_types.rs` (tables and schema) | 实现中 | Tables and registry schema verified; Cecil resolution and payload decoding open |
 | AssetRipper.SourceGenerated.Extensions | Handwritten generated-class extensions | traced across many increments | 已调查 | Individual rules ported where snapshot-determined; `Has_*` gates are generated and open |
 | AssetRipper.Web | HTML rendering helpers and YAML web extensions | none | 未调查 | File list only |
 | AssetRipper.Yaml | YAML DOM, scalars, writer, escaping | `export/unity_yaml.rs` | 实现中 | Writer verified against source order/scalars; emitter edge cases open |
@@ -90,7 +90,7 @@ available for audit. All rows are `已调查` with outputs as the ongoing audit 
 
 ## Summary counts
 
-- Libraries: 0 已验证, 3 已调查, 8 实现中, 11 未调查.
+- Libraries: 0 已验证, 3 已调查, 9 实现中, 10 未调查.
 - Tools: 0 ported, 15 未调查.
 - Tests: 8 executed as evidence.
 - Generators: 6 已调查 (outputs pending).
