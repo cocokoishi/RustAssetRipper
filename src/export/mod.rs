@@ -19,6 +19,7 @@ pub mod multi_asset;
 pub mod pointer_map;
 pub mod post_export;
 pub mod prefab_collection;
+pub mod prefab_export;
 pub mod primary_content;
 pub mod project_container;
 pub mod project_order;
