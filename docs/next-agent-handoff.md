@@ -140,3 +140,10 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Added `src/resources/vertex_data_blob.rs` (`ae...`; the next commit): the full `VertexDataBlob` create/parse path plus the `MeshHelper` format conversions. A committed fixture (`src/resources/vertex_data_blob_fixture.txt`) captured from the reference runtime pins channels, streams, and bytes for six versions under both endians; the Rust test matches them bit-for-bit and round-trips `ReadData`.
 - Not yet ported on this path: skin-stream writing in `Create` (source `//todo`), `VertexDataExtensions.GenerateVertices`/`GenerateSkin`/`GetChannel`, and bind-pose/`MeshData` index-buffer handling.
 - State at this checkpoint: 712 library + 23 CLI tests, warnings-denied Clippy, format check, 1,449-file baseline verifier, and `git diff --check` all pass. Phase 1 is still active; the Phase 1 gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+
+## 11. Checkpoint: shader channel/format layer (2026-10-04)
+
+- Added `src/resources/shader_channel.rs`: the `ShaderChannel`/`ShaderChannel4`/`ShaderChannel5`/`ShaderChannel2018` mappings and the `VertexChannelFormat`/`VertexFormat2017`/`VertexFormat2019`/shader-`VertexFormat` encodings, with `ChannelInfoExtensions.GetVertexFormat`/`GetStride`. `src/resources/shader_channel_fixture.txt` captured 426 rows from the reference runtime across six versions and is matched row-for-row.
+- This is the prerequisite for `VertexDataExtensions.GetChannel`/`GenerateVertices`/`GenerateSkin`, which are the next mesh-path pieces and remain unported. `GenerateVertices`/`GenerateSkin` need an `IVertexData`-like view and a submesh view; the generated `IVertexData` classes are not in the snapshot, so those will be unit-tested from constructed channel/stream/data layouts rather than a direct class probe.
+- State: 713 library + 23 CLI tests, warnings-denied Clippy, format check, 1,449-file baseline verifier, and `git diff --check` all pass. Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
