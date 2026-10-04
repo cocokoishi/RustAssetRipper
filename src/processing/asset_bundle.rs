@@ -542,6 +542,11 @@ pub struct WorkspaceAssetExportPath {
     pub asset_bundle_name: Option<String>,
     pub original_path: Option<String>,
     pub original_directory: Option<String>,
+    pub original_name: Option<String>,
+    pub original_extension: Option<String>,
+    pub override_directory: Option<String>,
+    pub override_name: Option<String>,
+    pub override_extension: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -565,6 +570,76 @@ impl WorkspaceAssetExportPathTable {
                 limit: limits.max_records,
             });
         }
+        for record in &mut records {
+            record.asset_bundle_name =
+                nonempty_string(std::mem::take(&mut record.asset_bundle_name));
+            record.original_path = nonempty_string(std::mem::take(&mut record.original_path));
+            record.original_directory =
+                nonempty_string(std::mem::take(&mut record.original_directory));
+            record.original_name = nonempty_string(std::mem::take(&mut record.original_name));
+            record.original_extension =
+                normalize_path_extension(std::mem::take(&mut record.original_extension));
+            record.override_directory =
+                nonempty_string(std::mem::take(&mut record.override_directory));
+            record.override_name = nonempty_string(std::mem::take(&mut record.override_name));
+            record.override_extension =
+                normalize_path_extension(std::mem::take(&mut record.override_extension));
+        }
+        let mut byte_count = export_path_metadata_bytes(&records)?;
+        if byte_count > limits.max_total_metadata_bytes {
+            return Err(WorkspaceAssetBundlePathError::MetadataByteLimitExceeded {
+                byte_count,
+                limit: limits.max_total_metadata_bytes,
+            });
+        }
+        for record in &mut records {
+            if let Some(path) = record.original_path.as_deref() {
+                let details = original_path_detail_slices(path);
+                let additional_bytes = (if record.original_directory.is_none() {
+                    details.directory.map_or(0, str::len)
+                } else {
+                    0
+                })
+                .checked_add(if record.original_name.is_none() {
+                    details.name.map_or(0, str::len)
+                } else {
+                    0
+                })
+                .and_then(|bytes| {
+                    bytes.checked_add(if record.original_extension.is_none() {
+                        details.extension.map_or(0, str::len)
+                    } else {
+                        0
+                    })
+                })
+                .ok_or(WorkspaceAssetBundlePathError::MetadataByteCountOverflow)?;
+                byte_count = byte_count
+                    .checked_add(additional_bytes)
+                    .ok_or(WorkspaceAssetBundlePathError::MetadataByteCountOverflow)?;
+                if byte_count > limits.max_total_metadata_bytes {
+                    return Err(WorkspaceAssetBundlePathError::MetadataByteLimitExceeded {
+                        byte_count,
+                        limit: limits.max_total_metadata_bytes,
+                    });
+                }
+                if record.original_directory.is_none() {
+                    record.original_directory = details
+                        .directory
+                        .map(try_copy_export_path_string)
+                        .transpose()?;
+                }
+                if record.original_name.is_none() {
+                    record.original_name =
+                        details.name.map(try_copy_export_path_string).transpose()?;
+                }
+                if record.original_extension.is_none() {
+                    record.original_extension = details
+                        .extension
+                        .map(try_copy_export_path_string)
+                        .transpose()?;
+                }
+            }
+        }
         records.sort_unstable_by_key(|record| (record.file_index, record.object_index));
         for pair in records.windows(2) {
             if (pair[0].file_index, pair[0].object_index)
@@ -576,7 +651,7 @@ impl WorkspaceAssetExportPathTable {
                 });
             }
         }
-        let byte_count = export_path_metadata_bytes(&records)?;
+        byte_count = export_path_metadata_bytes(&records)?;
         if byte_count > limits.max_total_metadata_bytes {
             return Err(WorkspaceAssetBundlePathError::MetadataByteLimitExceeded {
                 byte_count,
@@ -605,8 +680,30 @@ pub struct WorkspaceAssetExportPathReport {
     pub assigned_bundle_names: usize,
     pub assigned_original_paths: usize,
     pub assigned_collection_directories: usize,
+    pub restored_original_names: usize,
+    pub case_restoration_unverified: usize,
+    pub named_asset_name_unavailable: usize,
+    pub initialized_shader_overrides: usize,
     pub metadata_record_count: usize,
     pub metadata_string_bytes: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BundleOriginalPathEffect {
+    original_path: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct OriginalPathDetails {
+    directory: Option<String>,
+    name: Option<String>,
+    extension: Option<String>,
+}
+
+struct OriginalPathDetailSlices<'a> {
+    directory: Option<&'a str>,
+    name: Option<&'a str>,
+    extension: Option<&'a str>,
 }
 
 struct WorkspaceAssetBundlePathApplyState<'a> {
@@ -753,17 +850,30 @@ pub fn apply_workspace_asset_bundle_paths(
             });
         }
 
-        let original_path = bundle_container_original_path(
+        let path_effect = bundle_container_original_path(
             &reference.mapping.reference.path,
             &bundle.asset_name,
             mode,
         )?;
-        let original_directory = original_path
-            .as_deref()
-            .map(original_path_directory)
-            .transpose()?
-            .flatten();
         let bundle_name = try_copy_export_path_string(&bundle.asset_name)?;
+        let named_asset_name = if path_effect.is_some() {
+            match workspace_named_asset_name(target) {
+                Ok(name) => name,
+                Err(WorkspaceAssetBundlePathError::ObjectPayloadUnavailable { .. }) => {
+                    report.named_asset_name_unavailable = report
+                        .named_asset_name_unavailable
+                        .checked_add(1)
+                        .ok_or(WorkspaceAssetBundlePathError::CountOverflow {
+                            resource: "unavailable INamed asset names",
+                        })?;
+                    None
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            None
+        };
+        let is_shader = workspace_object_class_id(target) == Some(48);
         let index = ensure_export_path_record(
             &mut export_paths.records,
             &mut record_index,
@@ -772,20 +882,37 @@ pub fn apply_workspace_asset_bundle_paths(
             assignment.target_path_id,
             limits.max_records,
         )?;
-        let current_record = &export_paths.records[index];
-        let effective_path = original_path
-            .as_ref()
-            .or(current_record.original_path.as_ref());
-        let effective_directory = if original_path.is_some() {
-            original_directory.as_ref()
-        } else {
-            current_record.original_directory.as_ref()
-        };
-        let new_record_bytes = optional_string_bytes(Some(&bundle_name))
-            .checked_add(optional_string_bytes(effective_path))
-            .and_then(|bytes| bytes.checked_add(optional_string_bytes(effective_directory)))
-            .ok_or(WorkspaceAssetBundlePathError::MetadataByteCountOverflow)?;
         let old_record_bytes = export_path_record_bytes(&export_paths.records[index])?;
+        let record = &mut export_paths.records[index];
+        record.asset_bundle_name = Some(bundle_name);
+        if let Some(effect) = path_effect {
+            let mut path_details_changed = false;
+            if let Some(path) = effect.original_path {
+                let details = original_path_details(&path)?;
+                record.original_path = Some(path);
+                record.original_directory = details.directory;
+                record.original_name = details.name;
+                record.original_extension = details.extension;
+                report.assigned_original_paths = report
+                    .assigned_original_paths
+                    .checked_add(1)
+                    .ok_or(WorkspaceAssetBundlePathError::CountOverflow {
+                        resource: "assigned OriginalPaths",
+                    })?;
+            }
+            if let Some(asset_name) = named_asset_name.as_deref() {
+                if restore_original_name(record, asset_name, &mut report)? {
+                    path_details_changed = true;
+                }
+            }
+            if is_shader {
+                initialize_shader_overrides(record, &mut report)?;
+            }
+            if path_details_changed {
+                record.original_path = calculated_original_path(record)?;
+            }
+        }
+        let new_record_bytes = export_path_record_bytes(record)?;
         metadata_bytes = metadata_bytes
             .checked_sub(old_record_bytes)
             .and_then(|bytes| bytes.checked_add(new_record_bytes))
@@ -795,17 +922,6 @@ pub fn apply_workspace_asset_bundle_paths(
                 byte_count: metadata_bytes,
                 limit: limits.max_total_metadata_bytes,
             });
-        }
-        let record = &mut export_paths.records[index];
-        record.asset_bundle_name = Some(bundle_name);
-        if let Some(path) = original_path {
-            record.original_path = Some(path);
-            record.original_directory = original_directory;
-            report.assigned_original_paths = report.assigned_original_paths.checked_add(1).ok_or(
-                WorkspaceAssetBundlePathError::CountOverflow {
-                    resource: "assigned OriginalPaths",
-                },
-            )?;
         }
         report.assigned_bundle_names = report.assigned_bundle_names.checked_add(1).ok_or(
             WorkspaceAssetBundlePathError::CountOverflow {
@@ -1000,12 +1116,11 @@ fn apply_group_by_bundle_name_directories(
                 object.path_id,
                 state.limits.max_records,
             )?;
-            let current_record = &state.records[record_index_value];
-            let new_record_bytes = optional_string_bytes(current_record.asset_bundle_name.as_ref())
-                .checked_add(optional_string_bytes(current_record.original_path.as_ref()))
-                .and_then(|bytes| bytes.checked_add(directory.len()))
-                .ok_or(WorkspaceAssetBundlePathError::MetadataByteCountOverflow)?;
             let old_record_bytes = export_path_record_bytes(&state.records[record_index_value])?;
+            state.records[record_index_value].original_directory = Some(directory);
+            state.records[record_index_value].original_path =
+                calculated_original_path(&state.records[record_index_value])?;
+            let new_record_bytes = export_path_record_bytes(&state.records[record_index_value])?;
             *state.metadata_bytes = (*state.metadata_bytes)
                 .checked_sub(old_record_bytes)
                 .and_then(|bytes| bytes.checked_add(new_record_bytes))
@@ -1016,7 +1131,6 @@ fn apply_group_by_bundle_name_directories(
                     limit: state.limits.max_total_metadata_bytes,
                 });
             }
-            state.records[record_index_value].original_directory = Some(directory);
             state.report.assigned_collection_directories = state
                 .report
                 .assigned_collection_directories
@@ -1113,6 +1227,17 @@ fn export_path_record_bytes(
         .and_then(|bytes| {
             bytes.checked_add(optional_string_bytes(record.original_directory.as_ref()))
         })
+        .and_then(|bytes| bytes.checked_add(optional_string_bytes(record.original_name.as_ref())))
+        .and_then(|bytes| {
+            bytes.checked_add(optional_string_bytes(record.original_extension.as_ref()))
+        })
+        .and_then(|bytes| {
+            bytes.checked_add(optional_string_bytes(record.override_directory.as_ref()))
+        })
+        .and_then(|bytes| bytes.checked_add(optional_string_bytes(record.override_name.as_ref())))
+        .and_then(|bytes| {
+            bytes.checked_add(optional_string_bytes(record.override_extension.as_ref()))
+        })
         .ok_or(WorkspaceAssetBundlePathError::MetadataByteCountOverflow)
 }
 
@@ -1142,18 +1267,227 @@ fn try_copy_export_path_string(value: &str) -> Result<String, WorkspaceAssetBund
     Ok(copy)
 }
 
+fn nonempty_string(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.is_empty())
+}
+
+fn normalize_path_extension(value: Option<String>) -> Option<String> {
+    value.and_then(|mut value| {
+        if value.starts_with('.') {
+            value.remove(0);
+        }
+        nonempty_string(Some(value))
+    })
+}
+
+fn original_path_details(path: &str) -> Result<OriginalPathDetails, WorkspaceAssetBundlePathError> {
+    let details = original_path_detail_slices(path);
+    Ok(OriginalPathDetails {
+        directory: details
+            .directory
+            .map(try_copy_export_path_string)
+            .transpose()?,
+        name: details.name.map(try_copy_export_path_string).transpose()?,
+        extension: details
+            .extension
+            .map(try_copy_export_path_string)
+            .transpose()?,
+    })
+}
+
+fn original_path_detail_slices(path: &str) -> OriginalPathDetailSlices<'_> {
+    let path_value = std::path::Path::new(path);
+    let directory = path_value
+        .parent()
+        .and_then(std::path::Path::to_str)
+        .filter(|value| !value.is_empty());
+    let ends_with_separator = path.ends_with('/') || (cfg!(windows) && path.ends_with('\\'));
+    let name = if ends_with_separator {
+        None
+    } else {
+        path_value
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.is_empty())
+    };
+    let extension = if ends_with_separator {
+        None
+    } else {
+        path_value
+            .extension()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.is_empty())
+    };
+    OriginalPathDetailSlices {
+        directory,
+        name,
+        extension,
+    }
+}
+
+fn calculated_original_path(
+    record: &WorkspaceAssetExportPath,
+) -> Result<Option<String>, WorkspaceAssetBundlePathError> {
+    if record.original_directory.is_none()
+        && record.original_name.is_none()
+        && record.original_extension.is_none()
+    {
+        return Ok(None);
+    }
+    let extension_length = record
+        .original_extension
+        .as_ref()
+        .map_or(Some(0usize), |extension| extension.len().checked_add(1))
+        .ok_or(WorkspaceAssetBundlePathError::MetadataByteCountOverflow)?;
+    let name_length = record
+        .original_name
+        .as_ref()
+        .map_or(0, String::len)
+        .checked_add(extension_length)
+        .ok_or(WorkspaceAssetBundlePathError::MetadataByteCountOverflow)?;
+    let mut name = String::new();
+    name.try_reserve_exact(name_length).map_err(|_| {
+        WorkspaceAssetBundlePathError::AllocationFailed {
+            resource: "calculated OriginalPath filename",
+            requested: name_length,
+        }
+    })?;
+    if let Some(original_name) = record.original_name.as_deref() {
+        name.push_str(original_name);
+    }
+    if let Some(extension) = record.original_extension.as_deref() {
+        name.push('.');
+        name.push_str(extension);
+    }
+    if let Some(directory) = record.original_directory.as_deref() {
+        join_project_path(&[directory, &name]).map(Some)
+    } else if name.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(name))
+    }
+}
+
+fn workspace_named_asset_name(
+    object: &WorkspaceObject,
+) -> Result<Option<String>, WorkspaceAssetBundlePathError> {
+    let payload = object.payload.as_ref().map_err(|_| {
+        WorkspaceAssetBundlePathError::ObjectPayloadUnavailable {
+            file_index: object.file_index,
+            object_index: object.object_index,
+        }
+    })?;
+    let value = payload
+        .root
+        .unique_field_in_base_chain("m_Name")
+        .map_err(
+            |source| WorkspaceAssetBundlePathError::NamedAssetFieldLookup {
+                file_index: object.file_index,
+                object_index: object.object_index,
+                source,
+            },
+        )?;
+    let Some(SerializedValue::StringBytes(bytes)) = value else {
+        return Ok(None);
+    };
+    let name = str::from_utf8(bytes).map_err(|error| {
+        WorkspaceAssetBundlePathError::InvalidNamedAssetUtf8 {
+            file_index: object.file_index,
+            object_index: object.object_index,
+            valid_up_to: error.valid_up_to(),
+        }
+    })?;
+    try_copy_export_path_string(name).map(Some)
+}
+
+fn restore_original_name(
+    record: &mut WorkspaceAssetExportPath,
+    asset_name: &str,
+    report: &mut WorkspaceAssetExportPathReport,
+) -> Result<bool, WorkspaceAssetBundlePathError> {
+    let Some(original_name) = record.original_name.as_deref() else {
+        return Ok(false);
+    };
+    if original_name == asset_name {
+        return Ok(true);
+    }
+    if original_name.encode_utf16().count() != asset_name.encode_utf16().count() {
+        return Ok(false);
+    }
+    if original_name.is_ascii() && asset_name.is_ascii() {
+        if !original_name.eq_ignore_ascii_case(asset_name) {
+            return Ok(false);
+        }
+        record.original_name = Some(try_copy_export_path_string(asset_name)?);
+        report.restored_original_names = report.restored_original_names.checked_add(1).ok_or(
+            WorkspaceAssetBundlePathError::CountOverflow {
+                resource: "restored OriginalNames",
+            },
+        )?;
+        return Ok(true);
+    }
+    report.case_restoration_unverified = report.case_restoration_unverified.checked_add(1).ok_or(
+        WorkspaceAssetBundlePathError::CountOverflow {
+            resource: "unverified non-ASCII OriginalName comparisons",
+        },
+    )?;
+    Ok(false)
+}
+
+fn initialize_shader_overrides(
+    record: &mut WorkspaceAssetExportPath,
+    report: &mut WorkspaceAssetExportPathReport,
+) -> Result<(), WorkspaceAssetBundlePathError> {
+    let mut initialized = false;
+    if record.override_directory.is_none() {
+        if let Some(value) = record.original_directory.as_deref() {
+            record.override_directory = Some(try_copy_export_path_string(value)?);
+            initialized = true;
+        }
+    }
+    if record.override_name.is_none() {
+        if let Some(value) = record.original_name.as_deref() {
+            record.override_name = Some(try_copy_export_path_string(value)?);
+            initialized = true;
+        }
+    }
+    if record.override_extension.is_none() {
+        if let Some(value) = record.original_extension.as_deref() {
+            record.override_extension = Some(try_copy_export_path_string(value)?);
+            initialized = true;
+        }
+    }
+    if initialized {
+        report.initialized_shader_overrides = report
+            .initialized_shader_overrides
+            .checked_add(1)
+            .ok_or(WorkspaceAssetBundlePathError::CountOverflow {
+                resource: "initialized Shader override records",
+            })?;
+    }
+    Ok(())
+}
+
 fn bundle_container_original_path(
     container_path: &str,
     bundle_name: &str,
     mode: BundledAssetsExportMode,
-) -> Result<Option<String>, WorkspaceAssetBundlePathError> {
+) -> Result<Option<BundleOriginalPathEffect>, WorkspaceAssetBundlePathError> {
     let mut asset_path = ensure_path_not_rooted(container_path)?;
     if asset_path.is_empty() {
         return Ok(None);
     }
     match mode {
-        BundledAssetsExportMode::GroupByAssetType => Ok(None),
-        BundledAssetsExportMode::DirectExport => ensure_starts_with_assets(&asset_path).map(Some),
+        BundledAssetsExportMode::GroupByAssetType => Ok(Some(BundleOriginalPathEffect {
+            original_path: None,
+        })),
+        BundledAssetsExportMode::DirectExport => {
+            ensure_starts_with_assets(&asset_path).map(|original_path| {
+                Some(BundleOriginalPathEffect {
+                    original_path: Some(original_path),
+                })
+            })
+        }
         BundledAssetsExportMode::GroupByBundleName => {
             if let Some(relative_path) = strip_prefix_ignore_ascii_case(&asset_path, "Assets/") {
                 asset_path = try_copy_export_path_string(relative_path)?;
@@ -1170,7 +1504,13 @@ fn bundle_container_original_path(
             {
                 asset_path = try_copy_export_path_string(relative_path)?;
             }
-            join_project_path(&["Assets/AssetBundles", bundle_name, &asset_path]).map(Some)
+            join_project_path(&["Assets/AssetBundles", bundle_name, &asset_path]).map(
+                |original_path| {
+                    Some(BundleOriginalPathEffect {
+                        original_path: Some(original_path),
+                    })
+                },
+            )
         }
     }
 }
@@ -1278,16 +1618,6 @@ fn join_project_path(parts: &[&str]) -> Result<String, WorkspaceAssetBundlePathE
     Ok(result)
 }
 
-fn original_path_directory(path: &str) -> Result<Option<String>, WorkspaceAssetBundlePathError> {
-    let Some(separator_index) = path.rfind(['/', '\\']) else {
-        return Ok(None);
-    };
-    if separator_index == 0 {
-        return Ok(None);
-    }
-    try_copy_export_path_string(&path[..separator_index]).map(Some)
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WorkspaceAssetBundlePathError {
     AllocationFailed {
@@ -1342,6 +1672,16 @@ pub enum WorkspaceAssetBundlePathError {
     ObjectPayloadUnavailable {
         file_index: usize,
         object_index: usize,
+    },
+    NamedAssetFieldLookup {
+        file_index: usize,
+        object_index: usize,
+        source: SerializedValueLookupError,
+    },
+    InvalidNamedAssetUtf8 {
+        file_index: usize,
+        object_index: usize,
+        valid_up_to: usize,
     },
     ClassNameUnavailable {
         file_index: usize,
@@ -1424,6 +1764,22 @@ impl Display for WorkspaceAssetBundlePathError {
             } => write!(
                 formatter,
                 "cannot determine ClassName for object {file_index}:{object_index} because its payload is undecoded"
+            ),
+            Self::NamedAssetFieldLookup {
+                file_index,
+                object_index,
+                source,
+            } => write!(
+                formatter,
+                "cannot determine whether object {file_index}:{object_index} implements INamed: {source}"
+            ),
+            Self::InvalidNamedAssetUtf8 {
+                file_index,
+                object_index,
+                valid_up_to,
+            } => write!(
+                formatter,
+                "object {file_index}:{object_index} has invalid UTF-8 in m_Name at byte {valid_up_to}"
             ),
             Self::ClassNameUnavailable {
                 file_index,
@@ -1765,8 +2121,10 @@ impl Error for AssetBundleContainerMapError {
 mod tests {
     use super::{
         asset_bundle_container_target, asset_bundle_name_for_asset, bundle_container_original_path,
-        get_asset_bundle_name, AssetBundleContainerTarget, AssetBundleNameDecodeError,
-        BundledAssetsExportMode,
+        calculated_original_path, get_asset_bundle_name, initialize_shader_overrides,
+        original_path_details, restore_original_name, AssetBundleContainerTarget,
+        AssetBundleNameDecodeError, BundleOriginalPathEffect, BundledAssetsExportMode,
+        OriginalPathDetails, WorkspaceAssetExportPath, WorkspaceAssetExportPathReport,
     };
     use crate::serialized_file::object::{SerializedFieldValue, SerializedValue};
     use crate::serialized_file::references::PPtrResolution;
@@ -1872,6 +2230,8 @@ mod tests {
                 BundledAssetsExportMode::DirectExport,
             )
             .unwrap()
+            .unwrap()
+            .original_path
             .as_deref(),
             Some("Assets/Textures/wood.mat")
         );
@@ -1882,6 +2242,8 @@ mod tests {
                 BundledAssetsExportMode::DirectExport,
             )
             .unwrap()
+            .unwrap()
+            .original_path
             .as_deref(),
             Some("Assets/Textures/wood.mat")
         );
@@ -1906,7 +2268,9 @@ mod tests {
                 BundledAssetsExportMode::GroupByBundleName,
             )
             .unwrap(),
-            Some(expected_group_path)
+            Some(BundleOriginalPathEffect {
+                original_path: Some(expected_group_path),
+            })
         );
         assert_eq!(
             bundle_container_original_path(
@@ -1915,8 +2279,85 @@ mod tests {
                 BundledAssetsExportMode::GroupByAssetType,
             )
             .unwrap(),
-            None
+            Some(BundleOriginalPathEffect {
+                original_path: None,
+            })
         );
+    }
+
+    #[test]
+    fn original_path_details_split_directory_name_and_extension() {
+        assert_eq!(
+            original_path_details("Assets/Textures/Wood.Albedo.PNG").unwrap(),
+            OriginalPathDetails {
+                directory: Some("Assets/Textures".to_owned()),
+                name: Some("Wood.Albedo".to_owned()),
+                extension: Some("PNG".to_owned()),
+            }
+        );
+        assert_eq!(
+            original_path_details("Assets/Textures/README").unwrap(),
+            OriginalPathDetails {
+                directory: Some("Assets/Textures".to_owned()),
+                name: Some("README".to_owned()),
+                extension: None,
+            }
+        );
+    }
+
+    #[test]
+    fn original_name_restoration_matches_ascii_case_and_utf16_length() {
+        let mut record = WorkspaceAssetExportPath {
+            original_path: Some("Assets/textures/wood.png".to_owned()),
+            original_directory: Some("Assets/textures".to_owned()),
+            original_name: Some("wood".to_owned()),
+            original_extension: Some("png".to_owned()),
+            ..WorkspaceAssetExportPath::default()
+        };
+        let mut report = WorkspaceAssetExportPathReport::default();
+        assert!(restore_original_name(&mut record, "Wood", &mut report).unwrap());
+        assert_eq!(record.original_name.as_deref(), Some("Wood"));
+        record.original_path = calculated_original_path(&record).unwrap();
+        assert_eq!(
+            record.original_path.as_deref(),
+            Some(format!("Assets/textures{}Wood.png", std::path::MAIN_SEPARATOR).as_str())
+        );
+        assert_eq!(report.restored_original_names, 1);
+
+        assert!(!restore_original_name(&mut record, "Longer", &mut report).unwrap());
+        assert_eq!(report.restored_original_names, 1);
+    }
+
+    #[test]
+    fn original_name_restoration_reports_non_ascii_case_as_unverified() {
+        let mut record = WorkspaceAssetExportPath {
+            original_name: Some("über".to_owned()),
+            ..WorkspaceAssetExportPath::default()
+        };
+        let mut report = WorkspaceAssetExportPathReport::default();
+        assert!(!restore_original_name(&mut record, "Über", &mut report).unwrap());
+        assert_eq!(record.original_name.as_deref(), Some("über"));
+        assert_eq!(report.case_restoration_unverified, 1);
+    }
+
+    #[test]
+    fn shader_override_initialization_preserves_existing_values() {
+        let mut record = WorkspaceAssetExportPath {
+            original_directory: Some("Assets/Shaders".to_owned()),
+            original_name: Some("Surface".to_owned()),
+            original_extension: Some("shader".to_owned()),
+            override_name: Some("CustomName".to_owned()),
+            ..WorkspaceAssetExportPath::default()
+        };
+        let mut report = WorkspaceAssetExportPathReport::default();
+        initialize_shader_overrides(&mut record, &mut report).unwrap();
+        assert_eq!(record.override_directory.as_deref(), Some("Assets/Shaders"));
+        assert_eq!(record.override_name.as_deref(), Some("CustomName"));
+        assert_eq!(record.override_extension.as_deref(), Some("shader"));
+        assert_eq!(report.initialized_shader_overrides, 1);
+
+        initialize_shader_overrides(&mut record, &mut report).unwrap();
+        assert_eq!(report.initialized_shader_overrides, 1);
     }
 
     #[test]
