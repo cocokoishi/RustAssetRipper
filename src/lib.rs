@@ -9,6 +9,7 @@ pub mod compression;
 pub mod container;
 pub mod export;
 pub mod io;
+pub mod numerics;
 pub mod processing;
 pub mod product;
 pub mod resource;
