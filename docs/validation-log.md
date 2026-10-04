@@ -1427,3 +1427,8 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Added src/export/primary_content.rs: the 36-entry default handler table (Json catch-all, 20 empty handlers, Glb/Binary/Audio/Texture/Script handlers, Deleted tail), the Add-first dedup with empty-skip assembly delta, the ExportRootPath root with one-based progress lines, and SingleExportCollection destination planning with the full name budget and no sidecar.
 - Three tests cover the table split with binary/model shadowing, progress lines, and full-budget paths. A lifetime elision Clippy finding on the query helper was fixed with an anonymous lifetime bound.
 - Final verification on Windows with Rust/Cargo 1.98.1: cargo fmt --all -- --check exit 0; cargo test --workspace --locked --quiet exit 0 (573 library, 23 CLI, 0 doc tests); cargo clippy --workspace --all-targets --locked -- -D warnings exit 0; tools/verify-baseline.ps1 exit 0 (1,449/1,449 reference files unchanged); git diff --check exit 0. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+## Project coverage backbone (2026-10-04)
+
+- Added docs/project-coverage.md: all 51 solution projects with capability, Rust counterpart, and honest status (libraries 3 investigated, 8 in progress, 11 uninvestigated; 15 tools inventoried by entry point; 8 test projects as executed evidence; 6 generators with outputs as audit target). Capability lines for unexamined projects come from project file listings, not behavior audits.
+- A summary miscount (7 vs 8 in-progress libraries) was caught on recount and corrected. This document is the gate backbone, not the gate: every uninvestigated row still needs behavior-ledger evidence.
