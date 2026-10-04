@@ -15,6 +15,7 @@ pub mod project_plan;
 pub mod registration;
 pub mod scene_collection;
 pub mod script_hashing;
+pub mod settings;
 pub mod streamed_assets;
 pub mod unity_yaml;
 pub mod value_yaml;
