@@ -2561,6 +2561,10 @@ mod tests {
     };
     use assetripper::scheme::BatchMountReport;
     use assetripper::scheme::FileKind;
+    use assetripper::serialized_file::collection_workspace::{
+        WorkspaceAssetCollections, WorkspaceCollectionLimits,
+    };
+    use assetripper::serialized_file::object_workspace::{ObjectWorkspace, ObjectWorkspaceLimits};
     use assetripper::serialized_file::workspace::SerializedFileDependencyOutcome;
     use std::fs;
     use std::path::PathBuf;
@@ -2572,6 +2576,7 @@ mod tests {
     fn streamed_scene_bundle_lookup_uses_direct_collections_without_a_scope_path() {
         let bundles = [WorkspaceSerializedBundle {
             scope_path: None,
+            name_fixed: None,
             parent_bundle_index: None,
             parent_entry_index: None,
             direct_collection_file_indices: vec![3, 1],
@@ -2725,6 +2730,14 @@ mod tests {
     }
 
     fn make_asset_bundle_file() -> Vec<u8> {
+        make_asset_bundle_file_fixture(false)
+    }
+
+    fn make_asset_bundle_file_with_local_reference() -> Vec<u8> {
+        make_asset_bundle_file_fixture(true)
+    }
+
+    fn make_asset_bundle_file_fixture(include_local_target: bool) -> Vec<u8> {
         let mut strings = Vec::new();
         let mut nodes = Vec::new();
         push_asset_bundle_node(&mut strings, &mut nodes, 0, "AssetBundle", "", -1);
@@ -2780,7 +2793,7 @@ mod tests {
         }
         metadata.extend_from_slice(&strings);
         put_u32_le(&mut metadata, 0);
-        put_i32_le(&mut metadata, 1);
+        put_i32_le(&mut metadata, if include_local_target { 2 } else { 1 });
         put_i32_le(&mut metadata, 42);
         put_u32_le(&mut metadata, 0);
 
@@ -2790,21 +2803,37 @@ mod tests {
         put_i32_le(&mut payload, 0);
         put_i32_le(&mut payload, 0);
         put_i32_le(&mut payload, 0);
-        payload.extend_from_slice(&0_i64.to_le_bytes());
+        let container_path_id = if include_local_target { 43_i64 } else { 0 };
+        payload.extend_from_slice(&container_path_id.to_le_bytes());
         payload.push(1);
         put_i32_le(&mut payload, 1);
         put_asset_bundle_string_payload(&mut payload, "Assets/Scenes/BundleScene.unity");
         put_asset_bundle_string_payload(&mut payload, "CAB-Scene");
 
+        let mut target_payload = Vec::new();
+        if include_local_target {
+            put_i32_le(&mut target_payload, 0);
+            target_payload.push(0);
+            put_i32_le(&mut target_payload, 0);
+        }
+
         put_i32_le(&mut metadata, i32::try_from(payload.len()).unwrap());
         put_i32_le(&mut metadata, 142);
         put_u16_le(&mut metadata, 142);
         put_u16_le(&mut metadata, 0);
+        if include_local_target {
+            put_i32_le(&mut metadata, 43);
+            put_u32_le(&mut metadata, u32::try_from(payload.len()).unwrap());
+            put_i32_le(&mut metadata, i32::try_from(target_payload.len()).unwrap());
+            put_i32_le(&mut metadata, 142);
+            put_u16_le(&mut metadata, 142);
+            put_u16_le(&mut metadata, 0);
+        }
         put_i32_le(&mut metadata, 0);
         metadata.push(0);
 
         let data_offset = 20usize + metadata.len();
-        let file_size = data_offset + payload.len();
+        let file_size = data_offset + payload.len() + target_payload.len();
         let mut file = Vec::with_capacity(file_size);
         file.extend_from_slice(&i32::try_from(metadata.len()).unwrap().to_be_bytes());
         file.extend_from_slice(&u32::try_from(file_size).unwrap().to_be_bytes());
@@ -2814,6 +2843,7 @@ mod tests {
         file.extend_from_slice(&[0; 3]);
         file.extend_from_slice(&metadata);
         file.extend_from_slice(&payload);
+        file.extend_from_slice(&target_payload);
         file
     }
 
@@ -3924,6 +3954,41 @@ mod tests {
             )
             .unwrap();
 
+        let object_workspace = ObjectWorkspace::load_from_vfs(
+            &filesystem,
+            &loaded.workspace,
+            ObjectWorkspaceLimits::default(),
+        )
+        .unwrap();
+        let collection_workspace = WorkspaceAssetCollections::build(
+            &loaded.workspace,
+            &object_workspace,
+            WorkspaceCollectionLimits::default(),
+        )
+        .unwrap();
+        let bundle_name_plan =
+            assetripper::processing::asset_bundle::plan_workspace_asset_bundle_names(
+                &loaded.workspace,
+                &object_workspace,
+                &collection_workspace,
+                Default::default(),
+            )
+            .unwrap();
+        assert!(
+            bundle_name_plan.is_complete(),
+            "{:?}",
+            bundle_name_plan.issues
+        );
+        assert_eq!(bundle_name_plan.bundles.len(), 1);
+        assert_eq!(bundle_name_plan.bundles[0].source_name, "data.unity3d");
+        assert_eq!(bundle_name_plan.bundles[0].asset_name, "data.unity3d");
+        assert_eq!(bundle_name_plan.container_references.len(), 1);
+        assert_eq!(
+            bundle_name_plan.container_references[0].mapping.target,
+            assetripper::processing::asset_bundle::AssetBundleContainerTarget::Null
+        );
+        assert!(bundle_name_plan.assignments.is_empty());
+
         let mut output = Vec::new();
         super::print_workspace_summary_to(
             &mut output,
@@ -3959,6 +4024,83 @@ mod tests {
         assert!(summary.contains(
             "hierarchy file 0: 0 GameObjects, 0 Transforms, 1 scene assets (1 managers, 0 PrefabInstances, 0 SceneRoots), 0 component candidates (0 Transform IDs, 0 GameObject edges, 0 m_GameObject fields), 0 missing Transform plans, 0 relationships, 0 roots, 0 graph issues, 0 root issues, 0 reciprocal issues, scene graph complete=true, reference scans complete=true, overall complete=true"
         ));
+    }
+
+    #[test]
+    fn workspace_asset_bundle_plan_assigns_only_unique_local_container_targets() {
+        let mut filesystem = VirtualFileSystem::new();
+        let scene_file = make_occlusion_settings_file([1, 2, 3, 4]);
+        let streamed_bundle = make_asset_bundle_file_with_local_reference();
+        let webdata = make_webdata_fixture(&[
+            ("CAB-Scene", &scene_file),
+            ("assetbundle.assets", &streamed_bundle),
+        ]);
+        insert_vfs_file(
+            &mut filesystem,
+            "/game/Game_Data/globalgamemanagers",
+            &make_generation_10_file(),
+        );
+        insert_vfs_file(&mut filesystem, "/game/Game_Data/data.unity3d", &webdata);
+        let structure = PlatformStructure {
+            platform: PlatformKind::Windows,
+            selected_path: "/game".to_owned(),
+            consumed_paths: vec!["/game".to_owned()],
+            root_path: "/game".to_owned(),
+            name: Some("Game".to_owned()),
+            game_data_path: Some("/game/Game_Data".to_owned()),
+            data_paths: vec!["/game/Game_Data".to_owned()],
+        };
+        let loaded = structure
+            .load_primary_serialized_workspace(
+                &mut filesystem,
+                PlatformWorkspaceLoadOptions::default(),
+            )
+            .unwrap();
+        let object_workspace = ObjectWorkspace::load_from_vfs(
+            &filesystem,
+            &loaded.workspace,
+            ObjectWorkspaceLimits::default(),
+        )
+        .unwrap();
+        let collection_workspace = WorkspaceAssetCollections::build(
+            &loaded.workspace,
+            &object_workspace,
+            WorkspaceCollectionLimits::default(),
+        )
+        .unwrap();
+        let plan = assetripper::processing::asset_bundle::plan_workspace_asset_bundle_names(
+            &loaded.workspace,
+            &object_workspace,
+            &collection_workspace,
+            Default::default(),
+        )
+        .unwrap();
+
+        assert!(plan.is_complete(), "{:?}", plan.issues);
+        assert_eq!(plan.bundles.len(), 2);
+        let source_bundle = plan
+            .bundles
+            .iter()
+            .position(|bundle| bundle.source_path_id == 42)
+            .unwrap();
+        assert_eq!(plan.bundles[source_bundle].source_name, "data.unity3d");
+        assert_eq!(plan.bundles[source_bundle].container_references, 0..1);
+        assert_eq!(plan.assignments.len(), 1);
+        assert_eq!(plan.assignments[0].bundle_record_index, source_bundle);
+        assert_eq!(plan.assignments[0].target_object_index, 1);
+        assert_eq!(plan.assignments[0].target_path_id, 43);
+        assert_eq!(
+            plan.asset_name_for_assignment(&plan.assignments[0]),
+            Some("data.unity3d")
+        );
+        assert_eq!(
+            plan.container_references[plan.assignments[0].reference_record_index]
+                .mapping
+                .target,
+            assetripper::processing::asset_bundle::AssetBundleContainerTarget::LocalObject {
+                object_index: 1
+            }
+        );
     }
 
     #[test]

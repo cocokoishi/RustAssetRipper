@@ -16,6 +16,7 @@ use crate::container::unityfs::{UnityFsBundle, UnityFsError, UnityFsLimits};
 use crate::container::web_file::{WebFile, WebFileError, WebFileLimits};
 use crate::io::discovery::{discover_directory_inputs, DirectoryDiscoveryError};
 use crate::io::filesystem::VirtualFileSystem;
+use crate::io::special_names::fix_file_identifier;
 use crate::io::stream::{logical_file_name, logical_file_path, open_logical_file, SmartStream};
 use crate::serialized_file::file::{SerializedFile, SerializedFileError};
 use crate::serialized_file::format_version::FormatVersion;
@@ -85,6 +86,8 @@ pub struct ContainerMountLimits {
     pub max_active_nested_bytes: u64,
     /// Maximum aggregate path bytes retained for the nested container-scope report.
     pub max_total_container_scope_path_bytes: u64,
+    /// Maximum aggregate fixed Bundle.Name bytes retained for nested container metadata.
+    pub max_total_container_bundle_name_bytes: u64,
     /// Maximum aggregate SerializedFile path bytes retained for source-order metadata.
     pub max_total_serialized_file_path_bytes: u64,
     /// Maximum aggregate ResourceFile path bytes retained for bundle-resource metadata.
@@ -101,6 +104,7 @@ impl Default for ContainerMountLimits {
             max_depth: 64,
             max_active_nested_bytes: 1024 * 1024 * 1024,
             max_total_container_scope_path_bytes: 64 * 1024 * 1024,
+            max_total_container_bundle_name_bytes: 64 * 1024 * 1024,
             max_total_serialized_file_path_bytes: 64 * 1024 * 1024,
             max_total_resource_file_path_bytes: 64 * 1024 * 1024,
             max_total_resource_file_name_bytes: 64 * 1024 * 1024,
@@ -146,6 +150,8 @@ pub struct ContainerMountReport {
     pub container_scopes: Vec<String>,
     /// Aggregate bytes in `container_scopes` paths.
     pub container_scope_path_bytes: u64,
+    /// Aggregate UTF-8 bytes in source-compatible fixed Bundle names.
+    pub container_bundle_name_bytes: u64,
     /// Source container hierarchy in traversal order. Parent indexes refer to this vector; a
     /// child records the parent entry that contained it, while `scope_index` links to the
     /// corresponding virtual root when one was assigned.
@@ -166,11 +172,13 @@ pub struct ContainerMountReport {
 }
 
 /// One source FileContainer in the recursively mounted SerializedBundle tree.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MountedContainerBundle {
     pub scope_index: Option<usize>,
     pub parent_bundle_index: Option<usize>,
     pub parent_entry_index: Option<usize>,
+    /// Source FileContainer.Name after SpecialFileNames.FixFileIdentifier.
+    pub name_fixed: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -288,6 +296,7 @@ struct ContainerTreeMountState<'a> {
     visited_entries: usize,
     active_nested_bytes: u64,
     container_scope_path_bytes: u64,
+    container_bundle_name_bytes: u64,
     bundle_serialized_file_counts: Vec<usize>,
     bundle_resource_file_counts: Vec<usize>,
     resource_file_path_bytes: u64,
@@ -328,6 +337,11 @@ pub enum ContainerMountErrorKind {
     ContainerScopeCountOverflow,
     ContainerScopeAllocationFailed {
         requested: usize,
+    },
+    ContainerBundleNameSizeOverflow,
+    ContainerBundleNameLimitExceeded {
+        requested: u64,
+        limit: u64,
     },
     ContainerBundleCountOverflow,
     ContainerBundleAllocationFailed {
@@ -644,19 +658,31 @@ impl<'a> DispatchedFile<'a> {
         destination_root: Option<&str>,
         limits: ContainerMountLimits,
     ) -> Result<ContainerMountReport, ContainerMountError> {
+        self.mount_container_tree_with_source_name(filesystem, destination_root, None, limits)
+    }
+
+    /// Mount a container while retaining the source FileBase name used to create its Bundle.
+    pub fn mount_container_tree_with_source_name(
+        &self,
+        filesystem: &mut VirtualFileSystem,
+        destination_root: Option<&str>,
+        source_name: Option<&str>,
+        limits: ContainerMountLimits,
+    ) -> Result<ContainerMountReport, ContainerMountError> {
         let mut state = ContainerTreeMountState {
             filesystem,
             limits,
             visited_entries: 0,
             active_nested_bytes: 0,
             container_scope_path_bytes: 0,
+            container_bundle_name_bytes: 0,
             bundle_serialized_file_counts: Vec::new(),
             bundle_resource_file_counts: Vec::new(),
             resource_file_path_bytes: 0,
             resource_file_name_bytes: 0,
             report: ContainerMountReport::default(),
         };
-        self.mount_container_tree_at(destination_root, 0, None, None, &mut state)?;
+        self.mount_container_tree_at(destination_root, 0, None, None, source_name, &mut state)?;
         Ok(state.report)
     }
 
@@ -666,6 +692,7 @@ impl<'a> DispatchedFile<'a> {
         depth: usize,
         parent_bundle_index: Option<usize>,
         parent_entry_index: Option<usize>,
+        source_name: Option<&str>,
         state: &mut ContainerTreeMountState<'_>,
     ) -> Result<(), ContainerMountError> {
         let container_scope_index = record_container_scope(destination_root, state)?;
@@ -673,6 +700,7 @@ impl<'a> DispatchedFile<'a> {
             container_scope_index,
             parent_bundle_index,
             parent_entry_index,
+            source_name,
             state,
         )?;
         if depth > state.limits.max_depth {
@@ -1007,6 +1035,13 @@ impl Display for ContainerMountErrorKind {
             Self::ContainerScopeAllocationFailed { requested } => write!(
                 formatter,
                 "could not reserve {requested} bytes for container-scope metadata"
+            ),
+            Self::ContainerBundleNameSizeOverflow => {
+                formatter.write_str("fixed Bundle.Name byte count overflows u64")
+            }
+            Self::ContainerBundleNameLimitExceeded { requested, limit } => write!(
+                formatter,
+                "fixed Bundle.Name values use {requested} bytes, exceeding name limit {limit}"
             ),
             Self::ContainerBundleCountOverflow => {
                 formatter.write_str("container bundle count overflows usize")
@@ -1421,6 +1456,7 @@ fn record_container_bundle(
     scope_index: Option<usize>,
     parent_bundle_index: Option<usize>,
     parent_entry_index: Option<usize>,
+    source_name: Option<&str>,
     state: &mut ContainerTreeMountState<'_>,
 ) -> Result<usize, ContainerMountError> {
     if parent_bundle_index.is_some() != parent_entry_index.is_some() {
@@ -1451,6 +1487,51 @@ fn record_container_bundle(
             ));
         }
     }
+    let name_fixed = if let Some(source_name) = source_name {
+        let source_name_bytes = u64::try_from(source_name.len()).map_err(|_| {
+            ContainerMountError::new(
+                state.report.clone(),
+                ContainerMountErrorKind::ContainerBundleNameSizeOverflow,
+            )
+        })?;
+        if source_name_bytes > state.limits.max_total_container_bundle_name_bytes {
+            return Err(ContainerMountError::new(
+                state.report.clone(),
+                ContainerMountErrorKind::ContainerBundleNameLimitExceeded {
+                    requested: source_name_bytes,
+                    limit: state.limits.max_total_container_bundle_name_bytes,
+                },
+            ));
+        }
+        let fixed_name = fix_file_identifier(source_name);
+        let fixed_name_bytes = u64::try_from(fixed_name.len()).map_err(|_| {
+            ContainerMountError::new(
+                state.report.clone(),
+                ContainerMountErrorKind::ContainerBundleNameSizeOverflow,
+            )
+        })?;
+        let requested_name_bytes = state
+            .container_bundle_name_bytes
+            .checked_add(fixed_name_bytes)
+            .ok_or_else(|| {
+                ContainerMountError::new(
+                    state.report.clone(),
+                    ContainerMountErrorKind::ContainerBundleNameSizeOverflow,
+                )
+            })?;
+        if requested_name_bytes > state.limits.max_total_container_bundle_name_bytes {
+            return Err(ContainerMountError::new(
+                state.report.clone(),
+                ContainerMountErrorKind::ContainerBundleNameLimitExceeded {
+                    requested: requested_name_bytes,
+                    limit: state.limits.max_total_container_bundle_name_bytes,
+                },
+            ));
+        }
+        Some((fixed_name, requested_name_bytes))
+    } else {
+        None
+    };
     let requested_count = state
         .report
         .container_bundles
@@ -1513,11 +1594,18 @@ fn record_container_bundle(
             )
         })?;
     let bundle_index = state.report.container_bundles.len();
+    let (name_fixed, next_bundle_name_bytes) = match name_fixed {
+        Some((name, byte_count)) => (Some(name), byte_count),
+        None => (None, state.container_bundle_name_bytes),
+    };
     state.report.container_bundles.push(MountedContainerBundle {
         scope_index,
         parent_bundle_index,
         parent_entry_index,
+        name_fixed,
     });
+    state.container_bundle_name_bytes = next_bundle_name_bytes;
+    state.report.container_bundle_name_bytes = next_bundle_name_bytes;
     state.bundle_serialized_file_counts.push(0);
     state.bundle_resource_file_counts.push(0);
     Ok(bundle_index)
@@ -1595,6 +1683,7 @@ fn mount_tree_child<'a, 'b>(
                 depth,
                 Some(container_bundle_index),
                 Some(entry_index),
+                Some(resource_name),
                 state,
             );
             state.active_nested_bytes -= child_owned_bytes;
@@ -2060,7 +2149,18 @@ impl SchemeReader {
             | FileKind::UnityWebBundle
             | FileKind::UnityWebData
             | FileKind::UnityArchive => {
-                dispatched.mount_container_tree(filesystem, destination_root, mount_limits)
+                let source_name = logical_file_name(input_path).ok_or_else(|| {
+                    ContainerMountError::new(
+                        ContainerMountReport::default(),
+                        ContainerMountErrorKind::InputPathHasNoFileName,
+                    )
+                })?;
+                dispatched.mount_container_tree_with_source_name(
+                    filesystem,
+                    destination_root,
+                    Some(&source_name),
+                    mount_limits,
+                )
             }
             FileKind::SerializedFile | FileKind::Resource => {
                 dispatched.parse().map_err(|error| {
@@ -3406,16 +3506,19 @@ mod tests {
                     scope_index: Some(0),
                     parent_bundle_index: None,
                     parent_entry_index: None,
+                    name_fixed: None,
                 },
                 MountedContainerBundle {
                     scope_index: Some(1),
                     parent_bundle_index: Some(0),
                     parent_entry_index: Some(0),
+                    name_fixed: Some("plain-container".to_owned()),
                 },
                 MountedContainerBundle {
                     scope_index: Some(2),
                     parent_bundle_index: Some(0),
                     parent_entry_index: Some(1),
+                    name_fixed: Some("wrapped-container.gz".to_owned()),
                 },
             ]
         );
@@ -3462,11 +3565,13 @@ mod tests {
                     scope_index: Some(0),
                     parent_bundle_index: None,
                     parent_entry_index: None,
+                    name_fixed: None,
                 },
                 MountedContainerBundle {
                     scope_index: Some(1),
                     parent_bundle_index: Some(0),
                     parent_entry_index: Some(1),
+                    name_fixed: Some("nested.bundle".to_owned()),
                 },
             ]
         );
@@ -3506,6 +3611,60 @@ mod tests {
             root_collection_order,
             ["/tree/z-first.asset", "/tree/a-second.asset"]
         );
+    }
+
+    #[test]
+    fn recursive_container_mount_retains_fixed_source_bundle_names() {
+        let nested = webdata_fixture(&[("leaf.asset", b"leaf")]);
+        let input = webdata_fixture(&[("LIBRARY/Nested.Bundle", &nested)]);
+        let file = SchemeReader::read(&input).unwrap();
+        let mut filesystem = VirtualFileSystem::new();
+        let report = file
+            .mount_container_tree_with_source_name(
+                &mut filesystem,
+                Some("/mounted/root.bundle"),
+                Some("Library/Root.Bundle"),
+                ContainerMountLimits::default(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            report
+                .container_bundles
+                .iter()
+                .map(|bundle| bundle.name_fixed.as_deref())
+                .collect::<Vec<_>>(),
+            [Some("root.bundle"), Some("nested.bundle")]
+        );
+        assert_eq!(report.container_bundle_name_bytes, 24);
+    }
+
+    #[test]
+    fn source_bundle_names_obey_their_aggregate_mount_bound() {
+        let input = webdata_fixture(&[("leaf.asset", b"leaf")]);
+        let file = SchemeReader::read(&input).unwrap();
+        let mut filesystem = VirtualFileSystem::new();
+        let error = file
+            .mount_container_tree_with_source_name(
+                &mut filesystem,
+                Some("/mounted"),
+                Some("root.bundle"),
+                ContainerMountLimits {
+                    max_total_container_bundle_name_bytes: 4,
+                    ..ContainerMountLimits::default()
+                },
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            error.kind,
+            ContainerMountErrorKind::ContainerBundleNameLimitExceeded {
+                requested: 11,
+                limit: 4
+            }
+        ));
+        assert_eq!(error.partial_report.container_bundle_name_bytes, 0);
+        assert_eq!(filesystem.count(), 1);
     }
 
     #[test]

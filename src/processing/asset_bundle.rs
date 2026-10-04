@@ -2,14 +2,21 @@
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
+use std::ops::Range;
 use std::str;
 
+use crate::serialized_file::collection_workspace::WorkspaceAssetCollections;
 use crate::serialized_file::metadata::SerializedFileMetadata;
 use crate::serialized_file::object::{SerializedValue, SerializedValueLookupError};
+use crate::serialized_file::object_workspace::{ObjectWorkspace, WorkspaceObject};
 use crate::serialized_file::reference_graph::ObjectReferenceGraph;
 use crate::serialized_file::references::PPtrResolution;
+use crate::serialized_file::workspace::SerializedFileWorkspace;
 
-use super::scene_collections::AssetBundleContainerReference;
+use super::scene_collections::{
+    extract_asset_bundle_container_references, AssetBundleContainerDecodeError,
+    AssetBundleContainerReference, SceneBundleMappingLimits,
+};
 
 /// Resolve `GetAssetBundleName`: a non-empty serialized name wins, otherwise use the owning
 /// source Bundle's name. The returned value is the unmodified name, before the processor's
@@ -119,6 +126,527 @@ pub fn resolve_asset_bundle_container_reference(
     let resolution =
         reference_graph.resolve_pointer(metadata, reference.file_id, reference.path_id);
     asset_bundle_container_target(resolution)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssetBundleContainerMapping {
+    pub reference: AssetBundleContainerReference,
+    pub target: AssetBundleContainerTarget,
+}
+
+/// Resolved name and ordered Container targets for one decoded AssetBundle object.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssetBundleContainerNameMap {
+    /// AssetBundleExtensions.GetAssetBundleName result before path normalization.
+    pub source_name: String,
+    /// Name assigned by OriginalPathProcessor after removing a trailing bundle extension.
+    pub asset_name: String,
+    pub references: Vec<AssetBundleContainerMapping>,
+}
+
+pub fn map_asset_bundle_container(
+    root: &SerializedValue,
+    source_bundle_name: &str,
+    metadata: &SerializedFileMetadata,
+    reference_graph: &ObjectReferenceGraph,
+    limits: SceneBundleMappingLimits,
+) -> Result<AssetBundleContainerNameMap, AssetBundleContainerMapError> {
+    let source_name = get_asset_bundle_name(root, source_bundle_name)
+        .map_err(AssetBundleContainerMapError::Name)?;
+    let asset_name =
+        asset_bundle_name_for_asset(&source_name).map_err(AssetBundleContainerMapError::Name)?;
+    let container_references = extract_asset_bundle_container_references(root, limits)
+        .map_err(AssetBundleContainerMapError::Container)?;
+    let mut references = Vec::new();
+    references
+        .try_reserve_exact(container_references.len())
+        .map_err(|_| AssetBundleContainerMapError::AllocationFailed {
+            resource: "AssetBundle Container mappings",
+            requested: container_references.len(),
+        })?;
+    for reference in container_references {
+        let target =
+            resolve_asset_bundle_container_reference(&reference, metadata, reference_graph);
+        references.push(AssetBundleContainerMapping { reference, target });
+    }
+    Ok(AssetBundleContainerNameMap {
+        source_name,
+        asset_name,
+        references,
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorkspaceAssetBundleNameLimits {
+    pub max_asset_bundles: usize,
+    pub max_total_container_entries: usize,
+    pub max_total_name_and_path_bytes: usize,
+    pub max_issues: usize,
+    pub container: SceneBundleMappingLimits,
+}
+
+impl Default for WorkspaceAssetBundleNameLimits {
+    fn default() -> Self {
+        Self {
+            max_asset_bundles: 1_000_000,
+            max_total_container_entries: 1_000_000,
+            max_total_name_and_path_bytes: 256 * 1024 * 1024,
+            max_issues: 100_000,
+            container: SceneBundleMappingLimits::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceAssetBundleNameRecord {
+    pub source_file_index: usize,
+    pub source_object_index: usize,
+    pub source_path_id: i64,
+    pub source_name: String,
+    pub asset_name: String,
+    pub container_references: Range<usize>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceAssetBundleReferenceRecord {
+    pub bundle_record_index: usize,
+    pub mapping: AssetBundleContainerMapping,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceAssetBundleNameAssignment {
+    pub bundle_record_index: usize,
+    pub reference_record_index: usize,
+    pub target_file_index: usize,
+    pub target_object_index: usize,
+    pub target_path_id: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WorkspaceAssetBundleNameIssueKind {
+    ObjectDecode(String),
+    SourceBundleNameUnavailable,
+    MetadataDecode(String),
+    UnresolvedContainerTarget(AssetBundleContainerTarget),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceAssetBundleNameIssue {
+    pub source_file_index: usize,
+    pub source_object_index: usize,
+    pub source_path_id: i64,
+    pub kind: WorkspaceAssetBundleNameIssueKind,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct WorkspaceAssetBundleNamePlan {
+    pub bundles: Vec<WorkspaceAssetBundleNameRecord>,
+    /// Entries remain in AssetBundle Container order and source collection traversal order.
+    pub container_references: Vec<WorkspaceAssetBundleReferenceRecord>,
+    /// Assignments remain in baseline processing order; later assignments to the same target win.
+    pub assignments: Vec<WorkspaceAssetBundleNameAssignment>,
+    pub issues: Vec<WorkspaceAssetBundleNameIssue>,
+}
+
+impl WorkspaceAssetBundleNamePlan {
+    pub fn is_complete(&self) -> bool {
+        self.issues.is_empty()
+    }
+
+    pub fn asset_name_for_assignment(
+        &self,
+        assignment: &WorkspaceAssetBundleNameAssignment,
+    ) -> Option<&str> {
+        self.bundles
+            .get(assignment.bundle_record_index)
+            .map(|bundle| bundle.asset_name.as_str())
+    }
+}
+
+/// Build ordered, auditable AssetBundleName assignments without mutating input object values.
+pub fn plan_workspace_asset_bundle_names(
+    workspace: &SerializedFileWorkspace,
+    objects: &ObjectWorkspace,
+    collections: &WorkspaceAssetCollections,
+    limits: WorkspaceAssetBundleNameLimits,
+) -> Result<WorkspaceAssetBundleNamePlan, WorkspaceAssetBundleNamePlanError> {
+    let mut plan = WorkspaceAssetBundleNamePlan::default();
+    let mut total_metadata_bytes = 0usize;
+    for collection in collections.collections() {
+        let file = workspace.files().get(collection.source_file_index).ok_or(
+            WorkspaceAssetBundleNamePlanError::FileIndexOutOfBounds {
+                file_index: collection.source_file_index,
+                file_count: workspace.files().len(),
+            },
+        )?;
+        let source_objects = objects
+            .objects()
+            .get(collection.object_range.clone())
+            .ok_or(WorkspaceAssetBundleNamePlanError::ObjectRangeOutOfBounds {
+                start: collection.object_range.start,
+                end: collection.object_range.end,
+                object_count: objects.objects().len(),
+            })?;
+        for object in source_objects {
+            if object.file_index != collection.source_file_index {
+                return Err(
+                    WorkspaceAssetBundleNamePlanError::ObjectFileIdentityMismatch {
+                        expected_file_index: collection.source_file_index,
+                        actual_file_index: object.file_index,
+                    },
+                );
+            }
+            if workspace_object_class_id(object) != Some(142) {
+                continue;
+            }
+            if plan.bundles.len() >= limits.max_asset_bundles {
+                return Err(
+                    WorkspaceAssetBundleNamePlanError::AssetBundleCountLimitExceeded {
+                        count: plan.bundles.len().saturating_add(1),
+                        limit: limits.max_asset_bundles,
+                    },
+                );
+            }
+            let payload = match &object.payload {
+                Err(error) => {
+                    push_workspace_asset_bundle_issue(
+                        &mut plan,
+                        WorkspaceAssetBundleNameIssue {
+                            source_file_index: object.file_index,
+                            source_object_index: object.object_index,
+                            source_path_id: object.path_id,
+                            kind: WorkspaceAssetBundleNameIssueKind::ObjectDecode(
+                                error.to_string(),
+                            ),
+                        },
+                        limits.max_issues,
+                    )?;
+                    continue;
+                }
+                Ok(payload) => payload,
+            };
+            let source_bundle_name = match file.container_bundle_index {
+                None => Some("GameBundle"),
+                Some(bundle_index) => workspace
+                    .container_bundles()
+                    .get(bundle_index)
+                    .and_then(|bundle| bundle.name_fixed.as_deref()),
+            };
+            let fallback_name = source_bundle_name.unwrap_or_default();
+            let mapping = match map_asset_bundle_container(
+                &payload.root,
+                fallback_name,
+                &file.metadata,
+                &file.reference_graph,
+                limits.container,
+            ) {
+                Ok(mapping) => mapping,
+                Err(error) => {
+                    push_workspace_asset_bundle_issue(
+                        &mut plan,
+                        WorkspaceAssetBundleNameIssue {
+                            source_file_index: object.file_index,
+                            source_object_index: object.object_index,
+                            source_path_id: object.path_id,
+                            kind: WorkspaceAssetBundleNameIssueKind::MetadataDecode(
+                                error.to_string(),
+                            ),
+                        },
+                        limits.max_issues,
+                    )?;
+                    continue;
+                }
+            };
+            if source_bundle_name.is_none() && mapping.source_name.is_empty() {
+                push_workspace_asset_bundle_issue(
+                    &mut plan,
+                    WorkspaceAssetBundleNameIssue {
+                        source_file_index: object.file_index,
+                        source_object_index: object.object_index,
+                        source_path_id: object.path_id,
+                        kind: WorkspaceAssetBundleNameIssueKind::SourceBundleNameUnavailable,
+                    },
+                    limits.max_issues,
+                )?;
+            }
+            let can_assign_name = source_bundle_name.is_some() || !mapping.source_name.is_empty();
+            let entry_count = plan
+                .container_references
+                .len()
+                .checked_add(mapping.references.len())
+                .ok_or(WorkspaceAssetBundleNamePlanError::CountOverflow {
+                    resource: "AssetBundle Container references",
+                })?;
+            if entry_count > limits.max_total_container_entries {
+                return Err(
+                    WorkspaceAssetBundleNamePlanError::ContainerEntryCountLimitExceeded {
+                        count: entry_count,
+                        limit: limits.max_total_container_entries,
+                    },
+                );
+            }
+            let metadata_bytes = mapping
+                .source_name
+                .len()
+                .checked_add(mapping.asset_name.len())
+                .and_then(|bytes| {
+                    mapping
+                        .references
+                        .iter()
+                        .try_fold(bytes, |total, reference| {
+                            total.checked_add(reference.reference.path.len())
+                        })
+                })
+                .ok_or(WorkspaceAssetBundleNamePlanError::CountOverflow {
+                    resource: "AssetBundle name and Container path bytes",
+                })?;
+            total_metadata_bytes = total_metadata_bytes.checked_add(metadata_bytes).ok_or(
+                WorkspaceAssetBundleNamePlanError::CountOverflow {
+                    resource: "AssetBundle name and Container path bytes",
+                },
+            )?;
+            if total_metadata_bytes > limits.max_total_name_and_path_bytes {
+                return Err(
+                    WorkspaceAssetBundleNamePlanError::MetadataByteLimitExceeded {
+                        byte_count: total_metadata_bytes,
+                        limit: limits.max_total_name_and_path_bytes,
+                    },
+                );
+            }
+            let bundle_record_index = plan.bundles.len();
+            let reference_start = plan.container_references.len();
+            plan.container_references
+                .try_reserve(mapping.references.len())
+                .map_err(|_| WorkspaceAssetBundleNamePlanError::AllocationFailed {
+                    resource: "AssetBundle Container reference records",
+                    requested: entry_count,
+                })?;
+            for container_mapping in mapping.references {
+                let reference_record_index = plan.container_references.len();
+                match &container_mapping.target {
+                    AssetBundleContainerTarget::LocalObject { object_index } if can_assign_name => {
+                        let target = objects.get(object.file_index, *object_index).ok_or(
+                            WorkspaceAssetBundleNamePlanError::TargetObjectIndexOutOfBounds {
+                                file_index: object.file_index,
+                                object_index: *object_index,
+                            },
+                        )?;
+                        if target.path_id != container_mapping.reference.path_id {
+                            return Err(
+                                WorkspaceAssetBundleNamePlanError::TargetObjectIdentityMismatch {
+                                    file_index: object.file_index,
+                                    object_index: *object_index,
+                                    expected_path_id: container_mapping.reference.path_id,
+                                    actual_path_id: target.path_id,
+                                },
+                            );
+                        }
+                        plan.assignments.try_reserve(1).map_err(|_| {
+                            WorkspaceAssetBundleNamePlanError::AllocationFailed {
+                                resource: "AssetBundleName assignments",
+                                requested: plan.assignments.len().saturating_add(1),
+                            }
+                        })?;
+                        plan.assignments.push(WorkspaceAssetBundleNameAssignment {
+                            bundle_record_index,
+                            reference_record_index,
+                            target_file_index: target.file_index,
+                            target_object_index: target.object_index,
+                            target_path_id: target.path_id,
+                        });
+                    }
+                    AssetBundleContainerTarget::LocalObject { .. } => {}
+                    AssetBundleContainerTarget::MissingLocalObject { .. }
+                    | AssetBundleContainerTarget::AmbiguousLocalObject { .. }
+                    | AssetBundleContainerTarget::InvalidFileId { .. } => {
+                        push_workspace_asset_bundle_issue(
+                            &mut plan,
+                            WorkspaceAssetBundleNameIssue {
+                                source_file_index: object.file_index,
+                                source_object_index: object.object_index,
+                                source_path_id: object.path_id,
+                                kind: WorkspaceAssetBundleNameIssueKind::UnresolvedContainerTarget(
+                                    container_mapping.target.clone(),
+                                ),
+                            },
+                            limits.max_issues,
+                        )?;
+                    }
+                    AssetBundleContainerTarget::Null
+                    | AssetBundleContainerTarget::SharedFile { .. } => {}
+                }
+                plan.container_references
+                    .push(WorkspaceAssetBundleReferenceRecord {
+                        bundle_record_index,
+                        mapping: container_mapping,
+                    });
+            }
+            let reference_end = plan.container_references.len();
+            plan.bundles.try_reserve(1).map_err(|_| {
+                WorkspaceAssetBundleNamePlanError::AllocationFailed {
+                    resource: "AssetBundle name records",
+                    requested: bundle_record_index.saturating_add(1),
+                }
+            })?;
+            plan.bundles.push(WorkspaceAssetBundleNameRecord {
+                source_file_index: object.file_index,
+                source_object_index: object.object_index,
+                source_path_id: object.path_id,
+                source_name: mapping.source_name,
+                asset_name: mapping.asset_name,
+                container_references: reference_start..reference_end,
+            });
+        }
+    }
+    Ok(plan)
+}
+
+fn push_workspace_asset_bundle_issue(
+    plan: &mut WorkspaceAssetBundleNamePlan,
+    issue: WorkspaceAssetBundleNameIssue,
+    limit: usize,
+) -> Result<(), WorkspaceAssetBundleNamePlanError> {
+    if plan.issues.len() >= limit {
+        return Err(WorkspaceAssetBundleNamePlanError::IssueLimitExceeded {
+            count: plan.issues.len().saturating_add(1),
+            limit,
+        });
+    }
+    plan.issues.try_reserve(1).map_err(|_| {
+        WorkspaceAssetBundleNamePlanError::AllocationFailed {
+            resource: "AssetBundle name issues",
+            requested: plan.issues.len().saturating_add(1),
+        }
+    })?;
+    plan.issues.push(issue);
+    Ok(())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WorkspaceAssetBundleNamePlanError {
+    AllocationFailed {
+        resource: &'static str,
+        requested: usize,
+    },
+    FileIndexOutOfBounds {
+        file_index: usize,
+        file_count: usize,
+    },
+    ObjectRangeOutOfBounds {
+        start: usize,
+        end: usize,
+        object_count: usize,
+    },
+    ObjectFileIdentityMismatch {
+        expected_file_index: usize,
+        actual_file_index: usize,
+    },
+    AssetBundleCountLimitExceeded {
+        count: usize,
+        limit: usize,
+    },
+    ContainerEntryCountLimitExceeded {
+        count: usize,
+        limit: usize,
+    },
+    MetadataByteLimitExceeded {
+        byte_count: usize,
+        limit: usize,
+    },
+    CountOverflow {
+        resource: &'static str,
+    },
+    IssueLimitExceeded {
+        count: usize,
+        limit: usize,
+    },
+    TargetObjectIndexOutOfBounds {
+        file_index: usize,
+        object_index: usize,
+    },
+    TargetObjectIdentityMismatch {
+        file_index: usize,
+        object_index: usize,
+        expected_path_id: i64,
+        actual_path_id: i64,
+    },
+}
+
+impl Display for WorkspaceAssetBundleNamePlanError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AllocationFailed { resource, requested } => write!(
+                formatter,
+                "could not allocate {requested} entries for {resource}"
+            ),
+            Self::FileIndexOutOfBounds {
+                file_index,
+                file_count,
+            } => write!(
+                formatter,
+                "AssetBundle collection file index {file_index} is outside {file_count} files"
+            ),
+            Self::ObjectRangeOutOfBounds {
+                start,
+                end,
+                object_count,
+            } => write!(
+                formatter,
+                "AssetBundle collection object range {start}..{end} is outside {object_count} decoded objects"
+            ),
+            Self::ObjectFileIdentityMismatch {
+                expected_file_index,
+                actual_file_index,
+            } => write!(
+                formatter,
+                "AssetBundle object belongs to file {actual_file_index}; collection belongs to file {expected_file_index}"
+            ),
+            Self::AssetBundleCountLimitExceeded { count, limit } => write!(
+                formatter,
+                "AssetBundle count {count} exceeds processing limit {limit}"
+            ),
+            Self::ContainerEntryCountLimitExceeded { count, limit } => write!(
+                formatter,
+                "AssetBundle Container entry count {count} exceeds processing limit {limit}"
+            ),
+            Self::MetadataByteLimitExceeded { byte_count, limit } => write!(
+                formatter,
+                "AssetBundle names and Container paths use {byte_count} bytes, exceeding limit {limit}"
+            ),
+            Self::CountOverflow { resource } => {
+                write!(formatter, "{resource} count or byte size overflows")
+            }
+            Self::IssueLimitExceeded { count, limit } => write!(
+                formatter,
+                "AssetBundle processing issue count {count} exceeds limit {limit}"
+            ),
+            Self::TargetObjectIndexOutOfBounds {
+                file_index,
+                object_index,
+            } => write!(
+                formatter,
+                "AssetBundle local target object {file_index}:{object_index} is absent from the object workspace"
+            ),
+            Self::TargetObjectIdentityMismatch {
+                file_index,
+                object_index,
+                expected_path_id,
+                actual_path_id,
+            } => write!(
+                formatter,
+                "AssetBundle target {file_index}:{object_index} has PathID {actual_path_id}, expected {expected_path_id}"
+            ),
+        }
+    }
+}
+
+impl Error for WorkspaceAssetBundleNamePlanError {}
+
+fn workspace_object_class_id(object: &WorkspaceObject) -> Option<i32> {
+    object
+        .class_id
+        .map(i32::from)
+        .or_else(|| object.resolved_type_index.map(|_| object.raw_type_id))
 }
 
 fn asset_bundle_container_target(resolution: PPtrResolution<'_>) -> AssetBundleContainerTarget {
@@ -256,6 +784,42 @@ impl Error for AssetBundleNameDecodeError {
         match self {
             Self::FieldLookup { source, .. } => Some(source),
             _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AssetBundleContainerMapError {
+    Name(AssetBundleNameDecodeError),
+    Container(AssetBundleContainerDecodeError),
+    AllocationFailed {
+        resource: &'static str,
+        requested: usize,
+    },
+}
+
+impl Display for AssetBundleContainerMapError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Name(source) => Display::fmt(source, formatter),
+            Self::Container(source) => Display::fmt(source, formatter),
+            Self::AllocationFailed {
+                resource,
+                requested,
+            } => write!(
+                formatter,
+                "could not allocate {requested} entries for {resource}"
+            ),
+        }
+    }
+}
+
+impl Error for AssetBundleContainerMapError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Name(source) => Some(source),
+            Self::Container(source) => Some(source),
+            Self::AllocationFailed { .. } => None,
         }
     }
 }

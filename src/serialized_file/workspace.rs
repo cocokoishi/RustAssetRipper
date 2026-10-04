@@ -21,6 +21,7 @@ use crate::io::special_names::{
     fix_file_identifier, BUILTIN_EXTRA_NAME_1, BUILTIN_EXTRA_NAME_2, DEFAULT_RESOURCE_NAME_1,
     DEFAULT_RESOURCE_NAME_2,
 };
+use crate::io::stream::logical_file_name;
 use crate::scheme::{
     ContainerMountError, ContainerMountLimits, DispatchedFile, FileKind, MountedContainerBundle,
     MountedResourceFile, MountedSerializedFile, ParsedFile, SchemeError, SchemeReader,
@@ -43,6 +44,7 @@ pub struct SerializedFileWorkspaceLimits {
     pub max_total_dependency_container_output_bytes: u64,
     pub max_total_bundle_scope_bytes: usize,
     pub max_total_bundle_node_path_bytes: usize,
+    pub max_total_bundle_name_bytes: usize,
     pub max_total_bundle_resource_file_path_bytes: usize,
     pub max_total_bundle_resource_file_name_bytes: usize,
     pub max_total_objects: usize,
@@ -67,6 +69,7 @@ impl Default for SerializedFileWorkspaceLimits {
             max_total_dependency_container_output_bytes: 2 * 1024 * 1024 * 1024,
             max_total_bundle_scope_bytes: 64 * 1024 * 1024,
             max_total_bundle_node_path_bytes: 64 * 1024 * 1024,
+            max_total_bundle_name_bytes: 64 * 1024 * 1024,
             max_total_bundle_resource_file_path_bytes: 64 * 1024 * 1024,
             max_total_bundle_resource_file_name_bytes: 64 * 1024 * 1024,
             max_total_objects: 20_000_000,
@@ -87,6 +90,7 @@ pub struct SerializedFileWorkspaceReport {
     pub total_objects: usize,
     pub total_reference_edges: usize,
     pub bundle_resource_file_name_bytes: usize,
+    pub bundle_name_bytes: usize,
 }
 
 /// One fully parsed SerializedFile with its header, owned metadata, and per-file PPtr graph.
@@ -123,6 +127,8 @@ pub struct SerializedFileWorkspace {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceSerializedBundle {
     pub scope_path: Option<String>,
+    /// Source FileContainer.Name after SpecialFileNames.FixFileIdentifier.
+    pub name_fixed: Option<String>,
     pub parent_bundle_index: Option<usize>,
     pub parent_entry_index: Option<usize>,
     pub direct_collection_file_indices: Vec<usize>,
@@ -1292,6 +1298,8 @@ impl SerializedFileWorkspace {
                                                 .min(remaining_output_bytes);
 
                                         drop(index.take());
+                                        let source_bundle_name =
+                                            logical_file_name(&candidate.virtual_path);
                                         let mount_root = new_dependency_expansion_root(
                                             filesystem,
                                             &mut next_mount_namespace,
@@ -1306,9 +1314,10 @@ impl SerializedFileWorkspace {
                                             )
                                         })?;
                                         let mount_report = dispatched
-                                            .mount_container_tree(
+                                            .mount_container_tree_with_source_name(
                                                 filesystem,
                                                 Some(&mount_root),
+                                                source_bundle_name.as_deref(),
                                                 bounded_mount_limits,
                                             )
                                             .map_err(|error| {
@@ -2787,6 +2796,7 @@ fn append_mounted_container_bundles(
             )
         })?;
     let mut next_node_path_bytes = *total_node_path_bytes;
+    let mut next_bundle_name_bytes = workspace.report.bundle_name_bytes;
     for (bundle_index, bundle) in mounted_bundles.iter().enumerate() {
         let scope_path = bundle
             .scope_index
@@ -2898,8 +2908,47 @@ fn append_mounted_container_bundles(
             })?),
             None => None,
         };
+        let owned_name_fixed = if let Some(name_fixed) = bundle.name_fixed.as_deref() {
+            next_bundle_name_bytes = next_bundle_name_bytes
+                .checked_add(name_fixed.len())
+                .ok_or_else(|| {
+                    workspace_error(
+                        workspace.report,
+                        owned_scope_path.as_deref(),
+                        SerializedFileWorkspaceErrorKind::BundleNameByteCountOverflow,
+                    )
+                })?;
+            if next_bundle_name_bytes > limits.max_total_bundle_name_bytes {
+                return Err(workspace_error(
+                    workspace.report,
+                    owned_scope_path.as_deref(),
+                    SerializedFileWorkspaceErrorKind::TotalBundleNameBytesLimitExceeded {
+                        byte_count: next_bundle_name_bytes,
+                        limit: limits.max_total_bundle_name_bytes,
+                    },
+                ));
+            }
+            let mut owned_name = String::new();
+            owned_name
+                .try_reserve_exact(name_fixed.len())
+                .map_err(|_| {
+                    workspace_error(
+                        workspace.report,
+                        owned_scope_path.as_deref(),
+                        SerializedFileWorkspaceErrorKind::AllocationFailed {
+                            resource: "workspace fixed Bundle names",
+                            requested: name_fixed.len(),
+                        },
+                    )
+                })?;
+            owned_name.push_str(name_fixed);
+            Some(owned_name)
+        } else {
+            None
+        };
         new_bundles.push(WorkspaceSerializedBundle {
             scope_path: owned_scope_path,
+            name_fixed: owned_name_fixed,
             parent_bundle_index,
             parent_entry_index: bundle.parent_entry_index,
             direct_collection_file_indices,
@@ -2944,6 +2993,7 @@ fn append_mounted_container_bundles(
     *total_node_path_bytes = next_node_path_bytes;
     *total_resource_file_path_bytes = next_resource_path_bytes;
     workspace.report.bundle_resource_file_name_bytes = next_resource_name_bytes;
+    workspace.report.bundle_name_bytes = next_bundle_name_bytes;
     Ok(())
 }
 
@@ -3093,6 +3143,9 @@ fn remaining_workspace_limits(
         max_total_reference_edges: limits
             .max_total_reference_edges
             .saturating_sub(report.total_reference_edges),
+        max_total_bundle_name_bytes: limits
+            .max_total_bundle_name_bytes
+            .saturating_sub(report.bundle_name_bytes),
         max_total_bundle_resource_file_name_bytes: limits
             .max_total_bundle_resource_file_name_bytes
             .saturating_sub(report.bundle_resource_file_name_bytes),
@@ -3156,6 +3209,11 @@ fn append_workspace(
         .bundle_resource_file_name_bytes
         .checked_add(additional.report.bundle_resource_file_name_bytes)
         .ok_or(SerializedFileWorkspaceErrorKind::BundleResourceNameByteCountOverflow)?;
+    let bundle_name_bytes = workspace
+        .report
+        .bundle_name_bytes
+        .checked_add(additional.report.bundle_name_bytes)
+        .ok_or(SerializedFileWorkspaceErrorKind::BundleNameByteCountOverflow)?;
     workspace.report = SerializedFileWorkspaceReport {
         input_files,
         completed_files,
@@ -3165,6 +3223,7 @@ fn append_workspace(
         total_objects,
         total_reference_edges,
         bundle_resource_file_name_bytes,
+        bundle_name_bytes,
     };
     workspace.files.append(&mut additional.files);
     Ok(())
@@ -3387,6 +3446,11 @@ pub enum SerializedFileWorkspaceErrorKind {
     },
     BundleScopeByteCountOverflow,
     TotalBundleScopeBytesLimitExceeded {
+        byte_count: usize,
+        limit: usize,
+    },
+    BundleNameByteCountOverflow,
+    TotalBundleNameBytesLimitExceeded {
         byte_count: usize,
         limit: usize,
     },
@@ -3614,6 +3678,13 @@ impl Display for SerializedFileWorkspaceErrorKind {
                 f,
                 "loaded bundle scopes use {byte_count} bytes, exceeding limit {limit}"
             ),
+            Self::BundleNameByteCountOverflow => {
+                f.write_str("loaded fixed Bundle name byte count overflows")
+            }
+            Self::TotalBundleNameBytesLimitExceeded { byte_count, limit } => write!(
+                f,
+                "loaded fixed Bundle names use {byte_count} bytes, exceeding limit {limit}"
+            ),
             Self::BundleNodePathByteCountOverflow => {
                 f.write_str("container bundle node path byte count overflows")
             }
@@ -3766,6 +3837,7 @@ mod tests {
             container_bundles: vec![
                 WorkspaceSerializedBundle {
                     scope_path: Some("/root".to_owned()),
+                    name_fixed: None,
                     parent_bundle_index: None,
                     parent_entry_index: None,
                     direct_collection_file_indices: Vec::new(),
@@ -3773,6 +3845,7 @@ mod tests {
                 },
                 WorkspaceSerializedBundle {
                     scope_path: Some("/root/first".to_owned()),
+                    name_fixed: None,
                     parent_bundle_index: Some(0),
                     parent_entry_index: Some(1),
                     direct_collection_file_indices: Vec::new(),
@@ -3780,6 +3853,7 @@ mod tests {
                 },
                 WorkspaceSerializedBundle {
                     scope_path: Some("/root/second".to_owned()),
+                    name_fixed: None,
                     parent_bundle_index: Some(0),
                     parent_entry_index: Some(2),
                     direct_collection_file_indices: Vec::new(),
@@ -3787,6 +3861,7 @@ mod tests {
                 },
                 WorkspaceSerializedBundle {
                     scope_path: Some("/root/first/nested".to_owned()),
+                    name_fixed: None,
                     parent_bundle_index: Some(1),
                     parent_entry_index: Some(4),
                     direct_collection_file_indices: Vec::new(),
@@ -3896,6 +3971,7 @@ mod tests {
         let workspace = SerializedFileWorkspace {
             container_bundles: vec![WorkspaceSerializedBundle {
                 scope_path: Some("/bundle".to_owned()),
+                name_fixed: None,
                 parent_bundle_index: None,
                 parent_entry_index: None,
                 direct_collection_file_indices: Vec::new(),
@@ -4030,6 +4106,7 @@ mod tests {
             container_bundles: vec![
                 WorkspaceSerializedBundle {
                     scope_path: Some("/source".to_owned()),
+                    name_fixed: None,
                     parent_bundle_index: None,
                     parent_entry_index: None,
                     direct_collection_file_indices: Vec::new(),
@@ -4037,6 +4114,7 @@ mod tests {
                 },
                 WorkspaceSerializedBundle {
                     scope_path: Some("/sibling".to_owned()),
+                    name_fixed: None,
                     parent_bundle_index: None,
                     parent_entry_index: None,
                     direct_collection_file_indices: Vec::new(),
@@ -4350,6 +4428,7 @@ mod tests {
         workspace.container_bundles = vec![
             WorkspaceSerializedBundle {
                 scope_path: None,
+                name_fixed: None,
                 parent_bundle_index: None,
                 parent_entry_index: None,
                 direct_collection_file_indices: vec![1],
@@ -4357,6 +4436,7 @@ mod tests {
             },
             WorkspaceSerializedBundle {
                 scope_path: None,
+                name_fixed: None,
                 parent_bundle_index: Some(0),
                 parent_entry_index: Some(9),
                 direct_collection_file_indices: vec![2],
@@ -4364,6 +4444,7 @@ mod tests {
             },
             WorkspaceSerializedBundle {
                 scope_path: None,
+                name_fixed: None,
                 parent_bundle_index: Some(0),
                 parent_entry_index: Some(2),
                 direct_collection_file_indices: vec![3],
@@ -4371,6 +4452,7 @@ mod tests {
             },
             WorkspaceSerializedBundle {
                 scope_path: None,
+                name_fixed: None,
                 parent_bundle_index: None,
                 parent_entry_index: None,
                 direct_collection_file_indices: vec![4],
@@ -4680,6 +4762,7 @@ mod tests {
             files,
             container_bundles: vec![WorkspaceSerializedBundle {
                 scope_path: Some("/game/container".to_owned()),
+                name_fixed: None,
                 parent_bundle_index: None,
                 parent_entry_index: None,
                 direct_collection_file_indices: vec![1],
@@ -4759,6 +4842,7 @@ mod tests {
             container_bundles: vec![
                 WorkspaceSerializedBundle {
                     scope_path: Some("/game/first".to_owned()),
+                    name_fixed: None,
                     parent_bundle_index: None,
                     parent_entry_index: None,
                     direct_collection_file_indices: vec![1],
@@ -4766,6 +4850,7 @@ mod tests {
                 },
                 WorkspaceSerializedBundle {
                     scope_path: Some("/game/second".to_owned()),
+                    name_fixed: None,
                     parent_bundle_index: None,
                     parent_entry_index: None,
                     direct_collection_file_indices: vec![2],
@@ -4844,6 +4929,7 @@ mod tests {
             container_bundles: vec![
                 WorkspaceSerializedBundle {
                     scope_path: Some("/game/root".to_owned()),
+                    name_fixed: None,
                     parent_bundle_index: None,
                     parent_entry_index: None,
                     direct_collection_file_indices: vec![0],
@@ -4851,6 +4937,7 @@ mod tests {
                 },
                 WorkspaceSerializedBundle {
                     scope_path: Some("/game/root/entry-five".to_owned()),
+                    name_fixed: None,
                     parent_bundle_index: Some(0),
                     parent_entry_index: Some(5),
                     direct_collection_file_indices: vec![1],
@@ -4858,6 +4945,7 @@ mod tests {
                 },
                 WorkspaceSerializedBundle {
                     scope_path: Some("/game/root/entry-two".to_owned()),
+                    name_fixed: None,
                     parent_bundle_index: Some(0),
                     parent_entry_index: Some(2),
                     direct_collection_file_indices: vec![2],
@@ -5127,6 +5215,7 @@ mod tests {
             scope_index: Some(0),
             parent_bundle_index: None,
             parent_entry_index: None,
+            name_fixed: None,
         }];
         let mounted_files = [];
         let mounted_resources = [MountedResourceFile {
@@ -5261,12 +5350,74 @@ mod tests {
     }
 
     #[test]
+    fn workspace_retains_fixed_bundle_names_and_bounds_their_aggregate_bytes() {
+        let scopes = ["/bundle".to_owned()];
+        let bundles = [MountedContainerBundle {
+            scope_index: Some(0),
+            parent_bundle_index: None,
+            parent_entry_index: None,
+            name_fixed: Some("assets.bundle".to_owned()),
+        }];
+        let mut workspace = SerializedFileWorkspace::default();
+        append_mounted_container_bundles(
+            &mut workspace,
+            super::MountedContainerBundleInput {
+                container_scopes: &scopes,
+                mounted_bundles: &bundles,
+                serialized_files: &[],
+                resource_files: &[],
+                loaded_paths: &std::collections::HashMap::new(),
+                limits: SerializedFileWorkspaceLimits::default(),
+                bundle_count_limit: 1,
+            },
+            &mut 0,
+            &mut 0,
+        )
+        .unwrap();
+        assert_eq!(
+            workspace.container_bundles()[0].name_fixed.as_deref(),
+            Some("assets.bundle")
+        );
+        assert_eq!(workspace.report().bundle_name_bytes, 13);
+
+        let mut limited_workspace = SerializedFileWorkspace::default();
+        let error = append_mounted_container_bundles(
+            &mut limited_workspace,
+            super::MountedContainerBundleInput {
+                container_scopes: &scopes,
+                mounted_bundles: &bundles,
+                serialized_files: &[],
+                resource_files: &[],
+                loaded_paths: &std::collections::HashMap::new(),
+                limits: SerializedFileWorkspaceLimits {
+                    max_total_bundle_name_bytes: 4,
+                    ..SerializedFileWorkspaceLimits::default()
+                },
+                bundle_count_limit: 1,
+            },
+            &mut 0,
+            &mut 0,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error.kind,
+            SerializedFileWorkspaceErrorKind::TotalBundleNameBytesLimitExceeded {
+                byte_count: 13,
+                limit: 4
+            }
+        ));
+        assert!(limited_workspace.container_bundles().is_empty());
+        assert_eq!(limited_workspace.report().bundle_name_bytes, 0);
+    }
+
+    #[test]
     fn workspace_resource_source_names_obey_their_aggregate_bound() {
         let scopes = ["/root".to_owned()];
         let bundles = [MountedContainerBundle {
             scope_index: Some(0),
             parent_bundle_index: None,
             parent_entry_index: None,
+            name_fixed: None,
         }];
         let mounted_resources = [MountedResourceFile {
             virtual_path: "/root/stream.resS".to_owned(),
@@ -5323,6 +5474,7 @@ mod tests {
             scope_index: None,
             parent_bundle_index: None,
             parent_entry_index: None,
+            name_fixed: None,
         }];
         let mounted_files = [crate::scheme::MountedSerializedFile {
             virtual_path: "/first.asset".to_owned(),

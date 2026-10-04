@@ -398,7 +398,12 @@ fn import_initial_platform_files(
                     })
                 })?;
                 let mount_report = dispatched
-                    .mount_container_tree(filesystem, Some(&mount_root), mount_limits)
+                    .mount_container_tree_with_source_name(
+                        filesystem,
+                        Some(&mount_root),
+                        Some(&entry.file_name),
+                        mount_limits,
+                    )
                     .map_err(|source| {
                         PlatformWorkspaceLoadError::new(
                             PlatformWorkspaceLoadErrorKind::ContainerMount {
