@@ -109,16 +109,13 @@ The complete Rust test suite is evidence for this implementation snapshot, not e
 
 ## 7. Git / cloud state and required final sync
 
-At the start of this handoff increment, local `main` was at `5b95e616d36bbf4020576e697fa59f89a2d6b82f` with tree `4984d90072e592c786dba30e4bbe07987eef3bfc`; live remote `main` was `1ff88beb73b4b634cdc6a957999cf844bbaa7467` at that same tree. The new code and documentation in this handoff were made after that checkpoint. **They still must be committed and pushed before stopping.**
+Before this increment, local `main` was at `5b95e616d36bbf4020576e697fa59f89a2d6b82f` and remote `main` at `1ff88beb73b4b634cdc6a957999cf844bbaa7467`; both had tree `4984d90072e592c786dba30e4bbe07987eef3bfc`, but their histories had diverged. `git merge-tree --write-tree HEAD origin/main` previewed the exact same tree with no conflicts. A normal local merge commit `090d35a71b140ccaba0df974a3e19c1d714641f3` reconciled ancestry without changing that tree.
 
-Required push procedure after final document review:
+The implementation and first version of this handoff were committed as `b786f331b5947929386b11314bd09fefe5eb2d35`, tree `4ec2b2011e43de6bd2940dca35e01b82240ba0de`. Before pushing, `ls-remote`/`fetch` confirmed remote `1ff88beb...` was an ancestor. A normal fast-forward `git push origin main:main` succeeded. Afterward, `ls-remote` returned `b786f331...`; fetch returned the same commit and tree `4ec2b201...`; `git diff --exit-code HEAD FETCH_HEAD` exited 0. This code+handoff checkpoint is live on the authorized remote.
 
-1. Check `git status --short`, `git diff --check`, and the exact diff. Do not stage `target/`, user samples, reference sources, credentials, or unrelated files.
-2. Read the live ref with `git ls-remote origin refs/heads/main` and `git fetch origin main`; compare local/remote ancestry and tree. Resolve any unexpected movement without force.
-3. Commit the validated code+docs and push with a normal fast-forward `git push origin main:main`.
-4. Read `ls-remote` again, fetch again, and compare `git rev-parse HEAD^{tree}` to the fetched remote tree. Record the actual implementation/cloud commit IDs, trees, command results, and verification date in this file and the validation log; push that documentation follow-up as a second normal checkpoint and verify its tree too.
+The cloud evidence above was recorded in a documentation-only follow-up to this handoff and `docs/validation-log.md`; that follow-up is pushed and verified as part of the current remote `main`. Since a commit cannot contain its own ID, use `git log -1` plus a live ref/fetched-tree check to identify the exact documentation revision.
 
-Do not say “pushed” unless the live ref and fetched tree were read back and match. The handoff file’s final self-containing documentation commit ID can be obtained from `git log`; include it in the user-facing update rather than trying to store a commit’s own hash inside that commit.
+For future increments: check `git status --short`, `git diff --check`, and the exact diff; stage only the intended source/docs (never `target/`, sample data, reference sources, credentials, or unrelated files); check the live ref using `git ls-remote origin refs/heads/main` and `git fetch origin main`; reconcile unexpected ancestry movement safely; then commit, normal-push, fetch, and compare local/fetched trees. Never say “pushed” unless the live ref and fetched tree match. A commit cannot store its own hash in its tree; identify the final handoff revision from `git log` in the user-facing update.
 
 ## 8. Concrete resume plan for the next AI
 
