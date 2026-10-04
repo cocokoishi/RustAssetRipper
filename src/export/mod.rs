@@ -9,6 +9,7 @@ pub mod diagnostic_pointers;
 pub mod empty_script;
 pub mod export_extension;
 pub mod export_type;
+pub mod exporter_bases;
 pub mod guid_policy;
 pub mod ids;
 pub mod importer_fields;
