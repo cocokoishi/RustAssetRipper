@@ -5362,6 +5362,105 @@ mod tests {
     }
 
     #[test]
+    fn typed_data_lists_match_the_reference_runtime() {
+        // Expected hex strings come from the isolated `AssetRipper.Yaml` probe in
+        // `Temp/opencode/typedprobe` (recorded in docs/validation-log.md), which called
+        // `YamlScalarNode.CreateHex` for every supported element width.
+        let cases: Vec<(SerializedValue, &str)> = vec![
+            (
+                SerializedValue::Array(vec![
+                    SerializedValue::U8(0x00),
+                    SerializedValue::U8(0x12),
+                    SerializedValue::U8(0xFF),
+                ]),
+                "0012ff",
+            ),
+            (
+                SerializedValue::Array(vec![
+                    SerializedValue::I8(-1),
+                    SerializedValue::I8(0x7F),
+                    SerializedValue::I8(-128),
+                ]),
+                "ff7f80",
+            ),
+            (
+                SerializedValue::Array(vec![
+                    SerializedValue::I16(0x1234),
+                    SerializedValue::I16(-2),
+                ]),
+                "3412feff",
+            ),
+            (
+                SerializedValue::Array(vec![
+                    SerializedValue::U16(0x1234),
+                    SerializedValue::U16(0xFFFF),
+                ]),
+                "3412ffff",
+            ),
+            (
+                SerializedValue::Array(vec![
+                    SerializedValue::Char(0x41),
+                    SerializedValue::Char(0x56DE),
+                ]),
+                "4100de56",
+            ),
+            (
+                SerializedValue::Array(vec![
+                    SerializedValue::I32(0x0102_0304),
+                    SerializedValue::I32(-1),
+                ]),
+                "04030201ffffffff",
+            ),
+            (
+                SerializedValue::Array(vec![
+                    SerializedValue::U32(0x0102_0304),
+                    SerializedValue::U32(0xFFFF_FFFF),
+                ]),
+                "04030201ffffffff",
+            ),
+            (
+                SerializedValue::Array(vec![
+                    SerializedValue::I64(0x0102_0304_0506_0708),
+                    SerializedValue::I64(-1),
+                ]),
+                "0807060504030201ffffffffffffffff",
+            ),
+            (
+                SerializedValue::Array(vec![
+                    SerializedValue::U64(0x0102_0304_0506_0708),
+                    SerializedValue::U64(0xFFFF_FFFF_FFFF_FFFF),
+                ]),
+                "0807060504030201ffffffffffffffff",
+            ),
+            (
+                SerializedValue::Array(vec![
+                    SerializedValue::Bool(true),
+                    SerializedValue::Bool(false),
+                    SerializedValue::Bool(true),
+                ]),
+                "010001",
+            ),
+        ];
+
+        for (value, expected) in cases {
+            let structure = SerializedValue::Struct(vec![field("m_Data", value)]);
+            let document = convert(&structure, &HashMap::new(), |_| {
+                unreachable!("typed data lists contain no PPtrs")
+            })
+            .unwrap();
+            let output = crate::export::unity_yaml::write_unity_yaml_documents(
+                &[document],
+                crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+            )
+            .unwrap();
+            assert!(
+                output.contains(&format!("m_Data: {expected}")),
+                "expected {expected} in {output}"
+            );
+        }
+    }
+
+    #[test]
     fn type_tree_hints_drive_flow_structs_and_empty_array_shapes() {
         let type_tree = TypeTree {
             nodes: vec![
