@@ -522,13 +522,15 @@ impl UnityYamlEmitter {
             UnityYamlScalar::Boolean(value) => self.write_str(if *value { "1" } else { "0" }),
             UnityYamlScalar::Signed(value) => self.write_str(&value.to_string()),
             UnityYamlScalar::Unsigned(value) => self.write_str(&value.to_string()),
-            UnityYamlScalar::Float32(value) => self.write_str(&value.to_string()),
-            UnityYamlScalar::Float64(value) => self.write_str(&value.to_string()),
+            UnityYamlScalar::Float32(value) => self.write_str(&format_dotnet_f32(*value)),
+            UnityYamlScalar::Float64(value) => self.write_str(&format_dotnet_f64(*value)),
             UnityYamlScalar::Float32Hex(value) => {
-                self.write_str(&format!("0x{:08x}({})", value.to_bits(), value))
+                let text = format!("0x{:08x}({})", value.to_bits(), format_dotnet_f32(*value));
+                self.write_str(&text)
             }
             UnityYamlScalar::Float64Hex(value) => {
-                self.write_str(&format!("0x{:016x}({})", value.to_bits(), value))
+                let text = format!("0x{:016x}({})", value.to_bits(), format_dotnet_f64(*value));
+                self.write_str(&text)
             }
             UnityYamlScalar::String(value) => self.emit_string(value, false),
             UnityYamlScalar::PlainString(value) => self.emit_string(value, true),
@@ -790,6 +792,104 @@ impl UnityYamlEmitter {
             .try_reserve(additional)
             .map_err(|_| UnityYamlWriteError::AllocationFailed { requested })
     }
+}
+
+/// Format an `f32` exactly like .NET's `Single.ToString(CultureInfo.InvariantCulture)`.
+///
+/// `NumericNode<float>` writes through `TextWriter.Write(float)` under the invariant culture
+/// used by the baseline's `InvariantStreamWriter`, so Unity YAML floats follow .NET's default
+/// shortest-round-trip "G" formatting rather than Rust's `Display`. The notation threshold and
+/// special-value spellings were measured against the reference runtime; see the module docs and
+/// [`tests::float_formatting_matches_the_reference_runtime`].
+pub fn format_dotnet_f32(value: f32) -> String {
+    if value.is_nan() {
+        return "NaN".to_owned();
+    }
+    if value.is_infinite() {
+        return if value < 0.0 { "-Infinity" } else { "Infinity" }.to_owned();
+    }
+    let negative = value.is_sign_negative();
+    if value == 0.0 {
+        return if negative {
+            "-0".to_owned()
+        } else {
+            "0".to_owned()
+        };
+    }
+    format_dotnet_shortest(&format!("{value:e}"), negative, 9)
+}
+
+/// Format an `f64` exactly like .NET's `Double.ToString(CultureInfo.InvariantCulture)`.
+pub fn format_dotnet_f64(value: f64) -> String {
+    if value.is_nan() {
+        return "NaN".to_owned();
+    }
+    if value.is_infinite() {
+        return if value < 0.0 { "-Infinity" } else { "Infinity" }.to_owned();
+    }
+    let negative = value.is_sign_negative();
+    if value == 0.0 {
+        return if negative {
+            "-0".to_owned()
+        } else {
+            "0".to_owned()
+        };
+    }
+    format_dotnet_shortest(&format!("{value:e}"), negative, 17)
+}
+
+/// Reformat Rust's shortest-round-trip scientific form to .NET's fixed/scientific choice.
+///
+/// `sci` is the output of Rust's `LowerExp` for a finite nonzero value (for example `1.5e-7`).
+/// `threshold` is the largest positive power-of-ten exponent rendered in fixed notation: 9 for
+/// `Single`, 17 for `Double`. .NET uses scientific notation when the exponent is below -4 or at
+/// least `threshold`, always signs the exponent, and zero-pads it to two digits.
+fn format_dotnet_shortest(sci: &str, negative: bool, threshold: i32) -> String {
+    let (mantissa, exponent_text) = sci
+        .split_once('e')
+        .expect("Rust LowerExp always contains an exponent separator");
+    let exponent: i32 = exponent_text
+        .parse()
+        .expect("Rust LowerExp exponent is an integer");
+    let digits: String = mantissa.chars().filter(|c| c.is_ascii_digit()).collect();
+
+    let mut out = String::new();
+    if negative {
+        out.push('-');
+    }
+    if exponent < -4 || exponent >= threshold {
+        out.push_str(&digits[..1]);
+        if digits.len() > 1 {
+            out.push('.');
+            out.push_str(&digits[1..]);
+        }
+        out.push('E');
+        out.push(if exponent < 0 { '-' } else { '+' });
+        let magnitude = exponent.unsigned_abs();
+        if magnitude < 10 {
+            out.push('0');
+        }
+        out.push_str(&magnitude.to_string());
+    } else if exponent >= 0 {
+        let point = (exponent + 1) as usize;
+        if digits.len() <= point {
+            out.push_str(&digits);
+            for _ in 0..(point - digits.len()) {
+                out.push('0');
+            }
+        } else {
+            out.push_str(&digits[..point]);
+            out.push('.');
+            out.push_str(&digits[point..]);
+        }
+    } else {
+        out.push_str("0.");
+        for _ in 0..(-exponent - 1) {
+            out.push('0');
+        }
+        out.push_str(&digits);
+    }
+    out
 }
 
 fn string_needs_quotes(value: &str) -> bool {
@@ -1148,4 +1248,235 @@ mod tests {
             );
         }
     }
+    /// Byte-for-byte differential against the reference `AssetRipper.Yaml` runtime.
+    ///
+    /// The expected strings are `Single.ToString(CultureInfo.InvariantCulture)` and
+    /// `Double.ToString(CultureInfo.InvariantCulture)` values captured by an isolated net10.0
+    /// probe (`Temp/opencode/numericprobe`, recorded in `docs/validation-log.md`). The set mixes
+    /// curated boundaries with deterministic pseudo-random finite bit patterns and found the
+    /// Rust-versus-.NET divergence in the notation switch.
+    #[test]
+    fn float_formatting_matches_the_reference_runtime() {
+        for (bits, expected) in F32_CASES {
+            assert_eq!(
+                format_dotnet_f32(f32::from_bits(*bits)),
+                *expected,
+                "f32 {bits:#010X}"
+            );
+        }
+        for (bits, expected) in F64_CASES {
+            assert_eq!(
+                format_dotnet_f64(f64::from_bits(*bits)),
+                *expected,
+                "f64 {bits:#018X}"
+            );
+        }
+    }
+    const F32_CASES: &[(u32, &str)] = &[
+        (0x00000000, "0"),
+        (0x80000000, "-0"),
+        (0x3F800000, "1"),
+        (0xBF800000, "-1"),
+        (0x3F000000, "0.5"),
+        (0x3DCCCCCD, "0.1"),
+        (0x3E4CCCCD, "0.2"),
+        (0x3E99999A, "0.3"),
+        (0x40200000, "2.5"),
+        (0x40100000, "2.25"),
+        (0x3EAAAAAB, "0.33333334"),
+        (0x40490FD0, "3.14159"),
+        (0x3727C5AC, "1E-05"),
+        (0x38D1B717, "0.0001"),
+        (0x3A83126F, "0.001"),
+        (0x47C35000, "100000"),
+        (0x49742400, "1000000"),
+        (0x4B189680, "10000000"),
+        (0x4CBEBC20, "100000000"),
+        (0x58635FA9, "1E+15"),
+        (0x5A0E1BCA, "1E+16"),
+        (0x60AD78EC, "1E+20"),
+        (0x1E3CE508, "1E-20"),
+        (0x0DA24260, "1E-30"),
+        (0x000116C2, "1E-40"),
+        (0x7F7FFFFF, "3.4028235E+38"),
+        (0xFF7FFFFF, "-3.4028235E+38"),
+        (0x00000001, "1E-45"),
+        (0xFFC00000, "NaN"),
+        (0xFFC00000, "NaN"),
+        (0x7F800000, "Infinity"),
+        (0xFF800000, "-Infinity"),
+        (0x47F12065, "123456.79"),
+        (0x4996B438, "1234567"),
+        (0x4B3C614E, "12345678"),
+        (0x497423F0, "999999"),
+        (0x49742400, "1000000"),
+        (0x4B800000, "16777216"),
+        (0x42C80000, "100"),
+        (0x447A0000, "1000"),
+        (0x390173F8, "0.000123456"),
+        (0x66FF0AA8, "6.022E+23"),
+        (0xC2F6E979, "-123.456"),
+        (0x34210FB0, "1.5E-07"),
+        (0x38D1B716, "9.999999E-05"),
+        (0x3A83126E, "0.0009999999"),
+        (0x4B18967F, "9999999"),
+        (0x4CBEBC20, "100000000"),
+        (0x4E6E6B28, "1E+09"),
+        (0x4CEB79A3, "123456790"),
+        (0x4E932C06, "1.234568E+09"),
+        (0x0BF34DAD, "9.371707E-32"),
+        (0x026E6076, "1.7513161E-37"),
+        (0xE5906136, "-8.522675E+22"),
+        (0x368DCC74, "4.225929E-06"),
+        (0xA1C54AEC, "-1.3369071E-18"),
+        (0x4E7BFB79, "1.05689043E+09"),
+        (0xD6E8F2CF, "-1.2806478E+14"),
+        (0x1AF470EA, "1.0109846E-22"),
+        (0xB0D6E28B, "-1.5634937E-09"),
+        (0x49428D8E, "796888.9"),
+        (0xB8E8AB15, "-0.000110944886"),
+        (0x56D71F03, "1.182641E+14"),
+        (0xADA711FD, "-1.899369E-11"),
+        (0xD63B809E, "-5.154027E+13"),
+        (0x3F5A101F, "0.8518085"),
+        (0xFC5D43FF, "-4.595507E+36"),
+        (0x7DFAE6B8, "4.168812E+37"),
+        (0x5585BD75, "1.8381095E+13"),
+        (0x6B714B4F, "2.9170676E+26"),
+        (0xC8AE9A19, "-357584.78"),
+        (0x6D00616D, "2.4832414E+27"),
+        (0x9A319AEF, "-3.6727896E-23"),
+        (0x9C0AA21A, "-4.586988E-22"),
+        (0x826571DE, "-1.6856941E-37"),
+        (0xED7C0CBD, "-4.8753514E+27"),
+        (0xC1FA7BE4, "-31.310493"),
+        (0xCDBDF613, "-398377570"),
+        (0x69E7693F, "3.496986E+25"),
+        (0x6993082D, "2.2218838E+25"),
+        (0x987D857D, "-3.2766878E-24"),
+        (0x6CED8137, "2.297005E+27"),
+        (0x3498F7F5, "2.849262E-07"),
+        (0x78869B5A, "2.184121E+34"),
+        (0x7F6200EC, "3.0041031E+38"),
+        (0xD0DB7FED, "-2.9460752E+10"),
+        (0xC0FC9252, "-7.8928614"),
+        (0x73FFBFF6, "4.052518E+31"),
+        (0xE71B7D09, "-7.342733E+23"),
+        (0x26CD29B3, "1.4236035E-15"),
+        (0x0CBCBF20, "2.9081016E-31"),
+        (0x56D20E5E, "1.15479574E+14"),
+        (0x48B3FDC2, "368622.06"),
+        (0x9417AAB9, "-7.657221E-27"),
+        (0xE0DA0BAC, "-1.2569473E+20"),
+        (0x2F9AD4BB, "2.816359E-10"),
+        (0x9A43AFD2, "-4.046708E-23"),
+        (0xC47C9C0D, "-1010.4383"),
+        (0xEDB8C675, "-7.148145E+27"),
+        (0x41EE8AB9, "29.817736"),
+        (0xA840D9EC, "-1.0705395E-14"),
+        (0x1EA5A35F, "1.7537623E-20"),
+        (0xE029DFD9, "-4.8962964E+19"),
+        (0x38295A26, "4.0376697E-05"),
+        (0x496F4112, "979985.1"),
+        (0x2A2F9B10, "1.559692E-13"),
+        (0x4EB30026, "1.5015657E+09"),
+        (0xFDA6AFA6, "-2.7695483E+37"),
+        (0x2AF0CB79, "4.2773752E-13"),
+        (0x10A6D4AF, "6.5803146E-29"),
+        (0x302B52C6, "6.2327066E-10"),
+    ];
+    const F64_CASES: &[(u64, &str)] = &[
+        (0x0000000000000000, "0"),
+        (0x8000000000000000, "-0"),
+        (0x3FF0000000000000, "1"),
+        (0xBFF0000000000000, "-1"),
+        (0x3FE0000000000000, "0.5"),
+        (0x3FB999999999999A, "0.1"),
+        (0x3FD5555555555555, "0.3333333333333333"),
+        (0x400921FB54442D18, "3.141592653589793"),
+        (0x3EE4F8B588E368F1, "1E-05"),
+        (0x3F1A36E2EB1C432D, "0.0001"),
+        (0x3F50624DD2F1A9FC, "0.001"),
+        (0x40F86A0000000000, "100000"),
+        (0x430C6BF526340000, "1000000000000000"),
+        (0x4341C37937E08000, "10000000000000000"),
+        (0x4376345785D8A000, "1E+17"),
+        (0x4415AF1D78B58C40, "1E+20"),
+        (0x3BC79CA10C924223, "1E-20"),
+        (0x01A56E1FC2F8F359, "1E-300"),
+        (0x7FEFFFFFFFFFFFFF, "1.7976931348623157E+308"),
+        (0xFFEFFFFFFFFFFFFF, "-1.7976931348623157E+308"),
+        (0x0000000000000001, "5E-324"),
+        (0xFFF8000000000000, "NaN"),
+        (0xFFF8000000000000, "NaN"),
+        (0x7FF0000000000000, "Infinity"),
+        (0xFFF0000000000000, "-Infinity"),
+        (0x41D26580B487E69B, "1234567890.12345"),
+        (0x7FE1CCF385EBC8A0, "1E+308"),
+        (0x0000000000000001, "5E-324"),
+        (0x0010000000000000, "2.2250738585072014E-308"),
+        (0x4341C37937E08000, "10000000000000000"),
+        (0x4376345785D8A000, "1E+17"),
+        (0x437B69B4BA630F35, "1.2345678901234568E+17"),
+        (0xDC1B77AE0BF34DAD, "-4.9911105725155504E+135"),
+        (0x64F0EEB9026E6076, "1.715373926431966E+178"),
+        (0x7B07CE91E5906136, "4.4251604027143375E+284"),
+        (0x305F050C368DCC74, "1.0715660391465826E-75"),
+        (0x2CEB16E0A1C54AEC, "2.5973481493288907E-92"),
+        (0x97101DCE4E7BFB79, "-1.3475090132806154E-197"),
+        (0x9AD2E144D6E8F2CF, "-1.81996730402717E-179"),
+        (0xD9AA792E1AF470EA, "-8.750186241947517E+123"),
+        (0xDDAA4E85B0D6E28B, "-1.603964615428183E+143"),
+        (0x8F8EA9D349428D8E, "-9.643915712060552E-234"),
+        (0x08F474FFB8E8AB15, "1.5860846119992697E-265"),
+        (0x2EAD854756D71F03, "7.597954524892738E-84"),
+        (0x55BC79F8ADA711FD, "1.0204796945730538E+105"),
+        (0x0E1FC49BD63B809E, "1.1910593176322935E-240"),
+        (0xB92199E83F5A101F, "-1.694933913128696E-33"),
+        (0xC5765079FC5D43FF, "-4.3162252145519944E+26"),
+        (0x353CFC387DFAE6B8, "3.0261999441573203E-52"),
+        (0xA32EDABF5585BD75, "-3.238696681491661E-139"),
+        (0xFC5639B16B714B4F, "-8.663725837306241E+290"),
+        (0x92FB2DCFC8AE9A19, "-3.0797526843217145E-217"),
+        (0x544B0EC76D00616D, "1.15589923121874E+98"),
+        (0xBCBB9B7E9A319AEF, "-3.831296467316889E-16"),
+        (0x0F1A50D59C0AA21A, "6.466053826432699E-236"),
+        (0x80AE2120826571DE, "-2.1452846540129615E-305"),
+        (0x0E1ECD02ED7C0CBD, "1.1547975125429853E-240"),
+        (0x0D0981E8C1FA7BE4, "7.296267179458751E-246"),
+        (0xDC86B3D3CDBDF613, "-5.2803264785067434E+137"),
+        (0x6D0844C269E7693F, "1.6732138965686944E+217"),
+        (0x3681DA7F6993082D, "3.909076791246025E-46"),
+        (0x5B928E2C987D857D, "1.3170664051174186E+133"),
+        (0x6C716E1E6CED8137, "2.347135155778617E+214"),
+        (0xCCB870213498F7F5, "-3.92703626520675E+61"),
+        (0x9F07B27A78869B5A, "-3.3710794864173703E-159"),
+        (0xB0BA91E47F6200EC, "-5.874229071700385E-74"),
+        (0xC72B4C36D0DB7FED, "-7.086891063466728E+34"),
+        (0x35F305B0C0FC9252, "8.134710481112139E-49"),
+        (0x7AC78FB373FFBFF6, "2.7371952383912E+283"),
+        (0x8E39B81DE71B7D09, "-3.857101171397437E-240"),
+        (0x59A69BA126CD29B3, "7.472552783215012E+123"),
+        (0xBFCBFFFF0CBCBF20, "-0.21874988672197393"),
+        (0x2D1CE28856D20E5E, "2.215603731797175E-91"),
+        (0x572A15ED48B3FDC2, "7.841697833625344E+111"),
+        (0x32B911499417AAB9, "2.3803041954013153E-64"),
+        (0x17A8EC88E0DA0BAC, "1.0669643833474769E-194"),
+        (0x0CC88EAB2F9AD4BB, "4.3902997915267284E-247"),
+        (0xBC3A5B419A43AFD2, "-1.4287870889761718E-18"),
+        (0x6F0F3414C47C9C0D, "9.239942182940311E+226"),
+        (0xE71A7567EDB8C675, "-4.6049449625872434E+188"),
+        (0x63674CF841EE8AB9, "7.034866163903114E+170"),
+        (0xE375837DA840D9EC, "-1.2990664698521692E+171"),
+        (0x578EB22E1EA5A35F, "5.905686629582816E+113"),
+        (0x4EFA582EE029DFD9, "2.9091650704676072E+72"),
+        (0xF3B363E938295A26, "-2.1692042628035588E+249"),
+        (0x2E3A4EF3496F4112, "5.2900001119406624E-86"),
+        (0xB809D78E2A2F9B10, "-9.49285634690637E-39"),
+        (0x46217F104EB30026, "6.93101536724741E+29"),
+        (0x8947B5FEFDA6AFA6, "-5.882775229507853E-264"),
+        (0x4A3AE29B2AF0CB79, "3.9292734840969675E+49"),
+        (0xBFD0273B10A6D4AF, "-0.2523944532980051"),
+        (0xED0A00EB302B52C6, "-1.7928344098460697E+217"),
+    ];
 }
