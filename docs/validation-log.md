@@ -1533,3 +1533,9 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Added src/export/deleted_collection.rs: record-plus-deleted membership with append order, the fixed collection name, throwing export/IDs, the verbatim reference warning, and class-ID/stack-type pointer resolution that ignores locality unlike Skip/Fail.
 - Three tests cover membership, throwing paths, warnings, and pointers. One unstable `!`-type return was replaced with `Infallible`.
 - Final verification on Windows with Rust/Cargo 1.98.1: cargo fmt --all -- --check exit 0; cargo test --workspace --locked --quiet exit 0 (635 library, 23 CLI, 0 doc tests); cargo clippy --workspace --all-targets --locked -- -D warnings exit 0; tools/verify-baseline.ps1 exit 0 (1,449/1,449 reference files unchanged); git diff --check exit 0. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+## Resource extension selection (2026-10-04)
+
+- Added src/export/resource_extensions.rs: texture format/extension preference selection, text dispatch with the dangerous set and JSON/plain/binary sniffing (hand-rolled grammar with the 64-deep default bound), font `OTTO` magic with `ttf` fallback, video path extension with `bytes` fallback, and best-extension coalescing.
+- Six tests cover every branch. Two fixture findings fixed in tests/rules: leading-zero numbers rejected by the grammar, and a palindromic magic test vector replaced with a near-miss.
+- Final verification on Windows with Rust/Cargo 1.98.1: cargo fmt --all -- --check exit 0; cargo test --workspace --locked --quiet exit 0 (641 library, 23 CLI, 0 doc tests); cargo clippy --workspace --all-targets --locked -- -D warnings exit 0; tools/verify-baseline.ps1 exit 0 (1,449/1,449 reference files unchanged); git diff --check exit 0. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
