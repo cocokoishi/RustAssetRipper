@@ -2554,6 +2554,7 @@ mod tests {
         merge_mount_report, remaining_budget_u64, remaining_budget_usize,
         source_bundle_for_collection, WorkspaceSerializedBundle,
     };
+    use assetripper::io::dependency::DependencyFilePath;
     use assetripper::io::filesystem::VirtualFileSystem;
     use assetripper::io::platform_file_inventory::PlatformWorkspaceLoadOptions;
     use assetripper::io::platform_structure::{
@@ -2565,7 +2566,9 @@ mod tests {
         WorkspaceAssetCollections, WorkspaceCollectionLimits,
     };
     use assetripper::serialized_file::object_workspace::{ObjectWorkspace, ObjectWorkspaceLimits};
-    use assetripper::serialized_file::workspace::SerializedFileDependencyOutcome;
+    use assetripper::serialized_file::workspace::{
+        SerializedFileDependencyOutcome, SerializedFileWorkspace, SerializedFileWorkspaceLimits,
+    };
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2843,6 +2846,194 @@ mod tests {
         file.extend_from_slice(&[0; 3]);
         file.extend_from_slice(&metadata);
         file.extend_from_slice(&payload);
+        file.extend_from_slice(&target_payload);
+        file
+    }
+
+    fn make_resource_manager_file_with_local_reference() -> Vec<u8> {
+        let mut manager_strings = Vec::new();
+        let mut manager_nodes = Vec::new();
+        push_asset_bundle_node(
+            &mut manager_strings,
+            &mut manager_nodes,
+            0,
+            "ResourceManager",
+            "",
+            -1,
+        );
+        push_asset_bundle_node(
+            &mut manager_strings,
+            &mut manager_nodes,
+            1,
+            "map",
+            "m_Container",
+            -1,
+        );
+        push_asset_bundle_node(
+            &mut manager_strings,
+            &mut manager_nodes,
+            2,
+            "Array",
+            "Array",
+            -1,
+        );
+        push_asset_bundle_node(
+            &mut manager_strings,
+            &mut manager_nodes,
+            3,
+            "int",
+            "size",
+            4,
+        );
+        push_asset_bundle_node(
+            &mut manager_strings,
+            &mut manager_nodes,
+            3,
+            "pair",
+            "data",
+            -1,
+        );
+        push_asset_bundle_node(
+            &mut manager_strings,
+            &mut manager_nodes,
+            4,
+            "string",
+            "first",
+            -1,
+        );
+        push_asset_bundle_node(
+            &mut manager_strings,
+            &mut manager_nodes,
+            5,
+            "Array",
+            "Array",
+            -1,
+        );
+        push_asset_bundle_node(
+            &mut manager_strings,
+            &mut manager_nodes,
+            6,
+            "int",
+            "size",
+            4,
+        );
+        push_asset_bundle_node(
+            &mut manager_strings,
+            &mut manager_nodes,
+            6,
+            "char",
+            "data",
+            1,
+        );
+        push_asset_bundle_node(
+            &mut manager_strings,
+            &mut manager_nodes,
+            4,
+            "PPtr<Object>",
+            "second",
+            12,
+        );
+        push_asset_bundle_node(
+            &mut manager_strings,
+            &mut manager_nodes,
+            5,
+            "int",
+            "m_FileID",
+            4,
+        );
+        push_asset_bundle_node(
+            &mut manager_strings,
+            &mut manager_nodes,
+            5,
+            "SInt64",
+            "m_PathID",
+            8,
+        );
+
+        let mut target_strings = Vec::new();
+        let mut target_nodes = Vec::new();
+        push_asset_bundle_node(&mut target_strings, &mut target_nodes, 0, "Shader", "", -1);
+        push_asset_bundle_node(
+            &mut target_strings,
+            &mut target_nodes,
+            1,
+            "string",
+            "m_Name",
+            -1,
+        );
+        push_asset_bundle_node(
+            &mut target_strings,
+            &mut target_nodes,
+            2,
+            "Array",
+            "Array",
+            -1,
+        );
+        push_asset_bundle_node(&mut target_strings, &mut target_nodes, 3, "int", "size", 4);
+        push_asset_bundle_node(&mut target_strings, &mut target_nodes, 3, "char", "data", 1);
+
+        let mut metadata = Vec::new();
+        metadata.extend_from_slice(b"2019.4.0f1\0");
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 2);
+        for (class_id, strings, nodes) in [
+            (147, manager_strings, manager_nodes),
+            (48, target_strings, target_nodes),
+        ] {
+            put_i32_le(&mut metadata, class_id);
+            put_i32_le(&mut metadata, i32::try_from(nodes.len()).unwrap());
+            put_i32_le(&mut metadata, i32::try_from(strings.len()).unwrap());
+            for (level, type_offset, name_offset, byte_size, index) in nodes {
+                put_node(
+                    &mut metadata,
+                    level,
+                    type_offset,
+                    name_offset,
+                    byte_size,
+                    index,
+                );
+            }
+            metadata.extend_from_slice(&strings);
+        }
+
+        let mut manager_payload = Vec::new();
+        put_i32_le(&mut manager_payload, 2);
+        for path in ["Textures/inner/wood.shader", "wood.shader"] {
+            put_asset_bundle_string_payload(&mut manager_payload, path);
+            put_i32_le(&mut manager_payload, 0);
+            manager_payload.extend_from_slice(&43_i64.to_le_bytes());
+        }
+        let mut target_payload = Vec::new();
+        put_asset_bundle_string_payload(&mut target_payload, "Wood");
+
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 2);
+        put_i32_le(&mut metadata, 42);
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, i32::try_from(manager_payload.len()).unwrap());
+        put_i32_le(&mut metadata, 147);
+        put_u16_le(&mut metadata, 147);
+        put_u16_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 43);
+        put_u32_le(&mut metadata, u32::try_from(manager_payload.len()).unwrap());
+        put_i32_le(&mut metadata, i32::try_from(target_payload.len()).unwrap());
+        put_i32_le(&mut metadata, 48);
+        put_u16_le(&mut metadata, 48);
+        put_u16_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 0);
+        metadata.push(0);
+
+        let data_offset = 20usize + metadata.len();
+        let file_size = data_offset + manager_payload.len() + target_payload.len();
+        let mut file = Vec::with_capacity(file_size);
+        file.extend_from_slice(&i32::try_from(metadata.len()).unwrap().to_be_bytes());
+        file.extend_from_slice(&u32::try_from(file_size).unwrap().to_be_bytes());
+        file.extend_from_slice(&10i32.to_be_bytes());
+        file.extend_from_slice(&u32::try_from(data_offset).unwrap().to_be_bytes());
+        file.push(0);
+        file.extend_from_slice(&[0; 3]);
+        file.extend_from_slice(&metadata);
+        file.extend_from_slice(&manager_payload);
         file.extend_from_slice(&target_payload);
         file
     }
@@ -4275,6 +4466,127 @@ mod tests {
         assert_eq!(grouped_report.assigned_bundle_names, 1);
         assert_eq!(grouped_report.assigned_original_paths, 1);
         assert_eq!(grouped_report.assigned_collection_directories, 2);
+    }
+
+    #[test]
+    fn resource_manager_paths_select_longest_container_path_and_restore_asset_name() {
+        let mut filesystem = VirtualFileSystem::new();
+        let input_path = "/inputs/resource.assets";
+        insert_vfs_file(
+            &mut filesystem,
+            input_path,
+            &make_resource_manager_file_with_local_reference(),
+        );
+        let workspace = SerializedFileWorkspace::load_from_vfs(
+            &filesystem,
+            &[DependencyFilePath {
+                file_name: "resource.assets".to_owned(),
+                virtual_path: input_path.to_owned(),
+            }],
+            SerializedFileWorkspaceLimits::default(),
+        )
+        .unwrap();
+        let objects = ObjectWorkspace::load_from_vfs(
+            &filesystem,
+            &workspace,
+            ObjectWorkspaceLimits::default(),
+        )
+        .unwrap();
+        let collections = WorkspaceAssetCollections::build(
+            &workspace,
+            &objects,
+            WorkspaceCollectionLimits::default(),
+        )
+        .unwrap();
+        let resource_plan =
+            assetripper::processing::asset_bundle::plan_workspace_resource_manager_paths(
+                &workspace,
+                &objects,
+                &collections,
+                Default::default(),
+            )
+            .unwrap();
+        assert!(resource_plan.is_complete(), "{:?}", resource_plan.issues);
+        assert_eq!(resource_plan.resource_manager_count, 1);
+        assert_eq!(resource_plan.container_entry_count, 2);
+        assert_eq!(resource_plan.assignments.len(), 2);
+        assert_eq!(
+            resource_plan.assignments[0].path,
+            "Textures/inner/wood.shader"
+        );
+        assert_eq!(resource_plan.assignments[1].path, "wood.shader");
+        assert_eq!(resource_plan.assignments[0].file_id, 0);
+        let assignment_limit_error =
+            assetripper::processing::asset_bundle::plan_workspace_resource_manager_paths(
+                &workspace,
+                &objects,
+                &collections,
+                assetripper::processing::asset_bundle::WorkspaceResourceManagerPathLimits {
+                    max_assignments: 1,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(
+            assignment_limit_error,
+            assetripper::processing::asset_bundle::WorkspaceResourceManagerPathPlanError::CountLimitExceeded {
+                resource: "ResourceManager path assignments",
+                count: 2,
+                limit: 1,
+            }
+        ));
+        assert!(matches!(
+            objects.objects()[1]
+                .payload
+                .as_ref()
+                .unwrap()
+                .root
+                .unique_field_in_base_chain("m_Name")
+                .unwrap(),
+            Some(assetripper::serialized_file::object::SerializedValue::StringBytes(bytes))
+                if bytes == b"Wood"
+        ));
+
+        let bundle_plan =
+            assetripper::processing::asset_bundle::WorkspaceAssetBundleNamePlan::default();
+        let (paths, report) =
+            assetripper::processing::asset_bundle::apply_workspace_original_paths(
+                &workspace,
+                &objects,
+                &collections,
+                assetripper::processing::asset_bundle::WorkspaceOriginalPathPlans {
+                    asset_bundles: &bundle_plan,
+                    resource_managers: &resource_plan,
+                },
+                assetripper::processing::asset_bundle::BundledAssetsExportMode::DirectExport,
+                assetripper::processing::asset_bundle::WorkspaceAssetExportPathTable::empty(),
+                Default::default(),
+            )
+            .unwrap();
+        let target = paths.get(0, 1).expect("ResourceManager target metadata");
+        let expected_path = format!(
+            "Assets/Resources{}Textures/inner{}Wood.shader",
+            std::path::MAIN_SEPARATOR,
+            std::path::MAIN_SEPARATOR,
+        );
+        assert_eq!(
+            target.original_path.as_deref(),
+            Some(expected_path.as_str())
+        );
+        assert_eq!(target.original_name.as_deref(), Some("Wood"));
+        let expected_shader_directory = format!(
+            "Assets/Resources{}Textures/inner",
+            std::path::MAIN_SEPARATOR,
+        );
+        assert_eq!(
+            target.override_directory.as_deref(),
+            Some(expected_shader_directory.as_str())
+        );
+        assert_eq!(target.override_name.as_deref(), Some("Wood"));
+        assert_eq!(target.override_extension.as_deref(), Some("shader"));
+        assert_eq!(report.assigned_resource_manager_original_paths, 1);
+        assert_eq!(report.restored_original_names, 1);
+        assert_eq!(report.initialized_shader_overrides, 1);
     }
 
     #[test]

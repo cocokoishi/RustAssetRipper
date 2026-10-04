@@ -696,6 +696,10 @@ impl<'a> MultiFileReferenceGraph<'a> {
         &self.normalized_file_names
     }
 
+    /// Return PPtrs in source-file, source-object, then field traversal order.
+    ///
+    /// The source-file/object prefix is monotonic, so callers can use a partition point to find
+    /// one object's contiguous reference slice without scanning unrelated object edges.
     pub fn references(&self) -> &[MultiFileObjectReference<'a>] {
         &self.references
     }
