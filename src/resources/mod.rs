@@ -12,6 +12,7 @@ pub mod packed_bit_vector;
 pub mod packed_float_vector;
 pub mod packed_quat_vector;
 pub mod shader_channel;
+pub mod state_constant;
 pub mod sub_mesh_data;
 pub mod tangent_mode;
 pub mod transition_constant;

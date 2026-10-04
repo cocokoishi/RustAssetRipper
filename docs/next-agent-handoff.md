@@ -224,3 +224,10 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Added `src/resources/transition_constant.rs`: the `TransitionConstantExtensions` accessors with the old-versus-new layout fallbacks. A real `TransitionConstant.Create` differential captured six versions as `src/resources/transition_constant_fixture.txt`.
 - Next on the animator path: `StateConstantExtensions` (id/name resolution, blend-tree detection) and the `ControllerConstant` layer lookups, then the `Avatar` assembly.
 - State: 728 library + 23 CLI tests, warnings-denied Clippy, format check, 1,449-file baseline verifier, and `git diff --check` all pass. Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+
+## 23. Checkpoint: state constants (2026-10-04)
+
+- Added `src/resources/state_constant.rs`: the `StateConstantExtensions` id/name/write-default/blend-tree resolution. A real `StateConstant.Create` differential captured seven versions as `src/resources/state_constant_fixture.txt`.
+- Next on the animator path: the `ControllerConstant` layer lookups and the `Avatar`/`AvatarConstant` assembly, then the `AnimationClip` binding curve list.
+- State: 729 library + 23 CLI tests, warnings-denied Clippy, format check, 1,449-file baseline verifier, and `git diff --check` all pass. Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
