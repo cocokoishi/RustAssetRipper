@@ -660,7 +660,7 @@ mod tests {
         insert_file(&mut filesystem, "/bundle/by-path.asset");
         let registered = [
             DependencyFilePath {
-                file_name: "0123456789ABCDEf00000000FFFFFFFF".to_owned(),
+                file_name: "76543210fedcba9800000000ffffffff".to_owned(),
                 virtual_path: "/bundle/by-guid.asset".to_owned(),
             },
             DependencyFilePath {
@@ -678,7 +678,7 @@ mod tests {
 
         assert_eq!(
             meta_identifier.get_file_path().as_deref(),
-            Some("0123456789abcdef00000000ffffffff")
+            Some("76543210fedcba9800000000ffffffff")
         );
         assert_eq!(
             index.resolve(&meta_identifier).unwrap(),

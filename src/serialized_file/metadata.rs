@@ -441,7 +441,16 @@ impl FileIdentifier {
 
         if self.file_type == Some(ASSET_TYPE_META) {
             self.guid.map(|[data0, data1, data2, data3]| {
-                format!("{data0:08x}{data1:08x}{data2:08x}{data3:08x}")
+                // `FileIdentifier.GetFilePath` returns `UnityGuid.ToString`, which emits each
+                // 32-bit word's nibbles least significant first.
+                let mut value = String::with_capacity(32);
+                for word in [data0, data1, data2, data3] {
+                    for shift in 0..8 {
+                        let digit = ((word >> (shift * 4)) & 0x0f) as usize;
+                        value.push(b"0123456789abcdef"[digit] as char);
+                    }
+                }
+                value
             })
         } else {
             Some(self.fixed_path_name())

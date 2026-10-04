@@ -1898,3 +1898,10 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Fixed `src/export/unity_yaml.rs::format_unity_guid`, which previously emitted the reversed string, and corrected ten self-authored expectations in `meta.rs`, `project_output.rs`, `unity_yaml.rs`, `value_yaml.rs`, and `workspace_yaml.rs` that encoded the reversed convention.
 - Added `src/export/guid_fixture.txt` and `export::unity_yaml::tests::unity_guid_string_matches_the_reference_runtime`.
 - Final verification on Windows with Rust/Cargo 1.98.1: cargo fmt --all -- --check exit 0; cargo test --workspace --locked exit 0 (747 library, 23 CLI, 0 doc tests); cargo clippy --workspace --all-targets --locked -- -D warnings exit 0; tools/verify-baseline.ps1 exit 0 (1,449/1,449 reference files unchanged); git diff --check exit 0. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+
+## FileIdentifier Meta GUID fix (2026-10-04)
+
+- Found the second instance of the GUID reversal: `serialized_file::metadata::FileIdentifier::get_file_path` formatted Meta GUIDs most-significant nibble first, whereas the reference `FileIdentifier.GetFilePath` returns `Guid.ToString()`.
+- Fixed it to the nibble-reversed form and updated the `io::dependency` Meta-identity test's registered name and expected string to the corrected value (`76543210fedcba9800000000ffffffff` for the words `(0x01234567, 0x89abcdef, 0, 0xffffffff)`).
+- Final verification on Windows with Rust/Cargo 1.98.1: cargo fmt --all -- --check exit 0; cargo test --workspace --locked exit 0 (747 library, 23 CLI, 0 doc tests); cargo clippy --workspace --all-targets --locked -- -D warnings exit 0; tools/verify-baseline.ps1 exit 0 (1,449/1,449 reference files unchanged); git diff --check exit 0. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.

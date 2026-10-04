@@ -295,3 +295,10 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Discovered and fixed a real GUID-formatting defect: `format_unity_guid` emitted reversed strings; the reference `UnityGuid.ToString` nibble-reverses each 32-bit word. Added `guid_fixture.txt` and a runtime differential, and corrected ten affine test expectations.
 - This closes the `.meta` GUID-string half of the resume plan; importer-body tracing (`CreateImporter`, class-specific settings, GUID allocation/persistence integration) remains open and has no runtime-differential path yet.
 - State: 747 library + 23 CLI tests, warnings-denied Clippy, format check, 1,449-file baseline verifier, and `git diff --check` all pass. Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+
+## 32. Checkpoint: UnityGuid.ToString differential and GUID fix (2026-10-04)
+
+- Discovered and fixed a real GUID-formatting defect: `format_unity_guid` emitted reversed strings; the reference `UnityGuid.ToString` nibble-reverses each 32-bit word. Added `guid_fixture.txt` and a runtime differential, and corrected ten affine test expectations.
+- This closes the `.meta` GUID-string half of the resume plan; importer-body tracing (`CreateImporter`, class-specific settings, GUID allocation/persistence integration) remains open and has no runtime-differential path yet.
+- State: 747 library + 23 CLI tests, warnings-denied Clippy, format check, 1,449-file baseline verifier, and `git diff --check` all pass. Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
