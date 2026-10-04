@@ -19,6 +19,7 @@ pub mod importer_reads;
 pub mod manager_flows;
 pub mod meta;
 pub mod meta_emission;
+pub mod mixer_export;
 pub mod multi_asset;
 pub mod pointer_map;
 pub mod post_export;
