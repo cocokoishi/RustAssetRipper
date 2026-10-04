@@ -37,6 +37,7 @@ pub mod resource_extensions;
 pub mod scene_collection;
 pub mod scene_helpers;
 pub mod scene_member_order;
+pub mod script_admission;
 pub mod script_export_flow;
 pub mod script_hashing;
 pub mod settings;
