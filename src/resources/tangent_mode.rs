@@ -16,6 +16,10 @@ pub const LINEAR: i32 = 4;
 pub const CONSTANT: i32 = 6;
 /// `TangentMode.ClampedAuto`.
 pub const CLAMPED_AUTO: i32 = 8;
+/// `TangentMode.FreeSmooth` (`LFree | HFree`).
+pub const FREE_SMOOTH: i32 = 0;
+/// `TangentMode.FreeFree` (`Broken | LFree | HFree`).
+pub const FREE_FREE: i32 = 1;
 
 /// `TangentModeExtensions.TangentMode5Relevant`: 5.5.0 and greater.
 pub fn tangent_mode_5_relevant(version: UnityVersion) -> bool {

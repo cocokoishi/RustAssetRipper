@@ -168,3 +168,10 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Added `src/resources/tangent_mode.rs`: the `TangentMode`/`TangentMode2`/`TangentMode5` mapping with the 5.5 branch. A real runtime differential captured all 256 values as `src/resources/tangent_mode_fixture.txt`.
 - Next on the animation path: `KeyframeExtensions.Float.SetValues` and the `AnimationCurveExtensions` `SetValues` overloads (the probe `Temp/opencode/animprobe` already captured keyframe/curve results; the `InWeight`/`OutWeight` fields are version-gated and need a precise presence gate before porting), then `FloatCurve`/`AnimationClip` curve decoding.
 - State: 719 library + 23 CLI tests, warnings-denied Clippy, format check, 1,449-file baseline verifier, and `git diff --check` all pass. Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+
+## 15. Checkpoint: animation keyframe defaults (2026-10-04)
+
+- Added `src/resources/keyframe.rs`: `KeyframeExtensions.Float` `SetValues` (weight and slope overloads), `DefaultFloatWeight`, and the 2018.1 `InWeight`/`OutWeight`/`WeightedMode` presence gate. A real `Keyframe_Single.Create` differential captured eleven versions as `src/resources/keyframe_fixture.txt`.
+- Next on the animation path: the `AnimationCurveExtensions` `SetValues` overloads (the `animprobe` capture shows `PreInfinity`/`PostInfinity` always present and `RotationOrder` gated around 5.4), then `FloatCurve`/`AnimationClip` curve decoding and the `QuaternionCurve`/`Vector3Curve` variants.
+- State: 720 library + 23 CLI tests, warnings-denied Clippy, format check, 1,449-file baseline verifier, and `git diff --check` all pass. Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
