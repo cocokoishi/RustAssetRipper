@@ -1807,3 +1807,10 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Added `src/resources/muscle_clip_info.rs`: both `MuscleClipInfoExtensions.Initialize` overloads (neutral defaults and the fourteen-field copy from `MuscleClipConstant`).
 - Genuine original-runtime differential: the probe `Temp/opencode/mcprobe` instantiated real `MuscleClipInfo.Create`/`MuscleClipConstant.Create` subclasses for five versions, set distinctive constant values, and drove both overloads, capturing all seventeen info fields. The 5 rows are committed as `src/resources/muscle_clip_info_fixture.txt` and matched row-for-row.
 - Final verification on Windows with Rust/Cargo 1.98.1: cargo fmt --all -- --check exit 0; cargo test --workspace --locked exit 0 (726 library, 23 CLI, 0 doc tests); cargo clippy --workspace --all-targets --locked -- -D warnings exit 0; tools/verify-baseline.ps1 exit 0 (1,449/1,449 reference files unchanged); git diff --check exit 0. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+
+## Blend tree node accessor differential (2026-10-04)
+
+- Added `src/resources/blend_tree_node.rs`: the `BlendTreeNodeConstantExtensions` accessors (`GetThreshold`/`GetPosition`/`GetMinThreshold`/`GetMaxThreshold`/`TryGetDirectBlendParameter`/`IsBlendTree`) with the version- and blend-type dispatch.
+- Genuine original-runtime differential: the probe `Temp/opencode/btprobe` instantiated real `BlendTreeNodeConstant.Create(version)` subclasses for five versions, populated the 1D thresholds, 2D positions, direct ids, and child indices, and drove every accessor for three blend types. The 15 rows are committed as `src/resources/blend_tree_node_fixture.txt` and matched row-for-row.
+- Final verification on Windows with Rust/Cargo 1.98.1: cargo fmt --all -- --check exit 0; cargo test --workspace --locked exit 0 (727 library, 23 CLI, 0 doc tests); cargo clippy --workspace --all-targets --locked -- -D warnings exit 0; tools/verify-baseline.ps1 exit 0 (1,449/1,449 reference files unchanged); git diff --check exit 0. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
