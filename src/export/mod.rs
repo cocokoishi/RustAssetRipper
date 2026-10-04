@@ -7,6 +7,7 @@ pub mod meta;
 pub mod pointer_map;
 pub mod prefab_collection;
 pub mod project_output;
+pub mod project_plan;
 pub mod scene_collection;
 pub mod script_hashing;
 pub mod streamed_assets;
