@@ -19,6 +19,7 @@ pub mod primary_content;
 pub mod project_order;
 pub mod project_output;
 pub mod project_plan;
+pub mod redirect_collection;
 pub mod registration;
 pub mod scene_collection;
 pub mod scene_member_order;
