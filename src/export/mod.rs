@@ -5,6 +5,7 @@ pub mod collection_claims;
 pub mod collection_kind;
 pub mod collection_paths;
 pub mod diagnostic_pointers;
+pub mod empty_script;
 pub mod export_extension;
 pub mod export_type;
 pub mod guid_policy;
