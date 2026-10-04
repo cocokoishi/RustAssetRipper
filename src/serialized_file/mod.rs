@@ -12,4 +12,5 @@ pub mod object;
 pub mod object_workspace;
 pub mod reference_graph;
 pub mod references;
+pub mod transfer_flags;
 pub mod workspace;
