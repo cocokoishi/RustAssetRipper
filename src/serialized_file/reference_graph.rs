@@ -1328,9 +1328,12 @@ mod tests {
     };
     use crate::io::binary::Endian;
     use crate::processing::asset_bundle::{
-        resolve_asset_bundle_container_reference, AssetBundleContainerTarget,
+        map_asset_bundle_container, resolve_asset_bundle_container_reference,
+        AssetBundleContainerTarget,
     };
-    use crate::processing::scene_collections::AssetBundleContainerReference;
+    use crate::processing::scene_collections::{
+        AssetBundleContainerReference, SceneBundleMappingLimits,
+    };
     use crate::serialized_file::metadata::{
         FileIdentifier, ObjectInfo, SerializedFileMetadata, SerializedType, TypeTree, TypeTreeNode,
     };
@@ -1447,6 +1450,68 @@ mod tests {
                 file_id: 3,
                 external_count: 2,
             }
+        );
+    }
+
+    #[test]
+    fn asset_bundle_container_map_applies_name_rules_and_preserves_target_kinds() {
+        let metadata = metadata(&[10, 20]);
+        let graph = empty_graph(&[10, 20]);
+        let container_entry = |path: &str, file_id, path_id| {
+            SerializedValue::Struct(vec![
+                SerializedFieldValue {
+                    name: "first".to_owned(),
+                    value: SerializedValue::StringBytes(path.as_bytes().to_vec()),
+                },
+                SerializedFieldValue {
+                    name: "second".to_owned(),
+                    value: SerializedValue::Struct(vec![SerializedFieldValue {
+                        name: "asset".to_owned(),
+                        value: SerializedValue::PPtr { file_id, path_id },
+                    }]),
+                },
+            ])
+        };
+        let root = SerializedValue::Struct(vec![
+            SerializedFieldValue {
+                name: "m_AssetBundleName_R".to_owned(),
+                value: SerializedValue::StringBytes(b"character.bundle".to_vec()),
+            },
+            SerializedFieldValue {
+                name: "m_Container".to_owned(),
+                value: SerializedValue::Array(vec![
+                    container_entry("Assets/local.asset", 0, 20),
+                    container_entry("Assets/shared.asset", 2, 99),
+                    container_entry("Assets/null.asset", 0, 0),
+                ]),
+            },
+        ]);
+        let mapping = map_asset_bundle_container(
+            &root,
+            "source.bundle",
+            &metadata,
+            &graph,
+            SceneBundleMappingLimits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(mapping.source_name, "character.bundle");
+        assert_eq!(mapping.asset_name, "character");
+        assert_eq!(
+            mapping
+                .references
+                .iter()
+                .map(|entry| entry.target.clone())
+                .collect::<Vec<_>>(),
+            [
+                AssetBundleContainerTarget::LocalObject { object_index: 1 },
+                AssetBundleContainerTarget::SharedFile {
+                    file_id: 2,
+                    external_index: 1,
+                    path_id: 99,
+                },
+                AssetBundleContainerTarget::Null,
+            ]
         );
     }
 
