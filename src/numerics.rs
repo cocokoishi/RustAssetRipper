@@ -19,6 +19,12 @@
 //!   row-vector order, with affine point transforms, transposes, fourth-row resets, and
 //!   component inverses (zero rotations map to identity). Matrix inversion runs in `f64`
 //!   and rounds once, so inverse comparisons use tolerance rather than bit identity.
+//! - `Range<T>` / `DiscontinuousRange<T>` port the half-open interval algebra (contains,
+//!   strict ordering, intersection, adjacency-aware union, ordered merging, two-pointer
+//!   intersect/subtract, bounded negate) over any partially ordered copyable endpoint.
+//!   Two probed runtime quirks are replicated exactly: `subtract` drops residues once the
+//!   cutter list is exhausted, and multi-member `negate` fails on its gap construction.
+//!   `IComparableExtensions` needs no port: the four predicates are plain operators here.
 //! - Value types mirror their sources field-for-field: `Vector2i`/`Vector3i` integer
 //!   vectors (including the fall-through-to-Z member lookup and the throwing
 //!   member-by-value search), `BoneWeight1`/`BoneWeight4` weights with exact-sum
@@ -1191,6 +1197,422 @@ impl core::fmt::Display for ColorFloat {
     }
 }
 
+/// A half-open `[start, end)` range, mirroring `Range<T>`.
+///
+/// The bound is `PartialOrd` rather than a total order so float instantiations keep
+/// working; NaN therefore follows IEEE partial-order semantics instead of the source
+/// `IComparable<T>` total order. The reference suite has no NaN range cases, and all
+/// ported tests avoid NaN endpoints.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Range<T> {
+    /// Inclusive start; must be strictly less than `end`.
+    pub start: T,
+    /// Exclusive end; must be strictly greater than `start`.
+    pub end: T,
+}
+
+/// A range construction or combination that the source reports by throwing.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct RangeError;
+
+impl core::fmt::Display for RangeError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(formatter, "Invalid range")
+    }
+}
+
+impl std::error::Error for RangeError {}
+
+impl<T: PartialOrd + Copy> Range<T> {
+    /// `new Range(start, end)`; fails when `start >= end` like the source constructor.
+    pub fn new(start: T, end: T) -> Result<Self, RangeError> {
+        if start < end {
+            Ok(Self { start, end })
+        } else {
+            Err(RangeError)
+        }
+    }
+
+    /// `Contains(value)`: `start <= value < end`.
+    pub fn contains_point(self, value: T) -> bool {
+        self.start <= value && value < self.end
+    }
+
+    /// `Contains(range)`: full containment including equal endpoints.
+    pub fn contains_range(self, other: Self) -> bool {
+        self.start <= other.start && other.end <= self.end
+    }
+
+    /// `IsStrictlyLess`: `end <= other.start`.
+    pub fn is_strictly_less(self, other: Self) -> bool {
+        self.end <= other.start
+    }
+
+    /// `IsStrictlyGreater`: `start >= other.end`.
+    pub fn is_strictly_greater(self, other: Self) -> bool {
+        self.start >= other.end
+    }
+
+    /// `Intersects(other)`: either start point lies inside the other range.
+    pub fn intersects(self, other: Self) -> bool {
+        self.contains_point(other.start) || other.contains_point(self.start)
+    }
+
+    /// `Intersects(other, out intersection)`.
+    pub fn intersection(self, other: Self) -> Option<Self> {
+        if self.intersects(other) {
+            Some(Self {
+                start: max_value(self.start, other.start),
+                end: min_value(self.end, other.end),
+            })
+        } else {
+            None
+        }
+    }
+
+    /// `CanUnion`: intersecting or exactly adjacent ranges.
+    pub fn can_union(self, other: Self) -> bool {
+        self.intersects(other) || self.start == other.end || self.end == other.start
+    }
+
+    /// `CanUnion(other, out union)`.
+    pub fn union(self, other: Self) -> Option<Self> {
+        if self.can_union(other) {
+            Some(Self {
+                start: min_value(self.start, other.start),
+                end: max_value(self.end, other.end),
+            })
+        } else {
+            None
+        }
+    }
+
+    /// `MakeUnion`: fails for disjoint, non-adjacent ranges like the source.
+    pub fn make_union(self, other: Self) -> Result<Self, RangeError> {
+        self.union(other).ok_or(RangeError)
+    }
+
+    /// `MakeIntersection`: fails for non-intersecting ranges like the source.
+    pub fn make_intersection(self, other: Self) -> Result<Self, RangeError> {
+        self.intersection(other).ok_or(RangeError)
+    }
+}
+
+fn min_value<T: PartialOrd + Copy>(left: T, right: T) -> T {
+    if left < right {
+        left
+    } else {
+        right
+    }
+}
+
+fn max_value<T: PartialOrd + Copy>(left: T, right: T) -> T {
+    if left > right {
+        left
+    } else {
+        right
+    }
+}
+
+impl<T: core::fmt::Display> core::fmt::Display for Range<T> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(formatter, "{} : {}", self.start, self.end)
+    }
+}
+
+/// A sorted, normalized, possibly empty list of disjoint ranges.
+///
+/// Mirrors `DiscontinuousRange<T>`: every constructor merges overlapping or adjacent
+/// inputs through the same first-union/last-union scan as the source, so iteration order
+/// and counts match. Set operations replicate the source two-pointer walks exactly,
+/// including two confirmed runtime quirks (see `subtract` and `negate`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DiscontinuousRange<T> {
+    ranges: Vec<Range<T>>,
+}
+
+impl<T> DiscontinuousRange<T> {
+    /// The empty range.
+    pub const fn empty() -> Self {
+        Self { ranges: Vec::new() }
+    }
+
+    /// The number of disjoint ranges.
+    pub fn count(&self) -> usize {
+        self.ranges.len()
+    }
+
+    /// Range by position in sorted order.
+    pub fn get(&self, index: usize) -> Option<Range<T>>
+    where
+        T: Copy,
+    {
+        self.ranges.get(index).copied()
+    }
+
+    /// Sorted disjoint ranges in order.
+    pub fn as_slice(&self) -> &[Range<T>] {
+        &self.ranges
+    }
+
+    /// No ranges at all.
+    pub fn is_empty(&self) -> bool {
+        self.ranges.is_empty()
+    }
+
+    /// Exactly one range (the empty range counts as not continuous, like the source).
+    pub fn is_continuous(&self) -> bool {
+        self.ranges.len() == 1
+    }
+}
+
+impl<T: PartialOrd + Copy> DiscontinuousRange<T> {
+    /// A single range with no merging needed.
+    pub fn from_range(range: Range<T>) -> Self {
+        Self {
+            ranges: vec![range],
+        }
+    }
+
+    /// Merges an unordered collection exactly like the source params constructor.
+    pub fn from_vec(ranges: Vec<Range<T>>) -> Self {
+        let mut result = Self::empty();
+        for range in ranges {
+            result.add(range);
+        }
+        result
+    }
+
+    /// The union constructor `new DiscontinuousRange(range1, range2)`.
+    pub fn from_union(first: Self, second: Self) -> Self {
+        if first.is_empty() {
+            return second;
+        }
+        if second.is_empty() {
+            return first;
+        }
+        let mut result = first;
+        for range in second.ranges {
+            result.add(range);
+        }
+        result
+    }
+
+    /// Equals a single range: exactly one member equal to it.
+    pub fn equals_single(&self, other: Range<T>) -> bool {
+        self.ranges.len() == 1 && self.ranges[0] == other
+    }
+
+    /// `Contains(point)`: some member holds the point.
+    pub fn contains_point(&self, value: T) -> bool {
+        self.ranges.iter().any(|range| range.contains_point(value))
+    }
+
+    /// `Contains(range)`: some member fully holds the range.
+    pub fn contains_range(&self, range: Range<T>) -> bool {
+        self.ranges
+            .iter()
+            .any(|member| member.contains_range(range))
+    }
+
+    /// `Contains(other)`: every member of `other` is held by some member here.
+    pub fn contains_all(&self, other: &Self) -> bool {
+        other.ranges.iter().all(|range| self.contains_range(*range))
+    }
+
+    /// `Intersects(range)`.
+    pub fn intersects_range(&self, range: Range<T>) -> bool {
+        self.ranges.iter().any(|member| member.intersects(range))
+    }
+
+    /// `Intersects(other)` via the source two-pointer walk.
+    pub fn intersects(&self, other: &Self) -> bool {
+        let mut i = 0;
+        let mut j = 0;
+        while i < self.count() && j < other.count() {
+            let left = self.ranges[i];
+            let right = other.ranges[j];
+            if left.intersects(right) {
+                return true;
+            } else if left.is_strictly_less(right) {
+                i += 1;
+            } else {
+                j += 1;
+            }
+        }
+        false
+    }
+
+    /// `Union`: merges both member lists.
+    pub fn union(&self, other: &Self) -> Self {
+        Self::from_union(self.clone(), other.clone())
+    }
+
+    /// `Intersect`: pairwise intersections in order, directly stored without
+    /// re-normalization like the source (outputs are already disjoint and sorted).
+    pub fn intersect(&self, other: &Self) -> Self {
+        let mut ranges = Vec::new();
+        let mut i = 0;
+        let mut j = 0;
+        while i < self.count() && j < other.count() {
+            let left = self.ranges[i];
+            let right = other.ranges[j];
+            if let Some(intersection) = left.intersection(right) {
+                ranges.push(intersection);
+                if left.end <= right.end {
+                    i += 1;
+                } else {
+                    j += 1;
+                }
+            } else if left.is_strictly_less(right) {
+                i += 1;
+            } else {
+                j += 1;
+            }
+        }
+        Self { ranges }
+    }
+
+    /// `Subtract`: members of `self` minus members of `other`, replicating the source
+    /// walk exactly, including its confirmed tail-drop quirk: once `other` is exhausted
+    /// through the strictly-less/greater branches, remaining `self` members are dropped
+    /// rather than emitted (probed: `[10..20] minus [0..5]` yields empty, and a trailing
+    /// `[20..30]` member vanishes when `other` runs out first).
+    ///
+    /// Infallible by construction: every emitted pair is strictly ordered because all
+    /// inputs are normalized on construction, so the inner `expect` documents an
+    /// invariant rather than a fallible path.
+    pub fn subtract(&self, other: &Self) -> Self {
+        let mut ranges = Vec::new();
+        let mut i = 0;
+        let mut j = 0;
+        let mut ended_inside: Option<T> = None;
+        while i < self.count() && j < other.count() {
+            let current = self.ranges[i];
+            let cutting = other.ranges[j];
+            if current.is_strictly_less(cutting) {
+                if let Some(pending) = ended_inside.take() {
+                    ranges.push(
+                        Range::new(pending, current.end).expect(
+                            "subtract inputs are normalized, so pending starts stay ordered",
+                        ),
+                    );
+                }
+                i += 1;
+            } else if current.is_strictly_greater(cutting) {
+                j += 1;
+            } else {
+                if current.start < cutting.start {
+                    if let Some(pending) = ended_inside.take() {
+                        ranges.push(Range::new(pending, cutting.start).expect(
+                            "subtract inputs are normalized, so pending starts stay ordered",
+                        ));
+                    } else {
+                        ranges.push(
+                            Range::new(current.start, cutting.start)
+                                .expect("subtract overlap guarantees a strictly ordered prefix"),
+                        );
+                    }
+                }
+                if current.end <= cutting.end {
+                    i += 1;
+                } else if j < other.count() - 1 {
+                    ended_inside = Some(cutting.end);
+                    j += 1;
+                } else {
+                    ranges.push(
+                        Range::new(cutting.end, current.end)
+                            .expect("subtract overlap guarantees a strictly ordered suffix"),
+                    );
+                    j += 1;
+                }
+            }
+        }
+        Self { ranges }
+    }
+
+    /// `Negate(minimum, maximum)`: the complement within the bounding pair.
+    ///
+    /// Replicates a confirmed source quirk: gap construction reads the current member
+    /// start instead of the next member start, so any multi-member input fails exactly
+    /// like the probed runtime (`ArgumentException`, here `Err(RangeError)`). Single
+    /// members and the empty range behave normally.
+    pub fn negate(&self, minimum: T, maximum: T) -> Result<Self, RangeError> {
+        if self.is_empty() {
+            return Ok(Self::from_range(Range::new(minimum, maximum)?));
+        }
+        let mut ranges = Vec::with_capacity(self.count() + 1);
+        let first = self.ranges[0].start;
+        if first != minimum {
+            ranges.push(Range::new(minimum, first)?);
+        }
+        for i in 0..self.count() - 1 {
+            ranges.push(Range::new(self.ranges[i].end, self.ranges[i].start)?);
+        }
+        let last = self.ranges[self.count() - 1].end;
+        if last != maximum {
+            ranges.push(Range::new(last, maximum)?);
+        }
+        Ok(Self { ranges })
+    }
+
+    /// The explicit `Range<T>` conversion: succeeds only for continuous ranges.
+    pub fn as_continuous(&self) -> Result<Range<T>, RangeError> {
+        if self.is_continuous() {
+            Ok(self.ranges[0])
+        } else {
+            Err(RangeError)
+        }
+    }
+
+    /// The source `Add` scan: merges unionable runs, inserts before the first
+    /// strictly greater member, or appends.
+    fn add(&mut self, range: Range<T>) {
+        let count = self.count();
+        let mut first_union = count;
+        let mut last_union = count;
+        for (index, member) in self.ranges.iter().enumerate() {
+            if member.can_union(range) {
+                if first_union == count {
+                    first_union = index;
+                }
+                last_union = index;
+            } else if first_union < count {
+                break;
+            } else if member.is_strictly_greater(range) {
+                self.ranges.insert(index, range);
+                return;
+            }
+        }
+        if first_union == count {
+            self.ranges.push(range);
+        } else {
+            let merged = self.ranges[first_union].union(range).unwrap_or(range);
+            self.ranges[first_union] = merged;
+            if first_union < last_union {
+                self.ranges.drain(first_union + 1..=last_union);
+            }
+        }
+    }
+}
+
+impl<T: core::fmt::Display> core::fmt::Display for DiscontinuousRange<T> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if self.is_empty() {
+            return write!(formatter, "Empty");
+        }
+        let mut first = true;
+        for range in &self.ranges {
+            if !first {
+                write!(formatter, ", ")?;
+            }
+            first = false;
+            write!(formatter, "{range}")?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{angle_from_3_points, Quat, Vec3, GIMBAL_TEST_THRESHOLD, K_EPSILON};
@@ -1774,5 +2196,192 @@ mod tests {
         assert_eq!(vector.to_string(), "[10, 20, 30]");
         assert_eq!(Vector3i::ZERO, Vector3i::new(0, 0, 0));
         assert_eq!(Vector2i::new(3, -4).to_string(), "[3, -4]");
+    }
+
+    #[test]
+    fn ranges_follow_reference_cases() {
+        use super::{DiscontinuousRange, Range};
+        fn range(start: i32, end: i32) -> Range<i32> {
+            Range::new(start, end).unwrap()
+        }
+        let zero_to_ten = range(0, 10);
+        // Intersection, unions, containment, and strict ordering mirror RangeTests.
+        assert_eq!(
+            zero_to_ten.make_intersection(range(1, 11)),
+            Ok(range(1, 10))
+        );
+        assert_eq!(zero_to_ten.make_union(range(1, 11)), Ok(range(0, 11)));
+        assert_eq!(zero_to_ten.make_union(range(10, 20)), Ok(range(0, 20)));
+        assert!(zero_to_ten.contains_range(zero_to_ten));
+        assert!(zero_to_ten.contains_point(0));
+        assert!(zero_to_ten.contains_point(5));
+        assert!(!zero_to_ten.contains_point(10));
+        assert!(!zero_to_ten.contains_point(-10));
+        assert!(!zero_to_ten.contains_point(100));
+        assert!(Range::new(4, 3).is_err());
+        assert!(Range::new(4, 4).is_err());
+        assert!(zero_to_ten.make_union(range(20, 30)).is_err());
+        assert!(zero_to_ten.make_intersection(range(20, 30)).is_err());
+        assert!(zero_to_ten.is_strictly_less(range(10, 20)));
+        assert!(range(10, 20).is_strictly_greater(zero_to_ten));
+        assert!(!range(10, 20).is_strictly_less(zero_to_ten));
+        assert!(!zero_to_ten.is_strictly_greater(range(10, 20)));
+        assert!(!range(10, 20).is_strictly_less(range(0, 11)));
+        assert!(!range(0, 11).is_strictly_less(range(10, 20)));
+        assert!(!range(10, 20).is_strictly_greater(range(0, 11)));
+        assert!(!range(0, 11).is_strictly_greater(range(10, 20)));
+        assert_eq!(zero_to_ten.to_string(), "0 : 10");
+        // Adjacent ranges intersect nothing but still union.
+        assert!(!zero_to_ten.intersects(range(10, 20)));
+        assert!(zero_to_ten.can_union(range(10, 20)));
+        assert!(DiscontinuousRange::<i32>::empty().is_empty());
+    }
+
+    #[test]
+    fn discontinuous_ranges_follow_reference_cases() {
+        use super::{DiscontinuousRange, Range};
+        fn range(start: i32, end: i32) -> Range<i32> {
+            Range::new(start, end).unwrap()
+        }
+        fn list(ranges: Vec<Range<i32>>) -> DiscontinuousRange<i32> {
+            DiscontinuousRange::from_vec(ranges)
+        }
+        // Fixture numbers mirror DiscontinuousRangeTests exactly, including its
+        // `ZeroToTen = (0, 110)` naming quirk.
+        let min_to_zero = range(i32::MIN, 0);
+        let zero_to_three = range(0, 3);
+        let three_to_four = range(3, 4);
+        let four_to_five = range(4, 5);
+        let five_to_seven = range(5, 7);
+        let seven_to_nine = range(7, 9);
+        let nine_to_ten = range(9, 10);
+        let zero_to_ten = range(0, 110);
+        let ten_to_twenty = range(10, 20);
+        let zero_to_twenty = range(0, 20);
+        let zero_to_max = range(0, i32::MAX);
+        let twenty_to_max = range(20, i32::MAX);
+        let min_to_max = range(i32::MIN, i32::MAX);
+        assert_eq!(
+            list(vec![zero_to_three, seven_to_nine, four_to_five]).count(),
+            3
+        );
+        assert_eq!(
+            list(vec![
+                zero_to_three,
+                seven_to_nine,
+                range(0, 11),
+                four_to_five
+            ])
+            .count(),
+            1
+        );
+        assert_eq!(
+            list(vec![zero_to_three, seven_to_nine, four_to_five]),
+            list(vec![seven_to_nine, four_to_five, zero_to_three])
+        );
+        assert_eq!(
+            list(vec![ten_to_twenty, twenty_to_max, zero_to_ten]),
+            list(vec![zero_to_max])
+        );
+        assert_eq!(
+            list(vec![twenty_to_max, zero_to_ten]).union(&list(vec![zero_to_twenty])),
+            list(vec![zero_to_max])
+        );
+        assert_eq!(
+            list(vec![min_to_zero]).negate(i32::MIN, i32::MAX).unwrap(),
+            list(vec![zero_to_max])
+        );
+        assert_eq!(
+            list(vec![min_to_max]).subtract(&DiscontinuousRange::from_range(zero_to_twenty)),
+            list(vec![min_to_zero, twenty_to_max])
+        );
+        assert_eq!(
+            list(vec![min_to_max]).subtract(&DiscontinuousRange::from_range(min_to_zero)),
+            list(vec![zero_to_max])
+        );
+        assert_eq!(
+            list(vec![min_to_max]).subtract(&DiscontinuousRange::from_range(zero_to_max)),
+            list(vec![min_to_zero])
+        );
+        assert_eq!(
+            list(vec![ten_to_twenty]).subtract(&DiscontinuousRange::from_range(zero_to_max)),
+            DiscontinuousRange::empty()
+        );
+        assert_eq!(
+            list(vec![zero_to_max]).subtract(&list(vec![min_to_zero, zero_to_twenty])),
+            list(vec![twenty_to_max])
+        );
+        assert_eq!(
+            list(vec![zero_to_max]).subtract(&list(vec![min_to_zero, twenty_to_max])),
+            list(vec![zero_to_twenty])
+        );
+        assert_eq!(
+            list(vec![zero_to_max]).subtract(&list(vec![
+                min_to_zero,
+                zero_to_three,
+                three_to_four,
+                five_to_seven,
+                seven_to_nine,
+                ten_to_twenty,
+            ])),
+            list(vec![four_to_five, nine_to_ten, twenty_to_max])
+        );
+        assert_eq!(
+            list(vec![zero_to_max]).intersect(&list(vec![min_to_zero, zero_to_twenty])),
+            list(vec![zero_to_twenty])
+        );
+        assert!(list(vec![zero_to_max]).intersects_range(zero_to_twenty));
+        assert!(list(vec![zero_to_max]).contains_all(&list(vec![zero_to_twenty])));
+        assert!(list(vec![zero_to_three]).equals_single(zero_to_three));
+        assert!(list(vec![zero_to_three]).as_continuous().is_ok());
+        assert_eq!(
+            list(vec![zero_to_three, seven_to_nine, four_to_five]).to_string(),
+            "0 : 3, 4 : 5, 7 : 9"
+        );
+        assert_eq!(DiscontinuousRange::<i32>::empty().to_string(), "Empty");
+    }
+
+    #[test]
+    fn discontinuous_range_quirks_match_probed_runtime() {
+        use super::{DiscontinuousRange, Range};
+        fn range(start: i32, end: i32) -> Range<i32> {
+            Range::new(start, end).unwrap()
+        }
+        // Multi-member negate fails exactly like the probed runtime, while empty and
+        // single-member negations behave normally.
+        assert!(DiscontinuousRange::from_vec(vec![range(0, 3), range(7, 9)])
+            .negate(i32::MIN, i32::MAX)
+            .is_err());
+        assert_eq!(
+            DiscontinuousRange::<i32>::empty()
+                .negate(i32::MIN, i32::MAX)
+                .unwrap(),
+            DiscontinuousRange::from_range(range(i32::MIN, i32::MAX))
+        );
+        // Subtracting a strictly lesser or strictly greater cutter drops everything,
+        // and leftovers vanish once the cutter list runs out first.
+        assert_eq!(
+            DiscontinuousRange::from_range(range(10, 20))
+                .subtract(&DiscontinuousRange::from_range(range(0, 5))),
+            DiscontinuousRange::empty()
+        );
+        assert_eq!(
+            DiscontinuousRange::from_range(range(0, 20))
+                .subtract(&DiscontinuousRange::from_range(range(30, 40))),
+            DiscontinuousRange::empty()
+        );
+        assert_eq!(
+            DiscontinuousRange::from_vec(vec![range(0, 10), range(20, 30)]).subtract(
+                &DiscontinuousRange::from_vec(vec![range(0, 5), range(6, 7)])
+            ),
+            DiscontinuousRange::from_vec(vec![range(5, 6), range(7, 10)])
+        );
+        // Explicit conversion succeeds only for continuous ranges.
+        assert!(DiscontinuousRange::from_vec(vec![range(0, 3), range(7, 9)])
+            .as_continuous()
+            .is_err());
+        // Two-pointer intersect skips non-overlapping heads on either side.
+        assert!(!DiscontinuousRange::from_range(range(0, 3))
+            .intersects(&DiscontinuousRange::from_range(range(7, 9))));
     }
 }
