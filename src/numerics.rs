@@ -25,6 +25,10 @@
 //!   Two probed runtime quirks are replicated exactly: `subtract` drops residues once the
 //!   cutter list is exhausted, and multi-member `negate` fails on its gap construction.
 //!   `IComparableExtensions` needs no port: the four predicates are plain operators here.
+//! - `relative_distance` ports the `0..=1` similarity metrics over scalars, 2D/3D/4D
+//!   vectors, colors, bone weights, and matrices plus checked array averaging. The source
+//!   has no production callers; the port preserves the exact formulas for future
+//!   semantic comparison work.
 //! - Value types mirror their sources field-for-field: `Vector2i`/`Vector3i` integer
 //!   vectors (including the fall-through-to-Z member lookup and the throwing
 //!   member-by-value search), `BoneWeight1`/`BoneWeight4` weights with exact-sum
@@ -78,6 +82,24 @@ impl Vec3 {
     /// `Vector3.Length()` in single precision.
     pub fn length(self) -> f32 {
         (self.x * self.x + self.y * self.y + self.z * self.z).sqrt()
+    }
+
+    /// Squared length in single precision.
+    pub fn length_squared(self) -> f32 {
+        self.x * self.x + self.y * self.y + self.z * self.z
+    }
+
+    /// `Vector3.Distance` in single precision.
+    pub fn distance(self, other: Self) -> f32 {
+        self.distance_squared(other).sqrt()
+    }
+
+    /// `Vector3.DistanceSquared` in single precision.
+    pub fn distance_squared(self, other: Self) -> f32 {
+        let dx = self.x - other.x;
+        let dy = self.y - other.y;
+        let dz = self.z - other.z;
+        dx * dx + dy * dy + dz * dz
     }
 
     /// `Vector3Extensions.Dot` in single precision.
@@ -263,6 +285,89 @@ pub struct Vec4 {
     pub y: f32,
     pub z: f32,
     pub w: f32,
+}
+
+impl Vec4 {
+    /// `new Vector4(x, y, z, w)`.
+    pub const fn new(x: f32, y: f32, z: f32, w: f32) -> Self {
+        Self { x, y, z, w }
+    }
+
+    /// The zero vector.
+    pub const ZERO: Self = Self::new(0.0, 0.0, 0.0, 0.0);
+
+    /// Squared length in single precision.
+    pub fn length_squared(self) -> f32 {
+        self.x * self.x + self.y * self.y + self.z * self.z + self.w * self.w
+    }
+
+    /// `Vector4.Length()` in single precision.
+    pub fn length(self) -> f32 {
+        self.length_squared().sqrt()
+    }
+
+    /// `Vector4.Distance` in single precision.
+    pub fn distance(self, other: Self) -> f32 {
+        self.distance_squared(other).sqrt()
+    }
+
+    /// `Vector4.DistanceSquared` in single precision.
+    pub fn distance_squared(self, other: Self) -> f32 {
+        let dx = self.x - other.x;
+        let dy = self.y - other.y;
+        let dz = self.z - other.z;
+        let dw = self.w - other.w;
+        dx * dx + dy * dy + dz * dz + dw * dw
+    }
+
+    /// Drops the fourth lane, mirroring the external `AsVector3` helper used by mesh
+    /// and model exporters (its definition lives outside the frozen Numerics sources).
+    pub const fn as_vec3(self) -> Vec3 {
+        Vec3 {
+            x: self.x,
+            y: self.y,
+            z: self.z,
+        }
+    }
+}
+
+/// A single-precision 2D vector mirroring `System.Numerics.Vector2`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Vec2 {
+    pub x: f32,
+    pub y: f32,
+}
+
+impl Vec2 {
+    /// `new Vector2(x, y)`.
+    pub const fn new(x: f32, y: f32) -> Self {
+        Self { x, y }
+    }
+
+    /// The zero vector.
+    pub const ZERO: Self = Self::new(0.0, 0.0);
+
+    /// Squared length in single precision.
+    pub fn length_squared(self) -> f32 {
+        self.x * self.x + self.y * self.y
+    }
+
+    /// `Vector2.Length()` in single precision.
+    pub fn length(self) -> f32 {
+        self.length_squared().sqrt()
+    }
+
+    /// `Vector2.Distance` in single precision.
+    pub fn distance(self, other: Self) -> f32 {
+        self.distance_squared(other).sqrt()
+    }
+
+    /// `Vector2.DistanceSquared` in single precision.
+    pub fn distance_squared(self, other: Self) -> f32 {
+        let dx = self.x - other.x;
+        let dy = self.y - other.y;
+        dx * dx + dy * dy
+    }
 }
 
 /// A row-major 4x4 single-precision matrix mirroring `System.Numerics.Matrix4x4`.
@@ -505,6 +610,14 @@ impl Mat4 {
             m43: self.m34,
             m44: self.m44,
         }
+    }
+
+    /// All sixteen lanes in row-major field order, for lane-wise averaging.
+    pub const fn as_array(self) -> [f32; 16] {
+        [
+            self.m11, self.m12, self.m13, self.m14, self.m21, self.m22, self.m23, self.m24,
+            self.m31, self.m32, self.m33, self.m34, self.m41, self.m42, self.m43, self.m44,
+        ]
     }
 
     /// Matrix inverse via Cramer/adjugate evaluation.
@@ -1613,6 +1726,135 @@ impl<T: core::fmt::Display> core::fmt::Display for DiscontinuousRange<T> {
     }
 }
 
+/// Similarity metrics mirroring `RelativeDistanceMethods`.
+///
+/// Every function returns a value in `0..=1`: zero means equality, one means great
+/// distance, and array forms report the per-lane average. The source has no production
+/// callers in the snapshot; the port exists so future semantic comparison work can
+/// reuse the exact baseline formulas instead of inventing tolerances.
+pub mod relative_distance {
+    use super::{BoneWeight4, ColorFloat, Mat4, Vec2, Vec3, Vec4};
+
+    /// `RelativeDistance(float, float)`: exact equality short-circuits to zero.
+    pub fn scalar(first: f32, second: f32) -> f32 {
+        if first == second {
+            0.0
+        } else {
+            (first - second).abs() / (first.abs() + second.abs())
+        }
+    }
+
+    /// `RelativeDistance2(float, float)`: the squared ratio form.
+    pub fn scalar_squared(first: f32, second: f32) -> f32 {
+        let ratio = (first - second) / (first + second);
+        ratio * ratio
+    }
+
+    /// `RelativeDistance(Vector2, Vector2)`.
+    pub fn vec2(first: Vec2, second: Vec2) -> f32 {
+        if first == second {
+            0.0
+        } else {
+            first.distance(second) / (first.length() + second.length())
+        }
+    }
+
+    /// `RelativeDistance2(Vector2, Vector2)`.
+    pub fn vec2_squared(first: Vec2, second: Vec2) -> f32 {
+        let sum = Vec2::new(first.x + second.x, first.y + second.y);
+        first.distance_squared(second) / sum.length_squared()
+    }
+
+    /// `RelativeDistance(Vector3, Vector3)`.
+    pub fn vec3(first: Vec3, second: Vec3) -> f32 {
+        if first == second {
+            0.0
+        } else {
+            first.distance(second) / (first.length() + second.length())
+        }
+    }
+
+    /// `RelativeDistance(Vector4, Vector4)`.
+    pub fn vec4(first: Vec4, second: Vec4) -> f32 {
+        if first == second {
+            0.0
+        } else {
+            first.distance(second) / (first.length() + second.length())
+        }
+    }
+
+    /// `RelativeDistance(ColorFloat, ColorFloat)`, via the backing vector.
+    pub fn color(first: ColorFloat, second: ColorFloat) -> f32 {
+        vec4(
+            Vec4::new(first.r, first.g, first.b, first.a),
+            Vec4::new(second.r, second.g, second.b, second.a),
+        )
+    }
+
+    /// `RelativeDistance(BoneWeight4, BoneWeight4)`: the mean of the four lane distances.
+    pub fn bone_weight(first: BoneWeight4, second: BoneWeight4) -> f32 {
+        (scalar(first.weights[0], second.weights[0])
+            + scalar(first.weights[1], second.weights[1])
+            + scalar(first.weights[2], second.weights[2])
+            + scalar(first.weights[3], second.weights[3]))
+            / 4.0
+    }
+
+    /// `RelativeDistance(Matrix4x4, Matrix4x4)`: the mean of the sixteen lane distances.
+    pub fn mat4(first: Mat4, second: Mat4) -> f32 {
+        let left = first.as_array();
+        let right = second.as_array();
+        let mut sum = 0.0;
+        for (index, lane) in left.iter().enumerate() {
+            sum += scalar(*lane, right[index]);
+        }
+        sum / 16.0
+    }
+
+    /// Mismatched array lengths for the averaging forms.
+    #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+    pub struct LengthMismatch {
+        /// Length of the first array.
+        pub first: usize,
+        /// Length of the second array.
+        pub second: usize,
+    }
+
+    impl core::fmt::Display for LengthMismatch {
+        fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            write!(
+                formatter,
+                "Array lengths differ: {} != {}",
+                self.first, self.second
+            )
+        }
+    }
+
+    impl std::error::Error for LengthMismatch {}
+
+    /// Shared averaging core behind all seven source array overloads (scalar, 2D/3D/4D
+    /// vectors, colors, bone weights, matrices): the lane-distance sum plus the lane
+    /// count. Length mismatches are explicit errors here; the source only asserts in
+    /// debug builds.
+    pub fn average<T: Copy>(
+        first: &[T],
+        second: &[T],
+        distance: fn(T, T) -> f32,
+    ) -> Result<(f32, usize), LengthMismatch> {
+        if first.len() != second.len() {
+            return Err(LengthMismatch {
+                first: first.len(),
+                second: second.len(),
+            });
+        }
+        let mut sum = 0.0;
+        for (index, value) in first.iter().enumerate() {
+            sum += distance(*value, second[index]);
+        }
+        Ok((sum, first.len()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{angle_from_3_points, Quat, Vec3, GIMBAL_TEST_THRESHOLD, K_EPSILON};
@@ -2383,5 +2625,130 @@ mod tests {
         // Two-pointer intersect skips non-overlapping heads on either side.
         assert!(!DiscontinuousRange::from_range(range(0, 3))
             .intersects(&DiscontinuousRange::from_range(range(7, 9))));
+    }
+
+    #[test]
+    fn relative_distances_match_probed_runtime() {
+        use super::relative_distance::{
+            average, bone_weight, color, mat4, scalar, scalar_squared, vec2, vec2_squared, vec3,
+            vec4,
+        };
+        use super::{BoneWeight4, ColorFloat, Mat4, Vec2, Vec3, Vec4};
+        // Pinned probe words from the isolated dotnet battery.
+        assert_eq!(scalar(5.0, -3.0).to_bits(), 0x3F800000);
+        assert_eq!(scalar(0.0, 0.0).to_bits(), 0x00000000);
+        assert_eq!(scalar(1.0, 2.0).to_bits(), 0x3EAAAAAB);
+        assert_eq!(scalar(-1.0, -2.0).to_bits(), 0x3EAAAAAB);
+        assert_eq!(scalar_squared(5.0, 3.0).to_bits(), 0x3D800000);
+        assert_eq!(
+            vec2_squared(Vec2::new(1.0, 0.0), Vec2::new(2.0, 0.0)).to_bits(),
+            0x3DE38E39
+        );
+        assert_eq!(
+            vec2(Vec2::new(1.0, 2.0), Vec2::new(4.0, 6.0)).to_bits(),
+            0x3F077D85
+        );
+        assert_eq!(
+            color(ColorFloat::BLACK, ColorFloat::WHITE).to_bits(),
+            0x3F13CD3A
+        );
+        assert_eq!(
+            bone_weight(
+                BoneWeight4::new(0.25, 0.25, 0.25, 0.25, 0, 1, 2, 3),
+                BoneWeight4::new(0.5, 0.5, 0.0, 0.0, 0, 1, 2, 3),
+            )
+            .to_bits(),
+            0x3F2AAAAB
+        );
+        assert_eq!(
+            mat4(
+                Mat4::identity(),
+                Mat4::create_scale(Vec3 {
+                    x: 2.0,
+                    y: 2.0,
+                    z: 2.0
+                })
+            )
+            .to_bits(),
+            0x3D800000
+        );
+        assert_eq!(
+            average(&[1.0, 2.0], &[1.0, 4.0], scalar),
+            Ok((f32::from_bits(0x3EAAAAAB), 2))
+        );
+        // Opposite signs saturate at one and symmetry is bit-exact.
+        assert_eq!(scalar(5.0, -3.0), 1.0);
+        assert_eq!(scalar(1.5, -0.25), scalar(-0.25, 1.5));
+        // Axis-aligned distances agree exactly across dimensions, like the reference test.
+        let one_d = scalar(1.0, 2.0);
+        assert_eq!(vec2(Vec2::new(1.0, 0.0), Vec2::new(2.0, 0.0)), one_d);
+        assert_eq!(
+            vec3(
+                Vec3 {
+                    x: 1.0,
+                    y: 0.0,
+                    z: 0.0
+                },
+                Vec3 {
+                    x: 2.0,
+                    y: 0.0,
+                    z: 0.0
+                },
+            ),
+            one_d
+        );
+        assert_eq!(
+            vec4(Vec4::new(1.0, 0.0, 0.0, 0.0), Vec4::new(2.0, 0.0, 0.0, 0.0)),
+            one_d
+        );
+        // Zero equals zero in every dimension.
+        assert_eq!(scalar(0.0, 0.0), 0.0);
+        assert_eq!(vec2(Vec2::ZERO, Vec2::ZERO), 0.0);
+        assert_eq!(
+            vec3(
+                Vec3 {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0
+                },
+                Vec3 {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0
+                },
+            ),
+            0.0
+        );
+        assert_eq!(vec4(Vec4::ZERO, Vec4::ZERO), 0.0);
+        // `Vec4::as_vec3` drops the fourth lane for mesh/model callers.
+        assert_eq!(
+            Vec4::new(1.0, 2.0, 3.0, 4.0).as_vec3(),
+            Vec3 {
+                x: 1.0,
+                y: 2.0,
+                z: 3.0
+            }
+        );
+        // Deterministic fixture properties: self-zero, nonnegativity, symmetry, and the
+        // triangle inequality, mirroring RelativeDistanceTests without randomness.
+        let fixture = [-2.0f32, -1.5, -1.0, -0.25, 0.0, 0.25, 0.5, 1.0, 1.5, 2.0];
+        for value in fixture {
+            assert_eq!(scalar(value, value), 0.0, "{value}");
+        }
+        for window in fixture.windows(2) {
+            let (first, second) = (window[0], window[1]);
+            let distance = scalar(first, second);
+            assert!(distance >= 0.0, "{first} {second}");
+            assert_eq!(distance, scalar(second, first));
+        }
+        for window in fixture.windows(3) {
+            let (first, second, third) = (window[0], window[1], window[2]);
+            assert!(
+                scalar(first, second) + scalar(second, third) >= scalar(first, third),
+                "{first} {second} {third}"
+            );
+        }
+        // Array averaging reports sums with counts and rejects mismatched lengths.
+        assert!(average(&[1.0], &[1.0, 2.0], scalar).is_err());
     }
 }
