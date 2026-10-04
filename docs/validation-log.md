@@ -1432,3 +1432,9 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 
 - Added docs/project-coverage.md: all 51 solution projects with capability, Rust counterpart, and honest status (libraries 3 investigated, 8 in progress, 11 uninvestigated; 15 tools inventoried by entry point; 8 test projects as executed evidence; 6 generators with outputs as audit target). Capability lines for unexamined projects come from project file listings, not behavior audits.
 - A summary miscount (7 vs 8 in-progress libraries) was caught on recount and corrected. This document is the gate backbone, not the gate: every uninvestigated row still needs behavior-ledger evidence.
+
+## Managed serialization types (2026-10-04)
+
+- Added src/serialized_file/managed_types.rs: the 17-variant PrimitiveType with size/system-name/C# rules, ECMA-335 element-code mapping with Complex fallback, Field shape with array/display rules, MaxDepth rules including sticky unknown, all six ManagedReferenceTypes registry shapes with every field constant, and the engine predicate tables with direct-comparison rules.
+- Six tests cover every table. An initial variant-count assertion used 19 from a miscount; the enum holds 17 and the test now asserts that. Cecil-backed resolution, assignability, and registry payload decoding stay open by necessity.
+- Final verification on Windows with Rust/Cargo 1.98.1: cargo fmt --all -- --check exit 0; cargo test --workspace --locked --quiet exit 0 (579 library, 23 CLI, 0 doc tests); cargo clippy --workspace --all-targets --locked -- -D warnings exit 0; tools/verify-baseline.ps1 exit 0 (1,449/1,449 reference files unchanged); git diff --check exit 0. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
