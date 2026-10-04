@@ -20,7 +20,7 @@
 
 use std::fmt::{self, Display, Formatter};
 
-use crate::numerics::BoneWeight4;
+use crate::numerics::{BoneWeight4, Color32, ColorFloat};
 
 use super::packed_bit_vector::{PackedBitVector, PackedBitVectorError, PackedBitVectorLimits};
 use super::packed_float_vector::{PackedBitVectorSingle, PackedFloatVectorError};
@@ -186,6 +186,14 @@ pub struct CompressedMesh {
     pub bind_poses: PackedBitVectorSingle,
     /// `Has_BindPoses()`, a generated gate that is true only before Unity 5.
     pub has_bind_poses: bool,
+    /// `FloatColors`.
+    pub float_colors: PackedBitVectorSingle,
+    /// `Has_FloatColors()`.
+    pub has_float_colors: bool,
+    /// `Colors`.
+    pub colors: PackedBitVector,
+    /// `Has_Colors()`.
+    pub has_colors: bool,
 }
 
 impl CompressedMesh {
@@ -583,6 +591,75 @@ impl CompressedMesh {
         self.bind_poses.pack(&floats, limits)?;
         Ok(())
     }
+
+    /// `GetFloatColors`.
+    pub fn get_float_colors(
+        &self,
+        limits: PackedBitVectorLimits,
+    ) -> Result<Vec<ColorFloat>, CompressedMeshError> {
+        if self.has_float_colors {
+            let data = self.float_colors.unpack_chunked(1, 1, 0, None, limits)?;
+            return float_array_to_color_float(&data);
+        }
+        if self.has_colors {
+            // The source temporarily quadruples the item count and quarters the bit size so the
+            // packed colors unpack as individual bytes; the clone keeps the vector unchanged.
+            let mut temp = self.colors.clone();
+            temp.num_items =
+                temp.num_items
+                    .checked_mul(4)
+                    .ok_or(CompressedMeshError::AllocationFailed {
+                        resource: "color count",
+                        requested: usize::MAX,
+                    })?;
+            temp.bit_size /= 4;
+            let ints = temp.unpack_ints(limits)?;
+            let count = temp.num_items as usize / 4;
+            let mut result = Vec::new();
+            result
+                .try_reserve_exact(count)
+                .map_err(|_| CompressedMeshError::AllocationFailed {
+                    resource: "decompressed colors",
+                    requested: count,
+                })?;
+            for v in 0..count {
+                let color = Color32::new(
+                    ints[4 * v] as u8,
+                    ints[4 * v + 1] as u8,
+                    ints[4 * v + 2] as u8,
+                    ints[4 * v + 3] as u8,
+                );
+                result.push(ColorFloat::from(color));
+            }
+            return Ok(result);
+        }
+        Ok(Vec::new())
+    }
+
+    /// `SetFloatColors`.
+    pub fn set_float_colors(
+        &mut self,
+        colors: &[ColorFloat],
+        limits: PackedBitVectorLimits,
+    ) -> Result<(), CompressedMeshError> {
+        if self.has_float_colors {
+            let mut floats = Vec::with_capacity(colors.len() * 4);
+            for color in colors {
+                floats.push(color.r);
+                floats.push(color.g);
+                floats.push(color.b);
+                floats.push(color.a);
+            }
+            self.float_colors.pack(&floats, limits)?;
+        } else if self.has_colors {
+            let mut values = Vec::with_capacity(colors.len());
+            for color in colors {
+                values.push(Color32::from(*color).rgba());
+            }
+            self.colors.pack_uints(&values, limits)?;
+        }
+        Ok(())
+    }
 }
 
 /// `Vector3.Normalize`, which divides each component by the length.
@@ -724,6 +801,34 @@ fn float_array_to_vector2(
     Ok(result)
 }
 
+/// `MeshHelper.FloatArrayToColorFloat`: reinterpret four floats as one RGBA color.
+fn float_array_to_color_float(input: &[f32]) -> Result<Vec<ColorFloat>, CompressedMeshError> {
+    if !input.len().is_multiple_of(4) {
+        return Err(CompressedMeshError::InvalidFloatArrayLength {
+            length: input.len(),
+            dimension: 4,
+        });
+    }
+    let count = input.len() / 4;
+    let mut result = Vec::new();
+    result
+        .try_reserve_exact(count)
+        .map_err(|_| CompressedMeshError::AllocationFailed {
+            resource: "color array",
+            requested: count,
+        })?;
+    for i in 0..count {
+        let base = i * 4;
+        result.push(ColorFloat::new(
+            input[base],
+            input[base + 1],
+            input[base + 2],
+            input[base + 3],
+        ));
+    }
+    Ok(result)
+}
+
 fn transpose(matrix: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
     let mut result = [[0f32; 4]; 4];
     for (row, values) in result.iter_mut().enumerate() {
@@ -762,7 +867,7 @@ fn make_float_and_sign_arrays_vec4(tangents: &[Vec4]) -> (Vec<f32>, Vec<u32>) {
 #[cfg(test)]
 mod tests {
     use super::{normalize, CompressedMesh, Vec2, Vec3, Vec4};
-    use crate::numerics::BoneWeight4;
+    use crate::numerics::{BoneWeight4, ColorFloat};
     use crate::resources::packed_bit_vector::PackedBitVectorLimits;
 
     fn limits() -> PackedBitVectorLimits {
@@ -1024,6 +1129,68 @@ mod tests {
                 1065353216, 0, 0, 0, 0, 1065353216, 0, 0, 0, 0, 1065353216, 0, 1073741824,
                 1077936128, 1082130432, 1065353216, 1056964610, 0, 0, 0, 0, 1048576004, 0, 0, 0, 0,
                 1073741824, 0, 3212836864, 0, 0, 1065353216
+            ]
+        );
+    }
+
+    /// Colors differential against the reference `CompressedMeshExtensions` (probe
+    /// `Temp/opencode/colorprobe`): the `FloatColors` path and the `Colors` byte path.
+    #[test]
+    fn colors_match_the_reference_runtime() {
+        let colors = [
+            ColorFloat::new(0.0, 0.0, 0.0, 1.0),
+            ColorFloat::new(0.5, 0.25, 1.0, 0.0),
+            ColorFloat::new(0.1, 0.2, 0.3, 0.4),
+            ColorFloat::new(1.0, 1.0, 1.0, 1.0),
+        ];
+
+        let mut mesh = CompressedMesh {
+            has_float_colors: true,
+            ..CompressedMesh::default()
+        };
+        mesh.set_float_colors(&colors, limits()).unwrap();
+        let got = mesh.get_float_colors(limits()).unwrap();
+        let bits: Vec<u32> = got
+            .iter()
+            .flat_map(|color| {
+                [
+                    color.r.to_bits(),
+                    color.g.to_bits(),
+                    color.b.to_bits(),
+                    color.a.to_bits(),
+                ]
+            })
+            .collect();
+        assert_eq!(
+            bits,
+            [
+                0, 0, 0, 1065353216, 1056964609, 1048576001, 1065353216, 0, 1036831953, 1045220557,
+                1050253723, 1053609165, 1065353216, 1065353216, 1065353216, 1065353216
+            ]
+        );
+
+        let mut mesh = CompressedMesh {
+            has_colors: true,
+            ..CompressedMesh::default()
+        };
+        mesh.set_float_colors(&colors, limits()).unwrap();
+        let got = mesh.get_float_colors(limits()).unwrap();
+        let bits: Vec<u32> = got
+            .iter()
+            .flat_map(|color| {
+                [
+                    color.r.to_bits(),
+                    color.g.to_bits(),
+                    color.b.to_bits(),
+                    color.a.to_bits(),
+                ]
+            })
+            .collect();
+        assert_eq!(
+            bits,
+            [
+                0, 0, 0, 1065353216, 1056898815, 1048378621, 1065353216, 0, 1036568777, 1045220557,
+                1050187929, 1053609165, 1065353216, 1065353216, 1065353216, 1065353216
             ]
         );
     }
