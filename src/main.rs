@@ -4166,6 +4166,7 @@ mod tests {
                         asset_bundle_name: Some(prior_bundle_name.to_owned()),
                         original_path: Some(retained_path.to_owned()),
                         original_directory: Some(retained_directory.to_owned()),
+                        ..Default::default()
                     },
                 ],
                 Default::default(),
@@ -4199,7 +4200,11 @@ mod tests {
         );
         assert_eq!(
             type_grouped_report.metadata_string_bytes,
-            "data.unity3d".len() + retained_path.len() + retained_directory.len()
+            "data.unity3d".len()
+                + retained_path.len()
+                + retained_directory.len()
+                + "Existing".len()
+                + "asset".len()
         );
 
         let (grouped_paths, grouped_report) =
