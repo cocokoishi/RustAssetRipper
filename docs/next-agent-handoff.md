@@ -132,3 +132,11 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 ## 9. Honest status
 
 **The project is not complete. Phase 1 is active and its gate has not passed. Phase 2 has not started.** The next AI should treat this file as a detailed checkpoint, not as approval to weaken the goal or inspect user bundles early.
+
+
+## 10. Checkpoint: mesh decode path (2026-10-04)
+
+- The `CompressedMesh` decoder is complete and runtime-verified against `AssetRipper.SourceGenerated.Extensions` in `src/resources/compressed_mesh.rs`: geometry channels (`dd...`/`659bbf3`), UV channels and bind poses (`d4c6527`), and color channels (`ae6ed43`).
+- Added `src/resources/vertex_data_blob.rs` (`ae...`; the next commit): the full `VertexDataBlob` create/parse path plus the `MeshHelper` format conversions. A committed fixture (`src/resources/vertex_data_blob_fixture.txt`) captured from the reference runtime pins channels, streams, and bytes for six versions under both endians; the Rust test matches them bit-for-bit and round-trips `ReadData`.
+- Not yet ported on this path: skin-stream writing in `Create` (source `//todo`), `VertexDataExtensions.GenerateVertices`/`GenerateSkin`/`GetChannel`, and bind-pose/`MeshData` index-buffer handling.
+- State at this checkpoint: 712 library + 23 CLI tests, warnings-denied Clippy, format check, 1,449-file baseline verifier, and `git diff --check` all pass. Phase 1 is still active; the Phase 1 gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
