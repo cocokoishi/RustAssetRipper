@@ -25,6 +25,22 @@ use crate::numerics::BoneWeight4;
 use super::packed_bit_vector::{PackedBitVector, PackedBitVectorError, PackedBitVectorLimits};
 use super::packed_float_vector::{PackedBitVectorSingle, PackedFloatVectorError};
 
+/// A `System.Numerics.Vector2`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Vec2 {
+    /// `X`.
+    pub x: f32,
+    /// `Y`.
+    pub y: f32,
+}
+
+impl Vec2 {
+    /// Build from components.
+    pub const fn new(x: f32, y: f32) -> Self {
+        Self { x, y }
+    }
+}
+
 /// A `System.Numerics.Vector3`.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Vec3 {
@@ -81,6 +97,12 @@ pub enum CompressedMeshError {
     },
     /// A sign or weight array was shorter than the data required.
     MissingElementData { needed: usize, available: usize },
+    /// The two-channel UV fast path requires equal-length channel arrays.
+    MismatchedUvLengths { first: usize, second: usize },
+    /// A UV channel index is outside `0..8`.
+    InvalidUvChannel { channel: usize },
+    /// A UV channel dimension is outside `1..=4`.
+    InvalidUvDimension { dimension: usize },
 }
 
 impl Display for CompressedMeshError {
@@ -107,6 +129,16 @@ impl Display for CompressedMeshError {
                 formatter,
                 "compressed mesh needed {needed} elements but only {available} were available"
             ),
+            Self::MismatchedUvLengths { first, second } => write!(
+                formatter,
+                "UV channels must be the same length, got {first} and {second}"
+            ),
+            Self::InvalidUvChannel { channel } => {
+                write!(formatter, "UV channel {channel} is outside 0..8")
+            }
+            Self::InvalidUvDimension { dimension } => {
+                write!(formatter, "UV dimension {dimension} is outside 1..=4")
+            }
         }
     }
 }
@@ -144,6 +176,16 @@ pub struct CompressedMesh {
     pub tangent_signs: PackedBitVector,
     /// `Triangles`.
     pub triangles: PackedBitVector,
+    /// `UV`.
+    pub uv: PackedBitVectorSingle,
+    /// `UVInfo` (four bits per channel).
+    pub uv_info: u32,
+    /// `Has_UVInfo()`, supplied by the caller because it is a generated version gate.
+    pub has_uv_info: bool,
+    /// `BindPoses`.
+    pub bind_poses: PackedBitVectorSingle,
+    /// `Has_BindPoses()`, a generated gate that is true only before Unity 5.
+    pub has_bind_poses: bool,
 }
 
 impl CompressedMesh {
@@ -393,6 +435,154 @@ impl CompressedMesh {
         self.bone_indices.pack_ints(&bone_index_list, limits)?;
         Ok(())
     }
+
+    /// `GetUV`.
+    pub fn get_uv(
+        &self,
+        limits: PackedBitVectorLimits,
+    ) -> Result<[Option<Vec<Vec2>>; 8], CompressedMeshError> {
+        let mut result: [Option<Vec<Vec2>>; 8] = Default::default();
+        if self.uv.num_items == 0 {
+            return Ok(result);
+        }
+        let vertex_count = self.vertices.num_items as usize / 3;
+        if self.has_uv_info && self.uv_info != 0 {
+            let mut uv_src_offset = 0usize;
+            for (channel, slot) in result.iter_mut().enumerate() {
+                *slot = read_channel(
+                    &self.uv,
+                    self.uv_info,
+                    channel,
+                    vertex_count,
+                    &mut uv_src_offset,
+                    limits,
+                )?;
+            }
+        } else {
+            let data = self
+                .uv
+                .unpack_chunked(2, 2, 0, Some(vertex_count), limits)?;
+            result[0] = Some(float_array_to_vector2(&data, 2)?);
+            if self.uv.num_items as usize >= vertex_count * 4 {
+                let data =
+                    self.uv
+                        .unpack_chunked(2, 2, vertex_count * 2, Some(vertex_count), limits)?;
+                result[1] = Some(float_array_to_vector2(&data, 2)?);
+            }
+        }
+        Ok(result)
+    }
+
+    /// `SetUV`.
+    pub fn set_uv(
+        &mut self,
+        uv: [&[Vec2]; 8],
+        limits: PackedBitVectorLimits,
+    ) -> Result<(), CompressedMeshError> {
+        let late_channels_empty = uv[2..].iter().all(|channel| channel.is_empty());
+        if !self.has_uv_info || late_channels_empty {
+            self.uv_info = 0;
+            if uv[0].is_empty() {
+                self.uv = PackedBitVectorSingle::default();
+            } else if uv[1].is_empty() {
+                self.pack_uv(uv[0], limits)?;
+            } else {
+                if uv[0].len() != uv[1].len() {
+                    return Err(CompressedMeshError::MismatchedUvLengths {
+                        first: uv[0].len(),
+                        second: uv[1].len(),
+                    });
+                }
+                let mut concatenated = Vec::with_capacity(uv[0].len() + uv[1].len());
+                concatenated.extend_from_slice(uv[0]);
+                concatenated.extend_from_slice(uv[1]);
+                self.pack_uv(&concatenated, limits)?;
+            }
+        } else {
+            let mut buffer = Vec::new();
+            let mut uv_info = 0u32;
+            for (channel, data) in uv.iter().enumerate() {
+                if !data.is_empty() {
+                    uv_info = add_channel_info(uv_info, channel, true, 2)?;
+                    buffer.extend_from_slice(data);
+                }
+            }
+            self.pack_uv(&buffer, limits)?;
+            self.uv_info = uv_info;
+        }
+        Ok(())
+    }
+
+    fn pack_uv(
+        &mut self,
+        values: &[Vec2],
+        limits: PackedBitVectorLimits,
+    ) -> Result<(), CompressedMeshError> {
+        let mut floats = Vec::with_capacity(values.len() * 2);
+        for value in values {
+            floats.push(value.x);
+            floats.push(value.y);
+        }
+        self.uv.pack(&floats, limits)?;
+        Ok(())
+    }
+
+    /// `GetBindPoses` (Unity 5 and earlier).
+    pub fn get_bind_poses(
+        &self,
+        limits: PackedBitVectorLimits,
+    ) -> Result<Vec<[[f32; 4]; 4]>, CompressedMeshError> {
+        if !self.has_bind_poses {
+            return Ok(Vec::new());
+        }
+        const MATRIX_FLOATS: usize = 16;
+        let count = self.bind_poses.num_items as usize / MATRIX_FLOATS;
+        let data =
+            self.bind_poses
+                .unpack_chunked(MATRIX_FLOATS, MATRIX_FLOATS, 0, Some(count), limits)?;
+        let mut result = Vec::new();
+        result
+            .try_reserve_exact(count)
+            .map_err(|_| CompressedMeshError::AllocationFailed {
+                resource: "bind poses",
+                requested: count,
+            })?;
+        for i in 0..count {
+            let base = i * MATRIX_FLOATS;
+            let mut matrix = [[0f32; 4]; 4];
+            for (row, values) in matrix.iter_mut().enumerate() {
+                for (column, value) in values.iter_mut().enumerate() {
+                    *value = data[base + row * 4 + column];
+                }
+            }
+            result.push(transpose(matrix));
+        }
+        Ok(result)
+    }
+
+    /// `SetBindPoses` (Unity 5 and earlier).
+    pub fn set_bind_poses(
+        &mut self,
+        bind_poses: &[[[f32; 4]; 4]],
+        limits: PackedBitVectorLimits,
+    ) -> Result<(), CompressedMeshError> {
+        if !self.has_bind_poses {
+            return Ok(());
+        }
+        if bind_poses.is_empty() {
+            self.bind_poses = PackedBitVectorSingle::default();
+            return Ok(());
+        }
+        let mut floats = Vec::with_capacity(bind_poses.len() * 16);
+        for matrix in bind_poses {
+            let transposed = transpose(*matrix);
+            for row in transposed {
+                floats.extend_from_slice(&row);
+            }
+        }
+        self.bind_poses.pack(&floats, limits)?;
+        Ok(())
+    }
 }
 
 /// `Vector3.Normalize`, which divides each component by the length.
@@ -447,6 +637,103 @@ fn float_array_to_vector3(
     Ok(result)
 }
 
+/// `UVInfo.GetChannelInfo`.
+fn get_channel_info(value: u32, channel: usize) -> Result<(bool, usize), CompressedMeshError> {
+    if channel >= 8 {
+        return Err(CompressedMeshError::InvalidUvChannel { channel });
+    }
+    let bits = (value >> (channel * 4)) & 0xF;
+    let exists = bits & 0b0100 != 0;
+    let dimension = 1 + (bits & 0b0011) as usize;
+    Ok((exists, dimension))
+}
+
+/// `UVInfo.AddChannelInfo`.
+fn add_channel_info(
+    value: u32,
+    channel: usize,
+    exists: bool,
+    dimension: usize,
+) -> Result<u32, CompressedMeshError> {
+    if channel >= 8 {
+        return Err(CompressedMeshError::InvalidUvChannel { channel });
+    }
+    if !(1..=4).contains(&dimension) {
+        return Err(CompressedMeshError::InvalidUvDimension { dimension });
+    }
+    let shift = (channel * 4) as u32;
+    let bits = (if exists { 0b0100u32 } else { 0 }) | (dimension as u32 - 1);
+    Ok((value & !(0xFu32 << shift)) | (bits << shift))
+}
+
+/// `CompressedMeshExtensions.ReadChannel`.
+fn read_channel(
+    vector: &PackedBitVectorSingle,
+    uv_info: u32,
+    channel: usize,
+    vertex_count: usize,
+    current_offset: &mut usize,
+    limits: PackedBitVectorLimits,
+) -> Result<Option<Vec<Vec2>>, CompressedMeshError> {
+    let (exists, dimension) = get_channel_info(uv_info, channel)?;
+    if !exists {
+        return Ok(None);
+    }
+    let data = vector.unpack_chunked(
+        dimension,
+        dimension,
+        *current_offset,
+        Some(vertex_count),
+        limits,
+    )?;
+    *current_offset += dimension * vertex_count;
+    Ok(Some(float_array_to_vector2(&data, dimension)?))
+}
+
+/// `MeshHelper.FloatArrayToVector2`.
+fn float_array_to_vector2(
+    input: &[f32],
+    dimension: usize,
+) -> Result<Vec<Vec2>, CompressedMeshError> {
+    if !(1..=4).contains(&dimension) {
+        return Err(CompressedMeshError::InvalidDimension { dimension });
+    }
+    if !input.len().is_multiple_of(dimension) {
+        return Err(CompressedMeshError::InvalidFloatArrayLength {
+            length: input.len(),
+            dimension,
+        });
+    }
+    let count = input.len() / dimension;
+    let mut result = Vec::new();
+    result
+        .try_reserve_exact(count)
+        .map_err(|_| CompressedMeshError::AllocationFailed {
+            resource: "vector2 array",
+            requested: count,
+        })?;
+    for i in 0..count {
+        let base = i * dimension;
+        let value = if dimension == 1 {
+            Vec2::new(input[base], 0.0)
+        } else {
+            Vec2::new(input[base], input[base + 1])
+        };
+        result.push(value);
+    }
+    Ok(result)
+}
+
+fn transpose(matrix: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
+    let mut result = [[0f32; 4]; 4];
+    for (row, values) in result.iter_mut().enumerate() {
+        for (column, value) in values.iter_mut().enumerate() {
+            *value = matrix[column][row];
+        }
+    }
+    result
+}
+
 fn make_float_and_sign_arrays_vec3(normals: &[Vec3]) -> (Vec<f32>, Vec<u32>) {
     let mut floats = Vec::with_capacity(normals.len() * 2);
     let mut signs = Vec::with_capacity(normals.len());
@@ -474,7 +761,7 @@ fn make_float_and_sign_arrays_vec4(tangents: &[Vec4]) -> (Vec<f32>, Vec<u32>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize, CompressedMesh, Vec3, Vec4};
+    use super::{normalize, CompressedMesh, Vec2, Vec3, Vec4};
     use crate::numerics::BoneWeight4;
     use crate::resources::packed_bit_vector::PackedBitVectorLimits;
 
@@ -618,6 +905,125 @@ mod tests {
             [
                 1065295264, 1034556351, 0, 3206125978, 1061997773, 0, 1058262330, 1058262330,
                 1058262330
+            ]
+        );
+    }
+
+    fn vec2_bits(values: &[Vec2]) -> Vec<u32> {
+        values
+            .iter()
+            .flat_map(|value| [value.x.to_bits(), value.y.to_bits()])
+            .collect()
+    }
+
+    fn three_vertices() -> [Vec3; 3] {
+        [
+            Vec3::new(0.0, 0.5, 0.25),
+            Vec3::new(1.0, 1.5, 1.25),
+            Vec3::new(2.0, 2.5, 2.25),
+        ]
+    }
+
+    /// Byte-for-byte differential against the reference `CompressedMeshExtensions` UV and
+    /// bind-pose paths (probe `Temp/opencode/uvprobe`).
+    #[test]
+    fn uv_and_bind_poses_match_the_reference_runtime() {
+        let pair = [
+            Vec2::new(0.0, 0.0),
+            Vec2::new(0.25, 0.5),
+            Vec2::new(1.0, -1.0),
+        ];
+        let triple = [
+            Vec2::new(0.1, 0.2),
+            Vec2::new(0.3, -0.4),
+            Vec2::new(0.5, 0.6),
+        ];
+        let empty: [Vec2; 0] = [];
+
+        // Two-channel fast path: UVInfo stays zero.
+        let mut mesh = CompressedMesh {
+            has_uv_info: true,
+            ..CompressedMesh::default()
+        };
+        mesh.set_vertices(&three_vertices(), limits()).unwrap();
+        mesh.set_uv(
+            [
+                &pair, &triple, &empty, &empty, &empty, &empty, &empty, &empty,
+            ],
+            limits(),
+        )
+        .unwrap();
+        let uv = mesh.get_uv(limits()).unwrap();
+        assert_eq!(mesh.uv_info, 0);
+        assert_eq!(
+            vec2_bits(uv[0].as_ref().unwrap()),
+            [872415232, 872415232, 1048576000, 1056964608, 1065353216, 3212836864]
+        );
+        assert_eq!(
+            vec2_bits(uv[1].as_ref().unwrap()),
+            [1036831952, 1045220560, 1050253720, 3201092810, 1056964608, 1058642330]
+        );
+        assert!(uv[2..].iter().all(Option::is_none));
+
+        // UVInfo path: three channels, each dimension two.
+        let mut mesh = CompressedMesh {
+            has_uv_info: true,
+            ..CompressedMesh::default()
+        };
+        mesh.set_vertices(&three_vertices(), limits()).unwrap();
+        mesh.set_uv(
+            [
+                &pair, &triple, &triple, &empty, &empty, &empty, &empty, &empty,
+            ],
+            limits(),
+        )
+        .unwrap();
+        let uv = mesh.get_uv(limits()).unwrap();
+        assert_eq!(mesh.uv_info, 1365);
+        assert_eq!(
+            vec2_bits(uv[0].as_ref().unwrap()),
+            [872415232, 872415232, 1048576000, 1056964608, 1065353216, 3212836864]
+        );
+        assert_eq!(
+            vec2_bits(uv[1].as_ref().unwrap()),
+            [1036831952, 1045220560, 1050253720, 3201092810, 1056964608, 1058642330]
+        );
+        assert_eq!(
+            vec2_bits(uv[2].as_ref().unwrap()),
+            [1036831952, 1045220560, 1050253720, 3201092810, 1056964608, 1058642330]
+        );
+        assert!(uv[3..].iter().all(Option::is_none));
+
+        // Bind poses (Unity 5 and earlier).
+        let mut mesh = CompressedMesh {
+            has_bind_poses: true,
+            ..CompressedMesh::default()
+        };
+        let first = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [2.0, 3.0, 4.0, 1.0],
+        ];
+        let second = [
+            [0.5, 0.0, 0.0, 0.0],
+            [0.0, 0.25, 0.0, 0.0],
+            [0.0, 0.0, 2.0, 0.0],
+            [-1.0, 0.0, 0.0, 1.0],
+        ];
+        mesh.set_bind_poses(&[first, second], limits()).unwrap();
+        let poses = mesh.get_bind_poses(limits()).unwrap();
+        assert_eq!(poses.len(), 2);
+        let bits: Vec<u32> = poses
+            .iter()
+            .flat_map(|matrix| matrix.iter().flat_map(|row| row.map(f32::to_bits)))
+            .collect();
+        assert_eq!(
+            bits,
+            [
+                1065353216, 0, 0, 0, 0, 1065353216, 0, 0, 0, 0, 1065353216, 0, 1073741824,
+                1077936128, 1082130432, 1065353216, 1056964610, 0, 0, 0, 0, 1048576004, 0, 0, 0, 0,
+                1073741824, 0, 3212836864, 0, 0, 1065353216
             ]
         );
     }
