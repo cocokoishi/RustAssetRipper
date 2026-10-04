@@ -281,3 +281,10 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Added `src/resources/pptr.rs` and `src/resources/animator_controller.rs`, covering the `IsAsset`/`IsNull` pointer rule and the three `ContainsAnimationClip` extensions; the collection-registered `ProcessedAssetCollection.CreateAsset` route is now established for pointer-resolving differentials.
 - Next on the animator path: the `AnimatorController` state-machine/state assembly and `GetStateBehaviours`, then the `AnimationClip` export path.
 - State: 744 library + 23 CLI tests, warnings-denied Clippy, format check, 1,449-file baseline verifier, and `git diff --check` all pass. Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+
+## 31. Checkpoint: GameObject active state and transform hierarchy (2026-10-04)
+
+- Added `src/resources/game_object.rs` and `src/resources/transform.rs`, differentially verified for three versions. Confirmed that sampled versions serialize only `IsActive_Boolean`, and that `GetStateBehaviours` is not probeable because `AssetDictionary` keys (`StateKey`) are not publicly mutable.
+- Next on the animator path: the `AnimatorController` state-machine/state assembly; the `GetStateBehaviours` "found" branch will need either an internal-collection construction route or a modeled dictionary.
+- State: 746 library + 23 CLI tests, warnings-denied Clippy, format check, 1,449-file baseline verifier, and `git diff --check` all pass. Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
