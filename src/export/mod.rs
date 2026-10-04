@@ -2,6 +2,7 @@
 
 pub mod asset_path;
 pub mod collection_kind;
+pub mod collection_paths;
 pub mod export_extension;
 pub mod guid_policy;
 pub mod ids;

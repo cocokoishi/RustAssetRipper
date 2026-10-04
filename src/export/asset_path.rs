@@ -73,7 +73,7 @@ impl HostPathPlatform {
     }
 
     /// The character `Path.Join` inserts between two non-empty parts.
-    fn separator(self) -> char {
+    pub(crate) fn separator(self) -> char {
         match self {
             Self::Windows => '\\',
             Self::Unix => '/',
