@@ -178,6 +178,112 @@ pub struct StreamedSceneBundleMetadata {
     pub container_paths: Option<Vec<String>>,
 }
 
+/// One ordered AssetBundle Container key and its serialized `AssetInfo.Asset` pointer.
+///
+/// `file_id == 0` identifies a local asset in the AssetBundle's collection. Nonzero file IDs
+/// identify shared-file references and must not be treated as local container assets.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssetBundleContainerReference {
+    pub path: String,
+    pub file_id: i32,
+    pub path_id: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AssetBundleContainerDecodeError {
+    ContainerMetadata(StreamedSceneBundleDecodeError),
+    MissingContainerField,
+    MissingAssetPointer { entry_index: usize },
+}
+
+impl Display for AssetBundleContainerDecodeError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ContainerMetadata(source) => Display::fmt(source, f),
+            Self::MissingContainerField => {
+                f.write_str("AssetBundle has neither m_Container nor Container")
+            }
+            Self::MissingAssetPointer { entry_index } => write!(
+                f,
+                "AssetBundle Container entry {entry_index} has no AssetInfo asset pointer"
+            ),
+        }
+    }
+}
+
+impl Error for AssetBundleContainerDecodeError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::ContainerMetadata(source) => Some(source),
+            Self::MissingContainerField | Self::MissingAssetPointer { .. } => None,
+        }
+    }
+}
+
+/// Decode AssetBundle Container entries without discarding their asset identity pointers.
+///
+/// Scene processing only needs the ordered path keys, while `OriginalPathProcessor` also uses
+/// `AssetInfo.Asset.FileID` and `PathID` to assign bundle metadata to local assets. This decoder
+/// keeps those distinctions available to later processing stages.
+pub fn extract_asset_bundle_container_references(
+    root: &SerializedValue,
+    limits: SceneBundleMappingLimits,
+) -> Result<Vec<AssetBundleContainerReference>, AssetBundleContainerDecodeError> {
+    let container = unique_bundle_alias(root, "m_Container", "Container")
+        .map_err(AssetBundleContainerDecodeError::ContainerMetadata)?
+        .ok_or(AssetBundleContainerDecodeError::MissingContainerField)?;
+    let mut total_entries = 0usize;
+    let mut total_bytes = 0usize;
+    let entries = bundle_array(container, "m_Container", limits, &mut total_entries)
+        .map_err(AssetBundleContainerDecodeError::ContainerMetadata)?;
+    let mut decoded = reserve_bundle_entries(entries.len(), "m_Container")
+        .map_err(AssetBundleContainerDecodeError::ContainerMetadata)?;
+    for (entry_index, entry) in entries.iter().enumerate() {
+        let entry_path = format!("m_Container[{entry_index}]");
+        let pair = bundle_struct(entry, &entry_path)
+            .map_err(AssetBundleContainerDecodeError::ContainerMetadata)?;
+        let path = required_pair_field(pair, &entry_path, "first")
+            .map_err(AssetBundleContainerDecodeError::ContainerMetadata)?;
+        let asset_info = required_pair_field(pair, &entry_path, "second")
+            .map_err(AssetBundleContainerDecodeError::ContainerMetadata)?;
+        bundle_struct(asset_info, &format!("{entry_path}.second"))
+            .map_err(AssetBundleContainerDecodeError::ContainerMetadata)?;
+        let path = decode_bundle_string(
+            path,
+            &format!("{entry_path}.first"),
+            &mut total_bytes,
+            limits,
+        )
+        .map_err(AssetBundleContainerDecodeError::ContainerMetadata)?;
+        let asset_pointer = asset_info
+            .unique_field_in_base_chain("asset")
+            .map_err(|source| {
+                AssetBundleContainerDecodeError::ContainerMetadata(
+                    StreamedSceneBundleDecodeError::FieldLookup {
+                        field_path: format!("{entry_path}.second.asset"),
+                        source,
+                    },
+                )
+            })?
+            .ok_or(AssetBundleContainerDecodeError::MissingAssetPointer { entry_index })?;
+        let SerializedValue::PPtr { file_id, path_id } = asset_pointer else {
+            return Err(AssetBundleContainerDecodeError::ContainerMetadata(
+                StreamedSceneBundleDecodeError::WrongType {
+                    field_path: format!("{entry_path}.second.asset"),
+                    expected: "PPtr",
+                    actual: value_type_name(asset_pointer),
+                },
+            ));
+        };
+        decoded.push(AssetBundleContainerReference {
+            path,
+            file_id: *file_id,
+            path_id: *path_id,
+        });
+    }
+    Ok(decoded)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StreamedSceneBundleDecodeError {
     FieldLookup {
@@ -1550,10 +1656,11 @@ mod tests {
     use crate::serialized_file::object::{SerializedFieldValue, SerializedValue};
 
     use super::{
-        extract_occlusion_scene_guid, extract_streamed_scene_bundle_metadata,
-        map_container_paths_to_scene_collections, map_scene_hashes_to_collections,
-        map_streamed_scene_bundle_paths, plan_scene_definition, resolve_scene_collection_path,
-        scene_manager_kind, streamed_scene_project_path, BuildSettingsScenePathSet,
+        extract_asset_bundle_container_references, extract_occlusion_scene_guid,
+        extract_streamed_scene_bundle_metadata, map_container_paths_to_scene_collections,
+        map_scene_hashes_to_collections, map_streamed_scene_bundle_paths, plan_scene_definition,
+        resolve_scene_collection_path, scene_manager_kind, streamed_scene_project_path,
+        AssetBundleContainerDecodeError, AssetBundleContainerReference, BuildSettingsScenePathSet,
         SceneBundleMappingError, SceneBundleMappingLimits, SceneBundlePathMapping,
         SceneBundlePathMappingSource, SceneCollectionPathStatus, SceneDefinitionGuidPlan,
         SceneDefinitionPathSource, SceneDefinitionPlanError, SceneDefinitionPlanLimits,
@@ -2055,6 +2162,164 @@ mod tests {
                 limit: 0,
             })
         );
+    }
+
+    #[test]
+    fn asset_bundle_container_decoder_preserves_asset_pointer_file_scope() {
+        let entry = |path: &str, file_id, path_id| {
+            SerializedValue::Struct(vec![
+                field(
+                    "first",
+                    SerializedValue::StringBytes(path.as_bytes().to_vec()),
+                ),
+                field(
+                    "second",
+                    SerializedValue::Struct(vec![
+                        field("preloadIndex", SerializedValue::I32(0)),
+                        field("preloadSize", SerializedValue::I32(0)),
+                        field("asset", SerializedValue::PPtr { file_id, path_id }),
+                    ]),
+                ),
+            ])
+        };
+        let root = SerializedValue::Struct(vec![field(
+            "Base",
+            SerializedValue::Struct(vec![field(
+                "m_Container",
+                SerializedValue::Array(vec![
+                    entry("Assets/Local.prefab", 0, 17),
+                    entry("Assets/Shared.mat", 2, 81),
+                    entry("Assets/Null.asset", 0, 0),
+                ]),
+            )]),
+        )]);
+
+        assert_eq!(
+            extract_asset_bundle_container_references(&root, SceneBundleMappingLimits::default(),)
+                .unwrap(),
+            [
+                AssetBundleContainerReference {
+                    path: "Assets/Local.prefab".to_owned(),
+                    file_id: 0,
+                    path_id: 17,
+                },
+                AssetBundleContainerReference {
+                    path: "Assets/Shared.mat".to_owned(),
+                    file_id: 2,
+                    path_id: 81,
+                },
+                AssetBundleContainerReference {
+                    path: "Assets/Null.asset".to_owned(),
+                    file_id: 0,
+                    path_id: 0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn asset_bundle_container_decoder_reports_missing_and_invalid_asset_pointers() {
+        assert_eq!(
+            extract_asset_bundle_container_references(
+                &SerializedValue::Struct(Vec::new()),
+                SceneBundleMappingLimits::default(),
+            ),
+            Err(AssetBundleContainerDecodeError::MissingContainerField)
+        );
+
+        let root = SerializedValue::Struct(vec![field(
+            "m_Container",
+            SerializedValue::Array(vec![SerializedValue::Struct(vec![
+                field(
+                    "first",
+                    SerializedValue::StringBytes(b"Assets/Missing.asset".to_vec()),
+                ),
+                field("second", SerializedValue::Struct(Vec::new())),
+            ])]),
+        )]);
+        assert_eq!(
+            extract_asset_bundle_container_references(&root, SceneBundleMappingLimits::default(),),
+            Err(AssetBundleContainerDecodeError::MissingAssetPointer { entry_index: 0 })
+        );
+
+        let root = SerializedValue::Struct(vec![field(
+            "Container",
+            SerializedValue::Array(vec![SerializedValue::Struct(vec![
+                field(
+                    "first",
+                    SerializedValue::StringBytes(b"Assets/Wrong.asset".to_vec()),
+                ),
+                field(
+                    "second",
+                    SerializedValue::Struct(vec![field("asset", SerializedValue::I32(7))]),
+                ),
+            ])]),
+        )]);
+        assert!(matches!(
+            extract_asset_bundle_container_references(
+                &root,
+                SceneBundleMappingLimits::default(),
+            ),
+            Err(AssetBundleContainerDecodeError::ContainerMetadata(
+                StreamedSceneBundleDecodeError::WrongType {
+                    field_path,
+                    expected: "PPtr",
+                    actual: "i32",
+                }
+            )) if field_path == "m_Container[0].second.asset"
+        ));
+    }
+
+    #[test]
+    fn asset_bundle_container_decoder_obeys_entry_and_path_limits() {
+        let root = SerializedValue::Struct(vec![field(
+            "m_Container",
+            SerializedValue::Array(vec![SerializedValue::Struct(vec![
+                field("first", SerializedValue::StringBytes(b"a".to_vec())),
+                field(
+                    "second",
+                    SerializedValue::Struct(vec![field(
+                        "asset",
+                        SerializedValue::PPtr {
+                            file_id: 0,
+                            path_id: 1,
+                        },
+                    )]),
+                ),
+            ])]),
+        )]);
+
+        assert!(matches!(
+            extract_asset_bundle_container_references(
+                &root,
+                SceneBundleMappingLimits {
+                    max_entries: 0,
+                    max_total_name_and_path_bytes: usize::MAX,
+                },
+            ),
+            Err(AssetBundleContainerDecodeError::ContainerMetadata(
+                StreamedSceneBundleDecodeError::EntryCountLimitExceeded {
+                    field_path,
+                    count: 1,
+                    limit: 0,
+                }
+            )) if field_path == "m_Container"
+        ));
+        assert!(matches!(
+            extract_asset_bundle_container_references(
+                &root,
+                SceneBundleMappingLimits {
+                    max_entries: 1,
+                    max_total_name_and_path_bytes: 0,
+                },
+            ),
+            Err(AssetBundleContainerDecodeError::ContainerMetadata(
+                StreamedSceneBundleDecodeError::ByteLimitExceeded {
+                    requested: 1,
+                    limit: 0,
+                }
+            ))
+        ));
     }
 
     #[test]
