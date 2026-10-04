@@ -4,6 +4,7 @@ pub mod ids;
 pub mod meta;
 pub mod pointer_map;
 pub mod prefab_collection;
+pub mod project_output;
 pub mod scene_collection;
 pub mod streamed_assets;
 pub mod unity_yaml;

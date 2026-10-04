@@ -1284,3 +1284,12 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - This serializes only the metadata envelope around an existing importer mapping. Class-specific importer factories, per-asset path/GUID ownership, actual sidecar file writes, complete project export, and C# runtime differential remain unimplemented or unverified. No user AssetBundle or UABEA content was accessed.
 
 - Cloud verification: local implementation commit 48daaf498a8d78489eb3f7ff9e73ef2cc59fc442 has tree f57b916cfd706e4dd43974f8a656dbe92758756a; non-forced remote main checkpoint a97359808afb84c99a4b0d13b2ef67ababef9c17 has the same tree and parent 82285b1deabf2f27272861d0ea505c239ad1911d. ls-remote, fetch, and fetched-tree comparison all matched.
+
+## Add-only Unity `.meta` sidecar filesystem primitive (2026-10-03)
+
+- Added `src/export/project_output.rs` and exported the module from `src/export/mod.rs`. `write_unity_meta_sidecar` serializes a supplied `UnityMetaFile`, validates portable relative paths with byte/component bounds, creates directories only below a canonical output root, rejects linked/non-directory ancestors, and opens the sidecar with `create_new` so an existing file is preserved. The asset file and importer selection are deliberately outside this function.
+- Four synthetic tests cover successful add-only output and sibling preservation, refusal to overwrite an existing sidecar, traversal/absolute/device/invalid-path rejection before writes, and configured path limits.
+- Initial focused run exposed a Windows test-only path comparison (`\\?\` canonical path versus a non-canonical expected path); the test now canonicalizes the expected root. The four focused tests pass.
+- Final verification on Windows with Rust/Cargo 1.98.1: `cargo fmt --all -- --check` exit 0; `cargo test --workspace --locked --quiet` exit 0 (491 library, 23 CLI, 0 doc tests); `cargo clippy --workspace --all-targets --locked -- -D warnings` exit 0; `tools/verify-baseline.ps1` exit 0 (1,449/1,449 reference files unchanged); `git diff --check` exit 0.
+- The first warnings-denied Clippy run found a needless explicit lifetime in the new helper; it was elided and the final Clippy run passed. No real Unity file, user AssetBundle, UABEA, or AssetRipper runtime differential was used. The Phase 1 gate remains open.
+- Detailed continuation and the goal-versus-AGENTS.md comparison are in `docs/next-agent-handoff.md`.

@@ -1,5 +1,7 @@
 # Continuation status
 
+> Current handoff: `docs/next-agent-handoff.md` is the authoritative, up-to-date continuation record for the 2026-10-03 state. Older sections below are historical and may name an earlier next task or earlier cloud checkpoint; read the handoff first, then consult the feature ledger and validation log.
+
 ## Current phase
 
 Phase 1: full Rust port of the local AssetRipper source baseline. The Phase 1 gate has not passed. Phase 2 remains locked: no user AssetBundle contents have been opened, hashed, identified, or parsed, and UABEA has not been read or run.
