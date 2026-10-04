@@ -284,6 +284,97 @@ pub fn extract_asset_bundle_container_references(
     Ok(decoded)
 }
 
+/// One ordered ResourceManager Container key and its serialized object pointer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResourceManagerContainerReference {
+    pub path: String,
+    pub file_id: i32,
+    pub path_id: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ResourceManagerContainerDecodeError {
+    Metadata(StreamedSceneBundleDecodeError),
+    MissingContainerField,
+    MissingObjectPointer { entry_index: usize },
+}
+
+impl Display for ResourceManagerContainerDecodeError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Metadata(source) => {
+                write!(
+                    formatter,
+                    "ResourceManager Container metadata is malformed: {source}"
+                )
+            }
+            Self::MissingContainerField => {
+                formatter.write_str("ResourceManager has neither m_Container nor Container")
+            }
+            Self::MissingObjectPointer { entry_index } => write!(
+                formatter,
+                "ResourceManager Container entry {entry_index} has no object pointer"
+            ),
+        }
+    }
+}
+
+impl Error for ResourceManagerContainerDecodeError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Metadata(source) => Some(source),
+            Self::MissingContainerField | Self::MissingObjectPointer { .. } => None,
+        }
+    }
+}
+
+/// Decode the ordered `map<string, PPtr<Object>>` from a class-ID-147 ResourceManager.
+pub fn extract_resource_manager_container_references(
+    root: &SerializedValue,
+    limits: SceneBundleMappingLimits,
+) -> Result<Vec<ResourceManagerContainerReference>, ResourceManagerContainerDecodeError> {
+    let container = unique_bundle_alias(root, "m_Container", "Container")
+        .map_err(ResourceManagerContainerDecodeError::Metadata)?
+        .ok_or(ResourceManagerContainerDecodeError::MissingContainerField)?;
+    let mut total_entries = 0usize;
+    let mut total_bytes = 0usize;
+    let entries = bundle_array(container, "m_Container", limits, &mut total_entries)
+        .map_err(ResourceManagerContainerDecodeError::Metadata)?;
+    let mut decoded = reserve_bundle_entries(entries.len(), "m_Container")
+        .map_err(ResourceManagerContainerDecodeError::Metadata)?;
+    for (entry_index, entry) in entries.iter().enumerate() {
+        let entry_path = format!("m_Container[{entry_index}]");
+        let pair = bundle_struct(entry, &entry_path)
+            .map_err(ResourceManagerContainerDecodeError::Metadata)?;
+        let path = required_pair_field(pair, &entry_path, "first")
+            .map_err(ResourceManagerContainerDecodeError::Metadata)?;
+        let pointer = required_pair_field(pair, &entry_path, "second")
+            .map_err(ResourceManagerContainerDecodeError::Metadata)?;
+        let path = decode_bundle_string(
+            path,
+            &format!("{entry_path}.first"),
+            &mut total_bytes,
+            limits,
+        )
+        .map_err(ResourceManagerContainerDecodeError::Metadata)?;
+        let SerializedValue::PPtr { file_id, path_id } = pointer else {
+            return Err(ResourceManagerContainerDecodeError::Metadata(
+                StreamedSceneBundleDecodeError::WrongType {
+                    field_path: format!("{entry_path}.second"),
+                    expected: "PPtr",
+                    actual: value_type_name(pointer),
+                },
+            ));
+        };
+        decoded.push(ResourceManagerContainerReference {
+            path,
+            file_id: *file_id,
+            path_id: *path_id,
+        });
+    }
+    Ok(decoded)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StreamedSceneBundleDecodeError {
     FieldLookup {
@@ -1657,10 +1748,12 @@ mod tests {
 
     use super::{
         extract_asset_bundle_container_references, extract_occlusion_scene_guid,
-        extract_streamed_scene_bundle_metadata, map_container_paths_to_scene_collections,
-        map_scene_hashes_to_collections, map_streamed_scene_bundle_paths, plan_scene_definition,
-        resolve_scene_collection_path, scene_manager_kind, streamed_scene_project_path,
-        AssetBundleContainerDecodeError, AssetBundleContainerReference, BuildSettingsScenePathSet,
+        extract_resource_manager_container_references, extract_streamed_scene_bundle_metadata,
+        map_container_paths_to_scene_collections, map_scene_hashes_to_collections,
+        map_streamed_scene_bundle_paths, plan_scene_definition, resolve_scene_collection_path,
+        scene_manager_kind, streamed_scene_project_path, AssetBundleContainerDecodeError,
+        AssetBundleContainerReference, BuildSettingsScenePathSet,
+        ResourceManagerContainerDecodeError, ResourceManagerContainerReference,
         SceneBundleMappingError, SceneBundleMappingLimits, SceneBundlePathMapping,
         SceneBundlePathMappingSource, SceneCollectionPathStatus, SceneDefinitionGuidPlan,
         SceneDefinitionPathSource, SceneDefinitionPlanError, SceneDefinitionPlanLimits,
@@ -2319,6 +2412,87 @@ mod tests {
                     limit: 0,
                 }
             ))
+        ));
+    }
+
+    #[test]
+    fn resource_manager_container_decoder_preserves_order_and_pointer_scope() {
+        let entry = |path: &str, file_id, path_id| {
+            SerializedValue::Struct(vec![
+                field(
+                    "first",
+                    SerializedValue::StringBytes(path.as_bytes().to_vec()),
+                ),
+                field("second", SerializedValue::PPtr { file_id, path_id }),
+            ])
+        };
+        let root = SerializedValue::Struct(vec![field(
+            "Base",
+            SerializedValue::Struct(vec![field(
+                "Container",
+                SerializedValue::Array(vec![
+                    entry("Textures/inner/wood", 0, 17),
+                    entry("wood", 2, 81),
+                    entry("Null", 0, 0),
+                ]),
+            )]),
+        )]);
+
+        assert_eq!(
+            extract_resource_manager_container_references(
+                &root,
+                SceneBundleMappingLimits::default(),
+            )
+            .unwrap(),
+            [
+                ResourceManagerContainerReference {
+                    path: "Textures/inner/wood".to_owned(),
+                    file_id: 0,
+                    path_id: 17,
+                },
+                ResourceManagerContainerReference {
+                    path: "wood".to_owned(),
+                    file_id: 2,
+                    path_id: 81,
+                },
+                ResourceManagerContainerReference {
+                    path: "Null".to_owned(),
+                    file_id: 0,
+                    path_id: 0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn resource_manager_container_decoder_reports_missing_and_invalid_values() {
+        assert_eq!(
+            extract_resource_manager_container_references(
+                &SerializedValue::Struct(Vec::new()),
+                SceneBundleMappingLimits::default(),
+            ),
+            Err(ResourceManagerContainerDecodeError::MissingContainerField)
+        );
+
+        let root = SerializedValue::Struct(vec![field(
+            "m_Container",
+            SerializedValue::Array(vec![SerializedValue::Struct(vec![
+                field("first", SerializedValue::StringBytes(b"bad".to_vec())),
+                field("second", SerializedValue::I32(7)),
+            ])]),
+        )]);
+        assert!(matches!(
+            extract_resource_manager_container_references(
+                &root,
+                SceneBundleMappingLimits::default(),
+            ),
+            Err(ResourceManagerContainerDecodeError::Metadata(
+                StreamedSceneBundleDecodeError::WrongType {
+                    field_path,
+                    expected: "PPtr",
+                    actual: "i32",
+                }
+            )) if field_path == "m_Container[0].second"
         ));
     }
 
