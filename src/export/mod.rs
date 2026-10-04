@@ -23,6 +23,7 @@ pub mod project_plan;
 pub mod redirect_collection;
 pub mod registration;
 pub mod scene_collection;
+pub mod scene_helpers;
 pub mod scene_member_order;
 pub mod script_hashing;
 pub mod settings;
