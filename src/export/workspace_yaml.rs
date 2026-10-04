@@ -32,7 +32,9 @@ use super::pointer_map::{
     ExportPointerMapError, ProjectExportPointerMap, ProjectPointerRequest,
     ProjectPointerResolution, UnresolvedProjectPointer,
 };
-use super::prefab_collection::PrefabExportIdAssignment;
+use super::prefab_collection::{
+    PrefabAssetRepresentation, PrefabExportIdAssignment, PrefabExportIdPlan,
+};
 use super::scene_collection::{
     order_scene_yaml_assignments, ExportAssetCollectionIdentity, ExportAssetIdentity,
     SceneExportIdAssignment, SceneYamlAssetOrderError, SceneYamlAssetOrderLimits,
@@ -172,6 +174,83 @@ pub fn workspace_assignments_to_unity_yaml<A: UnityYamlCollectionAssignment>(
         limits,
         None,
         None,
+    )
+}
+
+/// Execute the YAML members of a planned Prefab collection in baseline hierarchy order.
+///
+/// `PrefabExportCollection.ExportableAssets` excludes hidden modern PrefabInstance markers but
+/// includes the legacy Prefab object. The latter remains an explicit error until its generated
+/// YAML payload and legacy `m_PrefabInternal` overlays are materialized. This function writes the
+/// `.prefab` YAML body only; importer `.meta` output is a separate export path.
+#[allow(clippy::too_many_arguments)]
+pub fn workspace_prefab_hierarchy_to_unity_yaml(
+    workspace: &SerializedFileWorkspace,
+    objects: &crate::serialized_file::object_workspace::ObjectWorkspace,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+    pointer_map: &ProjectExportPointerMap,
+    plan: &PrefabExportIdPlan,
+    current_collection_index: usize,
+    missing_reference_guid: Option<[u8; 16]>,
+    limits: UnityYamlWorkspaceCollectionLimits,
+) -> Result<String, UnityYamlWorkspaceCollectionError> {
+    let expected_emit_prefab_asset =
+        plan.representation == PrefabAssetRepresentation::LegacyPrefabMarker;
+    if plan.emit_prefab_asset != expected_emit_prefab_asset {
+        return Err(
+            UnityYamlWorkspaceCollectionError::PrefabPlanEmissionMismatch {
+                emit_prefab_asset: plan.emit_prefab_asset,
+                representation: plan.representation,
+            },
+        );
+    }
+    if plan.exportable_assets.len() > limits.max_documents {
+        return Err(UnityYamlWorkspaceCollectionError::DocumentLimitExceeded {
+            count: plan.exportable_assets.len(),
+            limit: limits.max_documents,
+        });
+    }
+
+    let mut assignments = Vec::new();
+    assignments
+        .try_reserve_exact(plan.exportable_assets.len())
+        .map_err(|_| UnityYamlWorkspaceCollectionError::AllocationFailed {
+            resource: "Prefab YAML assignments",
+            requested: plan.exportable_assets.len(),
+        })?;
+    for (assignment_index, asset) in plan.exportable_assets.iter().copied().enumerate() {
+        let mut matching = plan
+            .registered_assets
+            .iter()
+            .filter(|registered| registered.asset == asset);
+        let Some(assignment) = matching.next().copied() else {
+            return Err(
+                UnityYamlWorkspaceCollectionError::PrefabAssignmentNotRegistered {
+                    assignment_index,
+                    asset,
+                },
+            );
+        };
+        if matching.next().is_some() {
+            return Err(
+                UnityYamlWorkspaceCollectionError::PrefabAssignmentRegisteredMoreThanOnce {
+                    assignment_index,
+                    asset,
+                },
+            );
+        }
+        assignments.push(assignment);
+    }
+
+    workspace_assignments_to_unity_yaml(
+        workspace,
+        objects,
+        reference_graph,
+        pointer_map,
+        &assignments,
+        current_collection_index,
+        missing_reference_guid,
+        limits,
     )
 }
 
@@ -651,6 +730,18 @@ pub enum UnityYamlWorkspaceCollectionError {
         assignment_index: usize,
         asset: ExportAssetIdentity,
     },
+    PrefabAssignmentNotRegistered {
+        assignment_index: usize,
+        asset: ExportAssetIdentity,
+    },
+    PrefabAssignmentRegisteredMoreThanOnce {
+        assignment_index: usize,
+        asset: ExportAssetIdentity,
+    },
+    PrefabPlanEmissionMismatch {
+        emit_prefab_asset: bool,
+        representation: PrefabAssetRepresentation,
+    },
     WorkspaceObjectMissing {
         assignment_index: usize,
         asset: ExportAssetIdentity,
@@ -694,6 +785,27 @@ impl Display for UnityYamlWorkspaceCollectionError {
             } => write!(
                 f,
                 "workspace YAML assignment {assignment_index} is a processed asset without a generated YAML walker: {asset:?}"
+            ),
+            Self::PrefabAssignmentNotRegistered {
+                assignment_index,
+                asset,
+            } => write!(
+                f,
+                "Prefab YAML assignment {assignment_index} has no registered export ID: {asset:?}"
+            ),
+            Self::PrefabAssignmentRegisteredMoreThanOnce {
+                assignment_index,
+                asset,
+            } => write!(
+                f,
+                "Prefab YAML assignment {assignment_index} has duplicate registered export IDs: {asset:?}"
+            ),
+            Self::PrefabPlanEmissionMismatch {
+                emit_prefab_asset,
+                representation,
+            } => write!(
+                f,
+                "Prefab export plan says emit_prefab_asset={emit_prefab_asset} for representation {representation:?}"
             ),
             Self::WorkspaceObjectMissing {
                 assignment_index,
@@ -3894,6 +4006,155 @@ mod tests {
         assert!(output.find("--- !u!1 &42").unwrap() < output.find("--- !u!23 &9001").unwrap());
         assert!(output.contains("component: {fileID: 9001}"));
         assert!(output.contains("m_GameObject: {fileID: 42}"));
+    }
+
+    #[test]
+    fn modern_prefab_executor_omits_hidden_marker_and_preserves_hierarchy_order() {
+        const PREFAB_COLLECTION_INDEX: usize = 13;
+
+        let bytes = make_game_object_mesh_renderer_file();
+        let (filesystem, workspace) = load_workspace_bytes(&bytes);
+        let objects = ObjectWorkspace::load_from_vfs(
+            &filesystem,
+            &workspace,
+            ObjectWorkspaceLimits::default(),
+        )
+        .unwrap();
+        assert!(objects.report().is_complete());
+        let reference_graph = workspace
+            .reference_graph(MultiFileReferenceGraphLimits::default())
+            .unwrap();
+        assert!(reference_graph.is_complete());
+
+        let unity_version = SceneUnityVersion::parse("2019.4.0f1").unwrap();
+        let game_objects = [crate::export::prefab_collection::VersionedPrefabAsset {
+            identity: asset(0, GAME_OBJECT_PATH_ID, 1),
+            unity_version,
+        }];
+        let components = [crate::export::prefab_collection::VersionedPrefabAsset {
+            identity: asset(1, 9001, 23),
+            unity_version,
+        }];
+        let prefab_asset = crate::export::prefab_collection::VersionedPrefabAsset {
+            identity: ExportAssetIdentity {
+                collection: ExportAssetCollectionIdentity::ProcessedCollection {
+                    collection_index: 8,
+                },
+                object_index: 0,
+                path_id: 1,
+                class_id: 1001,
+            },
+            unity_version,
+        };
+        let hierarchy_asset = crate::export::prefab_collection::VersionedPrefabAsset {
+            identity: ExportAssetIdentity {
+                collection: ExportAssetCollectionIdentity::ProcessedCollection {
+                    collection_index: 9,
+                },
+                object_index: 0,
+                path_id: 1,
+                class_id: 1001,
+            },
+            unity_version,
+        };
+        let make_plan =
+            |representation,
+             hidden_assets: &[crate::export::scene_collection::ExportAssetObjectKey]| {
+                crate::export::prefab_collection::plan_prefab_export_ids(
+                    crate::export::prefab_collection::PrefabHierarchyAssetGroups {
+                        game_objects: &game_objects,
+                        components: &components,
+                        prefab_instances: &[],
+                        prefab_asset,
+                        hierarchy_asset,
+                        representation,
+                    },
+                    hidden_assets,
+                    crate::export::prefab_collection::PrefabExportPlanLimits::default(),
+                )
+                .unwrap()
+            };
+        let modern_plan = make_plan(
+            PrefabAssetRepresentation::PrefabInstanceMarker,
+            &[prefab_asset.identity.object_key()],
+        );
+        assert!(!modern_plan.emit_prefab_asset);
+        assert_eq!(
+            modern_plan.exportable_assets,
+            [game_objects[0].identity, components[0].identity]
+        );
+
+        let mut pointer_map_builder =
+            ProjectExportPointerMapBuilder::new(ExportPointerMapLimits::default());
+        pointer_map_builder
+            .register_prefab_collection(
+                PREFAB_COLLECTION_INDEX,
+                [0x7d; 16],
+                UnityProjectAssetType::Meta,
+                &modern_plan.registered_assets,
+            )
+            .unwrap();
+        let pointer_map = pointer_map_builder.build().unwrap();
+        let output = workspace_prefab_hierarchy_to_unity_yaml(
+            &workspace,
+            &objects,
+            &reference_graph,
+            &pointer_map,
+            &modern_plan,
+            PREFAB_COLLECTION_INDEX,
+            None,
+            UnityYamlWorkspaceCollectionLimits::default(),
+        )
+        .unwrap();
+
+        let game_object_file_id = modern_plan
+            .registered_assets
+            .iter()
+            .find(|assignment| assignment.asset == game_objects[0].identity)
+            .unwrap()
+            .file_id;
+        let component_file_id = modern_plan
+            .registered_assets
+            .iter()
+            .find(|assignment| assignment.asset == components[0].identity)
+            .unwrap()
+            .file_id;
+        assert!(
+            output
+                .find(&format!("--- !u!1 &{game_object_file_id}"))
+                .unwrap()
+                < output
+                    .find(&format!("--- !u!23 &{component_file_id}"))
+                    .unwrap()
+        );
+        assert!(output.contains(&format!("component: {{fileID: {component_file_id}}}")));
+        assert!(output.contains(&format!("m_GameObject: {{fileID: {game_object_file_id}}}")));
+        assert!(!output.contains("!u!1001"), "{output}");
+
+        let legacy_plan = make_plan(PrefabAssetRepresentation::LegacyPrefabMarker, &[]);
+        assert!(legacy_plan.emit_prefab_asset);
+        assert!(matches!(
+            workspace_prefab_hierarchy_to_unity_yaml(
+                &workspace,
+                &objects,
+                &reference_graph,
+                &pointer_map,
+                &legacy_plan,
+                PREFAB_COLLECTION_INDEX,
+                None,
+                UnityYamlWorkspaceCollectionLimits::default(),
+            ),
+            Err(
+                UnityYamlWorkspaceCollectionError::ProcessedAssetRequiresGeneratedWalker {
+                    assignment_index: 2,
+                    asset: ExportAssetIdentity {
+                        collection: ExportAssetCollectionIdentity::ProcessedCollection { .. },
+                        class_id: 1001,
+                        ..
+                    },
+                }
+            )
+        ));
     }
 
     #[test]
