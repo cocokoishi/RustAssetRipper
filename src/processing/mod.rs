@@ -1,5 +1,6 @@
 //! Unity object processing built on parsed SerializedFile values.
 
+pub mod asset_bundle;
 pub mod prefab_processing;
 pub mod project_settings;
 pub mod scene;

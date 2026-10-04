@@ -1327,6 +1327,10 @@ mod tests {
         ReferenceGraphLimits, SerializedObjectReference, WalkIssue,
     };
     use crate::io::binary::Endian;
+    use crate::processing::asset_bundle::{
+        resolve_asset_bundle_container_reference, AssetBundleContainerTarget,
+    };
+    use crate::processing::scene_collections::AssetBundleContainerReference;
     use crate::serialized_file::metadata::{
         FileIdentifier, ObjectInfo, SerializedFileMetadata, SerializedType, TypeTree, TypeTreeNode,
     };
@@ -1395,6 +1399,55 @@ mod tests {
             references: Vec::new(),
             issues: Vec::new(),
         }
+    }
+
+    #[test]
+    fn asset_bundle_container_pptrs_resolve_in_the_owning_file_scope() {
+        let owner_metadata = metadata(&[10, 20]);
+        let graph = empty_graph(&[10, 20]);
+        let reference = |file_id, path_id| AssetBundleContainerReference {
+            path: "Assets/entry.asset".to_owned(),
+            file_id,
+            path_id,
+        };
+        assert_eq!(
+            resolve_asset_bundle_container_reference(&reference(0, 20), &owner_metadata, &graph),
+            AssetBundleContainerTarget::LocalObject { object_index: 1 }
+        );
+        assert_eq!(
+            resolve_asset_bundle_container_reference(&reference(0, 0), &owner_metadata, &graph),
+            AssetBundleContainerTarget::Null
+        );
+        assert_eq!(
+            resolve_asset_bundle_container_reference(&reference(2, 99), &owner_metadata, &graph),
+            AssetBundleContainerTarget::SharedFile {
+                file_id: 2,
+                external_index: 1,
+                path_id: 99,
+            }
+        );
+        assert_eq!(
+            resolve_asset_bundle_container_reference(&reference(0, 99), &owner_metadata, &graph),
+            AssetBundleContainerTarget::MissingLocalObject { path_id: 99 }
+        );
+        assert_eq!(
+            resolve_asset_bundle_container_reference(
+                &reference(0, 10),
+                &metadata(&[10, 10]),
+                &empty_graph(&[10, 10]),
+            ),
+            AssetBundleContainerTarget::AmbiguousLocalObject {
+                path_id: 10,
+                match_count: 2,
+            }
+        );
+        assert_eq!(
+            resolve_asset_bundle_container_reference(&reference(3, 99), &owner_metadata, &graph),
+            AssetBundleContainerTarget::InvalidFileId {
+                file_id: 3,
+                external_count: 2,
+            }
+        );
     }
 
     fn graph_with_reference(
