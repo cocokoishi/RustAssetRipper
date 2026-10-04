@@ -5,6 +5,7 @@ pub mod collection_kind;
 pub mod export_extension;
 pub mod guid_policy;
 pub mod ids;
+pub mod importer_fields;
 pub mod meta;
 pub mod pointer_map;
 pub mod post_export;
