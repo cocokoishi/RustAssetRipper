@@ -154,7 +154,8 @@ impl ExportCollectionKind {
     /// The file extension when the baseline fixes it for the whole family.
     ///
     /// `Asset` returns `None` because `GetExportExtension` is virtual and dispatches on
-    /// generated marker interfaces; the remaining `None` families write no files.
+    /// generated marker interfaces; see `export_extension::ExportExtensionTable` for that
+    /// switch. The remaining `None` families write no files.
     pub fn fixed_extension(self) -> Option<&'static str> {
         match self {
             Self::Scene => Some("unity"),

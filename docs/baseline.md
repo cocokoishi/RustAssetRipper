@@ -19,12 +19,28 @@ The reference source was read only. No build, export, or test output was written
 
 ## Build and test availability
 
-- `dotnet --info` was attempted and could not run because `dotnet` was not found on `PATH`.
-- `cargo`, `rustc`, and `rustup` are not on `PATH`, but were found under `%USERPROFILE%\.cargo\bin` and used directly.
-- The active toolchain is `rustc 1.98.1`, `cargo 1.98.1`, `stable-aarch64-pc-windows-msvc`. The Rust package now declares 1.87 as its minimum because `ruzstd` 0.9.0 requires it; that minimum version has not been tested.
-- The reference solution includes 8 test projects, but its tests remain unrun because `dotnet` is unavailable.
+- `dotnet` **is** available on this workstation: SDK `10.0.401`. Earlier handoff records stated that
+  `dotnet` could not be found on `PATH`; that is no longer true and the reference baseline can now be
+  built, tested, and executed for differential validation.
+- The reference must never be built in place: an in-tree build writes `bin/`/`obj/` and would break
+  the 1,449-file manifest. All reference builds use an isolated copy outside the read-only tree, for
+  example `%LOCALAPPDATA%\Temp\opencode\ar-ref`. `tools/verify-baseline.ps1` was re-run after the
+  build and reported all 1,449 files unchanged.
+- `AssetRipper.slnx` restore succeeds from the `nuget.config` feed `https://nuget.samboy.dev/v3/index.json`
+  (reachable, HTTP 200). `AssetRipper.SourceGenerated` 1.4.0 resolves from that feed, so the generated
+  class package referenced by the snapshot is available instead of missing. It contains 18,299 types,
+  of which 3,439 are concrete generated Unity asset classes such as `ClassID_28.Texture2D_2017`, and
+  its 106 MiB XML document carries the per-class, per-version member metadata.
+- `dotnet build AssetRipper.slnx -c Release` exits 0 with 32 warnings and 0 errors.
+- `dotnet test` over the 8 test projects reports 339 passed and 20 failed. All 20 failures are the CRLF
+  checkout artifact recorded as `DIFF-REFERENCE-TEST-NEWLINE-001`; they are not product defects.
+- `cargo`, `rustc`, and `rustup` are still not on `PATH` and are used from `%USERPROFILE%\.cargo\bin`.
+- The active Rust toolchain is `rustc 1.98.1`, `cargo 1.98.1`, `stable-aarch64-pc-windows-msvc`. The Rust
+  package declares 1.87 as its minimum because `ruzstd` 0.9.0 requires it; that minimum is untested.
 - Current Rust verification is recorded in `validation-log.md`.
-- The Rust repository had no refs at initial identification. The only cloud write target is the user-authorized cocokoishi/RustAssetRipper main branch. Verify the live remote ref through the authorized GitHub connection before each write because the workstation origin/main tracking ref can lag. Do not use or touch any other repository.
+- The only cloud write target is the user-authorized cocokoishi/RustAssetRipper main branch. Verify the
+  live remote ref through the authorized GitHub connection before each write because the workstation
+  origin/main tracking ref can lag. Do not use or touch any other repository.
 
 ## Scope findings still open
 
