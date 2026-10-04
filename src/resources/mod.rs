@@ -3,6 +3,7 @@
 pub mod animation_curve;
 pub mod compressed_mesh;
 pub mod keyframe;
+pub mod keyframe_quaternion;
 pub mod keyframe_vector3;
 pub mod packed_bit_vector;
 pub mod packed_float_vector;
