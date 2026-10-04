@@ -547,6 +547,63 @@ pub fn get_unique_file_name(
     )
 }
 
+/// The directories and names selected by `AssetExportCollection.Export` path routing.
+///
+/// `subdirectory` is `Path.Join(project_directory, fixed_directory)` and `file_path` is
+/// `Path.Join(subdirectory, file_name)`, both using the supplied platform conventions.
+/// `relative_asset_path` is the portable `fixed_directory/file_name` form accepted by the
+/// add-only `.meta` sidecar writer, with every separator normalized to `/`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlannedAssetPaths {
+    pub subdirectory: String,
+    pub file_name: String,
+    pub file_path: String,
+    pub relative_asset_path: String,
+}
+
+/// Mirror the path-selection prefix of `AssetExportCollection.Export` without touching the disk.
+///
+/// The source fixes the best directory, joins it below the project directory, picks a unique
+/// file name in that subdirectory, creates the subdirectory, and joins the file path. This
+/// planner performs every step except the `Directory.Create` mutation, so the caller can create
+/// exactly the returned subdirectory before writing the asset and its sidecar.
+pub fn plan_asset_export_paths(
+    identity: &ExportAssetPathIdentity,
+    extension: &str,
+    platform: HostPathPlatform,
+    state: &mut UniqueNameState,
+    file_system: &impl ExportFileSystem,
+    project_directory: &str,
+) -> Result<PlannedAssetPaths, AssetPathError> {
+    let fixed_directory = fix_invalid_path_characters(&identity.best_directory(), platform)?;
+    if fixed_directory.is_empty() {
+        return Err(AssetPathError::AllocationFailed {
+            resource: "export subdirectory",
+        });
+    }
+    let subdirectory = join_path(project_directory, &fixed_directory, platform);
+    let file_name = get_unique_file_name(
+        identity,
+        extension,
+        platform,
+        state,
+        file_system,
+        &subdirectory,
+    )?;
+    let file_path = join_path(&subdirectory, &file_name, platform);
+    let relative_asset_path = owned_concat(
+        &fixed_directory.replace('\\', "/"),
+        &owned_concat("/", &file_name, "export relative asset path")?,
+        "export relative asset path",
+    )?;
+    Ok(PlannedAssetPaths {
+        subdirectory,
+        file_name,
+        file_path,
+        relative_asset_path,
+    })
+}
+
 fn owned_concat(
     first: &str,
     second: &str,
@@ -566,10 +623,10 @@ mod tests {
     use super::{
         find_valid_byte_length, fix_invalid_file_name_characters, fix_invalid_path_characters,
         get_extension, get_file_name_without_extension, get_unique_file_name, get_unique_name,
-        is_reserved_name, join_path, remove_clone_suffixes, remove_instance_suffixes,
-        truncate_to_utf8_byte_length, AssetPathError, ExportAssetPathIdentity, ExportFileSystem,
-        HostPathPlatform, UniqueNameLimits, UniqueNameState, MAX_ASSET_FILE_NAME_LENGTH,
-        MAX_FILE_NAME_LENGTH,
+        is_reserved_name, join_path, plan_asset_export_paths, remove_clone_suffixes,
+        remove_instance_suffixes, truncate_to_utf8_byte_length, AssetPathError,
+        ExportAssetPathIdentity, ExportFileSystem, HostPathPlatform, UniqueNameLimits,
+        UniqueNameState, MAX_ASSET_FILE_NAME_LENGTH, MAX_FILE_NAME_LENGTH,
     };
     use std::collections::BTreeSet;
 
@@ -1000,5 +1057,64 @@ mod tests {
 
         assert_eq!(MAX_ASSET_FILE_NAME_LENGTH, 240);
         assert_eq!(MAX_FILE_NAME_LENGTH, 245);
+    }
+
+    #[test]
+    fn planned_paths_follow_the_asset_collection_join_and_collision_order() {
+        let mut file_system = TestFileSystem::default();
+        let mut state = UniqueNameState::default();
+
+        // The class-name fallback directory is fixed and joined below the project root.
+        let planned = plan_asset_export_paths(
+            &identity("Mesh"),
+            "asset",
+            HostPathPlatform::Windows,
+            &mut state,
+            &file_system,
+            "Project",
+        )
+        .unwrap();
+        assert_eq!(planned.subdirectory, "Project\\Assets/Mesh");
+        assert_eq!(planned.file_name, "Mesh.asset");
+        assert_eq!(planned.file_path, "Project\\Assets/Mesh\\Mesh.asset");
+        assert_eq!(planned.relative_asset_path, "Assets/Mesh/Mesh.asset");
+
+        // An existing colliding file in the joined subdirectory gets the `_0` suffix and the
+        // relative path normalizes backslashes for the sidecar writer.
+        let mut asset = identity("Mesh");
+        asset.original_directory = Some("Assets\\Models".to_owned());
+        asset.named_name = Some("Cube".to_owned());
+        file_system
+            .add_directory("Project\\Assets\\Models")
+            .add_file("Project\\Assets\\Models", "Cube.asset");
+        let planned = plan_asset_export_paths(
+            &asset,
+            "asset",
+            HostPathPlatform::Windows,
+            &mut state,
+            &file_system,
+            "Project",
+        )
+        .unwrap();
+        assert_eq!(planned.subdirectory, "Project\\Assets\\Models");
+        assert_eq!(planned.file_name, "Cube_0.asset");
+        assert_eq!(planned.file_path, "Project\\Assets\\Models\\Cube_0.asset");
+        assert_eq!(planned.relative_asset_path, "Assets/Models/Cube_0.asset");
+
+        // Invalid directory characters are fixed before joining, matching `Export` order.
+        let mut asset = identity("Mesh");
+        asset.override_directory = Some("Assets<Old>".to_owned());
+        asset.override_name = Some("Icon".to_owned());
+        let planned = plan_asset_export_paths(
+            &asset,
+            "asset",
+            HostPathPlatform::Windows,
+            &mut state,
+            &file_system,
+            "Project",
+        )
+        .unwrap();
+        assert_eq!(planned.subdirectory, "Project\\Assets_Old_");
+        assert_eq!(planned.relative_asset_path, "Assets_Old_/Icon.asset");
     }
 }
