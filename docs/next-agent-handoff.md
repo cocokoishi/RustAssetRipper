@@ -245,3 +245,10 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Added `src/resources/blend_tree_node_constant.rs`, `src/resources/state_machine_constant.rs`, and `src/resources/animator_enums.rs`, each with a committed original-runtime differential fixture.
 - Next on the animator path: the `Avatar`/`AvatarConstant` assembly and `AvatarExtensions.FindBonePath`, then the `AnimationClip` binding curve list and the `AnimatorController` state-machine/state assembly.
 - State: 733 library + 23 CLI tests, warnings-denied Clippy, format check, 1,449-file baseline verifier, and `git diff --check` all pass. Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+
+## 26. Checkpoint: avatar constants and bone paths (2026-10-04)
+
+- Added `src/resources/avatar_constant.rs` and `src/resources/avatar.rs`, each with a committed original-runtime differential fixture. The probe also established that generated class assets can be built with `AssetCreator.CreateCollection(version)` + `AssetInfo`, which unblocks future class-level differentials.
+- Next on the animator path: the `AnimationClip` binding curve list and the `AnimatorController` state-machine/state assembly.
+- State: 735 library + 23 CLI tests, warnings-denied Clippy, format check, 1,449-file baseline verifier, and `git diff --check` all pass. Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

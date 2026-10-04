@@ -2,6 +2,8 @@
 
 pub mod animation_curve;
 pub mod animator_enums;
+pub mod avatar;
+pub mod avatar_constant;
 pub mod blend_tree_node;
 pub mod blend_tree_node_constant;
 pub mod compressed_animation_curve;

@@ -1844,3 +1844,11 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Added `src/resources/animator_enums.rs`: the `LayerConstant`/`ValueConstant`/`AnimatorControllerParameter` enum casts as raw-discriminant newtypes.
 - Genuine original-runtime differentials: probes `Temp/opencode/bt2probe` and `Temp/opencode/anim2probe` instantiated real generated subclasses across seven and six versions respectively and drove every accessor and cast. The rows are committed as `src/resources/blend_tree_node_constant_fixture.txt` (7), `src/resources/state_machine_constant_fixture.txt` (6), and `src/resources/animator_enums_fixture.txt` (6), and matched row-for-row.
 - Final verification on Windows with Rust/Cargo 1.98.1: cargo fmt --all -- --check exit 0; cargo test --workspace --locked exit 0 (733 library, 23 CLI, 0 doc tests); cargo clippy --workspace --all-targets --locked -- -D warnings exit 0; tools/verify-baseline.ps1 exit 0 (1,449/1,449 reference files unchanged); git diff --check exit 0. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+
+## Avatar constant and bone-path differentials (2026-10-04)
+
+- Added `src/resources/avatar_constant.rs`: `AvatarConstantExtensions.GetDefaultPose`/`GetSkeletonNameIDArray` with the 4.3 version gate.
+- Added `src/resources/avatar.rs`: `AvatarExtensions.FindBonePath`.
+- Genuine original-runtime differentials: probe `Temp/opencode/avatarprobe` instantiated real `AvatarConstant.Create(version)` subclasses and real generated `Avatar` objects (via `AssetCreator.CreateCollection` + `AssetInfo`) for seven versions and confirmed the selected pose/name source by reference identity and the present/absent bone lookups. The rows are committed as `src/resources/avatar_constant_fixture.txt` and `src/resources/avatar_fixture.txt` and matched row-for-row.
+- Final verification on Windows with Rust/Cargo 1.98.1: cargo fmt --all -- --check exit 0; cargo test --workspace --locked exit 0 (735 library, 23 CLI, 0 doc tests); cargo clippy --workspace --all-targets --locked -- -D warnings exit 0; tools/verify-baseline.ps1 exit 0 (1,449/1,449 reference files unchanged); git diff --check exit 0. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.

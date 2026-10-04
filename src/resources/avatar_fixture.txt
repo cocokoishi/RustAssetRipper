@@ -1,0 +1,7 @@
+AV|3.5.0f1|1|Bone/PathA|Bone/PathB|NONE
+AV|4.3.0f1|1|Bone/PathA|Bone/PathB|NONE
+AV|5.0.0f1|1|Bone/PathA|Bone/PathB|NONE
+AV|5.5.0f1|1|Bone/PathA|Bone/PathB|NONE
+AV|2017.1.0f1|1|Bone/PathA|Bone/PathB|NONE
+AV|2018.1.0f1|1|Bone/PathA|Bone/PathB|NONE
+AV|2019.4.3f1|1|Bone/PathA|Bone/PathB|NONE
