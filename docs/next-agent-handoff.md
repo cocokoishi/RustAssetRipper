@@ -182,3 +182,10 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Added `src/resources/animation_curve.rs`: the `AnimationCurveExtensions` single-float overloads (default loop/rotation envelope, default-value, two-value, slope builders) and the `CurveLoopTypes`/`RotationOrder` enum values. A real `AnimationCurve_Single.Create` differential captured eight versions as `src/resources/animation_curve_fixture.txt`.
 - Next on the animation path: the `Vector3f`/`Quaternionf` curve variants, the keyframe-list overloads, then the `FloatCurve`/`Vector3Curve`/`QuaternionCurve`/`PPtrCurve` bindings and `AnimationClip` clip decoding (`DenseClip`/`StreamedClip`/`ConstantClip`/compressed curves) and `MuscleClipInfo`.
 - State: 721 library + 23 CLI tests, warnings-denied Clippy, format check, 1,449-file baseline verifier, and `git diff --check` all pass. Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+
+## 17. Checkpoint: Vector3f keyframes and vector extensions (2026-10-04)
+
+- Added `src/resources/keyframe_vector3.rs` and `src/resources/vector_extensions.rs`: the `KeyframeExtensions.Vector3f` weight/slope overloads, the 2018.1 field gate, and the `Vector3f`/`Quaternionf` scale/copy/set/cast helpers. A real `Keyframe_Vector3f.Create` differential captured eight versions as `src/resources/keyframe_vector3_fixture.txt`.
+- Next on the animation path: the `Quaternionf` keyframe variant (including the scalar-weight fill and the quaternion `SetValues`), the `Vector3f`/`Quaternionf` curve builders, then the `FloatCurve`/`Vector3Curve`/`QuaternionCurve`/`PPtrCurve` bindings and `AnimationClip` clip decoding.
+- State: 723 library + 23 CLI tests, warnings-denied Clippy, format check, 1,449-file baseline verifier, and `git diff --check` all pass. Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
