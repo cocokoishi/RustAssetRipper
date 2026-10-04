@@ -11,6 +11,7 @@ pub mod export_type;
 pub mod guid_policy;
 pub mod ids;
 pub mod importer_fields;
+pub mod manager_flows;
 pub mod meta;
 pub mod meta_emission;
 pub mod multi_asset;
