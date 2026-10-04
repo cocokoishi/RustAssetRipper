@@ -1527,3 +1527,9 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Added src/serialized_file/transfer_flags.rs: all 32 `TransferInstructionFlags` bits with snapshot values and summaries, the four `Is*` predicates, and the prefab-collection OR rule. A missing top bit in the table was caught by the bit-exactness test and fixed.
 - Three tests cover values, predicates, and the prefab rule. No Clippy findings.
 - Final verification on Windows with Rust/Cargo 1.98.1: cargo fmt --all -- --check exit 0; cargo test --workspace --locked --quiet exit 0 (632 library, 23 CLI, 0 doc tests); cargo clippy --workspace --all-targets --locked -- -D warnings exit 0; tools/verify-baseline.ps1 exit 0 (1,449/1,449 reference files unchanged); git diff --check exit 0. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+## Deleted-asset collection (2026-10-04)
+
+- Added src/export/deleted_collection.rs: record-plus-deleted membership with append order, the fixed collection name, throwing export/IDs, the verbatim reference warning, and class-ID/stack-type pointer resolution that ignores locality unlike Skip/Fail.
+- Three tests cover membership, throwing paths, warnings, and pointers. One unstable `!`-type return was replaced with `Infallible`.
+- Final verification on Windows with Rust/Cargo 1.98.1: cargo fmt --all -- --check exit 0; cargo test --workspace --locked --quiet exit 0 (635 library, 23 CLI, 0 doc tests); cargo clippy --workspace --all-targets --locked -- -D warnings exit 0; tools/verify-baseline.ps1 exit 0 (1,449/1,449 reference files unchanged); git diff --check exit 0. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
