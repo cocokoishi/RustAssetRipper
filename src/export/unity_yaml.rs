@@ -697,6 +697,13 @@ impl UnityYamlEmitter {
     }
 
     fn write_str(&mut self, value: &str) -> Result<(), UnityYamlWriteError> {
+        // The baseline's `Emitter.Write(ReadOnlySpan<char>)` skips `WriteDelayed` for an empty
+        // span, so a pending whitespace or newline before an empty plain string is dropped
+        // rather than flushed. This is observable as `k:\n` (no trailing space) for an empty
+        // value.
+        if value.is_empty() {
+            return Ok(());
+        }
         self.write_delayed()?;
         self.append(value)
     }
@@ -790,7 +797,7 @@ fn string_needs_quotes(value: &str) -> bool {
         return false;
     };
     if first.is_whitespace()
-        || value.starts_with("- ")
+        || (value.starts_with('-') && value[1..].chars().next().is_some_and(char::is_whitespace))
         || value == "-"
         || ":[]\"'*&!@#%{}?<>,`".contains(first)
         || value.ends_with(':')
@@ -1064,5 +1071,81 @@ mod tests {
             ),
             Err(UnityYamlWriteError::OutputLimitExceeded { .. })
         ));
+    }
+
+    /// Emit `{k: <value>}` as a standalone mapping, the way `ExportMeta` writes a sidecar.
+    fn emit_scalar_document(value: &str) -> String {
+        let mut map = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+        map.insert_field("k", UnityYamlNode::string(value)).unwrap();
+        write_unity_yaml_mapping(&map, UnityYamlWriteLimits::default()).unwrap()
+    }
+
+    /// Byte-for-byte differential against the reference `AssetRipper.Yaml` runtime.
+    ///
+    /// Each expected document is the exact output of a probe that referenced the isolated
+    /// `AssetRipper.Yaml.dll` build, created `YamlScalarNode.Create(value)`, and wrote it under
+    /// a `k` key with `IsWriteDefaultTag = false`, `IsWriteVersion = false`,
+    /// `IsFormatKeys = true`, and a `\n` newline (the same configuration as
+    /// `write_unity_yaml_mapping`). The probe and its command are recorded in
+    /// `docs/validation-log.md`. It caught the `-` + non-space whitespace divergence.
+    #[test]
+    fn scalar_quoting_matches_the_reference_yaml_runtime() {
+        let cases: &[(&str, &str)] = &[
+            ("", "k:\n"),
+            ("abc", "k: abc\n"),
+            (" hello", "k: ' hello'\n"),
+            ("hello ", "k: 'hello '\n"),
+            ("\thello", "k: \"\\thello\"\n"),
+            ("- foo", "k: '- foo'\n"),
+            ("-foo", "k: -foo\n"),
+            ("-", "k: '-'\n"),
+            ("-\u{A0}foo", "k: '-\u{A0}foo'\n"),
+            ("-\u{2003}foo", "k: '-\u{2003}foo'\n"),
+            ("-\u{200B}foo", "k: -\u{200B}foo\n"),
+            (":foo", "k: ':foo'\n"),
+            ("[foo", "k: '[foo'\n"),
+            ("foo: bar", "k: 'foo: bar'\n"),
+            ("foo:", "k: 'foo:'\n"),
+            ("foo:\u{A0}bar", "k: 'foo:\u{A0}bar'\n"),
+            ("foo@\tbar", "k: \"foo@\\tbar\"\n"),
+            ("caf\u{E9}", "k: caf\u{E9}\n"),
+            ("line\nbreak", "k: \"line\\nbreak\"\n"),
+            ("quote'inside", "k: quote'inside\n"),
+            ("double\"inside", "k: double\"inside\n"),
+            ("back\\slash", "k: back\\slash\n"),
+            ("m_Name", "k: m_Name\n"),
+            ("a\u{2028}b", "k: a\u{2028}b\n"),
+            ("\u{A0}foo", "k: '\u{A0}foo'\n"),
+            ("foo\u{A0}", "k: 'foo\u{A0}'\n"),
+            ("!foo", "k: '!foo'\n"),
+            ("#foo", "k: '#foo'\n"),
+            ("%foo", "k: '%foo'\n"),
+            ("&foo", "k: '&foo'\n"),
+            ("*foo", "k: '*foo'\n"),
+            ("@foo", "k: '@foo'\n"),
+            ("`foo", "k: '`foo'\n"),
+            (">foo", "k: '>foo'\n"),
+            ("<foo", "k: '<foo'\n"),
+            (",foo", "k: ',foo'\n"),
+            ("'foo", "k: '''foo'\n"),
+            ("\"foo", "k: '\"foo'\n"),
+            ("{foo", "k: '{foo'\n"),
+            ("}foo", "k: '}foo'\n"),
+            ("?foo", "k: '?foo'\n"),
+            ("  ", "k: '  '\n"),
+            ("a:b", "k: a:b\n"),
+            ("a:\tb", "k: \"a:\\tb\"\n"),
+            ("\u{85}foo", "k: \"\\u0085foo\"\n"),
+            ("foo\rbar", "k: \"foo\\rbar\"\n"),
+            ("\u{0}", "k: \"\\u0000\"\n"),
+            ("tabs\there", "k: \"tabs\\there\"\n"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                &emit_scalar_document(input),
+                expected,
+                "input {input:?} diverged from the reference runtime"
+            );
+        }
     }
 }
