@@ -344,12 +344,95 @@ pub fn maybe_append_timestamped_subfolder(
     joined
 }
 
+/// `GameFileLoader` load state: `GameData` present or null.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum LoaderState {
+    Unloaded,
+    Loaded,
+}
+
+/// Whether `Reset` logs: only when data was actually present.
+pub fn reset_transition(state: LoaderState) -> (LoaderState, bool) {
+    match state {
+        LoaderState::Loaded => (LoaderState::Unloaded, true),
+        LoaderState::Unloaded => (LoaderState::Unloaded, false),
+    }
+}
+
+/// System directory names `IsValidExportDirectory` rejects as the final path segment.
+///
+/// The comparison is ordinal and case sensitive: `desktop` exports while `Desktop` does not.
+pub const PROTECTED_EXPORT_DIRECTORY_NAMES: [&str; 3] = ["Desktop", "Documents", "Downloads"];
+
+/// Mirror `GameFileLoader.IsValidExportDirectory`.
+///
+/// An empty path fails, as does a path whose file name is a protected system directory name.
+/// The file name is the text after the last `/` or `\` separator.
+pub fn is_valid_export_directory(path: &str) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    let file_name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    !PROTECTED_EXPORT_DIRECTORY_NAMES.contains(&file_name)
+}
+
+/// Mirror `GameFileLoader.UserConsentsToDeletion`.
+///
+/// Headless exports consent automatically; otherwise the dialog result applies, with a
+/// dismissed dialog (`None`) declining.
+pub fn deletion_consent(headless: bool, dialog_result: Option<bool>) -> bool {
+    if headless {
+        return true;
+    }
+    dialog_result.unwrap_or(false)
+}
+
+/// How an export command proceeds after the loaded and directory gates.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ExportFlow {
+    /// `GameData` is null: the baseline does nothing.
+    AbortedNotLoaded,
+    /// The export directory is empty or protected: the baseline logs an error.
+    AbortedInvalidDirectory,
+    /// A non-empty directory without deletion consent: the baseline logs and returns.
+    AbortedDeclined,
+    /// A non-empty consented directory: delete recursively, recreate, then export.
+    ProceedDeleteFirst,
+    /// A missing or empty directory: create it, then export.
+    ProceedCreateOnly,
+}
+
+/// Mirror the gate sequence shared by `ExportUnityProject` and `ExportPrimaryContent`.
+pub fn resolve_export_flow(
+    is_loaded: bool,
+    directory_valid: bool,
+    directory_non_empty: bool,
+    consent_to_delete: bool,
+) -> ExportFlow {
+    if !is_loaded {
+        return ExportFlow::AbortedNotLoaded;
+    }
+    if !directory_valid {
+        return ExportFlow::AbortedInvalidDirectory;
+    }
+    if !directory_non_empty {
+        return ExportFlow::ProceedCreateOnly;
+    }
+    if consent_to_delete {
+        ExportFlow::ProceedDeleteFirst
+    } else {
+        ExportFlow::AbortedDeclined
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        automatic_log_file_name, local_web_file_prefix, maybe_append_timestamped_subfolder,
-        ProductCommand, RouteMethod, EXPORT_SUBFOLDER_PREFIX, LOG_FILE_EXTENSION, LOG_FILE_PREFIX,
-        LOOPBACK_BIND_ADDRESS, ROTATED_LOG_FILES_KEPT, WEB_ROUTES,
+        automatic_log_file_name, deletion_consent, is_valid_export_directory,
+        local_web_file_prefix, maybe_append_timestamped_subfolder, reset_transition,
+        resolve_export_flow, ExportFlow, LoaderState, ProductCommand, RouteMethod,
+        EXPORT_SUBFOLDER_PREFIX, LOG_FILE_EXTENSION, LOG_FILE_PREFIX, LOOPBACK_BIND_ADDRESS,
+        PROTECTED_EXPORT_DIRECTORY_NAMES, ROTATED_LOG_FILES_KEPT, WEB_ROUTES,
     };
 
     #[test]
@@ -433,5 +516,66 @@ mod tests {
             "/out"
         );
         assert_eq!(EXPORT_SUBFOLDER_PREFIX, "AssetRipper_export_");
+    }
+
+    #[test]
+    fn loader_reset_logs_only_when_data_was_present() {
+        assert_eq!(
+            reset_transition(LoaderState::Loaded),
+            (LoaderState::Unloaded, true)
+        );
+        assert_eq!(
+            reset_transition(LoaderState::Unloaded),
+            (LoaderState::Unloaded, false)
+        );
+    }
+
+    #[test]
+    fn export_directories_reject_empty_and_protected_names_ordinally() {
+        assert!(!is_valid_export_directory(""));
+        assert!(!is_valid_export_directory("C:\\Users\\me\\Desktop"));
+        assert!(!is_valid_export_directory("/home/me/Documents"));
+        assert!(!is_valid_export_directory("Downloads"));
+        // Ordinal comparison: other casings export.
+        assert!(is_valid_export_directory("C:\\Users\\me\\desktop"));
+        assert!(is_valid_export_directory("/home/me/DOCUMENTS"));
+        assert!(is_valid_export_directory("/out/ExportedProject"));
+        assert_eq!(
+            PROTECTED_EXPORT_DIRECTORY_NAMES,
+            ["Desktop", "Documents", "Downloads"]
+        );
+    }
+
+    #[test]
+    fn deletion_consent_prefers_headless_over_dialogs() {
+        assert!(deletion_consent(true, None));
+        assert!(deletion_consent(true, Some(false)));
+        assert!(deletion_consent(false, Some(true)));
+        assert!(!deletion_consent(false, Some(false)));
+        assert!(!deletion_consent(false, None));
+    }
+
+    #[test]
+    fn export_flow_follows_the_loaded_valid_consent_gates() {
+        assert_eq!(
+            resolve_export_flow(false, true, true, true),
+            ExportFlow::AbortedNotLoaded
+        );
+        assert_eq!(
+            resolve_export_flow(true, false, false, false),
+            ExportFlow::AbortedInvalidDirectory
+        );
+        assert_eq!(
+            resolve_export_flow(true, true, false, false),
+            ExportFlow::ProceedCreateOnly
+        );
+        assert_eq!(
+            resolve_export_flow(true, true, true, true),
+            ExportFlow::ProceedDeleteFirst
+        );
+        assert_eq!(
+            resolve_export_flow(true, true, true, false),
+            ExportFlow::AbortedDeclined
+        );
     }
 }
