@@ -1272,6 +1272,144 @@ mod tests {
             );
         }
     }
+    /// Byte-for-byte differential against the reference `AssetRipper.Yaml` runtime layout.
+    ///
+    /// Expected documents come from the isolated net10.0 probe `Temp/opencode/layoutprobe`
+    /// (recorded in `docs/validation-log.md`), which built the same node trees through
+    /// `YamlMappingNode`/`YamlSequenceNode` and emitted with `IsWriteDefaultTag = false`,
+    /// `IsWriteVersion = false`, `IsFormatKeys = true`, and a `\n` newline.
+    #[test]
+    fn layout_matches_the_reference_yaml_runtime() {
+        let cases: &[(&str, &str)] = &[
+            ("nested_block", "a:\n  b: 1\n  c: x\nd: 1\n"),
+            ("block_seq", "s:\n- -1\n- 2\n"),
+            ("flow_seq", "s: [1, 2]\n"),
+            ("blockcurve_seq", "s:\n- 1\n"),
+            ("empty_block_seq", "s: []\n"),
+            ("empty_flow_seq", "s: []\n"),
+            ("empty_blockcurve_seq", "s: {}\n"),
+            ("seq_of_maps", "s:\n- x: 1\n- y: 2\n"),
+            ("flow_map", "f: {k: 1}\n"),
+            ("empty_block_map", "e: {}\n"),
+            ("anchored", "anchored: &a1 5\n"),
+            ("tagged", "tagged: !u!myTag 5\n"),
+            ("stripped", "stripped: stripped 5\n"),
+            ("anchored_multiline_map", "a:\n  &m1\n  b: 1\n"),
+            ("seq_nested_seq", "s:\n- [1]\n- 2\n"),
+        ];
+        for (name, expected) in cases {
+            assert_eq!(
+                &build_layout_case(name),
+                expected,
+                "layout case {name} diverged from the reference runtime"
+            );
+        }
+    }
+
+    fn render_layout(build: impl FnOnce(&mut UnityYamlNode)) -> String {
+        let mut root = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+        build(&mut root);
+        write_unity_yaml_mapping(&root, UnityYamlWriteLimits::default()).unwrap()
+    }
+
+    fn signed(value: i64) -> UnityYamlNode {
+        UnityYamlNode::scalar(UnityYamlScalar::Signed(value))
+    }
+
+    fn build_layout_case(name: &str) -> String {
+        match name {
+            "nested_block" => render_layout(|root| {
+                let mut inner = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+                inner.insert_field("b", signed(1)).unwrap();
+                inner.insert_field("c", UnityYamlNode::string("x")).unwrap();
+                root.insert_field("a", inner).unwrap();
+                root.insert_field("d", UnityYamlNode::scalar(UnityYamlScalar::Boolean(true)))
+                    .unwrap();
+            }),
+            "block_seq" => render_layout(|root| {
+                let mut seq = UnityYamlNode::sequence(UnityYamlSequenceStyle::Block);
+                seq.push(signed(-1)).unwrap();
+                seq.push(signed(2)).unwrap();
+                root.insert_field("s", seq).unwrap();
+            }),
+            "flow_seq" => render_layout(|root| {
+                let mut seq = UnityYamlNode::sequence(UnityYamlSequenceStyle::Flow);
+                seq.push(signed(1)).unwrap();
+                seq.push(signed(2)).unwrap();
+                root.insert_field("s", seq).unwrap();
+            }),
+            "blockcurve_seq" => render_layout(|root| {
+                let mut seq = UnityYamlNode::sequence(UnityYamlSequenceStyle::BlockCurve);
+                seq.push(signed(1)).unwrap();
+                root.insert_field("s", seq).unwrap();
+            }),
+            "empty_block_seq" => render_layout(|root| {
+                root.insert_field("s", UnityYamlNode::sequence(UnityYamlSequenceStyle::Block))
+                    .unwrap();
+            }),
+            "empty_flow_seq" => render_layout(|root| {
+                root.insert_field("s", UnityYamlNode::sequence(UnityYamlSequenceStyle::Flow))
+                    .unwrap();
+            }),
+            "empty_blockcurve_seq" => render_layout(|root| {
+                root.insert_field(
+                    "s",
+                    UnityYamlNode::sequence(UnityYamlSequenceStyle::BlockCurve),
+                )
+                .unwrap();
+            }),
+            "seq_of_maps" => render_layout(|root| {
+                let mut seq = UnityYamlNode::sequence(UnityYamlSequenceStyle::Block);
+                let mut first = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+                first.insert_field("x", signed(1)).unwrap();
+                let mut second = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+                second.insert_field("y", signed(2)).unwrap();
+                seq.push(first).unwrap();
+                seq.push(second).unwrap();
+                root.insert_field("s", seq).unwrap();
+            }),
+            "flow_map" => render_layout(|root| {
+                let mut inner = UnityYamlNode::mapping(UnityYamlMappingStyle::Flow);
+                inner.insert_field("k", signed(1)).unwrap();
+                root.insert_field("f", inner).unwrap();
+            }),
+            "empty_block_map" => render_layout(|root| {
+                root.insert_field("e", UnityYamlNode::mapping(UnityYamlMappingStyle::Block))
+                    .unwrap();
+            }),
+            "anchored" => render_layout(|root| {
+                let mut node = signed(5);
+                node.anchor = Some("a1".to_owned());
+                root.insert_field("anchored", node).unwrap();
+            }),
+            "tagged" => render_layout(|root| {
+                let mut node = signed(5);
+                node.tag = Some("!u!myTag".to_owned());
+                root.insert_field("tagged", node).unwrap();
+            }),
+            "stripped" => render_layout(|root| {
+                let mut node = signed(5);
+                node.stripped = true;
+                root.insert_field("stripped", node).unwrap();
+            }),
+            "anchored_multiline_map" => render_layout(|root| {
+                let mut inner = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+                inner.insert_field("b", signed(1)).unwrap();
+                inner.anchor = Some("m1".to_owned());
+                root.insert_field("a", inner).unwrap();
+            }),
+            "seq_nested_seq" => render_layout(|root| {
+                let mut outer = UnityYamlNode::sequence(UnityYamlSequenceStyle::Block);
+                let mut inner = UnityYamlNode::sequence(UnityYamlSequenceStyle::Flow);
+                inner.push(signed(1)).unwrap();
+                outer.push(inner).unwrap();
+                outer.push(signed(2)).unwrap();
+                root.insert_field("s", outer).unwrap();
+            }),
+            other => panic!("unknown layout case {other}"),
+        }
+    }
+
     const F32_CASES: &[(u32, &str)] = &[
         (0x00000000, "0"),
         (0x80000000, "-0"),
