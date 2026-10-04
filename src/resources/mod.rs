@@ -1,14 +1,18 @@
 //! Resource decoding and recovery primitives.
 
+pub mod animation_clip;
 pub mod animation_curve;
 pub mod animator_enums;
 pub mod avatar;
 pub mod avatar_constant;
 pub mod blend_tree_node;
 pub mod blend_tree_node_constant;
+pub mod clip;
 pub mod compressed_animation_curve;
 pub mod compressed_mesh;
+pub mod constant_clip;
 pub mod controller_constant;
+pub mod dense_clip;
 pub mod keyframe;
 pub mod keyframe_quaternion;
 pub mod keyframe_vector3;
@@ -19,6 +23,7 @@ pub mod packed_quat_vector;
 pub mod shader_channel;
 pub mod state_constant;
 pub mod state_machine_constant;
+pub mod streamed_clip;
 pub mod sub_mesh_data;
 pub mod tangent_mode;
 pub mod transition_constant;

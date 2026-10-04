@@ -252,3 +252,11 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Added `src/resources/avatar_constant.rs` and `src/resources/avatar.rs`, each with a committed original-runtime differential fixture. The probe also established that generated class assets can be built with `AssetCreator.CreateCollection(version)` + `AssetInfo`, which unblocks future class-level differentials.
 - Next on the animator path: the `AnimationClip` binding curve list and the `AnimatorController` state-machine/state assembly.
 - State: 735 library + 23 CLI tests, warnings-denied Clippy, format check, 1,449-file baseline verifier, and `git diff --check` all pass. Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+
+## 27. Checkpoint: clip extensions (2026-10-04)
+
+- Added the five clip modules (`streamed_clip`, `dense_clip`, `constant_clip`, `clip`, `animation_clip`) with committed original-runtime differentials, including the value-array-to-generic-binding CRC conversion and the 2022 negative-infinity-slope boundary.
+- Confirmed a source quirk: `ValueConstant_5_5.TypeID` is inert (no backing field), so the legacy binding conversion degenerates to Animator bindings on 5.5+.
+- Next on the animator path: the `AnimatorController` state-machine/state assembly and the `AnimationClip` export path.
+- State: 740 library + 23 CLI tests, warnings-denied Clippy, format check, 1,449-file baseline verifier, and `git diff --check` all pass. Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
