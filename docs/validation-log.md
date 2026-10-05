@@ -2180,3 +2180,9 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Extended `src/export/settings.rs`: `discriminant()` consts for all 12 enums and the full 21-member `ScriptLanguageVersion` (replacing the two-variant `ScriptLanguageSelection`, including `Latest = 2147483647` and the `CSharp7_1 = 701` step). The automatic language selection still needs external version ordering and stays out; default Unity versions (`0.0.0a0`) are pinned as probe literals since the Rust version type models no record defaults.
 - `DIFF-EXPORT-SETTINGS-001` recorded. New ledger row `EXP-EXPORT-SETTINGS-001` at `已实现但未验证`.
 - `cargo test --workspace --locked`: 925 library and 40 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+## Project-export lifecycle events and the unhandled-asset abort (2026-10-05)
+
+- Extended `src/export/project_order.rs` (the `ProjectExporter.Export` orchestration module): the four lifecycle events (`PreparationStarted/Finished`, `ExportStarted/Finished`) with source order, a `run_project_export_loop` driver reproducing the per-collection gate/warning/progress shape, and a fallible collection creator so `CreateCollection`'s no-handler throw aborts planning with `UnhandledAsset` and no partial plan. No runtime differential applies (event wiring over caller-supplied asset identities cannot execute without a full managed bundle); all behavior is source-read and directly asserted.
+- New ledger row `EXP-PROJECT-EXPORT-LOOP-001` at `已实现但未验证`.
+- `cargo test --workspace --locked`: 928 library and 40 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.

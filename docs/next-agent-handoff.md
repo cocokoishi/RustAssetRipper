@@ -552,3 +552,10 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - `cargo test --workspace --locked`: 925 library and 40 CLI tests; warnings-denied Clippy and format check pass. CI run `37289460672` green (all five jobs) for remote `main` = `5374d76`; local matches.
 - Next: `EXPORT-UNITY-001` orchestration audit, `TYPE-SCRIPT-001` remainder (manager resolutions), and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 66. Checkpoint: project-export lifecycle events and the unhandled-asset abort (2026-10-05)
+
+- Extended `src/export/project_order.rs` with the four `ProjectExporter.Export` lifecycle events, a loop driver reproducing the gate/warning/progress shape, and a fallible collection creator so the no-handler throw aborts planning with `UnhandledAsset`. Source-read over caller facts (no runtime differential applies); three new tests pin the abort, bracketing, and event sequence. New row `EXP-PROJECT-EXPORT-LOOP-001`.
+- `cargo test --workspace --locked`: 928 library and 40 CLI tests; warnings-denied Clippy and format check pass.
+- Next: `TYPE-SCRIPT-001` remainder (manager resolutions), `EXPORT-UNITY-001` remainder (file-writing pipeline), and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
