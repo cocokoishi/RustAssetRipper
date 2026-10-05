@@ -2361,5 +2361,5 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 ## Localization code rules (2026-10-06)
 
 - Ported the locale-independent `GUI.Localizations` rules as `src/localization.rs`: default `en-US`, the 23 filename-derived hyphenated codes, underscore-to-hyphen normalization, existence, and the switch-only-to-known-different `LoadLanguage` decision (null/identical/unknown are silent no-ops, so no error half). Four tests; corrected the stale `src/localization/` (nonexistent, now created) and `src/ui/` (actually `src/product.rs`) ledger mappings. String tables stay open pending a UI message consumer.
-- Lib suite 986/986 locally, workspace Clippy clean; full validation via Actions after push.
+- Lib suite 986/986 locally, workspace Clippy clean; CI run `37390365686` green (all five jobs) for remote `main` = `02ca514`; local matches.
 - No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
