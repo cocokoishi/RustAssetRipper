@@ -18,6 +18,7 @@ pub mod constant_clip;
 pub mod controller_constant;
 pub mod curve_wrappers;
 pub mod dense_clip;
+pub mod etc_decode;
 pub mod game_object;
 pub mod gl_texture_settings;
 pub mod graphics_format;

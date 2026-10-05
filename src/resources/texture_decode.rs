@@ -57,7 +57,7 @@ impl core::fmt::Display for TextureDecodeError {
 
 impl std::error::Error for TextureDecodeError {}
 
-fn require_input(input: &[u8], required: usize) -> Result<(), TextureDecodeError> {
+pub(crate) fn require_input(input: &[u8], required: usize) -> Result<(), TextureDecodeError> {
     if input.len() < required {
         return Err(TextureDecodeError::InputTooShort {
             required,
@@ -67,7 +67,11 @@ fn require_input(input: &[u8], required: usize) -> Result<(), TextureDecodeError
     Ok(())
 }
 
-fn require_output(output: &[u8], width: usize, height: usize) -> Result<usize, TextureDecodeError> {
+pub(crate) fn require_output(
+    output: &[u8],
+    width: usize,
+    height: usize,
+) -> Result<usize, TextureDecodeError> {
     let required = width
         .checked_mul(height)
         .and_then(|pixels| pixels.checked_mul(4))
