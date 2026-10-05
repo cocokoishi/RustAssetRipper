@@ -528,6 +528,6 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 ## 62. Checkpoint: parsed-form shader dummy with a runtime differential (2026-10-05)
 
 - Added `ParsedShaderProperty`/`ParsedShaderForm` decoding to `src/resources/shader.rs` and `render_parsed_property`/`render_parsed_properties`/`parsed_dummy_body`/`export_parsed_dummy` to `src/export/shader_export.rs`, wired into the `Dummy`/`Decompile` stack. Committed `src/export/shader_parsed_fixture.txt` (three real 2019.4 parsed forms through the shipped exporter) and `src/export/float_tostring_fixture.txt` (28 float renderings). Fixed the `Range(min, max)` spacing the differential exposed. New row `RES-SHADER-PARSED-001`; `DIFF-SHADER-PARSED-001` recorded. Serialized `m_*` names follow the class-48 convention without a local class-48 TypeTree dump.
-- `cargo test --workspace --locked`: 910 library and 40 CLI tests; warnings-denied Clippy and format check pass.
+- `cargo test --workspace --locked`: 910 library and 40 CLI tests; warnings-denied Clippy and format check pass. CI run `37285289510` green (all five jobs) for remote `main` = `be12850`; local matches.
 - Next: blend shapes, `EXPORT-UNITY-001`, `TYPE-SCRIPT-001`, and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
