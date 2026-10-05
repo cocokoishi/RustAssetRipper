@@ -571,5 +571,6 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 
 - Added `src/io/file_names.rs` (suffix cleanup, host-aware invalid-character fixing, reserved names, UTF-8 truncation, both path-splitting rules, `UniqueNamePlanner`, `GetUniqueFileName` composition). All 86 shipped-DLL rows in `src/io/file_names_fixture.txt` (probe `Temp/opencode/filenameprobe`, real temp dirs) matched, fixing the `.`/bare-dot asymmetry and pipe-bearing fixture parsing along the way, plus a cp437 probe-output mojibake fixed via pure-ASCII probe escapes. New row `EXP-FILE-NAME-001`; `DIFF-FILE-NAME-001` recorded.
 - `cargo test --workspace --locked`: 935 library and 40 CLI tests; warnings-denied Clippy and format check pass.
+- CI: run `37294766135` (for `ec2d9fa`) failed only `test (ubuntu-latest)` on the then-unconditional `con_0.txt` expectation; fixed in `6459798`, whose run `37295745789` is green on all five jobs. Remote `main` = `6459798`; local matches.
 - Next: `TYPE-SCRIPT-001` remainder (manager resolutions), `EXPORT-UNITY-001` remainder (asset/sidecar file writes), and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
