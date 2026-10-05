@@ -646,7 +646,13 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 ## 80. Checkpoint: settings persistence gate (2026-10-06)
 
 - Added the pure persistence rules (`decide_settings_persistence`, `decide_settings_auto_save`, `default_settings_file_path`) with a gate test. Only file I/O, the process directory query, and startup application stay outside. Targeted settings-file tests pass (7/7); CI run `37310873342` green (all five jobs) for remote `main` = `836f203`; local matches.
-- Next: `TYPE-SCRIPT-001` remainder (manager resolutions), CLI exposure + GUID freshness + folder sidecars, and actual settings file I/O plus startup application.
+- Next: `TYPE-SCRIPT-001` remainder (manager resolutions), CLI exposure + GUID freshness + folder sidecars, and settings-file loading into the CLI.
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 81. Checkpoint: settings application in export-texture (2026-10-06)
+
+- Bridged settings-to-writer image formats and threaded the configured default through `export-texture` (behavior-identical under default settings). New row `EXP-SETTINGS-APPLY-001`. Targeted lib + CLI tests pass; full validation via Actions after push.
+- Next: `TYPE-SCRIPT-001` remainder (manager resolutions), CLI exposure + GUID freshness + folder sidecars, and settings-file loading into the CLI.
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
 - Next: `TYPE-SCRIPT-001` remainder (manager resolutions), CLI exposure + GUID freshness + folder sidecars, and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

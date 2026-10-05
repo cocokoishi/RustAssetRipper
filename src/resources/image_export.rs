@@ -54,6 +54,21 @@ impl ImageExportFormat {
             _ => None,
         }
     }
+
+    /// Bridge from the settings record's `ImageExportFormat` to the writer dispatch.
+    ///
+    /// Both enums carry the same six members in the same order; the settings side owns the
+    /// discriminants while this side owns the codecs.
+    pub fn from_settings_format(format: crate::export::settings::ImageExportFormat) -> Self {
+        match format {
+            crate::export::settings::ImageExportFormat::Bmp => Self::Bmp,
+            crate::export::settings::ImageExportFormat::Exr => Self::Exr,
+            crate::export::settings::ImageExportFormat::Hdr => Self::Hdr,
+            crate::export::settings::ImageExportFormat::Jpeg => Self::Jpeg,
+            crate::export::settings::ImageExportFormat::Png => Self::Png,
+            crate::export::settings::ImageExportFormat::Tga => Self::Tga,
+        }
+    }
 }
 
 /// An image write failure.
@@ -344,6 +359,28 @@ mod tests {
         assert_eq!(output[16], 32);
         assert_eq!(output[17], 0x28);
         assert_eq!(&output[18..], &[30, 20, 10, 40]);
+    }
+
+    #[test]
+    fn settings_formats_bridge_to_the_matching_writer_format() {
+        use crate::export::settings::ImageExportFormat as SettingsFormat;
+
+        for settings in [
+            SettingsFormat::Bmp,
+            SettingsFormat::Exr,
+            SettingsFormat::Hdr,
+            SettingsFormat::Jpeg,
+            SettingsFormat::Png,
+            SettingsFormat::Tga,
+        ] {
+            let writer = ImageExportFormat::from_settings_format(settings);
+            // Same member, same file extension, same discriminant on both sides.
+            assert_eq!(writer.file_extension(), settings.file_extension());
+            assert_eq!(
+                ImageExportFormat::try_from_extension(settings.file_extension()),
+                Some(writer)
+            );
+        }
     }
 
     #[test]

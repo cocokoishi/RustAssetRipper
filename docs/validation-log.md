@@ -2281,3 +2281,9 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Only actual file I/O, the process directory query, and startup application stay outside now.
 - Targeted settings-file tests pass (7/7); CI run `37310873342` green (all five jobs) for remote `main` = `836f203`; local matches.
 - No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+## Settings application in export-texture (2026-10-06)
+
+- Bridged the duplicated `ImageExportFormat` enums (`resources::image_export::from_settings_format`, all six variants pinned with extension/discriminant agreement) and threaded the configured settings format through `export-texture` as the output-extension fallback. With default settings the behavior is byte-identical to the hardcoded `Png` fallback (both `export-texture` CLI tests still pass); a settings file load (`--settings` or default path) stays outside.
+- New ledger row `EXP-SETTINGS-APPLY-001` at implemented-but-unverified; targeted tests pass, full validation via Actions after push.
+- No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.

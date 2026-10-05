@@ -14,6 +14,7 @@ use assetripper::export::scene_collection::{
     ExportAssetCollectionIdentity, ExportAssetIdentity, SceneExportIdAssignment,
 };
 use assetripper::export::settings::ShaderExportMode;
+use assetripper::export::settings::{ExportDefaults, ImageExportFormat as SettingsImageFormat};
 use assetripper::export::shader_export::export_shader_text;
 use assetripper::export::streamed_assets::StreamedYamlAssetLimits;
 use assetripper::export::unity_yaml::{write_unity_yaml_documents, UnityYamlWriteLimits};
@@ -424,11 +425,16 @@ fn export_texture_to<W: io::Write>(
         _ => None,
     };
 
-    let format = output_path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .and_then(ImageExportFormat::try_from_extension)
-        .unwrap_or(ImageExportFormat::Png);
+    // The output extension selects the format; the configured settings format is the
+    // fallback. With default settings (`Png`) this matches the previous hardcoded fallback.
+    let configured = ExportDefaults::default().image_export_format;
+    let format = ImageExportFormat::from_settings_format(
+        output_path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .and_then(SettingsImageFormat::from_extension)
+            .unwrap_or(configured),
+    );
     let image =
         export_texture2d_image(&view, stream_bytes.as_deref(), format).map_err(|error| {
             invalid_data_owned(format!(
