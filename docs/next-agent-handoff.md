@@ -634,7 +634,13 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 ## 78. Checkpoint: ledger duplicate repair (2026-10-06)
 
 - Split the colliding `EXP-EXPORT-SETTINGS-001` rows into records + `EXP-EXPORT-SETTINGS-DIFF-001` (stale verified claim honestly normalized). Gate re-run: 356 rows, 0 duplicates, 0 malformed, 105 non-verified, OPEN. Docs-only increment; CI run `37307865982` green (all five jobs) for remote `main` = `6c2b17c`; local matches.
-- Next: `TYPE-SCRIPT-001` remainder (manager resolutions), CLI exposure + GUID freshness + folder sidecars, and settings persistence.
+- Next: `TYPE-SCRIPT-001` remainder (manager resolutions), CLI exposure + GUID freshness + folder sidecars, and the save/delete gate plus startup application.
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 79. Checkpoint: settings-file round-trip with a runtime differential (2026-10-06)
+
+- Added `src/export/settings_file.rs` (STJ-exact writer + tolerant bounded reader + opaque versions + 11 reverse discriminant maps), pinned by two committed shipped-DLL probe fixtures with byte-level BOM/CRLF facts. New row `EXP-SETTINGS-FILE-001`; `DIFF-SETTINGS-FILE-001` recorded. Targeted settings tests pass (11/11); full validation via Actions after push.
+- Next: `TYPE-SCRIPT-001` remainder (manager resolutions), CLI exposure + GUID freshness + folder sidecars, and the save/delete gate plus startup application.
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
 - Next: `TYPE-SCRIPT-001` remainder (manager resolutions), CLI exposure + GUID freshness + folder sidecars, and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

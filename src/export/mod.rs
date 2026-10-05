@@ -42,6 +42,7 @@ pub mod script_admission;
 pub mod script_export_flow;
 pub mod script_hashing;
 pub mod settings;
+pub mod settings_file;
 pub mod shader_export;
 pub mod streamed_assets;
 pub mod unity_yaml;

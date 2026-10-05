@@ -1,0 +1,31 @@
+{
+  "Import": {
+    "ScriptContentLevel": 3,
+    "StreamingAssetsMode": 0,
+    "DefaultVersion": "2019.4.40f1",
+    "TargetVersion": "2021.3.5f1"
+  },
+  "Processing": {
+    "EnablePrefabOutlining": true,
+    "EnableStaticMeshSeparation": false,
+    "EnableAssetDeduplication": true,
+    "RemoveNullableAttributes": true,
+    "PublicizeAssemblies": true,
+    "BundledAssetsExportMode": 1
+  },
+  "Export": {
+    "AudioExportFormat": 3,
+    "ImageExportFormat": 0,
+    "LightmapTextureExportFormat": 0,
+    "ScriptExportMode": 0,
+    "ScriptLanguageVersion": 1,
+    "ScriptTypesFullyQualified": true,
+    "ShaderExportMode": 2,
+    "SpriteExportMode": 1,
+    "TextExportMode": 0,
+    "ExportUnreadableAssets": true,
+    "PreferOriginalTextureExtension": false,
+    "SaveSettingsToDisk": true,
+    "LanguageCode": "ja"
+  }
+}

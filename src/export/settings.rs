@@ -45,6 +45,18 @@ impl ScriptContentLevel {
             Self::Level3 => 3,
         }
     }
+
+    /// Reverse of [`ScriptContentLevel::discriminant`]: unknown values stay unmapped instead
+    /// of silently becoming a valid level.
+    pub const fn from_discriminant(value: i32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Level0),
+            1 => Some(Self::Level1),
+            2 => Some(Self::Level2),
+            3 => Some(Self::Level3),
+            _ => None,
+        }
+    }
 }
 
 /// How the StreamingAssets folder is handled; default `Extract`.
@@ -60,6 +72,15 @@ impl StreamingAssetsMode {
         match self {
             Self::Ignore => 0,
             Self::Extract => 1,
+        }
+    }
+
+    /// Reverse of [`StreamingAssetsMode::discriminant`].
+    pub const fn from_discriminant(value: i32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Ignore),
+            1 => Some(Self::Extract),
+            _ => None,
         }
     }
 }
@@ -82,6 +103,16 @@ impl BundledAssetsExportMode {
             Self::GroupByAssetType => 0,
             Self::GroupByBundleName => 1,
             Self::DirectExport => 2,
+        }
+    }
+
+    /// Reverse of [`BundledAssetsExportMode::discriminant`].
+    pub const fn from_discriminant(value: i32) -> Option<Self> {
+        match value {
+            0 => Some(Self::GroupByAssetType),
+            1 => Some(Self::GroupByBundleName),
+            2 => Some(Self::DirectExport),
+            _ => None,
         }
     }
 }
@@ -109,6 +140,17 @@ impl AudioExportFormat {
             Self::PreferWav => 3,
         }
     }
+
+    /// Reverse of [`AudioExportFormat::discriminant`].
+    pub const fn from_discriminant(value: i32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Yaml),
+            1 => Some(Self::Native),
+            2 => Some(Self::Default),
+            3 => Some(Self::PreferWav),
+            _ => None,
+        }
+    }
 }
 
 /// Image export format in `ExportSettings`; default `Png`.
@@ -132,6 +174,19 @@ impl ImageExportFormat {
             Self::Jpeg => 3,
             Self::Png => 4,
             Self::Tga => 5,
+        }
+    }
+
+    /// Reverse of [`ImageExportFormat::discriminant`].
+    pub const fn from_discriminant(value: i32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Bmp),
+            1 => Some(Self::Exr),
+            2 => Some(Self::Hdr),
+            3 => Some(Self::Jpeg),
+            4 => Some(Self::Png),
+            5 => Some(Self::Tga),
+            _ => None,
         }
     }
     /// `ImageExportFormatExtensions.GetFileExtension`.
@@ -197,6 +252,16 @@ impl LightmapTextureExportFormat {
             Self::Yaml => 2,
         }
     }
+
+    /// Reverse of [`LightmapTextureExportFormat::discriminant`].
+    pub const fn from_discriminant(value: i32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Exr),
+            1 => Some(Self::Image),
+            2 => Some(Self::Yaml),
+            _ => None,
+        }
+    }
 }
 
 /// MonoScript export mode in `ExportSettings`; default `Hybrid`.
@@ -222,6 +287,17 @@ impl ScriptExportMode {
             Self::DllExportWithoutRenaming => 3,
         }
     }
+
+    /// Reverse of [`ScriptExportMode::discriminant`].
+    pub const fn from_discriminant(value: i32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Decompiled),
+            1 => Some(Self::Hybrid),
+            2 => Some(Self::DllExportWithRenaming),
+            3 => Some(Self::DllExportWithoutRenaming),
+            _ => None,
+        }
+    }
 }
 
 /// Shader export mode in `ExportSettings`; default `Dummy`.
@@ -244,6 +320,16 @@ impl ShaderExportMode {
             Self::Decompile => 2,
         }
     }
+
+    /// Reverse of [`ShaderExportMode::discriminant`].
+    pub const fn from_discriminant(value: i32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Dummy),
+            1 => Some(Self::Yaml),
+            2 => Some(Self::Decompile),
+            _ => None,
+        }
+    }
 }
 
 /// Sprite export mode in `ExportSettings`; default `Yaml`, the only metadata-precise mode.
@@ -263,6 +349,16 @@ impl SpriteExportMode {
             Self::Texture2D => 2,
         }
     }
+
+    /// Reverse of [`SpriteExportMode::discriminant`].
+    pub const fn from_discriminant(value: i32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Yaml),
+            1 => Some(Self::Native),
+            2 => Some(Self::Texture2D),
+            _ => None,
+        }
+    }
 }
 
 /// Text asset export mode in `ExportSettings`; default `Parse`.
@@ -280,6 +376,16 @@ impl TextExportMode {
             Self::Bytes => 0,
             Self::Txt => 1,
             Self::Parse => 2,
+        }
+    }
+
+    /// Reverse of [`TextExportMode::discriminant`].
+    pub const fn from_discriminant(value: i32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Bytes),
+            1 => Some(Self::Txt),
+            2 => Some(Self::Parse),
+            _ => None,
         }
     }
 }
@@ -363,6 +469,34 @@ impl ScriptLanguageVersion {
             Self::Latest => 2_147_483_647,
             Self::AutoExperimental => -2,
             Self::AutoSafe => -1,
+        }
+    }
+
+    /// Reverse of [`ScriptLanguageVersion::discriminant`].
+    pub const fn from_discriminant(value: i32) -> Option<Self> {
+        match value {
+            1 => Some(Self::CSharp1),
+            2 => Some(Self::CSharp2),
+            3 => Some(Self::CSharp3),
+            4 => Some(Self::CSharp4),
+            5 => Some(Self::CSharp5),
+            6 => Some(Self::CSharp6),
+            7 => Some(Self::CSharp7),
+            701 => Some(Self::CSharp7_1),
+            702 => Some(Self::CSharp7_2),
+            703 => Some(Self::CSharp7_3),
+            800 => Some(Self::CSharp8_0),
+            900 => Some(Self::CSharp9_0),
+            1000 => Some(Self::CSharp10_0),
+            1100 => Some(Self::CSharp11_0),
+            1200 => Some(Self::CSharp12_0),
+            1300 => Some(Self::CSharp13_0),
+            1400 => Some(Self::CSharp14_0),
+            1500 => Some(Self::CSharp15_0),
+            2_147_483_647 => Some(Self::Latest),
+            -2 => Some(Self::AutoExperimental),
+            -1 => Some(Self::AutoSafe),
+            _ => None,
         }
     }
 }
