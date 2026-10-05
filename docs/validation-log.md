@@ -2301,3 +2301,9 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Two stale test expectations updated with the differential as authority; three probe detours recorded (degenerate test triangle, misread lane widths from interleaving, UBYTE-vs-USHORT confusion on joint 300 — all resolved by the probe itself, not worked around).
 - `DIFF-GLB-ENCODING-001` recorded. New rows `RES-GLB-ENCODING-001` (implemented-but-unverified) and `RES-MODEL-001` moved to implementing with corrected module mapping (no `model.rs` exists). Targeted glb tests pass (23/23), full lib suite 965/965 locally; CI run `37319285613` green (all five jobs) for remote `main` = `d7b403a`; local matches.
 - No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+## GLB writer size guard (2026-10-06)
+
+- Ported `GlbWriter.TryWrite`'s too-large refusal as `GlbBuildLimits::max_output_bytes` (default 2GiB, mirroring the source 2Gb buffer ceiling): every buffer view checks the running total and the final binary-plus-JSON total is checked, yielding an explicit `OutputTooLarge` error instead of an allocation failure. `build_glb` keeps its signature over default limits via `build_glb_with_limits`. Also refreshed the stale `EXP-GLB-001` remainder (SparseWeight ordering now verified; `VertexColor1Texture8` encoding covered).
+- Targeted glb tests pass (24/24), full lib suite 966/966 and bin 43/43 locally, workspace Clippy clean; full validation via Actions after push.
+- No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.

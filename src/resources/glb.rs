@@ -26,6 +26,12 @@
 //! - A bone index above `u16::MAX` is an explicit [`GlbError::BoneIndexTooLarge`]; the source
 //!   stores joints as floats and lets the encoder deal with them, which has no defined outcome
 //!   for unrepresentable indices.
+//! - `GlbWriter.TryWrite` refuses oversized models with a message instead of succeeding. Here
+//!   `GlbBuildLimits::max_output_bytes` (default 2GiB, mirroring the source 2Gb buffer ceiling)
+//!   is checked both per buffer view and on the final binary-plus-JSON total, yielding an
+//!   explicit [`GlbError::OutputTooLarge`] instead of an allocation failure. The source's
+//!   catch-all and out-of-memory branches have no separable Rust counterpart: unexpected
+//!   failures already propagate as their own `GlbError` variants with context.
 //!
 //! Accessor encodings follow the SharpGLTF 1.0.2 writer differentially (probe
 //! `Temp/opencode/gltfprobe`): positions, normals, tangents, texture coordinates, and weights
@@ -222,6 +228,14 @@ pub enum GlbError {
         /// The offending bone index.
         bone_index: i32,
     },
+    /// The export exceeds the configured output cap, mirroring the source `GlbWriter`
+    /// refusal for models too large to write.
+    OutputTooLarge {
+        /// The refused byte count (binary chunk plus JSON).
+        byte_count: u64,
+        /// The configured cap.
+        limit: u64,
+    },
 }
 
 impl Display for GlbError {
@@ -271,6 +285,10 @@ impl Display for GlbError {
             } => write!(
                 formatter,
                 "mesh '{mesh}' vertex {vertex} has bone index {bone_index} above u16::MAX"
+            ),
+            Self::OutputTooLarge { byte_count, limit } => write!(
+                formatter,
+                "model of {byte_count} bytes exceeds the {limit}-byte GLB output cap and was too large to export"
             ),
         }
     }
@@ -360,17 +378,48 @@ struct VertexKey {
     weights: bool,
 }
 
+/// Bounds for GLB export.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GlbBuildLimits {
+    /// Maximum combined binary-chunk and JSON bytes for one export, mirroring the source
+    /// `GlbWriter` 2Gb buffer ceiling with a friendly error instead of an allocation failure.
+    pub max_output_bytes: u64,
+}
+
+impl Default for GlbBuildLimits {
+    fn default() -> Self {
+        Self {
+            max_output_bytes: 2 * 1024 * 1024 * 1024,
+        }
+    }
+}
+
 /// Accumulates glTF accessors, buffer views, and the binary chunk.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct GlbBuilder {
     bin: Vec<u8>,
     buffer_views: Vec<String>,
     accessors: Vec<String>,
+    limit: u64,
+}
+
+impl Default for GlbBuilder {
+    fn default() -> Self {
+        Self::with_limit(GlbBuildLimits::default().max_output_bytes)
+    }
 }
 
 impl GlbBuilder {
+    fn with_limit(limit: u64) -> Self {
+        Self {
+            bin: Vec::new(),
+            buffer_views: Vec::new(),
+            accessors: Vec::new(),
+            limit,
+        }
+    }
     /// Appends tightly packed floats as one buffer view and returns its index.
-    fn push_float_view(&mut self, values: &[f32]) -> usize {
+    fn push_float_view(&mut self, values: &[f32]) -> Result<usize, GlbError> {
         let mut bytes = Vec::with_capacity(values.len() * 4);
         for value in values {
             bytes.extend_from_slice(&value.to_le_bytes());
@@ -379,12 +428,12 @@ impl GlbBuilder {
     }
 
     /// Appends tightly packed unsigned bytes as one buffer view and returns its index.
-    fn push_ubyte_view(&mut self, values: &[u8]) -> usize {
+    fn push_ubyte_view(&mut self, values: &[u8]) -> Result<usize, GlbError> {
         self.push_view(values.to_vec())
     }
 
     /// Appends tightly packed unsigned shorts as one buffer view and returns its index.
-    fn push_ushort_view(&mut self, values: &[u16]) -> usize {
+    fn push_ushort_view(&mut self, values: &[u16]) -> Result<usize, GlbError> {
         let mut bytes = Vec::with_capacity(values.len() * 2);
         for value in values {
             bytes.extend_from_slice(&value.to_le_bytes());
@@ -393,7 +442,7 @@ impl GlbBuilder {
     }
 
     /// Appends tightly packed unsigned ints as one buffer view and returns its index.
-    fn push_uint_view(&mut self, values: &[u32]) -> usize {
+    fn push_uint_view(&mut self, values: &[u32]) -> Result<usize, GlbError> {
         let mut bytes = Vec::with_capacity(values.len() * 4);
         for value in values {
             bytes.extend_from_slice(&value.to_le_bytes());
@@ -401,56 +450,66 @@ impl GlbBuilder {
         self.push_view(bytes)
     }
 
-    fn push_view(&mut self, mut bytes: Vec<u8>) -> usize {
+    fn push_view(&mut self, mut bytes: Vec<u8>) -> Result<usize, GlbError> {
         while !bytes.len().is_multiple_of(4) {
             bytes.push(0);
         }
         let offset = self.bin.len();
         let length = bytes.len();
+        if offset as u64 + length as u64 > self.limit {
+            return Err(GlbError::OutputTooLarge {
+                byte_count: offset as u64 + length as u64,
+                limit: self.limit,
+            });
+        }
         self.bin.extend_from_slice(&bytes);
         let index = self.buffer_views.len();
         self.buffer_views.push(format!(
             "{{\"buffer\":0,\"byteOffset\":{offset},\"byteLength\":{length}}}"
         ));
-        index
+        Ok(index)
     }
 
     /// Adds a vertex accessor with the given component count.
     ///
     /// Only `VEC2`, `VEC3`, and `VEC4` float accessors are emitted; the count is the number of
     /// scalars divided by the component count, so callers must supply whole vertices.
-    fn push_vertex_accessor(&mut self, values: &[f32], kind: &'static str) -> usize {
+    fn push_vertex_accessor(
+        &mut self,
+        values: &[f32],
+        kind: &'static str,
+    ) -> Result<usize, GlbError> {
         let components = match kind {
             "VEC2" => 2,
             "VEC3" => 3,
             _ => 4,
         };
-        let view = self.push_float_view(values);
+        let view = self.push_float_view(values)?;
         self.accessors.push(format!(
             "{{\"bufferView\":{view},\"componentType\":5126,\"count\":{},\"type\":\"{kind}\"}}",
             values.len() / components
         ));
-        self.accessors.len() - 1
+        Ok(self.accessors.len() - 1)
     }
 
     /// Adds a `SCALAR` index accessor, unsigned shorts while every index fits below the
     /// reserved `65535`, unsigned ints otherwise (matching the SharpGLTF writer widths).
-    fn push_index_accessor(&mut self, indices: &[u32]) -> usize {
+    fn push_index_accessor(&mut self, indices: &[u32]) -> Result<usize, GlbError> {
         if indices.iter().all(|index| *index <= 65534) {
             let values: Vec<u16> = indices.iter().map(|index| *index as u16).collect();
-            let view = self.push_ushort_view(&values);
+            let view = self.push_ushort_view(&values)?;
             self.accessors.push(format!(
                 "{{\"bufferView\":{view},\"componentType\":5123,\"count\":{},\"type\":\"SCALAR\"}}",
                 indices.len()
             ));
         } else {
-            let view = self.push_uint_view(indices);
+            let view = self.push_uint_view(indices)?;
             self.accessors.push(format!(
                 "{{\"bufferView\":{view},\"componentType\":5125,\"count\":{},\"type\":\"SCALAR\"}}",
                 indices.len()
             ));
         }
-        self.accessors.len() - 1
+        Ok(self.accessors.len() - 1)
     }
 
     /// Adds the `POSITION` accessor, which the specification requires to carry `min` and `max`.
@@ -485,7 +544,7 @@ impl GlbBuilder {
                 maximum[axis] = maximum[axis].max(position[axis]);
             }
         }
-        let view = self.push_float_view(&values);
+        let view = self.push_float_view(&values)?;
         let minimum = format!(
             "[{},{},{}]",
             format_f32(minimum[0]),
@@ -508,22 +567,22 @@ impl GlbBuilder {
 
     /// Adds a `COLOR_0` accessor: normalized unsigned bytes with truncating quantization,
     /// matching the SharpGLTF writer.
-    fn push_color_accessor(&mut self, colors: &[[f32; 4]]) -> usize {
+    fn push_color_accessor(&mut self, colors: &[[f32; 4]]) -> Result<usize, GlbError> {
         let mut values = Vec::with_capacity(colors.len() * 4);
         for color in colors {
             values.extend(quantize_color(*color));
         }
-        let view = self.push_ubyte_view(&values);
+        let view = self.push_ubyte_view(&values)?;
         self.accessors.push(format!(
             "{{\"bufferView\":{view},\"componentType\":5121,\"count\":{},\"normalized\":true,\"type\":\"VEC4\"}}",
             colors.len()
         ));
-        self.accessors.len() - 1
+        Ok(self.accessors.len() - 1)
     }
 
     /// Adds a `JOINTS_0` accessor: unsigned bytes while every joint fits, unsigned shorts
     /// otherwise (matching the SharpGLTF writer widths).
-    fn push_joints_accessor(&mut self, joints: &[[u16; 4]]) -> usize {
+    fn push_joints_accessor(&mut self, joints: &[[u16; 4]]) -> Result<usize, GlbError> {
         if joints
             .iter()
             .flatten()
@@ -533,7 +592,7 @@ impl GlbBuilder {
             for joint in joints {
                 values.extend(joint.map(|lane| lane as u8));
             }
-            let view = self.push_ubyte_view(&values);
+            let view = self.push_ubyte_view(&values)?;
             self.accessors.push(format!(
                 "{{\"bufferView\":{view},\"componentType\":5121,\"count\":{},\"type\":\"VEC4\"}}",
                 joints.len()
@@ -543,13 +602,13 @@ impl GlbBuilder {
             for joint in joints {
                 values.extend_from_slice(joint);
             }
-            let view = self.push_ushort_view(&values);
+            let view = self.push_ushort_view(&values)?;
             self.accessors.push(format!(
                 "{{\"bufferView\":{view},\"componentType\":5123,\"count\":{},\"type\":\"VEC4\"}}",
                 joints.len()
             ));
         }
-        self.accessors.len() - 1
+        Ok(self.accessors.len() - 1)
     }
 }
 
@@ -1030,10 +1089,19 @@ fn collect_joints(vertices: &[GlbVertex]) -> Option<Vec<[u16; 4]>> {
 ///
 /// `name` becomes the root node name, matching `GlbMeshBuilder.Build`, which uses `mesh.Name`.
 pub fn build_glb(name: &str, mesh: &MeshData) -> Result<GlbMeshExport, GlbError> {
+    build_glb_with_limits(name, mesh, GlbBuildLimits::default())
+}
+
+/// Exports `mesh` as a glTF 2.0 binary file, refusing outputs beyond `limits`.
+pub fn build_glb_with_limits(
+    name: &str,
+    mesh: &MeshData,
+    limits: GlbBuildLimits,
+) -> Result<GlbMeshExport, GlbError> {
     if mesh.vertices.is_empty() {
         return Err(GlbError::NoVertices);
     }
-    let mut builder = GlbBuilder::default();
+    let mut builder = GlbBuilder::with_limit(limits.max_output_bytes);
     let mut warnings: Vec<String> = Vec::new();
     let mut primitive_jsons: Vec<String> = Vec::new();
     let mut mesh_names: Vec<String> = Vec::new();
@@ -1057,13 +1125,13 @@ pub fn build_glb(name: &str, mesh: &MeshData) -> Result<GlbMeshExport, GlbError>
         if let Some(values) = flatten_optional(&vertices, |vertex| vertex.normal) {
             attributes.push((
                 "NORMAL".to_owned(),
-                builder.push_vertex_accessor(&values, "VEC3"),
+                builder.push_vertex_accessor(&values, "VEC3")?,
             ));
         }
         if let Some(values) = flatten_optional(&vertices, |vertex| vertex.tangent) {
             attributes.push((
                 "TANGENT".to_owned(),
-                builder.push_vertex_accessor(&values, "VEC4"),
+                builder.push_vertex_accessor(&values, "VEC4")?,
             ));
         }
         let tex_coord_count = vertices.first().map_or(0, |vertex| vertex.tex_coords.len());
@@ -1081,7 +1149,7 @@ pub fn build_glb(name: &str, mesh: &MeshData) -> Result<GlbMeshExport, GlbError>
             }
             attributes.push((
                 format!("TEXCOORD_{channel}"),
-                builder.push_vertex_accessor(&values, "VEC2"),
+                builder.push_vertex_accessor(&values, "VEC2")?,
             ));
         }
         if let Some(colors) = vertices
@@ -1089,20 +1157,23 @@ pub fn build_glb(name: &str, mesh: &MeshData) -> Result<GlbMeshExport, GlbError>
             .map(|vertex| vertex.color)
             .collect::<Option<Vec<_>>>()
         {
-            attributes.push(("COLOR_0".to_owned(), builder.push_color_accessor(&colors)));
+            attributes.push(("COLOR_0".to_owned(), builder.push_color_accessor(&colors)?));
         }
         if let Some(joints) = collect_joints(&vertices) {
             let mut weights = Vec::with_capacity(vertices.len() * 4);
             for vertex in &vertices {
                 weights.extend_from_slice(&vertex.weights.unwrap_or([0.0; 4])[..]);
             }
-            attributes.push(("JOINTS_0".to_owned(), builder.push_joints_accessor(&joints)));
+            attributes.push((
+                "JOINTS_0".to_owned(),
+                builder.push_joints_accessor(&joints)?,
+            ));
             attributes.push((
                 "WEIGHTS_0".to_owned(),
-                builder.push_vertex_accessor(&weights, "VEC4"),
+                builder.push_vertex_accessor(&weights, "VEC4")?,
             ));
         }
-        let index_accessor = builder.push_index_accessor(&indices);
+        let index_accessor = builder.push_index_accessor(&indices)?;
 
         let attribute_json = attributes
             .iter()
@@ -1124,6 +1195,13 @@ pub fn build_glb(name: &str, mesh: &MeshData) -> Result<GlbMeshExport, GlbError>
         &builder.buffer_views,
         builder.bin.len(),
     );
+    let total = builder.bin.len() as u64 + json.len() as u64;
+    if total > limits.max_output_bytes {
+        return Err(GlbError::OutputTooLarge {
+            byte_count: total,
+            limit: limits.max_output_bytes,
+        });
+    }
     Ok(GlbMeshExport {
         bytes: wrap_glb(&json, &builder.bin),
         emitted_source_indices,
@@ -1618,20 +1696,43 @@ mod tests {
     fn accessor_widths_follow_the_writer_rules() {
         let mut builder = GlbBuilder::default();
         // Colors are normalized unsigned bytes.
-        let color = builder.push_color_accessor(&[[1.0, 0.0, 0.5, 0.25]]);
+        let color = builder
+            .push_color_accessor(&[[1.0, 0.0, 0.5, 0.25]])
+            .unwrap();
         assert!(builder.accessors[color].contains("\"componentType\":5121"));
         assert!(builder.accessors[color].contains("\"normalized\":true"));
         // Joints fit in a byte while every lane does, and widen otherwise.
-        let small = builder.push_joints_accessor(&[[1, 2, 3, 4]]);
+        let small = builder.push_joints_accessor(&[[1, 2, 3, 4]]).unwrap();
         assert!(builder.accessors[small].contains("\"componentType\":5121"));
         assert!(!builder.accessors[small].contains("normalized"));
-        let big = builder.push_joints_accessor(&[[300, 0, 0, 0]]);
+        let big = builder.push_joints_accessor(&[[300, 0, 0, 0]]).unwrap();
         assert!(builder.accessors[big].contains("\"componentType\":5123"));
         // Indices fit in a short below the reserved 65535.
-        let short = builder.push_index_accessor(&[0, 1, 65534]);
+        let short = builder.push_index_accessor(&[0, 1, 65534]).unwrap();
         assert!(builder.accessors[short].contains("\"componentType\":5123"));
-        let long = builder.push_index_accessor(&[0, 1, 65535]);
+        let long = builder.push_index_accessor(&[0, 1, 65535]).unwrap();
         assert!(builder.accessors[long].contains("\"componentType\":5125"));
+    }
+
+    #[test]
+    fn oversized_output_is_refused_with_context() {
+        let mesh = triangle_mesh();
+        let error = build_glb_with_limits(
+            "Tri",
+            &mesh,
+            GlbBuildLimits {
+                max_output_bytes: 16,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(error, GlbError::OutputTooLarge { limit: 16, .. }));
+        assert!(error.to_string().contains("too large to export"));
+        // The default cap is the source 2Gb buffer ceiling.
+        assert_eq!(
+            GlbBuildLimits::default().max_output_bytes,
+            2 * 1024 * 1024 * 1024
+        );
+        build_glb("Tri", &mesh).unwrap();
     }
 
     #[test]
