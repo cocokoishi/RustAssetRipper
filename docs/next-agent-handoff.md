@@ -722,3 +722,9 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Ported `format_export_failure` with a test; recorded precise dependencies for the meta-pipeline remainder. Caught and fixed a stale-cargo-cache incident (`clean -p` before trusting local runs). Fresh-build lib 982/982, bin 50/50, workspace Clippy clean; CI run `37333787247` green (all five jobs) for remote `main` = `f733870`; local matches.
 - Next: the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 93. Checkpoint: localization code rules (2026-10-06)
+
+- New `src/localization.rs` with the locale-independent rules (4 tests); fixed two stale module mappings; string tables stay open. Lib 986/986 locally, workspace Clippy clean; full validation via Actions after push.
+- Next: the remaining product rows (`PRODUCT-CONFIG-001`, `PRODUCT-GUI-001`, `GENERATORS-001`, `TOOLS-001` remainders).
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

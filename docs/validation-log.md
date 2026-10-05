@@ -2357,3 +2357,9 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Ported the `Failed to export '{Name}' ({TypeName})` loop warning as `format_export_failure` in `project_order.rs` with a dedicated test; recorded precise source-evidenced dependencies for the three remaining meta-pipeline items (CLI exposure needs collection dispatch; GUID freshness needs per-collection minting inside it; folder sidecars are source-dead).
 - Local validation incident: cargo's freshness cache skipped rebuilds after file edits (clock skew between source mtimes and the test binary), hiding the new test until `cargo clean -p assetripper-rs` forced a rebuild. Fresh-build results: lib 982/982, bin 50/50, workspace Clippy clean; CI run `37333787247` green (all five jobs) for remote `main` = `f733870`; local matches.
 - No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+## Localization code rules (2026-10-06)
+
+- Ported the locale-independent `GUI.Localizations` rules as `src/localization.rs`: default `en-US`, the 23 filename-derived hyphenated codes, underscore-to-hyphen normalization, existence, and the switch-only-to-known-different `LoadLanguage` decision (null/identical/unknown are silent no-ops, so no error half). Four tests; corrected the stale `src/localization/` (nonexistent, now created) and `src/ui/` (actually `src/product.rs`) ledger mappings. String tables stay open pending a UI message consumer.
+- Lib suite 986/986 locally, workspace Clippy clean; full validation via Actions after push.
+- No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
