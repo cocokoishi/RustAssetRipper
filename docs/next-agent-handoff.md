@@ -347,3 +347,11 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Texture format coverage now: DXT1/3/5, BC4/BC5, ETC1/ETC2/ETC2A1/ETC2A8, EAC R/RG (u/s), ATC RGB4/RGBA8, YUY2, RGBA32/RGB24/BGRA32/ARGB32/Alpha8/R8/RG16/RGB565/ARGB4444/RGBA4444, and R16/RG32/RGB48/RGBA64/half/float/signed/RGB9e5. Still unported: BC6H, BC7, ASTC, PVRTC, and the `TextureConverter` mip/layer/`GraphicsFormat` dispatch, Crunch, and the image writers.
 - Verified the `.meta` envelope (`src/export/meta.rs`) matches the reference `Meta.cs`: `fileFormatVersion: 2`, `guid`, optional `folderAsset`, optional `timeCreated`/`licenseType: Free` with the `SOURCE_DATE_EPOCH` fallback, then the importer mapping. `format_unity_guid_words` delegates to the corrected `format_unity_guid`. The remaining `.meta` work is the FS sidecar integration and the per-class `CreateImporter` tracing.
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+
+## 40. Checkpoint: BC7 decoder (2026-10-04)
+
+- Added `src/resources/bc7.rs` and `src/resources/bc7_tables.rs` (BC7), with a 16-row committed original-runtime differential (`bc7_fixture.txt`) covering every mode plus the invalid-mode transparent-black path. The large partition tables were mechanically extracted from `Bc7Tables.cs` rather than transcribed.
+- Texture coverage now: DXT1/3/5, BC4/BC5, BC7, ETC1/ETC2/ETC2A1/ETC2A8, EAC R/RG (u/s), ATC RGB4/RGBA8, YUY2, and the packed/wide formats. Remaining decoders: BC6H, ASTC, PVRTC.
+- Still open beyond decoders: the `TextureConverter` mip/layer/`GraphicsFormat` dispatch, Crunch, and the image writers (PNG/EXR/BMP); the `.meta` FS sidecar integration and per-class `CreateImporter` tracing; the full exporter registration/resource matrix audit; and the object-model/product workflows.
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
