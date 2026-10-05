@@ -1928,3 +1928,10 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - The first CI run (`37247118771`) failed: clippy flagged `byte_array.rs` `% size != 0` (should be `is_multiple_of`), and the Linux test run exposed `DIFF-PACKEDFLOAT-NAN-001` (a platform-dependent NaN sign in packed-float unpack that passed on Windows).
 - Fixed both; the second run (`37247323096`) is green on both operating systems across all five jobs. This is the first independent, non-Windows confirmation of the test suite.
 - No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+
+## Vector/quaternion/transform and Hash128 differentials (2026-10-04)
+
+- Added `src/resources/vector.rs`, `src/resources/quaternion.rs`, and `TransformLocalView::initialize_default` in `src/resources/transform.rs`, each with a committed original-runtime differential fixture.
+- Added `src/export/unity_yaml.rs::format_hash128` and wired it into `value_yaml.rs` (new `Hash128Overflow` error), mirroring the baseline's checked-overflow quirk (`DIFF-HASH128-OVERFLOW-001`) with a seven-row differential fixture including the exact 0x7F/0x80 boundary.
+- GitHub Actions run `37248303815` is green across all five jobs. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.

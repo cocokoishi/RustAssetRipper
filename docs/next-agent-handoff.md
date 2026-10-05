@@ -316,3 +316,10 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Added the byte-array/bounds/color/matrix/rect modules, each with a committed original-runtime differential fixture.
 - Added `.github/workflows/ci.yml` (rustfmt + clippy -D warnings + test on Ubuntu and Windows); compilation and tests now run on GitHub Actions rather than the local machine. The `tools/verify-baseline.ps1` verifier still runs only locally because it needs the read-only sibling reference snapshot.
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+
+## 36. Checkpoint: vectors, quaternions, transform init, Hash128 (2026-10-04)
+
+- Added the vector/quaternion/transform-init modules and the `Hash128` formatter with its checked-overflow quirk, all CI-verified on Ubuntu and Windows.
+- CI is the compile/test gate now; each push runs `rustfmt`, `clippy -D warnings`, and `test` on both operating systems.
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
