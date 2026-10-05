@@ -9,3 +9,4 @@ pub mod scene_collections;
 pub mod scene_hierarchy;
 pub mod scene_metadata;
 pub mod scene_naming;
+pub mod script_identity;

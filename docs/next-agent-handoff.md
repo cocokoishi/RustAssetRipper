@@ -538,3 +538,10 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - `cargo test --workspace --locked`: 918 library and 40 CLI tests; warnings-denied Clippy and format check pass. CI run `37286752472` green (all five jobs) for remote `main` = `298dc13`; local matches.
 - Next: `EXPORT-UNITY-001`, `TYPE-SCRIPT-001`, and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 64. Checkpoint: script identity and assembly names with a runtime differential (2026-10-05)
+
+- Extended `src/io/special_names.rs` (assembly-name fix/add/remove/project helpers) and added `src/processing/script_identity.rs` (`ScriptIdentifier`, `ScriptingBackend`, full/valid-name kernels). All 49 shipped-DLL probe rows in `src/io/script_identity_fixture.txt` matched, including case-sensitive edges and constructor rejections. New row `TYPE-SCRIPT-IDENTITY-001` (first audited slice of `TYPE-SCRIPT-001`); `DIFF-SCRIPT-IDENTITY-001` recorded. Manager resolutions stay unported.
+- `cargo test --workspace --locked`: 924 library and 40 CLI tests; warnings-denied Clippy and format check pass.
+- Next: `EXPORT-UNITY-001` orchestration audit, `TYPE-SCRIPT-001` remainder, and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

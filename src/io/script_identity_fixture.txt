@@ -1,0 +1,60 @@
+# Assembly-name and script-identity reference values.
+# Probe Temp/opencode/scriptidprobe: shipped AssetRipper.IO.Files.dll
+# (SpecialFileNames) and AssetRipper.Import.dll (ScriptingBackend,
+# ScriptIdentifier), SDK 10.0.401. No escaping: fields contain no
+# delimiters; empty fields are empty between pipes.
+# Formats: FIX|<in>|<FixAssemblyName>; RMEXT|<in>|<RemoveAssemblyFileExtension>;
+# ADDEXT|<in>|<AddAssemblyFileExtension>; ISPROJ|<in>|<0|1>;
+# BACKEND|<name>|<discriminant>; SID|<assembly>|<namespace>|<name>|<ToString>|<UniqueName>;
+# UNIQ3|<ToUniqueName(assembly, namespace, name)>; UNIQ2|<ToUniqueName(assembly, fullName)>;
+# ISDEF|<0|1> for default(ScriptIdentifier); DEFTOSTRING|<default ToString>;
+# THROW|<assembly>|<namespace or <null>>|<name>|<exception or none>.
+FIX|Assembly-CSharp.dll|Assembly-CSharp
+FIX|Assembly-CSharp|Assembly-CSharp
+FIX|Boo|Assembly - Boo
+FIX|Boo.dll|Boo
+FIX|Boo - first pass|Assembly - Boo - first pass
+FIX|CSharp|Assembly - CSharp
+FIX|CSharp - first pass|Assembly - CSharp - first pass
+FIX|UnityScript|Assembly - UnityScript
+FIX|UnityScript - first pass|Assembly - UnityScript - first pass
+FIX|csharp|csharp
+FIX|CSHARP.DLL|CSHARP.DLL
+FIX|MyLib.dll|MyLib
+FIX|MyLib|MyLib
+FIX||
+FIX|Assembly - CSharp|Assembly - CSharp
+FIX|Assembly-CSharp.dll|Assembly-CSharp
+RMEXT|A.dll|A
+ADDEXT|A.dll|A.dll
+RMEXT|A|A
+ADDEXT|A|A.dll
+RMEXT||
+ADDEXT||.dll
+RMEXT|A.DLL|A.DLL
+ADDEXT|A.DLL|A.DLL.dll
+RMEXT|A.dll.dll|A.dll
+ADDEXT|A.dll.dll|A.dll.dll
+ISPROJ|Assembly - CSharp|1
+ISPROJ|Assembly-CSharp|1
+ISPROJ|Assembly - first pass|1
+ISPROJ|Assembly-first pass|1
+ISPROJ|assembly - CSharp|0
+ISPROJ|Assembly - |1
+ISPROJ|Assembly-|1
+ISPROJ|Assembly|0
+ISPROJ|MyLib|0
+BACKEND|Unknown|0
+BACKEND|Mono|1
+BACKEND|IL2Cpp|2
+SID|Assembly-CSharp||Player|Player|[Assembly-CSharp]Player
+SID|Assembly-CSharp|Game|Player|Game.Player|[Assembly-CSharp]Game.Player
+SID|MyLib.dll|A.B|C|A.B.C|[MyLib.dll]A.B.C
+UNIQ3|[A]N
+UNIQ3|[A]G.N
+UNIQ2|[A]G.N
+ISDEF|1
+DEFTOSTRING|AssetRipper.Import.Structure.Assembly.ScriptIdentifier
+THROW||G|N|ArgumentException
+THROW|A|G||ArgumentException
+THROW|A|<null>|N|ArgumentNullException

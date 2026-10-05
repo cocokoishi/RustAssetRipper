@@ -43,9 +43,63 @@ pub fn fix_resource_path(resource_path: &str) -> String {
         .to_owned()
 }
 
+/// The managed assembly file extension the source appends and strips.
+pub const ASSEMBLY_EXTENSION: &str = ".dll";
+
+/// `SpecialFileNames.IsAssemblyIdentifier`: the legacy UnityScript/Boo module names.
+fn is_assembly_identifier(assembly: &str) -> bool {
+    matches!(
+        assembly,
+        "Boo"
+            | "Boo - first pass"
+            | "CSharp"
+            | "CSharp - first pass"
+            | "UnityScript"
+            | "UnityScript - first pass"
+    )
+}
+
+/// `SpecialFileNames.FixAssemblyName`: prefix legacy module names with `Assembly - `
+/// (checked against the original spelling, case-sensitively) and strip one `.dll`
+/// suffix (also case-sensitive).
+pub fn fix_assembly_name(assembly: &str) -> String {
+    let prefixed = if is_assembly_identifier(assembly) {
+        format!("Assembly - {assembly}")
+    } else {
+        assembly.to_owned()
+    };
+    remove_assembly_file_extension(&prefixed)
+}
+
+/// `SpecialFileNames.RemoveAssemblyFileExtension`: strip one case-sensitive `.dll`.
+pub fn remove_assembly_file_extension(assembly: &str) -> String {
+    assembly
+        .strip_suffix(ASSEMBLY_EXTENSION)
+        .unwrap_or(assembly)
+        .to_owned()
+}
+
+/// `SpecialFileNames.AddAssemblyFileExtension`: append `.dll` unless already present.
+pub fn add_assembly_file_extension(assembly: &str) -> String {
+    if assembly.ends_with(ASSEMBLY_EXTENSION) {
+        assembly.to_owned()
+    } else {
+        format!("{assembly}{ASSEMBLY_EXTENSION}")
+    }
+}
+
+/// `SpecialFileNames.IsProjectAssembly`: the `Assembly - ` / `Assembly-` prefixes,
+/// matched case-sensitively.
+pub fn is_project_assembly(assembly: &str) -> bool {
+    assembly.starts_with("Assembly - ") || assembly.starts_with("Assembly-")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{fix_dependency_name, fix_file_identifier, fix_resource_path};
+    use super::{
+        add_assembly_file_extension, fix_assembly_name, fix_dependency_name, fix_file_identifier,
+        fix_resource_path, is_project_assembly, remove_assembly_file_extension,
+    };
     use crate::serialized_file::metadata::FileIdentifier;
 
     #[test]
@@ -81,6 +135,63 @@ mod tests {
         assert!(super::is_builtin_extra(super::BUILTIN_EXTRA_NAME_2));
         assert!(!super::is_default_resource("unity editor resources"));
         assert!(!super::is_builtin_extra("unity default resources"));
+    }
+
+    /// Differential against the shipped `AssetRipper.IO.Files.dll` rows committed in
+    /// `script_identity_fixture.txt` (probe `Temp/opencode/scriptidprobe`, SDK 10.0.401):
+    /// assembly-name fixing, extension add/remove, and project-assembly detection,
+    /// including the case-sensitive edges (`csharp`, `CSHARP.DLL`, `A.DLL`).
+    #[test]
+    fn assembly_name_helpers_match_the_reference_runtime() {
+        let fixture = include_str!("script_identity_fixture.txt");
+        let mut fixed = 0;
+        let mut removed = 0;
+        let mut added = 0;
+        let mut detected = 0;
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            // Inputs never contain pipes or whitespace runs; outputs are single
+            // tokens, so a plain split is exact.
+            let mut parts = line.split('|');
+            match parts.next() {
+                Some("FIX") => {
+                    let input = parts.next().expect("an input");
+                    let expected = parts.next().expect("an output");
+                    assert!(parts.next().is_none(), "{line}");
+                    assert_eq!(fix_assembly_name(input), expected, "{line}");
+                    fixed += 1;
+                }
+                Some("RMEXT") => {
+                    let input = parts.next().expect("an input");
+                    let expected = parts.next().expect("an output");
+                    assert!(parts.next().is_none(), "{line}");
+                    assert_eq!(remove_assembly_file_extension(input), expected, "{line}");
+                    removed += 1;
+                }
+                Some("ADDEXT") => {
+                    let input = parts.next().expect("an input");
+                    let expected = parts.next().expect("an output");
+                    assert!(parts.next().is_none(), "{line}");
+                    assert_eq!(add_assembly_file_extension(input), expected, "{line}");
+                    added += 1;
+                }
+                Some("ISPROJ") => {
+                    let input = parts.next().expect("an input");
+                    let expected = parts.next().expect("a flag");
+                    assert!(parts.next().is_none(), "{line}");
+                    assert_eq!(is_project_assembly(input), expected == "1", "{line}");
+                    detected += 1;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(fixed, 16, "all probed fix rows are asserted");
+        assert_eq!(removed, 5, "all probed remove rows are asserted");
+        assert_eq!(added, 5, "all probed add rows are asserted");
+        assert_eq!(detected, 9, "all probed project rows are asserted");
     }
 
     #[test]
