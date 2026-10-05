@@ -502,3 +502,11 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - `cargo test --workspace --locked`: 889 library and 33 CLI tests; warnings-denied Clippy and format check pass.
 - Next: `AnimationClipConverter` core (bindings cache, streamed/dense/constant processing), `RES-AUDIO-001`, parsed-form shader dummy, `RES-ANIM-001` remainder, `EXPORT-UNITY-001`, `TYPE-SCRIPT-001`, and the product rows.
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 59. Checkpoint: Streamed-curve slopes + frame decoding differential (2026-10-05)
+
+- Added `src/resources/streamed_curve.rs` (`StreamedCurveKey` reads + bit-exact `CalculateSlopes`, `StreamedFrame` reads with duplicate collapse and the 2017.1+ alignment gate) with an 11-row runtime differential (`src/resources/streamed_curve_fixture.txt`). New row `PROC-ANIM-STREAMED-001` at `已实现但未验证`; `DIFF-STREAMED-SLOPES-001` recorded. Converter orchestration stays open.
+- Survived a mid-turn server restart without loss: worktree state re-verified from evidence (uncommitted module + fixture present, docs untouched), full suite re-run green before documenting.
+- `cargo test --workspace --locked`: 893 library and 33 CLI tests; warnings-denied Clippy and format check pass.
+- Next: `AnimationClipConverter` orchestration (buffer assembly, `ProcessStreams`/`ProcessDenses`/`ProcessConstant`, bindings cache), `RES-AUDIO-001`, parsed-form shader dummy, `EXPORT-UNITY-001`, `TYPE-SCRIPT-001`, and the product rows.
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

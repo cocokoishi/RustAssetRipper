@@ -2129,3 +2129,10 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Probe `Temp/opencode/rpathprobe` (SDK 10.0.401) evaluated the real .NET `UnknownPathRegex` on 21 paths; all rows committed as `src/resources/custom_curve_rpath_fixture.txt` and asserted exactly. Scene/checksum-dependent branches (blend-shape and material CRC lookups, `TryGetPath` tables, `ReverseAscii` fallbacks) stay caller-side; unknown attributes and unsupported types are explicit errors like the source throws.
 - New ledger row `PROC-ANIM-CUSTOM-CURVE-001` at `已实现但未验证`; recorded as `DIFF-CUSTOM-CURVE-REGEX-001`.
 - `cargo test --workspace --locked`: 889 library and 33 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+## Streamed-curve slopes and frame decoding with a runtime differential (2026-10-05)
+
+- Probe `Temp/opencode/sclipprobe` (SDK 10.0.401) drove real `StreamedCurveKey` instances through `CalculateSlopes` (regular, negative-infinity, chained inexact-limit, equal/step limits, fractional times) and real `StreamedFrame.Read` over crafted LE/BE buffers (duplicate collapse, alignment). Eleven rows committed as `src/resources/streamed_curve_fixture.txt` with exact bit words.
+- Added `src/resources/streamed_curve.rs`: key/frame reads with bounded buffers, bit-exact double-precision slope math (including the double-promoted limit comparison and the `5e-7f`-as-double threshold), and explicit truncation/negative-count errors. A test-replay bug on the chained row (wrong middle-key coefficients) was caught by the differential and fixed before committing.
+- New ledger row `PROC-ANIM-STREAMED-001` at `已实现但未验证`; recorded as `DIFF-STREAMED-SLOPES-001`. Converter orchestration (buffer assembly, `ProcessStreams`, bindings cache) stays open.
+- `cargo test --workspace --locked`: 893 library and 33 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.

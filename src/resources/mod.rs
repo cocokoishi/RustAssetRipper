@@ -54,6 +54,7 @@ pub mod shader_channel;
 pub mod state_constant;
 pub mod state_machine_constant;
 pub mod streamed_clip;
+pub mod streamed_curve;
 pub mod streaming_info;
 pub mod sub_mesh_data;
 pub mod tangent_mode;
