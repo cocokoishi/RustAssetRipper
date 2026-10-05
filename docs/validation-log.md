@@ -2363,3 +2363,8 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Ported the locale-independent `GUI.Localizations` rules as `src/localization.rs`: default `en-US`, the 23 filename-derived hyphenated codes, underscore-to-hyphen normalization, existence, and the switch-only-to-known-different `LoadLanguage` decision (null/identical/unknown are silent no-ops, so no error half). Four tests; corrected the stale `src/localization/` (nonexistent, now created) and `src/ui/` (actually `src/product.rs`) ledger mappings. String tables stay open pending a UI message consumer.
 - Lib suite 986/986 locally, workspace Clippy clean; CI run `37390365686` green (all five jobs) for remote `main` = `02ca514`; local matches.
 - No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+## Fallback hash and synthetic names (2026-10-06)
+
+- Ported `RawDataObject.RawDataHash` (CRC32 via the pinned `crc32_ieee`), `UnknownObject.Name` (always synthetic), and `UnreadableObject.Name` (stored unless null-or-empty) into `processing/asset_factory.rs` with a dedicated test (hash word, uppercase-hex shape, stored/empty/null arms). `SER-TT-ABSENT-001` evidence updated. Lib suite 987/987 locally, workspace Clippy clean; full validation via Actions after push.
+- No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.

@@ -2,7 +2,9 @@
 //!
 //! Covers the first audited slice of `SER-TT-ABSENT-001`: the `ReadAsset` top dispatch,
 //! the `ReadNormalObject` fallback chain, the `TryReadNormalObject` tail rules, the
-//! `CreateAsset` three outcomes, and the `CreateEngineAsset` name switch. Byte reading,
+//! `CreateAsset` three outcomes, the `CreateEngineAsset` name switch, and the
+//! `RawDataObject`/`UnknownObject`/`UnreadableObject` hash and synthetic-name rules.
+//! Byte reading,
 //! node building, and assembly-backed MonoBehaviour structures stay outside: they need
 //! generated objects and live assemblies. Version facts arrive precomputed because the
 //! Rust tree has no parsed Unity-version model yet.
@@ -10,6 +12,8 @@
 //! Differential evidence: the `ENGINE` rows of `mono_utils_fixture.txt` (probe
 //! `Temp/opencode/monoutilsprobe` resolving all 21 engine names at 2019.4.0f1, SDK
 //! 10.0.401); the dispatch and fallback rules are source-read over caller facts.
+
+use crate::resources::blend_shape::crc32_ieee;
 
 /// The class ID routed to the MonoBehaviour read path.
 pub const MONO_BEHAVIOUR_CLASS_ID: i32 = 114;
@@ -270,9 +274,60 @@ pub fn engine_asset_kind(name: &str) -> Option<EngineAssetKind> {
     }
 }
 
+/// `RawDataObject.RawDataHash`: a Crc32 hash of the raw bytes, reusing the
+/// shipped-`Checksum.dll`-pinned words.
+pub fn raw_data_hash(data: &[u8]) -> u32 {
+    crc32_ieee(data)
+}
+
+/// `UnknownObject.Name`: always the synthetic `Unknown{ClassName}_{Hash:X}` form (the
+/// setter is a no-op). The class name arrives as a caller fact.
+pub fn unknown_asset_name(class_name: &str, raw_data_hash: u32) -> String {
+    format!("Unknown{class_name}_{raw_data_hash:X}")
+}
+
+/// `UnreadableObject.Name`: the stored name unless it is null or empty, otherwise the
+/// synthetic `Unreadable{ClassName}_{Hash:X}` form.
+pub fn unreadable_asset_name(
+    class_name: &str,
+    stored_name: Option<&str>,
+    raw_data_hash: u32,
+) -> String {
+    match stored_name {
+        Some(name) if !name.is_empty() => name.to_owned(),
+        _ => format!("Unreadable{class_name}_{raw_data_hash:X}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fallback_names_follow_the_raw_data_hash_rule() {
+        // The hash is the reflected CRC-32 of the raw bytes.
+        assert_eq!(raw_data_hash(b""), crc32_ieee(b""));
+        assert_eq!(raw_data_hash(b"abc"), 0x3524_41C2);
+        // Unknown names are always synthetic with uppercase hex.
+        assert_eq!(
+            unknown_asset_name("Texture2D", 0x1234_ABCD),
+            "UnknownTexture2D_1234ABCD"
+        );
+        // Unreadable names keep a stored non-empty name.
+        assert_eq!(
+            unreadable_asset_name("Mesh", Some("Keep"), 0x1234_ABCD),
+            "Keep"
+        );
+        // Null or empty stored names fall back to the synthetic form.
+        assert_eq!(
+            unreadable_asset_name("Mesh", None, 0x1234_ABCD),
+            "UnreadableMesh_1234ABCD"
+        );
+        assert_eq!(
+            unreadable_asset_name("Mesh", Some(""), 0x1234_ABCD),
+            "UnreadableMesh_1234ABCD"
+        );
+    }
 
     #[test]
     fn read_path_dispatch_matches_the_source_order() {

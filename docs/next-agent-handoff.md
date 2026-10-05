@@ -726,5 +726,11 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 ## 93. Checkpoint: localization code rules (2026-10-06)
 
 - New `src/localization.rs` with the locale-independent rules (4 tests); fixed two stale module mappings; string tables stay open. Lib 986/986 locally, workspace Clippy clean; CI run `37390365686` green (all five jobs) for remote `main` = `02ca514`; local matches.
+- Next: fallback-object behaviors, then the remaining product rows (`PRODUCT-CONFIG-001`, `PRODUCT-GUI-001`, `GENERATORS-001`, `TOOLS-001` remainders).
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 94. Checkpoint: fallback hash and synthetic names (2026-10-06)
+
+- Ported `RawDataHash` + `Unknown`/`Unreadable` naming with a dedicated test; `SER-TT-ABSENT-001` evidence updated. Lib 987/987 locally, workspace Clippy clean; full validation via Actions after push.
 - Next: the remaining product rows (`PRODUCT-CONFIG-001`, `PRODUCT-GUI-001`, `GENERATORS-001`, `TOOLS-001` remainders).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
