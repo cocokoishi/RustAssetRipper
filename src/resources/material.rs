@@ -287,6 +287,46 @@ impl MaterialView {
             .find(|property| property.name == property_name)
     }
 
+    /// `GlbLevelBuilder.GetTextures`: the main/normal texture bindings for scene GLB export.
+    ///
+    /// The reference walks the texture properties in serialized order: a property named
+    /// `_MainTex`, `texture`, `Texture`, or `_Texture` supplies the main texture (first wins); a
+    /// property named `_Normal`, `Normal`, or `normal` supplies the normal texture (first wins);
+    /// any other property supplies the main-texture replacement (first wins), which fills in an
+    /// absent main texture. The reference additionally resolves each selected PPtr against the
+    /// asset collection and keeps only `ITexture2D` targets; that resolution needs the collection
+    /// and stays with the caller, so this returns the selected bindings.
+    pub fn glb_material_textures(
+        &self,
+    ) -> (
+        Option<&MaterialTextureProperty>,
+        Option<&MaterialTextureProperty>,
+    ) {
+        let mut main: Option<&MaterialTextureProperty> = None;
+        let mut normal: Option<&MaterialTextureProperty> = None;
+        let mut replacement: Option<&MaterialTextureProperty> = None;
+        for property in &self.saved_properties.tex_envs {
+            match property.name.as_str() {
+                "_MainTex" | "texture" | "Texture" | "_Texture" => {
+                    if main.is_none() {
+                        main = Some(property);
+                    }
+                }
+                "_Normal" | "Normal" | "normal" => {
+                    if normal.is_none() {
+                        normal = Some(property);
+                    }
+                }
+                _ => {
+                    if replacement.is_none() {
+                        replacement = Some(property);
+                    }
+                }
+            }
+        }
+        (main.or(replacement), normal)
+    }
+
     /// The dictionary shape `m_TexEnvs` used.
     pub fn tex_env_key_shape(&self) -> MaterialTexEnvKeyShape {
         self.saved_properties.tex_env_shape
@@ -890,6 +930,95 @@ mod tests {
             field("m_SavedProperties", sheet),
         ]);
         MaterialView::from_value(&root).unwrap()
+    }
+
+    /// Builds a `MaterialView` whose tex-env list is exactly `names`, in order.
+    fn material_with_named_tex_envs(names: &[&str]) -> MaterialView {
+        let sheet = SerializedValue::Struct(vec![field(
+            "m_TexEnvs",
+            SerializedValue::Array(
+                names
+                    .iter()
+                    .map(|name| pair(string(name), tex_env(Some((2, 100)))))
+                    .collect(),
+            ),
+        )]);
+        let root = SerializedValue::Struct(vec![field("m_SavedProperties", sheet)]);
+        MaterialView::from_value(&root).unwrap()
+    }
+
+    #[test]
+    fn glb_material_textures_select_main_and_normal_by_name() {
+        let view = material_with_named_tex_envs(&["_BumpMap", "_MainTex", "_Normal"]);
+        let (main, normal) = view.glb_material_textures();
+        assert_eq!(
+            main.map(|property| property.name.as_str()),
+            Some("_MainTex")
+        );
+        assert_eq!(
+            normal.map(|property| property.name.as_str()),
+            Some("_Normal")
+        );
+    }
+
+    #[test]
+    fn glb_material_textures_fall_back_to_the_first_other_texture() {
+        let view = material_with_named_tex_envs(&["_BumpMap", "_DetailAlbedoMap"]);
+        let (main, normal) = view.glb_material_textures();
+        assert_eq!(
+            main.map(|property| property.name.as_str()),
+            Some("_BumpMap")
+        );
+        assert_eq!(normal, None);
+    }
+
+    #[test]
+    fn glb_material_textures_prefer_main_over_replacement() {
+        let view = material_with_named_tex_envs(&["_BumpMap", "Texture"]);
+        let (main, _) = view.glb_material_textures();
+        assert_eq!(main.map(|property| property.name.as_str()), Some("Texture"));
+    }
+
+    #[test]
+    fn glb_material_textures_keep_the_first_match_of_each_kind() {
+        let view = material_with_named_tex_envs(&["_MainTex", "texture", "Normal", "_Normal"]);
+        let (main, normal) = view.glb_material_textures();
+        assert_eq!(
+            main.map(|property| property.name.as_str()),
+            Some("_MainTex")
+        );
+        assert_eq!(
+            normal.map(|property| property.name.as_str()),
+            Some("Normal")
+        );
+    }
+
+    #[test]
+    fn glb_material_textures_accept_all_spellings() {
+        for main_name in ["_MainTex", "texture", "Texture", "_Texture"] {
+            let view = material_with_named_tex_envs(&[main_name]);
+            assert_eq!(
+                view.glb_material_textures()
+                    .0
+                    .map(|property| property.name.as_str()),
+                Some(main_name)
+            );
+        }
+        for normal_name in ["_Normal", "Normal", "normal"] {
+            let view = material_with_named_tex_envs(&[normal_name]);
+            assert_eq!(
+                view.glb_material_textures()
+                    .1
+                    .map(|property| property.name.as_str()),
+                Some(normal_name)
+            );
+        }
+    }
+
+    #[test]
+    fn glb_material_textures_are_empty_without_tex_envs() {
+        let view = material_with_named_tex_envs(&[]);
+        assert_eq!(view.glb_material_textures(), (None, None));
     }
 
     #[test]

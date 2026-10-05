@@ -470,3 +470,9 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - 18 mesh tests pass, including the per-version TypeTree assertions and the Unity 3.5 fixed-stream reader test. cargo test --workspace --locked: 857 library and 28 CLI tests; warnings-denied Clippy and format check pass.
 - Next: RES-MATERIAL-EXPORT-001 (.mat/.shader), the animation rows (RES-ANIM-001/PROC-ANIM-001), RES-AUDIO-001, RES-MODEL-001 (blend shapes, CalculateMeshMetric, scene-level GLB), EXPORT-UNITY-001, TYPE-SCRIPT-001, and the product rows (PRODUCT-CONFIG/GUI/I18N-001, GENERATORS-001, TOOLS-001).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+## 55. Checkpoint: Scene-GLB material texture selection (2026-10-05)
+
+- Added glb_material_textures (GlbLevelBuilder.GetTextures name routing) with six tests; new ledger row RES-MODEL-GLB-MATERIAL-001 at ???.
+- cargo test --workspace --locked: 863 library and 28 CLI tests; warnings-denied Clippy passes.
+- Next: RES-MATERIAL-EXPORT-001 (.mat/.shader), the animation rows, RES-AUDIO-001, blend shapes/CalculateMeshMetric/scene-level GLB assembly, EXPORT-UNITY-001, TYPE-SCRIPT-001, and the product rows.
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
