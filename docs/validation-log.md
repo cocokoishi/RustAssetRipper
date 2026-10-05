@@ -2250,3 +2250,9 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Audited `AssetRipper.Configuration` (16 files: entry/instance/set/storage plus singleton/list stores and the string/parsable/JSON serializer selection rule) and the app wiring (`SerializedSettings` single `AssetRipper.Settings.json`, `FullConfiguration` load/save/delete, `SaveSettingsToDisk` gate in `SettingsPage`), call sites spot-verified. Records/enums/defaults are already ported in `src/export/settings.rs`; the generic keyed store needs no Rust equivalent.
 - `PRODUCT-CONFIG-001` moves to `已调查`; the concrete remainder is the JSON persistence round-trip plus the save/delete gate. Also corrected the row's Rust-module column (`src/export/settings.rs`, not `src/config/`).
 - No Rust source changed, so no cargo runs were needed for this increment. CI run `37305637087` green (all five jobs) for remote `main` = `f788871`; local matches. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+## Localization audit (2026-10-06)
+
+- Inventoried `AssetRipper/Localizations/`: 23 locale JSON files (`en_US.json` canonical with 272 keys via JSON parse; `id.json` effectively empty, exercising the fallback). Rules read directly: default `en-US`, `LoadLanguage` validation with hyphen normalization, per-key en-US fallback with a switch-default arm (`LocalizationGenerator.cs:46-73`).
+- `PRODUCT-I18N-001` moves to `已调查`; no Rust localization module exists yet — the full table port stays open.
+- No Rust source changed, so no cargo runs were needed for this increment. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.

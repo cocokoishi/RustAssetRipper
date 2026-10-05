@@ -616,7 +616,13 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 ## 75. Checkpoint: configuration framework audit (2026-10-06)
 
 - Audited `AssetRipper.Configuration` plus the settings load/save/delete wiring (call sites spot-verified). `PRODUCT-CONFIG-001` moves to `已调查` (records already ported; generic store needs no equivalent; JSON persistence round-trip + save/delete gate stay open). Docs-only increment; CI run `37305637087` green (all five jobs) for remote `main` = `f788871`; local matches.
-- Next: `TYPE-SCRIPT-001` remainder (manager resolutions), CLI exposure + GUID freshness + folder sidecars, settings persistence, and the product rows (`PRODUCT-GUI/I18N-001`).
+- Next: `TYPE-SCRIPT-001` remainder (manager resolutions), CLI exposure + GUID freshness + folder sidecars, settings persistence, and `PRODUCT-GUI-001`.
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 76. Checkpoint: localization audit (2026-10-06)
+
+- Inventoried 23 locale files (272-key `en_US.json`; empty `id.json`) with fallback rules read from `Localization.cs`/`LanguageCodes.cs`/`LocalizationGenerator.cs`. `PRODUCT-I18N-001` moves to `已调查`. Docs-only increment; no cargo runs needed.
+- Next: `TYPE-SCRIPT-001` remainder (manager resolutions), CLI exposure + GUID freshness + folder sidecars, settings persistence, and `PRODUCT-GUI-001`.
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
 - Next: `TYPE-SCRIPT-001` remainder (manager resolutions), CLI exposure + GUID freshness + folder sidecars, and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
