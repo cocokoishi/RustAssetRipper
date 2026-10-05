@@ -2232,3 +2232,9 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - `src/export/guid_policy.rs` now reports the deterministic sources closed: only `RandomPerCollection` stays open.
 - `DIFF-SCRIPT-GUID-001` recorded. New ledger row `EXP-SCRIPT-GUID-001` at `已实现但未验证`; targeted export tests pass (303/303); CI run `37303561833` green (all five jobs) for remote `main` = `e41e28e`; local matches.
 - No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+## Generator audit (2026-10-06)
+
+- Audited all six `*.SourceGenerator` projects (three parallel source reads, csproj kinds spot-verified): 4 Roslyn incremental generators — `GUI.Licensing` (license `.md` to `Licenses.g.cs`), `GUI.Localizations` (locale `.json` to `LanguageCodes.g.cs`/`Localization.g.cs`), `Processing` (hardcoded polyfills to a compiled `EmbeddedAssembly.cs` DLL blob), `SourceGenerated.Extensions` (hardcoded ClassID list to per-type `AssetCreator.g.cs` factories) — and 2 console tools — `IO.Files` (`FileSystem`/`LocalFileSystem`/`VirtualFileSystem` partial scaffolds) and `GUI` (settings-page code plus `en_US.json` normalization).
+- Rust dispositions recorded in `GENERATORS-001` (now `已调查`): no C# generator runs in the Rust build; VFS behavior is hand-ported; the `AssetCreator` factory overlaps the ported engine table; license/localization/settings derivations stay with their product rows.
+- No Rust source changed, so no cargo runs were needed for this increment. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.

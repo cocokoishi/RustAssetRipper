@@ -598,5 +598,13 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 ## 72. Checkpoint: script and assembly GUIDs with a runtime differential (2026-10-06)
 
 - Extended `src/export/script_hashing.rs` with from-scratch RFC 1321 MD5, `UnityGuid` (words, nibble-reversed string, `MissingReference`), `ConvertSystemOrUnityBytes`, `Md5Hash` overloads, `CalculateScriptGuid` bytes/`str`, `CalculateAssemblyGuid` with ordinal `.dll` strip, and `RemoveAssemblyFileExtension`/`FixAssemblyName`. Pinned by 16 committed probe rows in `src/export/script_guid_fixture.txt` (shipped DLLs, SDK 10.0.401; `MyLib.dll` == `MyLib` proved at runtime). `guid_policy` now reports only `RandomPerCollection` open. New row `EXP-SCRIPT-GUID-001`; `DIFF-SCRIPT-GUID-001` recorded. Targeted export tests pass (303/303); CI run `37303561833` green (all five jobs) for remote `main` = `e41e28e`; local matches.
+- Next: `TYPE-SCRIPT-001` remainder (manager resolutions), CLI exposure + GUID freshness + folder sidecars, `TOOLS-001`, and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`).
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 73. Checkpoint: generator audit (2026-10-06)
+
+- Audited all six `*.SourceGenerator` projects (4 Roslyn analyzers + 2 console tools) with per-generator input/output/consumer triples, csproj kinds spot-verified. `GENERATORS-001` moves to `已调查` with Rust dispositions (no C# generator in the Rust build; VFS hand-ported; `AssetCreator` overlaps the engine table; license/localization/settings stay with product rows). Docs-only increment; no cargo runs needed.
+- Next: `TYPE-SCRIPT-001` remainder (manager resolutions), CLI exposure + GUID freshness + folder sidecars, `TOOLS-001`, and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`).
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
 - Next: `TYPE-SCRIPT-001` remainder (manager resolutions), CLI exposure + GUID freshness + folder sidecars, and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
