@@ -23,10 +23,19 @@
 //!   buffer length. Here an out-of-range sub-mesh is an explicit [`GlbError::IndexOutOfRange`], and
 //!   a partial trailing primitive group is reported through [`GlbMeshExport::warnings`] rather than
 //!   silently dropped.
-//! - The source delegates the container to SharpGLTF, an external package that is not part of the
-//!   frozen snapshot, so byte-level equality with the reference output has not been differentially
-//!   verified. `SparseWeight8.Create` is reproduced as a descending sort by weight, which is that
-//!   type's documented purpose, but the exact reference ordering is likewise unverified.
+//! - A bone index above `u16::MAX` is an explicit [`GlbError::BoneIndexTooLarge`]; the source
+//!   stores joints as floats and lets the encoder deal with them, which has no defined outcome
+//!   for unrepresentable indices.
+//!
+//! Accessor encodings follow the SharpGLTF 1.0.2 writer differentially (probe
+//! `Temp/opencode/gltfprobe`): positions, normals, tangents, texture coordinates, and weights
+//! are little-endian floats; `COLOR_0` is normalized unsigned bytes with truncating
+//! quantization; `JOINTS_0` is unsigned bytes while every joint fits, unsigned shorts
+//! otherwise; indices are unsigned shorts while every index fits below the reserved
+//! `65535`, unsigned ints otherwise. Skin lanes reproduce `SparseWeight8.Create` (duplicate
+//! merge, exact-zero drop), `OrderedByWeight` (strongest first, magnitude-compared, smaller
+//! indices on ties), and the `VertexJoints4` renormalization (skipped at exact sums of zero
+//! and one, like the source).
 //!
 //! Vertex deduplication mirrors `VertexBuilder.CreateCompatibleMesh`: vertices with bit-identical
 //! attributes share a glTF vertex. Ordering is deterministic (first use within each sub-mesh, then
@@ -204,6 +213,15 @@ pub enum GlbError {
         /// The offending bone index.
         bone_index: i32,
     },
+    /// A bone index exceeds `u16::MAX`, which neither `JOINTS_0` encoding can represent.
+    BoneIndexTooLarge {
+        /// The mesh name supplied by the caller.
+        mesh: String,
+        /// The source vertex index.
+        vertex: u32,
+        /// The offending bone index.
+        bone_index: i32,
+    },
 }
 
 impl Display for GlbError {
@@ -245,6 +263,14 @@ impl Display for GlbError {
             } => write!(
                 formatter,
                 "mesh '{mesh}' vertex {vertex} has negative bone index {bone_index}"
+            ),
+            Self::BoneIndexTooLarge {
+                mesh,
+                vertex,
+                bone_index,
+            } => write!(
+                formatter,
+                "mesh '{mesh}' vertex {vertex} has bone index {bone_index} above u16::MAX"
             ),
         }
     }
@@ -352,6 +378,11 @@ impl GlbBuilder {
         self.push_view(bytes)
     }
 
+    /// Appends tightly packed unsigned bytes as one buffer view and returns its index.
+    fn push_ubyte_view(&mut self, values: &[u8]) -> usize {
+        self.push_view(values.to_vec())
+    }
+
     /// Appends tightly packed unsigned shorts as one buffer view and returns its index.
     fn push_ushort_view(&mut self, values: &[u16]) -> usize {
         let mut bytes = Vec::with_capacity(values.len() * 2);
@@ -402,13 +433,23 @@ impl GlbBuilder {
         self.accessors.len() - 1
     }
 
-    /// Adds a `SCALAR` unsigned-int index accessor.
+    /// Adds a `SCALAR` index accessor, unsigned shorts while every index fits below the
+    /// reserved `65535`, unsigned ints otherwise (matching the SharpGLTF writer widths).
     fn push_index_accessor(&mut self, indices: &[u32]) -> usize {
-        let view = self.push_uint_view(indices);
-        self.accessors.push(format!(
-            "{{\"bufferView\":{view},\"componentType\":5125,\"count\":{},\"type\":\"SCALAR\"}}",
-            indices.len()
-        ));
+        if indices.iter().all(|index| *index <= 65534) {
+            let values: Vec<u16> = indices.iter().map(|index| *index as u16).collect();
+            let view = self.push_ushort_view(&values);
+            self.accessors.push(format!(
+                "{{\"bufferView\":{view},\"componentType\":5123,\"count\":{},\"type\":\"SCALAR\"}}",
+                indices.len()
+            ));
+        } else {
+            let view = self.push_uint_view(indices);
+            self.accessors.push(format!(
+                "{{\"bufferView\":{view},\"componentType\":5125,\"count\":{},\"type\":\"SCALAR\"}}",
+                indices.len()
+            ));
+        }
         self.accessors.len() - 1
     }
 
@@ -465,17 +506,49 @@ impl GlbBuilder {
         Ok(self.accessors.len() - 1)
     }
 
-    /// Adds a `JOINTS_0` accessor.
-    fn push_joints_accessor(&mut self, joints: &[[u16; 4]]) -> usize {
-        let mut values = Vec::with_capacity(joints.len() * 4);
-        for joint in joints {
-            values.extend_from_slice(joint);
+    /// Adds a `COLOR_0` accessor: normalized unsigned bytes with truncating quantization,
+    /// matching the SharpGLTF writer.
+    fn push_color_accessor(&mut self, colors: &[[f32; 4]]) -> usize {
+        let mut values = Vec::with_capacity(colors.len() * 4);
+        for color in colors {
+            values.extend(quantize_color(*color));
         }
-        let view = self.push_ushort_view(&values);
+        let view = self.push_ubyte_view(&values);
         self.accessors.push(format!(
-            "{{\"bufferView\":{view},\"componentType\":5123,\"count\":{},\"type\":\"VEC4\"}}",
-            joints.len()
+            "{{\"bufferView\":{view},\"componentType\":5121,\"count\":{},\"normalized\":true,\"type\":\"VEC4\"}}",
+            colors.len()
         ));
+        self.accessors.len() - 1
+    }
+
+    /// Adds a `JOINTS_0` accessor: unsigned bytes while every joint fits, unsigned shorts
+    /// otherwise (matching the SharpGLTF writer widths).
+    fn push_joints_accessor(&mut self, joints: &[[u16; 4]]) -> usize {
+        if joints
+            .iter()
+            .flatten()
+            .all(|joint| *joint <= u8::MAX as u16)
+        {
+            let mut values = Vec::with_capacity(joints.len() * 4);
+            for joint in joints {
+                values.extend(joint.map(|lane| lane as u8));
+            }
+            let view = self.push_ubyte_view(&values);
+            self.accessors.push(format!(
+                "{{\"bufferView\":{view},\"componentType\":5121,\"count\":{},\"type\":\"VEC4\"}}",
+                joints.len()
+            ));
+        } else {
+            let mut values = Vec::with_capacity(joints.len() * 4);
+            for joint in joints {
+                values.extend_from_slice(joint);
+            }
+            let view = self.push_ushort_view(&values);
+            self.accessors.push(format!(
+                "{{\"bufferView\":{view},\"componentType\":5123,\"count\":{},\"type\":\"VEC4\"}}",
+                joints.len()
+            ));
+        }
         self.accessors.len() - 1
     }
 }
@@ -513,6 +586,29 @@ fn escape_json(value: &str) -> String {
     result
 }
 
+/// Quantizes one finite color channel to normalized unsigned bytes with C#-style
+/// truncation: non-positive values become zero, values at or above one become 255, and the
+/// rest truncate `value * 255` (so `0.5` maps to `127`, as the writer emits).
+fn quantize_color_channel(value: f32) -> u8 {
+    if value <= 0.0 {
+        0
+    } else if value >= 1.0 {
+        u8::MAX
+    } else {
+        (value * 255.0) as u8
+    }
+}
+
+/// Quantizes one vertex color: any non-finite channel zeroes the whole color, matching the
+/// writer's vector-wide poisoning (probed with infinite and NaN lanes).
+fn quantize_color(color: [f32; 4]) -> [u8; 4] {
+    if color.iter().all(|value| value.is_finite()) {
+        color.map(quantize_color_channel)
+    } else {
+        [0; 4]
+    }
+}
+
 /// The glTF primitive mode for a converted topology.
 fn glb_mode(topology: MeshTopology) -> Option<u32> {
     Some(match topology {
@@ -543,6 +639,82 @@ fn source_group_size(topology: MeshTopology) -> u64 {
         MeshTopology::QUADS => 4,
         _ => 3,
     }
+}
+
+/// Processed skin lanes for one vertex: joints plus weights.
+type SkinLanes = (Option<[u16; 4]>, Option<[f32; 4]>);
+
+/// `SparseWeight8.Create` plus `OrderedByWeight` plus the `VertexJoints4` renormalization
+/// for one vertex: negative indices fail, duplicate indices merge by summation, exact-zero
+/// weights drop out, an empty set stays zero (the source constructor skips renormalization
+/// at exact sums of zero and one), other sums scale to one, lanes sort strongest-first with
+/// magnitudes compared like `IndexWeight.IsGreaterThan` (smaller indices win ties), and
+/// missing lanes pad with joint zero.
+fn process_skin_bindings(
+    indices: &[i32; 4],
+    weights: &[f32; 4],
+    mesh_name: &str,
+    vertex: u32,
+) -> Result<SkinLanes, GlbError> {
+    let mut merged: Vec<(i32, f32)> = Vec::with_capacity(4);
+    for (&bone_index, &weight) in indices.iter().zip(weights.iter()) {
+        if bone_index < 0 {
+            return Err(GlbError::NegativeBoneIndex {
+                mesh: mesh_name.to_owned(),
+                vertex,
+                bone_index,
+            });
+        }
+        if weight == 0.0 {
+            continue;
+        }
+        if let Some(slot) = merged.iter_mut().find(|slot| slot.0 == bone_index) {
+            slot.1 += weight;
+        } else {
+            merged.push((bone_index, weight));
+        }
+    }
+    if merged.is_empty() {
+        return Ok((Some([0; 4]), Some([0.0; 4])));
+    }
+    merged.sort_by(|left, right| {
+        let left_magnitude = left.1.abs();
+        let right_magnitude = right.1.abs();
+        if left_magnitude > right_magnitude {
+            std::cmp::Ordering::Less
+        } else if right_magnitude > left_magnitude {
+            std::cmp::Ordering::Greater
+        } else if left_magnitude.is_nan() {
+            if right_magnitude.is_nan() {
+                left.0.cmp(&right.0)
+            } else {
+                std::cmp::Ordering::Greater
+            }
+        } else if right_magnitude.is_nan() {
+            std::cmp::Ordering::Less
+        } else {
+            left.0.cmp(&right.0)
+        }
+    });
+    let sum: f32 = merged.iter().map(|lane| lane.1).sum();
+    let mut joint_values = [0u16; 4];
+    let mut weight_values = [0.0f32; 4];
+    for (lane, (bone_index, weight)) in merged.into_iter().enumerate() {
+        if bone_index > u16::MAX as i32 {
+            return Err(GlbError::BoneIndexTooLarge {
+                mesh: mesh_name.to_owned(),
+                vertex,
+                bone_index,
+            });
+        }
+        joint_values[lane] = bone_index as u16;
+        weight_values[lane] = if sum != 0.0 && sum != 1.0 {
+            weight / sum
+        } else {
+            weight
+        };
+    }
+    Ok((Some(joint_values), Some(weight_values)))
 }
 
 /// Builds a glTF vertex for `index` from the processed mesh data.
@@ -622,34 +794,7 @@ fn build_vertex(mesh: &MeshData, mesh_name: &str, index: u32) -> Result<GlbVerte
     };
     let (joints, weights) = if mesh_type.contains(GlbMeshType::JOINTS4) {
         let skin = mesh.try_get_skin_at_index(index);
-        // `SparseWeight8.Create` keeps the strongest weights first.
-        let mut lanes: [(u16, f32); 4] = [(0, 0.0); 4];
-        for (lane, (&bone_index, &weight)) in
-            skin.indices.iter().zip(skin.weights.iter()).enumerate()
-        {
-            if bone_index < 0 {
-                return Err(GlbError::NegativeBoneIndex {
-                    mesh: mesh_name.to_owned(),
-                    vertex: index,
-                    bone_index,
-                });
-            }
-            lanes[lane] = (bone_index as u16, weight);
-        }
-        lanes.sort_by(|left, right| {
-            right
-                .1
-                .partial_cmp(&left.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| left.0.cmp(&right.0))
-        });
-        let mut joint_values = [0u16; 4];
-        let mut weight_values = [0f32; 4];
-        for (lane, (bone_index, weight)) in lanes.into_iter().enumerate() {
-            joint_values[lane] = bone_index;
-            weight_values[lane] = weight;
-        }
-        (Some(joint_values), Some(weight_values))
+        process_skin_bindings(&skin.indices, &skin.weights, mesh_name, index)?
     } else {
         (None, None)
     };
@@ -939,11 +1084,12 @@ pub fn build_glb(name: &str, mesh: &MeshData) -> Result<GlbMeshExport, GlbError>
                 builder.push_vertex_accessor(&values, "VEC2"),
             ));
         }
-        if let Some(values) = flatten_optional(&vertices, |vertex| vertex.color) {
-            attributes.push((
-                "COLOR_0".to_owned(),
-                builder.push_vertex_accessor(&values, "VEC4"),
-            ));
+        if let Some(colors) = vertices
+            .iter()
+            .map(|vertex| vertex.color)
+            .collect::<Option<Vec<_>>>()
+        {
+            attributes.push(("COLOR_0".to_owned(), builder.push_color_accessor(&colors)));
         }
         if let Some(joints) = collect_joints(&vertices) {
             let mut weights = Vec::with_capacity(vertices.len() * 4);
@@ -1207,7 +1353,8 @@ mod tests {
         assert!(text.contains("\"version\":\"2.0\""));
         assert!(text.contains("SubMesh_0"));
         assert!(text.contains("\"mode\":4"));
-        assert!(text.contains("\"componentType\":5125"));
+        // Small meshes use unsigned-short indices, matching the SharpGLTF writer.
+        assert!(text.contains("\"componentType\":5123"));
     }
 
     #[test]
@@ -1406,7 +1553,85 @@ mod tests {
         let text = String::from_utf8_lossy(&exported.bytes);
         // One shared vertex still needs one accessor entry for POSITION.
         assert_eq!(text.matches("\"POSITION\":").count(), 1);
-        assert_eq!(text.matches("\"componentType\":5125").count(), 1);
+        assert_eq!(text.matches("\"componentType\":5123").count(), 1);
+    }
+
+    #[test]
+    fn color_channels_quantize_with_truncation() {
+        // Probe values from the SharpGLTF writer: 0.5 becomes 127, not 128.
+        assert_eq!(quantize_color_channel(0.0), 0);
+        assert_eq!(quantize_color_channel(0.25), 63);
+        assert_eq!(quantize_color_channel(0.5), 127);
+        assert_eq!(quantize_color_channel(0.999), 254);
+        assert_eq!(quantize_color_channel(1.0), 255);
+        assert_eq!(quantize_color_channel(1.5), 255);
+        assert_eq!(quantize_color_channel(-0.5), 0);
+        // Any non-finite channel zeroes the whole color, including finite alpha.
+        assert_eq!(quantize_color([0.5, 0.5, 0.5, 1.0]), [127, 127, 127, 255]);
+        assert_eq!(quantize_color([f32::INFINITY, 0.5, 0.5, 1.0]), [0, 0, 0, 0]);
+        assert_eq!(quantize_color([0.5, 0.5, 0.5, f32::NAN]), [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn skin_bindings_follow_the_sparse_weight_rules() {
+        // Duplicate indices merge by summation, then renormalize to one.
+        assert_eq!(
+            process_skin_bindings(&[1, 1, 0, 0], &[0.4, 0.6, 0.0, 0.0], "M", 0).unwrap(),
+            (Some([1, 0, 0, 0]), Some([1.0, 0.0, 0.0, 0.0]))
+        );
+        // Exact-zero weights drop out; sub-unit sums scale up.
+        assert_eq!(
+            process_skin_bindings(&[0, 1, 2, 3], &[0.3, 0.3, 0.0, 0.0], "M", 0).unwrap(),
+            (Some([0, 1, 0, 0]), Some([0.5, 0.5, 0.0, 0.0]))
+        );
+        // An exact unit sum is left untouched.
+        assert_eq!(
+            process_skin_bindings(&[2, 0, 0, 0], &[1.0, 0.0, 0.0, 0.0], "M", 0).unwrap(),
+            (Some([2, 0, 0, 0]), Some([1.0, 0.0, 0.0, 0.0]))
+        );
+        // An empty set stays zero, mirroring the skipped renormalization.
+        assert_eq!(
+            process_skin_bindings(&[5, 6, 0, 0], &[0.0, 0.0, 0.0, 0.0], "M", 0).unwrap(),
+            (Some([0, 0, 0, 0]), Some([0.0, 0.0, 0.0, 0.0]))
+        );
+        // Negative indices fail with context.
+        assert_eq!(
+            process_skin_bindings(&[-1, 0, 0, 0], &[1.0, 0.0, 0.0, 0.0], "M", 7).unwrap_err(),
+            GlbError::NegativeBoneIndex {
+                mesh: "M".to_owned(),
+                vertex: 7,
+                bone_index: -1,
+            }
+        );
+        // Indices beyond the USHORT encoding fail with context.
+        assert_eq!(
+            process_skin_bindings(&[70000, 0, 0, 0], &[1.0, 0.0, 0.0, 0.0], "M", 7).unwrap_err(),
+            GlbError::BoneIndexTooLarge {
+                mesh: "M".to_owned(),
+                vertex: 7,
+                bone_index: 70000,
+            }
+        );
+    }
+
+    #[test]
+    fn accessor_widths_follow_the_writer_rules() {
+        let mut builder = GlbBuilder::default();
+        // Colors are normalized unsigned bytes.
+        let color = builder.push_color_accessor(&[[1.0, 0.0, 0.5, 0.25]]);
+        assert!(builder.accessors[color].contains("\"componentType\":5121"));
+        assert!(builder.accessors[color].contains("\"normalized\":true"));
+        // Joints fit in a byte while every lane does, and widen otherwise.
+        let small = builder.push_joints_accessor(&[[1, 2, 3, 4]]);
+        assert!(builder.accessors[small].contains("\"componentType\":5121"));
+        assert!(!builder.accessors[small].contains("normalized"));
+        let big = builder.push_joints_accessor(&[[300, 0, 0, 0]]);
+        assert!(builder.accessors[big].contains("\"componentType\":5123"));
+        // Indices fit in a short below the reserved 65535.
+        let short = builder.push_index_accessor(&[0, 1, 65534]);
+        assert!(builder.accessors[short].contains("\"componentType\":5123"));
+        let long = builder.push_index_accessor(&[0, 1, 65535]);
+        assert!(builder.accessors[long].contains("\"componentType\":5125"));
     }
 
     #[test]

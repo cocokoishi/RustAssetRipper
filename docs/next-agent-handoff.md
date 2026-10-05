@@ -660,5 +660,11 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - `export-texture`/`export-shader` accept `--settings <path>` with explicit-beats-file precedence and path-carrying errors; usage updated. `EXP-SETTINGS-APPLY-001` broadened. Targeted lib, bin (43/43), and workspace Clippy pass locally; CI run `37314261710` green (all five jobs) for remote `main` = `e462613`; local matches.
 - Next: `TYPE-SCRIPT-001` remainder (manager resolutions), CLI exposure + GUID freshness + folder sidecars, and remaining per-command settings plus default-path startup load.
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 83. Checkpoint: GLB vertex-encoding differential (2026-10-06)
+
+- Fixed three GLB accessor deviations with a SharpGLTF differential (color quantization, joint/index widths, SparseWeight lane rules). New row `RES-GLB-ENCODING-001`; `RES-MODEL-001` to implementing; `DIFF-GLB-ENCODING-001` recorded. Full lib suite 965/965 locally; full validation via Actions after push.
+- Next: `TYPE-SCRIPT-001` remainder (manager resolutions), CLI exposure + GUID freshness + folder sidecars, and remaining per-command settings plus default-path startup load.
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
 - Next: `TYPE-SCRIPT-001` remainder (manager resolutions), CLI exposure + GUID freshness + folder sidecars, and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
