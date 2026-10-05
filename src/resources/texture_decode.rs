@@ -274,6 +274,86 @@ pub fn decode_dxt5(
     Ok(offset)
 }
 
+fn read_dxt5_alpha_block(block: &[u8]) -> ([u8; 8], u64) {
+    let table = dxt5_alpha_table(block[0], block[1]);
+    let mut bits = 0u64;
+    for (index, byte) in block[2..8].iter().enumerate() {
+        bits |= u64::from(*byte) << (8 * index);
+    }
+    (table, bits)
+}
+
+/// `Bc4.Decompress`: one interpolated channel in the red slot, with `G = B = 0`, `A = 255`.
+pub fn decode_bc4(
+    input: &[u8],
+    width: usize,
+    height: usize,
+    output: &mut [u8],
+) -> Result<usize, TextureDecodeError> {
+    require_output(output, width, height)?;
+    let (blocks_x, blocks_y) = block_grid(width, height);
+    let required = blocks_x.saturating_mul(blocks_y).saturating_mul(8);
+    require_input(input, required)?;
+    let mut offset = 0;
+    for by in 0..blocks_y {
+        for bx in 0..blocks_x {
+            let (table, bits) = read_dxt5_alpha_block(&input[offset..offset + 8]);
+            for py in 0..4 {
+                for px in 0..4 {
+                    let x = bx * 4 + px;
+                    let y = by * 4 + py;
+                    if x >= width || y >= height {
+                        continue;
+                    }
+                    let index = py * 4 + px;
+                    let value = table[((bits >> (3 * index)) & 7) as usize];
+                    let pixel = (y * width + x) * 4;
+                    output[pixel..pixel + 4].copy_from_slice(&[value, 0, 0, 0xFF]);
+                }
+            }
+            offset += 8;
+        }
+    }
+    Ok(offset)
+}
+
+/// `Bc5.Decompress`: two interpolated channels (red then green), with `B = 0`, `A = 255`.
+pub fn decode_bc5(
+    input: &[u8],
+    width: usize,
+    height: usize,
+    output: &mut [u8],
+) -> Result<usize, TextureDecodeError> {
+    require_output(output, width, height)?;
+    let (blocks_x, blocks_y) = block_grid(width, height);
+    let required = blocks_x.saturating_mul(blocks_y).saturating_mul(16);
+    require_input(input, required)?;
+    let mut offset = 0;
+    for by in 0..blocks_y {
+        for bx in 0..blocks_x {
+            let block = &input[offset..offset + 16];
+            let (red_table, red_bits) = read_dxt5_alpha_block(&block[0..8]);
+            let (green_table, green_bits) = read_dxt5_alpha_block(&block[8..16]);
+            for py in 0..4 {
+                for px in 0..4 {
+                    let x = bx * 4 + px;
+                    let y = by * 4 + py;
+                    if x >= width || y >= height {
+                        continue;
+                    }
+                    let index = py * 4 + px;
+                    let red = red_table[((red_bits >> (3 * index)) & 7) as usize];
+                    let green = green_table[((green_bits >> (3 * index)) & 7) as usize];
+                    let pixel = (y * width + x) * 4;
+                    output[pixel..pixel + 4].copy_from_slice(&[red, green, 0, 0xFF]);
+                }
+            }
+            offset += 16;
+        }
+    }
+    Ok(offset)
+}
+
 fn decode_packed<const N: usize>(
     input: &[u8],
     width: usize,
@@ -431,6 +511,8 @@ mod tests {
             "DXT1" => decode_dxt1(input, width, height, &mut output),
             "DXT3" => decode_dxt3(input, width, height, &mut output),
             "DXT5" => decode_dxt5(input, width, height, &mut output),
+            "BC4" => decode_bc4(input, width, height, &mut output),
+            "BC5" => decode_bc5(input, width, height, &mut output),
             "RGBA32" => decode_rgba32(input, width, height, &mut output),
             "RGB24" => decode_rgb24(input, width, height, &mut output),
             "BGRA32" => decode_bgra32(input, width, height, &mut output),
@@ -470,6 +552,6 @@ mod tests {
             assert_eq!(output, expected_output, "output {line}");
             rows += 1;
         }
-        assert_eq!(rows, 22);
+        assert_eq!(rows, 27);
     }
 }
