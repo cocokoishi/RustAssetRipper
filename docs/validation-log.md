@@ -2317,5 +2317,5 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 ## Default-path settings startup load (2026-10-06)
 
 - `SerializedSettings.TryLoadFromDefaultPath` + `FullConfiguration.LoadFromDefaultPath` are now applied at CLI startup: `export-texture`/`export-shader`/`export-audio` fall back to the exe-adjacent `AssetRipper.Settings.json` when no `--settings` flag is given (explicit flag wins; a present-but-broken default file fails loudly with a path-carrying error, mirroring the source throw). The directory-dependent core (`load_default_export_settings_from_dir`) is hermetic; only the `current_exe` query lives in the thin wrapper.
-- Three new CLI tests pin absent-file-None, the full export record load (PreferWav/Bmp/Decompile discriminants), and the broken-file path error. Full bin suite 49/49 and lib 966/966 locally, workspace Clippy clean; full validation via Actions after push.
+- Three new CLI tests pin absent-file-None, the full export record load (PreferWav/Bmp/Decompile discriminants), and the broken-file path error. Full bin suite 49/49 and lib 966/966 locally, workspace Clippy clean; CI run `37324101483` green (all five jobs) for remote `main` = `c4a824f`; local matches.
 - No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
