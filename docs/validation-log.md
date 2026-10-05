@@ -2261,4 +2261,4 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 
 - Inventoried `GUI.Free` (3-line AOT host over `GUI.Web`) and `GUI.Web` (page/route inventory, `GameFileLoader` load/export call chains, Ookii `--Port/--Log/--LogPath/--local-web-file/--Headless` flag table). Key facts: no CLI export verb exists (export is HTTP POST only), output paths reject Desktop/Documents/Downloads, exports use timestamped subfolders.
 - `PRODUCT-GUI-001` moves to `已调查`. Also corrected wrong symbol names in `PRODUCT-CLI-INSPECT-001` (`LoadGame`/`ExportGame` do not exist; actual names are `LoadAndProcess`/`ExportUnityProject`/`ExportPrimaryContent`).
-- No Rust source changed, so no cargo runs were needed for this increment. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+- No Rust source changed, so no cargo runs were needed for this increment. CI run `37306891363` green (all five jobs) for remote `main` = `6a8712d`; local matches. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
