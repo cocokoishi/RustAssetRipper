@@ -651,7 +651,7 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 
 ## 81. Checkpoint: settings application in export-texture (2026-10-06)
 
-- Bridged settings-to-writer image formats and threaded the configured default through `export-texture` (behavior-identical under default settings). New row `EXP-SETTINGS-APPLY-001`. Targeted lib + CLI tests pass; full validation via Actions after push.
+- Bridged settings-to-writer image formats and threaded the configured default through `export-texture` (behavior-identical under default settings). New row `EXP-SETTINGS-APPLY-001`. Targeted lib + CLI tests pass; CI run `37312018667` green (all five jobs) for remote `main` = `7cedac2`; local matches.
 - Next: `TYPE-SCRIPT-001` remainder (manager resolutions), CLI exposure + GUID freshness + folder sidecars, and settings-file loading into the CLI.
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
 - Next: `TYPE-SCRIPT-001` remainder (manager resolutions), CLI exposure + GUID freshness + folder sidecars, and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
