@@ -2173,3 +2173,10 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Extended `src/io/special_names.rs` (`fix_assembly_name`, `remove/add_assembly_file_extension`, `is_project_assembly`, `ASSEMBLY_EXTENSION`) and added `src/processing/script_identity.rs` (`ScriptIdentifier` with validated construction, unique names, and display; `ScriptingBackend` with discriminants; `get_full_name`/`get_valid_assembly_name` kernels). The null-namespace rejection has no Rust counterpart and is documented as a gap.
 - `DIFF-SCRIPT-IDENTITY-001` recorded. New ledger row `TYPE-SCRIPT-IDENTITY-001` (first audited slice of `TYPE-SCRIPT-001`) at `已实现但未验证`.
 - `cargo test --workspace --locked`: 924 library and 40 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+## Export-settings discriminants and defaults with a runtime differential (2026-10-05)
+
+- Probe `Temp/opencode/settingprobe` (SDK 10.0.401) dumped every member discriminant of the 12 shipped configuration enums (`AssetRipper.Export.dll`, `AssetRipper.Import.dll`, `AssetRipper.Processing.dll`) plus `new ExportSettings()`/`ImportSettings()`/`ProcessingSettings()` default dumps; all 83 rows committed as `src/export/settings_fixture.txt`.
+- Extended `src/export/settings.rs`: `discriminant()` consts for all 12 enums and the full 21-member `ScriptLanguageVersion` (replacing the two-variant `ScriptLanguageSelection`, including `Latest = 2147483647` and the `CSharp7_1 = 701` step). The automatic language selection still needs external version ordering and stays out; default Unity versions (`0.0.0a0`) are pinned as probe literals since the Rust version type models no record defaults.
+- `DIFF-EXPORT-SETTINGS-001` recorded. New ledger row `EXP-EXPORT-SETTINGS-001` at `已实现但未验证`.
+- `cargo test --workspace --locked`: 925 library and 40 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
