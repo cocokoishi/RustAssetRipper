@@ -7,6 +7,9 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use assetripper::export::audio_export::try_decode_audio;
+use assetripper::export::audio_export::{
+    converts_ogg_to_wav, plan_audio_clip_collection, AudioDecodeFact,
+};
 use assetripper::export::pointer_map::{
     ExportCollectionPointerMetadata, ExportPointerMapLimits, ExportedAssetPointerEntry,
     ProjectExportPointerMap, UnityProjectAssetType,
@@ -14,6 +17,7 @@ use assetripper::export::pointer_map::{
 use assetripper::export::scene_collection::{
     ExportAssetCollectionIdentity, ExportAssetIdentity, SceneExportIdAssignment,
 };
+use assetripper::export::settings::AudioExportFormat as SettingsAudioFormat;
 use assetripper::export::settings::ShaderExportMode;
 use assetripper::export::settings::{ExportDefaults, ImageExportFormat as SettingsImageFormat};
 use assetripper::export::settings_file::ExportSettingsFile;
@@ -802,15 +806,30 @@ where
     I: Iterator<Item = OsString>,
 {
     let mut arguments = arguments;
+    // The configured format defaults to `ExportSettings.AudioExportFormat` (`Default`).
+    let mut configured = ExportDefaults::default().audio_export_format;
+    // Optional leading flags precede the positional arguments.
+    let mut positional: Vec<OsString> = Vec::new();
+    while let Some(next) = arguments.next() {
+        if next == "--settings" {
+            let path = arguments.next().ok_or_else(|| {
+                invalid_input("export-audio --settings requires a settings file path")
+            })?;
+            configured = load_cli_export_settings(Path::new(&path))?.audio_export_format;
+        } else {
+            positional.push(next);
+        }
+    }
+    let mut positional = positional.into_iter();
     let serialized_file_index =
-        parse_required_argument::<usize>(arguments.next(), "SerializedFile index")?;
-    let path_id = parse_required_argument::<i64>(arguments.next(), "object PathID")?;
-    let output_path = arguments
+        parse_required_argument::<usize>(positional.next(), "SerializedFile index")?;
+    let path_id = parse_required_argument::<i64>(positional.next(), "object PathID")?;
+    let output_path = positional
         .next()
         .map(PathBuf::from)
         .ok_or_else(|| invalid_input("export-audio requires an output audio path"))?;
     let mut input_files = Vec::new();
-    for argument in arguments {
+    for argument in positional {
         if input_files.len() >= MAX_INPUT_PATHS {
             return Err(invalid_input(format!(
                 "input path count exceeds {MAX_INPUT_PATHS}"
@@ -829,6 +848,7 @@ where
         &input_files,
         serialized_file_index,
         path_id,
+        configured,
         &output_path,
         &mut output,
     )
@@ -838,6 +858,7 @@ fn export_audio_to<W: io::Write>(
     input_files: &[PathBuf],
     serialized_file_index: usize,
     path_id: i64,
+    format: SettingsAudioFormat,
     output_path: &Path,
     status_output: &mut W,
 ) -> Result<(), Box<dyn Error>> {
@@ -958,6 +979,28 @@ fn export_audio_to<W: io::Write>(
             "SerializedFile {serialized_file_index} PathID {path_id} audio export failed: {error}"
         ))
         })?;
+    // `AudioClipExporter.TryCreateCollection` picks the collection extension from the
+    // decode outcome plus the configured `AudioExportFormat`; only `PreferWav` meeting
+    // an `ogg` decode changes anything. The class guard above already established the
+    // clip, and a successful decode is never empty.
+    let collection_extension = plan_audio_clip_collection(AudioDecodeFact {
+        is_audio_clip: true,
+        decode_succeeded: true,
+        decoded_is_empty: decoded.is_empty(),
+        decoded_extension: extension,
+        format,
+    })
+    .map_err(|refusal| {
+        invalid_data_owned(format!(
+            "SerializedFile {serialized_file_index} PathID {path_id} audio export refused: {refusal:?}"
+        ))
+    })?;
+    if converts_ogg_to_wav(extension, &collection_extension) {
+        return Err(invalid_data_owned(format!(
+            "SerializedFile {serialized_file_index} PathID {path_id} requires an Ogg-to-WAV conversion, which needs a Vorbis decoder that is not available"
+        ))
+        .into());
+    }
     let mut destination = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -965,7 +1008,7 @@ fn export_audio_to<W: io::Write>(
     destination.write_all(&decoded)?;
     writeln!(
         status_output,
-        "Wrote a {extension} audio from SerializedFile {serialized_file_index} PathID {path_id} to {output_path:?}."
+        "Wrote a {collection_extension} audio from SerializedFile {serialized_file_index} PathID {path_id} to {output_path:?}."
     )?;
     Ok(())
 }
@@ -3364,7 +3407,7 @@ fn invalid_data_owned(message: String) -> io::Error {
 
 fn print_usage() {
     println!(
-        "Usage:\n  assetripper-rs inspect <input-directory> [input-directory ...]\n  assetripper-rs inspect-files <input-file> [input-file ...]\n  assetripper-rs export-object-yaml <serialized-file-index> <path-id> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-file-yaml <serialized-file-index> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-texture [--settings <path>] <serialized-file-index> <path-id> <new-output-image> <input-file> [input-file ...]\n  assetripper-rs export-mesh <serialized-file-index> <path-id> <new-output-glb> <input-file> [input-file ...]\n  assetripper-rs export-shader [--shader-export-mode <dummy|yaml|decompile>] [--settings <path>] <serialized-file-index> <path-id> <new-output-shader> <input-file> [input-file ...]\n  assetripper-rs export-audio <serialized-file-index> <path-id> <new-output-audio> <input-file> [input-file ...]\n  assetripper-rs --help\n  assetripper-rs --version\n\n`inspect` mounts directories into isolated VFS roots. `inspect-files` dispatches explicitly selected file paths, registers top-level ResourceFiles as GameBundle root inputs, and reports the parsed SerializedFiles. `export-object-yaml` writes one decoded object as YAML. `export-file-yaml` writes YAML-exportable objects from one SerializedFile in object-table order, resolves streamed Mesh and image-texture bytes, preserves intra-file references through source PathIDs, and refuses unresolved or cross-file references. It reports ImageTexture objects omitted by the baseline when they have no usable image data. `export-texture` decodes one class-28 Texture2D, resolves its inline or streamed image data, and writes a PNG/BMP/TGA image; the output extension selects the format (otherwise the configured settings format, default PNG). `export-mesh` decodes one class-43 Mesh, resolves its vertex data and compressed mesh, and writes a glTF 2.0 binary file with one node per sub-mesh, converting Unity's left-handed coordinates to glTF's right-handed space and rewriting the sub-mesh topology. `export-shader` decodes one class-48 Shader and writes `.shader` text: decompiled script text is written verbatim under every mode, otherwise `dummy` (the default) and `decompile` render the fallback dummy body and `yaml` reports that YAML mode writes a YAML asset instead. `export-audio` decodes one class-83 AudioClip, resolves its inline or streamed audio data, and writes the decoded bytes; tracker audio passes through, `FSB5` reports the external-decoder requirement, and unknown bytes fail with the reference diagnostic. None of these commands replaces an existing output file. These are YAML, texture, single-mesh, single-shader, and single-clip paths, not a complete Unity project export."
+        "Usage:\n  assetripper-rs inspect <input-directory> [input-directory ...]\n  assetripper-rs inspect-files <input-file> [input-file ...]\n  assetripper-rs export-object-yaml <serialized-file-index> <path-id> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-file-yaml <serialized-file-index> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-texture [--settings <path>] <serialized-file-index> <path-id> <new-output-image> <input-file> [input-file ...]\n  assetripper-rs export-mesh <serialized-file-index> <path-id> <new-output-glb> <input-file> [input-file ...]\n  assetripper-rs export-shader [--shader-export-mode <dummy|yaml|decompile>] [--settings <path>] <serialized-file-index> <path-id> <new-output-shader> <input-file> [input-file ...]\n  assetripper-rs export-audio [--settings <path>] <serialized-file-index> <path-id> <new-output-audio> <input-file> [input-file ...]\n  assetripper-rs --help\n  assetripper-rs --version\n\n`inspect` mounts directories into isolated VFS roots. `inspect-files` dispatches explicitly selected file paths, registers top-level ResourceFiles as GameBundle root inputs, and reports the parsed SerializedFiles. `export-object-yaml` writes one decoded object as YAML. `export-file-yaml` writes YAML-exportable objects from one SerializedFile in object-table order, resolves streamed Mesh and image-texture bytes, preserves intra-file references through source PathIDs, and refuses unresolved or cross-file references. It reports ImageTexture objects omitted by the baseline when they have no usable image data. `export-texture` decodes one class-28 Texture2D, resolves its inline or streamed image data, and writes a PNG/BMP/TGA image; the output extension selects the format (otherwise the configured settings format, default PNG). `export-mesh` decodes one class-43 Mesh, resolves its vertex data and compressed mesh, and writes a glTF 2.0 binary file with one node per sub-mesh, converting Unity's left-handed coordinates to glTF's right-handed space and rewriting the sub-mesh topology. `export-shader` decodes one class-48 Shader and writes `.shader` text: decompiled script text is written verbatim under every mode, otherwise `dummy` (the default) and `decompile` render the fallback dummy body and `yaml` reports that YAML mode writes a YAML asset instead. `export-audio` decodes one class-83 AudioClip, resolves its inline or streamed audio data, and writes the decoded bytes; tracker audio passes through, `FSB5` reports the external-decoder requirement, and unknown bytes fail with the reference diagnostic. None of these commands replaces an existing output file. These are YAML, texture, single-mesh, single-shader, and single-clip paths, not a complete Unity project export."
     );
 }
 
@@ -5123,6 +5166,7 @@ mod tests {
             std::slice::from_ref(&serialized_path),
             0,
             42,
+            super::SettingsAudioFormat::Default,
             &output_path,
             &mut status,
         )
@@ -5133,9 +5177,15 @@ mod tests {
             .contains("Wrote a wav audio from SerializedFile 0 PathID 42"));
 
         let original = fs::read(&output_path).unwrap();
-        let error =
-            super::export_audio_to(&[serialized_path], 0, 42, &output_path, &mut Vec::new())
-                .unwrap_err();
+        let error = super::export_audio_to(
+            &[serialized_path],
+            0,
+            42,
+            super::SettingsAudioFormat::Default,
+            &output_path,
+            &mut Vec::new(),
+        )
+        .unwrap_err();
         assert_eq!(
             error.downcast_ref::<io::Error>().unwrap().kind(),
             io::ErrorKind::AlreadyExists
@@ -5162,6 +5212,7 @@ mod tests {
             std::slice::from_ref(&serialized_path),
             0,
             42,
+            super::SettingsAudioFormat::Default,
             &output_path,
             &mut status,
         )
@@ -5185,9 +5236,15 @@ mod tests {
             subdirectories: Vec::new(),
         };
 
-        let error =
-            super::export_audio_to(&[serialized_path], 0, 42, &output_path, &mut Vec::new())
-                .unwrap_err();
+        let error = super::export_audio_to(
+            &[serialized_path],
+            0,
+            42,
+            super::SettingsAudioFormat::Default,
+            &output_path,
+            &mut Vec::new(),
+        )
+        .unwrap_err();
         assert!(
             error.to_string().contains("Failed to convert audio"),
             "{error}"
@@ -5208,9 +5265,15 @@ mod tests {
             subdirectories: Vec::new(),
         };
 
-        let error =
-            super::export_audio_to(&[serialized_path], 0, 42, &output_path, &mut Vec::new())
-                .unwrap_err();
+        let error = super::export_audio_to(
+            &[serialized_path],
+            0,
+            42,
+            super::SettingsAudioFormat::Default,
+            &output_path,
+            &mut Vec::new(),
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("Fmod5Sharp"), "{error}");
         assert!(!output_path.exists());
         drop(input);
@@ -5228,9 +5291,15 @@ mod tests {
             subdirectories: Vec::new(),
         };
 
-        let error =
-            super::export_audio_to(&[serialized_path], 0, 42, &output_path, &mut Vec::new())
-                .unwrap_err();
+        let error = super::export_audio_to(
+            &[serialized_path],
+            0,
+            42,
+            super::SettingsAudioFormat::Default,
+            &output_path,
+            &mut Vec::new(),
+        )
+        .unwrap_err();
         assert!(
             error.to_string().contains("audio data could not be found"),
             "{error}"
@@ -5267,6 +5336,7 @@ mod tests {
             &[serialized_path.clone(), resource_path.clone()],
             0,
             42,
+            super::SettingsAudioFormat::Default,
             &output_path,
             &mut status,
         )
@@ -5294,13 +5364,157 @@ mod tests {
             subdirectories: Vec::new(),
         };
 
-        let error =
-            super::export_audio_to(&[serialized_path], 0, 42, &output_path, &mut Vec::new())
-                .unwrap_err();
+        let error = super::export_audio_to(
+            &[serialized_path],
+            0,
+            42,
+            super::SettingsAudioFormat::Default,
+            &output_path,
+            &mut Vec::new(),
+        )
+        .unwrap_err();
         assert!(
             error.to_string().contains("not a class-83 AudioClip"),
             "{error}"
         );
+        assert!(!output_path.exists());
+        drop(input);
+    }
+
+    #[test]
+    fn export_audio_settings_file_prefer_wav_reports_conversion_without_creating_output() {
+        use std::ffi::OsString;
+
+        let directory = TestInputDirectory::new_root();
+        let serialized_path = directory.join("main.assets");
+        let settings_path = directory.join("AssetRipper.Settings.json");
+        // The committed modified probe fixture configures `PreferWav` audio output.
+        fs::write(
+            &settings_path,
+            include_str!("export/settings_file_modified.json"),
+        )
+        .unwrap();
+        // Sound type 14 decodes as `ogg`, which `PreferWav` redirects to `wav`.
+        fs::write(
+            &serialized_path,
+            make_audio_clip_file(b"OggS....", Some(14)),
+        )
+        .unwrap();
+        let output_path = directory.join("clip.wav");
+        let input = TestInputDirectory {
+            directory,
+            files: vec![
+                serialized_path.clone(),
+                settings_path.clone(),
+                output_path.clone(),
+            ],
+            subdirectories: Vec::new(),
+        };
+
+        let arguments = vec![
+            OsString::from("--settings"),
+            settings_path.into_os_string(),
+            OsString::from("0"),
+            OsString::from("42"),
+            output_path.clone().into_os_string(),
+            serialized_path.into_os_string(),
+        ];
+        let error = super::export_audio_from_arguments(arguments.into_iter()).unwrap_err();
+        assert!(error.to_string().contains("Vorbis"), "{error}");
+        assert!(!output_path.exists());
+        drop(input);
+    }
+
+    #[test]
+    fn export_audio_settings_file_prefer_wav_keeps_non_ogg_bytes() {
+        use std::ffi::OsString;
+
+        let directory = TestInputDirectory::new_root();
+        let serialized_path = directory.join("main.assets");
+        let settings_path = directory.join("AssetRipper.Settings.json");
+        fs::write(
+            &settings_path,
+            include_str!("export/settings_file_modified.json"),
+        )
+        .unwrap();
+        // Sound type 20 decodes as `wav`, so `PreferWav` changes nothing.
+        let data = b"RIFF....";
+        fs::write(&serialized_path, make_audio_clip_file(data, Some(20))).unwrap();
+        let output_path = directory.join("clip.wav");
+        let input = TestInputDirectory {
+            directory,
+            files: vec![
+                serialized_path.clone(),
+                settings_path.clone(),
+                output_path.clone(),
+            ],
+            subdirectories: Vec::new(),
+        };
+
+        let arguments = vec![
+            OsString::from("--settings"),
+            settings_path.into_os_string(),
+            OsString::from("0"),
+            OsString::from("42"),
+            output_path.clone().into_os_string(),
+            serialized_path.into_os_string(),
+        ];
+        // `export_audio_from_arguments` reports to stdout internally; the byte-level
+        // assertion below carries this test.
+        super::export_audio_from_arguments(arguments.into_iter()).unwrap();
+        assert_eq!(fs::read(&output_path).unwrap(), data);
+        drop(input);
+    }
+
+    #[test]
+    fn export_audio_settings_file_problems_are_input_errors() {
+        use std::ffi::OsString;
+
+        let directory = TestInputDirectory::new_root();
+        let serialized_path = directory.join("main.assets");
+        let output_path = directory.join("clip.wav");
+        let bad_path = directory.join("bad.json");
+        fs::write(
+            &serialized_path,
+            make_audio_clip_file(b"RIFF....", Some(20)),
+        )
+        .unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![
+                serialized_path.clone(),
+                output_path.clone(),
+                bad_path.clone(),
+            ],
+            subdirectories: Vec::new(),
+        };
+
+        // A missing settings file names its path.
+        let arguments = vec![
+            OsString::from("--settings"),
+            OsString::from("no-such-file.json"),
+            OsString::from("0"),
+            OsString::from("42"),
+            output_path.clone().into_os_string(),
+            serialized_path.clone().into_os_string(),
+        ];
+        let error = super::export_audio_from_arguments(arguments.into_iter()).unwrap_err();
+        assert!(error.to_string().contains("no-such-file.json"), "{error}");
+        assert!(!output_path.exists());
+
+        // A malformed settings file is rejected before any export work.
+        let settings_path = bad_path;
+        fs::write(&settings_path, b"{\"Import\": {}}").unwrap();
+        let arguments = vec![
+            OsString::from("--settings"),
+            settings_path.into_os_string(),
+            OsString::from("0"),
+            OsString::from("42"),
+            output_path.clone().into_os_string(),
+            serialized_path.clone().into_os_string(),
+        ];
+        let error = super::export_audio_from_arguments(arguments.into_iter()).unwrap_err();
+        assert!(error.to_string().contains("bad.json"), "{error}");
         assert!(!output_path.exists());
         drop(input);
     }

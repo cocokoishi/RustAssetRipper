@@ -2307,3 +2307,9 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Ported `GlbWriter.TryWrite`'s too-large refusal as `GlbBuildLimits::max_output_bytes` (default 2GiB, mirroring the source 2Gb buffer ceiling): every buffer view checks the running total and the final binary-plus-JSON total is checked, yielding an explicit `OutputTooLarge` error instead of an allocation failure. `build_glb` keeps its signature over default limits via `build_glb_with_limits`. Also refreshed the stale `EXP-GLB-001` remainder (SparseWeight ordering now verified; `VertexColor1Texture8` encoding covered).
 - Targeted glb tests pass (24/24), full lib suite 966/966 and bin 43/43 locally, workspace Clippy clean; CI run `37321528059` green (all five jobs) for remote `main` = `f92976c`; local matches.
 - No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+## CLI settings loading in export-audio (2026-10-06)
+
+- `export-audio` accepts a leading `--settings <path>` flag (usage updated), bridging `ExportSettings.AudioExportFormat` through `plan_audio_clip_collection`: `Default` is behavior-identical, non-`ogg` decodes under `PreferWav` write through untouched, and a `PreferWav`-meets-`ogg` decode fails explicitly naming the unavailable Vorbis conversion (no output file). Missing/malformed settings files are path-carrying input errors, mirroring texture/shader.
+- Three new CLI tests (Vorbis refusal, wav passthrough, missing/malformed errors) plus the eight existing audio tests pass with an explicit `Default` format; full bin suite 46/46 and lib 966/966 locally, workspace Clippy clean; full validation via Actions after push.
+- No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
