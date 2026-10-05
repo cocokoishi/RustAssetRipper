@@ -15,12 +15,12 @@ use super::texture_decode::{require_input, require_output, TextureDecodeError};
 type Pixel = [u8; 4];
 type Block = [Pixel; 16];
 
-struct BitStream {
+pub(crate) struct BitStream {
     value: u128,
 }
 
 impl BitStream {
-    fn new(input: &[u8]) -> Self {
+    pub(crate) fn new(input: &[u8]) -> Self {
         let mut bytes = [0u8; 16];
         bytes.copy_from_slice(&input[..16]);
         Self {
@@ -32,24 +32,29 @@ impl BitStream {
         self.value as u32
     }
 
-    fn peak_bits(&self, num_bits: u32) -> u32 {
+    pub(crate) fn peak_bits(&self, num_bits: u32) -> u32 {
         self.bottom_bits() & ((1u32 << num_bits) - 1)
     }
 
-    fn advance(&mut self, num_bits: u32) {
+    pub(crate) fn advance(&mut self, num_bits: u32) {
         self.value >>= num_bits;
     }
 
-    fn read_bits(&mut self, num_bits: u32) -> u32 {
+    pub(crate) fn read_bits(&mut self, num_bits: u32) -> u32 {
         let bits = self.peak_bits(num_bits);
         self.advance(num_bits);
         bits
     }
 
-    fn read_bit(&mut self) -> u32 {
+    pub(crate) fn read_bit(&mut self) -> u32 {
         let result = self.bottom_bits() & 1;
         self.advance(1);
         result
+    }
+
+    /// `BitStream.ReadBitsReversed`: reads `num_bits` and reverses them.
+    pub(crate) fn read_bits_reversed(&mut self, num_bits: u32) -> u32 {
+        self.read_bits(num_bits).reverse_bits() >> (32 - num_bits)
     }
 }
 

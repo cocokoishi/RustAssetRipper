@@ -525,7 +525,7 @@ pub fn decode_rgba4444(
     })
 }
 
-fn ushort_to_byte(value: u16) -> u8 {
+pub(crate) fn ushort_to_byte(value: u16) -> u8 {
     ((u32::from(value) * 255 + 32895) >> 16) as u8
 }
 
