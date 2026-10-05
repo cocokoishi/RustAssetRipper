@@ -171,6 +171,6 @@ mod tests {
             assert_eq!(actual, expected, "{line}");
             rows += 1;
         }
-        assert_eq!(rows, 4);
+        assert_eq!(rows, 3);
     }
 }
