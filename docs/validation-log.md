@@ -1950,3 +1950,10 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Genuine original-runtime differential: probe `Temp/opencode/texdecprobe` decoded the shipped `AssetRipper.TextureDecoder.dll`; 22 rows are committed as `src/resources/texture_decode_fixture.txt` and matched byte-for-byte.
 - Recorded `DIFF-TEXDEC-EXPANSION-001`: the DXT endpoint uses bit replication while the standalone `RGB565` converter uses a bare shift, and the three-color DXT index 3 is opaque black.
 - GitHub Actions run `37249584027` is green across all five jobs. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+
+## BC4/BC5 texture decoders (2026-10-04)
+
+- Added `decode_bc4`/`decode_bc5` to `src/resources/texture_decode.rs` and recorded `DIFF-BC45-ROUNDING-001`: the `Bc` decoders use `+1`-rounded channel interpolation while the `Dxt` decoder truncates.
+- The fixture `src/resources/texture_decode_fixture.txt` now has 33 rows, including six direct interpolation-table probes that assert every table entry.
+- GitHub Actions run `37250084317` is green across all five jobs. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
