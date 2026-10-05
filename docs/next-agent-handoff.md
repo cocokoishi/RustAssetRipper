@@ -574,3 +574,10 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - CI: run `37294766135` (for `ec2d9fa`) failed only `test (ubuntu-latest)` on the then-unconditional `con_0.txt` expectation; fixed in `6459798`, whose run `37295745789` is green on all five jobs. Remote `main` = `6459798`; local matches.
 - Next: `TYPE-SCRIPT-001` remainder (manager resolutions), `EXPORT-UNITY-001` remainder (asset/sidecar file writes), and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 69. Checkpoint: managed type classification with a runtime differential (2026-10-06)
+
+- Added `src/processing/mono_utils.rs` (13 `MonoUtils` predicates, `PrimitiveType` + `to_primitive_type`, `EngineAssetKind` table with version-taking arms and probed 2019.4 concrete classes). All 777 shipped-assembly rows in `src/processing/mono_utils_fixture.txt` (probe `Temp/opencode/monoutilsprobe`) matched. New row `TYPE-MONO-UTILS-001`; `DIFF-MONO-UTILS-001` recorded. Assembly loading/construction stay out (need live managed assemblies).
+- `cargo test --workspace --locked`: 938 library and 40 CLI tests; warnings-denied Clippy and format check pass.
+- Next: `TYPE-SCRIPT-001` remainder (manager resolutions), `EXPORT-UNITY-001` remainder (asset/sidecar file writes), and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

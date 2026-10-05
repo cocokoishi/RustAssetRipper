@@ -2205,3 +2205,10 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 ### Ubuntu follow-up: reserved-gate test miss (2026-10-05)
 
 - CI run `37294766135` failed only `test (ubuntu-latest)`: `unique_name_planning_matches_the_reference_runtime` asserted the probed `con_0.txt` unconditionally, but `IsReservedName` is Windows-only in the source, so the correct Linux answer is the free `con.txt`. Fixed the test to degrade exactly like the source off Windows (same pattern as the `RESERVED` rows); no production code changed. The downloaded job log confirmed 934 passed with this single failure.
+
+## Managed type classification with a runtime differential (2026-10-05)
+
+- Probe `Temp/opencode/monoutilsprobe` (SDK 10.0.401) drove the shipped `AssetRipper.SerializationLogic.dll` (13 `MonoUtils` predicates over a 469-cell namespace/name matrix, `ToPrimitiveType` over 268 cells, all 17 `PrimitiveType` discriminants) and `AssetRipper.Import.dll` (`GameAssetFactory.CreateEngineAsset` at 2019.4.0f1: 21 concrete versioned subclasses plus 2 rejections); all 777 rows committed as `src/processing/mono_utils_fixture.txt`.
+- Added `src/processing/mono_utils.rs`: namespace consts, all 13 predicates, `PrimitiveType` with discriminants and name parsing, `to_primitive_type`, and the `EngineAssetKind` table (version-taking arms plus the probed 2019.4 concrete classes). Assembly loading and object construction stay outside (need live managed assemblies).
+- `DIFF-MONO-UTILS-001` recorded. New ledger row `TYPE-MONO-UTILS-001` at `已实现但未验证`.
+- `cargo test --workspace --locked`: 938 library and 40 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
