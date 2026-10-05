@@ -287,3 +287,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | `resources::mesh::read_sub_meshes`/`read_skin`/`read_streams` use the inverted names; a regression test pins the fixture property sets the mapping relies on. |
 | Regression evidence | `resources::mesh::tests::generated_api_fixture_supports_the_field_name_mapping` asserts all relied-upon properties. |
 | Remaining comparison | A residual `m_`-prefix ambiguity remains for sub-struct children, and no serialized `Mesh` payload or C# serialization round-trip has been executed. |
+
+## DIFF-MESH-TYPETREE-GATES-001 - real class-43 TypeTrees correct the reader's version gates
+
+| Field | Finding |
+|---|---|
+| Status | Source-derived evidence recorded; not an executed serialization differential |
+| Source location | Reference SourceTpk (AssetRipper.SourceGenerated.SourceTpk) via AssetRipper.Tpk 2.0.0.0: class-43 release TypeTrees for 3.5.0a0, 5.0.0a0, 2019.0.0a0, 6000.6.0a5 |
+| Input evidence | Probe Temp/opencode/tpkprobe walked the reference Tpk recursion and dumped every release node; the 909-line dump (185/223/238/255 nodes) is committed as src/resources/mesh_typetree_fixture.txt. |
+| Source-derived behavior | Unity 3.5 VertexData has four fixed m_Streams[0..3] (channelMask/offset/stride/lign, all UInt32) and no m_Channels; Unity 5.0+ uses m_Channels (stream/offset/ormat/dimension, all UInt8); m_IndexFormat exists only on 2019+. Unity 3.5 CompressedMesh carries m_BindPoses/m_Colors but no m_FloatColors/m_UVInfo; Unity 5.0+ is the reverse. Unity 3.5 SubMesh carries isTriStrip (UInt32) + 	riangleCount instead of 	opology, and has no aseVertex. |
+| Root cause | The reader previously required m_BindPoses/m_FloatColors/m_Colors unconditionally, read m_Streams only as a list, and asserted m_IndexFormat on all versions, so a real Unity 3.5 or 5.0 payload would fail or misread. |
+| Rust change | esources::mesh::read_compressed_mesh treats the four gated fields as optional with presence-derived gates; ead_vertex_data falls back to the four fixed m_Streams[N] structs; m_IndexFormat absence keeps the 16-bit default; the SubMesh 	opology/aseVertex/	riangleCount/isTriStrip branches were already optional and are now pinned per version. |
+| Regression evidence | esources::mesh::tests::real_class43_typetrees_match_the_reader_field_names asserts the exact child lists, gates, and element types for all four versions; unity_3_5_fixed_streams_are_read_without_channels, _unity_5_compressed_mesh_reads_with_the_pre_five_gates_off, and _pre_unity_5_compressed_mesh_reads_with_the_unity_5_gates_off pin the reader behavior. |
+| Remaining comparison | No serialized Mesh payload from Unity and no C# serialization round-trip has been executed; the fixture is the reference's own TypeTree database, so a Unity/AssetRipper divergence inside the Tpk itself would not be caught. m_CurrentChannels (3.5/5.0) is not captured because the read path never consumes it. |

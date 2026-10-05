@@ -118,7 +118,7 @@ pub struct VertexDataFields {
     pub vertex_count: u32,
     /// `m_Channels`, when the version serializes an explicit list.
     pub channels: Option<Vec<ChannelInfo>>,
-    /// `m_Streams`, when the version serializes a stream list.
+    /// `m_Streams`: a serialized stream list, or Unity 3.5's four fixed `m_Streams[0..3]`.
     pub streams: Option<Vec<StreamInfo>>,
     /// `m_DataSize`.
     pub data: Vec<u8>,
@@ -409,7 +409,9 @@ fn read_vertex_data(root: &SerializedValue) -> Result<Option<VertexDataFields>, 
     };
     let streams = match read_array(value, &["m_Streams"])? {
         Some(values) if !values.is_empty() => Some(read_streams(values)?),
-        _ => None,
+        // Unity 3.5 serializes four fixed `m_Streams[0..3]` StreamInfo structs instead of a
+        // list; the reference reads them through `GetStreams`/`Has_Streams_0_`.
+        _ => read_fixed_streams(value)?,
     };
     let data = read_bytes(value, &["m_DataSize"])?.unwrap_or_default();
     Ok(Some(VertexDataFields {
@@ -487,6 +489,38 @@ fn read_streams(values: &[SerializedValue]) -> Result<Vec<StreamInfo>, MeshViewE
     Ok(streams)
 }
 
+/// Unity 3.5's four fixed `m_Streams[0..3]` StreamInfo structs.
+///
+/// Their children are `channelMask`/`offset`/`stride`/`align` (all `UInt32`); there is no
+/// `dividerOp`/`frequency`, so those default to zero exactly as the reference's `SetValues` would
+/// write them. `align` only pads the stream and is not needed to locate data.
+fn read_fixed_streams(value: &SerializedValue) -> Result<Option<Vec<StreamInfo>>, MeshViewError> {
+    const FIXED_STREAMS: [&str; 4] = [
+        "m_Streams[0]",
+        "m_Streams[1]",
+        "m_Streams[2]",
+        "m_Streams[3]",
+    ];
+    let mut streams = Vec::with_capacity(4);
+    for name in FIXED_STREAMS {
+        let Some(field) = lookup(value, name)? else {
+            return Ok(None);
+        };
+        let channel_mask = read_u32(field, &["channelMask"])?.unwrap_or(0);
+        let offset = read_u32(field, &["offset"])?.unwrap_or(0);
+        let (stride, stride_is_u32) = read_stride(field)?;
+        streams.push(StreamInfo {
+            channel_mask,
+            offset,
+            stride,
+            stride_is_u32,
+            divider_op: 0,
+            frequency: 0,
+        });
+    }
+    Ok(Some(streams))
+}
+
 fn read_stride(root: &SerializedValue) -> Result<(u32, bool), MeshViewError> {
     let Some(value) = lookup(root, "stride")? else {
         return Ok((0, false));
@@ -548,6 +582,24 @@ fn read_compressed_mesh(root: &SerializedValue) -> Result<Option<CompressedMesh>
     let field = |name: &'static str| -> Result<&SerializedValue, MeshViewError> {
         lookup(value, name)?.ok_or(MeshViewError::MissingField { field: name })
     };
+    // `m_BindPoses`, `m_Colors`, `m_FloatColors`, and `m_UVInfo` are version-gated: the real
+    // class-43 TypeTrees carry `m_BindPoses`/`m_Colors` only on Unity 3.5-4.x and
+    // `m_FloatColors`/`m_UVInfo` only on Unity 5.0+, so an absent field is a gate that is off, not
+    // a missing required field. `src/resources/mesh_typetree_fixture.txt` pins which versions have
+    // which.
+    let optional_packed_float =
+        |name: &'static str| -> Result<PackedBitVectorSingle, MeshViewError> {
+            match lookup(value, name)? {
+                Some(field_value) => read_packed_float_vector(field_value, &["m_NumItems"]),
+                None => Ok(PackedBitVectorSingle::default()),
+            }
+        };
+    let optional_packed_int = |name: &'static str| -> Result<PackedBitVector, MeshViewError> {
+        match lookup(value, name)? {
+            Some(field_value) => read_packed_bit_vector(field_value, &["m_NumItems"]),
+            None => Ok(PackedBitVector::default()),
+        }
+    };
     let mesh = CompressedMesh {
         vertices: read_packed_float_vector(field("m_Vertices")?, &["m_NumItems"])?,
         normals: read_packed_float_vector(field("m_Normals")?, &["m_NumItems"])?,
@@ -560,11 +612,11 @@ fn read_compressed_mesh(root: &SerializedValue) -> Result<Option<CompressedMesh>
         uv: read_packed_float_vector(field("m_UV")?, &["m_NumItems"])?,
         uv_info: read_u32(value, &["m_UVInfo"])?.unwrap_or(0),
         has_uv_info: lookup(value, "m_UVInfo")?.is_some(),
-        bind_poses: read_packed_float_vector(field("m_BindPoses")?, &["m_NumItems"])?,
+        bind_poses: optional_packed_float("m_BindPoses")?,
         has_bind_poses: lookup(value, "m_BindPoses")?.is_some(),
-        float_colors: read_packed_float_vector(field("m_FloatColors")?, &["m_NumItems"])?,
+        float_colors: optional_packed_float("m_FloatColors")?,
         has_float_colors: lookup(value, "m_FloatColors")?.is_some(),
-        colors: read_packed_bit_vector(field("m_Colors")?, &["m_NumItems"])?,
+        colors: optional_packed_int("m_Colors")?,
         has_colors: lookup(value, "m_Colors")?.is_some(),
     };
     if !mesh.is_set() && mesh.uv.num_items == 0 && mesh.triangles.num_items == 0 {
@@ -963,5 +1015,362 @@ mod tests {
         ] {
             assert!(mesh.contains(&expected.to_owned()), "{expected}");
         }
+    }
+
+    /// One node of a real class-43 release TypeTree.
+    #[derive(Clone, Debug)]
+    struct TypeTreeNode {
+        level: usize,
+        type_name: String,
+        name: String,
+    }
+
+    /// Parses `src/resources/mesh_typetree_fixture.txt` into per-version node lists.
+    fn typetree_fixture() -> std::collections::HashMap<String, Vec<TypeTreeNode>> {
+        let fixture = include_str!("mesh_typetree_fixture.txt");
+        let mut versions: std::collections::HashMap<String, Vec<TypeTreeNode>> =
+            std::collections::HashMap::new();
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let parts: Vec<&str> = line.split('|').collect();
+            if parts[0] == "TREE" {
+                versions.entry(parts[1].to_owned()).or_default();
+                continue;
+            }
+            assert_eq!(parts[0], "NODE", "{line}");
+            assert_eq!(parts.len(), 11, "{line}");
+            versions
+                .entry(parts[1].to_owned())
+                .or_default()
+                .push(TypeTreeNode {
+                    level: parts[2].parse().unwrap(),
+                    type_name: parts[3].to_owned(),
+                    name: parts[4].to_owned(),
+                });
+        }
+        versions
+    }
+
+    /// The names of the direct children of the node whose `(level, name)` matches.
+    ///
+    /// Several levels reuse the name `data` (string bytes, the `SubMesh` element, the
+    /// `ChannelInfo` element), so callers that need a later one must pass its `type_name`.
+    fn children_of(
+        nodes: &[TypeTreeNode],
+        level: usize,
+        name: &str,
+        type_name: Option<&str>,
+    ) -> Vec<String> {
+        let parent = nodes
+            .iter()
+            .position(|node| {
+                node.level == level
+                    && node.name == name
+                    && type_name.is_none_or(|expected| node.type_name == expected)
+            })
+            .unwrap_or_else(|| panic!("no node at level {level} named {name}"));
+        let parent_level = nodes[parent].level;
+        nodes[parent + 1..]
+            .iter()
+            .take_while(|node| node.level > parent_level)
+            .filter(|node| node.level == parent_level + 1)
+            .map(|node| node.name.clone())
+            .collect()
+    }
+
+    fn node_at<'a>(
+        nodes: &'a [TypeTreeNode],
+        level: usize,
+        name: &str,
+        type_name: &str,
+    ) -> &'a TypeTreeNode {
+        nodes
+            .iter()
+            .find(|node| node.level == level && node.name == name && node.type_name == type_name)
+            .unwrap_or_else(|| panic!("no node at level {level} named {name} of type {type_name}"))
+    }
+
+    /// The reader's serialized names must match the real Unity class-43 TypeTrees.
+    ///
+    /// `src/resources/mesh_typetree_fixture.txt` is the release-node dump of the reference's
+    /// `SourceTpk` for Unity 3.5.0a0, 5.0.0a0, 2019.0.0a0, and 6000.6.0a5 (probe
+    /// `Temp/opencode/tpkprobe`). It pins the field names, the `SubMesh` child order, the
+    /// `ChannelInfo` children, and which version carries each `CompressedMesh` gate field.
+    #[test]
+    fn real_class43_typetrees_match_the_reader_field_names() {
+        let versions = typetree_fixture();
+        for version in ["3.5.0a0", "5.0.0a0", "2019.0.0a0", "6000.6.0a5"] {
+            let nodes = versions
+                .get(version)
+                .unwrap_or_else(|| panic!("the fixture has {version}"));
+            assert!(nodes.len() > 100, "{version} has a full tree");
+
+            // The reader's top-level names. `m_IndexFormat` exists only on Unity
+            // 2017.3+; older files are always 16-bit, which is also the reader's default.
+            for field in [
+                "m_Name",
+                "m_SubMeshes",
+                "m_BindPose",
+                "m_IndexBuffer",
+                "m_VertexData",
+                "m_CompressedMesh",
+            ] {
+                assert!(
+                    nodes
+                        .iter()
+                        .any(|node| node.level == 1 && node.name == field),
+                    "{version} has a level-1 {field}"
+                );
+            }
+            let has_index_format = nodes
+                .iter()
+                .any(|node| node.level == 1 && node.name == "m_IndexFormat");
+            assert_eq!(
+                has_index_format,
+                version == "2019.0.0a0" || version == "6000.6.0a5",
+                "{version} m_IndexFormat gate"
+            );
+
+            // The `SubMesh` element children, in the order the reader walks them.
+            let sub_mesh_children = children_of(nodes, 3, "data", Some("SubMesh"));
+            assert_eq!(
+                node_at(nodes, 3, "data", "SubMesh").type_name,
+                "SubMesh",
+                "{version} sub-mesh element type"
+            );
+            // Unity 3.5 has `isTriStrip`+`triangleCount` instead of `topology`;
+            // `baseVertex` was added in Unity 2017.3.
+            let mut expected: Vec<&str> = vec!["firstByte", "indexCount"];
+            if version == "3.5.0a0" {
+                expected.extend(["isTriStrip", "triangleCount"]);
+            } else {
+                expected.push("topology");
+                if version != "5.0.0a0" {
+                    expected.push("baseVertex");
+                }
+            }
+            expected.extend(["firstVertex", "vertexCount", "localAABB"]);
+            assert_eq!(sub_mesh_children, expected, "{version} SubMesh children");
+            assert!(
+                nodes
+                    .iter()
+                    .any(|node| node.level == 5 && node.name == "m_Center"),
+                "{version} AABB centre"
+            );
+
+            // The `VertexData` children: Unity 3.5 has four fixed `m_Streams[0..3]`
+            // and no `m_Channels`; Unity 5.0+ serializes `m_Channels` instead, and
+            // Unity 2019+ additionally drops `m_CurrentChannels`.
+            let vertex_data_children = children_of(nodes, 1, "m_VertexData", None);
+            for field in ["m_VertexCount", "m_DataSize"] {
+                assert!(
+                    vertex_data_children.iter().any(|name| name == field),
+                    "{version} VertexData has {field}"
+                );
+            }
+            let has_channels = vertex_data_children.iter().any(|name| name == "m_Channels");
+            assert_eq!(
+                has_channels,
+                version != "3.5.0a0",
+                "{version} m_Channels gate"
+            );
+            let has_fixed_streams = (0..4).all(|index| {
+                vertex_data_children
+                    .iter()
+                    .any(|name| name == &format!("m_Streams[{index}]"))
+            });
+            assert_eq!(
+                has_fixed_streams,
+                version == "3.5.0a0",
+                "{version} fixed m_Streams gate"
+            );
+            if has_channels {
+                let channel_children = children_of(nodes, 4, "data", Some("ChannelInfo"));
+                assert_eq!(
+                    node_at(nodes, 4, "data", "ChannelInfo").type_name,
+                    "ChannelInfo",
+                    "{version} channel element type"
+                );
+                for field in ["stream", "offset", "format", "dimension"] {
+                    assert!(
+                        channel_children.iter().any(|name| name == field),
+                        "{version} ChannelInfo has {field}"
+                    );
+                }
+            }
+
+            // The `CompressedMesh` gate fields, and the packed-vector children the reader reads.
+            let compressed_children = children_of(nodes, 1, "m_CompressedMesh", None);
+            let packed_children = children_of(nodes, 2, "m_Vertices", None);
+            for field in ["m_NumItems", "m_Range", "m_Start", "m_Data", "m_BitSize"] {
+                assert!(
+                    packed_children.iter().any(|name| name == field),
+                    "{version} PackedBitVector has {field}"
+                );
+            }
+            for field in [
+                "m_Vertices",
+                "m_UV",
+                "m_Normals",
+                "m_Tangents",
+                "m_Weights",
+                "m_NormalSigns",
+                "m_TangentSigns",
+                "m_BoneIndices",
+                "m_Triangles",
+            ] {
+                assert!(
+                    compressed_children.iter().any(|name| name == field),
+                    "{version} CompressedMesh has {field}"
+                );
+            }
+            // The four version gates: `m_BindPoses`/`m_Colors` are Unity 3.5-4.x only, and
+            // `m_FloatColors`/`m_UVInfo` are Unity 5.0+ only.
+            let pre_unity_5 = version == "3.5.0a0";
+            assert_eq!(
+                compressed_children.iter().any(|name| name == "m_BindPoses"),
+                pre_unity_5,
+                "{version} m_BindPoses gate"
+            );
+            assert_eq!(
+                compressed_children.iter().any(|name| name == "m_Colors"),
+                pre_unity_5,
+                "{version} m_Colors gate"
+            );
+            assert_eq!(
+                compressed_children
+                    .iter()
+                    .any(|name| name == "m_FloatColors"),
+                !pre_unity_5,
+                "{version} m_FloatColors gate"
+            );
+            assert_eq!(
+                compressed_children.iter().any(|name| name == "m_UVInfo"),
+                !pre_unity_5,
+                "{version} m_UVInfo gate"
+            );
+        }
+    }
+
+    /// A Unity 5+ compressed mesh has no `m_BindPoses` or `m_Colors`.
+    #[test]
+    fn a_unity_5_compressed_mesh_reads_with_the_pre_five_gates_off() {
+        let root = SerializedValue::Struct(vec![field(
+            "m_CompressedMesh",
+            SerializedValue::Struct(vec![
+                packed_float("m_Vertices", 0),
+                packed_float("m_Normals", 0),
+                packed_float("m_Tangents", 0),
+                packed_float("m_UV", 0),
+                packed_int("m_Weights", 0),
+                packed_int("m_BoneIndices", 0),
+                packed_int("m_NormalSigns", 0),
+                packed_int("m_TangentSigns", 0),
+                packed_int("m_Triangles", 3),
+                field("m_UVInfo", SerializedValue::U32(0)),
+                packed_float("m_FloatColors", 0),
+            ]),
+        )]);
+        let view = make_view(&root);
+        let mesh = view.compressed_mesh.expect("the mesh is set");
+        assert!(!mesh.has_bind_poses, "Unity 5 has no m_BindPoses");
+        assert!(!mesh.has_colors, "Unity 5 has no m_Colors");
+        assert!(mesh.has_float_colors);
+        assert!(mesh.has_uv_info);
+    }
+
+    /// A Unity 3.5/4.x compressed mesh has no `m_FloatColors` or `m_UVInfo`.
+    #[test]
+    fn a_pre_unity_5_compressed_mesh_reads_with_the_unity_5_gates_off() {
+        let root = SerializedValue::Struct(vec![field(
+            "m_CompressedMesh",
+            SerializedValue::Struct(vec![
+                packed_float("m_Vertices", 0),
+                packed_float("m_Normals", 0),
+                packed_float("m_Tangents", 0),
+                packed_float("m_UV", 0),
+                packed_int("m_Weights", 0),
+                packed_int("m_BoneIndices", 0),
+                packed_int("m_NormalSigns", 0),
+                packed_int("m_TangentSigns", 0),
+                packed_int("m_Triangles", 3),
+                packed_float("m_BindPoses", 0),
+                packed_int("m_Colors", 0),
+            ]),
+        )]);
+        let view = make_view(&root);
+        let mesh = view.compressed_mesh.expect("the mesh is set");
+        assert!(mesh.has_bind_poses, "Unity 3.5 has m_BindPoses");
+        assert!(mesh.has_colors, "Unity 3.5 has m_Colors");
+        assert!(!mesh.has_float_colors, "Unity 3.5 has no m_FloatColors");
+        assert!(!mesh.has_uv_info, "Unity 3.5 has no m_UVInfo");
+        assert_eq!(mesh.uv_info, 0);
+    }
+
+    /// Unity 3.5's four fixed `m_Streams[0..3]` are read when there is no `m_Channels`.
+    #[test]
+    fn unity_3_5_fixed_streams_are_read_without_channels() {
+        fn fixed_stream(channel_mask: u32, offset: u32, stride: u32) -> SerializedValue {
+            SerializedValue::Struct(vec![
+                field("channelMask", SerializedValue::U32(channel_mask)),
+                field("offset", SerializedValue::U32(offset)),
+                field("stride", SerializedValue::U32(stride)),
+                field("align", SerializedValue::U32(0)),
+            ])
+        }
+        let root = SerializedValue::Struct(vec![field(
+            "m_VertexData",
+            SerializedValue::Struct(vec![
+                field("m_VertexCount", SerializedValue::U32(3)),
+                field("m_CurrentChannels", SerializedValue::U32(3)),
+                field("m_Streams[0]", fixed_stream(0b11, 0, 24)),
+                field("m_Streams[1]", fixed_stream(0b100, 72, 4)),
+                field("m_Streams[2]", fixed_stream(0, 84, 0)),
+                field("m_Streams[3]", fixed_stream(0, 84, 0)),
+                field("m_DataSize", SerializedValue::Bytes(vec![0; 84])),
+            ]),
+        )]);
+        let view = make_view(&root);
+        let vertex_data = view.vertex_data.expect("vertex data is present");
+        assert_eq!(vertex_data.vertex_count, 3);
+        assert_eq!(vertex_data.channels, None);
+        let streams = vertex_data.streams.expect("four fixed streams are read");
+        assert_eq!(streams.len(), 4);
+        assert_eq!(streams[0].channel_mask, 0b11);
+        assert_eq!(streams[0].offset, 0);
+        assert_eq!(streams[0].stride, 24);
+        assert!(streams[0].stride_is_u32, "3.5 stride is UInt32");
+        assert_eq!(streams[1].channel_mask, 0b100);
+        assert_eq!(streams[1].stride, 4);
+        // `dividerOp`/`frequency` do not exist on 3.5 and stay zero.
+        assert_eq!(streams[0].divider_op, 0);
+        assert_eq!(streams[0].frequency, 0);
+    }
+
+    fn packed_float(name: &str, num_items: u32) -> SerializedFieldValue {
+        field(
+            name,
+            SerializedValue::Struct(vec![
+                field("m_NumItems", SerializedValue::U32(num_items)),
+                field("m_Range", SerializedValue::F32(0.0)),
+                field("m_Start", SerializedValue::F32(0.0)),
+                field("m_Data", SerializedValue::Bytes(Vec::new())),
+                field("m_BitSize", SerializedValue::U8(0)),
+            ]),
+        )
+    }
+
+    fn packed_int(name: &str, num_items: u32) -> SerializedFieldValue {
+        field(
+            name,
+            SerializedValue::Struct(vec![
+                field("m_NumItems", SerializedValue::U32(num_items)),
+                field("m_Data", SerializedValue::Bytes(Vec::new())),
+                field("m_BitSize", SerializedValue::U8(0)),
+            ]),
+        )
     }
 }
