@@ -701,6 +701,6 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 
 ## 89. Checkpoint: PreferOriginalTextureExtension bridge (2026-10-06)
 
-- Ported `GetTextureExportFormat` and threaded the preference through `export-texture`; recorded source-evidenced N/A for `export-mesh`/YAML per-command settings. Full bin 50/50 and lib 970/970 locally, workspace Clippy clean; full validation via Actions after push.
+- Ported `GetTextureExportFormat` and threaded the preference through `export-texture`; recorded source-evidenced N/A for `export-mesh`/YAML per-command settings. Full bin 50/50 and lib 970/970 locally, workspace Clippy clean; CI run `37328509913` green (all five jobs) for remote `main` = `0b05263`; local matches.
 - Next: CLI exposure + GUID freshness + folder sidecars, and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

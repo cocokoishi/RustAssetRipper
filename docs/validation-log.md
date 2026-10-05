@@ -2337,5 +2337,5 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 
 - Ported `GetTextureExportFormat` (`ImageExportFormat::texture_export_format`: recognized original extensions win when preferred, else configured) with unit tests, and threaded `ExportSettings.PreferOriginalTextureExtension` (default true, plus explicit-file and default-path values) through `export-texture`'s unrecognized-extension fallback. Bundle-decoded assets carry no original path (`None`), so the fallback reduces to the configured format today; the rule is pinned for future original-path tracking. New CLI test proves the prefer-original settings load falls back to PNG.
 - Recorded with source evidence that `export-mesh` takes no settings (neither mesh exporter reads `ExportSettings`) and YAML exporter-selection settings apply only inside full project-export dispatch (no CLI surface).
-- Full bin suite 50/50 and lib 970/970 locally, workspace Clippy clean; full validation via Actions after push.
+- Full bin suite 50/50 and lib 970/970 locally, workspace Clippy clean; CI run `37328509913` green (all five jobs) for remote `main` = `0b05263`; local matches.
 - No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
