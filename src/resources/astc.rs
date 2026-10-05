@@ -111,18 +111,20 @@ fn get_bits64(input: &[u8], bit: i32, len: i32) -> u64 {
     if len < 1 {
         0
     } else if bit >= 64 {
-        read_u64_le(input, 8) >> (bit - 64) & mask
+        read_u64_le(input, 8).wrapping_shr((bit - 64) as u32) & mask
     } else if bit <= 0 {
-        read_u64_le(input, 0) << (-bit) & mask
+        read_u64_le(input, 0).wrapping_shl((-bit) as u32) & mask
     } else if bit + len <= 64 {
-        read_u64_le(input, 0) >> bit & mask
+        read_u64_le(input, 0).wrapping_shr(bit as u32) & mask
     } else {
-        (read_u64_le(input, 0) >> bit | read_u64_le(input, 8) << (64 - bit)) & mask
+        (read_u64_le(input, 0).wrapping_shr(bit as u32)
+            | read_u64_le(input, 8).wrapping_shl((64 - bit) as u32))
+            & mask
     }
 }
 
 fn bit_reverse_u8(c: u8, bits: i32) -> i32 {
-    i32::from(BIT_REVERSE[c as usize] >> (8 - bits))
+    i32::from(BIT_REVERSE[c as usize]) >> (8 - bits)
 }
 
 fn bit_reverse_u64(d: u64, bits: i32) -> u64 {
@@ -602,12 +604,11 @@ fn decode_endpoints(input: &[u8], p: &mut BlockData) {
             }
             4 => set_endpoint(&mut p.endpoints[cem], v0, v0, v0, v2, v1, v1, v1, v3),
             5 => {
-                let (mut a0, mut b0) = (v0, v1);
-                let (mut a2, mut b2) = (v2, v3);
-                bit_transfer_signed(&mut a0, &mut b0);
-                bit_transfer_signed(&mut a2, &mut b2);
-                let b0 = b0 + a0;
-                set_endpoint_clamp(&mut p.endpoints[cem], a0, a0, a0, a2, b0, b0, b0, a2 + b2);
+                let (mut v0, mut v1, mut v2, mut v3) = (v0, v1, v2, v3);
+                bit_transfer_signed(&mut v1, &mut v0);
+                bit_transfer_signed(&mut v3, &mut v2);
+                v1 += v0;
+                set_endpoint_clamp(&mut p.endpoints[cem], v0, v0, v0, v2, v1, v1, v1, v2 + v3);
             }
             6 => set_endpoint(
                 &mut p.endpoints[cem],
@@ -628,34 +629,32 @@ fn decode_endpoints(input: &[u8], p: &mut BlockData) {
                 }
             }
             9 => {
-                let (mut a0, mut b0) = (v0, v1);
-                let (mut a2, mut b2) = (v2, v3);
-                let (mut a4, mut b4) = (v4, v5);
-                bit_transfer_signed(&mut a0, &mut b0);
-                bit_transfer_signed(&mut a2, &mut b2);
-                bit_transfer_signed(&mut a4, &mut b4);
-                if b0 + b2 + b4 >= 0 {
+                let (mut v0, mut v1, mut v2, mut v3, mut v4, mut v5) = (v0, v1, v2, v3, v4, v5);
+                bit_transfer_signed(&mut v1, &mut v0);
+                bit_transfer_signed(&mut v3, &mut v2);
+                bit_transfer_signed(&mut v5, &mut v4);
+                if v1 + v3 + v5 >= 0 {
                     set_endpoint_clamp(
                         &mut p.endpoints[cem],
-                        a0,
-                        a2,
-                        a4,
+                        v0,
+                        v2,
+                        v4,
                         255,
-                        a0 + b0,
-                        a2 + b2,
-                        a4 + b4,
+                        v0 + v1,
+                        v2 + v3,
+                        v4 + v5,
                         255,
                     );
                 } else {
                     set_endpoint_blue_clamp(
                         &mut p.endpoints[cem],
-                        a0 + b0,
-                        a2 + b2,
-                        a4 + b4,
+                        v0 + v1,
+                        v2 + v3,
+                        v4 + v5,
                         255,
-                        a0,
-                        a2,
-                        a4,
+                        v0,
+                        v2,
+                        v4,
                         255,
                     );
                 }
@@ -679,37 +678,35 @@ fn decode_endpoints(input: &[u8], p: &mut BlockData) {
                 }
             }
             13 => {
-                let (mut a0, mut b0) = (v0, v1);
-                let (mut a2, mut b2) = (v2, v3);
-                let (mut a4, mut b4) = (v4, v5);
-                let (mut a6, mut b6) = (v6, v7);
-                bit_transfer_signed(&mut a0, &mut b0);
-                bit_transfer_signed(&mut a2, &mut b2);
-                bit_transfer_signed(&mut a4, &mut b4);
-                bit_transfer_signed(&mut a6, &mut b6);
-                if b0 + b2 + b4 >= 0 {
+                let (mut v0, mut v1, mut v2, mut v3, mut v4, mut v5, mut v6, mut v7) =
+                    (v0, v1, v2, v3, v4, v5, v6, v7);
+                bit_transfer_signed(&mut v1, &mut v0);
+                bit_transfer_signed(&mut v3, &mut v2);
+                bit_transfer_signed(&mut v5, &mut v4);
+                bit_transfer_signed(&mut v7, &mut v6);
+                if v1 + v3 + v5 >= 0 {
                     set_endpoint_clamp(
                         &mut p.endpoints[cem],
-                        a0,
-                        a2,
-                        a4,
-                        a6,
-                        a0 + b0,
-                        a2 + b2,
-                        a4 + b4,
-                        a6 + b6,
+                        v0,
+                        v2,
+                        v4,
+                        v6,
+                        v0 + v1,
+                        v2 + v3,
+                        v4 + v5,
+                        v6 + v7,
                     );
                 } else {
                     set_endpoint_blue_clamp(
                         &mut p.endpoints[cem],
-                        a0 + b0,
-                        a2 + b2,
-                        a4 + b4,
-                        a6 + b6,
-                        a0,
-                        a2,
-                        a4,
-                        a6,
+                        v0 + v1,
+                        v2 + v3,
+                        v4 + v5,
+                        v6 + v7,
+                        v0,
+                        v2,
+                        v4,
+                        v6,
                     );
                 }
             }
