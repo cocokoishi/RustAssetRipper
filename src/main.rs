@@ -350,6 +350,13 @@ fn export_texture_to<W: io::Write>(
     let object = objects
         .get(serialized_file_index, object_index)
         .ok_or_else(|| invalid_data("selected workspace object is missing"))?;
+    if object.class_id != Some(28) {
+        return Err(invalid_data_owned(format!(
+            "SerializedFile {serialized_file_index} PathID {path_id} has class {:?}, not a class-28 Texture2D",
+            object.class_id
+        ))
+        .into());
+    }
     let payload = object.payload.as_ref().map_err(|error| {
         invalid_data_owned(format!(
             "SerializedFile {serialized_file_index} PathID {path_id} could not be decoded: {error}"

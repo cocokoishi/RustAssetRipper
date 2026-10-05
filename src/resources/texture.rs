@@ -176,7 +176,7 @@ impl Texture2DView {
     pub fn from_value(root: &SerializedValue) -> Result<Self, TextureViewError> {
         let width = required_i32(root, &["m_Width"])?;
         let height = required_i32(root, &["m_Height"])?;
-        let texture_format = optional_i32(root, &["m_TextureFormat", "m_Format"])?.unwrap_or(0);
+        let texture_format = optional_i32(root, &["m_TextureFormat"])?.unwrap_or(0);
         let complete_image_size =
             optional_number(root, &["m_CompleteImageSize", "m_DataSize"])?.unwrap_or(0);
         let image_count = optional_i32(root, &["m_ImageCount", "m_Depth"])?.unwrap_or(1);
@@ -596,11 +596,11 @@ mod tests {
         let SerializedValue::Struct(fields) = &mut root else {
             unreachable!()
         };
-        fields.push(field("m_Format", SerializedValue::I32(4)));
+        fields.push(field("m_DataSize", SerializedValue::I32(8)));
         assert!(matches!(
             Texture2DView::from_value(&root),
             Err(TextureViewError::WrongType {
-                field: "m_Format",
+                field: "m_DataSize",
                 ..
             })
         ));
