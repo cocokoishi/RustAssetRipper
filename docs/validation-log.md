@@ -2313,3 +2313,9 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - `export-audio` accepts a leading `--settings <path>` flag (usage updated), bridging `ExportSettings.AudioExportFormat` through `plan_audio_clip_collection`: `Default` is behavior-identical, non-`ogg` decodes under `PreferWav` write through untouched, and a `PreferWav`-meets-`ogg` decode fails explicitly naming the unavailable Vorbis conversion (no output file). Missing/malformed settings files are path-carrying input errors, mirroring texture/shader.
 - Three new CLI tests (Vorbis refusal, wav passthrough, missing/malformed errors) plus the eight existing audio tests pass with an explicit `Default` format; full bin suite 46/46 and lib 966/966 locally, workspace Clippy clean; CI run `37323075310` green (all five jobs) for remote `main` = `e6f616d`; local matches.
 - No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+## Default-path settings startup load (2026-10-06)
+
+- `SerializedSettings.TryLoadFromDefaultPath` + `FullConfiguration.LoadFromDefaultPath` are now applied at CLI startup: `export-texture`/`export-shader`/`export-audio` fall back to the exe-adjacent `AssetRipper.Settings.json` when no `--settings` flag is given (explicit flag wins; a present-but-broken default file fails loudly with a path-carrying error, mirroring the source throw). The directory-dependent core (`load_default_export_settings_from_dir`) is hermetic; only the `current_exe` query lives in the thin wrapper.
+- Three new CLI tests pin absent-file-None, the full export record load (PreferWav/Bmp/Decompile discriminants), and the broken-file path error. Full bin suite 49/49 and lib 966/966 locally, workspace Clippy clean; full validation via Actions after push.
+- No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.

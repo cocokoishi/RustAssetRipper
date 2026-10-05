@@ -284,14 +284,23 @@ fn export_texture_from_arguments(
     let mut configured = ExportDefaults::default().image_export_format;
     // Optional leading flags precede the positional arguments.
     let mut positional: Vec<OsString> = Vec::new();
+    let mut explicit_settings = false;
     while let Some(next) = arguments.next() {
         if next == "--settings" {
             let path = arguments.next().ok_or_else(|| {
                 invalid_input("export-texture --settings requires a settings file path")
             })?;
             configured = load_cli_export_settings(Path::new(&path))?.image_export_format;
+            explicit_settings = true;
         } else {
             positional.push(next);
+        }
+    }
+    // An explicit flag beats the default-path file; the default-path file beats
+    // built-in defaults, mirroring the startup `LoadFromDefaultPath` step.
+    if !explicit_settings {
+        if let Some(export) = try_load_default_export_settings()? {
+            configured = export.image_export_format;
         }
     }
     let mut positional = positional.into_iter();
@@ -615,6 +624,12 @@ fn export_mesh_to<W: io::Write>(
 /// future commands. Missing files, invalid UTF-8, oversized files, and schema violations
 /// are explicit input errors carrying the path.
 fn load_cli_export_settings(path: &Path) -> Result<ExportSettingsFile, Box<dyn Error>> {
+    read_export_settings_file(path)
+}
+
+/// Reads one `AssetRipper.Settings.json` file, shared by the explicit `--settings` flag
+/// and the default-path fallback. Every failure mode names the file.
+fn read_export_settings_file(path: &Path) -> Result<ExportSettingsFile, Box<dyn Error>> {
     use assetripper::export::settings_file::{parse_settings_file, SettingsFileLimits};
 
     let limits = SettingsFileLimits::default();
@@ -648,6 +663,45 @@ fn load_cli_export_settings(path: &Path) -> Result<ExportSettingsFile, Box<dyn E
         })
 }
 
+/// `SerializedSettings.TryLoadFromDefaultPath` for one caller-supplied directory: an
+/// absent file yields `None` (the caller keeps built-in defaults), while a present file
+/// loads or fails with a path-carrying error, mirroring the source throw on corrupt
+/// content. The directory is a parameter so tests stay hermetic; product code passes
+/// the executable directory (see `try_load_default_export_settings`).
+fn load_default_export_settings_from_dir(
+    directory: &Path,
+) -> Result<Option<ExportSettingsFile>, Box<dyn Error>> {
+    use assetripper::export::asset_path::HostPathPlatform;
+    use assetripper::export::settings_file::default_settings_file_path;
+
+    let platform = if cfg!(windows) {
+        HostPathPlatform::Windows
+    } else {
+        HostPathPlatform::Unix
+    };
+    let directory_text = directory
+        .to_str()
+        .ok_or_else(|| invalid_input("the executable directory is not valid UTF-8"))?;
+    let path = PathBuf::from(default_settings_file_path(directory_text, platform));
+    if !path.exists() {
+        return Ok(None);
+    }
+    read_export_settings_file(&path).map(Some)
+}
+
+/// `SerializedSettings.TryLoadFromDefaultPath` plus the `LoadFromDefaultPath` startup
+/// step for the CLI: settings stored next to the executable apply when the caller gave
+/// no explicit `--settings` flag. `AppContext.BaseDirectory` arrives here as the
+/// executable directory, keeping the process query in product code.
+fn try_load_default_export_settings() -> Result<Option<ExportSettingsFile>, Box<dyn Error>> {
+    let executable = std::env::current_exe()
+        .map_err(|source| invalid_input(format!("could not locate the executable: {source}")))?;
+    let directory = executable
+        .parent()
+        .ok_or_else(|| invalid_input("the executable path has no parent directory"))?;
+    load_default_export_settings_from_dir(directory)
+}
+
 /// Parses the optional leading `--shader-export-mode <dummy|yaml|decompile>` flag of
 /// `export-shader`; the default matches `ExportSettings.ShaderExportMode` (`Dummy`).
 fn parse_shader_export_mode(
@@ -677,6 +731,7 @@ where
     let mut flag_mode: Option<ShaderExportMode> = None;
     // The settings-file fallback defaults to the `ExportSettings` default (`Dummy`).
     let mut settings_mode = ShaderExportMode::Dummy;
+    let mut explicit_settings = false;
     // Optional leading flags precede the positional arguments.
     loop {
         let Some(next) = arguments.next() else {
@@ -691,6 +746,7 @@ where
                 invalid_input("export-shader --settings requires a settings file path")
             })?;
             settings_mode = load_cli_export_settings(Path::new(&path))?.shader_export_mode;
+            explicit_settings = true;
         } else {
             let serialized_file_index = next
                 .into_string()
@@ -718,7 +774,14 @@ where
             }
             let stdout = io::stdout();
             let mut output = stdout.lock();
-            // An explicit flag beats the settings file on any order.
+            // An explicit flag beats the settings file on any order; the
+            // default-path file fills the settings fallback when no `--settings`
+            // flag was given.
+            if !explicit_settings {
+                if let Some(export) = try_load_default_export_settings()? {
+                    settings_mode = export.shader_export_mode;
+                }
+            }
             let mode = flag_mode.unwrap_or(settings_mode);
             return export_shader_to(
                 &input_files,
@@ -810,14 +873,23 @@ where
     let mut configured = ExportDefaults::default().audio_export_format;
     // Optional leading flags precede the positional arguments.
     let mut positional: Vec<OsString> = Vec::new();
+    let mut explicit_settings = false;
     while let Some(next) = arguments.next() {
         if next == "--settings" {
             let path = arguments.next().ok_or_else(|| {
                 invalid_input("export-audio --settings requires a settings file path")
             })?;
             configured = load_cli_export_settings(Path::new(&path))?.audio_export_format;
+            explicit_settings = true;
         } else {
             positional.push(next);
+        }
+    }
+    // An explicit flag beats the default-path file; the default-path file beats
+    // built-in defaults, mirroring the startup `LoadFromDefaultPath` step.
+    if !explicit_settings {
+        if let Some(export) = try_load_default_export_settings()? {
+            configured = export.audio_export_format;
         }
     }
     let mut positional = positional.into_iter();
@@ -5516,6 +5588,76 @@ mod tests {
         let error = super::export_audio_from_arguments(arguments.into_iter()).unwrap_err();
         assert!(error.to_string().contains("bad.json"), "{error}");
         assert!(!output_path.exists());
+        drop(input);
+    }
+
+    #[test]
+    fn default_path_settings_absent_file_keeps_builtin_defaults() {
+        let directory = TestInputDirectory::new_root();
+        let input = TestInputDirectory {
+            directory: directory.clone(),
+            files: Vec::new(),
+            subdirectories: Vec::new(),
+        };
+
+        assert!(
+            super::load_default_export_settings_from_dir(&directory.join("empty"))
+                .unwrap()
+                .is_none()
+        );
+        drop(input);
+    }
+
+    #[test]
+    fn default_path_settings_present_file_loads_the_export_record() {
+        use assetripper::export::settings::AudioExportFormat;
+        use assetripper::export::settings::ImageExportFormat;
+        use assetripper::export::settings::ShaderExportMode;
+
+        let directory = TestInputDirectory::new_root();
+        let subdir = directory.join("exe");
+        std::fs::create_dir(&subdir).unwrap();
+        std::fs::write(
+            subdir.join("AssetRipper.Settings.json"),
+            "{\"Import\": {\"ScriptContentLevel\": 2, \"StreamingAssetsMode\": 1, \"DefaultVersion\": \"0.0.0a0\", \"TargetVersion\": \"0.0.0a0\"}, \"Processing\": {\"EnablePrefabOutlining\": false, \"EnableStaticMeshSeparation\": true, \"EnableAssetDeduplication\": false, \"RemoveNullableAttributes\": false, \"PublicizeAssemblies\": false, \"BundledAssetsExportMode\": 2}, \"Export\": {\"AudioExportFormat\": 3, \"ImageExportFormat\": 0, \"LightmapTextureExportFormat\": 2, \"ScriptExportMode\": 1, \"ScriptLanguageVersion\": -1, \"ScriptTypesFullyQualified\": false, \"ShaderExportMode\": 2, \"SpriteExportMode\": 0, \"TextExportMode\": 2, \"ExportUnreadableAssets\": false, \"PreferOriginalTextureExtension\": true, \"SaveSettingsToDisk\": false, \"LanguageCode\": null}}",
+        )
+        .unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![subdir.join("AssetRipper.Settings.json")],
+            subdirectories: vec![subdir.clone()],
+        };
+
+        let export = super::load_default_export_settings_from_dir(&subdir)
+            .unwrap()
+            .expect("the stored file must load");
+        assert_eq!(export.audio_export_format, AudioExportFormat::PreferWav);
+        assert_eq!(export.image_export_format, ImageExportFormat::Bmp);
+        assert_eq!(export.shader_export_mode, ShaderExportMode::Decompile);
+        drop(input);
+    }
+
+    #[test]
+    fn default_path_settings_broken_file_is_a_path_carrying_error() {
+        let directory = TestInputDirectory::new_root();
+        let subdir = directory.join("exe");
+        std::fs::create_dir(&subdir).unwrap();
+        std::fs::write(
+            subdir.join("AssetRipper.Settings.json"),
+            b"{\"Import\": {}}",
+        )
+        .unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![subdir.join("AssetRipper.Settings.json")],
+            subdirectories: vec![subdir.clone()],
+        };
+
+        let error = super::load_default_export_settings_from_dir(&subdir).unwrap_err();
+        assert!(
+            error.to_string().contains("AssetRipper.Settings.json"),
+            "{error}"
+        );
         drop(input);
     }
 
