@@ -35,10 +35,16 @@ fn decode_colors(c0: i32, c1: i32) -> [[i32; 3]; 4] {
             extend((c1 >> 5) & 0x3F, 6, 8),
             extend((c1 >> 11) & 0x1F, 5, 8),
         ];
-        for channel in 0..3 {
-            colors[1][channel] = (5 * colors[0][channel] + 3 * colors[3][channel]) / 8;
-            colors[2][channel] = (3 * colors[0][channel] + 5 * colors[3][channel]) / 8;
-        }
+        colors[1] = [
+            (5 * colors[0][0] + 3 * colors[3][0]) / 8,
+            (5 * colors[0][1] + 3 * colors[3][1]) / 8,
+            (5 * colors[0][2] + 3 * colors[3][2]) / 8,
+        ];
+        colors[2] = [
+            (3 * colors[0][0] + 5 * colors[3][0]) / 8,
+            (3 * colors[0][1] + 5 * colors[3][1]) / 8,
+            (3 * colors[0][2] + 5 * colors[3][2]) / 8,
+        ];
     } else {
         colors[2] = [
             extend(c0 & 0x1F, 5, 8),
@@ -50,9 +56,11 @@ fn decode_colors(c0: i32, c1: i32) -> [[i32; 3]; 4] {
             extend((c1 >> 5) & 0x3F, 6, 8),
             extend((c1 >> 11) & 0x1F, 5, 8),
         ];
-        for channel in 0..3 {
-            colors[1][channel] = 0.max(colors[2][channel] - colors[3][channel] / 4);
-        }
+        colors[1] = [
+            0.max(colors[2][0] - colors[3][0] / 4),
+            0.max(colors[2][1] - colors[3][1] / 4),
+            0.max(colors[2][2] - colors[3][2] / 4),
+        ];
     }
     colors
 }
