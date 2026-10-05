@@ -2055,3 +2055,10 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 
 - Added `compressed_mesh::decompress` (the `CompressedMesh.Decompress` channel orchestration) and `src/resources/mesh_data.rs` (the `MeshData` merge of the vertex-data-blob and compressed-mesh paths with the source's `??=` fallbacks, plus `UVCount`/`IndexFormat` and the `TryGet*AtIndex` post-processing: UV `Y` flip, tangent `W` snap, skin defaulting/renormalization).
 - Two `decompress` tests and seven `MeshData` tests; `cargo test --workspace --locked`: 810 library and 25 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+
+## Mesh class-43 field reader (2026-10-05)
+
+- Added `src/resources/mesh.rs`: `MeshView::from_value` reads `m_VertexData`, `m_CompressedMesh`, `m_IndexBuffer`, `m_IndexFormat`, `m_SubMeshes`, `m_BindPose`, and `m_Skin`; `processed_index_buffer` decodes 16/32-bit indices with file endianness; `read_mesh_data` runs the blob/compressed decoders and merges them into `MeshData`.
+- Five synthetic tests pass; `cargo test --workspace --locked`: 815 library and 25 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used.
+- The serialized `SubMesh`, `BoneWeights4` lane, and old-stream spellings remain candidate mappings; no Unity-produced or C# differential has run, so the ledger row is `已实现但未验证`. Phase 1 remains open.

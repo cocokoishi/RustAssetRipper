@@ -34,6 +34,7 @@ pub mod keyframe;
 pub mod keyframe_quaternion;
 pub mod keyframe_vector3;
 pub mod matrix4x4;
+pub mod mesh;
 pub mod mesh_data;
 pub mod min_max_gradient;
 pub mod muscle_clip_info;

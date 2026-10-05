@@ -423,3 +423,11 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Nine tests; `cargo test --workspace --locked`: 810 library and 25 CLI tests; warnings-denied Clippy passes.
 - Next: the `Mesh` field reader producing the blob and compressed mesh, `BindPose`/`m_Skin` parsing, and the GLB/OBJ mesh exporters; the class-189/3D/array texture routes, platform transforms, Crunch, EXR/HDR/JPEG writers, sprite/atlas export, and `.meta` sidecars; then the exporter registration/resource matrix audit and the object-model/product workflows.
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+
+## 49. Checkpoint: Mesh class-43 field reader (2026-10-05)
+
+- Added `src/resources/mesh.rs`: class-43 `MeshView` field reading, endian-aware `m_IndexBuffer` decoding, and `read_mesh_data` assembling processed `MeshData` from the blob/compressed paths.
+- Five synthetic tests; `cargo test --workspace --locked`: 815 library and 25 CLI tests; warnings-denied Clippy passes. The ledger row is `已实现但未验证` because serialized sub-mesh/skin/stream spellings still need a Unity-produced or C# differential.
+- Next: validate the mesh field spellings against generated/Unity-produced evidence, then the GLB/OBJ mesh exporters; the class-189/3D/array texture routes, platform transforms, Crunch, EXR/HDR/JPEG writers, sprite/atlas export, and `.meta` sidecars; then the exporter registration/resource matrix audit and the object-model/product workflows.
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
