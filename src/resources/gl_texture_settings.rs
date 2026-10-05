@@ -7,7 +7,7 @@
 //! Differential fixture: `gl_texture_settings_fixture.txt` (probe `Temp/opencode/resprobe`).
 
 /// A texture sampler-settings view.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct GLTextureSettingsView {
     /// `FilterMode`.
     pub filter_mode: i32,
@@ -25,20 +25,6 @@ pub struct GLTextureSettingsView {
     pub wrap_w: Option<i32>,
 }
 
-impl Default for GLTextureSettingsView {
-    fn default() -> Self {
-        Self {
-            filter_mode: 0,
-            aniso: 0,
-            mip_bias: 0.0,
-            wrap_mode: None,
-            wrap_u: None,
-            wrap_v: None,
-            wrap_w: None,
-        }
-    }
-}
-
 impl GLTextureSettingsView {
     /// `GLTextureSettingsExtensions.SetToDefault`: `FilterMode = -1`, `Aniso = -1`,
     /// `MipBias = -100`, and every present wrap field `= -1`.
@@ -46,15 +32,16 @@ impl GLTextureSettingsView {
         self.filter_mode = -1;
         self.aniso = -1;
         self.mip_bias = -100.0;
-        for field in [
+        for value in [
             &mut self.wrap_mode,
             &mut self.wrap_u,
             &mut self.wrap_v,
             &mut self.wrap_w,
-        ] {
-            if let Some(value) = field {
-                *value = -1;
-            }
+        ]
+        .into_iter()
+        .flatten()
+        {
+            *value = -1;
         }
     }
 

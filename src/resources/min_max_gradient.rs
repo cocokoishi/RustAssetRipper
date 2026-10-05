@@ -33,7 +33,7 @@ impl MinMaxGradientState {
 }
 
 /// A min/max gradient view. Exactly one color representation is present per layout.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct MinMaxGradientView {
     /// The serialized state.
     pub state: i32,
@@ -45,18 +45,6 @@ pub struct MinMaxGradientView {
     pub max_color32: Option<u32>,
     /// `MaxColor` as `ColorRGBAf` on the newer layout.
     pub max_color_f32: Option<[f32; 4]>,
-}
-
-impl Default for MinMaxGradientView {
-    fn default() -> Self {
-        Self {
-            state: 0,
-            min_color32: None,
-            min_color_f32: None,
-            max_color32: None,
-            max_color_f32: None,
-        }
-    }
 }
 
 impl MinMaxGradientView {
