@@ -407,3 +407,11 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Two generated generation-10 SerializedFile CLI-handler tests; `cargo test --workspace --locked`: 795 library and 25 CLI tests; warnings-denied Clippy passes.
 - Next: the class-189/3D/array texture routes, Xbox360/Switch platform transforms, Crunch, EXR/HDR/JPEG writers, sprite/atlas export, `.meta` sidecars, and wiring into a project export; then the exporter registration/resource matrix audit and the object-model/product workflows.
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+
+## 47. Checkpoint: Terrain heatmap exporter (2026-10-05)
+
+- Added `src/resources/terrain_heatmap.rs`: the `TerrainData` heightmap reader, the five-stop colour ramp, and the `max(dimension, resolution)` flipped RGBA32 bitmap. The `(Color32)ColorFloat` conversion matches the reference's truncating `ConvertFloatToByte`.
+- Six synthetic tests; `cargo test --workspace --locked`: 801 library and 25 CLI tests; warnings-denied Clippy passes.
+- Next: the class-189/3D/array texture routes, platform transforms, Crunch, EXR/HDR/JPEG writers, sprite/atlas export, `.meta` sidecars, and wiring into a project export; then the exporter registration/resource matrix audit and the object-model/product workflows.
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

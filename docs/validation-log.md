@@ -2042,3 +2042,10 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Added the `export-texture <serialized-file-index> <path-id> <new-output-image> <input-file> ...` CLI command. It mounts the selected inputs, loads the SerializedFile workspace, decodes the selected object, builds a `Texture2DView`, resolves inline or streamed image data through `resolve_and_read_streamed_resource_info`, and writes a PNG/BMP/TGA image via `export_texture2d_image`. The output extension selects the format (default PNG); an existing output file is never replaced.
 - Two generated generation-10 SerializedFile CLI-handler tests verify a PNG signature and status line, refusal to overwrite, and a non-texture object failing without output.
 - `cargo test --workspace --locked`: 795 library and 25 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+
+## Terrain heatmap exporter (2026-10-05)
+
+- Added `src/resources/terrain_heatmap.rs`: `TerrainHeightmap::from_value` reads `m_Heightmap.m_Width`/`m_Height`/`m_Resolution`/`m_Heights`, `rgba32_data` applies the five-stop colour ramp (normalizing by `short.MaxValue`), and `bitmap` builds the `max(dimension, resolution)` RGBA32 bitmap and flips it.
+- The `(Color32)ColorFloat` conversion matches the reference's `ConvertFloatToByte` (`NaN`/`<=0` → 0, `>=255` → 255, else truncate); alpha is always 255.
+- Six synthetic tests; `cargo test --workspace --locked`: 801 library and 25 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.

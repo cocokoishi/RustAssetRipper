@@ -50,6 +50,7 @@ pub mod streamed_clip;
 pub mod streaming_info;
 pub mod sub_mesh_data;
 pub mod tangent_mode;
+pub mod terrain_heatmap;
 pub mod texture;
 pub mod texture_converter;
 pub mod texture_decode;
