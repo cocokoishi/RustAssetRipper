@@ -8,6 +8,7 @@ use std::io::{self, Read, Seek, SeekFrom};
 use crate::io::dependency::DependencyFilePath;
 use crate::io::filesystem::{SearchOption, VirtualFileSystem};
 use crate::io::stream::logical_file_name;
+use crate::processing::script_identity::is_mono_assembly;
 use crate::scheme::{FileKind, SchemeReader};
 
 /// Resource bounds for scanning explicitly selected mounted paths.
@@ -164,7 +165,7 @@ impl MixedGameStructure {
                 {
                     add_parent_chain(&path, &selected_path, &mut data_paths);
                 }
-                if filename.ends_with(".dll") {
+                if is_mono_assembly(&filename) {
                     assemblies.insert((filename, path));
                 }
             }

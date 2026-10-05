@@ -2,7 +2,8 @@
 //!
 //! Covers the first audited slice of `TYPE-SCRIPT-001`: `ScriptIdentifier`
 //! (construction validation, `ToUniqueName` overloads, `ToString`, `IsDefault`,
-//! `UniqueName`), the `ScriptingBackend` discriminants, and the pure string kernels
+//! `UniqueName`), the `ScriptingBackend` discriminants, the `MonoManager.IsMonoAssembly`
+//! file-name predicate, and the pure string kernels
 //! behind `MonoScriptExtensions.GetFullName` and `GetValidAssemblyName` (the
 //! `IMonoScript`/assembly-manager lookups themselves stay outside: they need live
 //! managed assemblies).
@@ -67,6 +68,15 @@ impl Error for ScriptIdError {}
 /// (`ValueType.ToString()`), pinned by the probe.
 pub const DEFAULT_SCRIPT_IDENTIFIER_DISPLAY: &str =
     "AssetRipper.Import.Structure.Assembly.ScriptIdentifier";
+
+/// `MonoManager.AssemblyExtension`, the file-name suffix that marks a Mono assembly.
+pub const ASSEMBLY_EXTENSION: &str = ".dll";
+
+/// `MonoManager.IsMonoAssembly`: a file is a Mono assembly candidate exactly when its
+/// name ends with `.dll` under an ordinal (case-sensitive) comparison.
+pub fn is_mono_assembly(file_name: &str) -> bool {
+    file_name.ends_with(ASSEMBLY_EXTENSION)
+}
 
 /// `ScriptIdentifier`: an assembly-qualified script type identity.
 ///
@@ -241,6 +251,20 @@ mod tests {
         assert_eq!(ScriptingBackend::Unknown as i32, 0);
         assert_eq!(ScriptingBackend::Mono as i32, 1);
         assert_eq!(ScriptingBackend::IL2Cpp as i32, 2);
+    }
+
+    #[test]
+    fn mono_assembly_predicate_matches_the_source_rule() {
+        assert_eq!(ASSEMBLY_EXTENSION, ".dll");
+        assert!(is_mono_assembly("Assembly-CSharp.dll"));
+        assert!(is_mono_assembly("mscorlib.dll"));
+        // Ordinal comparison: case, trailing dots, and other extensions do not match.
+        assert!(!is_mono_assembly("Assembly-CSharp.DLL"));
+        assert!(!is_mono_assembly("Assembly-CSharp.dll "));
+        assert!(!is_mono_assembly("GameAssembly.so"));
+        assert!(!is_mono_assembly("global-metadata.dat"));
+        assert!(!is_mono_assembly(""));
+        assert!(!is_mono_assembly(".dll.bak"));
     }
 
     #[test]

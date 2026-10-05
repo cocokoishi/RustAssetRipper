@@ -10,6 +10,7 @@ use crate::io::dependency::DependencyIndexLimits;
 use crate::io::filesystem::{SearchOption, VirtualFileSystem};
 use crate::io::platform_structure::{PlatformKind, PlatformStructure};
 use crate::io::stream::{logical_file_name, logical_file_path};
+use crate::processing::script_identity::is_mono_assembly;
 use crate::scheme::{
     ContainerMountError, ContainerMountLimits, FileKind, SchemeError, SchemeReader,
 };
@@ -967,7 +968,7 @@ impl InventoryState<'_> {
     fn collect_assemblies(&mut self, root: &str) -> Result<(), PlatformFileInventoryError> {
         for path in self.top_level_files(root)? {
             let name = file_name(&path);
-            if !name.ends_with(".dll") {
+            if !is_mono_assembly(name) {
                 continue;
             }
             let next_count = self

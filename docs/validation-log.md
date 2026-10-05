@@ -2326,3 +2326,9 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Two findings recorded as N/A with source evidence: `Texture2DExtensions.GetKTXBaseInternalFormat` has no baseline caller; folder `.meta` sidecars are dead (no `isFolder:true` `Meta` caller).
 - Ported the two remaining pure `ExportHandler` pieces into `project_order.rs`: `GetListOfVersions` (first-seen distinct versions, space-joined) and `ThrowIfSettingsDontMatch` (explicit `SettingsMismatch` error; reference identity is caller-observed). Two new tests; lib suite 968/968 locally, workspace Clippy clean; CI run `37325748243` green (all five jobs) for remote `main` = `e28249b`; local matches.
 - No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+## TYPE-SCRIPT-001 manager/type-resolver audit (2026-10-06)
+
+- Audited all 21 files of `AssetRipper.Import/Structure/Assembly/` (`Managers/`, `Serializable/`, `TypeTrees/`, backend/identifier/extensions): pure metadata paths mapped to their Rust modules (`script_identity.rs`, `script_hashing.rs`, `script_export_flow.rs`, `script_admission.rs`, backend detection + `.dll` collection in `io/`); live assembly loading (AsmResolver/Cpp2Il/Cecil/ILSpy) recorded as external-tooling-blocked. Corrected the row (it pointed at nonexistent `src/types/` with `???` status).
+- Ported `MonoManager.IsMonoAssembly` as a named ordinal-`.dll` predicate in `script_identity.rs`, wired into both existing call sites with no behavior change, plus a dedicated test. Lib suite 969/969 locally, workspace Clippy clean; full validation via Actions after push.
+- No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.

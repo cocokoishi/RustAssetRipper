@@ -692,3 +692,9 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Audited all 124 UnityProjects files family-by-family, corrected the stale row (wrong module path, `???` status), recorded two dead-code N/A findings, and ported `GetListOfVersions` + `ThrowIfSettingsDontMatch`. Lib suite 968/968 locally, workspace Clippy clean; CI run `37325748243` green (all five jobs) for remote `main` = `e28249b`; local matches.
 - Next: `TYPE-SCRIPT-001` remainder (manager resolutions), CLI exposure + GUID freshness + folder sidecars, `export-mesh`/YAML per-command settings, and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 88. Checkpoint: TYPE-SCRIPT-001 audit and IsMonoAssembly port (2026-10-06)
+
+- Audited all 21 Assembly files, corrected the stale row (nonexistent `src/types/`, `???` status), split ported metadata paths from external-tooling-blocked live loading, and ported `IsMonoAssembly` with a dedicated test. Lib suite 969/969 locally, workspace Clippy clean; full validation via Actions after push.
+- Next: CLI exposure + GUID freshness + folder sidecars, `export-mesh`/YAML per-command settings, and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
