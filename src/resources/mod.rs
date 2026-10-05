@@ -7,6 +7,7 @@ pub mod animator_enums;
 pub mod astc;
 pub mod astc_tables;
 pub mod atc_yuy2;
+pub mod audio;
 pub mod avatar;
 pub mod avatar_constant;
 pub mod bc6h;

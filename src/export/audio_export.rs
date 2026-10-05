@@ -135,9 +135,10 @@ pub fn sound_type_raw_extension(name: &str) -> &'static str {
 
 /// The four printable characters of the unknown-audio diagnostic.
 ///
-/// `CopyPrintable`: fills with `'O'`, then copies ASCII printable bytes except tab.
+/// `CopyPrintable`: fills with `'Ø'` (U+00D8), then copies ASCII printable bytes
+/// except tab.
 pub fn diagnostic_printable(data: &[u8]) -> [char; 4] {
-    let mut out = ['O'; 4];
+    let mut out = ['Ø'; 4];
     for (index, character) in out.iter_mut().enumerate() {
         if index >= data.len() {
             break;
@@ -297,14 +298,93 @@ pub fn plan_streamed_resource(
     }
 }
 
+/// `AudioClipDecoder.TryDecode` composed over raw bytes: empty data fails with the
+/// reference message, a present 3.5 sound type passes the bytes through with the
+/// numeric extension, `FSB5` defers to the external `Fmod5Sharp` path, tracker
+/// magics pass through with fixed extensions, and anything else fails with the
+/// printable/hex diagnostic.
+///
+/// `FSB5` input is an explicit error (the container needs `Fmod5Sharp`, which also
+/// supplies the audio-type word in the reference failure message), never a silent
+/// passthrough.
+pub fn try_decode_audio(
+    name: &str,
+    sound_type: Option<i32>,
+    data: &[u8],
+) -> Result<(Vec<u8>, &'static str), AudioDecodeError> {
+    if data.is_empty() {
+        return Err(AudioDecodeError::NoAudioData {
+            name: name.to_owned(),
+        });
+    }
+    if let Some(sound_type) = sound_type {
+        return Ok((
+            data.to_vec(),
+            crate::resources::audio::fmod_sound_type_raw_extension(sound_type),
+        ));
+    }
+    match classify_audio_data(data) {
+        AudioDataKind::Fsb5 => Err(AudioDecodeError::FmodContainerUnsupported),
+        kind => match tracker_extension(kind) {
+            Some(extension) => Ok((data.to_vec(), extension)),
+            None => Err(AudioDecodeError::UnknownEncoding {
+                printable: diagnostic_printable(data).iter().collect(),
+                hex: diagnostic_hex(data).iter().collect(),
+            }),
+        },
+    }
+}
+
+/// Why `AudioClipDecoder.TryDecode` refused raw bytes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AudioDecodeError {
+    /// No bytes at all; mirrors the reference early failure (the message carries
+    /// the clip name like the source format string).
+    NoAudioData {
+        /// The clip name for the message.
+        name: String,
+    },
+    /// `FSB5` containers need the external `Fmod5Sharp` decoder.
+    FmodContainerUnsupported,
+    /// None of the magics matched; carries the printable/hex diagnostic words.
+    UnknownEncoding {
+        /// The four printable characters.
+        printable: String,
+        /// The eight hex characters.
+        hex: String,
+    },
+}
+
+impl core::fmt::Display for AudioDecodeError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NoAudioData { name } => write!(
+                formatter,
+                "Can't decode audio clip '{name}' with default decoder because its audio data could not be found."
+            ),
+            Self::FmodContainerUnsupported => write!(
+                formatter,
+                "FSB5 audio needs the external Fmod5Sharp decoder"
+            ),
+            Self::UnknownEncoding { printable, hex } => write!(
+                formatter,
+                "Failed to convert audio starting with '{printable}' ({hex})"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AudioDecodeError {}
+
 #[cfg(test)]
 mod tests {
     use super::{
         check_magic, classify_audio_data, compression_format_raw_extension, converts_ogg_to_wav,
         diagnostic_hex, diagnostic_printable, is_supported_export_format, native_audio_extension,
         plan_audio_clip_collection, plan_native_audio_export, plan_streamed_resource,
-        sound_type_raw_extension, tracker_extension, AudioDataKind, AudioDecodeFact, AudioRefusal,
-        NativeAudioExport, StreamedResourcePlan, MOD_MAGICS,
+        sound_type_raw_extension, tracker_extension, try_decode_audio, AudioDataKind,
+        AudioDecodeError, AudioDecodeFact, AudioRefusal, NativeAudioExport, StreamedResourcePlan,
+        MOD_MAGICS,
     };
     use crate::export::settings::AudioExportFormat;
 
@@ -392,11 +472,13 @@ mod tests {
     fn diagnostics_fill_then_copy_exactly() {
         assert_eq!(diagnostic_printable(b"ABCD"), ['A', 'B', 'C', 'D']);
         // Control bytes and DEL stay filled; tab counts as unprintable here.
+        // The fill is U+00D8 LATIN CAPITAL LETTER O WITH STROKE per the source
+        // `FillCharacter` (a prior revision mistakenly used ASCII 'O').
         assert_eq!(
             diagnostic_printable(b"\x01\x02\t\x7f"),
-            ['O', 'O', 'O', 'O']
+            ['Ø', 'Ø', 'Ø', 'Ø']
         );
-        assert_eq!(diagnostic_printable(b"A"), ['A', 'O', 'O', 'O']);
+        assert_eq!(diagnostic_printable(b"A"), ['A', 'Ø', 'Ø', 'Ø']);
         assert_eq!(
             diagnostic_hex(&[0xDE, 0xAD]),
             ['D', 'E', 'A', 'D', '0', '0', '0', '0']
@@ -488,6 +570,96 @@ mod tests {
         assert_eq!(
             plan_streamed_resource(true, false, "clip.audioclip"),
             StreamedResourcePlan::ZeroAndRestore
+        );
+    }
+
+    fn hex_bytes(word: &str) -> Vec<u8> {
+        (0..word.len())
+            .step_by(2)
+            .map(|index| u8::from_str_radix(&word[index..index + 2], 16).unwrap())
+            .collect()
+    }
+
+    /// Differential against the reference `AudioClipDecoder.TryDecode` (probe
+    /// `Temp/opencode/audioprobe`): real 3.5 clip instances with `AudioData` and
+    /// `Type` set, asserting the early message, the numeric extension mapping
+    /// with byte passthrough, and the unmapped default.
+    #[test]
+    fn try_decode_matches_the_reference_runtime() {
+        let fixture = include_str!("audio_decode_fixture.txt");
+        let mut rows = 0;
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut parts = line.splitn(6, '|');
+            assert_eq!(parts.next(), Some("ADECODE"), "{line}");
+            let tag = parts.next().expect("a probe tag");
+            let ok = parts
+                .next()
+                .expect("an ok word")
+                .strip_prefix("ok=")
+                .expect("an ok prefix");
+            let extension = parts
+                .next()
+                .expect("an extension word")
+                .strip_prefix("ext=")
+                .expect("an extension prefix");
+            let data_word = parts
+                .next()
+                .expect("a data word")
+                .strip_prefix("data=")
+                .expect("a data prefix");
+            let message = parts
+                .next()
+                .expect("a message")
+                .strip_prefix("msg=")
+                .expect("a message prefix");
+            assert!(parts.next().is_none(), "{line}");
+            let (data, sound_type) = match tag {
+                "empty" => (Vec::new(), Some(20)),
+                "typed-wav" => (hex_bytes(data_word), Some(20)),
+                "typed-ogg" => (hex_bytes(data_word), Some(14)),
+                "typed-default" => (hex_bytes(data_word), Some(999)),
+                _ => panic!("unexpected fixture tag {tag}"),
+            };
+            match try_decode_audio("", sound_type, &data) {
+                Ok((decoded, decoded_extension)) => {
+                    assert_eq!(ok, "1", "{line}");
+                    assert_eq!(decoded_extension, extension, "{line}");
+                    assert_eq!(decoded, data, "{line}");
+                    assert_eq!(message, "null", "{line}");
+                }
+                Err(error) => {
+                    assert_eq!(ok, "0", "{line}");
+                    assert_eq!(extension, "null", "{line}");
+                    assert_eq!(data_word, "null", "{line}");
+                    assert_eq!(error.to_string(), message, "{line}");
+                }
+            }
+            rows += 1;
+        }
+        assert_eq!(rows, 4, "all probed decode rows are asserted");
+    }
+
+    #[test]
+    fn try_decode_rejects_fsb5_and_unknown_bytes_explicitly() {
+        assert_eq!(
+            try_decode_audio("clip", None, b"FSB5...."),
+            Err(AudioDecodeError::FmodContainerUnsupported)
+        );
+        let error = try_decode_audio("clip", None, b"ABCD").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Failed to convert audio starting with 'ABCD' (41424344)"
+        );
+        // Tracker magics pass through untouched with fixed extensions.
+        let mut mod_data = vec![0u8; 1084];
+        mod_data[1080..1084].copy_from_slice(b"M.K.");
+        assert_eq!(
+            try_decode_audio("clip", None, &mod_data).map(|pair| pair.1),
+            Ok("mod")
         );
     }
 }

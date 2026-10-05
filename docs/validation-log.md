@@ -2143,3 +2143,11 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Added `try_get_next_frame` to `src/resources/streamed_curve.rs` and new module `src/resources/clip_convert.rs`: `IsTransform` precedence (Transform always; RectTransform only with valid type), bindings-cache expansion, `CalculateLastConstantTime` with all branches, the first-frame fix, dense frame times, the constant one-or-two rule, and `DefaultFloatWeight`. Missing bindings and invalid transform types are explicit errors.
 - New ledger row `PROC-ANIM-CONVERT-001` at `已实现但未验证`; recorded as `DIFF-CLIP-CONVERT-001`. Curve emission on clip objects stays open.
 - `cargo test --workspace --locked`: 899 library and 33 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+## AudioClip view and export-audio CLI with decoder differentials (2026-10-05)
+
+- Probe `Temp/opencode/audioprops` (SDK 10.0.401) pinned `IAudioClip` properties, per-version gates (3.5 inline `m_AudioData` + `m_Type`/`m_Format`; 5.0+ `m_Resource`), and the `FmodSoundType`/`FmodSoundFormat` discriminants (`src/resources/audio_generated_api_fixture.txt`). Probe `Temp/opencode/audioprobe` drove real 3.5 clips through the shipped `TryDecode`: the empty message, typed `wav`/`ogg` passthrough, and the unmapped default (`src/export/audio_decode_fixture.txt`).
+- Added `src/resources/audio.rs` (`AudioClipView` with source-order resolution and lazy integrity, numeric `FmodSoundType` table), `try_decode_audio` in `src/export/audio_export.rs` (reference order with exact messages; `FSB5`/unknown are explicit errors), and the `export-audio` CLI (class-83 guard, inline plus streamed `.resS` resolution, overwrite refusal).
+- Corrected a real deviation the trace exposed: the unknown-byte diagnostic fills with U+00D8, not ASCII `'O'` (source `FillCharacter` is explicit); code and test fixed, recorded in `DIFF-AUDIO-DECODE-001`. `OggToWav` could not load in the probe sandbox and stays source-read with an explicit error.
+- `RES-AUDIO-001` moves from `未调查` to `已实现但未验证`; recorded as `DIFF-AUDIO-DECODE-001`.
+- `cargo test --workspace --locked`: 908 library and 40 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.

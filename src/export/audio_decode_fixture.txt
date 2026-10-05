@@ -1,0 +1,9 @@
+# AudioClipDecoder.TryDecode reference values.
+# Probe Temp/opencode/audioprobe: real AudioClip.Create instances with AudioData
+# and Type set, calling the shipped AudioClipDecoder.TryDecode
+# (AssetRipper.Export.Modules.Audio.dll, SDK 10.0.401).
+# Format: ADECODE|<tag>|ok=<0|1>|ext=<extension or null>|data=<hex or null>|msg=<message or null>.
+ADECODE|empty|ok=0|ext=null|data=null|msg=Can't decode audio clip '' with default decoder because its audio data could not be found.
+ADECODE|typed-wav|ok=1|ext=wav|data=524946465F5F5F5F|msg=null
+ADECODE|typed-ogg|ok=1|ext=ogg|data=4F6767535F5F5F5F|msg=null
+ADECODE|typed-default|ok=1|ext=audioClip|data=414243445F5F5F5F|msg=null

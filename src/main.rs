@@ -5,6 +5,7 @@ use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use assetripper::export::audio_export::try_decode_audio;
 use assetripper::export::pointer_map::{
     ExportCollectionPointerMetadata, ExportPointerMapLimits, ExportedAssetPointerEntry,
     ProjectExportPointerMap, UnityProjectAssetType,
@@ -64,6 +65,7 @@ use assetripper::resource::{
     RootResourceFileCatalog, StreamedResourceContentLimits, StreamedResourceContentResolution,
     StreamedResourceInfo, StreamedResourceResolution, StreamedResourceScanLimits,
 };
+use assetripper::resources::audio::{AudioClipView, AudioDataSource, AUDIO_CLIP_CLASS_ID};
 use assetripper::resources::glb::build_glb;
 use assetripper::resources::image_export::ImageExportFormat;
 use assetripper::resources::mesh::MeshView;
@@ -165,6 +167,9 @@ fn run(arguments: impl Iterator<Item = OsString>) -> Result<(), Box<dyn Error>> 
     }
     if command == "export-shader" {
         return export_shader_from_arguments(arguments);
+    }
+    if command == "export-audio" {
+        return export_audio_from_arguments(arguments);
     }
     if command != "inspect" && command != "inspect-files" {
         print_usage();
@@ -716,6 +721,179 @@ fn export_shader_to<W: io::Write>(
     writeln!(
         status_output,
         "Wrote a shader from SerializedFile {serialized_file_index} PathID {path_id} to {output_path:?}."
+    )?;
+    Ok(())
+}
+
+fn export_audio_from_arguments<I>(arguments: I) -> Result<(), Box<dyn Error>>
+where
+    I: Iterator<Item = OsString>,
+{
+    let mut arguments = arguments;
+    let serialized_file_index =
+        parse_required_argument::<usize>(arguments.next(), "SerializedFile index")?;
+    let path_id = parse_required_argument::<i64>(arguments.next(), "object PathID")?;
+    let output_path = arguments
+        .next()
+        .map(PathBuf::from)
+        .ok_or_else(|| invalid_input("export-audio requires an output audio path"))?;
+    let mut input_files = Vec::new();
+    for argument in arguments {
+        if input_files.len() >= MAX_INPUT_PATHS {
+            return Err(invalid_input(format!(
+                "input path count exceeds {MAX_INPUT_PATHS}"
+            )));
+        }
+        input_files.push(PathBuf::from(argument));
+    }
+    if input_files.is_empty() {
+        return Err(invalid_input(
+            "export-audio requires at least one explicitly selected input file",
+        ));
+    }
+    let stdout = io::stdout();
+    let mut output = stdout.lock();
+    export_audio_to(
+        &input_files,
+        serialized_file_index,
+        path_id,
+        &output_path,
+        &mut output,
+    )
+}
+
+fn export_audio_to<W: io::Write>(
+    input_files: &[PathBuf],
+    serialized_file_index: usize,
+    path_id: i64,
+    output_path: &Path,
+    status_output: &mut W,
+) -> Result<(), Box<dyn Error>> {
+    let (mut filesystem, selected_paths, mount_report) = mount_input_files(input_files)?;
+    let mixed = MixedGameStructure::from_vfs_paths(
+        &filesystem,
+        &selected_paths,
+        MixedGameStructureLimits::default(),
+    )?;
+    let root_resources = RootResourceFileCatalog::from_mounted_explicit_resource_files(
+        &filesystem,
+        &mount_report.explicit_root_resource_files,
+        RootResourceCatalogLimits::default(),
+    )?;
+    if mixed.serialized_file_inputs.is_empty() {
+        return Err(invalid_input(
+            "the selected files contain no recognized SerializedFile input",
+        ));
+    }
+    let (workspace, _) = SerializedFileWorkspace::load_from_vfs_with_dependencies(
+        &mut filesystem,
+        &mixed.serialized_file_inputs,
+        &mixed.registered_files,
+        &mixed.data_paths,
+        SerializedFileWorkspaceLimits::default(),
+        DependencyIndexLimits::default(),
+        ContainerMountLimits::default(),
+    )?;
+    let file = workspace
+        .files()
+        .get(serialized_file_index)
+        .ok_or_else(|| {
+            invalid_input(format!(
+                "SerializedFile index {serialized_file_index} is out of range for {} loaded files",
+                workspace.files().len()
+            ))
+        })?;
+    let container_bundle_index = file.container_bundle_index;
+    let (object_index, _) = select_unique_object(&workspace, serialized_file_index, path_id)?;
+
+    let objects =
+        ObjectWorkspace::load_from_vfs(&filesystem, &workspace, ObjectWorkspaceLimits::default())?;
+    let object = objects
+        .get(serialized_file_index, object_index)
+        .ok_or_else(|| invalid_data("selected workspace object is missing"))?;
+    if object.class_id != Some(AUDIO_CLIP_CLASS_ID as i16) {
+        return Err(invalid_data_owned(format!(
+            "SerializedFile {serialized_file_index} PathID {path_id} has class {:?}, not a class-83 AudioClip",
+            object.class_id
+        ))
+        .into());
+    }
+    let payload = object.payload.as_ref().map_err(|error| {
+        invalid_data_owned(format!(
+            "SerializedFile {serialized_file_index} PathID {path_id} could not be decoded: {error}"
+        ))
+    })?;
+    let view = AudioClipView::from_value(&payload.root).map_err(|error| {
+        invalid_data_owned(format!(
+            "SerializedFile {serialized_file_index} PathID {path_id} is not an exportable AudioClip: {error}"
+        ))
+    })?;
+    let raw_data: Vec<u8> = match view.audio_data_source() {
+        AudioDataSource::Inline(bytes) => bytes.to_vec(),
+        AudioDataSource::Resource(info) => {
+            if !info.is_set() {
+                return Err(invalid_data_owned(format!(
+                    "SerializedFile {serialized_file_index} PathID {path_id} has an unset audio resource"
+                ))
+                .into());
+            }
+            let provider =
+                PlatformResourceProvider::with_mixed_data_paths(None, Some(&mixed.data_paths));
+            let resolution = resolve_and_read_streamed_resource_info(
+                &filesystem,
+                &workspace,
+                container_bundle_index,
+                info,
+                &root_resources,
+                &provider,
+                StreamedResourceContentLimits::default(),
+            )
+            .map_err(|error| {
+                invalid_data_owned(format!(
+                    "SerializedFile {serialized_file_index} PathID {path_id} streamed resource '{}' could not be read: {error}",
+                    info.path
+                ))
+            })?;
+            match resolution {
+                StreamedResourceContentResolution::Resolved { bytes, .. } => bytes,
+                StreamedResourceContentResolution::Missing {
+                    unavailable_data_paths,
+                } => {
+                    return Err(invalid_data_owned(format!(
+                        "SerializedFile {serialized_file_index} PathID {path_id} streamed resource '{}' is missing; unavailable data paths: {unavailable_data_paths:?}",
+                        info.path
+                    ))
+                    .into());
+                }
+                StreamedResourceContentResolution::Unset => {
+                    return Err(invalid_data_owned(format!(
+                        "SerializedFile {serialized_file_index} PathID {path_id} has an unset audio resource"
+                    ))
+                    .into());
+                }
+            }
+        }
+        AudioDataSource::Empty => Vec::new(),
+    };
+    let name = view
+        .name
+        .as_deref()
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .unwrap_or_default();
+    let (decoded, extension) =
+        try_decode_audio(name, view.sound_type, &raw_data).map_err(|error| {
+            invalid_data_owned(format!(
+            "SerializedFile {serialized_file_index} PathID {path_id} audio export failed: {error}"
+        ))
+        })?;
+    let mut destination = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output_path)?;
+    destination.write_all(&decoded)?;
+    writeln!(
+        status_output,
+        "Wrote a {extension} audio from SerializedFile {serialized_file_index} PathID {path_id} to {output_path:?}."
     )?;
     Ok(())
 }
@@ -3114,7 +3292,7 @@ fn invalid_data_owned(message: String) -> io::Error {
 
 fn print_usage() {
     println!(
-        "Usage:\n  assetripper-rs inspect <input-directory> [input-directory ...]\n  assetripper-rs inspect-files <input-file> [input-file ...]\n  assetripper-rs export-object-yaml <serialized-file-index> <path-id> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-file-yaml <serialized-file-index> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-texture <serialized-file-index> <path-id> <new-output-image> <input-file> [input-file ...]\n  assetripper-rs export-mesh <serialized-file-index> <path-id> <new-output-glb> <input-file> [input-file ...]\n  assetripper-rs export-shader [--shader-export-mode <dummy|yaml|decompile>] <serialized-file-index> <path-id> <new-output-shader> <input-file> [input-file ...]\n  assetripper-rs --help\n  assetripper-rs --version\n\n`inspect` mounts directories into isolated VFS roots. `inspect-files` dispatches explicitly selected file paths, registers top-level ResourceFiles as GameBundle root inputs, and reports the parsed SerializedFiles. `export-object-yaml` writes one decoded object as YAML. `export-file-yaml` writes YAML-exportable objects from one SerializedFile in object-table order, resolves streamed Mesh and image-texture bytes, preserves intra-file references through source PathIDs, and refuses unresolved or cross-file references. It reports ImageTexture objects omitted by the baseline when they have no usable image data. `export-texture` decodes one class-28 Texture2D, resolves its inline or streamed image data, and writes a PNG/BMP/TGA image; the output extension selects the format (default PNG). `export-mesh` decodes one class-43 Mesh, resolves its vertex data and compressed mesh, and writes a glTF 2.0 binary file with one node per sub-mesh, converting Unity's left-handed coordinates to glTF's right-handed space and rewriting the sub-mesh topology. `export-shader` decodes one class-48 Shader and writes `.shader` text: decompiled script text is written verbatim under every mode, otherwise `dummy` (the default) and `decompile` render the fallback dummy body and `yaml` reports that YAML mode writes a YAML asset instead. None of these commands replaces an existing output file. These are YAML, texture, single-mesh, and single-shader paths, not a complete Unity project export."
+        "Usage:\n  assetripper-rs inspect <input-directory> [input-directory ...]\n  assetripper-rs inspect-files <input-file> [input-file ...]\n  assetripper-rs export-object-yaml <serialized-file-index> <path-id> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-file-yaml <serialized-file-index> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-texture <serialized-file-index> <path-id> <new-output-image> <input-file> [input-file ...]\n  assetripper-rs export-mesh <serialized-file-index> <path-id> <new-output-glb> <input-file> [input-file ...]\n  assetripper-rs export-shader [--shader-export-mode <dummy|yaml|decompile>] <serialized-file-index> <path-id> <new-output-shader> <input-file> [input-file ...]\n  assetripper-rs export-audio <serialized-file-index> <path-id> <new-output-audio> <input-file> [input-file ...]\n  assetripper-rs --help\n  assetripper-rs --version\n\n`inspect` mounts directories into isolated VFS roots. `inspect-files` dispatches explicitly selected file paths, registers top-level ResourceFiles as GameBundle root inputs, and reports the parsed SerializedFiles. `export-object-yaml` writes one decoded object as YAML. `export-file-yaml` writes YAML-exportable objects from one SerializedFile in object-table order, resolves streamed Mesh and image-texture bytes, preserves intra-file references through source PathIDs, and refuses unresolved or cross-file references. It reports ImageTexture objects omitted by the baseline when they have no usable image data. `export-texture` decodes one class-28 Texture2D, resolves its inline or streamed image data, and writes a PNG/BMP/TGA image; the output extension selects the format (default PNG). `export-mesh` decodes one class-43 Mesh, resolves its vertex data and compressed mesh, and writes a glTF 2.0 binary file with one node per sub-mesh, converting Unity's left-handed coordinates to glTF's right-handed space and rewriting the sub-mesh topology. `export-shader` decodes one class-48 Shader and writes `.shader` text: decompiled script text is written verbatim under every mode, otherwise `dummy` (the default) and `decompile` render the fallback dummy body and `yaml` reports that YAML mode writes a YAML asset instead. `export-audio` decodes one class-83 AudioClip, resolves its inline or streamed audio data, and writes the decoded bytes; tracker audio passes through, `FSB5` reports the external-decoder requirement, and unknown bytes fail with the reference diagnostic. None of these commands replaces an existing output file. These are YAML, texture, single-mesh, single-shader, and single-clip paths, not a complete Unity project export."
     );
 }
 
@@ -4696,6 +4874,206 @@ mod tests {
         drop(input);
     }
 
+    #[test]
+    fn export_audio_writes_typed_bytes_and_refuses_overwrite() {
+        let directory = TestInputDirectory::new_root();
+        let serialized_path = directory.join("main.assets");
+        let output_path = directory.join("clip.wav");
+        let data = b"RIFF....";
+        fs::write(&serialized_path, make_audio_clip_file(data, Some(20))).unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![serialized_path.clone(), output_path.clone()],
+            subdirectories: Vec::new(),
+        };
+
+        let mut status = Vec::new();
+        super::export_audio_to(
+            std::slice::from_ref(&serialized_path),
+            0,
+            42,
+            &output_path,
+            &mut status,
+        )
+        .unwrap();
+        assert_eq!(fs::read(&output_path).unwrap(), data);
+        assert!(String::from_utf8(status)
+            .unwrap()
+            .contains("Wrote a wav audio from SerializedFile 0 PathID 42"));
+
+        let original = fs::read(&output_path).unwrap();
+        let error =
+            super::export_audio_to(&[serialized_path], 0, 42, &output_path, &mut Vec::new())
+                .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<io::Error>().unwrap().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(fs::read(&output_path).unwrap(), original);
+        drop(input);
+    }
+
+    #[test]
+    fn export_audio_passes_tracker_bytes_through_untouched() {
+        let directory = TestInputDirectory::new_root();
+        let serialized_path = directory.join("main.assets");
+        let output_path = directory.join("music.it");
+        let data = b"IMPM....";
+        fs::write(&serialized_path, make_audio_clip_file(data, None)).unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![serialized_path.clone(), output_path.clone()],
+            subdirectories: Vec::new(),
+        };
+
+        let mut status = Vec::new();
+        super::export_audio_to(
+            std::slice::from_ref(&serialized_path),
+            0,
+            42,
+            &output_path,
+            &mut status,
+        )
+        .unwrap();
+        assert_eq!(fs::read(&output_path).unwrap(), data);
+        assert!(String::from_utf8(status)
+            .unwrap()
+            .contains("Wrote a it audio from SerializedFile 0 PathID 42"));
+        drop(input);
+    }
+
+    #[test]
+    fn export_audio_reports_undecodable_bytes_without_creating_output() {
+        let directory = TestInputDirectory::new_root();
+        let serialized_path = directory.join("main.assets");
+        let output_path = directory.join("clip.bin");
+        fs::write(&serialized_path, make_audio_clip_file(b"ABCD", None)).unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![serialized_path.clone(), output_path.clone()],
+            subdirectories: Vec::new(),
+        };
+
+        let error =
+            super::export_audio_to(&[serialized_path], 0, 42, &output_path, &mut Vec::new())
+                .unwrap_err();
+        assert!(
+            error.to_string().contains("Failed to convert audio"),
+            "{error}"
+        );
+        assert!(!output_path.exists());
+        drop(input);
+    }
+
+    #[test]
+    fn export_audio_reports_fsb5_without_creating_output() {
+        let directory = TestInputDirectory::new_root();
+        let serialized_path = directory.join("main.assets");
+        let output_path = directory.join("clip.fsb");
+        fs::write(&serialized_path, make_audio_clip_file(b"FSB5....", None)).unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![serialized_path.clone(), output_path.clone()],
+            subdirectories: Vec::new(),
+        };
+
+        let error =
+            super::export_audio_to(&[serialized_path], 0, 42, &output_path, &mut Vec::new())
+                .unwrap_err();
+        assert!(error.to_string().contains("Fmod5Sharp"), "{error}");
+        assert!(!output_path.exists());
+        drop(input);
+    }
+
+    #[test]
+    fn export_audio_reports_empty_data_without_creating_output() {
+        let directory = TestInputDirectory::new_root();
+        let serialized_path = directory.join("main.assets");
+        let output_path = directory.join("clip.wav");
+        fs::write(&serialized_path, make_audio_clip_file(&[], Some(20))).unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![serialized_path.clone(), output_path.clone()],
+            subdirectories: Vec::new(),
+        };
+
+        let error =
+            super::export_audio_to(&[serialized_path], 0, 42, &output_path, &mut Vec::new())
+                .unwrap_err();
+        assert!(
+            error.to_string().contains("audio data could not be found"),
+            "{error}"
+        );
+        assert!(!output_path.exists());
+        drop(input);
+    }
+
+    #[test]
+    fn export_audio_resolves_streamed_resource_bytes() {
+        let directory = TestInputDirectory::new_root();
+        let serialized_path = directory.join("main.assets");
+        let resource_path = directory.join("audio.resS");
+        let output_path = directory.join("music.it");
+        let content = b"IMPM\0\0\0\0";
+        fs::write(
+            &serialized_path,
+            make_streamed_audio_clip_file("audio.resS", 0, 8),
+        )
+        .unwrap();
+        fs::write(&resource_path, content).unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![
+                serialized_path.clone(),
+                resource_path.clone(),
+                output_path.clone(),
+            ],
+            subdirectories: Vec::new(),
+        };
+
+        let mut status = Vec::new();
+        super::export_audio_to(
+            &[serialized_path.clone(), resource_path.clone()],
+            0,
+            42,
+            &output_path,
+            &mut status,
+        )
+        .unwrap();
+        assert_eq!(fs::read(&output_path).unwrap(), content);
+        assert!(String::from_utf8(status)
+            .unwrap()
+            .contains("Wrote a it audio from SerializedFile 0 PathID 42"));
+        drop(input);
+    }
+
+    #[test]
+    fn export_audio_reports_a_non_audio_object_without_creating_output() {
+        let directory = TestInputDirectory::new_root();
+        let serialized_path = directory.join("main.assets");
+        let output_path = directory.join("clip.wav");
+        fs::write(
+            &serialized_path,
+            make_build_settings_file(&["Assets/A.unity"]),
+        )
+        .unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![serialized_path.clone(), output_path.clone()],
+            subdirectories: Vec::new(),
+        };
+
+        let error =
+            super::export_audio_to(&[serialized_path], 0, 42, &output_path, &mut Vec::new())
+                .unwrap_err();
+        assert!(
+            error.to_string().contains("not a class-83 AudioClip"),
+            "{error}"
+        );
+        assert!(!output_path.exists());
+        drop(input);
+    }
+
     /// A class-43 `Mesh` whose vertex data is a single Float32 position channel and whose index
     /// buffer holds one 16-bit triangle.
     fn make_mesh_file() -> Vec<u8> {
@@ -5050,6 +5428,100 @@ mod tests {
         put_i32_le(&mut payload, -1);
         assert!(payload.len().is_multiple_of(4), "payload is 4-byte aligned");
         finish_single_object_file(b"2019.4.0f1\0", 21, &nodes, &strings, &payload, 42)
+    }
+
+    fn make_audio_clip_file(data: &[u8], sound_type: Option<i32>) -> Vec<u8> {
+        let mut strings = Vec::new();
+        let clip_type = push_type_tree_string(&mut strings, "AudioClip");
+        let empty_name = push_type_tree_string(&mut strings, "");
+        let string_type = push_type_tree_string(&mut strings, "string");
+        let name_field = push_type_tree_string(&mut strings, "m_Name");
+        let array_type = push_type_tree_string(&mut strings, "Array");
+        let int_type = push_type_tree_string(&mut strings, "int");
+        let size_field = push_type_tree_string(&mut strings, "size");
+        let data_field = push_type_tree_string(&mut strings, "data");
+        let char_type = push_type_tree_string(&mut strings, "char");
+        let typeless_type = push_type_tree_string(&mut strings, "TypelessData");
+        let audio_data_field = push_type_tree_string(&mut strings, "m_AudioData");
+        let uint8_type = push_type_tree_string(&mut strings, "UInt8");
+        let type_field = push_type_tree_string(&mut strings, "m_Type");
+
+        let mut nodes = Vec::new();
+        nodes.push((0, clip_type, empty_name, -1));
+        let table = StringTreeTable {
+            string_type,
+            array_type,
+            int_type,
+            size_field,
+            char_type,
+            data_field,
+        };
+        string_tree_nodes(&mut nodes, 1, &table, name_field);
+        nodes.push((1, typeless_type, audio_data_field, -1));
+        nodes.push((2, int_type, size_field, 4));
+        nodes.push((2, uint8_type, data_field, 1));
+        if sound_type.is_some() {
+            nodes.push((1, int_type, type_field, 4));
+        }
+
+        let mut payload = Vec::new();
+        put_typetree_string_value(&mut payload, "TestClip");
+        put_i32_le(&mut payload, i32::try_from(data.len()).unwrap());
+        payload.extend_from_slice(data);
+        let padding = (4 - payload.len() % 4) % 4;
+        payload.resize(payload.len() + padding, 0);
+        if let Some(sound_type) = sound_type {
+            put_i32_le(&mut payload, sound_type);
+        }
+        assert!(payload.len().is_multiple_of(4), "payload is 4-byte aligned");
+        finish_single_object_file(b"3.5.0f1\0", 83, &nodes, &strings, &payload, 42)
+    }
+
+    fn make_streamed_audio_clip_file(
+        stream_path: &str,
+        stream_offset: u64,
+        stream_size: u32,
+    ) -> Vec<u8> {
+        let mut strings = Vec::new();
+        let clip_type = push_type_tree_string(&mut strings, "AudioClip");
+        let empty_name = push_type_tree_string(&mut strings, "");
+        let string_type = push_type_tree_string(&mut strings, "string");
+        let name_field = push_type_tree_string(&mut strings, "m_Name");
+        let array_type = push_type_tree_string(&mut strings, "Array");
+        let int_type = push_type_tree_string(&mut strings, "int");
+        let size_field = push_type_tree_string(&mut strings, "size");
+        let data_field = push_type_tree_string(&mut strings, "data");
+        let char_type = push_type_tree_string(&mut strings, "char");
+        let resource_type = push_type_tree_string(&mut strings, "StreamingInfo");
+        let resource_field = push_type_tree_string(&mut strings, "m_Resource");
+        let path_field = push_type_tree_string(&mut strings, "path");
+        let offset_type = push_type_tree_string(&mut strings, "UInt64");
+        let offset_field = push_type_tree_string(&mut strings, "offset");
+        let uint32_type = push_type_tree_string(&mut strings, "UInt32");
+
+        let mut nodes = Vec::new();
+        nodes.push((0, clip_type, empty_name, -1));
+        let table = StringTreeTable {
+            string_type,
+            array_type,
+            int_type,
+            size_field,
+            char_type,
+            data_field,
+        };
+        string_tree_nodes(&mut nodes, 1, &table, name_field);
+        nodes.push((1, resource_type, resource_field, -1));
+        string_tree_nodes(&mut nodes, 2, &table, path_field);
+        nodes.push((2, offset_type, offset_field, 8));
+        nodes.push((2, uint32_type, size_field, 4));
+
+        let mut payload = Vec::new();
+        put_typetree_string_value(&mut payload, "TestClip");
+        put_typetree_string_value(&mut payload, stream_path);
+        payload.extend_from_slice(&stream_offset.to_le_bytes());
+        put_u32_le(&mut payload, stream_size);
+        assert!(payload.len().is_multiple_of(4), "payload is 4-byte aligned");
+        finish_single_object_file(b"2019.4.0f1\0", 83, &nodes, &strings, &payload, 42)
     }
 
     #[test]

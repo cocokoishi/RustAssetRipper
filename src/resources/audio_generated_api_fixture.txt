@@ -1,0 +1,158 @@
+# AudioClip generated-API reference values.
+# Probe Temp/opencode/audioprops: IAudioClip properties/gates, per-version gate values
+# on real AudioClip.Create instances, and FmodSoundType/FmodSoundFormat discriminants
+# from the shipped AssetRipper.SourceGenerated.dll (SDK 10.0.401).
+# Format: APROP|<type> <name>; AGATE|<name>; ACLASS|<version>|<class>;
+# AGATEV|<version>|<gate>|<0|1>; FST|<name>|<value>; FSF|<name>|<value>.
+APROP|Boolean Ambisonic
+APROP|Byte[] AudioData
+APROP|Int32 BitsPerSample
+APROP|Int32 Channels
+APROP|Int32 CompressionFormat
+APROP|AudioCompressionFormat CompressionFormatE
+APROP|IPPtr_EditorExtension CorrespondingSourceObject
+APROP|IEditorExtension CorrespondingSourceObjectP
+APROP|Byte[] EditorAudioData
+APROP|Int32 EditorCompressionFormat
+APROP|IStreamedResource EditorResource
+APROP|Int32 EditorSoundFormat
+APROP|Int32 EditorSoundType
+APROP|Int32 Format
+APROP|Int32 Frequency
+APROP|UInt32 HideFlags
+APROP|HideFlags HideFlagsE
+APROP|Boolean IsTrackerFormat
+APROP|Boolean Legacy3D
+APROP|Single Length
+APROP|Boolean LoadInBackground
+APROP|Int32 LoadType
+APROP|AudioClipLoadType LoadTypeE
+APROP|Utf8String Name_R
+APROP|Boolean P_3D
+APROP|PPtr_Prefab_2018_3 PrefabAsset
+APROP|IPrefab PrefabAssetP
+APROP|PPtr_PrefabInstance PrefabInstance
+APROP|IPrefabInstance PrefabInstanceP
+APROP|IPPtr_Prefab PrefabInternal
+APROP|IPrefabMarker PrefabInternalP
+APROP|Boolean PreloadAudioData
+APROP|IStreamedResource Resource
+APROP|Int32 Stream
+APROP|Int32 SubsoundIndex
+APROP|Int32 Type
+APROP|Boolean UseHardware
+AGATE|Has_Ambisonic
+AGATE|Has_AudioData
+AGATE|Has_BitsPerSample
+AGATE|Has_Channels
+AGATE|Has_CompressionFormat
+AGATE|Has_EditorAudioData
+AGATE|Has_EditorCompressionFormat
+AGATE|Has_EditorResource
+AGATE|Has_EditorSoundFormat
+AGATE|Has_EditorSoundType
+AGATE|Has_Format
+AGATE|Has_Frequency
+AGATE|Has_IsTrackerFormat
+AGATE|Has_Legacy3D
+AGATE|Has_Length
+AGATE|Has_LoadInBackground
+AGATE|Has_LoadType
+AGATE|Has_P_3D
+AGATE|Has_PrefabAsset
+AGATE|Has_PrefabInstance
+AGATE|Has_PrefabInternal
+AGATE|Has_PreloadAudioData
+AGATE|Has_Resource
+AGATE|Has_Stream
+AGATE|Has_SubsoundIndex
+AGATE|Has_Type
+AGATE|Has_UseHardware
+ACLASS|AssetRipper.SourceGenerated.Classes.ClassID_83.AudioClip_2017
+ACLASS|AssetRipper.SourceGenerated.Classes.ClassID_83.AudioClip_2018_2
+ACLASS|AssetRipper.SourceGenerated.Classes.ClassID_83.AudioClip_2018_3
+ACLASS|AssetRipper.SourceGenerated.Classes.ClassID_83.AudioClip_2020_1_0_a19
+ACLASS|AssetRipper.SourceGenerated.Classes.ClassID_83.AudioClip_3_5
+ACLASS|AssetRipper.SourceGenerated.Classes.ClassID_83.AudioClip_5
+ACLASS|AssetRipper.SourceGenerated.Classes.ClassID_83.AudioClip_5_6_0_b11
+ACLASS|AssetRipper.SourceGenerated.Classes.ClassID_83.AudioClip_5_6_0_b5
+FST|Unknown|0
+FST|Acc|1
+FST|Aiff|2
+FST|Asf|3
+FST|At3|4
+FST|Cdda|5
+FST|Dls|6
+FST|Flac|7
+FST|Fsb|8
+FST|Gcadpcm|9
+FST|It|10
+FST|Midi|11
+FST|Mod|12
+FST|Mpeg|13
+FST|Oggvorbis|14
+FST|Playlist|15
+FST|Raw|16
+FST|S3m|17
+FST|Sf2|18
+FST|User|19
+FST|Wav|20
+FST|Xm|21
+FST|Xma|22
+FST|Vag|23
+FST|Audioqueue|24
+FST|Xwma|25
+FST|Bcwav|26
+FST|At9|27
+FST|Vorbis|28
+FST|MediaFoundation|29
+FST|Max|30
+FST|Forceint|65536
+FSF|None|0
+FSF|Pcm8|1
+FSF|Pcm16|2
+FSF|Pcm24|3
+FSF|Pcm32|4
+FSF|Pcmfloat|5
+FSF|Gcadpcm|6
+FSF|Imaadpcm|7
+FSF|Vag|8
+FSF|Hevag|9
+FSF|Xma|10
+FSF|Mpeg|11
+FSF|Celt|12
+FSF|At9|13
+FSF|Xwma|14
+FSF|Vorbis|15
+FSF|Max|16
+FSF|Forceint|65536
+ACLASS|3.5.0a0|AssetRipper.SourceGenerated.Classes.ClassID_83.AudioClip_3_5
+AGATE|3.5.0a0|Has_AudioData|True
+AGATE|3.5.0a0|Has_Resource|False
+AGATE|3.5.0a0|Has_Type|True
+AGATE|3.5.0a0|Has_Format|True
+AGATE|3.5.0a0|Has_CompressionFormat|False
+ACLASS|5.0.0f1|AssetRipper.SourceGenerated.Classes.ClassID_83.AudioClip_5
+AGATE|5.0.0f1|Has_AudioData|False
+AGATE|5.0.0f1|Has_Resource|True
+AGATE|5.0.0f1|Has_Type|False
+AGATE|5.0.0f1|Has_Format|False
+AGATE|5.0.0f1|Has_CompressionFormat|True
+ACLASS|2017.1.0f1|AssetRipper.SourceGenerated.Classes.ClassID_83.AudioClip_2017
+AGATE|2017.1.0f1|Has_AudioData|False
+AGATE|2017.1.0f1|Has_Resource|True
+AGATE|2017.1.0f1|Has_Type|False
+AGATE|2017.1.0f1|Has_Format|False
+AGATE|2017.1.0f1|Has_CompressionFormat|True
+ACLASS|2019.4.0f1|AssetRipper.SourceGenerated.Classes.ClassID_83.AudioClip_2018_3
+AGATE|2019.4.0f1|Has_AudioData|False
+AGATE|2019.4.0f1|Has_Resource|True
+AGATE|2019.4.0f1|Has_Type|False
+AGATE|2019.4.0f1|Has_Format|False
+AGATE|2019.4.0f1|Has_CompressionFormat|True
+ACLASS|2022.3.0f1|AssetRipper.SourceGenerated.Classes.ClassID_83.AudioClip_2020_1_0_a19
+AGATE|2022.3.0f1|Has_AudioData|False
+AGATE|2022.3.0f1|Has_Resource|True
+AGATE|2022.3.0f1|Has_Type|False
+AGATE|2022.3.0f1|Has_Format|False
+AGATE|2022.3.0f1|Has_CompressionFormat|True

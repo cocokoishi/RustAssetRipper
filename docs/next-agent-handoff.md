@@ -517,3 +517,10 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - `cargo test --workspace --locked`: 899 library and 33 CLI tests; warnings-denied Clippy and format check pass.
 - Next: `RES-AUDIO-001`, parsed-form shader dummy, blend shapes, `EXPORT-UNITY-001`, `TYPE-SCRIPT-001`, and the product rows.
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 61. Checkpoint: AudioClip view + export-audio CLI + decoder differentials (2026-10-05)
+
+- Added `src/resources/audio.rs` (`AudioClipView`, source-order resolution, lazy integrity, numeric `FmodSoundType` table) with a generated-API fixture, `try_decode_audio` with a 4-row `TryDecode` differential, and the `export-audio` CLI (inline + streamed resolution, 7 CLI tests). Fixed the U+00D8 diagnostic-fill deviation. `RES-AUDIO-001` at `已实现但未验证`; `DIFF-AUDIO-DECODE-001` recorded. `FSB5`/Vorbis stay explicit errors.
+- `cargo test --workspace --locked`: 908 library and 40 CLI tests; warnings-denied Clippy and format check pass.
+- Next: parsed-form shader dummy, blend shapes, `EXPORT-UNITY-001`, `TYPE-SCRIPT-001`, and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
