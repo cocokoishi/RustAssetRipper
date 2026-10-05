@@ -1920,3 +1920,11 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Genuine original-runtime differentials: probe `Temp/opencode/miscprobe` captured every behavior; the rows are committed as `byte_array_fixture.txt` (3), `bounds_fixture.txt` (4), `color_fixture.txt` (3), `matrix4x4_fixture.txt` (32), and `rectf_fixture.txt` (4) and matched row-for-row.
 - Added `.github/workflows/ci.yml`: `rustfmt`, warnings-denied `clippy`, and `test` on Ubuntu and Windows, so compilation and the test suite run on GitHub Actions. The baseline verifier is not run in CI because it requires the read-only sibling reference snapshot.
 - No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+
+## GitHub Actions CI and cross-platform fixes (2026-10-04)
+
+- Added `.github/workflows/ci.yml`: `rustfmt`, warnings-denied `clippy`, and `cargo test` on `ubuntu-latest` and `windows-latest`, plus a build step, triggered on push/PR/manual dispatch. The `tools/verify-baseline.ps1` verifier still runs only locally because it needs the read-only sibling reference snapshot.
+- The first CI run (`37247118771`) failed: clippy flagged `byte_array.rs` `% size != 0` (should be `is_multiple_of`), and the Linux test run exposed `DIFF-PACKEDFLOAT-NAN-001` (a platform-dependent NaN sign in packed-float unpack that passed on Windows).
+- Fixed both; the second run (`37247323096`) is green on both operating systems across all five jobs. This is the first independent, non-Windows confirmation of the test suite.
+- No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
