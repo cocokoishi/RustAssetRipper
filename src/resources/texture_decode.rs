@@ -159,10 +159,7 @@ pub fn decode_dxt1(
 ) -> Result<usize, TextureDecodeError> {
     require_output(output, width, height)?;
     let (blocks_x, blocks_y) = block_grid(width, height);
-    let required = blocks_x
-        .checked_mul(blocks_y)
-        .and_then(|count| count.checked_mul(8))
-        .unwrap_or(usize::MAX);
+    let required = blocks_x.saturating_mul(blocks_y).saturating_mul(8);
     require_input(input, required)?;
     let mut offset = 0;
     for by in 0..blocks_y {
@@ -183,10 +180,7 @@ pub fn decode_dxt3(
 ) -> Result<usize, TextureDecodeError> {
     require_output(output, width, height)?;
     let (blocks_x, blocks_y) = block_grid(width, height);
-    let required = blocks_x
-        .checked_mul(blocks_y)
-        .and_then(|count| count.checked_mul(16))
-        .unwrap_or(usize::MAX);
+    let required = blocks_x.saturating_mul(blocks_y).saturating_mul(16);
     require_input(input, required)?;
     let mut offset = 0;
     for by in 0..blocks_y {
@@ -249,10 +243,7 @@ pub fn decode_dxt5(
 ) -> Result<usize, TextureDecodeError> {
     require_output(output, width, height)?;
     let (blocks_x, blocks_y) = block_grid(width, height);
-    let required = blocks_x
-        .checked_mul(blocks_y)
-        .and_then(|count| count.checked_mul(16))
-        .unwrap_or(usize::MAX);
+    let required = blocks_x.saturating_mul(blocks_y).saturating_mul(16);
     require_input(input, required)?;
     let mut offset = 0;
     for by in 0..blocks_y {
@@ -291,8 +282,8 @@ fn decode_packed<const N: usize>(
     mut convert: impl FnMut(&[u8]) -> [u8; 4],
 ) -> Result<usize, TextureDecodeError> {
     require_output(output, width, height)?;
-    let pixels = width.checked_mul(height).unwrap_or(usize::MAX);
-    let required = pixels.checked_mul(N).unwrap_or(usize::MAX);
+    let pixels = width.saturating_mul(height);
+    let required = pixels.saturating_mul(N);
     require_input(input, required)?;
     for index in 0..pixels {
         let source = &input[index * N..index * N + N];
