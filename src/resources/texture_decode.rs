@@ -274,13 +274,43 @@ pub fn decode_dxt5(
     Ok(offset)
 }
 
-fn read_dxt5_alpha_block(block: &[u8]) -> ([u8; 8], u64) {
-    let table = dxt5_alpha_table(block[0], block[1]);
+fn read_bc4_alpha_block(block: &[u8]) -> ([u8; 8], u64) {
+    let table = bc4_alpha_table(block[0], block[1]);
     let mut bits = 0u64;
     for (index, byte) in block[2..8].iter().enumerate() {
         bits |= u64::from(*byte) << (8 * index);
     }
     (table, bits)
+}
+
+/// The `BcHelpers.SmoothAlphaBlock` table: like the DXT5 alpha table but with `+1` rounding
+/// before the division, so the `Bc` decoders disagree with the `Dxt` decoder on some endpoints.
+fn bc4_alpha_table(alpha0: u8, alpha1: u8) -> [u8; 8] {
+    let a0 = u32::from(alpha0);
+    let a1 = u32::from(alpha1);
+    if alpha0 > alpha1 {
+        [
+            alpha0,
+            alpha1,
+            ((6 * a0 + a1 + 1) / 7) as u8,
+            ((5 * a0 + 2 * a1 + 1) / 7) as u8,
+            ((4 * a0 + 3 * a1 + 1) / 7) as u8,
+            ((3 * a0 + 4 * a1 + 1) / 7) as u8,
+            ((2 * a0 + 5 * a1 + 1) / 7) as u8,
+            ((a0 + 6 * a1 + 1) / 7) as u8,
+        ]
+    } else {
+        [
+            alpha0,
+            alpha1,
+            ((4 * a0 + a1 + 1) / 5) as u8,
+            ((3 * a0 + 2 * a1 + 1) / 5) as u8,
+            ((2 * a0 + 3 * a1 + 1) / 5) as u8,
+            ((a0 + 4 * a1 + 1) / 5) as u8,
+            0,
+            255,
+        ]
+    }
 }
 
 /// `Bc4.Decompress`: one interpolated channel in the red slot, with `G = B = 0`, `A = 255`.
@@ -297,7 +327,7 @@ pub fn decode_bc4(
     let mut offset = 0;
     for by in 0..blocks_y {
         for bx in 0..blocks_x {
-            let (table, bits) = read_dxt5_alpha_block(&input[offset..offset + 8]);
+            let (table, bits) = read_bc4_alpha_block(&input[offset..offset + 8]);
             for py in 0..4 {
                 for px in 0..4 {
                     let x = bx * 4 + px;
@@ -332,8 +362,8 @@ pub fn decode_bc5(
     for by in 0..blocks_y {
         for bx in 0..blocks_x {
             let block = &input[offset..offset + 16];
-            let (red_table, red_bits) = read_dxt5_alpha_block(&block[0..8]);
-            let (green_table, green_bits) = read_dxt5_alpha_block(&block[8..16]);
+            let (red_table, red_bits) = read_bc4_alpha_block(&block[0..8]);
+            let (green_table, green_bits) = read_bc4_alpha_block(&block[8..16]);
             for py in 0..4 {
                 for px in 0..4 {
                     let x = bx * 4 + px;
@@ -512,6 +542,7 @@ mod tests {
             "DXT3" => decode_dxt3(input, width, height, &mut output),
             "DXT5" => decode_dxt5(input, width, height, &mut output),
             "BC4" => decode_bc4(input, width, height, &mut output),
+            "BC4T" => decode_bc4(input, width, height, &mut output),
             "BC5" => decode_bc5(input, width, height, &mut output),
             "RGBA32" => decode_rgba32(input, width, height, &mut output),
             "RGB24" => decode_rgb24(input, width, height, &mut output),
@@ -552,6 +583,6 @@ mod tests {
             assert_eq!(output, expected_output, "output {line}");
             rows += 1;
         }
-        assert_eq!(rows, 27);
+        assert_eq!(rows, 33);
     }
 }
