@@ -7,6 +7,8 @@ pub mod animator_enums;
 pub mod atc_yuy2;
 pub mod avatar;
 pub mod avatar_constant;
+pub mod bc7;
+pub mod bc7_tables;
 pub mod blend_tree_node;
 pub mod blend_tree_node_constant;
 pub mod bounds;
