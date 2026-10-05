@@ -1973,3 +1973,11 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Genuine original-runtime differential: probe `Temp/opencode/texprobe2` decoded 24 blocks/images against the shipped DLL; 5 rows are committed as `src/resources/atc_yuy2_fixture.txt` and 19 as `src/resources/wide_format_fixture.txt`, all matched byte-for-byte.
 - Recorded `DIFF-ATC-COLOR-001`: ATC uses bit-replicating `Extend` and `5/8`/`3/8` interpolation, with a distinct explicit-alpha branch.
 - GitHub Actions run `37251358484` is green across all five jobs. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+
+## BC7 texture decoder (2026-10-04)
+
+- Added `src/resources/bc7.rs` and `src/resources/bc7_tables.rs`, ported from `AssetRipper.TextureDecoder`'s `BcHelpers.DecompressBc7`/`Bc7Tables`/`BitStream`. The large partition tables were mechanically extracted from the package source (`Bc7Tables.cs`) rather than transcribed, and committed as Rust data.
+- Genuine original-runtime differential: probe `Temp/opencode/bc7probe` decoded one block per mode plus invalid and payload variants; 16 rows are committed as `src/resources/bc7_fixture.txt` and matched byte-for-byte.
+- Texture format coverage now additionally includes BC7. Still unported: BC6H, ASTC, PVRTC, the `TextureConverter` mip/layer/`GraphicsFormat` dispatch, Crunch, and the image writers.
+- GitHub Actions run `37251920277` is green across all five jobs. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
