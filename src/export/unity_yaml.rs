@@ -1386,6 +1386,33 @@ mod tests {
             );
         }
     }
+
+    /// Differential against `float.ToString(CultureInfo.InvariantCulture)` (probe
+    /// `Temp/opencode/floatprobe`): the exact call behind `SerializedProperty`
+    /// float rendering in shader dummy exports.
+    #[test]
+    fn float_tostring_matches_the_reference_runtime() {
+        let fixture = include_str!("float_tostring_fixture.txt");
+        let mut rows = 0;
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut parts = line.splitn(3, '|');
+            assert_eq!(parts.next(), Some("FLOAT"), "{line}");
+            let bits = u32::from_str_radix(parts.next().expect("a bits word"), 16).unwrap();
+            let expected = parts.next().expect("a text word");
+            assert!(parts.next().is_none(), "{line}");
+            assert_eq!(
+                format_dotnet_f32(f32::from_bits(bits)),
+                expected,
+                "f32 {bits:#010X}"
+            );
+            rows += 1;
+        }
+        assert_eq!(rows, 28, "all probed float rows are asserted");
+    }
     /// Byte-for-byte differential against the reference `AssetRipper.Yaml` runtime layout.
     ///
     /// Expected documents come from the isolated net10.0 probe `Temp/opencode/layoutprobe`

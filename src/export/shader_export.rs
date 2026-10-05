@@ -403,9 +403,21 @@ pub enum ShaderTextExportError {
     /// The shader has neither script text nor a parsed form, so neither the `Simple`
     /// nor the dummy path applies.
     MissingScriptAndParsedForm,
-    /// The dummy path needs a parsed `SerializedShader` model (property block plus
-    /// template selection over generated objects), which is not ported.
-    ParsedFormUnsupported,
+    /// A serialized property has an unmapped type number.
+    UnsupportedPropertyType {
+        /// The raw `SerializedPropertyType` discriminant.
+        value: i32,
+    },
+    /// A texture property has an unmapped dimension.
+    UnsupportedTextureDimension {
+        /// The raw `TexDim` value.
+        value: i32,
+    },
+    /// No template body matches the best-template name.
+    MissingTemplateBody {
+        /// The template name.
+        name: String,
+    },
     /// The script has no `SubShader`, so the unparsed dummy path fails like the source
     /// `subshaderIndex < 0` return.
     MissingSubShader,
@@ -421,10 +433,16 @@ impl core::fmt::Display for ShaderTextExportError {
                 formatter,
                 "shader has neither script text nor a parsed form"
             ),
-            Self::ParsedFormUnsupported => write!(
+            Self::UnsupportedPropertyType { value } => write!(
                 formatter,
-                "shader dummy export with a parsed form is not supported"
+                "serialized shader property type {value} isn't supported"
             ),
+            Self::UnsupportedTextureDimension { value } => {
+                write!(formatter, "texture dimension {value} isn't supported")
+            }
+            Self::MissingTemplateBody { name } => {
+                write!(formatter, "no template body for '{name}'")
+            }
             Self::MissingSubShader => write!(
                 formatter,
                 "shader script has no SubShader for the dummy path"
@@ -443,6 +461,128 @@ impl From<crate::resources::shader::ShaderViewError> for ShaderTextExportError {
     fn from(error: crate::resources::shader::ShaderViewError) -> Self {
         Self::View(error)
     }
+}
+
+/// A parsed shader property and form live in `crate::resources::shader` next to the
+/// field view that decodes them; rendering stays here.
+pub use crate::resources::shader::{ParsedShaderForm, ParsedShaderProperty};
+
+/// `DummyShaderTextExporter.Export(ISerializedProperty)`: one property line with a
+/// two-tab indent, stored attributes plus flag keywords in source order, the
+/// `name ("description", type) = default` shape, and invariant float rendering.
+pub fn render_parsed_property(
+    property: &ParsedShaderProperty,
+) -> Result<String, ShaderTextExportError> {
+    use crate::export::unity_yaml::format_dotnet_f32;
+
+    let mut line = String::from("\t\t");
+    for attribute in &property.attributes {
+        line.push_str(&format!("[{attribute}] "));
+    }
+    const FLAG_KEYWORDS: &[(u32, &str)] = &[
+        (1 << 0, "[HideInInspector] "),
+        (1 << 1, "[PerRendererData] "),
+        (1 << 2, "[NoScaleOffset] "),
+        (1 << 3, "[Normal] "),
+        (1 << 4, "[HDR] "),
+        (1 << 5, "[Gamma] "),
+    ];
+    for (bit, keyword) in FLAG_KEYWORDS {
+        if property.flags & bit != 0 {
+            line.push_str(keyword);
+        }
+    }
+    let values = property.default_values;
+    let (type_word, default_word) = match property.type_number {
+        0 | 1 => (
+            "Vector".to_owned(),
+            format!(
+                "({},{},{},{})",
+                format_dotnet_f32(values[0]),
+                format_dotnet_f32(values[1]),
+                format_dotnet_f32(values[2]),
+                format_dotnet_f32(values[3])
+            ),
+        ),
+        2 => ("Float".to_owned(), format_dotnet_f32(values[0])),
+        3 => (
+            format!(
+                "Range({}, {})",
+                format_dotnet_f32(values[1]),
+                format_dotnet_f32(values[2])
+            ),
+            format_dotnet_f32(values[0]),
+        ),
+        4 => (
+            texture_dimension_keyword(property.texture_dimension)
+                .ok_or(ShaderTextExportError::UnsupportedTextureDimension {
+                    value: property.texture_dimension,
+                })?
+                .to_owned(),
+            format!("\"{}\" {{}}", property.default_texture_name),
+        ),
+        5 => ("Int".to_owned(), format_dotnet_f32(values[0])),
+        other => {
+            return Err(ShaderTextExportError::UnsupportedPropertyType { value: other });
+        }
+    };
+    line.push_str(&format!(
+        "{} (\"{}\", {type_word}) = {default_word}\n",
+        property.name, property.description
+    ));
+    Ok(line)
+}
+
+/// `DummyShaderTextExporter.Export(ISerializedProperties)`: the indented
+/// `Properties` block.
+pub fn render_parsed_properties(
+    properties: &[ParsedShaderProperty],
+) -> Result<String, ShaderTextExportError> {
+    let mut block = String::from("\tProperties {\n");
+    for property in properties {
+        block.push_str(&render_parsed_property(property)?);
+    }
+    block.push_str("\t}\n");
+    Ok(block)
+}
+
+/// The parsed-form dummy body: the best template text for the property facts, or
+/// the fallback body when the catalog is empty. Templates match by name against
+/// the vendored bodies, since the catalog and body orders differ.
+pub fn parsed_dummy_body(form: &ParsedShaderForm) -> Result<String, ShaderTextExportError> {
+    let facts: Vec<ShaderPropertyFact<'_>> = form
+        .properties
+        .iter()
+        .map(|property| ShaderPropertyFact {
+            name: property.name.as_str(),
+            type_number: property.type_number,
+        })
+        .collect();
+    let best = best_template_index(TEMPLATE_CATALOG, &facts).map(|index| TEMPLATE_CATALOG[index].0);
+    match best {
+        Some(name) => templates::all()
+            .into_iter()
+            .find(|(template_name, _)| *template_name == name)
+            .map(|(_, body)| body)
+            .ok_or_else(|| ShaderTextExportError::MissingTemplateBody {
+                name: name.to_owned(),
+            }),
+        None => Ok(fallback_dummy_shader()),
+    }
+}
+
+/// The parsed-form dummy output: header, rendered properties, marker, best template
+/// or fallback body, and the optional fallback and custom-editor trailers.
+pub fn export_parsed_dummy(form: &ParsedShaderForm) -> Result<String, ShaderTextExportError> {
+    let properties_block = render_parsed_properties(&form.properties)?;
+    let body = parsed_dummy_body(form)?;
+    Ok(render_parsed_dummy(
+        &form.name,
+        &properties_block,
+        &body,
+        &form.fallback_name,
+        &form.custom_editor_name,
+    ))
 }
 
 /// Assemble the unparsed dummy output on raw bytes: the script header up to (not
@@ -493,8 +633,8 @@ pub fn export_shader_text(
             Err(ShaderTextExportError::YamlModeWritesAsset)
         }
         crate::export::exporter_match::ShaderExporterChoice::Dummy => {
-            if view.has_parsed_form {
-                return Err(ShaderTextExportError::ParsedFormUnsupported);
+            if let Some(form) = &view.parsed {
+                return Ok(export_parsed_dummy(form)?.into_bytes());
             }
             let Some(script) = view.script.as_deref() else {
                 return Err(ShaderTextExportError::MissingScriptAndParsedForm);
@@ -509,13 +649,14 @@ pub fn export_shader_text(
 mod tests {
     use super::unity_patches::{patch_file_name, plan_patch_write, PatchWrite};
     use super::{
-        best_template_index, export_shader_text, fallback_dummy_shader,
+        best_template_index, export_parsed_dummy, export_shader_text, fallback_dummy_shader,
         property_declaration_keyword, render_parsed_dummy, render_unparsed_dummy,
         render_unparsed_dummy_bytes, requirement_matches, strip_carriage_returns, template_matches,
         templates, texture_dimension_keyword, yaml_shader_patch_texts, yaml_shader_patches,
-        ShaderPropertyFact, ShaderTextExportError, TemplateMatchError, TemplateRequirement,
-        DUMMY_MARKER_LINE, FILE_LOCKER_PATCH_MIN_VERSION, PROPERTY_FLAG_KEYWORDS,
-        REGISTER_PATCH_MIN_VERSION, TEMPLATE_CATALOG, YAML_SHADER_EXTENSION,
+        ParsedShaderForm, ShaderPropertyFact, ShaderTextExportError, TemplateMatchError,
+        TemplateRequirement, DUMMY_MARKER_LINE, FILE_LOCKER_PATCH_MIN_VERSION,
+        PROPERTY_FLAG_KEYWORDS, REGISTER_PATCH_MIN_VERSION, TEMPLATE_CATALOG,
+        YAML_SHADER_EXTENSION,
     };
 
     #[test]
@@ -719,6 +860,7 @@ mod tests {
                 name: None,
                 script: Some(script.as_bytes().to_vec()),
                 has_parsed_form: false,
+                parsed: None,
             };
             let admits = simple_admits == "simple-admits=1";
             assert_eq!(
@@ -790,36 +932,169 @@ mod tests {
         assert_eq!(rows, 6, "all six probed rows are asserted");
     }
 
+    /// Byte-for-byte differential against the reference parsed-form dummy path
+    /// (probe `Temp/opencode/shaderexport`): real 2019.4 `Shader.Create` instances
+    /// with a `ParsedForm` built through the generated API, calling the shipped
+    /// `DummyShaderTextExporter.ExportShader`. Property lines, template selection,
+    /// and fallback/custom-editor trailers must match exactly.
+    #[test]
+    fn parsed_dummy_text_matches_the_reference_runtime() {
+        use crate::export::settings::ShaderExportMode;
+        use crate::resources::shader::{ParsedShaderForm, ParsedShaderProperty, ShaderView};
+
+        let fixture = include_str!("shader_parsed_fixture.txt");
+        let mut current_tag = String::new();
+        let mut form = ParsedShaderForm::default();
+        let mut expected: Vec<u8> = Vec::new();
+        let mut rows = 0;
+        let flush = |tag: &str, form: &ParsedShaderForm, expected: &[u8]| {
+            assert!(!expected.is_empty(), "{tag} has no probed output");
+            // Direct assembly matches the probed text exactly: the shipped DLL
+            // templates agree with the frozen snapshot sources (Default spaced,
+            // the other three unspaced), so no normalization applies.
+            let probed = String::from_utf8(expected.to_vec()).unwrap();
+            // Direct assembly matches the probed text exactly.
+            assert_eq!(export_parsed_dummy(form), Ok(probed.clone()), "{tag}");
+            // Through the stack, the parsed form wins under Dummy and Decompile
+            // (no decompiled script is present); Yaml has no text form.
+            let view = ShaderView {
+                name: None,
+                script: None,
+                has_parsed_form: true,
+                parsed: Some(form.clone()),
+            };
+            let expected_bytes = probed.into_bytes();
+            assert_eq!(
+                export_shader_text(&view, ShaderExportMode::Dummy)
+                    .map_err(|error| error.to_string()),
+                Ok(expected_bytes.clone()),
+                "{tag}"
+            );
+            assert_eq!(
+                export_shader_text(&view, ShaderExportMode::Decompile)
+                    .map_err(|error| error.to_string()),
+                Ok(expected_bytes),
+                "{tag}"
+            );
+            assert_eq!(
+                export_shader_text(&view, ShaderExportMode::Yaml),
+                Err(ShaderTextExportError::YamlModeWritesAsset),
+                "{tag}"
+            );
+        };
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut parts = line.splitn(4, '|');
+            assert_eq!(parts.next(), Some("SPARSED"), "{line}");
+            let tag = parts.next().expect("a probe tag").to_owned();
+            if tag != current_tag && !current_tag.is_empty() {
+                flush(&current_tag, &form, &expected);
+                rows += 1;
+                form = ParsedShaderForm::default();
+                expected = Vec::new();
+            }
+            current_tag = tag;
+            match parts.next().expect("a row kind") {
+                "ok" => assert_eq!(parts.next(), Some("1"), "{line}"),
+                "meta" => {
+                    let rest = parts.next().expect("meta fields");
+                    let mut fields = rest.splitn(3, '|');
+                    form.name = fields.next().expect("a shader name").to_owned();
+                    form.fallback_name = fields.next().expect("a fallback name").to_owned();
+                    form.custom_editor_name =
+                        fields.next().expect("a custom editor name").to_owned();
+                }
+                "prop" => {
+                    let rest = parts.next().expect("property fields");
+                    let mut fields = rest.split('|');
+                    let name = fields.next().expect("a property name").to_owned();
+                    let description = fields.next().expect("a description").to_owned();
+                    let type_number: i32 = fields.next().expect("a type").parse().unwrap();
+                    let mut defaults = [0.0f32; 4];
+                    for slot in &mut defaults {
+                        *slot = f32::from_bits(
+                            u32::from_str_radix(fields.next().expect("default bits"), 16).unwrap(),
+                        );
+                    }
+                    let flags: u32 = fields.next().expect("flags").parse().unwrap();
+                    let attributes = fields
+                        .next()
+                        .expect("attributes")
+                        .split(',')
+                        .filter(|attribute| !attribute.is_empty())
+                        .map(str::to_owned)
+                        .collect();
+                    let texture_dimension: i32 = fields.next().expect("a texdim").parse().unwrap();
+                    let default_texture_name = fields.next().expect("a default name").to_owned();
+                    assert!(fields.next().is_none(), "{line}");
+                    form.properties.push(ParsedShaderProperty {
+                        name,
+                        description,
+                        attributes,
+                        flags,
+                        type_number,
+                        default_values: defaults,
+                        texture_dimension,
+                        default_texture_name,
+                    });
+                }
+                "text" => {
+                    expected = unescape_fixture_text(parts.next().expect("escaped text"));
+                }
+                other => panic!("unexpected row kind {other}"),
+            }
+        }
+        flush(&current_tag, &form, &expected);
+        rows += 1;
+        assert_eq!(rows, 3, "all probed parsed cases are asserted");
+    }
+
     #[test]
     fn shader_text_choices_without_decompiled_text() {
         use crate::export::settings::ShaderExportMode;
         use crate::resources::shader::ShaderView;
 
-        // A compiled script reaches the mode exporter; Yaml has no text form and a
-        // present parsed form has no ported model.
+        // A compiled script reaches the mode exporter; Yaml has no text form.
         let compiled = ShaderView {
             name: None,
             script: Some(b"Shader \"x\" {\nProgram \"vp\" {}\n}".to_vec()),
             has_parsed_form: false,
+            parsed: None,
         };
         assert!(matches!(
             export_shader_text(&compiled, ShaderExportMode::Yaml),
             Err(ShaderTextExportError::YamlModeWritesAsset)
         ));
+        // A decoded parsed form renders through the stack like the reference.
         let parsed = ShaderView {
             name: None,
             script: None,
             has_parsed_form: true,
+            parsed: Some(ParsedShaderForm {
+                name: "x".to_owned(),
+                properties: Vec::new(),
+                fallback_name: String::new(),
+                custom_editor_name: String::new(),
+            }),
         };
         assert_eq!(
-            export_shader_text(&parsed, ShaderExportMode::Dummy),
-            Err(ShaderTextExportError::ParsedFormUnsupported)
+            export_shader_text(&parsed, ShaderExportMode::Dummy)
+                .map(|bytes| String::from_utf8(bytes).unwrap()),
+            Ok(
+                "Shader \"x\" {\n\tProperties {\n\t}\n\t//DummyShaderTextExporter\n".to_owned()
+                    + &templates::all()[0].1
+                    + "\n}"
+            )
         );
         // Neither script nor parsed form reaches neither text path.
         let empty = ShaderView {
             name: None,
             script: None,
             has_parsed_form: false,
+            parsed: None,
         };
         assert_eq!(
             export_shader_text(&empty, ShaderExportMode::Dummy),
@@ -830,6 +1105,7 @@ mod tests {
             name: None,
             script: Some(Vec::new()),
             has_parsed_form: false,
+            parsed: None,
         };
         assert_eq!(
             export_shader_text(&blank, ShaderExportMode::Dummy),

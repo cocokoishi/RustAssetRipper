@@ -19,7 +19,9 @@
 use std::error::Error;
 use std::fmt::{self, Display};
 
-use crate::serialized_file::object::{SerializedValue, SerializedValueLookupError};
+use crate::serialized_file::object::{
+    SerializedFieldValue, SerializedValue, SerializedValueLookupError,
+};
 
 /// The serialized shader field carrying source text.
 pub const SHADER_SCRIPT_FIELD: &str = "m_Script";
@@ -68,7 +70,7 @@ impl Display for ShaderViewError {
             Self::WrongType { field, actual } => {
                 write!(
                     formatter,
-                    "Shader field '{field}' has kind {actual}, expected a string"
+                    "Shader field '{field}' has kind {actual}, which the exporter cannot read here"
                 )
             }
         }
@@ -77,8 +79,52 @@ impl Display for ShaderViewError {
 
 impl Error for ShaderViewError {}
 
+/// One parsed shader property: `ISerializedProperty` as the dummy exporter reads it.
+///
+/// Strings are decoded lossily: property text lands in emitted shader source, so
+/// undecodable bytes become the replacement character rather than failing the
+/// whole export.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ParsedShaderProperty {
+    /// `Name`.
+    pub name: String,
+    /// `Description`.
+    pub description: String,
+    /// Stored `Attributes` entries, in order.
+    pub attributes: Vec<String>,
+    /// `Flags` word; bits 0-5 map to the fixed keyword spellings.
+    pub flags: u32,
+    /// `SerializedPropertyType` discriminant.
+    pub type_number: i32,
+    /// `DefValue_0_` through `DefValue_3_`.
+    pub default_values: [f32; 4],
+    /// `DefTexture.TexDim`.
+    pub texture_dimension: i32,
+    /// `DefTexture.DefaultName`.
+    pub default_texture_name: String,
+}
+
+/// A parsed shader form: `ISerializedShader` as the dummy exporter reads it.
+///
+/// The `m_`-prefixed serialized names follow the public class-48 TypeTree layout
+/// (`m_ParsedForm` with `m_Name`, `m_PropInfo`/`m_Props`, `m_FallbackName`,
+/// `m_CustomEditorName`; each property with `m_Attributes`, `m_Flags`, `m_Name`,
+/// `m_Description`, `m_Type`, `m_DefValue_0..3`, and `m_DefTexture` with
+/// `m_TexDim`/`m_DefaultName`). No local class-48 TypeTree dump has confirmed them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ParsedShaderForm {
+    /// `Name`.
+    pub name: String,
+    /// `PropInfo.Props`, in order.
+    pub properties: Vec<ParsedShaderProperty>,
+    /// `FallbackName`.
+    pub fallback_name: String,
+    /// `CustomEditorName`.
+    pub custom_editor_name: String,
+}
+
 /// The fields `SimpleShaderExporter` and `DummyShaderTextExporter` read from a shader.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ShaderView {
     /// Raw `m_Name` bytes, when present.
     pub name: Option<Vec<u8>>,
@@ -86,6 +132,8 @@ pub struct ShaderView {
     pub script: Option<Vec<u8>>,
     /// Whether `m_ParsedForm` is present.
     pub has_parsed_form: bool,
+    /// The decoded parsed form, when `m_ParsedForm` is present.
+    pub parsed: Option<ParsedShaderForm>,
 }
 
 impl ShaderView {
@@ -94,11 +142,191 @@ impl ShaderView {
     /// Absent `m_Script`/`m_ParsedForm` fields read as none/absent (the 2019+ layouts
     /// drop `m_Script`); a present-but-wrongly-typed field is an explicit error.
     pub fn from_value(root: &SerializedValue) -> Result<Self, ShaderViewError> {
+        let parsed = match lookup(root, SHADER_PARSED_FORM_FIELD)? {
+            None => None,
+            Some(value) => Some(read_parsed_form(value)?),
+        };
         Ok(Self {
             name: optional_string(root, SHADER_NAME_FIELD)?,
             script: optional_string(root, SHADER_SCRIPT_FIELD)?,
-            has_parsed_form: lookup(root, SHADER_PARSED_FORM_FIELD)?.is_some(),
+            has_parsed_form: parsed.is_some(),
+            parsed,
         })
+    }
+}
+
+fn read_parsed_form(value: &SerializedValue) -> Result<ParsedShaderForm, ShaderViewError> {
+    let form = as_struct(value, SHADER_PARSED_FORM_FIELD)?;
+    let mut properties = Vec::new();
+    if let Some(prop_info) = find_field(form, "m_PropInfo")? {
+        let info = as_struct(prop_info, "m_PropInfo")?;
+        if let Some(props) = find_field(info, "m_Props")? {
+            let items = as_array(props, "m_Props")?;
+            for item in items {
+                properties.push(read_parsed_property(item)?);
+            }
+        }
+    }
+    Ok(ParsedShaderForm {
+        name: optional_lossy_string(form, "m_Name")?.unwrap_or_default(),
+        properties,
+        fallback_name: optional_lossy_string(form, "m_FallbackName")?.unwrap_or_default(),
+        custom_editor_name: optional_lossy_string(form, "m_CustomEditorName")?.unwrap_or_default(),
+    })
+}
+
+fn read_parsed_property(value: &SerializedValue) -> Result<ParsedShaderProperty, ShaderViewError> {
+    let prop = as_struct(value, "m_Props")?;
+    let mut attributes = Vec::new();
+    if let Some(list) = find_field(prop, "m_Attributes")? {
+        for item in as_array(list, "m_Attributes")? {
+            match item {
+                SerializedValue::StringBytes(bytes) => {
+                    attributes.push(String::from_utf8_lossy(bytes).into_owned());
+                }
+                other => {
+                    return Err(ShaderViewError::WrongType {
+                        field: "m_Attributes",
+                        actual: serialized_kind(other),
+                    });
+                }
+            }
+        }
+    }
+    let mut default_values = [0.0f32; 4];
+    for (index, field) in [
+        "m_DefValue_0_",
+        "m_DefValue_1_",
+        "m_DefValue_2_",
+        "m_DefValue_3_",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if let Some(value) = find_field(prop, field)? {
+            match value {
+                SerializedValue::F32(number) => default_values[index] = *number,
+                other => {
+                    return Err(ShaderViewError::WrongType {
+                        field: "m_DefValue",
+                        actual: serialized_kind(other),
+                    });
+                }
+            }
+        }
+    }
+    let (texture_dimension, default_texture_name) = match find_field(prop, "m_DefTexture")? {
+        None => (0, String::new()),
+        Some(texture) => {
+            let fields = as_struct(texture, "m_DefTexture")?;
+            (
+                optional_i32_in(fields, "m_TexDim")?.unwrap_or(0),
+                optional_lossy_string(fields, "m_DefaultName")?.unwrap_or_default(),
+            )
+        }
+    };
+    Ok(ParsedShaderProperty {
+        name: optional_lossy_string(prop, "m_Name")?.unwrap_or_default(),
+        description: optional_lossy_string(prop, "m_Description")?.unwrap_or_default(),
+        attributes,
+        flags: optional_u32_in(prop, "m_Flags")?.unwrap_or(0),
+        type_number: optional_i32_in(prop, "m_Type")?.unwrap_or(0),
+        default_values,
+        texture_dimension,
+        default_texture_name,
+    })
+}
+
+fn find_field<'a>(
+    fields: &'a [SerializedFieldValue],
+    name: &'static str,
+) -> Result<Option<&'a SerializedValue>, ShaderViewError> {
+    let mut matching = fields.iter().filter(|field| field.name == name);
+    let Some(first) = matching.next() else {
+        return Ok(None);
+    };
+    if matching.next().is_some() {
+        let match_count = fields.iter().filter(|field| field.name == name).count();
+        return Err(ShaderViewError::FieldLookup {
+            field: name,
+            source: SerializedValueLookupError::DuplicateField {
+                name: name.to_owned(),
+                match_count,
+            },
+        });
+    }
+    Ok(Some(&first.value))
+}
+
+fn as_struct<'a>(
+    value: &'a SerializedValue,
+    field: &'static str,
+) -> Result<&'a [SerializedFieldValue], ShaderViewError> {
+    match value {
+        SerializedValue::Struct(fields) => Ok(fields),
+        other => Err(ShaderViewError::WrongType {
+            field,
+            actual: serialized_kind(other),
+        }),
+    }
+}
+
+fn as_array<'a>(
+    value: &'a SerializedValue,
+    field: &'static str,
+) -> Result<&'a [SerializedValue], ShaderViewError> {
+    match value {
+        SerializedValue::Array(items) => Ok(items),
+        other => Err(ShaderViewError::WrongType {
+            field,
+            actual: serialized_kind(other),
+        }),
+    }
+}
+
+fn optional_lossy_string(
+    fields: &[SerializedFieldValue],
+    name: &'static str,
+) -> Result<Option<String>, ShaderViewError> {
+    match find_field(fields, name)? {
+        None => Ok(None),
+        Some(SerializedValue::StringBytes(bytes)) => {
+            Ok(Some(String::from_utf8_lossy(bytes).into_owned()))
+        }
+        Some(other) => Err(ShaderViewError::WrongType {
+            field: "m_Name",
+            actual: serialized_kind(other),
+        }),
+    }
+}
+
+fn optional_i32_in(
+    fields: &[SerializedFieldValue],
+    name: &'static str,
+) -> Result<Option<i32>, ShaderViewError> {
+    match find_field(fields, name)? {
+        None => Ok(None),
+        Some(SerializedValue::I32(value)) => Ok(Some(*value)),
+        Some(SerializedValue::U32(value)) => Ok(Some(*value as i32)),
+        Some(other) => Err(ShaderViewError::WrongType {
+            field: "m_Type",
+            actual: serialized_kind(other),
+        }),
+    }
+}
+
+fn optional_u32_in(
+    fields: &[SerializedFieldValue],
+    name: &'static str,
+) -> Result<Option<u32>, ShaderViewError> {
+    match find_field(fields, name)? {
+        None => Ok(None),
+        Some(SerializedValue::U32(value)) => Ok(Some(*value)),
+        Some(SerializedValue::I32(value)) => Ok(Some(*value as u32)),
+        Some(other) => Err(ShaderViewError::WrongType {
+            field: "m_Flags",
+            actual: serialized_kind(other),
+        }),
     }
 }
 
