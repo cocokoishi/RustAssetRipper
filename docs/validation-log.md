@@ -2256,3 +2256,9 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Inventoried `AssetRipper/Localizations/`: 23 locale JSON files (`en_US.json` canonical with 272 keys via JSON parse; `id.json` effectively empty, exercising the fallback). Rules read directly: default `en-US`, `LoadLanguage` validation with hyphen normalization, per-key en-US fallback with a switch-default arm (`LocalizationGenerator.cs:46-73`).
 - `PRODUCT-I18N-001` moves to `已调查`; no Rust localization module exists yet — the full table port stays open.
 - No Rust source changed, so no cargo runs were needed for this increment. CI run `37306221817` green (all five jobs) for remote `main` = `b1f8126`; local matches. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+## GUI surface audit (2026-10-06)
+
+- Inventoried `GUI.Free` (3-line AOT host over `GUI.Web`) and `GUI.Web` (page/route inventory, `GameFileLoader` load/export call chains, Ookii `--Port/--Log/--LogPath/--local-web-file/--Headless` flag table). Key facts: no CLI export verb exists (export is HTTP POST only), output paths reject Desktop/Documents/Downloads, exports use timestamped subfolders.
+- `PRODUCT-GUI-001` moves to `已调查`. Also corrected wrong symbol names in `PRODUCT-CLI-INSPECT-001` (`LoadGame`/`ExportGame` do not exist; actual names are `LoadAndProcess`/`ExportUnityProject`/`ExportPrimaryContent`).
+- No Rust source changed, so no cargo runs were needed for this increment. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.

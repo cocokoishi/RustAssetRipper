@@ -624,5 +624,11 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Inventoried 23 locale files (272-key `en_US.json`; empty `id.json`) with fallback rules read from `Localization.cs`/`LanguageCodes.cs`/`LocalizationGenerator.cs`. `PRODUCT-I18N-001` moves to `已调查`. Docs-only increment; CI run `37306221817` green (all five jobs) for remote `main` = `b1f8126`; local matches.
 - Next: `TYPE-SCRIPT-001` remainder (manager resolutions), CLI exposure + GUID freshness + folder sidecars, settings persistence, and `PRODUCT-GUI-001`.
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 77. Checkpoint: GUI surface audit (2026-10-06)
+
+- Inventoried `GUI.Free` + `GUI.Web` pages/routes/flags with call chains read directly. `PRODUCT-GUI-001` moves to `已调查`; fixed wrong `GameFileLoader` symbols in `PRODUCT-CLI-INSPECT-001`. Docs-only increment; no cargo runs needed.
+- Next: `TYPE-SCRIPT-001` remainder (manager resolutions), CLI exposure + GUID freshness + folder sidecars, and settings persistence.
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
 - Next: `TYPE-SCRIPT-001` remainder (manager resolutions), CLI exposure + GUID freshness + folder sidecars, and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
