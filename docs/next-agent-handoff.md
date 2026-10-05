@@ -309,3 +309,10 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Added `src/resources/texture_format.rs` and `src/resources/graphics_format.rs`, each with a full-enum original-runtime differential (91 and 156 rows).
 - These feed the texture exporter, which is still unported; the mapping tables are now pinned exactly.
 - State: 749 library + 23 CLI tests, warnings-denied Clippy, format check, 1,449-file baseline verifier, and `git diff --check` all pass. Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+
+## 35. Checkpoint: pure-logic extensions and GitHub Actions CI (2026-10-04)
+
+- Added the byte-array/bounds/color/matrix/rect modules, each with a committed original-runtime differential fixture.
+- Added `.github/workflows/ci.yml` (rustfmt + clippy -D warnings + test on Ubuntu and Windows); compilation and tests now run on GitHub Actions rather than the local machine. The `tools/verify-baseline.ps1` verifier still runs only locally because it needs the read-only sibling reference snapshot.
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

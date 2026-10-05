@@ -1912,3 +1912,11 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Added `src/resources/texture_format.rs` (`IsCrunched`/`IsDxt`/`IsRgb`) and `src/resources/graphics_format.rs` (`ToTextureFormat` with the `NotSupported`/`NotImplemented`/`ArgumentOutOfRange` errors).
 - Genuine original-runtime differential: probe `Temp/opencode/texprobe` enumerated all 91 `TextureFormat` and all 156 `GraphicsFormat` members and captured every classifier and mapping result (or thrown exception type). The rows are committed as `src/resources/texture_format_fixture.txt` (91) and `src/resources/graphics_format_fixture.txt` (156) and matched row-for-row; four aliased GraphicsFormat values collapse to one match arm.
 - Final verification on Windows with Rust/Cargo 1.98.1: cargo fmt --all -- --check exit 0; cargo test --workspace --locked exit 0 (749 library, 23 CLI, 0 doc tests); cargo clippy --workspace --all-targets --locked -- -D warnings exit 0; tools/verify-baseline.ps1 exit 0 (1,449/1,449 reference files unchanged); git diff --check exit 0. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+
+## Byte-array, bounds, color, matrix, and rect differentials; GitHub Actions CI (2026-10-04)
+
+- Added `src/resources/byte_array.rs` (`SwapBytes`), `src/resources/bounds.rs` (`Bounds`/`AABB` vertex-array bounds), `src/resources/color.rs` (`ColorRGBA32`/`ColorRGBAf` packing and black/white), `src/resources/matrix4x4.rs` (transpose copy/cast), and `src/resources/rectf.rs` (`CopyValues` and derived accessors).
+- Genuine original-runtime differentials: probe `Temp/opencode/miscprobe` captured every behavior; the rows are committed as `byte_array_fixture.txt` (3), `bounds_fixture.txt` (4), `color_fixture.txt` (3), `matrix4x4_fixture.txt` (32), and `rectf_fixture.txt` (4) and matched row-for-row.
+- Added `.github/workflows/ci.yml`: `rustfmt`, warnings-denied `clippy`, and `test` on Ubuntu and Windows, so compilation and the test suite run on GitHub Actions. The baseline verifier is not run in CI because it requires the read-only sibling reference snapshot.
+- No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
