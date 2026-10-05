@@ -4,6 +4,7 @@ use std::fmt::{self, Display, Formatter};
 use crate::io::binary::{BinaryError, BinaryReader};
 
 use super::header::{HeaderError, SerializedFileHeader};
+use super::managed_types::managed_reference as managed_names;
 use super::metadata::{
     unity_version_aligns_arrays, SerializedFileMetadata, TypeTree, TypeTreeNode,
 };
@@ -623,17 +624,23 @@ fn decode_root(
         let children = direct_children(type_tree, node_index, object_index, reader.offset())?;
         let type_name = node.type_name.as_deref().unwrap_or("");
         let node_name = node.name.as_deref().unwrap_or("");
-        let managed_reference_node =
-            matches!(type_name, "managedReference" | "managedRefArrayItem")
-                && children.len() == 1
-                && matches!(
-                    type_tree.nodes[children[0]].name.as_deref(),
-                    Some("rid" | "id")
-                );
-        let registry_node = type_name == "ManagedReferencesRegistry"
-            && node_name == "references"
+        // `TypeTreeNodeStruct.IsManagedReference`: a `managedReference` (or array-item)
+        // node holding one `rid` (or legacy `id`) child.
+        let managed_reference_node = matches!(
+            type_name,
+            managed_names::MANAGED_REFERENCE_NAME
+                | managed_names::MANAGED_REFERENCE_ARRAY_ITEM_NAME
+        ) && children.len() == 1
+            && matches!(
+                type_tree.nodes[children[0]].name.as_deref(),
+                Some(managed_names::REFERENCE_ID_FIELD_NAME | managed_names::INDEX_FIELD_NAME)
+            );
+        // `TypeTreeNodeStruct.IsManagedReferencesRegistry`.
+        let registry_node = type_name == managed_names::REGISTRY_NAME
+            && node_name == managed_names::REGISTRY_FIELD_NAME
             && children.len() > 1;
-        let dynamic_managed_data = type_name == "ReferencedObjectData" && node_name == "data";
+        let dynamic_managed_data = type_name == managed_names::REFERENCED_OBJECT_DATA_NAME
+            && node_name == managed_names::DATA_FIELD_NAME;
         if managed_reference_node || registry_node || dynamic_managed_data {
             return Err(ObjectDecodeError::new(
                 reader.offset(),
@@ -1100,10 +1107,8 @@ fn array_node_for_value(
         {
             let element_type = type_tree.nodes[element_index].type_name.as_deref();
             element_type == node.type_name.as_deref()
-                || matches!(
-                    element_type,
-                    Some("Generic Mono" | "managedReferenceArrayItem")
-                )
+                || element_type == Some("Generic Mono")
+                || is_managed_reference_element(type_tree, element_index, object_index, offset)?
         } else {
             false
         }
@@ -1365,6 +1370,34 @@ fn minimum_encoded_size(
             },
         )
     })
+}
+
+/// `TypeTreeNodeStruct.IsManagedReference` for an array element node: the element type
+/// is `managedReference` (or `managedRefArrayItem`) holding one `rid` (or legacy
+/// `id`) child. This is the predicate `IsNamedVector` applies to SerializeReference
+/// array elements.
+fn is_managed_reference_element(
+    type_tree: &TypeTreeLayout<'_>,
+    node_index: usize,
+    object_index: usize,
+    offset: usize,
+) -> Result<bool, ObjectDecodeError> {
+    let node = &type_tree.nodes[node_index];
+    if !matches!(
+        node.type_name.as_deref(),
+        Some(
+            managed_names::MANAGED_REFERENCE_NAME
+                | managed_names::MANAGED_REFERENCE_ARRAY_ITEM_NAME
+        )
+    ) {
+        return Ok(false);
+    }
+    let children = direct_children(type_tree, node_index, object_index, offset)?;
+    Ok(children.len() == 1
+        && matches!(
+            type_tree.nodes[children[0]].name.as_deref(),
+            Some(managed_names::REFERENCE_ID_FIELD_NAME | managed_names::INDEX_FIELD_NAME)
+        ))
 }
 
 fn direct_children(
@@ -1866,6 +1899,69 @@ mod tests {
     use crate::serialized_file::format_version::FormatVersion;
     use crate::serialized_file::header::SerializedFileHeader;
     use crate::serialized_file::metadata::{SerializedFileMetadata, TypeTree, TypeTreeNode};
+
+    fn layout_node(level: u8, name: &str, type_name: &str) -> TypeTreeNode {
+        TypeTreeNode {
+            level,
+            version: 1,
+            type_flags: 0,
+            type_string_offset: None,
+            name_string_offset: None,
+            type_name: Some(type_name.to_owned()),
+            name: Some(name.to_owned()),
+            byte_size: 0,
+            index: 0,
+            meta_flags: 0,
+            reference_type_hash: None,
+        }
+    }
+
+    fn element_layout(nodes: Vec<TypeTreeNode>) -> super::TypeTreeLayout<'static> {
+        // The layout borrows the tree; leak the box so the test can hold it.
+        let tree: &'static TypeTree = Box::leak(Box::new(TypeTree {
+            nodes,
+            string_buffer: Vec::new(),
+        }));
+        super::TypeTreeLayout::new(tree, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn managed_reference_elements_require_the_full_source_predicate() {
+        // `managedReference` holding one `rid` child matches.
+        let layout = element_layout(vec![
+            layout_node(0, "item", "managedReference"),
+            layout_node(1, "rid", "SInt64"),
+        ]);
+        assert!(super::is_managed_reference_element(&layout, 0, 0, 0).unwrap());
+        // The legacy `id` child matches too.
+        let layout = element_layout(vec![
+            layout_node(0, "item", "managedRefArrayItem"),
+            layout_node(1, "id", "SInt32"),
+        ]);
+        assert!(super::is_managed_reference_element(&layout, 0, 0, 0).unwrap());
+        // A wrong child name does not match.
+        let layout = element_layout(vec![
+            layout_node(0, "item", "managedReference"),
+            layout_node(1, "value", "SInt64"),
+        ]);
+        assert!(!super::is_managed_reference_element(&layout, 0, 0, 0).unwrap());
+        // Two children do not match.
+        let layout = element_layout(vec![
+            layout_node(0, "item", "managedReference"),
+            layout_node(1, "rid", "SInt64"),
+            layout_node(1, "extra", "SInt32"),
+        ]);
+        assert!(!super::is_managed_reference_element(&layout, 0, 0, 0).unwrap());
+        // No children do not match.
+        let layout = element_layout(vec![layout_node(0, "item", "managedRefArrayItem")]);
+        assert!(!super::is_managed_reference_element(&layout, 0, 0, 0).unwrap());
+        // Other element types never match, even with a `rid` child.
+        let layout = element_layout(vec![
+            layout_node(0, "item", "Generic Mono"),
+            layout_node(1, "rid", "SInt64"),
+        ]);
+        assert!(!super::is_managed_reference_element(&layout, 0, 0, 0).unwrap());
+    }
 
     #[test]
     fn structured_values_support_unique_fields_arrays_and_pointer_identity() {

@@ -5,6 +5,7 @@ mod common_strings;
 pub mod file;
 pub mod format_version;
 pub mod header;
+pub mod managed_registry;
 pub mod managed_types;
 pub mod metadata;
 pub mod metadata_prefix;

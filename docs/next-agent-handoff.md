@@ -710,3 +710,9 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Last two `未调查` rows (`PROC-ANIM-001`, `RES-ANIM-001`) moved to `已调查` with per-file mappings; new `PROC-ANIM-PATH-CHECKSUM-001` row with the ported cache kernels (6 tests). Lib suite 976/976 locally, workspace Clippy clean; CI run `37329970095` green (all five jobs) for remote `main` = `cf1ef8f`; local matches.
 - Next: CLI exposure + GUID freshness + folder sidecars, and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 91. Checkpoint: managed-registry framing and named-vector fix (2026-10-06)
+
+- Verified managed-reference literals against `ManagedReferenceTypes`, fixed the named-vector element deviation with the full predicate, and ported the resolver-free registry framing (new `SER-MANAGED-REGISTRY-001`, 4 tests + 6-case predicate test). Lib suite 981/981 locally, workspace Clippy clean; full validation via Actions after push.
+- Next: CLI exposure + GUID freshness + folder sidecars, and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
