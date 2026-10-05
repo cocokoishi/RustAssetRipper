@@ -451,6 +451,45 @@ fn format_unity_guid(bytes: [u8; 16]) -> String {
     value
 }
 
+/// A failure while formatting a `Hash128`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Hash128Error {
+    /// The baseline's `HashHelper.ToString` uses checked 32-bit arithmetic, so a word whose most
+    /// significant byte has the high bit set overflows instead of formatting.
+    Overflow,
+}
+
+impl core::fmt::Display for Hash128Error {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Overflow => {
+                formatter.write_str("Hash128 word overflows the baseline's checked int")
+            }
+        }
+    }
+}
+
+impl std::error::Error for Hash128Error {}
+
+/// `HashHelper.ToString`: each 32-bit word's big-endian hex, the opposite nibble order from a GUID.
+/// The baseline throws on a word whose most significant byte has the high bit set.
+pub fn format_hash128(bytes: [u8; 16]) -> Result<String, Hash128Error> {
+    for word in bytes.chunks_exact(4) {
+        if word[3] >= 0x80 {
+            return Err(Hash128Error::Overflow);
+        }
+    }
+    let mut value = String::with_capacity(32);
+    for word in bytes.chunks_exact(4) {
+        let word = u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
+        for shift in (0..8).rev() {
+            let digit = ((word >> (shift * 4)) & 0x0f) as usize;
+            value.push(b"0123456789abcdef"[digit] as char);
+        }
+    }
+    Ok(value)
+}
+
 struct UnityYamlEmitter {
     output: String,
     pending_whitespace: bool,
@@ -979,6 +1018,36 @@ mod tests {
             format_unity_guid(engine_bytes),
             "0000000000000000e000000000000000"
         );
+    }
+
+    /// Differential against the external `HashHelper.ToString` (probe `Temp/opencode/hashprobe2`).
+    /// A word whose most significant byte has the high bit set overflows the baseline's checked
+    /// arithmetic, so the formatter returns an error for it.
+    #[test]
+    fn hash128_string_matches_the_reference_runtime() {
+        let fixture = include_str!("hash128_fixture.txt");
+        let mut rows = 0;
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let parts: Vec<&str> = line.split('|').collect();
+            assert_eq!(parts[0], "H", "{line}");
+            let mut bytes = [0u8; 16];
+            for (index, chunk) in parts[1].as_bytes().chunks_exact(2).enumerate() {
+                let text = std::str::from_utf8(chunk).unwrap();
+                bytes[index] = u8::from_str_radix(text, 16).unwrap();
+            }
+            let result = format_hash128(bytes);
+            if parts[2] == "OverflowException" {
+                assert_eq!(result, Err(Hash128Error::Overflow), "{line}");
+            } else {
+                assert_eq!(result.unwrap(), parts[2], "{line}");
+            }
+            rows += 1;
+        }
+        assert_eq!(rows, 7);
     }
 
     #[test]

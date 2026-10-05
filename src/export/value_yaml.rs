@@ -13,7 +13,7 @@ use crate::serialized_file::object::{SerializedFieldValue, SerializedValue};
 use super::pointer_map::ProjectPointerResolution;
 use super::scene_collection::ExportAssetIdentity;
 use super::unity_yaml::{
-    format_unity_guid_words, project_pointer_to_unity_yaml, UnityYamlDocument,
+    format_hash128, format_unity_guid_words, project_pointer_to_unity_yaml, UnityYamlDocument,
     UnityYamlMappingStyle, UnityYamlNode, UnityYamlNodeBuildError, UnityYamlNodeKind,
     UnityYamlScalar, UnityYamlSequenceStyle, UnityYamlWriteError,
 };
@@ -229,6 +229,9 @@ pub enum UnityYamlObjectConversionError {
         field_name: String,
         field_index: usize,
     },
+    Hash128Overflow {
+        field_path: String,
+    },
     GuidFieldCount {
         field_path: String,
         expected: usize,
@@ -339,6 +342,10 @@ impl Display for UnityYamlObjectConversionError {
             } => write!(
                 f,
                 "Hash128 byte {field_index} ({field_name:?}) at {field_path:?} is missing, duplicated, or not an unsigned byte"
+            ),
+            Self::Hash128Overflow { field_path } => write!(
+                f,
+                "Hash128 at {field_path:?} overflows the baseline's checked 32-bit arithmetic"
             ),
             Self::GuidFieldCount {
                 field_path,
@@ -1724,19 +1731,10 @@ fn convert_hash128_value(
                 field_path: field_path.to_owned(),
             });
         }
-        let mut hash = String::new();
-        hash.try_reserve_exact(HASH_STRING_LENGTH).map_err(|_| {
-            UnityYamlObjectConversionError::AllocationFailed {
-                resource: "Hash128 YAML string",
-                requested: HASH_STRING_LENGTH,
-            }
-        })?;
-        for chunk in bytes.chunks_exact(4) {
-            let word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-            for shift in (0..8).rev() {
-                hash.push(hex_digit(((word >> (shift * 4)) & 0x0f) as u8));
-            }
-        }
+        let hash =
+            format_hash128(bytes).map_err(|_| UnityYamlObjectConversionError::Hash128Overflow {
+                field_path: field_path.to_owned(),
+            })?;
         mapping
             .insert_field("Hash", UnityYamlNode::string(hash))
             .map_err(UnityYamlObjectConversionError::NodeBuild)?;
