@@ -223,26 +223,26 @@ fn decode_etc2_block(input: &[u8], output: &mut Block) {
                         | (i32::from(input[7]) >> 5 & 6)
                         | (i32::from(input[6]) >> 4 & 1)) as u8;
                     c[8] = (shift(input[7], 2) | (i32::from(input[7]) >> 4 & 3)) as u8;
-                    for y in 0..4 {
-                        for x in 0..4 {
+                    for y in 0..4usize {
+                        for x in 0..4usize {
                             let i = y * 4 + x;
                             let red = clamp255(
-                                (x * (i32::from(c[3]) - i32::from(c[0]))
-                                    + y * (i32::from(c[6]) - i32::from(c[0]))
+                                (x as i32 * (i32::from(c[3]) - i32::from(c[0]))
+                                    + y as i32 * (i32::from(c[6]) - i32::from(c[0]))
                                     + 4 * i32::from(c[0])
                                     + 2)
                                     >> 2,
                             );
                             let green = clamp255(
-                                (x * (i32::from(c[4]) - i32::from(c[1]))
-                                    + y * (i32::from(c[7]) - i32::from(c[1]))
+                                (x as i32 * (i32::from(c[4]) - i32::from(c[1]))
+                                    + y as i32 * (i32::from(c[7]) - i32::from(c[1]))
                                     + 4 * i32::from(c[1])
                                     + 2)
                                     >> 2,
                             );
                             let blue = clamp255(
-                                (x * (i32::from(c[5]) - i32::from(c[2]))
-                                    + y * (i32::from(c[8]) - i32::from(c[2]))
+                                (x as i32 * (i32::from(c[5]) - i32::from(c[2]))
+                                    + y as i32 * (i32::from(c[8]) - i32::from(c[2]))
                                     + 4 * i32::from(c[2])
                                     + 2)
                                     >> 2,
@@ -384,26 +384,26 @@ fn decode_etc2_punch_through_block(input: &[u8], output: &mut Block) {
                     | (i32::from(input[7]) >> 5 & 6)
                     | (i32::from(input[6]) >> 4 & 1)) as u8;
                 c[8] = (shift(input[7], 2) | (i32::from(input[7]) >> 4 & 3)) as u8;
-                for y in 0..4 {
-                    for x in 0..4 {
+                for y in 0..4usize {
+                    for x in 0..4usize {
                         let i = y * 4 + x;
                         let red = clamp255(
-                            (x * (i32::from(c[3]) - i32::from(c[0]))
-                                + y * (i32::from(c[6]) - i32::from(c[0]))
+                            (x as i32 * (i32::from(c[3]) - i32::from(c[0]))
+                                + y as i32 * (i32::from(c[6]) - i32::from(c[0]))
                                 + 4 * i32::from(c[0])
                                 + 2)
                                 >> 2,
                         );
                         let green = clamp255(
-                            (x * (i32::from(c[4]) - i32::from(c[1]))
-                                + y * (i32::from(c[7]) - i32::from(c[1]))
+                            (x as i32 * (i32::from(c[4]) - i32::from(c[1]))
+                                + y as i32 * (i32::from(c[7]) - i32::from(c[1]))
                                 + 4 * i32::from(c[1])
                                 + 2)
                                 >> 2,
                         );
                         let blue = clamp255(
-                            (x * (i32::from(c[5]) - i32::from(c[2]))
-                                + y * (i32::from(c[8]) - i32::from(c[2]))
+                            (x as i32 * (i32::from(c[5]) - i32::from(c[2]))
+                                + y as i32 * (i32::from(c[8]) - i32::from(c[2]))
                                 + 4 * i32::from(c[2])
                                 + 2)
                                 >> 2,
