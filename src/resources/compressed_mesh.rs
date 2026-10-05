@@ -196,6 +196,82 @@ pub struct CompressedMesh {
     pub has_colors: bool,
 }
 
+/// The decompressed geometry channels of a `CompressedMesh` (`CompressedMesh.Decompress`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DecompressedMesh {
+    /// `Vertices`, when the packed vector is non-empty.
+    pub vertices: Option<Vec<Vec3>>,
+    /// `Normals`, when the packed vector is non-empty.
+    pub normals: Option<Vec<Vec3>>,
+    /// `Tangents`, when the packed vector is non-empty.
+    pub tangents: Option<Vec<Vec4>>,
+    /// `FloatColors`/`Colors`, when either packed vector is non-empty.
+    pub colors: Option<Vec<ColorFloat>>,
+    /// `UV0`..`UV7`.
+    pub uvs: [Option<Vec<Vec2>>; 8],
+    /// `Weights`.
+    pub skin: Option<Vec<BoneWeight4>>,
+    /// `BindPoses`, when the gate is set and the packed vector is non-empty.
+    pub bind_pose: Option<Vec<[[f32; 4]; 4]>>,
+    /// `Triangles`.
+    pub processed_index_buffer: Option<Vec<u32>>,
+}
+
+/// `CompressedMesh.Decompress`: the channel decode order the source uses.
+pub fn decompress(
+    mesh: &CompressedMesh,
+    limits: PackedBitVectorLimits,
+) -> Result<DecompressedMesh, CompressedMeshError> {
+    let vertices = if mesh.vertices.num_items > 0 {
+        Some(mesh.get_vertices(limits)?)
+    } else {
+        None
+    };
+    let uvs = mesh.get_uv(limits)?;
+    let bind_pose = if mesh.has_bind_poses && mesh.bind_poses.num_items > 0 {
+        Some(mesh.get_bind_poses(limits)?)
+    } else {
+        None
+    };
+    let normals = if mesh.normals.num_items > 0 {
+        Some(mesh.get_normals(limits)?)
+    } else {
+        None
+    };
+    let tangents = if mesh.tangents.num_items > 0 {
+        Some(mesh.get_tangents(limits)?)
+    } else {
+        None
+    };
+    let colors = if (mesh.has_float_colors && mesh.float_colors.num_items > 0)
+        || (mesh.has_colors && mesh.colors.num_items > 0)
+    {
+        Some(mesh.get_float_colors(limits)?)
+    } else {
+        None
+    };
+    let skin = if mesh.weights.num_items > 0 {
+        Some(mesh.get_weights(limits)?)
+    } else {
+        None
+    };
+    let processed_index_buffer = if mesh.triangles.num_items > 0 {
+        Some(mesh.get_triangles(limits)?)
+    } else {
+        None
+    };
+    Ok(DecompressedMesh {
+        vertices,
+        normals,
+        tangents,
+        colors,
+        uvs,
+        skin,
+        bind_pose,
+        processed_index_buffer,
+    })
+}
+
 impl CompressedMesh {
     /// `IsSet`.
     pub const fn is_set(&self) -> bool {
@@ -1193,5 +1269,68 @@ mod tests {
                 1050187929, 1053609165, 1065353216, 1065353216, 1065353216, 1065353216
             ]
         );
+    }
+
+    #[test]
+    fn decompress_orchestrates_every_channel_in_source_order() {
+        let mut mesh = CompressedMesh {
+            has_float_colors: true,
+            ..CompressedMesh::default()
+        };
+        mesh.set_vertices(
+            &[Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 2.0, 3.0)],
+            limits(),
+        )
+        .unwrap();
+        mesh.set_normals(
+            &[Vec3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 1.0, 0.0)],
+            limits(),
+        )
+        .unwrap();
+        mesh.set_tangents(&[Vec4::new(1.0, 0.0, 0.0, 1.0)], limits())
+            .unwrap();
+        let uv0 = [Vec2::new(0.0, 0.0), Vec2::new(1.0, 1.0)];
+        let empty: [Vec2; 0] = [];
+        mesh.set_uv(
+            [&uv0, &empty, &empty, &empty, &empty, &empty, &empty, &empty],
+            limits(),
+        )
+        .unwrap();
+        mesh.set_weights(
+            &[BoneWeight4::new(1.0, 0.0, 0.0, 0.0, 3, 0, 0, 0)],
+            limits(),
+        )
+        .unwrap();
+        mesh.set_triangles(&[0, 1, 2], limits()).unwrap();
+        mesh.set_float_colors(&[ColorFloat::new(1.0, 0.0, 0.0, 1.0)], limits())
+            .unwrap();
+
+        let decompressed = super::decompress(&mesh, limits()).unwrap();
+        assert_eq!(decompressed.vertices.as_ref().unwrap().len(), 2);
+        assert_eq!(decompressed.normals.as_ref().unwrap().len(), 2);
+        assert_eq!(decompressed.tangents.as_ref().unwrap().len(), 1);
+        assert_eq!(decompressed.uvs[0].as_ref().unwrap().len(), 2);
+        assert!(decompressed.uvs[1].is_none());
+        assert_eq!(decompressed.skin.as_ref().unwrap().len(), 1);
+        assert_eq!(
+            decompressed.processed_index_buffer.as_ref().unwrap().len(),
+            3
+        );
+        assert_eq!(decompressed.colors.as_ref().unwrap().len(), 1);
+        assert!(decompressed.bind_pose.is_none());
+    }
+
+    #[test]
+    fn decompress_leaves_empty_channels_unset() {
+        let mesh = CompressedMesh::default();
+        let decompressed = super::decompress(&mesh, limits()).unwrap();
+        assert!(decompressed.vertices.is_none());
+        assert!(decompressed.normals.is_none());
+        assert!(decompressed.tangents.is_none());
+        assert!(decompressed.colors.is_none());
+        assert!(decompressed.skin.is_none());
+        assert!(decompressed.bind_pose.is_none());
+        assert!(decompressed.processed_index_buffer.is_none());
+        assert!(decompressed.uvs.iter().all(Option::is_none));
     }
 }

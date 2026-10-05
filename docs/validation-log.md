@@ -2049,3 +2049,9 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Added `src/resources/terrain_heatmap.rs`: `TerrainHeightmap::from_value` reads `m_Heightmap.m_Width`/`m_Height`/`m_Resolution`/`m_Heights`, `rgba32_data` applies the five-stop colour ramp (normalizing by `short.MaxValue`), and `bitmap` builds the `max(dimension, resolution)` RGBA32 bitmap and flips it.
 - The `(Color32)ColorFloat` conversion matches the reference's `ConvertFloatToByte` (`NaN`/`<=0` → 0, `>=255` → 255, else truncate); alpha is always 255.
 - Six synthetic tests; `cargo test --workspace --locked`: 801 library and 25 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+
+## Processed mesh data (2026-10-05)
+
+- Added `compressed_mesh::decompress` (the `CompressedMesh.Decompress` channel orchestration) and `src/resources/mesh_data.rs` (the `MeshData` merge of the vertex-data-blob and compressed-mesh paths with the source's `??=` fallbacks, plus `UVCount`/`IndexFormat` and the `TryGet*AtIndex` post-processing: UV `Y` flip, tangent `W` snap, skin defaulting/renormalization).
+- Two `decompress` tests and seven `MeshData` tests; `cargo test --workspace --locked`: 810 library and 25 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.

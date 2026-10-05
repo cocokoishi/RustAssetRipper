@@ -415,3 +415,11 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Six synthetic tests; `cargo test --workspace --locked`: 801 library and 25 CLI tests; warnings-denied Clippy passes.
 - Next: the class-189/3D/array texture routes, platform transforms, Crunch, EXR/HDR/JPEG writers, sprite/atlas export, `.meta` sidecars, and wiring into a project export; then the exporter registration/resource matrix audit and the object-model/product workflows.
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+
+## 48. Checkpoint: Processed mesh data (2026-10-05)
+
+- Added `compressed_mesh::decompress` (the `CompressedMesh.Decompress` orchestration) and `src/resources/mesh_data.rs` (the processed `MeshData` merging the vertex-data-blob and compressed paths with the source's `??=` fallbacks, plus `UVCount`/`IndexFormat` and the `TryGet*AtIndex` post-processing).
+- Nine tests; `cargo test --workspace --locked`: 810 library and 25 CLI tests; warnings-denied Clippy passes.
+- Next: the `Mesh` field reader producing the blob and compressed mesh, `BindPose`/`m_Skin` parsing, and the GLB/OBJ mesh exporters; the class-189/3D/array texture routes, platform transforms, Crunch, EXR/HDR/JPEG writers, sprite/atlas export, and `.meta` sidecars; then the exporter registration/resource matrix audit and the object-model/product workflows.
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

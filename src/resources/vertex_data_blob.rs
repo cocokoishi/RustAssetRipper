@@ -353,7 +353,7 @@ impl MeshData {
             .is_some_and(|values| values.len() == self.vertices.len())
     }
 
-    fn uv(&self, index: usize) -> Option<&Vec<Vec2>> {
+    pub(crate) fn uv(&self, index: usize) -> Option<&Vec<Vec2>> {
         match index {
             0 => self.uv0.as_ref(),
             1 => self.uv1.as_ref(),
