@@ -1957,3 +1957,11 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Added `decode_bc4`/`decode_bc5` to `src/resources/texture_decode.rs` and recorded `DIFF-BC45-ROUNDING-001`: the `Bc` decoders use `+1`-rounded channel interpolation while the `Dxt` decoder truncates.
 - The fixture `src/resources/texture_decode_fixture.txt` now has 33 rows, including six direct interpolation-table probes that assert every table entry.
 - GitHub Actions run `37250084317` is green across all five jobs. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+
+## ETC1/ETC2/EAC texture decoders (2026-10-04)
+
+- Added `src/resources/etc_decode.rs`: ETC1 (individual/differential), ETC2 (individual/differential/T/H/planar), ETC2A1 punch-through, ETC2A8, and EAC R/RG unsigned/signed, ported from the `AssetRipper.TextureDecoder` dependency used by `TextureConverter`.
+- Genuine original-runtime differential: probe `Temp/opencode/etcprobe` decoded blocks crafted to hit every mode against the shipped `AssetRipper.TextureDecoder.dll`; 23 rows are committed as `src/resources/etc_decode_fixture.txt` and matched byte-for-byte.
+- Recorded `DIFF-ETC-ALPHAORDER-001`: the ETC2A8 alpha channel uses the reverse block permutation of the color channel.
+- GitHub Actions run `37250701750` is green across all five jobs. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
