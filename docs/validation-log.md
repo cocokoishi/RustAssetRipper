@@ -2219,3 +2219,9 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - The 23 `ENGINE` rows of `mono_utils_fixture.txt` (probe `Temp/opencode/monoutilsprobe`, SDK 10.0.401) are re-asserted through the new table; dispatch rules are source-read over caller facts. Also corrected the previous entry's over-claim: `mono_utils.rs` never contained the engine table.
 - `DIFF-ASSET-FACTORY-001` recorded. New ledger row `SER-ASSET-FACTORY-001` at `已实现但未验证`.
 - `cargo test --workspace --locked`: 944 library and 40 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+## Asset-plus-meta pipeline composition (2026-10-06)
+
+- Extended `src/export/project_output.rs` (first pipeline slice of the `.meta` recovery item): `export_asset_with_meta` mirrors `AssetExportCollection.Export` over caller facts — failed exports write nothing, asset bytes land before the `Meta(GUID, importer)` record as `{file}.meta`, both files add-only (the source overwrites; refused by design). The confined directory walk is now shared between asset and sidecar writes with no behavior change (existing sidecar tests still pass). GUIDs stay caller-supplied nonzero (source mints per-collection random GUIDs; determinism requirement wins, documented).
+- New ledger row `EXP-META-PIPELINE-001` at `已实现但未验证`; targeted module tests pass (8/8), full validation via Actions after push.
+- No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.

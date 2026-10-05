@@ -7,8 +7,8 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use super::meta::{UnityMetaFile, UnityMetaFileError};
-use super::unity_yaml::UnityYamlWriteLimits;
+use super::meta::{UnityMetaFile, UnityMetaFileError, UnityMetaFileOptions};
+use super::unity_yaml::{UnityYamlNode, UnityYamlWriteLimits};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UnityProjectOutputLimits {
@@ -74,6 +74,14 @@ pub enum UnityProjectOutputError {
         path: PathBuf,
         source: io::Error,
     },
+    CreateAsset {
+        path: PathBuf,
+        source: io::Error,
+    },
+    WriteAsset {
+        path: PathBuf,
+        source: io::Error,
+    },
 }
 
 impl Display for UnityProjectOutputError {
@@ -116,6 +124,12 @@ impl Display for UnityProjectOutputError {
             Self::WriteSidecar { path, source } => {
                 write!(formatter, "could not write Unity meta sidecar {path:?}: {source}")
             }
+            Self::CreateAsset { path, source } => {
+                write!(formatter, "could not create Unity asset file {path:?}: {source}")
+            }
+            Self::WriteAsset { path, source } => {
+                write!(formatter, "could not write Unity asset file {path:?}: {source}")
+            }
         }
     }
 }
@@ -126,7 +140,9 @@ impl Error for UnityProjectOutputError {
             Self::CreateOutputRoot { source, .. }
             | Self::CreateOutputDirectory { source, .. }
             | Self::CreateSidecar { source, .. }
-            | Self::WriteSidecar { source, .. } => Some(source),
+            | Self::CreateAsset { source, .. }
+            | Self::WriteSidecar { source, .. }
+            | Self::WriteAsset { source, .. } => Some(source),
             Self::SerializeMeta(source) => Some(source),
             _ => None,
         }
@@ -150,63 +166,8 @@ pub fn write_unity_meta_sidecar(
         .to_yaml(yaml_limits)
         .map_err(UnityProjectOutputError::SerializeMeta)?;
 
-    fs::create_dir_all(output_root).map_err(|source| {
-        UnityProjectOutputError::CreateOutputRoot {
-            path: output_root.to_path_buf(),
-            source,
-        }
-    })?;
-    let canonical_root = fs::canonicalize(output_root).map_err(|source| {
-        UnityProjectOutputError::CreateOutputRoot {
-            path: output_root.to_path_buf(),
-            source,
-        }
-    })?;
-    if !fs::metadata(&canonical_root)
-        .map_err(|source| UnityProjectOutputError::CreateOutputRoot {
-            path: canonical_root.clone(),
-            source,
-        })?
-        .is_dir()
-    {
-        return Err(UnityProjectOutputError::OutputRootIsNotDirectory {
-            path: canonical_root,
-        });
-    }
-
-    let mut current_directory = canonical_root.clone();
-    for component in &components[..components.len() - 1] {
-        let candidate = current_directory.join(component);
-        match fs::create_dir(&candidate) {
-            Ok(()) => {}
-            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(source) => {
-                return Err(UnityProjectOutputError::CreateOutputDirectory {
-                    path: candidate,
-                    source,
-                });
-            }
-        }
-        let metadata = fs::symlink_metadata(&candidate).map_err(|source| {
-            UnityProjectOutputError::CreateOutputDirectory {
-                path: candidate.clone(),
-                source,
-            }
-        })?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(UnityProjectOutputError::UnsafeOutputAncestor { path: candidate });
-        }
-        current_directory = fs::canonicalize(&candidate).map_err(|_| {
-            UnityProjectOutputError::UnsafeOutputAncestor {
-                path: candidate.clone(),
-            }
-        })?;
-        if !current_directory.starts_with(&canonical_root) {
-            return Err(UnityProjectOutputError::UnsafeOutputAncestor {
-                path: current_directory,
-            });
-        }
-    }
+    let current_directory =
+        ensure_output_directory(output_root, &components[..components.len() - 1])?;
 
     let mut sidecar_name = OsString::new();
     sidecar_name
@@ -244,6 +205,172 @@ pub fn write_unity_meta_sidecar(
     Ok(UnityMetaSidecarReport {
         path: sidecar_path,
         byte_count: contents.len(),
+    })
+}
+
+/// Create the output root and one confined subdirectory level per component, rejecting
+/// links, files, and escapes, and return the deepest directory. Shared by asset bytes
+/// and `.meta` sidecars so both land under the same validated walk.
+fn ensure_output_directory(
+    output_root: &Path,
+    dir_components: &[&str],
+) -> Result<PathBuf, UnityProjectOutputError> {
+    fs::create_dir_all(output_root).map_err(|source| {
+        UnityProjectOutputError::CreateOutputRoot {
+            path: output_root.to_path_buf(),
+            source,
+        }
+    })?;
+    let canonical_root = fs::canonicalize(output_root).map_err(|source| {
+        UnityProjectOutputError::CreateOutputRoot {
+            path: output_root.to_path_buf(),
+            source,
+        }
+    })?;
+    if !fs::metadata(&canonical_root)
+        .map_err(|source| UnityProjectOutputError::CreateOutputRoot {
+            path: canonical_root.clone(),
+            source,
+        })?
+        .is_dir()
+    {
+        return Err(UnityProjectOutputError::OutputRootIsNotDirectory {
+            path: canonical_root,
+        });
+    }
+
+    let mut current_directory = canonical_root.clone();
+    for component in dir_components {
+        let candidate = current_directory.join(component);
+        match fs::create_dir(&candidate) {
+            Ok(()) => {}
+            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(source) => {
+                return Err(UnityProjectOutputError::CreateOutputDirectory {
+                    path: candidate,
+                    source,
+                });
+            }
+        }
+        let metadata = fs::symlink_metadata(&candidate).map_err(|source| {
+            UnityProjectOutputError::CreateOutputDirectory {
+                path: candidate.clone(),
+                source,
+            }
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(UnityProjectOutputError::UnsafeOutputAncestor { path: candidate });
+        }
+        current_directory = fs::canonicalize(&candidate).map_err(|_| {
+            UnityProjectOutputError::UnsafeOutputAncestor {
+                path: candidate.clone(),
+            }
+        })?;
+        if !current_directory.starts_with(&canonical_root) {
+            return Err(UnityProjectOutputError::UnsafeOutputAncestor {
+                path: current_directory,
+            });
+        }
+    }
+    Ok(current_directory)
+}
+
+/// Caller facts for one `AssetExportCollection.Export` step: the planned portable
+/// relative asset path, the caller-owned export GUID, and the importer record.
+///
+/// The source mints a random GUID per collection; the Rust pipeline requires a
+/// caller-supplied nonzero GUID instead so repeated exports stay deterministic.
+pub struct AssetExportWithMetaPlan {
+    /// Portable relative asset path including the planned unique file name.
+    pub relative_asset_path: String,
+    /// The export GUID (rejected when zero).
+    pub guid: [u8; 16],
+    /// The importer class name, e.g. `NativeFormatImporter`.
+    pub importer_class: String,
+    /// The importer mapping node.
+    pub importer: UnityYamlNode,
+    /// Folder/license/timestamp options for the `.meta` envelope.
+    pub meta_options: UnityMetaFileOptions,
+}
+
+/// The outcome of one asset-plus-`.meta` export step.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AssetExportStep {
+    /// `ExportInner` failed: neither asset bytes nor meta are written, mirroring the
+    /// source `false` return.
+    SkippedFailedExport,
+    /// Asset bytes plus the add-only `.meta` sidecar were written.
+    Exported {
+        /// The written asset file.
+        asset_path: PathBuf,
+        /// Bytes handed to the asset writer.
+        asset_bytes: usize,
+        /// The written sidecar report.
+        sidecar: UnityMetaSidecarReport,
+    },
+}
+
+/// Run one asset-plus-`.meta` export step over caller facts, mirroring
+/// `AssetExportCollection.Export`: asset bytes first, then `Meta(GUID, importer)`
+/// beside them as `{file}.meta`. A failed export writes nothing; both files are
+/// created add-only (the source overwrites, which the pipeline refuses by design).
+pub fn export_asset_with_meta(
+    output_root: &Path,
+    plan: AssetExportWithMetaPlan,
+    export_succeeded: bool,
+    write_asset_bytes: impl FnOnce(&Path) -> io::Result<usize>,
+    path_limits: UnityProjectOutputLimits,
+    yaml_limits: UnityYamlWriteLimits,
+) -> Result<AssetExportStep, UnityProjectOutputError> {
+    if !export_succeeded {
+        return Ok(AssetExportStep::SkippedFailedExport);
+    }
+    let components = validated_path_components(&plan.relative_asset_path, path_limits)?;
+    let (dir_components, [file_name]) = components.split_at(components.len() - 1) else {
+        return Err(UnityProjectOutputError::InvalidRelativePath {
+            reason: "path must contain only ordinary, portable relative components",
+        });
+    };
+    let directory = ensure_output_directory(output_root, dir_components)?;
+    let asset_path = directory.join(file_name);
+    let mut asset_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&asset_path)
+        .map_err(|source| UnityProjectOutputError::CreateAsset {
+            path: asset_path.clone(),
+            source,
+        })?;
+    let asset_bytes =
+        write_asset_bytes(&asset_path).map_err(|source| UnityProjectOutputError::WriteAsset {
+            path: asset_path.clone(),
+            source,
+        })?;
+    asset_file
+        .flush()
+        .map_err(|source| UnityProjectOutputError::WriteAsset {
+            path: asset_path.clone(),
+            source,
+        })?;
+    drop(asset_file);
+    let meta = UnityMetaFile::new(
+        plan.guid,
+        &plan.importer_class,
+        plan.importer,
+        plan.meta_options,
+    )
+    .map_err(UnityProjectOutputError::SerializeMeta)?;
+    let sidecar = write_unity_meta_sidecar(
+        output_root,
+        &plan.relative_asset_path,
+        meta,
+        path_limits,
+        yaml_limits,
+    )?;
+    Ok(AssetExportStep::Exported {
+        asset_path,
+        asset_bytes,
+        sidecar,
     })
 }
 
@@ -465,5 +592,149 @@ mod tests {
             Err(UnityProjectOutputError::TooManyPathComponents { .. })
         ));
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    use super::{export_asset_with_meta, AssetExportStep, AssetExportWithMetaPlan};
+
+    fn export_plan(path: &str) -> AssetExportWithMetaPlan {
+        AssetExportWithMetaPlan {
+            relative_asset_path: path.to_owned(),
+            guid: [9; 16],
+            importer_class: "NativeFormatImporter".to_owned(),
+            importer: UnityYamlNode::mapping(UnityYamlMappingStyle::Block),
+            meta_options: UnityMetaFileOptions {
+                has_license_data: false,
+                time_created_unix_seconds: Some(1_700_000_000),
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn failed_exports_write_neither_asset_nor_meta() {
+        let root = TestOutputRoot::new();
+        assert_eq!(
+            export_asset_with_meta(
+                root.path(),
+                export_plan("Assets/Textures/Icon.png"),
+                false,
+                |_| panic!("a failed export must not write asset bytes"),
+                UnityProjectOutputLimits::default(),
+                UnityYamlWriteLimits::default(),
+            )
+            .unwrap(),
+            AssetExportStep::SkippedFailedExport
+        );
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn successful_exports_write_asset_bytes_before_the_sidecar() {
+        let root = TestOutputRoot::new();
+        let step = export_asset_with_meta(
+            root.path(),
+            export_plan("Assets/Textures/Icon.png"),
+            true,
+            |path| fs::write(path, b"asset-bytes").map(|()| 11),
+            UnityProjectOutputLimits::default(),
+            UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        let canonical_root = fs::canonicalize(root.path()).unwrap();
+        let asset_path = canonical_root
+            .join("Assets")
+            .join("Textures")
+            .join("Icon.png");
+        let AssetExportStep::Exported {
+            asset_path: planned,
+            asset_bytes,
+            sidecar,
+        } = step
+        else {
+            panic!("a successful export must report both files");
+        };
+        assert_eq!(planned, asset_path);
+        assert_eq!(asset_bytes, 11);
+        assert_eq!(fs::read(&asset_path).unwrap(), b"asset-bytes");
+        assert_eq!(
+            sidecar.path,
+            canonical_root
+                .join("Assets")
+                .join("Textures")
+                .join("Icon.png.meta")
+        );
+        // The sidecar carries the planned GUID and importer record.
+        let sidecar_text = fs::read_to_string(&sidecar.path).unwrap();
+        assert!(
+            sidecar_text.contains("guid: 90909090909090909090909090909090"),
+            "{sidecar_text}"
+        );
+        assert!(
+            sidecar_text.contains("NativeFormatImporter: {}"),
+            "{sidecar_text}"
+        );
+        assert_eq!(sidecar.byte_count, sidecar_text.len());
+    }
+
+    #[test]
+    fn existing_files_are_refused_without_overwriting() {
+        let root = TestOutputRoot::new();
+        let asset_path = root.path().join("Icon.png");
+        fs::write(&asset_path, b"existing user bytes").unwrap();
+        assert!(matches!(
+            export_asset_with_meta(
+                root.path(),
+                export_plan("Icon.png"),
+                true,
+                |path| fs::write(path, b"new bytes").map(|()| 9),
+                UnityProjectOutputLimits::default(),
+                UnityYamlWriteLimits::default(),
+            ),
+            Err(UnityProjectOutputError::CreateAsset { .. })
+        ));
+        assert_eq!(fs::read(&asset_path).unwrap(), b"existing user bytes");
+        assert!(!root.path().join("Icon.png.meta").exists());
+
+        // A pre-existing sidecar fails after the asset lands, mirroring the
+        // source asset-first order while keeping both files add-only.
+        let root = TestOutputRoot::new();
+        let sidecar_path = root.path().join("Icon.png.meta");
+        fs::write(&sidecar_path, b"existing user meta").unwrap();
+        assert!(matches!(
+            export_asset_with_meta(
+                root.path(),
+                export_plan("Icon.png"),
+                true,
+                |path| fs::write(path, b"new bytes").map(|()| 9),
+                UnityProjectOutputLimits::default(),
+                UnityYamlWriteLimits::default(),
+            ),
+            Err(UnityProjectOutputError::SidecarAlreadyExists { .. })
+        ));
+        assert_eq!(fs::read(&sidecar_path).unwrap(), b"existing user meta");
+    }
+
+    #[test]
+    fn zero_guids_fail_the_meta_step_with_the_asset_already_written() {
+        let root = TestOutputRoot::new();
+        let mut plan = export_plan("Icon.png");
+        plan.guid = [0; 16];
+        assert!(matches!(
+            export_asset_with_meta(
+                root.path(),
+                plan,
+                true,
+                |path| fs::write(path, b"asset-bytes").map(|()| 11),
+                UnityProjectOutputLimits::default(),
+                UnityYamlWriteLimits::default(),
+            ),
+            Err(UnityProjectOutputError::SerializeMeta(_))
+        ));
+        // Source order writes asset bytes before the meta record is built.
+        assert_eq!(
+            fs::read(root.path().join("Icon.png")).unwrap(),
+            b"asset-bytes"
+        );
+        assert!(!root.path().join("Icon.png.meta").exists());
     }
 }

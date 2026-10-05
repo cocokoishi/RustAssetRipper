@@ -588,3 +588,9 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - `cargo test --workspace --locked`: 944 library and 40 CLI tests; warnings-denied Clippy and format check pass. CI run `37298704192` green (all five jobs) for remote `main` = `1afe5c4`; local matches.
 - Next: `TYPE-SCRIPT-001` remainder (manager resolutions), `EXPORT-UNITY-001` remainder (asset/sidecar file writes), and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 71. Checkpoint: asset-plus-meta pipeline composition (2026-10-06)
+
+- Extended `src/export/project_output.rs` with `export_asset_with_meta` mirroring `AssetExportCollection.Export` (skip-on-failure, asset bytes before `{file}.meta`, add-only both files, caller-supplied GUIDs, shared confined walk). New row `EXP-META-PIPELINE-001`. Targeted module tests pass (8/8); full validation via Actions after push.
+- Next: `TYPE-SCRIPT-001` remainder (manager resolutions), CLI exposure + GUID freshness + folder sidecars, and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
