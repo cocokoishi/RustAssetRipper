@@ -578,6 +578,6 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 ## 69. Checkpoint: managed type classification with a runtime differential (2026-10-06)
 
 - Added `src/processing/mono_utils.rs` (13 `MonoUtils` predicates, `PrimitiveType` + `to_primitive_type`, `EngineAssetKind` table with version-taking arms and probed 2019.4 concrete classes). All 777 shipped-assembly rows in `src/processing/mono_utils_fixture.txt` (probe `Temp/opencode/monoutilsprobe`) matched. New row `TYPE-MONO-UTILS-001`; `DIFF-MONO-UTILS-001` recorded. Assembly loading/construction stay out (need live managed assemblies).
-- `cargo test --workspace --locked`: 938 library and 40 CLI tests; warnings-denied Clippy and format check pass.
+- `cargo test --workspace --locked`: 938 library and 40 CLI tests; warnings-denied Clippy and format check pass. CI run `37297415096` green (all five jobs) for remote `main` = `cb90d30`; local matches.
 - Next: `TYPE-SCRIPT-001` remainder (manager resolutions), `EXPORT-UNITY-001` remainder (asset/sidecar file writes), and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
