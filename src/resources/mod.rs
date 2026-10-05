@@ -34,6 +34,7 @@ pub mod image_export;
 pub mod keyframe;
 pub mod keyframe_quaternion;
 pub mod keyframe_vector3;
+pub mod material;
 pub mod matrix4x4;
 pub mod mesh;
 pub mod mesh_data;

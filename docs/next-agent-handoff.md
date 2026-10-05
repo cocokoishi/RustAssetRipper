@@ -449,3 +449,11 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - `cargo test --workspace --locked`: 836 library and 28 CLI tests; warnings-denied Clippy passes. The ledger row is `EXP-GLB-001` at `已实现但未验证`: no Unity-produced input and no SharpGLTF output comparison has run.
 - Next: blend shapes (`IBlendShapeData`), `CalculateMeshMetric`, the scene-level `GlbLevelBuilder`/`GlbTerrainBuilder`, streamed mesh bytes; the class-189/3D/array texture routes, platform transforms, Crunch, EXR/HDR/JPEG writers, sprite/atlas export, and `.meta` sidecars; then the exporter registration/resource matrix audit and the object-model/product workflows.
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 52. Checkpoint: Material object model and CRC28 differential (2026-10-05)
+
+- Added `src/resources/material.rs` with the class-21 `Material` field model, the three `m_TexEnvs` dictionary shapes, and `find_property_name_by_crc28`.
+- Two reference probes pinned the evidence: `Temp/opencode/matprops` for the generated property names (`src/resources/material_generated_api_fixture.txt`) and `Temp/opencode/crcprobe` for `Crc28Algorithm` (`src/resources/crc28_fixture.txt`). `RES-MATERIAL-CRC28-001` is now `已验证` on a real runtime differential; `RES-MATERIAL-VIEW-001` is `已实现但未验证`.
+- `cargo test --workspace --locked`: 852 library and 28 CLI tests; warnings-denied Clippy passes.
+- Next: `RES-MATERIAL-EXPORT-001` (the `.mat`/`.shader` asset exporter and its `ShaderExportMode` branches), then the other uninvestigated rows: `RES-ANIM-001`/`PROC-ANIM-001` (animation clips and controllers), `RES-AUDIO-001` (audio decode), `RES-MODEL-001` (blend shapes, `CalculateMeshMetric`, scene-level GLB), `EXPORT-UNITY-001`, `TYPE-SCRIPT-001`, `PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, and `TOOLS-001`.
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

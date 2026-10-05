@@ -1,0 +1,142 @@
+### AssetRipper.SourceGenerated.Classes.ClassID_21.IMaterial => AssetRipper.SourceGenerated.Classes.ClassID_21.IMaterial
+Boolean AllowLocking_C21
+AssetList`1 BuildTextureStacks_C21
+IPPtr_EditorExtension CorrespondingSourceObject_C21
+IEditorExtension CorrespondingSourceObject_C21P
+Int32 CustomRenderQueue_C21
+AssetList`1 DisabledShaderPasses_C21
+Boolean DoubleSidedGI_C21
+Boolean EnableInstancingVariants_C21
+UInt32 HideFlags_C21
+HideFlags HideFlags_C21E
+AssetList`1 InvalidKeywords_C21
+UInt32 LightmapFlags_C21
+Utf8String LockedProperties_C21
+UInt32 ModifiedSerializedProperties_C21
+Utf8String Name_C21
+PPtr_Material_5 Parent_C21
+IMaterial Parent_C21P
+PPtr_Prefab_2018_3 PrefabAsset_C21
+IPrefab PrefabAsset_C21P
+PPtr_PrefabInstance PrefabInstance_C21
+IPrefabInstance PrefabInstance_C21P
+IPPtr_Prefab PrefabInternal_C21
+IPrefabMarker PrefabInternal_C21P
+IUnityPropertySheet SavedProperties_C21
+AssetList`1 ShaderKeywords_C21_AssetList_Utf8String
+Utf8String ShaderKeywords_C21_Utf8String
+IPPtr_Shader Shader_C21
+IShader Shader_C21P
+AssetDictionary`2 StringTagMap_C21
+AssetList`1 ValidKeywords_C21
+### AssetRipper.SourceGenerated.Subclasses.UnityPropertySheet.IUnityPropertySheet => AssetRipper.SourceGenerated.Subclasses.UnityPropertySheet.IUnityPropertySheet
+AssetDictionary`2 Colors_AssetDictionary_FastPropertyName_ColorRGBAf
+AssetDictionary`2 Colors_AssetDictionary_Utf8String_ColorRGBAf
+AssetDictionary`2 Floats_AssetDictionary_FastPropertyName_Single
+AssetDictionary`2 Floats_AssetDictionary_Utf8String_Single
+AssetDictionary`2 Ints
+AssetDictionary`2 TexEnvs_AssetDictionary_FastPropertyName_UnityTexEnv_3_5
+AssetDictionary`2 TexEnvs_AssetDictionary_FastPropertyName_UnityTexEnv_5
+AssetDictionary`2 TexEnvs_AssetDictionary_Utf8String_UnityTexEnv_5
+### AssetRipper.SourceGenerated.Subclasses.UnityTexEnv.IUnityTexEnv => AssetRipper.SourceGenerated.Subclasses.UnityTexEnv.IUnityTexEnv
+Vector2f Offset
+Vector2f Scale
+IPPtr_Texture Texture
+### AssetRipper.SourceGenerated.Subclasses.UnityPropertySheet.UnityPropertySheet_3_5 => AssetRipper.SourceGenerated.Subclasses.UnityPropertySheet.UnityPropertySheet_3_5
+AssetDictionary`2 Colors_AssetDictionary_FastPropertyName_ColorRGBAf
+AssetDictionary`2 Colors_AssetDictionary_Utf8String_ColorRGBAf
+AssetDictionary`2 Floats_AssetDictionary_FastPropertyName_Single
+AssetDictionary`2 Floats_AssetDictionary_Utf8String_Single
+Boolean FlowMappedInYaml
+AssetDictionary`2 Ints
+Int32 SerializedVersion
+AssetDictionary`2 TexEnvs_AssetDictionary_FastPropertyName_UnityTexEnv_3_5
+AssetDictionary`2 TexEnvs_AssetDictionary_FastPropertyName_UnityTexEnv_5
+AssetDictionary`2 TexEnvs_AssetDictionary_Utf8String_UnityTexEnv_5
+### AssetRipper.SourceGenerated.Subclasses.UnityPropertySheet.UnityPropertySheet_5 => AssetRipper.SourceGenerated.Subclasses.UnityPropertySheet.UnityPropertySheet_5
+AssetDictionary`2 Colors_AssetDictionary_FastPropertyName_ColorRGBAf
+AssetDictionary`2 Colors_AssetDictionary_Utf8String_ColorRGBAf
+AssetDictionary`2 Floats_AssetDictionary_FastPropertyName_Single
+AssetDictionary`2 Floats_AssetDictionary_Utf8String_Single
+Boolean FlowMappedInYaml
+AssetDictionary`2 Ints
+Int32 SerializedVersion
+AssetDictionary`2 TexEnvs_AssetDictionary_FastPropertyName_UnityTexEnv_3_5
+AssetDictionary`2 TexEnvs_AssetDictionary_FastPropertyName_UnityTexEnv_5
+AssetDictionary`2 TexEnvs_AssetDictionary_Utf8String_UnityTexEnv_5
+### AssetRipper.SourceGenerated.Subclasses.UnityTexEnv.UnityTexEnv_3_5 => AssetRipper.SourceGenerated.Subclasses.UnityTexEnv.UnityTexEnv_3_5
+Boolean FlowMappedInYaml
+Vector2f Offset
+Vector2f Scale
+Int32 SerializedVersion
+IPPtr_Texture Texture
+### AssetRipper.SourceGenerated.Subclasses.UnityTexEnv.UnityTexEnv_5 => AssetRipper.SourceGenerated.Subclasses.UnityTexEnv.UnityTexEnv_5
+Boolean FlowMappedInYaml
+Vector2f Offset
+Vector2f Scale
+Int32 SerializedVersion
+IPPtr_Texture Texture
+### AssetRipper.SourceGenerated.Subclasses.Shader.IShader => MISSING
+### AssetRipper.SourceGenerated.Subclasses.PPtr.Shader.PPtr_Shader => MISSING
+### IUnityPropertySheet subclasses
+TYPE AssetRipper.SourceGenerated.Subclasses.UnityPropertySheet.UnityPropertySheet
+  IReadOnlyList`1 FieldPaths
+TYPE AssetRipper.SourceGenerated.Subclasses.UnityPropertySheet.UnityPropertySheet_2021
+  AssetDictionary`2 Colors_AssetDictionary_FastPropertyName_ColorRGBAf
+  AssetDictionary`2 Colors_AssetDictionary_Utf8String_ColorRGBAf
+  AssetDictionary`2 Floats_AssetDictionary_FastPropertyName_Single
+  AssetDictionary`2 Floats_AssetDictionary_Utf8String_Single
+  Boolean FlowMappedInYaml
+  AssetDictionary`2 Ints
+  Int32 SerializedVersion
+  AssetDictionary`2 TexEnvs_AssetDictionary_FastPropertyName_UnityTexEnv_3_5
+  AssetDictionary`2 TexEnvs_AssetDictionary_FastPropertyName_UnityTexEnv_5
+  AssetDictionary`2 TexEnvs_AssetDictionary_Utf8String_UnityTexEnv_5
+TYPE AssetRipper.SourceGenerated.Subclasses.UnityPropertySheet.UnityPropertySheet_3_5
+  AssetDictionary`2 Colors_AssetDictionary_FastPropertyName_ColorRGBAf
+  AssetDictionary`2 Colors_AssetDictionary_Utf8String_ColorRGBAf
+  AssetDictionary`2 Floats_AssetDictionary_FastPropertyName_Single
+  AssetDictionary`2 Floats_AssetDictionary_Utf8String_Single
+  Boolean FlowMappedInYaml
+  AssetDictionary`2 Ints
+  Int32 SerializedVersion
+  AssetDictionary`2 TexEnvs_AssetDictionary_FastPropertyName_UnityTexEnv_3_5
+  AssetDictionary`2 TexEnvs_AssetDictionary_FastPropertyName_UnityTexEnv_5
+  AssetDictionary`2 TexEnvs_AssetDictionary_Utf8String_UnityTexEnv_5
+TYPE AssetRipper.SourceGenerated.Subclasses.UnityPropertySheet.UnityPropertySheet_5
+  AssetDictionary`2 Colors_AssetDictionary_FastPropertyName_ColorRGBAf
+  AssetDictionary`2 Colors_AssetDictionary_Utf8String_ColorRGBAf
+  AssetDictionary`2 Floats_AssetDictionary_FastPropertyName_Single
+  AssetDictionary`2 Floats_AssetDictionary_Utf8String_Single
+  Boolean FlowMappedInYaml
+  AssetDictionary`2 Ints
+  Int32 SerializedVersion
+  AssetDictionary`2 TexEnvs_AssetDictionary_FastPropertyName_UnityTexEnv_3_5
+  AssetDictionary`2 TexEnvs_AssetDictionary_FastPropertyName_UnityTexEnv_5
+  AssetDictionary`2 TexEnvs_AssetDictionary_Utf8String_UnityTexEnv_5
+TYPE AssetRipper.SourceGenerated.Subclasses.UnityPropertySheet.UnityPropertySheet_5_6
+  AssetDictionary`2 Colors_AssetDictionary_FastPropertyName_ColorRGBAf
+  AssetDictionary`2 Colors_AssetDictionary_Utf8String_ColorRGBAf
+  AssetDictionary`2 Floats_AssetDictionary_FastPropertyName_Single
+  AssetDictionary`2 Floats_AssetDictionary_Utf8String_Single
+  Boolean FlowMappedInYaml
+  AssetDictionary`2 Ints
+  Int32 SerializedVersion
+  AssetDictionary`2 TexEnvs_AssetDictionary_FastPropertyName_UnityTexEnv_3_5
+  AssetDictionary`2 TexEnvs_AssetDictionary_FastPropertyName_UnityTexEnv_5
+  AssetDictionary`2 TexEnvs_AssetDictionary_Utf8String_UnityTexEnv_5
+### IUnityTexEnv subclasses
+TYPE AssetRipper.SourceGenerated.Subclasses.UnityTexEnv.UnityTexEnv
+  IReadOnlyList`1 FieldPaths
+TYPE AssetRipper.SourceGenerated.Subclasses.UnityTexEnv.UnityTexEnv_3_5
+  Boolean FlowMappedInYaml
+  Vector2f Offset
+  Vector2f Scale
+  Int32 SerializedVersion
+  IPPtr_Texture Texture
+TYPE AssetRipper.SourceGenerated.Subclasses.UnityTexEnv.UnityTexEnv_5
+  Boolean FlowMappedInYaml
+  Vector2f Offset
+  Vector2f Scale
+  Int32 SerializedVersion
+  IPPtr_Texture Texture

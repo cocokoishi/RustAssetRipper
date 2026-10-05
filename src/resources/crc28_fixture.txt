@@ -1,0 +1,15 @@
+# AssetRipper.Checksum.Crc28Algorithm probe (Temp/opencode/crcprobe, SDK 10.0.401)
+# Format: PROBE|base64(utf8 input)|HashUTF8|HashData(utf8 bytes)|Crc32Algorithm.HashUTF8|MatchUTF8(exact)|MatchUTF8(hash^1)
+# Crc28Algorithm.Mask = 0x0FFFFFFF; every Crc28 word equals the Crc32 word masked to 28 bits.
+PROBE||00000000|00000000|00000000|True|False
+PROBE|a|08B7BE43|08B7BE43|E8B7BE43|True|False
+PROBE|abc|052441C2|052441C2|352441C2|True|False
+PROBE|_MainTex|0D6A83C9|0D6A83C9|6D6A83C9|True|False
+PROBE|_MainTex_HDR|09F43CD4|09F43CD4|99F43CD4|True|False
+PROBE|_MainTex_ST|0686C589|0686C589|4686C589|True|False
+PROBE|_MainTex_TexelSize|01D24D00|01D24D00|C1D24D00|True|False
+PROBE|_Glossiness|03D467DD|03D467DD|D3D467DD|True|False
+PROBE|_Color|0DAF8B71|0DAF8B71|2DAF8B71|True|False
+PROBE|_BumpMap|0F63E008|0F63E008|3F63E008|True|False
+PROBE|_Metallic|04ACA5AE|04ACA5AE|44ACA5AE|True|False
+PROBE|_MainTex_é|04CBC132|04CBC132|F4CBC132|True|False
