@@ -391,3 +391,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | `resources::shader::{ParsedShaderProperty, ParsedShaderForm, ShaderView::from_value}` decoding; `export::shader_export::{render_parsed_property, render_parsed_properties, parsed_dummy_body, export_parsed_dummy}` wired into the `Dummy`/`Decompile` stack. Serialized `m_*` names follow the class-48 convention without a local class-48 TypeTree dump. |
 | Regression evidence | `export::shader_export::tests::parsed_dummy_text_matches_the_reference_runtime` matches all three probed outputs byte-for-byte through direct assembly and the mode stack; `float_tostring_matches_the_reference_runtime` pins all 28 formatter rows. |
 | Remaining comparison | Only three property shapes were probed; `any`/`3D`/`2DArray`/`CubeArray` dimensions and `NoScaleOffset`/`Normal` flags are asserted directly. No Unity-produced shader has been exported. |
+
+## DIFF-BLENDSHAPE-001 - blend-shape CRC core and lookup precedence
+
+| Field | Finding |
+|---|---|
+| Status | Reference-runtime differential recorded for the CRC core; branch dispatch asserted directly |
+| Source location | `AssetRipper.SourceGenerated.Extensions/MeshBlendShapeExtensions.cs` (`IsCRCMatch`); `BlendShapeDataExtensions.cs` (`FindShapeNameByCRC`); `MeshExtensions.cs` (`FindBlendShapeNameByCRC`); `MeshBlendShapeChannelExtensions.cs` (`SetValues`); `AssetRipper.Checksum.Crc32Algorithm` (external package) |
+| Input evidence | The 12 `Crc32Algorithm.HashUTF8` words plus the `MatchUTF8` accept/reject columns committed in `src/resources/crc28_fixture.txt` (probe `Temp/opencode/crcprobe`, shipped `AssetRipper.Checksum.dll`, SDK 10.0.401) are re-asserted through the new lookup path. Probe `Temp/opencode/blendprops` confirmed the generated property surface (`IBlendShapeData`, `IMeshBlendShapeChannel`, `IMeshBlendShape`, `IMesh.Shapes/ShapesList`). Serialized field names come from the committed 5.0 class-43 TypeTree dump (`mesh_typetree_fixture.txt`). |
+| Source-derived behavior | `IsCRCMatch` is a null-guarded CRC equality; the channel scan returns the first stored-hash match; the mesh dispatch returns the channel-table result whenever `m_Shapes` is present and only otherwise scans the legacy list. `SetValues` writes `Name`, `NameHash = HashUTF8(name)`, `FrameIndex`, `FrameCount` on a mutable generated channel. |
+| Root cause | No deviation found; this increment ports previously uncovered lookup behavior. |
+| Rust change | `resources::blend_shape::{crc32_ieee, is_crc_match, find_channel_name_by_crc, BlendShapeLookupView}` with presence-driven decoding. `SetValues` stays caller-side (needs mutable generated objects). |
+| Regression evidence | `crc32_and_match_reproduce_the_shipped_checksum_words` matches all 12 shipped words plus accept/reject; seven further tests pin first-match order, the no-fallthrough precedence, legacy scanning, decoding, and error paths. |
+| Remaining comparison | No Unity-produced mesh with blend shapes has been looked up; the 4.x `m_ShapesList` layout is asserted synthetically (no 4.x TypeTree dump is committed). |

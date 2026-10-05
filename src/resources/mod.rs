@@ -14,6 +14,7 @@ pub mod bc6h;
 pub mod bc6h_tables;
 pub mod bc7;
 pub mod bc7_tables;
+pub mod blend_shape;
 pub mod blend_tree_node;
 pub mod blend_tree_node_constant;
 pub mod bounds;

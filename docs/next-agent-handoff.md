@@ -531,3 +531,10 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - `cargo test --workspace --locked`: 910 library and 40 CLI tests; warnings-denied Clippy and format check pass. CI run `37285289510` green (all five jobs) for remote `main` = `be12850`; local matches.
 - Next: blend shapes, `EXPORT-UNITY-001`, `TYPE-SCRIPT-001`, and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 63. Checkpoint: blend-shape name resolution with a checksum differential (2026-10-05)
+
+- Added `src/resources/blend_shape.rs` (`crc32_ieee`, `is_crc_match`, `find_channel_name_by_crc`, `BlendShapeLookupView` decoding `m_Shapes`/`channels` and `m_ShapesList` with the source precedence). CRC core re-asserts the 12 shipped `Crc32Algorithm` words in `crc28_fixture.txt`; generated surface confirmed by probe `Temp/opencode/blendprops`; serialized names from the committed 5.0 class-43 TypeTree dump. New row `RES-BLENDSHAPE-001`; `DIFF-BLENDSHAPE-001` recorded. `SetValues` stays caller-side.
+- `cargo test --workspace --locked`: 918 library and 40 CLI tests; warnings-denied Clippy and format check pass.
+- Next: `EXPORT-UNITY-001`, `TYPE-SCRIPT-001`, and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
