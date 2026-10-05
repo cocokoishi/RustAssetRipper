@@ -265,6 +265,14 @@ pub fn run_project_export_loop<C>(
     }
 }
 
+/// Mirror the `Failed to export` warning text of the `ProjectExporter.Export` loop:
+/// the collection name plus its runtime type name.
+///
+/// Both arrive as caller facts; the port only fixes the text shape.
+pub fn format_export_failure(collection_name: &str, collection_type_name: &str) -> String {
+    format!("Failed to export '{collection_name}' ({collection_type_name})")
+}
+
 /// `ExportHandler.Export` logs the distinct Unity versions across the fetched asset
 /// collections (`GetListOfVersions`): first-seen order, single-space separated.
 ///
@@ -296,9 +304,10 @@ pub const fn throw_if_settings_dont_match(same_settings: bool) -> Result<(), Pro
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_collection_outcome, distinct_collection_versions, plan_project_export_order,
-        plan_project_export_with_events, run_project_export_loop, throw_if_settings_dont_match,
-        CollectionExportOutcome, ProjectExportEvent, ProjectOrderError, ProjectOrderLimits,
+        classify_collection_outcome, distinct_collection_versions, format_export_failure,
+        plan_project_export_order, plan_project_export_with_events, run_project_export_loop,
+        throw_if_settings_dont_match, CollectionExportOutcome, ProjectExportEvent,
+        ProjectOrderError, ProjectOrderLimits,
     };
     use std::collections::HashMap;
     use std::rc::Rc;
@@ -553,6 +562,14 @@ mod tests {
         assert_eq!(
             ProjectOrderError::SettingsMismatch.to_string(),
             "export handler settings don't match"
+        );
+    }
+
+    #[test]
+    fn failure_warnings_name_the_collection_and_its_type() {
+        assert_eq!(
+            format_export_failure("Main", "TextureExportCollection"),
+            "Failed to export 'Main' (TextureExportCollection)"
         );
     }
 }
