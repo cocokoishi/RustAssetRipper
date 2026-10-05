@@ -2027,3 +2027,11 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Added `src/resources/image_export.rs`: the `ImageExportFormat` enum and `Bitmap::save` for PNG, BMP, and TGA. The BMP writer reproduces `BmpWriter.WriteBmp` byte-for-byte; the PNG writer emits filter-0 scanlines with an RGB or RGBA colour type; the TGA writer emits uncompressed top-down BGRA/BGR.
 - EXR, HDR, and JPEG return `ImageWriteError::Unsupported` until their codecs are ported.
 - `cargo test --workspace --locked`: 786 library and 23 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+
+## Texture2D view and export (2026-10-05)
+
+- Added `src/resources/texture.rs`: `Texture2DView::from_value` reads the class-28 export fields (`m_Width`, `m_Height`, `m_TextureFormat`, `m_CompleteImageSize`, `m_ImageCount`, `m_MipCount`, `m_LightmapFormat`, `image data`, `m_StreamData`), computes `ActualImageSize` (complete size, else per-layer data length), prefers inline over streamed bytes, and `export_texture2d_image` runs the decode → `FlipY` → `UnpackNormal` → image-writer pipeline.
+- Aliases are read with `unique_field_in_base_chain`; duplicate aliases, missing required fields, negative dimensions, wrong value kinds, and unavailable image data all produce explicit errors rather than zero-filled output.
+- 9 new focused tests cover field reads, the `ActualImageSize` fallback and per-layer division, missing/negative/ambiguous fields, PNG export, inline-over-stream precedence, streamed-content requirement, and the normal-map unpack.
+- `cargo test --workspace --locked`: 795 library and 23 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
