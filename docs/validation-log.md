@@ -2366,5 +2366,5 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 
 ## Fallback hash and synthetic names (2026-10-06)
 
-- Ported `RawDataObject.RawDataHash` (CRC32 via the pinned `crc32_ieee`), `UnknownObject.Name` (always synthetic), and `UnreadableObject.Name` (stored unless null-or-empty) into `processing/asset_factory.rs` with a dedicated test (hash word, uppercase-hex shape, stored/empty/null arms). `SER-TT-ABSENT-001` evidence updated. Lib suite 987/987 locally, workspace Clippy clean; full validation via Actions after push.
+- Ported `RawDataObject.RawDataHash` (CRC32 via the pinned `crc32_ieee`), `UnknownObject.Name` (always synthetic), and `UnreadableObject.Name` (stored unless null-or-empty) into `processing/asset_factory.rs` with a dedicated test (hash word, uppercase-hex shape, stored/empty/null arms). `SER-TT-ABSENT-001` evidence updated. Lib suite 987/987 locally, workspace Clippy clean; CI run `37391118909` green (all five jobs) for remote `main` = `739822e`; local matches.
 - No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
