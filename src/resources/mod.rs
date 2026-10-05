@@ -18,6 +18,7 @@ pub mod blend_tree_node_constant;
 pub mod bounds;
 pub mod byte_array;
 pub mod clip;
+pub mod clip_convert;
 pub mod color;
 pub mod compressed_animation_curve;
 pub mod compressed_mesh;

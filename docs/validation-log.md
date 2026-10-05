@@ -2136,3 +2136,10 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Added `src/resources/streamed_curve.rs`: key/frame reads with bounded buffers, bit-exact double-precision slope math (including the double-promoted limit comparison and the `5e-7f`-as-double threshold), and explicit truncation/negative-count errors. A test-replay bug on the chained row (wrong middle-key coefficients) was caught by the differential and fixed before committing.
 - New ledger row `PROC-ANIM-STREAMED-001` at `已实现但未验证`; recorded as `DIFF-STREAMED-SLOPES-001`. Converter orchestration (buffer assembly, `ProcessStreams`, bindings cache) stays open.
 - `cargo test --workspace --locked`: 893 library and 33 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+## Converter orchestration math with search and rounding differentials (2026-10-05)
+
+- Probe `Temp/opencode/sclipprobe` also invoked the private `TryGetNextFrame` via reflection (six search rows) and `float.Round` on nine inputs (confirming to-even rounding with `-0.5` → `-0.0`); rows appended to `src/resources/streamed_curve_fixture.txt`.
+- Added `try_get_next_frame` to `src/resources/streamed_curve.rs` and new module `src/resources/clip_convert.rs`: `IsTransform` precedence (Transform always; RectTransform only with valid type), bindings-cache expansion, `CalculateLastConstantTime` with all branches, the first-frame fix, dense frame times, the constant one-or-two rule, and `DefaultFloatWeight`. Missing bindings and invalid transform types are explicit errors.
+- New ledger row `PROC-ANIM-CONVERT-001` at `已实现但未验证`; recorded as `DIFF-CLIP-CONVERT-001`. Curve emission on clip objects stays open.
+- `cargo test --workspace --locked`: 899 library and 33 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.

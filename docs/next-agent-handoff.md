@@ -510,3 +510,10 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - `cargo test --workspace --locked`: 893 library and 33 CLI tests; warnings-denied Clippy and format check pass.
 - Next: `AnimationClipConverter` orchestration (buffer assembly, `ProcessStreams`/`ProcessDenses`/`ProcessConstant`, bindings cache), `RES-AUDIO-001`, parsed-form shader dummy, `EXPORT-UNITY-001`, `TYPE-SCRIPT-001`, and the product rows.
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 60. Checkpoint: Converter orchestration math + search/rounding differentials (2026-10-05)
+
+- Added `try_get_next_frame` (6-row reflection differential) to `streamed_curve.rs` and new `clip_convert.rs` (bindings cache, `IsTransform` precedence, `CalculateLastConstantTime`, first-frame fix, dense/constant rules, `DefaultFloatWeight`, 9-row rounding differential). New row `PROC-ANIM-CONVERT-001` at `已实现但未验证`; `DIFF-CLIP-CONVERT-001` recorded. Curve emission stays open.
+- `cargo test --workspace --locked`: 899 library and 33 CLI tests; warnings-denied Clippy and format check pass.
+- Next: `RES-AUDIO-001`, parsed-form shader dummy, blend shapes, `EXPORT-UNITY-001`, `TYPE-SCRIPT-001`, and the product rows.
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

@@ -205,6 +205,22 @@ fn set_negative_infinity_slope(
     }
 }
 
+/// `AnimationClipConverter.TryGetNextFrame`: the first curve with `curve_id` in a
+/// later frame wins, scanned frame by frame and curve by curve.
+pub fn try_get_next_frame(
+    frames: &[StreamedFrame],
+    current: usize,
+    curve_id: i32,
+) -> Option<(usize, usize)> {
+    for (frame_index, frame) in frames.iter().enumerate().skip(current.saturating_add(1)) {
+        for (curve_position, curve) in frame.curves.iter().enumerate() {
+            if curve.index == curve_id {
+                return Some((frame_index, curve_position));
+            }
+        }
+    }
+    None
+}
 /// One decoded streamed frame: `StreamedFrame`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StreamedFrame {
@@ -626,5 +642,63 @@ mod tests {
     #[test]
     fn rounding_threshold_matches_the_source_float_constant() {
         assert_eq!(ROUNDING_ERROR_THRESHOLD, f64::from(5e-7f32));
+    }
+
+    /// Differential against the reference `AnimationClipConverter.TryGetNextFrame`
+    /// (probe `Temp/opencode/sclipprobe`): the first later frame holding the curve
+    /// ID wins, with positions and misses asserted exactly.
+    #[test]
+    fn next_frame_search_matches_the_reference_runtime() {
+        fn frame(indexes: &[i32]) -> StreamedFrame {
+            StreamedFrame {
+                time: 0.0,
+                curves: indexes
+                    .iter()
+                    .map(|&index| StreamedCurveKey {
+                        index,
+                        coefficient: [0.0; 3],
+                        right_sided_limit: 0.0,
+                        left_sided_limit: 0.0,
+                        exact_left_sided_limit: true,
+                        in_slope: 0.0,
+                        out_slope: 0.0,
+                    })
+                    .collect(),
+            }
+        }
+        let frames = [frame(&[3, 7]), frame(&[7, 3]), frame(&[7])];
+        let fixture = include_str!("streamed_curve_fixture.txt");
+        let mut rows = 0;
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut parts = line.split('|');
+            if parts.clone().next() != Some("SNEXT") {
+                continue;
+            }
+            assert_eq!(parts.next(), Some("SNEXT"), "{line}");
+            let current: usize = parts.next().expect("a frame index").parse().unwrap();
+            let curve_id: i32 = parts.next().expect("a curve id").parse().unwrap();
+            let found = parts.next().expect("a found word");
+            let frame_word = parts.next().expect("a frame word");
+            let position_word = parts.next().expect("a position word");
+            assert!(parts.next().is_none(), "{line}");
+            match try_get_next_frame(&frames, current, curve_id) {
+                Some((frame_index, position)) => {
+                    assert_eq!(found, "1", "{line}");
+                    assert_eq!(frame_index.to_string(), frame_word, "{line}");
+                    assert_eq!(position.to_string(), position_word, "{line}");
+                }
+                None => {
+                    assert_eq!(found, "0", "{line}");
+                    assert_eq!(frame_word, "-1", "{line}");
+                    assert_eq!(position_word, "-1", "{line}");
+                }
+            }
+            rows += 1;
+        }
+        assert_eq!(rows, 6, "all probed search rows are asserted");
     }
 }
