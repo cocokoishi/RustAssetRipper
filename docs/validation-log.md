@@ -2209,6 +2209,13 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 ## Managed type classification with a runtime differential (2026-10-05)
 
 - Probe `Temp/opencode/monoutilsprobe` (SDK 10.0.401) drove the shipped `AssetRipper.SerializationLogic.dll` (13 `MonoUtils` predicates over a 469-cell namespace/name matrix, `ToPrimitiveType` over 268 cells, all 17 `PrimitiveType` discriminants) and `AssetRipper.Import.dll` (`GameAssetFactory.CreateEngineAsset` at 2019.4.0f1: 21 concrete versioned subclasses plus 2 rejections); all 777 rows committed as `src/processing/mono_utils_fixture.txt`.
-- Added `src/processing/mono_utils.rs`: namespace consts, all 13 predicates, `PrimitiveType` with discriminants and name parsing, `to_primitive_type`, and the `EngineAssetKind` table (version-taking arms plus the probed 2019.4 concrete classes). Assembly loading and object construction stay outside (need live managed assemblies).
+- Added `src/processing/mono_utils.rs`: namespace consts, all 13 predicates, and `PrimitiveType` with discriminants and name parsing. Assembly loading and object construction stay outside (need live managed assemblies). The 23 `ENGINE` rows were committed as fixture evidence; the name table itself is ported next in `asset_factory.rs`.
 - `DIFF-MONO-UTILS-001` recorded. New ledger row `TYPE-MONO-UTILS-001` at `已实现但未验证`.
 - `cargo test --workspace --locked`: 938 library and 40 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+## Asset-factory dispatch with an engine-table differential (2026-10-06)
+
+- Added `src/processing/asset_factory.rs` (first audited slice of `SER-TT-ABSENT-001`): the `ReadAsset` top dispatch (pre-3.5 unreadable, class-114 MonoBehaviour, normal), the `ReadNormalObject` fallback chain with its info/warning/error log levels, the `TryReadNormalObject` tail rules (exact, zero padding, 24-byte Chinese texture tail), the Patch build-bump retry arithmetic, the `CreateAsset` three outcomes, and the 21-arm `CreateEngineAsset` table (version-taking arms plus probed 2019.4 concrete classes). Byte reading, node building, and assembly-backed structures stay outside; version facts arrive precomputed (no parsed version model exists yet).
+- The 23 `ENGINE` rows of `mono_utils_fixture.txt` (probe `Temp/opencode/monoutilsprobe`, SDK 10.0.401) are re-asserted through the new table; dispatch rules are source-read over caller facts. Also corrected the previous entry's over-claim: `mono_utils.rs` never contained the engine table.
+- `DIFF-ASSET-FACTORY-001` recorded. New ledger row `SER-ASSET-FACTORY-001` at `已实现但未验证`.
+- `cargo test --workspace --locked`: 944 library and 40 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
