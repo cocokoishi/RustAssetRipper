@@ -719,6 +719,6 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 
 ## 92. Checkpoint: export-failure warning text (2026-10-06)
 
-- Ported `format_export_failure` with a test; recorded precise dependencies for the meta-pipeline remainder. Caught and fixed a stale-cargo-cache incident (`clean -p` before trusting local runs). Fresh-build lib 982/982, bin 50/50, workspace Clippy clean; full validation via Actions after push.
+- Ported `format_export_failure` with a test; recorded precise dependencies for the meta-pipeline remainder. Caught and fixed a stale-cargo-cache incident (`clean -p` before trusting local runs). Fresh-build lib 982/982, bin 50/50, workspace Clippy clean; CI run `37333787247` green (all five jobs) for remote `main` = `f733870`; local matches.
 - Next: the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

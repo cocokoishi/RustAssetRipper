@@ -2355,5 +2355,5 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 ## Export-failure warning text and meta-pipeline dependencies (2026-10-06)
 
 - Ported the `Failed to export '{Name}' ({TypeName})` loop warning as `format_export_failure` in `project_order.rs` with a dedicated test; recorded precise source-evidenced dependencies for the three remaining meta-pipeline items (CLI exposure needs collection dispatch; GUID freshness needs per-collection minting inside it; folder sidecars are source-dead).
-- Local validation incident: cargo's freshness cache skipped rebuilds after file edits (clock skew between source mtimes and the test binary), hiding the new test until `cargo clean -p assetripper-rs` forced a rebuild. Fresh-build results: lib 982/982, bin 50/50, workspace Clippy clean; full validation via Actions after push.
+- Local validation incident: cargo's freshness cache skipped rebuilds after file edits (clock skew between source mtimes and the test binary), hiding the new test until `cargo clean -p assetripper-rs` forced a rebuild. Fresh-build results: lib 982/982, bin 50/50, workspace Clippy clean; CI run `37333787247` green (all five jobs) for remote `main` = `f733870`; local matches.
 - No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
