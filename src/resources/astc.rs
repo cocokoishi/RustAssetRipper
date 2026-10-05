@@ -350,7 +350,7 @@ fn decode_block_parameters(input: &[u8], p: &mut BlockData) {
                 }
                 _ => {
                     for i in 0..4 {
-                        p.cem[i] |= get_bits(input, 120 + i * 2 - weight_bits, 2);
+                        p.cem[i] |= get_bits(input, 120 + (i as i32) * 2 - weight_bits, 2);
                     }
                 }
             }
@@ -427,7 +427,7 @@ fn decode_intseq(
                 | (d >> ((b * 5) as u32) & 0x80)) as usize;
             let mut j = 0;
             while j < 5 && n < count as usize {
-                let bits = (d >> ((D_IMT[j] + b * j) as u32)) as u32 as i32 & mask;
+                let bits = (d >> ((D_IMT[j] + b * (j as i32)) as u32)) as u32 as i32 & mask;
                 out[n] = IntSeqData {
                     bits,
                     nonbits: DI_TRITS_TABLE[j * 256 + x],
@@ -460,7 +460,7 @@ fn decode_intseq(
                 | (d >> ((b * 3) as u32) & 0x60)) as usize;
             let mut j = 0;
             while j < 3 && n < count as usize {
-                let bits = (d as u32 as i32) >> (D_IMQ[j] + b * j) & mask;
+                let bits = (d as u32 as i32) >> ((D_IMQ[j] + b * (j as i32)) as u32) & mask;
                 out[n] = IntSeqData {
                     bits,
                     nonbits: DI_QUINTS_TABLE[j * 128 + x],
@@ -509,35 +509,33 @@ fn decode_endpoints(input: &[u8], p: &mut BlockData) {
     let mut ev = [0i32; 32];
     match CEM_TABLE_A[p.cem_range] {
         3 => {
-            let mut b = 0;
             let c = DE_TRITS_TABLE[CEM_TABLE_B[p.cem_range] as usize];
             for i in 0..p.endpoint_value_num as usize {
                 let a = (ep_seq[i].bits & 1) * 0x1ff;
                 let x = ep_seq[i].bits >> 1;
-                match CEM_TABLE_B[p.cem_range] {
-                    1 => b = 0,
-                    2 => b = 0b100010110 * x,
-                    3 => b = x << 7 | x << 2 | x,
-                    4 => b = x << 6 | x,
-                    5 => b = x << 5 | x >> 2,
-                    _ => b = x << 4 | x >> 4,
-                }
+                let b = match CEM_TABLE_B[p.cem_range] {
+                    1 => 0,
+                    2 => 0b100010110 * x,
+                    3 => x << 7 | x << 2 | x,
+                    4 => x << 6 | x,
+                    5 => x << 5 | x >> 2,
+                    _ => x << 4 | x >> 4,
+                };
                 ev[i] = (a & 0x80) | ((ep_seq[i].nonbits * c + b) ^ a) >> 2;
             }
         }
         5 => {
-            let mut b = 0;
             let c = DE_QUINTS_TABLE[CEM_TABLE_B[p.cem_range] as usize];
             for i in 0..p.endpoint_value_num as usize {
                 let a = (ep_seq[i].bits & 1) * 0x1ff;
                 let x = ep_seq[i].bits >> 1;
-                match CEM_TABLE_B[p.cem_range] {
-                    1 => b = 0,
-                    2 => b = 0b100001100 * x,
-                    3 => b = x << 7 | x << 1 | x >> 1,
-                    4 => b = x << 6 | x >> 1,
-                    _ => b = x << 5 | x >> 3,
-                }
+                let b = match CEM_TABLE_B[p.cem_range] {
+                    1 => 0,
+                    2 => 0b100001100 * x,
+                    3 => x << 7 | x << 1 | x >> 1,
+                    4 => x << 6 | x >> 1,
+                    _ => x << 5 | x >> 3,
+                };
                 ev[i] = (a & 0x80) | ((ep_seq[i].nonbits * c + b) ^ a) >> 2;
             }
         }
@@ -613,9 +611,9 @@ fn decode_endpoints(input: &[u8], p: &mut BlockData) {
             }
             6 => set_endpoint(
                 &mut p.endpoints[cem],
-                v0 * v3 >> 8,
-                v1 * v3 >> 8,
-                v2 * v3 >> 8,
+                (v0 * v3) >> 8,
+                (v1 * v3) >> 8,
+                (v2 * v3) >> 8,
                 255,
                 v0,
                 v1,
@@ -664,9 +662,9 @@ fn decode_endpoints(input: &[u8], p: &mut BlockData) {
             }
             10 => set_endpoint(
                 &mut p.endpoints[cem],
-                v0 * v3 >> 8,
-                v1 * v3 >> 8,
-                v2 * v3 >> 8,
+                (v0 * v3) >> 8,
+                (v1 * v3) >> 8,
+                (v2 * v3) >> 8,
                 v4,
                 v0,
                 v1,
