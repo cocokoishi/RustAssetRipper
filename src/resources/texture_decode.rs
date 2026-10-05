@@ -210,7 +210,7 @@ pub fn decode_dxt3(
     Ok(offset)
 }
 
-fn dxt5_alpha_table(alpha0: u8, alpha1: u8) -> [u8; 8] {
+pub(crate) fn dxt5_alpha_table(alpha0: u8, alpha1: u8) -> [u8; 8] {
     let a0 = u32::from(alpha0);
     let a1 = u32::from(alpha1);
     if alpha0 > alpha1 {
@@ -525,6 +525,377 @@ pub fn decode_rgba4444(
     })
 }
 
+fn ushort_to_byte(value: u16) -> u8 {
+    ((u32::from(value) * 255 + 32895) >> 16) as u8
+}
+
+fn short_to_byte(value: i16) -> u8 {
+    ushort_to_byte((value as u16) ^ 0x8000)
+}
+
+fn sbyte_to_byte(value: i8) -> u8 {
+    (value as u8) ^ 0x80
+}
+
+fn float_to_byte(value: f32) -> u8 {
+    let x = value * 255.0;
+    if x > 255.0 {
+        255
+    } else if x > 0.0 {
+        x as u8
+    } else {
+        0
+    }
+}
+
+fn double_to_byte(value: f64) -> u8 {
+    let x = value * 255.0;
+    if x > 255.0 {
+        255
+    } else if x > 0.0 {
+        x as u8
+    } else {
+        0
+    }
+}
+
+/// Decodes an IEEE 754 binary16 bit pattern to `f32`.
+fn half_bits_to_f32(bits: u16) -> f32 {
+    let sign = (bits >> 15) & 1;
+    let exponent = (bits >> 10) & 0x1F;
+    let mantissa = bits & 0x03FF;
+    let value = if exponent == 0 {
+        (f32::from(mantissa)) * 2.0f32.powi(-24)
+    } else if exponent == 31 {
+        if mantissa == 0 {
+            f32::INFINITY
+        } else {
+            f32::NAN
+        }
+    } else {
+        (1.0 + f32::from(mantissa) / 1024.0) * 2.0f32.powi(i32::from(exponent) - 15)
+    };
+    if sign == 1 {
+        -value
+    } else {
+        value
+    }
+}
+
+/// `RgbConverter` for `TextureFormat.R16`.
+pub fn decode_r16(
+    input: &[u8],
+    width: usize,
+    height: usize,
+    output: &mut [u8],
+) -> Result<usize, TextureDecodeError> {
+    decode_packed::<2>(input, width, height, output, |p| {
+        [ushort_to_byte(u16::from_le_bytes([p[0], p[1]])), 0, 0, 0xFF]
+    })
+}
+
+/// `RgbConverter` for `TextureFormat.RG32`.
+pub fn decode_rg32(
+    input: &[u8],
+    width: usize,
+    height: usize,
+    output: &mut [u8],
+) -> Result<usize, TextureDecodeError> {
+    decode_packed::<4>(input, width, height, output, |p| {
+        [
+            ushort_to_byte(u16::from_le_bytes([p[0], p[1]])),
+            ushort_to_byte(u16::from_le_bytes([p[2], p[3]])),
+            0,
+            0xFF,
+        ]
+    })
+}
+
+/// `RgbConverter` for `TextureFormat.RGB48`.
+pub fn decode_rgb48(
+    input: &[u8],
+    width: usize,
+    height: usize,
+    output: &mut [u8],
+) -> Result<usize, TextureDecodeError> {
+    decode_packed::<6>(input, width, height, output, |p| {
+        [
+            ushort_to_byte(u16::from_le_bytes([p[0], p[1]])),
+            ushort_to_byte(u16::from_le_bytes([p[2], p[3]])),
+            ushort_to_byte(u16::from_le_bytes([p[4], p[5]])),
+            0xFF,
+        ]
+    })
+}
+
+/// `RgbConverter` for `TextureFormat.RGBA64`.
+pub fn decode_rgba64(
+    input: &[u8],
+    width: usize,
+    height: usize,
+    output: &mut [u8],
+) -> Result<usize, TextureDecodeError> {
+    decode_packed::<8>(input, width, height, output, |p| {
+        [
+            ushort_to_byte(u16::from_le_bytes([p[0], p[1]])),
+            ushort_to_byte(u16::from_le_bytes([p[2], p[3]])),
+            ushort_to_byte(u16::from_le_bytes([p[4], p[5]])),
+            ushort_to_byte(u16::from_le_bytes([p[6], p[7]])),
+        ]
+    })
+}
+
+/// `RgbConverter` for `TextureFormat.RHalf`.
+pub fn decode_r_half(
+    input: &[u8],
+    width: usize,
+    height: usize,
+    output: &mut [u8],
+) -> Result<usize, TextureDecodeError> {
+    decode_packed::<2>(input, width, height, output, |p| {
+        [
+            float_to_byte(half_bits_to_f32(u16::from_le_bytes([p[0], p[1]]))),
+            0,
+            0,
+            0xFF,
+        ]
+    })
+}
+
+/// `RgbConverter` for `TextureFormat.RGHalf`.
+pub fn decode_rg_half(
+    input: &[u8],
+    width: usize,
+    height: usize,
+    output: &mut [u8],
+) -> Result<usize, TextureDecodeError> {
+    decode_packed::<4>(input, width, height, output, |p| {
+        [
+            float_to_byte(half_bits_to_f32(u16::from_le_bytes([p[0], p[1]]))),
+            float_to_byte(half_bits_to_f32(u16::from_le_bytes([p[2], p[3]]))),
+            0,
+            0xFF,
+        ]
+    })
+}
+
+/// `RgbConverter` for `TextureFormat.RGBAHalf`.
+pub fn decode_rgba_half(
+    input: &[u8],
+    width: usize,
+    height: usize,
+    output: &mut [u8],
+) -> Result<usize, TextureDecodeError> {
+    decode_packed::<8>(input, width, height, output, |p| {
+        [
+            float_to_byte(half_bits_to_f32(u16::from_le_bytes([p[0], p[1]]))),
+            float_to_byte(half_bits_to_f32(u16::from_le_bytes([p[2], p[3]]))),
+            float_to_byte(half_bits_to_f32(u16::from_le_bytes([p[4], p[5]]))),
+            float_to_byte(half_bits_to_f32(u16::from_le_bytes([p[6], p[7]]))),
+        ]
+    })
+}
+
+/// `RgbConverter` for `TextureFormat.RFloat`.
+pub fn decode_r_float(
+    input: &[u8],
+    width: usize,
+    height: usize,
+    output: &mut [u8],
+) -> Result<usize, TextureDecodeError> {
+    decode_packed::<4>(input, width, height, output, |p| {
+        [
+            float_to_byte(f32::from_le_bytes([p[0], p[1], p[2], p[3]])),
+            0,
+            0,
+            0xFF,
+        ]
+    })
+}
+
+/// `RgbConverter` for `TextureFormat.RGFloat`.
+pub fn decode_rg_float(
+    input: &[u8],
+    width: usize,
+    height: usize,
+    output: &mut [u8],
+) -> Result<usize, TextureDecodeError> {
+    decode_packed::<8>(input, width, height, output, |p| {
+        [
+            float_to_byte(f32::from_le_bytes([p[0], p[1], p[2], p[3]])),
+            float_to_byte(f32::from_le_bytes([p[4], p[5], p[6], p[7]])),
+            0,
+            0xFF,
+        ]
+    })
+}
+
+/// `RgbConverter` for `TextureFormat.RGBAFloat`.
+pub fn decode_rgba_float(
+    input: &[u8],
+    width: usize,
+    height: usize,
+    output: &mut [u8],
+) -> Result<usize, TextureDecodeError> {
+    decode_packed::<16>(input, width, height, output, |p| {
+        [
+            float_to_byte(f32::from_le_bytes([p[0], p[1], p[2], p[3]])),
+            float_to_byte(f32::from_le_bytes([p[4], p[5], p[6], p[7]])),
+            float_to_byte(f32::from_le_bytes([p[8], p[9], p[10], p[11]])),
+            float_to_byte(f32::from_le_bytes([p[12], p[13], p[14], p[15]])),
+        ]
+    })
+}
+
+/// `RgbConverter` for `TextureFormat.R8_SIGNED`.
+pub fn decode_r8_signed(
+    input: &[u8],
+    width: usize,
+    height: usize,
+    output: &mut [u8],
+) -> Result<usize, TextureDecodeError> {
+    decode_packed::<1>(input, width, height, output, |p| {
+        [sbyte_to_byte(p[0] as i8), 0, 0, 0xFF]
+    })
+}
+
+/// `RgbConverter` for `TextureFormat.RG16_SIGNED`.
+pub fn decode_rg16_signed(
+    input: &[u8],
+    width: usize,
+    height: usize,
+    output: &mut [u8],
+) -> Result<usize, TextureDecodeError> {
+    decode_packed::<2>(input, width, height, output, |p| {
+        [
+            sbyte_to_byte(p[0] as i8),
+            sbyte_to_byte(p[1] as i8),
+            0,
+            0xFF,
+        ]
+    })
+}
+
+/// `RgbConverter` for `TextureFormat.RGB24_SIGNED`.
+pub fn decode_rgb24_signed(
+    input: &[u8],
+    width: usize,
+    height: usize,
+    output: &mut [u8],
+) -> Result<usize, TextureDecodeError> {
+    decode_packed::<3>(input, width, height, output, |p| {
+        [
+            sbyte_to_byte(p[0] as i8),
+            sbyte_to_byte(p[1] as i8),
+            sbyte_to_byte(p[2] as i8),
+            0xFF,
+        ]
+    })
+}
+
+/// `RgbConverter` for `TextureFormat.RGBA32_SIGNED`.
+pub fn decode_rgba32_signed(
+    input: &[u8],
+    width: usize,
+    height: usize,
+    output: &mut [u8],
+) -> Result<usize, TextureDecodeError> {
+    decode_packed::<4>(input, width, height, output, |p| {
+        [
+            sbyte_to_byte(p[0] as i8),
+            sbyte_to_byte(p[1] as i8),
+            sbyte_to_byte(p[2] as i8),
+            sbyte_to_byte(p[3] as i8),
+        ]
+    })
+}
+
+/// `RgbConverter` for `TextureFormat.R16_SIGNED`.
+pub fn decode_r16_signed(
+    input: &[u8],
+    width: usize,
+    height: usize,
+    output: &mut [u8],
+) -> Result<usize, TextureDecodeError> {
+    decode_packed::<2>(input, width, height, output, |p| {
+        [short_to_byte(i16::from_le_bytes([p[0], p[1]])), 0, 0, 0xFF]
+    })
+}
+
+/// `RgbConverter` for `TextureFormat.RG32_SIGNED`.
+pub fn decode_rg32_signed(
+    input: &[u8],
+    width: usize,
+    height: usize,
+    output: &mut [u8],
+) -> Result<usize, TextureDecodeError> {
+    decode_packed::<4>(input, width, height, output, |p| {
+        [
+            short_to_byte(i16::from_le_bytes([p[0], p[1]])),
+            short_to_byte(i16::from_le_bytes([p[2], p[3]])),
+            0,
+            0xFF,
+        ]
+    })
+}
+
+/// `RgbConverter` for `TextureFormat.RGB48_SIGNED`.
+pub fn decode_rgb48_signed(
+    input: &[u8],
+    width: usize,
+    height: usize,
+    output: &mut [u8],
+) -> Result<usize, TextureDecodeError> {
+    decode_packed::<6>(input, width, height, output, |p| {
+        [
+            short_to_byte(i16::from_le_bytes([p[0], p[1]])),
+            short_to_byte(i16::from_le_bytes([p[2], p[3]])),
+            short_to_byte(i16::from_le_bytes([p[4], p[5]])),
+            0xFF,
+        ]
+    })
+}
+
+/// `RgbConverter` for `TextureFormat.RGBA64_SIGNED`.
+pub fn decode_rgba64_signed(
+    input: &[u8],
+    width: usize,
+    height: usize,
+    output: &mut [u8],
+) -> Result<usize, TextureDecodeError> {
+    decode_packed::<8>(input, width, height, output, |p| {
+        [
+            short_to_byte(i16::from_le_bytes([p[0], p[1]])),
+            short_to_byte(i16::from_le_bytes([p[2], p[3]])),
+            short_to_byte(i16::from_le_bytes([p[4], p[5]])),
+            short_to_byte(i16::from_le_bytes([p[6], p[7]])),
+        ]
+    })
+}
+
+/// `RgbConverter` for `TextureFormat.RGB9e5Float`.
+pub fn decode_rgb9e5_float(
+    input: &[u8],
+    width: usize,
+    height: usize,
+    output: &mut [u8],
+) -> Result<usize, TextureDecodeError> {
+    decode_packed::<4>(input, width, height, output, |p| {
+        let bits = u32::from_le_bytes([p[0], p[1], p[2], p[3]]);
+        let exponent = (bits >> 27) as i32 - 24;
+        let scale = 2.0f64.powi(exponent);
+        let red = f64::from(bits & 0x1FF) * scale;
+        let green = f64::from((bits >> 9) & 0x1FF) * scale;
+        let blue = f64::from((bits >> 18) & 0x1FF) * scale;
+        [
+            double_to_byte(red),
+            double_to_byte(green),
+            double_to_byte(blue),
+            0xFF,
+        ]
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -588,5 +959,59 @@ mod tests {
             rows += 1;
         }
         assert_eq!(rows, 33);
+    }
+
+    fn decode_wide(kind: &str, input: &[u8], width: usize, height: usize) -> (usize, Vec<u8>) {
+        let mut output = vec![0u8; width * height * 4];
+        let consumed = match kind {
+            "R16" => decode_r16(input, width, height, &mut output),
+            "RG32" => decode_rg32(input, width, height, &mut output),
+            "RGB48" => decode_rgb48(input, width, height, &mut output),
+            "RGBA64" => decode_rgba64(input, width, height, &mut output),
+            "RHalf" => decode_r_half(input, width, height, &mut output),
+            "RGHalf" => decode_rg_half(input, width, height, &mut output),
+            "RGBAHalf" => decode_rgba_half(input, width, height, &mut output),
+            "RFloat" => decode_r_float(input, width, height, &mut output),
+            "RGFloat" => decode_rg_float(input, width, height, &mut output),
+            "RGBAFloat" => decode_rgba_float(input, width, height, &mut output),
+            "R8_SIGNED" => decode_r8_signed(input, width, height, &mut output),
+            "RG16_SIGNED" => decode_rg16_signed(input, width, height, &mut output),
+            "RGB24_SIGNED" => decode_rgb24_signed(input, width, height, &mut output),
+            "RGBA32_SIGNED" => decode_rgba32_signed(input, width, height, &mut output),
+            "R16_SIGNED" => decode_r16_signed(input, width, height, &mut output),
+            "RG32_SIGNED" => decode_rg32_signed(input, width, height, &mut output),
+            "RGB48_SIGNED" => decode_rgb48_signed(input, width, height, &mut output),
+            "RGBA64_SIGNED" => decode_rgba64_signed(input, width, height, &mut output),
+            "RGB9e5Float" => decode_rgb9e5_float(input, width, height, &mut output),
+            other => panic!("unknown wide format {other}"),
+        }
+        .unwrap();
+        (consumed, output)
+    }
+
+    /// Byte-for-byte differential against `AssetRipper.TextureDecoder`'s `RgbConverter` (probe
+    /// `Temp/opencode/texprobe2`) for the 16-bit, half, float, signed, and RGB9e5 formats.
+    #[test]
+    fn wide_formats_match_the_reference_runtime() {
+        let fixture = include_str!("wide_format_fixture.txt");
+        let mut rows = 0;
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let parts: Vec<&str> = line.split('|').collect();
+            let width: usize = parts[1].parse().unwrap();
+            let height: usize = parts[2].parse().unwrap();
+            let input = parse_hex(parts[3]);
+            let result: Vec<&str> = parts[4].split(':').collect();
+            let expected_consumed: usize = result[0].parse().unwrap();
+            let expected_output = parse_hex(result[1]);
+            let (consumed, output) = decode_wide(parts[0], &input, width, height);
+            assert_eq!(consumed, expected_consumed, "consumed {line}");
+            assert_eq!(output, expected_output, "output {line}");
+            rows += 1;
+        }
+        assert_eq!(rows, 19);
     }
 }

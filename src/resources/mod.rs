@@ -4,6 +4,7 @@ pub mod animation_clip;
 pub mod animation_curve;
 pub mod animator_controller;
 pub mod animator_enums;
+pub mod atc_yuy2;
 pub mod avatar;
 pub mod avatar_constant;
 pub mod blend_tree_node;
