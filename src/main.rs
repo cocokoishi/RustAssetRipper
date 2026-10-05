@@ -280,8 +280,10 @@ fn export_texture_from_arguments(
     arguments: impl Iterator<Item = OsString>,
 ) -> Result<(), Box<dyn Error>> {
     let mut arguments = arguments;
-    // The configured fallback defaults to `ExportSettings.ImageExportFormat` (`Png`).
+    // The configured fallback defaults to `ExportSettings.ImageExportFormat` (`Png`),
+    // with original-extension preference defaulting to true.
     let mut configured = ExportDefaults::default().image_export_format;
+    let mut prefer_original = ExportDefaults::default().prefer_original_texture_extension;
     // Optional leading flags precede the positional arguments.
     let mut positional: Vec<OsString> = Vec::new();
     let mut explicit_settings = false;
@@ -290,7 +292,9 @@ fn export_texture_from_arguments(
             let path = arguments.next().ok_or_else(|| {
                 invalid_input("export-texture --settings requires a settings file path")
             })?;
-            configured = load_cli_export_settings(Path::new(&path))?.image_export_format;
+            let export = load_cli_export_settings(Path::new(&path))?;
+            configured = export.image_export_format;
+            prefer_original = export.prefer_original_texture_extension;
             explicit_settings = true;
         } else {
             positional.push(next);
@@ -301,6 +305,7 @@ fn export_texture_from_arguments(
     if !explicit_settings {
         if let Some(export) = try_load_default_export_settings()? {
             configured = export.image_export_format;
+            prefer_original = export.prefer_original_texture_extension;
         }
     }
     let mut positional = positional.into_iter();
@@ -332,6 +337,7 @@ fn export_texture_from_arguments(
         serialized_file_index,
         path_id,
         configured,
+        prefer_original,
         &output_path,
         &mut output,
     )
@@ -342,6 +348,7 @@ fn export_texture_to<W: io::Write>(
     serialized_file_index: usize,
     path_id: i64,
     configured: SettingsImageFormat,
+    prefer_original_texture_extension: bool,
     output_path: &Path,
     status_output: &mut W,
 ) -> Result<(), Box<dyn Error>> {
@@ -457,14 +464,22 @@ fn export_texture_to<W: io::Write>(
         _ => None,
     };
 
-    // The output extension selects the format; the configured settings format is the
-    // fallback. With default settings (`Png`) this matches the previous hardcoded fallback.
+    // The output extension selects the format; otherwise `GetTextureExportFormat`
+    // picks the original extension's format when preferred and recognized, else the
+    // configured settings format. Bundle-decoded assets carry no original path, so the
+    // best extension is `None` and the fallback reduces to the configured format.
+    // With default settings (`Png`) this matches the previous hardcoded fallback.
+    let fallback = SettingsImageFormat::texture_export_format(
+        prefer_original_texture_extension,
+        None,
+        configured,
+    );
     let format = ImageExportFormat::from_settings_format(
         output_path
             .extension()
             .and_then(|extension| extension.to_str())
             .and_then(SettingsImageFormat::from_extension)
-            .unwrap_or(configured),
+            .unwrap_or(fallback),
     );
     let image =
         export_texture2d_image(&view, stream_bytes.as_deref(), format).map_err(|error| {
@@ -4760,6 +4775,7 @@ mod tests {
             0,
             42,
             assetripper::export::settings::ImageExportFormat::Png,
+            true,
             &output_path,
             &mut status,
         )
@@ -4776,6 +4792,7 @@ mod tests {
             0,
             42,
             assetripper::export::settings::ImageExportFormat::Png,
+            true,
             &output_path,
             &mut Vec::new(),
         )
@@ -4809,6 +4826,7 @@ mod tests {
             0,
             42,
             assetripper::export::settings::ImageExportFormat::Png,
+            true,
             &output_path,
             &mut Vec::new(),
         );
@@ -4853,6 +4871,48 @@ mod tests {
         ];
         super::export_texture_from_arguments(arguments.into_iter()).unwrap();
         assert_eq!(&fs::read(&output_path).unwrap()[..2], b"BM");
+        drop(input);
+    }
+
+    #[test]
+    fn export_texture_settings_file_prefer_original_falls_back_to_configured() {
+        use std::ffi::OsString;
+
+        let directory = TestInputDirectory::new_root();
+        let serialized_path = directory.join("main.assets");
+        let settings_path = directory.join("AssetRipper.Settings.json");
+        // PNG configured with original-extension preference: bundle-decoded assets
+        // carry no original path, so the `.bin` output falls back to PNG.
+        fs::write(
+            &settings_path,
+            "{\"Import\": {\"ScriptContentLevel\": 2, \"StreamingAssetsMode\": 1, \"DefaultVersion\": \"0.0.0a0\", \"TargetVersion\": \"0.0.0a0\"}, \"Processing\": {\"EnablePrefabOutlining\": false, \"EnableStaticMeshSeparation\": true, \"EnableAssetDeduplication\": false, \"RemoveNullableAttributes\": false, \"PublicizeAssemblies\": false, \"BundledAssetsExportMode\": 2}, \"Export\": {\"AudioExportFormat\": 2, \"ImageExportFormat\": 4, \"LightmapTextureExportFormat\": 2, \"ScriptExportMode\": 1, \"ScriptLanguageVersion\": -1, \"ScriptTypesFullyQualified\": false, \"ShaderExportMode\": 0, \"SpriteExportMode\": 0, \"TextExportMode\": 2, \"ExportUnreadableAssets\": false, \"PreferOriginalTextureExtension\": true, \"SaveSettingsToDisk\": false, \"LanguageCode\": null}}",
+        )
+        .unwrap();
+        let output_path = directory.join("texture.bin");
+        fs::write(&serialized_path, make_texture2d_file()).unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![
+                serialized_path.clone(),
+                settings_path.clone(),
+                output_path.clone(),
+            ],
+            subdirectories: Vec::new(),
+        };
+
+        let arguments = vec![
+            OsString::from("--settings"),
+            settings_path.into_os_string(),
+            OsString::from("0"),
+            OsString::from("42"),
+            output_path.clone().into_os_string(),
+            serialized_path.into_os_string(),
+        ];
+        super::export_texture_from_arguments(arguments.into_iter()).unwrap();
+        assert_eq!(
+            &fs::read(&output_path).unwrap()[..8],
+            &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]
+        );
         drop(input);
     }
 

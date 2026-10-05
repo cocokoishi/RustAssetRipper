@@ -230,6 +230,26 @@ impl ImageExportFormat {
         }
         self.file_extension().to_owned()
     }
+
+    /// `GetTextureExportFormat`: the original extension's format wins when preferred and
+    /// recognized, otherwise the configured format is used.
+    ///
+    /// The asset's best extension (`OverrideExtension ?? OriginalExtension`) arrives as a
+    /// caller fact; bundle-decoded assets carry no original path, so callers pass `None`.
+    pub fn texture_export_format(
+        prefer_original_texture_extension: bool,
+        best_extension: Option<&str>,
+        configured: Self,
+    ) -> Self {
+        if prefer_original_texture_extension {
+            if let Some(original) = best_extension {
+                if let Some(format) = Self::from_extension(original) {
+                    return format;
+                }
+            }
+        }
+        configured
+    }
 }
 
 /// Lightmap texture export format in `ExportSettings`; default `Yaml`.
@@ -665,6 +685,35 @@ mod tests {
         assert_eq!(
             ImageExportFormat::Exr.texture_extension(false, Some("png")),
             "exr"
+        );
+    }
+
+    #[test]
+    fn texture_export_format_prefers_recognized_originals_only() {
+        use ImageExportFormat as Format;
+
+        // A recognized original extension's format wins when preferred.
+        assert_eq!(
+            Format::texture_export_format(true, Some("tga"), Format::Png),
+            Format::Tga
+        );
+        assert_eq!(
+            Format::texture_export_format(true, Some("jpg"), Format::Png),
+            Format::Jpeg
+        );
+        // An unrecognized original or no original falls back to the configured format.
+        assert_eq!(
+            Format::texture_export_format(true, Some("dds"), Format::Png),
+            Format::Png
+        );
+        assert_eq!(
+            Format::texture_export_format(true, None, Format::Bmp),
+            Format::Bmp
+        );
+        // Without preference the configured format always wins.
+        assert_eq!(
+            Format::texture_export_format(false, Some("png"), Format::Exr),
+            Format::Exr
         );
     }
 
