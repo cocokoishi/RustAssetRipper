@@ -29,6 +29,7 @@ pub mod etc_decode;
 pub mod game_object;
 pub mod gl_texture_settings;
 pub mod graphics_format;
+pub mod image_export;
 pub mod keyframe;
 pub mod keyframe_quaternion;
 pub mod keyframe_vector3;

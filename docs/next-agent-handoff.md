@@ -383,3 +383,11 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - `cargo test --workspace --locked`: 780 library and 23 CLI tests; warnings-denied Clippy passes.
 - Next: the `RgbConverter`/`DirectBitmap` pixel-type plumbing and the image writers (PNG/EXR/BMP/TGA/JPEG), then Crunch; then the `.meta` FS sidecar integration and per-class `CreateImporter` tracing; the full exporter registration/resource matrix audit; and the object-model/product workflows.
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+
+## 44. Checkpoint: Texture image writers (2026-10-05)
+
+- Added `src/resources/image_export.rs`: `ImageExportFormat` and `Bitmap::save` for PNG, BMP (byte-exact `BmpWriter` layout), and TGA. EXR/HDR/JPEG return `ImageWriteError::Unsupported`.
+- `cargo test --workspace --locked`: 786 library and 23 CLI tests; warnings-denied Clippy passes.
+- Next: the `RgbConverter`/`DirectBitmap` pixel-type plumbing, Crunch, and the EXR/HDR/JPEG writers; then the `.meta` FS sidecar integration and per-class `CreateImporter` tracing; the full exporter registration/resource matrix audit; and the object-model/product workflows.
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

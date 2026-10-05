@@ -2020,3 +2020,10 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - `UnpackNormal`'s truncating `Convert<double, byte>` (the reference gives `254`, not `255`, for a `(128,128)` normal) is covered by a synthetic test.
 - Crunch decompression is not ported; crunched formats return `TextureConvertError::CrunchUnsupported` rather than decoding wrong data.
 - `cargo test --workspace --locked`: 780 library and 23 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+
+## Texture image writers (2026-10-05)
+
+- Added `src/resources/image_export.rs`: the `ImageExportFormat` enum and `Bitmap::save` for PNG, BMP, and TGA. The BMP writer reproduces `BmpWriter.WriteBmp` byte-for-byte; the PNG writer emits filter-0 scanlines with an RGB or RGBA colour type; the TGA writer emits uncompressed top-down BGRA/BGR.
+- EXR, HDR, and JPEG return `ImageWriteError::Unsupported` until their codecs are ported.
+- `cargo test --workspace --locked`: 786 library and 23 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.

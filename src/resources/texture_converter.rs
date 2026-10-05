@@ -153,6 +153,8 @@ pub struct Bitmap {
     pub depth: usize,
     /// Whether the reference's pixel type is `ColorRGBA<byte>` (controls `UnpackNormal`).
     pub is_rgba8: bool,
+    /// Whether the reference's pixel type has an alpha channel (controls the PNG colour type).
+    pub has_alpha: bool,
     /// Row-major RGBA8 pixels, `width * height * depth * 4` bytes.
     pub pixels: Vec<u8>,
 }
@@ -284,6 +286,7 @@ pub fn convert_to_bitmap(image: &TextureImage<'_>) -> Result<Bitmap, TextureConv
         height: image.height,
         depth: image.depth,
         is_rgba8: is_rgba8_target(image.texture_format),
+        has_alpha: has_alpha(image.texture_format),
         pixels: vec![0; pixel_bytes],
     };
 
@@ -345,6 +348,17 @@ pub fn is_rgba8_target(texture_format: i32) -> bool {
             | 80
             | 81
             | 82
+    )
+}
+
+/// The reference's outer `TryConvertToBitmap` pixel type has an alpha channel for these formats.
+pub fn has_alpha(texture_format: i32) -> bool {
+    if texture_format == 0 {
+        return true;
+    }
+    !matches!(
+        texture_format,
+        3 | 7 | 8 | 9 | 15 | 16 | 18 | 19 | 22 | 62 | 63 | 72 | 73 | 75 | 76 | 77 | 79 | 80 | 81
     )
 }
 
@@ -594,6 +608,7 @@ mod tests {
             height: 2,
             depth: 1,
             is_rgba8: true,
+            has_alpha: true,
             pixels: (0u8..16).collect(),
         };
         bitmap.flip_y();
@@ -662,6 +677,7 @@ mod tests {
             height: 1,
             depth: 1,
             is_rgba8: true,
+            has_alpha: true,
             pixels: vec![128, 128, 0, 255],
         };
         bitmap.unpack_normal();
@@ -675,6 +691,7 @@ mod tests {
             height: 1,
             depth: 1,
             is_rgba8: false,
+            has_alpha: false,
             pixels: vec![128, 128, 0, 255],
         };
         bitmap.unpack_normal();
