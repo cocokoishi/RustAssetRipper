@@ -2244,3 +2244,9 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Audited all fifteen tool-family projects (two parallel source reads, `OutputType` and `generate.bat` spot-verified): 9 dev/diagnostic consoles (cab-map, dependence-graph, file-extract, JSON-dump, MonoBehaviour-test, raw-texture-extract, system-test harness, TypeTree-extract, API-history generator) and the 7-project `AssemblyDumper` family (manual dump, TPK download, native-enum extraction, ILSpy recompile, NuGet fix, shared utils, doc-extraction library).
 - Rust dispositions recorded in `TOOLS-001` (now `已调查`): no CLI equivalent owed as product surface; never port the emitter, only output semantics per class; no doc-pipeline, downloader, or packaging equivalents.
 - No Rust source changed, so no cargo runs were needed for this increment. CI run `37305025403` green (all five jobs) for remote `main` = `db0f5d1`; local matches. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+## Configuration framework audit (2026-10-06)
+
+- Audited `AssetRipper.Configuration` (16 files: entry/instance/set/storage plus singleton/list stores and the string/parsable/JSON serializer selection rule) and the app wiring (`SerializedSettings` single `AssetRipper.Settings.json`, `FullConfiguration` load/save/delete, `SaveSettingsToDisk` gate in `SettingsPage`), call sites spot-verified. Records/enums/defaults are already ported in `src/export/settings.rs`; the generic keyed store needs no Rust equivalent.
+- `PRODUCT-CONFIG-001` moves to `已调查`; the concrete remainder is the JSON persistence round-trip plus the save/delete gate. Also corrected the row's Rust-module column (`src/export/settings.rs`, not `src/config/`).
+- No Rust source changed, so no cargo runs were needed for this increment. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
