@@ -16,7 +16,8 @@
 use std::error::Error;
 use std::fmt::{self, Display};
 
-use crate::io::special_names::fix_assembly_name;
+use crate::io::special_names::{fix_assembly_name, remove_assembly_file_extension};
+use crate::serialized_file::metadata::SerializedTypeReference;
 
 /// `ScriptingBackend`: the source scripting backend discriminants.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -158,6 +159,44 @@ pub fn get_valid_assembly_name(assembly: &str) -> String {
     }
 }
 
+/// The `TypeTreeResolver.TryGetSerializableType` failure when no reference matches.
+pub const TYPE_REFERENCE_NOT_FOUND: &str =
+    "The type reference was not found in the set of available type trees.";
+
+/// The `TypeTreeResolver.TryGetSerializableType` failure when the matched `OldType`
+/// cannot build nodes. Node building itself stays with the TypeTree reader.
+pub const TYPE_TREE_NODE_BUILD_FAILED: &str = "Failed to create nodes from the type tree.";
+
+/// The `TypeTreeResolver` three-way match predicate: class name, namespace, and the
+/// extension-stripped assembly name, all compared ordinally.
+///
+/// Absent Rust fields read as empty, matching the source `Utf8String.Empty` defaults.
+/// A default identifier (absent name) never matches: the source compares against a null
+/// name, which no stored class name equals.
+pub fn type_reference_matches_script(
+    reference: &SerializedTypeReference,
+    script: &ScriptIdentifier,
+) -> bool {
+    let Some(name) = script.name.as_deref() else {
+        return false;
+    };
+    reference.class_name.as_deref().unwrap_or_default() == name
+        && reference.namespace.as_deref().unwrap_or_default() == script.namespace
+        && remove_assembly_file_extension(reference.assembly_name.as_deref().unwrap_or_default())
+            == script.assembly
+}
+
+/// The `TypeTreeResolver` linear scan: the index of the first matching reference, or
+/// `None` with `TYPE_REFERENCE_NOT_FOUND` as the failure reason.
+pub fn find_type_reference_index(
+    references: &[SerializedTypeReference],
+    script: &ScriptIdentifier,
+) -> Option<usize> {
+    references
+        .iter()
+        .position(|reference| type_reference_matches_script(reference, script))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,5 +319,88 @@ mod tests {
         assert_eq!(get_valid_assembly_name(""), "Assembly-CSharp");
         assert_eq!(get_valid_assembly_name("MyLib.dll"), "MyLib");
         assert_eq!(get_valid_assembly_name("CSharp"), "Assembly - CSharp");
+    }
+
+    fn script_reference(
+        class: Option<&str>,
+        namespace: Option<&str>,
+        assembly: Option<&str>,
+    ) -> SerializedTypeReference {
+        SerializedTypeReference {
+            raw_type_id: 0,
+            type_id_for_hash: 0,
+            is_stripped_type: false,
+            script_type_index: 0,
+            script_id: None,
+            old_type_hash: None,
+            type_tree: None,
+            class_name: class.map(str::to_owned),
+            namespace: namespace.map(str::to_owned),
+            assembly_name: assembly.map(str::to_owned),
+        }
+    }
+
+    /// Differential against the shipped `AssetRipper.Import.dll` resolver
+    /// (probe `Temp/opencode/scriptidprobe`, SDK 10.0.401): the `RESOLVE` rows pin
+    /// both failure reasons. The `broken-tree` row proves the three-way match fired
+    /// (a miss would report not-found), so the first test replays that match.
+    #[test]
+    fn type_reference_scan_matches_the_reference_runtime() {
+        let mut rows = 0;
+        for parts in fixture_rows("RESOLVE") {
+            assert_eq!(parts.len(), 4, "{parts:?}");
+            match parts[1].as_str() {
+                "empty" => {
+                    assert_eq!(parts[2], "0", "{parts:?}");
+                    assert_eq!(parts[3], TYPE_REFERENCE_NOT_FOUND, "{parts:?}");
+                }
+                "broken-tree" => {
+                    assert_eq!(parts[2], "0", "{parts:?}");
+                    assert_eq!(parts[3], TYPE_TREE_NODE_BUILD_FAILED, "{parts:?}");
+                }
+                other => panic!("unexpected resolve case {other}"),
+            }
+            rows += 1;
+        }
+        assert_eq!(rows, 2, "both probed resolve rows are asserted");
+        // The probed broken-tree reference: Player/""/Assembly-CSharp.
+        let script = ScriptIdentifier::try_new("Assembly-CSharp", "", "Player").unwrap();
+        let references = vec![script_reference(
+            Some("Player"),
+            Some(""),
+            Some("Assembly-CSharp"),
+        )];
+        assert_eq!(find_type_reference_index(&references, &script), Some(0));
+        assert!(find_type_reference_index(&[], &script).is_none());
+    }
+
+    #[test]
+    fn type_reference_match_covers_assembly_stripping_case_and_absence() {
+        let script = ScriptIdentifier::try_new("Assembly-CSharp", "Game", "Player").unwrap();
+        // The resolver strips the stored extension before comparing.
+        assert!(type_reference_matches_script(
+            &script_reference(Some("Player"), Some("Game"), Some("Assembly-CSharp.dll")),
+            &script
+        ));
+        // Ordinal comparison: case differs, no match.
+        assert!(!type_reference_matches_script(
+            &script_reference(Some("player"), Some("Game"), Some("Assembly-CSharp")),
+            &script
+        ));
+        // Absent Rust fields read as empty like Utf8String.Empty.
+        let empty_ns = ScriptIdentifier::try_new("A", "", "N").unwrap();
+        assert!(type_reference_matches_script(
+            &script_reference(Some("N"), None, Some("A")),
+            &empty_ns
+        ));
+        // A default identifier never matches, even against empty fields.
+        assert!(!type_reference_matches_script(
+            &script_reference(Some(""), Some(""), Some("")),
+            &ScriptIdentifier::default()
+        ));
+        // First match wins in scan order.
+        let first = script_reference(Some("Player"), Some("Game"), Some("Assembly-CSharp"));
+        let references = vec![script_reference(Some("Other"), None, None), first];
+        assert_eq!(find_type_reference_index(&references, &script), Some(1));
     }
 }

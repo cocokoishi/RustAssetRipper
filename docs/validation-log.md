@@ -2186,3 +2186,10 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Extended `src/export/project_order.rs` (the `ProjectExporter.Export` orchestration module): the four lifecycle events (`PreparationStarted/Finished`, `ExportStarted/Finished`) with source order, a `run_project_export_loop` driver reproducing the per-collection gate/warning/progress shape, and a fallible collection creator so `CreateCollection`'s no-handler throw aborts planning with `UnhandledAsset` and no partial plan. No runtime differential applies (event wiring over caller-supplied asset identities cannot execute without a full managed bundle); all behavior is source-read and directly asserted.
 - New ledger row `EXP-PROJECT-EXPORT-LOOP-001` at `已实现但未验证`.
 - `cargo test --workspace --locked`: 928 library and 40 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+## TypeTreeResolver match predicate with a runtime differential (2026-10-05)
+
+- Extended probe `Temp/opencode/scriptidprobe` (SDK 10.0.401) to drive the internal shipped `TypeTreeResolver` through reflection: an empty reference list reports `found=0` with the not-found reason, and a matching reference with an empty `OldType` reports `found=0` with the node-build reason (proving the three-way match fired first). Both `RESOLVE` rows appended to `src/io/script_identity_fixture.txt`.
+- Extended `src/processing/script_identity.rs`: `type_reference_matches_script` (ordinal three-way match with assembly-extension stripping; absent fields read as empty; default identifiers never match) and `find_type_reference_index` (first-match scan). Node building from the matched `OldType` stays with the TypeTree reader; both failure literals are pinned.
+- `DIFF-SCRIPT-RESOLVER-001` recorded. New ledger row `TYPE-SCRIPT-RESOLVER-001` at `已实现但未验证`.
+- `cargo test --workspace --locked`: 930 library and 40 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.

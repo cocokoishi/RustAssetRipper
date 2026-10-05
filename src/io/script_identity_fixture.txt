@@ -1,14 +1,15 @@
 # Assembly-name and script-identity reference values.
 # Probe Temp/opencode/scriptidprobe: shipped AssetRipper.IO.Files.dll
 # (SpecialFileNames) and AssetRipper.Import.dll (ScriptingBackend,
-# ScriptIdentifier), SDK 10.0.401. No escaping: fields contain no
+# ScriptIdentifier, TypeTreeResolver), SDK 10.0.401. No escaping: fields contain no
 # delimiters; empty fields are empty between pipes.
 # Formats: FIX|<in>|<FixAssemblyName>; RMEXT|<in>|<RemoveAssemblyFileExtension>;
 # ADDEXT|<in>|<AddAssemblyFileExtension>; ISPROJ|<in>|<0|1>;
 # BACKEND|<name>|<discriminant>; SID|<assembly>|<namespace>|<name>|<ToString>|<UniqueName>;
 # UNIQ3|<ToUniqueName(assembly, namespace, name)>; UNIQ2|<ToUniqueName(assembly, fullName)>;
 # ISDEF|<0|1> for default(ScriptIdentifier); DEFTOSTRING|<default ToString>;
-# THROW|<assembly>|<namespace or <null>>|<name>|<exception or none>.
+# THROW|<assembly>|<namespace or <null>>|<name>|<exception or none>;
+# RESOLVE|<case>|<found 0|1>|<failure reason or empty>.
 FIX|Assembly-CSharp.dll|Assembly-CSharp
 FIX|Assembly-CSharp|Assembly-CSharp
 FIX|Boo|Assembly - Boo
@@ -58,3 +59,5 @@ DEFTOSTRING|AssetRipper.Import.Structure.Assembly.ScriptIdentifier
 THROW||G|N|ArgumentException
 THROW|A|G||ArgumentException
 THROW|A|<null>|N|ArgumentNullException
+RESOLVE|empty|0|The type reference was not found in the set of available type trees.
+RESOLVE|broken-tree|0|Failed to create nodes from the type tree.
