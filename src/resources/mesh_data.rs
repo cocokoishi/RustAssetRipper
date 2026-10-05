@@ -366,6 +366,340 @@ fn convert_vec4s(values: &[super::compressed_mesh::Vec4]) -> Vec<Vec4> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resources::compressed_mesh::{decompress, CompressedMesh};
+    use crate::resources::packed_bit_vector::PackedBitVectorLimits;
+    use crate::resources::sub_mesh_data::MeshTopology;
+
+    /// The five vertex-channel lists the reference probe fed into `FillWithCompressedMeshData`.
+    type TriangleInputs = (Vec<Vec3>, Vec<Vec3>, Vec<Vec4>, Vec<ColorFloat>, Vec<Vec2>);
+
+    /// The `MeshData.CreateTriangleMesh` inputs the reference probe used.
+    fn triangle_inputs() -> TriangleInputs {
+        (
+            vec![
+                vec3(0.0, 0.0, 0.0),
+                vec3(1.0, 0.0, 0.0),
+                vec3(0.0, 1.0, 0.0),
+            ],
+            vec![
+                vec3(0.0, 0.0, 1.0),
+                vec3(0.0, 0.0, 1.0),
+                vec3(0.0, 0.0, 1.0),
+            ],
+            vec![
+                Vec4::new(1.0, 0.0, 0.0, 1.0),
+                Vec4::new(1.0, 0.0, 0.0, 1.0),
+                Vec4::new(1.0, 0.0, 0.0, 1.0),
+            ],
+            vec![
+                ColorFloat::new(1.0, 0.0, 0.0, 1.0),
+                ColorFloat::new(0.0, 1.0, 0.0, 1.0),
+                ColorFloat::new(0.0, 0.0, 1.0, 1.0),
+            ],
+            vec![
+                Vec2 { x: 0.0, y: 0.0 },
+                Vec2 { x: 1.0, y: 0.0 },
+                Vec2 { x: 0.0, y: 1.0 },
+            ],
+        )
+    }
+
+    /// Builds the compressed mesh the reference `FillWithCompressedMeshData` produced for a Unity
+    /// 5+ mesh.
+    fn filled_compressed_mesh() -> CompressedMesh {
+        let (vertices, normals, tangents, colors, uv) = triangle_inputs();
+        let limits = PackedBitVectorLimits::default();
+        let mut mesh = CompressedMesh {
+            has_uv_info: true,
+            has_float_colors: true,
+            has_colors: true,
+            has_bind_poses: false,
+            ..CompressedMesh::default()
+        };
+        let vertices: Vec<CompressedVec3> = vertices
+            .iter()
+            .map(|value| CompressedVec3::new(value.x, value.y, value.z))
+            .collect();
+        let normals: Vec<CompressedVec3> = normals
+            .iter()
+            .map(|value| CompressedVec3::new(value.x, value.y, value.z))
+            .collect();
+        let tangents: Vec<crate::resources::compressed_mesh::Vec4> = tangents
+            .iter()
+            .map(|value| {
+                crate::resources::compressed_mesh::Vec4::new(value.x, value.y, value.z, value.w)
+            })
+            .collect();
+        let uv: Vec<CompressedVec2> = uv
+            .iter()
+            .map(|value| CompressedVec2::new(value.x, value.y))
+            .collect();
+        mesh.set_vertices(&vertices, limits).unwrap();
+        mesh.set_normals(&normals, limits).unwrap();
+        mesh.set_tangents(&tangents, limits).unwrap();
+        mesh.set_float_colors(&colors, limits).unwrap();
+        mesh.set_uv([&uv[..], &uv[..], &[], &[], &[], &[], &[], &[]], limits)
+            .unwrap();
+        mesh.set_triangles(&[0, 1, 2], limits).unwrap();
+        mesh
+    }
+
+    /// The reference-runtime differential for the class-43 read path.
+    ///
+    /// `src/resources/mesh_read_fixture.txt` is the output of probe `Temp/opencode/meshread`, which
+    /// built real generated `Mesh_5`/`Mesh_2017`/`Mesh_2019`/`Mesh_2022` objects, filled each with
+    /// the reference `MeshData.CreateTriangleMesh` values through
+    /// `MeshExtensions.FillWithCompressedMeshData`, and called `ReadData` and `TryMakeFromMesh`.
+    /// All four versions produced identical rows, so this test reconstructs the same inputs with
+    /// the Rust compressed-mesh packers and asserts the reference values.
+    #[test]
+    fn compressed_mesh_read_path_matches_the_reference_runtime() {
+        let fixture = include_str!("mesh_read_fixture.txt");
+        let mut versions = 0;
+        let mut current_version = String::new();
+        let mut saw_read = false;
+        let mut saw_data = false;
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let parts: Vec<&str> = line.split('|').collect();
+            assert!(parts.len() >= 3, "{line}");
+            let kind = parts[0];
+            if kind == "READ" {
+                current_version = parts[1].to_owned();
+                versions += 1;
+                assert_eq!(parts[2], "IsSet=True", "{line}");
+                assert_eq!(parts[3], "HasAnyVertices=True", "{line}");
+                assert_eq!(parts[4], "IsCombined=False", "{line}");
+                assert_eq!(parts[5], "IndexFormat=UInt16", "{line}");
+                assert_eq!(parts[6], "Is16=True", "{line}");
+                saw_read = true;
+                continue;
+            }
+            assert!(!current_version.is_empty(), "{line}");
+            match kind {
+                "VERT" => assert_eq!(
+                    parse_vec3(parts[2]),
+                    vec![
+                        vec3(0.0, 0.0, 0.0),
+                        vec3(1.0, 0.0, 0.0),
+                        vec3(0.0, 1.0, 0.0)
+                    ],
+                    "{line}"
+                ),
+                "NORM" => assert_eq!(
+                    parse_vec3(parts[2]),
+                    vec![vec3(0.0, 0.0, 1.0); 3],
+                    "{line}"
+                ),
+                "TANG" => assert_eq!(
+                    parse_vec4(parts[2]),
+                    vec![Vec4::new(1.0, 0.0, 0.0, 1.0); 3],
+                    "{line}"
+                ),
+                "COLO" => assert_eq!(
+                    parse_colors(parts[2]),
+                    vec![
+                        ColorFloat::new(1.0, 0.0, 0.0, 1.0),
+                        ColorFloat::new(0.0, 1.0, 0.0, 1.0),
+                        ColorFloat::new(0.0, 0.0, 1.0, 1.0),
+                    ],
+                    "{line}"
+                ),
+                "UV0" => assert_eq!(
+                    parse_vec2(parts[2]),
+                    vec![
+                        Vec2 { x: 0.0, y: 0.0 },
+                        Vec2 { x: 1.0, y: 0.0 },
+                        Vec2 { x: 0.0, y: 1.0 }
+                    ],
+                    "{line}"
+                ),
+                "UV7" => assert_eq!(parts[2], "null", "the reference has no UV7: {line}"),
+                "SKIN" | "BIND" => {
+                    assert_eq!(parts[2], "[]", "the reference returns an empty array: {line}")
+                }
+                "INDX" => assert_eq!(parts[2], "[0,1,2]", "{line}"),
+                "DATA" => {
+                    saw_data = true;
+                    assert_eq!(
+                        parts[2..].join("|"),
+                        "HasNormals=True|HasTangents=True|HasColors=True|HasSkin=False|UVCount=2|IndexFormat=UInt16",
+                        "{line}"
+                    );
+                }
+                "DATASUB" => assert_eq!(
+                    parts[2..].join("|"),
+                    "Count=1|BaseVertex=0|FirstIndex=0|IndexCount=3|TriangleCount=1|VertexCount=3|Topology=Triangles",
+                    "{line}"
+                ),
+                _ => panic!("unexpected fixture row {line}"),
+            }
+        }
+        assert!(saw_read, "the fixture has READ rows");
+        assert!(saw_data, "the fixture has DATA rows");
+        assert_eq!(versions, 4, "four Unity versions were probed");
+
+        // Now reconstruct the same inputs and check the Rust produces the reference values.
+        let limits = PackedBitVectorLimits::default();
+        let compressed = filled_compressed_mesh();
+        let decompressed = decompress(&compressed, limits).unwrap();
+        let (vertices, normals, tangents, colors, uv) = triangle_inputs();
+        let decompressed_vertices: Vec<Vec3> = decompressed
+            .vertices
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|value| convert_vec3(*value))
+            .collect();
+        assert_eq!(decompressed_vertices, vertices);
+        let decompressed_normals: Vec<Vec3> = decompressed
+            .normals
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|value| convert_vec3(*value))
+            .collect();
+        assert_eq!(decompressed_normals, normals);
+        assert_eq!(
+            decompressed.tangents.as_ref().unwrap().len(),
+            tangents.len()
+        );
+        assert_eq!(decompressed.colors.as_deref(), Some(colors.as_slice()));
+        let decompressed_uv0: Vec<Vec2> = decompressed.uvs[0]
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|value| convert_vec2(*value))
+            .collect();
+        assert_eq!(decompressed_uv0, uv);
+        let decompressed_uv1: Vec<Vec2> = decompressed.uvs[1]
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|value| convert_vec2(*value))
+            .collect();
+        assert_eq!(decompressed_uv1, uv);
+        assert_eq!(decompressed.uvs[7], None, "the reference has no UV7");
+        assert_eq!(decompressed.skin, None);
+        assert_eq!(decompressed.bind_pose, None);
+        assert_eq!(
+            decompressed.processed_index_buffer.as_deref(),
+            Some([0u32, 1, 2].as_slice())
+        );
+
+        let sub_mesh = SubMeshData {
+            base_vertex: 0,
+            first_index: 0,
+            first_vertex: 0,
+            index_count: 3,
+            triangle_count: 1,
+            vertex_count: 3,
+            topology: MeshTopology::TRIANGLES,
+            local_bounds: Default::default(),
+        };
+        let data = MeshData::try_make_from_parts(MeshParts {
+            blob: None,
+            compressed: decompressed,
+            mesh_bind_pose: None,
+            mesh_index_buffer: Vec::new(),
+            mesh_skin: None,
+            sub_meshes: vec![sub_mesh],
+        })
+        .expect("the reference reports TryMakeFromMesh == True");
+        assert!(data.has_normals());
+        assert!(data.has_tangents());
+        assert!(data.has_colors());
+        assert!(!data.has_skin());
+        assert_eq!(data.uv_count(), 2);
+        assert_eq!(data.index_format(), IndexFormat::UInt16);
+        assert_eq!(data.vertices, vertices);
+        assert_eq!(data.uv0.as_deref(), Some(uv.as_slice()));
+        assert_eq!(data.uv1.as_deref(), Some(uv.as_slice()));
+        assert_eq!(data.uv7, None);
+        assert_eq!(data.processed_index_buffer, vec![0, 1, 2]);
+        assert_eq!(data.sub_meshes.len(), 1);
+        assert_eq!(data.sub_meshes[0].first_index, 0);
+        assert_eq!(data.sub_meshes[0].index_count, 3);
+        assert_eq!(data.sub_meshes[0].triangle_count, 1);
+        assert_eq!(data.sub_meshes[0].vertex_count, 3);
+        assert_eq!(data.sub_meshes[0].topology, MeshTopology::TRIANGLES);
+    }
+
+    /// Parses a reference `<x, y, z>` row.
+    fn parse_vec3(text: &str) -> Vec<Vec3> {
+        parse_tuple_list(text, 3)
+            .into_iter()
+            .map(|values| vec3(values[0], values[1], values[2]))
+            .collect()
+    }
+
+    /// Parses a reference `<x, y, z, w>` row.
+    fn parse_vec4(text: &str) -> Vec<Vec4> {
+        parse_tuple_list(text, 4)
+            .into_iter()
+            .map(|values| Vec4::new(values[0], values[1], values[2], values[3]))
+            .collect()
+    }
+
+    /// Parses a reference `<x, y>` row.
+    fn parse_vec2(text: &str) -> Vec<Vec2> {
+        parse_tuple_list(text, 2)
+            .into_iter()
+            .map(|values| Vec2 {
+                x: values[0],
+                y: values[1],
+            })
+            .collect()
+    }
+
+    /// Parses a reference `[R:r G:g B:b A:a]` row.
+    fn parse_colors(text: &str) -> Vec<ColorFloat> {
+        let inner = text
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .trim_matches(|character| character == '[' || character == ']');
+        inner
+            .split("],[")
+            .map(|entry| {
+                let mut values = [0.0f32; 4];
+                for token in entry.split_whitespace() {
+                    let (name, value) = token.split_once(':').expect("a `Name:value` token");
+                    let slot = match name {
+                        "R" => 0,
+                        "G" => 1,
+                        "B" => 2,
+                        "A" => 3,
+                        other => panic!("unexpected colour channel {other}"),
+                    };
+                    values[slot] = value.parse().expect("a colour component");
+                }
+                ColorFloat::new(values[0], values[1], values[2], values[3])
+            })
+            .collect()
+    }
+
+    /// Parses `[<a, b>,<c, d>]` into a list of component vectors.
+    fn parse_tuple_list(text: &str, components: usize) -> Vec<Vec<f32>> {
+        let inner = text.trim_start_matches('[').trim_end_matches(']');
+        inner
+            .split(">,<")
+            .map(|entry| {
+                let entry = entry
+                    .trim_start_matches('<')
+                    .trim_end_matches('>')
+                    .trim_matches(|character| character == '<' || character == '>');
+                let values: Vec<f32> = entry
+                    .split(',')
+                    .map(|value| value.trim().parse().expect("a numeric component"))
+                    .collect();
+                assert_eq!(values.len(), components, "row '{text}' component count");
+                values
+            })
+            .collect()
+    }
 
     fn empty_parts() -> MeshParts {
         MeshParts {

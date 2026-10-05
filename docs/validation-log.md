@@ -2087,3 +2087,11 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Also corrected `find_property_name_by_crc28` to the reference's real search order (tex-env names with `_HDR`, `_ST`, `_TexelSize` postfixes, then floats, then ints, then colors) and added `m_Ints`.
 - Split the coarse `RES-MATERIAL-001` placeholder into `RES-MATERIAL-VIEW-001` (已实现但未验证), `RES-MATERIAL-CRC28-001` (已验证, reference-runtime differential), and `RES-MATERIAL-EXPORT-001` (已调查, no `.mat`/`.shader` exporter yet).
 - `cargo test --workspace --locked`: 852 library and 28 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+## Mesh read-path reference-runtime differential (2026-10-05)
+
+- Probe `Temp/opencode/meshread` (SDK 10.0.401) built real generated `Mesh_5`/`Mesh_2017`/`Mesh_2019`/`Mesh_2022` objects through `AssetInfo` + `ProcessedAssetCollection` + `GameBundle`, filled each with the reference `MeshData.CreateTriangleMesh` values via `MeshExtensions.FillWithCompressedMeshData`, and called `ReadData` and `TryMakeFromMesh`.
+- All four versions produced identical rows; the 53 kept rows are committed as `src/resources/mesh_read_fixture.txt`. The Rust test reconstructs the same inputs with its own compressed-mesh packers and asserts every reference value, so `RES-MESH-DATA-001` moves from `已实现但未验证` to `已验证`.
+- Observed reference values now pinned: `UVCount=2` from a `UVInfo`-zeroed two-channel pack, `UV7 == null`, empty `Skin`/`BindPose` arrays, `[0,1,2]` indices, and `IndexFormat=UInt16`/`Is16=True`.
+- An unexpected probe result: setting `IndexFormatE` to `UInt32` on a `Mesh_2019` still reported `Is16=True`, so `Has_IndexFormat()` appears false there. The 32-bit index path therefore remains covered only by the Rust unit test; recorded in the ledger row.
+- `cargo test --workspace --locked`: 853 library and 28 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.

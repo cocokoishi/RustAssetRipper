@@ -1,0 +1,57 @@
+# Reference-runtime differential for the class-43 Mesh read path.
+# Probe Temp/opencode/meshread against the shipped AssetRipper.SourceGenerated(.Extensions).dll
+# and AssetRipper.Numerics.dll (SDK 10.0.401). The probe builds a real generated Mesh,
+# fills it with the reference MeshData.CreateTriangleMesh values through
+# MeshExtensions.FillWithCompressedMeshData, then calls ReadData and TryMakeFromMesh.
+# Vector rows use <x, y, z> / <x, y, z, w>; colour rows use [R:r G:g B:b A:a];
+# index rows are comma lists; null and [] are the reference empty forms.
+# All four probed versions produce identical rows, so the Rust test asserts the same
+# expectations for every version it reconstructs.
+READ|5.0.0f1|IsSet=True|HasAnyVertices=True|IsCombined=False|IndexFormat=UInt16|Is16=True
+VERT|5.0.0f1|[<0, 0, 0>,<1, 0, 0>,<0, 1, 0>]
+NORM|5.0.0f1|[<0, 0, 1>,<0, 0, 1>,<0, 0, 1>]
+TANG|5.0.0f1|[<1, 0, 0, 1>,<1, 0, 0, 1>,<1, 0, 0, 1>]
+COLO|5.0.0f1|[[R:1.00 G:0.00 B:0.00 A:1.00],[R:0.00 G:1.00 B:0.00 A:1.00],[R:0.00 G:0.00 B:1.00 A:1.00]]
+UV0|5.0.0f1|[<0, 0>,<1, 0>,<0, 1>]
+UV7|5.0.0f1|null
+SKIN|5.0.0f1|[]
+BIND|5.0.0f1|[]
+INDX|5.0.0f1|[0,1,2]
+DATA|5.0.0f1|HasNormals=True|HasTangents=True|HasColors=True|HasSkin=False|UVCount=2|IndexFormat=UInt16
+DATASUB|5.0.0f1|Count=1|BaseVertex=0|FirstIndex=0|IndexCount=3|TriangleCount=1|VertexCount=3|Topology=Triangles
+READ|2017.1.0f1|IsSet=True|HasAnyVertices=True|IsCombined=False|IndexFormat=UInt16|Is16=True
+VERT|2017.1.0f1|[<0, 0, 0>,<1, 0, 0>,<0, 1, 0>]
+NORM|2017.1.0f1|[<0, 0, 1>,<0, 0, 1>,<0, 0, 1>]
+TANG|2017.1.0f1|[<1, 0, 0, 1>,<1, 0, 0, 1>,<1, 0, 0, 1>]
+COLO|2017.1.0f1|[[R:1.00 G:0.00 B:0.00 A:1.00],[R:0.00 G:1.00 B:0.00 A:1.00],[R:0.00 G:0.00 B:1.00 A:1.00]]
+UV0|2017.1.0f1|[<0, 0>,<1, 0>,<0, 1>]
+UV7|2017.1.0f1|null
+SKIN|2017.1.0f1|[]
+BIND|2017.1.0f1|[]
+INDX|2017.1.0f1|[0,1,2]
+DATA|2017.1.0f1|HasNormals=True|HasTangents=True|HasColors=True|HasSkin=False|UVCount=2|IndexFormat=UInt16
+DATASUB|2017.1.0f1|Count=1|BaseVertex=0|FirstIndex=0|IndexCount=3|TriangleCount=1|VertexCount=3|Topology=Triangles
+READ|2019.4.0f1|IsSet=True|HasAnyVertices=True|IsCombined=False|IndexFormat=UInt16|Is16=True
+VERT|2019.4.0f1|[<0, 0, 0>,<1, 0, 0>,<0, 1, 0>]
+NORM|2019.4.0f1|[<0, 0, 1>,<0, 0, 1>,<0, 0, 1>]
+TANG|2019.4.0f1|[<1, 0, 0, 1>,<1, 0, 0, 1>,<1, 0, 0, 1>]
+COLO|2019.4.0f1|[[R:1.00 G:0.00 B:0.00 A:1.00],[R:0.00 G:1.00 B:0.00 A:1.00],[R:0.00 G:0.00 B:1.00 A:1.00]]
+UV0|2019.4.0f1|[<0, 0>,<1, 0>,<0, 1>]
+UV7|2019.4.0f1|null
+SKIN|2019.4.0f1|[]
+BIND|2019.4.0f1|[]
+INDX|2019.4.0f1|[0,1,2]
+DATA|2019.4.0f1|HasNormals=True|HasTangents=True|HasColors=True|HasSkin=False|UVCount=2|IndexFormat=UInt16
+DATASUB|2019.4.0f1|Count=1|BaseVertex=0|FirstIndex=0|IndexCount=3|TriangleCount=1|VertexCount=3|Topology=Triangles
+READ|2022.3.0f1|IsSet=True|HasAnyVertices=True|IsCombined=False|IndexFormat=UInt16|Is16=True
+VERT|2022.3.0f1|[<0, 0, 0>,<1, 0, 0>,<0, 1, 0>]
+NORM|2022.3.0f1|[<0, 0, 1>,<0, 0, 1>,<0, 0, 1>]
+TANG|2022.3.0f1|[<1, 0, 0, 1>,<1, 0, 0, 1>,<1, 0, 0, 1>]
+COLO|2022.3.0f1|[[R:1.00 G:0.00 B:0.00 A:1.00],[R:0.00 G:1.00 B:0.00 A:1.00],[R:0.00 G:0.00 B:1.00 A:1.00]]
+UV0|2022.3.0f1|[<0, 0>,<1, 0>,<0, 1>]
+UV7|2022.3.0f1|null
+SKIN|2022.3.0f1|[]
+BIND|2022.3.0f1|[]
+INDX|2022.3.0f1|[0,1,2]
+DATA|2022.3.0f1|HasNormals=True|HasTangents=True|HasColors=True|HasSkin=False|UVCount=2|IndexFormat=UInt16
+DATASUB|2022.3.0f1|Count=1|BaseVertex=0|FirstIndex=0|IndexCount=3|TriangleCount=1|VertexCount=3|Topology=Triangles

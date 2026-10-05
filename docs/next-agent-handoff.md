@@ -457,3 +457,10 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - `cargo test --workspace --locked`: 852 library and 28 CLI tests; warnings-denied Clippy passes.
 - Next: `RES-MATERIAL-EXPORT-001` (the `.mat`/`.shader` asset exporter and its `ShaderExportMode` branches), then the other uninvestigated rows: `RES-ANIM-001`/`PROC-ANIM-001` (animation clips and controllers), `RES-AUDIO-001` (audio decode), `RES-MODEL-001` (blend shapes, `CalculateMeshMetric`, scene-level GLB), `EXPORT-UNITY-001`, `TYPE-SCRIPT-001`, `PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, and `TOOLS-001`.
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 53. Checkpoint: Mesh read-path reference-runtime differential (2026-10-05)
+
+- Probe `Temp/opencode/meshread` exercised the real generated `Mesh` + `MeshExtensions.ReadData` + `MeshData.TryMakeFromMesh` path for four Unity versions; the rows are committed as `src/resources/mesh_read_fixture.txt` and `RES-MESH-DATA-001` is now `已验证`.
+- `cargo test --workspace --locked`: 853 library and 28 CLI tests; warnings-denied Clippy passes.
+- Next: the same differential treatment for skin/bind-pose/blend-shape mesh paths and the class-43 field reader (`RES-MESH-VIEW-001` still `已实现但未验证`); then `RES-MATERIAL-EXPORT-001` (`.mat`/`.shader`), the animation rows (`RES-ANIM-001`/`PROC-ANIM-001`), `RES-AUDIO-001`, `RES-MODEL-001` (blend shapes, `CalculateMeshMetric`, scene-level GLB), `EXPORT-UNITY-001`, `TYPE-SCRIPT-001`, and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
