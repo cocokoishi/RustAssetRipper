@@ -2274,3 +2274,10 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Three test failures fixed during development (LanguageCode emitted outside the object, missing array-skipping for unknown keys, one wrong expectation path) plus two Clippy denials (`push_str` single char, single-pattern match) and a missing object depth check.
 - `DIFF-SETTINGS-FILE-001` recorded. New ledger row `EXP-SETTINGS-FILE-001` at implemented-but-unverified; targeted settings tests pass (11/11); CI run `37309863852` green (all five jobs) for remote `main` = `fc93892`; local matches.
 - No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+## Settings persistence gate (2026-10-06)
+
+- Extended `src/export/settings_file.rs` with the pure persistence rules: `decide_settings_persistence` (form post: checked saves, unchecked deletes), `decide_settings_auto_save` (background: checked saves, unchecked leaves the file alone), and `default_settings_file_path` over the ported `join_path` (exe directory arrives as a caller fact). One new gate test covers both decisions plus Windows/Unix/empty-root paths.
+- Only actual file I/O, the process directory query, and startup application stay outside now.
+- Targeted settings-file tests pass (7/7); full validation via Actions after push.
+- No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.

@@ -28,6 +28,7 @@
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
+use super::asset_path::{join_path, HostPathPlatform};
 use super::settings::{
     AudioExportFormat, BundledAssetsExportMode, ExportDefaults, ImageExportFormat, ImportDefaults,
     LightmapTextureExportFormat, ProcessingDefaults, ScriptContentLevel, ScriptExportMode,
@@ -441,6 +442,44 @@ fn push_json_string(output: &mut String, text: &str) -> Result<(), ()> {
     }
     output.push('"');
     Ok(())
+}
+
+/// `SerializedSettings.DefaultFilePath`: the executing directory joined with the file name.
+///
+/// `AppContext.BaseDirectory` arrives as a caller fact; process queries stay in product code.
+pub fn default_settings_file_path(executing_directory: &str, platform: HostPathPlatform) -> String {
+    join_path(executing_directory, SETTINGS_FILE_NAME, platform)
+}
+
+/// What posting the settings form does with the default file (`SettingsPage.HandlePostRequest`
+/// plus `FullConfiguration.MaybeSaveToDefaultPath`): a checked box saves, an unchecked box
+/// deletes any stored file, and background saves only happen when checked.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum SettingsPersistenceAction {
+    /// `Configuration.SaveToDefaultPath()`.
+    SaveToDefaultPath,
+    /// `SerializedSettings.DeleteDefaultPath()`.
+    DeleteDefaultPath,
+    /// No file write; the stored file (if any) is left alone.
+    LeaveStoredFile,
+}
+
+/// The form-post gate: checked saves, unchecked deletes.
+pub const fn decide_settings_persistence(save_settings_to_disk: bool) -> SettingsPersistenceAction {
+    if save_settings_to_disk {
+        SettingsPersistenceAction::SaveToDefaultPath
+    } else {
+        SettingsPersistenceAction::DeleteDefaultPath
+    }
+}
+
+/// The background auto-save gate: only a checked box writes.
+pub const fn decide_settings_auto_save(save_settings_to_disk: bool) -> SettingsPersistenceAction {
+    if save_settings_to_disk {
+        SettingsPersistenceAction::SaveToDefaultPath
+    } else {
+        SettingsPersistenceAction::LeaveStoredFile
+    }
 }
 
 /// Parse `AssetRipper.Settings.json` back into records.
@@ -1236,6 +1275,48 @@ mod tests {
             VersionText::new("", SettingsFileLimits::default()),
             Err(SettingsFileError::InvalidJson { .. })
         ));
+    }
+
+    #[test]
+    fn persistence_gate_and_default_path_follow_the_source() {
+        use super::{
+            decide_settings_auto_save, decide_settings_persistence, default_settings_file_path,
+            SettingsPersistenceAction, SETTINGS_FILE_NAME,
+        };
+        use crate::export::asset_path::HostPathPlatform;
+
+        assert_eq!(SETTINGS_FILE_NAME, "AssetRipper.Settings.json");
+        // Form post: checked saves, unchecked deletes.
+        assert_eq!(
+            decide_settings_persistence(true),
+            SettingsPersistenceAction::SaveToDefaultPath
+        );
+        assert_eq!(
+            decide_settings_persistence(false),
+            SettingsPersistenceAction::DeleteDefaultPath
+        );
+        // Background auto-save: checked saves, unchecked leaves the file alone.
+        assert_eq!(
+            decide_settings_auto_save(true),
+            SettingsPersistenceAction::SaveToDefaultPath
+        );
+        assert_eq!(
+            decide_settings_auto_save(false),
+            SettingsPersistenceAction::LeaveStoredFile
+        );
+        // Default path joins the executing directory on either platform.
+        assert_eq!(
+            default_settings_file_path("C:\\app", HostPathPlatform::Windows),
+            "C:\\app\\AssetRipper.Settings.json"
+        );
+        assert_eq!(
+            default_settings_file_path("/opt/app/", HostPathPlatform::Unix),
+            "/opt/app/AssetRipper.Settings.json"
+        );
+        assert_eq!(
+            default_settings_file_path("", HostPathPlatform::Unix),
+            "AssetRipper.Settings.json"
+        );
     }
 
     #[test]
