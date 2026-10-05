@@ -1965,3 +1965,11 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Genuine original-runtime differential: probe `Temp/opencode/etcprobe` decoded blocks crafted to hit every mode against the shipped `AssetRipper.TextureDecoder.dll`; 23 rows are committed as `src/resources/etc_decode_fixture.txt` and matched byte-for-byte.
 - Recorded `DIFF-ETC-ALPHAORDER-001`: the ETC2A8 alpha channel uses the reverse block permutation of the color channel.
 - GitHub Actions run `37250701750` is green across all five jobs. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+
+## ATC, YUY2, and wide texture formats (2026-10-04)
+
+- Added `src/resources/atc_yuy2.rs` (ATC RGB4/RGBA8, YUY2) and the 16-bit/half/float/signed/RGB9e5 converters in `src/resources/texture_decode.rs`, ported from `AssetRipper.TextureDecoder`'s `AtcDecoder`, `Yuy2Decoder`, and `NumericConversion`.
+- Genuine original-runtime differential: probe `Temp/opencode/texprobe2` decoded 24 blocks/images against the shipped DLL; 5 rows are committed as `src/resources/atc_yuy2_fixture.txt` and 19 as `src/resources/wide_format_fixture.txt`, all matched byte-for-byte.
+- Recorded `DIFF-ATC-COLOR-001`: ATC uses bit-replicating `Extend` and `5/8`/`3/8` interpolation, with a distinct explicit-alpha branch.
+- GitHub Actions run `37251358484` is green across all five jobs. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
