@@ -663,7 +663,7 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 
 ## 83. Checkpoint: GLB vertex-encoding differential (2026-10-06)
 
-- Fixed three GLB accessor deviations with a SharpGLTF differential (color quantization, joint/index widths, SparseWeight lane rules). New row `RES-GLB-ENCODING-001`; `RES-MODEL-001` to implementing; `DIFF-GLB-ENCODING-001` recorded. Full lib suite 965/965 locally; full validation via Actions after push.
+- Fixed three GLB accessor deviations with a SharpGLTF differential (color quantization, joint/index widths, SparseWeight lane rules). New row `RES-GLB-ENCODING-001`; `RES-MODEL-001` to implementing; `DIFF-GLB-ENCODING-001` recorded. Full lib suite 965/965 locally; CI run `37319285613` green (all five jobs) for remote `main` = `d7b403a`; local matches.
 - Next: `TYPE-SCRIPT-001` remainder (manager resolutions), CLI exposure + GUID freshness + folder sidecars, and remaining per-command settings plus default-path startup load.
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
 - Next: `TYPE-SCRIPT-001` remainder (manager resolutions), CLI exposure + GUID freshness + folder sidecars, and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
