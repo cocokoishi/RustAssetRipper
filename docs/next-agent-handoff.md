@@ -330,3 +330,10 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Added the streamed-resource, sampler-settings, and particle-gradient modules with committed original-runtime differentials.
 - Captured two version branches directly: `WrapMode` (old) vs `WrapU`/`WrapV`/`WrapW` (new), and packed vs float gradient color.
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+
+## 38. Checkpoint: texture decoders (2026-10-04)
+
+- Added the DXT1/DXT3/DXT5 and packed-format decoders with a committed `AssetRipper.TextureDecoder` differential fixture; this is the first real texture-pixel capability in the Rust port.
+- Remaining texture work: BC4/BC5/BC6H/BC7, ATC, ETC/EAC, ASTC, PVRTC, YUY2, half/float/signed/16-bit formats, the `TextureConverter` mip/layer/`GraphicsFormat` dispatch, Crunch, and the PNG/EXR/BMP writers.
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

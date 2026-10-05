@@ -1942,3 +1942,11 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Added `src/resources/streaming_info.rs`, `src/resources/gl_texture_settings.rs`, and `src/resources/min_max_gradient.rs`, each with a committed original-runtime differential fixture (probe `Temp/opencode/resprobe`).
 - The differential captured two real version branches: the sampler `WrapMode` vs `WrapU`/`WrapV`/`WrapW` split, and the gradient packed-color vs float-color split.
 - GitHub Actions run `37248866979` is green across all five jobs. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+
+## Texture decoder (DXT1/3/5 and packed formats) differential (2026-10-04)
+
+- Added `src/resources/texture_decode.rs`: DXT1/DXT3/DXT5 block decoding plus `RGBA32`, `RGB24`, `BGRA32`, `ARGB32`, `Alpha8`, `R8`, `RG16`, `RGB565`, `ARGB4444`, and `RGBA4444` packed decoders, ported from the `AssetRipper.TextureDecoder` dependency used by `TextureConverter`.
+- Genuine original-runtime differential: probe `Temp/opencode/texdecprobe` decoded the shipped `AssetRipper.TextureDecoder.dll`; 22 rows are committed as `src/resources/texture_decode_fixture.txt` and matched byte-for-byte.
+- Recorded `DIFF-TEXDEC-EXPANSION-001`: the DXT endpoint uses bit replication while the standalone `RGB565` converter uses a bare shift, and the three-color DXT index 3 is opaque black.
+- GitHub Actions run `37249584027` is green across all five jobs. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
