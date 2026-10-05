@@ -1935,3 +1935,10 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Added `src/resources/vector.rs`, `src/resources/quaternion.rs`, and `TransformLocalView::initialize_default` in `src/resources/transform.rs`, each with a committed original-runtime differential fixture.
 - Added `src/export/unity_yaml.rs::format_hash128` and wired it into `value_yaml.rs` (new `Hash128Overflow` error), mirroring the baseline's checked-overflow quirk (`DIFF-HASH128-OVERFLOW-001`) with a seven-row differential fixture including the exact 0x7F/0x80 boundary.
 - GitHub Actions run `37248303815` is green across all five jobs. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+
+## StreamingInfo/GLTextureSettings/MinMaxGradient differentials (2026-10-04)
+
+- Added `src/resources/streaming_info.rs`, `src/resources/gl_texture_settings.rs`, and `src/resources/min_max_gradient.rs`, each with a committed original-runtime differential fixture (probe `Temp/opencode/resprobe`).
+- The differential captured two real version branches: the sampler `WrapMode` vs `WrapU`/`WrapV`/`WrapW` split, and the gradient packed-color vs float-color split.
+- GitHub Actions run `37248866979` is green across all five jobs. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
