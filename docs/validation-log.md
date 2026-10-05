@@ -1999,3 +1999,14 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Recorded `DIFF-PVRTC-BLUE-001`: the reference expands the second colour's blue into colour A's slot, which the port reproduces exactly.
 - Texture coverage now: DXT1/3/5, BC4/BC5, BC6H, BC7, ETC1/ETC2/ETC2A1/ETC2A8, EAC R/RG (u/s), ATC RGB4/RGBA8, PVRTC2/4, YUY2, and the packed/wide formats. Only ASTC remains among the block decoders.
 - GitHub Actions run `37252919176` is green across all five jobs. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+
+## ASTC texture decoder (2026-10-05)
+
+- Added `src/resources/astc.rs` and `src/resources/astc_tables.rs`, ported from `AssetRipper.TextureDecoder`'s `AstcDecoder` (4×4 through 12×12 footprints, void-extent blocks, dual-plane weights, and partition selection). The lookup tables are mechanically extracted from the package source.
+- Genuine original-runtime differential: probe `Temp/opencode/astcprobe` decoded 4×4, 6×6, and 8×8 footprints plus a void-extent block; eight rows are committed as `src/resources/astc_fixture.txt` and matched byte-for-byte.
+- Recorded `DIFF-ASTC-BITTRANSFER-001`: the reference's `BitTransferSigned(ref v[1], ref v[0])` argument order, which a first port mirrored incorrectly.
+- Recorded `DIFF-ASTC-SHIFT-001`: C# masks `ulong` shift counts, so the Rust port uses wrapping shifts in `GetBits64` and promotes the bit-reverse table byte to `i32`.
+- Added `TextureDecodeError::InvalidBlockDimension` instead of overloading `InputTooShort` for the reference's 4..=12 `ArgumentException`.
+- Texture coverage now: DXT1/3/5, BC4/BC5, BC6H, BC7, ETC1/ETC2/ETC2A1/ETC2A8, EAC R/RG (u/s), ATC RGB4/RGBA8, PVRTC2/4, ASTC, YUY2, and the packed/wide formats. All block decoders dispatched by `TextureConverter.DecodeTexture` are now ported; the remaining texture work is the `RgbConverter`/`DirectBitmap` plumbing, the mip/layer/`GraphicsFormat` dispatch, Crunch, and the image writers.
+- GitHub Actions run `37254780389` is green across all five jobs. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.

@@ -364,3 +364,12 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Texture decoder coverage is now complete except ASTC: DXT1/3/5, BC4/BC5, BC6H, BC7, ETC1/ETC2/ETC2A1/ETC2A8, EAC R/RG (u/s), ATC RGB4/RGBA8, PVRTC2/4, YUY2, and the packed/wide formats.
 - Still open beyond the decoders: ASTC, the `TextureConverter` mip/layer/`GraphicsFormat` dispatch, Crunch, and the image writers; the `.meta` FS sidecar integration and per-class `CreateImporter` tracing; the full exporter registration/resource matrix audit; and the object-model/product workflows.
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+
+## 42. Checkpoint: ASTC decoder (2026-10-05)
+
+- Added `src/resources/astc.rs` and `src/resources/astc_tables.rs` (ASTC 4×4–12×12, void-extent, dual-plane, partitions), with an 8-row committed original-runtime differential (`astc_fixture.txt`). The lookup tables were mechanically extracted from `AstcDecoder.cs`.
+- Recorded `DIFF-ASTC-BITTRANSFER-001` (the reference calls `BitTransferSigned(ref v[1], ref v[0])`) and `DIFF-ASTC-SHIFT-001` (C# masks `ulong` shift counts; the Rust port uses wrapping shifts and promotes the bit-reverse table byte to `i32`). Added `TextureDecodeError::InvalidBlockDimension`.
+- All block decoders dispatched by `TextureConverter.DecodeTexture` are now ported: DXT1/3/5, BC4/BC5, BC6H, BC7, ETC1/ETC2/ETC2A1/ETC2A8, EAC R/RG (u/s), ATC RGB4/RGBA8, PVRTC2/4, ASTC, YUY2, and the packed/wide formats.
+- Next: the `RgbConverter`/`DirectBitmap` plumbing (the generic `TColor`/`TChannelValue` conversion used by `TryConvertToBitmap`), the `TextureConverter` mip/layer/`GraphicsFormat` dispatch, Crunch, and the image writers (PNG/EXR/BMP/TGA); then the `.meta` FS sidecar integration and per-class `CreateImporter` tracing; the full exporter registration/resource matrix audit; and the object-model/product workflows.
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
