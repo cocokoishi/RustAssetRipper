@@ -563,6 +563,6 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 ## 67. Checkpoint: TypeTreeResolver match predicate with a runtime differential (2026-10-05)
 
 - Extended probe `Temp/opencode/scriptidprobe` to drive the internal shipped `TypeTreeResolver` (empty list + matching-but-broken `OldType`), pinning both failure reasons; rows appended to `src/io/script_identity_fixture.txt`. Extended `src/processing/script_identity.rs` with the ordinal three-way match, first-match scan, and verbatim reason literals (default identifiers never match). New row `TYPE-SCRIPT-RESOLVER-001`; `DIFF-SCRIPT-RESOLVER-001` recorded. Node building stays with the TypeTree reader.
-- `cargo test --workspace --locked`: 930 library and 40 CLI tests; warnings-denied Clippy and format check pass.
+- `cargo test --workspace --locked`: 930 library and 40 CLI tests; warnings-denied Clippy and format check pass. CI run `37291680476` green (all five jobs) for remote `main` = `55b1e0e`; local matches.
 - Next: `TYPE-SCRIPT-001` remainder (manager resolutions), `EXPORT-UNITY-001` remainder (file-writing pipeline), and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
