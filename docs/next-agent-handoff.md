@@ -671,7 +671,7 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 
 ## 84. Checkpoint: GLB writer size guard (2026-10-06)
 
-- Ported the `GlbWriter` too-large refusal as a configurable `GlbBuildLimits::max_output_bytes` cap (default 2GiB) with an explicit `OutputTooLarge` error checked per buffer view and on the final total; refreshed the stale `EXP-GLB-001` remainder. Targeted glb tests pass (24/24), full lib 966/966 and bin 43/43 locally, workspace Clippy clean; full validation via Actions after push.
+- Ported the `GlbWriter` too-large refusal as a configurable `GlbBuildLimits::max_output_bytes` cap (default 2GiB) with an explicit `OutputTooLarge` error checked per buffer view and on the final total; refreshed the stale `EXP-GLB-001` remainder. Targeted glb tests pass (24/24), full lib 966/966 and bin 43/43 locally, workspace Clippy clean; CI run `37321528059` green (all five jobs) for remote `main` = `f92976c`; local matches.
 - Next: `TYPE-SCRIPT-001` remainder (manager resolutions), CLI exposure + GUID freshness + folder sidecars, and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
 
