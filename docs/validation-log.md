@@ -2287,3 +2287,10 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Bridged the duplicated `ImageExportFormat` enums (`resources::image_export::from_settings_format`, all six variants pinned with extension/discriminant agreement) and threaded the configured settings format through `export-texture` as the output-extension fallback. With default settings the behavior is byte-identical to the hardcoded `Png` fallback (both `export-texture` CLI tests still pass); a settings file load (`--settings` or default path) stays outside.
 - New ledger row `EXP-SETTINGS-APPLY-001` at implemented-but-unverified; targeted tests pass; CI run `37312018667` green (all five jobs) for remote `main` = `7cedac2`; local matches.
 - No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+## CLI settings-file loading (2026-10-06)
+
+- `export-texture` and `export-shader` accept a leading `--settings <path>` flag (`load_cli_export_settings`: bounded read, UTF-8 check, schema parse, path-carrying errors). The configured image format backs the texture fallback and the configured shader mode backs the mode flag, with explicit flags beating the file on any order. Usage lines updated.
+- Three test failures fixed during development (binary-crate paths, a `?`-type mismatch, an `ExportDefaults`-vs-file type confusion) plus one Clippy denial (while-let loop) and one wrong test expectation (the `Simple` exporter admits the test script under every mode, so the shader test now uses compiled text where mode discriminates).
+- `EXP-SETTINGS-APPLY-001` broadened to cover CLI loading; targeted lib (7/7 image-export), bin (43/43), and workspace Clippy checks pass locally; full validation via Actions after push.
+- No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.

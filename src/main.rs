@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::ffi::OsString;
+use std::fs;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -15,6 +16,7 @@ use assetripper::export::scene_collection::{
 };
 use assetripper::export::settings::ShaderExportMode;
 use assetripper::export::settings::{ExportDefaults, ImageExportFormat as SettingsImageFormat};
+use assetripper::export::settings_file::ExportSettingsFile;
 use assetripper::export::shader_export::export_shader_text;
 use assetripper::export::streamed_assets::StreamedYamlAssetLimits;
 use assetripper::export::unity_yaml::{write_unity_yaml_documents, UnityYamlWriteLimits};
@@ -274,15 +276,30 @@ fn export_texture_from_arguments(
     arguments: impl Iterator<Item = OsString>,
 ) -> Result<(), Box<dyn Error>> {
     let mut arguments = arguments;
+    // The configured fallback defaults to `ExportSettings.ImageExportFormat` (`Png`).
+    let mut configured = ExportDefaults::default().image_export_format;
+    // Optional leading flags precede the positional arguments.
+    let mut positional: Vec<OsString> = Vec::new();
+    while let Some(next) = arguments.next() {
+        if next == "--settings" {
+            let path = arguments.next().ok_or_else(|| {
+                invalid_input("export-texture --settings requires a settings file path")
+            })?;
+            configured = load_cli_export_settings(Path::new(&path))?.image_export_format;
+        } else {
+            positional.push(next);
+        }
+    }
+    let mut positional = positional.into_iter();
     let serialized_file_index =
-        parse_required_argument::<usize>(arguments.next(), "SerializedFile index")?;
-    let path_id = parse_required_argument::<i64>(arguments.next(), "object PathID")?;
-    let output_path = arguments
+        parse_required_argument::<usize>(positional.next(), "SerializedFile index")?;
+    let path_id = parse_required_argument::<i64>(positional.next(), "object PathID")?;
+    let output_path = positional
         .next()
         .map(PathBuf::from)
         .ok_or_else(|| invalid_input("export-texture requires an output image path"))?;
     let mut input_files = Vec::new();
-    for argument in arguments {
+    for argument in positional {
         if input_files.len() >= MAX_INPUT_PATHS {
             return Err(invalid_input(format!(
                 "input path count exceeds {MAX_INPUT_PATHS}"
@@ -301,6 +318,7 @@ fn export_texture_from_arguments(
         &input_files,
         serialized_file_index,
         path_id,
+        configured,
         &output_path,
         &mut output,
     )
@@ -310,6 +328,7 @@ fn export_texture_to<W: io::Write>(
     input_files: &[PathBuf],
     serialized_file_index: usize,
     path_id: i64,
+    configured: SettingsImageFormat,
     output_path: &Path,
     status_output: &mut W,
 ) -> Result<(), Box<dyn Error>> {
@@ -427,7 +446,6 @@ fn export_texture_to<W: io::Write>(
 
     // The output extension selects the format; the configured settings format is the
     // fallback. With default settings (`Png`) this matches the previous hardcoded fallback.
-    let configured = ExportDefaults::default().image_export_format;
     let format = ImageExportFormat::from_settings_format(
         output_path
             .extension()
@@ -587,6 +605,45 @@ fn export_mesh_to<W: io::Write>(
     Ok(())
 }
 
+/// Loads an `AssetRipper.Settings.json` file for a `--settings` CLI flag.
+///
+/// Only the export record is consumed today; the remaining records stay available for
+/// future commands. Missing files, invalid UTF-8, oversized files, and schema violations
+/// are explicit input errors carrying the path.
+fn load_cli_export_settings(path: &Path) -> Result<ExportSettingsFile, Box<dyn Error>> {
+    use assetripper::export::settings_file::{parse_settings_file, SettingsFileLimits};
+
+    let limits = SettingsFileLimits::default();
+    let bytes = fs::read(path).map_err(|source| {
+        invalid_input(format!(
+            "could not read settings file {}: {source}",
+            path.display()
+        ))
+    })?;
+    if bytes.len() > limits.max_file_bytes {
+        return Err(invalid_input(format!(
+            "settings file {} uses {} bytes, exceeding limit {}",
+            path.display(),
+            bytes.len(),
+            limits.max_file_bytes
+        )));
+    }
+    let text = String::from_utf8(bytes).map_err(|_| {
+        invalid_input(format!(
+            "settings file {} is not valid UTF-8",
+            path.display()
+        ))
+    })?;
+    parse_settings_file(&text, limits)
+        .map(|settings| settings.export)
+        .map_err(|error| {
+            invalid_input(format!(
+                "settings file {} could not be parsed: {error}",
+                path.display()
+            ))
+        })
+}
+
 /// Parses the optional leading `--shader-export-mode <dummy|yaml|decompile>` flag of
 /// `export-shader`; the default matches `ExportSettings.ShaderExportMode` (`Dummy`).
 fn parse_shader_export_mode(
@@ -613,7 +670,9 @@ where
     I: Iterator<Item = OsString>,
 {
     let mut arguments = arguments;
-    let mut mode = ShaderExportMode::Dummy;
+    let mut flag_mode: Option<ShaderExportMode> = None;
+    // The settings-file fallback defaults to the `ExportSettings` default (`Dummy`).
+    let mut settings_mode = ShaderExportMode::Dummy;
     // Optional leading flags precede the positional arguments.
     loop {
         let Some(next) = arguments.next() else {
@@ -622,7 +681,12 @@ where
             ));
         };
         if next == "--shader-export-mode" {
-            mode = parse_shader_export_mode(arguments.next())?;
+            flag_mode = Some(parse_shader_export_mode(arguments.next())?);
+        } else if next == "--settings" {
+            let path = arguments.next().ok_or_else(|| {
+                invalid_input("export-shader --settings requires a settings file path")
+            })?;
+            settings_mode = load_cli_export_settings(Path::new(&path))?.shader_export_mode;
         } else {
             let serialized_file_index = next
                 .into_string()
@@ -650,6 +714,8 @@ where
             }
             let stdout = io::stdout();
             let mut output = stdout.lock();
+            // An explicit flag beats the settings file on any order.
+            let mode = flag_mode.unwrap_or(settings_mode);
             return export_shader_to(
                 &input_files,
                 serialized_file_index,
@@ -3298,7 +3364,7 @@ fn invalid_data_owned(message: String) -> io::Error {
 
 fn print_usage() {
     println!(
-        "Usage:\n  assetripper-rs inspect <input-directory> [input-directory ...]\n  assetripper-rs inspect-files <input-file> [input-file ...]\n  assetripper-rs export-object-yaml <serialized-file-index> <path-id> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-file-yaml <serialized-file-index> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-texture <serialized-file-index> <path-id> <new-output-image> <input-file> [input-file ...]\n  assetripper-rs export-mesh <serialized-file-index> <path-id> <new-output-glb> <input-file> [input-file ...]\n  assetripper-rs export-shader [--shader-export-mode <dummy|yaml|decompile>] <serialized-file-index> <path-id> <new-output-shader> <input-file> [input-file ...]\n  assetripper-rs export-audio <serialized-file-index> <path-id> <new-output-audio> <input-file> [input-file ...]\n  assetripper-rs --help\n  assetripper-rs --version\n\n`inspect` mounts directories into isolated VFS roots. `inspect-files` dispatches explicitly selected file paths, registers top-level ResourceFiles as GameBundle root inputs, and reports the parsed SerializedFiles. `export-object-yaml` writes one decoded object as YAML. `export-file-yaml` writes YAML-exportable objects from one SerializedFile in object-table order, resolves streamed Mesh and image-texture bytes, preserves intra-file references through source PathIDs, and refuses unresolved or cross-file references. It reports ImageTexture objects omitted by the baseline when they have no usable image data. `export-texture` decodes one class-28 Texture2D, resolves its inline or streamed image data, and writes a PNG/BMP/TGA image; the output extension selects the format (default PNG). `export-mesh` decodes one class-43 Mesh, resolves its vertex data and compressed mesh, and writes a glTF 2.0 binary file with one node per sub-mesh, converting Unity's left-handed coordinates to glTF's right-handed space and rewriting the sub-mesh topology. `export-shader` decodes one class-48 Shader and writes `.shader` text: decompiled script text is written verbatim under every mode, otherwise `dummy` (the default) and `decompile` render the fallback dummy body and `yaml` reports that YAML mode writes a YAML asset instead. `export-audio` decodes one class-83 AudioClip, resolves its inline or streamed audio data, and writes the decoded bytes; tracker audio passes through, `FSB5` reports the external-decoder requirement, and unknown bytes fail with the reference diagnostic. None of these commands replaces an existing output file. These are YAML, texture, single-mesh, single-shader, and single-clip paths, not a complete Unity project export."
+        "Usage:\n  assetripper-rs inspect <input-directory> [input-directory ...]\n  assetripper-rs inspect-files <input-file> [input-file ...]\n  assetripper-rs export-object-yaml <serialized-file-index> <path-id> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-file-yaml <serialized-file-index> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-texture [--settings <path>] <serialized-file-index> <path-id> <new-output-image> <input-file> [input-file ...]\n  assetripper-rs export-mesh <serialized-file-index> <path-id> <new-output-glb> <input-file> [input-file ...]\n  assetripper-rs export-shader [--shader-export-mode <dummy|yaml|decompile>] [--settings <path>] <serialized-file-index> <path-id> <new-output-shader> <input-file> [input-file ...]\n  assetripper-rs export-audio <serialized-file-index> <path-id> <new-output-audio> <input-file> [input-file ...]\n  assetripper-rs --help\n  assetripper-rs --version\n\n`inspect` mounts directories into isolated VFS roots. `inspect-files` dispatches explicitly selected file paths, registers top-level ResourceFiles as GameBundle root inputs, and reports the parsed SerializedFiles. `export-object-yaml` writes one decoded object as YAML. `export-file-yaml` writes YAML-exportable objects from one SerializedFile in object-table order, resolves streamed Mesh and image-texture bytes, preserves intra-file references through source PathIDs, and refuses unresolved or cross-file references. It reports ImageTexture objects omitted by the baseline when they have no usable image data. `export-texture` decodes one class-28 Texture2D, resolves its inline or streamed image data, and writes a PNG/BMP/TGA image; the output extension selects the format (otherwise the configured settings format, default PNG). `export-mesh` decodes one class-43 Mesh, resolves its vertex data and compressed mesh, and writes a glTF 2.0 binary file with one node per sub-mesh, converting Unity's left-handed coordinates to glTF's right-handed space and rewriting the sub-mesh topology. `export-shader` decodes one class-48 Shader and writes `.shader` text: decompiled script text is written verbatim under every mode, otherwise `dummy` (the default) and `decompile` render the fallback dummy body and `yaml` reports that YAML mode writes a YAML asset instead. `export-audio` decodes one class-83 AudioClip, resolves its inline or streamed audio data, and writes the decoded bytes; tracker audio passes through, `FSB5` reports the external-decoder requirement, and unknown bytes fail with the reference diagnostic. None of these commands replaces an existing output file. These are YAML, texture, single-mesh, single-shader, and single-clip paths, not a complete Unity project export."
     );
 }
 
@@ -4578,6 +4644,7 @@ mod tests {
             std::slice::from_ref(&serialized_path),
             0,
             42,
+            assetripper::export::settings::ImageExportFormat::Png,
             &output_path,
             &mut status,
         )
@@ -4589,9 +4656,15 @@ mod tests {
             .contains("Wrote a png texture from SerializedFile 0 PathID 42"));
 
         let original = png;
-        let error =
-            super::export_texture_to(&[serialized_path], 0, 42, &output_path, &mut Vec::new())
-                .unwrap_err();
+        let error = super::export_texture_to(
+            &[serialized_path],
+            0,
+            42,
+            assetripper::export::settings::ImageExportFormat::Png,
+            &output_path,
+            &mut Vec::new(),
+        )
+        .unwrap_err();
         assert_eq!(
             error.downcast_ref::<io::Error>().unwrap().kind(),
             io::ErrorKind::AlreadyExists
@@ -4616,10 +4689,162 @@ mod tests {
             subdirectories: Vec::new(),
         };
 
-        let result =
-            super::export_texture_to(&[serialized_path], 0, 42, &output_path, &mut Vec::new());
+        let result = super::export_texture_to(
+            &[serialized_path],
+            0,
+            42,
+            assetripper::export::settings::ImageExportFormat::Png,
+            &output_path,
+            &mut Vec::new(),
+        );
         assert!(result.is_err());
         assert!(!output_path.exists());
+        drop(input);
+    }
+
+    #[test]
+    fn export_texture_settings_file_selects_the_fallback_format() {
+        use std::ffi::OsString;
+
+        let directory = TestInputDirectory::new_root();
+        let serialized_path = directory.join("main.assets");
+        let settings_path = directory.join("AssetRipper.Settings.json");
+        // The committed modified probe fixture configures BMP output.
+        fs::write(
+            &settings_path,
+            include_str!("export/settings_file_modified.json"),
+        )
+        .unwrap();
+        let output_path = directory.join("texture.bin");
+        fs::write(&serialized_path, make_texture2d_file()).unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![
+                serialized_path.clone(),
+                settings_path.clone(),
+                output_path.clone(),
+            ],
+            subdirectories: Vec::new(),
+        };
+
+        // An unrecognized extension falls back to the configured BMP format.
+        let arguments = vec![
+            OsString::from("--settings"),
+            settings_path.clone().into_os_string(),
+            OsString::from("0"),
+            OsString::from("42"),
+            output_path.clone().into_os_string(),
+            serialized_path.clone().into_os_string(),
+        ];
+        super::export_texture_from_arguments(arguments.into_iter()).unwrap();
+        assert_eq!(&fs::read(&output_path).unwrap()[..2], b"BM");
+        drop(input);
+    }
+
+    #[test]
+    fn export_texture_settings_file_problems_are_input_errors() {
+        use std::ffi::OsString;
+
+        let directory = TestInputDirectory::new_root();
+        let serialized_path = directory.join("main.assets");
+        let output_path = directory.join("texture.bin");
+        let bad_path = directory.join("bad.json");
+        fs::write(&serialized_path, make_texture2d_file()).unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![
+                serialized_path.clone(),
+                output_path.clone(),
+                bad_path.clone(),
+            ],
+            subdirectories: Vec::new(),
+        };
+
+        // A missing settings file names its path.
+        let arguments = vec![
+            OsString::from("--settings"),
+            OsString::from("no-such-file.json"),
+            OsString::from("0"),
+            OsString::from("42"),
+            output_path.clone().into_os_string(),
+            serialized_path.clone().into_os_string(),
+        ];
+        let error = super::export_texture_from_arguments(arguments.into_iter()).unwrap_err();
+        assert!(error.to_string().contains("no-such-file.json"), "{error}");
+        assert!(!output_path.exists());
+
+        // A malformed settings file is rejected before any export work.
+        let settings_path = bad_path;
+        fs::write(&settings_path, b"{\"Import\": {}}").unwrap();
+        let arguments = vec![
+            OsString::from("--settings"),
+            settings_path.into_os_string(),
+            OsString::from("0"),
+            OsString::from("42"),
+            output_path.clone().into_os_string(),
+            serialized_path.clone().into_os_string(),
+        ];
+        let error = super::export_texture_from_arguments(arguments.into_iter()).unwrap_err();
+        assert!(error.to_string().contains("bad.json"), "{error}");
+        assert!(!output_path.exists());
+        drop(input);
+    }
+
+    #[test]
+    fn export_shader_settings_file_selects_the_fallback_mode() {
+        use std::ffi::OsString;
+
+        // Compiled text (`Program` present): `Simple` does not admit it, so the mode
+        // decides between the dummy bytes and the YAML-asset redirect.
+        let script = "Shader \"Test/Compiled\" {\n\tSubShader {\n\t\tPass {\n\t\t\tProgram \"vp\" {\n\t\t\t\tSubProgram \"d3d11\" {\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n}";
+        let directory = TestInputDirectory::new_root();
+        let serialized_path = directory.join("main.assets");
+        let settings_path = directory.join("AssetRipper.Settings.json");
+        // YAML mode with default versions and language settings.
+        fs::write(
+            &settings_path,
+            "{\"Import\": {\"ScriptContentLevel\": 2, \"StreamingAssetsMode\": 1, \"DefaultVersion\": \"0.0.0a0\", \"TargetVersion\": \"0.0.0a0\"}, \"Processing\": {\"EnablePrefabOutlining\": false, \"EnableStaticMeshSeparation\": true, \"EnableAssetDeduplication\": false, \"RemoveNullableAttributes\": false, \"PublicizeAssemblies\": false, \"BundledAssetsExportMode\": 2}, \"Export\": {\"AudioExportFormat\": 2, \"ImageExportFormat\": 4, \"LightmapTextureExportFormat\": 2, \"ScriptExportMode\": 1, \"ScriptLanguageVersion\": -1, \"ScriptTypesFullyQualified\": false, \"ShaderExportMode\": 1, \"SpriteExportMode\": 0, \"TextExportMode\": 2, \"ExportUnreadableAssets\": false, \"PreferOriginalTextureExtension\": true, \"SaveSettingsToDisk\": false, \"LanguageCode\": null}}",
+        )
+        .unwrap();
+        let output_path = directory.join("shader.shader");
+        fs::write(&serialized_path, make_shader_file(script)).unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![
+                serialized_path.clone(),
+                settings_path.clone(),
+                output_path.clone(),
+            ],
+            subdirectories: Vec::new(),
+        };
+
+        // The settings file selects YAML mode, whose text path reports the asset
+        // redirect instead of writing dummy bytes.
+        let arguments = vec![
+            OsString::from("--settings"),
+            settings_path.clone().into_os_string(),
+            OsString::from("0"),
+            OsString::from("42"),
+            output_path.clone().into_os_string(),
+            serialized_path.clone().into_os_string(),
+        ];
+        let error = super::export_shader_from_arguments(arguments.into_iter()).unwrap_err();
+        assert!(error.to_string().contains("writes a YAML asset"), "{error}");
+        assert!(!output_path.exists());
+
+        // An explicit flag beats the settings file on any order.
+        let arguments = vec![
+            OsString::from("--shader-export-mode"),
+            OsString::from("dummy"),
+            OsString::from("--settings"),
+            settings_path.into_os_string(),
+            OsString::from("0"),
+            OsString::from("42"),
+            output_path.clone().into_os_string(),
+            serialized_path.clone().into_os_string(),
+        ];
+        super::export_shader_from_arguments(arguments.into_iter()).unwrap();
+        assert!(output_path.exists());
         drop(input);
     }
 
