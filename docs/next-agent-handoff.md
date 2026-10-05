@@ -549,6 +549,6 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 ## 65. Checkpoint: export-settings discriminants and defaults with a runtime differential (2026-10-05)
 
 - Added `discriminant()` consts for all 12 configuration enums in `src/export/settings.rs` and replaced two-variant `ScriptLanguageSelection` with the full 21-member `ScriptLanguageVersion` (including `Latest = 2147483647`). All 83 shipped-assembly rows in `src/export/settings_fixture.txt` (probe `Temp/opencode/settingprobe`) matched, including the 24 record defaults and the capitalized .NET boolean rendering. New row `EXP-EXPORT-SETTINGS-001`; `DIFF-EXPORT-SETTINGS-001` recorded.
-- `cargo test --workspace --locked`: 925 library and 40 CLI tests; warnings-denied Clippy and format check pass.
+- `cargo test --workspace --locked`: 925 library and 40 CLI tests; warnings-denied Clippy and format check pass. CI run `37289460672` green (all five jobs) for remote `main` = `5374d76`; local matches.
 - Next: `EXPORT-UNITY-001` orchestration audit, `TYPE-SCRIPT-001` remainder (manager resolutions), and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
