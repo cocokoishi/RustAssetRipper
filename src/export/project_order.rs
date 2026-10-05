@@ -16,7 +16,8 @@
 //!
 //! Asset content, the exporter stack, and the event subscribers stay outside this module; only
 //! the order, the queued-set rule, the export gate, the progress steps, the lifecycle events,
-//! and the unhandled-asset abort are ported, over caller-supplied asset and collection identities.
+//! the unhandled-asset abort, the export-start version listing, and the settings-identity
+//! guard are ported, over caller-supplied asset and collection identities.
 
 use std::collections::HashSet;
 use std::error::Error;
@@ -36,6 +37,9 @@ pub enum ProjectOrderError {
     /// planning aborts. The source message names the asset; the generic key cannot render
     /// here, so callers attach the asset identity to this error.
     UnhandledAsset,
+    /// An export handler was built from different settings than the loader holds, so
+    /// `ThrowIfSettingsDontMatch` rejects it. Reference identity is caller-observed.
+    SettingsMismatch,
     /// A bounded allocation for the plan could not be reserved.
     AllocationFailed { resource: &'static str },
 }
@@ -57,6 +61,9 @@ impl Display for ProjectOrderError {
             ),
             Self::UnhandledAsset => {
                 write!(formatter, "there is no exporter that can handle the asset")
+            }
+            Self::SettingsMismatch => {
+                write!(formatter, "export handler settings don't match")
             }
             Self::AllocationFailed { resource } => {
                 write!(formatter, "could not allocate {resource}")
@@ -258,12 +265,40 @@ pub fn run_project_export_loop<C>(
     }
 }
 
+/// `ExportHandler.Export` logs the distinct Unity versions across the fetched asset
+/// collections (`GetListOfVersions`): first-seen order, single-space separated.
+///
+/// Versions arrive as caller facts (the port carries them opaquely); only the
+/// `Distinct` plus `string.Join(' ', ...)` shape is ported.
+pub fn distinct_collection_versions(versions: &[&str]) -> String {
+    let mut seen: Vec<&str> = Vec::new();
+    for version in versions {
+        if !seen.contains(version) {
+            seen.push(version);
+        }
+    }
+    seen.join(" ")
+}
+
+/// `ExportHandler.ThrowIfSettingsDontMatch`: the loader (`GameFileLoader.ExportHandler`
+/// setter) only accepts a handler built from its own settings instance.
+///
+/// Reference identity is caller-observed, so the check takes the comparison outcome: a
+/// mismatch is an explicit error carrying the source message, never a silent accept.
+pub const fn throw_if_settings_dont_match(same_settings: bool) -> Result<(), ProjectOrderError> {
+    if same_settings {
+        Ok(())
+    } else {
+        Err(ProjectOrderError::SettingsMismatch)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_collection_outcome, plan_project_export_order, plan_project_export_with_events,
-        run_project_export_loop, CollectionExportOutcome, ProjectExportEvent, ProjectOrderError,
-        ProjectOrderLimits,
+        classify_collection_outcome, distinct_collection_versions, plan_project_export_order,
+        plan_project_export_with_events, run_project_export_loop, throw_if_settings_dont_match,
+        CollectionExportOutcome, ProjectExportEvent, ProjectOrderError, ProjectOrderLimits,
     };
     use std::collections::HashMap;
     use std::rc::Rc;
@@ -492,6 +527,32 @@ mod tests {
                 ProjectExportEvent::ProgressUpdated { index: 2, total: 3 },
                 ProjectExportEvent::ExportFinished,
             ]
+        );
+    }
+
+    #[test]
+    fn version_listing_dedups_in_first_seen_order() {
+        assert_eq!(distinct_collection_versions(&[]), "");
+        assert_eq!(
+            distinct_collection_versions(&["2021.3.0f1", "2019.4.31f1", "2021.3.0f1"]),
+            "2021.3.0f1 2019.4.31f1"
+        );
+        assert_eq!(
+            distinct_collection_versions(&["5.6.0f1", "5.6.0f1"]),
+            "5.6.0f1"
+        );
+    }
+
+    #[test]
+    fn settings_identity_mismatches_are_explicit_errors() {
+        assert_eq!(throw_if_settings_dont_match(true), Ok(()));
+        assert_eq!(
+            throw_if_settings_dont_match(false),
+            Err(ProjectOrderError::SettingsMismatch)
+        );
+        assert_eq!(
+            ProjectOrderError::SettingsMismatch.to_string(),
+            "export handler settings don't match"
         );
     }
 }

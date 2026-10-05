@@ -684,5 +684,11 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 ## 86. Checkpoint: default-path settings startup load (2026-10-06)
 
 - The three settings-aware commands fall back to the exe-adjacent `AssetRipper.Settings.json` when no `--settings` flag is given (explicit flag wins; broken default file fails loudly). Three new CLI tests; full bin 49/49 and lib 966/966 locally, workspace Clippy clean; CI run `37324101483` green (all five jobs) for remote `main` = `c4a824f`; local matches.
+- Next: `TYPE-SCRIPT-001` remainder (manager resolutions), `EXPORT-UNITY-001` orchestration audit, CLI exposure + GUID freshness + folder sidecars, `export-mesh`/YAML per-command settings, and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 87. Checkpoint: EXPORT-UNITY-001 orchestration audit (2026-10-06)
+
+- Audited all 124 UnityProjects files family-by-family, corrected the stale row (wrong module path, `???` status), recorded two dead-code N/A findings, and ported `GetListOfVersions` + `ThrowIfSettingsDontMatch`. Lib suite 968/968 locally, workspace Clippy clean; full validation via Actions after push.
 - Next: `TYPE-SCRIPT-001` remainder (manager resolutions), CLI exposure + GUID freshness + folder sidecars, `export-mesh`/YAML per-command settings, and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
