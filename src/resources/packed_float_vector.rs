@@ -330,7 +330,15 @@ impl<'a> PackedBitReader<'a> {
             }
         }
         x &= self.mask;
-        (x as f32) / self.half_max_value + self.start
+        let result = (x as f32) / self.half_max_value + self.start;
+        // `0.0 / 0.0` yields the hardware default NaN, whose sign bit differs between the
+        // Windows and Linux x86-64 targets. The baseline's .NET result is the positive quiet NaN
+        // `0x7FC00000`, so canonicalize to keep the output deterministic.
+        if result.is_nan() {
+            f32::from_bits(0x7FC0_0000)
+        } else {
+            result
+        }
     }
 }
 

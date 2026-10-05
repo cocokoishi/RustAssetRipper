@@ -44,7 +44,7 @@ pub fn swap_bytes(input: &[u8], size: usize) -> Result<Vec<u8>, ByteArrayError> 
     if size != 2 && size != 4 {
         return Err(ByteArrayError::UnsupportedSize { size });
     }
-    if input.len() % size != 0 {
+    if !input.len().is_multiple_of(size) {
         return Err(ByteArrayError::NotMultipleOfSize {
             size,
             length: input.len(),
