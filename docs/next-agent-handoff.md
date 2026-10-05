@@ -337,3 +337,13 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Added the DXT1/DXT3/DXT5 and packed-format decoders with a committed `AssetRipper.TextureDecoder` differential fixture; this is the first real texture-pixel capability in the Rust port.
 - Remaining texture work: BC4/BC5/BC6H/BC7, ATC, ETC/EAC, ASTC, PVRTC, YUY2, half/float/signed/16-bit formats, the `TextureConverter` mip/layer/`GraphicsFormat` dispatch, Crunch, and the PNG/EXR/BMP writers.
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+
+## 39. Checkpoint: ETC/EAC, ATC/YUY2, and wide texture formats (2026-10-04)
+
+- Added `src/resources/etc_decode.rs` (ETC1 individual/differential, ETC2 individual/differential/T/H/planar, ETC2A1 punch-through, ETC2A8, EAC R/RG unsigned/signed), `src/resources/atc_yuy2.rs` (ATC RGB4/RGBA8, YUY2), and the 16-bit/half/float/signed/RGB9e5 converters in `src/resources/texture_decode.rs`.
+- Every module carries a committed original-runtime differential (`AssetRipper.TextureDecoder` 2.6.3 decoded through the shipped DLL): `etc_decode_fixture.txt` (23 rows), `atc_yuy2_fixture.txt` (5 rows), `wide_format_fixture.txt` (19 rows), plus the earlier `texture_decode_fixture.txt` (33 rows).
+- Recorded `DIFF-ETC-ALPHAORDER-001` (ETC2A8 alpha uses the reverse block permutation) and `DIFF-ATC-COLOR-001` (ATC `Extend`/`5-3` weights and explicit-alpha branch).
+- Texture format coverage now: DXT1/3/5, BC4/BC5, ETC1/ETC2/ETC2A1/ETC2A8, EAC R/RG (u/s), ATC RGB4/RGBA8, YUY2, RGBA32/RGB24/BGRA32/ARGB32/Alpha8/R8/RG16/RGB565/ARGB4444/RGBA4444, and R16/RG32/RGB48/RGBA64/half/float/signed/RGB9e5. Still unported: BC6H, BC7, ASTC, PVRTC, and the `TextureConverter` mip/layer/`GraphicsFormat` dispatch, Crunch, and the image writers.
+- Verified the `.meta` envelope (`src/export/meta.rs`) matches the reference `Meta.cs`: `fileFormatVersion: 2`, `guid`, optional `folderAsset`, optional `timeCreated`/`licenseType: Free` with the `SOURCE_DATE_EPOCH` fallback, then the importer mapping. `format_unity_guid_words` delegates to the corrected `format_unity_guid`. The remaining `.meta` work is the FS sidecar integration and the per-class `CreateImporter` tracing.
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
