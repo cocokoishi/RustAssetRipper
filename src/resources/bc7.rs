@@ -127,11 +127,17 @@ fn decode_bc7_block(input: &[u8], output: &mut Block) {
         if mode == 1 {
             let i = bstream.read_bit();
             let j = bstream.read_bit();
-            for k in 0..3 {
-                endpoints[0][k] |= i;
-                endpoints[1][k] |= i;
-                endpoints[2][k] |= j;
-                endpoints[3][k] |= j;
+            for value in &mut endpoints[0][..3] {
+                *value |= i;
+            }
+            for value in &mut endpoints[1][..3] {
+                *value |= i;
+            }
+            for value in &mut endpoints[2][..3] {
+                *value |= j;
+            }
+            for value in &mut endpoints[3][..3] {
+                *value |= j;
             }
         } else if (MODE_HAS_PBITS & (1 << mode)) != 0 {
             for endpoint in endpoints.iter_mut().take(num_endpoints) {
@@ -145,9 +151,9 @@ fn decode_bc7_block(input: &[u8], output: &mut Block) {
 
     for endpoint in endpoints.iter_mut().take(num_endpoints) {
         let rgb_bits = ACTUAL_BITS_COUNT[0][mode as usize] + ((MODE_HAS_PBITS >> mode) & 1);
-        for k in 0..3 {
-            endpoint[k] <<= 8 - rgb_bits;
-            endpoint[k] |= endpoint[k] >> rgb_bits;
+        for value in &mut endpoint[..3] {
+            *value <<= 8 - rgb_bits;
+            *value |= *value >> rgb_bits;
         }
         let alpha_bits = ACTUAL_BITS_COUNT[1][mode as usize] + ((MODE_HAS_PBITS >> mode) & 1);
         endpoint[3] <<= 8 - alpha_bits;
