@@ -585,6 +585,6 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 ## 70. Checkpoint: asset-factory dispatch with an engine-table differential (2026-10-06)
 
 - Added `src/processing/asset_factory.rs` (first audited slice of `SER-TT-ABSENT-001`): `ReadAsset` dispatch, `ReadNormalObject` fallback chain with log levels, `TryReadNormalObject` tail rules, Patch build-bump retry, `CreateAsset` outcomes, and the 21-arm `CreateEngineAsset` table re-asserting the `ENGINE` fixture rows. New row `SER-ASSET-FACTORY-001`; `DIFF-ASSET-FACTORY-001` recorded. Byte reading/node building/assemblies stay out.
-- `cargo test --workspace --locked`: 944 library and 40 CLI tests; warnings-denied Clippy and format check pass.
+- `cargo test --workspace --locked`: 944 library and 40 CLI tests; warnings-denied Clippy and format check pass. CI run `37298704192` green (all five jobs) for remote `main` = `1afe5c4`; local matches.
 - Next: `TYPE-SCRIPT-001` remainder (manager resolutions), `EXPORT-UNITY-001` remainder (asset/sidecar file writes), and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
