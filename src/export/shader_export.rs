@@ -395,14 +395,125 @@ pub const PROPERTY_FLAG_KEYWORDS: &[&str] = &[
     "[Gamma] ",
 ];
 
+/// A `.shader` text export failure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ShaderTextExportError {
+    /// The field view could not be built.
+    View(crate::resources::shader::ShaderViewError),
+    /// The shader has neither script text nor a parsed form, so neither the `Simple`
+    /// nor the dummy path applies.
+    MissingScriptAndParsedForm,
+    /// The dummy path needs a parsed `SerializedShader` model (property block plus
+    /// template selection over generated objects), which is not ported.
+    ParsedFormUnsupported,
+    /// The script has no `SubShader`, so the unparsed dummy path fails like the source
+    /// `subshaderIndex < 0` return.
+    MissingSubShader,
+    /// `ShaderExportMode::Yaml` produces a YAML asset, not `.shader` text.
+    YamlModeWritesAsset,
+}
+
+impl core::fmt::Display for ShaderTextExportError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::View(error) => write!(formatter, "{error}"),
+            Self::MissingScriptAndParsedForm => write!(
+                formatter,
+                "shader has neither script text nor a parsed form"
+            ),
+            Self::ParsedFormUnsupported => write!(
+                formatter,
+                "shader dummy export with a parsed form is not supported"
+            ),
+            Self::MissingSubShader => write!(
+                formatter,
+                "shader script has no SubShader for the dummy path"
+            ),
+            Self::YamlModeWritesAsset => write!(
+                formatter,
+                "ShaderExportMode::Yaml writes a YAML asset, not .shader text"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ShaderTextExportError {}
+
+impl From<crate::resources::shader::ShaderViewError> for ShaderTextExportError {
+    fn from(error: crate::resources::shader::ShaderViewError) -> Self {
+        Self::View(error)
+    }
+}
+
+/// Assemble the unparsed dummy output on raw bytes: the script header up to (not
+/// including) the first `SubShader`, then the marker line, one tab, the fallback text,
+/// and a closing brace. A missing `SubShader` fails.
+///
+/// Byte-equal to [`render_unparsed_dummy`] on valid UTF-8; the byte form additionally
+/// covers non-UTF-8 scripts without a lossy conversion.
+pub fn render_unparsed_dummy_bytes(header: &[u8], fallback: &[u8]) -> Option<Vec<u8>> {
+    let index = find_needle(header, crate::resources::shader::SUBSHADER_NEEDLE)?;
+    let mut output = Vec::with_capacity(index + fallback.len() + 32);
+    output.extend_from_slice(&header[..index]);
+    output.extend_from_slice(DUMMY_MARKER_LINE.as_bytes());
+    output.push(b'\t');
+    output.extend_from_slice(fallback);
+    output.push(b'}');
+    Some(output)
+}
+
+fn find_needle(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+/// `SimpleShaderExporter.Export` wins plus the mode-exporter fallback, in stack order.
+///
+/// The stack tries `Simple` first under every mode (decompiled script text wins even
+/// under `Yaml`); otherwise `Yaml` writes a YAML asset rather than text, and `Dummy`
+/// (which `Decompile` falls back to, since this snapshot has no decompiler exporter)
+/// renders the unparsed dummy form or fails explicitly.
+pub fn export_shader_text(
+    view: &crate::resources::shader::ShaderView,
+    mode: crate::export::settings::ShaderExportMode,
+) -> Result<Vec<u8>, ShaderTextExportError> {
+    let simple_admits = view
+        .script
+        .as_deref()
+        .is_some_and(crate::resources::shader::script_has_decompiled_text);
+    match crate::export::exporter_match::select_shader_exporter(mode, simple_admits) {
+        crate::export::exporter_match::ShaderExporterChoice::Simple => {
+            Ok(view.script.clone().unwrap_or_default())
+        }
+        crate::export::exporter_match::ShaderExporterChoice::Yaml => {
+            Err(ShaderTextExportError::YamlModeWritesAsset)
+        }
+        crate::export::exporter_match::ShaderExporterChoice::Dummy => {
+            if view.has_parsed_form {
+                return Err(ShaderTextExportError::ParsedFormUnsupported);
+            }
+            let Some(script) = view.script.as_deref() else {
+                return Err(ShaderTextExportError::MissingScriptAndParsedForm);
+            };
+            render_unparsed_dummy_bytes(script, fallback_dummy_shader().as_bytes())
+                .ok_or(ShaderTextExportError::MissingSubShader)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::unity_patches::{patch_file_name, plan_patch_write, PatchWrite};
     use super::{
-        best_template_index, fallback_dummy_shader, property_declaration_keyword,
-        render_parsed_dummy, render_unparsed_dummy, requirement_matches, strip_carriage_returns,
-        template_matches, templates, texture_dimension_keyword, yaml_shader_patch_texts,
-        yaml_shader_patches, ShaderPropertyFact, TemplateMatchError, TemplateRequirement,
+        best_template_index, export_shader_text, fallback_dummy_shader,
+        property_declaration_keyword, render_parsed_dummy, render_unparsed_dummy,
+        render_unparsed_dummy_bytes, requirement_matches, strip_carriage_returns, template_matches,
+        templates, texture_dimension_keyword, yaml_shader_patch_texts, yaml_shader_patches,
+        ShaderPropertyFact, ShaderTextExportError, TemplateMatchError, TemplateRequirement,
         DUMMY_MARKER_LINE, FILE_LOCKER_PATCH_MIN_VERSION, PROPERTY_FLAG_KEYWORDS,
         REGISTER_PATCH_MIN_VERSION, TEMPLATE_CATALOG, YAML_SHADER_EXTENSION,
     };
@@ -541,5 +652,205 @@ mod tests {
         assert_eq!(texture_dimension_keyword(6), Some("CubeArray"));
         assert_eq!(texture_dimension_keyword(7), None);
         assert_eq!(PROPERTY_FLAG_KEYWORDS.len(), 6);
+    }
+
+    /// The probe scripts behind each `shader_dummy_fixture.txt` tag.
+    fn fixture_script(tag: &str) -> &'static str {
+        match tag {
+            "simple" => "Shader \"Test/Simple\" {\n\tSubShader {\n\t\tPass {}\n\t}\n}",
+            "nosub" => "Shader \"Test/NoSub\" {\n\t// nothing\n}",
+            "program" => {
+                "Shader \"Test/Prog\" {\n\tSubShader {\n\t\tProgram \"vp\" {\n\t\t}\n\t}\n}"
+            }
+            _ => panic!("unexpected fixture tag {tag}"),
+        }
+    }
+
+    fn unescape_fixture_text(escaped: &str) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(escaped.len());
+        let mut chars = escaped.chars();
+        while let Some(char) = chars.next() {
+            if char != '\\' {
+                let mut buffer = [0; 4];
+                bytes.extend_from_slice(char.encode_utf8(&mut buffer).as_bytes());
+                continue;
+            }
+            match chars.next() {
+                Some('n') => bytes.push(b'\n'),
+                Some('t') => bytes.push(b'\t'),
+                Some('r') => bytes.push(b'\r'),
+                Some('\\') => bytes.push(b'\\'),
+                other => panic!("unexpected fixture escape {other:?}"),
+            }
+        }
+        bytes
+    }
+
+    /// Byte-for-byte differential against the reference `DummyShaderTextExporter`
+    /// (probe `Temp/opencode/shaderexport`): real per-version `Shader.Create` instances
+    /// with `Script` set, calling the shipped `ExportShader(IShader, TextWriter`).
+    #[test]
+    fn dummy_text_matches_the_reference_runtime() {
+        use crate::export::settings::ShaderExportMode;
+        use crate::resources::shader::ShaderView;
+
+        let fixture = include_str!("shader_dummy_fixture.txt");
+        let mut rows = 0;
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut parts = line.splitn(6, '|');
+            assert_eq!(parts.next(), Some("SEXPORT"), "{line}");
+            let version = parts.next().expect("a probe version");
+            let tag = parts.next().expect("a probe tag");
+            let simple_admits = parts.next().expect("a Simple admission word");
+            let dummy_ok = parts.next().expect("a dummy result word");
+            let escaped = parts.next().expect("escaped dummy text");
+            assert!(parts.next().is_none(), "{line}");
+            // The probed versions carry Script without a parsed form.
+            assert!(
+                version == "3.5.0a0" || version == "5.0.0f1",
+                "probed unparsed-path version {version}"
+            );
+            let script = fixture_script(tag);
+            let view = ShaderView {
+                name: None,
+                script: Some(script.as_bytes().to_vec()),
+                has_parsed_form: false,
+            };
+            let admits = simple_admits == "simple-admits=1";
+            assert_eq!(
+                crate::resources::shader::script_has_decompiled_text(script.as_bytes()),
+                admits,
+                "{version} {tag}"
+            );
+            let expected = unescape_fixture_text(escaped);
+            // The probe called the dummy exporter directly, bypassing the stack, so
+            // the Dummy choice reproduces the probed text (or its explicit failure).
+            match dummy_ok {
+                "dummy-ok=1" => {
+                    assert_eq!(
+                        render_unparsed_dummy_bytes(
+                            script.as_bytes(),
+                            fallback_dummy_shader().as_bytes()
+                        ),
+                        Some(expected.clone()),
+                        "{version} {tag}"
+                    );
+                }
+                "dummy-ok=0" => {
+                    assert!(expected.is_empty(), "{version} {tag}");
+                    assert_eq!(
+                        render_unparsed_dummy_bytes(
+                            script.as_bytes(),
+                            fallback_dummy_shader().as_bytes()
+                        ),
+                        None,
+                        "{version} {tag}"
+                    );
+                }
+                _ => panic!("unexpected dummy result word {dummy_ok}"),
+            }
+            // Through the stack, decompiled text wins as raw `Script` bytes under
+            // every mode; otherwise Dummy (and Decompile, which falls back to it)
+            // renders the probed text and Yaml has no text form.
+            if admits {
+                for mode in [
+                    ShaderExportMode::Dummy,
+                    ShaderExportMode::Yaml,
+                    ShaderExportMode::Decompile,
+                ] {
+                    assert_eq!(
+                        export_shader_text(&view, mode),
+                        Ok(script.as_bytes().to_vec()),
+                        "{version} {tag} {mode:?}"
+                    );
+                }
+            } else {
+                assert_eq!(
+                    export_shader_text(&view, ShaderExportMode::Dummy),
+                    Ok(expected.clone()),
+                    "{version} {tag}"
+                );
+                assert_eq!(
+                    export_shader_text(&view, ShaderExportMode::Decompile),
+                    Ok(expected),
+                    "{version} {tag}"
+                );
+                assert_eq!(
+                    export_shader_text(&view, ShaderExportMode::Yaml),
+                    Err(ShaderTextExportError::YamlModeWritesAsset),
+                    "{version} {tag}"
+                );
+            }
+            rows += 1;
+        }
+        assert_eq!(rows, 6, "all six probed rows are asserted");
+    }
+
+    #[test]
+    fn shader_text_choices_without_decompiled_text() {
+        use crate::export::settings::ShaderExportMode;
+        use crate::resources::shader::ShaderView;
+
+        // A compiled script reaches the mode exporter; Yaml has no text form and a
+        // present parsed form has no ported model.
+        let compiled = ShaderView {
+            name: None,
+            script: Some(b"Shader \"x\" {\nProgram \"vp\" {}\n}".to_vec()),
+            has_parsed_form: false,
+        };
+        assert!(matches!(
+            export_shader_text(&compiled, ShaderExportMode::Yaml),
+            Err(ShaderTextExportError::YamlModeWritesAsset)
+        ));
+        let parsed = ShaderView {
+            name: None,
+            script: None,
+            has_parsed_form: true,
+        };
+        assert_eq!(
+            export_shader_text(&parsed, ShaderExportMode::Dummy),
+            Err(ShaderTextExportError::ParsedFormUnsupported)
+        );
+        // Neither script nor parsed form reaches neither text path.
+        let empty = ShaderView {
+            name: None,
+            script: None,
+            has_parsed_form: false,
+        };
+        assert_eq!(
+            export_shader_text(&empty, ShaderExportMode::Dummy),
+            Err(ShaderTextExportError::MissingScriptAndParsedForm)
+        );
+        // An empty script is not decompiled text and has no SubShader.
+        let blank = ShaderView {
+            name: None,
+            script: Some(Vec::new()),
+            has_parsed_form: false,
+        };
+        assert_eq!(
+            export_shader_text(&blank, ShaderExportMode::Dummy),
+            Err(ShaderTextExportError::MissingSubShader)
+        );
+    }
+
+    #[test]
+    fn byte_and_str_dummy_assembly_agree_on_valid_utf8() {
+        let cases = [
+            ("Shader \"x\" {\n}\n", "FB"),
+            ("Shader \"x\" {\nSubShader {\n}\n}\n", "FB"),
+            ("prefix SubShader middle SubShader", "--"),
+        ];
+        for (script, fallback) in cases {
+            assert_eq!(
+                render_unparsed_dummy_bytes(script.as_bytes(), fallback.as_bytes()),
+                render_unparsed_dummy(script, fallback).map(|text| text.into_bytes()),
+                "{script:?}"
+            );
+        }
+        assert_eq!(render_unparsed_dummy_bytes(b"no marker", b"FB"), None);
     }
 }

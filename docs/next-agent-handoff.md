@@ -486,3 +486,12 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - `cargo test --workspace --locked`: 874 library and 28 CLI tests; warnings-denied Clippy and format check pass.
 - Next: `RES-MATERIAL-EXPORT-001` (`.mat`/`.shader`), the animation rows (`RES-ANIM-001`/`PROC-ANIM-001`), `RES-AUDIO-001`, blend shapes/scene-level GLB assembly, `EXPORT-UNITY-001`, `TYPE-SCRIPT-001`, and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 57. Checkpoint: Shader text export CLI + material YAML emission (2026-10-05)
+
+- Added `src/resources/shader.rs` (`ShaderView`: `m_Script`/`m_Name` bytes, `m_ParsedForm` presence; byte-level decompiled-text gate agreeing with the `&str` gate) and `export_shader_text` in `src/export/shader_export.rs` (stack order: `Simple` raw bytes under every mode, else `Yaml` errors, else `Dummy`/`Decompile` render or fail explicitly; parsed-form dummy is an explicit `ParsedFormUnsupported`).
+- Runtime differential `src/export/shader_dummy_fixture.txt` (probe `Temp/opencode/shaderexport`, real per-version `Shader.Create` + shipped `DummyShaderTextExporter.ExportShader`): six rows matched byte-for-byte, including the version gates (`Shader_3_5`/`Shader_5` script-only, 2019+/2022+ parsed-only) and `Simple`-first precedence. New `export-shader` CLI with `--shader-export-mode` plus a synthetic class-21 `.mat` YAML emission test (`--- !u!21 &1`).
+- `RES-MATERIAL-EXPORT-001` moves to `已实现但未验证`; recorded as `DIFF-SHADER-DUMMY-001`.
+- `cargo test --workspace --locked`: 881 library and 33 CLI tests; warnings-denied Clippy and format check pass.
+- Next: the animation rows (`RES-ANIM-001`/`PROC-ANIM-001`), `RES-AUDIO-001`, parsed-form shader dummy, blend shapes/scene-level GLB assembly, `EXPORT-UNITY-001`, `TYPE-SCRIPT-001`, and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

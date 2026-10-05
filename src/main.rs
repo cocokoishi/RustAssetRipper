@@ -12,6 +12,8 @@ use assetripper::export::pointer_map::{
 use assetripper::export::scene_collection::{
     ExportAssetCollectionIdentity, ExportAssetIdentity, SceneExportIdAssignment,
 };
+use assetripper::export::settings::ShaderExportMode;
+use assetripper::export::shader_export::export_shader_text;
 use assetripper::export::streamed_assets::StreamedYamlAssetLimits;
 use assetripper::export::unity_yaml::{write_unity_yaml_documents, UnityYamlWriteLimits};
 use assetripper::export::value_yaml::UnityYamlObjectConversionLimits;
@@ -66,6 +68,7 @@ use assetripper::resources::glb::build_glb;
 use assetripper::resources::image_export::ImageExportFormat;
 use assetripper::resources::mesh::MeshView;
 use assetripper::resources::packed_bit_vector::PackedBitVectorLimits;
+use assetripper::resources::shader::{ShaderView, SHADER_CLASS_ID};
 use assetripper::resources::texture::{export_texture2d_image, Texture2DView};
 use assetripper::resources::vertex_data_blob::{EndianType, UnityVersion};
 use assetripper::scheme::{
@@ -159,6 +162,9 @@ fn run(arguments: impl Iterator<Item = OsString>) -> Result<(), Box<dyn Error>> 
     }
     if command == "export-mesh" {
         return export_mesh_from_arguments(arguments);
+    }
+    if command == "export-shader" {
+        return export_shader_from_arguments(arguments);
     }
     if command != "inspect" && command != "inspect-files" {
         print_usage();
@@ -566,6 +572,150 @@ fn export_mesh_to<W: io::Write>(
         "Wrote a GLB with {vertex_count} vertices, {sub_mesh_count} sub-meshes, and \
          {emitted_indices} emitted indices from SerializedFile {serialized_file_index} \
          PathID {path_id} to {output_path:?}."
+    )?;
+    Ok(())
+}
+
+/// Parses the optional leading `--shader-export-mode <dummy|yaml|decompile>` flag of
+/// `export-shader`; the default matches `ExportSettings.ShaderExportMode` (`Dummy`).
+fn parse_shader_export_mode(
+    argument: Option<OsString>,
+) -> Result<ShaderExportMode, Box<dyn Error>> {
+    let Some(argument) = argument else {
+        return Ok(ShaderExportMode::Dummy);
+    };
+    let text = argument
+        .into_string()
+        .map_err(|_| invalid_input("the --shader-export-mode value must be valid UTF-8"))?;
+    match text.as_str() {
+        "dummy" => Ok(ShaderExportMode::Dummy),
+        "yaml" => Ok(ShaderExportMode::Yaml),
+        "decompile" => Ok(ShaderExportMode::Decompile),
+        _ => Err(invalid_input(format!(
+            "unknown --shader-export-mode '{text}'; expected dummy, yaml, or decompile"
+        ))),
+    }
+}
+
+fn export_shader_from_arguments<I>(arguments: I) -> Result<(), Box<dyn Error>>
+where
+    I: Iterator<Item = OsString>,
+{
+    let mut arguments = arguments;
+    let mut mode = ShaderExportMode::Dummy;
+    // Optional leading flags precede the positional arguments.
+    loop {
+        let Some(next) = arguments.next() else {
+            return Err(invalid_input(
+                "export-shader requires a SerializedFile index",
+            ));
+        };
+        if next == "--shader-export-mode" {
+            mode = parse_shader_export_mode(arguments.next())?;
+        } else {
+            let serialized_file_index = next
+                .into_string()
+                .ok()
+                .and_then(|text| text.parse::<usize>().ok())
+                .ok_or_else(|| invalid_input("export-shader requires a SerializedFile index"))?;
+            let path_id = parse_required_argument::<i64>(arguments.next(), "object PathID")?;
+            let output_path = arguments
+                .next()
+                .map(PathBuf::from)
+                .ok_or_else(|| invalid_input("export-shader requires an output .shader path"))?;
+            let mut input_files = Vec::new();
+            for argument in arguments {
+                if input_files.len() >= MAX_INPUT_PATHS {
+                    return Err(invalid_input(format!(
+                        "input path count exceeds {MAX_INPUT_PATHS}"
+                    )));
+                }
+                input_files.push(PathBuf::from(argument));
+            }
+            if input_files.is_empty() {
+                return Err(invalid_input(
+                    "export-shader requires at least one explicitly selected input file",
+                ));
+            }
+            let stdout = io::stdout();
+            let mut output = stdout.lock();
+            return export_shader_to(
+                &input_files,
+                serialized_file_index,
+                path_id,
+                mode,
+                &output_path,
+                &mut output,
+            );
+        }
+    }
+}
+
+fn export_shader_to<W: io::Write>(
+    input_files: &[PathBuf],
+    serialized_file_index: usize,
+    path_id: i64,
+    mode: ShaderExportMode,
+    output_path: &Path,
+    status_output: &mut W,
+) -> Result<(), Box<dyn Error>> {
+    let (mut filesystem, selected_paths, _mount_report) = mount_input_files(input_files)?;
+    let mixed = MixedGameStructure::from_vfs_paths(
+        &filesystem,
+        &selected_paths,
+        MixedGameStructureLimits::default(),
+    )?;
+    if mixed.serialized_file_inputs.is_empty() {
+        return Err(invalid_input(
+            "the selected files contain no recognized SerializedFile input",
+        ));
+    }
+    let (workspace, _) = SerializedFileWorkspace::load_from_vfs_with_dependencies(
+        &mut filesystem,
+        &mixed.serialized_file_inputs,
+        &mixed.registered_files,
+        &mixed.data_paths,
+        SerializedFileWorkspaceLimits::default(),
+        DependencyIndexLimits::default(),
+        ContainerMountLimits::default(),
+    )?;
+    let (object_index, _) = select_unique_object(&workspace, serialized_file_index, path_id)?;
+
+    let objects =
+        ObjectWorkspace::load_from_vfs(&filesystem, &workspace, ObjectWorkspaceLimits::default())?;
+    let object = objects
+        .get(serialized_file_index, object_index)
+        .ok_or_else(|| invalid_data("selected workspace object is missing"))?;
+    if object.class_id != Some(SHADER_CLASS_ID as i16) {
+        return Err(invalid_data_owned(format!(
+            "SerializedFile {serialized_file_index} PathID {path_id} has class {:?}, not a class-48 Shader",
+            object.class_id
+        ))
+        .into());
+    }
+    let payload = object.payload.as_ref().map_err(|error| {
+        invalid_data_owned(format!(
+            "SerializedFile {serialized_file_index} PathID {path_id} could not be decoded: {error}"
+        ))
+    })?;
+    let view = ShaderView::from_value(&payload.root).map_err(|error| {
+        invalid_data_owned(format!(
+            "SerializedFile {serialized_file_index} PathID {path_id} is not an exportable Shader: {error}"
+        ))
+    })?;
+    let text = export_shader_text(&view, mode).map_err(|error| {
+        invalid_data_owned(format!(
+            "SerializedFile {serialized_file_index} PathID {path_id} shader export failed: {error}"
+        ))
+    })?;
+    let mut destination = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output_path)?;
+    destination.write_all(&text)?;
+    writeln!(
+        status_output,
+        "Wrote a shader from SerializedFile {serialized_file_index} PathID {path_id} to {output_path:?}."
     )?;
     Ok(())
 }
@@ -2964,7 +3114,7 @@ fn invalid_data_owned(message: String) -> io::Error {
 
 fn print_usage() {
     println!(
-        "Usage:\n  assetripper-rs inspect <input-directory> [input-directory ...]\n  assetripper-rs inspect-files <input-file> [input-file ...]\n  assetripper-rs export-object-yaml <serialized-file-index> <path-id> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-file-yaml <serialized-file-index> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-texture <serialized-file-index> <path-id> <new-output-image> <input-file> [input-file ...]\n  assetripper-rs export-mesh <serialized-file-index> <path-id> <new-output-glb> <input-file> [input-file ...]\n  assetripper-rs --help\n  assetripper-rs --version\n\n`inspect` mounts directories into isolated VFS roots. `inspect-files` dispatches explicitly selected file paths, registers top-level ResourceFiles as GameBundle root inputs, and reports the parsed SerializedFiles. `export-object-yaml` writes one decoded object as YAML. `export-file-yaml` writes YAML-exportable objects from one SerializedFile in object-table order, resolves streamed Mesh and image-texture bytes, preserves intra-file references through source PathIDs, and refuses unresolved or cross-file references. It reports ImageTexture objects omitted by the baseline when they have no usable image data. `export-texture` decodes one class-28 Texture2D, resolves its inline or streamed image data, and writes a PNG/BMP/TGA image; the output extension selects the format (default PNG). `export-mesh` decodes one class-43 Mesh, resolves its vertex data and compressed mesh, and writes a glTF 2.0 binary file with one node per sub-mesh, converting Unity's left-handed coordinates to glTF's right-handed space and rewriting the sub-mesh topology. None of these commands replaces an existing output file. These are YAML, texture, and single-mesh paths, not a complete Unity project export."
+        "Usage:\n  assetripper-rs inspect <input-directory> [input-directory ...]\n  assetripper-rs inspect-files <input-file> [input-file ...]\n  assetripper-rs export-object-yaml <serialized-file-index> <path-id> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-file-yaml <serialized-file-index> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-texture <serialized-file-index> <path-id> <new-output-image> <input-file> [input-file ...]\n  assetripper-rs export-mesh <serialized-file-index> <path-id> <new-output-glb> <input-file> [input-file ...]\n  assetripper-rs export-shader [--shader-export-mode <dummy|yaml|decompile>] <serialized-file-index> <path-id> <new-output-shader> <input-file> [input-file ...]\n  assetripper-rs --help\n  assetripper-rs --version\n\n`inspect` mounts directories into isolated VFS roots. `inspect-files` dispatches explicitly selected file paths, registers top-level ResourceFiles as GameBundle root inputs, and reports the parsed SerializedFiles. `export-object-yaml` writes one decoded object as YAML. `export-file-yaml` writes YAML-exportable objects from one SerializedFile in object-table order, resolves streamed Mesh and image-texture bytes, preserves intra-file references through source PathIDs, and refuses unresolved or cross-file references. It reports ImageTexture objects omitted by the baseline when they have no usable image data. `export-texture` decodes one class-28 Texture2D, resolves its inline or streamed image data, and writes a PNG/BMP/TGA image; the output extension selects the format (default PNG). `export-mesh` decodes one class-43 Mesh, resolves its vertex data and compressed mesh, and writes a glTF 2.0 binary file with one node per sub-mesh, converting Unity's left-handed coordinates to glTF's right-handed space and rewriting the sub-mesh topology. `export-shader` decodes one class-48 Shader and writes `.shader` text: decompiled script text is written verbatim under every mode, otherwise `dummy` (the default) and `decompile` render the fallback dummy body and `yaml` reports that YAML mode writes a YAML asset instead. None of these commands replaces an existing output file. These are YAML, texture, single-mesh, and single-shader paths, not a complete Unity project export."
     );
 }
 
@@ -4376,6 +4526,176 @@ mod tests {
         drop(input);
     }
 
+    #[test]
+    fn export_shader_writes_simple_bytes_and_refuses_overwrite() {
+        use assetripper::export::settings::ShaderExportMode;
+
+        let script = "Shader \"Test/Simple\" {\n\tSubShader {\n\t\tPass {}\n\t}\n}";
+        let directory = TestInputDirectory::new_root();
+        let serialized_path = directory.join("main.assets");
+        let output_path = directory.join("shader.shader");
+        fs::write(&serialized_path, make_shader_file(script)).unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![serialized_path.clone(), output_path.clone()],
+            subdirectories: Vec::new(),
+        };
+
+        let mut status = Vec::new();
+        super::export_shader_to(
+            std::slice::from_ref(&serialized_path),
+            0,
+            42,
+            ShaderExportMode::Dummy,
+            &output_path,
+            &mut status,
+        )
+        .unwrap();
+        // Decompiled text wins under every mode with the raw script bytes.
+        assert_eq!(fs::read(&output_path).unwrap(), script.as_bytes());
+        assert!(String::from_utf8(status)
+            .unwrap()
+            .contains("Wrote a shader from SerializedFile 0 PathID 42"));
+
+        let original = fs::read(&output_path).unwrap();
+        let error = super::export_shader_to(
+            &[serialized_path],
+            0,
+            42,
+            ShaderExportMode::Dummy,
+            &output_path,
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<io::Error>().unwrap().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(fs::read(&output_path).unwrap(), original);
+        drop(input);
+    }
+
+    #[test]
+    fn export_shader_renders_dummy_for_compiled_scripts() {
+        use assetripper::export::settings::ShaderExportMode;
+
+        let script = "Shader \"Test/Prog\" {\n\tSubShader {\n\t\tProgram \"vp\" {\n\t\t}\n\t}\n}";
+        let directory = TestInputDirectory::new_root();
+        let serialized_path = directory.join("main.assets");
+        let output_path = directory.join("shader.shader");
+        fs::write(&serialized_path, make_shader_file(script)).unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![serialized_path.clone(), output_path.clone()],
+            subdirectories: Vec::new(),
+        };
+
+        super::export_shader_to(
+            std::slice::from_ref(&serialized_path),
+            0,
+            42,
+            ShaderExportMode::Decompile,
+            &output_path,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let text = fs::read_to_string(&output_path).unwrap();
+        // Header slice plus marker plus fallback body plus brace, like the probed rows.
+        assert!(text.starts_with("Shader \"Test/Prog\" {\n\t\t//DummyShaderTextExporter\n"));
+        assert!(text.contains("\n\tSubShader{\n"));
+        assert!(text.ends_with("\t}\n}"));
+        drop(input);
+    }
+
+    #[test]
+    fn export_shader_yaml_mode_reports_asset_not_text() {
+        use assetripper::export::settings::ShaderExportMode;
+
+        let script = "Shader \"Test/Prog\" {\n\tSubShader {\n\t\tProgram \"vp\" {\n\t\t}\n\t}\n}";
+        let directory = TestInputDirectory::new_root();
+        let serialized_path = directory.join("main.assets");
+        let output_path = directory.join("shader.shader");
+        fs::write(&serialized_path, make_shader_file(script)).unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![serialized_path.clone(), output_path.clone()],
+            subdirectories: Vec::new(),
+        };
+
+        let error = super::export_shader_to(
+            &[serialized_path],
+            0,
+            42,
+            ShaderExportMode::Yaml,
+            &output_path,
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("writes a YAML asset"), "{error}");
+        assert!(!output_path.exists());
+        drop(input);
+    }
+
+    #[test]
+    fn export_shader_reports_a_non_shader_object_without_creating_output() {
+        use assetripper::export::settings::ShaderExportMode;
+
+        let directory = TestInputDirectory::new_root();
+        let serialized_path = directory.join("main.assets");
+        let output_path = directory.join("shader.shader");
+        fs::write(
+            &serialized_path,
+            make_build_settings_file(&["Assets/A.unity"]),
+        )
+        .unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![serialized_path.clone(), output_path.clone()],
+            subdirectories: Vec::new(),
+        };
+
+        let error = super::export_shader_to(
+            &[serialized_path],
+            0,
+            42,
+            ShaderExportMode::Dummy,
+            &output_path,
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("not a class-48 Shader"),
+            "{error}"
+        );
+        assert!(!output_path.exists());
+        drop(input);
+    }
+
+    #[test]
+    fn export_object_yaml_emits_material_fields() {
+        let directory = TestInputDirectory::new_root();
+        let serialized_path = directory.join("main.assets");
+        let output_path = directory.join("material.mat");
+        fs::write(&serialized_path, make_material_file()).unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![serialized_path.clone(), output_path.clone()],
+            subdirectories: Vec::new(),
+        };
+
+        let mut status = Vec::new();
+        super::export_object_yaml_to(&[serialized_path], 0, 42, &output_path, &mut status).unwrap();
+        let yaml = fs::read_to_string(&output_path).unwrap();
+        assert!(yaml.contains("--- !u!21 &1"), "{yaml}");
+        assert!(yaml.contains("m_Name"), "{yaml}");
+        assert!(yaml.contains("TestMat"), "{yaml}");
+        assert!(yaml.contains("m_CustomRenderQueue"), "{yaml}");
+        assert!(String::from_utf8(status)
+            .unwrap()
+            .contains("Wrote one YAML object from SerializedFile 0 PathID 42"));
+        drop(input);
+    }
+
     /// A class-43 `Mesh` whose vertex data is a single Float32 position channel and whose index
     /// buffer holds one 16-bit triangle.
     fn make_mesh_file() -> Vec<u8> {
@@ -4584,6 +4904,152 @@ mod tests {
         bytes.extend_from_slice(&metadata);
         bytes.extend_from_slice(&payload);
         bytes
+    }
+
+    fn put_typetree_string_value(payload: &mut Vec<u8>, text: &str) {
+        put_i32_le(payload, i32::try_from(text.len()).unwrap());
+        payload.extend_from_slice(text.as_bytes());
+        let padding = (4 - payload.len() % 4) % 4;
+        payload.resize(payload.len() + padding, 0);
+    }
+
+    fn finish_single_object_file(
+        version: &[u8],
+        class_id: i32,
+        nodes: &[(u8, u32, u32, i32)],
+        strings: &[u8],
+        payload: &[u8],
+        path_id: i32,
+    ) -> Vec<u8> {
+        let mut metadata = Vec::new();
+        metadata.extend_from_slice(version);
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 1);
+        put_i32_le(&mut metadata, class_id);
+        put_i32_le(&mut metadata, i32::try_from(nodes.len()).unwrap());
+        put_i32_le(&mut metadata, i32::try_from(strings.len()).unwrap());
+        for (level, type_offset, name_offset, byte_size) in nodes {
+            put_node(
+                &mut metadata,
+                *level,
+                *type_offset,
+                *name_offset,
+                *byte_size,
+                0,
+            );
+        }
+        metadata.extend_from_slice(strings);
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 1);
+        put_i32_le(&mut metadata, path_id);
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, i32::try_from(payload.len()).unwrap());
+        put_i32_le(&mut metadata, class_id);
+        put_u16_le(&mut metadata, u16::try_from(class_id).unwrap());
+        put_u16_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 0);
+        metadata.push(0);
+
+        let data_offset = 20 + metadata.len();
+        let file_size = data_offset + payload.len();
+        let mut bytes = Vec::with_capacity(file_size);
+        put_i32_le_as_be(&mut bytes, i32::try_from(metadata.len()).unwrap());
+        put_u32_be(&mut bytes, u32::try_from(file_size).unwrap());
+        put_u32_be(&mut bytes, 10);
+        put_u32_be(&mut bytes, u32::try_from(data_offset).unwrap());
+        bytes.push(0);
+        bytes.extend_from_slice(&[0; 3]);
+        bytes.extend_from_slice(&metadata);
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+
+    /// Offsets into the synthetic TypeTree string buffer for `string` nodes.
+    struct StringTreeTable {
+        string_type: u32,
+        array_type: u32,
+        int_type: u32,
+        size_field: u32,
+        char_type: u32,
+        data_field: u32,
+    }
+
+    fn string_tree_nodes(
+        nodes: &mut Vec<(u8, u32, u32, i32)>,
+        level: u8,
+        table: &StringTreeTable,
+        name: u32,
+    ) {
+        nodes.push((level, table.string_type, name, -1));
+        nodes.push((level + 1, table.array_type, table.array_type, -1));
+        nodes.push((level + 2, table.int_type, table.size_field, 4));
+        nodes.push((level + 2, table.char_type, table.data_field, 1));
+    }
+
+    fn make_shader_file(script: &str) -> Vec<u8> {
+        let mut strings = Vec::new();
+        let shader_type = push_type_tree_string(&mut strings, "Shader");
+        let empty_name = push_type_tree_string(&mut strings, "");
+        let string_type = push_type_tree_string(&mut strings, "string");
+        let name_field = push_type_tree_string(&mut strings, "m_Name");
+        let script_field = push_type_tree_string(&mut strings, "m_Script");
+        let array_type = push_type_tree_string(&mut strings, "Array");
+        let int_type = push_type_tree_string(&mut strings, "int");
+        let size_field = push_type_tree_string(&mut strings, "size");
+        let data_field = push_type_tree_string(&mut strings, "data");
+        let char_type = push_type_tree_string(&mut strings, "char");
+
+        let mut nodes = Vec::new();
+        nodes.push((0, shader_type, empty_name, -1));
+        let table = StringTreeTable {
+            string_type,
+            array_type,
+            int_type,
+            size_field,
+            char_type,
+            data_field,
+        };
+        string_tree_nodes(&mut nodes, 1, &table, name_field);
+        string_tree_nodes(&mut nodes, 1, &table, script_field);
+
+        let mut payload = Vec::new();
+        put_typetree_string_value(&mut payload, "Test/Simple");
+        put_typetree_string_value(&mut payload, script);
+        assert!(payload.len().is_multiple_of(4), "payload is 4-byte aligned");
+        finish_single_object_file(b"5.0.0f1\0", 48, &nodes, &strings, &payload, 42)
+    }
+
+    fn make_material_file() -> Vec<u8> {
+        let mut strings = Vec::new();
+        let material_type = push_type_tree_string(&mut strings, "Material");
+        let empty_name = push_type_tree_string(&mut strings, "");
+        let string_type = push_type_tree_string(&mut strings, "string");
+        let name_field = push_type_tree_string(&mut strings, "m_Name");
+        let array_type = push_type_tree_string(&mut strings, "Array");
+        let int_type = push_type_tree_string(&mut strings, "int");
+        let size_field = push_type_tree_string(&mut strings, "size");
+        let data_field = push_type_tree_string(&mut strings, "data");
+        let char_type = push_type_tree_string(&mut strings, "char");
+        let queue_field = push_type_tree_string(&mut strings, "m_CustomRenderQueue");
+
+        let mut nodes = Vec::new();
+        nodes.push((0, material_type, empty_name, -1));
+        let table = StringTreeTable {
+            string_type,
+            array_type,
+            int_type,
+            size_field,
+            char_type,
+            data_field,
+        };
+        string_tree_nodes(&mut nodes, 1, &table, name_field);
+        nodes.push((1, int_type, queue_field, 4));
+
+        let mut payload = Vec::new();
+        put_typetree_string_value(&mut payload, "TestMat");
+        put_i32_le(&mut payload, -1);
+        assert!(payload.len().is_multiple_of(4), "payload is 4-byte aligned");
+        finish_single_object_file(b"2019.4.0f1\0", 21, &nodes, &strings, &payload, 42)
     }
 
     #[test]
