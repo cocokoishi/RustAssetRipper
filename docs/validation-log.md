@@ -2339,3 +2339,9 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Recorded with source evidence that `export-mesh` takes no settings (neither mesh exporter reads `ExportSettings`) and YAML exporter-selection settings apply only inside full project-export dispatch (no CLI surface).
 - Full bin suite 50/50 and lib 970/970 locally, workspace Clippy clean; CI run `37328509913` green (all five jobs) for remote `main` = `0b05263`; local matches.
 - No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+## Animation umbrella audit and PathChecksumCache port (2026-10-06)
+
+- Inventoried all 13 animation processing files plus the 2 animator-controller export files. `PROC-ANIM-001` and `RES-ANIM-001` were the last two `未调查` rows; both move to `已调查` with per-file mappings (ported vs open vs external-blocked). No stale module paths remain in the ledger (verified by search).
+- Ported the game-data-free `PathChecksumCache` kernels as `src/resources/path_checksum.rs` (seeded two-way cache, hash-and-store `Add`, reverse lookup, clearing `Reset`, depth-10 dotted field recursion, caller-side population documented, CRC via the pinned `crc32_ieee`). New row `PROC-ANIM-PATH-CHECKSUM-001`; six tests; lib suite 976/976 locally, workspace Clippy clean; full validation via Actions after push.
+- No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
