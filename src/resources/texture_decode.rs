@@ -34,6 +34,13 @@ pub enum TextureDecodeError {
         /// Provided output bytes.
         actual: usize,
     },
+    /// The ASTC block footprint is outside the supported `4..=12` range.
+    InvalidBlockDimension {
+        /// Requested block width.
+        block_width: usize,
+        /// Requested block height.
+        block_height: usize,
+    },
 }
 
 impl core::fmt::Display for TextureDecodeError {
@@ -49,6 +56,15 @@ impl core::fmt::Display for TextureDecodeError {
                 write!(
                     formatter,
                     "texture output has {actual} bytes; needs {required}"
+                )
+            }
+            Self::InvalidBlockDimension {
+                block_width,
+                block_height,
+            } => {
+                write!(
+                    formatter,
+                    "ASTC block dimensions {block_width}x{block_height} are outside the supported 4..=12 range"
                 )
             }
         }

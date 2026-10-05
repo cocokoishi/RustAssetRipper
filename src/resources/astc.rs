@@ -249,8 +249,10 @@ fn set_endpoint_blue_clamp(
 }
 
 fn select_color(v0: i32, v1: i32, weight: i32) -> u8 {
-    ((((((v0 << 8 | v0) * (64 - weight) + (v1 << 8 | v1) * weight + 32) >> 6) * 255 + 32768)
-        / 65536) as u8)
+    let value = ((((v0 << 8 | v0) * (64 - weight) + (v1 << 8 | v1) * weight + 32) >> 6) * 255
+        + 32768)
+        / 65536;
+    value as u8
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1011,9 +1013,11 @@ fn decode_block(
             *pixel = color;
         }
     } else {
-        let mut block = BlockData::default();
-        block.bw = block_width;
-        block.bh = block_height;
+        let mut block = BlockData {
+            bw: block_width,
+            bh: block_height,
+            ..BlockData::default()
+        };
         decode_block_parameters(input, &mut block);
         decode_endpoints(input, &mut block);
         decode_weights(input, &mut block);
@@ -1034,16 +1038,16 @@ pub fn decode_astc(
     output: &mut [u8],
 ) -> Result<usize, TextureDecodeError> {
     if !(4..=12).contains(&block_width) || !(4..=12).contains(&block_height) {
-        return Err(TextureDecodeError::InputTooShort {
-            required: block_width,
-            actual: block_height,
+        return Err(TextureDecodeError::InvalidBlockDimension {
+            block_width,
+            block_height,
         });
     }
     require_output(output, width, height)?;
     let bw = block_width as i32;
     let bh = block_height as i32;
-    let bcw = (width + block_width - 1) / block_width;
-    let bch = (height + block_height - 1) / block_height;
+    let bcw = width.div_ceil(block_width);
+    let bch = height.div_ceil(block_height);
     let clen_last = (width + block_width - 1) % block_width + 1;
     let required = bcw.saturating_mul(bch).saturating_mul(16);
     require_input(input, required)?;
