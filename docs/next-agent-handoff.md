@@ -355,3 +355,12 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Texture coverage now: DXT1/3/5, BC4/BC5, BC7, ETC1/ETC2/ETC2A1/ETC2A8, EAC R/RG (u/s), ATC RGB4/RGBA8, YUY2, and the packed/wide formats. Remaining decoders: BC6H, ASTC, PVRTC.
 - Still open beyond decoders: the `TextureConverter` mip/layer/`GraphicsFormat` dispatch, Crunch, and the image writers (PNG/EXR/BMP); the `.meta` FS sidecar integration and per-class `CreateImporter` tracing; the full exporter registration/resource matrix audit; and the object-model/product workflows.
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+
+## 41. Checkpoint: BC6H and PVRTC decoders (2026-10-04)
+
+- Added `src/resources/bc6h.rs`/`bc6h_tables.rs` (BC6H, 19-row differential, tables mechanically extracted) and `src/resources/pvrtc.rs` (PVRTC2/PVRTC4, 4-row differential).
+- Recorded `DIFF-BC6H-HALF-001` (the decoded 16-bit values are reinterpreted as IEEE-754 binary16 before output conversion) and `DIFF-PVRTC-BLUE-001` (the reference expands the second colour's blue into colour A's slot).
+- Texture decoder coverage is now complete except ASTC: DXT1/3/5, BC4/BC5, BC6H, BC7, ETC1/ETC2/ETC2A1/ETC2A8, EAC R/RG (u/s), ATC RGB4/RGBA8, PVRTC2/4, YUY2, and the packed/wide formats.
+- Still open beyond the decoders: ASTC, the `TextureConverter` mip/layer/`GraphicsFormat` dispatch, Crunch, and the image writers; the `.meta` FS sidecar integration and per-class `CreateImporter` tracing; the full exporter registration/resource matrix audit; and the object-model/product workflows.
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

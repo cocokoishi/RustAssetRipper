@@ -1990,3 +1990,12 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Recorded `DIFF-BC6H-HALF-001`: the decoded 16-bit values are reinterpreted as IEEE-754 binary16 before conversion to the output channel, which a first integer-conversion port got wrong.
 - Texture coverage now: DXT1/3/5, BC4/BC5, BC6H, BC7, ETC1/ETC2/ETC2A1/ETC2A8, EAC R/RG (u/s), ATC RGB4/RGBA8, YUY2, and the packed/wide formats. Remaining decoders: ASTC and PVRTC.
 - GitHub Actions run `37252617246` is green across all five jobs. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+
+## PVRTC texture decoder (2026-10-04)
+
+- Added `src/resources/pvrtc.rs`, ported from `AssetRipper.TextureDecoder`'s `PvrtcDecoder` (PVRTC2/PVRTC4).
+- Genuine original-runtime differential: probe `Temp/opencode/pvrtcprobe` decoded 8×8 images with two payload patterns; four rows are committed as `src/resources/pvrtc_fixture.txt` and matched byte-for-byte.
+- Recorded `DIFF-PVRTC-BLUE-001`: the reference expands the second colour's blue into colour A's slot, which the port reproduces exactly.
+- Texture coverage now: DXT1/3/5, BC4/BC5, BC6H, BC7, ETC1/ETC2/ETC2A1/ETC2A8, EAC R/RG (u/s), ATC RGB4/RGBA8, PVRTC2/4, YUY2, and the packed/wide formats. Only ASTC remains among the block decoders.
+- GitHub Actions run `37252919176` is green across all five jobs. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
