@@ -1,0 +1,28 @@
+# Script and assembly GUID reference values.
+# Probe Temp/opencode/guidprobe: shipped AssetRipper.Export.UnityProjects.dll
+# (ScriptHashing.CalculateScriptGuid/CalculateAssemblyGuid) and
+# AssetRipper.Primitives.dll (UnityGuid.Md5Hash), SDK 10.0.401. Pure ASCII.
+# Md5Hash MD5s the input bytes (the 3-span overload concatenates assembly,
+# namespace, and class bytes), then ConvertSystemOrUnityBytes flips the first
+# 4 bytes, swaps each of the next two byte pairs, and swaps nibbles per byte;
+# UnityGuid words are the little-endian words of the converted buffer and
+# ToString renders each word least-significant nibble first.
+# Formats: GUID3|<assembly>|<namespace>|<class>|<guid string>;
+# GUID1|<assembly>|<guid string> (the string overload strips one .dll suffix);
+# WORDS|<tag>|<Data0:X8>|<Data1:X8>|<Data2:X8>|<Data3:X8>.
+GUID3|Assembly-CSharp||Player|35f8c4d42304d9a7cd31d22caa78f503
+GUID3|Assembly-CSharp|Game|Player|032ec17f52c608efecf3117b3fcc7668
+GUID3|MyLib|A|B|3b6e31a249ce2f18212bfdc6a4baa392
+GUID3||||d98c1dd4008f04b2e9800998ecf8427e
+GUID1|MyLib|3bab432f963500feac2f7d04dc48bb18
+GUID1|Assembly-CSharp|06dd3d5416bf43ea368cc39ff96e6d5a
+GUID1|MyLib.dll|3bab432f963500feac2f7d04dc48bb18
+GUID1||d98c1dd4008f04b2e9800998ecf8427e
+WORDS|script-lit|4D4C8F53|7A9D4032|C22D13DC|305F87AA
+WORDS|script-flags|F71CE230|FE806C25|B7113FCE|8667CCF3
+WORDS|script-mylib|2A13E6B3|81F2EC94|6CDFB212|293AAB4A
+WORDS|script-empty|4DD1C89D|2B40F800|8990089E|E7248FCE
+WORDS|asm-mylib|F234BAB3|EF005369|40D7F2CA|81BB84CD
+WORDS|asm-csharp|45D3DD60|AE34FB61|F93CC863|A5D6E69F
+WORDS|asm-empty|4DD1C89D|2B40F800|8990089E|E7248FCE
+WORDS|asm-dll-suffix|F234BAB3|EF005369|40D7F2CA|81BB84CD

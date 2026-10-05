@@ -2225,3 +2225,10 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Extended `src/export/project_output.rs` (first pipeline slice of the `.meta` recovery item): `export_asset_with_meta` mirrors `AssetExportCollection.Export` over caller facts — failed exports write nothing, asset bytes land before the `Meta(GUID, importer)` record as `{file}.meta`, both files add-only (the source overwrites; refused by design). The confined directory walk is now shared between asset and sidecar writes with no behavior change (existing sidecar tests still pass). GUIDs stay caller-supplied nonzero (source mints per-collection random GUIDs; determinism requirement wins, documented).
 - New ledger row `EXP-META-PIPELINE-001` at `已实现但未验证`; targeted module tests pass (8/8), full validation via Actions after push.
 - No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+## Script and assembly GUIDs with a runtime differential (2026-10-06)
+
+- Extended `src/export/script_hashing.rs`: from-scratch RFC 1321 MD5 (section A.5 suite), `UnityGuid` words/string/`MissingReference`, `ConvertSystemOrUnityBytes`, `Md5Hash` one- and three-part overloads, `CalculateScriptGuid` bytes/`str`, `CalculateAssemblyGuid` with the ordinal `.dll` strip, and `RemoveAssemblyFileExtension`/`FixAssemblyName` (case-sensitive suffix, legacy-identifier prefix). The byte layout follows the external `AssetRipper.Primitives` `UnityGuid.cs` and is pinned by 16 committed probe rows in `src/export/script_guid_fixture.txt` (shipped DLLs, SDK 10.0.401; the probe writes the file itself in UTF-8 so no console roundtrip corrupts it). The probe also proved the `.dll`-strip rule (`MyLib.dll` equals `MyLib`) and killed a hand-derived nibble-only description of the conversion.
+- `src/export/guid_policy.rs` now reports the deterministic sources closed: only `RandomPerCollection` stays open.
+- `DIFF-SCRIPT-GUID-001` recorded. New ledger row `EXP-SCRIPT-GUID-001` at `已实现但未验证`; targeted export tests pass (303/303), full validation via Actions after push.
+- No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.

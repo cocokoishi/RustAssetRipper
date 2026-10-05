@@ -9,12 +9,14 @@
 //!   preserve a supplied nonzero GUID and substitute `UnityGuid.NewGuid()` for a zero GUID, and
 //!   document that the result is never zero.
 //! - Script and assembly GUIDs are deterministic per identity (`ScriptHashing` documents them as
-//!   stable "for consistency"), and engine assets use predefined constants. The MD5-based byte
-//!   layout behind them lives in the external `AssetRipper.Primitives` package rather than the
-//!   frozen snapshot, so only the ownership rule and the word tuples written in the snapshot
-//!   are recorded here, not the byte hashes.
-//! - `UnityGuid.MissingReference` marks fail, skip, and missing-reference pointers. Its value
-//!   also lives in the external package, so it is referenced by role only.
+//!   stable "for consistency"). Their MD5-based byte layout lives in the external
+//!   `AssetRipper.Primitives` package rather than the frozen snapshot, but it is now ported
+//!   and runtime-pinned in `script_hashing` (`UnityGuid.Md5Hash` plus `ConvertSystemOrUnityBytes`
+//!   over `script_guid_fixture.txt`), so the word values are known.
+//! - `UnityGuid.MissingReference` marks fail, skip, and missing-reference pointers. Its words
+//!   (`0xD0000000, 0x1FEEBDAE, 0x00FDAED5, 0x0000000D`, rendering
+//!   `0000000deadbeef15deadf00d0000000`) are captured by the same probe and re-asserted in
+//!   `script_hashing`.
 //! - `Meta` itself rejects a zero GUID, which the Rust envelope serializer already enforces.
 //!
 //! Random GUID generation needs an entropy source the snapshot does not pin down, so this
@@ -85,14 +87,19 @@ impl ExportGuidSource {
         }
     }
 
-    /// Whether the GUID bytes are fully determined by the frozen snapshot.
+    /// Whether the exporter can produce the exact GUID bytes from snapshot-pinned rules plus
+    /// stored or caller-supplied facts (no entropy source needed).
     ///
     /// Script hashes and the missing-reference sentinel depend on the external primitives
-    /// package, so their byte values stay open even though their stability is known.
+    /// package, whose `UnityGuid` layout is now ported and runtime-pinned in
+    /// `script_hashing`. Only the per-collection random source stays open.
     pub fn byte_layout_in_snapshot(self) -> bool {
         match self {
-            Self::RandomPerCollection | Self::PreservedScene | Self::PredefinedEngine => true,
-            Self::DeterministicScript | Self::MissingReference => false,
+            Self::RandomPerCollection => false,
+            Self::DeterministicScript
+            | Self::PreservedScene
+            | Self::PredefinedEngine
+            | Self::MissingReference => true,
         }
     }
 }
@@ -164,19 +171,15 @@ mod tests {
     }
 
     #[test]
-    fn only_package_backed_sources_stay_open() {
+    fn only_the_random_source_stays_open() {
         for source in [
-            ExportGuidSource::RandomPerCollection,
+            ExportGuidSource::DeterministicScript,
             ExportGuidSource::PreservedScene,
             ExportGuidSource::PredefinedEngine,
+            ExportGuidSource::MissingReference,
         ] {
             assert!(source.byte_layout_in_snapshot(), "{source:?}");
         }
-        for source in [
-            ExportGuidSource::DeterministicScript,
-            ExportGuidSource::MissingReference,
-        ] {
-            assert!(!source.byte_layout_in_snapshot(), "{source:?}");
-        }
+        assert!(!ExportGuidSource::RandomPerCollection.byte_layout_in_snapshot());
     }
 }
