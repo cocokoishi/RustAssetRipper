@@ -2292,5 +2292,5 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 
 - `export-texture` and `export-shader` accept a leading `--settings <path>` flag (`load_cli_export_settings`: bounded read, UTF-8 check, schema parse, path-carrying errors). The configured image format backs the texture fallback and the configured shader mode backs the mode flag, with explicit flags beating the file on any order. Usage lines updated.
 - Three test failures fixed during development (binary-crate paths, a `?`-type mismatch, an `ExportDefaults`-vs-file type confusion) plus one Clippy denial (while-let loop) and one wrong test expectation (the `Simple` exporter admits the test script under every mode, so the shader test now uses compiled text where mode discriminates).
-- `EXP-SETTINGS-APPLY-001` broadened to cover CLI loading; targeted lib (7/7 image-export), bin (43/43), and workspace Clippy checks pass locally; full validation via Actions after push.
+- `EXP-SETTINGS-APPLY-001` broadened to cover CLI loading; targeted lib (7/7 image-export), bin (43/43), and workspace Clippy checks pass locally; CI run `37314261710` green (all five jobs) for remote `main` = `e462613`; local matches.
 - No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.

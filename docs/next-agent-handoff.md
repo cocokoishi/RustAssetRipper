@@ -657,7 +657,7 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 
 ## 82. Checkpoint: CLI settings-file loading (2026-10-06)
 
-- `export-texture`/`export-shader` accept `--settings <path>` with explicit-beats-file precedence and path-carrying errors; usage updated. `EXP-SETTINGS-APPLY-001` broadened. Targeted lib, bin (43/43), and workspace Clippy pass locally; full validation via Actions after push.
+- `export-texture`/`export-shader` accept `--settings <path>` with explicit-beats-file precedence and path-carrying errors; usage updated. `EXP-SETTINGS-APPLY-001` broadened. Targeted lib, bin (43/43), and workspace Clippy pass locally; CI run `37314261710` green (all five jobs) for remote `main` = `e462613`; local matches.
 - Next: `TYPE-SCRIPT-001` remainder (manager resolutions), CLI exposure + GUID freshness + folder sidecars, and remaining per-command settings plus default-path startup load.
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
 - Next: `TYPE-SCRIPT-001` remainder (manager resolutions), CLI exposure + GUID freshness + folder sidecars, and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
