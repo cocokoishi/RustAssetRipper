@@ -1981,3 +1981,12 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Genuine original-runtime differential: probe `Temp/opencode/bc7probe` decoded one block per mode plus invalid and payload variants; 16 rows are committed as `src/resources/bc7_fixture.txt` and matched byte-for-byte.
 - Texture format coverage now additionally includes BC7. Still unported: BC6H, ASTC, PVRTC, the `TextureConverter` mip/layer/`GraphicsFormat` dispatch, Crunch, and the image writers.
 - GitHub Actions run `37251920277` is green across all five jobs. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+
+## BC6H texture decoder (2026-10-04)
+
+- Added `src/resources/bc6h.rs` and `src/resources/bc6h_tables.rs`, ported from `AssetRipper.TextureDecoder`'s `BcHelpers.DecompressBc6h`/`Bc6hTables`/`Bc6h`. The tables were mechanically extracted from the package source.
+- Genuine original-runtime differential: probe `Temp/opencode/bc6hprobe` decoded one block per mode plus a reserved mode and payload variants; 19 rows are committed as `src/resources/bc6h_fixture.txt` and matched byte-for-byte.
+- Recorded `DIFF-BC6H-HALF-001`: the decoded 16-bit values are reinterpreted as IEEE-754 binary16 before conversion to the output channel, which a first integer-conversion port got wrong.
+- Texture coverage now: DXT1/3/5, BC4/BC5, BC6H, BC7, ETC1/ETC2/ETC2A1/ETC2A8, EAC R/RG (u/s), ATC RGB4/RGBA8, YUY2, and the packed/wide formats. Remaining decoders: ASTC and PVRTC.
+- GitHub Actions run `37252617246` is green across all five jobs. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
