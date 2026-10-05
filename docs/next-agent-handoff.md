@@ -689,6 +689,6 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 
 ## 87. Checkpoint: EXPORT-UNITY-001 orchestration audit (2026-10-06)
 
-- Audited all 124 UnityProjects files family-by-family, corrected the stale row (wrong module path, `???` status), recorded two dead-code N/A findings, and ported `GetListOfVersions` + `ThrowIfSettingsDontMatch`. Lib suite 968/968 locally, workspace Clippy clean; full validation via Actions after push.
+- Audited all 124 UnityProjects files family-by-family, corrected the stale row (wrong module path, `???` status), recorded two dead-code N/A findings, and ported `GetListOfVersions` + `ThrowIfSettingsDontMatch`. Lib suite 968/968 locally, workspace Clippy clean; CI run `37325748243` green (all five jobs) for remote `main` = `e28249b`; local matches.
 - Next: `TYPE-SCRIPT-001` remainder (manager resolutions), CLI exposure + GUID freshness + folder sidecars, `export-mesh`/YAML per-command settings, and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
