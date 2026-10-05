@@ -10,7 +10,9 @@
 //! `"<>| : *?\` and `/` (plus `,[]` and C0 controls on every host); elsewhere only `/`
 //! and NUL join the portable additions. `IsReservedName` is Windows-only in the source
 //! and reads false everywhere else. The probe ran on Windows, so the `FIXFN`/`FIXPATH`
-//! rows pin Windows behavior; OS-independent rows are asserted on every host.
+//! rows pin Windows behavior; OS-independent rows are asserted on every host. Separator
+//! handling mirrors Windows (both slashes split); a backslash inside a Unix file name
+//! stays open and unprobed.
 //!
 //! `GetUniqueName` reads the real filesystem in the source; the Rust planner takes
 //! caller-supplied existence facts and keeps the per-directory counter map, with the
@@ -559,12 +561,17 @@ mod tests {
                 .unwrap(),
             "name_0.ext"
         );
-        // Reserved stems are suffixed even without a collision.
+        // Reserved stems are suffixed even without a collision. The reserved gate
+        // is Windows-only in the source, so other hosts take the free name.
         assert_eq!(
             planner
                 .unique_name("collision", "con.txt", 245, true, join, exists)
                 .unwrap(),
-            "con_0.txt"
+            if cfg!(windows) {
+                "con_0.txt"
+            } else {
+                "con.txt"
+            }
         );
         // Overlong names truncate to the byte budget with the extension kept.
         let long_unicode = "a".repeat(240) + "\u{e9}.txt";

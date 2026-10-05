@@ -2201,3 +2201,7 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Also fixed a probe/output hygiene issue found mid-increment: PowerShell `>` redirection had decoded dotnet UTF-8 output as OEM cp437; the probe now emits pure ASCII and the fixture carries `\u` escapes.
 - `DIFF-FILE-NAME-001` recorded. New ledger row `EXP-FILE-NAME-001` at `已实现但未验证`.
 - `cargo test --workspace --locked`: 935 library and 40 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+### Ubuntu follow-up: reserved-gate test miss (2026-10-05)
+
+- CI run `37294766135` failed only `test (ubuntu-latest)`: `unique_name_planning_matches_the_reference_runtime` asserted the probed `con_0.txt` unconditionally, but `IsReservedName` is Windows-only in the source, so the correct Linux answer is the free `con.txt`. Fixed the test to degrade exactly like the source off Windows (same pattern as the `RESERVED` rows); no production code changed. The downloaded job log confirmed 934 passed with this single failure.
