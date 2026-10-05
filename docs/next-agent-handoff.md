@@ -440,3 +440,12 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - `cargo test --workspace --locked`: 816 library and 25 CLI tests; warnings-denied Clippy passes. Recorded as `DIFF-MESH-GENERATED-API-001` (source-derived, not a serialization differential).
 - Next: the GLB/OBJ mesh exporters; the class-189/3D/array texture routes, platform transforms, Crunch, EXR/HDR/JPEG writers, sprite/atlas export, and `.meta` sidecars; then the exporter registration/resource matrix audit and the object-model/product workflows.
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+
+## 51. Checkpoint: GLB mesh export and `export-mesh` CLI (2026-10-05)
+
+- Added `src/resources/glb.rs` with the `GlbMeshType` selection, the coordinate-space and tangent conversions, the sub-mesh topology rewrite, and a self-contained glTF 2.0 GLB writer (JSON plus binary chunk, no external glTF library at runtime).
+- Added the `export-mesh` CLI command with three tests, including a synthetic class-43 `Mesh` SerializedFile that produces a verified GLB; 19 module tests cover every topology rewrite, the container layout, and the error paths.
+- `cargo test --workspace --locked`: 836 library and 28 CLI tests; warnings-denied Clippy passes. The ledger row is `EXP-GLB-001` at `已实现但未验证`: no Unity-produced input and no SharpGLTF output comparison has run.
+- Next: blend shapes (`IBlendShapeData`), `CalculateMeshMetric`, the scene-level `GlbLevelBuilder`/`GlbTerrainBuilder`, streamed mesh bytes; the class-189/3D/array texture routes, platform transforms, Crunch, EXR/HDR/JPEG writers, sprite/atlas export, and `.meta` sidecars; then the exporter registration/resource matrix audit and the object-model/product workflows.
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

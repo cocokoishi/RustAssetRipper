@@ -2070,3 +2070,11 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Combined with the `Pass002_RenameSubnodes` naming rule, the property names imply the `boneIndex[0]`/`weight[0]` lane names and the `channelMask`/`stride`/`dividerOp`/`frequency` stream names used by `src/resources/mesh.rs`. A regression test pins every relied-upon property.
 - Fixed the stream stride to read the `stride` field (the `m_Stride` alias was wrong) with the storage width selected by the decoded value kind, and corrected the bind-pose fields to the `E00..E33` spelling used by `matrix4x4.rs`.
 - `cargo test --workspace --locked`: 816 library and 25 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used. Recorded as `DIFF-MESH-GENERATED-API-001` (source-derived, not a serialization differential). Phase 1 remains open.
+
+
+## GLB mesh export (2026-10-05)
+
+- Added `src/resources/glb.rs`: `get_mesh_type`, the `GlbCoordinateConversion` scales, `build_primitive` (topology rewrite), and `build_glb` (glTF 2.0 JSON plus binary container). `GlbMeshExport` returns the file bytes, the per-sub-mesh emitted source-index sequence for auditing, and any warnings.
+- Added the `export-mesh` CLI command in `src/main.rs`, guarded to class 43, refusing to overwrite, and reporting vertex/sub-mesh/emitted-index counts. It uses `select_unique_object`, `file_unity_version`, and `file_endian_type`; an absent or unparseable Unity version string is an explicit error rather than a default.
+- 19 module tests and 3 CLI tests. The CLI test builds a synthetic class-43 `Mesh` SerializedFile with a Float32 position channel, a 16-bit index buffer, and one triangle sub-mesh, then asserts the GLB magic, total length, mesh name, and `SubMesh_0` node.
+- `cargo test --workspace --locked`: 836 library and 28 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used. SharpGLTF is an external package outside the frozen snapshot, so byte-level output equality is not claimed. Phase 1 remains open.

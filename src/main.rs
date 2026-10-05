@@ -20,6 +20,7 @@ use assetripper::export::workspace_yaml::{
     workspace_object_to_unity_yaml_document_with_streamed_resources,
     UnityYamlWorkspaceCollectionLimits, WorkspaceStreamedYamlResourceContext,
 };
+use assetripper::io::binary::Endian;
 use assetripper::io::dependency::DependencyIndexLimits;
 use assetripper::io::filesystem::VirtualFileSystem;
 use assetripper::io::game_structure::{MixedGameStructure, MixedGameStructureLimits};
@@ -61,8 +62,12 @@ use assetripper::resource::{
     RootResourceFileCatalog, StreamedResourceContentLimits, StreamedResourceContentResolution,
     StreamedResourceInfo, StreamedResourceResolution, StreamedResourceScanLimits,
 };
+use assetripper::resources::glb::build_glb;
 use assetripper::resources::image_export::ImageExportFormat;
+use assetripper::resources::mesh::MeshView;
+use assetripper::resources::packed_bit_vector::PackedBitVectorLimits;
 use assetripper::resources::texture::{export_texture2d_image, Texture2DView};
+use assetripper::resources::vertex_data_blob::{EndianType, UnityVersion};
 use assetripper::scheme::{
     BatchMountLimits, BatchMountReport, ContainerMountLimits, PathMountInput, SchemeReader,
     SchemeReaderLimits,
@@ -73,6 +78,7 @@ use assetripper::serialized_file::collection_workspace::{
 use assetripper::serialized_file::file::SerializedFile;
 use assetripper::serialized_file::metadata::ObjectInfo;
 use assetripper::serialized_file::object::ObjectDecodeLimits;
+use assetripper::serialized_file::object::SerializedValue;
 use assetripper::serialized_file::object_workspace::{
     ObjectWorkspace, ObjectWorkspaceLimits, WorkspaceObject,
 };
@@ -150,6 +156,9 @@ fn run(arguments: impl Iterator<Item = OsString>) -> Result<(), Box<dyn Error>> 
     }
     if command == "export-texture" {
         return export_texture_from_arguments(arguments);
+    }
+    if command == "export-mesh" {
+        return export_mesh_from_arguments(arguments);
     }
     if command != "inspect" && command != "inspect-files" {
         print_usage();
@@ -427,6 +436,233 @@ fn export_texture_to<W: io::Write>(
         output_path
     )?;
     Ok(())
+}
+
+fn export_mesh_from_arguments<I>(arguments: I) -> Result<(), Box<dyn Error>>
+where
+    I: Iterator<Item = OsString>,
+{
+    let mut arguments = arguments;
+    let serialized_file_index =
+        parse_required_argument::<usize>(arguments.next(), "SerializedFile index")?;
+    let path_id = parse_required_argument::<i64>(arguments.next(), "object PathID")?;
+    let output_path = arguments
+        .next()
+        .map(PathBuf::from)
+        .ok_or_else(|| invalid_input("export-mesh requires an output .glb path"))?;
+    let mut input_files = Vec::new();
+    for argument in arguments {
+        if input_files.len() >= MAX_INPUT_PATHS {
+            return Err(invalid_input(format!(
+                "input path count exceeds {MAX_INPUT_PATHS}"
+            )));
+        }
+        input_files.push(PathBuf::from(argument));
+    }
+    if input_files.is_empty() {
+        return Err(invalid_input(
+            "export-mesh requires at least one explicitly selected input file",
+        ));
+    }
+    let stdout = io::stdout();
+    let mut output = stdout.lock();
+    export_mesh_to(
+        &input_files,
+        serialized_file_index,
+        path_id,
+        &output_path,
+        &mut output,
+    )
+}
+
+fn export_mesh_to<W: io::Write>(
+    input_files: &[PathBuf],
+    serialized_file_index: usize,
+    path_id: i64,
+    output_path: &Path,
+    status_output: &mut W,
+) -> Result<(), Box<dyn Error>> {
+    let (mut filesystem, selected_paths, _mount_report) = mount_input_files(input_files)?;
+    let mixed = MixedGameStructure::from_vfs_paths(
+        &filesystem,
+        &selected_paths,
+        MixedGameStructureLimits::default(),
+    )?;
+    if mixed.serialized_file_inputs.is_empty() {
+        return Err(invalid_input(
+            "the selected files contain no recognized SerializedFile input",
+        ));
+    }
+    let (workspace, _) = SerializedFileWorkspace::load_from_vfs_with_dependencies(
+        &mut filesystem,
+        &mixed.serialized_file_inputs,
+        &mixed.registered_files,
+        &mixed.data_paths,
+        SerializedFileWorkspaceLimits::default(),
+        DependencyIndexLimits::default(),
+        ContainerMountLimits::default(),
+    )?;
+    let (object_index, _) = select_unique_object(&workspace, serialized_file_index, path_id)?;
+
+    let objects =
+        ObjectWorkspace::load_from_vfs(&filesystem, &workspace, ObjectWorkspaceLimits::default())?;
+    let object = objects
+        .get(serialized_file_index, object_index)
+        .ok_or_else(|| invalid_data("selected workspace object is missing"))?;
+    if object.class_id != Some(43) {
+        return Err(invalid_data_owned(format!(
+            "SerializedFile {serialized_file_index} PathID {path_id} has class {:?}, not a class-43 Mesh",
+            object.class_id
+        ))
+        .into());
+    }
+    let payload = object.payload.as_ref().map_err(|error| {
+        invalid_data_owned(format!(
+            "SerializedFile {serialized_file_index} PathID {path_id} could not be decoded: {error}"
+        ))
+    })?;
+    let view = MeshView::from_value(
+        &payload.root,
+        file_unity_version(&workspace, serialized_file_index)?,
+        file_endian_type(&workspace, serialized_file_index),
+    )
+    .map_err(|error| {
+        invalid_data_owned(format!(
+            "SerializedFile {serialized_file_index} PathID {path_id} is not an exportable Mesh: {error}"
+        ))
+    })?;
+    let mesh_data = view
+        .read_mesh_data(PackedBitVectorLimits::default())
+        .map_err(|error| {
+            invalid_data_owned(format!(
+                "SerializedFile {serialized_file_index} PathID {path_id} mesh data could not be read: {error}"
+            ))
+        })?
+        .ok_or_else(|| {
+            invalid_data_owned(format!(
+                "SerializedFile {serialized_file_index} PathID {path_id} has no mesh data to export"
+            ))
+        })?;
+    let name = mesh_export_name(&payload.root)
+        .unwrap_or_else(|| format!("Mesh_{serialized_file_index}_{path_id}"));
+    let exported = build_glb(&name, &mesh_data).map_err(|error| {
+        invalid_data_owned(format!(
+            "SerializedFile {serialized_file_index} PathID {path_id} GLB export failed: {error}"
+        ))
+    })?;
+    let mut destination = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output_path)?;
+    destination.write_all(&exported.bytes)?;
+    for warning in &exported.warnings {
+        writeln!(status_output, "warning: {warning}")?;
+    }
+    let vertex_count = mesh_data.vertices.len();
+    let sub_mesh_count = exported.emitted_source_indices.len();
+    let emitted_indices: usize = exported.emitted_source_indices.iter().map(Vec::len).sum();
+    writeln!(
+        status_output,
+        "Wrote a GLB with {vertex_count} vertices, {sub_mesh_count} sub-meshes, and \
+         {emitted_indices} emitted indices from SerializedFile {serialized_file_index} \
+         PathID {path_id} to {output_path:?}."
+    )?;
+    Ok(())
+}
+
+/// `Mesh.Name`, when the payload carries a readable UTF-8 name.
+fn mesh_export_name(root: &SerializedValue) -> Option<String> {
+    root.unique_field_in_base_chain("m_Name")
+        .ok()
+        .flatten()
+        .and_then(|value| match value {
+            SerializedValue::StringBytes(bytes) => {
+                std::str::from_utf8(bytes).ok().map(str::to_owned)
+            }
+            SerializedValue::Bytes(bytes) => std::str::from_utf8(bytes).ok().map(str::to_owned),
+            _ => None,
+        })
+        .filter(|name| !name.is_empty())
+}
+
+/// Finds the single object with `path_id`, rejecting a missing or duplicated PathID.
+fn select_unique_object(
+    workspace: &SerializedFileWorkspace,
+    serialized_file_index: usize,
+    path_id: i64,
+) -> Result<(usize, &ObjectInfo), Box<dyn Error>> {
+    let file = workspace
+        .files()
+        .get(serialized_file_index)
+        .ok_or_else(|| {
+            invalid_input(format!(
+                "SerializedFile index {serialized_file_index} is out of range for {} loaded files",
+                workspace.files().len()
+            ))
+        })?;
+    let mut matching = file
+        .metadata
+        .objects
+        .iter()
+        .enumerate()
+        .filter(|(_, object)| object.path_id == path_id);
+    let found = matching.next().ok_or_else(|| {
+        invalid_input(format!(
+            "SerializedFile {serialized_file_index} has no object with PathID {path_id}"
+        ))
+    })?;
+    if matching.next().is_some() {
+        return Err(invalid_data_owned(format!(
+            "SerializedFile {serialized_file_index} has multiple objects with PathID {path_id}"
+        ))
+        .into());
+    }
+    Ok(found)
+}
+
+/// The numeric Unity version used by the vertex-data branches.
+///
+/// An absent or unparseable version string is reported rather than silently defaulted, because the
+/// channel and stream layouts differ across versions.
+fn file_unity_version(
+    workspace: &SerializedFileWorkspace,
+    serialized_file_index: usize,
+) -> Result<UnityVersion, Box<dyn Error>> {
+    let text = workspace
+        .files()
+        .get(serialized_file_index)
+        .and_then(|file| file.metadata.prefix.unity_version_text.as_deref())
+        .ok_or_else(|| {
+            invalid_data_owned(format!(
+                "SerializedFile {serialized_file_index} has no Unity version string, so its mesh \
+                 channel layout cannot be resolved"
+            ))
+        })?;
+    UnityVersion::parse(text).ok_or_else(|| {
+        invalid_data_owned(format!(
+            "SerializedFile {serialized_file_index} Unity version '{text}' is unparseable, so its \
+             mesh channel layout cannot be resolved"
+        ))
+        .into()
+    })
+}
+
+/// The file's body byte order.
+///
+/// Pre-generation-9 files keep the flag in the metadata; a file whose header does not declare one
+/// is little endian, matching `EndianBinaryReader`'s default.
+fn file_endian_type(
+    workspace: &SerializedFileWorkspace,
+    serialized_file_index: usize,
+) -> EndianType {
+    match workspace
+        .files()
+        .get(serialized_file_index)
+        .and_then(|file| file.header.data_endian)
+    {
+        Some(Endian::Big) => EndianType::Big,
+        Some(Endian::Little) | None => EndianType::Little,
+    }
 }
 
 fn parse_required_argument<T>(
@@ -2728,7 +2964,7 @@ fn invalid_data_owned(message: String) -> io::Error {
 
 fn print_usage() {
     println!(
-        "Usage:\n  assetripper-rs inspect <input-directory> [input-directory ...]\n  assetripper-rs inspect-files <input-file> [input-file ...]\n  assetripper-rs export-object-yaml <serialized-file-index> <path-id> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-file-yaml <serialized-file-index> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-texture <serialized-file-index> <path-id> <new-output-image> <input-file> [input-file ...]\n  assetripper-rs --help\n  assetripper-rs --version\n\n`inspect` mounts directories into isolated VFS roots. `inspect-files` dispatches explicitly selected file paths, registers top-level ResourceFiles as GameBundle root inputs, and reports the parsed SerializedFiles. `export-object-yaml` writes one decoded object as YAML. `export-file-yaml` writes YAML-exportable objects from one SerializedFile in object-table order, resolves streamed Mesh and image-texture bytes, preserves intra-file references through source PathIDs, and refuses unresolved or cross-file references. It reports ImageTexture objects omitted by the baseline when they have no usable image data. `export-texture` decodes one class-28 Texture2D, resolves its inline or streamed image data, and writes a PNG/BMP/TGA image; the output extension selects the format (default PNG). None of these commands replaces an existing output file. These are YAML and texture paths, not a complete Unity project export."
+        "Usage:\n  assetripper-rs inspect <input-directory> [input-directory ...]\n  assetripper-rs inspect-files <input-file> [input-file ...]\n  assetripper-rs export-object-yaml <serialized-file-index> <path-id> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-file-yaml <serialized-file-index> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-texture <serialized-file-index> <path-id> <new-output-image> <input-file> [input-file ...]\n  assetripper-rs export-mesh <serialized-file-index> <path-id> <new-output-glb> <input-file> [input-file ...]\n  assetripper-rs --help\n  assetripper-rs --version\n\n`inspect` mounts directories into isolated VFS roots. `inspect-files` dispatches explicitly selected file paths, registers top-level ResourceFiles as GameBundle root inputs, and reports the parsed SerializedFiles. `export-object-yaml` writes one decoded object as YAML. `export-file-yaml` writes YAML-exportable objects from one SerializedFile in object-table order, resolves streamed Mesh and image-texture bytes, preserves intra-file references through source PathIDs, and refuses unresolved or cross-file references. It reports ImageTexture objects omitted by the baseline when they have no usable image data. `export-texture` decodes one class-28 Texture2D, resolves its inline or streamed image data, and writes a PNG/BMP/TGA image; the output extension selects the format (default PNG). `export-mesh` decodes one class-43 Mesh, resolves its vertex data and compressed mesh, and writes a glTF 2.0 binary file with one node per sub-mesh, converting Unity's left-handed coordinates to glTF's right-handed space and rewriting the sub-mesh topology. None of these commands replaces an existing output file. These are YAML, texture, and single-mesh paths, not a complete Unity project export."
     );
 }
 
@@ -2859,6 +3095,18 @@ mod tests {
     }
 
     fn put_u32_le(output: &mut Vec<u8>, value: u32) {
+        output.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn put_u32_be(output: &mut Vec<u8>, value: u32) {
+        output.extend_from_slice(&value.to_be_bytes());
+    }
+
+    fn put_i32_le_as_be(output: &mut Vec<u8>, value: i32) {
+        output.extend_from_slice(&value.to_be_bytes());
+    }
+
+    fn put_f32_le(output: &mut Vec<u8>, value: f32) {
         output.extend_from_slice(&value.to_le_bytes());
     }
 
@@ -4039,6 +4287,303 @@ mod tests {
         assert!(result.is_err());
         assert!(!output_path.exists());
         drop(input);
+    }
+
+    #[test]
+    fn export_mesh_writes_a_glb_and_refuses_overwrite() {
+        let directory = TestInputDirectory::new_root();
+        let serialized_path = directory.join("main.assets");
+        let output_path = directory.join("mesh.glb");
+        fs::write(&serialized_path, make_mesh_file()).unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![serialized_path.clone(), output_path.clone()],
+            subdirectories: Vec::new(),
+        };
+
+        let mut status = Vec::new();
+        super::export_mesh_to(
+            std::slice::from_ref(&serialized_path),
+            0,
+            42,
+            &output_path,
+            &mut status,
+        )
+        .unwrap();
+        let glb = fs::read(&output_path).unwrap();
+        assert_eq!(&glb[..4], b"glTF");
+        assert_eq!(
+            u32::from_le_bytes(glb[8..12].try_into().unwrap()) as usize,
+            glb.len(),
+            "the declared total length matches the file"
+        );
+        let status = String::from_utf8(status).unwrap();
+        assert!(status.contains("Wrote a GLB with 3 vertices"), "{status}");
+        assert!(status.contains("1 sub-meshes"), "{status}");
+        assert!(status.contains("3 emitted indices"), "{status}");
+        // The JSON chunk carries the mesh name and one SubMesh_0 node.
+        let json_length = u32::from_le_bytes(glb[12..16].try_into().unwrap()) as usize;
+        let json = std::str::from_utf8(&glb[20..20 + json_length]).unwrap();
+        assert!(json.contains("\"Tri\""), "{json}");
+        assert!(json.contains("SubMesh_0"), "{json}");
+
+        let original = glb;
+        let error = super::export_mesh_to(&[serialized_path], 0, 42, &output_path, &mut Vec::new())
+            .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<io::Error>().unwrap().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(fs::read(&output_path).unwrap(), original);
+        drop(input);
+    }
+
+    #[test]
+    fn export_mesh_reports_a_non_mesh_object_without_creating_output() {
+        let directory = TestInputDirectory::new_root();
+        let serialized_path = directory.join("main.assets");
+        let output_path = directory.join("mesh.glb");
+        fs::write(&serialized_path, make_texture2d_file()).unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![serialized_path.clone(), output_path.clone()],
+            subdirectories: Vec::new(),
+        };
+
+        let error = super::export_mesh_to(&[serialized_path], 0, 42, &output_path, &mut Vec::new())
+            .unwrap_err();
+        assert!(error.to_string().contains("not a class-43 Mesh"), "{error}");
+        assert!(!output_path.exists());
+        drop(input);
+    }
+
+    #[test]
+    fn export_mesh_requires_an_existing_path_id() {
+        let directory = TestInputDirectory::new_root();
+        let serialized_path = directory.join("main.assets");
+        let output_path = directory.join("mesh.glb");
+        fs::write(&serialized_path, make_mesh_file()).unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![serialized_path.clone(), output_path.clone()],
+            subdirectories: Vec::new(),
+        };
+
+        let error = super::export_mesh_to(&[serialized_path], 0, 7, &output_path, &mut Vec::new())
+            .unwrap_err();
+        assert!(error.to_string().contains("PathID 7"), "{error}");
+        assert!(!output_path.exists());
+        drop(input);
+    }
+
+    /// A class-43 `Mesh` whose vertex data is a single Float32 position channel and whose index
+    /// buffer holds one 16-bit triangle.
+    fn make_mesh_file() -> Vec<u8> {
+        let mut strings = Vec::new();
+        let mesh_type = push_type_tree_string(&mut strings, "Mesh");
+        let empty_name = push_type_tree_string(&mut strings, "");
+        let string_type = push_type_tree_string(&mut strings, "string");
+        let name_field = push_type_tree_string(&mut strings, "m_Name");
+        let vector_type = push_type_tree_string(&mut strings, "vector");
+        let sub_meshes_field = push_type_tree_string(&mut strings, "m_SubMeshes");
+        let array_type = push_type_tree_string(&mut strings, "Array");
+        let int_type = push_type_tree_string(&mut strings, "int");
+        let size_field = push_type_tree_string(&mut strings, "size");
+        let data_field = push_type_tree_string(&mut strings, "data");
+        let sub_mesh_type = push_type_tree_string(&mut strings, "SubMesh");
+        let uint32_type = push_type_tree_string(&mut strings, "UInt32");
+        let first_byte_field = push_type_tree_string(&mut strings, "firstByte");
+        let index_count_field = push_type_tree_string(&mut strings, "indexCount");
+        let topology_field = push_type_tree_string(&mut strings, "topology");
+        let base_vertex_field = push_type_tree_string(&mut strings, "baseVertex");
+        let first_vertex_field = push_type_tree_string(&mut strings, "firstVertex");
+        let vertex_count_field = push_type_tree_string(&mut strings, "vertexCount");
+        let local_aabb_field = push_type_tree_string(&mut strings, "localAABB");
+        let aabb_type = push_type_tree_string(&mut strings, "AABB");
+        let center_field = push_type_tree_string(&mut strings, "m_Center");
+        let extent_field = push_type_tree_string(&mut strings, "m_Extent");
+        let vector3_type = push_type_tree_string(&mut strings, "Vector3");
+        let x_field = push_type_tree_string(&mut strings, "x");
+        let y_field = push_type_tree_string(&mut strings, "y");
+        let z_field = push_type_tree_string(&mut strings, "z");
+        let float_type = push_type_tree_string(&mut strings, "float");
+        let typeless_data_type = push_type_tree_string(&mut strings, "TypelessData");
+        let uint8_type = push_type_tree_string(&mut strings, "UInt8");
+        let char_type = push_type_tree_string(&mut strings, "char");
+        let index_buffer_field = push_type_tree_string(&mut strings, "m_IndexBuffer");
+        let index_format_field = push_type_tree_string(&mut strings, "m_IndexFormat");
+        let vertex_data_field = push_type_tree_string(&mut strings, "m_VertexData");
+        let vertex_data_type = push_type_tree_string(&mut strings, "VertexData");
+        let vertex_count_name = push_type_tree_string(&mut strings, "m_VertexCount");
+        let channels_field = push_type_tree_string(&mut strings, "m_Channels");
+        let channel_info_type = push_type_tree_string(&mut strings, "ChannelInfo");
+        let dimension_field = push_type_tree_string(&mut strings, "dimension");
+        let offset_field = push_type_tree_string(&mut strings, "offset");
+        let format_field = push_type_tree_string(&mut strings, "format");
+        let stream_field = push_type_tree_string(&mut strings, "stream");
+        let streams_field = push_type_tree_string(&mut strings, "m_Streams");
+        let stream_info_type = push_type_tree_string(&mut strings, "StreamInfo");
+        let channel_mask_field = push_type_tree_string(&mut strings, "channelMask");
+        let stream_offset_field = push_type_tree_string(&mut strings, "offset");
+        let stride_field = push_type_tree_string(&mut strings, "stride");
+        let divider_op_field = push_type_tree_string(&mut strings, "dividerOp");
+        let uint16_type = push_type_tree_string(&mut strings, "UInt16");
+        let frequency_field = push_type_tree_string(&mut strings, "frequency");
+        let data_size_field = push_type_tree_string(&mut strings, "m_DataSize");
+
+        let mut nodes: Vec<(u8, u32, u32, i32)> = Vec::new();
+        fn push_node(
+            nodes: &mut Vec<(u8, u32, u32, i32)>,
+            level: u8,
+            type_offset: u32,
+            name_offset: u32,
+            byte_size: i32,
+        ) {
+            nodes.push((level, type_offset, name_offset, byte_size));
+        }
+
+        // Level 0: the Mesh root.
+        push_node(&mut nodes, 0, mesh_type, empty_name, -1);
+        // Level 1: m_Name (string).
+        push_node(&mut nodes, 1, string_type, name_field, -1);
+        push_node(&mut nodes, 2, array_type, array_type, -1);
+        push_node(&mut nodes, 3, int_type, size_field, 4);
+        push_node(&mut nodes, 3, char_type, data_field, 1);
+        // Level 1: m_SubMeshes (vector of SubMesh).
+        push_node(&mut nodes, 1, vector_type, sub_meshes_field, -1);
+        push_node(&mut nodes, 2, array_type, array_type, -1);
+        push_node(&mut nodes, 3, int_type, size_field, 4);
+        push_node(&mut nodes, 3, sub_mesh_type, data_field, -1);
+        push_node(&mut nodes, 4, uint32_type, first_byte_field, 4);
+        push_node(&mut nodes, 4, uint32_type, index_count_field, 4);
+        push_node(&mut nodes, 4, int_type, topology_field, 4);
+        push_node(&mut nodes, 4, uint32_type, base_vertex_field, 4);
+        push_node(&mut nodes, 4, uint32_type, first_vertex_field, 4);
+        push_node(&mut nodes, 4, uint32_type, vertex_count_field, 4);
+        push_node(&mut nodes, 4, aabb_type, local_aabb_field, -1);
+        for field in [center_field, extent_field] {
+            push_node(&mut nodes, 5, vector3_type, field, -1);
+            for component in [x_field, y_field, z_field] {
+                push_node(&mut nodes, 6, float_type, component, 4);
+            }
+        }
+        // Level 1: m_IndexBuffer (TypelessData).
+        push_node(&mut nodes, 1, typeless_data_type, index_buffer_field, -1);
+        push_node(&mut nodes, 2, int_type, size_field, 4);
+        push_node(&mut nodes, 2, uint8_type, data_field, 1);
+        // Level 1: m_IndexFormat (int).
+        push_node(&mut nodes, 1, int_type, index_format_field, 4);
+        // Level 1: m_VertexData (VertexData).
+        push_node(&mut nodes, 1, vertex_data_type, vertex_data_field, -1);
+        push_node(&mut nodes, 2, uint32_type, vertex_count_name, 4);
+        push_node(&mut nodes, 2, vector_type, channels_field, -1);
+        push_node(&mut nodes, 3, array_type, array_type, -1);
+        push_node(&mut nodes, 4, int_type, size_field, 4);
+        push_node(&mut nodes, 4, channel_info_type, data_field, -1);
+        for field in [dimension_field, offset_field, format_field, stream_field] {
+            push_node(&mut nodes, 5, uint8_type, field, 1);
+        }
+        push_node(&mut nodes, 2, vector_type, streams_field, -1);
+        push_node(&mut nodes, 3, array_type, array_type, -1);
+        push_node(&mut nodes, 4, int_type, size_field, 4);
+        push_node(&mut nodes, 4, stream_info_type, data_field, -1);
+        push_node(&mut nodes, 5, uint32_type, channel_mask_field, 4);
+        push_node(&mut nodes, 5, uint32_type, stream_offset_field, 4);
+        push_node(&mut nodes, 5, uint8_type, stride_field, 1);
+        push_node(&mut nodes, 5, uint8_type, divider_op_field, 1);
+        push_node(&mut nodes, 5, uint16_type, frequency_field, 2);
+        push_node(&mut nodes, 2, typeless_data_type, data_size_field, -1);
+        push_node(&mut nodes, 3, int_type, size_field, 4);
+        push_node(&mut nodes, 3, uint8_type, data_field, 1);
+
+        let vertex_data: [f32; 9] = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let mut vertex_bytes = Vec::with_capacity(36);
+        for value in vertex_data {
+            vertex_bytes.extend_from_slice(&value.to_le_bytes());
+        }
+
+        let mut payload = Vec::new();
+        // m_Name
+        put_i32_le(&mut payload, 3);
+        payload.extend_from_slice(b"Tri");
+        payload.resize(payload.len() + 1, 0);
+        // m_SubMeshes: one sub-mesh with three indices.
+        put_i32_le(&mut payload, 1);
+        put_u32_le(&mut payload, 0); // firstByte
+        put_u32_le(&mut payload, 3); // indexCount
+        put_i32_le(&mut payload, 0); // topology (Triangles)
+        put_u32_le(&mut payload, 0); // baseVertex
+        put_u32_le(&mut payload, 0); // firstVertex
+        put_u32_le(&mut payload, 3); // vertexCount
+        for _ in 0..6 {
+            put_f32_le(&mut payload, 0.0); // m_Center then m_Extent
+        }
+        // m_IndexBuffer: 0, 1, 2 as 16-bit indices.
+        put_i32_le(&mut payload, 6);
+        for value in [0u16, 1, 2] {
+            payload.extend_from_slice(&value.to_le_bytes());
+        }
+        payload.resize(payload.len() + 2, 0);
+        // m_IndexFormat: 16-bit.
+        put_i32_le(&mut payload, 0);
+        // m_VertexData
+        put_u32_le(&mut payload, 3); // m_VertexCount
+        put_i32_le(&mut payload, 1); // m_Channels size
+        payload.push(3); // dimension
+        payload.push(0); // offset
+        payload.push(0); // format (Float32)
+        payload.push(0); // stream
+        put_i32_le(&mut payload, 1); // m_Streams size
+        put_u32_le(&mut payload, 1); // channelMask
+        put_u32_le(&mut payload, 0); // offset
+        payload.push(12); // stride
+        payload.push(0); // dividerOp
+        put_u16_le(&mut payload, 0); // frequency
+        put_i32_le(&mut payload, i32::try_from(vertex_bytes.len()).unwrap());
+        payload.extend_from_slice(&vertex_bytes);
+        assert!(payload.len().is_multiple_of(4), "payload is 4-byte aligned");
+
+        let mut metadata = Vec::new();
+        metadata.extend_from_slice(b"2019.4.0f1\0");
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 1);
+        put_i32_le(&mut metadata, 43);
+        put_i32_le(&mut metadata, i32::try_from(nodes.len()).unwrap());
+        put_i32_le(&mut metadata, i32::try_from(strings.len()).unwrap());
+        for (level, type_offset, name_offset, byte_size) in &nodes {
+            put_node(
+                &mut metadata,
+                *level,
+                *type_offset,
+                *name_offset,
+                *byte_size,
+                0,
+            );
+        }
+        metadata.extend_from_slice(&strings);
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 1);
+        put_i32_le(&mut metadata, 42);
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, i32::try_from(payload.len()).unwrap());
+        put_i32_le(&mut metadata, 43);
+        put_u16_le(&mut metadata, 43);
+        put_u16_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 0);
+        metadata.push(0);
+
+        let data_offset = 20 + metadata.len();
+        let file_size = data_offset + payload.len();
+        let mut bytes = Vec::with_capacity(file_size);
+        put_i32_le_as_be(&mut bytes, i32::try_from(metadata.len()).unwrap());
+        put_u32_be(&mut bytes, u32::try_from(file_size).unwrap());
+        put_u32_be(&mut bytes, 10);
+        put_u32_be(&mut bytes, u32::try_from(data_offset).unwrap());
+        bytes.push(0);
+        bytes.extend_from_slice(&[0; 3]);
+        bytes.extend_from_slice(&metadata);
+        bytes.extend_from_slice(&payload);
+        bytes
     }
 
     #[test]
