@@ -2330,5 +2330,5 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 ## TYPE-SCRIPT-001 manager/type-resolver audit (2026-10-06)
 
 - Audited all 21 files of `AssetRipper.Import/Structure/Assembly/` (`Managers/`, `Serializable/`, `TypeTrees/`, backend/identifier/extensions): pure metadata paths mapped to their Rust modules (`script_identity.rs`, `script_hashing.rs`, `script_export_flow.rs`, `script_admission.rs`, backend detection + `.dll` collection in `io/`); live assembly loading (AsmResolver/Cpp2Il/Cecil/ILSpy) recorded as external-tooling-blocked. Corrected the row (it pointed at nonexistent `src/types/` with `???` status).
-- Ported `MonoManager.IsMonoAssembly` as a named ordinal-`.dll` predicate in `script_identity.rs`, wired into both existing call sites with no behavior change, plus a dedicated test. Lib suite 969/969 locally, workspace Clippy clean; full validation via Actions after push.
+- Ported `MonoManager.IsMonoAssembly` as a named ordinal-`.dll` predicate in `script_identity.rs`, wired into both existing call sites with no behavior change, plus a dedicated test. Lib suite 969/969 locally, workspace Clippy clean; CI run `37327106695` green (all five jobs) for remote `main` = `e9aa2bb`; local matches.
 - No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
