@@ -49,6 +49,7 @@ pub mod streamed_clip;
 pub mod streaming_info;
 pub mod sub_mesh_data;
 pub mod tangent_mode;
+pub mod texture_converter;
 pub mod texture_decode;
 pub mod texture_format;
 pub mod transform;

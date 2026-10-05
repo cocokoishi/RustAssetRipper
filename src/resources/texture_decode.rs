@@ -463,6 +463,37 @@ pub fn decode_argb32(
     decode_packed::<4>(input, width, height, output, |p| [p[1], p[2], p[3], p[0]])
 }
 
+/// `RgbConverter` for `TextureFormat.BGR24` (`ColorBGR<byte>` layout `b,g,r`).
+pub fn decode_bgr24(
+    input: &[u8],
+    width: usize,
+    height: usize,
+    output: &mut [u8],
+) -> Result<usize, TextureDecodeError> {
+    decode_packed::<3>(input, width, height, output, |p| [p[2], p[1], p[0], 0xFF])
+}
+
+/// `RgbConverter` for `TextureFormat.ARGBFloat` (`ColorARGB<float>` layout `a,r,g,b`).
+pub fn decode_argb_float(
+    input: &[u8],
+    width: usize,
+    height: usize,
+    output: &mut [u8],
+) -> Result<usize, TextureDecodeError> {
+    decode_packed::<16>(input, width, height, output, |p| {
+        let a = f32::from_le_bytes([p[0], p[1], p[2], p[3]]);
+        let r = f32::from_le_bytes([p[4], p[5], p[6], p[7]]);
+        let g = f32::from_le_bytes([p[8], p[9], p[10], p[11]]);
+        let b = f32::from_le_bytes([p[12], p[13], p[14], p[15]]);
+        [
+            float_to_byte(r),
+            float_to_byte(g),
+            float_to_byte(b),
+            float_to_byte(a),
+        ]
+    })
+}
+
 /// `RgbConverter` for `TextureFormat.Alpha8`.
 pub fn decode_alpha8(
     input: &[u8],
@@ -763,6 +794,234 @@ pub fn decode_rgba_float(
     })
 }
 
+pub(crate) fn uint32_to_byte(value: u32) -> u8 {
+    // `NumericConversion.ConvertUInt32<byte>`: interpolate then round half away from zero.
+    let interpolated = f64::from(value) / f64::from(u32::MAX);
+    let exact = interpolated * 255.0;
+    exact.round() as u8
+}
+
+pub(crate) fn int32_to_byte(value: i32) -> u8 {
+    // `ChangeSign(int)` flips the sign bit before the unsigned conversion.
+    uint32_to_byte((value as u32) ^ 0x8000_0000)
+}
+
+/// `RgbConverter` for `GraphicsFormat.R32_UInt` (`ColorR<uint>`).
+pub fn decode_r32_unsigned(
+    input: &[u8],
+    width: usize,
+    height: usize,
+    output: &mut [u8],
+) -> Result<usize, TextureDecodeError> {
+    decode_packed::<4>(input, width, height, output, |p| {
+        [
+            uint32_to_byte(u32::from_le_bytes([p[0], p[1], p[2], p[3]])),
+            0,
+            0,
+            0xFF,
+        ]
+    })
+}
+
+/// `RgbConverter` for `GraphicsFormat.R32G32_UInt` (`ColorRG<uint>`).
+pub fn decode_r32g32_unsigned(
+    input: &[u8],
+    width: usize,
+    height: usize,
+    output: &mut [u8],
+) -> Result<usize, TextureDecodeError> {
+    decode_packed::<8>(input, width, height, output, |p| {
+        [
+            uint32_to_byte(u32::from_le_bytes([p[0], p[1], p[2], p[3]])),
+            uint32_to_byte(u32::from_le_bytes([p[4], p[5], p[6], p[7]])),
+            0,
+            0xFF,
+        ]
+    })
+}
+
+/// `RgbConverter` for `GraphicsFormat.R32G32B32_UInt` (`ColorRGB<uint>`).
+pub fn decode_r32g32b32_unsigned(
+    input: &[u8],
+    width: usize,
+    height: usize,
+    output: &mut [u8],
+) -> Result<usize, TextureDecodeError> {
+    decode_packed::<12>(input, width, height, output, |p| {
+        [
+            uint32_to_byte(u32::from_le_bytes([p[0], p[1], p[2], p[3]])),
+            uint32_to_byte(u32::from_le_bytes([p[4], p[5], p[6], p[7]])),
+            uint32_to_byte(u32::from_le_bytes([p[8], p[9], p[10], p[11]])),
+            0xFF,
+        ]
+    })
+}
+
+/// `RgbConverter` for `GraphicsFormat.R32G32B32A32_UInt` (`ColorRGBA<uint>`).
+pub fn decode_r32g32b32a32_unsigned(
+    input: &[u8],
+    width: usize,
+    height: usize,
+    output: &mut [u8],
+) -> Result<usize, TextureDecodeError> {
+    decode_packed::<16>(input, width, height, output, |p| {
+        [
+            uint32_to_byte(u32::from_le_bytes([p[0], p[1], p[2], p[3]])),
+            uint32_to_byte(u32::from_le_bytes([p[4], p[5], p[6], p[7]])),
+            uint32_to_byte(u32::from_le_bytes([p[8], p[9], p[10], p[11]])),
+            uint32_to_byte(u32::from_le_bytes([p[12], p[13], p[14], p[15]])),
+        ]
+    })
+}
+
+/// `RgbConverter` for `GraphicsFormat.R32_SInt` (`ColorR<int>`).
+pub fn decode_r32_signed(
+    input: &[u8],
+    width: usize,
+    height: usize,
+    output: &mut [u8],
+) -> Result<usize, TextureDecodeError> {
+    decode_packed::<4>(input, width, height, output, |p| {
+        [
+            int32_to_byte(i32::from_le_bytes([p[0], p[1], p[2], p[3]])),
+            0,
+            0,
+            0xFF,
+        ]
+    })
+}
+
+/// `RgbConverter` for `GraphicsFormat.R32G32_SInt` (`ColorRG<int>`).
+pub fn decode_r32g32_signed(
+    input: &[u8],
+    width: usize,
+    height: usize,
+    output: &mut [u8],
+) -> Result<usize, TextureDecodeError> {
+    decode_packed::<8>(input, width, height, output, |p| {
+        [
+            int32_to_byte(i32::from_le_bytes([p[0], p[1], p[2], p[3]])),
+            int32_to_byte(i32::from_le_bytes([p[4], p[5], p[6], p[7]])),
+            0,
+            0xFF,
+        ]
+    })
+}
+
+/// `RgbConverter` for `GraphicsFormat.R32G32B32_SInt` (`ColorRGB<int>`).
+pub fn decode_r32g32b32_signed(
+    input: &[u8],
+    width: usize,
+    height: usize,
+    output: &mut [u8],
+) -> Result<usize, TextureDecodeError> {
+    decode_packed::<12>(input, width, height, output, |p| {
+        [
+            int32_to_byte(i32::from_le_bytes([p[0], p[1], p[2], p[3]])),
+            int32_to_byte(i32::from_le_bytes([p[4], p[5], p[6], p[7]])),
+            int32_to_byte(i32::from_le_bytes([p[8], p[9], p[10], p[11]])),
+            0xFF,
+        ]
+    })
+}
+
+/// `RgbConverter` for `GraphicsFormat.R32G32B32A32_SInt` (`ColorRGBA<int>`).
+pub fn decode_r32g32b32a32_signed(
+    input: &[u8],
+    width: usize,
+    height: usize,
+    output: &mut [u8],
+) -> Result<usize, TextureDecodeError> {
+    decode_packed::<16>(input, width, height, output, |p| {
+        [
+            int32_to_byte(i32::from_le_bytes([p[0], p[1], p[2], p[3]])),
+            int32_to_byte(i32::from_le_bytes([p[4], p[5], p[6], p[7]])),
+            int32_to_byte(i32::from_le_bytes([p[8], p[9], p[10], p[11]])),
+            int32_to_byte(i32::from_le_bytes([p[12], p[13], p[14], p[15]])),
+        ]
+    })
+}
+
+/// `RgbConverter` for `GraphicsFormat.R16G16B16_SFloat` (`ColorRGB<Half>`).
+pub fn decode_rgb_half(
+    input: &[u8],
+    width: usize,
+    height: usize,
+    output: &mut [u8],
+) -> Result<usize, TextureDecodeError> {
+    decode_packed::<6>(input, width, height, output, |p| {
+        [
+            float_to_byte(half_bits_to_f32(u16::from_le_bytes([p[0], p[1]]))),
+            float_to_byte(half_bits_to_f32(u16::from_le_bytes([p[2], p[3]]))),
+            float_to_byte(half_bits_to_f32(u16::from_le_bytes([p[4], p[5]]))),
+            0xFF,
+        ]
+    })
+}
+
+/// `RgbConverter` for `GraphicsFormat.R32G32B32_SFloat` (`ColorRGB<float>`).
+pub fn decode_rgb_float(
+    input: &[u8],
+    width: usize,
+    height: usize,
+    output: &mut [u8],
+) -> Result<usize, TextureDecodeError> {
+    decode_packed::<12>(input, width, height, output, |p| {
+        [
+            float_to_byte(f32::from_le_bytes([p[0], p[1], p[2], p[3]])),
+            float_to_byte(f32::from_le_bytes([p[4], p[5], p[6], p[7]])),
+            float_to_byte(f32::from_le_bytes([p[8], p[9], p[10], p[11]])),
+            0xFF,
+        ]
+    })
+}
+
+/// `RgbConverter` for `GraphicsFormat.B8G8R8_SNorm` / `B8G8R8_SInt` (`ColorBGR<sbyte>`).
+pub fn decode_bgr24_signed(
+    input: &[u8],
+    width: usize,
+    height: usize,
+    output: &mut [u8],
+) -> Result<usize, TextureDecodeError> {
+    decode_packed::<3>(input, width, height, output, |p| {
+        [
+            sbyte_to_byte(p[2] as i8),
+            sbyte_to_byte(p[1] as i8),
+            sbyte_to_byte(p[0] as i8),
+            0xFF,
+        ]
+    })
+}
+
+/// `RgbConverter` for `GraphicsFormat.B8G8R8A8_SNorm` / `B8G8R8A8_SInt` (`ColorBGRA<sbyte>`).
+pub fn decode_bgra32_signed(
+    input: &[u8],
+    width: usize,
+    height: usize,
+    output: &mut [u8],
+) -> Result<usize, TextureDecodeError> {
+    decode_packed::<4>(input, width, height, output, |p| {
+        [
+            sbyte_to_byte(p[2] as i8),
+            sbyte_to_byte(p[1] as i8),
+            sbyte_to_byte(p[0] as i8),
+            sbyte_to_byte(p[3] as i8),
+        ]
+    })
+}
+
+/// `RgbConverter` for `GraphicsFormat.A16_UNorm` (`ColorA<ushort>`).
+pub fn decode_a16(
+    input: &[u8],
+    width: usize,
+    height: usize,
+    output: &mut [u8],
+) -> Result<usize, TextureDecodeError> {
+    decode_packed::<2>(input, width, height, output, |p| {
+        [0, 0, 0, ushort_to_byte(u16::from_le_bytes([p[0], p[1]]))]
+    })
+}
+
 /// `RgbConverter` for `TextureFormat.R8_SIGNED`.
 pub fn decode_r8_signed(
     input: &[u8],
@@ -999,6 +1258,8 @@ mod tests {
             "RGB48_SIGNED" => decode_rgb48_signed(input, width, height, &mut output),
             "RGBA64_SIGNED" => decode_rgba64_signed(input, width, height, &mut output),
             "RGB9e5Float" => decode_rgb9e5_float(input, width, height, &mut output),
+            "BGR24" => decode_bgr24(input, width, height, &mut output),
+            "ARGBFloat" => decode_argb_float(input, width, height, &mut output),
             other => panic!("unknown wide format {other}"),
         }
         .unwrap();
@@ -1028,6 +1289,54 @@ mod tests {
             assert_eq!(output, expected_output, "output {line}");
             rows += 1;
         }
-        assert_eq!(rows, 19);
+        assert_eq!(rows, 23);
+    }
+
+    fn decode_graphics(kind: &str, input: &[u8], width: usize, height: usize) -> (usize, Vec<u8>) {
+        let mut output = vec![0u8; width * height * 4];
+        let consumed = match kind {
+            "R32_UInt" => decode_r32_unsigned(input, width, height, &mut output),
+            "R32G32_UInt" => decode_r32g32_unsigned(input, width, height, &mut output),
+            "R32G32B32_UInt" => decode_r32g32b32_unsigned(input, width, height, &mut output),
+            "R32G32B32A32_UInt" => decode_r32g32b32a32_unsigned(input, width, height, &mut output),
+            "R32_SInt" => decode_r32_signed(input, width, height, &mut output),
+            "R32G32_SInt" => decode_r32g32_signed(input, width, height, &mut output),
+            "R32G32B32_SInt" => decode_r32g32b32_signed(input, width, height, &mut output),
+            "R32G32B32A32_SInt" => decode_r32g32b32a32_signed(input, width, height, &mut output),
+            "R16G16B16_SFloat" => decode_rgb_half(input, width, height, &mut output),
+            "R32G32B32_SFloat" => decode_rgb_float(input, width, height, &mut output),
+            "B8G8R8_SNorm" => decode_bgr24_signed(input, width, height, &mut output),
+            "B8G8R8A8_SNorm" => decode_bgra32_signed(input, width, height, &mut output),
+            "A16_UNorm" => decode_a16(input, width, height, &mut output),
+            other => panic!("unknown graphics format {other}"),
+        }
+        .unwrap();
+        (consumed, output)
+    }
+
+    /// Byte-for-byte differential against `AssetRipper.TextureDecoder`'s `RgbConverter` (probe
+    /// `Temp/opencode/texprobe4`) for the `GraphicsFormat`-only decoders.
+    #[test]
+    fn graphics_format_decoders_match_the_reference_runtime() {
+        let fixture = include_str!("graphics_format_decode_fixture.txt");
+        let mut rows = 0;
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let parts: Vec<&str> = line.split('|').collect();
+            let width: usize = parts[1].parse().unwrap();
+            let height: usize = parts[2].parse().unwrap();
+            let input = parse_hex(parts[3]);
+            let result: Vec<&str> = parts[4].split(':').collect();
+            let expected_consumed: usize = result[0].parse().unwrap();
+            let expected_output = parse_hex(result[1]);
+            let (consumed, output) = decode_graphics(parts[0], &input, width, height);
+            assert_eq!(consumed, expected_consumed, "consumed {line}");
+            assert_eq!(output, expected_output, "output {line}");
+            rows += 1;
+        }
+        assert_eq!(rows, 13);
     }
 }

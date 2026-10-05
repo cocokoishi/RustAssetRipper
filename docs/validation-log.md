@@ -2010,3 +2010,13 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Added `TextureDecodeError::InvalidBlockDimension` instead of overloading `InputTooShort` for the reference's 4..=12 `ArgumentException`.
 - Texture coverage now: DXT1/3/5, BC4/BC5, BC6H, BC7, ETC1/ETC2/ETC2A1/ETC2A8, EAC R/RG (u/s), ATC RGB4/RGBA8, PVRTC2/4, ASTC, YUY2, and the packed/wide formats. All block decoders dispatched by `TextureConverter.DecodeTexture` are now ported; the remaining texture work is the `RgbConverter`/`DirectBitmap` plumbing, the mip/layer/`GraphicsFormat` dispatch, Crunch, and the image writers.
 - GitHub Actions run `37254780389` is green across all five jobs. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+
+## Texture converter dispatch (2026-10-05)
+
+- Added `src/resources/texture_converter.rs`, porting `TextureConverter.TryConvertToBitmap`/`DecodeTexture`: the `TextureFormat` and `GraphicsFormat` decoder switches, the per-layer loop over `ImageSize` (with the `Texture3D` stride fallback), `FlipY`, and `UnpackNormal`.
+- Added the missing RGB decoders `TextureFormat.BGR24` and `TextureFormat.ARGBFloat`, plus the `GraphicsFormat`-only decoders (`R32*_UInt`, `R32*_SInt`, `R16G16B16_SFloat`, `R32G32B32_SFloat`, `B8G8R8_SNorm`, `B8G8R8A8_SNorm`, `A16_UNorm`).
+- Genuine original-runtime differentials: probe `Temp/opencode/texprobe3` appended four `BGR24`/`ARGBFloat` rows to `wide_format_fixture.txt` (now 23), and probe `Temp/opencode/texprobe4` produced the 13-row `graphics_format_decode_fixture.txt`. Both matched byte-for-byte.
+- `UnpackNormal`'s truncating `Convert<double, byte>` (the reference gives `254`, not `255`, for a `(128,128)` normal) is covered by a synthetic test.
+- Crunch decompression is not ported; crunched formats return `TextureConvertError::CrunchUnsupported` rather than decoding wrong data.
+- `cargo test --workspace --locked`: 780 library and 23 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.

@@ -373,3 +373,13 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - All block decoders dispatched by `TextureConverter.DecodeTexture` are now ported: DXT1/3/5, BC4/BC5, BC6H, BC7, ETC1/ETC2/ETC2A1/ETC2A8, EAC R/RG (u/s), ATC RGB4/RGBA8, PVRTC2/4, ASTC, YUY2, and the packed/wide formats.
 - Next: the `RgbConverter`/`DirectBitmap` plumbing (the generic `TColor`/`TChannelValue` conversion used by `TryConvertToBitmap`), the `TextureConverter` mip/layer/`GraphicsFormat` dispatch, Crunch, and the image writers (PNG/EXR/BMP/TGA); then the `.meta` FS sidecar integration and per-class `CreateImporter` tracing; the full exporter registration/resource matrix audit; and the object-model/product workflows.
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+
+## 43. Checkpoint: TextureConverter dispatch (2026-10-05)
+
+- Added `src/resources/texture_converter.rs` (`TryConvertToBitmap`/`DecodeTexture`: the `TextureFormat` and `GraphicsFormat` switches, the per-layer loop, `FlipY`, and `UnpackNormal`), plus the missing `BGR24`/`ARGBFloat` and `GraphicsFormat`-only decoders in `texture_decode.rs`.
+- Differential coverage: `wide_format_fixture.txt` grew to 23 rows (`texprobe3`), and `graphics_format_decode_fixture.txt` has 13 rows (`texprobe4`).
+- Crunch is still not ported; crunched formats return `TextureConvertError::CrunchUnsupported`.
+- `cargo test --workspace --locked`: 780 library and 23 CLI tests; warnings-denied Clippy passes.
+- Next: the `RgbConverter`/`DirectBitmap` pixel-type plumbing and the image writers (PNG/EXR/BMP/TGA/JPEG), then Crunch; then the `.meta` FS sidecar integration and per-class `CreateImporter` tracing; the full exporter registration/resource matrix audit; and the object-model/product workflows.
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
