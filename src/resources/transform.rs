@@ -108,6 +108,34 @@ pub fn calculate_root_order(tree: &[TransformNode], index: usize) -> Result<usiz
     Err(TransformError::NotAmongFathersChildren)
 }
 
+/// A transform's serialized local fields.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TransformLocalView {
+    /// `LocalPosition`.
+    pub position: [f32; 3],
+    /// `LocalRotation` (x, y, z, w).
+    pub rotation: [f32; 4],
+    /// `LocalScale`.
+    pub scale: [f32; 3],
+    /// `RootOrder`.
+    pub root_order: i32,
+    /// `LocalEulerAnglesHint`: present only on versions that serialize it.
+    pub euler_hint: Option<[f32; 3]>,
+}
+
+impl TransformLocalView {
+    /// `TransformExtensions.InitializeDefault`.
+    pub fn initialize_default(&mut self) {
+        self.position = [0.0; 3];
+        self.rotation = [0.0, 0.0, 0.0, 1.0];
+        self.scale = [1.0; 3];
+        self.root_order = 0;
+        if let Some(hint) = &mut self.euler_hint {
+            *hint = [0.0; 3];
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,5 +224,65 @@ mod tests {
             children: Vec::new(),
         }];
         assert_eq!(get_root_path(&cyclic, 0), Err(TransformError::Cycle));
+    }
+
+    /// Byte-for-byte differential against the reference `TransformExtensions.InitializeDefault`
+    /// (probe `Temp/opencode/vecprobe`).
+    #[test]
+    fn transform_initialize_default_matches_the_reference_runtime() {
+        let fixture = include_str!("transform_default_fixture.txt");
+        let mut rows = 0;
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let parts: Vec<&str> = line.split('|').collect();
+            assert_eq!(parts[0], "TD", "{line}");
+            let has_euler = parts[11] == "1";
+            let mut view = TransformLocalView {
+                position: [9.0; 3],
+                rotation: [9.0; 4],
+                scale: [9.0; 3],
+                root_order: 7,
+                euler_hint: has_euler.then_some([9.0; 3]),
+            };
+            view.initialize_default();
+            assert_eq!(
+                [
+                    view.position[0].to_bits(),
+                    view.position[1].to_bits(),
+                    view.position[2].to_bits(),
+                ],
+                [
+                    parts[2].parse::<u32>().unwrap(),
+                    parts[3].parse::<u32>().unwrap(),
+                    parts[4].parse::<u32>().unwrap(),
+                ],
+                "{line}"
+            );
+            assert_eq!(view.rotation[3].to_bits(), parts[5].parse::<u32>().unwrap(), "{line}");
+            assert_eq!(view.rotation[0].to_bits(), parts[6].parse::<u32>().unwrap(), "{line}");
+            assert_eq!(
+                [
+                    view.scale[0].to_bits(),
+                    view.scale[1].to_bits(),
+                    view.scale[2].to_bits(),
+                ],
+                [
+                    parts[7].parse::<u32>().unwrap(),
+                    parts[8].parse::<u32>().unwrap(),
+                    parts[9].parse::<u32>().unwrap(),
+                ],
+                "{line}"
+            );
+            assert_eq!(view.root_order, parts[10].parse::<i32>().unwrap(), "{line}");
+            assert_eq!(view.euler_hint.is_some(), has_euler, "{line}");
+            if has_euler {
+                assert_eq!(view.euler_hint.unwrap()[0].to_bits(), parts[12].parse::<u32>().unwrap(), "{line}");
+            }
+            rows += 1;
+        }
+        assert_eq!(rows, 3);
     }
 }
