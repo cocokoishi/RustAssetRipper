@@ -431,3 +431,12 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Five synthetic tests; `cargo test --workspace --locked`: 815 library and 25 CLI tests; warnings-denied Clippy passes. The ledger row is `已实现但未验证` because serialized sub-mesh/skin/stream spellings still need a Unity-produced or C# differential.
 - Next: validate the mesh field spellings against generated/Unity-produced evidence, then the GLB/OBJ mesh exporters; the class-189/3D/array texture routes, platform transforms, Crunch, EXR/HDR/JPEG writers, sprite/atlas export, and `.meta` sidecars; then the exporter registration/resource matrix audit and the object-model/product workflows.
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+
+## 50. Checkpoint: Mesh generated-API field evidence (2026-10-05)
+
+- Probe `Temp/opencode/meshprops` dumped the shipped `AssetRipper.SourceGenerated.dll` property lists; the 105-line output is committed as `src/resources/mesh_generated_api_fixture.txt` with a regression test pinning every relied-upon property.
+- Fixed the stream stride to read `stride` (the `m_Stride` alias was wrong) with storage width from the value kind, and corrected bind-pose fields to `E00..E33`.
+- `cargo test --workspace --locked`: 816 library and 25 CLI tests; warnings-denied Clippy passes. Recorded as `DIFF-MESH-GENERATED-API-001` (source-derived, not a serialization differential).
+- Next: the GLB/OBJ mesh exporters; the class-189/3D/array texture routes, platform transforms, Crunch, EXR/HDR/JPEG writers, sprite/atlas export, and `.meta` sidecars; then the exporter registration/resource matrix audit and the object-model/product workflows.
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

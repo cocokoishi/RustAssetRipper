@@ -2062,3 +2062,11 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Added `src/resources/mesh.rs`: `MeshView::from_value` reads `m_VertexData`, `m_CompressedMesh`, `m_IndexBuffer`, `m_IndexFormat`, `m_SubMeshes`, `m_BindPose`, and `m_Skin`; `processed_index_buffer` decodes 16/32-bit indices with file endianness; `read_mesh_data` runs the blob/compressed decoders and merges them into `MeshData`.
 - Five synthetic tests pass; `cargo test --workspace --locked`: 815 library and 25 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used.
 - The serialized `SubMesh`, `BoneWeights4` lane, and old-stream spellings remain candidate mappings; no Unity-produced or C# differential has run, so the ledger row is `已实现但未验证`. Phase 1 remains open.
+
+
+## Mesh generated-API field evidence (2026-10-05)
+
+- Probe `Temp/opencode/meshprops` dumped the shipped `AssetRipper.SourceGenerated.dll` property lists for `IMesh`, `ISubMesh`, `IBoneWeights4`, `IStreamInfo`, `IChannelInfo`, and `ICompressedMesh`; the 105-line output is committed as `src/resources/mesh_generated_api_fixture.txt`.
+- Combined with the `Pass002_RenameSubnodes` naming rule, the property names imply the `boneIndex[0]`/`weight[0]` lane names and the `channelMask`/`stride`/`dividerOp`/`frequency` stream names used by `src/resources/mesh.rs`. A regression test pins every relied-upon property.
+- Fixed the stream stride to read the `stride` field (the `m_Stride` alias was wrong) with the storage width selected by the decoded value kind, and corrected the bind-pose fields to the `E00..E33` spelling used by `matrix4x4.rs`.
+- `cargo test --workspace --locked`: 816 library and 25 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used. Recorded as `DIFF-MESH-GENERATED-API-001` (source-derived, not a serialization differential). Phase 1 remains open.

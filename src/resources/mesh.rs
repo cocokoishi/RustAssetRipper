@@ -7,9 +7,14 @@
 //!
 //! Field-name basis: `m_VertexData`/`m_DataSize` are already used by the streamed-asset path; the
 //! `SubMesh` children use Unity's serialized TypeTree names (`firstByte`, `indexCount`, `topology`,
-//! `baseVertex`, `firstVertex`, `vertexCount`, `localAABB`, `m_IsTriStrip`). Because the generated
-//! `SubMesh` class lives in the external package, these names are not independently re-derived
-//! here; a payload whose sub-mesh children do not match produces an explicit error rather than an
+//! `baseVertex`, `firstVertex`, `vertexCount`, `localAABB`, `m_IsTriStrip`/`isTriStrip`). The
+//! generated `ISubMesh`/`IBoneWeights4`/`IStreamInfo`/`IChannelInfo`/`ICompressedMesh` property
+//! names (probed from the shipped `AssetRipper.SourceGenerated.dll`) combined with the
+//! `Pass002_RenameSubnodes` naming rule (`data[0]` becomes `data_0_`, then `m_`-prefixed and
+//! capitalized) imply the `weight[0]`/`boneIndex[0]` lane names and the `channelMask`/`stride`/
+//! `dividerOp`/`frequency` stream names. A residual `m_`-prefix ambiguity remains for sub-struct
+//! children (for example `isTriStrip` versus `m_IsTriStrip`, both of which are accepted); a
+//! payload whose sub-mesh children match neither produces an explicit error rather than an
 //! empty sub-mesh list.
 
 use std::error::Error;
@@ -441,12 +446,35 @@ fn read_streams(values: &[SerializedValue]) -> Result<Vec<StreamInfo>, MeshViewE
     for value in values {
         let channel_mask = read_u32(value, &["channelMask"])?.unwrap_or(0);
         let offset = read_u32(value, &["offset"])?.unwrap_or(0);
-        let (stride, stride_is_u32) = match read_u32(value, &["m_Stride"])? {
-            Some(stride) => (stride, true),
-            None => (read_u32(value, &["stride"])?.unwrap_or(0), false),
-        };
+        // The generated `Stride_Byte`/`Stride_UInt32` properties imply the TypeTree field is
+        // `stride`; the decoded value kind selects the storage width. `Align` is not needed to
+        // locate data and is ignored here.
+        let (stride, stride_is_u32) = read_stride(value)?;
         let divider_op = read_u8(value, &["dividerOp"])?.unwrap_or(0);
-        let frequency = read_u8(value, &["frequency"])?.unwrap_or(0);
+        // The generated `Frequency` property is `UInt16`; values above a byte are reported
+        // rather than truncated.
+        let frequency = match lookup(value, "frequency")? {
+            None => 0,
+            Some(SerializedValue::U8(value)) => *value,
+            Some(SerializedValue::U16(value)) => {
+                u8::try_from(*value).map_err(|_| MeshViewError::WrongType {
+                    field: "frequency",
+                    actual: "a UInt16 above 255",
+                })?
+            }
+            Some(SerializedValue::I32(value)) => {
+                u8::try_from(*value).map_err(|_| MeshViewError::WrongType {
+                    field: "frequency",
+                    actual: "an out-of-range integer",
+                })?
+            }
+            Some(other) => {
+                return Err(MeshViewError::WrongType {
+                    field: "frequency",
+                    actual: serialized_kind(other),
+                })
+            }
+        };
         streams.push(StreamInfo {
             channel_mask,
             offset,
@@ -457,6 +485,22 @@ fn read_streams(values: &[SerializedValue]) -> Result<Vec<StreamInfo>, MeshViewE
         });
     }
     Ok(streams)
+}
+
+fn read_stride(root: &SerializedValue) -> Result<(u32, bool), MeshViewError> {
+    let Some(value) = lookup(root, "stride")? else {
+        return Ok((0, false));
+    };
+    match value {
+        SerializedValue::U8(value) => Ok((u32::from(*value), false)),
+        SerializedValue::U32(value) => Ok((*value, true)),
+        SerializedValue::I32(value) if *value >= 0 => Ok((*value as u32, true)),
+        SerializedValue::I32(_) => Err(MeshViewError::NegativeValue { field: "stride" }),
+        other => Err(MeshViewError::WrongType {
+            field: "stride",
+            actual: serialized_kind(other),
+        }),
+    }
 }
 
 fn read_packed_bit_vector(
@@ -822,5 +866,102 @@ mod tests {
             ]),
         )]);
         assert!(make_view(&root).compressed_mesh.is_none());
+    }
+
+    /// Generated-API evidence for the serialized field-name mapping.
+    ///
+    /// The fixture is the property dump of the shipped `AssetRipper.SourceGenerated.dll`
+    /// (probe `Temp/opencode/meshprops`). Combined with the `Pass002_RenameSubnodes` naming rule
+    /// (`data[0]` becomes `data_0_`, then `m_`-prefixed and capitalized), these property names
+    /// imply the serialized TypeTree names this reader uses.
+    #[test]
+    fn generated_api_fixture_supports_the_field_name_mapping() {
+        let fixture = include_str!("mesh_generated_api_fixture.txt");
+        let mut sections: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        let mut current = String::new();
+        for line in fixture.lines() {
+            let line = line.trim();
+            if let Some(name) = line.strip_prefix("### ") {
+                current = name.split(" => ").next().unwrap_or(name).to_owned();
+            } else if !line.is_empty() && !current.is_empty() {
+                sections
+                    .entry(current.clone())
+                    .or_default()
+                    .push(line.to_owned());
+            }
+        }
+        let properties = |section: &str| -> Vec<String> {
+            sections
+                .get(section)
+                .cloned()
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|line| line.split_whitespace().nth(1).map(str::to_owned))
+                .collect()
+        };
+
+        let sub_mesh = properties("AssetRipper.SourceGenerated.Subclasses.SubMesh.ISubMesh");
+        for expected in [
+            "BaseVertex",
+            "FirstByte",
+            "FirstVertex",
+            "IndexCount",
+            "IsTriStrip",
+            "LocalAABB",
+            "Topology",
+            "TriangleCount",
+            "VertexCount",
+        ] {
+            assert!(sub_mesh.contains(&expected.to_owned()), "{expected}");
+        }
+
+        let bone_weights =
+            properties("AssetRipper.SourceGenerated.Subclasses.BoneWeights4.IBoneWeights4");
+        for expected in [
+            "BoneIndex_0_",
+            "BoneIndex_1_",
+            "BoneIndex_2_",
+            "BoneIndex_3_",
+            "Weight_0_",
+            "Weight_1_",
+            "Weight_2_",
+            "Weight_3_",
+        ] {
+            assert!(bone_weights.contains(&expected.to_owned()), "{expected}");
+        }
+
+        let stream_info =
+            properties("AssetRipper.SourceGenerated.Subclasses.StreamInfo.IStreamInfo");
+        for expected in [
+            "ChannelMask",
+            "DividerOp",
+            "Frequency",
+            "Offset",
+            "Stride_Byte",
+            "Stride_UInt32",
+        ] {
+            assert!(stream_info.contains(&expected.to_owned()), "{expected}");
+        }
+
+        let channel_info =
+            properties("AssetRipper.SourceGenerated.Subclasses.ChannelInfo.IChannelInfo");
+        for expected in ["Dimension", "Format", "Offset", "Stream"] {
+            assert!(channel_info.contains(&expected.to_owned()), "{expected}");
+        }
+
+        let mesh = properties("AssetRipper.SourceGenerated.Classes.ClassID_43.IMesh");
+        for expected in [
+            "BindPose",
+            "CompressedMesh",
+            "IndexBuffer",
+            "IndexFormat",
+            "Skin",
+            "StreamData",
+            "SubMeshes",
+            "VertexData",
+        ] {
+            assert!(mesh.contains(&expected.to_owned()), "{expected}");
+        }
     }
 }
