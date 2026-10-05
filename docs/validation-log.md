@@ -2193,3 +2193,11 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Extended `src/processing/script_identity.rs`: `type_reference_matches_script` (ordinal three-way match with assembly-extension stripping; absent fields read as empty; default identifiers never match) and `find_type_reference_index` (first-match scan). Node building from the matched `OldType` stays with the TypeTree reader; both failure literals are pinned.
 - `DIFF-SCRIPT-RESOLVER-001` recorded. New ledger row `TYPE-SCRIPT-RESOLVER-001` at `已实现但未验证`.
 - `cargo test --workspace --locked`: 930 library and 40 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+## Export file-name planning with a filesystem differential (2026-10-05)
+
+- Probe `Temp/opencode/filenameprobe` (SDK 10.0.401) drove the shipped `AssetRipper.IO.Files.dll`: static name helpers, the internal UTF-8 truncation over ASCII/CJK/emoji edges, `Path.GetExtension`/`GetFileNameWithoutExtension` edges (`.bashrc`, `a.`, `..`), and `LocalFileSystem.GetUniqueName` against real temporary directories (missing dir, repeated collisions sharing planner state, reserved stems, overlong unicode/extensionless names); 86 rows committed as `src/io/file_names_fixture.txt` (pure ASCII via probe `\u` escapes).
+- Added `src/io/file_names.rs`: suffix cleanup, host-aware invalid-character fixing (Windows set vs portable set; reserved names Windows-only, like the source), UTF-8 truncation, both path-splitting rules, a `UniqueNamePlanner` over caller-supplied existence facts with the remembered-counter map, and the `GetUniqueFileName` composition. Fixed two real bugs the differential exposed along the way: the `.`/bare-dot extension rule and pipe-bearing inputs in fixture parsing.
+- Also fixed a probe/output hygiene issue found mid-increment: PowerShell `>` redirection had decoded dotnet UTF-8 output as OEM cp437; the probe now emits pure ASCII and the fixture carries `\u` escapes.
+- `DIFF-FILE-NAME-001` recorded. New ledger row `EXP-FILE-NAME-001` at `已实现但未验证`.
+- `cargo test --workspace --locked`: 935 library and 40 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.

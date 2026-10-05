@@ -1,0 +1,99 @@
+# Export file-name planning reference values.
+# Probe Temp/opencode/filenameprobe: shipped AssetRipper.IO.Files.dll
+# (FileSystem, Utf8Truncation, LocalFileSystem.GetUniqueName against real
+# temporary directories), SDK 10.0.401, Windows host. The probe escapes
+# non-ASCII output, so this file is pure ASCII. Escapes: \\ \n \r \t,
+# \xNN for control bytes, \uNNNN for other non-ASCII (surrogate pairs for
+# astral characters). FIXFN and FIXPATH inputs may contain literal pipes:
+# the input is everything between the first and the last pipe of those rows.
+# Formats: CLONE|<in>|<RemoveCloneSuffixes>; INST|<in>|<RemoveInstanceSuffixes>;
+# FIXFN|<in>|<FixInvalidFileNameCharacters>; FIXPATH|<in>|<FixInvalidPathCharacters>;
+# RESERVED|<in>|<0|1>; MAXLEN|<MaxFileNameLength>; TRUNC|<in>|<max>|<out>;
+# EXT|<in>|<GetExtension>; NOWEXT|<in>|<GetFileNameWithoutExtension>;
+# UQ|<case>|<GetUniqueName> (sequential calls share one planner state).
+CLONE|A(Clone)|A
+INST|A(Clone)|A(Clone)
+CLONE|(Clone)A(Clone)B|AB
+INST|(Clone)A(Clone)B|(Clone)A(Clone)B
+CLONE|Plain|Plain
+INST|Plain|Plain
+CLONE|A(Instance)|A(Instance)
+INST|A(Instance)|A
+CLONE||
+INST||
+FIXFN|plain|plain
+FIXFN|a:b|a_b
+FIXFN|a,b|a_b
+FIXFN|a[b]|a_b_
+FIXFN|a]b|a_b
+FIXFN|a<b|a_b
+FIXFN|a|b|a_b
+FIXFN|a?b|a_b
+FIXFN|a*b|a_b
+FIXFN|a/b|a_b
+FIXFN|a\\b|a_b
+FIXFN|a\u0001b|a_b
+FIXFN|a\u001Fb|a_b
+FIXFN|a\u007Fb|a\u007Fb
+FIXFN|caf\u00E9|caf\u00E9
+FIXPATH|a|a
+FIXPATH| a |a
+FIXPATH|a/b|a/b
+FIXPATH|a /b|a/b
+FIXPATH|a/ b|a/b
+FIXPATH|a  /  b|a/b
+FIXPATH|/a/b/|/a/b/
+FIXPATH|a:b|a_b
+FIXPATH|a,b|a_b
+RESERVED|con|1
+RESERVED|CON|1
+RESERVED|aux|1
+RESERVED|nul|1
+RESERVED|prn|1
+RESERVED|com1|1
+RESERVED|COM9|1
+RESERVED|lpt1|1
+RESERVED|LPT9|1
+RESERVED|con1|0
+RESERVED|abc|0
+RESERVED|ab|0
+RESERVED|abcd|0
+RESERVED|com10|0
+RESERVED|lpt0|0
+RESERVED|a|0
+MAXLEN|245
+EXT|a.b|.b
+NOWEXT|a.b|a
+EXT|a|
+NOWEXT|a|a
+EXT|.bashrc|.bashrc
+NOWEXT|.bashrc|
+EXT|a.|
+NOWEXT|a.|a
+EXT|a..b|.b
+NOWEXT|a..b|a.
+EXT|a.b.c|.c
+NOWEXT|a.b.c|a.b
+EXT|.|
+NOWEXT|.|
+EXT|..|
+NOWEXT|..|.
+EXT|a/b.c|.c
+NOWEXT|a/b.c|b
+EXT||
+NOWEXT||
+TRUNC|abc|2|ab
+TRUNC|abc|3|abc
+TRUNC|abc|10|abc
+TRUNC|caf\u00E9x|4|caf
+TRUNC|caf\u00E9x|5|caf\u00E9
+TRUNC|a\u00E9b|2|a
+TRUNC|\uD83D\uDE00x|4|\uD83D\uDE00
+TRUNC|\uD83D\uDE00x|5|\uD83D\uDE00x
+TRUNC||0|
+UQ|missing-dir|name.ext
+UQ|first-collision|name_0.ext
+UQ|second-collision|name_0.ext
+UQ|reserved|con_0.txt
+UQ|long-unicode|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.txt
+UQ|long-noext|bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb

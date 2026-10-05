@@ -564,5 +564,12 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 
 - Extended probe `Temp/opencode/scriptidprobe` to drive the internal shipped `TypeTreeResolver` (empty list + matching-but-broken `OldType`), pinning both failure reasons; rows appended to `src/io/script_identity_fixture.txt`. Extended `src/processing/script_identity.rs` with the ordinal three-way match, first-match scan, and verbatim reason literals (default identifiers never match). New row `TYPE-SCRIPT-RESOLVER-001`; `DIFF-SCRIPT-RESOLVER-001` recorded. Node building stays with the TypeTree reader.
 - `cargo test --workspace --locked`: 930 library and 40 CLI tests; warnings-denied Clippy and format check pass. CI run `37291680476` green (all five jobs) for remote `main` = `55b1e0e`; local matches.
-- Next: `TYPE-SCRIPT-001` remainder (manager resolutions), `EXPORT-UNITY-001` remainder (file-writing pipeline), and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
+- Next: `TYPE-SCRIPT-001` remainder (manager resolutions), `EXPORT-UNITY-001` remainder (asset/sidecar file writes), and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 68. Checkpoint: export file-name planning with a filesystem differential (2026-10-05)
+
+- Added `src/io/file_names.rs` (suffix cleanup, host-aware invalid-character fixing, reserved names, UTF-8 truncation, both path-splitting rules, `UniqueNamePlanner`, `GetUniqueFileName` composition). All 86 shipped-DLL rows in `src/io/file_names_fixture.txt` (probe `Temp/opencode/filenameprobe`, real temp dirs) matched, fixing the `.`/bare-dot asymmetry and pipe-bearing fixture parsing along the way, plus a cp437 probe-output mojibake fixed via pure-ASCII probe escapes. New row `EXP-FILE-NAME-001`; `DIFF-FILE-NAME-001` recorded.
+- `cargo test --workspace --locked`: 935 library and 40 CLI tests; warnings-denied Clippy and format check pass.
+- Next: `TYPE-SCRIPT-001` remainder (manager resolutions), `EXPORT-UNITY-001` remainder (asset/sidecar file writes), and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
