@@ -261,8 +261,16 @@ mod tests {
                 ],
                 "{line}"
             );
-            assert_eq!(view.rotation[3].to_bits(), parts[5].parse::<u32>().unwrap(), "{line}");
-            assert_eq!(view.rotation[0].to_bits(), parts[6].parse::<u32>().unwrap(), "{line}");
+            assert_eq!(
+                view.rotation[3].to_bits(),
+                parts[5].parse::<u32>().unwrap(),
+                "{line}"
+            );
+            assert_eq!(
+                view.rotation[0].to_bits(),
+                parts[6].parse::<u32>().unwrap(),
+                "{line}"
+            );
             assert_eq!(
                 [
                     view.scale[0].to_bits(),
@@ -279,7 +287,11 @@ mod tests {
             assert_eq!(view.root_order, parts[10].parse::<i32>().unwrap(), "{line}");
             assert_eq!(view.euler_hint.is_some(), has_euler, "{line}");
             if has_euler {
-                assert_eq!(view.euler_hint.unwrap()[0].to_bits(), parts[12].parse::<u32>().unwrap(), "{line}");
+                assert_eq!(
+                    view.euler_hint.unwrap()[0].to_bits(),
+                    parts[12].parse::<u32>().unwrap(),
+                    "{line}"
+                );
             }
             rows += 1;
         }

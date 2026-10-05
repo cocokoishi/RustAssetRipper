@@ -136,6 +136,10 @@ mod tests {
                 continue;
             }
             let parts: Vec<&str> = line.split('|').collect();
+            if parts[0] == "Q" {
+                // The quaternion row is covered by `resources::quaternion`.
+                continue;
+            }
             let expected: Vec<u32> = parts[1..].iter().map(|v| v.parse().unwrap()).collect();
             let actual = match parts[0] {
                 "V2" => {
