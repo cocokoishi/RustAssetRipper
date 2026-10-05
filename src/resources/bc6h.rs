@@ -10,7 +10,9 @@
 
 use super::bc6h_tables::{ACTUAL_BITS_COUNT, PARTITION_SETS, WEIGHT3, WEIGHT4};
 use super::bc7::BitStream;
-use super::texture_decode::{require_input, require_output, ushort_to_byte, TextureDecodeError};
+use super::texture_decode::{
+    float_to_byte, half_bits_to_f32, require_input, require_output, TextureDecodeError,
+};
 
 type Pixel = [u8; 4];
 type Block = [Pixel; 16];
@@ -95,7 +97,7 @@ fn read_bc6h_mode_bits(bstream: &mut BitStream) -> u32 {
     }
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::needless_range_loop)]
 fn decode_bc6h_block(input: &[u8], output: &mut [[u16; 3]; 16], is_signed: bool) {
     let mut bstream = BitStream::new(input);
     let mut r = [0u32; 4];
@@ -493,9 +495,9 @@ fn decode_block_image(
             decode_bc6h_block(&input[offset..offset + 16], &mut ushorts, is_signed);
             for (index, pixel) in buffer.iter_mut().enumerate() {
                 *pixel = [
-                    ushort_to_byte(ushorts[index][0]),
-                    ushort_to_byte(ushorts[index][1]),
-                    ushort_to_byte(ushorts[index][2]),
+                    float_to_byte(half_bits_to_f32(ushorts[index][0])),
+                    float_to_byte(half_bits_to_f32(ushorts[index][1])),
+                    float_to_byte(half_bits_to_f32(ushorts[index][2])),
                     0xFF,
                 ];
             }

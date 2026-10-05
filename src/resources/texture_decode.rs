@@ -537,7 +537,7 @@ fn sbyte_to_byte(value: i8) -> u8 {
     (value as u8) ^ 0x80
 }
 
-fn float_to_byte(value: f32) -> u8 {
+pub(crate) fn float_to_byte(value: f32) -> u8 {
     let x = value * 255.0;
     if x > 255.0 {
         255
@@ -560,7 +560,7 @@ fn double_to_byte(value: f64) -> u8 {
 }
 
 /// Decodes an IEEE 754 binary16 bit pattern to `f32`.
-fn half_bits_to_f32(bits: u16) -> f32 {
+pub(crate) fn half_bits_to_f32(bits: u16) -> f32 {
     let sign = (bits >> 15) & 1;
     let exponent = (bits >> 10) & 0x1F;
     let mantissa = bits & 0x03FF;
