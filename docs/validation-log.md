@@ -2035,3 +2035,10 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Aliases are read with `unique_field_in_base_chain`; duplicate aliases, missing required fields, negative dimensions, wrong value kinds, and unavailable image data all produce explicit errors rather than zero-filled output.
 - 9 new focused tests cover field reads, the `ActualImageSize` fallback and per-layer division, missing/negative/ambiguous fields, PNG export, inline-over-stream precedence, streamed-content requirement, and the normal-map unpack.
 - `cargo test --workspace --locked`: 795 library and 23 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+
+## CLI texture export (2026-10-05)
+
+- Added the `export-texture <serialized-file-index> <path-id> <new-output-image> <input-file> ...` CLI command. It mounts the selected inputs, loads the SerializedFile workspace, decodes the selected object, builds a `Texture2DView`, resolves inline or streamed image data through `resolve_and_read_streamed_resource_info`, and writes a PNG/BMP/TGA image via `export_texture2d_image`. The output extension selects the format (default PNG); an existing output file is never replaced.
+- Two generated generation-10 SerializedFile CLI-handler tests verify a PNG signature and status line, refusal to overwrite, and a non-texture object failing without output.
+- `cargo test --workspace --locked`: 795 library and 25 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.

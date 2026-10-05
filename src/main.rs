@@ -56,10 +56,13 @@ use assetripper::processing::scene_metadata::{
     decode_build_settings_scene_paths_from_parts, BuildSettingsSceneLimits,
 };
 use assetripper::resource::{
-    resolve_streamed_resource_info, scan_streamed_resource_infos, ResolvedResourceFile,
-    RootResourceCatalogLimits, RootResourceFileCatalog, StreamedResourceContentLimits,
+    resolve_and_read_streamed_resource_info, resolve_streamed_resource_info,
+    scan_streamed_resource_infos, ResolvedResourceFile, RootResourceCatalogLimits,
+    RootResourceFileCatalog, StreamedResourceContentLimits, StreamedResourceContentResolution,
     StreamedResourceInfo, StreamedResourceResolution, StreamedResourceScanLimits,
 };
+use assetripper::resources::image_export::ImageExportFormat;
+use assetripper::resources::texture::{export_texture2d_image, Texture2DView};
 use assetripper::scheme::{
     BatchMountLimits, BatchMountReport, ContainerMountLimits, PathMountInput, SchemeReader,
     SchemeReaderLimits,
@@ -144,6 +147,9 @@ fn run(arguments: impl Iterator<Item = OsString>) -> Result<(), Box<dyn Error>> 
     }
     if command == "export-file-yaml" {
         return export_file_yaml_from_arguments(arguments);
+    }
+    if command == "export-texture" {
+        return export_texture_from_arguments(arguments);
     }
     if command != "inspect" && command != "inspect-files" {
         print_usage();
@@ -241,6 +247,179 @@ fn export_object_yaml_from_arguments(
         &output_path,
         &mut output,
     )
+}
+
+fn export_texture_from_arguments(
+    arguments: impl Iterator<Item = OsString>,
+) -> Result<(), Box<dyn Error>> {
+    let mut arguments = arguments;
+    let serialized_file_index =
+        parse_required_argument::<usize>(arguments.next(), "SerializedFile index")?;
+    let path_id = parse_required_argument::<i64>(arguments.next(), "object PathID")?;
+    let output_path = arguments
+        .next()
+        .map(PathBuf::from)
+        .ok_or_else(|| invalid_input("export-texture requires an output image path"))?;
+    let mut input_files = Vec::new();
+    for argument in arguments {
+        if input_files.len() >= MAX_INPUT_PATHS {
+            return Err(invalid_input(format!(
+                "input path count exceeds {MAX_INPUT_PATHS}"
+            )));
+        }
+        input_files.push(PathBuf::from(argument));
+    }
+    if input_files.is_empty() {
+        return Err(invalid_input(
+            "export-texture requires at least one explicitly selected input file",
+        ));
+    }
+    let stdout = io::stdout();
+    let mut output = stdout.lock();
+    export_texture_to(
+        &input_files,
+        serialized_file_index,
+        path_id,
+        &output_path,
+        &mut output,
+    )
+}
+
+fn export_texture_to<W: io::Write>(
+    input_files: &[PathBuf],
+    serialized_file_index: usize,
+    path_id: i64,
+    output_path: &Path,
+    status_output: &mut W,
+) -> Result<(), Box<dyn Error>> {
+    let (mut filesystem, selected_paths, mount_report) = mount_input_files(input_files)?;
+    let mixed = MixedGameStructure::from_vfs_paths(
+        &filesystem,
+        &selected_paths,
+        MixedGameStructureLimits::default(),
+    )?;
+    let root_resources = RootResourceFileCatalog::from_mounted_explicit_resource_files(
+        &filesystem,
+        &mount_report.explicit_root_resource_files,
+        RootResourceCatalogLimits::default(),
+    )?;
+    if mixed.serialized_file_inputs.is_empty() {
+        return Err(invalid_input(
+            "the selected files contain no recognized SerializedFile input",
+        ));
+    }
+    let (workspace, _) = SerializedFileWorkspace::load_from_vfs_with_dependencies(
+        &mut filesystem,
+        &mixed.serialized_file_inputs,
+        &mixed.registered_files,
+        &mixed.data_paths,
+        SerializedFileWorkspaceLimits::default(),
+        DependencyIndexLimits::default(),
+        ContainerMountLimits::default(),
+    )?;
+    let file = workspace
+        .files()
+        .get(serialized_file_index)
+        .ok_or_else(|| {
+            invalid_input(format!(
+                "SerializedFile index {serialized_file_index} is out of range for {} loaded files",
+                workspace.files().len()
+            ))
+        })?;
+    let container_bundle_index = file.container_bundle_index;
+    let mut matching_objects = file
+        .metadata
+        .objects
+        .iter()
+        .enumerate()
+        .filter(|(_, object)| object.path_id == path_id);
+    let (object_index, _) = matching_objects.next().ok_or_else(|| {
+        invalid_input(format!(
+            "SerializedFile {serialized_file_index} has no object with PathID {path_id}"
+        ))
+    })?;
+    if matching_objects.next().is_some() {
+        return Err(invalid_data_owned(format!(
+            "SerializedFile {serialized_file_index} has multiple objects with PathID {path_id}"
+        ))
+        .into());
+    }
+
+    let objects =
+        ObjectWorkspace::load_from_vfs(&filesystem, &workspace, ObjectWorkspaceLimits::default())?;
+    let object = objects
+        .get(serialized_file_index, object_index)
+        .ok_or_else(|| invalid_data("selected workspace object is missing"))?;
+    let payload = object.payload.as_ref().map_err(|error| {
+        invalid_data_owned(format!(
+            "SerializedFile {serialized_file_index} PathID {path_id} could not be decoded: {error}"
+        ))
+    })?;
+    let view = Texture2DView::from_value(&payload.root).map_err(|error| {
+        invalid_data_owned(format!(
+            "SerializedFile {serialized_file_index} PathID {path_id} is not an exportable Texture2D: {error}"
+        ))
+    })?;
+
+    let stream_bytes: Option<Vec<u8>> = match &view.stream_data {
+        Some(info) if view.image_data.is_empty() && info.is_set() => {
+            let provider =
+                PlatformResourceProvider::with_mixed_data_paths(None, Some(&mixed.data_paths));
+            let resolution = resolve_and_read_streamed_resource_info(
+                &filesystem,
+                &workspace,
+                container_bundle_index,
+                info,
+                &root_resources,
+                &provider,
+                StreamedResourceContentLimits::default(),
+            )
+            .map_err(|error| {
+                invalid_data_owned(format!(
+                    "SerializedFile {serialized_file_index} PathID {path_id} streamed resource '{}' could not be read: {error}",
+                    info.path
+                ))
+            })?;
+            match resolution {
+                StreamedResourceContentResolution::Resolved { bytes, .. } => Some(bytes),
+                StreamedResourceContentResolution::Missing {
+                    unavailable_data_paths,
+                } => {
+                    return Err(invalid_data_owned(format!(
+                        "SerializedFile {serialized_file_index} PathID {path_id} streamed resource '{}' is missing; unavailable data paths: {unavailable_data_paths:?}",
+                        info.path
+                    ))
+                    .into());
+                }
+                StreamedResourceContentResolution::Unset => None,
+            }
+        }
+        _ => None,
+    };
+
+    let format = output_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .and_then(ImageExportFormat::try_from_extension)
+        .unwrap_or(ImageExportFormat::Png);
+    let image =
+        export_texture2d_image(&view, stream_bytes.as_deref(), format).map_err(|error| {
+            invalid_data_owned(format!(
+            "SerializedFile {serialized_file_index} PathID {path_id} texture export failed: {error}"
+        ))
+        })?;
+    let mut destination = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output_path)?;
+    destination.write_all(&image)?;
+    writeln!(
+        status_output,
+        "Wrote a {} texture from SerializedFile {serialized_file_index} PathID {path_id} to {:?}.",
+        format.file_extension(),
+        output_path
+    )?;
+    Ok(())
 }
 
 fn parse_required_argument<T>(
@@ -2542,7 +2721,7 @@ fn invalid_data_owned(message: String) -> io::Error {
 
 fn print_usage() {
     println!(
-        "Usage:\n  assetripper-rs inspect <input-directory> [input-directory ...]\n  assetripper-rs inspect-files <input-file> [input-file ...]\n  assetripper-rs export-object-yaml <serialized-file-index> <path-id> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-file-yaml <serialized-file-index> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs --help\n  assetripper-rs --version\n\n`inspect` mounts directories into isolated VFS roots. `inspect-files` dispatches explicitly selected file paths, registers top-level ResourceFiles as GameBundle root inputs, and reports the parsed SerializedFiles. `export-object-yaml` writes one decoded object as YAML. `export-file-yaml` writes YAML-exportable objects from one SerializedFile in object-table order, resolves streamed Mesh and image-texture bytes, preserves intra-file references through source PathIDs, and refuses unresolved or cross-file references. It reports ImageTexture objects omitted by the baseline when they have no usable image data. Neither command replaces an existing output file. These are YAML paths, not a complete Unity project export."
+        "Usage:\n  assetripper-rs inspect <input-directory> [input-directory ...]\n  assetripper-rs inspect-files <input-file> [input-file ...]\n  assetripper-rs export-object-yaml <serialized-file-index> <path-id> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-file-yaml <serialized-file-index> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-texture <serialized-file-index> <path-id> <new-output-image> <input-file> [input-file ...]\n  assetripper-rs --help\n  assetripper-rs --version\n\n`inspect` mounts directories into isolated VFS roots. `inspect-files` dispatches explicitly selected file paths, registers top-level ResourceFiles as GameBundle root inputs, and reports the parsed SerializedFiles. `export-object-yaml` writes one decoded object as YAML. `export-file-yaml` writes YAML-exportable objects from one SerializedFile in object-table order, resolves streamed Mesh and image-texture bytes, preserves intra-file references through source PathIDs, and refuses unresolved or cross-file references. It reports ImageTexture objects omitted by the baseline when they have no usable image data. `export-texture` decodes one class-28 Texture2D, resolves its inline or streamed image data, and writes a PNG/BMP/TGA image; the output extension selects the format (default PNG). None of these commands replaces an existing output file. These are YAML and texture paths, not a complete Unity project export."
     );
 }
 
@@ -3326,6 +3505,91 @@ mod tests {
         file
     }
 
+    fn make_texture2d_file() -> Vec<u8> {
+        let mut string_buffer = Vec::new();
+        let root_type = push_type_tree_string(&mut string_buffer, "Texture2D");
+        let empty_name = push_type_tree_string(&mut string_buffer, "");
+        let int_type = push_type_tree_string(&mut string_buffer, "int");
+        let width_name = push_type_tree_string(&mut string_buffer, "m_Width");
+        let height_name = push_type_tree_string(&mut string_buffer, "m_Height");
+        let format_name = push_type_tree_string(&mut string_buffer, "m_TextureFormat");
+        let complete_size_name = push_type_tree_string(&mut string_buffer, "m_CompleteImageSize");
+        let image_count_name = push_type_tree_string(&mut string_buffer, "m_ImageCount");
+        let uint8_type = push_type_tree_string(&mut string_buffer, "UInt8");
+        let lightmap_name = push_type_tree_string(&mut string_buffer, "m_LightmapFormat");
+        let typeless_data_type = push_type_tree_string(&mut string_buffer, "TypelessData");
+        let image_data_name = push_type_tree_string(&mut string_buffer, "image data");
+        let size_name = push_type_tree_string(&mut string_buffer, "size");
+        let data_name = push_type_tree_string(&mut string_buffer, "data");
+
+        let data: [u8; 8] = [10, 20, 30, 255, 40, 50, 60, 255];
+        let mut metadata = Vec::new();
+        metadata.extend_from_slice(b"2019.4.0f1\0");
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 1);
+        put_i32_le(&mut metadata, 28);
+        put_i32_le(&mut metadata, 10);
+        put_i32_le(&mut metadata, i32::try_from(string_buffer.len()).unwrap());
+        for (level, type_offset, name_offset, byte_size, index) in [
+            (0, root_type, empty_name, -1, 0),
+            (1, int_type, width_name, 4, 1),
+            (1, int_type, height_name, 4, 2),
+            (1, int_type, format_name, 4, 3),
+            (1, int_type, complete_size_name, 4, 4),
+            (1, int_type, image_count_name, 4, 5),
+            (1, uint8_type, lightmap_name, 1, 6),
+            (1, typeless_data_type, image_data_name, -1, 7),
+            (2, int_type, size_name, 4, 8),
+            (2, uint8_type, data_name, 1, 9),
+        ] {
+            put_node(
+                &mut metadata,
+                level,
+                type_offset,
+                name_offset,
+                byte_size,
+                index,
+            );
+        }
+        metadata.extend_from_slice(&string_buffer);
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 1);
+        put_i32_le(&mut metadata, 42);
+        put_u32_le(&mut metadata, 0);
+
+        let mut payload = Vec::new();
+        put_i32_le(&mut payload, 2); // m_Width
+        put_i32_le(&mut payload, 1); // m_Height
+        put_i32_le(&mut payload, 4); // m_TextureFormat (RGBA32)
+        put_i32_le(&mut payload, i32::try_from(data.len()).unwrap()); // m_CompleteImageSize
+        put_i32_le(&mut payload, 1); // m_ImageCount
+        payload.push(0); // m_LightmapFormat
+        put_i32_le(&mut payload, i32::try_from(data.len()).unwrap());
+        payload.extend_from_slice(&data);
+        let padding = (4 - payload.len() % 4) % 4;
+        payload.resize(payload.len() + padding, 0);
+
+        put_i32_le(&mut metadata, i32::try_from(payload.len()).unwrap());
+        put_i32_le(&mut metadata, 28);
+        put_u16_le(&mut metadata, 28);
+        put_u16_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 0);
+        metadata.push(0);
+
+        let data_offset = 20 + metadata.len();
+        let file_size = data_offset + payload.len();
+        let mut file = Vec::with_capacity(file_size);
+        file.extend_from_slice(&i32::try_from(metadata.len()).unwrap().to_be_bytes());
+        file.extend_from_slice(&u32::try_from(file_size).unwrap().to_be_bytes());
+        file.extend_from_slice(&10i32.to_be_bytes());
+        file.extend_from_slice(&u32::try_from(data_offset).unwrap().to_be_bytes());
+        file.push(0);
+        file.extend_from_slice(&[0; 3]);
+        file.extend_from_slice(&metadata);
+        file.extend_from_slice(&payload);
+        file
+    }
+
     fn make_build_settings_file(scene_paths: &[&str]) -> Vec<u8> {
         make_build_settings_file_with_path_id(scene_paths, 42)
     }
@@ -3704,6 +3968,68 @@ mod tests {
         assert!(String::from_utf8(status)
             .unwrap()
             .contains("Skipped SerializedFile 0 PathID 77"));
+        assert!(!output_path.exists());
+        drop(input);
+    }
+
+    #[test]
+    fn export_texture_writes_png_and_refuses_overwrite() {
+        let directory = TestInputDirectory::new_root();
+        let serialized_path = directory.join("main.assets");
+        let output_path = directory.join("texture.png");
+        fs::write(&serialized_path, make_texture2d_file()).unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![serialized_path.clone(), output_path.clone()],
+            subdirectories: Vec::new(),
+        };
+
+        let mut status = Vec::new();
+        super::export_texture_to(
+            std::slice::from_ref(&serialized_path),
+            0,
+            42,
+            &output_path,
+            &mut status,
+        )
+        .unwrap();
+        let png = fs::read(&output_path).unwrap();
+        assert_eq!(&png[..8], &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
+        assert!(String::from_utf8(status)
+            .unwrap()
+            .contains("Wrote a png texture from SerializedFile 0 PathID 42"));
+
+        let original = png;
+        let error =
+            super::export_texture_to(&[serialized_path], 0, 42, &output_path, &mut Vec::new())
+                .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<io::Error>().unwrap().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(fs::read(&output_path).unwrap(), original);
+        drop(input);
+    }
+
+    #[test]
+    fn export_texture_reports_a_non_texture_object_without_creating_output() {
+        let directory = TestInputDirectory::new_root();
+        let serialized_path = directory.join("main.assets");
+        let output_path = directory.join("texture.png");
+        fs::write(
+            &serialized_path,
+            make_build_settings_file(&["Assets/A.unity"]),
+        )
+        .unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![serialized_path.clone(), output_path.clone()],
+            subdirectories: Vec::new(),
+        };
+
+        let result =
+            super::export_texture_to(&[serialized_path], 0, 42, &output_path, &mut Vec::new());
+        assert!(result.is_err());
         assert!(!output_path.exists());
         drop(input);
     }
