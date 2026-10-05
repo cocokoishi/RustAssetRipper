@@ -630,5 +630,11 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Inventoried `GUI.Free` + `GUI.Web` pages/routes/flags with call chains read directly. `PRODUCT-GUI-001` moves to `已调查`; fixed wrong `GameFileLoader` symbols in `PRODUCT-CLI-INSPECT-001`. Docs-only increment; CI run `37306891363` green (all five jobs) for remote `main` = `6a8712d`; local matches.
 - Next: `TYPE-SCRIPT-001` remainder (manager resolutions), CLI exposure + GUID freshness + folder sidecars, and settings persistence.
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 78. Checkpoint: ledger duplicate repair (2026-10-06)
+
+- Split the colliding `EXP-EXPORT-SETTINGS-001` rows into records + `EXP-EXPORT-SETTINGS-DIFF-001` (stale verified claim honestly normalized). Gate re-run: 356 rows, 0 duplicates, 0 malformed, 105 non-verified, OPEN. Docs-only increment; no cargo runs needed.
+- Next: `TYPE-SCRIPT-001` remainder (manager resolutions), CLI exposure + GUID freshness + folder sidecars, and settings persistence.
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
 - Next: `TYPE-SCRIPT-001` remainder (manager resolutions), CLI exposure + GUID freshness + folder sidecars, and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
