@@ -495,3 +495,10 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - `cargo test --workspace --locked`: 881 library and 33 CLI tests; warnings-denied Clippy and format check pass.
 - Next: the animation rows (`RES-ANIM-001`/`PROC-ANIM-001`), `RES-AUDIO-001`, parsed-form shader dummy, blend shapes/scene-level GLB assembly, `EXPORT-UNITY-001`, `TYPE-SCRIPT-001`, and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 58. Checkpoint: Custom-curve attribute tables + regex differential (2026-10-05)
+
+- Added `src/resources/custom_curve.rs` (constraint tables, `Renderer`/`RendererMaterial`/`SpriteRenderer` branches, `BindingCustomType`/`TransformType`, prefixes, regex-free `is_unknown_path`) with a 21-row .NET-regex differential (`src/resources/custom_curve_rpath_fixture.txt`). New row `PROC-ANIM-CUSTOM-CURVE-001` at `已实现但未验证`; `DIFF-CUSTOM-CURVE-REGEX-001` recorded. Scene/checksum branches stay open with explicit errors.
+- `cargo test --workspace --locked`: 889 library and 33 CLI tests; warnings-denied Clippy and format check pass.
+- Next: `AnimationClipConverter` core (bindings cache, streamed/dense/constant processing), `RES-AUDIO-001`, parsed-form shader dummy, `RES-ANIM-001` remainder, `EXPORT-UNITY-001`, `TYPE-SCRIPT-001`, and the product rows.
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

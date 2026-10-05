@@ -24,6 +24,7 @@ pub mod compressed_mesh;
 pub mod constant_clip;
 pub mod controller_constant;
 pub mod curve_wrappers;
+pub mod custom_curve;
 pub mod dense_clip;
 pub mod etc_decode;
 pub mod game_object;

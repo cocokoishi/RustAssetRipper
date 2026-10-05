@@ -2122,3 +2122,10 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - Added `src/resources/shader.rs` (`ShaderView` with byte-oriented reads, presence-driven gates) and `export_shader_text` in `src/export/shader_export.rs` (stack order with explicit `YamlModeWritesAsset`/`ParsedFormUnsupported`/`MissingSubShader` errors). New `export-shader` CLI (`--shader-export-mode`, class-48 guard, overwrite refusal) and a synthetic class-21 `.mat` YAML emission test through the generic object-YAML path.
 - `RES-MATERIAL-EXPORT-001` moves from `已调查` to `已实现但未验证`; recorded as `DIFF-SHADER-DUMMY-001`. The parsed-form dummy path stays open (explicit error, not a silent fallback).
 - `cargo test --workspace --locked`: 881 library and 33 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+## Custom-curve attribute tables with a regex differential (2026-10-05)
+
+- Added `src/resources/custom_curve.rs`: `BindingCustomType` (all 22 discriminants) and `TransformType`/`GetDimension` from the snapshot enums, the six constraint property tables (low nibble plus `attribute >> 8` indices), the `Renderer`/`RendererMaterial`/`SpriteRenderer` branches, the six converter prefixes, and a regex-free `is_unknown_path` matcher.
+- Probe `Temp/opencode/rpathprobe` (SDK 10.0.401) evaluated the real .NET `UnknownPathRegex` on 21 paths; all rows committed as `src/resources/custom_curve_rpath_fixture.txt` and asserted exactly. Scene/checksum-dependent branches (blend-shape and material CRC lookups, `TryGetPath` tables, `ReverseAscii` fallbacks) stay caller-side; unknown attributes and unsupported types are explicit errors like the source throws.
+- New ledger row `PROC-ANIM-CUSTOM-CURVE-001` at `已实现但未验证`; recorded as `DIFF-CUSTOM-CURVE-REGEX-001`.
+- `cargo test --workspace --locked`: 889 library and 33 CLI tests; warnings-denied Clippy and format check pass. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.

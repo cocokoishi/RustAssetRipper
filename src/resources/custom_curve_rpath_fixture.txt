@@ -1,0 +1,25 @@
+# CustomCurveResolver.UnknownPathRegex reference values.
+# Probe Temp/opencode/rpathprobe: .NET Regex '^path_0x[0-9A-F]{1,10}_[H-Wh-w]{6}[HJLN]$'
+# (RegexOptions.Compiled, SDK 10.0.401), the pattern from the frozen snapshot.
+# Format: RPATH|<path>|<0|1>.
+RPATH|path_0x1A2B_HJKLMNN|1
+RPATH|path_0x0_HHHHHHH|1
+RPATH|path_0xFFFFFFFFFF_hhhhhhN|1
+RPATH|path_0xDEADBEEF1_mnopqrL|1
+RPATH|path_0x1A2B_HJKLMN|0
+RPATH|path_0x1A2B_HJKLMNQQ|0
+RPATH|path_0x1a2b_HJKLMNN|0
+RPATH|typetree_0x1A_HJKLMNN|0
+RPATH|path_0x_HJKLMNN|0
+RPATH|path_0x123456789AB_HJKLMNN|0
+RPATH|path_0x1A2B_ABCDEFH|0
+RPATH|path_0x1A2B_HJKLMNX|0
+RPATH|path_0x1A2B_HJKLMNQ|0
+RPATH|path_0x1A2B_HJKLMN |0
+RPATH|path_0xF_GGGGGGH|0
+RPATH|path_0xF_ggggggH|0
+RPATH|path_0xF_GGGGGGG|0
+RPATH|path_0xF_HJKLMNM|0
+RPATH||0
+RPATH|path_0x|0
+RPATH|path_0x1_234567H|0
