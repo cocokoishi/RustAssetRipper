@@ -609,7 +609,7 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 
 ## 74. Checkpoint: tool audit (2026-10-06)
 
-- Audited all fifteen tool-family projects (9 dev/diagnostic consoles + 7-project `AssemblyDumper` family) with per-tool input/output/consumer triples, `OutputType` and `generate.bat` spot-verified. `TOOLS-001` moves to `已调查` with Rust dispositions (no CLI equivalent owed as product surface; never port the emitter; no doc-pipeline/downloader/packaging equivalents). Docs-only increment; no cargo runs needed.
+- Audited all fifteen tool-family projects (9 dev/diagnostic consoles + 7-project `AssemblyDumper` family) with per-tool input/output/consumer triples, `OutputType` and `generate.bat` spot-verified. `TOOLS-001` moves to `已调查` with Rust dispositions (no CLI equivalent owed as product surface; never port the emitter; no doc-pipeline/downloader/packaging equivalents). Docs-only increment; CI run `37305025403` green (all five jobs) for remote `main` = `db0f5d1`; local matches.
 - Next: `TYPE-SCRIPT-001` remainder (manager resolutions), CLI exposure + GUID freshness + folder sidecars, and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
 - Next: `TYPE-SCRIPT-001` remainder (manager resolutions), CLI exposure + GUID freshness + folder sidecars, and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
