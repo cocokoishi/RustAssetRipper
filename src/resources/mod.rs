@@ -38,6 +38,7 @@ pub mod material;
 pub mod matrix4x4;
 pub mod mesh;
 pub mod mesh_data;
+pub mod mesh_metric;
 pub mod min_max_gradient;
 pub mod muscle_clip_info;
 pub mod packed_bit_vector;

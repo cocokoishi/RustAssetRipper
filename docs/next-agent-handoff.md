@@ -464,15 +464,25 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - `cargo test --workspace --locked`: 853 library and 28 CLI tests; warnings-denied Clippy passes.
 - Next: the same differential treatment for skin/bind-pose/blend-shape mesh paths and the class-43 field reader (`RES-MESH-VIEW-001` still `已实现但未验证`); then `RES-MATERIAL-EXPORT-001` (`.mat`/`.shader`), the animation rows (`RES-ANIM-001`/`PROC-ANIM-001`), `RES-AUDIO-001`, `RES-MODEL-001` (blend shapes, `CalculateMeshMetric`, scene-level GLB), `EXPORT-UNITY-001`, `TYPE-SCRIPT-001`, and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
 ## 54. Checkpoint: Mesh TypeTree gates from the reference Tpk (2026-10-05)
 
-- Committed src/resources/mesh_typetree_fixture.txt (real class-43 release TypeTrees for four Unity versions, dumped from the reference SourceTpk) and fixed three version-gate defects the trees exposed in src/resources/mesh.rs.
-- 18 mesh tests pass, including the per-version TypeTree assertions and the Unity 3.5 fixed-stream reader test. cargo test --workspace --locked: 857 library and 28 CLI tests; warnings-denied Clippy and format check pass.
-- Next: RES-MATERIAL-EXPORT-001 (.mat/.shader), the animation rows (RES-ANIM-001/PROC-ANIM-001), RES-AUDIO-001, RES-MODEL-001 (blend shapes, CalculateMeshMetric, scene-level GLB), EXPORT-UNITY-001, TYPE-SCRIPT-001, and the product rows (PRODUCT-CONFIG/GUI/I18N-001, GENERATORS-001, TOOLS-001).
+- Committed `src/resources/mesh_typetree_fixture.txt` (real class-43 release TypeTrees for four Unity versions, dumped from the reference `SourceTpk`) and fixed three version-gate defects the trees exposed in `src/resources/mesh.rs`.
+- 18 mesh tests pass, including the per-version TypeTree assertions and the Unity 3.5 fixed-stream reader test. `cargo test --workspace --locked`: 857 library and 28 CLI tests; warnings-denied Clippy and format check pass.
+- Next: `RES-MATERIAL-EXPORT-001` (`.mat`/`.shader`), the animation rows (`RES-ANIM-001`/`PROC-ANIM-001`), `RES-AUDIO-001`, `RES-MODEL-001` (blend shapes, `CalculateMeshMetric`, scene-level GLB), `EXPORT-UNITY-001`, `TYPE-SCRIPT-001`, and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
 ## 55. Checkpoint: Scene-GLB material texture selection (2026-10-05)
 
-- Added glb_material_textures (GlbLevelBuilder.GetTextures name routing) with six tests; new ledger row RES-MODEL-GLB-MATERIAL-001 at ???.
-- cargo test --workspace --locked: 863 library and 28 CLI tests; warnings-denied Clippy passes.
-- Next: RES-MATERIAL-EXPORT-001 (.mat/.shader), the animation rows, RES-AUDIO-001, blend shapes/CalculateMeshMetric/scene-level GLB assembly, EXPORT-UNITY-001, TYPE-SCRIPT-001, and the product rows.
+- Added `MaterialView::glb_material_textures` (`GlbLevelBuilder.GetTextures` name routing) with six tests; new ledger row `RES-MODEL-GLB-MATERIAL-001` at `已实现但未验证`.
+- `cargo test --workspace --locked`: 863 library and 28 CLI tests; warnings-denied Clippy passes.
+- Next: `RES-MATERIAL-EXPORT-001` (`.mat`/`.shader`), the animation rows, `RES-AUDIO-001`, blend shapes/`CalculateMeshMetric`/scene-level GLB assembly, `EXPORT-UNITY-001`, `TYPE-SCRIPT-001`, and the product rows.
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 56. Checkpoint: Mesh metric differential + doc-encoding repair (2026-10-05)
+
+- Added `src/resources/mesh_metric.rs` (`TriangleEnumerable`/`CalculateMeshMetric`) with an exact-match runtime differential (`src/resources/mesh_metric_fixture.txt`); resolved the `Fill` stamp version gate (`Mesh_2019` stamps, `Mesh_5` discards). New row `RES-MESH-METRIC-001` at `已验证`.
+- Repaired doc corruption from shell heredoc appends (PowerShell backtick escapes and transport mojibake ate backticks/CJK in four appended blocks): truncated and rewrote them via the edit tool; verified zero control bytes and intact CJK/backticks. Rule going forward: docs are written only through the edit/write tools, never shell heredocs.
+- `cargo test --workspace --locked`: 874 library and 28 CLI tests; warnings-denied Clippy and format check pass.
+- Next: `RES-MATERIAL-EXPORT-001` (`.mat`/`.shader`), the animation rows (`RES-ANIM-001`/`PROC-ANIM-001`), `RES-AUDIO-001`, blend shapes/scene-level GLB assembly, `EXPORT-UNITY-001`, `TYPE-SCRIPT-001`, and the product rows (`PRODUCT-CONFIG/GUI/I18N-001`, `GENERATORS-001`, `TOOLS-001`).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

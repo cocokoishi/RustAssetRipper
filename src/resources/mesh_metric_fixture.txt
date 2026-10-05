@@ -1,0 +1,16 @@
+# `MeshExtensions.CalculateMeshMetric` reference values.
+# Probe Temp/opencode/meshread: direct expression-tree invocation of the private static
+# `CalculateMeshMetric` in the shipped AssetRipper.SourceGenerated.Extensions.dll (SDK 10.0.401).
+# Format: MTRCDIRECT|<case>|<Single.ToString()>.
+# square: unit triangle, unit UVs. scaled: unit triangle, 2x UVs. flat: degenerate UVs.
+# empty: empty buffers. strip: unit quad as a triangle strip with unit UVs.
+MTRCDIRECT|square|1
+MTRCDIRECT|scaled|0.25
+MTRCDIRECT|flat|1
+MTRCDIRECT|empty|1
+MTRCDIRECT|strip|0.5
+# FillWithCompressedMeshData stamps MeshMetrics_0_/1_ only when the generated class
+# carries the fields (Has_MeshMetrics_0_/1_ true on Mesh_2019, false on Mesh_5).
+# Format: MTRCVERSION|<mesh version>|<MeshMetrics_0_>|<MeshMetrics_1_>.
+MTRCVERSION|2019.4.0f1|1|1
+MTRCVERSION|5.0.0f1|0|0

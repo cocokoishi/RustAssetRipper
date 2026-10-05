@@ -1252,6 +1252,19 @@ mod tests {
                 !pre_unity_5,
                 "{version} m_UVInfo gate"
             );
+            // `m_MeshMetrics[0/1]` exist only on Unity 2019+. A pre-2019 generated class
+            // discards the `FillWithCompressedMeshData` stamp (`Has_MeshMetrics_0_/1_` false
+            // on `Mesh_5`, true on `Mesh_2019`); see `DIFF-MESH-METRIC-001`.
+            let has_metrics = version == "2019.0.0a0" || version == "6000.6.0a5";
+            for field in ["m_MeshMetrics[0]", "m_MeshMetrics[1]"] {
+                assert_eq!(
+                    nodes
+                        .iter()
+                        .any(|node| node.level == 1 && node.name == field),
+                    has_metrics,
+                    "{version} {field} gate"
+                );
+            }
         }
     }
 
