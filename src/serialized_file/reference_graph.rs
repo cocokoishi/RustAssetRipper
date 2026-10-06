@@ -798,6 +798,30 @@ impl<'a> MultiFileReferenceGraph<'a> {
             .get(external_index)
     }
 
+    /// Return the distinct source external-table indexes with no loaded dependency
+    /// file, in ascending identifier order.
+    ///
+    /// This mirrors `SerializedAssetCollection.InitializeDependencyList` reporting
+    /// each unresolved identifier once: several PPtrs can share one external slot,
+    /// but the missing dependency is reported per identifier, not per reference.
+    /// Pair with `dependency_identifier` to fetch the reported entries.
+    pub fn missing_dependency_indexes(&self, source_file_index: usize) -> Vec<usize> {
+        let mut indexes: Vec<usize> = self
+            .references
+            .iter()
+            .filter(|reference| reference.source_file_index == source_file_index)
+            .filter_map(|reference| match reference.resolution {
+                MultiFilePPtrResolution::MissingDependency { external_index, .. } => {
+                    Some(external_index)
+                }
+                _ => None,
+            })
+            .collect();
+        indexes.sort_unstable();
+        indexes.dedup();
+        indexes
+    }
+
     /// Return every supplied file matching the source-normalized dependency name.
     pub fn candidate_file_indices<'b>(
         &'b self,
@@ -1804,6 +1828,55 @@ mod tests {
             [(0, 0), (0, 2)]
         );
         assert_eq!(graph.references_from_object(4, 0).count(), 0);
+    }
+
+    #[test]
+    fn missing_dependencies_report_each_unresolved_identifier_once() {
+        let source_metadata = metadata(&[11]);
+        let mut source_graph = graph_with_reference(&[11], 11, 1, 22);
+        // A second PPtr shares external slot 0; a third uses slot 1.
+        source_graph.references.push(SerializedObjectReference {
+            source_object_index: 0,
+            source_path_id: 11,
+            field_path: "m_Other".to_owned(),
+            file_id: 1,
+            path_id: 23,
+        });
+        source_graph.references.push(SerializedObjectReference {
+            source_object_index: 0,
+            source_path_id: 11,
+            field_path: "m_Third".to_owned(),
+            file_id: 2,
+            path_id: 24,
+        });
+        let unrelated_metadata = metadata(&[22]);
+        let unrelated_graph = empty_graph(&[22]);
+        let files = [
+            NamedObjectReferenceGraph {
+                file_name: "main.assets",
+                metadata: &source_metadata,
+                graph: &source_graph,
+            },
+            NamedObjectReferenceGraph {
+                file_name: "different.assets",
+                metadata: &unrelated_metadata,
+                graph: &unrelated_graph,
+            },
+        ];
+        let graph = MultiFileReferenceGraph::build(&files).unwrap();
+        // Slot 0 is shared by two references but reported once, in identifier order.
+        assert_eq!(graph.missing_dependency_indexes(0), [0, 1]);
+        assert_eq!(
+            graph.dependency_identifier(0, 0).unwrap().fixed_path_name(),
+            "shared.assets"
+        );
+        assert_eq!(
+            graph.dependency_identifier(0, 1).unwrap().fixed_path_name(),
+            "scene.assets"
+        );
+        // Files without missing dependencies report nothing; neither do unknown files.
+        assert_eq!(graph.missing_dependency_indexes(1), Vec::<usize>::new());
+        assert_eq!(graph.missing_dependency_indexes(7), Vec::<usize>::new());
     }
 
     #[test]

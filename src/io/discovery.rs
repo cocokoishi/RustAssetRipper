@@ -15,6 +15,9 @@
 //! explicit error when a regular file collides with a split group on the same
 //! logical path. `expand_import_paths` additionally accepts files alongside
 //! directories, mirroring the reference tools' mixed `GetAllFilePaths` inputs.
+//! An explicitly passed split part keeps its part path but reports the logical
+//! base name, mirroring `GetFileName`; its size stays the single part as-is,
+//! with group resolution left to the opener.
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -174,7 +177,7 @@ pub fn expand_import_paths(
                     })?;
             inputs.push(DiscoveredInput {
                 path: path.clone(),
-                relative_path: PathBuf::from(name),
+                relative_path: explicit_file_logical_path(name),
                 source_bytes,
             });
             report.discovered_inputs = inputs.len();
@@ -482,6 +485,14 @@ fn split_logical_path(path: &Path) -> (PathBuf, bool) {
     (path.with_file_name(base), true)
 }
 
+/// Logical relative name for an explicitly passed import file.
+///
+/// Mirrors `GetFileName`: a split part folds to its base name so explicit file inputs agree
+/// with directory-discovered groups; any other file keeps its name.
+pub fn explicit_file_logical_path(file_name: &str) -> PathBuf {
+    split_logical_path(Path::new(file_name)).0
+}
+
 fn discovery_error(
     report: &DirectoryDiscoveryReport,
     path: &Path,
@@ -555,8 +566,8 @@ impl Error for DirectoryDiscoveryErrorKind {
 #[cfg(test)]
 mod tests {
     use super::{
-        discover_directory_inputs, expand_import_paths, split_logical_path,
-        DirectoryDiscoveryErrorKind,
+        discover_directory_inputs, expand_import_paths, explicit_file_logical_path,
+        split_logical_path, DirectoryDiscoveryErrorKind,
     };
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -782,6 +793,28 @@ mod tests {
         assert_eq!(report.discovered_inputs, 2);
         assert_eq!(report.skipped_inputs, 1);
         assert_eq!(report.source_bytes, 8);
+    }
+
+    #[test]
+    fn explicit_split_part_files_fold_to_their_logical_name() {
+        assert_eq!(
+            explicit_file_logical_path("data.bundle.split0"),
+            PathBuf::from("data.bundle")
+        );
+        assert_eq!(
+            explicit_file_logical_path("direct.bin"),
+            PathBuf::from("direct.bin")
+        );
+        // End-to-end: an explicitly passed part keeps its part path but reports the base name.
+        let root = TestDiscoveryRoot::new();
+        let part = root.write("data.bundle.split0", b"aa");
+        let (expanded, report) =
+            expand_import_paths(std::slice::from_ref(&part), 10_000, 16, 10_000).unwrap();
+        assert_eq!(expanded.len(), 1);
+        assert_eq!(expanded[0].path, part);
+        assert_eq!(expanded[0].relative_path, PathBuf::from("data.bundle"));
+        assert_eq!(expanded[0].source_bytes, 2);
+        assert_eq!(report.discovered_inputs, 1);
     }
 
     #[test]

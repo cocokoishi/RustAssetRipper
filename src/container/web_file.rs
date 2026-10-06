@@ -174,23 +174,7 @@ impl<'a> WebFile<'a> {
                 ));
             }
 
-            let start = offset as usize;
-            let end = start.checked_add(size as usize).ok_or_else(|| {
-                WebFileError::new(WebFileErrorKind::EntryRangeOverflow {
-                    entry: entries.len(),
-                    offset: start,
-                    size: size as usize,
-                })
-            })?;
-            let range = start..end;
-            if end > input.len() {
-                return Err(WebFileError::new(WebFileErrorKind::EntryOutOfBounds {
-                    entry: entries.len(),
-                    offset: start,
-                    size: size as usize,
-                    input_size: input.len(),
-                }));
-            }
+            let range = entry_byte_range(entries.len(), offset as u32, size as u32, input.len())?;
 
             let mut owned_name = String::new();
             owned_name.try_reserve_exact(name.len()).map_err(|_| {
@@ -335,6 +319,39 @@ impl<'a> WebFile<'a> {
 /// bring the output length up to a multiple of four.
 fn entry_padding(output_len: usize) -> usize {
     (4 - (output_len & 3)) & 3
+}
+
+/// Checked entry payload range over caller facts: the stored offset and size widen
+/// without wrapping (`EntryRangeOverflow`), then the range must land inside the input
+/// (`EntryOutOfBounds`). This mirrors the `entry.Offset + basePosition` addressing and
+/// the exact-sized payload read of `WebFile.Read`; inputs not starting at the container
+/// base are the caller's to slice, as documented above. Callers pass the offset and
+/// size after the negativity checks, so the `u32` widening cannot wrap. On 64-bit
+/// targets `u32` pairs cannot overflow `usize`, so the overflow arm only fires on
+/// 32-bit targets; it is preserved from the inline check it replaces.
+fn entry_byte_range(
+    entry: usize,
+    offset: u32,
+    size: u32,
+    input_size: usize,
+) -> Result<std::ops::Range<usize>, WebFileError> {
+    let start = offset as usize;
+    let end = start.checked_add(size as usize).ok_or_else(|| {
+        WebFileError::new(WebFileErrorKind::EntryRangeOverflow {
+            entry,
+            offset: start,
+            size: size as usize,
+        })
+    })?;
+    if end > input_size {
+        return Err(WebFileError::new(WebFileErrorKind::EntryOutOfBounds {
+            entry,
+            offset: start,
+            size: size as usize,
+            input_size,
+        }));
+    }
+    Ok(start..end)
 }
 
 fn read_7bit_length(reader: &mut BinaryReader<'_>) -> Result<usize, WebFileError> {
@@ -733,6 +750,29 @@ mod tests {
         assert_eq!(super::entry_padding(4), 0);
         assert_eq!(super::entry_padding(5), 3);
         assert_eq!(super::entry_padding(8), 0);
+    }
+
+    #[test]
+    fn entry_ranges_accept_inside_reject_outside() {
+        assert_eq!(super::entry_byte_range(0, 20, 8, 64), Ok(20..28));
+        assert_eq!(super::entry_byte_range(0, 20, 0, 20), Ok(20..20));
+        let error = super::entry_byte_range(2, 60, 8, 64).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            WebFileErrorKind::EntryOutOfBounds {
+                entry: 2,
+                offset: 60,
+                size: 8,
+                input_size: 64,
+            }
+        ));
+        // The parse path applies the same decision: a past-end entry is rejected.
+        let mut overrun = web_file_with_one_entry("x", b"data");
+        overrun[20..24].copy_from_slice(&i32::MAX.to_le_bytes());
+        assert!(matches!(
+            WebFile::parse(&overrun).unwrap_err().kind(),
+            WebFileErrorKind::EntryOutOfBounds { .. }
+        ));
     }
 
     fn web_file_with_entries(records: &[(&str, &[u8])]) -> Vec<u8> {

@@ -1107,6 +1107,11 @@ impl Seek for MultiFileStream {
     }
 }
 
+/// Shared end-relative seek decision for the partial, file-range, and multi-file views:
+/// `End` offsets add to the length (BCL semantics), so `End(0)` is the end, negative
+/// offsets count back, and positive offsets may run past the end (reads then clamp).
+/// This deliberately does not follow `RandomAccessStream.Seek`, which subtracts its
+/// offset (`Length - offset`); the port stays BCL-correct on every view instead.
 fn seek_target(position: u64, length: u64, from: SeekFrom) -> io::Result<u64> {
     let base = match from {
         SeekFrom::Start(value) => return Ok(value),
@@ -1180,6 +1185,34 @@ mod tests {
         assert!(PartialStream::new(source, 2, 2).is_err());
         let source = Cursor::new(b"abc".to_vec());
         assert!(PartialStream::new(source, u64::MAX, 1).is_err());
+    }
+
+    /// End-relative seeks follow BCL semantics on both partial views: `End(0)` is the
+    /// end, negative offsets count back, and positive offsets may run past the end
+    /// (reads then clamp to zero). This locks the port against the source
+    /// `RandomAccessStream.Seek` inversion (`Length - offset`).
+    #[test]
+    fn partial_views_seek_from_end_with_standard_offsets() {
+        let source = Cursor::new(b"0123456789".to_vec());
+        let mut partial = PartialStream::new(source, 2, 5).unwrap();
+        assert_eq!(partial.seek(SeekFrom::End(0)).unwrap(), 5);
+        assert_eq!(partial.seek(SeekFrom::End(-2)).unwrap(), 3);
+        assert_eq!(partial.seek(SeekFrom::End(2)).unwrap(), 7);
+        let mut tail = [0; 4];
+        assert_eq!(partial.read(&mut tail).unwrap(), 0);
+        assert!(partial.seek(SeekFrom::End(i64::MIN)).is_err());
+
+        let directory = create_test_directory("partial-end-seek");
+        let path = directory.join("ranges.bin");
+        std::fs::write(&path, b"0123456789").unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let mut range = FileRangeStream::from_file(file, 2, 5).unwrap();
+        assert_eq!(range.seek(SeekFrom::End(0)).unwrap(), 5);
+        assert_eq!(range.seek(SeekFrom::End(-2)).unwrap(), 3);
+        assert_eq!(range.seek(SeekFrom::End(2)).unwrap(), 7);
+        assert_eq!(range.read(&mut tail).unwrap(), 0);
+        assert!(range.seek(SeekFrom::End(i64::MIN)).is_err());
+        remove_test_files(&directory, &["ranges.bin"]);
     }
 
     /// Bounded write-through (`PartialStream.Write`): bytes land at the logical

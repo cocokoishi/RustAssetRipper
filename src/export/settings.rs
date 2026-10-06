@@ -7,7 +7,8 @@
 //!   `DefaultVersion`/`TargetVersion` Unity versions. The shorthand feeds the
 //!   game-structure collection and streaming-assets post-export skip flags caller-side;
 //!   settings-file persistence keeps using `StreamingAssetsMode` itself, matching the
-//!   baseline `JsonIgnore`.
+//!   baseline `JsonIgnore`. `CoreConfiguration.DisableScriptImport` (level `Level0` only)
+//!   rides on the content level the same way for the scripting-backend skip flag.
 //! - `ProcessingSettings`: prefab outlining off, static mesh separation on, asset
 //!   deduplication off, nullable removal off, assembly publicizing off, and
 //!   `BundledAssetsExportMode::DirectExport`.
@@ -60,6 +61,16 @@ impl ScriptContentLevel {
             3 => Some(Self::Level3),
             _ => None,
         }
+    }
+
+    /// Whether this level disables script import.
+    ///
+    /// Mirrors `CoreConfiguration.DisableScriptImport`
+    /// (`AssetRipper/Source/AssetRipper.Import/Configuration/CoreConfiguration.cs`, line
+    /// 14): only `Level0` (scripts are not loaded) disables; every higher level keeps the
+    /// scripting-backend and assembly-collection path enabled.
+    pub const fn disables_script_import(self) -> bool {
+        matches!(self, Self::Level0)
     }
 }
 
@@ -612,6 +623,13 @@ impl ImportDefaults {
         self.streaming_assets_mode.skip_streaming_assets()
     }
 
+    /// `CoreConfiguration.DisableScriptImport` over these defaults: only a `Level0`
+    /// content level disables script import. Callers feed the result to the
+    /// scripting-backend and assembly-collection skip flags.
+    pub const fn disable_script_import(self) -> bool {
+        self.script_content_level.disables_script_import()
+    }
+
     /// `ImportSettings.IgnoreStreamingAssets` setter: `true` selects `Ignore`,
     /// `false` unconditionally reselects `Extract`, like the source. The property
     /// carries `JsonIgnore` in the baseline, so settings-file persistence keeps
@@ -891,6 +909,34 @@ mod tests {
         let _ = TerrainExportMode::Yaml;
         let _ = TerrainExportMode::Mesh;
         let _ = TerrainExportMode::Heatmap;
+    }
+
+    #[test]
+    fn disable_script_import_follows_the_source_computed_property() {
+        // Only `Level0` (scripts are not loaded) disables; higher levels keep the
+        // scripting path enabled.
+        assert!(ScriptContentLevel::Level0.disables_script_import());
+        assert!(!ScriptContentLevel::Level1.disables_script_import());
+        assert!(!ScriptContentLevel::Level2.disables_script_import());
+        assert!(!ScriptContentLevel::Level3.disables_script_import());
+        // The defaults read goes through the content level like
+        // `CoreConfiguration.DisableScriptImport` reads `ImportSettings`.
+        assert!(!ImportDefaults::default().disable_script_import());
+        for level in [
+            ScriptContentLevel::Level0,
+            ScriptContentLevel::Level1,
+            ScriptContentLevel::Level2,
+            ScriptContentLevel::Level3,
+        ] {
+            let defaults = ImportDefaults {
+                script_content_level: level,
+                ..ImportDefaults::default()
+            };
+            assert_eq!(
+                defaults.disable_script_import(),
+                level == ScriptContentLevel::Level0
+            );
+        }
     }
 
     #[test]
