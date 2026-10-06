@@ -2,7 +2,7 @@
 //!
 //! Ports the locale-independent rules: the default code, the hyphenated code
 //! table derived from the `AssetRipper/Localizations/*.json` filenames, code
-//! existence, underscore-to-hyphen normalization, and the `LoadLanguage`
+//! existence, the file-stem conversion tables, and the `LoadLanguage`
 //! switch rule (null, current, and unknown codes leave the current language
 //! alone; only a known different code switches and raises the change event).
 //!
@@ -10,7 +10,10 @@
 //! UI surface: with no localized message consumer, vendoring six thousand strings
 //! would be dead data. The settings-file `LanguageCode` field stays a validated-at-
 //! startup string for the same reason (the source validates it in `LoadLanguage`,
-//! not in the JSON reader).
+//! not in the JSON reader). The `LanguageNameDictionary` native names stay out too:
+//! the source computes them at build time from the builder's `CultureInfo` data,
+//! which has no version-stable Rust equivalent, and they feed only the language
+//! picker UI.
 
 /// `LanguageCodes.English`, the default `CurrentLanguageCode`.
 pub const ENGLISH_LANGUAGE_CODE: &str = "en-US";
@@ -23,10 +26,29 @@ pub const LANGUAGE_CODES: &[&str] = &[
     "ro", "ru", "th", "tr", "uk", "vi", "zh-Hans", "zh-Hant",
 ];
 
-/// `LanguageCodes.AsHyphenatedLanguageCode`: locale file stems use underscores
-/// (`en_US`), dictionary codes use hyphens (`en-US`); anything else is identity.
-pub fn as_hyphenated_language_code(code: &str) -> String {
-    code.replace('_', "-")
+/// `LanguageCodes.AsHyphenatedLanguageCode`: the generated switch maps exactly the
+/// locale file stems that contain an underscore; every other code is identity.
+/// Only the four regional locales have underscored stems.
+pub fn as_hyphenated_language_code(code: &str) -> &str {
+    match code {
+        "en_US" => "en-US",
+        "pt_BR" => "pt-BR",
+        "zh_Hans" => "zh-Hans",
+        "zh_Hant" => "zh-Hant",
+        _ => code,
+    }
+}
+
+/// `LanguageCodes.AsUnderscoredLanguageCode`: the reverse table, used for the
+/// locale file names; every other code is identity.
+pub fn as_underscored_language_code(code: &str) -> &str {
+    match code {
+        "en-US" => "en_US",
+        "pt-BR" => "pt_BR",
+        "zh-Hans" => "zh_Hans",
+        "zh-Hant" => "zh_Hant",
+        _ => code,
+    }
 }
 
 /// `LanguageCodes.Exists`: a non-null code the dictionary knows.
@@ -59,8 +81,10 @@ pub fn decide_load_language(current: &str, requested: Option<&str>) -> LoadLangu
         return LoadLanguageOutcome::Unchanged;
     };
     let normalized = as_hyphenated_language_code(requested);
-    if normalized != current && language_exists(&normalized) {
-        LoadLanguageOutcome::Switched { code: normalized }
+    if normalized != current && language_exists(normalized) {
+        LoadLanguageOutcome::Switched {
+            code: normalized.to_owned(),
+        }
     } else {
         LoadLanguageOutcome::Unchanged
     }
@@ -69,8 +93,8 @@ pub fn decide_load_language(current: &str, requested: Option<&str>) -> LoadLangu
 #[cfg(test)]
 mod tests {
     use super::{
-        as_hyphenated_language_code, decide_load_language, language_exists, LoadLanguageOutcome,
-        ENGLISH_LANGUAGE_CODE, LANGUAGE_CODES,
+        as_hyphenated_language_code, as_underscored_language_code, decide_load_language,
+        language_exists, LoadLanguageOutcome, ENGLISH_LANGUAGE_CODE, LANGUAGE_CODES,
     };
 
     #[test]
@@ -94,6 +118,27 @@ mod tests {
         assert_eq!(as_hyphenated_language_code("en-US"), "en-US");
         assert_eq!(as_hyphenated_language_code("fr"), "fr");
         assert_eq!(as_hyphenated_language_code(""), "");
+        // Only real file stems map: unknown underscored codes are identity,
+        // exactly like the generated switch default arm.
+        assert_eq!(as_hyphenated_language_code("xx_YY"), "xx_YY");
+    }
+
+    #[test]
+    fn underscoring_reverses_the_stem_table() {
+        assert_eq!(as_underscored_language_code("en-US"), "en_US");
+        assert_eq!(as_underscored_language_code("pt-BR"), "pt_BR");
+        assert_eq!(as_underscored_language_code("zh-Hans"), "zh_Hans");
+        assert_eq!(as_underscored_language_code("zh-Hant"), "zh_Hant");
+        assert_eq!(as_underscored_language_code("fr"), "fr");
+        assert_eq!(as_underscored_language_code("en_US"), "en_US");
+        assert_eq!(as_underscored_language_code(""), "");
+        // Both tables round-trip over every known code.
+        for code in LANGUAGE_CODES {
+            assert_eq!(
+                as_hyphenated_language_code(as_underscored_language_code(code)),
+                *code
+            );
+        }
     }
 
     #[test]
