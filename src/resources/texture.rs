@@ -1,7 +1,7 @@
 //! `Texture2D` (class 28) field view and bitmap export.
 //!
 //! Ports the field reads that drive `TextureConverter.TryConvertToBitmap(ITexture2D)`:
-//! `Texture2DExtensions.CompleteImageSize`/`ActualImageSize`, the `GetImageData`
+//! `Texture2DExtensions.CompleteImageSize`/`ActualImageSize`/`Mips`, the `GetImageData`
 //! platform pipeline (inline-vs-streamed selection, the Xbox360 adjacent-pair
 //! swap, Switch GOB unswizzling), the `Height * Depth` layer layout, and the
 //! `NormalmapDXT5nm` normal-map unpack.
@@ -205,8 +205,12 @@ pub struct Texture2DView {
     pub complete_image_size: usize,
     /// `m_ImageCount` (`Depth`).
     pub image_count: usize,
-    /// `m_MipCount`; `> 1` means the texture has mipmaps.
+    /// `m_MipCount`; `> 1` means the texture has mipmaps even without the flag below.
     pub mip_count: i32,
+    /// `m_MipMap`; OR-ed with `m_MipCount > 1` by `Texture2DExtensions.Mips`.
+    /// Payloads whose class predates the field behave as `false`, like the
+    /// version-gated blob below.
+    pub mip_map: bool,
     /// `m_LightmapFormat`.
     pub lightmap_format: u8,
     /// Inline `image data` bytes.
@@ -229,6 +233,7 @@ impl Texture2DView {
             optional_number(root, &["m_CompleteImageSize", "m_DataSize"])?.unwrap_or(0);
         let image_count = optional_i32(root, &["m_ImageCount", "m_Depth"])?.unwrap_or(1);
         let mip_count = optional_i32(root, &["m_MipCount"])?.unwrap_or(0);
+        let mip_map = optional_bool(root, &["m_MipMap"])?.unwrap_or(false);
         let lightmap_format = optional_u8(root, &["m_LightmapFormat"])?.unwrap_or(0);
         let image_data =
             optional_bytes(root, &["image data", "m_ImageData_C28"])?.unwrap_or_default();
@@ -242,6 +247,7 @@ impl Texture2DView {
             complete_image_size,
             image_count: nonnegative(image_count, "m_ImageCount")?,
             mip_count,
+            mip_map,
             lightmap_format,
             image_data,
             stream_data,
@@ -274,9 +280,12 @@ impl Texture2DView {
         }
     }
 
-    /// Whether the source `MipMap`/`MipCount` marks the texture as mipmapped.
+    /// `Texture2DExtensions.Mips`: `MipMap_C28 || MipCount_C28 > 1`.
+    ///
+    /// This is the flag `ImporterFactory.TextureImporterData` copies into
+    /// `EnableMipMap` for `ITexture2D` assets.
     pub fn has_mips(&self) -> bool {
-        self.mip_count > 1
+        self.mip_map || self.mip_count > 1
     }
 
     /// The image bytes `GetImageData` would return, given optional streamed content.
@@ -655,6 +664,22 @@ fn optional_u8(
     }
 }
 
+fn optional_bool(
+    root: &SerializedValue,
+    names: &[&'static str],
+) -> Result<Option<bool>, TextureViewError> {
+    match lookup(root, names)? {
+        None => Ok(None),
+        Some((_, SerializedValue::Bool(value))) => Ok(Some(*value)),
+        Some((_, SerializedValue::U8(value))) => Ok(Some(*value != 0)),
+        Some((_, SerializedValue::I32(value))) => Ok(Some(*value != 0)),
+        Some((field, value)) => Err(TextureViewError::WrongType {
+            field,
+            actual: serialized_kind(value),
+        }),
+    }
+}
+
 fn optional_bytes(
     root: &SerializedValue,
     names: &[&'static str],
@@ -768,6 +793,57 @@ mod tests {
     }
 
     #[test]
+    fn mip_flag_and_count_drive_has_mips() {
+        // `Texture2DExtensions.Mips`: `MipMap_C28 || MipCount_C28 > 1`. The
+        // shared fixture carries neither, so it reports no mipmaps.
+        let plain = Texture2DView::from_value(&rgba32_texture()).unwrap();
+        assert!(!plain.mip_map);
+        assert!(!plain.has_mips());
+
+        // (mip_map field, mip_count field, expected).
+        let rows = [
+            (SerializedValue::Bool(true), 1, true),
+            (SerializedValue::Bool(true), 0, true),
+            (SerializedValue::Bool(false), 2, true),
+            (SerializedValue::Bool(false), 1, false),
+            (SerializedValue::U8(1), 1, true),
+            (SerializedValue::I32(0), 2, true),
+        ];
+        for (flag, count, expected) in rows {
+            let mut root = rgba32_texture();
+            let SerializedValue::Struct(fields) = &mut root else {
+                unreachable!()
+            };
+            fields.push(field("m_MipMap", flag));
+            fields.push(field("m_MipCount", SerializedValue::I32(count)));
+            assert_eq!(
+                Texture2DView::from_value(&root).unwrap().has_mips(),
+                expected,
+                "mip count {count}"
+            );
+        }
+    }
+
+    #[test]
+    fn mip_flag_with_a_wrong_kind_is_rejected() {
+        let mut root = rgba32_texture();
+        let SerializedValue::Struct(fields) = &mut root else {
+            unreachable!()
+        };
+        fields.push(field(
+            "m_MipMap",
+            SerializedValue::StringBytes(b"yes".to_vec()),
+        ));
+        assert!(matches!(
+            Texture2DView::from_value(&root),
+            Err(TextureViewError::WrongType {
+                field: "m_MipMap",
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn missing_required_field_is_reported() {
         let root = SerializedValue::Struct(vec![field("m_Height", SerializedValue::I32(1))]);
         assert!(matches!(
@@ -857,6 +933,7 @@ mod tests {
             complete_image_size: 4,
             image_count: 1,
             mip_count: 0,
+            mip_map: false,
             lightmap_format: TEXTURE_USAGE_MODE_NORMALMAP_DXT5NM,
             image_data: vec![128, 128, 0, 255],
             stream_data: None,
@@ -880,6 +957,7 @@ mod tests {
             complete_image_size: 8,
             image_count: 1,
             mip_count: 0,
+            mip_map: false,
             lightmap_format: 0,
             image_data: vec![1, 2, 3, 4, 5, 6, 7, 8],
             stream_data: None,
@@ -1089,6 +1167,7 @@ mod tests {
             complete_image_size: 0,
             image_count: 1,
             mip_count: 0,
+            mip_map: false,
             lightmap_format: 0,
             image_data: data,
             stream_data: None,

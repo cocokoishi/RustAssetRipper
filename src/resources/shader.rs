@@ -12,6 +12,21 @@
 //! the `Simple` path and slices the header up to `SubShader` for the dummy path, so no
 //! UTF-8 validity is assumed. `m_Name` is retained for diagnostics only.
 //!
+//! Also ports the serialized-shader render-state predicates
+//! (`SerializedShaderFloatValueExtensions`, `SerializedShaderVectorValueExtensions`,
+//! `SerializedStencilOpExtensions`, `SerializedShaderStateExtensions`): float/vector
+//! zero/max defaults, the `<noninit>` name gate, stencil-op defaults (`Keep`/`Always`),
+//! and the alpha-to-mask/conservative/lighting/stencil state words. No callers of these
+//! predicates were found under `AssetRipper/Source`; the kernels pin the decision shapes
+//! for the render-state emission.
+//!
+//! Open: `Name` resolution across the `Utf8String`/`FastPropertyName` backings (needs the
+//! generated `Has_*` gates; the resolved name arrives as a caller fact), the generic
+//! `GetValue<T>` enum-cast machinery (an `i32` identity on the Rust side),
+//! name-or-value string emission (float formatting belongs to the export-side invariant
+//! renderer), and the remaining typed render-state casts (`BlendMode`, `ZTest`, ...),
+//! whose discriminants stay in the snapshot enums.
+//!
 //! Differential evidence: `shader_dummy_fixture.txt` (probe `Temp/opencode/shaderexport`,
 //! real `Shader.Create` instances per version with `Script` set, calling the shipped
 //! `DummyShaderTextExporter.ExportShader`).
@@ -351,6 +366,135 @@ fn contains_needle(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window == needle)
 }
 
+/// Name sentinel marking an uninitialized shader state name.
+///
+/// Mirrors the `"<noninit>"` comparison in `HasName`: a render-state name that is
+/// empty or equal to this sentinel counts as nameless.
+pub const SHADER_UNINITIALIZED_NAME: &str = "<noninit>";
+
+/// `HasName`: a shader state name is set when it is neither empty nor the
+/// uninitialized sentinel.
+///
+/// Shared by `SerializedShaderFloatValue.HasName` and
+/// `SerializedShaderVectorValue.HasName`. The `Name` getter itself (choosing
+/// between the `Utf8String` and `FastPropertyName` backings) needs the generated
+/// `Has_*` gates and stays caller-side; here the resolved name is a caller fact.
+pub fn shader_state_name_is_set(name: &str) -> bool {
+    !name.is_empty() && name != SHADER_UNINITIALIZED_NAME
+}
+
+/// `SerializedShaderFloatValue.IsZero`: exact float equality with zero
+/// (negative zero compares equal, matching the reference `==`).
+pub fn shader_float_is_zero(value: f32) -> bool {
+    value == 0.0
+}
+
+/// `SerializedShaderFloatValue.IsMax`: exact float equality with 255.
+pub fn shader_float_is_max(value: f32) -> bool {
+    value == 255.0
+}
+
+/// `SerializedShaderFloatValue.IsZeroAndNameless`.
+pub fn shader_float_is_zero_and_nameless(value: f32, name: &str) -> bool {
+    shader_float_is_zero(value) && !shader_state_name_is_set(name)
+}
+
+/// `SerializedShaderFloatValue.IsMaxAndNameless`.
+pub fn shader_float_is_max_and_nameless(value: f32, name: &str) -> bool {
+    shader_float_is_max(value) && !shader_state_name_is_set(name)
+}
+
+/// `SerializedShaderFloatValue.IsDefault<T>`: the truncated value equals the
+/// expected discriminant and the value is nameless.
+///
+/// The reference bit-casts `(int)value` to the enum; the Rust side compares the
+/// truncated `i32` against the caller-supplied discriminant. Truncation agrees
+/// for finite in-`i32`-range inputs, which covers every enum-typed shader state;
+/// NaN and out-of-range magnitudes convert differently across runtimes and are
+/// out of scope here.
+pub fn shader_float_is_default(value: f32, name: &str, default: i32) -> bool {
+    value as i32 == default && !shader_state_name_is_set(name)
+}
+
+/// `SerializedShaderVectorValue.IsZero`: every lane is exactly zero.
+pub fn shader_vector_is_zero(value: [f32; 4]) -> bool {
+    value == [0.0, 0.0, 0.0, 0.0]
+}
+
+/// `SerializedShaderVectorValue.IsZeroAndNameless`.
+pub fn shader_vector_is_zero_and_nameless(value: [f32; 4], name: &str) -> bool {
+    shader_vector_is_zero(value) && !shader_state_name_is_set(name)
+}
+
+/// `StencilOp.Keep` discriminant (`StencilOp.cs`).
+pub const STENCIL_OP_KEEP: i32 = 0;
+
+/// `StencilComp.Always` discriminant (`StencilComp.cs`).
+pub const STENCIL_COMP_ALWAYS: i32 = 8;
+
+/// `SerializedStencilOp.IsDefault`: pass, fail, and z-fail are `Keep` and the
+/// comparison is `Always`.
+///
+/// The pass/fail/z-fail/comparison facts are the `GetValue<T>` discriminants as
+/// `i32`; the generic enum-cast machinery itself is an identity on the Rust side
+/// and stays caller-side.
+pub fn stencil_op_is_default(pass: i32, fail: i32, z_fail: i32, comparison: i32) -> bool {
+    pass == STENCIL_OP_KEEP
+        && fail == STENCIL_OP_KEEP
+        && z_fail == STENCIL_OP_KEEP
+        && comparison == STENCIL_COMP_ALWAYS
+}
+
+/// `StencilRefIsDefault`: the stencil reference is zero and nameless.
+pub fn stencil_ref_is_default(value: f32, name: &str) -> bool {
+    shader_float_is_zero_and_nameless(value, name)
+}
+
+/// Shared `StencilReadMaskIsDefault`/`StencilWriteMaskIsDefault` shape: the mask
+/// is max (255) and nameless.
+pub fn stencil_mask_is_default(value: f32, name: &str) -> bool {
+    shader_float_is_max_and_nameless(value, name)
+}
+
+/// `AlphaToMaskValue`: the alpha-to-mask flag is any nonzero integer.
+pub fn shader_alpha_to_mask_enabled(value: i32) -> bool {
+    value != 0
+}
+
+/// `ConservativeValue`: the optional conservative flag is present and nonzero.
+pub fn shader_conservative_enabled(value: Option<i32>) -> bool {
+    matches!(value, Some(flag) if flag != 0)
+}
+
+/// `LightingValue`: the lighting flag renders as `On` or `Off`.
+pub fn shader_lighting_word(enabled: bool) -> &'static str {
+    if enabled {
+        "On"
+    } else {
+        "Off"
+    }
+}
+
+/// `StencilIsDefault`: every stencil sub-state is default.
+///
+/// Mirrors the six-way conjunction in `SerializedShaderStateExtensions`: the
+/// reference, the read mask, the write mask, and the three stencil operations.
+pub fn shader_stencil_is_default(
+    ref_is_default: bool,
+    read_mask_is_default: bool,
+    write_mask_is_default: bool,
+    op_is_default: bool,
+    op_front_is_default: bool,
+    op_back_is_default: bool,
+) -> bool {
+    ref_is_default
+        && read_mask_is_default
+        && write_mask_is_default
+        && op_is_default
+        && op_front_is_default
+        && op_back_is_default
+}
+
 fn serialized_kind(value: &SerializedValue) -> &'static str {
     match value {
         SerializedValue::Bool(_) => "bool",
@@ -484,5 +628,93 @@ mod tests {
                 "{case:?}"
             );
         }
+    }
+
+    #[test]
+    fn state_name_gate_rejects_empty_and_uninitialized_names() {
+        assert!(shader_state_name_is_set("_MainTex"));
+        assert!(shader_state_name_is_set(" "));
+        assert!(!shader_state_name_is_set(""));
+        assert!(!shader_state_name_is_set(SHADER_UNINITIALIZED_NAME));
+        // Ordinal comparison: only the exact sentinel counts as uninitialized.
+        assert!(shader_state_name_is_set("<NONINIT>"));
+    }
+
+    #[test]
+    fn float_zero_max_and_default_predicates_follow_the_reference() {
+        assert!(shader_float_is_zero(0.0));
+        assert!(shader_float_is_zero(-0.0));
+        assert!(!shader_float_is_zero(f32::MIN_POSITIVE));
+        assert!(!shader_float_is_zero(1.0));
+        assert!(shader_float_is_max(255.0));
+        assert!(!shader_float_is_max(254.999_99));
+        assert!(!shader_float_is_max(255.000_01));
+        assert!(shader_float_is_zero_and_nameless(0.0, ""));
+        // The sentinel counts as nameless, matching `HasName`.
+        assert!(shader_float_is_zero_and_nameless(
+            0.0,
+            SHADER_UNINITIALIZED_NAME
+        ));
+        assert!(!shader_float_is_zero_and_nameless(0.0, "_MainTex"));
+        assert!(!shader_float_is_zero_and_nameless(1.0, ""));
+        assert!(shader_float_is_max_and_nameless(255.0, ""));
+        assert!(!shader_float_is_max_and_nameless(255.0, "_MainTex"));
+        // Truncation toward zero, like the reference `(int)` cast.
+        assert!(shader_float_is_default(2.0, "", 2));
+        assert!(shader_float_is_default(2.9, "", 2));
+        assert!(shader_float_is_default(-0.0, "", 0));
+        assert!(!shader_float_is_default(2.0, "_MainTex", 2));
+        assert!(!shader_float_is_default(3.0, "", 2));
+    }
+
+    #[test]
+    fn vector_zero_predicates_require_every_lane() {
+        assert!(shader_vector_is_zero([0.0, 0.0, 0.0, 0.0]));
+        assert!(shader_vector_is_zero([-0.0, -0.0, -0.0, -0.0]));
+        assert!(!shader_vector_is_zero([0.0, 0.0, 0.0, f32::MIN_POSITIVE]));
+        assert!(shader_vector_is_zero_and_nameless([0.0, 0.0, 0.0, 0.0], ""));
+        assert!(!shader_vector_is_zero_and_nameless(
+            [0.0, 0.0, 0.0, 0.0],
+            "_Color"
+        ));
+    }
+
+    #[test]
+    fn stencil_op_default_needs_keep_and_always() {
+        assert_eq!(STENCIL_OP_KEEP, 0);
+        assert_eq!(STENCIL_COMP_ALWAYS, 8);
+        assert!(stencil_op_is_default(0, 0, 0, 8));
+        assert!(!stencil_op_is_default(1, 0, 0, 8));
+        assert!(!stencil_op_is_default(0, 2, 0, 8));
+        assert!(!stencil_op_is_default(0, 0, 5, 8));
+        assert!(!stencil_op_is_default(0, 0, 0, 1));
+        assert!(stencil_ref_is_default(0.0, ""));
+        assert!(!stencil_ref_is_default(0.0, "_StencilRef"));
+        assert!(stencil_mask_is_default(255.0, SHADER_UNINITIALIZED_NAME));
+        assert!(!stencil_mask_is_default(254.0, ""));
+    }
+
+    #[test]
+    fn render_state_words_and_stencil_conjunction_match_the_reference() {
+        assert!(shader_alpha_to_mask_enabled(1));
+        assert!(shader_alpha_to_mask_enabled(-1));
+        assert!(!shader_alpha_to_mask_enabled(0));
+        assert!(shader_conservative_enabled(Some(1)));
+        assert!(!shader_conservative_enabled(Some(0)));
+        assert!(!shader_conservative_enabled(None));
+        assert_eq!(shader_lighting_word(true), "On");
+        assert_eq!(shader_lighting_word(false), "Off");
+        assert!(shader_stencil_is_default(
+            true, true, true, true, true, true
+        ));
+        assert!(!shader_stencil_is_default(
+            false, true, true, true, true, true
+        ));
+        assert!(!shader_stencil_is_default(
+            true, true, true, true, true, false
+        ));
+        assert!(!shader_stencil_is_default(
+            true, false, true, true, true, true
+        ));
     }
 }

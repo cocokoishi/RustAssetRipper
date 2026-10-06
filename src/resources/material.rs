@@ -16,6 +16,16 @@
 //!
 //! `FindPropertyNameByCRC28` inverts the dictionary: it maps the CRC of a property name back to the
 //! stored name, so a caller holding only a shader-declared CRC can still find the binding.
+//! `RendererExtensions.FindMaterialPropertyNameByCRC28` repeats that lookup across the
+//! renderer's materials in order, skipping null entries, first match wins.
+//!
+//! `EngineAssetsFactory.Create(IMaterial)` builds the engine material from the material name
+//! plus the resolved shader name, and refuses a material whose non-null shader pointer fails
+//! to resolve.
+//!
+//! Deliberately open: PPtr resolution (shader, textures) needs the asset collection and stays
+//! caller-side; engine-asset GUID/fileID assignment (`PredefinedAssetCache`, exporters) is
+//! export plumbing outside the object model; the font-material path belongs to the font scope.
 //!
 //! Field-name basis: the committed `material_generated_api_fixture.txt` property dump of the
 //! shipped `AssetRipper.SourceGenerated.dll` (probe `Temp/opencode/matprops`). `IMaterial` exposes
@@ -364,6 +374,60 @@ impl MaterialView {
         }
         None
     }
+
+    /// `RendererExtensions.FindMaterialPropertyNameByCRC28`: the first material in
+    /// renderer order whose CRC lookup matches wins; null materials are skipped.
+    ///
+    /// Collection-side PPtr resolution stays caller-side: the caller supplies the
+    /// already-resolved material views (`None` for a null or unresolvable entry).
+    pub fn find_material_property_name_by_crc28(
+        materials: &[Option<&MaterialView>],
+        crc: u32,
+    ) -> Option<String> {
+        for material in materials.iter().flatten() {
+            if let Some(name) = material.find_property_name_by_crc28(crc) {
+                return Some(name);
+            }
+        }
+        None
+    }
+}
+
+/// Caller facts behind `EngineAssetsFactory.Create(IMaterial)`.
+///
+/// Shader-pointer resolution needs the asset collection and stays caller-side; the
+/// caller reports whether the pointer was null and the resolved shader name, if any.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EngineMaterialFacts<'a> {
+    /// `material.Name`.
+    pub name: &'a str,
+    /// `material.Shader_C21P`: the resolved shader name, when resolution succeeded.
+    pub resolved_shader_name: Option<&'a str>,
+    /// `material.Shader_C21.IsNull()`: the shader pointer itself is null.
+    pub shader_ptr_is_null: bool,
+}
+
+/// The engine material `EngineAssetsFactory.Create` builds: the material name plus
+/// the shader name, when a shader applies.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EngineMaterial<'a> {
+    /// `material.Name`.
+    pub name: &'a str,
+    /// `shader?.Name`: none for a null shader pointer.
+    pub shader: Option<&'a str>,
+}
+
+/// `EngineAssetsFactory.Create(IMaterial)`: a null shader pointer yields an engine
+/// material with no shader; a non-null pointer that fails to resolve refuses the
+/// material (`null`); otherwise the engine material carries both names.
+pub fn create_engine_material(facts: EngineMaterialFacts<'_>) -> Option<EngineMaterial<'_>> {
+    if facts.resolved_shader_name.is_none() && !facts.shader_ptr_is_null {
+        return None;
+    }
+    Some(EngineMaterial {
+        name: facts.name,
+        shader: facts.resolved_shader_name,
+    })
 }
 
 /// `UnityPropertySheetExtensions.HDRPostfixName`, `STPostfixName`, and
@@ -1370,5 +1434,72 @@ mod tests {
         for expected in ["Offset", "Scale", "Texture"] {
             assert!(tex_env_5.contains(&expected.to_owned()), "{expected}");
         }
+    }
+
+    #[test]
+    fn renderer_crc_lookup_skips_nulls_and_keeps_the_first_match() {
+        let first = material_with_tex_envs(string);
+        let second = material_with_named_tex_envs(&["_DetailAlbedoMap"]);
+        let crc = crc28(b"_MainTex_HDR");
+        // First match in renderer order wins.
+        assert_eq!(
+            MaterialView::find_material_property_name_by_crc28(&[Some(&first), Some(&second)], crc),
+            Some("_MainTex_HDR".to_owned())
+        );
+        // Null entries are skipped, not fatal.
+        assert_eq!(
+            MaterialView::find_material_property_name_by_crc28(&[None, Some(&second)], crc),
+            None
+        );
+        assert_eq!(
+            MaterialView::find_material_property_name_by_crc28(&[None, Some(&first)], crc),
+            Some("_MainTex_HDR".to_owned())
+        );
+        // No match anywhere reads absent.
+        assert_eq!(
+            MaterialView::find_material_property_name_by_crc28(&[Some(&second)], crc),
+            None
+        );
+        assert_eq!(
+            MaterialView::find_material_property_name_by_crc28(&[], crc),
+            None
+        );
+    }
+
+    #[test]
+    fn engine_material_creation_follows_the_shader_pointer_gate() {
+        // A resolved shader yields both names.
+        assert_eq!(
+            create_engine_material(EngineMaterialFacts {
+                name: "Standard",
+                resolved_shader_name: Some("Standard"),
+                shader_ptr_is_null: false,
+            }),
+            Some(EngineMaterial {
+                name: "Standard",
+                shader: Some("Standard"),
+            })
+        );
+        // A null shader pointer yields a shader-less engine material.
+        assert_eq!(
+            create_engine_material(EngineMaterialFacts {
+                name: "Bare",
+                resolved_shader_name: None,
+                shader_ptr_is_null: true,
+            }),
+            Some(EngineMaterial {
+                name: "Bare",
+                shader: None,
+            })
+        );
+        // A non-null pointer that fails to resolve refuses the material.
+        assert_eq!(
+            create_engine_material(EngineMaterialFacts {
+                name: "Dangling",
+                resolved_shader_name: None,
+                shader_ptr_is_null: false,
+            }),
+            None
+        );
     }
 }
