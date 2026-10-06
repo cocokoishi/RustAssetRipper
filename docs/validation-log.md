@@ -2381,5 +2381,5 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 
 ## ImageTexture base view (2026-10-06)
 
-- Ported the class-189 `ImageTexture` base field view (`ImageTextureView`: width/height/image-bytes/stream-info with the `_C189` aliases) plus the inline-wins `GetImageData` selection; verified no format field, blob, or swap applies to the base (concrete-subtype `GraphicsFormat` dispatch stays open). Two tests. Lib suite 999/999 locally, workspace Clippy clean; full validation via Actions after push.
+- Ported the class-189 `ImageTexture` base field view (`ImageTextureView`: width/height/image-bytes/stream-info with the `_C189` aliases) plus the inline-wins `GetImageData` selection; verified no format field, blob, or swap applies to the base (concrete-subtype `GraphicsFormat` dispatch stays open). Two tests. Lib suite 999/999 locally, workspace Clippy clean; CI run `37395035692` green (all five jobs) for remote `main` = `8111b9d`; local matches.
 - No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.

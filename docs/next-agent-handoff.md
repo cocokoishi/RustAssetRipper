@@ -749,6 +749,6 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 
 ## 97. Checkpoint: ImageTexture base view (2026-10-06)
 
-- Ported `ImageTextureView` + selection with two tests. Lib 999/999 locally, workspace Clippy clean; full validation via Actions after push.
+- Ported `ImageTextureView` + selection with two tests. Lib 999/999 locally, workspace Clippy clean; CI run `37395035692` green (all five jobs) for remote `main` = `8111b9d`; local matches.
 - Next: the remaining product rows (`PRODUCT-CONFIG-001`, `PRODUCT-GUI-001`, `GENERATORS-001`, `TOOLS-001` remainders).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
