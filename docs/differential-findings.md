@@ -535,6 +535,19 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Regression evidence | All 22 fixture vectors reproduce byte-for-byte (including all 256 gray conversions, every probed run length 1-130 plus 300, the 300-literal chunking, the mixed literal/run row, and the two-row marker repetition); targeted tests pin both width boundaries and alpha indifference; full lib suite passes 1003/1003 locally with warnings-denied Clippy |
 | Remaining comparison | EXR (`ExrWriter`) and JPEG (stb `WriteJpg`) stay `Unsupported`; the zero-width degenerate case writes header only by construction and was not probed |
 
+## DIFF-TEXTURE-ARRAY-001 - array/3D texture selection and size rules
+
+| Field | Finding |
+|---|---|
+| Status | Reference-runtime differential recorded; views and rules ported and pinned |
+| Source location | `AssetRipper.SourceGenerated.Extensions/Texture2DArrayExtensions.cs`, `Texture3DExtensions.cs`, `CubemapArrayExtensions.cs`; `AssetRipper.Export.Modules.Textures/TextureConverter.cs` (the three `GraphicsFormat` overloads) |
+| Input evidence | Probe `Temp/opencode/arrayprobe` driving live 2022.3 assets over versioned `ProcessedAssetCollection`s (SDK 10.0.401): 6 committed rows in `src/resources/texture_array_fixture.txt`, plus `Has_*` gate outcomes on 5.6/2019.4/2022.3 and the newest-class property dumps |
+| Source-derived behavior | Inline bytes win with no swap or unswizzle on any of the three classes; `Texture2DArray` size divides by depth with depths below two keeping the whole size; cubemap height equals width and depth is `CubemapCount * 6` (kept verbatim with the source `Not sure about this`); cubemap size is zero with no faces; the two `Texture3D` unions share one field each (setting `Format_UInt32` reads back through `Format`); the lightmap gate is off everywhere probed so the usage mode backs it; missing mip counts derive `round(log2(maxSide))`; unconvertible graphics formats fall back to `RGBA32` |
+| Root cause | No deviation found; this increment ports the previously open array/3D field layer. The probe corrected one design assumption (separate `Texture3D` format spellings are one shared field, so the view keeps both read spellings but one value) |
+| Rust change | `resources::texture_array::{Texture3DView, Texture2DArrayView, CubemapArrayView, resolve_array_image_data, texture2d_array_complete_image_size, cubemap_array_height/depth/complete_image_size, Texture3DView::{format_value, texture_format_or_default, lightmap_value, complete_image_size_value, mip_count_value}}` with `wrapping_div` matching the source `(int)` casts and an explicit error for the unreachable face-count overflow |
+| Regression evidence | All 6 fixture rows reproduce byte-for-byte with their derived sizes; union precedence, rounding fallback (including the zero-side refusal where the source conversion throws), size branches, overflow refusal, and view readers pinned; full lib suite passes 1018/1018 locally with warnings-denied Clippy |
+| Remaining comparison | Bitmap export wiring and CLI classes 117/187/188 stay open |
+
 ## DIFF-TEXTURE-GETIMAGEDATA-001 - GetImageData platform orchestration
 
 | Field | Finding |

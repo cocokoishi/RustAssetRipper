@@ -65,6 +65,7 @@ pub mod switch_swizzle;
 pub mod tangent_mode;
 pub mod terrain_heatmap;
 pub mod texture;
+pub mod texture_array;
 pub mod texture_converter;
 pub mod texture_decode;
 pub mod texture_format;

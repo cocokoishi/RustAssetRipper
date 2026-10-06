@@ -1,0 +1,23 @@
+# Format: VEC|tag|class|format|width|height|third|cubemapCount|sizeField|hex(inline input)|hex(expected output)|extra...
+# (`third` = Depth on classes 117/187, unused on 188; `sizeField` = DataSize on
+# 187/188, CompleteImageSize on 117; `extra` holds derived values like size=,
+# h=, d=, texfmt=, light=, mips=.)
+# Reference-runtime differential: probe Temp/opencode/arrayprobe driving live assets
+# (`Texture2DArray`/`Texture3D`/`CubemapArray.Create` over versioned
+# `ProcessedAssetCollection`s, SDK 10.0.401; all rows ran on 2022.3 assets).
+# Rows pin the inline-wins selection (no swap or unswizzle on these classes),
+# the `DataSize/Depth` and `DataSize/(CubemapCount*6)` size rules with their
+# divide-by-one and zero-depth branches, the cubemap height/depth rules, and the
+# Texture3D format/texture-format/lightmap/mip/size derivations.
+# Supporting facts from the same probe: `Has_Format_Int32`, `Has_MipCount`, and
+# `Has_CompleteImageSize_UInt32` are true on 5.6/2019.4/2022.3 (the `Format`
+# setter/getter share one field, so setting `Format_UInt32 = 4` reads back as
+# `Format = 4`); `Has_LightmapFormat` is false on all three (lightmap falls back
+# to `UsageMode`, here `1 = BakedLightmapDoubleLDR`); `GraphicsFormat` 4 converts
+# to `TextureFormat.RGBA32`.
+VEC|arr-inline|187|4|4|4|4|0|100|01020304|01020304|size=25
+VEC|arr-empty|187|4|0|0|0|0|0|||size=0
+VEC|arr-depth1|187|4|4|4|1|0|100|09|09|size=100
+VEC|cube-inline|188|4|8|0|0|2|120|0506|0506|h=8|d=12|size=10
+VEC|cube-zero|188|4|8|0|0|0|120|||d=0|size=0
+VEC|t3-inline|117|4|4|4|4|0|64|070809|070809|texfmt=RGBA32|light=BakedLightmapDoubleLDR|mips=5|size=64
