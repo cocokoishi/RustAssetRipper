@@ -1122,3 +1122,11 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Gates: `cargo fmt --check` 0, full tests 1236 lib + 55 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
 - Next: fortieth team round (gate-first: IO containers, export loop, product surface gaps).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 150. Checkpoint: fortieth team round integrated — gate-first (2026-10-06)
+
+- Five teammates shipped disjoint scopes, all lead-verified (targeted suites re-run: 14/14, 7/7, 5/5, 6/6, 5/5) and integrated: `texture-meta` ported metadata placement (`IO-BUNDLE-UNITYFS-META-001`); `sprite-fill` pinned header guards (`IO-BUNDLE-RAW-WEB-HEADER-001`); `texture-export` pinned path diagnostics (`EXP-PROJECT-EXPORT-LOOP-001`); `mesh-deform` ported the gather gate (`PROC-PREFAB-SCENE-BUNDLE-001`); `anim-graph` ported the destination table (`RES-ANIM-001`). No scope violations, no placeholders, no verified row touched.
+- Gate question answered YES: all five units reduce the Phase 1 incomplete count.
+- Gates: `cargo fmt --check` 0, full tests 1242 lib + 55 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
+- Next: forty-first team round (gate-first: compression, scheme dispatch, serialized-file graph gaps).
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

@@ -15,11 +15,19 @@ const BLOCK_INFO_NEEDS_PADDING: u32 = 0x200;
 const BLOCKS_AND_DIRECTORY_COMBINED: u32 = 0x40;
 const COMPRESSION_MASK: u32 = 0x3f;
 const BLOCK_COMPRESSION_MASK: u16 = 0x3f;
+/// `BundleVersion.BF_LargeFilesSupport`: bundles at this version and later align
+/// the post-header stream to 16 bytes (`FileStreamBundleFile.Read`).
+///
+/// Later `BundleVersion` members share this value in the baseline; only the gate
+/// itself is asserted here.
+pub const BUNDLE_VERSION_LARGE_FILES_SUPPORT: i32 = 7;
 /// `NodeFlags.SerializedFile`: the directory-node bit marking SerializedFile entries.
 ///
 /// The baseline stores this bit on every node but never branches on it (entry kinds
 /// are recovered downstream by content sniffing instead); it is pinned here so the
-/// named bit survives as a caller fact rather than a magic number.
+/// named bit survives as a caller fact rather than a magic number. The remaining
+/// header bits the baseline never branches on (`OldWebPluginCompatibility`,
+/// `EncryptionOld`, `EncryptionNew`) stay uninterpreted for the same reason.
 pub const NODE_SERIALIZED_FILE_FLAG: u32 = 4;
 
 /// `CompressionType` enum names (`AssetRipper.IO.Files.BundleFiles.CompressionType`)
@@ -204,7 +212,7 @@ impl<'a> UnityFsBundle<'a> {
         let header_size = reader.position();
 
         let blocks_at_end = flags & BLOCK_INFO_AT_END != 0;
-        if version >= 7 {
+        if version >= BUNDLE_VERSION_LARGE_FILES_SUPPORT {
             reader.align(16).map_err(|error| {
                 UnityFsError::from_binary(error, "UnityFS v7+ header alignment")
             })?;
@@ -309,7 +317,7 @@ impl<'a> UnityFsBundle<'a> {
         } else {
             metadata_end
         };
-        if blocks_at_end && version >= 7 {
+        if blocks_at_end && version >= BUNDLE_VERSION_LARGE_FILES_SUPPORT {
             data_offset = align_offset(data_offset, 16).ok_or_else(|| {
                 UnityFsError::new(
                     data_offset,
@@ -1387,7 +1395,7 @@ impl Display for UnityFsErrorKind {
 mod tests {
     use super::{
         compression_type_name, UnityFsBundle, UnityFsErrorKind, UnityFsLimits, UnityFsNode,
-        NODE_SERIALIZED_FILE_FLAG,
+        BUNDLE_VERSION_LARGE_FILES_SUPPORT, NODE_SERIALIZED_FILE_FLAG,
     };
     use crate::compression::wrappers::compress_gzip;
     use crate::io::filesystem::VirtualFileSystem;
@@ -1546,7 +1554,7 @@ mod tests {
         push_cstring(&mut header, "2022.3.1f1");
         let data_start = header.len() + 8 + 4 + 4 + 4;
         let mut body = Vec::new();
-        if version >= 7 {
+        if version >= BUNDLE_VERSION_LARGE_FILES_SUPPORT {
             let padding = (16 - (data_start & 15)) & 15;
             body.resize(padding, 0);
         }
@@ -1575,6 +1583,63 @@ mod tests {
         );
         header.extend_from_slice(&body);
         header
+    }
+
+    /// A metadata-at-start bundle whose flags omit the combined-directory bit: the
+    /// baseline `ReadMetadata` then reads blocks only, and the directory stays empty.
+    fn make_bare_bundle(entry_bytes: &[u8]) -> Vec<u8> {
+        let mut metadata = vec![0x5a; 16];
+        push_i32(&mut metadata, 1);
+        metadata.extend_from_slice(&(entry_bytes.len() as u32).to_be_bytes());
+        metadata.extend_from_slice(&(entry_bytes.len() as u32).to_be_bytes());
+        metadata.extend_from_slice(&0u16.to_be_bytes());
+        let mut header = Vec::new();
+        push_cstring(&mut header, "UnityFS");
+        push_i32(&mut header, 6);
+        push_cstring(&mut header, "2022.3.1f1");
+        push_cstring(&mut header, "2022.3.1f1");
+        let data_start = header.len() + 8 + 4 + 4 + 4;
+        push_i64(
+            &mut header,
+            (data_start + metadata.len() + entry_bytes.len()) as i64,
+        );
+        push_i32(&mut header, metadata.len() as i32);
+        push_i32(&mut header, metadata.len() as i32);
+        push_u32(&mut header, 0);
+        header.extend_from_slice(&metadata);
+        header.extend_from_slice(entry_bytes);
+        header
+    }
+
+    /// The metadata-placement branches the other fixtures never take: a directory-less
+    /// bundle parses to an empty node table, and a pre-alignment version with
+    /// blocks-info-at-end skips the 16-byte data alignment.
+    #[test]
+    fn parses_bare_metadata_and_unaligned_end_placement() {
+        let input = make_bare_bundle(b"bare entry");
+        let bundle = UnityFsBundle::parse(&input).unwrap();
+        assert_eq!(bundle.uncompressed_data_hash, [0x5a; 16]);
+        assert_eq!(bundle.storage_blocks.len(), 1);
+        assert!(bundle.nodes.is_empty());
+        assert_eq!(bundle.uncompressed_data_size, 10);
+        let error = bundle.read_entry(0).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            UnityFsErrorKind::InvalidEntryIndex {
+                entry_index: 0,
+                entry_count: 0
+            }
+        ));
+
+        let input = make_bundle_variant(b"entry data", 0, false, 6, 0, true);
+        let bundle = UnityFsBundle::parse(&input).unwrap();
+        assert_eq!(bundle.header.version, 6);
+        assert_eq!(bundle.data_offset, bundle.header.header_size);
+        assert_eq!(
+            bundle.metadata_offset + bundle.header.compressed_blocks_info_size as usize,
+            input.len()
+        );
+        assert_eq!(bundle.read_entry(0).unwrap().as_ref(), b"entry data");
     }
 
     #[test]

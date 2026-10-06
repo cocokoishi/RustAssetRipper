@@ -1,4 +1,12 @@
 //! UnityRaw and UnityWeb bundle parsing.
+//!
+//! Mirrors `AssetRipper.IO.Files/BundleFiles/RawWeb` (`RawWebBundleHeader.Read` with its
+//! version-4/2/3 gates, `RawWebBundleFile.Read` with its header-size check, last-chunk UnityWeb
+//! decompression, and the metadata-size check).
+//!
+//! Deliberate hardening, all explicit errors: declared sizes are validated against limits and the
+//! input before slicing, entry ranges are bounds-checked where the source seeks and reads, and
+//! directory reads are bounded by the metadata cap instead of scanning unbounded data.
 
 use std::borrow::Cow;
 use std::error::Error;
@@ -1031,5 +1039,35 @@ mod tests {
             .copy_from_slice(&i32::MAX.to_be_bytes());
         let range_error = RawWebBundle::parse(&outside_entry.bytes).unwrap_err();
         assert!(range_error.to_string().contains("exceeds data size"));
+    }
+
+    #[test]
+    fn rejects_corrupt_header_fields_with_context() {
+        // A negative bundle version fails before any version-gated field is read.
+        let negative_version = make_header(RawWebKind::UnityRaw, -1, &[], 0);
+        let version_error = RawWebBundle::parse(&negative_version.bytes).unwrap_err();
+        assert!(version_error.to_string().contains("is negative (-1)"));
+
+        // A negative declared header size fails at its field offset.
+        let mut negative_size = make_raw_fixture(4, b"data");
+        negative_size.bytes[negative_size.header_size_offset..negative_size.header_size_offset + 4]
+            .copy_from_slice(&(-5i32).to_be_bytes());
+        let size_error = RawWebBundle::parse(&negative_size.bytes).unwrap_err();
+        assert!(size_error
+            .to_string()
+            .contains("invalid negative header size -5"));
+
+        // A declared size past the consumed fields fails the header-size check.
+        let mut drifted = make_raw_fixture(4, b"data");
+        let declared = i32::from_be_bytes(
+            drifted.bytes[drifted.header_size_offset..drifted.header_size_offset + 4]
+                .try_into()
+                .expect("fixture header field width"),
+        );
+        drifted.bytes.extend_from_slice(&[0; 4]);
+        drifted.bytes[drifted.header_size_offset..drifted.header_size_offset + 4]
+            .copy_from_slice(&(declared + 4).to_be_bytes());
+        let drift_error = RawWebBundle::parse(&drifted.bytes).unwrap_err();
+        assert!(drift_error.to_string().contains("but declares"));
     }
 }

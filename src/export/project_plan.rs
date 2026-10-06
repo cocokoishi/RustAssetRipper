@@ -223,4 +223,19 @@ mod tests {
             "ProjectSettings/ProjectSettings.asset"
         );
     }
+
+    #[test]
+    fn fixed_path_failures_carry_caller_readable_diagnostics() {
+        assert_eq!(
+            FixedPathError::EmptyScenePath.to_string(),
+            "scene export paths need a non-empty scene path"
+        );
+        assert_eq!(
+            FixedPathError::AllocationFailed {
+                resource: "export scene path"
+            }
+            .to_string(),
+            "could not allocate export scene path"
+        );
+    }
 }

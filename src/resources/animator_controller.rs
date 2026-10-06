@@ -1,14 +1,15 @@
 //! `AnimatorControllerExtensions`, `AnimatorOverrideControllerExtensions`, and
-//! `RuntimeAnimatorControllerExtensions`, plus the state-behaviour lookup and
-//! state-machine list-routing kernels.
+//! `RuntimeAnimatorControllerExtensions`, plus the state-behaviour lookup,
+//! state-machine list-routing, and transition-destination decoding kernels.
 //!
 //! Mirrors the `ContainsAnimationClip` overloads: an animator controller owns a clip pointer list,
 //! an override controller owns original/override pairs plus a base controller, and the runtime
 //! dispatch hands off to whichever of the two concrete controller kinds it holds.
-//! Also mirrors `GetStateBehaviours` (range-table index resolution) and the
+//! Also mirrors `GetStateBehaviours` (range-table index resolution), the
 //! `AnimatorStateMachineExtensions` child-count/capacity routing (modern
 //! `ChildStates`/`ChildStateMachines` versus the legacy `StatesP`/
-//! `ChildStateMachine` lists).
+//! `ChildStateMachine` lists), and the `TryGetDestinationState` destination-id
+//! decision (absent/state/port) behind every transition rebuild.
 //!
 //! The asset-graph traversals stay open: `FetchEditorHierarchy` (controller,
 //! state-machine, blend-tree, and state hierarchies) needs collection-backed
@@ -16,6 +17,8 @@
 //! `AnimatorStateContext` release rebuild in `AssetRipper.Processing`. The
 //! `HideInHierarchy` flag write inside `GetStateBehaviours` is a caller-side
 //! mutation; this module only resolves which behaviour slots are selected.
+//! Likewise the selector-table `FullPathID` search and the `IsEntry` read behind
+//! a decoded port stay caller-side with the generated objects.
 
 use super::pptr::{is_asset, AssetRef, PPtrView};
 
@@ -353,6 +356,82 @@ pub fn entry_transition_capacity(has_entry_transitions: bool, requested: usize) 
     }
 }
 
+/// `AnimatorStateMachineContext.StateMachineTransitionFlag`: destination ids at or
+/// above this address state-machine entry/exit ports instead of plain states.
+pub const STATE_MACHINE_TRANSITION_FLAG: u32 = 30_000;
+
+/// Why a transition destination id resolves to nothing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DestinationRejection {
+    /// `uint.MaxValue`: names no destination at all (the `TryGetDestinationState`
+    /// head; the same check is available as `has_transition_destination` in
+    /// `animator_enums`, and is repeated here so the decision table is complete).
+    NoDestination,
+    /// A state-machine port id on a layout without a selector table (pre-Unity-5,
+    /// where `Has_SelectorStateConstantArray()` is false).
+    MissingSelectorTable,
+    /// `destination % StateMachineTransitionFlag` runs past the selector table.
+    SelectorIndexOutOfBounds {
+        /// The rejected selector index.
+        selector_index: u32,
+        /// The selector table length.
+        selector_count: usize,
+    },
+}
+
+/// A decoded `TryGetDestinationState` outcome.
+///
+/// Mirrors `AnimatorStateMachineContext.TryGetDestinationState`
+/// (`AssetRipper/Source/AssetRipper.Processing/AnimatorControllers/AnimatorStateMachineContext.cs`,
+/// lines 445-478) as a decision over caller facts: `has_selector_table` is
+/// `StateMachineConstant.Has_SelectorStateConstantArray()` and `selector_count`
+/// is the `SelectorStateConstantArray` length. The selector-table read, the
+/// `FullPathID` machine search, and the plain-state index lookup stay caller-side
+/// with the generated objects.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransitionDestination {
+    /// A plain state: the source casts the id to an `int` state index (ids below
+    /// the flag are small, so the wrapping cast never changes the value).
+    State {
+        /// The state index.
+        state_index: i32,
+    },
+    /// A state-machine entry/exit port: index into the selector table.
+    StateMachinePort {
+        /// The selector table index.
+        selector_index: u32,
+    },
+    /// The id resolves to nothing.
+    Rejected(DestinationRejection),
+}
+
+/// Decides what a transition destination id addresses.
+pub const fn decode_transition_destination(
+    destination_state: u32,
+    has_selector_table: bool,
+    selector_count: usize,
+) -> TransitionDestination {
+    if destination_state == u32::MAX {
+        return TransitionDestination::Rejected(DestinationRejection::NoDestination);
+    }
+    if destination_state < STATE_MACHINE_TRANSITION_FLAG {
+        return TransitionDestination::State {
+            state_index: destination_state as i32,
+        };
+    }
+    if !has_selector_table {
+        return TransitionDestination::Rejected(DestinationRejection::MissingSelectorTable);
+    }
+    let selector_index = destination_state % STATE_MACHINE_TRANSITION_FLAG;
+    if selector_index as u64 >= selector_count as u64 {
+        return TransitionDestination::Rejected(DestinationRejection::SelectorIndexOutOfBounds {
+            selector_index,
+            selector_count,
+        });
+    }
+    TransitionDestination::StateMachinePort { selector_index }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -593,5 +672,71 @@ mod tests {
             entry_transition_capacity(true, child_state_machine_count(true, 2, 8)),
             Some(2)
         );
+    }
+
+    #[test]
+    fn transition_destination_decoding_follows_the_source_branches() {
+        use TransitionDestination as Decoded;
+        // The sentinel names no destination, with or without a selector table.
+        assert_eq!(
+            decode_transition_destination(u32::MAX, true, 4),
+            Decoded::Rejected(DestinationRejection::NoDestination)
+        );
+        assert_eq!(
+            decode_transition_destination(u32::MAX, false, 0),
+            Decoded::Rejected(DestinationRejection::NoDestination)
+        );
+        // Ids below the flag address plain states, table or not.
+        assert_eq!(
+            decode_transition_destination(0, false, 0),
+            Decoded::State { state_index: 0 }
+        );
+        assert_eq!(
+            decode_transition_destination(7, true, 4),
+            Decoded::State { state_index: 7 }
+        );
+        assert_eq!(
+            decode_transition_destination(29_999, true, 4),
+            Decoded::State {
+                state_index: 29_999
+            }
+        );
+        // Port ids need the selector table.
+        assert_eq!(
+            decode_transition_destination(30_000, false, 4),
+            Decoded::Rejected(DestinationRejection::MissingSelectorTable)
+        );
+        // The selector index is the id modulo the flag.
+        assert_eq!(
+            decode_transition_destination(30_000, true, 1),
+            Decoded::StateMachinePort { selector_index: 0 }
+        );
+        assert_eq!(
+            decode_transition_destination(30_001, true, 2),
+            Decoded::StateMachinePort { selector_index: 1 }
+        );
+        // An index past the table is rejected with its witness values.
+        assert_eq!(
+            decode_transition_destination(30_005, true, 5),
+            Decoded::Rejected(DestinationRejection::SelectorIndexOutOfBounds {
+                selector_index: 5,
+                selector_count: 5,
+            })
+        );
+        assert_eq!(
+            decode_transition_destination(30_000, true, 0),
+            Decoded::Rejected(DestinationRejection::SelectorIndexOutOfBounds {
+                selector_index: 0,
+                selector_count: 0,
+            })
+        );
+        // The modulo wraps large ids: 4_294_967_294 % 30_000 == 17_294.
+        assert_eq!(
+            decode_transition_destination(u32::MAX - 1, true, 20_000),
+            Decoded::StateMachinePort {
+                selector_index: 17_294
+            }
+        );
+        assert_eq!(STATE_MACHINE_TRANSITION_FLAG, 30_000);
     }
 }

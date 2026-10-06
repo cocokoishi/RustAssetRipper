@@ -5,7 +5,9 @@
 //! A prefab collection gathers the hierarchy's assets plus the hierarchy object itself, in
 //! that order, through the shared multi-asset mechanics (`multi_asset.rs`): the primary
 //! asset is the hierarchy's prefab, and every gathered member takes the default
-//! count-seeded pseudo-random ID. The gathered set and the exported set differ on purpose:
+//! count-seeded pseudo-random ID. The primary asset itself is refused by the `AddAsset`
+//! gate when it appears among the hierarchy assets, so it keeps only its main export
+//! ID and refused members consume no ID seeds. The gathered set and the exported set differ on purpose:
 //! `ExportableAssets` yields the hierarchy's own exportable list in order (not the
 //! collected extras), tracking each member's file as it goes, while the display name is the
 //! root GameObject's name.
@@ -51,19 +53,36 @@ pub fn prefab_instance_pointer(
 /// Mirror the constructor gathering order: hierarchy assets first, then the hierarchy
 /// object itself, each deduplicated by the multi-asset rules.
 ///
+/// The main asset (the hierarchy's prefab, which already travels inside the hierarchy
+/// assets) is refused by the `AddAsset` gate below, exactly as the source `AddAssets`
+/// pass skips it; refused members consume no count-seeded IDs. Null members have no
+/// index, so callers drop them before numbering.
+///
 /// Returns the ordered add sequence; callers feed it to `MultiAssetCollection::add` with
 /// the pseudo-random scheme so count-seeded IDs match the source.
-pub fn prefab_gathering_order(hierarchy_assets: Vec<usize>, hierarchy_object: usize) -> Vec<usize> {
+pub fn prefab_gathering_order(
+    hierarchy_assets: Vec<usize>,
+    hierarchy_object: usize,
+    main_asset: usize,
+) -> Vec<usize> {
     let mut ordered = Vec::new();
     for member in hierarchy_assets
         .into_iter()
         .chain(std::iter::once(hierarchy_object))
     {
-        if !ordered.contains(&member) {
+        if prefab_gather_admits(member, main_asset, &ordered) {
             ordered.push(member);
         }
     }
     ordered
+}
+
+/// `AssetsExportCollection<T>.AddAsset` (`AssetRipper/Source/AssetRipper.Export.UnityProjects/Project/AssetsExportCollection.cs`
+/// lines 63-72) over caller facts: a null member (which has no index, so it never
+/// reaches this gate) and the main asset itself are refused; otherwise the first add
+/// wins (`TryAdd`), and only admitted members consume a count-seeded pseudo-random ID.
+pub fn prefab_gather_admits(member: usize, main_asset: usize, gathered: &[usize]) -> bool {
+    member != main_asset && !gathered.contains(&member)
 }
 
 /// Mirror `ExportableAssets`: the hierarchy's exportable members in order with their files.
@@ -78,7 +97,10 @@ pub fn prefab_exportable_with_files(
 #[cfg(test)]
 mod tests {
     use super::super::export_type::ExportAssetType;
-    use super::{prefab_exportable_with_files, prefab_gathering_order, prefab_instance_pointer};
+    use super::{
+        prefab_exportable_with_files, prefab_gather_admits, prefab_gathering_order,
+        prefab_instance_pointer,
+    };
 
     #[test]
     fn pointers_combine_class_ids_guids_and_legacy_branches() {
@@ -105,21 +127,47 @@ mod tests {
 
     #[test]
     fn gathering_orders_hierarchy_assets_before_the_hierarchy_itself() {
+        // The main asset id (99) is outside every list here, so nothing is refused.
         assert_eq!(
-            prefab_gathering_order([10, 11].into_iter().collect(), 12),
+            prefab_gathering_order([10, 11].into_iter().collect(), 12, 99),
             [10, 11, 12]
         );
         // An already-listed hierarchy object is not appended twice, and member
         // duplicates keep their first position like TryAdd.
         assert_eq!(
-            prefab_gathering_order([10, 12].into_iter().collect(), 12),
+            prefab_gathering_order([10, 12].into_iter().collect(), 12, 99),
             [10, 12]
         );
         assert_eq!(
-            prefab_gathering_order([10, 11, 10].into_iter().collect(), 12),
+            prefab_gathering_order([10, 11, 10].into_iter().collect(), 12, 99),
             [10, 11, 12]
         );
-        assert!(prefab_gathering_order(Vec::new(), 12) == [12]);
+        assert!(prefab_gathering_order(Vec::new(), 12, 99) == [12]);
+    }
+
+    #[test]
+    fn gathering_refuses_the_main_asset_like_add_asset() {
+        // The hierarchy's prefab travels inside the hierarchy assets, but the source
+        // `AddAssets` pass refuses it because it is already the main asset.
+        assert_eq!(
+            prefab_gathering_order([10, 9, 11].into_iter().collect(), 12, 9),
+            [10, 11, 12]
+        );
+        // The hierarchy object itself is refused when it is the main asset.
+        assert_eq!(prefab_gathering_order(vec![10], 9, 9), [10]);
+        // Refused members consume no slots: later duplicates still keep first position.
+        assert_eq!(
+            prefab_gathering_order([9, 10, 9].into_iter().collect(), 12, 9),
+            [10, 12]
+        );
+    }
+
+    #[test]
+    fn gather_gate_refuses_main_asset_and_duplicates() {
+        assert!(prefab_gather_admits(10, 9, &[]));
+        assert!(!prefab_gather_admits(9, 9, &[]));
+        assert!(!prefab_gather_admits(10, 9, &[10]));
+        assert!(prefab_gather_admits(11, 9, &[10]));
     }
 
     #[test]
