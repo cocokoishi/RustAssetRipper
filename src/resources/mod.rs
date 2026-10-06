@@ -50,6 +50,7 @@ pub mod packed_float_vector;
 pub mod packed_quat_vector;
 pub mod path_checksum;
 pub mod pptr;
+pub mod preview_image;
 pub mod pvrtc;
 pub mod quaternion;
 pub mod rectf;

@@ -799,5 +799,11 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 ## 105. Checkpoint: sprite atlas coordinates (2026-10-06)
 
 - Extended `src/resources/sprite.rs` with `get_sprite_coordinates_in_atlas` in source f32 order; new row `RES-SPRITE-ATLAS-001`. Targeted lib tests 6/6 locally, fmt + targeted lib Clippy clean; full workspace + CI pending (Actions still blocked by billing).
+- Next: preview image dispatch, then Crunch/EXR/JPEG, meta fields, then core SER/OBJ/PROC rows.
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 106. Checkpoint: web preview image dispatch (2026-10-06)
+
+- Added `src/resources/preview_image.rs` routing `HasImageData`/`GetImageBitmap`/`GetRawImageData` over caller facts; new row `RES-PREVIEW-IMAGE-001`. Targeted lib tests 3/3 locally, fmt + targeted lib Clippy clean; full workspace + CI pending (Actions still blocked by billing).
 - Next: Crunch/EXR/JPEG, meta fields, then core SER/OBJ/PROC rows.
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
