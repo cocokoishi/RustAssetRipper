@@ -15,6 +15,30 @@ const BLOCK_INFO_NEEDS_PADDING: u32 = 0x200;
 const BLOCKS_AND_DIRECTORY_COMBINED: u32 = 0x40;
 const COMPRESSION_MASK: u32 = 0x3f;
 const BLOCK_COMPRESSION_MASK: u16 = 0x3f;
+/// `NodeFlags.SerializedFile`: the directory-node bit marking SerializedFile entries.
+///
+/// The baseline stores this bit on every node but never branches on it (entry kinds
+/// are recovered downstream by content sniffing instead); it is pinned here so the
+/// named bit survives as a caller fact rather than a magic number.
+pub const NODE_SERIALIZED_FILE_FLAG: u32 = 4;
+
+/// `CompressionType` enum names (`AssetRipper.IO.Files.BundleFiles.CompressionType`)
+/// for diagnostics: 0 None, 1 Lzma, 2 Lz4, 3 Lz4HC, 4 Lzham.
+///
+/// Unknown discriminants read `None`, mirroring the source `default` branch. One
+/// deliberate difference is documented, not changed: the baseline renders these names
+/// inside its unsupported-compression texts, while `UnityFsErrorKind::UnsupportedCompression`
+/// keeps the numeric discriminant so unknown future types stay reportable.
+pub const fn compression_type_name(compression: u8) -> Option<&'static str> {
+    match compression {
+        0 => Some("None"),
+        1 => Some("Lzma"),
+        2 => Some("Lz4"),
+        3 => Some("Lz4HC"),
+        4 => Some("Lzham"),
+        _ => None,
+    }
+}
 
 /// Resource bounds applied before allocating decompressed bundle metadata or entries.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -98,6 +122,13 @@ pub struct UnityFsNode {
     pub size: u64,
     pub flags: u32,
     pub path: String,
+}
+
+impl UnityFsNode {
+    /// Whether the `NodeFlags.SerializedFile` bit is set on this directory entry.
+    pub const fn is_serialized_file(&self) -> bool {
+        self.flags & NODE_SERIALIZED_FILE_FLAG != 0
+    }
 }
 
 /// Read-only view of a UnityFS bundle with parsed blocks and directory entries.
@@ -1354,7 +1385,10 @@ impl Display for UnityFsErrorKind {
 
 #[cfg(test)]
 mod tests {
-    use super::{UnityFsBundle, UnityFsErrorKind, UnityFsLimits};
+    use super::{
+        compression_type_name, UnityFsBundle, UnityFsErrorKind, UnityFsLimits, UnityFsNode,
+        NODE_SERIALIZED_FILE_FLAG,
+    };
     use crate::compression::wrappers::compress_gzip;
     use crate::io::filesystem::VirtualFileSystem;
     use crate::scheme::{ContainerMountLimits, FileKind, ParsedFile, SchemeReader, WrapperKind};
@@ -1726,5 +1760,43 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn bundle_flag_and_compression_names_match_the_source_enums() {
+        assert_eq!(NODE_SERIALIZED_FILE_FLAG, 4);
+        // The named compression discriminants resolve; anything else reads unknown,
+        // mirroring the source `default` branch.
+        assert_eq!(compression_type_name(0), Some("None"));
+        assert_eq!(compression_type_name(1), Some("Lzma"));
+        assert_eq!(compression_type_name(2), Some("Lz4"));
+        assert_eq!(compression_type_name(3), Some("Lz4HC"));
+        assert_eq!(compression_type_name(4), Some("Lzham"));
+        assert_eq!(compression_type_name(5), None);
+        assert_eq!(compression_type_name(255), None);
+    }
+
+    #[test]
+    fn directory_node_serialized_file_bit_follows_the_flag_word() {
+        let node = UnityFsNode {
+            offset: 0,
+            size: 8,
+            flags: NODE_SERIALIZED_FILE_FLAG,
+            path: "level0".to_owned(),
+        };
+        assert!(node.is_serialized_file());
+        // Other flag bits alone do not mark a SerializedFile.
+        let other = UnityFsNode {
+            flags: 0x40,
+            ..node.clone()
+        };
+        assert!(!other.is_serialized_file());
+        let combined = UnityFsNode {
+            flags: 0x40 | NODE_SERIALIZED_FILE_FLAG,
+            ..node.clone()
+        };
+        assert!(combined.is_serialized_file());
+        let bare = UnityFsNode { flags: 0, ..node };
+        assert!(!bare.is_serialized_file());
     }
 }

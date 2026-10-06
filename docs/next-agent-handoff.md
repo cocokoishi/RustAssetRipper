@@ -888,3 +888,10 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Gates: `cargo fmt --check` 0, full tests 1108 lib + 52 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
 - Next: eighth team round (bundle/archive/container gaps), then `SetBoneGeometry`/outline mesh internals.
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 118. Checkpoint: eighth team round integrated (2026-10-06)
+
+- Three teammates shipped disjoint scopes, all lead-verified (targeted suites re-run: 13/13, 9/9, 13/13) and integrated: `texture-meta` pinned the UnityFS flag/name surface (`IO-BUNDLE-UNITYFS-ENTRY-001`); `sprite-fill` named the WebFile align step + boundary coverage (`IO-BUNDLE-WEBDATA-001`); `texture-export` closed the asset_bundle survey with a coverage ledger + pinning tests (`PROC-ASSETBUNDLE-PATH-METADATA-001`). No scope violations, no placeholders.
+- Gates: `cargo fmt --check` 0, full tests 1116 lib + 52 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
+- Next: ninth team round (CLI/product-layer gaps), then `SetBoneGeometry`/outline mesh internals.
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

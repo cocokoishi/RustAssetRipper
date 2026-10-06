@@ -1,4 +1,11 @@
 //! Unity WebData containers used for web player resources.
+//!
+//! Ports the `WebFile`/`WebFileEntry` directory parsing and writing plus the
+//! `WebFileScheme` sniff shape (`is_web_file` needs the signature and its zero
+//! terminator, mirroring the strict `Length - Position > Signature.Length`
+//! room check). Entry payload mounting as `ResourceFile` objects stays with the
+//! scheme dispatcher, and inputs not starting at the container base are the
+//! caller's to slice.
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -285,7 +292,7 @@ impl<'a> WebFile<'a> {
 
         for (index, entry) in self.entries.iter().enumerate() {
             if align_entries {
-                let padding = (4 - (output.len() & 3)) & 3;
+                let padding = entry_padding(output.len());
                 push_bytes(&mut output, &[0; 3][..padding], maximum_output_size)?;
             }
             if output.len() > i32::MAX as usize {
@@ -309,6 +316,14 @@ impl<'a> WebFile<'a> {
         }
         Ok(output)
     }
+}
+
+/// Four-byte data-alignment step used when writing entry payloads.
+///
+/// Mirrors the `EndianWriter.AlignStream` call in `WebFile.Write`: padding bytes
+/// bring the output length up to a multiple of four.
+fn entry_padding(output_len: usize) -> usize {
+    (4 - (output_len & 3)) & 3
 }
 
 fn read_7bit_length(reader: &mut BinaryReader<'_>) -> Result<usize, WebFileError> {
@@ -684,5 +699,85 @@ mod tests {
             error.kind(),
             WebFileErrorKind::OutputLimitExceeded { .. }
         ));
+    }
+
+    #[test]
+    fn sniff_needs_the_signature_and_its_terminator() {
+        // The source requires room past the signature (`Length - Position >
+        // Signature.Length`), so a bare 15-byte signature never matches.
+        assert!(!WebFile::is_web_file(&[]));
+        assert!(!WebFile::is_web_file(b"UnityWebData1.0"));
+        assert!(!WebFile::is_web_file(b"UnityWebData1.0X"));
+        assert!(!WebFile::is_web_file(b"0123456789abcdef"));
+        assert!(WebFile::is_web_file(b"UnityWebData1.0\0"));
+        assert!(WebFile::is_web_file(b"UnityWebData1.0\0extra"));
+    }
+
+    #[test]
+    fn entry_padding_matches_four_byte_alignment() {
+        assert_eq!(super::entry_padding(0), 0);
+        assert_eq!(super::entry_padding(1), 3);
+        assert_eq!(super::entry_padding(2), 2);
+        assert_eq!(super::entry_padding(3), 1);
+        assert_eq!(super::entry_padding(4), 0);
+        assert_eq!(super::entry_padding(5), 3);
+        assert_eq!(super::entry_padding(8), 0);
+    }
+
+    fn web_file_with_entries(records: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut directory_len = 0usize;
+        for (name, _) in records {
+            directory_len += 4 + 4 + encoded_7bit_length(name.len()).len() + name.len();
+        }
+        let header_size = 20 + directory_len;
+        let mut bytes = b"UnityWebData1.0\0".to_vec();
+        bytes.extend_from_slice(&(header_size as i32).to_le_bytes());
+        let mut offset = header_size;
+        for (name, data) in records {
+            bytes.extend_from_slice(&(offset as i32).to_le_bytes());
+            bytes.extend_from_slice(&(data.len() as i32).to_le_bytes());
+            bytes.extend_from_slice(&encoded_7bit_length(name.len()));
+            bytes.extend_from_slice(name.as_bytes());
+            offset += data.len();
+        }
+        for (_, data) in records {
+            bytes.extend_from_slice(data);
+        }
+        bytes
+    }
+
+    #[test]
+    fn parses_a_header_with_no_entries() {
+        let mut bytes = b"UnityWebData1.0\0".to_vec();
+        bytes.extend_from_slice(&20i32.to_le_bytes());
+        let parsed = WebFile::parse(&bytes).unwrap();
+        assert!(parsed.entries.is_empty());
+        assert_eq!(parsed.header_size, 20);
+        let written = parsed.write(true, 1024).unwrap();
+        assert_eq!(WebFile::parse(&written).unwrap().entries.len(), 0);
+    }
+
+    #[test]
+    fn parses_and_round_trips_multiple_entries_with_empty_names_and_data() {
+        let input = web_file_with_entries(&[("a", b"one"), ("", b""), ("b/c", b"12")]);
+        let parsed = WebFile::parse(&input).unwrap();
+        assert_eq!(parsed.entries.len(), 3);
+        assert_eq!(parsed.entries[1].name, "");
+        assert_eq!(parsed.entry_data(1), Some(&b""[..]));
+        assert_eq!(parsed.entry_data(2), Some(&b"12"[..]));
+        for align_entries in [false, true] {
+            let written = parsed.write(align_entries, 4096).unwrap();
+            let reread = WebFile::parse(&written).unwrap();
+            assert_eq!(reread.entries.len(), 3);
+            for index in 0..3 {
+                assert_eq!(reread.entries[index].name, parsed.entries[index].name);
+                assert_eq!(reread.entry_data(index), parsed.entry_data(index));
+            }
+            if align_entries {
+                for entry in &reread.entries {
+                    assert_eq!(entry.offset & 3, 0);
+                }
+            }
+        }
     }
 }

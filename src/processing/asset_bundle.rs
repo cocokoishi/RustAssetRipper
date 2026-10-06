@@ -1,4 +1,32 @@
 //! AssetBundle naming and Container pointer resolution.
+//!
+//! Ports `OriginalPathProcessor.Process` (both passes), `OriginalPathHelper`, and
+//! `AssetBundleExtensions.GetAssetBundleName`
+//! (`AssetRipper/Source/AssetRipper.Processing/Scenes/OriginalPathProcessor.cs`,
+//! `AssetRipper/Source/AssetRipper.Processing/OriginalPathHelper.cs`,
+//! `AssetRipper/Source/AssetRipper.SourceGenerated.Extensions/AssetBundleExtensions.cs`):
+//!
+//! - Bundle discovery reads the serialized name first and falls back to the owning
+//!   Bundle's name (`GameBundle.Name` is literally `"GameBundle"`, matched here); a
+//!   trailing `.bundle` is removed case-insensitively.
+//! - Shared Container entries (`AssetInfo.Asset.FileID != 0`) resolve to non-local
+//!   targets and never receive bundle names or paths, matching the source skip.
+//! - ResourceManager paths replace only when the candidate is longer, measured in
+//!   UTF-16 units exactly like the source `string.Length` comparison.
+//! - GroupByBundleName collection directories apply only when unset (`??=`), and only
+//!   for bundles outside the game bundle.
+//! - `UndoPathLowercasing` restores ASCII case-insensitive matches; non-ASCII pairs are
+//!   conservatively declined and counted (the source invariant-culture comparison has no
+//!   workspace equivalent here).
+//! - Shader override directory/name/extension fill only when unset (`??=`).
+//! - Unresolvable Container targets surface as auditable plan issues instead of the
+//!   source's silent skips.
+//!
+//! Deliberately open (audited, not missing):
+//! - `AssetBundleExtensions.HasPathExtension` has zero call sites in the frozen baseline,
+//!   so no gate is ported.
+//! - The `IsStreamedSceneAssetBundle` `Debug.Assert` in `PrefabProcessor` has no release
+//!   behavior; streamed-scene path recovery itself lives in `scene_collections.rs`.
 
 use std::collections::HashMap;
 use std::error::Error;
@@ -2911,9 +2939,9 @@ impl Error for AssetBundleContainerMapError {
 mod tests {
     use super::{
         asset_bundle_container_target, asset_bundle_name_for_asset, bundle_container_original_path,
-        calculated_original_path, get_asset_bundle_name, initialize_shader_overrides,
-        original_path_details, resource_manager_path_should_replace, restore_original_name,
-        sort_workspace_original_path_events, AssetBundleContainerTarget,
+        calculated_original_path, ensure_starts_with_assets, get_asset_bundle_name,
+        initialize_shader_overrides, original_path_details, resource_manager_path_should_replace,
+        restore_original_name, sort_workspace_original_path_events, AssetBundleContainerTarget,
         AssetBundleNameDecodeError, BundleOriginalPathEffect, BundledAssetsExportMode,
         OriginalPathDetails, WorkspaceAssetExportPath, WorkspaceAssetExportPathReport,
         WorkspaceOriginalPathEvent, WorkspaceOriginalPathEventKind,
@@ -3010,6 +3038,43 @@ mod tests {
         assert_eq!(
             asset_bundle_name_for_asset("bundle.avatars").unwrap(),
             "bundle.avatars"
+        );
+    }
+
+    #[test]
+    fn direct_asset_paths_keep_verbatim_correct_case_and_prepend_assets() {
+        // `OriginalPathHelper.EnsureStartsWithAssets`: exact, case-corrected, prepended.
+        assert_eq!(
+            ensure_starts_with_assets("Assets/Textures/wood.mat").unwrap(),
+            "Assets/Textures/wood.mat"
+        );
+        assert_eq!(
+            ensure_starts_with_assets("aSSETS/Textures/wood.mat").unwrap(),
+            "Assets/Textures/wood.mat"
+        );
+        assert_eq!(
+            ensure_starts_with_assets("Textures/wood.mat").unwrap(),
+            "Assets/Textures/wood.mat"
+        );
+    }
+
+    #[test]
+    fn original_path_details_cover_trailing_separators_and_bare_names() {
+        assert_eq!(
+            original_path_details("Assets/Textures/").unwrap(),
+            OriginalPathDetails {
+                directory: Some("Assets".to_owned()),
+                name: None,
+                extension: None,
+            }
+        );
+        assert_eq!(
+            original_path_details("wood.png").unwrap(),
+            OriginalPathDetails {
+                directory: None,
+                name: Some("wood".to_owned()),
+                extension: Some("png".to_owned()),
+            }
         );
     }
 
