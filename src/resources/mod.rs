@@ -35,6 +35,7 @@ pub mod gl_texture_settings;
 pub mod glb;
 pub mod graphics_format;
 pub mod image_export;
+pub mod jpeg;
 pub mod keyframe;
 pub mod keyframe_quaternion;
 pub mod keyframe_vector3;

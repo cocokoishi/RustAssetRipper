@@ -1,8 +1,8 @@
 //! Image writers for `DirectBitmap.Save`.
 //!
 //! The reference dispatches on `ImageExportFormat` and uses FPng, `BmpWriter`, `ExrWriter`, and
-//! StbImageWriteSharp. This port writes PNG, BMP, TGA, Radiance HDR, and OpenEXR directly; only
-//! JPEG returns [`ImageWriteError::Unsupported`].
+//! StbImageWriteSharp. This port writes PNG, BMP, TGA, Radiance HDR, OpenEXR, and JPEG
+//! directly; every `ImageExportFormat` member now has a writer.
 //!
 //! The BMP writer reproduces `BmpWriter.WriteBmp` byte-for-byte (a 108-byte `BITMAPV4HEADER`,
 //! BGRA rows bottom-up). The PNG writer emits filter-0 scanlines; it is not byte-identical to
@@ -79,7 +79,7 @@ impl ImageExportFormat {
 pub enum ImageWriteError {
     /// The underlying stream failed.
     Io(io::Error),
-    /// The format's codec is not yet ported.
+    /// A requested format has no writer (all current formats are covered).
     Unsupported {
         /// The requested format.
         format: ImageExportFormat,
@@ -127,9 +127,14 @@ impl Bitmap {
             ImageExportFormat::Bmp => self.save_bmp(writer),
             ImageExportFormat::Tga => self.save_tga(writer),
             ImageExportFormat::Exr => self.save_exr(writer),
-            ImageExportFormat::Jpeg => Err(ImageWriteError::Unsupported { format }),
+            ImageExportFormat::Jpeg => self.save_jpg(writer),
             ImageExportFormat::Hdr => self.save_hdr(writer),
         }
+    }
+
+    /// `DirectBitmap.SaveAsJpeg` (`ImageWriter.WriteJpg` with zero quality).
+    pub fn save_jpg<W: Write>(&self, writer: &mut W) -> Result<(), ImageWriteError> {
+        super::jpeg::save_jpg(self, writer)
     }
 
     fn stacked_height(&self) -> usize {
@@ -735,15 +740,12 @@ mod tests {
     }
 
     #[test]
-    fn jpeg_stays_unsupported() {
-        let image = bitmap(1, 1, true, vec![1, 2, 3, 4]);
+    fn jpeg_saves_through_the_format_dispatch() {
+        let image = bitmap(1, 1, true, vec![255, 0, 0, 255]);
         let mut output = Vec::new();
-        assert!(matches!(
-            image.save(&mut output, ImageExportFormat::Jpeg),
-            Err(ImageWriteError::Unsupported {
-                format: ImageExportFormat::Jpeg
-            })
-        ));
+        image.save(&mut output, ImageExportFormat::Jpeg).unwrap();
+        assert_eq!(&output[..2], &[0xFF, 0xD8]);
+        assert_eq!(&output[output.len() - 2..], &[0xFF, 0xD9]);
     }
 
     #[test]
