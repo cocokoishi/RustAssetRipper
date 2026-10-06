@@ -2413,3 +2413,8 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 
 - Composed `export_texture3d_image`/`export_texture2d_array_image`/`export_cubemap_array_image` in `src/resources/texture.rs` (GraphicsFormat route, per-type flip/unpack, `TextureExportError::Array`) and dispatched classes 117/187/188 in `export-texture` with export-level PNG tests plus end-to-end CLI exports for all three. Debugging note: the tests caught two authoring errors (an incoherent 4-byte cubemap vector for six faces, and a hardcoded TypeTree node count that broke the synthetic files). Lib suite 1019/1019 and bin 52/52 locally, `cargo fmt --check` clean, workspace Clippy clean; Actions validation pending (loop still blocked).
 - No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+## Sprite conversion gates (2026-10-06)
+
+- Added `src/resources/sprite.rs` (`SPRITE_CLASS_ID`, `sprite_supported`, `sprite_try_convert_to_bitmap`) mirroring `SpriteConverter.Supported`/`TryConvertToBitmap` over caller-resolved facts: a resolved texture reports its integrity/conversion outcome, while atlas-backed and texture-less sprites fail with an empty bitmap. Three tests pin the class ID and both truth tables. Targeted `cargo test -p assetripper-rs --lib resources::sprite`: 3/3 pass locally; `cargo fmt --check` clean; full workspace and CI pending (Actions blocked repo-side by billing: jobs fail in ~2s with no runner and the `spending limit` annotation). No runtime differential applies without a managed collection. New row `RES-SPRITE-CONVERT-001`.
+- No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.

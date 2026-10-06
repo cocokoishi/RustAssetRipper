@@ -55,6 +55,7 @@ pub mod quaternion;
 pub mod rectf;
 pub mod shader;
 pub mod shader_channel;
+pub mod sprite;
 pub mod state_constant;
 pub mod state_machine_constant;
 pub mod streamed_clip;

@@ -789,3 +789,9 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Composed the three exports + CLI dispatch with PNG and end-to-end tests. Lib 1019/1019 and bin 52/52 locally, fmt + Clippy clean; Actions validation pending (loop still blocked).
 - Next: remaining rows (sprite/atlas, Crunch/EXR/JPEG, meta fields, then core SER/OBJ/PROC rows).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 104. Checkpoint: sprite conversion gates (2026-10-06)
+
+- Added `src/resources/sprite.rs` (`SPRITE_CLASS_ID`, `sprite_supported`, `sprite_try_convert_to_bitmap`) mirroring `SpriteConverter.Supported`/`TryConvertToBitmap` over caller facts; new row `RES-SPRITE-CONVERT-001`. Targeted lib tests 3/3 locally, fmt clean; full workspace + CI pending (Actions still blocked: billing `spending limit` annotation, no runner).
+- Next: sprite atlas rect math, then Crunch/EXR/JPEG, meta fields, then core SER/OBJ/PROC rows.
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
