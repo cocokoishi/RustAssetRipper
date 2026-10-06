@@ -20,6 +20,11 @@
 //!   dispatch shape and the unconditional literals below are pinned.
 //! - The `MonoImporter` execution-order narrowing: `(short)script.ExecutionOrder`, which wraps
 //!   exactly like Rust's `as` conversion because C# explicit conversions are unchecked by default.
+//! - The `TextureExportCollection.AddSprites` importer decisions: Single versus Multiple mode
+//!   (with the shipped `SpriteImportMode`/`SpriteAlignment` discriminants read off the
+//!   generated DLL by reflection), the sprite-supplied extrude/mesh-type/pivot/border/
+//!   pixels-per-unit, and the sprite-sheet build gate. Version-gated application to a
+//!   generated importer object stays caller-side.
 //!
 //! Everything that copies asset state (`TextureImporterData` texture reads, font metrics,
 //! audio settings, video dimensions, shader texture maps) or branches on generated
@@ -55,6 +60,150 @@ pub enum PrefabImporterBranch {
     LegacyPrefabAsset,
     /// A modern prefab instance: a `PrefabImporter` carrying the root bundle name.
     ModernPrefabImporter,
+}
+
+/// Baseline `SpriteImportMode` discriminants (read off the shipped
+/// `AssetRipper.SourceGenerated.dll` with a reflection probe: None 0, Single 1,
+/// Multiple 2, Polygon 3). `AddSprites` writes only Single and Multiple.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum SpriteImportMode {
+    /// One sprite (or none): per-sprite sheet of exactly one entry.
+    Single = 1,
+    /// Several sprites, or one sprite that does not cover its texture.
+    Multiple = 2,
+}
+
+/// Baseline `SpriteAlignment` discriminants used by `AddSprites` (Center 0,
+/// Custom 9 in the shipped enums).
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum SpriteAlignment {
+    /// The default and multi-sprite alignment.
+    Center = 0,
+    /// The single matching-sprite alignment.
+    Custom = 9,
+}
+
+/// Baseline `SpriteMeshType.FullRect` discriminant (0 in the shipped enums).
+/// The empty-sprite path writes it; otherwise the sprite render-data mesh type
+/// (an opaque generated integer) passes through untouched.
+pub const SPRITE_MESH_TYPE_FULL_RECT: i32 = 0;
+
+/// Baseline `TextureImporterType.Sprite` discriminant (8 in the shipped enums),
+/// written by every non-empty `AddSprites` path.
+pub const TEXTURE_IMPORTER_TYPE_SPRITE: i32 = 8;
+
+/// Caller facts for one sprite in `TextureExportCollection.AddSprites`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpriteFacts {
+    /// The sprite `Rect` (`[x, y, width, height]`).
+    pub rect: [f32; 4],
+    /// The sprite render-data texture rect in the same layout.
+    pub texture_rect: [f32; 4],
+    /// Whether the sprite name equals the texture name.
+    pub name_matches_texture: bool,
+    /// The sprite `Extrude`.
+    pub extrude: u32,
+    /// The sprite render-data mesh type (opaque generated integer).
+    pub mesh_type: i32,
+    /// Whether the sprite exposes a pivot.
+    pub has_pivot: bool,
+    /// The sprite pivot.
+    pub pivot: [f32; 2],
+    /// Whether the sprite exposes a border.
+    pub has_border: bool,
+    /// The sprite border.
+    pub border: [f32; 4],
+    /// The sprite `PixelsToUnits`.
+    pub pixels_to_units: f32,
+}
+
+/// The importer fields `AddSprites` assigns, before version-gated application.
+///
+/// Fields the source leaves untouched (the texture type on the empty path, which
+/// keeps the `ImporterFactory` default) are reported as `None`/false so callers
+/// can distinguish "write" from "leave alone".
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpriteImporterDecision {
+    /// `SpriteModeE`.
+    pub mode: SpriteImportMode,
+    /// Whether `TextureTypeE` is forced to Sprite (empty path leaves it alone).
+    pub texture_type_is_sprite: bool,
+    /// `SpriteExtrude`.
+    pub extrude: u32,
+    /// `SpriteMeshType`.
+    pub mesh_type: i32,
+    /// `Alignment`.
+    pub alignment: SpriteAlignment,
+    /// `SpritePivot` when the importer exposes it (and the sprite supplies one
+    /// on the single-sprite path).
+    pub pivot: Option<[f32; 2]>,
+    /// `SpriteBorder` when both sides expose it (single-sprite path only).
+    pub border: Option<[f32; 4]>,
+    /// `SpritePixelsToUnits`.
+    pub pixels_to_units: f32,
+    /// Whether `AddSpriteSheet`/`AddIDToName` run (`m_exportSprites` with sprites).
+    pub build_sprite_sheet: bool,
+}
+
+/// `TextureExportCollection.AddSprites` over caller facts.
+///
+/// With no sprites the importer takes Single mode, extrude 1, `FullRect`, center
+/// alignment, a centered pivot, and 100 pixels per unit, leaving the texture
+/// type at its factory default. With exactly one sprite the mode is Single only
+/// when the sprite rect equals its render-data texture rect and the sprite name
+/// equals the texture name, else Multiple; the sprite's extrude, mesh type,
+/// pivot, border, and pixels-per-unit apply. With several sprites the first
+/// sprite supplies extrude, mesh type, and pixels-per-unit under Multiple mode
+/// with center alignment. The sprite sheet and ID table build only when
+/// `export_sprites` is set and at least one sprite is present.
+pub fn decide_sprite_importer(
+    sprites: &[SpriteFacts],
+    export_sprites: bool,
+    importer_has_pivot: bool,
+    importer_has_border: bool,
+) -> SpriteImporterDecision {
+    match sprites {
+        [] => SpriteImporterDecision {
+            mode: SpriteImportMode::Single,
+            texture_type_is_sprite: false,
+            extrude: texture_importer::SPRITE_EXTRUDE as u32,
+            mesh_type: SPRITE_MESH_TYPE_FULL_RECT,
+            alignment: SpriteAlignment::Center,
+            pivot: importer_has_pivot.then_some([0.5, 0.5]),
+            border: None,
+            pixels_to_units: texture_importer::SPRITE_PIXELS_TO_UNITS,
+            build_sprite_sheet: false,
+        },
+        [sprite] => {
+            let single = sprite.rect == sprite.texture_rect && sprite.name_matches_texture;
+            SpriteImporterDecision {
+                mode: if single {
+                    SpriteImportMode::Single
+                } else {
+                    SpriteImportMode::Multiple
+                },
+                texture_type_is_sprite: true,
+                extrude: sprite.extrude,
+                mesh_type: sprite.mesh_type,
+                alignment: SpriteAlignment::Custom,
+                pivot: (importer_has_pivot && sprite.has_pivot).then_some(sprite.pivot),
+                border: (importer_has_border && sprite.has_border).then_some(sprite.border),
+                pixels_to_units: sprite.pixels_to_units,
+                build_sprite_sheet: export_sprites,
+            }
+        }
+        [first, ..] => SpriteImporterDecision {
+            mode: SpriteImportMode::Multiple,
+            texture_type_is_sprite: true,
+            extrude: first.extrude,
+            mesh_type: first.mesh_type,
+            alignment: SpriteAlignment::Center,
+            pivot: importer_has_pivot.then_some([0.5, 0.5]),
+            border: None,
+            pixels_to_units: first.pixels_to_units,
+            build_sprite_sheet: export_sprites,
+        },
+    }
 }
 
 /// The `EmitPrefabAsset` branch: `Prefab is IPrefabMarker` selects the legacy asset path.
@@ -255,11 +404,12 @@ pub mod fixed_importer_literals {
 
 #[cfg(test)]
 mod tests {
-    use super::{plugin_importer, texture_importer};
     use super::{
-        propagate_asset_bundle_name, select_prefab_importer, truncate_execution_order,
-        PrefabImporterBranch,
+        decide_sprite_importer, propagate_asset_bundle_name, select_prefab_importer,
+        truncate_execution_order, PrefabImporterBranch, SpriteAlignment, SpriteFacts,
+        SpriteImportMode, SPRITE_MESH_TYPE_FULL_RECT, TEXTURE_IMPORTER_TYPE_SPRITE,
     };
+    use super::{plugin_importer, texture_importer};
 
     #[test]
     fn bundle_name_propagates_only_with_field_and_non_null_source() {
@@ -296,6 +446,102 @@ mod tests {
         assert_eq!(
             select_prefab_importer(false),
             PrefabImporterBranch::ModernPrefabImporter
+        );
+    }
+
+    #[test]
+    fn sprite_importer_follows_add_sprites_branches() {
+        fn sprite(matching: bool) -> SpriteFacts {
+            SpriteFacts {
+                rect: [1.0, 2.0, 32.0, 16.0],
+                texture_rect: if matching {
+                    [1.0, 2.0, 32.0, 16.0]
+                } else {
+                    [0.0, 0.0, 64.0, 64.0]
+                },
+                name_matches_texture: matching,
+                extrude: 3,
+                mesh_type: 7,
+                has_pivot: true,
+                pivot: [0.25, 0.75],
+                has_border: true,
+                border: [1.0, 2.0, 3.0, 4.0],
+                pixels_to_units: 50.0,
+            }
+        }
+
+        // No sprites: Single mode, factory extrude, FullRect, center alignment,
+        // a centered pivot, 100 pixels per unit, texture type untouched, no sheet.
+        let empty = decide_sprite_importer(&[], true, true, true);
+        assert_eq!(empty.mode, SpriteImportMode::Single);
+        assert_eq!(empty.mode as i32, 1);
+        assert!(!empty.texture_type_is_sprite);
+        assert_eq!(empty.extrude, 1);
+        assert_eq!(empty.mesh_type, SPRITE_MESH_TYPE_FULL_RECT);
+        assert_eq!(empty.mesh_type, 0);
+        assert_eq!(empty.alignment, SpriteAlignment::Center);
+        assert_eq!(empty.alignment as i32, 0);
+        assert_eq!(empty.pivot, Some([0.5, 0.5]));
+        assert_eq!(empty.border, None);
+        assert_eq!(empty.pixels_to_units, 100.0);
+        assert!(!empty.build_sprite_sheet);
+        // Without an importer pivot field there is no pivot either.
+        assert_eq!(decide_sprite_importer(&[], true, false, true).pivot, None);
+
+        // One matching sprite: Single mode with the sprite's own geometry.
+        let single = decide_sprite_importer(&[sprite(true)], true, true, true);
+        assert_eq!(single.mode, SpriteImportMode::Single);
+        assert!(single.texture_type_is_sprite);
+        assert_eq!(TEXTURE_IMPORTER_TYPE_SPRITE, 8);
+        assert_eq!(single.extrude, 3);
+        assert_eq!(single.mesh_type, 7);
+        assert_eq!(single.alignment, SpriteAlignment::Custom);
+        assert_eq!(single.alignment as i32, 9);
+        assert_eq!(single.pivot, Some([0.25, 0.75]));
+        assert_eq!(single.border, Some([1.0, 2.0, 3.0, 4.0]));
+        assert_eq!(single.pixels_to_units, 50.0);
+        assert!(single.build_sprite_sheet);
+        // The sheet builds only when sprite export is enabled.
+        assert!(!decide_sprite_importer(&[sprite(true)], false, true, true).build_sprite_sheet);
+
+        // One sprite whose rect or name differs: Multiple mode, same sprite values.
+        for other in [sprite(false), sprite(true)] {
+            let mut other = other;
+            if other.rect == other.texture_rect {
+                other.name_matches_texture = false;
+            }
+            let multiple = decide_sprite_importer(&[other], true, true, true);
+            assert_eq!(multiple.mode, SpriteImportMode::Multiple);
+            assert_eq!(multiple.mode as i32, 2);
+            assert_eq!(multiple.alignment, SpriteAlignment::Custom);
+            assert_eq!(multiple.extrude, 3);
+        }
+
+        // Missing sprite pivot or border suppresses that copy only.
+        let mut no_pivot = sprite(true);
+        no_pivot.has_pivot = false;
+        let gated = decide_sprite_importer(&[no_pivot], true, true, true);
+        assert_eq!(gated.pivot, None);
+        assert_eq!(gated.border, Some([1.0, 2.0, 3.0, 4.0]));
+        assert_eq!(
+            decide_sprite_importer(&[sprite(true)], true, true, false).border,
+            None
+        );
+
+        // Several sprites: Multiple mode with the first sprite's values.
+        let many = decide_sprite_importer(&[sprite(false), sprite(true)], true, true, true);
+        assert_eq!(many.mode, SpriteImportMode::Multiple);
+        assert!(many.texture_type_is_sprite);
+        assert_eq!(many.extrude, 3);
+        assert_eq!(many.mesh_type, 7);
+        assert_eq!(many.alignment, SpriteAlignment::Center);
+        assert_eq!(many.pivot, Some([0.5, 0.5]));
+        assert_eq!(many.border, None);
+        assert_eq!(many.pixels_to_units, 50.0);
+        assert!(many.build_sprite_sheet);
+        assert!(
+            !decide_sprite_importer(&[sprite(false), sprite(true)], false, true, true)
+                .build_sprite_sheet
         );
     }
 

@@ -832,3 +832,10 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Gates: `cargo fmt --check` 0, full tests 1038 lib + 52 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
 - Next: sprite exporter wiring, meta fields, then core SER/OBJ/PROC rows.
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 110. Checkpoint: sprite importer decisions (2026-10-06)
+
+- Ported `TextureExportCollection.AddSprites` as `decide_sprite_importer` in `src/export/importer_fields.rs` (empty/single/multiple branches, rect+name Single condition, sprite-supplied geometry, pivot/border gating, sheet-build flag), extending row `EXP-IMPORTER-FIELDS-001`. Shipped enum discriminants via reflection probe `Temp/opencode/enumprobe` (`AssetRipper.SourceGenerated.dll` 1.4.0): Single 1, Multiple 2, Center 0, Custom 9, FullRect 0, Sprite 8. Standing rule reaffirmed: commit and push promptly after each validated increment.
+- Gates: `cargo fmt --check` 0, full tests 1039 lib + 52 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
+- Next: meta texture-importer asset-copied fields, `FillSpriteMetaData`, then core SER/OBJ/PROC rows.
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
