@@ -839,3 +839,10 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Gates: `cargo fmt --check` 0, full tests 1039 lib + 52 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
 - Next: meta texture-importer asset-copied fields, `FillSpriteMetaData`, then core SER/OBJ/PROC rows.
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 111. Checkpoint: first team round integrated (2026-10-06)
+
+- Three teammates shipped disjoint scopes in one increment, all lead-verified (targeted suites re-run: 10/10, 14/14, 17/17) and integrated: `texture-meta` closed the `TextureImporterData` gaps (normalmap predicate, per-branch shapes, mip gates, no-streaming constants; `EXP-IMPORTER-READS-001`); `sprite-fill` ported `FillSpriteMetaData` (`RES-SPRITE-METADATA-001`); `texture-export` ported the `TextureAssetExporter` gates/flow (`EXP-TEXTURE-EXPORTER-001`, correcting the format-selection location to `ImageExportFormat.cs`). No scope violations, no placeholders, no docs edits by teammates.
+- Gates: `cargo fmt --check` 0, full tests 1060 lib + 52 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
+- Next: core SER/OBJ/PROC rows (second team round), then `SetBoneGeometry`/outline mesh internals.
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

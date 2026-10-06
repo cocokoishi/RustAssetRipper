@@ -53,6 +53,8 @@
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
+use super::settings::{ImageExportFormat, SpriteExportMode};
+
 /// `ExportCollection.AssetExtension`, the fallback arm of `GetExportExtension`.
 pub const DEFAULT_EXPORT_EXTENSION: &str = "asset";
 
@@ -313,6 +315,101 @@ impl ExportExtensionTable {
     }
 }
 
+/// `TextureAssetExporter.ExportSprites` over the configured sprite mode.
+///
+/// The source reads `SpriteExportMode is not SpriteExportMode.Yaml`
+/// (`AssetRipper/Source/AssetRipper.Export.UnityProjects/Textures/TextureAssetExporter.cs`
+/// line 17). The mode variants themselves (`Yaml`, `Native`, `Texture2D`) are declared in
+/// `AssetRipper/Source/AssetRipper.Export/Configuration/SpriteExportMode.cs`; only `Yaml`
+/// (the default, metadata-precise mode) disables converted sprite export.
+pub const fn texture_exporter_exports_sprites(mode: SpriteExportMode) -> bool {
+    match mode {
+        SpriteExportMode::Yaml => false,
+        SpriteExportMode::Native | SpriteExportMode::Texture2D => true,
+    }
+}
+
+/// `TextureAssetExporter.TryCreateCollection` admission gate over caller facts.
+///
+/// The source admits the asset exactly when `asset.MainAsset is SpriteInformationObject`
+/// and ([`texture_exporter_exports_sprites`] holds or the asset is not an `ISprite`),
+/// creating a `TextureExportCollection` in that case and declining otherwise
+/// (`AssetRipper/Source/AssetRipper.Export.UnityProjects/Textures/TextureAssetExporter.cs`
+/// lines 26-38).
+pub const fn texture_asset_exporter_admits_collection(
+    main_asset_is_sprite_information: bool,
+    export_sprites: bool,
+    asset_is_sprite: bool,
+) -> bool {
+    main_asset_is_sprite_information && (export_sprites || !asset_is_sprite)
+}
+
+/// Outcome of `TextureAssetExporter.Export` for one texture asset.
+///
+/// The source returns `false` with a warning when `CheckAssetIntegrity` fails or when
+/// `TextureConverter.TryConvertToBitmap` fails, and otherwise saves the converted bitmap
+/// with `GetTextureExportFormat(PreferOriginalTextureExtension, ImageExportFormat)` and
+/// returns `true`
+/// (`AssetRipper/Source/AssetRipper.Export.UnityProjects/Textures/TextureAssetExporter.cs`
+/// lines 40-60).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TextureAssetExportOutcome {
+    /// `!texture.CheckAssetIntegrity()`: the export logs and returns `false`.
+    IntegrityFailed,
+    /// `TextureConverter.TryConvertToBitmap` returned `false`: the export logs and
+    /// returns `false`.
+    ConversionFailed,
+    /// The bitmap was saved with the selected encoder format: the export returns `true`.
+    Saved {
+        /// `GetTextureExportFormat(PreferOriginalTextureExtension, ImageExportFormat)`.
+        format: ImageExportFormat,
+    },
+}
+
+impl TextureAssetExportOutcome {
+    /// The boolean the source `Export` returns: only the save path reports success.
+    pub const fn succeeded(self) -> bool {
+        match self {
+            Self::Saved { .. } => true,
+            Self::IntegrityFailed | Self::ConversionFailed => false,
+        }
+    }
+}
+
+/// `TextureAssetExporter.Export` outcome flow over caller facts.
+///
+/// `integrity_ok` is the `ITexture2D.CheckAssetIntegrity` result and `conversion_ok` is
+/// the `TextureConverter.TryConvertToBitmap` result. The save path resolves its encoder
+/// format through `GetTextureExportFormat`
+/// (`AssetRipper/Source/AssetRipper.Export/Configuration/ImageExportFormat.cs` lines
+/// 93-100, implemented once as
+/// [`ImageExportFormat::texture_export_format`](super::settings::ImageExportFormat::texture_export_format)):
+/// the asset's best extension (`OverrideExtension ?? OriginalExtension`, `None` when the
+/// asset carries no original path) wins when original extensions are preferred and it
+/// names a known image format (`jpg` included, matched exactly), and the configured
+/// `ImageExportFormat` is used otherwise.
+pub fn decide_texture_asset_export(
+    integrity_ok: bool,
+    conversion_ok: bool,
+    prefer_original_texture_extension: bool,
+    best_extension: Option<&str>,
+    image_export_format: ImageExportFormat,
+) -> TextureAssetExportOutcome {
+    if !integrity_ok {
+        return TextureAssetExportOutcome::IntegrityFailed;
+    }
+    if !conversion_ok {
+        return TextureAssetExportOutcome::ConversionFailed;
+    }
+    TextureAssetExportOutcome::Saved {
+        format: ImageExportFormat::texture_export_format(
+            prefer_original_texture_extension,
+            best_extension,
+            image_export_format,
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -461,5 +558,113 @@ mod tests {
         assert!(identity
             .satisfied_markers
             .contains(&ExportClassMarker::Texture2D));
+    }
+
+    #[test]
+    fn export_sprites_holds_for_every_non_yaml_mode() {
+        // `TextureAssetExporter.ExportSprites => SpriteExportMode is not Yaml`.
+        assert!(!texture_exporter_exports_sprites(SpriteExportMode::Yaml));
+        assert!(texture_exporter_exports_sprites(SpriteExportMode::Native));
+        assert!(texture_exporter_exports_sprites(
+            SpriteExportMode::Texture2D
+        ));
+    }
+
+    #[test]
+    fn texture_exporter_gate_matches_the_source_truth_table() {
+        // (main_asset_is_sprite_information, export_sprites, asset_is_sprite, expected).
+        let rows = [
+            (false, false, false, false),
+            (false, false, true, false),
+            (false, true, false, false),
+            (false, true, true, false),
+            (true, false, false, true),
+            (true, false, true, false),
+            (true, true, false, true),
+            (true, true, true, true),
+        ];
+        for (main_is_sprite_info, export_sprites, is_sprite, expected) in rows {
+            assert_eq!(
+                texture_asset_exporter_admits_collection(
+                    main_is_sprite_info,
+                    export_sprites,
+                    is_sprite
+                ),
+                expected,
+                "main_is_sprite_info={main_is_sprite_info} export_sprites={export_sprites} is_sprite={is_sprite}"
+            );
+        }
+    }
+
+    #[test]
+    fn texture_export_reports_integrity_failure_first() {
+        // Integrity failure short-circuits before conversion and format selection.
+        let outcome =
+            decide_texture_asset_export(false, true, true, Some("tga"), ImageExportFormat::Png);
+        assert_eq!(outcome, TextureAssetExportOutcome::IntegrityFailed);
+        assert!(!outcome.succeeded());
+    }
+
+    #[test]
+    fn texture_export_reports_conversion_failure() {
+        let outcome =
+            decide_texture_asset_export(true, false, true, Some("tga"), ImageExportFormat::Png);
+        assert_eq!(outcome, TextureAssetExportOutcome::ConversionFailed);
+        assert!(!outcome.succeeded());
+    }
+
+    #[test]
+    fn texture_export_save_path_prefers_a_known_original_extension() {
+        let outcome =
+            decide_texture_asset_export(true, true, true, Some("tga"), ImageExportFormat::Png);
+        assert_eq!(
+            outcome,
+            TextureAssetExportOutcome::Saved {
+                format: ImageExportFormat::Tga
+            }
+        );
+        assert!(outcome.succeeded());
+    }
+
+    #[test]
+    fn texture_export_save_path_honors_the_jpg_alias() {
+        let outcome =
+            decide_texture_asset_export(true, true, true, Some("jpg"), ImageExportFormat::Png);
+        assert_eq!(
+            outcome,
+            TextureAssetExportOutcome::Saved {
+                format: ImageExportFormat::Jpeg
+            }
+        );
+    }
+
+    #[test]
+    fn texture_export_save_path_falls_back_to_the_configured_format() {
+        // An unrecognized original extension cannot select a format.
+        let outcome =
+            decide_texture_asset_export(true, true, true, Some("dds"), ImageExportFormat::Png);
+        assert_eq!(
+            outcome,
+            TextureAssetExportOutcome::Saved {
+                format: ImageExportFormat::Png
+            }
+        );
+        // No original path recorded at all.
+        let outcome = decide_texture_asset_export(true, true, true, None, ImageExportFormat::Bmp);
+        assert_eq!(
+            outcome,
+            TextureAssetExportOutcome::Saved {
+                format: ImageExportFormat::Bmp
+            }
+        );
+        // Original extensions are not preferred.
+        let outcome =
+            decide_texture_asset_export(true, true, false, Some("tga"), ImageExportFormat::Exr);
+        assert_eq!(
+            outcome,
+            TextureAssetExportOutcome::Saved {
+                format: ImageExportFormat::Exr
+            }
+        );
     }
 }

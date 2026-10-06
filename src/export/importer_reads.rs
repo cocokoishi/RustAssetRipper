@@ -111,6 +111,123 @@ pub fn select_texture_type_source(is_cubemap: bool, has_texture_shape: bool) -> 
     }
 }
 
+/// Caller-side facts for `TextureUsageModeExtensions.IsNormalmap` in
+/// `AssetRipper/Source/AssetRipper.SourceGenerated.Extensions/TextureUsageModeExtensions.cs`.
+///
+/// The generated `TextureUsageMode` enum stays caller-side; the caller maps its value onto
+/// this kernel enum (anything that is not one of the three normal-map modes maps to `Other`)
+/// and lets [`is_normalmap_usage_mode`] apply the snapshot predicate.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum TextureUsageMode {
+    /// `TextureUsageMode.NormalmapDXT5nm`.
+    NormalmapDXT5nm,
+    /// `TextureUsageMode.NormalmapPlain`.
+    NormalmapPlain,
+    /// `TextureUsageMode.NormalmapASTCnm`.
+    NormalmapASTCnm,
+    /// Every other `TextureUsageMode` value.
+    Other,
+}
+
+/// `TextureUsageModeExtensions.IsNormalmap` in
+/// `AssetRipper/Source/AssetRipper.SourceGenerated.Extensions/TextureUsageModeExtensions.cs`:
+/// exactly `NormalmapDXT5nm`, `NormalmapPlain`, and `NormalmapASTCnm` count as normalmaps.
+pub fn is_normalmap_usage_mode(mode: TextureUsageMode) -> bool {
+    matches!(
+        mode,
+        TextureUsageMode::NormalmapDXT5nm
+            | TextureUsageMode::NormalmapPlain
+            | TextureUsageMode::NormalmapASTCnm
+    )
+}
+
+/// The `TextureType` choice shared by all four `TextureImporterData` branches in
+/// `AssetRipper/Source/AssetRipper.Export.UnityProjects/Textures/ImporterFactory.cs`
+/// (lines 123-125, 141-143, 157-159, 173-175): a normal-mapped source becomes `NormalMap`,
+/// everything else becomes `Default`. The caller supplies the `IsNormalmap()` fact because
+/// each branch reads it off a different accessor (`LightmapFormat_C28E`, `UsageModeE`, or
+/// `GetLightmapFormat()`).
+pub fn select_texture_importer_type(is_normalmap: bool) -> &'static str {
+    if is_normalmap {
+        texture_type_literals::NORMAL_MAP
+    } else {
+        texture_type_literals::DEFAULT
+    }
+}
+
+/// `EnableMipMap` for the `ITexture2DArray` and `ICubemapArray` branches in
+/// `AssetRipper/Source/AssetRipper.Export.UnityProjects/Textures/ImporterFactory.cs`
+/// (lines 133, 149): `MipCount > 1`, strictly greater — a single mip level means no mipmaps.
+pub fn mip_count_enables_mipmap(mip_count: i32) -> bool {
+    mip_count > 1
+}
+
+/// `EnableMipMap` for the `ITexture3D` branch in
+/// `AssetRipper/Source/AssetRipper.Export.UnityProjects/Textures/ImporterFactory.cs`
+/// (line 165): `Has_MipCount() && MipCount > 1 || Has_MipMap() && MipMap`.
+///
+/// `&&` binds tighter than `||`, so either mip source can enable mipmaps on its own, and an
+/// absent field contributes `false` through its `Has_*` gate without being read.
+pub fn select_texture_3d_enable_mipmap(
+    has_mip_count: bool,
+    mip_count: i32,
+    has_mip_map: bool,
+    mip_map: bool,
+) -> bool {
+    (has_mip_count && mip_count > 1) || (has_mip_map && mip_map)
+}
+
+/// `TextureImporterShape` literal names selected by the `TextureImporterData` branches in
+/// `AssetRipper/Source/AssetRipper.Export.UnityProjects/Textures/ImporterFactory.cs`.
+pub mod texture_shape_literals {
+    /// `ITexture2D` branch when the texture is not a cubemap.
+    pub const TEXTURE_2D: &str = "Texture2D";
+    /// `ITexture2D` branch when the texture is a cubemap.
+    pub const TEXTURE_CUBE: &str = "TextureCube";
+    /// `ITexture2DArray` branch, and — per the source's own
+    /// `//Maybe this should be TextureCube` note — the `ICubemapArray` branch too.
+    pub const TEXTURE_2D_ARRAY: &str = "Texture2DArray";
+    /// `ITexture3D` branch.
+    pub const TEXTURE_3D: &str = "Texture3D";
+}
+
+/// The `ITexture2D` shape branch in
+/// `AssetRipper/Source/AssetRipper.Export.UnityProjects/Textures/ImporterFactory.cs`
+/// (lines 126-128): `texture2D is ICubemap` selects `TextureCube`, anything else `Texture2D`.
+pub fn select_texture_2d_shape(is_cubemap: bool) -> &'static str {
+    if is_cubemap {
+        texture_shape_literals::TEXTURE_CUBE
+    } else {
+        texture_shape_literals::TEXTURE_2D
+    }
+}
+
+/// Fixed `TextureShape` of the `ITexture2DArray` branch in
+/// `AssetRipper/Source/AssetRipper.Export.UnityProjects/Textures/ImporterFactory.cs`
+/// (line 144): always `Texture2DArray`, with no asset read.
+pub const TEXTURE_2D_ARRAY_IMPORTER_SHAPE: &str = texture_shape_literals::TEXTURE_2D_ARRAY;
+
+/// Fixed `TextureShape` of the `ICubemapArray` branch in
+/// `AssetRipper/Source/AssetRipper.Export.UnityProjects/Textures/ImporterFactory.cs`
+/// (line 160): always `Texture2DArray`, exactly as written — the source carries a
+/// `//Maybe this should be TextureCube` comment, which is preserved here as documented
+/// behavior rather than "fixed" to `TextureCube`.
+pub const CUBEMAP_ARRAY_IMPORTER_SHAPE: &str = texture_shape_literals::TEXTURE_2D_ARRAY;
+
+/// Fixed `TextureShape` of the `ITexture3D` branch in
+/// `AssetRipper/Source/AssetRipper.Export.UnityProjects/Textures/ImporterFactory.cs`
+/// (line 176): always `Texture3D`, with no asset read.
+pub const TEXTURE_3D_IMPORTER_SHAPE: &str = texture_shape_literals::TEXTURE_3D;
+
+/// Fixed streaming facts shared by the `ITexture2DArray`, `ICubemapArray`, and `ITexture3D`
+/// branches in `AssetRipper/Source/AssetRipper.Export.UnityProjects/Textures/ImporterFactory.cs`
+/// (lines 135-136, 151-152, 167-168): arrays and volumes never stream — `StreamingMipmaps`
+/// is `false` and the priority is `default` — with no asset read. Only the `ITexture2D`
+/// branch copies `StreamingMipmaps_C28` / `StreamingMipmapsPriority_C28` off the asset.
+pub const NON_2D_STREAMING_MIPMAPS: bool = false;
+/// Fixed streaming priority for the non-`ITexture2D` branches (see [`NON_2D_STREAMING_MIPMAPS`]).
+pub const NON_2D_STREAMING_MIPMAPS_PRIORITY: i32 = 0;
+
 /// `SpriteImportMode` literal names for the texture sprite branches.
 pub mod sprite_mode_literals {
     /// No sprites, or exactly one sprite matching the texture rect and name.
@@ -462,6 +579,12 @@ pub const TEXTURE_2D_ARRAY_DATA_READS: &[ImporterAssetRead] = &[
         gate: "Has_UsageMode()",
         effect: "TextureType NormalMap, else Default",
     },
+    ImporterAssetRead {
+        importer: "TextureImporterData",
+        reads: "branch fixed (no asset field)",
+        gate: "none",
+        effect: "TextureShape Texture2DArray",
+    },
 ];
 
 /// Asset reads feeding `TextureImporterData` for `ICubemapArray` assets.
@@ -510,6 +633,12 @@ pub const CUBEMAP_ARRAY_DATA_READS: &[ImporterAssetRead] = &[
         reads: "cubemapArray.UsageModeE.IsNormalmap()",
         gate: "Has_UsageMode()",
         effect: "TextureType NormalMap, else Default",
+    },
+    ImporterAssetRead {
+        importer: "TextureImporterData",
+        reads: "branch fixed (no asset field; source notes 'Maybe this should be TextureCube')",
+        gate: "none",
+        effect: "TextureShape Texture2DArray",
     },
 ];
 
@@ -563,6 +692,12 @@ pub const TEXTURE_3D_DATA_READS: &[ImporterAssetRead] = &[
         gate: "none",
         effect: "TextureType NormalMap, else Default",
     },
+    ImporterAssetRead {
+        importer: "TextureImporterData",
+        reads: "branch fixed (no asset field)",
+        gate: "none",
+        effect: "TextureShape Texture3D",
+    },
 ];
 
 /// Asset reads of `ImporterFactory.GenerateIHVImporter`.
@@ -614,11 +749,15 @@ pub const PREFAB_IMPORTER_READS: &[ImporterAssetRead] = &[ImporterAssetRead {
 #[cfg(test)]
 mod tests {
     use super::{
-        calculate_max_texture_size, select_generate_cubemap, select_npot_scale,
-        select_sprite_branch, select_texture_type_source, SpriteBranchInput, AUDIO_IMPORTER_READS,
-        CUBEMAP_ARRAY_DATA_READS, FONT_IMPORTER_READS, IHV_IMPORTER_READS, PREFAB_IMPORTER_READS,
-        SHADER_IMPORTER_READS, TEXTURE_2D_ARRAY_DATA_READS, TEXTURE_2D_DATA_READS,
-        TEXTURE_3D_DATA_READS, VIDEO_IMPORTER_READS,
+        calculate_max_texture_size, is_normalmap_usage_mode, mip_count_enables_mipmap,
+        select_generate_cubemap, select_npot_scale, select_sprite_branch, select_texture_2d_shape,
+        select_texture_3d_enable_mipmap, select_texture_importer_type, select_texture_type_source,
+        texture_shape_literals, SpriteBranchInput, TextureUsageMode, AUDIO_IMPORTER_READS,
+        CUBEMAP_ARRAY_DATA_READS, CUBEMAP_ARRAY_IMPORTER_SHAPE, FONT_IMPORTER_READS,
+        IHV_IMPORTER_READS, NON_2D_STREAMING_MIPMAPS, NON_2D_STREAMING_MIPMAPS_PRIORITY,
+        PREFAB_IMPORTER_READS, SHADER_IMPORTER_READS, TEXTURE_2D_ARRAY_DATA_READS,
+        TEXTURE_2D_ARRAY_IMPORTER_SHAPE, TEXTURE_2D_DATA_READS, TEXTURE_3D_DATA_READS,
+        TEXTURE_3D_IMPORTER_SHAPE, VIDEO_IMPORTER_READS,
     };
 
     #[test]
@@ -701,9 +840,9 @@ mod tests {
         assert_eq!(VIDEO_IMPORTER_READS.len(), 7);
         assert_eq!(SHADER_IMPORTER_READS.len(), 2);
         assert_eq!(TEXTURE_2D_DATA_READS.len(), 10);
-        assert_eq!(TEXTURE_2D_ARRAY_DATA_READS.len(), 7);
-        assert_eq!(CUBEMAP_ARRAY_DATA_READS.len(), 7);
-        assert_eq!(TEXTURE_3D_DATA_READS.len(), 8);
+        assert_eq!(TEXTURE_2D_ARRAY_DATA_READS.len(), 8);
+        assert_eq!(CUBEMAP_ARRAY_DATA_READS.len(), 8);
+        assert_eq!(TEXTURE_3D_DATA_READS.len(), 9);
         assert_eq!(IHV_IMPORTER_READS.len(), 5);
         assert_eq!(PREFAB_IMPORTER_READS.len(), 1);
         // The default-settings gate guards exactly the three sample-settings copies.
@@ -736,11 +875,102 @@ mod tests {
         assert!(CUBEMAP_ARRAY_DATA_READS
             .iter()
             .any(|row| row.reads == "cubemapArray.Width and Width"));
+        // Every non-2D branch pins its fixed TextureShape; the cubemap-array row keeps
+        // the source's 'Maybe this should be TextureCube' note instead of correcting it.
+        assert!(TEXTURE_2D_ARRAY_DATA_READS
+            .iter()
+            .any(|row| row.effect == "TextureShape Texture2DArray" && row.gate == "none"));
+        assert!(CUBEMAP_ARRAY_DATA_READS
+            .iter()
+            .any(|row| row.effect == "TextureShape Texture2DArray"
+                && row.reads.contains("Maybe this should be TextureCube")));
+        assert!(TEXTURE_3D_DATA_READS
+            .iter()
+            .any(|row| row.effect == "TextureShape Texture3D" && row.gate == "none"));
         // The two ungated bundle copies are pinned, not normalized.
         for table in [IHV_IMPORTER_READS, PREFAB_IMPORTER_READS] {
             assert!(table
                 .iter()
                 .any(|row| row.gate == "non-null only, no Has_ gate"));
         }
+    }
+
+    #[test]
+    fn normalmap_predicate_matches_usage_mode_extension() {
+        // Exactly the three modes named in TextureUsageModeExtensions.IsNormalmap.
+        assert!(is_normalmap_usage_mode(TextureUsageMode::NormalmapDXT5nm));
+        assert!(is_normalmap_usage_mode(TextureUsageMode::NormalmapPlain));
+        assert!(is_normalmap_usage_mode(TextureUsageMode::NormalmapASTCnm));
+        assert!(!is_normalmap_usage_mode(TextureUsageMode::Other));
+    }
+
+    #[test]
+    fn importer_type_follows_normalmap_fact_in_every_branch() {
+        // Shared by the ITexture2D, ITexture2DArray, ICubemapArray, and ITexture3D branches.
+        assert_eq!(select_texture_importer_type(true), "NormalMap");
+        assert_eq!(select_texture_importer_type(false), "Default");
+    }
+
+    #[test]
+    fn array_mipmaps_need_strictly_more_than_one_mip() {
+        // ITexture2DArray and ICubemapArray: `MipCount > 1`, not `>= 1`.
+        assert!(!mip_count_enables_mipmap(0));
+        assert!(!mip_count_enables_mipmap(1));
+        assert!(mip_count_enables_mipmap(2));
+        assert!(mip_count_enables_mipmap(13));
+        assert!(!mip_count_enables_mipmap(-3));
+    }
+
+    #[test]
+    fn texture_3d_mipmaps_follow_either_gated_mip_source() {
+        // Neither source present: no mipmaps regardless of the stored values.
+        assert!(!select_texture_3d_enable_mipmap(false, 99, false, true));
+        assert!(!select_texture_3d_enable_mipmap(false, 0, false, false));
+        // MipCount alone enables only when present and strictly above one.
+        assert!(select_texture_3d_enable_mipmap(true, 2, false, false));
+        assert!(!select_texture_3d_enable_mipmap(true, 1, false, false));
+        assert!(!select_texture_3d_enable_mipmap(true, 0, false, true));
+        // MipMap alone enables only when present and set; `&&` binds tighter than `||`,
+        // so each disjunct stands on its own gate plus its own value check.
+        assert!(select_texture_3d_enable_mipmap(false, 0, true, true));
+        assert!(!select_texture_3d_enable_mipmap(false, 99, true, false));
+        assert!(!select_texture_3d_enable_mipmap(true, 1, true, false));
+        // Either source suffices when both are present.
+        assert!(select_texture_3d_enable_mipmap(true, 4, true, false));
+        assert!(select_texture_3d_enable_mipmap(true, 1, true, true));
+        assert!(select_texture_3d_enable_mipmap(true, 4, true, true));
+    }
+
+    #[test]
+    fn texture_shapes_match_per_branch_assignments() {
+        // ITexture2D: `texture2D is ICubemap` picks TextureCube, else Texture2D.
+        assert_eq!(select_texture_2d_shape(true), "TextureCube");
+        assert_eq!(select_texture_2d_shape(false), "Texture2D");
+        assert_eq!(
+            select_texture_2d_shape(true),
+            texture_shape_literals::TEXTURE_CUBE
+        );
+        assert_eq!(
+            select_texture_2d_shape(false),
+            texture_shape_literals::TEXTURE_2D
+        );
+        // The fixed branches keep the source's shapes, including the cubemap-array quirk:
+        // Texture2DArray even though the source wonders about TextureCube.
+        assert_eq!(TEXTURE_2D_ARRAY_IMPORTER_SHAPE, "Texture2DArray");
+        assert_eq!(CUBEMAP_ARRAY_IMPORTER_SHAPE, "Texture2DArray");
+        assert_eq!(TEXTURE_3D_IMPORTER_SHAPE, "Texture3D");
+        assert_eq!(
+            CUBEMAP_ARRAY_IMPORTER_SHAPE,
+            TEXTURE_2D_ARRAY_IMPORTER_SHAPE
+        );
+    }
+
+    #[test]
+    fn non_2d_branches_never_stream_mipmaps() {
+        // ITexture2DArray, ICubemapArray, and ITexture3D write fixed values with no
+        // asset read; only ITexture2D copies the streaming fields off the asset.
+        // Pinned at compile time (a runtime assert on constants trips Clippy).
+        const { assert!(!NON_2D_STREAMING_MIPMAPS) };
+        const { assert!(NON_2D_STREAMING_MIPMAPS_PRIORITY == 0) };
     }
 }
