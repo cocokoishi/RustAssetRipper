@@ -489,12 +489,12 @@ fn read_serialized_type(
     };
 
     let (script_id, old_type_hash) = if generation.raw() >= 13 {
-        let should_read_script_id = type_id_for_hash == -1
-            || type_id_for_hash == 114
-            || (script_type_index >= 0
-                && (is_reference_type
-                    || !ignore_script_type_for_hash(prefix.unity_version_text.as_deref())));
-        let script_id = if should_read_script_id {
+        let script_id = if should_read_type_script_id(
+            type_id_for_hash,
+            script_type_index,
+            is_reference_type,
+            prefix.unity_version_text.as_deref(),
+        ) {
             Some(read_hash128(reader, &format!("{context} script ID"))?)
         } else {
             None
@@ -547,6 +547,30 @@ fn read_serialized_type(
         namespace,
         assembly_name,
     })
+}
+
+/// Whether `SerializedTypeBase.Read` reads the `ScriptID` hash for one type entry.
+///
+/// Ports the `readScriptID` gate (`AssetRipper/Source/AssetRipper.IO.Files/SerializedFiles/Parser/SerializedTypeBase.cs`
+/// lines 67-76): MonoBehaviour markers (`-1`, after the pre-`RefactoredClassId`
+/// negative-ID clamp that `read_serialized_type` preserves as `type_id_for_hash`) and
+/// `MonoScript` (`114`) always carry the hash; otherwise the script type index decides,
+/// except pre-`2018.3.0a1` Unity versions ignore script types for plain serialized types
+/// (reference types override `IgnoreScriptTypeForHash` to false and always honor a
+/// non-negative index).
+///
+/// Deliberately read-side only: the sibling `Write` path gates on the raw type ID
+/// instead of the clamped marker, so the two expressions must not be unified.
+pub fn should_read_type_script_id(
+    type_id_for_hash: i32,
+    script_type_index: i16,
+    is_reference_type: bool,
+    unity_version: Option<&str>,
+) -> bool {
+    type_id_for_hash == -1
+        || type_id_for_hash == 114
+        || (script_type_index >= 0
+            && (is_reference_type || !ignore_script_type_for_hash(unity_version)))
 }
 
 fn ignore_script_type_for_hash(unity_version: Option<&str>) -> bool {
@@ -2099,6 +2123,51 @@ mod tests {
             );
             assert_eq!(metadata.objects[0].resolved_type_index, Some(0));
         }
+    }
+
+    #[test]
+    fn type_script_id_presence_matches_the_source_read_gate() {
+        use super::should_read_type_script_id;
+        // MonoBehaviour markers (`-1`, the clamped pre-16 negative-ID form) and
+        // `MonoScript` (`114`) always carry the hash, whatever the script index,
+        // flavor, or Unity version.
+        for type_id in [-1, 114] {
+            for (script, reference, version) in [
+                (-1, false, None),
+                (0, true, Some("5.4.0f1")),
+                (-1, false, Some("2022.1.0f1")),
+            ] {
+                assert!(
+                    should_read_type_script_id(type_id, script, reference, version),
+                    "type {type_id}, script {script}, reference {reference}, version {version:?}"
+                );
+            }
+        }
+        // Otherwise a non-negative script index decides, except old Unity versions
+        // ignore script types for plain types while reference types honor them.
+        assert!(should_read_type_script_id(28, 0, false, Some("2020.3.0f1")));
+        assert!(!should_read_type_script_id(
+            28,
+            0,
+            false,
+            Some("2017.4.0f1")
+        ));
+        assert!(should_read_type_script_id(28, 0, true, Some("2017.4.0f1")));
+        // An unparseable version falls back to reading, like the source 0.0.0 default.
+        assert!(should_read_type_script_id(
+            28,
+            0,
+            false,
+            Some("not-a-version")
+        ));
+        // Negative script indexes never carry the hash for ordinary classes.
+        assert!(!should_read_type_script_id(
+            28,
+            -1,
+            false,
+            Some("2020.3.0f1")
+        ));
+        assert!(!should_read_type_script_id(28, -1, true, None));
     }
 
     #[test]

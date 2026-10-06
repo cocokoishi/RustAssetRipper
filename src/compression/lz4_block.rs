@@ -371,6 +371,66 @@ impl Display for Lz4BlockErrorKind {
 mod tests {
     use super::{compress_block, decompress_block, Lz4BlockErrorKind};
 
+    fn parse_hex(text: &str) -> Vec<u8> {
+        text.as_bytes()
+            .chunks_exact(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect()
+    }
+
+    /// Byte-for-byte differential against the K4os reference codec behind the
+    /// baseline (`K4os.Compression.LZ4` 1.3.8, `LZ4Level.L00_FAST`; probe
+    /// `target/test-tmp/lz4probe`): every compressed payload below is K4os
+    /// `Encode` output, and K4os `Decode` round-trips each to its raw form.
+    ///
+    /// The small shapes additionally confirm encoder-shape agreement: K4os emits
+    /// byte-identical blocks to `compress_block` for the short, distinct-20,
+    /// repeat, and run-13 inputs (see `encoder_emits_exact_bytes_for_canonical_shapes`).
+    #[test]
+    fn decodes_k4os_reference_vectors() {
+        let phrase = "Hello, Unity bundle world! ";
+        let bytes256: Vec<u8> = (0..=255u16).map(|value| value as u8).collect();
+        let mut bytes256_compressed = vec![0xf0, 0xf1];
+        bytes256_compressed.extend_from_slice(&bytes256);
+        let vectors: &[(Vec<u8>, Vec<u8>)] = &[
+            // K4os encodes empty input to empty output.
+            (Vec::new(), Vec::new()),
+            (
+                parse_hex("800102030405060708"),
+                vec![1, 2, 3, 4, 5, 6, 7, 8],
+            ),
+            (
+                parse_hex("f0050714212e3b4855626f7c8996a3b0bdcad7e4f1fe"),
+                (0..20).map(|index| index * 13 + 7).collect(),
+            ),
+            (
+                parse_hex("8330313233343536370800503730313233"),
+                b"01234567012345670123".to_vec(),
+            ),
+            (parse_hex("13610100506161616161"), vec![b'a'; 13]),
+            (
+                parse_hex(
+                    "ff0c48656c6c6f2c20556e6974792062756e646c6520776f726c6421201b00a550726c642120",
+                ),
+                phrase.repeat(8).into_bytes(),
+            ),
+            (bytes256_compressed, bytes256),
+            // A 255-chained match extension with overlapping RLE output.
+            (parse_hex("1fab0100ffffffea50ababababab"), vec![0xab; 1024]),
+            (
+                parse_hex("8361626364656667680300503132333435"),
+                b"abcdefghfghfghf12345".to_vec(),
+            ),
+        ];
+        for (index, (compressed, expected)) in vectors.iter().enumerate() {
+            assert_eq!(
+                &decompress_block(compressed, expected.len(), expected.len()).unwrap(),
+                expected,
+                "k4os vector {index}"
+            );
+        }
+    }
+
     #[test]
     fn decodes_overlapping_matches_and_exact_literal_sequences() {
         let input = [

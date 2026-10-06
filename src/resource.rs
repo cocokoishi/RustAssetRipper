@@ -1,4 +1,10 @@
 //! Bounded access to byte ranges stored in Unity ResourceFiles.
+//!
+//! Covers `ResourceFile` (`IsDefaultResourceFile` plus the streamed-range read surface behind
+//! `Write`/`ToByteArray`), `Bundle.ResolveResource` (bundle-hierarchy order, then the external
+//! provider), and `StreamedResourceExtensions` (`CheckIntegrity`/`GetContent` gates). Bundle
+//! construction, stream ownership, and the parent-chain walk stay caller-side; the hierarchy
+//! lookup itself lives in the serialized-file workspace.
 
 use std::fmt;
 use std::fmt::Write as FmtWrite;
@@ -18,6 +24,22 @@ use crate::serialized_file::workspace::{
 };
 
 const UNITY_STREAM_OFFSET_MAX: u64 = i64::MAX as u64;
+
+/// `ResourceFile.ResourceFileExtension`.
+pub const RESOURCE_FILE_EXTENSION: &str = ".resource";
+
+/// `ResourceFile.StreamingFileExtension`.
+pub const STREAMING_FILE_EXTENSION: &str = ".ress";
+
+/// `ResourceFile.IsDefaultResourceFile`: the name's extension, lowercased like the source,
+/// is `.resource` or `.ress`.
+pub fn is_default_resource_file(file_name: &str) -> bool {
+    let extension = file_name
+        .rsplit_once('.')
+        .map(|(_, extension)| extension)
+        .unwrap_or("");
+    extension.eq_ignore_ascii_case("resource") || extension.eq_ignore_ascii_case("ress")
+}
 
 /// Limits for streamed ResourceFile reads.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2348,5 +2370,18 @@ mod tests {
             read_streamed_resource_bytes(&filesystem, "/bundle/shared.resS", 0, 5, limits),
             Err(StreamedResourceError::MaterializationLimitExceeded { limit: 4, .. })
         ));
+    }
+
+    #[test]
+    fn default_resource_files_match_the_source_extensions() {
+        use super::is_default_resource_file;
+        assert!(is_default_resource_file("shared.ress"));
+        assert!(is_default_resource_file("shared.resource"));
+        assert!(is_default_resource_file("SHARED.RESS"));
+        assert!(is_default_resource_file("archive:/textures/shared.ResS"));
+        assert!(!is_default_resource_file("shared.assets"));
+        assert!(!is_default_resource_file("shared"));
+        assert!(!is_default_resource_file("shared.ress.txt"));
+        assert!(!is_default_resource_file(""));
     }
 }

@@ -1146,3 +1146,11 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Gates: `cargo fmt --check` 0, full tests 1253 lib + 56 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
 - Next: forty-third team round (gate-first: bundle blocks, platform structures, typetree decode).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 153. Checkpoint: forty-third team round integrated — gate-first (2026-10-06)
+
+- Five teammates shipped disjoint scopes, all lead-verified (targeted suites re-run: 6/6, 15/15, 11/11, 18/18, 12/12) and integrated: `texture-meta` built the K4os differential (`IO-COMP-LZ4-001`); `sprite-fill` ported the last member (`IO-RESOURCE-001`); `texture-export` pinned desktop arms (`IO-STRUCTURE-DESKTOP-001`); `mesh-deform` named the script-ID gate (`SER-META-TYPES-001`); `anim-graph` ported the reference trio (`EXP-META-PIPELINE-001`). No scope violations, no placeholders, no verified row touched.
+- Gate question answered YES: all five units reduce the Phase 1 incomplete count.
+- Gates: `cargo fmt --check` 0, full tests 1258 lib + 56 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
+- Next: forty-fourth team round (gate-first: platform mobiles/consoles, stream primitives, assembly types).
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

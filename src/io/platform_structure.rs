@@ -1371,6 +1371,75 @@ mod tests {
     }
 
     #[test]
+    fn desktop_detectors_cover_fallback_names_direct_selection_and_empty_shapes() {
+        // Windows falls back to a bare `Data` directory: one executable keeps
+        // its stem as the game name.
+        let mut filesystem = VirtualFileSystem::new();
+        insert_file(&mut filesystem, "/solo/only.exe");
+        insert_directory(&mut filesystem, "/solo/Data");
+        let solo = detect_desktop_platform(
+            &filesystem,
+            &["/solo".to_owned()],
+            PlatformStructureLimits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(solo.platform, DesktopPlatform::Windows);
+        assert_eq!(solo.name.as_deref(), Some("only"));
+        assert_eq!(solo.game_data_path.as_deref(), Some("/solo/Data"));
+
+        // Several executables without named pairs share the root folder name.
+        insert_file(&mut filesystem, "/multi/b.exe");
+        insert_file(&mut filesystem, "/multi/a.exe");
+        insert_directory(&mut filesystem, "/multi/Data");
+        let multi = detect_desktop_platform(
+            &filesystem,
+            &["/multi".to_owned()],
+            PlatformStructureLimits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(multi.platform, DesktopPlatform::Windows);
+        assert_eq!(multi.name.as_deref(), Some("multi"));
+        assert_eq!(multi.game_data_path.as_deref(), Some("/multi/Data"));
+
+        // A Linux executable selects its parent root directly, and a named
+        // pair wins without any fallback.
+        insert_file(&mut filesystem, "/lin/game.x86");
+        insert_directory(&mut filesystem, "/lin/game_Data");
+        let direct = detect_desktop_platform(
+            &filesystem,
+            &["/lin/game.x86".to_owned()],
+            PlatformStructureLimits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(direct.platform, DesktopPlatform::Linux);
+        assert_eq!(direct.selected_path, "/lin/game.x86");
+        assert_eq!(direct.root_path, "/lin");
+        assert_eq!(direct.game_data_path.as_deref(), Some("/lin/game_Data"));
+
+        // A `.app` bundle without resources and an orphaned data directory
+        // match no desktop shape.
+        insert_directory(&mut filesystem, "/Empty.app");
+        assert!(detect_desktop_platform(
+            &filesystem,
+            &["/Empty.app".to_owned()],
+            PlatformStructureLimits::default()
+        )
+        .unwrap()
+        .is_none());
+        insert_directory(&mut filesystem, "/o/Orphan_Data");
+        assert!(detect_desktop_platform(
+            &filesystem,
+            &["/o/Orphan_Data".to_owned()],
+            PlatformStructureLimits::default()
+        )
+        .unwrap()
+        .is_none());
+    }
+
+    #[test]
     fn follows_source_priority_and_reports_bad_selection_paths() {
         let mut filesystem = VirtualFileSystem::new();
         insert_file(&mut filesystem, "/both/Game.exe");

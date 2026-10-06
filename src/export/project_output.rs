@@ -13,6 +13,10 @@
 //!   matching the source construction order (`Meta(GUID, importer)` after export).
 //! - Unique-name resolution and the `.meta` length reservation live in `asset_path`;
 //!   the importer record (including its bundle-name propagation) is a caller fact.
+//! - Single-asset reference rules (`AssetExportCollection<T>.Contains`, `GetExportID`,
+//!   `CreateExportPointer`): member identity and pointer locality over caller facts;
+//!   the main export ID, collection GUID, and exporter type flow in from `ids.rs` and
+//!   `export_type.rs` through the caller.
 //!
 //! Deliberately stricter than the source, by pipeline design:
 //! - Both files are created add-only; the source overwrites existing files.
@@ -397,6 +401,58 @@ pub fn export_asset_with_meta(
     })
 }
 
+/// `AssetExportCollection<T>.Contains`: identity with the collection asset.
+/// `AssetInfo` equality is resolved caller-side; only the outcome is modeled here.
+pub const fn single_asset_contains(is_same_asset: bool) -> bool {
+    is_same_asset
+}
+
+/// `AssetExportCollection<T>.GetExportID`: the main export ID for the member asset
+/// (resolved caller-side via `ExportIdHandler`), `ArgumentException` otherwise.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SingleAssetExportId {
+    /// The member asset: take the main export ID.
+    MainExportId,
+    /// Anything else: throw `ArgumentException`.
+    ThrowsArgument,
+}
+
+/// Selects the `GetExportID` behavior from asset identity.
+pub const fn single_asset_export_id(is_same_asset: bool) -> SingleAssetExportId {
+    if is_same_asset {
+        SingleAssetExportId::MainExportId
+    } else {
+        SingleAssetExportId::ThrowsArgument
+    }
+}
+
+/// `AssetExportCollection<T>.CreateExportPointer`: local requests mint the bare file-ID
+/// pointer; non-local requests attach the collection GUID and exporter type (both caller
+/// facts); foreign assets fail through the ID rule first, on either locality.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SingleAssetExportPointer {
+    /// Mint `MetaPtr(exportID)`.
+    LocalFileId,
+    /// Mint `MetaPtr(exportID, GUID, exporter type)`.
+    RemoteWithCollectionIdentity,
+    /// Throw `ArgumentException` via the ID rule.
+    ThrowsArgument,
+}
+
+/// Selects the pointer behavior from locality and asset identity.
+pub const fn single_asset_export_pointer(
+    is_local: bool,
+    is_same_asset: bool,
+) -> SingleAssetExportPointer {
+    if !is_same_asset {
+        SingleAssetExportPointer::ThrowsArgument
+    } else if is_local {
+        SingleAssetExportPointer::LocalFileId
+    } else {
+        SingleAssetExportPointer::RemoteWithCollectionIdentity
+    }
+}
+
 fn validated_path_components(
     path: &str,
     limits: UnityProjectOutputLimits,
@@ -463,6 +519,10 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    use super::{
+        single_asset_contains, single_asset_export_id, single_asset_export_pointer,
+        SingleAssetExportId, SingleAssetExportPointer,
+    };
     use super::{write_unity_meta_sidecar, UnityProjectOutputError, UnityProjectOutputLimits};
     use crate::export::meta::{UnityMetaFile, UnityMetaFileOptions};
     use crate::export::unity_yaml::{UnityYamlMappingStyle, UnityYamlNode, UnityYamlWriteLimits};
@@ -814,5 +874,38 @@ mod tests {
             Err(UnityProjectOutputError::InvalidRelativePath { .. })
         ));
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn single_asset_reference_rules_follow_identity_and_locality() {
+        assert!(single_asset_contains(true));
+        assert!(!single_asset_contains(false));
+        assert_eq!(
+            single_asset_export_id(true),
+            SingleAssetExportId::MainExportId
+        );
+        assert_eq!(
+            single_asset_export_id(false),
+            SingleAssetExportId::ThrowsArgument
+        );
+        // Foreign assets fail through the ID rule first, on either locality.
+        assert_eq!(
+            single_asset_export_pointer(true, false),
+            SingleAssetExportPointer::ThrowsArgument
+        );
+        assert_eq!(
+            single_asset_export_pointer(false, false),
+            SingleAssetExportPointer::ThrowsArgument
+        );
+        // Members mint the bare file-ID pointer locally...
+        assert_eq!(
+            single_asset_export_pointer(true, true),
+            SingleAssetExportPointer::LocalFileId
+        );
+        // ...and attach the collection GUID plus exporter type remotely.
+        assert_eq!(
+            single_asset_export_pointer(false, true),
+            SingleAssetExportPointer::RemoteWithCollectionIdentity
+        );
     }
 }
