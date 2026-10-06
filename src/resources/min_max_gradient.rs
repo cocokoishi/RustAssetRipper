@@ -17,6 +17,8 @@ pub enum MinMaxGradientState {
     RandomBetweenTwoColors = 2,
     /// A random gradient between two gradients.
     RandomBetweenTwoGradients = 3,
+    /// A random color.
+    RandomColor = 4,
 }
 
 impl MinMaxGradientState {
@@ -27,6 +29,7 @@ impl MinMaxGradientState {
             1 => Self::Gradient,
             2 => Self::RandomBetweenTwoColors,
             3 => Self::RandomBetweenTwoGradients,
+            4 => Self::RandomColor,
             _ => return None,
         })
     }
@@ -135,5 +138,35 @@ mod tests {
             rows += 1;
         }
         assert_eq!(rows, 3);
+    }
+
+    #[test]
+    fn state_decoding_covers_the_source_enum_including_random_color() {
+        assert_eq!(
+            MinMaxGradientState::from_i32(0),
+            Some(MinMaxGradientState::Color)
+        );
+        assert_eq!(
+            MinMaxGradientState::from_i32(1),
+            Some(MinMaxGradientState::Gradient)
+        );
+        assert_eq!(
+            MinMaxGradientState::from_i32(2),
+            Some(MinMaxGradientState::RandomBetweenTwoColors)
+        );
+        assert_eq!(
+            MinMaxGradientState::from_i32(3),
+            Some(MinMaxGradientState::RandomBetweenTwoGradients)
+        );
+        assert_eq!(
+            MinMaxGradientState::from_i32(4),
+            Some(MinMaxGradientState::RandomColor)
+        );
+        assert_eq!(MinMaxGradientState::from_i32(5), None);
+        assert_eq!(MinMaxGradientState::from_i32(-1), None);
+
+        let mut view = MinMaxGradientView::default();
+        view.set_min_max_state(MinMaxGradientState::RandomColor);
+        assert_eq!(view.get_min_max_state(), 4);
     }
 }

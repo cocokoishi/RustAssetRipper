@@ -1,8 +1,14 @@
-//! `RectfExtensions`.
+//! `RectfExtensions` plus the sprite physics-shape point math.
 //!
 //! Mirrors `AssetRipper.SourceGenerated.Extensions/RectfExtensions.cs`. The serialized `Rectf`
 //! holds `X`/`Y`/`Width`/`Height`; `CopyValues` fills them from a runtime rectangle and the
 //! accessors expose the center/position/size.
+//!
+//! Also mirrors the per-point math of `SpriteMetaDataExtensions.GeneratePhysicsShape`: the
+//! pivot shift from the atlas rect/pivot and the pixels-to-units point transform. The shape
+//! list assembly, the empty-shape early-out, and the packing-rotation fixup stay caller-side
+//! (the fixup switches on the generated packing-rotation enum); only this pure point math
+//! ports.
 //!
 //! Differential fixture: `rectf_fixture.txt` (probe `Temp/opencode/miscprobe`).
 
@@ -44,6 +50,30 @@ impl RectfView {
     }
 }
 
+/// `SpriteMetaDataExtensions.GeneratePhysicsShape` pivot shift.
+///
+/// `rect_size` is the atlas rect size (`[width, height]`); the half-rect term multiplies
+/// by `0.5` exactly like the source.
+pub fn sprite_physics_pivot_shift(rect_size: [f32; 2], pivot: [f32; 2]) -> [f32; 2] {
+    [
+        rect_size[0] * pivot[0] - rect_size[0] * 0.5,
+        rect_size[1] * pivot[1] - rect_size[1] * 0.5,
+    ]
+}
+
+/// `SpriteMetaDataExtensions.GeneratePhysicsShape` point transform: the source point scales
+/// by the sprite's pixels-to-units, then shifts by [`sprite_physics_pivot_shift`].
+pub fn sprite_physics_shape_point(
+    point: [f32; 2],
+    pixels_to_units: f32,
+    pivot_shift: [f32; 2],
+) -> [f32; 2] {
+    [
+        point[0] * pixels_to_units + pivot_shift[0],
+        point[1] * pixels_to_units + pivot_shift[1],
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,5 +108,34 @@ mod tests {
         assert_eq!(rect.position(), [1.5, 2.5]);
         assert_eq!(rect.size(), [3.5, 4.5]);
         assert_eq!(rect.center(), [1.5 + 1.75, 2.5 + 2.25]);
+    }
+
+    /// The physics-shape pivot shift centers on a centered pivot and the point transform
+    /// scales before shifting.
+    #[test]
+    fn sprite_physics_shape_math_matches_the_source_order() {
+        // A centered pivot needs no shift; a corner pivot shifts by half the rect.
+        assert_eq!(
+            sprite_physics_pivot_shift([10.0, 20.0], [0.5, 0.5]),
+            [0.0, 0.0]
+        );
+        assert_eq!(
+            sprite_physics_pivot_shift([10.0, 20.0], [0.0, 0.0]),
+            [-5.0, -10.0]
+        );
+        assert_eq!(
+            sprite_physics_pivot_shift([10.0, 20.0], [1.0, 0.25]),
+            [5.0, -5.0]
+        );
+        // Points scale by pixels-to-units, then shift.
+        let shift = sprite_physics_pivot_shift([10.0, 20.0], [0.0, 0.0]);
+        assert_eq!(
+            sprite_physics_shape_point([3.0, 4.0], 2.0, shift),
+            [1.0, -2.0]
+        );
+        assert_eq!(
+            sprite_physics_shape_point([0.0, 0.0], 100.0, [0.0, 0.0]),
+            [0.0, 0.0]
+        );
     }
 }
