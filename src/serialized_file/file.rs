@@ -7,7 +7,10 @@ use super::metadata::{
     ExternalFileTableLayout, ObjectRecordTableLayout, SerializedFileMetadata,
     SerializedFileMetadataError,
 };
-use super::object::{ObjectDecodeError, ObjectDecodeLimits, ParsedObjectPayload};
+use super::object::{
+    serialized_file_object_read_flags, ObjectDecodeError, ObjectDecodeLimits, ParsedObjectPayload,
+};
+use super::transfer_flags::TransferInstructionFlags;
 
 mod writer;
 pub use writer::{
@@ -69,6 +72,26 @@ impl<'a> SerializedFile<'a> {
         self.metadata
             .decode_object_payload_with_limits(self.input, &self.header, object_index, limits)
             .map_err(SerializedFileError::from_object)
+    }
+
+    /// Baseline `SerializedFile.Flags` for this parsed file, over caller path facts.
+    ///
+    /// Feeds the parsed generation, target platform, and body endianness with the raw
+    /// `FileBase.FilePath`/`Name` facts into the shared `serialized_file_object_read_flags`
+    /// kernel: `NoTarget` platforms on platform-carrying generations read editor scenes
+    /// (`.unity` paths) as `SerializeEditorMinimalScene`, engine resources (and, below
+    /// generation 10, builtin-extra files) add `IsBuiltinResourcesFile`, big-endian
+    /// bodies add `SwapEndianess`, and everything else reads as `SerializeGameRelease`.
+    /// Path entry naming (`NameFixed`) and the collections carrying the word stay
+    /// caller-side; this entry point only derives the flag word from one parsed file.
+    pub fn object_read_flags(&self, file_path: &str, file_name: &str) -> TransferInstructionFlags {
+        serialized_file_object_read_flags(
+            self.header.format_version,
+            self.metadata.prefix.target_platform,
+            file_path,
+            file_name,
+            self.metadata.prefix.body_endian,
+        )
     }
 }
 
@@ -959,5 +982,51 @@ mod tests {
                 field: "path name origin"
             }
         ));
+    }
+
+    #[test]
+    fn read_entry_derives_baseline_transfer_flags_from_parsed_facts() {
+        use crate::serialized_file::transfer_flags::TransferInstructionFlags;
+
+        // The generation-10 fixture targets platform 0 with a little-endian body.
+        let input = make_generation_10_file();
+        let parsed = SerializedFile::parse(&input).unwrap();
+        assert_eq!(
+            parsed.object_read_flags("Assets/level0", "level0"),
+            TransferInstructionFlags::SERIALIZE_GAME_RELEASE
+        );
+        // Engine resource names add the builtin bit on top of the release base.
+        let builtin = parsed.object_read_flags("Assets/level0", "unity default resources");
+        assert!(builtin.is_builtin_resources());
+        assert_eq!(
+            builtin,
+            TransferInstructionFlags::SERIALIZE_GAME_RELEASE
+                .with(TransferInstructionFlags::IS_BUILTIN_RESOURCES_FILE)
+        );
+        // A `.unity` path alone changes nothing while the platform is not `NoTarget`.
+        assert_eq!(
+            parsed.object_read_flags("Assets/scene.unity", "scene"),
+            TransferInstructionFlags::SERIALIZE_GAME_RELEASE
+        );
+
+        // Patch the target platform to `NoTarget` (0xFFFFFFFE), which sits right
+        // after the 11-byte version string in this 20-byte-header fixture: `.unity`
+        // paths then read as editor-minimal scenes, anything else with bare flags,
+        // and the ordinal suffix check stays case-sensitive.
+        let mut no_target = input.clone();
+        no_target[31..35].copy_from_slice(&0xFFFFFFFEu32.to_le_bytes());
+        let parsed = SerializedFile::parse(&no_target).unwrap();
+        assert_eq!(
+            parsed.object_read_flags("Assets/scene.unity", "scene"),
+            TransferInstructionFlags::SERIALIZE_EDITOR_MINIMAL_SCENE
+        );
+        assert_eq!(
+            parsed.object_read_flags("Assets/level0", "level0"),
+            TransferInstructionFlags::NONE
+        );
+        assert_eq!(
+            parsed.object_read_flags("Assets/SCENE.UNITY", "scene"),
+            TransferInstructionFlags::NONE
+        );
     }
 }

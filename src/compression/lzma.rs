@@ -1,4 +1,9 @@
 //! Bounded decoder for Unity's LZMA block payloads.
+//!
+//! One deliberate difference is documented, not changed: the source read loop stops
+//! at the requested count and leaves a short stream for downstream size checks to
+//! reject, while this decoder fails closed on a short stream and truncates a long
+//! stream to the requested count (pinned by the output-size contract test below).
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -366,6 +371,27 @@ mod tests {
                 limit: 15
             }
         );
+    }
+
+    /// Output-size contract against `LzmaCompression.DecompressLzmaStream`: a short
+    /// stream fails closed (the source read loop would leave its pre-sized buffer
+    /// short and fail downstream in `ReadMetadata`), while a long stream truncates to
+    /// the requested count exactly like the source loop. The outcomes below were
+    /// verified against the decoder dependency; `OutputSizeMismatch` and
+    /// `OutputExceeded` remain as backstops for decoders that return without
+    /// honoring the requested count.
+    #[test]
+    fn output_size_contract_matches_the_source_read_loop() {
+        let original = b"0123456789abcdef0123456789abcdef";
+        let mut framed = Vec::new();
+        lzma_rs::lzma_compress(&mut Cursor::new(original), &mut framed).unwrap();
+        let mut payload = framed[..5].to_vec();
+        payload.extend_from_slice(&framed[13..]);
+        // Fewer bytes than requested: a hard error, never a short buffer.
+        let short = decompress_block(&payload, 64, 64).unwrap_err();
+        assert!(matches!(short.kind, LzmaBlockErrorKind::Decoder(_)));
+        // More bytes than requested: the first `expected` bytes, like the source loop.
+        assert_eq!(decompress_block(&payload, 8, 64).unwrap(), b"01234567");
     }
 
     #[test]

@@ -1,4 +1,9 @@
 //! Bounded Zstandard frame decoding for Unity storage blocks.
+//!
+//! Mirrors `AssetRipper.IO.Files/BundleFiles/ZstdCompression.cs`: the four-byte frame
+//! signature check and bounded decompression of exactly the declared sizes. One deliberate
+//! hardening: inputs shorter than the signature read `false` instead of throwing like the
+//! source's exact stream read.
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -205,5 +210,26 @@ mod tests {
 
         let malformed = decompress_block(&ZSTD_FRAME_MAGIC, 3, 3, 1024).unwrap_err();
         assert!(matches!(malformed.kind, ZstdBlockErrorKind::Decoder(_)));
+    }
+
+    #[test]
+    fn guards_short_signatures_and_unreservable_outputs() {
+        // Inputs shorter than the signature read false instead of throwing
+        // like the source's exact stream read.
+        assert!(!has_frame_magic(&[]));
+        assert!(!has_frame_magic(&ZSTD_FRAME_MAGIC[..3]));
+        assert!(has_frame_magic(&ZSTD_FRAME_MAGIC));
+        let mut prefixed = ZSTD_FRAME_MAGIC.to_vec();
+        prefixed.extend_from_slice(b"trailing");
+        assert!(has_frame_magic(&prefixed));
+        // An output no allocator could reserve fails before decoding.
+        let allocation = decompress_block(&[], usize::MAX, usize::MAX, 1024).unwrap_err();
+        assert_eq!(
+            allocation.kind,
+            ZstdBlockErrorKind::AllocationFailed {
+                requested: usize::MAX
+            }
+        );
+        assert!(allocation.to_string().contains("could not allocate"));
     }
 }

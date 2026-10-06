@@ -1664,6 +1664,35 @@ fn export_file_yaml_to<W: io::Write>(
     Ok(())
 }
 
+/// How a loaded selection proceeds through load-and-process.
+///
+/// Mirrors the `ExportHandler.LoadAndProcess` branching
+/// (`AssetRipper/Source/AssetRipper.Export.UnityProjects/ExportHandler.cs`, lines 142-150)
+/// together with the empty-bundle warning in the `GameStructure` constructor
+/// (`AssetRipper/Source/AssetRipper.Import/Structure/GameStructure.cs`, lines 42-45),
+/// decided over the caller-counted asset collections (`GameBundle.HasAnyAssetCollections()`,
+/// i.e. `FetchAssetCollections().Any()`). The load and process phases themselves need the
+/// VFS, collections, and processor pipeline and stay with their callers, as does the
+/// `GameFileLoader.Reset` state clearing (a fresh CLI process starts empty).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LoadProcessPlan {
+    /// The bundle holds asset collections: quiet load, then run processing.
+    Process,
+    /// The bundle holds none: warn that no valid assets were found, skip
+    /// processing, and return the bundle unprocessed.
+    ReturnUnprocessed,
+}
+
+/// Decides whether a loaded bundle with `asset_collection_count` collections runs
+/// the processing phase.
+const fn plan_load_process(asset_collection_count: usize) -> LoadProcessPlan {
+    if asset_collection_count > 0 {
+        LoadProcessPlan::Process
+    } else {
+        LoadProcessPlan::ReturnUnprocessed
+    }
+}
+
 fn inspect_explicit_files(input_files: &[PathBuf]) -> Result<(), Box<dyn Error>> {
     let stdout = io::stdout();
     let mut output = stdout.lock();
@@ -1687,7 +1716,7 @@ fn inspect_explicit_files_to<W: io::Write>(
     )?;
     print_explicit_root_resource_catalog_to(output, &root_resources)?;
 
-    if mixed.serialized_file_inputs.is_empty() {
+    if plan_load_process(mixed.serialized_file_inputs.len()) == LoadProcessPlan::ReturnUnprocessed {
         if root_resources.files().is_empty() {
             return Err(invalid_input(
                 "the selected files contain no recognized SerializedFile or root ResourceFile inputs",
@@ -1826,7 +1855,7 @@ fn inspect_directories(input_directories: &[PathBuf]) -> Result<(), Box<dyn Erro
         &selected_paths,
         MixedGameStructureLimits::default(),
     )?;
-    if mixed.serialized_file_inputs.is_empty() {
+    if plan_load_process(mixed.serialized_file_inputs.len()) == LoadProcessPlan::ReturnUnprocessed {
         return Err(invalid_input(
             "the selected directories contain no recognized SerializedFile inputs",
         ));
@@ -7536,5 +7565,16 @@ mod tests {
         for command in ["--help", "-h", "help", "--version", "-V"] {
             super::run(os_args(&[command]).into_iter()).unwrap();
         }
+    }
+
+    #[test]
+    fn load_process_plan_follows_the_bundle_presence_gate() {
+        use super::{plan_load_process, LoadProcessPlan};
+        // Any loaded collection runs processing, like `HasAnyAssetCollections()`.
+        assert_eq!(plan_load_process(1), LoadProcessPlan::Process);
+        assert_eq!(plan_load_process(2), LoadProcessPlan::Process);
+        assert_eq!(plan_load_process(usize::MAX), LoadProcessPlan::Process);
+        // An empty bundle warns, skips processing, and still returns.
+        assert_eq!(plan_load_process(0), LoadProcessPlan::ReturnUnprocessed);
     }
 }

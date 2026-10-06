@@ -4566,4 +4566,28 @@ mod tests {
             FileKind::UnityFs
         );
     }
+
+    #[test]
+    fn detection_edges_follow_the_source_minimums_and_readability() {
+        // Empty input is an unknown resource, not a scheme.
+        let empty = SchemeReader::read(b"").unwrap();
+        assert_eq!(empty.kind(), FileKind::Resource);
+        assert!(!empty.is_readable());
+        assert!(!SchemeReader::is_readable(b""));
+        // A bundle magic below the 0x20-byte source minimum does not dispatch.
+        let short = b"UnityFS\0".to_vec();
+        let short_file = SchemeReader::read(&short).unwrap();
+        assert_eq!(short_file.kind(), FileKind::Resource);
+        assert!(!SchemeReader::is_readable(&short));
+        assert_eq!(
+            SchemeReader::probe_raw_kind(b"short", 100),
+            FileKind::Resource
+        );
+        // A wrapped resource counts as scheme-readable; the bare form does not.
+        let wrapped = compress_gzip(b"payload", 1024).unwrap();
+        let wrapped_file = SchemeReader::read(&wrapped).unwrap();
+        assert_eq!(wrapped_file.kind(), FileKind::Resource);
+        assert!(wrapped_file.is_readable());
+        assert!(SchemeReader::is_readable(&wrapped));
+    }
 }
