@@ -11,6 +11,9 @@
 //!
 //! Crunch decompression (`CrunchHandler`) is not yet ported; a crunched format returns
 //! [`TextureConvertError::CrunchUnsupported`] rather than silently decoding wrong data.
+//! [`is_use_unity_crunch`] records which external decompressor the reference would call
+//! (`UnityCrunch` vs `Crunch`); both live in external NuGet packages with no in-snapshot
+//! implementation, so both paths still report `CrunchUnsupported`.
 
 use super::astc::decode_astc;
 use super::atc_yuy2::{decode_atc_rgb4, decode_atc_rgba8, decode_yuy2};
@@ -34,6 +37,7 @@ use super::texture_decode::{
     decode_rgba64_signed, decode_rgba_float, decode_rgba_half, TextureDecodeError,
 };
 use super::texture_format::is_crunched;
+use super::vertex_data_blob::UnityVersion;
 
 /// A texture conversion failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -122,6 +126,23 @@ impl core::fmt::Display for TextureConvertError {
 }
 
 impl std::error::Error for TextureConvertError {}
+
+/// `CrunchHandler.IsUseUnityCrunch`.
+///
+/// Unity 2017.3 and later always decompress through `UnityCrunch`; older versions use it
+/// only for the ETC crunched formats and fall back to `Crunch` otherwise. Both callees are
+/// external NuGet packages (`AssetRipper.Conversions.UnityCrunch` 1.0.3 and
+/// `AssetRipper.Conversions.Crunch` 1.0.3) with no implementation in the frozen snapshot,
+/// so this gate only records which external decompressor the reference would call.
+pub fn is_use_unity_crunch(version: UnityVersion, texture_format: i32) -> bool {
+    if version.at_least_at(2017, 3) {
+        return true;
+    }
+    matches!(
+        texture_format,
+        64 /* ETC_RGB4Crunched */ | 65 /* ETC2_RGBA8Crunched */
+    )
+}
 
 /// The inputs `TextureConverter.TryConvertToBitmap` reads from an image texture.
 #[derive(Clone, Copy, Debug)]
@@ -666,6 +687,33 @@ mod tests {
             convert_to_bitmap(&image),
             Err(TextureConvertError::CrunchUnsupported { texture_format: 28 })
         );
+    }
+
+    #[test]
+    fn crunch_gate_selects_the_external_decompressor() {
+        let new = UnityVersion::parse("2017.3.0f1").unwrap();
+        let old = UnityVersion::parse("2017.2.5f1").unwrap();
+        let ancient = UnityVersion::parse("5.6.7f1").unwrap();
+        // Unity 2017.3+ always uses UnityCrunch, even for non-ETC crunched formats.
+        for format in [
+            28, /* DXT1Crunched */
+            29, /* DXT5Crunched */
+            64, 65,
+        ] {
+            assert!(is_use_unity_crunch(new, format), "format {format}");
+        }
+        // Older versions use UnityCrunch only for the ETC crunched formats.
+        assert!(is_use_unity_crunch(old, 64));
+        assert!(is_use_unity_crunch(old, 65));
+        assert!(is_use_unity_crunch(ancient, 64));
+        assert!(is_use_unity_crunch(ancient, 65));
+        assert!(!is_use_unity_crunch(old, 28));
+        assert!(!is_use_unity_crunch(old, 29));
+        assert!(!is_use_unity_crunch(ancient, 28));
+        // The version gate dominates: on 2017.3+ the answer is true before the format is
+        // considered (the caller only invokes the gate for crunched formats).
+        assert!(is_use_unity_crunch(new, 10 /* DXT1 */));
+        assert!(!is_use_unity_crunch(old, 10));
     }
 
     #[test]

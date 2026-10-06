@@ -2428,3 +2428,15 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 
 - Added `src/resources/preview_image.rs` (`PreviewAssetKind`, `has_preview_image_data`, `preview_bitmap_source`, `preview_raw_source`) mirroring the `AssetAPI` image-region dispatch over caller facts, composing the ported `sprite_supported` gate for the sprite presence arm. Three tests pin the presence table, the bitmap switch, and the raw switch with the `ITexture2D` narrowing (including the texture-less-sprite empty case caught during authoring). Targeted `cargo test -p assetripper-rs --lib resources::preview_image`: 3/3 pass locally; `cargo fmt --check` clean; targeted lib Clippy clean; full workspace and CI pending (Actions still blocked repo-side by billing). No runtime differential applies without managed objects. New row `RES-PREVIEW-IMAGE-001`.
 - No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+## Full-workspace retrovalidation with a workspace-local temp dir (2026-10-06)
+
+- The three sprite/preview increments above had only targeted-test evidence because CI was billing-blocked. A local full run (`cargo test --workspace --locked --quiet`, Rust/Cargo 1.98.1) initially reported 1008 passed / 20 failed, but every failure was `Os { code: 5, PermissionDenied }` inside `std::env::temp_dir()` creation (`project_output.rs`, `stream.rs`, `scheme.rs` fixtures) — an environment restriction on the session temp directory, not a code regression.
+- Re-ran with `TEMP`/`TMP` redirected to the gitignored `target/test-tmp`: **1028 library + 52 CLI + 0 doc tests, all pass**. This retroactively supplies the missing full-workspace evidence for `RES-SPRITE-CONVERT-001`, `RES-SPRITE-ATLAS-001`, and `RES-PREVIEW-IMAGE-001`. CI (Actions) remains billing-blocked.
+- No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+## Crunch decompressor gate (2026-10-06)
+
+- Audited the reference Crunch path: `CrunchHandler.DecompressCrunch` dispatches solely on `IsUseUnityCrunch` (Unity >= 2017.3, else the `ETC_RGB4Crunched`/`ETC2_RGBA8Crunched` pair) to two external NuGet packages (`AssetRipper.Conversions.UnityCrunch` 1.0.3, `AssetRipper.Conversions.Crunch` 1.0.3) with no implementation in the frozen snapshot.
+- Added `is_use_unity_crunch` to `src/resources/texture_converter.rs` mirroring that gate over caller version/format facts. Both decompressors stay explicit `CrunchUnsupported` errors; the gate is not yet wired into `convert_to_bitmap`, which takes no version. New row `RES-TEXTURE-CRUNCH-001`. No runtime differential applies without the external packages.
+- Final verification on Windows with Rust/Cargo 1.98.1: `cargo fmt --all -- --check` exit 0; `cargo test --workspace --locked` exit 0 (1029 library, 52 CLI, 0 doc tests, `TEMP`/`TMP` redirected to `target/test-tmp`); `cargo clippy --workspace --all-targets --locked -- -D warnings` exit 0; `tools/verify-baseline.ps1` exit 0 (1,449/1,449 reference files unchanged); `git diff --check` exit 0. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
