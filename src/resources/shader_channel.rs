@@ -1,7 +1,8 @@
 //! Shader channel and vertex format enums and extensions.
 //!
 //! Mirrors `AssetRipper.SourceGenerated.Extensions.Enums.Shader.ShaderChannel` and
-//! `.VertexFormat`, plus `ChannelInfoExtensions.GetVertexFormat`/`GetStride`. The shader channel
+//! `.VertexFormat`, plus `ChannelInfoExtensions.GetVertexFormat`/`GetStride` and the `Dimension`
+//! nibble rules (`IsSet`/`GetDataDimension`/`SetDataDimension`). The shader channel
 //! set and its numeric mapping changed at Unity 5 and again at 2018.1, and the vertex format
 //! encoding changed at 2017.1 and 2019.1; both are reproduced here for the frozen baseline.
 
@@ -440,6 +441,22 @@ pub fn channel_info_get_stride(
     Ok(calculate_stride(vertex_format, version, data_dimension))
 }
 
+/// `ChannelInfoExtensions.IsSet`: the channel carries data when `Dimension` is nonzero.
+pub const fn channel_info_is_set(dimension: u8) -> bool {
+    dimension > 0
+}
+
+/// `ChannelInfoExtensions.GetDataDimension`: the low nibble of `Dimension`.
+pub const fn channel_info_data_dimension(dimension: u8) -> u8 {
+    dimension & 0b0000_1111
+}
+
+/// `ChannelInfoExtensions.SetDataDimension`: replace the low nibble of `Dimension`
+/// and keep the high nibble, masking the value exactly like the source.
+pub const fn channel_info_set_data_dimension(dimension: u8, value: u8) -> u8 {
+    (dimension & 0b1111_0000) | (value & 0b0000_1111)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -560,7 +577,7 @@ mod tests {
                     let format: u8 = parts[2].parse().unwrap();
                     let dimension: u8 = parts[3].parse().unwrap();
                     assert_eq!(
-                        dimension & 0b1111,
+                        channel_info_data_dimension(dimension),
                         parts[4].parse::<u8>().unwrap(),
                         "{line}"
                     );
@@ -595,5 +612,24 @@ mod tests {
             3 => ShaderVertexFormat::Byte,
             _ => ShaderVertexFormat::Int,
         }
+    }
+
+    #[test]
+    fn channel_info_dimension_nibbles_follow_the_source_masks() {
+        // `IsSet` keys on the whole byte, not the data nibble.
+        assert!(!channel_info_is_set(0x00));
+        assert!(channel_info_is_set(0x03));
+        assert!(channel_info_is_set(0xF0));
+        // The data dimension is the low nibble.
+        assert_eq!(channel_info_data_dimension(0x00), 0);
+        assert_eq!(channel_info_data_dimension(0x03), 3);
+        assert_eq!(channel_info_data_dimension(0xF3), 3);
+        assert_eq!(channel_info_data_dimension(0xFF), 15);
+        // Setting replaces the low nibble and keeps the high one.
+        assert_eq!(channel_info_set_data_dimension(0x00, 3), 0x03);
+        assert_eq!(channel_info_set_data_dimension(0xF0, 3), 0xF3);
+        assert_eq!(channel_info_set_data_dimension(0xAB, 0), 0xA0);
+        assert_eq!(channel_info_set_data_dimension(0xAB, 0x1C), 0xAC);
+        assert_eq!(channel_info_set_data_dimension(0xFF, 0xFF), 0xFF);
     }
 }

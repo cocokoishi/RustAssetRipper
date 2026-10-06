@@ -177,4 +177,41 @@ mod tests {
         }
         assert_eq!(rows, 3);
     }
+
+    #[test]
+    fn copy_values_across_layouts_keeps_absence_rules() {
+        // The source uses the newer layout, the destination the older one: fields
+        // absent on the destination stay absent, and a present destination field
+        // reads `0` for the missing source counterpart.
+        let source = GLTextureSettingsView {
+            filter_mode: 2,
+            aniso: 4,
+            mip_bias: 0.5,
+            wrap_mode: None,
+            wrap_u: Some(7),
+            wrap_v: None,
+            wrap_w: Some(8),
+        };
+        let mut dest = GLTextureSettingsView {
+            wrap_mode: Some(9),
+            wrap_u: None,
+            wrap_v: Some(9),
+            wrap_w: None,
+            ..GLTextureSettingsView::default()
+        };
+        dest.copy_values(&source);
+        assert_eq!(dest.filter_mode, 2);
+        assert_eq!(dest.aniso, 4);
+        assert_eq!(dest.mip_bias.to_bits(), 0.5f32.to_bits());
+        assert_eq!(dest.wrap_mode, Some(0));
+        assert_eq!(dest.wrap_u, None);
+        assert_eq!(dest.wrap_v, Some(0));
+        assert_eq!(dest.wrap_w, None);
+        // `SetToDefault` only touches present wrap fields.
+        dest.set_to_default();
+        assert_eq!(dest.wrap_mode, Some(-1));
+        assert_eq!(dest.wrap_u, None);
+        assert_eq!(dest.wrap_v, Some(-1));
+        assert_eq!(dest.wrap_w, None);
+    }
 }

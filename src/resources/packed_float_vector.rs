@@ -12,6 +12,11 @@
 //!   — the integer mask is reinterpreted as float bits rather than converted numerically — so the
 //!   packing is only approximately a round trip. Both quirks are reproduced rather than "fixed".
 //!
+//! The generic `Pack<T>` member reinterprets whole 4-byte units as floats
+//! (`MemoryMarshal.Cast<T, float>`, used for `Matrix4x4` bind poses and `Vector3` vertices);
+//! [`PackedBitVectorSingle::pack_words`] is that path over caller-held words. Byte ownership
+//! stays caller-side.
+//!
 //! Reads are bounded by [`PackedBitVectorLimits`]; over-long or truncated inputs return errors.
 
 use std::fmt::{self, Display, Formatter};
@@ -174,6 +179,24 @@ impl PackedBitVectorSingle {
         limits: PackedBitVectorLimits,
     ) -> Result<(), PackedFloatVectorError> {
         self.pack_with_bit_size(data, 24, false, limits)
+    }
+
+    /// `Pack<T>`: packs 4-byte words reinterpreted as floats, like the source
+    /// `MemoryMarshal.Cast<T, float>` path, using the default high-accuracy packing.
+    pub fn pack_words(
+        &mut self,
+        words: &[u32],
+        limits: PackedBitVectorLimits,
+    ) -> Result<(), PackedFloatVectorError> {
+        let mut floats = Vec::new();
+        floats.try_reserve_exact(words.len()).map_err(|_| {
+            PackedFloatVectorError::AllocationFailed {
+                resource: "reinterpreted float vector",
+                requested: words.len(),
+            }
+        })?;
+        floats.extend(words.iter().map(|word| f32::from_bits(*word)));
+        self.pack(&floats, limits)
     }
 
     /// `Pack(ReadOnlySpan<float>, int bitSize, bool adjustBitSize)`.
@@ -603,5 +626,37 @@ mod tests {
                 chunk_stride: 2,
             })
         );
+    }
+
+    /// Mirrors the baseline `FloatVectorTests` guarantees: every bit size 1..=32 packs
+    /// and unpacks without throwing at full length, the word path matches the float
+    /// path bit-for-bit, and the 24-bit default stays within `1e-6` of the input.
+    #[test]
+    fn packing_sweep_matches_the_baseline_test_guarantees() {
+        // Deterministic stand-in for the baseline's seeded random values.
+        let values: Vec<f32> = (0..20).map(|i| (i * 37 % 100) as f32 / 10.0).collect();
+        for bit_size in 1..=32 {
+            let mut vector = PackedBitVectorSingle::default();
+            vector
+                .pack_with_bit_size(&values, bit_size, false, limits())
+                .unwrap();
+            let unpacked = vector.unpack(limits()).unwrap();
+            assert_eq!(unpacked.len(), values.len(), "bit size {bit_size}");
+        }
+
+        let words: Vec<u32> = values.iter().map(|value| value.to_bits()).collect();
+        let mut from_words = PackedBitVectorSingle::default();
+        from_words.pack_words(&words, limits()).unwrap();
+        let mut from_floats = PackedBitVectorSingle::default();
+        from_floats.pack(&values, limits()).unwrap();
+        assert_eq!(from_words, from_floats);
+
+        let unpacked = from_floats.unpack(limits()).unwrap();
+        for (actual, expected) in unpacked.iter().zip(&values) {
+            assert!(
+                (actual - expected).abs() <= 0.000001,
+                "got {actual}, wanted {expected}"
+            );
+        }
     }
 }
