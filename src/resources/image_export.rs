@@ -1,13 +1,15 @@
 //! Image writers for `DirectBitmap.Save`.
 //!
 //! The reference dispatches on `ImageExportFormat` and uses FPng, `BmpWriter`, `ExrWriter`, and
-//! StbImageWriteSharp. This port writes PNG, BMP, TGA, and Radiance HDR directly; EXR and JPEG
-//! return [`ImageWriteError::Unsupported`] until their codecs are ported.
+//! StbImageWriteSharp. This port writes PNG, BMP, TGA, Radiance HDR, and OpenEXR directly; only
+//! JPEG returns [`ImageWriteError::Unsupported`].
 //!
 //! The BMP writer reproduces `BmpWriter.WriteBmp` byte-for-byte (a 108-byte `BITMAPV4HEADER`,
 //! BGRA rows bottom-up). The PNG writer emits filter-0 scanlines; it is not byte-identical to
 //! FPng but carries identical pixels. The HDR writer reproduces StbImageWriteSharp `WriteHdr`
-//! byte-for-byte (fixed header, shared-exponent RGBE pixels, new-style RLE per scanline).
+//! byte-for-byte (fixed header, shared-exponent RGBE pixels, new-style RLE per scanline). The
+//! EXR writer reproduces `ExrWriter.Write<ColorRGBA<byte>, byte>` byte-for-byte (fixed 331-byte
+//! header, per-scanline offset table, premultiplied half-float pixels planar in A/B/G/R order).
 
 use std::io::{self, Write};
 
@@ -124,9 +126,8 @@ impl Bitmap {
             ImageExportFormat::Png => self.save_png(writer),
             ImageExportFormat::Bmp => self.save_bmp(writer),
             ImageExportFormat::Tga => self.save_tga(writer),
-            ImageExportFormat::Exr | ImageExportFormat::Jpeg => {
-                Err(ImageWriteError::Unsupported { format })
-            }
+            ImageExportFormat::Exr => self.save_exr(writer),
+            ImageExportFormat::Jpeg => Err(ImageWriteError::Unsupported { format }),
             ImageExportFormat::Hdr => self.save_hdr(writer),
         }
     }
@@ -303,11 +304,218 @@ impl Bitmap {
         }
         Ok(())
     }
+
+    /// `ExrWriter.Write<ColorRGBA<byte>, byte>`: OpenEXR scanline file, no compression.
+    ///
+    /// Bytes arrive as RGBA8. Alpha stays linear; RGB passes through the sRGB transfer
+    /// applied to the premultiplied product (`byte/255 * alpha/255`), so the stored
+    /// pixels are alpha-associated. Each scanline is channel planar in chlist order
+    /// (A, B, G, R) as little-endian halves. Layers stack vertically like the other
+    /// writers. Only the byte RGBA path is ported: the Rust bitmap is always RGBA8,
+    /// matching the only instantiation the product pipeline can reach.
+    pub fn save_exr<W: Write>(&self, writer: &mut W) -> Result<(), ImageWriteError> {
+        let width = self.width;
+        let height = self.stacked_height();
+        if width > i32::MAX as usize || height > i32::MAX as usize {
+            return Err(ImageWriteError::DimensionTooLarge { value: width });
+        }
+        let row_halves = width
+            .checked_mul(8)
+            .filter(|bytes| *bytes <= i32::MAX as usize)
+            .ok_or(ImageWriteError::DimensionTooLarge { value: width })?;
+        let pixel_count = width
+            .checked_mul(height)
+            .ok_or(ImageWriteError::DimensionTooLarge { value: width })?;
+        if self.pixels.len() < pixel_count.saturating_mul(4) {
+            return Err(ImageWriteError::DimensionTooLarge { value: width });
+        }
+        let width_i32 = width as i32;
+        let height_i32 = height as i32;
+        let mut header = Vec::with_capacity(331);
+        write_exr_header(&mut header, width_i32, height_i32);
+
+        // Offset table: each scanline block starts after the header, the table
+        // itself, and every earlier block (`y`/`size` prefix plus pixel bytes).
+        let table_start = header.len() as u64;
+        writer.write_all(&header)?;
+        let block_len = 8u64.saturating_add(row_halves as u64);
+        for row in 0..height as u64 {
+            writer.write_all(
+                &(table_start
+                    .saturating_add(height as u64 * 8)
+                    .saturating_add(row.saturating_mul(block_len)))
+                .to_le_bytes(),
+            )?;
+        }
+
+        let mut halves = vec![0u16; width.saturating_mul(4)];
+        for y in 0..height {
+            writer.write_all(&(y as i32).to_le_bytes())?;
+            writer.write_all(&(row_halves as i32).to_le_bytes())?;
+            let row = &self.pixels[y * width * 4..(y + 1) * width * 4];
+            for (pixel, slot) in row.chunks_exact(4).zip(halves.chunks_exact_mut(4)) {
+                let alpha = f32::from(pixel[3]) / 255.0;
+                slot[0] = f32_to_half_bits(alpha);
+                slot[1] = rgba_byte_to_half(pixel[2], alpha);
+                slot[2] = rgba_byte_to_half(pixel[1], alpha);
+                slot[3] = rgba_byte_to_half(pixel[0], alpha);
+            }
+            // Channel planar in chlist order: all of A, then B, G, R.
+            for channel in 0..4 {
+                for pixel in halves.chunks_exact(4) {
+                    writer.write_all(&pixel[channel].to_le_bytes())?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The OpenEXR file magic and scanline version word.
+const EXR_MAGIC_VERSION: [u8; 8] = [0x76, 0x2F, 0x31, 0x01, 0x02, 0x00, 0x00, 0x00];
+
+/// Appends the fixed `ExrWriter` header: magic, version, the A/B/G/R half-float
+/// channel list, no compression, matching data/display windows, increasing-Y line
+/// order, unit aspect, centered screen window of width one, and the attribute
+/// terminator. The byte layout reproduces the reference writer exactly.
+fn write_exr_header(header: &mut Vec<u8>, width: i32, height: i32) {
+    header.extend_from_slice(&EXR_MAGIC_VERSION);
+    write_exr_string(header, "channels");
+    write_exr_string(header, "chlist");
+    // Four 18-byte entries plus the chlist terminator.
+    header.extend_from_slice(&73i32.to_le_bytes());
+    for channel in *b"ABGR" {
+        header.push(channel);
+        header.push(0);
+        header.extend_from_slice(&1i32.to_le_bytes()); // half float
+        header.push(0); // perceptually linear
+        header.extend_from_slice(&[0, 0, 0]); // reserved
+        header.extend_from_slice(&1i32.to_le_bytes()); // x sampling
+        header.extend_from_slice(&1i32.to_le_bytes()); // y sampling
+    }
+    header.push(0); // chlist terminator
+    write_exr_attribute(header, "compression", "compression", &[0]);
+    write_exr_box_attribute(header, "dataWindow", width, height);
+    write_exr_box_attribute(header, "displayWindow", width, height);
+    write_exr_attribute(header, "lineOrder", "lineOrder", &[0]); // increasing Y
+    write_exr_float_attribute(header, "pixelAspectRatio", 1.0);
+    header.extend_from_slice(b"screenWindowCenter\0v2f\0");
+    header.extend_from_slice(&8i32.to_le_bytes());
+    header.extend_from_slice(&[0; 8]);
+    write_exr_float_attribute(header, "screenWindowWidth", 1.0);
+    header.push(0); // attribute terminator
+}
+
+/// Appends one NUL-terminated OpenEXR short name.
+fn write_exr_string(header: &mut Vec<u8>, value: &str) {
+    header.extend_from_slice(value.as_bytes());
+    header.push(0);
+}
+
+/// Appends an OpenEXR attribute with a raw payload.
+fn write_exr_attribute(header: &mut Vec<u8>, name: &str, type_name: &str, value: &[u8]) {
+    write_exr_string(header, name);
+    write_exr_string(header, type_name);
+    header.extend_from_slice(&(value.len() as i32).to_le_bytes());
+    header.extend_from_slice(value);
+}
+
+/// Appends an OpenEXR `box2i` attribute covering `(0, 0)` to `(width - 1, height - 1)`.
+fn write_exr_box_attribute(header: &mut Vec<u8>, name: &str, width: i32, height: i32) {
+    write_exr_string(header, name);
+    write_exr_string(header, "box2i");
+    header.extend_from_slice(&16i32.to_le_bytes());
+    header.extend_from_slice(&0i32.to_le_bytes());
+    header.extend_from_slice(&0i32.to_le_bytes());
+    header.extend_from_slice(&width.saturating_sub(1).to_le_bytes());
+    header.extend_from_slice(&height.saturating_sub(1).to_le_bytes());
+}
+
+/// Appends an OpenEXR `float` attribute.
+fn write_exr_float_attribute(header: &mut Vec<u8>, name: &str, value: f32) {
+    write_exr_string(header, name);
+    write_exr_string(header, "float");
+    header.extend_from_slice(&4i32.to_le_bytes());
+    header.extend_from_slice(&value.to_le_bytes());
+}
+
+/// An RGBA8 color lane through the `ExrWriter` pixel pipeline: the sRGB transfer
+/// applied to the premultiplied product, rounded to a half-float.
+///
+/// `alpha` is the already-normalized alpha (`byte/255`); the reference multiplies
+/// the normalized byte by it before the transfer, so the stored pixels are
+/// alpha-associated.
+fn rgba_byte_to_half(byte: u8, alpha: f32) -> u16 {
+    let linear = f32::from(byte) / 255.0 * alpha;
+    f32_to_half_bits(srgb_decode(linear))
+}
+
+/// The sRGB electro-optical transfer used by the reference writer.
+fn srgb_decode(value: f32) -> f32 {
+    if value <= 0.04045 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// Round-to-nearest-even `f32` to IEEE-754 binary16 bits.
+///
+/// Inputs from the EXR pipeline are finite values in `[0, 1]`, so only the
+/// normal, subnormal, and zero arms are reachable; the infinite/NaN arms follow
+/// the standard convention for completeness.
+fn f32_to_half_bits(value: f32) -> u16 {
+    let bits = value.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exponent = ((bits >> 23) & 0xFF) as i32;
+    let mantissa = bits & 0x007F_FFFF;
+    if exponent == 0xFF {
+        // Infinity or NaN.
+        return if mantissa == 0 {
+            sign | 0x7C00
+        } else {
+            sign | 0x7E00
+        };
+    }
+    let half_exponent = exponent - 112;
+    if half_exponent >= 31 {
+        // Overflow of the half range.
+        sign | 0x7C00
+    } else if half_exponent <= 0 {
+        if half_exponent < -10 {
+            // Too small even for a half subnormal.
+            sign
+        } else {
+            // Subnormal half: the rounded result is `mantissa * 2^(half_exponent - 14)`
+            // (at most ten bits), so shift the restored 24-bit mantissa right by
+            // `14 - half_exponent` with round-to-nearest-even on the dropped bits.
+            let shifted = mantissa | 0x0080_0000;
+            let shift = (14 - half_exponent) as u32;
+            let kept = shifted >> shift;
+            let dropped_mask = (1u32 << shift) - 1;
+            let dropped = shifted & dropped_mask;
+            let halfway = 1u32 << (shift - 1);
+            let round_up = dropped > halfway || (dropped == halfway && (kept & 1) == 1);
+            debug_assert!(kept <= 0x3FF, "subnormal half must fit ten bits");
+            sign | (kept as u16).wrapping_add(u16::from(round_up))
+        }
+    } else {
+        // Normal half: round the 23-bit mantissa down to 10 bits.
+        let kept = mantissa >> 13;
+        let dropped = mantissa & 0x1FFF;
+        let round_up = dropped > 0x1000 || (dropped == 0x1000 && (kept & 1) == 1);
+        let rounded = kept.wrapping_add(u32::from(round_up));
+        if rounded == 0x400 {
+            // Mantissa overflow carries into the exponent.
+            sign | (((half_exponent + 1) as u16) << 10)
+        } else {
+            sign | ((half_exponent as u16) << 10) | (rounded as u16)
+        }
+    }
 }
 
 /// The fixed StbImageWriteSharp HDR header; the `-Y {height} +X {width}` line follows.
 const HDR_HEADER_PREFIX: &[u8] = b"#?RADIANCE\n# Written by stb_image_write.h\nFORMAT=32-bit_rle_rgbe\nEXPOSURE=          1.0000000000000\n\n";
-
 /// The smallest scanline width StbImageWriteSharp encodes with RLE.
 const HDR_RLE_MIN_WIDTH: usize = 8;
 /// Scanlines at or above this width fall back to flat RGBE (`0x8000` in the source).
@@ -527,21 +735,177 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_formats_are_reported() {
+    fn jpeg_stays_unsupported() {
         let image = bitmap(1, 1, true, vec![1, 2, 3, 4]);
         let mut output = Vec::new();
-        assert!(matches!(
-            image.save(&mut output, ImageExportFormat::Exr),
-            Err(ImageWriteError::Unsupported {
-                format: ImageExportFormat::Exr
-            })
-        ));
         assert!(matches!(
             image.save(&mut output, ImageExportFormat::Jpeg),
             Err(ImageWriteError::Unsupported {
                 format: ImageExportFormat::Jpeg
             })
         ));
+    }
+
+    #[test]
+    fn exr_saves_through_the_format_dispatch() {
+        let image = bitmap(1, 1, true, vec![128, 128, 128, 255]);
+        let mut output = Vec::new();
+        image.save(&mut output, ImageExportFormat::Exr).unwrap();
+        assert_eq!(&output[..4], &[0x76, 0x2F, 0x31, 0x01]);
+    }
+
+    fn parse_hex_bytes(text: &str) -> Vec<u8> {
+        assert!(text.len().is_multiple_of(2), "odd hex length");
+        text.as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let digit = |c: u8| {
+                    (c as char)
+                        .to_digit(16)
+                        .unwrap_or_else(|| panic!("bad hex digit {c}"))
+                };
+                (digit(pair[0]) * 16 + digit(pair[1])) as u8
+            })
+            .collect()
+    }
+
+    fn parse_half_words(text: &str) -> Vec<u16> {
+        assert!(text.len().is_multiple_of(4), "odd half-word hex length");
+        parse_hex_bytes(text)
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect()
+    }
+
+    #[test]
+    fn exr_matches_the_reference_files_byte_for_byte() {
+        let fixture = include_str!("exr_fixture.txt");
+        let mut rows = 0;
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if !line.starts_with("FILE|") {
+                continue;
+            }
+            let mut parts = line.split('|');
+            assert_eq!(parts.next(), Some("FILE"));
+            let tag = parts
+                .next()
+                .unwrap_or_else(|| panic!("missing tag in {line}"));
+            let width: usize = parts
+                .next()
+                .unwrap_or_else(|| panic!("missing width in {line}"))
+                .parse()
+                .unwrap();
+            let height: usize = parts
+                .next()
+                .unwrap_or_else(|| panic!("missing height in {line}"))
+                .parse()
+                .unwrap();
+            let pixels = parse_hex_bytes(
+                parts
+                    .next()
+                    .unwrap_or_else(|| panic!("missing pixels in {line}")),
+            );
+            let expected = parse_hex_bytes(
+                parts
+                    .next()
+                    .unwrap_or_else(|| panic!("missing file in {line}")),
+            );
+            assert_eq!(pixels.len(), width * height * 4, "pixel length in {tag}");
+            let image = bitmap(width, height, true, pixels);
+            let mut output = Vec::new();
+            image.save_exr(&mut output).unwrap();
+            assert_eq!(output, expected, "EXR bytes for {tag}");
+            rows += 1;
+        }
+        assert_eq!(rows, 4, "expected four reference EXR files");
+    }
+
+    #[test]
+    fn exr_conversion_tables_match_the_reference() {
+        let fixture = include_str!("exr_fixture.txt");
+        let mut srgb: Option<Vec<u16>> = None;
+        let mut alpha: Option<Vec<u16>> = None;
+        for line in fixture.lines() {
+            let line = line.trim();
+            if let Some(table) = line.strip_prefix("SRGB|") {
+                srgb = Some(parse_half_words(table));
+            } else if let Some(table) = line.strip_prefix("ALPHA|") {
+                alpha = Some(parse_half_words(table));
+            }
+        }
+        let srgb = srgb.expect("SRGB table");
+        let alpha = alpha.expect("ALPHA table");
+        assert_eq!(srgb.len(), 256, "sRGB table length");
+        assert_eq!(alpha.len(), 256, "alpha table length");
+        for (byte, expected) in srgb.iter().enumerate() {
+            // Gray ramp pixels carry alpha 255, so the product is the byte alone.
+            assert_eq!(
+                rgba_byte_to_half(byte as u8, 1.0),
+                *expected,
+                "sRGB half for byte {byte}"
+            );
+        }
+        for (byte, expected) in alpha.iter().enumerate() {
+            assert_eq!(
+                f32_to_half_bits(f32::from(byte as u8) / 255.0),
+                *expected,
+                "linear half for alpha {byte}"
+            );
+        }
+        // Premultiplied spot checks from the grid and threshold probes, covering the
+        // sRGB linear/pow sides on both the direct (alpha 255) and scaled paths:
+        // (byte, alpha).
+        for ((byte, alpha), expected) in [
+            ((1u8, 4u8), 0x0050u16),
+            ((2, 4), 0x00A0),
+            ((3, 4), 0x00F0),
+            ((15, 16), 0x0CAE),
+            ((15, 240), 0x1C8B),
+            ((11, 16), 0x0ADD),
+            ((164, 16), 0x1A66),
+            ((165, 16), 0x1A70),
+        ] {
+            assert_eq!(
+                rgba_byte_to_half(byte, f32::from(alpha) / 255.0),
+                expected,
+                "premultiplied half for byte {byte}, alpha {alpha}"
+            );
+        }
+    }
+
+    #[test]
+    fn exr_stacks_depth_layers_as_scanlines() {
+        // Two 1x1 layers stack to a two-scanline file with chained offsets.
+        let image = Bitmap {
+            width: 1,
+            height: 1,
+            depth: 2,
+            is_rgba8: true,
+            has_alpha: true,
+            pixels: vec![255, 255, 255, 255, 0, 0, 0, 0],
+        };
+        let mut output = Vec::new();
+        image.save_exr(&mut output).unwrap();
+        // dataWindow/displayWindow cover (0, 0) to (0, stacked height - 1).
+        assert_eq!(output.len(), 331 + 16 + 2 * (8 + 8));
+        let offset0 = u64::from_le_bytes(output[331..339].try_into().unwrap());
+        let offset1 = u64::from_le_bytes(output[339..347].try_into().unwrap());
+        assert_eq!(offset0, 331 + 16);
+        assert_eq!(offset1, offset0 + 8 + 8);
+        // First scanline is white (four 1.0 halves), second is transparent black.
+        let row0 = offset0 as usize;
+        assert_eq!(&output[row0..row0 + 8], &[0, 0, 0, 0, 8, 0, 0, 0]);
+        assert_eq!(
+            &output[row0 + 8..row0 + 16],
+            &[0x00, 0x3C, 0x00, 0x3C, 0x00, 0x3C, 0x00, 0x3C]
+        );
+        let row1 = offset1 as usize;
+        assert_eq!(&output[row1..row1 + 8], &[1, 0, 0, 0, 8, 0, 0, 0]);
+        assert_eq!(&output[row1 + 8..row1 + 16], &[0; 8]);
     }
 
     #[test]
