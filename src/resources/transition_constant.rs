@@ -171,4 +171,31 @@ mod tests {
         }
         assert_eq!(rows, 18);
     }
+
+    #[test]
+    fn legacy_fallback_edges_follow_source_defaults() {
+        // Without an `Atomic` flag the source reads the default `false`, which maps to
+        // `Destination`, not `None`.
+        let no_atomic = TransitionConstantView {
+            interruption_source: None,
+            ..TransitionConstantView::default()
+        };
+        assert_eq!(
+            no_atomic.get_interruption_source(),
+            INTERRUPTION_SOURCE_DESTINATION
+        );
+        // Without serialized fields the first exit-time condition wins, matching the
+        // source `foreach` early return rather than the last match.
+        let ordered = TransitionConstantView {
+            conditions: vec![condition(0.25), condition(0.75)],
+            ..TransitionConstantView::default()
+        };
+        assert_eq!(ordered.get_exit_time().to_bits(), 0.25f32.to_bits());
+        assert!(ordered.get_has_exit_time());
+        // With no exit-time condition anywhere the documented defaults apply.
+        let bare = TransitionConstantView::default();
+        assert_eq!(bare.get_exit_time().to_bits(), 1.0f32.to_bits());
+        assert!(!bare.get_has_exit_time());
+        assert!(bare.get_has_fixed_duration());
+    }
 }

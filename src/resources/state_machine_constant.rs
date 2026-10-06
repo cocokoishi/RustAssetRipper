@@ -2,7 +2,8 @@
 //!
 //! Mirrors `AssetRipper.SourceGenerated.Extensions/StateMachineConstantExtensions.cs`. The state
 //! machine count is recovered from the entry/exit selector array, which pairs an entry and an exit
-//! selector per state machine.
+//! selector per state machine; versions without the array report zero. The transition decision
+//! lives in a dedicated kernel; short or uniform arrays follow the same rule with no special case.
 
 /// A state-machine-constant view.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -18,16 +19,23 @@ impl StateMachineConstantView {
         let Some(ids) = &self.selector_full_path_ids else {
             return 0;
         };
-        let mut count = 0;
-        let mut previous: Option<u32> = None;
-        for id in ids {
-            if previous != Some(*id) {
-                previous = Some(*id);
-                count += 1;
-            }
-        }
-        count
+        count_selector_transitions(ids)
     }
+}
+
+/// Counts state machines from selector full-path ids: each change of id
+/// (including the first) opens a new machine, tolerating missing entry or exit
+/// halves exactly like the source loop.
+fn count_selector_transitions(ids: &[u32]) -> usize {
+    let mut count = 0;
+    let mut previous: Option<u32> = None;
+    for id in ids {
+        if previous != Some(*id) {
+            previous = Some(*id);
+            count += 1;
+        }
+    }
+    count
 }
 
 #[cfg(test)]
@@ -58,5 +66,25 @@ mod tests {
             rows += 1;
         }
         assert_eq!(rows, 6);
+    }
+
+    #[test]
+    fn state_machine_count_edges_follow_the_transition_rule() {
+        let view = StateMachineConstantView {
+            selector_full_path_ids: None,
+        };
+        assert_eq!(view.state_machine_count(), 0);
+        for (ids, expected) in [
+            (vec![], 0),
+            (vec![7, 7, 7, 7], 1),
+            (vec![1, 1, 2, 2], 2),
+            (vec![1, 2, 2, 1], 3),
+            (vec![1, 2, 1, 2], 4),
+        ] {
+            let view = StateMachineConstantView {
+                selector_full_path_ids: Some(ids),
+            };
+            assert_eq!(view.state_machine_count(), expected);
+        }
     }
 }

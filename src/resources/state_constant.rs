@@ -3,6 +3,12 @@
 //! Mirrors `AssetRipper.SourceGenerated.Extensions/StateConstantExtensions.cs`. State ids come
 //! from the full-path, path, or plain id field depending on the version; names are either a
 //! dictionary lookup by `NameID` or the state path with any parent-machine prefix stripped.
+//!
+//! Also covers the caller-independent grouping math of
+//! `AssetRipper.Processing/AnimatorControllers/AnimatorStateContext.cs`: the default-state
+//! index, the parent-machine path derivation, and the state-index selection behind
+//! `StateIndicesForStateMachine`. Asset creation and the path↔id registry stay caller-side;
+//! the registry-backed overload takes its entries as caller facts.
 
 use std::collections::HashMap;
 
@@ -88,6 +94,69 @@ impl StateConstantView {
         }
         Ok(state_path)
     }
+}
+
+/// `AnimatorStateContext` default-state index: `DefaultState` unless it is `uint.MaxValue`,
+/// which selects index 0. Downstream bounds stay caller-side.
+pub fn default_state_index(default_state: u32) -> usize {
+    if default_state == u32::MAX {
+        0
+    } else {
+        default_state as usize
+    }
+}
+
+/// `AnimatorStateContext.StateIndicesForStateMachine(fullPathID)`: the state indices whose
+/// parent machine id matches, in order.
+pub fn state_indices_for_state_machine(
+    parent_machine_ids: &[u32],
+    full_path_id: u32,
+) -> Vec<usize> {
+    parent_machine_ids
+        .iter()
+        .enumerate()
+        .filter_map(|(index, parent)| (*parent == full_path_id).then_some(index))
+        .collect()
+}
+
+/// `AnimatorStateContext.StateIndicesForStateMachine(fullPath)`: resolves the path through
+/// the caller-held path↔id entries, then selects like the id overload. An unregistered
+/// path selects nothing.
+pub fn state_indices_for_state_machine_path(
+    parent_machine_ids: &[u32],
+    path_entries: &[(String, u32)],
+    full_path: &str,
+) -> Vec<usize> {
+    match path_entries
+        .iter()
+        .find(|(path, _)| path == full_path)
+        .map(|(_, id)| *id)
+    {
+        Some(full_path_id) => state_indices_for_state_machine(parent_machine_ids, full_path_id),
+        None => Vec::new(),
+    }
+}
+
+/// `AnimatorStateContext.MakeStateMachinePath`: strips the trailing `.StateName` from a
+/// `[stateMachinePath.]StateName` full path.
+///
+/// Paths too short to hold the separator read `None` where the source throws, as do
+/// suffix cuts that land inside a UTF-8 sequence (the source slices UTF-16 units). A
+/// suffix that is not `.StateName` also reads `None`; the source slices blindly there,
+/// but valid call-site pairs always match, so only malformed inputs differ.
+pub fn make_state_machine_path(full_path: &str, state_name: &str) -> Option<String> {
+    let end = full_path
+        .len()
+        .checked_sub(state_name.len())?
+        .checked_sub(1)?;
+    if !full_path.is_char_boundary(end) {
+        return None;
+    }
+    let (machine_path, suffix) = full_path.split_at(end);
+    if !suffix.starts_with('.') || &suffix[1..] != state_name {
+        return None;
+    }
+    Some(machine_path.to_owned())
 }
 
 #[cfg(test)]
@@ -223,5 +292,45 @@ mod tests {
             rows += 1;
         }
         assert_eq!(rows, 7);
+    }
+
+    #[test]
+    fn animator_state_grouping_math_matches_the_source_context() {
+        // The default-state sentinel selects index 0; anything else passes through.
+        assert_eq!(default_state_index(u32::MAX), 0);
+        assert_eq!(default_state_index(0), 0);
+        assert_eq!(default_state_index(9), 9);
+        // Parent-machine selection keeps order and duplicates, and misses cleanly.
+        let parents = [7u32, 3, 7, 9];
+        assert_eq!(state_indices_for_state_machine(&parents, 7), vec![0, 2]);
+        assert_eq!(state_indices_for_state_machine(&parents, 9), vec![3]);
+        assert_eq!(
+            state_indices_for_state_machine(&parents, 1),
+            Vec::<usize>::new()
+        );
+        assert_eq!(state_indices_for_state_machine(&[], 7), Vec::<usize>::new());
+        // The path overload resolves through the registry entries first.
+        let entries = [(String::from("A.B"), 7u32), (String::from("C"), 9u32)];
+        assert_eq!(
+            state_indices_for_state_machine_path(&parents, &entries, "A.B"),
+            vec![0, 2]
+        );
+        assert_eq!(
+            state_indices_for_state_machine_path(&parents, &entries, "Missing"),
+            Vec::<usize>::new()
+        );
+        // Path derivation strips one trailing `.StateName` segment.
+        assert_eq!(
+            make_state_machine_path("Parent.State", "State").as_deref(),
+            Some("Parent")
+        );
+        assert_eq!(
+            make_state_machine_path("A.B.State", "State").as_deref(),
+            Some("A.B")
+        );
+        // Too-short paths, mismatched suffixes, and empty names read None.
+        assert_eq!(make_state_machine_path("NoDot", "NoDot"), None);
+        assert_eq!(make_state_machine_path("Parent.Other", "State"), None);
+        assert_eq!(make_state_machine_path("", "State"), None);
     }
 }
