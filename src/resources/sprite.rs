@@ -26,8 +26,8 @@
 //! Also ported is the `SpriteProcessor.ProcessSprite` offset recalculation (pivot
 //! offset and texture-rect offset over caller facts); the atlas detachment and the
 //! rect/pivot/border copies stay caller-side. The `SettingsRaw` packing-settings
-//! bit layout (`SpriteAtlasData`/`SpriteRenderData`) stays open pending the
-//! generated packing-enum member names.
+//! bit positions shared by `SpriteAtlasData` and `SpriteRenderData` are pinned as
+//! raw discriminants; only the generated packing-enum member names stay open.
 
 /// The class ID of `Sprite` (class 213).
 pub const SPRITE_CLASS_ID: i32 = 213;
@@ -199,6 +199,29 @@ pub fn sprite_texture_rect_offset(
         texture_rect_origin[0] - rect_origin[0],
         texture_rect_origin[1] - rect_origin[1],
     ]
+}
+
+/// `SettingsRaw` packed flag shared by `SpriteAtlasData` and `SpriteRenderData`.
+///
+/// Both extensions read bit 0 (`IsPacked`); the packing-enum member names stay
+/// open (see the module docs), so this pins the position, not the spelling.
+pub fn sprite_settings_raw_is_packed(settings_raw: u32) -> bool {
+    settings_raw & 1 != 0
+}
+
+/// `SettingsRaw` packing-mode discriminant: bit 1.
+pub fn sprite_settings_raw_packing_mode(settings_raw: u32) -> u32 {
+    (settings_raw >> 1) & 1
+}
+
+/// `SettingsRaw` packing-rotation discriminant: bits 2-5.
+pub fn sprite_settings_raw_packing_rotation(settings_raw: u32) -> u32 {
+    (settings_raw >> 2) & 0xF
+}
+
+/// `SettingsRaw` mesh-type discriminant: bit 6.
+pub fn sprite_settings_raw_mesh_type(settings_raw: u32) -> u32 {
+    (settings_raw >> 6) & 1
 }
 
 /// Discriminant of `SpriteAlignment.Custom` written by `FillSpriteMetaData`.
@@ -546,6 +569,48 @@ mod tests {
         assert_eq!(out.rect, [0.0, 0.0, 32.0, 16.0]);
         assert_eq!(out.pivot, [1.25, 0.75]);
         assert_eq!(out.border, [0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn settings_raw_decodes_the_shared_packing_positions() {
+        // Bit 0 is the packed flag; bit 1 the mode; bits 2-5 the rotation; bit 6
+        // the mesh type. Higher bits and the enum spellings stay out of scope.
+        assert_eq!(
+            (
+                sprite_settings_raw_is_packed(0),
+                sprite_settings_raw_packing_mode(0),
+                sprite_settings_raw_packing_rotation(0),
+                sprite_settings_raw_mesh_type(0),
+            ),
+            (false, 0, 0, 0)
+        );
+        assert_eq!(
+            (
+                sprite_settings_raw_is_packed(0x28),
+                sprite_settings_raw_packing_mode(0x28),
+                sprite_settings_raw_packing_rotation(0x28),
+                sprite_settings_raw_mesh_type(0x28),
+            ),
+            (false, 0, 10, 0)
+        );
+        assert_eq!(
+            (
+                sprite_settings_raw_is_packed(0x5F),
+                sprite_settings_raw_packing_mode(0x5F),
+                sprite_settings_raw_packing_rotation(0x5F),
+                sprite_settings_raw_mesh_type(0x5F),
+            ),
+            (true, 1, 7, 1)
+        );
+        assert_eq!(
+            (
+                sprite_settings_raw_is_packed(u32::MAX),
+                sprite_settings_raw_packing_mode(u32::MAX),
+                sprite_settings_raw_packing_rotation(u32::MAX),
+                sprite_settings_raw_mesh_type(u32::MAX),
+            ),
+            (true, 1, 15, 1)
+        );
     }
 
     const FILL_BONES: [SpriteBoneFacts; 2] = [

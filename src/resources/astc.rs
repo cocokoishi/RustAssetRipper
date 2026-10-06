@@ -1124,4 +1124,67 @@ mod tests {
         }
         assert!(rows >= 8, "expected at least 8 ASTC rows, got {rows}");
     }
+
+    /// Partial block grids, block-size gates, and buffer bounds, beyond the exact-multiple
+    /// differential rows.
+    ///
+    /// Void-extent blocks (`0xfc` with an odd second byte) fill a solid colour taken from
+    /// bytes 9/11/13/15 on any block footprint, so the grids below are hand-verifiable;
+    /// the consumed counts follow the ceiling block grid exactly.
+    #[test]
+    fn partial_grids_and_block_gates_match_the_family_layout() {
+        fn void_block(color: [u8; 4]) -> [u8; 16] {
+            let mut block = [0u8; 16];
+            block[0] = 0xFC;
+            block[1] = 0x01;
+            block[9] = color[0];
+            block[11] = color[1];
+            block[13] = color[2];
+            block[15] = color[3];
+            block
+        }
+        fn solid_pixels(output: &[u8], color: [u8; 4]) {
+            assert!(output.chunks_exact(4).all(|pixel| pixel == color));
+        }
+
+        let color = [0x11, 0x22, 0x33, 0x44];
+        // 6x6 with 4x4 blocks: a 2x2 grid with partial right and bottom edges.
+        let input = [
+            void_block(color),
+            void_block(color),
+            void_block(color),
+            void_block(color),
+        ]
+        .concat();
+        let mut output = vec![0u8; 6 * 6 * 4];
+        assert_eq!(decode_astc(&input, 6, 6, 4, 4, &mut output).unwrap(), 64);
+        solid_pixels(&output, color);
+        // 10x10 blocks on 10x10 and 12x12 blocks on a sub-block image each take one block.
+        let input = void_block(color).to_vec();
+        let mut output = vec![0u8; 10 * 10 * 4];
+        assert_eq!(
+            decode_astc(&input, 10, 10, 10, 10, &mut output).unwrap(),
+            16
+        );
+        solid_pixels(&output, color);
+        let mut output = vec![0u8; 5 * 7 * 4];
+        assert_eq!(decode_astc(&input, 5, 7, 12, 12, &mut output).unwrap(), 16);
+        solid_pixels(&output, color);
+        // Block footprints outside 4..=12 are rejected before touching the buffers.
+        let mut output = vec![0u8; 4 * 4 * 4];
+        for (block_width, block_height) in [(3, 4), (4, 3), (13, 4), (4, 13), (0, 4)] {
+            assert_eq!(
+                decode_astc(&input, 4, 4, block_width, block_height, &mut output),
+                Err(TextureDecodeError::InvalidBlockDimension {
+                    block_width,
+                    block_height
+                })
+            );
+        }
+        // Short inputs and outputs report bounds instead of panicking.
+        let mut output = vec![0u8; 4 * 4 * 4];
+        assert!(decode_astc(&[0u8; 15], 4, 4, 4, 4, &mut output).is_err());
+        let mut short = vec![0u8; 4 * 4 * 4 - 1];
+        assert!(decode_astc(&input, 4, 4, 4, 4, &mut short).is_err());
+    }
 }

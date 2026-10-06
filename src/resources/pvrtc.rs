@@ -385,6 +385,7 @@ pub fn decode_pvrtc_2bpp(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resources::texture_decode::TextureDecodeError;
 
     fn parse_hex(text: &str) -> Vec<u8> {
         text.as_bytes()
@@ -426,5 +427,45 @@ mod tests {
             rows += 1;
         }
         assert_eq!(rows, 4);
+    }
+
+    #[test]
+    fn decode_edges_report_short_buffers() {
+        let mut output = vec![0u8; 8 * 8 * 4];
+        // 8x8 needs the full 2x2-block floor: 32 bytes.
+        assert_eq!(
+            decode_pvrtc_4bpp(&[0u8; 31], 8, 8, &mut output),
+            Err(TextureDecodeError::InputTooShort {
+                required: 32,
+                actual: 31,
+            })
+        );
+        assert!(decode_pvrtc_4bpp(&[0u8; 32], 8, 8, &mut output).is_ok());
+        // The output must hold every pixel.
+        let mut small = vec![0u8; 8 * 8 * 4 - 1];
+        assert!(matches!(
+            decode_pvrtc_4bpp(&[0u8; 128], 8, 8, &mut small),
+            Err(TextureDecodeError::OutputTooSmall { .. })
+        ));
+        // 4x4 images floor to the same 2x2 blocks.
+        let mut tiny = vec![0u8; 4 * 4 * 4];
+        assert_eq!(
+            decode_pvrtc_4bpp(&[0u8; 31], 4, 4, &mut tiny),
+            Err(TextureDecodeError::InputTooShort {
+                required: 32,
+                actual: 31,
+            })
+        );
+        assert!(decode_pvrtc_4bpp(&[0u8; 32], 4, 4, &mut tiny).is_ok());
+        // 2bpp floors each axis independently: 8x4 still needs 32 bytes.
+        let mut wide = vec![0u8; 8 * 4 * 4];
+        assert_eq!(
+            decode_pvrtc_2bpp(&[0u8; 31], 8, 4, &mut wide),
+            Err(TextureDecodeError::InputTooShort {
+                required: 32,
+                actual: 31,
+            })
+        );
+        assert!(decode_pvrtc_2bpp(&[0u8; 32], 8, 4, &mut wide).is_ok());
     }
 }
