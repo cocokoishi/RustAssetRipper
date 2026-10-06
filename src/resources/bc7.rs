@@ -373,6 +373,7 @@ pub fn decode_bc7(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resources::texture_decode::TextureDecodeError;
 
     fn parse_hex(text: &str) -> Vec<u8> {
         text.as_bytes()
@@ -409,5 +410,33 @@ mod tests {
             rows += 1;
         }
         assert!(rows >= 12, "expected at least 12 BC7 rows, got {rows}");
+    }
+
+    #[test]
+    fn decode_edges_match_the_source_bounds() {
+        // A reserved mode decodes an all-zero block, like the source.
+        let mut output = vec![0xFFu8; 4 * 4 * 4];
+        let consumed = decode_bc7(&[0u8; 16], 4, 4, &mut output).unwrap();
+        assert_eq!(consumed, 16);
+        assert_eq!(output, vec![0u8; 64]);
+        // Partial block grids round up: 6x5 needs 2x2 blocks.
+        let mut partial = vec![0u8; 6 * 5 * 4];
+        assert_eq!(
+            decode_bc7(&[0u8; 63], 6, 5, &mut partial),
+            Err(TextureDecodeError::InputTooShort {
+                required: 64,
+                actual: 63,
+            })
+        );
+        assert_eq!(decode_bc7(&[0u8; 64], 6, 5, &mut partial).unwrap(), 64);
+        // The output must hold every pixel.
+        let mut small = vec![0u8; 6 * 5 * 4 - 1];
+        assert!(matches!(
+            decode_bc7(&[0u8; 64], 6, 5, &mut small),
+            Err(TextureDecodeError::OutputTooSmall { .. })
+        ));
+        // Empty images decode to nothing.
+        let mut empty = Vec::new();
+        assert_eq!(decode_bc7(&[], 0, 0, &mut empty).unwrap(), 0);
     }
 }

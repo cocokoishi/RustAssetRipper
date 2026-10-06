@@ -579,4 +579,37 @@ mod tests {
         }
         assert!(rows >= 15, "expected at least 15 BC6H rows, got {rows}");
     }
+
+    /// The signed path, the family grid, and buffer bounds, beyond the unsigned 4x4
+    /// differential rows.
+    ///
+    /// The mode-10 block below (`0b00011`, then a full 10-bit R endpoint with zero
+    /// elsewhere) is hand-traced through the spec layout: signed decoding sign-extends
+    /// the endpoint to -1, unquantizes to -96, finishes to half bits 93 (a tiny
+    /// positive), and clamps every pixel to zero, while the unsigned reading of the
+    /// same block saturates red. Any divergence in the signed-only branches (sign
+    /// extension, negative unquantize/finish) breaks the expected split.
+    #[test]
+    fn signed_path_and_layout_match_the_spec_branches() {
+        let input = [0xE3, 0x7F, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let mut output = vec![0u8; 4 * 4 * 4];
+        assert_eq!(decode_bc6h_signed(&input, 4, 4, &mut output).unwrap(), 16);
+        assert!(output.chunks_exact(4).all(|pixel| pixel == [0, 0, 0, 255]));
+        let mut output = vec![0u8; 4 * 4 * 4];
+        assert_eq!(decode_bc6h(&input, 4, 4, &mut output).unwrap(), 16);
+        assert!(output
+            .chunks_exact(4)
+            .all(|pixel| pixel == [255, 0, 0, 255]));
+        // All-zero blocks decode opaque black on both paths; 5x5 spans a 2x2 grid.
+        let zeros = [0u8; 64];
+        let mut output = vec![0u8; 5 * 5 * 4];
+        assert_eq!(decode_bc6h_signed(&zeros, 5, 5, &mut output).unwrap(), 64);
+        assert!(output.chunks_exact(4).all(|pixel| pixel == [0, 0, 0, 255]));
+        // Short inputs and outputs report bounds instead of panicking.
+        let mut output = vec![0u8; 4 * 4 * 4];
+        assert!(decode_bc6h(&[0u8; 15], 4, 4, &mut output).is_err());
+        assert!(decode_bc6h_signed(&[0u8; 15], 4, 4, &mut output).is_err());
+        let mut short = vec![0u8; 4 * 4 * 4 - 1];
+        assert!(decode_bc6h(&[0u8; 16], 4, 4, &mut short).is_err());
+    }
 }

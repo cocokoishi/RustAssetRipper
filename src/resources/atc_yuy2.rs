@@ -245,4 +245,60 @@ mod tests {
         }
         assert_eq!(rows, 5);
     }
+
+    #[test]
+    fn partial_blocks_odd_widths_and_bounds_match_the_source_shapes() {
+        // A 5x3 image is two blocks wide with a ragged edge: the copy geometry is
+        // checked against the fixture-validated single-block path, which both
+        // blocks share here.
+        let (_, full) = decode("ATC_RGB4", &[0x11u8; 8], 4, 4);
+        let mut output = vec![0xAAu8; 5 * 3 * 4];
+        let consumed = decode_atc_rgb4(&[0x11u8; 16], 5, 3, &mut output).unwrap();
+        assert_eq!(consumed, 16);
+        let mut expected = Vec::with_capacity(5 * 3 * 4);
+        for y in 0..3 {
+            expected.extend_from_slice(&full[y * 16..y * 16 + 16]);
+            expected.extend_from_slice(&full[y * 16..y * 16 + 4]);
+        }
+        assert_eq!(output, expected);
+        // Odd YUY2 widths drop the final column: the pair math consumes
+        // `half_width` pairs and the leftover column is never written.
+        let mut output = vec![0xAAu8; 5 * 4];
+        let consumed = decode_yuy2(&[0x80u8; 8], 5, 1, &mut output).unwrap();
+        assert_eq!(consumed, 8);
+        assert_eq!(&output[16..20], &[0xAAu8; 4]);
+        let (_, even) = decode("YUY2", &[0x80u8; 8], 4, 1);
+        assert_eq!(&output[..16], &even[..]);
+        // Short inputs and outputs report exact bounds per entry point.
+        let mut output = vec![0u8; 64];
+        assert_eq!(
+            decode_atc_rgb4(&[0u8; 7], 4, 4, &mut output),
+            Err(TextureDecodeError::InputTooShort {
+                required: 8,
+                actual: 7
+            })
+        );
+        assert_eq!(
+            decode_atc_rgba8(&[0u8; 15], 4, 4, &mut output),
+            Err(TextureDecodeError::InputTooShort {
+                required: 16,
+                actual: 15
+            })
+        );
+        assert_eq!(
+            decode_yuy2(&[0u8; 31], 4, 4, &mut output),
+            Err(TextureDecodeError::InputTooShort {
+                required: 32,
+                actual: 31
+            })
+        );
+        let mut small = vec![0u8; 63];
+        assert_eq!(
+            decode_atc_rgb4(&[0u8; 8], 4, 4, &mut small),
+            Err(TextureDecodeError::OutputTooSmall {
+                required: 64,
+                actual: 63
+            })
+        );
+    }
 }
