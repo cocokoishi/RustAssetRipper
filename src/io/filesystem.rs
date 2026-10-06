@@ -5,7 +5,10 @@
 //!
 //! Deliberately open: the `Encoding` text overloads (only UTF-8 ports), GUID-named
 //! temporary file/directory creation, `DeleteTemporaryDirectory` (which needs the
-//! still-unported recursive directory delete), and real-filesystem mounting.
+//! still-unported recursive directory delete), real-filesystem mounting, and the
+//! `GetUniqueName` uniqueness-counter loop with its reserved-name gate (both need
+//! live directory state; only the length stage ports, as
+//! `truncate_file_name_to_byte_length`).
 
 use std::collections::BTreeMap;
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -36,6 +39,69 @@ impl Default for VirtualFileSystemLimits {
 pub enum SearchOption {
     TopDirectoryOnly,
     AllDirectories,
+}
+
+/// `FileSystem.GetUniqueName` length stage: when the UTF-8 byte count of `file_name`
+/// exceeds `max_name_length`, the extension is preserved and the stem is truncated
+/// to fit, backing off to the last full UTF-8 sequence
+/// (`Utf8Truncation.TruncateToUTF8ByteLength`). Names within budget pass through
+/// untouched.
+///
+/// The extension follows `System.IO.Path.GetExtension` (the dot-inclusive suffix of
+/// the last path segment, empty when there is no dot). The uniqueness-counter loop
+/// and the reserved-name gate stay caller-side: they need live directory state.
+/// One deliberate difference is documented, not changed: a budget the extension
+/// alone already exceeds saturates to an empty stem here, while the source
+/// negative length throws; real callers always pass room for the extension.
+pub fn truncate_file_name_to_byte_length(file_name: &str, max_name_length: usize) -> String {
+    if file_name.len() <= max_name_length {
+        return file_name.to_owned();
+    }
+    let extension = file_extension(file_name);
+    let stem = &file_name[..file_name.len() - extension.len()];
+    let stem_budget = max_name_length.saturating_sub(extension.len());
+    format!(
+        "{}{extension}",
+        truncate_to_utf8_byte_length(stem, stem_budget)
+    )
+}
+
+/// The dot-inclusive suffix of the last path segment, or empty when it has no dot.
+fn file_extension(file_name: &str) -> &str {
+    let segment = file_name.rsplit(['/', '\\']).next().unwrap_or(file_name);
+    match segment.rfind('.') {
+        Some(dot) => &segment[dot..],
+        None => "",
+    }
+}
+
+/// `Utf8Truncation.TruncateToUTF8ByteLength`: keep at most `max_length` bytes,
+/// backing off over a split multi-byte sequence to its start.
+fn truncate_to_utf8_byte_length(text: &str, max_length: usize) -> &str {
+    let bytes = text.as_bytes();
+    if max_length >= bytes.len() {
+        return text;
+    }
+    // The next byte starts a sequence, so the boundary is already valid.
+    if bytes[max_length] & 0b1100_0000 != 0b1000_0000 {
+        return &text[..max_length];
+    }
+    // Otherwise back off over the continuation bytes and the sequence start.
+    // The ASCII arm below is unreachable for valid UTF-8 (a continuation byte
+    // always follows a sequence start) and mirrors the source loop as written.
+    let mut valid_length = max_length;
+    for index in (0..max_length).rev() {
+        let byte = bytes[index];
+        if byte & 0b1100_0000 == 0b1000_0000 {
+            valid_length -= 1;
+        } else {
+            if byte & 0b1000_0000 == 0b1000_0000 {
+                valid_length -= 1;
+            }
+            break;
+        }
+    }
+    &text[..valid_length]
 }
 
 #[derive(Default)]
@@ -1057,5 +1123,29 @@ mod tests {
             resolved.ends_with("/relative-tmp") || resolved == "relative-tmp",
             "{resolved}"
         );
+    }
+
+    /// The `GetUniqueName` length stage against the reference `GetUniqueNameTests`
+    /// rows (`AssetRipper.IO.Files.Tests`): those tests use a missing directory, so
+    /// every expectation exercises exactly this stage.
+    #[test]
+    fn file_name_truncation_matches_the_unique_name_tests() {
+        use super::truncate_file_name_to_byte_length as truncate;
+        // Multibyte characters back off to the last full sequence.
+        assert_eq!(truncate("A文.ext", 4), ".ext");
+        assert_eq!(truncate("A文.ext", 5), "A.ext");
+        assert_eq!(truncate("A文.ext", 6), "A.ext");
+        assert_eq!(truncate("A文.ext", 7), "A.ext");
+        assert_eq!(truncate("A文.ext", 8), "A文.ext");
+        assert_eq!(truncate("A文.ext", 9), "A文.ext");
+        // The extension is preserved while the stem shrinks.
+        assert_eq!(truncate("A文.exte", 8), "A.exte");
+        assert_eq!(truncate("A文.exte", 9), "A文.exte");
+        // Extensionless names truncate the whole stem.
+        assert_eq!(truncate("A文", 3), "A");
+        assert_eq!(truncate("A文", 4), "A文");
+        // Names within budget pass through untouched.
+        assert_eq!(truncate("plain.txt", 9), "plain.txt");
+        assert_eq!(truncate("", 0), "");
     }
 }

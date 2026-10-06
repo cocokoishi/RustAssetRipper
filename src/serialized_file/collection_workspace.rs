@@ -1,4 +1,12 @@
 //! Source-ordered collection records linking SerializedFiles to decoded workspace objects.
+//!
+//! Also ports the `SerializedAssetCollection.InitializeDependencyList` slot assignment:
+//! slot 0 is always the collection itself and external identifier `i` lands at slot
+//! `i + 1`, with missing targets kept as explicit nulls. Identifier-to-collection
+//! matching (`Bundle.ResolveCollection`, including the fixed-name and
+//! default-resource/builtin-extra fallbacks) and missing-dependency reporting stay
+//! caller-side; the caller drops its identifier facts after a successful return, which
+//! is the one-shot consumption the source performs by clearing `DependencyIdentifiers`.
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -273,6 +281,79 @@ impl WorkspaceAssetCollections {
     }
 }
 
+/// Caller-reported outcome of resolving one external identifier, in identifier order.
+///
+/// Name matching stays caller-side; this only carries whether identifier `i` matched a
+/// workspace collection for slot `i + 1`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkspaceDependencyTarget {
+    /// The identifier matched this workspace collection.
+    Collection { collection_index: usize },
+    /// No collection matched; the caller reports it through its dependency provider.
+    Missing,
+}
+
+/// One initialized dependency list: file-index slots plus the missing positions.
+///
+/// Slot 0 is always the collection itself, mirroring `AssetCollection` (whose zeroth
+/// dependency entry is `this` for file-index correspondence); missing targets are
+/// explicit nulls, mirroring the source `SetDependency(i + 1, null)` entries.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CollectionDependencyList {
+    pub slots: Vec<Option<usize>>,
+    /// External-identifier positions with no matching collection, in order.
+    pub missing_identifier_positions: Vec<usize>,
+}
+
+/// `SerializedAssetCollection.InitializeDependencyList` (`AssetRipper/Source/AssetRipper.Assets/Collections/SerializedAssetCollection.cs`
+/// lines 20-40) over caller facts.
+///
+/// Sequential identifier slots always append (`AssetCollection.SetDependency` pads only
+/// for non-sequential callers, which cannot happen here), so the output is the self
+/// slot followed by one slot per resolution outcome. A collection that already carries
+/// extra slots is rejected like the source `Dependencies.Count > 1` guard, which runs
+/// before the identifier pass.
+pub fn initialize_collection_dependency_slots(
+    collection_index: usize,
+    resolved: &[WorkspaceDependencyTarget],
+    has_extra_slots: bool,
+) -> Result<CollectionDependencyList, Box<WorkspaceCollectionError>> {
+    if has_extra_slots {
+        return Err(collection_error(
+            WorkspaceCollectionErrorKind::DependencyListAlreadyInitialized { collection_index },
+        ));
+    }
+    let slot_count = resolved.len().checked_add(1).ok_or_else(|| {
+        collection_error(WorkspaceCollectionErrorKind::CountOverflow {
+            resource: "collection dependency slots",
+        })
+    })?;
+    let mut slots = Vec::new();
+    slots.try_reserve_exact(slot_count).map_err(|_| {
+        collection_error(WorkspaceCollectionErrorKind::AllocationFailed {
+            resource: "collection dependency slots",
+            requested: slot_count,
+        })
+    })?;
+    slots.push(Some(collection_index));
+    let mut missing_identifier_positions = Vec::new();
+    for (position, target) in resolved.iter().enumerate() {
+        match target {
+            WorkspaceDependencyTarget::Collection { collection_index } => {
+                slots.push(Some(*collection_index));
+            }
+            WorkspaceDependencyTarget::Missing => {
+                missing_identifier_positions.push(position);
+                slots.push(None);
+            }
+        }
+    }
+    Ok(CollectionDependencyList {
+        slots,
+        missing_identifier_positions,
+    })
+}
+
 #[derive(Debug)]
 pub struct WorkspaceCollectionError {
     pub kind: WorkspaceCollectionErrorKind,
@@ -321,6 +402,9 @@ pub enum WorkspaceCollectionErrorKind {
     },
     DuplicateFileCollection {
         file_index: usize,
+    },
+    DependencyListAlreadyInitialized {
+        collection_index: usize,
     },
     SourceTraversal(Box<SerializedFileWorkspaceError>),
 }
@@ -381,6 +465,12 @@ impl Display for WorkspaceCollectionErrorKind {
             Self::DuplicateFileCollection { file_index } => {
                 write!(f, "file {file_index} was assigned more than one collection index")
             }
+            Self::DependencyListAlreadyInitialized { collection_index } => {
+                write!(
+                    f,
+                    "collection {collection_index} already has an initialized dependency list"
+                )
+            }
             Self::SourceTraversal(error) => write!(f, "source collection traversal failed: {error}"),
         }
     }
@@ -397,4 +487,62 @@ impl Error for WorkspaceCollectionError {
 
 fn collection_error(kind: WorkspaceCollectionErrorKind) -> Box<WorkspaceCollectionError> {
     Box::new(WorkspaceCollectionError { kind })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        initialize_collection_dependency_slots, WorkspaceCollectionErrorKind,
+        WorkspaceDependencyTarget,
+    };
+
+    #[test]
+    fn dependency_slots_assign_self_then_identifier_order_with_nulls_for_missing() {
+        let list = initialize_collection_dependency_slots(
+            3,
+            &[
+                WorkspaceDependencyTarget::Collection {
+                    collection_index: 7,
+                },
+                WorkspaceDependencyTarget::Missing,
+                WorkspaceDependencyTarget::Collection {
+                    collection_index: 2,
+                },
+            ],
+            false,
+        )
+        .unwrap();
+        // Slot 0 is the collection itself; identifier `i` lands at slot `i + 1`,
+        // and the missing target is kept as an explicit null for file-index
+        // correspondence, like the source `SetDependency(i + 1, null)` entries.
+        assert_eq!(list.slots, [Some(3), Some(7), None, Some(2)]);
+        assert_eq!(list.missing_identifier_positions, [1]);
+
+        // No identifiers leaves just the self slot with nothing to report.
+        let empty = initialize_collection_dependency_slots(5, &[], false).unwrap();
+        assert_eq!(empty.slots, [Some(5)]);
+        assert!(empty.missing_identifier_positions.is_empty());
+    }
+
+    #[test]
+    fn dependency_list_rejects_already_initialized_collections_first() {
+        // The source `Dependencies.Count > 1` guard runs before the identifier pass,
+        // so it wins even when there is nothing to resolve.
+        let error = initialize_collection_dependency_slots(4, &[], true).unwrap_err();
+        assert!(matches!(
+            error.kind,
+            WorkspaceCollectionErrorKind::DependencyListAlreadyInitialized {
+                collection_index: 4
+            }
+        ));
+        let error =
+            initialize_collection_dependency_slots(4, &[WorkspaceDependencyTarget::Missing], true)
+                .unwrap_err();
+        assert!(matches!(
+            error.kind,
+            WorkspaceCollectionErrorKind::DependencyListAlreadyInitialized {
+                collection_index: 4
+            }
+        ));
+    }
 }

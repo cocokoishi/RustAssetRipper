@@ -2239,4 +2239,115 @@ mod tests {
             SerializedFileMetadataErrorKind::InvalidTypeIndex { type_index: 4, .. }
         ));
     }
+
+    #[test]
+    fn modern_object_records_resolve_types_and_reject_bad_references() {
+        fn modern_tables(type_index: i32) -> Vec<u8> {
+            let generation = FormatVersion::TypeTreeNodeWithTypeFlags;
+            let endian = Endian::Little;
+            let mut tables = Vec::new();
+            write_i32(&mut tables, 1, endian); // type count
+            write_i32(&mut tables, 28, endian);
+            tables.push(1); // stripped type flag
+            write_i16(&mut tables, -1, endian); // type script index
+            for word in [1, 2, 3, 4] {
+                write_u32(&mut tables, word, endian);
+            }
+            push_empty_modern_tree(&mut tables, generation, endian);
+            write_i32(&mut tables, 1, endian); // object count
+            align_table_position(generation, &mut tables, 20);
+            write_i64(&mut tables, 5, endian); // PathID
+            write_u32(&mut tables, 0, endian);
+            write_i32(&mut tables, 0, endian);
+            write_i32(&mut tables, type_index, endian);
+            write_i32(&mut tables, 0, endian); // scripts
+            write_i32(&mut tables, 0, endian); // externals
+            write_string(&mut tables, "");
+            tables
+        }
+
+        // A resolved modern object backfills the raw ID and the script/stripped
+        // slots from its type while the absent pre-17 fields stay empty, matching
+        // the source defaults.
+        let generation = FormatVersion::TypeTreeNodeWithTypeFlags;
+        let endian = Endian::Little;
+        let (file, header) = make_file(generation, endian, &modern_tables(0), &[]);
+        let metadata = SerializedFileMetadata::parse_file(&file, &header).unwrap();
+        let object = &metadata.objects[0];
+        assert_eq!(object.path_id, 5);
+        assert_eq!(object.serialized_type_index, Some(0));
+        assert_eq!(object.raw_type_id, 28);
+        assert_eq!(object.class_id, None);
+        assert_eq!(object.script_type_index, Some(-1));
+        assert_eq!(object.is_destroyed, None);
+        assert_eq!(object.is_stripped, Some(true));
+        assert_eq!(object.resolved_type_index, Some(0));
+
+        // A negative serialized type index scans for TypeID 0 instead of
+        // indexing, so a table without it is an explicit error.
+        let (file, header) = make_file(generation, endian, &modern_tables(-1), &[]);
+        let error = SerializedFileMetadata::parse_file(&file, &header).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            SerializedFileMetadataErrorKind::ObjectTypeNotFound { raw_type_id: 0, .. }
+        ));
+
+        // Duplicate TypeIDs on the scan path stay ambiguous instead of taking
+        // the first match.
+        let generation = FormatVersion::RefactorTypeData;
+        let mut tables = Vec::new();
+        write_i32(&mut tables, 2, endian); // type count
+        for base in [1, 5] {
+            write_i32(&mut tables, 0, endian);
+            tables.push(0);
+            write_i16(&mut tables, -1, endian);
+            for word in base..base + 4 {
+                write_u32(&mut tables, word, endian);
+            }
+            push_empty_modern_tree(&mut tables, generation, endian);
+        }
+        write_i32(&mut tables, 1, endian); // object count
+        align_table_position(generation, &mut tables, 20);
+        write_i64(&mut tables, 3, endian); // PathID
+        write_u32(&mut tables, 0, endian);
+        write_i32(&mut tables, 0, endian);
+        write_i32(&mut tables, -1, endian); // negative index scans for TypeID 0
+        let (file, header) = make_file(generation, endian, &tables, &[]);
+        let error = SerializedFileMetadata::parse_file(&file, &header).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            SerializedFileMetadataErrorKind::AmbiguousObjectType { raw_type_id: 0, .. }
+        ));
+
+        // A negative large-file payload offset is rejected, not wrapped.
+        let generation = FormatVersion::LargeFilesSupport;
+        let mut tables = Vec::new();
+        write_i32(&mut tables, 0, endian); // types
+        write_i32(&mut tables, 1, endian); // objects
+        align_table_position(generation, &mut tables, 48);
+        write_i64(&mut tables, 9, endian); // PathID
+        write_i64(&mut tables, -1, endian); // negative payload offset
+        let (file, header) = make_file(generation, endian, &tables, &[]);
+        let error = SerializedFileMetadata::parse_file(&file, &header).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            SerializedFileMetadataErrorKind::NegativeObjectOffset(-1)
+        ));
+
+        // A negative payload size is rejected on the legacy integer path too.
+        let generation = FormatVersion::Unknown9;
+        let mut tables = Vec::new();
+        write_i32(&mut tables, 0, endian); // types
+        write_u32(&mut tables, 0, endian); // generation 7-13 long FileID field
+        write_i32(&mut tables, 1, endian); // objects
+        write_i32(&mut tables, 9, endian); // PathID
+        write_u32(&mut tables, 0, endian);
+        write_i32(&mut tables, -5, endian); // negative payload size
+        let (file, header) = make_file(generation, endian, &tables, &[]);
+        let error = SerializedFileMetadata::parse_file(&file, &header).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            SerializedFileMetadataErrorKind::NegativeObjectSize(-5)
+        ));
+    }
 }

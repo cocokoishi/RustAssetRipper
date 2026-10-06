@@ -1,4 +1,12 @@
 //! Deterministic VFS inventory matching the source `MixedGameStructure` input path.
+//!
+//! Mirrors `CollectFromDirectory` (per-directory source collection with parent-chain data paths)
+//! and `CollectWebFiles` (the `.data`/`.datagz`/`.data.unityweb` extension switch, where a bare
+//! `.unityweb` file is ignored). Directory scans inspect at most 32 bytes per file and use the
+//! declared VFS length to validate SerializedFile headers; they do not decode wrappers or read
+//! resource bodies. Explicitly selected files register even when they probe as resources, and all
+//! counts and byte totals are bounded by [`MixedGameStructureLimits`] instead of failing like the
+//! source's unbounded enumeration.
 
 use std::collections::BTreeSet;
 use std::error::Error;
@@ -665,5 +673,34 @@ mod tests {
             missing.kind,
             MixedGameStructureErrorKind::SelectedPathNotFound
         ));
+    }
+
+    #[test]
+    fn web_data_variants_follow_the_source_extension_switch() {
+        let mut filesystem = VirtualFileSystem::new();
+        insert_file(&mut filesystem, "/web/run.datagz", b"gzipped");
+        insert_file(&mut filesystem, "/web/blob.data.unityweb", b"web");
+        insert_file(&mut filesystem, "/web/plain.unityweb", b"ignored");
+        let structure = MixedGameStructure::from_vfs_paths(
+            &filesystem,
+            &["/web".to_owned()],
+            MixedGameStructureLimits::default(),
+        )
+        .unwrap();
+
+        assert!(structure
+            .registered_files
+            .iter()
+            .any(|file| { file.file_name == "run" && file.virtual_path == "/web/run.datagz" }));
+        assert!(structure.registered_files.iter().any(|file| {
+            file.file_name == "blob" && file.virtual_path == "/web/blob.data.unityweb"
+        }));
+        // A bare `.unityweb` file matches no switch arm and is ignored.
+        assert!(!structure
+            .registered_files
+            .iter()
+            .any(|file| file.virtual_path == "/web/plain.unityweb"));
+        assert_eq!(structure.data_paths, ["/web"]);
+        assert_eq!(structure.report.scanned_files, 3);
     }
 }

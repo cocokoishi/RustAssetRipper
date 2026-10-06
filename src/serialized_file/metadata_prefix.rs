@@ -3,6 +3,7 @@ use std::fmt::{self, Display, Formatter};
 
 use crate::io::binary::{BinaryError, BinaryReader, Endian};
 
+use super::format_version::FormatVersion;
 use super::header::{HeaderError, SerializedFileHeader};
 
 /// Maximum encoded Unity version string length accepted by default.
@@ -138,6 +139,63 @@ impl SerializedFileMetadataPrefix {
             consumed_bytes: reader.position(),
         })
     }
+
+    /// Plans prefix emission for `version` from the parsed prefix values.
+    ///
+    /// The generation gates reuse the `FormatVersion` predicates the read side uses
+    /// (`metadata_at_end` is baseline `HasEndian`). A signaling generation whose text is
+    /// `None` plans no version string: the baseline writes the parsed version there
+    /// (defaulting stripped signatures), so inventing text stays with the caller, as do
+    /// byte encoding, platform numbering, and the tables that follow the prefix.
+    pub fn emission(&self, version: FormatVersion) -> MetadataPrefixEmission<'_> {
+        MetadataPrefixEmission {
+            endian_marker: if version.metadata_at_end() {
+                Some(if self.body_endian == Endian::Big {
+                    1
+                } else {
+                    0
+                })
+            } else {
+                None
+            },
+            version_text: if version.has_signature() {
+                self.unity_version_text.as_deref()
+            } else {
+                None
+            },
+            target_platform: if version.has_platform() {
+                self.target_platform
+            } else {
+                None
+            },
+            type_tree_flag: if version.has_enable_type_tree() {
+                Some(self.has_type_tree)
+            } else {
+                None
+            },
+        }
+    }
+}
+
+/// Which metadata-prefix fields a generation emits on write.
+///
+/// Mirrors the prefix half of baseline `Write`
+/// (`AssetRipper/Source/AssetRipper.IO.Files/SerializedFiles/Parser/SerializedFileMetadata.cs`,
+/// lines 133-150): the endian marker exists only before generation 9 (endianness lives in
+/// the header from 9 on), then the version string (generation 7+), the target platform
+/// (8+), and the type-tree flag (13+). Generations without the flag field implicitly
+/// enable type trees on read.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MetadataPrefixEmission<'a> {
+    /// Endian marker byte (`1` for big-endian bodies, `0` for little-endian); `None`
+    /// when the generation stores endianness in the header.
+    pub endian_marker: Option<u8>,
+    /// Unity version string, when the generation carries a signature.
+    pub version_text: Option<&'a str>,
+    /// Target platform, when the generation carries one.
+    pub target_platform: Option<u32>,
+    /// Type-tree flag, when the generation serializes one.
+    pub type_tree_flag: Option<bool>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -229,7 +287,7 @@ impl Display for MetadataPrefixErrorKind {
 
 #[cfg(test)]
 mod tests {
-    use super::SerializedFileMetadataPrefix;
+    use super::{MetadataPrefixEmission, SerializedFileMetadataPrefix};
     use crate::io::binary::Endian;
     use crate::serialized_file::format_version::FormatVersion;
     use crate::serialized_file::header::SerializedFileHeader;
@@ -326,5 +384,100 @@ mod tests {
 
         assert_eq!(error.offset(), 20);
         assert!(error.to_string().contains("Unity version string"));
+    }
+
+    fn emission_prefix(body_endian: Endian) -> SerializedFileMetadataPrefix {
+        SerializedFileMetadataPrefix {
+            metadata_offset: 0,
+            metadata_size: 0,
+            body_endian,
+            unity_version_text: Some("2022.3.1f1".to_owned()),
+            target_platform: Some(7),
+            has_type_tree: false,
+            consumed_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn emission_plan_follows_generation_presence() {
+        // Generation 8: marker plus signature and platform, but no type-tree flag.
+        assert_eq!(
+            emission_prefix(Endian::Big).emission(FormatVersion::Unknown8),
+            MetadataPrefixEmission {
+                endian_marker: Some(1),
+                version_text: Some("2022.3.1f1"),
+                target_platform: Some(7),
+                type_tree_flag: None,
+            }
+        );
+        // A little-endian body marks zero, like the baseline ternary.
+        assert_eq!(
+            emission_prefix(Endian::Little)
+                .emission(FormatVersion::Unknown8)
+                .endian_marker,
+            Some(0)
+        );
+        // Generation 9 stores endianness in the header, so no marker is planned.
+        assert_eq!(
+            emission_prefix(Endian::Big).emission(FormatVersion::Unknown9),
+            MetadataPrefixEmission {
+                endian_marker: None,
+                version_text: Some("2022.3.1f1"),
+                target_platform: Some(7),
+                type_tree_flag: None,
+            }
+        );
+        // Generation 13 plans every prefix field.
+        assert_eq!(
+            emission_prefix(Endian::Big).emission(FormatVersion::HasTypeTreeHashes),
+            MetadataPrefixEmission {
+                endian_marker: None,
+                version_text: Some("2022.3.1f1"),
+                target_platform: Some(7),
+                type_tree_flag: Some(false),
+            }
+        );
+        // Generation 6 plans only the marker: no signature, platform, or flag yet.
+        assert_eq!(
+            emission_prefix(Endian::Big).emission(FormatVersion::Unknown6),
+            MetadataPrefixEmission {
+                endian_marker: Some(1),
+                version_text: None,
+                target_platform: None,
+                type_tree_flag: None,
+            }
+        );
+    }
+
+    #[test]
+    fn emission_plan_round_trips_parsed_prefix_values() {
+        // A parsed generation-8 prefix re-emits its own marker, version, and platform.
+        let mut metadata = vec![1];
+        metadata.extend_from_slice(b"2022.3.1f1\0");
+        metadata.extend_from_slice(&[0, 0, 0, 7]);
+        let (file, header) = make_file(FormatVersion::Unknown8, &metadata, Endian::Little);
+        let prefix = SerializedFileMetadataPrefix::parse_file(&file, &header).unwrap();
+        assert_eq!(
+            prefix.emission(FormatVersion::Unknown8),
+            MetadataPrefixEmission {
+                endian_marker: Some(1),
+                version_text: Some("2022.3.1f1"),
+                target_platform: Some(7),
+                type_tree_flag: None,
+            }
+        );
+        // A parsed type-tree flag survives the round trip on flag generations.
+        let mut flagged = b"2019.4.0f1\0".to_vec();
+        flagged.extend_from_slice(&[0, 0, 0, 5, 1]);
+        let (flag_file, flag_header) =
+            make_file(FormatVersion::HasTypeTreeHashes, &flagged, Endian::Big);
+        let flag_prefix =
+            SerializedFileMetadataPrefix::parse_file(&flag_file, &flag_header).unwrap();
+        assert_eq!(
+            flag_prefix
+                .emission(FormatVersion::HasTypeTreeHashes)
+                .type_tree_flag,
+            Some(true)
+        );
     }
 }
