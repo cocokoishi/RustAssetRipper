@@ -1,4 +1,8 @@
 //! Bounded Unity YAML document, node, and pointer formatting primitives.
+//!
+//! Mapping entries also cover the `serializedVersion` append/prepend gates
+//! (`YamlSerializedVersionExtensions`); typeless-data mapping assembly
+//! (`AddTypelessData`) stays with the value converter, which owns byte emission.
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -123,6 +127,33 @@ impl UnityYamlNode {
         self.insert(Self::plain_string(key), value)
     }
 
+    /// Prepends a key/value pair to a mapping, mirroring `YamlMappingNode.InsertBegin`.
+    pub fn insert_begin(
+        &mut self,
+        key: UnityYamlNode,
+        value: UnityYamlNode,
+    ) -> Result<(), UnityYamlNodeBuildError> {
+        let UnityYamlNodeKind::Mapping { entries, .. } = &mut self.kind else {
+            return Err(UnityYamlNodeBuildError::NotAMapping);
+        };
+        entries
+            .try_reserve(1)
+            .map_err(|_| UnityYamlNodeBuildError::AllocationFailed)?;
+        entries.insert(0, (key, value));
+        Ok(())
+    }
+
+    /// Prepends a plain-string field to a mapping, mirroring
+    /// `YamlMappingNode.InsertBegin(string, YamlNode)` (keys are plain scalars,
+    /// like [`Self::insert_field`]).
+    pub fn insert_field_begin(
+        &mut self,
+        key: impl Into<String>,
+        value: UnityYamlNode,
+    ) -> Result<(), UnityYamlNodeBuildError> {
+        self.insert_begin(Self::plain_string(key), value)
+    }
+
     pub fn push(&mut self, value: UnityYamlNode) -> Result<(), UnityYamlNodeBuildError> {
         let UnityYamlNodeKind::Sequence { items, .. } = &mut self.kind else {
             return Err(UnityYamlNodeBuildError::NotASequence);
@@ -192,6 +223,26 @@ impl Display for UnityYamlNodeBuildError {
 }
 
 impl Error for UnityYamlNodeBuildError {}
+
+/// Key for the `serializedVersion` mapping entry
+/// (`YamlSerializedVersionExtensions.SerializedVersionName`).
+pub const SERIALIZED_VERSION_KEY: &str = "serializedVersion";
+
+/// `AddSerializedVersion` gate: the entry is appended only when `version > 1`.
+pub fn serialized_version_is_appended(version: i32) -> bool {
+    version > 1
+}
+
+/// `ForceAddSerializedVersion` gate: the entry is appended when `version > 0`.
+pub fn serialized_version_is_forced(version: i32) -> bool {
+    version > 0
+}
+
+/// `InsertSerializedVersion` gate: the entry is prepended (see
+/// [`UnityYamlNode::insert_field_begin`]) only when `version > 1`.
+pub fn serialized_version_is_prepended(version: i32) -> bool {
+    version > 1
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct UnityYamlDocument {
@@ -1758,4 +1809,81 @@ mod tests {
         (0xBFD0273B10A6D4AF, "-0.2523944532980051"),
         (0xED0A00EB302B52C6, "-1.7928344098460697E+217"),
     ];
+
+    #[test]
+    fn serialized_version_gates_match_the_reference_thresholds() {
+        assert_eq!(SERIALIZED_VERSION_KEY, "serializedVersion");
+        assert!(!serialized_version_is_appended(0));
+        assert!(!serialized_version_is_appended(1));
+        assert!(serialized_version_is_appended(2));
+        assert!(!serialized_version_is_forced(0));
+        assert!(serialized_version_is_forced(1));
+        assert!(serialized_version_is_forced(2));
+        assert!(!serialized_version_is_prepended(1));
+        assert!(serialized_version_is_prepended(2));
+    }
+
+    #[test]
+    fn insert_begin_prepends_mapping_entries_in_order() {
+        let mut mapping = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+        mapping
+            .insert_field("m_Name", UnityYamlNode::string("body"))
+            .unwrap();
+        mapping
+            .insert_field_begin(
+                SERIALIZED_VERSION_KEY,
+                UnityYamlNode::scalar(UnityYamlScalar::Signed(2)),
+            )
+            .unwrap();
+        let text = write_unity_yaml_mapping(&mapping, UnityYamlWriteLimits::default()).unwrap();
+        assert_eq!(text, "serializedVersion: 2\nm_name: body\n");
+        // A second prepend lands before the first.
+        mapping
+            .insert_field_begin("first", UnityYamlNode::scalar(UnityYamlScalar::Signed(1)))
+            .unwrap();
+        let text = write_unity_yaml_mapping(&mapping, UnityYamlWriteLimits::default()).unwrap();
+        assert_eq!(text, "first: 1\nserializedVersion: 2\nm_name: body\n");
+        // Prepending to a non-mapping is an explicit error.
+        let mut scalar = UnityYamlNode::scalar(UnityYamlScalar::Signed(0));
+        assert_eq!(
+            scalar.insert_field_begin("k", UnityYamlNode::scalar(UnityYamlScalar::Signed(0))),
+            Err(UnityYamlNodeBuildError::NotAMapping)
+        );
+    }
+
+    #[test]
+    fn serialized_version_entry_placement_follows_the_gates_end_to_end() {
+        // Version 2 is prepended ahead of the body, like InsertSerializedVersion.
+        let mut mapping = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+        mapping
+            .insert_field("m_Name", UnityYamlNode::string("v2"))
+            .unwrap();
+        let version = 2;
+        if serialized_version_is_prepended(version) {
+            mapping
+                .insert_field_begin(
+                    SERIALIZED_VERSION_KEY,
+                    UnityYamlNode::scalar(UnityYamlScalar::Signed(version as i64)),
+                )
+                .unwrap();
+        }
+        let text = write_unity_yaml_mapping(&mapping, UnityYamlWriteLimits::default()).unwrap();
+        assert_eq!(text, "serializedVersion: 2\nm_name: v2\n");
+        // Version 1 is omitted entirely, like AddSerializedVersion.
+        let mut mapping = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+        mapping
+            .insert_field("m_Name", UnityYamlNode::string("v1"))
+            .unwrap();
+        let version = 1;
+        if serialized_version_is_appended(version) {
+            mapping
+                .insert_field(
+                    SERIALIZED_VERSION_KEY,
+                    UnityYamlNode::scalar(UnityYamlScalar::Signed(version as i64)),
+                )
+                .unwrap();
+        }
+        let text = write_unity_yaml_mapping(&mapping, UnityYamlWriteLimits::default()).unwrap();
+        assert_eq!(text, "m_name: v1\n");
+    }
 }

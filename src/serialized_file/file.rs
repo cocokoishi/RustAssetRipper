@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
+use super::format_version::FormatVersion;
 use super::header::{HeaderError, SerializedFileHeader};
 use super::metadata::{
     ExternalFileTableLayout, ObjectRecordTableLayout, SerializedFileMetadata,
@@ -69,6 +70,59 @@ impl<'a> SerializedFile<'a> {
             .decode_object_payload_with_limits(self.input, &self.header, object_index, limits)
             .map_err(SerializedFileError::from_object)
     }
+}
+
+/// The minimum header bytes the sniff reads (`SerializedFileHeader.HeaderMinSize`).
+pub const SERIALIZED_FILE_SNIFF_MIN_SIZE: usize = 16;
+/// The minimum metadata bytes a sniffed file must declare
+/// (`SerializedFileHeader.MetadataMinSize`).
+pub const SERIALIZED_FILE_SNIFF_MIN_METADATA_SIZE: i64 = 13;
+
+/// `SerializedFileHeader.IsSerializedFileHeader` over a whole input slice.
+///
+/// Reads the big-endian size/generation prefix (generation is always at offset 8);
+/// generations with large-file support re-read the sizes from offsets `0x14`/`0x18`.
+/// The generation must be a defined `FormatVersion`, the declared metadata size must
+/// reach 13 bytes, the declared file size must reach 29 bytes, and the declared file
+/// size must equal the actual input length.
+///
+/// One deliberate hardening difference: the source repositions its reader past the
+/// 16-byte prefix for large-file generations without re-checking bounds, so a
+/// 16-to-31-byte input naming generation 22 throws there; this kernel returns `false`
+/// for any input too short to hold the fields it reads.
+pub fn is_serialized_file(input: &[u8]) -> bool {
+    if input.len() < SERIALIZED_FILE_SNIFF_MIN_SIZE {
+        return false;
+    }
+    let mut metadata_size = i32::from_be_bytes([input[0], input[1], input[2], input[3]]) as i64;
+    let mut header_file_size = u32::from_be_bytes([input[4], input[5], input[6], input[7]]) as u64;
+    let generation = i32::from_be_bytes([input[8], input[9], input[10], input[11]]);
+    let Ok(version) = FormatVersion::try_from(generation) else {
+        return false;
+    };
+    if version.has_large_file_support() {
+        const EXTENDED_PREFIX_END: usize = 0x20;
+        if input.len() < EXTENDED_PREFIX_END {
+            return false;
+        }
+        metadata_size =
+            i32::from_be_bytes([input[0x14], input[0x15], input[0x16], input[0x17]]) as i64;
+        header_file_size = u64::from_be_bytes([
+            input[0x18],
+            input[0x19],
+            input[0x1a],
+            input[0x1b],
+            input[0x1c],
+            input[0x1d],
+            input[0x1e],
+            input[0x1f],
+        ]);
+    }
+    metadata_size >= SERIALIZED_FILE_SNIFF_MIN_METADATA_SIZE
+        && header_file_size
+            >= (SERIALIZED_FILE_SNIFF_MIN_SIZE as u64
+                + SERIALIZED_FILE_SNIFF_MIN_METADATA_SIZE as u64)
+        && header_file_size == input.len() as u64
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -141,8 +195,9 @@ pub enum SerializedFileErrorKind {
 #[cfg(test)]
 mod tests {
     use super::{
-        SerializedExternalFileInsertion, SerializedFile, SerializedFileErrorKind,
-        SerializedFileRewriteErrorKind, SerializedFileRewriteLimits, SerializedObjectInsertion,
+        is_serialized_file, SerializedExternalFileInsertion, SerializedFile,
+        SerializedFileErrorKind, SerializedFileRewriteErrorKind, SerializedFileRewriteLimits,
+        SerializedObjectInsertion,
     };
     use crate::serialized_file::format_version::FormatVersion;
     use crate::serialized_file::metadata::FileIdentifier;
@@ -541,6 +596,48 @@ mod tests {
             }])
         );
         assert_eq!(decoded.trailing_bytes, [0xa1, 0xb2, 0xc3, 0xd4, 0xe5]);
+    }
+
+    #[test]
+    fn header_sniff_matches_the_source_checks() {
+        // A well-formed file passes.
+        let file = make_generation_10_file();
+        assert!(is_serialized_file(&file));
+        // Too short for even the legacy prefix.
+        assert!(!is_serialized_file(&file[..15]));
+        assert!(!is_serialized_file(&[]));
+        // The declared size must equal the actual length.
+        let mut short_size = file.clone();
+        short_size[4..8].copy_from_slice(&((file.len() as u32) - 1).to_be_bytes());
+        assert!(!is_serialized_file(&short_size));
+        // Undefined generations fail (4 and 23 are not defined).
+        for generation in [0_i32, 4, 23, 100, -1] {
+            let mut bad_gen = file.clone();
+            bad_gen[8..12].copy_from_slice(&generation.to_be_bytes());
+            assert!(!is_serialized_file(&bad_gen), "generation {generation}");
+        }
+        // A declared metadata size below the 13-byte minimum fails.
+        let mut small_meta = file.clone();
+        small_meta[0..4].copy_from_slice(&12_i32.to_be_bytes());
+        assert!(!is_serialized_file(&small_meta));
+    }
+
+    #[test]
+    fn header_sniff_reads_large_file_sizes_from_the_extended_prefix() {
+        // Minimal 64-byte generation-22 input: legacy fields zeroed, extended sizes set.
+        let mut file = vec![0u8; 64];
+        file[8..12].copy_from_slice(&22_i32.to_be_bytes());
+        file[0x14..0x18].copy_from_slice(&13_i32.to_be_bytes());
+        file[0x18..0x20].copy_from_slice(&64_u64.to_be_bytes());
+        assert!(is_serialized_file(&file));
+        // A mismatched extended file size fails.
+        file[0x18..0x20].copy_from_slice(&63_u64.to_be_bytes());
+        assert!(!is_serialized_file(&file));
+        // A generation-22 input too short for the extended prefix fails instead of
+        // reading out of bounds (hardened relative to the source).
+        let mut short = vec![0u8; 20];
+        short[8..12].copy_from_slice(&22_i32.to_be_bytes());
+        assert!(!is_serialized_file(&short));
     }
 
     #[test]

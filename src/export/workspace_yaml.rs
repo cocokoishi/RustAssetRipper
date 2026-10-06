@@ -1200,6 +1200,23 @@ fn generated_component_pointer_field_path(
     Ok(format!("m_Component[{appended_index}]{suffix}"))
 }
 
+/// `StrippedAssetExtensions.IsStripped` over caller facts: the asset's main asset is a
+/// hierarchy object tracking a stripped set, and the asset is in that set
+/// (`AssetRipper/Source/AssetRipper.Export.UnityProjects/StrippedAssetExtensions.cs`
+/// lines 10-18). `YamlWalker.ExportYamlDocument` strips the walked fields to the
+/// per-class allowlist and marks the document `stripped` exactly on this decision
+/// (`AssetRipper/Source/AssetRipper.Export.UnityProjects/YamlWalker.cs` lines 80-85).
+///
+/// The workspace executor passes `false` today because neither fact is wired through the
+/// workspace flow; this kernel records the decision shape so a caller supplying
+/// hierarchy facts can replace the constant without re-deriving it.
+pub const fn is_stripped_document(
+    main_asset_is_hierarchy_object: bool,
+    asset_in_stripped_set: bool,
+) -> bool {
+    main_asset_is_hierarchy_object && asset_in_stripped_set
+}
+
 /// Convert one workspace-decoded SerializedFile object into the project YAML form.
 ///
 /// The object identity, its TypeTree and version, reference scan, and project pointer map are all
@@ -1595,7 +1612,8 @@ fn workspace_object_to_unity_yaml_document_with_context(
         type_root.version,
         file_id,
         // SerializedFile's stripped bit selects a serialized type layout; the baseline YAML
-        // marker comes from the owning hierarchy's StrippedAssets set, which is not wired here.
+        // marker comes from the owning hierarchy's StrippedAssets set, which is not wired
+        // here (see `is_stripped_document` for the decision shape).
         false,
         export_root,
         &hints,
@@ -4650,5 +4668,14 @@ mod tests {
                 UnityYamlObjectConversionError::PointerConversion { .. }
             ))
         ));
+    }
+
+    #[test]
+    fn stripped_marker_needs_hierarchy_and_set_membership() {
+        // `StrippedAssetExtensions.IsStripped`: both facts must hold.
+        assert!(is_stripped_document(true, true));
+        assert!(!is_stripped_document(true, false));
+        assert!(!is_stripped_document(false, true));
+        assert!(!is_stripped_document(false, false));
     }
 }
