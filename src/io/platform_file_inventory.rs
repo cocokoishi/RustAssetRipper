@@ -4,6 +4,14 @@
 //! `IL2CppManager`, `BaseManager`, `AssemblyManager.Initialize` and its failure fallback,
 //! `OnRequestAssembly`) need a managed-assembly reader and stay out; this module only
 //! discovers assembly file paths.
+//!
+//! Bundle version strings are likewise unread on this lane: the baseline parses
+//! `globalgamemanagers` or `data.unity3d`'s `UnityWebMinimumRevision` into
+//! `PlatformGameStructure.Version` (`AssetRipper/Source/AssetRipper.Import/Platforms/PlatformGameStructure.cs`,
+//! lines 355-381), but the only reader of that property is `IL2CppManager.Initialize`
+//! (`AssetRipper/Source/AssetRipper.Import/Structure/Assembly/Managers/IL2CppManager.cs`,
+//! line 79), which stays out with the managers above. Per-file versions still come from
+//! serialized headers downstream.
 
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};

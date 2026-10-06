@@ -790,27 +790,40 @@ fn parse_metadata(
     }
 
     let bytes_read = reader.position();
-    if bytes_read != declared_size {
-        let aligned_bytes_read = bytes_read.checked_add(3).map(|value| value & !3);
-        if !(reader_base_offset.is_multiple_of(4)
-            && declared_size.is_multiple_of(4)
-            && aligned_bytes_read == Some(declared_size))
-        {
-            return Err(metadata_problem(
-                physical_offset,
+    if !metadata_size_accepts(bytes_read, declared_size, reader_base_offset) {
+        return Err(metadata_problem(
+            physical_offset,
+            bytes_read,
+            UnityFsErrorKind::MetadataSizeMismatch {
                 bytes_read,
-                UnityFsErrorKind::MetadataSizeMismatch {
-                    bytes_read,
-                    declared_size,
-                },
-            ));
-        }
+                declared_size,
+            },
+        ));
     }
     Ok(ParsedMetadata {
         uncompressed_data_hash: hash,
         storage_blocks: blocks,
         nodes,
     })
+}
+
+/// `FileStreamBundleFile.ReadMetadata` size rule over caller facts: an exact byte count
+/// always passes (the declared size need not be a multiple of 4); otherwise the declared
+/// size may include up to three alignment bytes, accepted only when both the metadata
+/// base and the declared size are 4-aligned and rounding the bytes read up reaches the
+/// declared size (AssetRipper issue #1470: no flag marks such bundles).
+fn metadata_size_accepts(
+    bytes_read: usize,
+    declared_size: usize,
+    metadata_base_offset: usize,
+) -> bool {
+    if bytes_read == declared_size {
+        return true;
+    }
+    let aligned_bytes_read = bytes_read.checked_add(3).map(|value| value & !3);
+    metadata_base_offset.is_multiple_of(4)
+        && declared_size.is_multiple_of(4)
+        && aligned_bytes_read == Some(declared_size)
 }
 
 fn validate_nodes(
@@ -1935,5 +1948,22 @@ mod tests {
         assert_eq!(super::entry_block_window(10, 20, 12, 18), Some((12, 18)));
         // An empty entry has no window anywhere.
         assert_eq!(super::entry_block_window(10, 10, 0, 30), None);
+    }
+
+    #[test]
+    fn metadata_size_rule_accepts_exact_and_aligned_slack() {
+        // An exact byte count always passes, whatever the alignment.
+        assert!(super::metadata_size_accepts(20, 20, 1));
+        assert!(super::metadata_size_accepts(20, 20, 4));
+        // Up to three alignment bytes pass when both sides are 4-aligned.
+        assert!(super::metadata_size_accepts(17, 20, 4));
+        assert!(super::metadata_size_accepts(18, 20, 0));
+        assert!(super::metadata_size_accepts(19, 20, 8));
+        // Anything else mismatches: unaligned base, unaligned declared size,
+        // four slack bytes, or an overrun.
+        assert!(!super::metadata_size_accepts(17, 20, 1));
+        assert!(!super::metadata_size_accepts(17, 21, 4));
+        assert!(!super::metadata_size_accepts(16, 20, 4));
+        assert!(!super::metadata_size_accepts(21, 20, 4));
     }
 }

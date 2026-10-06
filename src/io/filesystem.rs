@@ -180,7 +180,7 @@ impl VirtualFileSystem {
         if value.trim().is_empty() {
             return;
         }
-        if value.starts_with('/') || value.starts_with('\\') {
+        if is_path_rooted(value) {
             self.temporary_directory = value.to_owned();
             return;
         }
@@ -811,11 +811,18 @@ fn unsupported_pattern(pattern: &str) -> io::Error {
     )
 }
 
+/// `VirtualPathImplementation.IsPathRooted` over caller facts: a path is rooted exactly
+/// when its first character is a forward or backward slash. Drive-prefixed values such as
+/// `C:\temp` are not rooted by this rule, matching the source.
+fn is_path_rooted(path: &str) -> bool {
+    path.starts_with('/') || path.starts_with('\\')
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        logical_file_path, split_sibling_part_index, SearchOption, VirtualFileSystem,
-        VirtualFileSystemLimits,
+        is_path_rooted, logical_file_path, split_sibling_part_index, SearchOption,
+        VirtualFileSystem, VirtualFileSystemLimits,
     };
     use crate::io::stream::SmartStream;
     use std::io::{Read, Seek, SeekFrom, Write};
@@ -1210,6 +1217,18 @@ mod tests {
                 .kind(),
             std::io::ErrorKind::NotFound
         );
+    }
+
+    /// The `IsPathRooted` rule behind temporary-directory storage: only a leading
+    /// slash (forward or backward) roots a virtual path.
+    #[test]
+    fn rooted_path_detection_matches_the_source_rule() {
+        assert!(is_path_rooted("/scratch"));
+        assert!(is_path_rooted("\\scratch"));
+        assert!(!is_path_rooted(""));
+        assert!(!is_path_rooted("relative-tmp"));
+        // Drive-prefixed values are not rooted by this rule, like the source.
+        assert!(!is_path_rooted("C:\\temp"));
     }
 
     #[test]

@@ -1258,3 +1258,11 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Gates: `cargo fmt --check` 0, full tests 1321 lib + 57 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
 - Next: fifty-seventh team round (gate-first: bundle version strings, UnityFS meta, platform registry).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 167. Checkpoint: fifty-seventh team round integrated — gate-first (2026-10-06)
+
+- All five shipped, all lead-verified (targeted suites re-run: 16/16, 17/17, 7/7, 15/15, 29/29) and integrated: `anim-graph` exonerated version strings (`IO-PLATFORM-FILES-001`, docs-only); `texture-export` named the size rule (`IO-BUNDLE-UNITYFS-META-001`); `mesh-deform` ported the failure contract (`SER-MANAGED-REFS-001`); `sprite-fill` named the rooted check (`IO-FS-IMPORT-PATH-LIST-001`); `texture-meta` cached the name fix (`IO-RESOURCE-001`). No scope violations, no placeholders, no verified row touched.
+- Gate question answered YES: all five assignments reduce or evidence-close the Phase 1 incomplete count.
+- Gates: `cargo fmt --check` 0, full tests 1325 lib + 57 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
+- Next: fifty-eighth team round (gate-first: LZMA tables, typetree walker, export records).
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

@@ -145,6 +145,11 @@ pub struct WorkspaceResourceFile {
     pub virtual_path: String,
     /// Original source container entry name, before the workspace mount root was added.
     pub name: String,
+    /// `name` after `SpecialFileNames.FixFileIdentifier`, cached at registration the
+    /// way `FileBase` fixes `NameFixed` when `Name` is assigned, so lookups never
+    /// renormalize. The cached copy is derived from the already-budgeted `name` and
+    /// carries no separate aggregate byte accounting.
+    pub name_fixed: String,
     pub container_bundle_index: usize,
     pub container_entry_index: usize,
     pub container_resource_index: usize,
@@ -1838,7 +1843,7 @@ impl SerializedFileWorkspace {
                     count: self.resource_files.len(),
                 },
             )?;
-            if fix_file_identifier(&resource.name) == fixed_name {
+            if resource.name_fixed.as_str() == fixed_name {
                 return Ok(Some(resource_index));
             }
         }
@@ -2755,6 +2760,7 @@ fn append_mounted_container_bundles(
                 )
             })?;
         owned_name.push_str(&resource_file.name);
+        let owned_name_fixed = fix_file_identifier(&owned_name);
         let global_bundle_index = base_index.checked_add(bundle_index).ok_or_else(|| {
             workspace_error(
                 workspace.report,
@@ -2776,6 +2782,7 @@ fn append_mounted_container_bundles(
         new_resource_files.push(WorkspaceResourceFile {
             virtual_path: owned_path,
             name: owned_name,
+            name_fixed: owned_name_fixed,
             container_bundle_index: global_bundle_index,
             container_entry_index: resource_file.entry_index,
             container_resource_index: resource_file.resource_index,
@@ -3961,6 +3968,7 @@ mod tests {
                 WorkspaceResourceFile {
                     virtual_path: "/root/from-parent.resS".to_owned(),
                     name: "from-parent.resS".to_owned(),
+                    name_fixed: "from-parent.ress".to_owned(),
                     container_bundle_index: 0,
                     container_entry_index: 0,
                     container_resource_index: 0,
@@ -3968,6 +3976,7 @@ mod tests {
                 WorkspaceResourceFile {
                     virtual_path: "/root/first/archive:/textures/Shared.resS".to_owned(),
                     name: "archive:/textures/Shared.resS".to_owned(),
+                    name_fixed: "shared.ress".to_owned(),
                     container_bundle_index: 1,
                     container_entry_index: 0,
                     container_resource_index: 0,
@@ -3975,6 +3984,7 @@ mod tests {
                 WorkspaceResourceFile {
                     virtual_path: "/root/second/from-parent.resS".to_owned(),
                     name: "from-parent.resS".to_owned(),
+                    name_fixed: "from-parent.ress".to_owned(),
                     container_bundle_index: 2,
                     container_entry_index: 0,
                     container_resource_index: 0,
@@ -3982,6 +3992,7 @@ mod tests {
                 WorkspaceResourceFile {
                     virtual_path: "/root/first/nested/archive:/other/Shared.resS".to_owned(),
                     name: "archive:/other/Shared.resS".to_owned(),
+                    name_fixed: "shared.ress".to_owned(),
                     container_bundle_index: 3,
                     container_entry_index: 0,
                     container_resource_index: 0,
@@ -3989,6 +4000,7 @@ mod tests {
                 WorkspaceResourceFile {
                     virtual_path: "/root/second/sibling.resS".to_owned(),
                     name: "sibling.resS".to_owned(),
+                    name_fixed: "sibling.ress".to_owned(),
                     container_bundle_index: 2,
                     container_entry_index: 1,
                     container_resource_index: 1,
@@ -4069,6 +4081,7 @@ mod tests {
             resource_files: vec![WorkspaceResourceFile {
                 virtual_path: "/bundle/shared.resS".to_owned(),
                 name: "shared.resS".to_owned(),
+                name_fixed: "shared.ress".to_owned(),
                 container_bundle_index: 0,
                 container_entry_index: 0,
                 container_resource_index: 0,
@@ -4213,6 +4226,7 @@ mod tests {
             resource_files: vec![WorkspaceResourceFile {
                 virtual_path: "/sibling/shared.resS".to_owned(),
                 name: "shared.resS".to_owned(),
+                name_fixed: "shared.ress".to_owned(),
                 container_bundle_index: 1,
                 container_entry_index: 0,
                 container_resource_index: 0,
@@ -5625,6 +5639,65 @@ mod tests {
         assert_eq!(workspace.resource_files()[0].container_bundle_index, 0);
     }
 
+    /// Mounted resources cache their fixed name at registration (like `FileBase.NameFixed`),
+    /// so hierarchy lookups compare the cached form instead of renormalizing per lookup.
+    #[test]
+    fn mounted_resources_cache_their_fixed_names_for_lookups() {
+        let scopes = [];
+        let bundles = [MountedContainerBundle {
+            scope_index: None,
+            parent_bundle_index: None,
+            parent_entry_index: None,
+            name_fixed: None,
+        }];
+        let mounted_resources = [MountedResourceFile {
+            virtual_path: "/archive:/textures/Shared.resS".to_owned(),
+            name: "archive:/textures/Shared.resS".to_owned(),
+            container_scope_index: None,
+            container_bundle_index: 0,
+            entry_index: 0,
+            resource_index: 0,
+        }];
+        let mut workspace = SerializedFileWorkspace::default();
+        let mut total_node_path_bytes = 0;
+        let mut total_resource_path_bytes = 0;
+        super::append_mounted_container_bundles(
+            &mut workspace,
+            super::MountedContainerBundleInput {
+                container_scopes: &scopes,
+                mounted_bundles: &bundles,
+                serialized_files: &[],
+                resource_files: &mounted_resources,
+                loaded_paths: &std::collections::HashMap::new(),
+                limits: SerializedFileWorkspaceLimits::default(),
+                bundle_count_limit: 1,
+            },
+            &mut total_node_path_bytes,
+            &mut total_resource_path_bytes,
+        )
+        .unwrap();
+
+        assert_eq!(workspace.resource_files().len(), 1);
+        assert_eq!(
+            workspace.resource_files()[0].name_fixed,
+            "shared.ress",
+            "the fixed name is cached at registration, not per lookup"
+        );
+        assert_eq!(
+            workspace
+                .resolve_bundled_resource_file(Some(0), "ARCHIVE:/request/SHARED.ress")
+                .unwrap(),
+            Some(0),
+            "lookups match through the cached fixed name"
+        );
+        assert_eq!(
+            workspace
+                .resolve_bundled_resource_file(Some(0), "archive:/missing/nope.resS")
+                .unwrap(),
+            None
+        );
+    }
+
     #[test]
     fn platform_inventory_enforces_initial_serialized_file_limit() {
         let mut filesystem = VirtualFileSystem::new();
@@ -5789,6 +5862,7 @@ mod tests {
             [super::WorkspaceResourceFile {
                 virtual_path: "/__assetripper_dependency_mount_0/stream.resS".to_owned(),
                 name: "stream.resS".to_owned(),
+                name_fixed: "stream.ress".to_owned(),
                 container_bundle_index: 0,
                 container_entry_index: 1,
                 container_resource_index: 0,

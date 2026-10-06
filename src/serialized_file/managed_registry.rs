@@ -4,10 +4,11 @@
 //! Ports the format dispatch and structural guards, which need no type resolver:
 //! the terminated/counted format discriminants, the terminus triple, the
 //! unknown/null reference identifiers, the counted-format capacity guard, the
-//! terminated-loop control decisions, and per-entry framing (identifier
-//! classification plus the content-presence gate).
-//! Reading entry type triples and object payloads stays open: content decoding
-//! needs `ITypeResolver.TryGetSerializableType` (live assemblies or TypeTrees).
+//! terminated-loop control decisions, per-entry framing (identifier
+//! classification plus the content-presence gate), and the type-resolution
+//! failure diagnostic. Reading entry type triples and object payloads stays open:
+//! content decoding needs `ITypeResolver.TryGetSerializableType` (live assemblies
+//! or TypeTrees).
 //!
 //! The registry has two formats. In the terminated format the objects end with a
 //! terminus entry and an object's identifier is its index; in the counted format
@@ -230,6 +231,37 @@ pub const fn referenced_object_has_content(
     matches!(kind, ReferenceIdKind::Content) && !class_name_is_empty && !assembly_name_is_empty
 }
 
+/// What resolving one referenced object's serializable type decides
+/// (`ReadReferencedObjectData` without the content read, which needs the resolver).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReferencedTypeOutcome {
+    /// The type resolved: content bytes follow.
+    Resolved,
+    /// The type did not resolve: the source answers with an invalid-data error
+    /// naming the type and the resolver's reason, never a silent null.
+    Unresolved { message: String },
+}
+
+/// Decides whether content bytes follow a resolved type lookup. The unique name
+/// arrives composed (the caller strips the assembly extension and joins the
+/// triple with the script-identity kernels); an absent resolver reason reads as
+/// empty, mirroring the source string interpolation.
+pub fn decide_referenced_type_resolution(
+    resolved: bool,
+    unique_name: &str,
+    failure_reason: &str,
+) -> ReferencedTypeOutcome {
+    if resolved {
+        ReferencedTypeOutcome::Resolved
+    } else {
+        ReferencedTypeOutcome::Unresolved {
+            message: format!(
+                "Could not resolve the referenced type {unique_name}. Reason: {failure_reason}"
+            ),
+        }
+    }
+}
+
 /// The counted-format capacity guard: the stream must hold at least one byte per
 /// object (`remainingBytes < count`), mirroring the source `EndOfStreamException`.
 /// A negative count is refused explicitly where the source allocation throws.
@@ -350,6 +382,29 @@ mod tests {
             false,
             false
         ));
+    }
+
+    #[test]
+    fn unresolved_referenced_types_name_the_type_and_reason() {
+        use super::{decide_referenced_type_resolution, ReferencedTypeOutcome};
+        assert_eq!(
+            decide_referenced_type_resolution(true, "[A]G.N", "unused"),
+            ReferencedTypeOutcome::Resolved
+        );
+        assert_eq!(
+            decide_referenced_type_resolution(false, "[A]G.N", "no such type"),
+            ReferencedTypeOutcome::Unresolved {
+                message: "Could not resolve the referenced type [A]G.N. Reason: no such type"
+                    .to_owned(),
+            }
+        );
+        // An absent resolver reason reads as empty, like the source interpolation.
+        assert_eq!(
+            decide_referenced_type_resolution(false, "[A]N", ""),
+            ReferencedTypeOutcome::Unresolved {
+                message: "Could not resolve the referenced type [A]N. Reason: ".to_owned(),
+            }
+        );
     }
 
     #[test]
