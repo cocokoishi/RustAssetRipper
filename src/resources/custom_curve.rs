@@ -684,4 +684,37 @@ mod tests {
         assert_eq!(BLEND_SHAPE_PREFIX, "blendShape.");
         assert_eq!(MATERIAL_PREFIX, "material.");
     }
+
+    #[test]
+    fn precedence_boundaries_and_messages_match_the_snapshot() {
+        // Bit 31 wins over the channel bits: the source checks it first.
+        assert_eq!(
+            split_renderer_material_attribute(0xC000_0000 | 0x0D6A_83C9),
+            (0x0D6A_83C9, RendererMaterialSelector::Direct)
+        );
+        assert_eq!(
+            renderer_material_attribute_name("_MainTex", 0xC000_0000 | 0x0D6A_83C9),
+            "material._MainTex"
+        );
+        // The constraint range is exactly 31-36.
+        assert!(!BindingCustomType(30).is_constraint());
+        assert!(!BindingCustomType(37).is_constraint());
+        // The failure messages mirror the source exception spellings.
+        assert_eq!(
+            CustomCurveError::InvalidTransformType { value: 9 }.to_string(),
+            "invalid TransformType value 9"
+        );
+        assert_eq!(
+            CustomCurveError::UnknownAttribute {
+                custom_type: 34,
+                attribute: 8
+            }
+            .to_string(),
+            "unknown attribute 0x8 (8) for custom binding type 34"
+        );
+        assert_eq!(
+            CustomCurveError::UnsupportedCustomType { custom_type: 25 }.to_string(),
+            "custom binding type 25 needs scene or checksum lookups"
+        );
+    }
 }

@@ -13,8 +13,9 @@
 //! `nameHash`, `frameIndex`, and `frameCount`) and from the generated `IMesh` surface
 //! (`mesh_generated_api_fixture.txt`: `Shapes`, `ShapesList`). The lookup only decodes
 //! the name-bearing records; vertex deltas, frame ranges, and full weights stay with
-//! the mesh-geometry reader. `MeshBlendShapeChannelExtensions.SetValues` mutates a
-//! generated channel object, so it stays caller-side like the other generated setters.
+//! the mesh-geometry reader. The `SetValues` field assignments mutate a
+//! generated channel object and stay caller-side; only its name-hash derivation
+//! ports (`blend_shape_channel_name_hash`).
 //!
 //! Differential evidence: the CRC words reuse the shipped-`AssetRipper.Checksum.dll`
 //! probe rows in `crc28_fixture.txt` (`Crc32Algorithm.HashUTF8` plus the `MatchUTF8`
@@ -120,6 +121,13 @@ pub fn crc32_ieee(bytes: &[u8]) -> u32 {
 /// CRC-32 equals `crc`; an absent name never matches.
 pub fn is_crc_match(name: Option<&str>, crc: u32) -> bool {
     name.is_some_and(|text| crc32_ieee(text.as_bytes()) == crc)
+}
+
+/// `MeshBlendShapeChannelExtensions.SetValues` name-hash half: the stored `NameHash`
+/// is the UTF-8 CRC-32 of the channel name. The name, frame index, and frame count
+/// assignments mutate the generated channel object and stay caller-side.
+pub fn blend_shape_channel_name_hash(name: &str) -> u32 {
+    crc32_ieee(name.as_bytes())
 }
 
 /// One `BlendShapeData` channel name record.
@@ -616,5 +624,25 @@ mod tests {
             blend_shape_attribute_name(false, "Hips/Face", &[], "path_0xDEAD_XYZABC"),
             "blendShape.path_0xDEAD_XYZABC"
         );
+    }
+
+    /// The `SetValues` hash half composes with the lookup: a hashed name resolves
+    /// back through the channel table and the legacy CRC scan alike.
+    #[test]
+    fn channel_name_hash_round_trips_through_lookup() {
+        let hash = blend_shape_channel_name_hash("Smile");
+        assert_eq!(hash, crc32_ieee(b"Smile"));
+        let channels = [BlendShapeChannelName {
+            name: Some("Smile".to_owned()),
+            name_hash: Some(hash),
+        }];
+        assert_eq!(find_channel_name_by_crc(&channels, hash), Some("Smile"));
+        assert_eq!(find_channel_name_by_crc(&channels, hash ^ 1), None);
+        let view = BlendShapeLookupView {
+            channels: None,
+            shapes_list_names: Some(vec![Some("Smile".to_owned())]),
+        };
+        assert_eq!(view.find_shape_name_by_crc(hash), Some("Smile"));
+        assert!(is_crc_match(Some("Smile"), hash));
     }
 }

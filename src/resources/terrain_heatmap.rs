@@ -453,4 +453,148 @@ mod tests {
             })
         ));
     }
+
+    fn heightmap_root(
+        width: SerializedValue,
+        height: SerializedValue,
+        resolution: SerializedValue,
+        heights: SerializedValue,
+    ) -> SerializedValue {
+        SerializedValue::Struct(vec![field(
+            "m_Heightmap",
+            SerializedValue::Struct(vec![
+                field("m_Width", width),
+                field("m_Height", height),
+                field("m_Resolution", resolution),
+                field("m_Heights", heights),
+            ]),
+        )])
+    }
+
+    #[test]
+    fn field_errors_follow_the_source_guards() {
+        // Negative dimensions fail.
+        let root = terrain_with(-3, 1, 1, &[0]);
+        assert!(matches!(
+            TerrainHeightmap::from_value(&root),
+            Err(TerrainHeatmapError::NegativeValue { field: "m_Width" })
+        ));
+        // Wrong kinds name the decoded kind.
+        let bad_width = heightmap_root(
+            SerializedValue::F32(1.0),
+            SerializedValue::I32(1),
+            SerializedValue::I32(1),
+            SerializedValue::Array(vec![]),
+        );
+        assert!(matches!(
+            TerrainHeightmap::from_value(&bad_width),
+            Err(TerrainHeatmapError::WrongType { .. })
+        ));
+        let bad_list = heightmap_root(
+            SerializedValue::I32(1),
+            SerializedValue::I32(1),
+            SerializedValue::I32(1),
+            SerializedValue::I32(0),
+        );
+        assert!(matches!(
+            TerrainHeightmap::from_value(&bad_list),
+            Err(TerrainHeatmapError::WrongType { .. })
+        ));
+        let bad_element = heightmap_root(
+            SerializedValue::I32(1),
+            SerializedValue::I32(1),
+            SerializedValue::I32(1),
+            SerializedValue::Array(vec![SerializedValue::F32(0.0)]),
+        );
+        assert!(matches!(
+            TerrainHeightmap::from_value(&bad_element),
+            Err(TerrainHeatmapError::WrongType { .. })
+        ));
+        // Unsigned dimensions read like signed ones.
+        let unsigned = heightmap_root(
+            SerializedValue::U32(2),
+            SerializedValue::U32(1),
+            SerializedValue::U32(2),
+            SerializedValue::Array(vec![
+                SerializedValue::I16(0),
+                SerializedValue::I16(0),
+                SerializedValue::I16(0),
+                SerializedValue::I16(0),
+            ]),
+        );
+        let view = TerrainHeightmap::from_value(&unsigned).unwrap();
+        assert_eq!((view.width, view.height, view.resolution), (2, 1, 2));
+        // Duplicate names surface the lookup failure.
+        let doubled = SerializedValue::Struct(vec![
+            field("m_Heightmap", SerializedValue::I32(0)),
+            field("m_Heightmap", SerializedValue::I32(0)),
+        ]);
+        assert!(matches!(
+            TerrainHeightmap::from_value(&doubled),
+            Err(TerrainHeatmapError::FieldLookup {
+                field: "m_Heightmap",
+                ..
+            })
+        ));
+        // Overflowing dimensions fail without allocating the grid.
+        let huge = TerrainHeightmap {
+            width: usize::MAX,
+            height: 2,
+            resolution: 1,
+            heights: vec![0],
+        };
+        assert!(matches!(
+            huge.bitmap(),
+            Err(TerrainHeatmapError::DimensionOverflow)
+        ));
+        assert!(matches!(
+            huge.mesh_heights(),
+            Err(TerrainHeatmapError::DimensionOverflow)
+        ));
+    }
+
+    #[test]
+    fn heatmap_error_messages_pin_the_reporting_strings() {
+        assert_eq!(
+            TerrainHeatmapError::MissingField {
+                field: "m_Heightmap"
+            }
+            .to_string(),
+            "TerrainData is missing required field 'm_Heightmap'"
+        );
+        assert_eq!(
+            TerrainHeatmapError::WrongType {
+                field: "m_Width",
+                actual: "float"
+            }
+            .to_string(),
+            "TerrainData field 'm_Width' has kind float, expected a number"
+        );
+        assert_eq!(
+            TerrainHeatmapError::NegativeValue { field: "m_Height" }.to_string(),
+            "TerrainData field 'm_Height' is negative"
+        );
+        assert_eq!(
+            TerrainHeatmapError::DimensionOverflow.to_string(),
+            "TerrainData heightmap dimensions overflow usize"
+        );
+        assert_eq!(
+            TerrainHeatmapError::HeightmapTooShort {
+                actual: 1,
+                required: 4
+            }
+            .to_string(),
+            "TerrainData heightmap has 1 heights; needs 4"
+        );
+        let doubled = SerializedValue::Struct(vec![
+            field("m_Heightmap", SerializedValue::I32(0)),
+            field("m_Heightmap", SerializedValue::I32(0)),
+        ]);
+        let error = TerrainHeightmap::from_value(&doubled).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "could not read TerrainData field 'm_Heightmap': \
+             field 'm_Heightmap' occurs 2 times in the decoded struct"
+        );
+    }
 }
