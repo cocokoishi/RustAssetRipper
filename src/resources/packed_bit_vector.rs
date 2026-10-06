@@ -566,4 +566,32 @@ mod tests {
         assert_eq!(get_bit_count(1), 0);
         assert_eq!(get_bit_count(2), 1);
     }
+
+    /// Mirrors the baseline `IntVectorTests` guarantees: full-width values round-trip
+    /// exactly, and the signed unpack stays consistent with the unsigned unpack.
+    /// (Negative inputs hit the 32-bit zero quirk pinned in the differential above,
+    /// so only non-negative integers round-trip.)
+    #[test]
+    fn round_trips_match_the_baseline_test_guarantees() {
+        // Every bit width 1..=31 plus arbitrary values, all below `u32::MAX`.
+        let mut uints: Vec<u32> = (1..=31).map(|k| (1u32 << k) - 1).collect();
+        uints.extend([0, 123_456_789, 987_654_321, 2_147_483_647]);
+        let mut packed = PackedBitVector::default();
+        packed.pack_uints(&uints, limits()).unwrap();
+        assert_eq!(packed.unpack_uints(limits()).unwrap(), uints);
+        // The old signed unpack agrees once reinterpreted as unsigned.
+        let ints = packed.unpack_ints(limits()).unwrap();
+        let back: Vec<u32> = ints.into_iter().map(|value| value as u32).collect();
+        assert_eq!(back, uints);
+
+        let ushorts: Vec<u16> = vec![0, 1, 255, 256, 1000, 32767, 32768, 65534, 65535];
+        let mut packed = PackedBitVector::default();
+        packed.pack_ushorts(&ushorts, limits()).unwrap();
+        assert_eq!(packed.unpack_ushorts(limits()).unwrap(), ushorts);
+
+        let ints: Vec<i32> = vec![0, 1, 127, 32767, 65535, 123_456_789, i32::MAX];
+        let mut packed = PackedBitVector::default();
+        packed.pack_ints(&ints, limits()).unwrap();
+        assert_eq!(packed.unpack_ints(limits()).unwrap(), ints);
+    }
 }

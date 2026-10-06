@@ -1406,4 +1406,55 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn int_and_norm_conversions_match_the_shared_read_quirks() {
+        // `BytesToIntArray` zero-extends 8-bit values and sign-extends 16-bit values
+        // regardless of the signedness flag: the signed/unsigned pairs share one read.
+        assert_eq!(
+            bytes_to_int_array(&[0xFF], VertexFormat::SInt8).unwrap(),
+            vec![255]
+        );
+        assert_eq!(
+            bytes_to_int_array(&[0xFF], VertexFormat::UInt8).unwrap(),
+            vec![255]
+        );
+        assert_eq!(
+            bytes_to_int_array(&[0x00, 0x80], VertexFormat::UInt16).unwrap(),
+            vec![-32768]
+        );
+        assert_eq!(
+            bytes_to_int_array(&[0x00, 0x80], VertexFormat::SInt16).unwrap(),
+            vec![-32768]
+        );
+        assert_eq!(
+            bytes_to_int_array(&[0xFF, 0xFF, 0xFF, 0xFF], VertexFormat::UInt32).unwrap(),
+            vec![-1]
+        );
+        // Signed-normalized extremes clamp to exactly `-1`, matching the `Max(..., -1f)`.
+        assert_eq!(
+            bytes_to_float_array(&[0x80], VertexFormat::SNorm8).unwrap(),
+            vec![-1.0]
+        );
+        assert_eq!(
+            bytes_to_float_array(&[0x81], VertexFormat::SNorm8).unwrap(),
+            vec![-1.0]
+        );
+        assert_eq!(
+            bytes_to_float_array(&[0x7F], VertexFormat::SNorm8).unwrap(),
+            vec![1.0]
+        );
+        assert_eq!(
+            bytes_to_float_array(&[0xFF], VertexFormat::UNorm8).unwrap(),
+            vec![1.0]
+        );
+        assert_eq!(
+            bytes_to_float_array(&[0x00, 0x80], VertexFormat::SNorm16).unwrap(),
+            vec![-1.0]
+        );
+        assert_eq!(
+            bytes_to_float_array(&[0xFF, 0xFF], VertexFormat::UNorm16).unwrap(),
+            vec![1.0]
+        );
+    }
 }

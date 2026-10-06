@@ -451,4 +451,84 @@ mod tests {
             assert!(largest > 0.9, "index {index} largest was {largest}");
         }
     }
+
+    #[test]
+    fn pack_and_unpack_edges_report_instead_of_panicking() {
+        use super::PackedQuatVectorError;
+        // Empty vectors round-trip with no bytes.
+        let mut vector = PackedBitVectorQuaternion::default();
+        vector.pack(&[], limits()).unwrap();
+        assert_eq!(vector.num_items, 0);
+        assert!(vector.data.is_empty());
+        assert!(vector.unpack(limits()).unwrap().is_empty());
+        // Item and byte limits gate both directions.
+        let tight = PackedBitVectorLimits {
+            max_items: 0,
+            max_bytes: 0,
+        };
+        let one = [Quaternion::new(0.0, 0.0, 0.0, 1.0)];
+        assert_eq!(
+            PackedBitVectorQuaternion::default().pack(&one, tight),
+            Err(PackedQuatVectorError::ItemLimitExceeded {
+                requested: 1,
+                limit: 0,
+            })
+        );
+        let no_bytes = PackedBitVectorLimits {
+            max_items: 1,
+            max_bytes: 0,
+        };
+        assert_eq!(
+            PackedBitVectorQuaternion::default().pack(&one, no_bytes),
+            Err(PackedQuatVectorError::ByteLimitExceeded {
+                requested: 4,
+                limit: 0,
+            })
+        );
+        let over = PackedBitVectorQuaternion {
+            num_items: 1,
+            data: Vec::new(),
+        };
+        assert_eq!(
+            over.unpack(tight),
+            Err(PackedQuatVectorError::ItemLimitExceeded {
+                requested: 1,
+                limit: 0,
+            })
+        );
+        // Short buffers fail at the first missing byte.
+        let empty = PackedBitVectorQuaternion {
+            num_items: 1,
+            data: Vec::new(),
+        };
+        assert_eq!(
+            empty.unpack(limits()),
+            Err(PackedQuatVectorError::TruncatedData {
+                byte_index: 0,
+                length: 0,
+            })
+        );
+        let short = PackedBitVectorQuaternion {
+            num_items: 1,
+            data: vec![0x03],
+        };
+        assert_eq!(
+            short.unpack(limits()),
+            Err(PackedQuatVectorError::TruncatedData {
+                byte_index: 1,
+                length: 1,
+            })
+        );
+        // Out-of-range component indices address W, like the source fallthrough.
+        let probe = Quaternion::new(1.0, 2.0, 3.0, 4.0);
+        assert_eq!(probe.component(7), 4.0);
+        let mut flipped = probe;
+        flipped.flip_sign(9);
+        assert_eq!(flipped.components(), [1.0, 2.0, 3.0, -4.0]);
+        let mut set = probe;
+        set.set_component(4, 5.0);
+        assert_eq!(set.components(), [1.0, 2.0, 3.0, 5.0]);
+        // `ItemCountOverflow` (a longer-than-`u32` slice) and `AllocationFailed`
+        // cannot be triggered deterministically and stay untested.
+    }
 }
