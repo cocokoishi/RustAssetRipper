@@ -750,5 +750,11 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 ## 97. Checkpoint: ImageTexture base view (2026-10-06)
 
 - Ported `ImageTextureView` + selection with two tests. Lib 999/999 locally, workspace Clippy clean; CI run `37395035692` green (all five jobs) for remote `main` = `8111b9d`; local matches.
+- Next: the HDR writer, then the remaining product rows (`PRODUCT-CONFIG-001`, `PRODUCT-GUI-001`, `GENERATORS-001`, `TOOLS-001` remainders).
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 98. Checkpoint: Radiance HDR writer (2026-10-06)
+
+- Ported `save_hdr` byte-for-byte (22-vector shipped-DLL differential + boundary tests); new finding `DIFF-HDR-001`. Lib 1003/1003 and bin 50/50 locally, workspace Clippy clean; full validation via Actions after push.
 - Next: the remaining product rows (`PRODUCT-CONFIG-001`, `PRODUCT-GUI-001`, `GENERATORS-001`, `TOOLS-001` remainders).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

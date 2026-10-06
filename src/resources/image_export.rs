@@ -1,12 +1,13 @@
 //! Image writers for `DirectBitmap.Save`.
 //!
 //! The reference dispatches on `ImageExportFormat` and uses FPng, `BmpWriter`, `ExrWriter`, and
-//! StbImageWriteSharp. This port writes PNG, BMP, and TGA directly; EXR, HDR, and JPEG return
-//! [`ImageWriteError::Unsupported`] until their codecs are ported.
+//! StbImageWriteSharp. This port writes PNG, BMP, TGA, and Radiance HDR directly; EXR and JPEG
+//! return [`ImageWriteError::Unsupported`] until their codecs are ported.
 //!
 //! The BMP writer reproduces `BmpWriter.WriteBmp` byte-for-byte (a 108-byte `BITMAPV4HEADER`,
 //! BGRA rows bottom-up). The PNG writer emits filter-0 scanlines; it is not byte-identical to
-//! FPng but carries identical pixels.
+//! FPng but carries identical pixels. The HDR writer reproduces StbImageWriteSharp `WriteHdr`
+//! byte-for-byte (fixed header, shared-exponent RGBE pixels, new-style RLE per scanline).
 
 use std::io::{self, Write};
 
@@ -123,9 +124,10 @@ impl Bitmap {
             ImageExportFormat::Png => self.save_png(writer),
             ImageExportFormat::Bmp => self.save_bmp(writer),
             ImageExportFormat::Tga => self.save_tga(writer),
-            ImageExportFormat::Exr | ImageExportFormat::Hdr | ImageExportFormat::Jpeg => {
+            ImageExportFormat::Exr | ImageExportFormat::Jpeg => {
                 Err(ImageWriteError::Unsupported { format })
             }
+            ImageExportFormat::Hdr => self.save_hdr(writer),
         }
     }
 
@@ -262,6 +264,147 @@ impl Bitmap {
         }
         Ok(())
     }
+
+    /// StbImageWriteSharp `WriteHdr`: Radiance RGBE with new-style RLE scanlines.
+    ///
+    /// Bytes arrive as RGBA8; alpha is ignored exactly like the reference, which
+    /// converts to RGB(A) bytes and lets the encoder read only the color lanes.
+    /// Scanlines run top-down in stacked (`Height * Depth`) order.
+    pub fn save_hdr<W: Write>(&self, writer: &mut W) -> Result<(), ImageWriteError> {
+        let width = self.width;
+        let height = self.stacked_height();
+        if width > i32::MAX as usize || height > i32::MAX as usize {
+            return Err(ImageWriteError::DimensionTooLarge { value: width });
+        }
+        let pixel_count = width
+            .checked_mul(height)
+            .ok_or(ImageWriteError::DimensionTooLarge { value: width })?;
+        if self.pixels.len() < pixel_count.saturating_mul(4) {
+            return Err(ImageWriteError::DimensionTooLarge { value: width });
+        }
+        writer.write_all(HDR_HEADER_PREFIX)?;
+        writer.write_all(format!("-Y {height} +X {width}\n").as_bytes())?;
+
+        let mut rgbe_row = vec![0u8; width.saturating_mul(4)];
+        let mut encoded = Vec::new();
+        for y in 0..height {
+            let row = &self.pixels[y * width * 4..(y + 1) * width * 4];
+            for (pixel, slot) in row.chunks_exact(4).zip(rgbe_row.chunks_exact_mut(4)) {
+                slot.copy_from_slice(&rgb8_to_rgbe(pixel[0], pixel[1], pixel[2]));
+            }
+            if is_hdr_rle_width(width) {
+                encoded.clear();
+                encoded.reserve(width * 4 + 4);
+                encode_hdr_scanline_rle(&rgbe_row, &mut encoded);
+                writer.write_all(&encoded)?;
+            } else {
+                writer.write_all(&rgbe_row)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The fixed StbImageWriteSharp HDR header; the `-Y {height} +X {width}` line follows.
+const HDR_HEADER_PREFIX: &[u8] = b"#?RADIANCE\n# Written by stb_image_write.h\nFORMAT=32-bit_rle_rgbe\nEXPOSURE=          1.0000000000000\n\n";
+
+/// The smallest scanline width StbImageWriteSharp encodes with RLE.
+const HDR_RLE_MIN_WIDTH: usize = 8;
+/// Scanlines at or above this width fall back to flat RGBE (`0x8000` in the source).
+const HDR_RLE_MAX_WIDTH: usize = 0x8000;
+/// The longest run or literal chunk in new-style Radiance RLE.
+const HDR_RLE_MAX_CHUNK: usize = 127;
+/// The longest literal chunk (the count byte also covers 128).
+const HDR_LITERAL_MAX_CHUNK: usize = 128;
+/// A run of at least this length encodes as a run; shorter matches stay literal.
+const HDR_MIN_RUN: usize = 3;
+
+/// Whether a scanline uses new-style RLE (`8 <= width < 0x8000` in the source).
+fn is_hdr_rle_width(width: usize) -> bool {
+    (HDR_RLE_MIN_WIDTH..HDR_RLE_MAX_WIDTH).contains(&width)
+}
+
+/// The shared-exponent RGBE pixel for 8-bit color lanes.
+///
+/// Bytes scale by `1/255` exactly like the reference float path; the exponent is
+/// the `frexp` exponent biased by 128, and zero maps to all-zero bytes. Mantissa
+/// truncation matches the reference float-to-byte cast.
+fn rgb8_to_rgbe(red: u8, green: u8, blue: u8) -> [u8; 4] {
+    let r = f32::from(red) / 255.0;
+    let g = f32::from(green) / 255.0;
+    let b = f32::from(blue) / 255.0;
+    let brightest = r.max(g).max(b);
+    if brightest < 1e-32 {
+        return [0, 0, 0, 0];
+    }
+    // Inputs are finite normals in `[1/255, 1]`, so the raw exponent field is
+    // never all-clear (subnormal) or all-set (infinite/NaN).
+    let bits = brightest.to_bits();
+    let exponent = (((bits >> 23) & 0xFF) as i32) - 126;
+    let mantissa = f32::from_bits((bits & 0x007F_FFFF) | (126 << 23));
+    let scale = mantissa * 256.0 / brightest;
+    [
+        (r * scale) as u8,
+        (g * scale) as u8,
+        (b * scale) as u8,
+        (exponent + 128) as u8,
+    ]
+}
+
+/// New-style Radiance RLE for one RGBE scanline: the `02 02 hi lo` marker, then
+/// each color lane separately. A match of [`HDR_MIN_RUN`] or more encodes as
+/// [`HDR_RLE_MAX_CHUNK`]-capped runs (an already-classified run emits even a
+/// 1-2 tail chunk); anything else accumulates [`HDR_LITERAL_MAX_CHUNK`]-capped
+/// literals that stop at the next run.
+fn encode_hdr_scanline_rle(rgbe_row: &[u8], output: &mut Vec<u8>) {
+    let width = rgbe_row.len() / 4;
+    output.push(2);
+    output.push(2);
+    output.push((width >> 8) as u8);
+    output.push((width & 0xFF) as u8);
+    let mut lane = vec![0u8; width];
+    for channel in 0..4 {
+        for (index, slot) in lane.iter_mut().enumerate() {
+            *slot = rgbe_row[index * 4 + channel];
+        }
+        encode_hdr_lane(&lane, output);
+    }
+}
+
+fn encode_hdr_lane(lane: &[u8], output: &mut Vec<u8>) {
+    let width = lane.len();
+    let mut index = 0;
+    while index < width {
+        let mut run = 1;
+        while index + run < width && lane[index + run] == lane[index] {
+            run += 1;
+        }
+        if run >= HDR_MIN_RUN {
+            let mut remaining = run;
+            while remaining > 0 {
+                let chunk = remaining.min(HDR_RLE_MAX_CHUNK);
+                output.push(0x80 | chunk as u8);
+                output.push(lane[index]);
+                remaining -= chunk;
+            }
+            index += run;
+        } else {
+            let start = index;
+            index += 1;
+            while index < width && index - start < HDR_LITERAL_MAX_CHUNK {
+                let mut ahead = 1;
+                while index + ahead < width && lane[index + ahead] == lane[index] {
+                    ahead += 1;
+                }
+                if ahead >= HDR_MIN_RUN {
+                    break;
+                }
+                index += 1;
+            }
+            output.push((index - start) as u8);
+            output.extend_from_slice(&lane[start..index]);
+        }
+    }
 }
 
 fn write_chunk<W: Write>(writer: &mut W, kind: &[u8; 4], data: &[u8]) -> io::Result<()> {
@@ -393,6 +536,102 @@ mod tests {
                 format: ImageExportFormat::Exr
             })
         ));
+        assert!(matches!(
+            image.save(&mut output, ImageExportFormat::Jpeg),
+            Err(ImageWriteError::Unsupported {
+                format: ImageExportFormat::Jpeg
+            })
+        ));
+    }
+
+    #[test]
+    fn hdr_saves_through_the_format_dispatch() {
+        let image = bitmap(1, 1, true, vec![255, 255, 255, 255]);
+        let mut output = Vec::new();
+        image.save(&mut output, ImageExportFormat::Hdr).unwrap();
+        assert!(output.starts_with(b"#?RADIANCE\n"));
+    }
+
+    #[test]
+    fn hdr_matches_the_reference_writer_byte_for_byte() {
+        let fixture = include_str!("hdr_fixture.txt");
+        let mut rows = 0;
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let parts: Vec<&str> = line.split('|').collect();
+            assert_eq!(parts.len(), 6, "{line:?}");
+            assert_eq!(parts[0], "VEC");
+            let width: usize = parts[2].parse().unwrap();
+            let height: usize = parts[3].parse().unwrap();
+            let pixels = parse_hex(parts[4]);
+            let expected = parse_hex(parts[5]);
+            assert_eq!(pixels.len(), width * height * 4, "{}", parts[1]);
+            let image = bitmap(width, height, true, pixels);
+            let mut output = Vec::new();
+            image.save_hdr(&mut output).unwrap();
+            assert_eq!(output, expected, "{}", parts[1]);
+            rows += 1;
+        }
+        assert_eq!(rows, 22, "all fixture vectors are asserted");
+    }
+
+    #[test]
+    fn hdr_boundary_widths_follow_the_flat_rle_rule() {
+        // 32767-wide solid pixels stay RLE: 115-byte header, the `02 02 7F FF`
+        // marker, then `R127 x 258 + R1` per lane. The probe reported 2191 bytes.
+        let pixels = [200u8, 100, 50, 255].repeat(32767);
+        let image = bitmap(32767, 1, true, pixels);
+        let mut output = Vec::new();
+        image.save_hdr(&mut output).unwrap();
+        assert_eq!(output.len(), 2191);
+        let marker = [2u8, 2, 0x7F, 0xFF];
+        assert_eq!(&output[115..119], &marker);
+        let mut lane = Vec::new();
+        lane.extend_from_slice(&[0xFF, 200].repeat(258));
+        lane.extend_from_slice(&[0x81, 200]);
+        assert_eq!(&output[119..119 + 518], lane.as_slice());
+        // 32768-wide pixels go flat: 115-byte header plus raw RGBE. The probe
+        // reported 131187 bytes with an `C8643280` tail.
+        let pixels = [200u8, 100, 50, 255].repeat(32768);
+        let image = bitmap(32768, 1, true, pixels);
+        let mut output = Vec::new();
+        image.save_hdr(&mut output).unwrap();
+        assert_eq!(output.len(), 115 + 32768 * 4);
+        assert_eq!(&output[115..119], &[0xC8, 0x64, 0x32, 0x80]);
+        assert_eq!(&output[output.len() - 4..], &[0xC8, 0x64, 0x32, 0x80]);
+    }
+
+    #[test]
+    fn hdr_ignores_alpha_like_the_reference() {
+        let opaque = bitmap(2, 1, true, vec![200, 100, 50, 255, 10, 20, 30, 255]);
+        let transparent = bitmap(2, 1, true, vec![200, 100, 50, 0, 10, 20, 30, 0]);
+        let mut first = Vec::new();
+        let mut second = Vec::new();
+        opaque.save_hdr(&mut first).unwrap();
+        transparent.save_hdr(&mut second).unwrap();
+        assert_eq!(first, second);
+    }
+
+    fn parse_hex(text: &str) -> Vec<u8> {
+        assert!(text.len().is_multiple_of(2), "even hex length");
+        let mut bytes = Vec::with_capacity(text.len() / 2);
+        let digits = text.as_bytes();
+        for pair in digits.chunks_exact(2) {
+            bytes.push(hex_value(pair[0]) << 4 | hex_value(pair[1]));
+        }
+        bytes
+    }
+
+    fn hex_value(digit: u8) -> u8 {
+        match digit {
+            b'0'..=b'9' => digit - b'0',
+            b'A'..=b'F' => digit - b'A' + 10,
+            b'a'..=b'f' => digit - b'a' + 10,
+            _ => panic!("non-hex digit {digit}"),
+        }
     }
 
     #[test]

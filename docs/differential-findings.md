@@ -521,3 +521,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | `resources::glb::{quantize_color, quantize_color_channel, process_skin_bindings, push_color_accessor, push_ubyte_view}`; width-switching `push_joints_accessor`/`push_index_accessor`; new `GlbError::BoneIndexTooLarge`. |
 | Regression evidence | New tests pin truncation (incl. 0.999→254), vector poisoning, merge/drop/renormalize/pad rules, both error variants, and all four accessor width switches; full lib suite passes 965/965 locally. |
 | Remaining comparison | `GlbLevelBuilder` hierarchy export and `GlbTerrainBuilder` have no CLI path and stay unported; morph targets are absent on both sides (confirmed in `GlbSubMeshBuilder`). |
+
+## DIFF-HDR-001 - Radiance HDR writer rules
+
+| Field | Finding |
+|---|---|
+| Status | Reference-runtime differential recorded; writer ported and pinned byte-for-byte |
+| Source location | StbImageWriteSharp 1.16.7 `ImageWriter.WriteHdr` (shipped `StbImageWriteSharp.dll`), called by `AssetRipper.Export.Modules.Textures/DirectBitmap\`1.cs` (`SaveAsHdr`) with `Width`, `Height * Depth`, and the `GetDataAndComponentsForSaving` bytes |
+| Input evidence | Probe `Temp/opencode/hdrprobe` (SDK 10.0.401, RGBA input): 22 committed `VEC` rows in `src/resources/hdr_fixture.txt` plus two over-size boundary facts (32767-wide solid is RLE at 2191 bytes with marker `02 02 7F FF`; 32768-wide solid is flat at 131187 bytes with an `C8643280` tail) |
+| Source-derived behavior | Fixed 101-byte header (`#?RADIANCE`, `# Written by stb_image_write.h`, `FORMAT=32-bit_rle_rgbe`, `EXPOSURE=` with 10 spaces plus `1.0000000000000`, blank line) then `-Y {h} +X {w}`; bytes scale by `1/255` into a shared-exponent RGBE pixel (zero maps to all-zero, alpha ignored); scanlines encode independently with new-style RLE iff `8 <= width < 0x8000`, else flat; a match of 3+ encodes as 127-capped runs where an already-classified run emits even a 1-2 tail chunk, while shorter matches accumulate 128-capped literals that stop at the next run |
+| Root cause | No deviation found; this increment ports the previously open HDR writer. The run-tail rule (e.g. a 128-run emits `R127 R1`, not `R127` plus a 3-literal) and the `0x8000` flat boundary were established purely from probe bytes, not from library sources |
+| Rust change | `resources::image_export::{save_hdr, rgb8_to_rgbe, encode_hdr_scanline_rle}` with integer-`frexp` conversion and bounded chunk emission; `save()` dispatches `Hdr` to the new writer |
+| Regression evidence | All 22 fixture vectors reproduce byte-for-byte (including all 256 gray conversions, every probed run length 1-130 plus 300, the 300-literal chunking, the mixed literal/run row, and the two-row marker repetition); targeted tests pin both width boundaries and alpha indifference; full lib suite passes 1003/1003 locally with warnings-denied Clippy |
+| Remaining comparison | EXR (`ExrWriter`) and JPEG (stb `WriteJpg`) stay `Unsupported`; the zero-width degenerate case writes header only by construction and was not probed |
