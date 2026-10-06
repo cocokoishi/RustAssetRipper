@@ -6,8 +6,8 @@
 //! the `ReadMonoBehaviour` structure-source decision, the `MakeError_*` and
 //! `LogMonoBehaviorReadException` diagnostic texts, the `RawDataObject`/`UnknownObject`/
 //! `UnreadableObject` hash and synthetic-name rules, and the `ReadExtraTextureFields`
-//! 24-byte tail layout, plus the structure-resolver selection and the player-settings
-//! class predicate. Byte reading,
+//! 24-byte tail layout, plus the structure-resolver selection, the player-settings
+//! class predicate, and the MonoBehaviour structure field-start rule. Byte reading,
 //! node building, and assembly-backed MonoBehaviour structures stay outside: they need
 //! generated objects and live assemblies. Version facts arrive precomputed because the
 //! Rust tree has no parsed Unity-version model yet.
@@ -404,6 +404,31 @@ pub fn unreadable_asset_name(
     }
 }
 
+/// The base field ending the generated MonoBehaviour header in a TypeTree node list.
+pub const MONO_BEHAVIOUR_NAME_FIELD: &str = "m_Name";
+/// The editor-only base field following `m_Name` on newer generations.
+pub const MONO_BEHAVIOUR_EDITOR_CLASS_ID_FIELD: &str = "m_EditorClassIdentifier";
+
+/// `SerializableTreeType.FindStartingIndexForMonoBehaviour` over caller facts: a
+/// MonoBehaviour structure starts after the later of `m_Name` and
+/// `m_EditorClassIdentifier`, skipping the base fields the generated
+/// `monoBehaviour.Read` already consumed (reading them again would misalign the
+/// remainder and surface as a layout mismatch). Either marker may be absent, which
+/// reads as index -1 like the source `IndexOf`; both absent starts at zero. The
+/// caller supplies the ordered node field names, so no tree model crosses here.
+pub fn monobehaviour_structure_start_index(field_names: &[&str]) -> usize {
+    let position = |marker: &str| {
+        field_names
+            .iter()
+            .position(|name| *name == marker)
+            .map(|index| index as i64)
+            .unwrap_or(-1)
+    };
+    let start =
+        position(MONO_BEHAVIOUR_NAME_FIELD).max(position(MONO_BEHAVIOUR_EDITOR_CLASS_ID_FIELD)) + 1;
+    usize::try_from(start).unwrap_or(0)
+}
+
 /// Which type resolver a freshly created asset reads its TypeTree structure with.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum StructureResolverKind {
@@ -722,6 +747,56 @@ mod tests {
         for class_id in [0, 28, 48, 114, 115, 128, 130, -1, i32::MAX] {
             assert!(!super::is_player_settings_class(class_id), "{class_id}");
         }
+    }
+
+    #[test]
+    fn monobehaviour_structures_skip_the_generated_base_fields() {
+        use super::{MONO_BEHAVIOUR_EDITOR_CLASS_ID_FIELD, MONO_BEHAVIOUR_NAME_FIELD};
+        assert_eq!(MONO_BEHAVIOUR_NAME_FIELD, "m_Name");
+        assert_eq!(
+            MONO_BEHAVIOUR_EDITOR_CLASS_ID_FIELD,
+            "m_EditorClassIdentifier"
+        );
+        // Newer generations carry both markers: fields start after the later one.
+        assert_eq!(
+            super::monobehaviour_structure_start_index(&[
+                "m_GameObject",
+                "m_Enabled",
+                "m_EditorHideFlags",
+                "m_Name",
+                "m_EditorClassIdentifier",
+                "m_Material",
+            ]),
+            5
+        );
+        // Legacy generations without the editor marker start after `m_Name`.
+        assert_eq!(
+            super::monobehaviour_structure_start_index(&[
+                "m_GameObject",
+                "m_Enabled",
+                "m_Name",
+                "health",
+            ]),
+            3
+        );
+        // The maximum wins when the markers arrive out of order.
+        assert_eq!(
+            super::monobehaviour_structure_start_index(
+                &["m_EditorClassIdentifier", "m_Name", "x",]
+            ),
+            2
+        );
+        // The first match wins, like the source `IndexOf`.
+        assert_eq!(
+            super::monobehaviour_structure_start_index(&["m_Name", "m_Name", "x"]),
+            1
+        );
+        // Both markers absent starts at zero.
+        assert_eq!(
+            super::monobehaviour_structure_start_index(&["health", "speed"]),
+            0
+        );
+        assert_eq!(super::monobehaviour_structure_start_index(&[]), 0);
     }
 
     #[test]

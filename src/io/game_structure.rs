@@ -16,7 +16,7 @@
 //! downstream in both implementations (the source GZip/Brotli schemes versus the
 //! `SchemeReader::read` wrapper loop), so nothing is silently dropped.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::io::{self, Read, Seek, SeekFrom};
@@ -60,7 +60,8 @@ pub struct MixedGameStructure {
     pub registered_files: Vec<DependencyFilePath>,
     /// Registered entries whose raw headers identify them as SerializedFiles.
     pub serialized_file_inputs: Vec<DependencyFilePath>,
-    /// Managed assembly names and their mounted paths.
+    /// Managed assembly names and their mounted paths. Names are unique: the first path wins,
+    /// like the source `Assemblies` dictionary, and later duplicates are counted in the report.
     pub assemblies: Vec<DependencyFilePath>,
     /// Direct-file parent directories and directories containing recognized source files.
     pub data_paths: Vec<String>,
@@ -74,6 +75,8 @@ pub struct MixedGameStructureReport {
     pub scanned_bytes: u64,
     /// Normalized selections skipped because platform detection consumed them.
     pub skipped_consumed_paths: usize,
+    /// Assembly paths dropped because their file name was already registered.
+    pub duplicate_assemblies: usize,
 }
 
 impl MixedGameStructure {
@@ -118,7 +121,7 @@ impl MixedGameStructure {
 
         let mut files = BTreeSet::new();
         let mut serialized_files = BTreeSet::new();
-        let mut assemblies = BTreeSet::new();
+        let mut assemblies = BTreeMap::new();
         let mut data_paths = BTreeSet::new();
         let mut unique_selections = BTreeSet::new();
         let mut scanned_paths = BTreeSet::new();
@@ -213,7 +216,7 @@ impl MixedGameStructure {
                     add_parent_chain(&path, &selected_path, &mut data_paths);
                 }
                 if is_mono_assembly(&filename) {
-                    assemblies.insert((filename, path));
+                    insert_assembly(&mut assemblies, &mut report, filename, path);
                 }
             }
         }
@@ -222,7 +225,7 @@ impl MixedGameStructure {
         Ok(MixedGameStructure {
             registered_files: into_dependency_paths(files),
             serialized_file_inputs: into_dependency_paths(serialized_files),
-            assemblies: into_dependency_paths(assemblies),
+            assemblies: into_dependency_paths(assemblies.into_iter().collect()),
             data_paths: data_paths.into_iter().collect(),
             report,
         })
@@ -366,6 +369,22 @@ fn normalize_selected_path(
 /// matches skip; sub-paths of consumed roots still scan, like the source leftover list.
 fn is_consumed_path(normalized_selected: &str, consumed_paths: &BTreeSet<String>) -> bool {
     consumed_paths.contains(normalized_selected)
+}
+
+/// `CollectAssemblies` name rule over caller facts: assemblies are keyed by file name and
+/// the first path wins, mirroring the source `Assemblies` dictionary. Later duplicates are
+/// counted, not registered; the source logs a warning, and there is no logging sink here.
+fn insert_assembly(
+    assemblies: &mut BTreeMap<String, String>,
+    report: &mut MixedGameStructureReport,
+    filename: String,
+    path: String,
+) {
+    if assemblies.contains_key(&filename) {
+        report.duplicate_assemblies += 1;
+        return;
+    }
+    assemblies.insert(filename, path);
 }
 
 fn parent_path(path: &str) -> String {
@@ -809,5 +828,29 @@ mod tests {
             .registered_files
             .iter()
             .any(|file| file.virtual_path == "/scan/wrapped.gz"));
+    }
+
+    #[test]
+    fn duplicate_assembly_names_keep_the_first_path_and_count_the_rest() {
+        let mut filesystem = VirtualFileSystem::new();
+        insert_file(&mut filesystem, "/a/Data/Managed/Engine.dll", b"first");
+        insert_file(&mut filesystem, "/b/Data/Managed/Engine.dll", b"second");
+        insert_file(&mut filesystem, "/b/Data/Managed/Other.dll", b"other");
+        let structure = MixedGameStructure::from_vfs_paths(
+            &filesystem,
+            &["/".to_owned()],
+            MixedGameStructureLimits::default(),
+        )
+        .unwrap();
+
+        // Enumeration is lexical, so the `/a` copy wins like the source first-wins rule.
+        assert_eq!(structure.assemblies.len(), 2);
+        assert!(structure.assemblies.iter().any(|entry| {
+            entry.file_name == "Engine.dll" && entry.virtual_path == "/a/Data/Managed/Engine.dll"
+        }));
+        assert!(structure.assemblies.iter().any(|entry| {
+            entry.file_name == "Other.dll" && entry.virtual_path == "/b/Data/Managed/Other.dll"
+        }));
+        assert_eq!(structure.report.duplicate_assemblies, 1);
     }
 }

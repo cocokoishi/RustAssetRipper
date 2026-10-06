@@ -1266,3 +1266,11 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Gates: `cargo fmt --check` 0, full tests 1325 lib + 57 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
 - Next: fifty-eighth team round (gate-first: LZMA tables, typetree walker, export records).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 168. Checkpoint: fifty-eighth team round integrated — gate-first (2026-10-06)
+
+- All five shipped, all lead-verified (targeted suites re-run: 8/8, 15/15, 13/13, 8/8, 39/39) and integrated: `texture-meta` closed the encoder gap (`IO-COMP-LZMA-UNITYFS-001`); `mesh-deform` ported the MB start index (`SER-TT-ABSENT-001` factory); `anim-graph` wired the orphan kernel (`EXP-META-PIPELINE-001`, zero new tests); `sprite-fill` fixed mixed-side first-wins (`PRODUCT-CLI-INSPECT-001`); `texture-export` named registry predicates + fixed a real over-refusal (`SER-TT-ABSENT-001` reader). No scope violations, no placeholders, no verified row touched.
+- Gate question answered YES: all five units reduce the Phase 1 incomplete count.
+- Gates: `cargo fmt --check` 0, full tests 1329 lib + 57 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
+- Next: fifty-ninth team round (gate-first: LZMA size lane, mono tables, platform registry).
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

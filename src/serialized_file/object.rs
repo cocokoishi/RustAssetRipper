@@ -1086,11 +1086,8 @@ fn decode_root(
         let managed_reference_node =
             is_managed_reference_element(type_tree, node_index, object_index, reader.offset())?;
         // `TypeTreeNodeStruct.IsManagedReferencesRegistry`.
-        let registry_node = type_name == managed_names::REGISTRY_NAME
-            && node_name == managed_names::REGISTRY_FIELD_NAME
-            && children.len() > 1;
-        let dynamic_managed_data = type_name == managed_names::REFERENCED_OBJECT_DATA_NAME
-            && node_name == managed_names::DATA_FIELD_NAME;
+        let registry_node = is_managed_references_registry(type_name, node_name, children.len());
+        let dynamic_managed_data = is_referenced_object_data(type_name, node_name, children.len());
         if managed_reference_node || registry_node || dynamic_managed_data {
             // `TypeTreeNodeStruct.IsIndexedManagedReference` selects the legacy `id`
             // field shape over the `rid`-addressed shape for the rejection report,
@@ -1880,6 +1877,25 @@ fn is_indexed_managed_reference_element(
         && type_tree.nodes[children[0]].name.as_deref() == Some(managed_names::INDEX_FIELD_NAME))
 }
 
+/// `TypeTreeNodeStruct.IsManagedReferencesRegistry` over caller facts: the
+/// `ManagedReferencesRegistry` type holding the `references` field with more than one
+/// subnode (the identifier plus at least one referenced object).
+fn is_managed_references_registry(type_name: &str, node_name: &str, child_count: usize) -> bool {
+    type_name == managed_names::REGISTRY_NAME
+        && node_name == managed_names::REGISTRY_FIELD_NAME
+        && child_count > 1
+}
+
+/// `TypeTreeNodeStruct.IsReferencedObjectData` over caller facts: the
+/// `ReferencedObjectData` dynamic payload holder, which carries no subnodes because the
+/// object content is read dynamically, not from the tree. A same-named node WITH
+/// children is an ordinary struct here, not dynamic data.
+fn is_referenced_object_data(type_name: &str, node_name: &str, child_count: usize) -> bool {
+    type_name == managed_names::REFERENCED_OBJECT_DATA_NAME
+        && node_name == managed_names::DATA_FIELD_NAME
+        && child_count == 0
+}
+
 fn direct_children(
     type_tree: &TypeTreeLayout<'_>,
     node_index: usize,
@@ -2582,6 +2598,54 @@ mod tests {
             layout_node(1, "extra", "SInt32"),
         ]);
         assert!(!super::is_indexed_managed_reference_element(&layout, 0, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn managed_registry_and_data_nodes_follow_the_source_predicates() {
+        // `IsManagedReferencesRegistry`: the name pair plus more than one subnode.
+        assert!(super::is_managed_references_registry(
+            "ManagedReferencesRegistry",
+            "references",
+            2
+        ));
+        assert!(!super::is_managed_references_registry(
+            "ManagedReferencesRegistry",
+            "references",
+            1
+        ));
+        assert!(!super::is_managed_references_registry(
+            "ManagedReferencesRegistry",
+            "references",
+            0
+        ));
+        assert!(!super::is_managed_references_registry(
+            "ManagedReferencesRegistry",
+            "other",
+            2
+        ));
+        assert!(!super::is_managed_references_registry(
+            "other",
+            "references",
+            2
+        ));
+        // `IsReferencedObjectData`: the dynamic holder carries no subnodes; a
+        // same-named node with children is an ordinary struct, not dynamic data.
+        assert!(super::is_referenced_object_data(
+            "ReferencedObjectData",
+            "data",
+            0
+        ));
+        assert!(!super::is_referenced_object_data(
+            "ReferencedObjectData",
+            "data",
+            1
+        ));
+        assert!(!super::is_referenced_object_data(
+            "ReferencedObjectData",
+            "other",
+            0
+        ));
+        assert!(!super::is_referenced_object_data("other", "data", 0));
     }
 
     #[test]

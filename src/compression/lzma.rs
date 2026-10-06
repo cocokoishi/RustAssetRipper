@@ -4,6 +4,10 @@
 //! at the requested count and leaves a short stream for downstream size checks to
 //! reject, while this decoder fails closed on a short stream and truncates a long
 //! stream to the requested count (pinned by the output-size contract test below).
+//!
+//! Independent-encoder coverage comes from SharpCompress 0.50.4 vectors (the
+//! baseline's own LZMA library): `decodes_sharpcompress_encoded_unity_payloads`
+//! decodes payloads no `lzma-rs` code has touched.
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -399,5 +403,68 @@ mod tests {
         let error = decompress_block(&[93, 0, 0, 16, 0, 1], 32, 64).unwrap_err();
         assert!(matches!(error.kind, LzmaBlockErrorKind::Decoder(_)));
         assert!(error.input_offset >= 5);
+    }
+
+    fn parse_hex(hex: &str) -> Vec<u8> {
+        assert!(hex.len().is_multiple_of(2), "test hex must pair nibbles");
+        (0..hex.len())
+            .step_by(2)
+            .map(|index| {
+                u8::from_str_radix(&hex[index..index + 2], 16).expect("test hex must be valid")
+            })
+            .collect()
+    }
+
+    /// Independent-encoder vectors for the UnityFS metadata lane: each payload was
+    /// encoded with SharpCompress 0.50.4 (the baseline's own LZMA library, mirroring
+    /// `CompressLzmaStream`: five property bytes plus the raw stream) in an offline
+    /// dotnet probe, which also round-tripped every vector through the SharpCompress
+    /// decoder. Nothing here was produced by `lzma-rs`, breaking the self-encoding
+    /// loop the other tests use. All three use properties `5D 00 00 10 00`
+    /// (lc=3, lp=0, pb=2, 1 MiB dictionary).
+    #[test]
+    fn decodes_sharpcompress_encoded_unity_payloads() {
+        let repeated =
+            parse_hex("5D0000100000241949986F1011485D43E4F891745C8A47E9D66EE801B113E65249BE5E8000");
+        assert_eq!(repeated.len(), 37);
+        let expected_repeated =
+            b"Hello UnityFS metadata! Hello UnityFS metadata! Hello UnityFS metadata! ";
+        assert_eq!(expected_repeated.len(), 72);
+        assert_eq!(
+            decompress_block(&repeated, expected_repeated.len(), expected_repeated.len())
+                .unwrap()
+                .as_slice(),
+            expected_repeated
+        );
+
+        let sequence = parse_hex(
+            "5D0000100000000052500A84F99BB28021A969D627E03E065A5F048D53D404BA39570509C15524DE9DB871593160A19FF96F4973F2C8EA8CBA1A8B29692180FE338366AF466DEC9E898A0B83F03C0E898E3FED5FE79E90D91CFF32F4B2E03951B2D21415B4C571BADB06E3799A9FBB38C1B000AC930BAA0619031208155B9BC848F0322EFE2DA087C8F0A4E0D251EB8D675692B24D84C5F18631DF6A625BC2792DD9F73C73BA747407D83CA9562224A166F85A845F3067D2F64B492E7F20EBDBF8100E947877C73F6BEFB4CD95E26FF6446E06CF0B821ACBDB7AF0578D98FF90C03EE6C1124175EE032896EB09370E1E",
+        );
+        assert_eq!(sequence.len(), 240);
+        let expected_sequence: Vec<u8> = (0u8..=255).collect();
+        assert_eq!(
+            decompress_block(&sequence, expected_sequence.len(), expected_sequence.len()).unwrap(),
+            expected_sequence
+        );
+
+        let metadata = parse_hex(
+            "5D00001000002D6D3C1A00177EEB2644FF6A1F536A5A91464786307E5BE1A06A1EAF3A8CA000",
+        );
+        assert_eq!(metadata.len(), 38);
+        let mut expected_metadata = vec![0x5A; 16];
+        expected_metadata.extend_from_slice(&[0, 0, 0, 1]);
+        expected_metadata.extend_from_slice(&[0, 0, 0, 19]);
+        expected_metadata.extend_from_slice(&[0, 0, 0, 19]);
+        expected_metadata.extend_from_slice(&[0, 0]);
+        expected_metadata.extend_from_slice(&[0; 8]);
+        expected_metadata.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 19]);
+        expected_metadata.extend_from_slice(&[0, 0, 0, 4]);
+        expected_metadata.extend_from_slice(b"data/file.bin");
+        expected_metadata.push(0);
+        assert_eq!(expected_metadata.len(), 64);
+        assert_eq!(
+            decompress_block(&metadata, expected_metadata.len(), expected_metadata.len()).unwrap(),
+            expected_metadata
+        );
     }
 }

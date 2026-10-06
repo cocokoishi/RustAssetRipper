@@ -18,6 +18,15 @@
 //!   the main export ID, collection GUID, and exporter type flow in from `ids.rs` and
 //!   `export_type.rs` through the caller.
 //!
+//! Survey closures, so later rounds do not re-litigate them:
+//! - The base `ExportCollection.ExportAsset` overload has no baseline callers; the same
+//!   step kernel covers its shape (precomputed path, throwing exporter).
+//! - `Meta`'s `Importer.IncludesImporter` version gate is commented out upstream ("for
+//!   now, assume true"), so the importer record is always written.
+//! - Open: the base `CreateImporter` also stamps `MainObjectFileID` with the asset's main
+//!   export ID, but no Rust importer builder emits that field yet; it belongs to the
+//!   per-exporter importer construction, not this tail.
+//!
 //! Deliberately stricter than the source, by pipeline design:
 //! - Both files are created add-only; the source overwrites existing files.
 //! - Every relative path is confined (no traversal, absolute paths, device names,
@@ -35,6 +44,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use super::meta::{UnityMetaFile, UnityMetaFileError, UnityMetaFileOptions};
+use super::meta_emission::decide_asset_collection_export;
 use super::meta_emission::export_meta_mechanics::META_EXTENSION;
 use super::unity_yaml::{UnityYamlNode, UnityYamlWriteLimits};
 
@@ -342,7 +352,9 @@ pub fn export_asset_with_meta(
     path_limits: UnityProjectOutputLimits,
     yaml_limits: UnityYamlWriteLimits,
 ) -> Result<AssetExportStep, UnityProjectOutputError> {
-    if !export_succeeded {
+    // No site writes the sidecar for a failed asset export. The shared outcome kernel owns
+    // this gate so its two spellings cannot diverge.
+    if !decide_asset_collection_export(export_succeeded).emits_meta() {
         return Ok(AssetExportStep::SkippedFailedExport);
     }
     let components = validated_path_components(&plan.relative_asset_path, path_limits)?;
