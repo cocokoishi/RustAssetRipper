@@ -483,12 +483,43 @@ impl Display for SerializedValueMutationError {
 
 impl Error for SerializedValueMutationError {}
 
+/// Reader-side TypeTree usability behind the absent-TypeTree recovery row
+/// (`SER-TT-ABSENT-001`).
+///
+/// This states only what the reader knows without assemblies or generated
+/// layouts: whether the resolved serialized type carries a TypeTree and whether
+/// that tree has nodes. The factory's `MonoBehaviourReadFacts.has_type_tree`
+/// consumes this fact; layout construction (`TypeTreeLayout::new`) and any
+/// parse-acceptance decision stay downstream. A present-but-unparseable tree
+/// reports `Present` here and surfaces its layout error when built, exactly
+/// like the previous inline prelude checks.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum TypeTreeUsability {
+    /// No TypeTree: recovery must come from another structure source.
+    Missing,
+    /// A TypeTree with no nodes: undecodable like a missing one.
+    Empty,
+    /// A TypeTree with nodes: decode proceeds to layout construction.
+    Present,
+}
+
+/// Classify the resolved serialized type's TypeTree for the decode prelude and
+/// the absent-tree recovery facts.
+pub fn classify_type_tree_usability(type_tree: Option<&TypeTree>) -> TypeTreeUsability {
+    match type_tree {
+        None => TypeTreeUsability::Missing,
+        Some(tree) if tree.nodes.is_empty() => TypeTreeUsability::Empty,
+        Some(_) => TypeTreeUsability::Present,
+    }
+}
+
 impl SerializedFileMetadata {
     /// Decode one object's payload using its resolved serialized type and TypeTree.
     ///
     /// A missing TypeTree is reported explicitly. This method does not claim coverage for the
     /// source project's no-TypeTree type recovery, MonoBehaviour assembly resolver, or managed
-    /// reference registry paths.
+    /// reference registry paths; it reports the reader-side usability fact
+    /// (`classify_type_tree_usability`) those paths consume.
     pub fn decode_object_payload(
         &self,
         file_bytes: &[u8],
@@ -543,9 +574,23 @@ impl SerializedFileMetadata {
                 },
             )
         })?;
-        let type_tree = serialized_type.type_tree.as_ref().ok_or_else(|| {
-            ObjectDecodeError::new(0, ObjectDecodeErrorKind::MissingTypeTree { object_index })
-        })?;
+        let type_tree = match classify_type_tree_usability(serialized_type.type_tree.as_ref()) {
+            TypeTreeUsability::Missing => {
+                return Err(ObjectDecodeError::new(
+                    0,
+                    ObjectDecodeErrorKind::MissingTypeTree { object_index },
+                ));
+            }
+            TypeTreeUsability::Empty => {
+                return Err(ObjectDecodeError::new(
+                    0,
+                    ObjectDecodeErrorKind::EmptyTypeTree { object_index },
+                ));
+            }
+            TypeTreeUsability::Present => serialized_type.type_tree.as_ref().ok_or_else(|| {
+                ObjectDecodeError::new(0, ObjectDecodeErrorKind::MissingTypeTree { object_index })
+            })?,
+        };
         let type_root = type_tree.nodes.first().ok_or_else(|| {
             ObjectDecodeError::new(0, ObjectDecodeErrorKind::EmptyTypeTree { object_index })
         })?;
@@ -2483,6 +2528,49 @@ mod tests {
                 .unwrap(),
             big_endian_payload
         );
+    }
+
+    #[test]
+    fn tree_usability_distinguishes_absent_and_empty_trees() {
+        use super::TypeTreeUsability;
+        assert_eq!(
+            super::classify_type_tree_usability(None),
+            TypeTreeUsability::Missing
+        );
+        let empty = TypeTree {
+            nodes: Vec::new(),
+            string_buffer: Vec::new(),
+        };
+        assert_eq!(
+            super::classify_type_tree_usability(Some(&empty)),
+            TypeTreeUsability::Empty
+        );
+        let present = TypeTree {
+            nodes: vec![node(0, "Root", "Root", -1, 0)],
+            string_buffer: Vec::new(),
+        };
+        assert_eq!(
+            super::classify_type_tree_usability(Some(&present)),
+            TypeTreeUsability::Present
+        );
+        // The decode prelude reports each fact with its own error.
+        let (file, header, mut metadata) = make_file(&[0]);
+        metadata.types[0].type_tree = Some(empty);
+        let error = metadata
+            .decode_object_payload(&file, &header, 0)
+            .unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            ObjectDecodeErrorKind::EmptyTypeTree { object_index: 0 }
+        ));
+        metadata.types[0].type_tree = None;
+        let error = metadata
+            .decode_object_payload(&file, &header, 0)
+            .unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            ObjectDecodeErrorKind::MissingTypeTree { object_index: 0 }
+        ));
     }
 
     #[test]

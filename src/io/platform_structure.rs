@@ -1,8 +1,8 @@
 //! Platform root and DataPath discovery for mounted Unity game layouts.
 //!
 //! Covers the root/marker decisions per platform (including the Android APK/OBB bitmask and the
-//! `assets/bin/Data` gate) plus the Android, iOS, and Switch directory layouts. Backend selection,
-//! assembly and metadata collection, and bundle gathering live in the file inventory;
+//! `assets/bin/Data` gate) plus the Android, iOS, Switch, and PS4 directory layouts. Backend
+//! selection, assembly and metadata collection, and bundle gathering live in the file inventory;
 //! bundle-hierarchy lookups live in the serialized-file workspace.
 
 use std::error::Error;
@@ -779,6 +779,37 @@ pub fn switch_data_layout(root_path: &str) -> SwitchDataLayout {
     }
 }
 
+/// `PS4GameStructure` directory layout for one title root.
+///
+/// Mirrors the constructor joins: `Media` as the data directory (gated on `eboot.bin`),
+/// `Resources` and `Managed` under it, the PS4-only `Modules` directory holding
+/// `Il2CppUserAssemblies.prx`, and `global-metadata.dat` directly under `Data/Metadata` rather
+/// than under `Managed`. Streaming assets and the Unity player stay unset on PS4, like the
+/// source, so they have no slots here.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Ps4DataLayout {
+    pub game_data_path: String,
+    pub resources_path: String,
+    pub managed_path: String,
+    pub modules_path: String,
+    pub il2cpp_game_assembly_path: String,
+    pub il2cpp_metadata_path: String,
+}
+
+pub fn ps4_data_layout(root_path: &str) -> Ps4DataLayout {
+    let game_data_path = join_path(root_path, "Media");
+    let managed_path = join_path(&game_data_path, "Managed");
+    let modules_path = join_path(&game_data_path, "Modules");
+    Ps4DataLayout {
+        resources_path: join_path(&game_data_path, "Resources"),
+        il2cpp_game_assembly_path: join_path(&modules_path, "Il2CppUserAssemblies.prx"),
+        il2cpp_metadata_path: join_path(&game_data_path, "Metadata/global-metadata.dat"),
+        managed_path,
+        modules_path,
+        game_data_path,
+    }
+}
+
 fn detect_ios(
     filesystem: &VirtualFileSystem,
     selected_path: &str,
@@ -821,8 +852,8 @@ fn detect_ps4(
     let has_executable = top_level_files(filesystem, selected_path)?
         .iter()
         .any(|path| file_name(path) == "eboot.bin");
-    let game_data_path = join_path(selected_path, "Media");
-    if !has_executable || !exists_directory(filesystem, &game_data_path)? {
+    let layout = ps4_data_layout(selected_path);
+    if !has_executable || !exists_directory(filesystem, &layout.game_data_path)? {
         return Ok(None);
     }
     Ok(Some(make_structure(
@@ -831,8 +862,8 @@ fn detect_ps4(
         vec![selected_path.to_owned()],
         selected_path.to_owned(),
         Some(file_name(selected_path).to_owned()),
-        Some(game_data_path.clone()),
-        vec![game_data_path],
+        Some(layout.game_data_path.clone()),
+        vec![layout.game_data_path],
     )))
 }
 
@@ -1266,7 +1297,7 @@ impl Error for PlatformStructureError {
 mod tests {
     use super::{
         android_data_layout, detect_desktop_platform, detect_platform_structure, ios_data_layout,
-        switch_data_layout, DesktopPlatform, PlatformKind, PlatformResourceLookup,
+        ps4_data_layout, switch_data_layout, DesktopPlatform, PlatformKind, PlatformResourceLookup,
         PlatformResourceProvider, PlatformResourceSource, PlatformStructure,
         PlatformStructureErrorKind, PlatformStructureLimits,
     };
@@ -1664,6 +1695,25 @@ mod tests {
         assert_eq!(
             layout.il2cpp_metadata_path,
             "/switch/romfs/Data/Managed/Metadata/global-metadata.dat"
+        );
+    }
+
+    #[test]
+    fn ps4_directory_layout_matches_the_constructor_joins() {
+        let layout = ps4_data_layout("/ps4");
+        assert_eq!(layout.game_data_path, "/ps4/Media");
+        assert_eq!(layout.resources_path, "/ps4/Media/Resources");
+        assert_eq!(layout.managed_path, "/ps4/Media/Managed");
+        assert_eq!(layout.modules_path, "/ps4/Media/Modules");
+        // The IL2Cpp assembly is the PS4-only prx under `Modules`.
+        assert_eq!(
+            layout.il2cpp_game_assembly_path,
+            "/ps4/Media/Modules/Il2CppUserAssemblies.prx"
+        );
+        // The metadata sits directly under `Data/Metadata`, not under `Managed`.
+        assert_eq!(
+            layout.il2cpp_metadata_path,
+            "/ps4/Media/Metadata/global-metadata.dat"
         );
     }
 

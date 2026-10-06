@@ -13,7 +13,8 @@
 //! Deliberately stricter than the source enumeration: lexical traversal order,
 //! rejected symlinks and non-regular files, depth/entry/input/size bounds, and an
 //! explicit error when a regular file collides with a split group on the same
-//! logical path.
+//! logical path. `expand_import_paths` additionally accepts files alongside
+//! directories, mirroring the reference tools' mixed `GetAllFilePaths` inputs.
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -26,6 +27,8 @@ pub struct DirectoryDiscoveryReport {
     pub directory_entries_scanned: usize,
     pub discovered_inputs: usize,
     pub source_bytes: u64,
+    /// Import paths that did not exist and were skipped by `expand_import_paths`.
+    pub skipped_inputs: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -64,6 +67,126 @@ pub enum DirectoryDiscoveryErrorKind {
 struct InputGroup {
     regular_file: Option<(PathBuf, u64)>,
     split_parts: Vec<(PathBuf, u64)>,
+}
+
+/// Expand mixed file-or-directory import paths, mirroring the reference tools'
+/// `GetAllFilePaths`: files become single inputs, directories reuse the bounded
+/// recursive discovery below, and missing paths are skipped with a report count
+/// instead of failing the batch.
+///
+/// Deliberate differences are documented, not changed: directories expand
+/// recursively under the same depth/entry/input bounds (the reference tools use
+/// top-level `EnumerateFiles` only); skips are counted, not printed, because
+/// there is no logging sink in Phase 1; collisions between inputs from different
+/// roots stay the mount layer's concern.
+pub fn expand_import_paths(
+    paths: &[PathBuf],
+    max_directory_entries: usize,
+    max_directory_depth: usize,
+    max_inputs: usize,
+) -> Result<(Vec<DiscoveredInput>, DirectoryDiscoveryReport), DirectoryDiscoveryError> {
+    let mut report = DirectoryDiscoveryReport::default();
+    let mut inputs = Vec::new();
+    for path in paths {
+        let metadata = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                report.skipped_inputs = report.skipped_inputs.saturating_add(1);
+                continue;
+            }
+            Err(error) => {
+                return Err(discovery_error(
+                    &report,
+                    path,
+                    DirectoryDiscoveryErrorKind::Io(error),
+                ));
+            }
+        };
+        if metadata.file_type().is_symlink() {
+            return Err(discovery_error(
+                &report,
+                path,
+                DirectoryDiscoveryErrorKind::SymbolicLinkNotAllowed,
+            ));
+        }
+        if metadata.is_dir() {
+            let remaining_inputs = max_inputs.saturating_sub(inputs.len());
+            let (mut discovered, directory_report) = discover_directory_inputs(
+                path,
+                max_directory_entries,
+                max_directory_depth,
+                remaining_inputs,
+            )?;
+            report.directory_entries_scanned = report
+                .directory_entries_scanned
+                .checked_add(directory_report.directory_entries_scanned)
+                .ok_or_else(|| {
+                    discovery_error(
+                        &report,
+                        path,
+                        DirectoryDiscoveryErrorKind::EntryLimitExceeded {
+                            count: usize::MAX,
+                            limit: max_directory_entries,
+                        },
+                    )
+                })?;
+            report.source_bytes = report
+                .source_bytes
+                .checked_add(directory_report.source_bytes)
+                .ok_or_else(|| {
+                    discovery_error(
+                        &report,
+                        path,
+                        DirectoryDiscoveryErrorKind::SourceSizeOverflow,
+                    )
+                })?;
+            inputs.append(&mut discovered);
+            report.discovered_inputs = inputs.len();
+        } else if metadata.is_file() {
+            if inputs.len() >= max_inputs {
+                return Err(discovery_error(
+                    &report,
+                    path,
+                    DirectoryDiscoveryErrorKind::InputLimitExceeded {
+                        count: inputs.len().saturating_add(1),
+                        limit: max_inputs,
+                    },
+                ));
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                return Err(discovery_error(
+                    &report,
+                    path,
+                    DirectoryDiscoveryErrorKind::InvalidPathEncoding,
+                ));
+            };
+            let source_bytes = metadata.len();
+            report.source_bytes =
+                report
+                    .source_bytes
+                    .checked_add(source_bytes)
+                    .ok_or_else(|| {
+                        discovery_error(
+                            &report,
+                            path,
+                            DirectoryDiscoveryErrorKind::SourceSizeOverflow,
+                        )
+                    })?;
+            inputs.push(DiscoveredInput {
+                path: path.clone(),
+                relative_path: PathBuf::from(name),
+                source_bytes,
+            });
+            report.discovered_inputs = inputs.len();
+        } else {
+            return Err(discovery_error(
+                &report,
+                path,
+                DirectoryDiscoveryErrorKind::UnsupportedFileType,
+            ));
+        }
+    }
+    Ok((inputs, report))
 }
 
 /// Recursively lists files in lexical order and folds each contiguous-looking `.splitN`
@@ -431,7 +554,10 @@ impl Error for DirectoryDiscoveryErrorKind {
 
 #[cfg(test)]
 mod tests {
-    use super::{discover_directory_inputs, split_logical_path, DirectoryDiscoveryErrorKind};
+    use super::{
+        discover_directory_inputs, expand_import_paths, split_logical_path,
+        DirectoryDiscoveryErrorKind,
+    };
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -626,6 +752,49 @@ mod tests {
             matches!(
                 error.kind,
                 DirectoryDiscoveryErrorKind::DuplicateLogicalPath
+            ),
+            "unexpected kind: {}",
+            error.kind
+        );
+    }
+
+    /// Mixed `GetAllFilePaths` inputs: files pass through, directories expand,
+    /// and missing paths are skipped with a report count.
+    #[test]
+    fn mixed_file_and_directory_inputs_expand_with_missing_skipped() {
+        let root = TestDiscoveryRoot::new();
+        let direct = root.write("direct.bin", b"1234");
+        root.write("bundle/data.bundle.split0", b"aa");
+        root.write("bundle/data.bundle.split1", b"bb");
+        let missing = root.path().join("gone.bin");
+        let inputs = vec![direct.clone(), root.path().join("bundle"), missing];
+        let (expanded, report) = expand_import_paths(&inputs, 10_000, 16, 10_000).unwrap();
+        assert_eq!(expanded.len(), 2);
+        assert_eq!(expanded[0].path, direct);
+        assert_eq!(expanded[0].relative_path, PathBuf::from("direct.bin"));
+        assert_eq!(expanded[0].source_bytes, 4);
+        assert_eq!(expanded[1].relative_path, PathBuf::from("data.bundle"));
+        assert_eq!(expanded[1].source_bytes, 4);
+        assert_eq!(
+            expanded[1].path,
+            root.path().join("bundle/data.bundle.split0")
+        );
+        assert_eq!(report.discovered_inputs, 2);
+        assert_eq!(report.skipped_inputs, 1);
+        assert_eq!(report.source_bytes, 8);
+    }
+
+    #[test]
+    fn import_path_expansion_enforces_the_total_input_limit() {
+        let root = TestDiscoveryRoot::new();
+        root.write("a.bin", b"a");
+        root.write("sub/b.bin", b"b");
+        let inputs = vec![root.path().join("a.bin"), root.path().join("sub")];
+        let error = expand_import_paths(&inputs, 10_000, 16, 1).unwrap_err();
+        assert!(
+            matches!(
+                error.kind,
+                DirectoryDiscoveryErrorKind::InputLimitExceeded { .. }
             ),
             "unexpected kind: {}",
             error.kind

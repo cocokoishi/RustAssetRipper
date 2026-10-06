@@ -1,4 +1,10 @@
 //! File-scoped classification of serialized Unity object pointers.
+//!
+//! Covers the read side (`AssetCollection.TryGetAsset` file-table convention: FileID zero is the
+//! local file, positive FileIDs select external entries starting at one) and the write-side
+//! construction choice (`AssetCollection.CreatePPtr` refuses collections absent from the
+//! dependency table while `ForceCreatePPtr` appends them). Loading an external dependency,
+//! checking dependency compatibility, and appending to a live table stay caller-side.
 
 use super::metadata::{FileIdentifier, SerializedFileMetadata};
 
@@ -79,9 +85,59 @@ impl SerializedFileMetadata {
     }
 }
 
+/// What constructing a PPtr for an asset identity decides.
+///
+/// Mirrors `AssetCollection.CreatePPtr` (strict) and `ForceCreatePPtr` (appending)
+/// (`AssetRipper/Source/AssetRipper.Assets/Collections/AssetCollection.cs`, lines
+/// 92-116), which back the generated `IPPtr<T>.SetAsset` implementations: the asset's
+/// collection selects its dependency-table index (the local collection is index zero,
+/// like FileID zero), and a null asset always encodes as the default `(0, 0)` pointer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PPtrConstruction {
+    /// A null asset encodes as `(0, 0)` in both modes.
+    Null,
+    /// The asset's collection already sits at this dependency-table index, so both
+    /// modes reuse it (`IndexOf` hit / `AddDependency` early return).
+    Existing { file_id: i32, path_id: i64 },
+    /// Force mode appended the missing collection at this index. Table growth and the
+    /// compatibility check stay caller-side, like `AddDependency`.
+    Appended { file_id: i32, path_id: i64 },
+    /// Strict mode refuses a collection absent from the dependency table; the source
+    /// throws `ArgumentException` here instead of producing a pointer.
+    MissingDependency,
+}
+
+/// Plan `CreatePPtr` (`force == false`) or `ForceCreatePPtr` (`force == true`) over caller
+/// facts: the asset's PathID (`None` is the null asset), the asset collection's
+/// dependency-table index (`None` when absent), and the index an append would take
+/// (the caller's current table length).
+pub const fn plan_pptr_construction(
+    path_id: Option<i64>,
+    dependency_index: Option<i32>,
+    force: bool,
+    next_dependency_index: i32,
+) -> PPtrConstruction {
+    match path_id {
+        None => PPtrConstruction::Null,
+        Some(path_id) => match dependency_index {
+            Some(file_id) => PPtrConstruction::Existing { file_id, path_id },
+            None => {
+                if force {
+                    PPtrConstruction::Appended {
+                        file_id: next_dependency_index,
+                        path_id,
+                    }
+                } else {
+                    PPtrConstruction::MissingDependency
+                }
+            }
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{PPtrResolution, SerializedFileMetadata};
+    use super::{PPtrConstruction, PPtrResolution, SerializedFileMetadata};
     use crate::io::binary::Endian;
     use crate::serialized_file::metadata::{FileIdentifier, ObjectInfo};
     use crate::serialized_file::metadata_prefix::SerializedFileMetadataPrefix;
@@ -188,6 +244,47 @@ mod tests {
             PPtrResolution::AmbiguousLocalObject {
                 path_id: 101,
                 match_count: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn pptr_construction_follows_the_strict_and_force_branches() {
+        use super::plan_pptr_construction;
+        // A null asset encodes as (0, 0) in both modes.
+        assert_eq!(
+            plan_pptr_construction(None, None, false, 3),
+            PPtrConstruction::Null
+        );
+        assert_eq!(
+            plan_pptr_construction(None, Some(0), true, 3),
+            PPtrConstruction::Null
+        );
+        // A known collection is reused by both modes, including the local index zero.
+        assert_eq!(
+            plan_pptr_construction(Some(101), Some(0), false, 3),
+            PPtrConstruction::Existing {
+                file_id: 0,
+                path_id: 101
+            }
+        );
+        assert_eq!(
+            plan_pptr_construction(Some(101), Some(2), true, 3),
+            PPtrConstruction::Existing {
+                file_id: 2,
+                path_id: 101
+            }
+        );
+        // A missing collection is refused in strict mode but appended in force mode.
+        assert_eq!(
+            plan_pptr_construction(Some(101), None, false, 3),
+            PPtrConstruction::MissingDependency
+        );
+        assert_eq!(
+            plan_pptr_construction(Some(101), None, true, 3),
+            PPtrConstruction::Appended {
+                file_id: 3,
+                path_id: 101
             }
         );
     }

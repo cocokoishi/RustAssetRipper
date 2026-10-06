@@ -2,7 +2,7 @@
 //!
 //! Covers the first audited slice of `SER-TT-ABSENT-001`: the `ReadAsset` top dispatch,
 //! the `ReadNormalObject` fallback chain with its engine-collection gate, the
-//! `TryReadNormalObject` tail rules, the `CreateAsset` three outcomes, the `CreateEngineAsset` name switch,
+//! `TryReadNormalObject` tail rules with their control-flow composition, the `CreateAsset` three outcomes, the `CreateEngineAsset` name switch,
 //! the `ReadMonoBehaviour` structure-source decision, the `MakeError_*` and
 //! `LogMonoBehaviorReadException` diagnostic texts, the `RawDataObject`/`UnknownObject`/
 //! `UnreadableObject` hash and synthetic-name rules, and the `ReadExtraTextureFields`
@@ -76,6 +76,72 @@ pub fn classify_object_tail(remaining: &[u8], is_texture2d: bool) -> ObjectTailO
         ObjectTailOutcome::ChineseTextureFields
     } else {
         ObjectTailOutcome::IncorrectByteCount
+    }
+}
+
+/// What `TryReadNormalObject` returns for one asset.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum TryReadOutcome {
+    /// A created asset stands (clean, padded, Chinese-tailed, or half-read): the
+    /// caller keeps it and reports `TryReadLog`.
+    UseCreatedAsset,
+    /// Creation missed entirely: an `UnknownObject` wraps the raw bytes silently.
+    UseUnknownObject,
+}
+
+/// The log `TryReadNormalObject` emits alongside its outcome. Each error variant
+/// pairs with its message builder below (`incorrect_byte_count_message`,
+/// `read_exception_message`, `chinese_texture_warning_message`).
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum TryReadLog {
+    /// Clean reads, padding, and creation misses stay silent.
+    Silent,
+    /// The Chinese tail logs its warning while the asset stands.
+    WarningChineseTextureFields,
+    /// A thrown read logs the read exception.
+    ErrorReadException,
+    /// A leftover suffix logs the incorrect-byte-count error.
+    ErrorIncorrectByteCount,
+}
+
+/// Caller facts behind one `TryReadNormalObject` decision. Byte reading stays
+/// caller-side (reader-side object.rs territory): this kernel only composes the
+/// creation outcome, the throw flag, and the tail classification.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TryReadFacts {
+    /// The `CreateAsset` outcome for this asset.
+    pub created: CreatedAssetKind,
+    /// `asset.Read` threw; the half-read asset is kept with the exception error.
+    pub read_threw: bool,
+    /// The tail classification, meaningful only for a created asset that did not throw.
+    pub tail: ObjectTailOutcome,
+}
+
+/// `TryReadNormalObject`: a creation miss wraps silently without reading; a thrown
+/// read keeps the asset with the exception error; otherwise the tail decides (exact
+/// and padding stay silent, the Chinese tail warns, leftovers error).
+pub fn decide_try_read_object(facts: &TryReadFacts) -> (TryReadOutcome, TryReadLog) {
+    if facts.created == CreatedAssetKind::Unknown {
+        (TryReadOutcome::UseUnknownObject, TryReadLog::Silent)
+    } else if facts.read_threw {
+        (
+            TryReadOutcome::UseCreatedAsset,
+            TryReadLog::ErrorReadException,
+        )
+    } else {
+        match facts.tail {
+            ObjectTailOutcome::Exact | ObjectTailOutcome::ZeroPadding => {
+                (TryReadOutcome::UseCreatedAsset, TryReadLog::Silent)
+            }
+            ObjectTailOutcome::ChineseTextureFields => (
+                TryReadOutcome::UseCreatedAsset,
+                TryReadLog::WarningChineseTextureFields,
+            ),
+            ObjectTailOutcome::IncorrectByteCount => (
+                TryReadOutcome::UseCreatedAsset,
+                TryReadLog::ErrorIncorrectByteCount,
+            ),
+        }
     }
 }
 
@@ -536,6 +602,78 @@ mod tests {
             (
                 NormalObjectOutcome::UseUnreadable,
                 NormalObjectLog::ErrorReadError
+            )
+        );
+    }
+
+    #[test]
+    fn try_read_composition_matches_the_source_control_flow() {
+        // A creation miss wraps silently without reading: later facts are ignored.
+        for facts in [
+            TryReadFacts {
+                created: CreatedAssetKind::Unknown,
+                read_threw: false,
+                tail: ObjectTailOutcome::Exact,
+            },
+            TryReadFacts {
+                created: CreatedAssetKind::Unknown,
+                read_threw: true,
+                tail: ObjectTailOutcome::IncorrectByteCount,
+            },
+        ] {
+            assert_eq!(
+                decide_try_read_object(&facts),
+                (TryReadOutcome::UseUnknownObject, TryReadLog::Silent)
+            );
+        }
+        // A thrown read keeps the asset with the exception error, whatever the tail.
+        let thrown = TryReadFacts {
+            created: CreatedAssetKind::Serialized,
+            read_threw: true,
+            tail: ObjectTailOutcome::Exact,
+        };
+        assert_eq!(
+            decide_try_read_object(&thrown),
+            (
+                TryReadOutcome::UseCreatedAsset,
+                TryReadLog::ErrorReadException
+            )
+        );
+        // Clean and padded tails stay silent; the Chinese tail warns; leftovers error.
+        let base = TryReadFacts {
+            created: CreatedAssetKind::TypeTreeObject,
+            read_threw: false,
+            tail: ObjectTailOutcome::Exact,
+        };
+        assert_eq!(
+            decide_try_read_object(&base),
+            (TryReadOutcome::UseCreatedAsset, TryReadLog::Silent)
+        );
+        assert_eq!(
+            decide_try_read_object(&TryReadFacts {
+                tail: ObjectTailOutcome::ZeroPadding,
+                ..base
+            }),
+            (TryReadOutcome::UseCreatedAsset, TryReadLog::Silent)
+        );
+        assert_eq!(
+            decide_try_read_object(&TryReadFacts {
+                tail: ObjectTailOutcome::ChineseTextureFields,
+                ..base
+            }),
+            (
+                TryReadOutcome::UseCreatedAsset,
+                TryReadLog::WarningChineseTextureFields
+            )
+        );
+        assert_eq!(
+            decide_try_read_object(&TryReadFacts {
+                tail: ObjectTailOutcome::IncorrectByteCount,
+                ..base
+            }),
+            (
+                TryReadOutcome::UseCreatedAsset,
+                TryReadLog::ErrorIncorrectByteCount
             )
         );
     }
