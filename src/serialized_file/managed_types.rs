@@ -15,6 +15,9 @@
 //! - The `ManagedReferenceTypes` registry schema: every type, field, and array-depth constant
 //!   plus the canonical field layouts the baseline normalizes type trees onto. Decoding registry
 //!   payloads stays open; this records the schema our decoder must eventually accept.
+//! - The `FieldSerializer` SerializeReference field-shape selection: stable reference
+//!   identifiers (Unity 2021.2.0a19+) address registry objects with the 64-bit `rid`
+//!   shape, earlier versions with the 32-bit index shape.
 //! - The `EngineTypePredicates` string tables with the direct-comparison rules
 //!   (`IsSerializableUnityStruct` including the `LazyLoadReference` prefix, and the
 //!   should-have-had-serializable value-type set). Assignability checks need a runtime type
@@ -297,6 +300,26 @@ pub const MANAGED_REFERENCE_SHAPES: &[ManagedReferenceShape] = &[
     },
 ];
 
+/// `FieldSerializer` SerializeReference field-shape selection over caller facts.
+///
+/// Objects referenced by `[SerializeReference]` fields got stable identifiers in
+/// Unity 2021.2.0a19 (`HasStableReferenceIds`): at and after that version the field
+/// holds the 64-bit `rid` shape, before it the 32-bit index shape. `has_stable_reference_ids`
+/// is that version gate, precomputed by the caller. This is the assembly-side twin of the
+/// tree-side `IsIndexedManagedReference` selection in `object.rs`, which reads the same
+/// pair of canonical shapes from the identifier child name instead.
+pub fn managed_reference_shape_for_stable_ids(
+    has_stable_reference_ids: bool,
+) -> &'static ManagedReferenceShape {
+    // Shapes are in source declaration order: `ManagedReference` (rid) first,
+    // `IndexedManagedReference` (id) second; the schema test pins both layouts.
+    if has_stable_reference_ids {
+        &MANAGED_REFERENCE_SHAPES[0]
+    } else {
+        &MANAGED_REFERENCE_SHAPES[1]
+    }
+}
+
 /// Unity value types that should have had the serializable attribute.
 pub const UNITY_VALUE_TYPES_NEEDING_SERIALIZABLE: [&str; 14] = [
     "Vector3",
@@ -362,8 +385,9 @@ pub fn max_depth_of(field_depths: &[Option<i32>]) -> i32 {
 mod tests {
     use super::{
         element_type, is_serializable_unity_struct, is_unity_engine_value_type, managed_reference,
-        max_depth_of, FieldShape, PrimitiveType, MANAGED_REFERENCE_SHAPES,
-        SERIALIZABLE_UNITY_STRUCTS, UNITY_VALUE_TYPES_NEEDING_SERIALIZABLE,
+        managed_reference_shape_for_stable_ids, max_depth_of, FieldShape, PrimitiveType,
+        MANAGED_REFERENCE_SHAPES, SERIALIZABLE_UNITY_STRUCTS,
+        UNITY_VALUE_TYPES_NEEDING_SERIALIZABLE,
     };
 
     #[test]
@@ -519,6 +543,28 @@ mod tests {
         ));
         assert!(!is_serializable_unity_struct("UnityEngine.Vector3"));
         assert!(!is_serializable_unity_struct("UnityEngine.Gradient"));
+    }
+
+    #[test]
+    fn stable_identifier_flag_selects_the_reference_shape() {
+        let modern = managed_reference_shape_for_stable_ids(true);
+        assert_eq!(modern.type_name, managed_reference::MANAGED_REFERENCE_NAME);
+        assert!(!modern.flow_mapped_in_yaml);
+        assert_eq!(modern.fields.len(), 1);
+        assert_eq!(
+            modern.fields[0].name,
+            managed_reference::REFERENCE_ID_FIELD_NAME
+        );
+        assert_eq!(modern.fields[0].type_name, "Long");
+        assert_eq!(modern.fields[0].array_depth, 0);
+        let legacy = managed_reference_shape_for_stable_ids(false);
+        assert_eq!(legacy.type_name, managed_reference::MANAGED_REFERENCE_NAME);
+        assert!(!legacy.flow_mapped_in_yaml);
+        assert_eq!(legacy.fields.len(), 1);
+        assert_eq!(legacy.fields[0].name, managed_reference::INDEX_FIELD_NAME);
+        assert_eq!(legacy.fields[0].type_name, "Int");
+        assert_eq!(legacy.fields[0].array_depth, 0);
+        assert!(!std::ptr::eq(modern, legacy));
     }
 
     #[test]

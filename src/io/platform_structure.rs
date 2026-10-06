@@ -1,9 +1,10 @@
 //! Platform root and DataPath discovery for mounted Unity game layouts.
 //!
 //! Covers the root/marker decisions per platform (including the Android APK/OBB bitmask and the
-//! `assets/bin/Data` gate) plus the Android, iOS, Switch, and PS4 directory layouts. Backend
-//! selection, assembly and metadata collection, and bundle gathering live in the file inventory;
-//! bundle-hierarchy lookups live in the serialized-file workspace.
+//! `assets/bin/Data` gate), the Android, iOS, Switch, and PS4 directory layouts, and the WebGL
+//! build-flavor preference. Backend selection, assembly and metadata collection, and bundle
+//! gathering live in the file inventory; bundle-hierarchy lookups live in the serialized-file
+//! workspace.
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -810,6 +811,14 @@ pub fn ps4_data_layout(root_path: &str) -> Ps4DataLayout {
     }
 }
 
+/// `WebGLGameStructure` build-flavor search order: `Build` (`*.data.unityweb`), then
+/// `Development` (`*.data`), then `Release` (`*.datagz`), mirroring the constructor preference.
+pub const WEBGL_BUILD_FLAVORS: [(&str, &str); 3] = [
+    ("Build", ".data.unityweb"),
+    ("Development", ".data"),
+    ("Release", ".datagz"),
+];
+
 fn detect_ios(
     filesystem: &VirtualFileSystem,
     selected_path: &str,
@@ -949,11 +958,7 @@ fn detect_webgl(
     {
         return Ok(None);
     }
-    for (directory, suffix) in [
-        ("Build", ".data.unityweb"),
-        ("Development", ".data"),
-        ("Release", ".datagz"),
-    ] {
+    for (directory, suffix) in WEBGL_BUILD_FLAVORS {
         let data_directory = join_path(selected_path, directory);
         if exists_directory(filesystem, &data_directory)?
             && has_top_level_suffix(filesystem, &data_directory, suffix)?
@@ -1299,7 +1304,7 @@ mod tests {
         android_data_layout, detect_desktop_platform, detect_platform_structure, ios_data_layout,
         ps4_data_layout, switch_data_layout, DesktopPlatform, PlatformKind, PlatformResourceLookup,
         PlatformResourceProvider, PlatformResourceSource, PlatformStructure,
-        PlatformStructureErrorKind, PlatformStructureLimits,
+        PlatformStructureErrorKind, PlatformStructureLimits, WEBGL_BUILD_FLAVORS,
     };
     use crate::io::filesystem::VirtualFileSystem;
 
@@ -1798,6 +1803,31 @@ mod tests {
         assert_eq!(web_player.name.as_deref(), Some("index"));
         assert_eq!(web_player.game_data_path, None);
         assert_eq!(web_player.data_paths, ["/player"]);
+    }
+
+    #[test]
+    fn webgl_build_flavors_prefer_build_then_development_then_release() {
+        assert_eq!(
+            WEBGL_BUILD_FLAVORS,
+            [
+                ("Build", ".data.unityweb"),
+                ("Development", ".data"),
+                ("Release", ".datagz"),
+            ]
+        );
+        // A Release-only tree still detects, with the release directory as data path.
+        let mut filesystem = VirtualFileSystem::new();
+        insert_file(&mut filesystem, "/rel/index.html");
+        insert_file(&mut filesystem, "/rel/Release/game.datagz");
+        let release = detect_platform_structure(
+            &filesystem,
+            &["/rel".to_owned()],
+            PlatformStructureLimits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(release.platform, PlatformKind::WebGl);
+        assert_eq!(release.data_paths, ["/rel", "/rel/Release"]);
     }
 
     #[test]

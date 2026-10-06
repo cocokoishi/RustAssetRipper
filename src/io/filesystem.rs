@@ -430,24 +430,15 @@ impl VirtualFileSystem {
             return Err(invalid_path("logical file path cannot be empty"));
         }
         let siblings = self.enumerate_files(directory, "*", SearchOption::TopDirectoryOnly)?;
-        let split_prefix = format!("{base_name}.split");
         let mut indexed_parts = Vec::<(usize, String)>::new();
         for sibling in siblings {
             let Some(file_name) = sibling.rsplit('/').next() else {
                 continue;
             };
-            let Some(suffix) = file_name.strip_prefix(&split_prefix) else {
+            let Some(index) = split_sibling_part_index(base_name, file_name) else {
                 continue;
             };
-            if suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
-                continue;
-            }
-            let index = suffix.parse::<usize>().map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("split part index in '{sibling}' exceeds the address space"),
-                )
-            })?;
+            let index = index?;
             indexed_parts.try_reserve(1).map_err(|_| {
                 io::Error::new(
                     io::ErrorKind::OutOfMemory,
@@ -744,6 +735,29 @@ fn logical_split_base(path: &str) -> Option<&str> {
     path.get(..path.len().checked_sub(suffix.len() + ".split".len())?)
 }
 
+/// Split-part suffix decision for virtual sibling scans: the numeric part index
+/// when `file_name` is exactly `{base}.split<digits>`, or `None` for unrelated
+/// siblings. This recognizes with a known base, unlike `logical_split_base`,
+/// which derives the base from the name.
+///
+/// Unlike the on-disk opener (`io::stream`), which rejects decoy names such as
+/// `data.split+1` because they would corrupt an assembled group, sibling scans
+/// must ignore them: batched path-list inputs share virtual directories, so one
+/// input's oddly-named files can never disturb another input's group.
+/// Overflowing indices are an error. Called by `find_contiguous_split_parts`.
+fn split_sibling_part_index(base_name: &str, file_name: &str) -> Option<io::Result<usize>> {
+    let suffix = file_name.strip_prefix(base_name)?.strip_prefix(".split")?;
+    if suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some(suffix.parse::<usize>().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("split part index in '{file_name}' exceeds the address space"),
+        )
+    }))
+}
+
 fn file_extension_pattern(pattern: &str) -> io::Result<&str> {
     if pattern == "*" {
         return Ok("");
@@ -789,7 +803,9 @@ fn unsupported_pattern(pattern: &str) -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{SearchOption, VirtualFileSystem, VirtualFileSystemLimits};
+    use super::{
+        split_sibling_part_index, SearchOption, VirtualFileSystem, VirtualFileSystemLimits,
+    };
     use crate::io::stream::SmartStream;
     use std::io::{Read, Seek, SeekFrom, Write};
 
@@ -859,6 +875,66 @@ mod tests {
         assert!(!filesystem
             .logical_file_exists("/data/missing.resS")
             .unwrap());
+    }
+
+    /// The sibling-scan part decision: strict `{base}.split<digits>` names
+    /// resolve to their index while unrelated siblings — including decoy names
+    /// the on-disk opener rejects — stay ignored instead of disturbing a group.
+    #[test]
+    fn split_sibling_names_resolve_strictly_numeric_indices() {
+        assert_eq!(
+            split_sibling_part_index("data", "data.split0")
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            split_sibling_part_index("data", "data.split007")
+                .unwrap()
+                .unwrap(),
+            7
+        );
+        assert!(split_sibling_part_index("data", "other.split0").is_none());
+        assert!(split_sibling_part_index("data", "database.split0").is_none());
+        assert!(split_sibling_part_index("data", "data.split").is_none());
+        assert!(split_sibling_part_index("data", "data.split+1").is_none());
+        assert!(split_sibling_part_index("data", "data.split 1").is_none());
+    }
+
+    /// Grouping with decoys: batched inputs share virtual directories, so a
+    /// decoy sibling must neither join the group nor break its assembly, and it
+    /// stays readable as the regular file it is.
+    #[test]
+    fn split_grouping_ignores_decoy_siblings() {
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem.create_directory(Some("/batch")).unwrap();
+        filesystem
+            .write_all_bytes("/batch/group.resS.split0", b"first ")
+            .unwrap();
+        filesystem
+            .write_all_bytes("/batch/group.resS.split1", b"second")
+            .unwrap();
+        filesystem
+            .write_all_bytes("/batch/group.resS.split+1", b"decoy")
+            .unwrap();
+        filesystem
+            .write_all_bytes("/batch/other.resS.split0", b"other")
+            .unwrap();
+
+        let mut stream = filesystem.open_logical_file("/batch/group.resS").unwrap();
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"first second");
+        assert_eq!(
+            filesystem
+                .read_all_bytes("/batch/group.resS.split+1", 5)
+                .unwrap(),
+            b"decoy"
+        );
+        let mut other = filesystem.open_logical_file("/batch/other.resS").unwrap();
+        let mut other_bytes = Vec::new();
+        other.read_to_end(&mut other_bytes).unwrap();
+        assert_eq!(other_bytes, b"other");
     }
 
     #[test]

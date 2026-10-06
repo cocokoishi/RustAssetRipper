@@ -48,6 +48,10 @@ impl Default for PlatformFileInventoryLimits {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PlatformFileInventoryOptions {
     pub skip_streaming_assets: bool,
+    /// `CoreConfiguration.DisableScriptImport` (`ScriptContentLevel.Level0`): report the
+    /// scripting backend as `Unknown` and skip assembly collection entirely. File and
+    /// bundle collection still run; only backend identification and Mono gathering stop.
+    pub disable_script_import: bool,
 }
 
 /// Files that the platform structure registers for dependency lookup.
@@ -148,7 +152,8 @@ impl PlatformStructure {
         if self.platform == PlatformKind::Android {
             state.collect_android_asset_bundles(self)?;
         }
-        let scripting_backend = state.detect_backend_and_collect_assemblies(self)?;
+        let scripting_backend =
+            state.detect_backend_and_collect_assemblies(self, options.disable_script_import)?;
 
         Ok(PlatformFileInventory {
             registered_files: state
@@ -800,9 +805,10 @@ impl InventoryState<'_> {
     fn detect_backend_and_collect_assemblies(
         &mut self,
         structure: &PlatformStructure,
+        scripts_disabled: bool,
     ) -> Result<ScriptingBackend, PlatformFileInventoryError> {
         let managed_path = managed_path(structure);
-        let backend = if self.has_il2cpp_files(structure, managed_path.as_deref())? {
+        let detected = if self.has_il2cpp_files(structure, managed_path.as_deref())? {
             ScriptingBackend::Il2Cpp
         } else if let Some(path) = managed_path.as_deref() {
             if self.has_mono_assemblies(path)? {
@@ -813,6 +819,9 @@ impl InventoryState<'_> {
         } else {
             ScriptingBackend::Unknown
         };
+        // This pass only identifies the platform structure's backend; mixed-structure
+        // selection stays with the mixed-structure handling.
+        let backend = select_scripting_backend(scripts_disabled, Some(detected), None);
 
         if backend == ScriptingBackend::Mono {
             let managed_candidate = managed_path
@@ -1281,6 +1290,33 @@ fn managed_path(structure: &PlatformStructure) -> Option<String> {
     }
 }
 
+/// `GameStructure.GetScriptingBackend` selection
+/// (`AssetRipper/Source/AssetRipper.Import/Structure/GameStructure.cs`, lines 115-139) over
+/// caller facts: disabled script import always reports `Unknown` (like the source, which
+/// then installs the no-op assembly manager); otherwise the platform backend wins unless
+/// it is unknown, then the mixed backend, then `Unknown`. A `None` backend is an absent
+/// structure, which the source skips exactly like an `Unknown` one.
+pub const fn select_scripting_backend(
+    scripts_disabled: bool,
+    platform_backend: Option<ScriptingBackend>,
+    mixed_backend: Option<ScriptingBackend>,
+) -> ScriptingBackend {
+    if scripts_disabled {
+        return ScriptingBackend::Unknown;
+    }
+    if let Some(backend) = platform_backend {
+        if !matches!(backend, ScriptingBackend::Unknown) {
+            return backend;
+        }
+    }
+    if let Some(backend) = mixed_backend {
+        if !matches!(backend, ScriptingBackend::Unknown) {
+            return backend;
+        }
+    }
+    ScriptingBackend::Unknown
+}
+
 /// Where a Mono backend gathers assemblies from.
 ///
 /// Mirrors the `CollectMainAssemblies` location dispatch
@@ -1688,9 +1724,9 @@ impl Error for PlatformWorkspaceLoadErrorKind {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_primary_engine_file, plan_mono_assembly_collection, MainAssemblyCollection,
-        PlatformFileInventoryErrorKind, PlatformFileInventoryLimits, PlatformFileInventoryOptions,
-        ScriptingBackend,
+        is_primary_engine_file, plan_mono_assembly_collection, select_scripting_backend,
+        MainAssemblyCollection, PlatformFileInventoryErrorKind, PlatformFileInventoryLimits,
+        PlatformFileInventoryOptions, ScriptingBackend,
     };
     use crate::io::filesystem::VirtualFileSystem;
     use crate::io::platform_structure::{PlatformKind, PlatformStructure};
@@ -1764,6 +1800,7 @@ mod tests {
                 &filesystem,
                 PlatformFileInventoryOptions {
                     skip_streaming_assets: true,
+                    disable_script_import: false,
                 },
                 PlatformFileInventoryLimits::default(),
             )
@@ -1837,6 +1874,7 @@ mod tests {
                 &filesystem,
                 PlatformFileInventoryOptions {
                     skip_streaming_assets: true,
+                    disable_script_import: false,
                 },
                 PlatformFileInventoryLimits::default(),
             )
@@ -1878,6 +1916,7 @@ mod tests {
                 &filesystem,
                 PlatformFileInventoryOptions {
                     skip_streaming_assets: true,
+                    disable_script_import: false,
                 },
                 PlatformFileInventoryLimits::default(),
             )
@@ -1971,6 +2010,7 @@ mod tests {
                 &filesystem,
                 PlatformFileInventoryOptions {
                     skip_streaming_assets: true,
+                    disable_script_import: false,
                 },
                 PlatformFileInventoryLimits::default(),
             )
@@ -1988,6 +2028,7 @@ mod tests {
                 &filesystem,
                 PlatformFileInventoryOptions {
                     skip_streaming_assets: true,
+                    disable_script_import: false,
                 },
                 PlatformFileInventoryLimits {
                     max_assemblies: 0,
@@ -1999,6 +2040,36 @@ mod tests {
             error.kind,
             PlatformFileInventoryErrorKind::AssemblyCountLimitExceeded { count: 1, limit: 0 }
         ));
+    }
+
+    #[test]
+    fn disabled_script_import_reports_unknown_and_collects_no_assemblies() {
+        let mut filesystem = VirtualFileSystem::new();
+        write_file(
+            &mut filesystem,
+            "/game/Game_Data/Managed/Assembly-CSharp.dll",
+            b"managed assembly",
+        );
+        let structure = structure(
+            PlatformKind::Windows,
+            "/game",
+            &["/game/Game_Data"],
+            Some("/game/Game_Data"),
+            Some("Game"),
+        );
+
+        let inventory = structure
+            .collect_game_files(
+                &filesystem,
+                PlatformFileInventoryOptions {
+                    skip_streaming_assets: true,
+                    disable_script_import: true,
+                },
+                PlatformFileInventoryLimits::default(),
+            )
+            .unwrap();
+        assert_eq!(inventory.scripting_backend, ScriptingBackend::Unknown);
+        assert!(inventory.assemblies.is_empty());
     }
 
     #[test]
@@ -2033,6 +2104,7 @@ mod tests {
                     &filesystem,
                     PlatformFileInventoryOptions {
                         skip_streaming_assets: true,
+                        disable_script_import: false,
                     },
                     PlatformFileInventoryLimits::default(),
                 )
@@ -2156,6 +2228,7 @@ mod tests {
                     &filesystem,
                     PlatformFileInventoryOptions {
                         skip_streaming_assets: true,
+                        disable_script_import: false,
                     },
                     PlatformFileInventoryLimits::default(),
                 )
@@ -2196,6 +2269,7 @@ mod tests {
                 &filesystem,
                 PlatformFileInventoryOptions {
                     skip_streaming_assets: true,
+                    disable_script_import: false,
                 },
                 PlatformFileInventoryLimits::default(),
             )
@@ -2222,6 +2296,7 @@ mod tests {
                 &filesystem,
                 PlatformFileInventoryOptions {
                     skip_streaming_assets: true,
+                    disable_script_import: false,
                 },
                 PlatformFileInventoryLimits::default(),
             )
@@ -2327,6 +2402,40 @@ mod tests {
         ] {
             assert!(!is_primary_engine_file(name), "{name}");
         }
+    }
+
+    #[test]
+    fn scripting_backend_selection_follows_the_disable_and_structure_branches() {
+        use ScriptingBackend::{Il2Cpp, Mono, Unknown};
+        // Disabled script import always reports Unknown, like the source installing the
+        // no-op assembly manager.
+        for platform in [None, Some(Unknown), Some(Mono), Some(Il2Cpp)] {
+            for mixed in [None, Some(Unknown), Some(Mono)] {
+                assert_eq!(
+                    select_scripting_backend(true, platform, mixed),
+                    Unknown,
+                    "{platform:?}/{mixed:?}"
+                );
+            }
+        }
+        // The platform backend wins unless it is unknown or absent.
+        assert_eq!(
+            select_scripting_backend(false, Some(Mono), Some(Il2Cpp)),
+            Mono
+        );
+        assert_eq!(select_scripting_backend(false, Some(Il2Cpp), None), Il2Cpp);
+        // An unknown or absent platform backend falls through to mixed.
+        assert_eq!(
+            select_scripting_backend(false, Some(Unknown), Some(Mono)),
+            Mono
+        );
+        assert_eq!(select_scripting_backend(false, None, Some(Mono)), Mono);
+        // Nothing known anywhere reports Unknown.
+        assert_eq!(
+            select_scripting_backend(false, Some(Unknown), Some(Unknown)),
+            Unknown
+        );
+        assert_eq!(select_scripting_backend(false, None, None), Unknown);
     }
 
     #[test]

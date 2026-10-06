@@ -321,26 +321,18 @@ impl ObjectReferenceGraph {
             };
         }
 
-        let Some(external_index) = file_id
-            .checked_sub(1)
-            .and_then(|index| usize::try_from(index).ok())
-        else {
+        let Some(external_index) = external_table_index(file_id, metadata.externals.len()) else {
             return PPtrResolution::InvalidFileId {
                 file_id,
                 external_count: metadata.externals.len(),
             };
         };
-        match metadata.externals.get(external_index) {
-            Some(identifier) => PPtrResolution::ExternalDependency {
-                file_id,
-                external_index,
-                path_id,
-                identifier,
-            },
-            None => PPtrResolution::InvalidFileId {
-                file_id,
-                external_count: metadata.externals.len(),
-            },
+        let identifier = &metadata.externals[external_index];
+        PPtrResolution::ExternalDependency {
+            file_id,
+            external_index,
+            path_id,
+            identifier,
         }
     }
 
@@ -849,21 +841,14 @@ impl<'a> MultiFileReferenceGraph<'a> {
                 path_id,
             ));
         }
-        let Some(external_index) = file_id
-            .checked_sub(1)
-            .and_then(|index| usize::try_from(index).ok())
+        let Some(external_index) = external_table_index(file_id, source.metadata.externals.len())
         else {
             return Ok(MultiFilePPtrResolution::InvalidFileId {
                 file_id,
                 external_count: source.metadata.externals.len(),
             });
         };
-        let Some(identifier) = source.metadata.externals.get(external_index) else {
-            return Ok(MultiFilePPtrResolution::InvalidFileId {
-                file_id,
-                external_count: source.metadata.externals.len(),
-            });
-        };
+        let identifier = &source.metadata.externals[external_index];
         let target_file_index =
             if let Some(target_file_index) = dependency_targets.get(&external_index) {
                 *target_file_index
@@ -975,21 +960,14 @@ impl<'a> MultiFileReferenceGraph<'a> {
             };
         }
 
-        let Some(external_index) = file_id
-            .checked_sub(1)
-            .and_then(|index| usize::try_from(index).ok())
+        let Some(external_index) = external_table_index(file_id, source_metadata.externals.len())
         else {
             return MultiFilePPtrResolution::InvalidFileId {
                 file_id,
                 external_count: source_metadata.externals.len(),
             };
         };
-        let Some(identifier) = source_metadata.externals.get(external_index) else {
-            return MultiFilePPtrResolution::InvalidFileId {
-                file_id,
-                external_count: source_metadata.externals.len(),
-            };
-        };
+        let identifier = &source_metadata.externals[external_index];
         let dependency_name = identifier.fixed_path_name();
         let (first, end) = self.name_range(&dependency_name);
         match end - first {
@@ -1135,6 +1113,19 @@ fn engine_resource_alias(normalized_name: &str) -> Option<&'static str> {
         }
         _ => None,
     }
+}
+
+/// `AssetCollection.TryGetDependency` file-index gate over caller facts.
+///
+/// PPtr file 0 addresses the local file (callers handle it before this gate);
+/// positive file `n` addresses external slot `n - 1`. Negative, shifted, and
+/// past-the-table IDs have no slot: callers map the miss to their invalid-ID
+/// outcome, mirroring the source null return. A returned index is always
+/// in-bounds for a table of `external_count` entries.
+fn external_table_index(file_id: i32, external_count: usize) -> Option<usize> {
+    let index = file_id.checked_sub(1)?;
+    let index = usize::try_from(index).ok()?;
+    (index < external_count).then_some(index)
 }
 
 fn local_path_id_resolution(graph: &ObjectReferenceGraph, path_id: i64) -> LocalPathIdResolution {
@@ -1439,6 +1430,22 @@ mod tests {
             file_type: None,
             path_name_origin: path.to_owned(),
         }
+    }
+
+    #[test]
+    fn external_file_ids_address_table_slots_like_try_get_dependency() {
+        use super::external_table_index;
+        // File 1 addresses slot 0; higher files shift by one like Dependencies.
+        assert_eq!(external_table_index(1, 2), Some(0));
+        assert_eq!(external_table_index(2, 2), Some(1));
+        // File 0 is the local file (handled before the gate); negative,
+        // shifted, and past-the-table IDs have no slot.
+        assert_eq!(external_table_index(0, 2), None);
+        assert_eq!(external_table_index(-1, 2), None);
+        assert_eq!(external_table_index(i32::MIN, 2), None);
+        assert_eq!(external_table_index(3, 2), None);
+        assert_eq!(external_table_index(1, 0), None);
+        assert_eq!(external_table_index(i32::MAX, 0), None);
     }
 
     fn empty_graph(path_ids: &[i64]) -> ObjectReferenceGraph {
