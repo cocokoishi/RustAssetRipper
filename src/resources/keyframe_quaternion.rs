@@ -319,4 +319,56 @@ mod tests {
         }
         assert_eq!(rows, 48);
     }
+
+    #[test]
+    fn set_values_resets_junk_but_keeps_untouched_slopes() {
+        let version = UnityVersion::parse("2019.4.3f1").unwrap();
+        let mut keyframe = KeyframeQuaternionView {
+            time: 9.0,
+            value: quat(9.0, 9.0, 9.0, 9.0),
+            in_slope: quat(4.0, 5.0, 6.0, 7.0),
+            out_slope: quat(8.0, 9.0, 10.0, 11.0),
+            in_weight: Some(quat(9.0, 9.0, 9.0, 9.0)),
+            out_weight: Some(quat(9.0, 9.0, 9.0, 9.0)),
+            tangent_mode: 9,
+            weighted_mode: Some(9),
+        };
+        let value = quat(0.1, 0.2, 0.3, 0.4);
+        let weight = quat(0.5, 0.6, 0.7, 0.8);
+        set_values_weight_quat(&mut keyframe, version, 1.5, value, weight);
+        // The weight-only overload rewrites its fields exactly; the slopes it
+        // does not own survive, like the source.
+        assert_eq!(
+            keyframe,
+            KeyframeQuaternionView {
+                time: 1.5,
+                value,
+                in_slope: quat(4.0, 5.0, 6.0, 7.0),
+                out_slope: quat(8.0, 9.0, 10.0, 11.0),
+                in_weight: Some(weight),
+                out_weight: Some(weight),
+                tangent_mode: 0,
+                weighted_mode: Some(0),
+            }
+        );
+        // The scalar overload broadcasts one weight to all four lanes.
+        set_values_weight_scalar(&mut keyframe, version, 2.5, value, 0.25);
+        assert_eq!(keyframe.in_weight, Some(quat(0.25, 0.25, 0.25, 0.25)));
+        assert_eq!(keyframe.out_weight, Some(quat(0.25, 0.25, 0.25, 0.25)));
+        // The slopes overload writes its own slopes and still resets the rest.
+        set_values_slopes_quat(
+            &mut keyframe,
+            version,
+            3.5,
+            value,
+            quat(1.0, 1.1, 1.2, 1.3),
+            quat(2.0, 2.1, 2.2, 2.3),
+            weight,
+        );
+        assert_eq!(keyframe.time.to_bits(), 3.5f32.to_bits());
+        assert_eq!(keyframe.in_slope, quat(1.0, 1.1, 1.2, 1.3));
+        assert_eq!(keyframe.out_slope, quat(2.0, 2.1, 2.2, 2.3));
+        assert_eq!(keyframe.tangent_mode, 1);
+        assert_eq!(keyframe.weighted_mode, Some(0));
+    }
 }

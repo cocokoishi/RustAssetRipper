@@ -46,6 +46,23 @@ pub fn calculate_from_vertex_array(vertices: &[[f32; 3]]) -> Bounds {
     }
 }
 
+impl Bounds {
+    /// `Bounds.CopyTo`: write the center and extent back into an AABB view.
+    pub fn copy_to(&self, destination: &mut AabbView) {
+        destination.copy_values_from(self.center, self.extent);
+    }
+}
+
+impl From<AabbView> for Bounds {
+    /// The implicit `Bounds(AABB)` conversion: read the live center and extent.
+    fn from(value: AabbView) -> Self {
+        Bounds {
+            center: value.center,
+            extent: value.extent,
+        }
+    }
+}
+
 /// An AABB view.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct AabbView {
@@ -149,5 +166,20 @@ mod tests {
         };
         aabb.reset();
         assert_eq!(aabb, AabbView::default());
+    }
+
+    #[test]
+    fn bounds_and_aabb_convert_without_reinterpretation() {
+        let aabb = AabbView {
+            center: [1.0, -2.0, 3.0],
+            extent: [4.0, 5.0, -6.0],
+        };
+        let bounds = Bounds::from(aabb);
+        assert_eq!(bits(bounds.center), bits(aabb.center));
+        assert_eq!(bits(bounds.extent), bits(aabb.extent));
+
+        let mut target = AabbView::default();
+        bounds.copy_to(&mut target);
+        assert_eq!(target, aabb);
     }
 }

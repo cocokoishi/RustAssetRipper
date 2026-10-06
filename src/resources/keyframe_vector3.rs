@@ -198,4 +198,52 @@ mod tests {
         }
         assert_eq!(rows, 8);
     }
+
+    #[test]
+    fn set_values_resets_junk_but_keeps_untouched_slopes() {
+        let version = UnityVersion::parse("2019.4.3f1").unwrap();
+        let mut keyframe = KeyframeVector3View {
+            time: 9.0,
+            value: vec3(9.0, 9.0, 9.0),
+            in_slope: vec3(4.0, 5.0, 6.0),
+            out_slope: vec3(7.0, 8.0, 9.0),
+            in_weight: Some(vec3(9.0, 9.0, 9.0)),
+            out_weight: Some(vec3(9.0, 9.0, 9.0)),
+            tangent_mode: 9,
+            weighted_mode: Some(9),
+        };
+        let value = vec3(1.0, 2.0, 3.0);
+        let weight = vec3(0.1, 0.2, 0.3);
+        set_values_weight(&mut keyframe, version, 1.5, value, weight);
+        // The weight-only overload rewrites its fields exactly; the slopes it
+        // does not own survive, like the source.
+        assert_eq!(
+            keyframe,
+            KeyframeVector3View {
+                time: 1.5,
+                value,
+                in_slope: vec3(4.0, 5.0, 6.0),
+                out_slope: vec3(7.0, 8.0, 9.0),
+                in_weight: Some(weight),
+                out_weight: Some(weight),
+                tangent_mode: 0,
+                weighted_mode: Some(0),
+            }
+        );
+        // The slopes overload writes its own slopes and still resets the rest.
+        set_values_slopes(
+            &mut keyframe,
+            version,
+            2.5,
+            value,
+            vec3(1.0, 1.0, 1.0),
+            vec3(2.0, 2.0, 2.0),
+            weight,
+        );
+        assert_eq!(keyframe.time.to_bits(), 2.5f32.to_bits());
+        assert_eq!(keyframe.in_slope, vec3(1.0, 1.0, 1.0));
+        assert_eq!(keyframe.out_slope, vec3(2.0, 2.0, 2.0));
+        assert_eq!(keyframe.tangent_mode, 1);
+        assert_eq!(keyframe.weighted_mode, Some(0));
+    }
 }
