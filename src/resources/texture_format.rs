@@ -36,6 +36,58 @@ pub fn is_rgb(format: i32) -> bool {
     )
 }
 
+/// `BuildTarget.Xbox360`, the only platform `IsSwapBytes` applies to.
+pub const XBOX360_BUILD_TARGET: i32 = 11;
+
+/// `Texture2DExtensions.IsSwapBytes`: Xbox360 textures in a 16-bit or DXT layout
+/// are stored with swapped byte pairs.
+pub fn is_swap_bytes(platform: i32, format: i32) -> bool {
+    platform == XBOX360_BUILD_TARGET
+        && matches!(
+            format,
+            2 /* ARGB4444 */ | 7 /* RGB565 */ | 10 /* DXT1 */ | 28 /* DXT1Crunched */
+            | 11 /* DXT3 */ | 12 /* DXT5 */ | 29 /* DXT5Crunched */
+        )
+}
+
+/// Why texture image bytes cannot be byte-swapped.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SwapBytesError {
+    /// An odd byte count has no partner for its final byte. The source loop would
+    /// index out of range here; valid swapped layouts always carry even counts.
+    OddByteCount { byte_count: usize },
+}
+
+impl core::fmt::Display for SwapBytesError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::OddByteCount { byte_count } => write!(
+                formatter,
+                "cannot swap adjacent bytes of {byte_count} bytes: the final byte has no partner"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SwapBytesError {}
+
+/// The `GetImageData` Xbox360 step: swap every adjacent byte pair.
+///
+/// The source swaps in place over the fetched buffer (inline or streamed); the
+/// copy-before-swap stays caller-side. Operates on a copy and returns it.
+pub fn swap_adjacent_bytes(data: &[u8]) -> Result<Vec<u8>, SwapBytesError> {
+    if !data.len().is_multiple_of(2) {
+        return Err(SwapBytesError::OddByteCount {
+            byte_count: data.len(),
+        });
+    }
+    let mut swapped = data.to_vec();
+    for pair in swapped.chunks_exact_mut(2) {
+        pair.swap(0, 1);
+    }
+    Ok(swapped)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -60,5 +112,29 @@ mod tests {
             rows += 1;
         }
         assert_eq!(rows, 91);
+    }
+
+    #[test]
+    fn swap_rule_matches_the_xbox360_layouts() {
+        // All seven swapped layouts on Xbox360.
+        for format in [2, 7, 10, 11, 12, 28, 29] {
+            assert!(is_swap_bytes(XBOX360_BUILD_TARGET, format), "{format}");
+        }
+        // Other formats and other platforms never swap.
+        assert!(!is_swap_bytes(XBOX360_BUILD_TARGET, 4));
+        assert!(!is_swap_bytes(XBOX360_BUILD_TARGET, 64));
+        assert!(!is_swap_bytes(0, 10));
+        assert!(!is_swap_bytes(13, 12));
+    }
+
+    #[test]
+    fn adjacent_swap_exchanges_every_pair() {
+        assert_eq!(swap_adjacent_bytes(&[]), Ok(Vec::new()));
+        assert_eq!(swap_adjacent_bytes(&[0x12, 0x34]), Ok(vec![0x34, 0x12]));
+        assert_eq!(swap_adjacent_bytes(&[1, 2, 3, 4]), Ok(vec![2, 1, 4, 3]));
+        assert_eq!(
+            swap_adjacent_bytes(&[1, 2, 3]),
+            Err(SwapBytesError::OddByteCount { byte_count: 3 })
+        );
     }
 }

@@ -732,5 +732,11 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 ## 94. Checkpoint: fallback hash and synthetic names (2026-10-06)
 
 - Ported `RawDataHash` + `Unknown`/`Unreadable` naming with a dedicated test; `SER-TT-ABSENT-001` evidence updated. Lib 987/987 locally, workspace Clippy clean; CI run `37391118909` green (all five jobs) for remote `main` = `739822e`; local matches.
-- Next: the remaining product rows (`PRODUCT-CONFIG-001`, `PRODUCT-GUI-001`, `GENERATORS-001`, `TOOLS-001` remainders).
+- Next: texture platform transforms, then the remaining product rows (`PRODUCT-CONFIG-001`, `PRODUCT-GUI-001`, `GENERATORS-001`, `TOOLS-001` remainders).
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 95. Checkpoint: Xbox360 swap rule (2026-10-06)
+
+- Ported `IsSwapBytes` + pair loop with two tests. Lib 989/989 locally, workspace Clippy clean; full validation via Actions after push.
+- Next: Switch unswizzle, then the remaining product rows (`PRODUCT-CONFIG-001`, `PRODUCT-GUI-001`, `GENERATORS-001`, `TOOLS-001` remainders).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
