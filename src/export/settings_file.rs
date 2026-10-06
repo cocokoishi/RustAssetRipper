@@ -482,6 +482,95 @@ pub const fn decide_settings_auto_save(save_settings_to_disk: bool) -> SettingsP
     }
 }
 
+/// `CoreConfiguration.LogConfigurationValues` (plus `FullConfiguration`'s override)
+/// as message texts, in source order.
+///
+/// The export root path is logged from the live configuration rather than the
+/// settings file, so it arrives as a caller fact; logger dispatch stays
+/// caller-side. Only the source-logged subset appears: record members the source
+/// never logs (`SaveSettingsToDisk`, `LanguageCode`, `ScriptTypesFullyQualified`,
+/// `RemoveNullableAttributes`, `PublicizeAssemblies`) are omitted here too. Enums
+/// render by member name (the `{:?}` layouts pinned in `settings.rs`), booleans
+/// render capitalized like .NET, and versions render as their stored text.
+pub fn settings_log_messages(
+    export_root_path: &str,
+    settings: &SerializedSettingsFile,
+) -> Vec<String> {
+    let mut messages = Vec::with_capacity(20);
+    messages.push("Configuration Settings:".to_owned());
+    messages.push(format!("ExportRootPath: {export_root_path}"));
+    let import = &settings.import;
+    messages.push(format!(
+        "ScriptContentLevel: {:?}",
+        import.script_content_level
+    ));
+    messages.push(format!(
+        "StreamingAssetsMode: {:?}",
+        import.streaming_assets_mode
+    ));
+    messages.push(format!(
+        "DefaultVersion: {}",
+        import.default_version.as_str()
+    ));
+    messages.push(format!("TargetVersion: {}", import.target_version.as_str()));
+    let processing = &settings.processing;
+    messages.push(format!(
+        "EnablePrefabOutlining: {}",
+        dotnet_bool(processing.enable_prefab_outlining)
+    ));
+    messages.push(format!(
+        "EnableStaticMeshSeparation: {}",
+        dotnet_bool(processing.enable_static_mesh_separation)
+    ));
+    messages.push(format!(
+        "EnableAssetDeduplication: {}",
+        dotnet_bool(processing.enable_asset_deduplication)
+    ));
+    messages.push(format!(
+        "BundledAssetsExportMode: {:?}",
+        processing.bundled_assets_export_mode
+    ));
+    let export = &settings.export;
+    messages.push(format!(
+        "AudioExportFormat: {:?}",
+        export.audio_export_format
+    ));
+    messages.push(format!(
+        "ImageExportFormat: {:?}",
+        export.image_export_format
+    ));
+    messages.push(format!(
+        "LightmapTextureExportFormat: {:?}",
+        export.lightmap_texture_export_format
+    ));
+    messages.push(format!("ScriptExportMode: {:?}", export.script_export_mode));
+    messages.push(format!(
+        "ScriptLanguageVersion: {:?}",
+        export.script_language_version
+    ));
+    messages.push(format!("ShaderExportMode: {:?}", export.shader_export_mode));
+    messages.push(format!("SpriteExportMode: {:?}", export.sprite_export_mode));
+    messages.push(format!("TextExportMode: {:?}", export.text_export_mode));
+    messages.push(format!(
+        "ExportUnreadableAssets: {}",
+        dotnet_bool(export.export_unreadable_assets)
+    ));
+    messages.push(format!(
+        "PreferOriginalTextureExtension: {}",
+        dotnet_bool(export.prefer_original_texture_extension)
+    ));
+    messages
+}
+
+/// .NET renders booleans capitalized; Rust does not.
+const fn dotnet_bool(value: bool) -> &'static str {
+    if value {
+        "True"
+    } else {
+        "False"
+    }
+}
+
 /// Parse `AssetRipper.Settings.json` back into records.
 ///
 /// Unknown properties are ignored, missing properties keep defaults, and duplicate keys
@@ -1075,9 +1164,9 @@ impl<'a> JsonParser<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_settings_file, write_settings_file, ExportSettingsFile, ImportSettingsFile,
-        ProcessingSettingsFile, SerializedSettingsFile, SettingsFileError, SettingsFileLimits,
-        VersionText, DEFAULT_UNITY_VERSION_TEXT,
+        parse_settings_file, settings_log_messages, write_settings_file, ExportSettingsFile,
+        ImportSettingsFile, ProcessingSettingsFile, SerializedSettingsFile, SettingsFileError,
+        SettingsFileLimits, VersionText, DEFAULT_UNITY_VERSION_TEXT,
     };
     use crate::export::settings::{
         AudioExportFormat, BundledAssetsExportMode, ExportDefaults, ImageExportFormat,
@@ -1327,5 +1416,68 @@ mod tests {
         assert!(written.contains("\"LanguageCode\": \"q\\\"\\\\é\\u0001\""));
         let parsed = parse_settings_file(&written, SettingsFileLimits::default()).unwrap();
         assert_eq!(parsed, settings);
+    }
+
+    #[test]
+    fn log_messages_follow_the_source_rows_in_order() {
+        let parsed = parse_settings_file(
+            include_str!("settings_file_defaults.json"),
+            SettingsFileLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            settings_log_messages("C:\\rip", &parsed),
+            [
+                "Configuration Settings:",
+                "ExportRootPath: C:\\rip",
+                "ScriptContentLevel: Level2",
+                "StreamingAssetsMode: Extract",
+                "DefaultVersion: 0.0.0a0",
+                "TargetVersion: 0.0.0a0",
+                "EnablePrefabOutlining: False",
+                "EnableStaticMeshSeparation: True",
+                "EnableAssetDeduplication: False",
+                "BundledAssetsExportMode: DirectExport",
+                "AudioExportFormat: Default",
+                "ImageExportFormat: Png",
+                "LightmapTextureExportFormat: Yaml",
+                "ScriptExportMode: Hybrid",
+                "ScriptLanguageVersion: AutoSafe",
+                "ShaderExportMode: Dummy",
+                "SpriteExportMode: Yaml",
+                "TextExportMode: Parse",
+                "ExportUnreadableAssets: False",
+                "PreferOriginalTextureExtension: True",
+            ]
+        );
+    }
+
+    #[test]
+    fn log_messages_render_modified_values_like_dotnet() {
+        assert_eq!(
+            settings_log_messages("/tmp/rip", &modified_settings()),
+            [
+                "Configuration Settings:",
+                "ExportRootPath: /tmp/rip",
+                "ScriptContentLevel: Level3",
+                "StreamingAssetsMode: Ignore",
+                "DefaultVersion: 2019.4.40f1",
+                "TargetVersion: 2021.3.5f1",
+                "EnablePrefabOutlining: True",
+                "EnableStaticMeshSeparation: False",
+                "EnableAssetDeduplication: True",
+                "BundledAssetsExportMode: GroupByBundleName",
+                "AudioExportFormat: PreferWav",
+                "ImageExportFormat: Bmp",
+                "LightmapTextureExportFormat: Exr",
+                "ScriptExportMode: Decompiled",
+                "ScriptLanguageVersion: CSharp1",
+                "ShaderExportMode: Decompile",
+                "SpriteExportMode: Native",
+                "TextExportMode: Bytes",
+                "ExportUnreadableAssets: True",
+                "PreferOriginalTextureExtension: False",
+            ]
+        );
     }
 }

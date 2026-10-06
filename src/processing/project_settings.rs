@@ -1,4 +1,12 @@
 //! Bounded models for generated Unity project settings.
+//!
+//! Covers the `EditorBuildSettings` scene copy, the `EditorSettingsExtensions.SetToDefaults`
+//! values, and the `EditorFormatProcessor` PlayerSettings editor-field decisions. The
+//! PlayerSettings enum discriminants below are the stable UnityEditor API values
+//! (`ApiCompatibilityLevel`, `ScriptingRuntimeVersion`, `WebGLLinkerTarget`): the frozen
+//! baseline references them from the `AssetRipper.Primitives` package rather than declaring
+//! them, so the discriminants are recorded here as an external-API dependency, not
+//! baseline-read values.
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -237,6 +245,52 @@ impl EditorBuildSettingsModel {
     }
 }
 
+/// `WebGLLinkerTarget.Wasm`, written to `webGLLinkerTarget` when the field is present.
+pub const WEB_GL_LINKER_TARGET_WASM: i32 = 1;
+/// `ApiCompatibilityLevel.NET_2_0`, for assemblies carrying mscorlib 2.
+pub const API_COMPATIBILITY_LEVEL_NET_2_0: i32 = 2;
+/// `ApiCompatibilityLevel.NET_Unity_4_8`, for modern assemblies.
+pub const API_COMPATIBILITY_LEVEL_NET_UNITY_4_8: i32 = 5;
+/// `ScriptingRuntimeVersion.Legacy`, for assemblies carrying mscorlib 2.
+pub const SCRIPTING_RUNTIME_VERSION_LEGACY: i32 = 0;
+/// `ScriptingRuntimeVersion.Latest`, for modern assemblies.
+pub const SCRIPTING_RUNTIME_VERSION_LATEST: i32 = 1;
+
+/// Editor values for a `TypeTreeObject{ IsPlayerSettings }` asset, mirroring the
+/// `EditorFormatProcessor.Convert` arm: `webGLLinkerTarget` is forced to Wasm and
+/// `allowUnsafeCode` to true, while the scripting pair follows `HasMscorlib2`.
+///
+/// Field presence (`ContainsField`) stays caller-side; this kernel answers what to write.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PlayerSettingsEditorValues {
+    pub web_gl_linker_target: i32,
+    pub allow_unsafe_code: bool,
+    pub api_compatibility_level: i32,
+    pub scripting_runtime_version: i32,
+}
+
+/// The PlayerSettings scripting decision: mscorlib-2 assemblies keep the legacy pair,
+/// everything else moves to the latest pair.
+pub fn player_settings_editor_values(has_mscorlib2: bool) -> PlayerSettingsEditorValues {
+    let (api_compatibility_level, scripting_runtime_version) = if has_mscorlib2 {
+        (
+            API_COMPATIBILITY_LEVEL_NET_2_0,
+            SCRIPTING_RUNTIME_VERSION_LEGACY,
+        )
+    } else {
+        (
+            API_COMPATIBILITY_LEVEL_NET_UNITY_4_8,
+            SCRIPTING_RUNTIME_VERSION_LATEST,
+        )
+    };
+    PlayerSettingsEditorValues {
+        web_gl_linker_target: WEB_GL_LINKER_TARGET_WASM,
+        allow_unsafe_code: true,
+        api_compatibility_level,
+        scripting_runtime_version,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -353,5 +407,40 @@ mod tests {
         });
         assert_eq!(settings.collab_editor_settings, None);
         assert_eq!(settings.asset_pipeline_mode, None);
+    }
+
+    #[test]
+    fn player_settings_editor_values_follow_the_mscorlib_branch() {
+        assert_eq!(
+            super::player_settings_editor_values(true),
+            super::PlayerSettingsEditorValues {
+                web_gl_linker_target: super::WEB_GL_LINKER_TARGET_WASM,
+                allow_unsafe_code: true,
+                api_compatibility_level: super::API_COMPATIBILITY_LEVEL_NET_2_0,
+                scripting_runtime_version: super::SCRIPTING_RUNTIME_VERSION_LEGACY,
+            }
+        );
+        assert_eq!(
+            super::player_settings_editor_values(false),
+            super::PlayerSettingsEditorValues {
+                web_gl_linker_target: 1,
+                allow_unsafe_code: true,
+                api_compatibility_level: super::API_COMPATIBILITY_LEVEL_NET_UNITY_4_8,
+                scripting_runtime_version: super::SCRIPTING_RUNTIME_VERSION_LATEST,
+            }
+        );
+        // The unconditional fields match the source literals on both branches.
+        for values in [
+            super::player_settings_editor_values(true),
+            super::player_settings_editor_values(false),
+        ] {
+            assert_eq!(values.web_gl_linker_target, 1);
+            assert!(values.allow_unsafe_code);
+        }
+        // Discriminants pin the UnityEditor enum values documented above.
+        assert_eq!(super::API_COMPATIBILITY_LEVEL_NET_2_0, 2);
+        assert_eq!(super::API_COMPATIBILITY_LEVEL_NET_UNITY_4_8, 5);
+        assert_eq!(super::SCRIPTING_RUNTIME_VERSION_LEGACY, 0);
+        assert_eq!(super::SCRIPTING_RUNTIME_VERSION_LATEST, 1);
     }
 }

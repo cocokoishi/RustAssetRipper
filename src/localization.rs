@@ -115,6 +115,7 @@ mod tests {
         assert_eq!(as_hyphenated_language_code("en_US"), "en-US");
         assert_eq!(as_hyphenated_language_code("pt_BR"), "pt-BR");
         assert_eq!(as_hyphenated_language_code("zh_Hans"), "zh-Hans");
+        assert_eq!(as_hyphenated_language_code("zh_Hant"), "zh-Hant");
         assert_eq!(as_hyphenated_language_code("en-US"), "en-US");
         assert_eq!(as_hyphenated_language_code("fr"), "fr");
         assert_eq!(as_hyphenated_language_code(""), "");
@@ -145,7 +146,14 @@ mod tests {
     fn existence_needs_a_known_hyphenated_code() {
         assert!(language_exists("en-US"));
         assert!(language_exists("zh-Hant"));
+        // Every table code exists; the dictionary lookup is ordinally case-sensitive
+        // like the source, so differently-cased codes do not.
+        for code in LANGUAGE_CODES {
+            assert!(language_exists(code), "{code}");
+        }
+        assert!(!language_exists("EN-US"));
         assert!(!language_exists("en_US"));
+        assert!(!language_exists("pt_BR"));
         assert!(!language_exists("xx"));
         assert!(!language_exists(""));
     }
