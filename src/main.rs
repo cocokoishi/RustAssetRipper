@@ -78,7 +78,7 @@ use assetripper::resources::image_export::ImageExportFormat;
 use assetripper::resources::mesh::MeshView;
 use assetripper::resources::packed_bit_vector::PackedBitVectorLimits;
 use assetripper::resources::shader::{ShaderView, SHADER_CLASS_ID};
-use assetripper::resources::texture::{export_texture2d_image, Texture2DView};
+use assetripper::resources::texture::{export_texture2d_image, Texture2DView, CUBEMAP_CLASS_ID};
 use assetripper::resources::vertex_data_blob::{EndianType, UnityVersion};
 use assetripper::scheme::{
     BatchMountLimits, BatchMountReport, ContainerMountLimits, PathMountInput, SchemeReader,
@@ -410,9 +410,10 @@ fn export_texture_to<W: io::Write>(
     let object = objects
         .get(serialized_file_index, object_index)
         .ok_or_else(|| invalid_data("selected workspace object is missing"))?;
-    if object.class_id != Some(28) {
+    let class_id = object.class_id.map(i32::from);
+    if !matches!(class_id, Some(28) | Some(CUBEMAP_CLASS_ID)) {
         return Err(invalid_data_owned(format!(
-            "SerializedFile {serialized_file_index} PathID {path_id} has class {:?}, not a class-28 Texture2D",
+            "SerializedFile {serialized_file_index} PathID {path_id} has class {:?}, not a class-28 Texture2D or class-89 Cubemap",
             object.class_id
         ))
         .into());
@@ -493,11 +494,15 @@ fn export_texture_to<W: io::Write>(
         .unwrap_or(0);
     let platform_blob_little_endian =
         file.metadata.prefix.body_endian == assetripper::io::binary::Endian::Little;
+    // Cubemaps (class 89) share the `ITexture2D` fields but skip the vertical
+    // flip (`texture is not ICubemap`).
+    let flip_y = !matches!(class_id, Some(CUBEMAP_CLASS_ID));
     let image = export_texture2d_image(
         &view,
         stream_bytes.as_deref(),
         platform,
         platform_blob_little_endian,
+        flip_y,
         format,
     )
     .map_err(|error| {
@@ -4309,8 +4314,18 @@ mod tests {
     }
 
     fn make_texture2d_file() -> Vec<u8> {
+        make_texture_file(28, "Texture2D", 2, 1, &[10, 20, 30, 255, 40, 50, 60, 255])
+    }
+
+    fn make_texture_file(
+        class_id: i32,
+        root_type_name: &str,
+        width: i32,
+        height: i32,
+        data: &[u8],
+    ) -> Vec<u8> {
         let mut string_buffer = Vec::new();
-        let root_type = push_type_tree_string(&mut string_buffer, "Texture2D");
+        let root_type = push_type_tree_string(&mut string_buffer, root_type_name);
         let empty_name = push_type_tree_string(&mut string_buffer, "");
         let int_type = push_type_tree_string(&mut string_buffer, "int");
         let width_name = push_type_tree_string(&mut string_buffer, "m_Width");
@@ -4325,12 +4340,11 @@ mod tests {
         let size_name = push_type_tree_string(&mut string_buffer, "size");
         let data_name = push_type_tree_string(&mut string_buffer, "data");
 
-        let data: [u8; 8] = [10, 20, 30, 255, 40, 50, 60, 255];
         let mut metadata = Vec::new();
         metadata.extend_from_slice(b"2019.4.0f1\0");
         put_u32_le(&mut metadata, 0);
         put_i32_le(&mut metadata, 1);
-        put_i32_le(&mut metadata, 28);
+        put_i32_le(&mut metadata, class_id);
         put_i32_le(&mut metadata, 10);
         put_i32_le(&mut metadata, i32::try_from(string_buffer.len()).unwrap());
         for (level, type_offset, name_offset, byte_size, index) in [
@@ -4361,20 +4375,20 @@ mod tests {
         put_u32_le(&mut metadata, 0);
 
         let mut payload = Vec::new();
-        put_i32_le(&mut payload, 2); // m_Width
-        put_i32_le(&mut payload, 1); // m_Height
+        put_i32_le(&mut payload, width); // m_Width
+        put_i32_le(&mut payload, height); // m_Height
         put_i32_le(&mut payload, 4); // m_TextureFormat (RGBA32)
         put_i32_le(&mut payload, i32::try_from(data.len()).unwrap()); // m_CompleteImageSize
         put_i32_le(&mut payload, 1); // m_ImageCount
         payload.push(0); // m_LightmapFormat
         put_i32_le(&mut payload, i32::try_from(data.len()).unwrap());
-        payload.extend_from_slice(&data);
+        payload.extend_from_slice(data);
         let padding = (4 - payload.len() % 4) % 4;
         payload.resize(payload.len() + padding, 0);
 
         put_i32_le(&mut metadata, i32::try_from(payload.len()).unwrap());
-        put_i32_le(&mut metadata, 28);
-        put_u16_le(&mut metadata, 28);
+        put_i32_le(&mut metadata, class_id);
+        put_u16_le(&mut metadata, class_id as u16);
         put_u16_le(&mut metadata, 0);
         put_i32_le(&mut metadata, 0);
         metadata.push(0);
@@ -4820,6 +4834,46 @@ mod tests {
             io::ErrorKind::AlreadyExists
         );
         assert_eq!(fs::read(&output_path).unwrap(), original);
+        drop(input);
+    }
+
+    #[test]
+    fn export_cubemap_skips_the_vertical_flip() {
+        // The class-89 payload shares the class-28 fields (1x2 RGBA rows
+        // [10,20,30,255] and [40,50,60,255]); as a cubemap the rows keep file
+        // order, so the bottom-up BMP tail holds row 1 first as BGRA. A flipped
+        // class-28 export of the same bytes would end with row 0 instead.
+        let directory = TestInputDirectory::new_root();
+        let serialized_path = directory.join("main.assets");
+        let output_path = directory.join("cubemap.bmp");
+        fs::write(
+            &serialized_path,
+            make_texture_file(89, "Cubemap", 1, 2, &[10, 20, 30, 255, 40, 50, 60, 255]),
+        )
+        .unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![serialized_path.clone(), output_path.clone()],
+            subdirectories: Vec::new(),
+        };
+
+        let mut status = Vec::new();
+        super::export_texture_to(
+            std::slice::from_ref(&serialized_path),
+            0,
+            42,
+            assetripper::export::settings::ImageExportFormat::Bmp,
+            true,
+            &output_path,
+            &mut status,
+        )
+        .unwrap();
+        let bmp = fs::read(&output_path).unwrap();
+        assert_eq!(&bmp[..2], b"BM");
+        assert_eq!(&bmp[122..], &[60, 50, 40, 255, 30, 20, 10, 255]);
+        assert!(String::from_utf8(status)
+            .unwrap()
+            .contains("Wrote a bmp texture from SerializedFile 0 PathID 42"));
         drop(input);
     }
 

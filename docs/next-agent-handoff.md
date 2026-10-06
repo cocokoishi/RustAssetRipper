@@ -768,6 +768,12 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 ## 100. Checkpoint: localization conversion tables (2026-10-06)
 
 - Table-driven stem conversions with round-trip tests (5 localization tests); recorded the name-dictionary non-port. Lib 1009/1009 and bin 50/50 locally, `cargo fmt --check` clean, workspace Clippy clean.
-- CI note: run `37399516633` for remote `main` = `2c15f74` failed all five jobs in ~5s with no steps and no runner assigned across three attempts (infra-side startup failure, not code; local gates above all pass). A fresh run is triggered by the next push; record its outcome here.
+- CI note: runs `37399516633` (3 attempts), `37400550877` (fresh push), and manual dispatch `37400914855` all fail in 4-5s with no steps, no runner, and no logs; GitHub status shows no incident and repo Actions are enabled. Local gates (lib 1009, bin 50, fmt, Clippy) all pass. Actions loop is blocked repo-side for now; work continues with full local validation until it recovers.
+- Next: the cubemap export route, then the remaining product rows.
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 101. Checkpoint: cubemap export route (2026-10-06)
+
+- Ported class-89 acceptance + no-flip gate with a generated-API audit and an end-to-end CLI test; new row `RES-TEXTURE-CUBEMAP-001`. Lib 1011/1011 and bin 51/51 locally, fmt + Clippy clean; Actions validation pending (loop still blocked).
 - Next: the remaining product rows (`PRODUCT-CONFIG-001`, `PRODUCT-GUI-001`, `GENERATORS-001`, `TOOLS-001` remainders).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

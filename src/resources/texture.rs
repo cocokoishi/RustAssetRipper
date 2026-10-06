@@ -338,6 +338,11 @@ impl Texture2DView {
     }
 }
 
+/// The class ID of `Cubemap` (class 89): it implements `ITexture2D` with the same
+/// `_C28` fields, but `TryConvertToBitmap` skips the vertical flip for it
+/// (`texture is not ICubemap`).
+pub const CUBEMAP_CLASS_ID: i32 = 89;
+
 /// The class ID of `ImageTexture` (class 189), the format-less texture base whose
 /// concrete subtypes carry the `GraphicsFormat`.
 pub const IMAGE_TEXTURE_CLASS_ID: i32 = 189;
@@ -396,17 +401,19 @@ impl ImageTextureView {
 /// data; it is ignored otherwise, matching `GetImageData`'s precedence. `platform` is the
 /// collection platform discriminant (unknown platforms pass 0, which transforms nothing) and
 /// `platform_blob_little_endian` is the collection endianness reading the Switch blob shift.
+/// `flip_y` mirrors the `texture is not ICubemap` gate: cubemaps skip the vertical flip.
 pub fn export_texture2d_image(
     view: &Texture2DView,
     stream_content: Option<&[u8]>,
     platform: i32,
     platform_blob_little_endian: bool,
+    flip_y: bool,
     format: ImageExportFormat,
 ) -> Result<Vec<u8>, TextureExportError> {
     let data = view.resolved_image_data(platform, platform_blob_little_endian, stream_content)?;
     let image = view.to_texture_image(&data);
     let unpack_normal = view.lightmap_format == TEXTURE_USAGE_MODE_NORMALMAP_DXT5NM;
-    let bitmap = try_convert_to_bitmap(&image, true, unpack_normal)?;
+    let bitmap = try_convert_to_bitmap(&image, flip_y, unpack_normal)?;
     let mut output = Vec::new();
     bitmap.save(&mut output, format)?;
     Ok(output)
@@ -418,6 +425,7 @@ pub fn export_texture2d_value(
     stream_content: Option<&[u8]>,
     platform: i32,
     platform_blob_little_endian: bool,
+    flip_y: bool,
     format: ImageExportFormat,
 ) -> Result<Vec<u8>, TextureExportError> {
     let view = Texture2DView::from_value(root)?;
@@ -426,6 +434,7 @@ pub fn export_texture2d_value(
         stream_content,
         platform,
         platform_blob_little_endian,
+        flip_y,
         format,
     )
 }
@@ -682,9 +691,15 @@ mod tests {
 
     #[test]
     fn exports_an_rgba32_texture_to_png() {
-        let output =
-            export_texture2d_value(&rgba32_texture(), None, 0, true, ImageExportFormat::Png)
-                .unwrap();
+        let output = export_texture2d_value(
+            &rgba32_texture(),
+            None,
+            0,
+            true,
+            true,
+            ImageExportFormat::Png,
+        )
+        .unwrap();
         assert_eq!(
             &output[..8],
             &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]
@@ -714,14 +729,20 @@ mod tests {
             ]),
         ));
         assert!(matches!(
-            export_texture2d_value(&root, None, 0, true, ImageExportFormat::Png),
+            export_texture2d_value(&root, None, 0, true, true, ImageExportFormat::Png),
             Err(TextureExportError::ImageDataUnavailable)
         ));
         // Providing the exact streamed content succeeds.
         let content = [1u8, 2, 3, 4, 5, 6, 7, 8];
-        assert!(
-            export_texture2d_value(&root, Some(&content), 0, true, ImageExportFormat::Png).is_ok()
-        );
+        assert!(export_texture2d_value(
+            &root,
+            Some(&content),
+            0,
+            true,
+            true,
+            ImageExportFormat::Png
+        )
+        .is_ok());
     }
 
     #[test]
@@ -738,8 +759,95 @@ mod tests {
             stream_data: None,
             platform_blob: Vec::new(),
         };
-        let output = export_texture2d_image(&view, None, 0, true, ImageExportFormat::Png).unwrap();
+        let output =
+            export_texture2d_image(&view, None, 0, true, true, ImageExportFormat::Png).unwrap();
         assert!(output.len() > 8);
+    }
+
+    /// The `texture is not ICubemap` gate: a 2x1 texture flips its rows, while
+    /// the same bytes as a cubemap keep file order (asserted on BMP tails,
+    /// which need no decoder: the 122-byte header precedes bottom-up BGRA).
+    #[test]
+    fn cubemaps_skip_the_vertical_flip() {
+        // Two 1-wide rows: top [1,2,3,4], bottom [5,6,7,8].
+        let view = Texture2DView {
+            width: 1,
+            height: 2,
+            texture_format: 4,
+            complete_image_size: 8,
+            image_count: 1,
+            mip_count: 0,
+            lightmap_format: 0,
+            image_data: vec![1, 2, 3, 4, 5, 6, 7, 8],
+            stream_data: None,
+            platform_blob: Vec::new(),
+        };
+        let flipped =
+            export_texture2d_image(&view, None, 0, true, true, ImageExportFormat::Bmp).unwrap();
+        let unflipped =
+            export_texture2d_image(&view, None, 0, true, false, ImageExportFormat::Bmp).unwrap();
+        assert_ne!(flipped, unflipped);
+        // BMP stores rows bottom-up as BGRA: the flipped bitmap ends with the
+        // top row, the cubemap bitmap with the bottom row.
+        assert_eq!(&flipped[122..], &[3, 2, 1, 4, 7, 6, 5, 8]);
+        assert_eq!(&unflipped[122..], &[7, 6, 5, 8, 3, 2, 1, 4]);
+    }
+
+    /// The generated cubemap surface carries every `_C28` field the view reads,
+    /// on both the oldest (`Cubemap_5`) and newest (`Cubemap_6000_1_0_a9`)
+    /// audited classes, and implements `ICubemap` over `ITexture2D` (probe
+    /// `Temp/opencode/cubeprobe`).
+    #[test]
+    fn cubemap_generated_surface_covers_the_view_fields() {
+        assert_eq!(CUBEMAP_CLASS_ID, 89);
+        let fixture = include_str!("cubemap_generated_api_fixture.txt");
+        let mut classes: Vec<&str> = Vec::new();
+        let mut sections: Vec<(String, Vec<String>)> = Vec::new();
+        for line in fixture.lines() {
+            let line = line.trim();
+            if let Some(name) = line.strip_prefix("class=") {
+                classes.push(name);
+            } else if let Some(header) = line.strip_prefix("### ") {
+                let header = header.strip_suffix(" properties:").unwrap_or(header);
+                sections.push((header.to_owned(), Vec::new()));
+            } else if let Some(property) = line.strip_prefix('P') {
+                if let Some((_, props)) = sections.last_mut() {
+                    props.push(property.trim().to_owned());
+                }
+            }
+        }
+        assert!(classes.len() >= 27, "all versioned cubemap classes listed");
+        for wanted in [
+            "AssetRipper.SourceGenerated.Classes.ClassID_89.Cubemap_5",
+            "AssetRipper.SourceGenerated.Classes.ClassID_89.Cubemap_6000_1_0_a9",
+        ] {
+            let (_, props) = sections
+                .iter()
+                .find(|(header, _)| header.ends_with(wanted))
+                .unwrap_or_else(|| panic!("{wanted} audited"));
+            for field in [
+                "Format_C28",
+                "Width_C28",
+                "Height_C28",
+                "ImageCount_C28",
+                "ImageData_C28",
+                "StreamData_C28",
+                "PlatformBlob_C28",
+                "MipCount_C28",
+                "MipMap_C28",
+                "LightmapFormat_C28",
+                "CompleteImageSize_C28_Int32",
+            ] {
+                assert!(props.iter().any(|p| p.ends_with(field)), "{wanted} {field}");
+            }
+        }
+        let ifaces = fixture
+            .lines()
+            .find_map(|line| line.strip_prefix("ifaces="))
+            .unwrap_or("");
+        for marker in ["ICubemap", "ITexture2D"] {
+            assert!(ifaces.split(',').any(|name| name == marker), "{marker}");
+        }
     }
 
     #[test]
