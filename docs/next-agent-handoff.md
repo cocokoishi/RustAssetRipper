@@ -761,6 +761,6 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 
 ## 99. Checkpoint: GetImageData platform orchestration (2026-10-06)
 
-- Ported `resolved_image_data` with a 12-row live-object differential; new row `RES-TEXTURE-GETIMAGEDATA-001`, new finding `DIFF-TEXTURE-GETIMAGEDATA-001`. Lib 1008/1008 and bin 50/50 locally, workspace Clippy clean; full validation via Actions after push.
+- Ported `resolved_image_data` with a 12-row live-object differential; new row `RES-TEXTURE-GETIMAGEDATA-001`, new finding `DIFF-TEXTURE-GETIMAGEDATA-001`. Lib 1008/1008 and bin 50/50 locally, workspace Clippy clean; CI run `37398996545` green (all five jobs) for remote `main` = `e0b16aa`; local matches.
 - Next: the remaining product rows (`PRODUCT-CONFIG-001`, `PRODUCT-GUI-001`, `GENERATORS-001`, `TOOLS-001` remainders).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
