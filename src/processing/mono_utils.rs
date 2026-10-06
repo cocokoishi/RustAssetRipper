@@ -6,7 +6,8 @@
 //! with its `PrimitiveType` discriminants, and the engine-asset name switch (which
 //! arm takes a Unity version and which concrete subclass 2019.4.0f1 resolves).
 //! Assembly loading, type resolution, and object construction stay outside: they need
-//! live managed assemblies.
+//! live managed assemblies. The `ToPrimitiveType` enum branch takes only their outcomes
+//! (whether the definition resolved to an enum, plus each field's resolved type).
 //!
 //! Differential evidence: `mono_utils_fixture.txt` (probe `Temp/opencode/monoutilsprobe`
 //! against the shipped `AssetRipper.SerializationLogic.dll` and `AssetRipper.Import.dll`,
@@ -21,6 +22,8 @@ pub const SYSTEM_COLLECTIONS_GENERIC_NAMESPACE: &str = "System.Collections.Gener
 pub const UNITY_ENGINE_NAMESPACE: &str = "UnityEngine";
 /// The `UnityEngine.Rendering` namespace constant.
 pub const UNITY_ENGINE_RENDERING_NAMESPACE: &str = "UnityEngine.Rendering";
+/// The backing-field name `MonoUtils.ToPrimitiveType` scans enum definitions for.
+pub const ENUM_VALUE_FIELD_NAME: &str = "value__";
 
 /// `MonoUtils.IsPrimitive`: a `System` primitive by long or alias name.
 pub fn is_primitive(namespace: Option<&str>, name: Option<&str>) -> bool {
@@ -248,6 +251,40 @@ pub fn to_primitive_type(namespace: Option<&str>, name: Option<&str>) -> Primiti
         }
     } else {
         PrimitiveType::Complex
+    }
+}
+
+/// One enum backing-field fact for the `ToPrimitiveType` enum branch: the field name
+/// plus the resolved field-type identity, which is absent when the signature, the
+/// field type, or its resolution is missing (each null link in the source chain).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EnumBackingField<'a> {
+    pub name: &'a str,
+    pub type_namespace: Option<&'a str>,
+    pub type_name: Option<&'a str>,
+}
+
+/// The enum branch of `MonoUtils.ToPrimitiveType(ITypeDefOrRef?, RuntimeContext?)`
+/// over caller facts: when the resolved definition is an enum, the first `value__`
+/// field's type replaces the enum type for classification; a missing field (or a
+/// non-enum/absent definition) keeps the original namespace+name, which the caller
+/// feeds to `to_primitive_type`. Assembly loading, signature reads, and type
+/// resolution stay caller-side; only their outcomes arrive here, in field order.
+pub fn enum_backing_type_for_primitive<'a>(
+    is_enum: bool,
+    fields: &[EnumBackingField<'a>],
+    namespace: Option<&'a str>,
+    name: Option<&'a str>,
+) -> (Option<&'a str>, Option<&'a str>) {
+    if !is_enum {
+        return (namespace, name);
+    }
+    match fields
+        .iter()
+        .find(|field| field.name == ENUM_VALUE_FIELD_NAME)
+    {
+        Some(field) => (field.type_namespace, field.type_name),
+        None => (namespace, name),
     }
 }
 
@@ -505,5 +542,76 @@ mod tests {
         assert!(EngineAssetKind::Gradient.takes_version());
         assert!(!EngineAssetKind::Vector3.takes_version());
         assert!(!EngineAssetKind::Guid.takes_version());
+    }
+
+    #[test]
+    fn enum_backing_fields_replace_only_resolved_enum_types() {
+        use super::EnumBackingField;
+        let backing = [EnumBackingField {
+            name: super::ENUM_VALUE_FIELD_NAME,
+            type_namespace: Some(super::SYSTEM_NAMESPACE),
+            type_name: Some("Int32"),
+        }];
+        // An enum classifies as its backing field's type.
+        let (namespace, name) =
+            super::enum_backing_type_for_primitive(true, &backing, Some("Game"), Some("MyEnum"));
+        assert_eq!((namespace, name), (Some("System"), Some("Int32")));
+        assert_eq!(
+            super::to_primitive_type(namespace, name),
+            super::PrimitiveType::Int
+        );
+        // A non-enum keeps its own identity even when `value__` fields are reported.
+        let (namespace, name) =
+            super::enum_backing_type_for_primitive(false, &backing, Some("Game"), Some("MyEnum"));
+        assert_eq!((namespace, name), (Some("Game"), Some("MyEnum")));
+        assert_eq!(
+            super::to_primitive_type(namespace, name),
+            super::PrimitiveType::Complex
+        );
+        // The first `value__` field wins; later fields are ignored like the source break.
+        let two = [
+            EnumBackingField {
+                name: super::ENUM_VALUE_FIELD_NAME,
+                type_namespace: Some(super::SYSTEM_NAMESPACE),
+                type_name: Some("Boolean"),
+            },
+            EnumBackingField {
+                name: super::ENUM_VALUE_FIELD_NAME,
+                type_namespace: Some(super::SYSTEM_NAMESPACE),
+                type_name: Some("Int64"),
+            },
+        ];
+        let (_, name) =
+            super::enum_backing_type_for_primitive(true, &two, Some("Game"), Some("MyEnum"));
+        assert_eq!(name, Some("Boolean"));
+        // An enum without a `value__` field keeps the enum identity (which then
+        // classifies `Complex` unless the enum itself names a primitive).
+        let other = [EnumBackingField {
+            name: "other",
+            type_namespace: Some(super::SYSTEM_NAMESPACE),
+            type_name: Some("Int32"),
+        }];
+        let (namespace, name) =
+            super::enum_backing_type_for_primitive(true, &other, Some("Game"), Some("MyEnum"));
+        assert_eq!((namespace, name), (Some("Game"), Some("MyEnum")));
+        // A `value__` field with missing type facts (null signature/type/resolution
+        // links) classifies `Complex`, like the source null chain.
+        let missing = [EnumBackingField {
+            name: super::ENUM_VALUE_FIELD_NAME,
+            type_namespace: None,
+            type_name: None,
+        }];
+        let (namespace, name) =
+            super::enum_backing_type_for_primitive(true, &missing, Some("Game"), Some("MyEnum"));
+        assert_eq!((namespace, name), (None, None));
+        assert_eq!(
+            super::to_primitive_type(namespace, name),
+            super::PrimitiveType::Complex
+        );
+        // Absent types stay absent.
+        assert_eq!(
+            super::enum_backing_type_for_primitive(false, &[], None, None),
+            (None, None)
+        );
     }
 }

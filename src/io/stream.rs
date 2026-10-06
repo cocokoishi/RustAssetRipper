@@ -93,6 +93,46 @@ impl<S: Read + Seek> Seek for PartialStream<S> {
     }
 }
 
+/// Bounded write-through (`PartialStream.Write`): the source throws when the
+/// write would end past the range, otherwise the bytes land at the current
+/// logical position. `SetLength` stays unsupported, matching the source
+/// `NotSupportedException`.
+impl<S: Read + Seek + Write> Write for PartialStream<S> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        let end = self
+            .position
+            .checked_add(buffer.len() as u64)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "partial stream's position is out of range",
+                )
+            })?;
+        if end > self.length {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "partial stream's position is out of range",
+            ));
+        }
+        let absolute_position = self.base_offset.checked_add(self.position).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "stream position overflows")
+        })?;
+        self.source.seek(SeekFrom::Start(absolute_position))?;
+        let written = self.source.write(buffer)?;
+        self.position = self.position.checked_add(written as u64).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "partial stream position overflows",
+            )
+        })?;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.source.flush()
+    }
+}
+
 /// A read-only file range whose logical position is independent from sibling views.
 pub struct FileRangeStream {
     file: Arc<Mutex<File>>,
@@ -1117,6 +1157,27 @@ mod tests {
         assert!(PartialStream::new(source, 2, 2).is_err());
         let source = Cursor::new(b"abc".to_vec());
         assert!(PartialStream::new(source, u64::MAX, 1).is_err());
+    }
+
+    /// Bounded write-through (`PartialStream.Write`): bytes land at the logical
+    /// position and advance it, while a write ending past the range fails with
+    /// the source untouched.
+    #[test]
+    fn partial_stream_writes_inside_its_range_only() {
+        let source = Cursor::new(b"0123456789".to_vec());
+        let mut partial = PartialStream::new(source, 2, 5).unwrap();
+        assert_eq!(partial.seek(SeekFrom::Start(1)).unwrap(), 1);
+        assert_eq!(partial.write(b"abc").unwrap(), 3);
+        assert_eq!(partial.position(), 4);
+        // A write ending exactly at the range end is accepted.
+        assert_eq!(partial.write(b"d").unwrap(), 1);
+        assert_eq!(partial.position(), 5);
+        // Past-the-end writes fail and leave the source untouched.
+        assert_eq!(partial.position(), partial.length());
+        assert!(partial.write(b"e").is_err());
+        assert_eq!(partial.position(), 5);
+        let source = partial.into_inner().into_inner();
+        assert_eq!(source, b"012abcd789");
     }
 
     #[test]

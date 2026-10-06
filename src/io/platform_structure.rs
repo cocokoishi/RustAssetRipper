@@ -1,4 +1,9 @@
 //! Platform root and DataPath discovery for mounted Unity game layouts.
+//!
+//! Covers the root/marker decisions per platform (including the Android APK/OBB bitmask and the
+//! `assets/bin/Data` gate) plus the Android directory layout. Backend selection, assembly and
+//! metadata collection, and bundle gathering live in the file inventory; bundle-hierarchy lookups
+//! live in the serialized-file workspace.
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -686,6 +691,33 @@ fn android_root_marker(
     Ok(marker)
 }
 
+/// `AndroidGameStructure` directory layout for one APK or OBB root.
+///
+/// Mirrors the constructor joins: `assets/bin/Data` under the root, `Resources` and `Managed`
+/// under the data directory, `global-metadata.dat` under `Managed/Metadata`, and `lib` under
+/// the root. `StreamingAssetsPath` and `UnityPlayerPath` stay unset on Android, like the source,
+/// so they have no slots here.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AndroidDataLayout {
+    pub game_data_path: String,
+    pub resources_path: String,
+    pub managed_path: String,
+    pub lib_path: String,
+    pub il2cpp_metadata_path: String,
+}
+
+pub fn android_data_layout(root_path: &str) -> AndroidDataLayout {
+    let game_data_path = join_path(root_path, "assets/bin/Data");
+    let managed_path = join_path(&game_data_path, "Managed");
+    AndroidDataLayout {
+        resources_path: join_path(&game_data_path, "Resources"),
+        il2cpp_metadata_path: join_path(&managed_path, "Metadata/global-metadata.dat"),
+        managed_path,
+        lib_path: join_path(root_path, "lib"),
+        game_data_path,
+    }
+}
+
 fn detect_ios(
     filesystem: &VirtualFileSystem,
     selected_path: &str,
@@ -1174,8 +1206,8 @@ impl Error for PlatformStructureError {
 #[cfg(test)]
 mod tests {
     use super::{
-        detect_desktop_platform, detect_platform_structure, DesktopPlatform, PlatformKind,
-        PlatformResourceLookup, PlatformResourceProvider, PlatformResourceSource,
+        android_data_layout, detect_desktop_platform, detect_platform_structure, DesktopPlatform,
+        PlatformKind, PlatformResourceLookup, PlatformResourceProvider, PlatformResourceSource,
         PlatformStructure, PlatformStructureErrorKind, PlatformStructureLimits,
     };
     use crate::io::filesystem::VirtualFileSystem;
@@ -1513,6 +1545,26 @@ mod tests {
                 count: 2
             }
         ));
+    }
+
+    #[test]
+    fn android_directory_layout_matches_the_constructor_joins() {
+        let layout = android_data_layout("/apk");
+        assert_eq!(layout.game_data_path, "/apk/assets/bin/Data");
+        assert_eq!(layout.resources_path, "/apk/assets/bin/Data/Resources");
+        assert_eq!(layout.managed_path, "/apk/assets/bin/Data/Managed");
+        assert_eq!(layout.lib_path, "/apk/lib");
+        assert_eq!(
+            layout.il2cpp_metadata_path,
+            "/apk/assets/bin/Data/Managed/Metadata/global-metadata.dat"
+        );
+        // The same joins apply to an OBB root.
+        let obb = android_data_layout("/obb");
+        assert_eq!(obb.game_data_path, "/obb/assets/bin/Data");
+        assert_eq!(
+            obb.il2cpp_metadata_path,
+            "/obb/assets/bin/Data/Managed/Metadata/global-metadata.dat"
+        );
     }
 
     #[test]

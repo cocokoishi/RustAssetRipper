@@ -3,8 +3,9 @@
 //! Covers the first audited slice of `TYPE-SCRIPT-001`: `ScriptIdentifier`
 //! (construction validation, `ToUniqueName` overloads, `ToString`, `IsDefault`,
 //! `UniqueName`), the `ScriptingBackend` discriminants, the `MonoManager.IsMonoAssembly`
-//! file-name predicate, and the pure string kernels
-//! behind `MonoScriptExtensions.GetFullName` and `GetValidAssemblyName` (the
+//! file-name predicate, the pure string kernels
+//! behind `MonoScriptExtensions.GetFullName` and `GetValidAssemblyName`, and the
+//! `PropertiesHash` fallback bytes behind `GetPropertiesHash` (the
 //! `IMonoScript`/assembly-manager lookups themselves stay outside: they need live
 //! managed assemblies).
 //!
@@ -76,6 +77,24 @@ pub const ASSEMBLY_EXTENSION: &str = ".dll";
 /// name ends with `.dll` under an ordinal (case-sensitive) comparison.
 pub fn is_mono_assembly(file_name: &str) -> bool {
     file_name.ends_with(ASSEMBLY_EXTENSION)
+}
+
+/// `MonoScriptExtensions.GetPropertiesHash` fallback over caller facts.
+///
+/// When the `PropertiesHash_Hash128_5` field is absent, the source expands the legacy
+/// `PropertiesHash_UInt32` into the first four hash bytes in collection byte order and
+/// leaves the remaining twelve bytes at the struct default (zero). `hash` is the legacy
+/// value; `big_endian` is whether the owning collection reads big-endian (the source
+/// checks `monoScript.Collection.EndianType`, noting most platforms are little-endian).
+pub fn properties_hash_fallback_bytes(hash: u32, big_endian: bool) -> [u8; 16] {
+    let words = if big_endian {
+        hash.to_be_bytes()
+    } else {
+        hash.to_le_bytes()
+    };
+    [
+        words[0], words[1], words[2], words[3], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ]
 }
 
 /// `ScriptIdentifier`: an assembly-qualified script type identity.
@@ -426,5 +445,22 @@ mod tests {
         let first = script_reference(Some("Player"), Some("Game"), Some("Assembly-CSharp"));
         let references = vec![script_reference(Some("Other"), None, None), first];
         assert_eq!(find_type_reference_index(&references, &script), Some(1));
+    }
+
+    #[test]
+    fn properties_hash_fallback_expands_in_collection_byte_order() {
+        assert_eq!(
+            properties_hash_fallback_bytes(0x1234_5678, false),
+            [0x78, 0x56, 0x34, 0x12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
+        assert_eq!(
+            properties_hash_fallback_bytes(0x1234_5678, true),
+            [0x12, 0x34, 0x56, 0x78, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
+        assert_eq!(properties_hash_fallback_bytes(0, true), [0; 16]);
+        assert_eq!(
+            properties_hash_fallback_bytes(u32::MAX, false),
+            [0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
     }
 }

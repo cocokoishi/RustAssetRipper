@@ -815,18 +815,43 @@ impl InventoryState<'_> {
         };
 
         if backend == ScriptingBackend::Mono {
-            if let Some(path) = managed_path.as_deref() {
-                if self.directory_exists(path)? {
+            let managed_candidate = managed_path
+                .as_deref()
+                .filter(|path| !path.trim().is_empty());
+            let managed_ready = match managed_candidate {
+                Some(path) => self.directory_exists(path)?,
+                None => false,
+            };
+            // The baseline probes the lib directory only when the managed branch misses.
+            let game_data_candidate = if managed_ready {
+                None
+            } else {
+                structure
+                    .game_data_path
+                    .as_deref()
+                    .filter(|path| !path.is_empty())
+            };
+            let lib_candidate = game_data_candidate.map(|path| join_path(path, "lib"));
+            let lib_ready = match lib_candidate.as_deref() {
+                Some(path) => self.directory_exists(path)?,
+                None => false,
+            };
+            match plan_mono_assembly_collection(
+                managed_candidate,
+                managed_ready,
+                game_data_candidate,
+                lib_candidate.as_deref(),
+                lib_ready,
+            ) {
+                MainAssemblyCollection::Managed(path) => {
                     self.collect_assemblies(path)?;
                     return Ok(backend);
                 }
-            }
-            if let Some(game_data_path) = structure.game_data_path.as_deref() {
-                let lib_path = join_path(game_data_path, "lib");
-                if self.directory_exists(&lib_path)? {
+                MainAssemblyCollection::GameDataAndLib(game_data_path, lib_path) => {
                     self.collect_assemblies(game_data_path)?;
-                    self.collect_assemblies(&lib_path)?;
+                    self.collect_assemblies(lib_path)?;
                 }
+                MainAssemblyCollection::None => {}
             }
         }
         Ok(backend)
@@ -1256,6 +1281,49 @@ fn managed_path(structure: &PlatformStructure) -> Option<String> {
     }
 }
 
+/// Where a Mono backend gathers assemblies from.
+///
+/// Mirrors the `CollectMainAssemblies` location dispatch
+/// (`AssetRipper/Source/AssetRipper.Import/Platforms/PlatformGameStructure.cs`, lines
+/// 290-309): a usable, existing managed directory wins on its own; otherwise the game
+/// data directory and its `lib` child are collected together; anything else collects
+/// nothing. Backend detection stays upstream and filesystem probes stay caller-side,
+/// which also preserves the baseline probe order (the lib directory is only probed
+/// when the managed branch misses).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MainAssemblyCollection<'a> {
+    /// Collect nothing: no usable location.
+    None,
+    /// Collect from the managed directory only.
+    Managed(&'a str),
+    /// Collect from the game data directory and its `lib` child.
+    GameDataAndLib(&'a str, &'a str),
+}
+
+/// Selects the Mono assembly location from caller facts: the candidate managed and
+/// game-data directories (already filtered for blank values by the caller contract
+/// below, re-checked here exactly like the source `IsNullOrWhiteSpace`/
+/// `IsNullOrEmpty` gates) with their existence results.
+pub fn plan_mono_assembly_collection<'a>(
+    managed_path: Option<&'a str>,
+    managed_path_exists: bool,
+    game_data_path: Option<&'a str>,
+    lib_path: Option<&'a str>,
+    lib_path_exists: bool,
+) -> MainAssemblyCollection<'a> {
+    if let Some(path) = managed_path {
+        if !path.trim().is_empty() && managed_path_exists {
+            return MainAssemblyCollection::Managed(path);
+        }
+    }
+    if let (Some(game_data_path), Some(lib_path)) = (game_data_path, lib_path) {
+        if !game_data_path.is_empty() && lib_path_exists {
+            return MainAssemblyCollection::GameDataAndLib(game_data_path, lib_path);
+        }
+    }
+    MainAssemblyCollection::None
+}
+
 fn is_number_with_optional_split_zero(suffix: &str) -> bool {
     let digits = suffix.strip_suffix(".split0").unwrap_or(suffix);
     !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
@@ -1620,8 +1688,9 @@ impl Error for PlatformWorkspaceLoadErrorKind {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_primary_engine_file, PlatformFileInventoryErrorKind, PlatformFileInventoryLimits,
-        PlatformFileInventoryOptions, ScriptingBackend,
+        is_primary_engine_file, plan_mono_assembly_collection, MainAssemblyCollection,
+        PlatformFileInventoryErrorKind, PlatformFileInventoryLimits, PlatformFileInventoryOptions,
+        ScriptingBackend,
     };
     use crate::io::filesystem::VirtualFileSystem;
     use crate::io::platform_structure::{PlatformKind, PlatformStructure};
@@ -2258,5 +2327,76 @@ mod tests {
         ] {
             assert!(!is_primary_engine_file(name), "{name}");
         }
+    }
+
+    #[test]
+    fn mono_assembly_location_follows_the_collect_main_assemblies_branches() {
+        // An existing managed directory wins on its own, even with a lib fallback ready.
+        assert_eq!(
+            plan_mono_assembly_collection(
+                Some("/game/Data/Managed"),
+                true,
+                Some("/game/Data"),
+                Some("/game/Data/lib"),
+                true,
+            ),
+            MainAssemblyCollection::Managed("/game/Data/Managed")
+        );
+        // Blank managed paths behave as absent, like `IsNullOrWhiteSpace`.
+        for blank in [None, Some(""), Some("   ")] {
+            assert_eq!(
+                plan_mono_assembly_collection(
+                    blank,
+                    true,
+                    Some("/game/Data"),
+                    Some("/game/Data/lib"),
+                    true,
+                ),
+                MainAssemblyCollection::GameDataAndLib("/game/Data", "/game/Data/lib"),
+                "{blank:?}"
+            );
+        }
+        // A missing managed directory falls through to the game-data pair.
+        assert_eq!(
+            plan_mono_assembly_collection(
+                Some("/game/Data/Managed"),
+                false,
+                Some("/game/Data"),
+                Some("/game/Data/lib"),
+                true,
+            ),
+            MainAssemblyCollection::GameDataAndLib("/game/Data", "/game/Data/lib")
+        );
+        // Without a game-data directory, or without its lib child, nothing is collected.
+        assert_eq!(
+            plan_mono_assembly_collection(Some("/game/Data/Managed"), false, None, None, false),
+            MainAssemblyCollection::None
+        );
+        assert_eq!(
+            plan_mono_assembly_collection(
+                Some("/game/Data/Managed"),
+                false,
+                Some("/game/Data"),
+                Some("/game/Data/lib"),
+                false,
+            ),
+            MainAssemblyCollection::None
+        );
+        // An empty game-data path behaves as absent, like `IsNullOrEmpty`.
+        assert_eq!(
+            plan_mono_assembly_collection(Some("/game/Data/Managed"), false, Some(""), None, false),
+            MainAssemblyCollection::None
+        );
+        // A missing lib path (not just a missing directory) also collects nothing.
+        assert_eq!(
+            plan_mono_assembly_collection(
+                Some("/game/Data/Managed"),
+                false,
+                Some("/game/Data"),
+                None,
+                true,
+            ),
+            MainAssemblyCollection::None
+        );
     }
 }
