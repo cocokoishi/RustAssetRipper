@@ -61,6 +61,7 @@ pub mod streamed_clip;
 pub mod streamed_curve;
 pub mod streaming_info;
 pub mod sub_mesh_data;
+pub mod switch_swizzle;
 pub mod tangent_mode;
 pub mod terrain_heatmap;
 pub mod texture;

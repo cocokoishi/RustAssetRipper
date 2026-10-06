@@ -5,14 +5,14 @@
 //! selection of `GetImageData`, the `Height * Depth` layer layout, and the `NormalmapDXT5nm`
 //! normal-map unpack.
 //!
-//! Open, and deliberately not guessed here: the Switch `SwitchSwizzle.Unswizzle`
-//! platform transform; the class-189 `ImageTexture` `GraphicsFormat`
+//! Open, and deliberately not guessed here: the class-189 `ImageTexture` `GraphicsFormat`
 //! route; and the generated `Has_*` version gates that decide which `m_*` field alias exists.
 //! A view built from a payload missing a required field returns an explicit error rather than a
 //! zero-filled texture.
 //!
 //! The Xbox360 adjacent-pair swap (`IsSwapBytes` plus the pair loop) lives in
-//! `texture_format`; applying it needs the bundle platform, which the field view does
+//! `texture_format`, and Switch GOB unswizzling lives in `switch_swizzle`;
+//! applying either needs the bundle platform, which the field view does
 //! not carry yet.
 
 use std::error::Error;

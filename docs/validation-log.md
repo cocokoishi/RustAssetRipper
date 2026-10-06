@@ -2373,3 +2373,8 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 
 - Ported `Texture2DExtensions.IsSwapBytes` (Xbox360 + 7 layouts) plus the adjacent-pair swap loop into `resources/texture_format.rs` with two tests (rule matrix, pair exchange + odd-count refusal). Odd counts are explicit errors where the source loop would index out of range; the copy-before-swap stays caller-side. Lib suite 989/989 locally, workspace Clippy clean; CI run `37392170107` green (all five jobs) for remote `main` = `38a5670`; local matches.
 - No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+## Switch GOB unswizzle (2026-10-06)
+
+- Ported `SwitchSwizzle.Unswizzle` as `src/resources/switch_swizzle.rs` (GOB tables, block dims/sizes, padded dims, blob texel height, corrected formats, RGBA-to-RGB, bounded copies with explicit errors for the source assert/throw paths). Eight tests including byte-for-byte reproduction of 8 vectors from an independent C# model written directly from the source (`switch_swizzle_fixture.txt`, probe `Temp/opencode/swizzleprobe`, SDK 10.0.401). New row `RES-TEXTURE-SWIZZLE-001`. Lib suite 997/997 locally, workspace Clippy clean; full validation via Actions after push.
+- No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
