@@ -78,7 +78,14 @@ use assetripper::resources::image_export::ImageExportFormat;
 use assetripper::resources::mesh::MeshView;
 use assetripper::resources::packed_bit_vector::PackedBitVectorLimits;
 use assetripper::resources::shader::{ShaderView, SHADER_CLASS_ID};
-use assetripper::resources::texture::{export_texture2d_image, Texture2DView, CUBEMAP_CLASS_ID};
+use assetripper::resources::texture::{
+    export_cubemap_array_image, export_texture2d_array_image, export_texture2d_image,
+    export_texture3d_image, Texture2DView, CUBEMAP_CLASS_ID,
+};
+use assetripper::resources::texture_array::{
+    CubemapArrayView, Texture2DArrayView, Texture3DView, CUBEMAPARRAY_CLASS_ID,
+    TEXTURE2DARRAY_CLASS_ID, TEXTURE3D_CLASS_ID,
+};
 use assetripper::resources::vertex_data_blob::{EndianType, UnityVersion};
 use assetripper::scheme::{
     BatchMountLimits, BatchMountReport, ContainerMountLimits, PathMountInput, SchemeReader,
@@ -411,26 +418,77 @@ fn export_texture_to<W: io::Write>(
         .get(serialized_file_index, object_index)
         .ok_or_else(|| invalid_data("selected workspace object is missing"))?;
     let class_id = object.class_id.map(i32::from);
-    if !matches!(class_id, Some(28) | Some(CUBEMAP_CLASS_ID)) {
-        return Err(invalid_data_owned(format!(
-            "SerializedFile {serialized_file_index} PathID {path_id} has class {:?}, not a class-28 Texture2D or class-89 Cubemap",
-            object.class_id
-        ))
-        .into());
-    }
     let payload = object.payload.as_ref().map_err(|error| {
         invalid_data_owned(format!(
             "SerializedFile {serialized_file_index} PathID {path_id} could not be decoded: {error}"
         ))
     })?;
-    let view = Texture2DView::from_value(&payload.root).map_err(|error| {
-        invalid_data_owned(format!(
-            "SerializedFile {serialized_file_index} PathID {path_id} is not an exportable Texture2D: {error}"
-        ))
-    })?;
-
-    let stream_bytes: Option<Vec<u8>> = match &view.stream_data {
-        Some(info) if view.image_data.is_empty() && info.is_set() => {
+    enum TextureExportTarget {
+        Texture2D { view: Texture2DView, flip_y: bool },
+        Texture3D { view: Texture3DView },
+        Texture2DArray { view: Texture2DArrayView },
+        CubemapArray { view: CubemapArrayView },
+    }
+    let target = match class_id {
+        Some(28) | Some(CUBEMAP_CLASS_ID) => {
+            let view = Texture2DView::from_value(&payload.root).map_err(|error| {
+                invalid_data_owned(format!(
+                    "SerializedFile {serialized_file_index} PathID {path_id} is not an exportable Texture2D: {error}"
+                ))
+            })?;
+            // Cubemaps (class 89) share the `ITexture2D` fields but skip the
+            // vertical flip (`texture is not ICubemap`).
+            let flip_y = !matches!(class_id, Some(CUBEMAP_CLASS_ID));
+            TextureExportTarget::Texture2D { view, flip_y }
+        }
+        Some(TEXTURE3D_CLASS_ID) => {
+            let view = Texture3DView::from_value(&payload.root).map_err(|error| {
+                invalid_data_owned(format!(
+                    "SerializedFile {serialized_file_index} PathID {path_id} is not an exportable Texture3D: {error}"
+                ))
+            })?;
+            TextureExportTarget::Texture3D { view }
+        }
+        Some(TEXTURE2DARRAY_CLASS_ID) => {
+            let view = Texture2DArrayView::from_value(&payload.root).map_err(|error| {
+                invalid_data_owned(format!(
+                    "SerializedFile {serialized_file_index} PathID {path_id} is not an exportable Texture2DArray: {error}"
+                ))
+            })?;
+            TextureExportTarget::Texture2DArray { view }
+        }
+        Some(CUBEMAPARRAY_CLASS_ID) => {
+            let view = CubemapArrayView::from_value(&payload.root).map_err(|error| {
+                invalid_data_owned(format!(
+                    "SerializedFile {serialized_file_index} PathID {path_id} is not an exportable CubemapArray: {error}"
+                ))
+            })?;
+            TextureExportTarget::CubemapArray { view }
+        }
+        _ => {
+            return Err(invalid_data_owned(format!(
+                "SerializedFile {serialized_file_index} PathID {path_id} has class {:?}, not a class-28 Texture2D, class-89 Cubemap, class-117 Texture3D, class-187 Texture2DArray, or class-188 CubemapArray",
+                object.class_id
+            ))
+            .into());
+        }
+    };
+    let (image_is_empty, stream_data) = match &target {
+        TextureExportTarget::Texture2D { view, .. } => {
+            (view.image_data.is_empty(), view.stream_data.as_ref())
+        }
+        TextureExportTarget::Texture3D { view } => {
+            (view.image_data.is_empty(), view.stream_data.as_ref())
+        }
+        TextureExportTarget::Texture2DArray { view } => {
+            (view.image_data.is_empty(), view.stream_data.as_ref())
+        }
+        TextureExportTarget::CubemapArray { view } => {
+            (view.image_data.is_empty(), view.stream_data.as_ref())
+        }
+    };
+    let stream_bytes: Option<Vec<u8>> = match stream_data {
+        Some(info) if image_is_empty && info.is_set() => {
             let provider =
                 PlatformResourceProvider::with_mixed_data_paths(None, Some(&mixed.data_paths));
             let resolution = resolve_and_read_streamed_resource_info(
@@ -486,6 +544,8 @@ fn export_texture_to<W: io::Write>(
     // (Xbox360 swap, Switch unswizzle); the file's own metadata prefix is the
     // honest available equivalent. Discriminant 0 matches no `BuildTarget` and
     // transforms nothing.
+    // Cubemaps (class 89) share the `ITexture2D` fields but skip the vertical
+    // flip (`texture is not ICubemap`); the flag travels with the target below.
     let platform = file
         .metadata
         .prefix
@@ -494,17 +554,25 @@ fn export_texture_to<W: io::Write>(
         .unwrap_or(0);
     let platform_blob_little_endian =
         file.metadata.prefix.body_endian == assetripper::io::binary::Endian::Little;
-    // Cubemaps (class 89) share the `ITexture2D` fields but skip the vertical
-    // flip (`texture is not ICubemap`).
-    let flip_y = !matches!(class_id, Some(CUBEMAP_CLASS_ID));
-    let image = export_texture2d_image(
-        &view,
-        stream_bytes.as_deref(),
-        platform,
-        platform_blob_little_endian,
-        flip_y,
-        format,
-    )
+    let image = match &target {
+        TextureExportTarget::Texture2D { view, flip_y } => export_texture2d_image(
+            view,
+            stream_bytes.as_deref(),
+            platform,
+            platform_blob_little_endian,
+            *flip_y,
+            format,
+        ),
+        TextureExportTarget::Texture3D { view } => {
+            export_texture3d_image(view, stream_bytes.as_deref(), format)
+        }
+        TextureExportTarget::Texture2DArray { view } => {
+            export_texture2d_array_image(view, stream_bytes.as_deref(), format)
+        }
+        TextureExportTarget::CubemapArray { view } => {
+            export_cubemap_array_image(view, stream_bytes.as_deref(), format)
+        }
+    }
     .map_err(|error| {
         invalid_data_owned(format!(
             "SerializedFile {serialized_file_index} PathID {path_id} texture export failed: {error}"
@@ -4411,6 +4479,121 @@ mod tests {
         make_build_settings_file_with_path_id(scene_paths, 42)
     }
 
+    /// Synthetic class-117/187/188 texture file: 1x1(x1) RGBA pixels behind a
+    /// `GraphicsFormat` discriminant of 4 (RGBA32 decode). `height` is absent
+    /// on class 188 (its height equals its width); `third` is `m_Depth` on 117
+    /// and 187, `m_CubemapCount` on 188; `size` is `m_DataSize` (u32) on
+    /// 187/188 and `m_CompleteImageSize` (u32 spelling) on 117.
+    #[allow(clippy::too_many_arguments)]
+    fn make_array_texture_file(
+        class_id: i32,
+        root_type_name: &str,
+        height: Option<i32>,
+        third: Option<(&str, i32)>,
+        size_name: &str,
+        size_is_u32: bool,
+        size_value: u32,
+        data: &[u8],
+    ) -> Vec<u8> {
+        let mut string_buffer = Vec::new();
+        let root_type = push_type_tree_string(&mut string_buffer, root_type_name);
+        let empty_name = push_type_tree_string(&mut string_buffer, "");
+        let int_type = push_type_tree_string(&mut string_buffer, "int");
+        let uint_type = push_type_tree_string(&mut string_buffer, "UInt32");
+        let width_name = push_type_tree_string(&mut string_buffer, "m_Width");
+        let height_name = push_type_tree_string(&mut string_buffer, "m_Height");
+        let third_name = third.map(|(name, _)| push_type_tree_string(&mut string_buffer, name));
+        let format_name = push_type_tree_string(&mut string_buffer, "m_Format");
+        let size_name = push_type_tree_string(&mut string_buffer, size_name);
+        let typeless_data_type = push_type_tree_string(&mut string_buffer, "TypelessData");
+        let image_data_name = push_type_tree_string(&mut string_buffer, "m_ImageData");
+        let size_field_name = push_type_tree_string(&mut string_buffer, "size");
+        let data_field_name = push_type_tree_string(&mut string_buffer, "data");
+        let uint8_type = push_type_tree_string(&mut string_buffer, "UInt8");
+
+        let mut metadata = Vec::new();
+        metadata.extend_from_slice(b"2019.4.0f1\0");
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 1);
+        put_i32_le(&mut metadata, class_id);
+        let size_type = if size_is_u32 { uint_type } else { int_type };
+        let mut array_nodes = vec![(0, root_type, empty_name, -1, 0)];
+        array_nodes.push((1, int_type, width_name, 4, 1));
+        let mut array_index = 2;
+        if height.is_some() {
+            array_nodes.push((1, int_type, height_name, 4, array_index));
+            array_index += 1;
+        }
+        if let Some(third) = third_name {
+            array_nodes.push((1, int_type, third, 4, array_index));
+            array_index += 1;
+        }
+        array_nodes.push((1, int_type, format_name, 4, array_index));
+        array_index += 1;
+        array_nodes.push((1, size_type, size_name, 4, array_index));
+        array_index += 1;
+        array_nodes.push((1, typeless_data_type, image_data_name, -1, array_index));
+        array_index += 1;
+        array_nodes.push((2, int_type, size_field_name, 4, array_index));
+        array_index += 1;
+        array_nodes.push((2, uint8_type, data_field_name, 1, array_index));
+        put_i32_le(&mut metadata, i32::try_from(array_nodes.len()).unwrap());
+        put_i32_le(&mut metadata, i32::try_from(string_buffer.len()).unwrap());
+        for (level, type_offset, name_offset, byte_size, index) in array_nodes {
+            put_node(
+                &mut metadata,
+                level,
+                type_offset,
+                name_offset,
+                byte_size,
+                index,
+            );
+        }
+        metadata.extend_from_slice(&string_buffer);
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 1);
+        put_i32_le(&mut metadata, 42);
+        put_u32_le(&mut metadata, 0);
+
+        let mut payload = Vec::new();
+        put_i32_le(&mut payload, 1); // m_Width
+        if let Some(height) = height {
+            put_i32_le(&mut payload, height); // m_Height
+        }
+        if let Some((_, third)) = third {
+            put_i32_le(&mut payload, third); // m_Depth or m_CubemapCount
+        }
+        put_i32_le(&mut payload, 4); // m_Format (GraphicsFormat RGBA32 route)
+        if size_is_u32 {
+            put_u32_le(&mut payload, size_value);
+        } else {
+            put_i32_le(&mut payload, size_value as i32);
+        }
+        put_i32_le(&mut payload, i32::try_from(data.len()).unwrap());
+        payload.extend_from_slice(data);
+        let padding = (4 - payload.len() % 4) % 4;
+        payload.resize(payload.len() + padding, 0);
+
+        put_i32_le(&mut metadata, i32::try_from(payload.len()).unwrap());
+        put_i32_le(&mut metadata, class_id);
+        put_u16_le(&mut metadata, class_id as u16);
+        put_u16_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 0);
+        metadata.push(0);
+
+        let data_offset = 20 + metadata.len();
+        let file_size = data_offset + payload.len();
+        let mut file = Vec::with_capacity(file_size);
+        file.extend_from_slice(&i32::try_from(metadata.len()).unwrap().to_be_bytes());
+        file.extend_from_slice(&u32::try_from(file_size).unwrap().to_be_bytes());
+        file.extend_from_slice(&10i32.to_be_bytes());
+        file.extend_from_slice(&u32::try_from(data_offset).unwrap().to_be_bytes());
+        file.push(0);
+        file.extend_from_slice(&[0; 3]);
+        file.extend_from_slice(&metadata);
+        file.extend_from_slice(&payload);
+        file
+    }
     fn make_build_settings_file_with_path_id(scene_paths: &[&str], object_path_id: i32) -> Vec<u8> {
         let mut string_buffer = Vec::new();
         let build_settings_type = push_type_tree_string(&mut string_buffer, "BuildSettings");
@@ -4875,6 +5058,80 @@ mod tests {
             .unwrap()
             .contains("Wrote a bmp texture from SerializedFile 0 PathID 42"));
         drop(input);
+    }
+
+    /// Class-117/187/188 textures export through the `GraphicsFormat` route:
+    /// each synthetic file carries one RGBA pixel (format discriminant 4) and
+    /// must yield a one-pixel PNG.
+    #[test]
+    fn export_array_textures_write_pngs() {
+        let face_pixels: Vec<u8> = (0..6)
+            .flat_map(|face| [10 + face, 20 + face, 30 + face, 255])
+            .collect();
+        for (class_id, root_name, height, third, size_name, size_value, data) in [
+            (
+                117,
+                "Texture3D",
+                Some(1),
+                Some(("m_Depth", 1)),
+                "m_CompleteImageSize",
+                4,
+                vec![10, 20, 30, 255],
+            ),
+            (
+                187,
+                "Texture2DArray",
+                Some(1),
+                Some(("m_Depth", 1)),
+                "m_DataSize",
+                4,
+                vec![10, 20, 30, 255],
+            ),
+            (
+                188,
+                "CubemapArray",
+                None,
+                Some(("m_CubemapCount", 1)),
+                "m_DataSize",
+                24,
+                face_pixels.clone(),
+            ),
+        ] {
+            let directory = TestInputDirectory::new_root();
+            let serialized_path = directory.join("main.assets");
+            let output_path = directory.join("texture.png");
+            fs::write(
+                &serialized_path,
+                make_array_texture_file(
+                    class_id, root_name, height, third, size_name, true, size_value, &data,
+                ),
+            )
+            .unwrap();
+            let input = TestInputDirectory {
+                directory,
+                files: vec![serialized_path.clone(), output_path.clone()],
+                subdirectories: Vec::new(),
+            };
+
+            let mut status = Vec::new();
+            super::export_texture_to(
+                std::slice::from_ref(&serialized_path),
+                0,
+                42,
+                assetripper::export::settings::ImageExportFormat::Png,
+                true,
+                &output_path,
+                &mut status,
+            )
+            .unwrap();
+            let png = fs::read(&output_path).unwrap();
+            assert_eq!(
+                &png[..8],
+                &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A],
+                "class {class_id}"
+            );
+            drop(input);
+        }
     }
 
     #[test]

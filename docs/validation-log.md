@@ -2408,3 +2408,8 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 
 - Ported the class-117/187/188 field views plus selection, size, height/depth, and Texture3D gate rules as `src/resources/texture_array.rs`, pinned by 6 live-asset probe rows (`texture_array_fixture.txt`, probe `Temp/opencode/arrayprobe`, 2022.3 assets, SDK 10.0.401) with six further unit tests. New row `RES-TEXTURE-ARRAY-001`, new finding `DIFF-TEXTURE-ARRAY-001`. Lib suite 1018/1018 locally, `cargo fmt --check` clean, workspace Clippy clean; Actions validation pending (loop still blocked).
 - No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+## Array/3D export wiring (2026-10-06)
+
+- Composed `export_texture3d_image`/`export_texture2d_array_image`/`export_cubemap_array_image` in `src/resources/texture.rs` (GraphicsFormat route, per-type flip/unpack, `TextureExportError::Array`) and dispatched classes 117/187/188 in `export-texture` with export-level PNG tests plus end-to-end CLI exports for all three. Debugging note: the tests caught two authoring errors (an incoherent 4-byte cubemap vector for six faces, and a hardcoded TypeTree node count that broke the synthetic files). Lib suite 1019/1019 and bin 52/52 locally, `cargo fmt --check` clean, workspace Clippy clean; Actions validation pending (loop still blocked).
+- No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.

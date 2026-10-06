@@ -783,3 +783,9 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Ported 117/187/188 views + rules with a 6-row live-asset differential; new row `RES-TEXTURE-ARRAY-001`, new finding `DIFF-TEXTURE-ARRAY-001`. Lib 1018/1018 locally, fmt + Clippy clean; Actions validation pending (loop still blocked).
 - Next: array/3D export wiring + CLI classes, then remaining rows.
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 103. Checkpoint: array/3D export wiring (2026-10-06)
+
+- Composed the three exports + CLI dispatch with PNG and end-to-end tests. Lib 1019/1019 and bin 52/52 locally, fmt + Clippy clean; Actions validation pending (loop still blocked).
+- Next: remaining rows (sprite/atlas, Crunch/EXR/JPEG, meta fields, then core SER/OBJ/PROC rows).
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

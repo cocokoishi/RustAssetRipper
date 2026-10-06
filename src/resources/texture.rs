@@ -26,6 +26,11 @@ use crate::serialized_file::object::{SerializedValue, SerializedValueLookupError
 
 use super::image_export::{ImageExportFormat, ImageWriteError};
 use super::switch_swizzle::{SwitchSwizzleError, SwitchUnswizzleInput, PLATFORM_BLOB_MIN_LENGTH};
+use super::texture_array::{
+    cubemap_array_complete_image_size, cubemap_array_depth, resolve_array_image_data,
+    texture2d_array_complete_image_size, CubemapArrayView, Texture2DArrayView, Texture3DView,
+    TextureArrayError,
+};
 use super::texture_converter::{try_convert_to_bitmap, TextureConvertError, TextureImage};
 use super::texture_format::{
     is_swap_bytes, swap_adjacent_bytes, SwapBytesError, SWITCH_BUILD_TARGET,
@@ -114,6 +119,8 @@ pub enum TextureExportError {
     Swap(SwapBytesError),
     /// Switch GOB unswizzling rejected the inputs.
     Unswizzle(SwitchSwizzleError),
+    /// An array/3D texture rule rejected the inputs.
+    Array(TextureArrayError),
     /// The decoder or converter rejected the image.
     Convert(TextureConvertError),
     /// The image writer rejected the output.
@@ -138,6 +145,12 @@ impl From<SwitchSwizzleError> for TextureExportError {
     }
 }
 
+impl From<TextureArrayError> for TextureExportError {
+    fn from(error: TextureArrayError) -> Self {
+        Self::Array(error)
+    }
+}
+
 impl From<TextureConvertError> for TextureExportError {
     fn from(error: TextureConvertError) -> Self {
         Self::Convert(error)
@@ -158,6 +171,7 @@ impl Display for TextureExportError {
                 .write_str("Texture2D has neither inline image data nor a resolvable stream"),
             Self::Swap(error) => write!(formatter, "{error}"),
             Self::Unswizzle(error) => write!(formatter, "{error}"),
+            Self::Array(error) => write!(formatter, "{error}"),
             Self::Convert(error) => write!(formatter, "{error}"),
             Self::Image(error) => write!(formatter, "{error}"),
         }
@@ -170,6 +184,7 @@ impl Error for TextureExportError {
             Self::View(error) => Some(error),
             Self::Swap(error) => Some(error),
             Self::Unswizzle(error) => Some(error),
+            Self::Array(error) => Some(error),
             Self::Convert(error) => Some(error),
             Self::Image(error) => Some(error),
             Self::ImageDataUnavailable => None,
@@ -437,6 +452,94 @@ pub fn export_texture2d_value(
         flip_y,
         format,
     )
+}
+
+/// Exports one `Texture3D` to an encoded image.
+///
+/// `stream_content` follows the same inline-wins contract as `GetImageData`.
+/// The converter runs the `GraphicsFormat` route with the derived format, the
+/// derived complete size, and the vertical flip; the DXT5nm unpack follows the
+/// derived lightmap value.
+pub fn export_texture3d_image(
+    view: &Texture3DView,
+    stream_content: Option<&[u8]>,
+    format: ImageExportFormat,
+) -> Result<Vec<u8>, TextureExportError> {
+    let data =
+        resolve_array_image_data(&view.image_data, view.stream_data.is_some(), stream_content)?;
+    let image = TextureImage {
+        texture_format: 0,
+        graphics_format: view.format_value(),
+        width: view.width,
+        height: view.height,
+        depth: view.depth,
+        image_size: usize::try_from(view.complete_image_size_value()).unwrap_or(0),
+        data: &data,
+    };
+    let unpack_normal = view.lightmap_value() == i32::from(TEXTURE_USAGE_MODE_NORMALMAP_DXT5NM);
+    let bitmap = try_convert_to_bitmap(&image, true, unpack_normal)?;
+    let mut output = Vec::new();
+    bitmap.save(&mut output, format)?;
+    Ok(output)
+}
+
+/// Exports one `Texture2DArray` to an encoded image.
+///
+/// The converter runs the `GraphicsFormat` route with the array depth and the
+/// derived complete size, then the vertical flip. No normal unpack applies.
+pub fn export_texture2d_array_image(
+    view: &Texture2DArrayView,
+    stream_content: Option<&[u8]>,
+    format: ImageExportFormat,
+) -> Result<Vec<u8>, TextureExportError> {
+    let data =
+        resolve_array_image_data(&view.image_data, view.stream_data.is_some(), stream_content)?;
+    let image = TextureImage {
+        texture_format: 0,
+        graphics_format: view.format,
+        width: view.width,
+        height: view.height,
+        depth: view.depth,
+        image_size: usize::try_from(texture2d_array_complete_image_size(
+            view.data_size,
+            view.depth,
+        ))
+        .unwrap_or(0),
+        data: &data,
+    };
+    let bitmap = try_convert_to_bitmap(&image, true, false)?;
+    let mut output = Vec::new();
+    bitmap.save(&mut output, format)?;
+    Ok(output)
+}
+
+/// Exports one `CubemapArray` to an encoded image.
+///
+/// Height equals width and depth is six faces per cubemap; the converter runs
+/// the `GraphicsFormat` route and then the vertical flip (kept despite the
+/// source `Maybe not needed?` comment).
+pub fn export_cubemap_array_image(
+    view: &CubemapArrayView,
+    stream_content: Option<&[u8]>,
+    format: ImageExportFormat,
+) -> Result<Vec<u8>, TextureExportError> {
+    let data =
+        resolve_array_image_data(&view.image_data, view.stream_data.is_some(), stream_content)?;
+    let depth = cubemap_array_depth(view.cubemap_count)?;
+    let image = TextureImage {
+        texture_format: 0,
+        graphics_format: view.format,
+        width: view.width,
+        height: view.width,
+        depth: usize::try_from(depth).unwrap_or(0),
+        image_size: usize::try_from(cubemap_array_complete_image_size(view.data_size, depth))
+            .unwrap_or(0),
+        data: &data,
+    };
+    let bitmap = try_convert_to_bitmap(&image, true, false)?;
+    let mut output = Vec::new();
+    bitmap.save(&mut output, format)?;
+    Ok(output)
 }
 
 fn nonnegative(value: i32, field: &'static str) -> Result<usize, TextureViewError> {
@@ -791,6 +894,57 @@ mod tests {
         // top row, the cubemap bitmap with the bottom row.
         assert_eq!(&flipped[122..], &[3, 2, 1, 4, 7, 6, 5, 8]);
         assert_eq!(&unflipped[122..], &[7, 6, 5, 8, 3, 2, 1, 4]);
+    }
+
+    /// The `GraphicsFormat`-routed exports produce images from 1x1(x1) RGBA
+    /// pixels (discriminant 4 decodes RGBA32).
+    #[test]
+    fn array_exports_produce_images() {
+        let pixels = vec![10, 20, 30, 255];
+        let view3d = crate::resources::texture_array::Texture3DView {
+            width: 1,
+            height: 1,
+            depth: 1,
+            format_i32: None,
+            format_u32: Some(4),
+            image_data: pixels.clone(),
+            stream_data: None,
+            lightmap_format: None,
+            usage_mode: 0,
+            mip_count: None,
+            mip_map: false,
+            complete_image_size_u32: Some(4),
+            complete_image_size_i32: None,
+        };
+        let png = export_texture3d_image(&view3d, None, ImageExportFormat::Png).unwrap();
+        assert_eq!(&png[..8], &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
+
+        let view_array = crate::resources::texture_array::Texture2DArrayView {
+            width: 1,
+            height: 1,
+            depth: 1,
+            format: 4,
+            data_size: 4,
+            image_data: pixels.clone(),
+            stream_data: None,
+        };
+        let png = export_texture2d_array_image(&view_array, None, ImageExportFormat::Png).unwrap();
+        assert_eq!(&png[..8], &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
+
+        let view_cube = crate::resources::texture_array::CubemapArrayView {
+            width: 1,
+            cubemap_count: 1,
+            format: 4,
+            data_size: 24,
+            // Six faces of one RGBA pixel each.
+            image_data: vec![
+                10, 20, 30, 255, 11, 21, 31, 255, 12, 22, 32, 255, //
+                13, 23, 33, 255, 14, 24, 34, 255, 15, 25, 35, 255,
+            ],
+            stream_data: None,
+        };
+        let png = export_cubemap_array_image(&view_cube, None, ImageExportFormat::Png).unwrap();
+        assert_eq!(&png[..8], &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
     }
 
     /// The generated cubemap surface carries every `_C28` field the view reads,
