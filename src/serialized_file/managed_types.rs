@@ -18,6 +18,8 @@
 //! - The `FieldSerializer` SerializeReference field-shape selection: stable reference
 //!   identifiers (Unity 2021.2.0a19+) address registry objects with the 64-bit `rid`
 //!   shape, earlier versions with the 32-bit index shape.
+//! - The `FieldSerializer.GetManagedReferenceArrayDepth` nesting rule: each enclosing
+//!   single-dimension array or `List<T>` adds one array level around the element type.
 //! - The `EngineTypePredicates` string tables with the direct-comparison rules
 //!   (`IsSerializableUnityStruct` including the `LazyLoadReference` prefix, and the
 //!   should-have-had-serializable value-type set). Assignability checks need a runtime type
@@ -320,6 +322,36 @@ pub fn managed_reference_shape_for_stable_ids(
     }
 }
 
+/// One nesting layer around a `[SerializeReference]` field's element type for
+/// `FieldSerializer.GetManagedReferenceArrayDepth`.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ManagedReferenceContainerLayer {
+    /// A single-dimension array (`SzArrayTypeSignature`): peels one level.
+    Array,
+    /// A `List<T>` generic instance: peels into the type argument.
+    List,
+    /// Any other type: the element itself, where peeling stops.
+    Element,
+}
+
+/// `FieldSerializer.GetManagedReferenceArrayDepth` over caller facts: each enclosing
+/// single-dimension array or `List<T>` adds one array level; the element type itself
+/// is irrelevant because every referenced object stores just its identifier.
+/// Callers pass the nesting from the outside in; counting stops at the first
+/// `Element` layer like the source loop returns, ignoring anything after it.
+pub fn managed_reference_array_depth(layers: &[ManagedReferenceContainerLayer]) -> usize {
+    let mut depth = 0;
+    for layer in layers {
+        match layer {
+            ManagedReferenceContainerLayer::Array | ManagedReferenceContainerLayer::List => {
+                depth += 1;
+            }
+            ManagedReferenceContainerLayer::Element => break,
+        }
+    }
+    depth
+}
+
 /// Unity value types that should have had the serializable attribute.
 pub const UNITY_VALUE_TYPES_NEEDING_SERIALIZABLE: [&str; 14] = [
     "Vector3",
@@ -385,9 +417,9 @@ pub fn max_depth_of(field_depths: &[Option<i32>]) -> i32 {
 mod tests {
     use super::{
         element_type, is_serializable_unity_struct, is_unity_engine_value_type, managed_reference,
-        managed_reference_shape_for_stable_ids, max_depth_of, FieldShape, PrimitiveType,
-        MANAGED_REFERENCE_SHAPES, SERIALIZABLE_UNITY_STRUCTS,
-        UNITY_VALUE_TYPES_NEEDING_SERIALIZABLE,
+        managed_reference_array_depth, managed_reference_shape_for_stable_ids, max_depth_of,
+        FieldShape, ManagedReferenceContainerLayer, PrimitiveType, MANAGED_REFERENCE_SHAPES,
+        SERIALIZABLE_UNITY_STRUCTS, UNITY_VALUE_TYPES_NEEDING_SERIALIZABLE,
     };
 
     #[test]
@@ -565,6 +597,30 @@ mod tests {
         assert_eq!(legacy.fields[0].type_name, "Int");
         assert_eq!(legacy.fields[0].array_depth, 0);
         assert!(!std::ptr::eq(modern, legacy));
+    }
+
+    #[test]
+    fn managed_reference_array_depth_counts_containers() {
+        use ManagedReferenceContainerLayer as Layer;
+        assert_eq!(managed_reference_array_depth(&[]), 0);
+        assert_eq!(managed_reference_array_depth(&[Layer::Element]), 0);
+        assert_eq!(
+            managed_reference_array_depth(&[Layer::Array, Layer::Element]),
+            1
+        );
+        assert_eq!(
+            managed_reference_array_depth(&[Layer::List, Layer::Element]),
+            1
+        );
+        assert_eq!(
+            managed_reference_array_depth(&[Layer::Array, Layer::List, Layer::Element]),
+            2
+        );
+        // Counting stops at the element; anything after it is ignored.
+        assert_eq!(
+            managed_reference_array_depth(&[Layer::Array, Layer::Element, Layer::Array]),
+            1
+        );
     }
 
     #[test]

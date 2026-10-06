@@ -2,9 +2,11 @@
 //!
 //! Covers the root/marker decisions per platform (including the Android APK/OBB bitmask and the
 //! `assets/bin/Data` gate), the Android, iOS, Switch, PS4, and WiiU directory layouts, the WebGL
-//! build-flavor preference, and the WebPlayer html-to-bundle pairing. Backend selection, assembly
-//! and metadata collection, and bundle gathering live in the file inventory; bundle-hierarchy
-//! lookups live in the serialized-file workspace.
+//! build-flavor preference, and the WebPlayer html-to-bundle pairing. The desktop detectors share
+//! a bare-`Data` fallback (the Linux baseline has no such arm; the port applies the Windows rule
+//! to both deliberately). Backend selection, assembly and metadata collection, and bundle
+//! gathering live in the file inventory; bundle-hierarchy lookups live in the serialized-file
+//! workspace.
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -491,20 +493,7 @@ fn windows_game_data_directory(
             return Ok(Some((named_data_path, last_name)));
         }
     }
-    if executable_count == 0 {
-        return Ok(None);
-    }
-
-    let fallback = join_path(root_path, "Data");
-    if !exists_directory(filesystem, &fallback)? {
-        return Ok(None);
-    }
-    let name = if executable_count == 1 {
-        last_name
-    } else {
-        file_name(root_path).to_owned()
-    };
-    Ok(Some((fallback, name)))
+    desktop_data_fallback(filesystem, root_path, executable_count, &last_name)
 }
 
 fn detect_linux(
@@ -578,16 +567,29 @@ fn linux_game_data_directory(
             return Ok(Some((named_data_path, last_name)));
         }
     }
+    desktop_data_fallback(filesystem, root_path, executable_count, &last_name)
+}
+
+/// Bare-`Data` fallback shared by the desktop detectors: when executables exist but none has a
+/// matching `{name}_Data` directory, the source `WindowsGameStructure.GetDataDirectory` falls
+/// back to `Data` (single-executable stem, else the root name). The Linux baseline has no such
+/// arm; the port applies it to both desktop layouts deliberately so renamed data directories
+/// still resolve.
+fn desktop_data_fallback(
+    filesystem: &VirtualFileSystem,
+    root_path: &str,
+    executable_count: usize,
+    last_name: &str,
+) -> Result<Option<(String, String)>, PlatformStructureError> {
     if executable_count == 0 {
         return Ok(None);
     }
-
     let fallback = join_path(root_path, "Data");
     if !exists_directory(filesystem, &fallback)? {
         return Ok(None);
     }
     let name = if executable_count == 1 {
-        last_name
+        last_name.to_owned()
     } else {
         file_name(root_path).to_owned()
     };
@@ -1342,11 +1344,12 @@ impl Error for PlatformStructureError {
 #[cfg(test)]
 mod tests {
     use super::{
-        android_data_layout, detect_desktop_platform, detect_platform_structure, ios_data_layout,
-        ps4_data_layout, switch_data_layout, web_player_bundle_path, wiiu_data_layout,
-        DesktopPlatform, PlatformKind, PlatformResourceLookup, PlatformResourceProvider,
-        PlatformResourceSource, PlatformStructure, PlatformStructureErrorKind,
-        PlatformStructureLimits, WEBGL_BUILD_FLAVORS,
+        android_data_layout, desktop_data_fallback, detect_desktop_platform,
+        detect_platform_structure, ios_data_layout, ps4_data_layout, switch_data_layout,
+        web_player_bundle_path, wiiu_data_layout, DesktopPlatform, PlatformKind,
+        PlatformResourceLookup, PlatformResourceProvider, PlatformResourceSource,
+        PlatformStructure, PlatformStructureErrorKind, PlatformStructureLimits,
+        WEBGL_BUILD_FLAVORS,
     };
     use crate::io::filesystem::VirtualFileSystem;
 
@@ -1883,6 +1886,32 @@ mod tests {
         assert_eq!(web_player_bundle_path("/player", "INDEX.HTML"), None);
         assert_eq!(web_player_bundle_path("/player", "index.unity3d"), None);
         assert_eq!(web_player_bundle_path("/player", "notes.txt"), None);
+    }
+
+    #[test]
+    fn desktop_data_fallback_names_single_and_multiple_executables() {
+        let mut filesystem = VirtualFileSystem::new();
+        insert_directory(&mut filesystem, "/fb/Data");
+        insert_file(&mut filesystem, "/fb/game.x86");
+        // A lone executable without a matching data directory lends its stem.
+        assert_eq!(
+            desktop_data_fallback(&filesystem, "/fb", 1, "game").unwrap(),
+            Some(("/fb/Data".to_owned(), "game".to_owned()))
+        );
+        // Several executables fall back to the root name.
+        assert_eq!(
+            desktop_data_fallback(&filesystem, "/fb", 2, "game").unwrap(),
+            Some(("/fb/Data".to_owned(), "fb".to_owned()))
+        );
+        // No executables, or no `Data` directory: no fallback.
+        assert_eq!(
+            desktop_data_fallback(&filesystem, "/fb", 0, "game").unwrap(),
+            None
+        );
+        assert_eq!(
+            desktop_data_fallback(&filesystem, "/empty", 1, "game").unwrap(),
+            None
+        );
     }
 
     #[test]

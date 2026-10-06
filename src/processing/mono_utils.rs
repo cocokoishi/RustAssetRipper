@@ -3,9 +3,11 @@
 //!
 //! Covers the pure string kernels behind script/type resolution: the namespace+name
 //! predicates (`IsPrimitive`, `IsObject`, `IsEngineStruct`, ...), `ToPrimitiveType`
-//! with its `PrimitiveType` discriminants, the CorLib element-type branch, and the
+//! with its `PrimitiveType` discriminants, the CorLib element-type branch, the
+//! `GetSize`/`IsCSharpPrimitive` serialization tables, and the
 //! engine-asset name switch (which arm takes a Unity version and which concrete
-//! subclass 2019.4.0f1 resolves).
+//! subclass 2019.4.0f1 resolves). `ToSystemTypeName` stays open: it is naming-only
+//! (no classification decision).
 //! Assembly loading, type resolution, and object construction stay outside: they need
 //! live managed assemblies. The `ToPrimitiveType` enum branch takes only their outcomes
 //! (whether the definition resolved to an enum, plus each field's resolved type).
@@ -226,6 +228,28 @@ impl PrimitiveType {
             "Complex" => Some(Self::Complex),
             _ => None,
         }
+    }
+
+    /// `PrimitiveTypeExtensions.GetSize`: the serialized size in bytes. Fixed-size
+    /// kinds report their width; pairs, strings, and complex kinds report -1 like
+    /// the source. Exhaustive over the enum, so the source `default: throw` arm has
+    /// no reachable case here.
+    pub const fn byte_size(self) -> i32 {
+        match self {
+            Self::Void => 0,
+            Self::Bool | Self::Byte | Self::SByte => 1,
+            Self::Char | Self::Short | Self::UShort => 2,
+            Self::Int | Self::UInt | Self::Single => 4,
+            Self::Long | Self::ULong | Self::Double => 8,
+            Self::Pair | Self::MapPair | Self::String | Self::Complex => -1,
+        }
+    }
+
+    /// `PrimitiveTypeExtensions.IsCSharpPrimitive`: strings and every fixed-size
+    /// kind. This is the production caller behind the size table: field
+    /// serialization dispatches on this predicate, not on raw sizes.
+    pub const fn is_c_sharp_primitive(self) -> bool {
+        matches!(self, Self::String) || self.byte_size() > 0
     }
 }
 
@@ -587,6 +611,59 @@ mod tests {
         assert!(EngineAssetKind::Gradient.takes_version());
         assert!(!EngineAssetKind::Vector3.takes_version());
         assert!(!EngineAssetKind::Guid.takes_version());
+    }
+
+    #[test]
+    fn primitive_sizes_and_csharp_coverage_match_the_source_tables() {
+        use super::PrimitiveType;
+        assert_eq!(PrimitiveType::Void.byte_size(), 0);
+        for kind in [
+            PrimitiveType::Bool,
+            PrimitiveType::Byte,
+            PrimitiveType::SByte,
+        ] {
+            assert_eq!(kind.byte_size(), 1, "{kind:?}");
+            assert!(kind.is_c_sharp_primitive(), "{kind:?}");
+        }
+        for kind in [
+            PrimitiveType::Char,
+            PrimitiveType::Short,
+            PrimitiveType::UShort,
+        ] {
+            assert_eq!(kind.byte_size(), 2, "{kind:?}");
+            assert!(kind.is_c_sharp_primitive(), "{kind:?}");
+        }
+        for kind in [
+            PrimitiveType::Int,
+            PrimitiveType::UInt,
+            PrimitiveType::Single,
+        ] {
+            assert_eq!(kind.byte_size(), 4, "{kind:?}");
+            assert!(kind.is_c_sharp_primitive(), "{kind:?}");
+        }
+        for kind in [
+            PrimitiveType::Long,
+            PrimitiveType::ULong,
+            PrimitiveType::Double,
+        ] {
+            assert_eq!(kind.byte_size(), 8, "{kind:?}");
+            assert!(kind.is_c_sharp_primitive(), "{kind:?}");
+        }
+        // Strings read primitive despite their variable size; pairs, void, and
+        // complex kinds do not.
+        assert_eq!(PrimitiveType::String.byte_size(), -1);
+        assert!(PrimitiveType::String.is_c_sharp_primitive());
+        for kind in [
+            PrimitiveType::Void,
+            PrimitiveType::Pair,
+            PrimitiveType::MapPair,
+            PrimitiveType::Complex,
+        ] {
+            assert!(!kind.is_c_sharp_primitive(), "{kind:?}");
+        }
+        assert_eq!(PrimitiveType::Pair.byte_size(), -1);
+        assert_eq!(PrimitiveType::MapPair.byte_size(), -1);
+        assert_eq!(PrimitiveType::Complex.byte_size(), -1);
     }
 
     #[test]

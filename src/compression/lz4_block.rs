@@ -134,8 +134,9 @@ const LZ4_MAX_DISTANCE: usize = 0xFFFF;
 /// role on the UnityFS write path (`FileStreamBundleFile.WriteFileStreamMetadata`):
 /// a single-pass match finder over a 12-bit hash table emitting spec-valid blocks
 /// with minimum match length 4, 16-bit match offsets, nibble-15 length extensions,
-/// and a literal-only five-byte tail. An empty input encodes to the canonical
-/// single endmark token. `maximum_output_size` bounds the reservation up front
+/// and a literal-only five-byte tail. An empty input encodes to no bytes, matching
+/// `LZ4Codec.Encode` (K4os emits zero bytes for empty input; verified against the
+/// 1.3.8 reference output shapes). `maximum_output_size` bounds the reservation
 /// against the worst case (`len + len / 255 + 16`); match selection affects only
 /// density, so byte-identity with K4os output is not promised, but every emitted
 /// block decodes back through [`decompress_block`].
@@ -154,14 +155,12 @@ pub fn compress_block(input: &[u8], maximum_output_size: usize) -> Result<Vec<u8
         ));
     }
     let mut output = Vec::new();
+    if input.is_empty() {
+        return Ok(output);
+    }
     output
         .try_reserve_exact(worst_case)
         .map_err(|_| Lz4BlockError::new(0, Lz4BlockErrorKind::AllocationFailed(worst_case)))?;
-
-    if input.is_empty() {
-        output.push(0x00);
-        return Ok(output);
-    }
 
     let mut table = vec![usize::MAX; 1 << LZ4_HASH_BITS];
     let mut anchor = 0usize;
@@ -384,7 +383,7 @@ mod tests {
     /// `Encode` output, and K4os `Decode` round-trips each to its raw form.
     ///
     /// The small shapes additionally confirm encoder-shape agreement: K4os emits
-    /// byte-identical blocks to `compress_block` for the short, distinct-20,
+    /// byte-identical blocks to `compress_block` for the empty, short, distinct-20,
     /// repeat, and run-13 inputs (see `encoder_emits_exact_bytes_for_canonical_shapes`).
     #[test]
     fn decodes_k4os_reference_vectors() {
@@ -493,8 +492,10 @@ mod tests {
 
     #[test]
     fn encoder_emits_exact_bytes_for_canonical_shapes() {
-        // Empty input is the canonical single endmark token.
-        assert_eq!(compress_block(&[], 64).unwrap(), vec![0x00]);
+        // Empty input encodes to no bytes, matching `LZ4Codec.Encode` (the K4os
+        // reference emits zero bytes for empty input; the empty row of
+        // `decodes_k4os_reference_vectors` pins the decode side).
+        assert!(compress_block(&[], 64).unwrap().is_empty());
         // Fewer than 12 bytes never enter the match finder: one literal token.
         assert_eq!(
             compress_block(&[1, 2, 3, 4, 5, 6, 7, 8], 64).unwrap(),

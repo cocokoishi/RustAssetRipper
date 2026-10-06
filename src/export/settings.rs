@@ -22,8 +22,9 @@
 //! prefer-original rule over `GetBestExtension`), so it is implemented rather than described.
 //! `TerrainExportMode` is declared in the export configuration but consumed nowhere outside a
 //! GUI dropdown: no `ExportSettings` field and no exporter reads it. `ScriptLanguageVersion`
-//! carries the full shipped member list with discriminants; the automatic selection itself
-//! needs full Unity-version ordering from the external primitives package and stays out.
+//! carries the full shipped member list with discriminants, and the automatic selection
+//! (`ToCSharpLanguageVersion`, `GetAutomaticCSharpLanguageVersion`) is implemented over
+//! caller-supplied version facts; release-type ordering itself stays with the version type.
 
 /// Script loading level in `ImportSettings`; default `Level2`.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -449,9 +450,6 @@ impl TerrainExportMode {
 }
 
 /// The C# language version for decompiled scripts (`ScriptLanguageVersion`); default `AutoSafe`.
-///
-/// The named variants mirror the shipped enum values; the automatic selection itself
-/// needs full Unity-version ordering from the external primitives package and stays out.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ScriptLanguageVersion {
     CSharp1,
@@ -531,6 +529,64 @@ impl ScriptLanguageVersion {
             -1 => Some(Self::AutoSafe),
             _ => None,
         }
+    }
+
+    /// `ToCSharpLanguageVersion(unityVersion)`: the automatic members resolve against
+    /// caller-supplied version facts; concrete members pass through like the source cast.
+    pub const fn resolve_with_version(self, facts: AutomaticLanguageVersionFacts) -> Self {
+        match self {
+            Self::AutoExperimental => automatic_script_language_version(true, facts),
+            Self::AutoSafe => automatic_script_language_version(false, facts),
+            concrete => concrete,
+        }
+    }
+
+    /// `ToCSharpLanguageVersion()` without a Unity version: both automatic members become
+    /// `Latest`; concrete members pass through.
+    pub const fn resolve_without_version(self) -> Self {
+        match self {
+            Self::AutoExperimental | Self::AutoSafe => Self::Latest,
+            concrete => concrete,
+        }
+    }
+}
+
+/// Caller facts for `GetAutomaticCSharpLanguageVersion`: whether the Unity version reaches
+/// each threshold, in source evaluation order. The release-type-sensitive gates (notably
+/// `HasCSharp9Support`, which needs alpha/beta ordering) arrive pre-evaluated because
+/// version ordering lives outside the settings records.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct AutomaticLanguageVersionFacts {
+    /// `HasCSharp9Support`: at least 2022.1.0a3, or at least 2021.2.0b6 within major 2021.
+    pub has_csharp9_support: bool,
+    /// At least 2020.2.
+    pub at_least_2020_2: bool,
+    /// At least 2019.2.
+    pub at_least_2019_2: bool,
+    /// At least 2018.3.
+    pub at_least_2018_3: bool,
+    /// At least 2017.1.
+    pub at_least_2017_1: bool,
+}
+
+/// `GetAutomaticCSharpLanguageVersion(unityVersion, experimental)`: C# 9 on supported
+/// versions, then 8.0 from 2020.2 and 7.3 from 2019.2 (or from 2018.3 in experimental
+/// mode); experimental mode additionally reaches 6 from 2017.1; anything older falls
+/// back to C# 4.
+pub const fn automatic_script_language_version(
+    experimental: bool,
+    facts: AutomaticLanguageVersionFacts,
+) -> ScriptLanguageVersion {
+    if facts.has_csharp9_support {
+        ScriptLanguageVersion::CSharp9_0
+    } else if facts.at_least_2020_2 {
+        ScriptLanguageVersion::CSharp8_0
+    } else if facts.at_least_2019_2 || (experimental && facts.at_least_2018_3) {
+        ScriptLanguageVersion::CSharp7_3
+    } else if experimental && facts.at_least_2017_1 {
+        ScriptLanguageVersion::CSharp6
+    } else {
+        ScriptLanguageVersion::CSharp4
     }
 }
 
@@ -747,6 +803,82 @@ mod tests {
             Format::texture_export_format(false, Some("png"), Format::Exr),
             Format::Exr
         );
+    }
+
+    #[test]
+    fn automatic_language_selection_follows_the_version_thresholds() {
+        use super::{automatic_script_language_version, AutomaticLanguageVersionFacts};
+        use ScriptLanguageVersion::{
+            AutoExperimental, AutoSafe, CSharp11_0, CSharp4, CSharp6, CSharp7_3, CSharp8_0,
+            CSharp9_0, Latest,
+        };
+        fn facts(
+            has_csharp9_support: bool,
+            at_least_2020_2: bool,
+            at_least_2019_2: bool,
+            at_least_2018_3: bool,
+            at_least_2017_1: bool,
+        ) -> AutomaticLanguageVersionFacts {
+            AutomaticLanguageVersionFacts {
+                has_csharp9_support,
+                at_least_2020_2,
+                at_least_2019_2,
+                at_least_2018_3,
+                at_least_2017_1,
+            }
+        }
+        let none = facts(false, false, false, false, false);
+        // Thresholds apply in source order; higher support wins regardless of mode.
+        assert_eq!(
+            automatic_script_language_version(false, facts(true, true, true, true, true)),
+            CSharp9_0
+        );
+        assert_eq!(
+            automatic_script_language_version(true, facts(false, true, true, true, true)),
+            CSharp8_0
+        );
+        assert_eq!(
+            automatic_script_language_version(false, facts(false, false, true, true, true)),
+            CSharp7_3
+        );
+        // The 2018.3 and 2017.1 branches need experimental mode.
+        assert_eq!(
+            automatic_script_language_version(true, facts(false, false, false, true, true)),
+            CSharp7_3
+        );
+        assert_eq!(
+            automatic_script_language_version(true, facts(false, false, false, false, true)),
+            CSharp6
+        );
+        assert_eq!(
+            automatic_script_language_version(false, facts(false, false, false, true, true)),
+            CSharp4
+        );
+        assert_eq!(
+            automatic_script_language_version(false, facts(false, false, false, false, true)),
+            CSharp4
+        );
+        assert_eq!(automatic_script_language_version(true, none), CSharp4);
+        assert_eq!(automatic_script_language_version(false, none), CSharp4);
+        // The member-level dispatch picks the experimental flag from the variant.
+        assert_eq!(
+            AutoSafe.resolve_with_version(facts(false, false, false, true, true)),
+            CSharp4
+        );
+        assert_eq!(
+            AutoExperimental.resolve_with_version(facts(false, false, false, true, true)),
+            CSharp7_3
+        );
+        assert_eq!(
+            AutoSafe.resolve_with_version(facts(false, true, false, false, false)),
+            CSharp8_0
+        );
+        // Concrete members pass through untouched on both entry points.
+        assert_eq!(CSharp11_0.resolve_with_version(none), CSharp11_0);
+        assert_eq!(CSharp11_0.resolve_without_version(), CSharp11_0);
+        // Without a version, both automatic members become Latest.
+        assert_eq!(AutoSafe.resolve_without_version(), Latest);
+        assert_eq!(AutoExperimental.resolve_without_version(), Latest);
     }
 
     #[test]
