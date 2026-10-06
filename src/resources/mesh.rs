@@ -11,12 +11,13 @@
 //! content fetching and integrity checks need the asset collection and stay caller-side;
 //! this module resolves only which source applies.
 //!
-//! Deliberately open: the mutating fill/set paths (`FillWithCompressedMeshData`,
-//! `SetProcessedIndexBuffer`, `SetIndexFormat`, optimization-flag and compression setters),
+//! Deliberately open: the mutating fill paths (`FillWithCompressedMeshData`,
+//! `SetProcessedIndexBuffer` byte writes, optimization-flag and compression setters),
 //! whose generated-enum values and collection writes have no read-side counterpart here;
-//! `VertexDataBlob.IsSet` facts arrive precomputed because the blob lives in its own module;
-//! the UV-distribution metric lives in `mesh_metric`, and blend-shape CRC search in
-//! `blend_shape`.
+//! the `SetIndexFormat` write gate ports below because it needs only the field-presence
+//! fact. `VertexDataBlob.IsSet` facts arrive precomputed because the blob lives in its
+//! own module; the UV-distribution metric lives in `mesh_metric`, the processed-index
+//! lane conversions alongside it, and blend-shape CRC search in `blend_shape`.
 //!
 //! Field-name basis: `m_VertexData`/`m_DataSize` are already used by the streamed-asset path; the
 //! `SubMesh` children use Unity's serialized TypeTree names (`firstByte`, `indexCount`, `topology`,
@@ -87,6 +88,8 @@ pub enum MeshViewError {
     VertexData(VertexDataError),
     /// The compressed mesh could not be decompressed.
     CompressedMesh(CompressedMeshError),
+    /// A 32-bit index format was requested on a version without `m_IndexFormat`.
+    UnsupportedIndexFormat,
 }
 
 impl From<VertexDataError> for MeshViewError {
@@ -122,6 +125,10 @@ impl Display for MeshViewError {
             }
             Self::VertexData(error) => write!(formatter, "{error}"),
             Self::CompressedMesh(error) => write!(formatter, "{error}"),
+            Self::UnsupportedIndexFormat => write!(
+                formatter,
+                "only 16 bit vertex indices are supported without m_IndexFormat"
+            ),
         }
     }
 }
@@ -211,6 +218,11 @@ impl MeshView {
             Some(1) => IndexFormat::UInt32,
             _ => IndexFormat::UInt16,
         }
+    }
+
+    /// `MeshExtensions.Is16BitIndices`.
+    pub fn is_16_bit_indices(&self) -> bool {
+        self.resolved_index_format() == IndexFormat::UInt16
     }
 
     /// `MeshExtensions.GetProcessedIndexBuffer`: decode `m_IndexBuffer` with the file endianness.
@@ -333,6 +345,25 @@ pub enum MeshVertexBytesSource {
     Streamed,
     /// Empty inline data and no stream descriptor: reads empty.
     Empty,
+}
+
+/// `MeshExtensions.SetIndexFormat` write gate over caller facts.
+///
+/// Versions serializing `m_IndexFormat` accept either width and the caller writes it;
+/// versions without the field (3.5–2017.3) run 16-bit exclusively, so requesting
+/// 32-bit there is the source `NotSupportedException`. Returns whether the caller
+/// performs the write; the field write itself stays caller-side.
+pub fn set_index_format(
+    has_index_format: bool,
+    format: IndexFormat,
+) -> Result<bool, MeshViewError> {
+    if has_index_format {
+        Ok(true)
+    } else if format == IndexFormat::UInt16 {
+        Ok(false)
+    } else {
+        Err(MeshViewError::UnsupportedIndexFormat)
+    }
 }
 
 /// `MeshExtensions.IsCombinedMesh`: the `^Combined Mesh \(root scene\)( [0-9]+)?$`
@@ -927,6 +958,42 @@ mod tests {
             make_view(&root).resolved_index_format(),
             IndexFormat::UInt16
         );
+    }
+
+    #[test]
+    fn index_format_gate_matches_the_source_branches() {
+        // With the field, either width writes.
+        assert!(set_index_format(true, IndexFormat::UInt16).unwrap());
+        assert!(set_index_format(true, IndexFormat::UInt32).unwrap());
+        // Without the field, 16-bit is a silent no-op and 32-bit throws.
+        assert!(!set_index_format(false, IndexFormat::UInt16).unwrap());
+        assert!(matches!(
+            set_index_format(false, IndexFormat::UInt32),
+            Err(MeshViewError::UnsupportedIndexFormat)
+        ));
+        assert_eq!(
+            MeshViewError::UnsupportedIndexFormat.to_string(),
+            "only 16 bit vertex indices are supported without m_IndexFormat"
+        );
+    }
+
+    #[test]
+    fn is_16_bit_indices_follows_the_resolved_format() {
+        let root = SerializedValue::Struct(vec![
+            field("m_IndexFormat", SerializedValue::I32(0)),
+            field("m_IndexBuffer", SerializedValue::Bytes(vec![1, 0])),
+        ]);
+        assert!(make_view(&root).is_16_bit_indices());
+        let root = SerializedValue::Struct(vec![
+            field("m_IndexFormat", SerializedValue::I32(1)),
+            field("m_IndexBuffer", SerializedValue::Bytes(vec![1, 0, 0, 0])),
+        ]);
+        assert!(!make_view(&root).is_16_bit_indices());
+        let root = SerializedValue::Struct(vec![field(
+            "m_IndexBuffer",
+            SerializedValue::Bytes(vec![7, 0]),
+        )]);
+        assert!(make_view(&root).is_16_bit_indices());
     }
 
     #[test]

@@ -285,4 +285,36 @@ mod tests {
         };
         assert!(empty.convert_value_array_to_generic_binding().is_empty());
     }
+
+    #[test]
+    fn strides_skip_mid_stride_entries_without_rescanning() {
+        // Classification is positional: the source advances by stride with no
+        // bounds checks or rescans, so CRC entries landing mid-stride are
+        // swallowed instead of classified.
+        let skipped = ClipView {
+            binding: Some(vec![
+                ValueArrayEntry {
+                    id: 100,
+                    type_id: CRC_POSITION_X,
+                },
+                ValueArrayEntry {
+                    id: 200,
+                    type_id: CRC_QUATERNION_X,
+                },
+                ValueArrayEntry {
+                    id: 300,
+                    type_id: CRC_SCALE_X,
+                },
+            ]),
+            ..ClipView::default()
+        };
+        assert_eq!(
+            skipped.convert_value_array_to_generic_binding(),
+            vec![GenericBindingView {
+                path: 100,
+                attribute: ATTRIBUTE_TRANSFORM_POSITION,
+                class_id: CLASS_ID_TRANSFORM,
+            }]
+        );
+    }
 }

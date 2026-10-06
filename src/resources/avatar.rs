@@ -407,4 +407,25 @@ mod tests {
         assert_eq!(update_humanoid_muscle(141, chest_only), 142);
         assert_eq!(update_humanoid_muscle(141, legacy), 158);
     }
+
+    /// Out-of-range ids update and then read `None`, where the source throws.
+    #[test]
+    fn out_of_range_muscles_update_then_read_none() {
+        let modern = UnityVersion::parse("2022.3.1f1").unwrap();
+        let legacy = UnityVersion::parse("5.0.0f1").unwrap();
+        // An empty skeleton map resolves nothing.
+        assert_eq!(find_bone_path(&HashMap::new(), 12345), None);
+        // Past `Last` the update arithmetic still runs, but no band names the result.
+        for muscle in [200, 1000] {
+            assert!(update_humanoid_muscle(muscle, modern) >= HUMANOID_MUSCLE_LAST);
+            assert_eq!(
+                humanoid_muscle_attribute(update_humanoid_muscle(muscle, modern)),
+                None
+            );
+            assert_eq!(
+                humanoid_muscle_attribute(update_humanoid_muscle(muscle, legacy)),
+                None
+            );
+        }
+    }
 }
