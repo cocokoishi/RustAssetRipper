@@ -1,4 +1,4 @@
-//! Animator enum casts.
+//! Animator enum casts and the synced-layer index.
 //!
 //! Mirrors `LayerConstantExtensions.GetLayerBlendingMode`,
 //! `ValueConstantExtensions.GetTypeValue`, and
@@ -6,6 +6,11 @@
 //! integer to its enum, so the Rust side models the raw discriminant. The generated enum member
 //! names live in the published `AssetRipper.SourceGenerated` package rather than the frozen
 //! source snapshot, so only the discriminant identity is asserted here.
+//!
+//! Also mirrors the `AnimatorControllerProcessor.InitializeLayer` synced-layer decision, which
+//! needs no enum: unsynchronized layers read -1, synchronized ones their state-machine index.
+//! The parameter-default dispatch in `InitializeParameter` stays open: it switches on the
+//! external `AnimatorControllerParameterType` values, which the frozen baseline does not declare.
 
 /// `AnimatorLayerBlendingMode` discriminant.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -28,6 +33,17 @@ pub fn get_value_constant_type(raw: u32) -> AnimatorControllerParameterType {
 /// `AnimatorControllerParameterExtensions.GetTypeValue`.
 pub fn get_animator_controller_parameter_type(raw: i32) -> AnimatorControllerParameterType {
     AnimatorControllerParameterType(raw)
+}
+
+/// `AnimatorControllerProcessor.InitializeLayer` synced-layer index:
+/// `StateMachineSynchronizedLayerIndex == 0` reads -1, otherwise the layer's
+/// `StateMachineIndex` (wrapping like the source cast).
+pub fn synced_layer_index(synchronized_layer_index: u32, state_machine_index: u32) -> i32 {
+    if synchronized_layer_index == 0 {
+        -1
+    } else {
+        state_machine_index as i32
+    }
 }
 
 #[cfg(test)]
@@ -67,5 +83,15 @@ mod tests {
             rows += 1;
         }
         assert_eq!(rows, 6);
+    }
+
+    /// `InitializeLayer` synced-layer decision: -1 unless synchronized.
+    #[test]
+    fn synced_layer_index_matches_the_source_branch() {
+        assert_eq!(synced_layer_index(0, 0), -1);
+        assert_eq!(synced_layer_index(0, 7), -1);
+        assert_eq!(synced_layer_index(1, 7), 7);
+        assert_eq!(synced_layer_index(2, 0), 0);
+        assert_eq!(synced_layer_index(3, u32::MAX), -1);
     }
 }

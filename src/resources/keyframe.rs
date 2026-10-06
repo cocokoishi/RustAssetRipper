@@ -200,4 +200,31 @@ mod tests {
             "{line}"
         );
     }
+
+    #[test]
+    fn default_weight_bits_and_overload_shapes_match_the_source() {
+        // `DefaultFloatWeight` is the double division narrowed to `f32`, not the
+        // single-precision division: both round to the same word today, and the pin
+        // keeps the source expression honest.
+        assert_eq!(DEFAULT_FLOAT_WEIGHT.to_bits(), 0x3EAAAAAB);
+        assert_eq!(DEFAULT_FLOAT_WEIGHT.to_bits(), (1.0f32 / 3.0).to_bits());
+
+        let version = UnityVersion::parse("2019.4.3f1").unwrap();
+        // The weight-only overload never touches the slopes, exactly like the source.
+        let mut weighted = KeyframeView {
+            in_slope: 11.0,
+            out_slope: 22.0,
+            ..view_for(keyframe_presence(version))
+        };
+        set_values_weight(&mut weighted, version, 1.0, 2.0, 0.5);
+        assert_eq!(weighted.in_slope.to_bits(), 11.0f32.to_bits());
+        assert_eq!(weighted.out_slope.to_bits(), 22.0f32.to_bits());
+        assert_eq!(weighted.in_weight.map(f32::to_bits), Some(0.5f32.to_bits()));
+        // The slope overload writes the slopes through the free-free tangent.
+        let mut sloped = view_for(keyframe_presence(version));
+        set_values_slopes(&mut sloped, version, 1.0, 2.0, 3.0, 4.0, 0.75);
+        assert_eq!(sloped.in_slope.to_bits(), 3.0f32.to_bits());
+        assert_eq!(sloped.out_slope.to_bits(), 4.0f32.to_bits());
+        assert_eq!(sloped.tangent_mode, to_tangent(FREE_FREE, version));
+    }
 }

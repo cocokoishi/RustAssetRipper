@@ -3,7 +3,8 @@
 //! Mirrors `QuaternionCurveExtensions`, `Vector3CurveExtensions`, `FloatCurveExtensions`, and
 //! `PPtrCurveExtensions`. Each sets the curve path (and, for float/PPtr curves, the attribute,
 //! class id, and script pointer); the quaternion/vector/float wrappers additionally reset the
-//! curve envelope to the default cycle-with-offset loop and ZXY rotation order.
+//! curve envelope to the default cycle-with-offset loop and ZXY rotation order. The script
+//! pointer arrives as a caller-resolved path id because `SetAsset` needs the live collection.
 
 use super::animation_curve::{CURVE_LOOP_CYCLE_WITH_OFFSET, ROTATION_ORDER_ZXY};
 
@@ -136,7 +137,7 @@ pub fn pptr_curve_set_values(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resources::animation_curve::ROTATION_ORDER_YZX;
+    use crate::resources::animation_curve::{CURVE_LOOP_CYCLE_WITH_OFFSET, ROTATION_ORDER_YZX};
 
     fn envelope(rotation_present: bool) -> CurveEnvelope {
         CurveEnvelope {
@@ -247,5 +248,71 @@ mod tests {
             rows += 1;
         }
         assert_eq!(rows, 20);
+    }
+
+    #[test]
+    fn set_values_overwrites_junk_destinations() {
+        let junk = CurveEnvelope {
+            pre_infinity: 7,
+            post_infinity: 9,
+            rotation_order: Some(9),
+        };
+        // Quaternion: envelope resets, path overwrites.
+        let mut curve = QuaternionCurveView {
+            path: "old".to_string(),
+            envelope: junk,
+        };
+        quaternion_curve_set_values(&mut curve, "new");
+        assert_eq!(curve.path, "new");
+        assert_eq!(curve.envelope.pre_infinity, CURVE_LOOP_CYCLE_WITH_OFFSET);
+        assert_eq!(curve.envelope.post_infinity, CURVE_LOOP_CYCLE_WITH_OFFSET);
+        assert_eq!(
+            curve.envelope.rotation_order,
+            Some(crate::resources::animation_curve::ROTATION_ORDER_ZXY)
+        );
+        // Vector3 explicit order overrides junk; the legacy slot drops it.
+        let mut curve = Vector3CurveView {
+            path: "old".to_string(),
+            envelope: junk,
+        };
+        vector3_curve_set_values_with_rotation_order(&mut curve, "new", ROTATION_ORDER_YZX);
+        assert_eq!(curve.path, "new");
+        assert_eq!(curve.envelope.rotation_order, Some(ROTATION_ORDER_YZX));
+        let mut legacy = Vector3CurveView {
+            path: "old".to_string(),
+            envelope: CurveEnvelope {
+                rotation_order: None,
+                ..junk
+            },
+        };
+        vector3_curve_set_values_with_rotation_order(&mut legacy, "new", ROTATION_ORDER_YZX);
+        assert_eq!(legacy.envelope.rotation_order, None);
+        // Float: every field lands, including the script pointer.
+        let script = ScriptReference { path_id: 42 };
+        let mut curve = FloatCurveView {
+            path: "old".to_string(),
+            attribute: "old".to_string(),
+            class_id: 1,
+            script: Some(ScriptReference { path_id: 1 }),
+            envelope: junk,
+        };
+        float_curve_set_values(&mut curve, "p", "a", 115, script);
+        assert_eq!(curve.path, "p");
+        assert_eq!(curve.attribute, "a");
+        assert_eq!(curve.class_id, 115);
+        assert_eq!(curve.script, Some(script));
+        assert_eq!(curve.envelope.pre_infinity, CURVE_LOOP_CYCLE_WITH_OFFSET);
+        // PPtr: no envelope exists; the identity fields overwrite.
+        let mut curve = PPtrCurveView {
+            path: "old".to_string(),
+            attribute: "old".to_string(),
+            class_id: 1,
+            script: None,
+        };
+        pptr_curve_set_values(&mut curve, "p", "a", 115, script);
+        assert_eq!(curve.path, "p");
+        assert_eq!(curve.attribute, "a");
+        assert_eq!(curve.class_id, 115);
+        assert_eq!(curve.script, Some(script));
     }
 }
