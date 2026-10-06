@@ -15,6 +15,10 @@
 //! - In the three-color DXT mode (`color0 <= color1`) the reference emits opaque black
 //!   `(0, 0, 0, 255)` for index 3 rather than transparent black.
 //!
+//! - `R_BC4_SNorm`/`RG_BC5_SNorm` decode through the same unsigned entry points on
+//!   purpose: the whole `GraphicsFormat` switch instantiates `ColorRGBA<byte>, byte`,
+//!   so the reference runs byte-channel interpolation for signed and unsigned alike.
+//!
 //! Differential fixture: `texture_decode_fixture.txt` (probe `Temp/opencode/texdecprobe`).
 
 /// A texture decode failure.
@@ -1338,5 +1342,60 @@ mod tests {
             rows += 1;
         }
         assert_eq!(rows, 13);
+    }
+
+    #[test]
+    fn short_inputs_and_outputs_report_exact_bounds() {
+        // Output size is checked first: a 4x4 image needs 64 RGBA bytes.
+        let mut small = vec![0u8; 63];
+        assert_eq!(
+            decode_dxt1(&[0u8; 8], 4, 4, &mut small),
+            Err(TextureDecodeError::OutputTooSmall {
+                required: 64,
+                actual: 63
+            })
+        );
+        // One DXT1 block needs 8 input bytes.
+        let mut output = vec![0u8; 64];
+        assert_eq!(
+            decode_dxt1(&[0u8; 7], 4, 4, &mut output),
+            Err(TextureDecodeError::InputTooShort {
+                required: 8,
+                actual: 7
+            })
+        );
+        // Overflowed output sizes report the maximum bound.
+        let mut empty = Vec::new();
+        assert_eq!(
+            decode_rgba32(&[], usize::MAX, usize::MAX, &mut empty),
+            Err(TextureDecodeError::OutputTooSmall {
+                required: usize::MAX,
+                actual: 0
+            })
+        );
+        assert_eq!(
+            TextureDecodeError::InputTooShort {
+                required: 8,
+                actual: 7
+            }
+            .to_string(),
+            "texture input has 7 bytes; needs 8"
+        );
+        assert_eq!(
+            TextureDecodeError::OutputTooSmall {
+                required: 64,
+                actual: 63
+            }
+            .to_string(),
+            "texture output has 63 bytes; needs 64"
+        );
+        assert_eq!(
+            TextureDecodeError::InvalidBlockDimension {
+                block_width: 3,
+                block_height: 5
+            }
+            .to_string(),
+            "ASTC block dimensions 3x5 are outside the supported 4..=12 range"
+        );
     }
 }

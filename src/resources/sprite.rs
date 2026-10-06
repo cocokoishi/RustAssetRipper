@@ -22,6 +22,12 @@
 //! `#warning TODO` for `Edges`). This module reports *whether* the outline, the
 //! physics shape, and the bone payload must be produced, plus the Bone PPU
 //! scaling math; the caller owns the vertex extraction.
+//!
+//! Also ported is the `SpriteProcessor.ProcessSprite` offset recalculation (pivot
+//! offset and texture-rect offset over caller facts); the atlas detachment and the
+//! rect/pivot/border copies stay caller-side. The `SettingsRaw` packing-settings
+//! bit layout (`SpriteAtlasData`/`SpriteRenderData`) stays open pending the
+//! generated packing-enum member names.
 
 /// The class ID of `Sprite` (class 213).
 pub const SPRITE_CLASS_ID: i32 = 213;
@@ -164,6 +170,35 @@ pub fn get_sprite_coordinates_in_atlas(
         pivot: atlas_pivot,
         border: atlas_border,
     }
+}
+
+/// `SpriteProcessor.ProcessSprite` pivot offset over caller facts.
+///
+/// The offset in pixels of the pivot to the center of the sprite rect:
+/// `(pivot - 0.5) * rect size`, in the source's exact operation order.
+/// Consumes the atlas coordinates' rect size and pivot; the caller writes the
+/// result back to the sprite `Offset`.
+pub fn sprite_pivot_offset(pivot: [f32; 2], rect_size: [f32; 2]) -> [f32; 2] {
+    [
+        (pivot[0] - 0.5) * rect_size[0],
+        (pivot[1] - 0.5) * rect_size[1],
+    ]
+}
+
+/// `SpriteProcessor.ProcessSprite` texture-rect offset over caller facts.
+///
+/// The offset in pixels of the render-data texture rect to the sprite rect.
+/// The caller writes the result back to `RD.TextureRectOffset`; the atlas
+/// detachment (`SpriteAtlasP = null`) and the rect/pivot/border copies stay
+/// caller-side with the generated sprite objects.
+pub fn sprite_texture_rect_offset(
+    texture_rect_origin: [f32; 2],
+    rect_origin: [f32; 2],
+) -> [f32; 2] {
+    [
+        texture_rect_origin[0] - rect_origin[0],
+        texture_rect_origin[1] - rect_origin[1],
+    ]
 }
 
 /// Discriminant of `SpriteAlignment.Custom` written by `FillSpriteMetaData`.
@@ -427,6 +462,27 @@ mod tests {
         assert!(!sprite_try_convert_to_bitmap(false, true, true));
         assert!(!sprite_try_convert_to_bitmap(false, false, false));
         assert!(!sprite_try_convert_to_bitmap(false, false, true));
+    }
+
+    #[test]
+    fn processor_offsets_follow_the_pivot_and_rect_origins() {
+        // Centered pivot: no offset whatever the rect size.
+        assert_eq!(sprite_pivot_offset([0.5, 0.5], [64.0, 32.0]), [0.0, 0.0]);
+        // Corner pivots shift by half the rect size, in exact source order.
+        assert_eq!(
+            sprite_pivot_offset([0.0, 0.0], [64.0, 32.0]),
+            [-32.0, -16.0]
+        );
+        assert_eq!(sprite_pivot_offset([1.0, 1.0], [10.0, 20.0]), [5.0, 10.0]);
+        // Texture-rect offset is the origin difference.
+        assert_eq!(
+            sprite_texture_rect_offset([1.0, 2.0], [10.0, 20.0]),
+            [-9.0, -18.0]
+        );
+        assert_eq!(
+            sprite_texture_rect_offset([4.0, 4.0], [4.0, 4.0]),
+            [0.0, 0.0]
+        );
     }
 
     #[test]

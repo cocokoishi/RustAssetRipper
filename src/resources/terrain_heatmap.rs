@@ -1,10 +1,14 @@
 //! `TerrainHeatmap` ported from
-//! `AssetRipper.Export.Modules.Textures/TerrainHeatmap.cs`.
+//! `AssetRipper.Export.Modules.Textures/TerrainHeatmap.cs`, plus the height-grid kernel
+//! from `AssetRipper.Export.Modules.Models/GlbTerrainBuilder.GetHeights`.
 //!
 //! Converts a `TerrainData` (class 156) heightmap into an RGBA32 heatmap: each `short` height is
 //! normalized by `short.MaxValue`, mapped through the five-stop colour ramp, written as opaque
 //! pixels, and flipped vertically. The bitmap size is `max(width, resolution)` by
-//! `max(height, resolution)`.
+//! `max(height, resolution)`. The same grid also feeds the mesh exporter as row-major
+//! normalized heights; vertex positions, UV scales, and triangle winding need the mesh
+//! builder and stay caller-side, as do splat-alpha texture resolution and the
+//! `Terrain` (class 218) shadow decisions.
 //!
 //! The `(Color32)ColorFloat` conversion is the reference's `ConvertFloatToByte`: `NaN` and values
 //! `<= 0` become `0`, values `>= 255` clamp to `255`, and the rest truncate.
@@ -189,6 +193,31 @@ impl TerrainHeightmap {
         bitmap.pixels.truncate(expected * 4);
         bitmap.flip_y();
         Ok(bitmap)
+    }
+
+    /// `GlbTerrainBuilder.GetHeights`: the `max(width, resolution)` by
+    /// `max(height, resolution)` grid of `height / short.MaxValue` in row-major
+    /// `[x + y * width]` order, feeding the terrain mesh exporter.
+    ///
+    /// A short height list is the same `HeightmapTooShort` error as [`TerrainHeightmap::bitmap`];
+    /// the source would throw out of range. Longer lists are read up to the grid capacity,
+    /// matching the source loop bounds.
+    pub fn mesh_heights(&self) -> Result<Vec<f32>, TerrainHeatmapError> {
+        let width = self.bitmap_width();
+        let height = self.bitmap_height();
+        let expected = width
+            .checked_mul(height)
+            .ok_or(TerrainHeatmapError::DimensionOverflow)?;
+        if self.heights.len() < expected {
+            return Err(TerrainHeatmapError::HeightmapTooShort {
+                actual: self.heights.len(),
+                required: expected,
+            });
+        }
+        Ok(self.heights[..expected]
+            .iter()
+            .map(|height| f32::from(*height) / f32::from(i16::MAX))
+            .collect())
     }
 }
 
@@ -394,6 +423,33 @@ mod tests {
             TerrainHeightmap::from_value(&root),
             Err(TerrainHeatmapError::MissingField {
                 field: "m_Heightmap"
+            })
+        ));
+    }
+
+    #[test]
+    fn mesh_heights_normalize_the_grid_in_row_major_order() {
+        let view =
+            TerrainHeightmap::from_value(&terrain_with(2, 2, 2, &[0, 16384, -16384, i16::MAX]))
+                .unwrap();
+        let grid = view.mesh_heights().unwrap();
+        assert_eq!(grid.len(), 4);
+        assert_eq!(grid[0], 0.0);
+        assert_eq!(grid[1], 16384.0 / 32767.0);
+        assert_eq!(grid[2], -16384.0 / 32767.0);
+        assert_eq!(grid[3], 1.0);
+        // Resolution padding grows the grid row-major, like the bitmap dimensions.
+        let padded = TerrainHeightmap::from_value(&terrain_with(1, 1, 2, &[1, 2, 3, 4])).unwrap();
+        assert_eq!(padded.bitmap_width(), 2);
+        assert_eq!(padded.bitmap_height(), 2);
+        assert_eq!(padded.mesh_heights().unwrap().len(), 4);
+        // A short list reports the same shortfall as the bitmap path.
+        let short = TerrainHeightmap::from_value(&terrain(&[0], 2)).unwrap();
+        assert!(matches!(
+            short.mesh_heights(),
+            Err(TerrainHeatmapError::HeightmapTooShort {
+                actual: 1,
+                required: 4
             })
         ));
     }
