@@ -84,4 +84,29 @@ mod tests {
         };
         assert_eq!(fallback.curve_count(), 10);
     }
+
+    #[test]
+    fn curve_count_cast_matches_unchecked_source_semantics() {
+        // The source casts `CurveCount_UInt32` with `(int)` in an unchecked context, so
+        // counts above `i32::MAX` wrap instead of saturating or failing; the `as` cast
+        // preserves that exactly.
+        let wrapped = StreamedClipView {
+            data_count: 1,
+            curve_count_u32: Some(u32::MAX),
+            curve_count_u16: 0,
+            discrete_curve_count: 0,
+        };
+        assert_eq!(wrapped.curve_count(), -1);
+        // The `u16` fallback path cannot overflow `i32`.
+        let saturated = StreamedClipView {
+            data_count: 1,
+            curve_count_u32: None,
+            curve_count_u16: u16::MAX,
+            discrete_curve_count: u16::MAX,
+        };
+        assert_eq!(saturated.curve_count(), u16::MAX as i32 + u16::MAX as i32);
+        // An empty view is unset with no curves.
+        assert!(!StreamedClipView::default().is_set());
+        assert_eq!(StreamedClipView::default().curve_count(), 0);
+    }
 }

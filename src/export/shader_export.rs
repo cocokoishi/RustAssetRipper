@@ -23,7 +23,9 @@
 //!   requirement lists match everything, otherwise every required `(name, type-number)`
 //!   pair needs a same-named, same-numbered shader property; the winner is the match
 //!   with the most requirements (first one wins ties). Property-type numbers are
-//!   snapshot facts (Color 0, Vector 1, Single 2, Range 3, Texture 4).
+//!   snapshot facts (Color 0, Vector 1, Single 2, Range 3, Texture 4). Template bodies
+//!   resolve through the manifest resource paths below, and requirement names are
+//!   non-empty like the source constructor guard.
 //! - Dummy text assembly: without a parsed form, the script header up to (not including)
 //!   the first `SubShader` is followed by the marker line, one tab, the fallback text,
 //!   and a closing brace; a missing `SubShader` fails. With a parsed form, the header,
@@ -189,6 +191,13 @@ pub struct TemplateRequirement {
     pub type_number: i32,
 }
 
+/// `RequiredProperty` construction rejects null or empty names
+/// (`ArgumentException.ThrowIfNullOrEmpty`); there is no null in Rust, so the
+/// kernel pins the non-empty half for hand-built catalog entries.
+pub const fn template_requirement_is_valid(name: &str) -> bool {
+    !name.is_empty()
+}
+
 /// The `Templates.json` catalog: template names with their requirement lists, in order.
 pub const TEMPLATE_CATALOG: &[(&str, &[TemplateRequirement])] = &[
     ("Default", &[]),
@@ -220,6 +229,27 @@ pub const TEMPLATE_CATALOG: &[(&str, &[TemplateRequirement])] = &[
         ],
     ),
 ];
+
+/// Manifest resource prefix of `TemplateList.LoadTemplates`
+/// (`ShaderTemplatePrefix`).
+pub const TEMPLATE_RESOURCE_PREFIX: &str = "AssetRipper.Export.UnityProjects.Shaders.Templates.";
+/// Template body resource extension (`ShaderTemplateExtension`).
+pub const TEMPLATE_RESOURCE_EXTENSION: &str = ".txt";
+/// The catalog JSON resource path (`TemplatesJsonPath`).
+pub const TEMPLATES_JSON_PATH: &str =
+    "AssetRipper.Export.UnityProjects.Shaders.Templates.Templates.json";
+
+/// Template body lookup: `ShaderTemplatePrefix + template name + extension`.
+/// Resource loading itself stays caller-side; the bodies are vendored here.
+pub fn template_resource_path(template_name: &str) -> String {
+    let mut path = String::with_capacity(
+        TEMPLATE_RESOURCE_PREFIX.len() + template_name.len() + TEMPLATE_RESOURCE_EXTENSION.len(),
+    );
+    path.push_str(TEMPLATE_RESOURCE_PREFIX);
+    path.push_str(template_name);
+    path.push_str(TEMPLATE_RESOURCE_EXTENSION);
+    path
+}
 
 /// One shader property fact: its name plus its snapshot type number.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -356,8 +386,8 @@ pub fn render_parsed_dummy(
 
 /// Declaration keywords of the dummy property serializer, by snapshot type number.
 ///
-/// Value rendering needs caller floats with invariant formatting and stays open; only
-/// the keyword selection is pinned.
+/// Only the keyword selection is pinned here; value rendering lives in
+/// [`render_parsed_property`] with invariant float formatting.
 pub const fn property_declaration_keyword(type_number: i32) -> Option<&'static str> {
     match type_number {
         n if n == property_type_numbers::COLOR || n == property_type_numbers::VECTOR => {
@@ -652,11 +682,12 @@ mod tests {
         best_template_index, export_parsed_dummy, export_shader_text, fallback_dummy_shader,
         property_declaration_keyword, render_parsed_dummy, render_unparsed_dummy,
         render_unparsed_dummy_bytes, requirement_matches, strip_carriage_returns, template_matches,
-        templates, texture_dimension_keyword, yaml_shader_patch_texts, yaml_shader_patches,
-        ParsedShaderForm, ShaderPropertyFact, ShaderTextExportError, TemplateMatchError,
-        TemplateRequirement, DUMMY_MARKER_LINE, FILE_LOCKER_PATCH_MIN_VERSION,
-        PROPERTY_FLAG_KEYWORDS, REGISTER_PATCH_MIN_VERSION, TEMPLATE_CATALOG,
-        YAML_SHADER_EXTENSION,
+        template_requirement_is_valid, template_resource_path, templates,
+        texture_dimension_keyword, yaml_shader_patch_texts, yaml_shader_patches, ParsedShaderForm,
+        ShaderPropertyFact, ShaderTextExportError, TemplateMatchError, TemplateRequirement,
+        DUMMY_MARKER_LINE, FILE_LOCKER_PATCH_MIN_VERSION, PROPERTY_FLAG_KEYWORDS,
+        REGISTER_PATCH_MIN_VERSION, TEMPLATES_JSON_PATH, TEMPLATE_CATALOG,
+        TEMPLATE_RESOURCE_EXTENSION, TEMPLATE_RESOURCE_PREFIX, YAML_SHADER_EXTENSION,
     };
 
     #[test]
@@ -683,6 +714,42 @@ mod tests {
         );
         assert_eq!(plan_patch_write(true), PatchWrite::SkipExists);
         assert_eq!(plan_patch_write(false), PatchWrite::Write);
+    }
+
+    #[test]
+    fn template_resources_follow_the_manifest_paths() {
+        assert_eq!(
+            TEMPLATE_RESOURCE_PREFIX,
+            "AssetRipper.Export.UnityProjects.Shaders.Templates."
+        );
+        assert_eq!(TEMPLATE_RESOURCE_EXTENSION, ".txt");
+        assert_eq!(
+            TEMPLATES_JSON_PATH,
+            "AssetRipper.Export.UnityProjects.Shaders.Templates.Templates.json"
+        );
+        assert!(TEMPLATES_JSON_PATH.starts_with(TEMPLATE_RESOURCE_PREFIX));
+        assert_eq!(
+            template_resource_path("SingleTexture"),
+            "AssetRipper.Export.UnityProjects.Shaders.Templates.SingleTexture.txt"
+        );
+        // Catalog order and names mirror Templates.json.
+        let names: Vec<&str> = TEMPLATE_CATALOG.iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            names,
+            [
+                "Default",
+                "SingleTexture",
+                "SingleColor",
+                "TransparentDiffuse"
+            ]
+        );
+        // Every catalog requirement name passes the constructor guard.
+        for (_, requirements) in TEMPLATE_CATALOG {
+            for requirement in *requirements {
+                assert!(template_requirement_is_valid(requirement.name));
+            }
+        }
+        assert!(!template_requirement_is_valid(""));
     }
 
     #[test]

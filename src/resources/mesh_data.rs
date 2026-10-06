@@ -164,6 +164,28 @@ impl MeshData {
         })
     }
 
+    /// `MeshData.Empty`: no channels, no indices, no sub-meshes.
+    pub fn empty() -> Self {
+        Self {
+            vertices: Vec::new(),
+            normals: None,
+            tangents: None,
+            colors: None,
+            uv0: None,
+            uv1: None,
+            uv2: None,
+            uv3: None,
+            uv4: None,
+            uv5: None,
+            uv6: None,
+            uv7: None,
+            skin: None,
+            bind_pose: None,
+            processed_index_buffer: Vec::new(),
+            sub_meshes: Vec::new(),
+        }
+    }
+
     /// `MeshData.HasNormals`.
     pub fn has_normals(&self) -> bool {
         self.normals
@@ -190,6 +212,51 @@ impl MeshData {
         self.skin
             .as_ref()
             .is_some_and(|values| values.len() == self.vertices.len())
+    }
+
+    fn channel_has(&self, index: usize) -> bool {
+        self.uv(index)
+            .is_some_and(|values| values.len() == self.vertices.len())
+    }
+
+    /// `MeshData.HasUV0`.
+    pub fn has_uv0(&self) -> bool {
+        self.channel_has(0)
+    }
+
+    /// `MeshData.HasUV1`.
+    pub fn has_uv1(&self) -> bool {
+        self.channel_has(1)
+    }
+
+    /// `MeshData.HasUV2`.
+    pub fn has_uv2(&self) -> bool {
+        self.channel_has(2)
+    }
+
+    /// `MeshData.HasUV3`.
+    pub fn has_uv3(&self) -> bool {
+        self.channel_has(3)
+    }
+
+    /// `MeshData.HasUV4`.
+    pub fn has_uv4(&self) -> bool {
+        self.channel_has(4)
+    }
+
+    /// `MeshData.HasUV5`.
+    pub fn has_uv5(&self) -> bool {
+        self.channel_has(5)
+    }
+
+    /// `MeshData.HasUV6`.
+    pub fn has_uv6(&self) -> bool {
+        self.channel_has(6)
+    }
+
+    /// `MeshData.HasUV7`.
+    pub fn has_uv7(&self) -> bool {
+        self.channel_has(7)
     }
 
     fn uv(&self, index: usize) -> Option<&Vec<Vec2>> {
@@ -829,5 +896,41 @@ mod tests {
         };
         let data = MeshData::try_make_from_parts(parts).unwrap();
         assert_eq!(data.processed_index_buffer, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn empty_has_no_channels_and_uv_presence_matches_lengths() {
+        let empty = MeshData::empty();
+        assert!(empty.vertices.is_empty());
+        assert!(!empty.has_normals());
+        assert!(!empty.has_tangents());
+        assert!(!empty.has_colors());
+        assert!(!empty.has_skin());
+        assert_eq!(empty.uv_count(), 0);
+        assert!(!empty.has_uv0());
+        assert!(!empty.has_uv7());
+
+        // A channel counts only when present with exactly one entry per vertex.
+        let one = vec![Vec2 { x: 0.0, y: 0.0 }];
+        let two = vec![Vec2 { x: 0.0, y: 0.0 }, Vec2 { x: 1.0, y: 1.0 }];
+        let matched = MeshData {
+            uv0: Some(one.clone()),
+            uv3: Some(one.clone()),
+            uv7: Some(two.clone()),
+            ..MeshData::empty()
+        };
+        let matched = MeshData {
+            vertices: vec![Vec3 {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            }],
+            ..matched
+        };
+        assert!(matched.has_uv0());
+        assert!(!matched.has_uv1());
+        assert!(matched.has_uv3());
+        assert!(!matched.has_uv7());
+        assert_eq!(matched.uv_count(), 1);
     }
 }
