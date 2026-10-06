@@ -17,8 +17,10 @@
 //! Script pointers resolve by the same export type: decompiled scripts use the MonoScript
 //! main export ID with the script GUID, skipped ones the script file ID with the reference
 //! GUID, and saved ones the script file ID with the assembly GUID, all as `Meta` pointers.
-//! The MonoScript class ID is 115: every MonoScript-touching file imports the generated
-//! `ClassID_115` namespace, so the decompiled file ID is `GetMainExportID(115, 0)`.
+//! Collection pointer requests reject local pointers and non-first-script assets before
+//! routing to the first script. The MonoScript class ID is 115: every MonoScript-touching
+//! file imports the generated `ClassID_115` namespace, so the decompiled file ID is
+//! `GetMainExportID(115, 0)`.
 //!
 //! The `.asmdef` body is `{"name","references","allowUnsafeCode":true}` with references in
 //! module order minus null and reference-known entries. String escaping covers ASCII
@@ -30,6 +32,9 @@ use super::empty_script::MonoScriptIdentity;
 use super::ids::{get_main_export_id, ExportIdError};
 use super::settings::ScriptExportMode;
 use crate::processing::scene_naming::SceneUnityVersion;
+
+use std::error::Error;
+use std::fmt::{self, Display, Formatter};
 
 /// The MonoScript class ID: every MonoScript-touching file imports `ClassID_115`.
 pub const MONO_SCRIPT_CLASS_ID: i32 = 115;
@@ -113,6 +118,48 @@ pub const fn script_pointer_guid(export_type: AssemblyExportType) -> ScriptPoint
 /// The decompiled file ID behind `Decompile` pointers.
 pub fn decompiled_file_id() -> Result<i64, ExportIdError> {
     get_main_export_id(MONO_SCRIPT_CLASS_ID, 0)
+}
+
+/// Rejection of a script-collection pointer request, mirroring the source throws.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ScriptCollectionPointerError {
+    /// `ThrowIfLocal`: local pointers throw `NotSupportedException`.
+    LocalPointerNotSupported,
+    /// `ThrowIfNotAsset`: only the reference-identical first script is accepted.
+    NotCollectionAsset,
+}
+
+impl Display for ScriptCollectionPointerError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LocalPointerNotSupported => {
+                formatter.write_str("local script collection pointers are not supported")
+            }
+            Self::NotCollectionAsset => {
+                formatter.write_str("script collection pointers require the first script asset")
+            }
+        }
+    }
+}
+
+impl Error for ScriptCollectionPointerError {}
+
+/// Mirror `ScriptExportCollectionBase.CreateExportPointer` target selection.
+///
+/// Local requests and non-first-script assets are rejected in source order; every
+/// accepted asset resolves to the exporter's first-script pointer, which stays
+/// caller-built alongside its GUID facts.
+pub const fn script_collection_pointer_target(
+    is_local: bool,
+    is_first_script: bool,
+) -> Result<(), ScriptCollectionPointerError> {
+    if is_local {
+        return Err(ScriptCollectionPointerError::LocalPointerNotSupported);
+    }
+    if !is_first_script {
+        return Err(ScriptCollectionPointerError::NotCollectionAsset);
+    }
+    Ok(())
 }
 
 /// One dedup input: identity plus the two `ShouldExport` facts.
@@ -249,10 +296,11 @@ mod tests {
     use super::{
         add_assembly_file_extension, assembly_definition_file_name, assembly_definition_json,
         assembly_export_type, decompiled_file_id, emit_assembly_definitions,
-        filter_assembly_references, plan_script_collection_scripts, script_export_mode_name,
-        script_file_actions, script_pointer_guid, AssemblyExportType, ScriptExportCandidate,
-        ScriptFileActions, ScriptPointerGuid, ASSEMBLY_EXTENSION, MONO_SCRIPT_CLASS_ID,
-        MONO_SCRIPT_DECOMPILED_FILE_ID,
+        filter_assembly_references, plan_script_collection_scripts,
+        script_collection_pointer_target, script_export_mode_name, script_file_actions,
+        script_pointer_guid, AssemblyExportType, ScriptCollectionPointerError,
+        ScriptExportCandidate, ScriptFileActions, ScriptPointerGuid, ASSEMBLY_EXTENSION,
+        MONO_SCRIPT_CLASS_ID, MONO_SCRIPT_DECOMPILED_FILE_ID,
     };
     use crate::export::empty_script::MonoScriptIdentity;
     use crate::processing::scene_naming::SceneUnityVersion;
@@ -320,6 +368,33 @@ mod tests {
         assert_eq!(MONO_SCRIPT_CLASS_ID, 115);
         assert_eq!(MONO_SCRIPT_DECOMPILED_FILE_ID, 11_500_000);
         assert_eq!(decompiled_file_id(), Ok(11_500_000));
+    }
+
+    #[test]
+    fn collection_pointer_requests_reject_local_and_foreign_assets() {
+        // The first script routes to the exporter's pointer.
+        assert_eq!(script_collection_pointer_target(false, true), Ok(()));
+        // Local requests throw before the asset check, even for foreign assets.
+        assert_eq!(
+            script_collection_pointer_target(true, true),
+            Err(ScriptCollectionPointerError::LocalPointerNotSupported)
+        );
+        assert_eq!(
+            script_collection_pointer_target(true, false),
+            Err(ScriptCollectionPointerError::LocalPointerNotSupported)
+        );
+        assert_eq!(
+            script_collection_pointer_target(false, false),
+            Err(ScriptCollectionPointerError::NotCollectionAsset)
+        );
+        assert_eq!(
+            ScriptCollectionPointerError::LocalPointerNotSupported.to_string(),
+            "local script collection pointers are not supported"
+        );
+        assert_eq!(
+            ScriptCollectionPointerError::NotCollectionAsset.to_string(),
+            "script collection pointers require the first script asset"
+        );
     }
 
     #[test]

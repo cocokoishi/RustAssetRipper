@@ -11,7 +11,8 @@
 //! panics or unbounded allocation: truncated buffers fail with the byte offset, and
 //! a curve count that cannot fit in the remaining buffer fails instead of allocating.
 //! Each curve occupies exactly 20 bytes, so the bound is derived from the input, not
-//! arbitrary.
+//! arbitrary. Double-to-single narrowing follows the source `(float)` cast
+//! (overflow yields infinities) rather than Rust's saturating `as` conversion.
 //!
 //! Differential fixture: `streamed_curve_fixture.txt` (probe `Temp/opencode/sclipprobe`,
 //! real `StreamedCurveKey` instances calling `CalculateSlopes` and real
@@ -124,7 +125,8 @@ impl StreamedCurveKey {
     /// `StreamedCurveKey.CalculateSlopes`.
     ///
     /// All intermediate arithmetic is double precision with single-precision casts at
-    /// exactly the source positions, so results match bit-for-bit on finite inputs.
+    /// exactly the source positions, so results match bit-for-bit on finite inputs;
+    /// the narrowing follows the source overflow-to-infinity rule.
     /// The zero-coefficient test uses `==` like `Vector3 == default` (`-0.0` counts
     /// as zero, `NaN` as nonzero).
     pub fn calculate_slopes(
@@ -140,7 +142,9 @@ impl StreamedCurveKey {
             let coeff_x = f64::from(self.coefficient[0]) * delta * delta;
             let coeff_y = f64::from(self.coefficient[1]) * delta;
             self.out_slope = self.coefficient[2];
-            next.in_slope = (3.0 * coeff_x + 2.0 * coeff_y + f64::from(self.coefficient[2])) as f32;
+            next.in_slope = narrow_double_to_single(
+                3.0 * coeff_x + 2.0 * coeff_y + f64::from(self.coefficient[2]),
+            );
             if use_negative_infinity_slopes
                 && next.coefficient[0] == 0.0
                 && next.coefficient[1] == 0.0
@@ -167,6 +171,19 @@ impl StreamedCurveKey {
         } else {
             self.out_slope = f32::INFINITY;
         }
+    }
+}
+
+/// Double-to-single narrowing with the source `(float)` cast semantics: overflow
+/// yields infinities, while Rust's `as` conversion would saturate at `f32::MAX`.
+/// Finite in-range values (including NaN and infinities) convert identically.
+fn narrow_double_to_single(value: f64) -> f32 {
+    if value > f64::from(f32::MAX) {
+        f32::INFINITY
+    } else if value < -f64::from(f32::MAX) {
+        f32::NEG_INFINITY
+    } else {
+        value as f32
     }
 }
 
@@ -201,7 +218,7 @@ fn set_negative_infinity_slope(
         next.left_sided_limit = f64::from(key.right_sided_limit);
     }
     if is_discontinuous {
-        key.right_sided_limit = key.left_sided_limit as f32;
+        key.right_sided_limit = narrow_double_to_single(key.left_sided_limit);
     }
 }
 
@@ -234,6 +251,10 @@ impl StreamedFrame {
     /// Reads one frame at `offset`: time, curve count, keys with consecutive
     /// duplicates collapsed keeping the last, and the 2017.1+ alignment.
     /// Returns the frame and the offset just past the alignment padding.
+    ///
+    /// `offset` is absolute from the buffer start, like the source reader
+    /// position behind `reader.Align()`: callers pass the container-base buffer
+    /// rather than a rebased subslice so the padding matches.
     pub fn read(
         input: &[u8],
         endian: EndianType,
@@ -700,5 +721,47 @@ mod tests {
             rows += 1;
         }
         assert_eq!(rows, 6, "all probed search rows are asserted");
+    }
+
+    #[test]
+    fn narrowing_follows_the_source_cast_on_overflow() {
+        assert_eq!(narrow_double_to_single(0.0), 0.0);
+        assert_eq!(narrow_double_to_single(1.5), 1.5);
+        assert_eq!(narrow_double_to_single(f64::from(f32::MAX)), f32::MAX);
+        assert_eq!(narrow_double_to_single(f64::from(f32::MIN)), f32::MIN);
+        assert_eq!(narrow_double_to_single(1.0e300), f32::INFINITY);
+        assert_eq!(narrow_double_to_single(-1.0e300), f32::NEG_INFINITY);
+        assert_eq!(narrow_double_to_single(f64::INFINITY), f32::INFINITY);
+        assert_eq!(
+            narrow_double_to_single(f64::NEG_INFINITY),
+            f32::NEG_INFINITY
+        );
+        assert!(narrow_double_to_single(f64::NAN).is_nan());
+    }
+
+    #[test]
+    fn frame_alignment_uses_the_absolute_buffer_offset() {
+        let aligned = UnityVersion {
+            major: 2019,
+            minor: 4,
+            patch: 0,
+        };
+        let legacy = UnityVersion {
+            major: 5,
+            minor: 0,
+            patch: 0,
+        };
+        // Two junk bytes, then an empty frame: time plus count end at absolute
+        // offset 10, so the 2017.1+ alignment pads two bytes to reach 12.
+        let mut buffer = vec![0xAA, 0xBB];
+        put_f32(&mut buffer, EndianType::Little, 2.5);
+        put_i32(&mut buffer, EndianType::Little, 0);
+        buffer.extend_from_slice(&[0xCC, 0xCC]);
+        let (frame, next) = StreamedFrame::read(&buffer, EndianType::Little, aligned, 2).unwrap();
+        assert_eq!(frame.time, 2.5);
+        assert!(frame.curves.is_empty());
+        assert_eq!(next, 12);
+        let (_, legacy_next) = StreamedFrame::read(&buffer, EndianType::Little, legacy, 2).unwrap();
+        assert_eq!(legacy_next, 10);
     }
 }
