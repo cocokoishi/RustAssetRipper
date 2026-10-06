@@ -481,12 +481,30 @@ fn export_texture_to<W: io::Write>(
             .and_then(SettingsImageFormat::from_extension)
             .unwrap_or(fallback),
     );
-    let image =
-        export_texture2d_image(&view, stream_bytes.as_deref(), format).map_err(|error| {
-            invalid_data_owned(format!(
+    // The collection platform and endianness drive the `GetImageData` transforms
+    // (Xbox360 swap, Switch unswizzle); the file's own metadata prefix is the
+    // honest available equivalent. Discriminant 0 matches no `BuildTarget` and
+    // transforms nothing.
+    let platform = file
+        .metadata
+        .prefix
+        .target_platform
+        .and_then(|platform| i32::try_from(platform).ok())
+        .unwrap_or(0);
+    let platform_blob_little_endian =
+        file.metadata.prefix.body_endian == assetripper::io::binary::Endian::Little;
+    let image = export_texture2d_image(
+        &view,
+        stream_bytes.as_deref(),
+        platform,
+        platform_blob_little_endian,
+        format,
+    )
+    .map_err(|error| {
+        invalid_data_owned(format!(
             "SerializedFile {serialized_file_index} PathID {path_id} texture export failed: {error}"
         ))
-        })?;
+    })?;
     let mut destination = OpenOptions::new()
         .write(true)
         .create_new(true)

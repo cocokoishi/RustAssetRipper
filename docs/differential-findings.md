@@ -534,3 +534,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | `resources::image_export::{save_hdr, rgb8_to_rgbe, encode_hdr_scanline_rle}` with integer-`frexp` conversion and bounded chunk emission; `save()` dispatches `Hdr` to the new writer |
 | Regression evidence | All 22 fixture vectors reproduce byte-for-byte (including all 256 gray conversions, every probed run length 1-130 plus 300, the 300-literal chunking, the mixed literal/run row, and the two-row marker repetition); targeted tests pin both width boundaries and alpha indifference; full lib suite passes 1003/1003 locally with warnings-denied Clippy |
 | Remaining comparison | EXR (`ExrWriter`) and JPEG (stb `WriteJpg`) stay `Unsupported`; the zero-width degenerate case writes header only by construction and was not probed |
+
+## DIFF-TEXTURE-GETIMAGEDATA-001 - GetImageData platform orchestration
+
+| Field | Finding |
+|---|---|
+| Status | Reference-runtime differential recorded; orchestration ported and pinned |
+| Source location | `AssetRipper.SourceGenerated.Extensions/Texture2DExtensions.cs` (`GetImageData` lines 79-113, `IsSwapBytes` lines 135-152); `AssetRipper.IO.Files/BuildTarget.cs` (Xbox360 = 11, Switch = 38, Switch2 = 48) |
+| Input evidence | Probe `Temp/opencode/texplatprobe` driving live 2022.3 `Texture2D` assets over versioned `ProcessedAssetCollection`s (SDK 10.0.401): 12 committed rows in `src/resources/texture_platform_fixture.txt`. Supporting facts from the same probe: `Has_PlatformBlob_C28` is false on 2020.1 and older, true on 2020.2+; `m_PlatformBlob` confirmed as the single UTF-16 serialized-name literal in the shipped `AssetRipper.SourceGenerated.dll` |
+| Source-derived behavior | Inline bytes win and are copied before a swap (input never mutated, output is a new array); non-swap formats return the input array by reference; streamed bytes swap in place on the fresh buffer; the unswizzle gate is blob length >= 12 AND exact `Switch` equality (Switch2 passes through); odd swap counts throw `IndexOutOfRangeException`; empty input returns empty |
+| Root cause | Two probe-design corrections, no source deviations: RGBA32/RGB24 are not in the swap list (first probe vectors were no-op passthroughs by mistake), and pre-2020.2 assets have no blob store (the setter silently drops, so Switch vectors need 2020.2+ assets). The Rust port maps the odd-count throw to `SwapBytesError::OddByteCount` and borrows instead of aliasing (observably identical) |
+| Rust change | `resources::texture::{Texture2DView::platform_blob, resolved_image_data}` with `Cow` aliasing; `SWITCH_BUILD_TARGET`/`SWITCH2_BUILD_TARGET` consts; `TextureExportError::Swap`/`Unswizzle`; CLI threads `metadata.prefix.target_platform`/`body_endian` through `export_texture2d_image`/`export_texture2d_value` |
+| Regression evidence | All 12 fixture rows reproduce byte-for-byte, including both Switch vectors through the full orchestration; view-immutability, borrow-vs-own, streamed-swap, and blob-spelling tests; full lib suite passes 1008/1008 locally with warnings-denied Clippy |
+| Remaining comparison | Streamed fetching stays caller-side; unknown platforms (discriminant 0) transform nothing by construction |

@@ -39,6 +39,13 @@ pub fn is_rgb(format: i32) -> bool {
 /// `BuildTarget.Xbox360`, the only platform `IsSwapBytes` applies to.
 pub const XBOX360_BUILD_TARGET: i32 = 11;
 
+/// `BuildTarget.Switch`, the only platform `GetImageData` unswizzles for. The
+/// gate is an exact discriminant match: `Switch2` (48) does not unswizzle.
+pub const SWITCH_BUILD_TARGET: i32 = 38;
+
+/// `BuildTarget.Switch2`, pinned only to document the exact-equality gate above.
+pub const SWITCH2_BUILD_TARGET: i32 = 48;
+
 /// `Texture2DExtensions.IsSwapBytes`: Xbox360 textures in a 16-bit or DXT layout
 /// are stored with swapped byte pairs.
 pub fn is_swap_bytes(platform: i32, format: i32) -> bool {

@@ -1,20 +1,21 @@
 //! `Texture2D` (class 28) field view and bitmap export.
 //!
 //! Ports the field reads that drive `TextureConverter.TryConvertToBitmap(ITexture2D)`:
-//! `Texture2DExtensions.CompleteImageSize`/`ActualImageSize`, the inline-vs-streamed image-data
-//! selection of `GetImageData`, the `Height * Depth` layer layout, and the `NormalmapDXT5nm`
-//! normal-map unpack.
+//! `Texture2DExtensions.CompleteImageSize`/`ActualImageSize`, the `GetImageData`
+//! platform pipeline (inline-vs-streamed selection, the Xbox360 adjacent-pair
+//! swap, Switch GOB unswizzling), the `Height * Depth` layer layout, and the
+//! `NormalmapDXT5nm` normal-map unpack.
 //!
 //! Open, and deliberately not guessed here: the class-189 `ImageTexture` `GraphicsFormat`
 //! route; and the generated `Has_*` version gates that decide which `m_*` field alias exists.
 //! A view built from a payload missing a required field returns an explicit error rather than a
 //! zero-filled texture.
 //!
-//! The Xbox360 adjacent-pair swap (`IsSwapBytes` plus the pair loop) lives in
-//! `texture_format`, and Switch GOB unswizzling lives in `switch_swizzle`;
-//! applying either needs the bundle platform, which the field view does
-//! not carry yet.
+//! Platform facts (`Collection.Platform`, `Collection.EndianType`) arrive as caller
+//! arguments: the CLI reads them from the SerializedFile metadata prefix. An unknown
+//! platform (discriminant 0, which no `BuildTarget` member uses) applies neither transform.
 
+use std::borrow::Cow;
 use std::error::Error;
 use std::fmt::{self, Display};
 
@@ -24,7 +25,11 @@ use crate::resource::{
 use crate::serialized_file::object::{SerializedValue, SerializedValueLookupError};
 
 use super::image_export::{ImageExportFormat, ImageWriteError};
+use super::switch_swizzle::{SwitchSwizzleError, SwitchUnswizzleInput, PLATFORM_BLOB_MIN_LENGTH};
 use super::texture_converter::{try_convert_to_bitmap, TextureConvertError, TextureImage};
+use super::texture_format::{
+    is_swap_bytes, swap_adjacent_bytes, SwapBytesError, SWITCH_BUILD_TARGET,
+};
 
 /// `TextureUsageMode.NormalmapDXT5nm`; the only lightmap format that triggers `UnpackNormal`.
 pub const TEXTURE_USAGE_MODE_NORMALMAP_DXT5NM: u8 = 5;
@@ -105,6 +110,10 @@ pub enum TextureExportError {
     View(TextureViewError),
     /// The image data is unavailable: neither inline bytes nor a resolvable stream.
     ImageDataUnavailable,
+    /// The Xbox360 adjacent-pair swap rejected the byte count.
+    Swap(SwapBytesError),
+    /// Switch GOB unswizzling rejected the inputs.
+    Unswizzle(SwitchSwizzleError),
     /// The decoder or converter rejected the image.
     Convert(TextureConvertError),
     /// The image writer rejected the output.
@@ -114,6 +123,18 @@ pub enum TextureExportError {
 impl From<TextureViewError> for TextureExportError {
     fn from(error: TextureViewError) -> Self {
         Self::View(error)
+    }
+}
+
+impl From<SwapBytesError> for TextureExportError {
+    fn from(error: SwapBytesError) -> Self {
+        Self::Swap(error)
+    }
+}
+
+impl From<SwitchSwizzleError> for TextureExportError {
+    fn from(error: SwitchSwizzleError) -> Self {
+        Self::Unswizzle(error)
     }
 }
 
@@ -135,6 +156,8 @@ impl Display for TextureExportError {
             Self::View(error) => write!(formatter, "{error}"),
             Self::ImageDataUnavailable => formatter
                 .write_str("Texture2D has neither inline image data nor a resolvable stream"),
+            Self::Swap(error) => write!(formatter, "{error}"),
+            Self::Unswizzle(error) => write!(formatter, "{error}"),
             Self::Convert(error) => write!(formatter, "{error}"),
             Self::Image(error) => write!(formatter, "{error}"),
         }
@@ -145,6 +168,8 @@ impl Error for TextureExportError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::View(error) => Some(error),
+            Self::Swap(error) => Some(error),
+            Self::Unswizzle(error) => Some(error),
             Self::Convert(error) => Some(error),
             Self::Image(error) => Some(error),
             Self::ImageDataUnavailable => None,
@@ -173,6 +198,10 @@ pub struct Texture2DView {
     pub image_data: Vec<u8>,
     /// `m_StreamData`, if present.
     pub stream_data: Option<StreamedResourceInfo>,
+    /// `m_PlatformBlob` (the Switch texel-height word lives at offset 8).
+    /// The field is version-gated in the source (present on 2020.2+, absent on
+    /// 2020.1 and older); a payload without it behaves like an empty blob.
+    pub platform_blob: Vec<u8>,
 }
 
 impl Texture2DView {
@@ -189,6 +218,7 @@ impl Texture2DView {
         let image_data =
             optional_bytes(root, &["image data", "m_ImageData_C28"])?.unwrap_or_default();
         let stream_data = optional_stream(root, &["m_StreamData", "m_StreamData_C28"])?;
+        let platform_blob = optional_bytes(root, &["m_PlatformBlob"])?.unwrap_or_default();
 
         Ok(Self {
             width: nonnegative(width, "m_Width")?,
@@ -200,6 +230,7 @@ impl Texture2DView {
             lightmap_format,
             image_data,
             stream_data,
+            platform_blob,
         })
     }
 
@@ -240,6 +271,57 @@ impl Texture2DView {
         } else {
             stream_content
         }
+    }
+
+    /// `Texture2DExtensions.GetImageData` over caller facts: the collection
+    /// platform discriminant, the collection endianness for the blob shift, and
+    /// the caller-resolved streamed content.
+    ///
+    /// Inline bytes win when non-empty (copied before an Xbox360 swap so the
+    /// view is never mutated, exactly like the source copy); otherwise the
+    /// streamed content is swapped in place, like the freshly fetched source
+    /// buffer. The Switch unswizzle runs exactly when the blob holds at least
+    /// 12 bytes and the platform discriminant is `Switch` (38); `Switch2` does
+    /// not qualify. Untransformed bytes borrow the view; transformed bytes are
+    /// owned. An odd swap count is an explicit error where the source loop
+    /// throws `IndexOutOfRangeException`.
+    pub fn resolved_image_data<'a>(
+        &'a self,
+        platform: i32,
+        platform_blob_little_endian: bool,
+        stream_content: Option<&'a [u8]>,
+    ) -> Result<Cow<'a, [u8]>, TextureExportError> {
+        let swap = is_swap_bytes(platform, self.texture_format);
+        let unswizzle =
+            platform == SWITCH_BUILD_TARGET && self.platform_blob.len() >= PLATFORM_BLOB_MIN_LENGTH;
+        let mut data: Cow<'a, [u8]> = match self.image_bytes(stream_content) {
+            // The swap step below always copies before swapping, so borrowing
+            // here never mutates the view; the source's explicit copy and this
+            // borrow-then-copy are observably identical.
+            Some(bytes) => Cow::Borrowed(bytes),
+            // No inline bytes and no stream field: `GetImageData` returns the
+            // empty array (transforms below are no-ops over it, except a gated
+            // unswizzle, which fails exactly where the source copy throws).
+            None if self.stream_data.is_none() => Cow::Borrowed(&[]),
+            // A declared stream the caller could not resolve stays an error.
+            None => return Err(TextureExportError::ImageDataUnavailable),
+        };
+        if swap {
+            data = Cow::Owned(swap_adjacent_bytes(&data)?);
+        }
+        if unswizzle {
+            let input = SwitchUnswizzleInput {
+                image_count: self.image_count as u32,
+                format: self.texture_format,
+                width: self.width as u32,
+                height: self.height as u32,
+                platform_blob: self.platform_blob.as_slice(),
+                platform_blob_little_endian,
+                data: &data,
+            };
+            data = Cow::Owned(super::switch_swizzle::unswizzle(&input)?);
+        }
+        Ok(data)
     }
 
     /// Builds the converter input for this texture.
@@ -311,16 +393,18 @@ impl ImageTextureView {
 /// Exports one `Texture2D` to an encoded image.
 ///
 /// `stream_content` must be the exact byte range for `m_StreamData` when the texture has no inline
-/// data; it is ignored otherwise, matching `GetImageData`'s precedence.
+/// data; it is ignored otherwise, matching `GetImageData`'s precedence. `platform` is the
+/// collection platform discriminant (unknown platforms pass 0, which transforms nothing) and
+/// `platform_blob_little_endian` is the collection endianness reading the Switch blob shift.
 pub fn export_texture2d_image(
     view: &Texture2DView,
     stream_content: Option<&[u8]>,
+    platform: i32,
+    platform_blob_little_endian: bool,
     format: ImageExportFormat,
 ) -> Result<Vec<u8>, TextureExportError> {
-    let data = view
-        .image_bytes(stream_content)
-        .ok_or(TextureExportError::ImageDataUnavailable)?;
-    let image = view.to_texture_image(data);
+    let data = view.resolved_image_data(platform, platform_blob_little_endian, stream_content)?;
+    let image = view.to_texture_image(&data);
     let unpack_normal = view.lightmap_format == TEXTURE_USAGE_MODE_NORMALMAP_DXT5NM;
     let bitmap = try_convert_to_bitmap(&image, true, unpack_normal)?;
     let mut output = Vec::new();
@@ -332,10 +416,18 @@ pub fn export_texture2d_image(
 pub fn export_texture2d_value(
     root: &SerializedValue,
     stream_content: Option<&[u8]>,
+    platform: i32,
+    platform_blob_little_endian: bool,
     format: ImageExportFormat,
 ) -> Result<Vec<u8>, TextureExportError> {
     let view = Texture2DView::from_value(root)?;
-    export_texture2d_image(&view, stream_content, format)
+    export_texture2d_image(
+        &view,
+        stream_content,
+        platform,
+        platform_blob_little_endian,
+        format,
+    )
 }
 
 fn nonnegative(value: i32, field: &'static str) -> Result<usize, TextureViewError> {
@@ -591,7 +683,8 @@ mod tests {
     #[test]
     fn exports_an_rgba32_texture_to_png() {
         let output =
-            export_texture2d_value(&rgba32_texture(), None, ImageExportFormat::Png).unwrap();
+            export_texture2d_value(&rgba32_texture(), None, 0, true, ImageExportFormat::Png)
+                .unwrap();
         assert_eq!(
             &output[..8],
             &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]
@@ -621,12 +714,14 @@ mod tests {
             ]),
         ));
         assert!(matches!(
-            export_texture2d_value(&root, None, ImageExportFormat::Png),
+            export_texture2d_value(&root, None, 0, true, ImageExportFormat::Png),
             Err(TextureExportError::ImageDataUnavailable)
         ));
         // Providing the exact streamed content succeeds.
         let content = [1u8, 2, 3, 4, 5, 6, 7, 8];
-        assert!(export_texture2d_value(&root, Some(&content), ImageExportFormat::Png).is_ok());
+        assert!(
+            export_texture2d_value(&root, Some(&content), 0, true, ImageExportFormat::Png).is_ok()
+        );
     }
 
     #[test]
@@ -641,8 +736,9 @@ mod tests {
             lightmap_format: TEXTURE_USAGE_MODE_NORMALMAP_DXT5NM,
             image_data: vec![128, 128, 0, 255],
             stream_data: None,
+            platform_blob: Vec::new(),
         };
-        let output = export_texture2d_image(&view, None, ImageExportFormat::Png).unwrap();
+        let output = export_texture2d_image(&view, None, 0, true, ImageExportFormat::Png).unwrap();
         assert!(output.len() > 8);
     }
 
@@ -715,5 +811,161 @@ mod tests {
         let view = ImageTextureView::from_value(&root).unwrap();
         assert_eq!(view.image_bytes(Some(&[3, 4])), Some([3, 4].as_slice()));
         assert_eq!(view.image_bytes(None), None);
+    }
+
+    fn platform_view(
+        format: i32,
+        width: usize,
+        height: usize,
+        data: Vec<u8>,
+        blob: Vec<u8>,
+    ) -> Texture2DView {
+        Texture2DView {
+            width,
+            height,
+            texture_format: format,
+            complete_image_size: 0,
+            image_count: 1,
+            mip_count: 0,
+            lightmap_format: 0,
+            image_data: data,
+            stream_data: None,
+            platform_blob: blob,
+        }
+    }
+
+    /// The live-runtime `GetImageData` differential committed in
+    /// `texture_platform_fixture.txt` (probe `Temp/opencode/texplatprobe`):
+    /// every row must reproduce byte-for-byte, including the odd-count throw.
+    #[test]
+    fn platform_pipeline_matches_the_live_runtime() {
+        let fixture = include_str!("texture_platform_fixture.txt");
+        let mut rows = 0;
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let parts: Vec<&str> = line.split('|').collect();
+            let (kind, tag) = (parts[0], parts[1]);
+            let platform: i32 = parts[2].parse().unwrap();
+            let format: i32 = parts[3].parse().unwrap();
+            let width: usize = parts[4].parse().unwrap();
+            let height: usize = parts[5].parse().unwrap();
+            let input = parse_hex_bytes(parts[6]);
+            let blob = parse_hex_bytes(parts[7]);
+            let view = platform_view(format, width, height, input, blob);
+            if kind == "ERR" {
+                assert_eq!(parts[8], "IndexOutOfRangeException", "{tag}");
+                assert!(
+                    matches!(
+                        view.resolved_image_data(platform, true, None),
+                        Err(TextureExportError::Swap(
+                            crate::resources::texture_format::SwapBytesError::OddByteCount { .. }
+                        ))
+                    ),
+                    "{tag}"
+                );
+            } else {
+                let expected = parse_hex_bytes(parts[8]);
+                assert_eq!(
+                    view.resolved_image_data(platform, true, None)
+                        .unwrap()
+                        .into_owned(),
+                    expected,
+                    "{tag}"
+                );
+            }
+            rows += 1;
+        }
+        assert_eq!(rows, 12, "all fixture rows are asserted");
+    }
+
+    #[test]
+    fn swap_never_mutates_the_view() {
+        let view = platform_view(
+            10, /* DXT1 */
+            4,
+            4,
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+            vec![],
+        );
+        let resolved = view.resolved_image_data(11, true, None).unwrap();
+        assert_eq!(resolved.as_ref(), &[2, 1, 4, 3, 6, 5, 8, 7]);
+        assert_eq!(view.image_data, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn passthrough_borrows_while_transforms_own() {
+        // No transform: the bytes borrow the view, like the source alias.
+        let view = platform_view(4, 2, 1, vec![1, 2, 3, 4], vec![]);
+        assert!(matches!(
+            view.resolved_image_data(5, true, None).unwrap(),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        // A swap owns its buffer, like the source copy.
+        let view = platform_view(10, 4, 4, vec![1, 2, 3, 4], vec![]);
+        assert!(matches!(
+            view.resolved_image_data(11, true, None).unwrap(),
+            std::borrow::Cow::Owned(_)
+        ));
+    }
+
+    #[test]
+    fn streamed_bytes_take_the_swap_path() {
+        // Empty inline bytes resolve the streamed content, which the Xbox360
+        // swap then transforms in place (the source swaps its fresh buffer).
+        let mut view = platform_view(10 /* DXT1 */, 4, 4, vec![], vec![]);
+        view.stream_data = Some(crate::resource::StreamedResourceInfo {
+            path: "tex.resS".to_owned(),
+            offset: 0,
+            size: 4,
+        });
+        let stream = [1u8, 2, 3, 4];
+        let resolved = view.resolved_image_data(11, true, Some(&stream)).unwrap();
+        assert_eq!(resolved.as_ref(), &[2, 1, 4, 3]);
+        assert_eq!(stream, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn blob_field_reads_the_serialized_spelling() {
+        // `m_PlatformBlob` (single UTF-16 literal in the shipped generated DLL;
+        // version-gated in the source: present on 2020.2+, absent before).
+        let root = SerializedValue::Struct(vec![
+            field("m_Width", SerializedValue::I32(2)),
+            field("m_Height", SerializedValue::I32(1)),
+            field("m_PlatformBlob", SerializedValue::Bytes(vec![0; 12])),
+        ]);
+        assert_eq!(
+            Texture2DView::from_value(&root).unwrap().platform_blob,
+            vec![0; 12]
+        );
+        // Payloads without the field behave like an empty blob.
+        let root = SerializedValue::Struct(vec![
+            field("m_Width", SerializedValue::I32(2)),
+            field("m_Height", SerializedValue::I32(1)),
+        ]);
+        assert!(Texture2DView::from_value(&root)
+            .unwrap()
+            .platform_blob
+            .is_empty());
+    }
+
+    fn parse_hex_bytes(text: &str) -> Vec<u8> {
+        assert!(text.len().is_multiple_of(2), "even hex length");
+        let mut bytes = Vec::with_capacity(text.len() / 2);
+        for pair in text.as_bytes().chunks_exact(2) {
+            bytes.push(hex_nibble(pair[0]) << 4 | hex_nibble(pair[1]));
+        }
+        bytes
+    }
+
+    fn hex_nibble(digit: u8) -> u8 {
+        match digit {
+            b'0'..=b'9' => digit - b'0',
+            b'A'..=b'F' => digit - b'A' + 10,
+            b'a'..=b'f' => digit - b'a' + 10,
+            _ => panic!("non-hex digit {digit}"),
+        }
     }
 }

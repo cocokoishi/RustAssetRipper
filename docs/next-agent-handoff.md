@@ -756,5 +756,11 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 ## 98. Checkpoint: Radiance HDR writer (2026-10-06)
 
 - Ported `save_hdr` byte-for-byte (22-vector shipped-DLL differential + boundary tests); new finding `DIFF-HDR-001`. Lib 1003/1003 and bin 50/50 locally, workspace Clippy clean; CI run `37396898585` green (all five jobs) for remote `main` = `3c4e811`; local matches.
+- Next: the `GetImageData` platform orchestration, then the remaining product rows.
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 99. Checkpoint: GetImageData platform orchestration (2026-10-06)
+
+- Ported `resolved_image_data` with a 12-row live-object differential; new row `RES-TEXTURE-GETIMAGEDATA-001`, new finding `DIFF-TEXTURE-GETIMAGEDATA-001`. Lib 1008/1008 and bin 50/50 locally, workspace Clippy clean; full validation via Actions after push.
 - Next: the remaining product rows (`PRODUCT-CONFIG-001`, `PRODUCT-GUI-001`, `GENERATORS-001`, `TOOLS-001` remainders).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
