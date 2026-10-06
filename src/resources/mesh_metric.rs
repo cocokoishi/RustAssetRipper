@@ -11,6 +11,11 @@
 //! index group, an index outside the vertex/UV buffers, or an unsupported topology throws in the
 //! reference; here those are explicit [`MeshMetricError`] values carrying the sub-mesh position,
 //! because the callers of this crate must not turn malformed payloads into panics.
+//!
+//! Also ported are the processed-index-buffer codecs that feed the metric pipeline:
+//! `UShortToUInt`/`UIntToUShort` (the guarded lane conversions) and the
+//! `SetProcessedIndexBuffer` byte assembly over caller facts (index width and file endianness).
+//! The collection writes around the assembly stay caller-side.
 
 use std::error::Error;
 use std::fmt::{self, Display};
@@ -56,6 +61,14 @@ pub enum MeshMetricError {
         /// The UV buffer length.
         uvs: usize,
     },
+    /// A lane-conversion buffer is shorter than the requested index count (the source
+    /// `ArgumentOutOfRangeException` on `indexCount`).
+    IndexBufferTooShort {
+        /// The available lane count.
+        available: usize,
+        /// The requested index count.
+        required: usize,
+    },
 }
 
 impl Display for MeshMetricError {
@@ -81,6 +94,10 @@ impl Display for MeshMetricError {
             } => write!(
                 formatter,
                 "sub-mesh {sub_mesh} index {index} is outside the vertex buffer ({vertices}) and UV buffer ({uvs})"
+            ),
+            Self::IndexBufferTooShort { available, required } => write!(
+                formatter,
+                "index conversion needs {required} lanes but the buffer holds {available}"
             ),
         }
     }
@@ -205,6 +222,65 @@ pub fn triangle_area_v2(a: Vec2, b: Vec2, c: Vec2) -> f32 {
             z: 0.0,
         },
     )
+}
+
+/// `MeshExtensions.UShortToUInt`: widen `count` lanes, rejecting short buffers like the
+/// source guard.
+pub fn ushort_to_uint(source: &[u16], count: usize) -> Result<Vec<u32>, MeshMetricError> {
+    if source.len() < count {
+        return Err(MeshMetricError::IndexBufferTooShort {
+            available: source.len(),
+            required: count,
+        });
+    }
+    Ok(source
+        .iter()
+        .take(count)
+        .map(|lane| u32::from(*lane))
+        .collect())
+}
+
+/// `MeshExtensions.UIntToUShort`: narrow `count` lanes with the source wrapping cast,
+/// rejecting short buffers like the source guard.
+pub fn uint_to_ushort(source: &[u32], count: usize) -> Result<Vec<u16>, MeshMetricError> {
+    if source.len() < count {
+        return Err(MeshMetricError::IndexBufferTooShort {
+            available: source.len(),
+            required: count,
+        });
+    }
+    Ok(source.iter().take(count).map(|lane| *lane as u16).collect())
+}
+
+/// `MeshExtensions.SetProcessedIndexBuffer` byte assembly over caller facts.
+///
+/// `is_16_bit` is the `Is16BitIndices` outcome and `file_big_endian` the collection
+/// endianness; the host endianness never leaks in because both branches spell the byte
+/// order explicitly, matching the three source branches bit-for-bit. The destination
+/// buffer write stays caller-side.
+pub fn encode_processed_index_buffer(
+    indices: &[u32],
+    is_16_bit: bool,
+    file_big_endian: bool,
+) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(indices.len() * if is_16_bit { 2 } else { 4 });
+    for &index in indices {
+        if is_16_bit {
+            let narrow = index as u16;
+            bytes.extend(if file_big_endian {
+                narrow.to_be_bytes()
+            } else {
+                narrow.to_le_bytes()
+            });
+        } else {
+            bytes.extend(if file_big_endian {
+                index.to_be_bytes()
+            } else {
+                index.to_le_bytes()
+            });
+        }
+    }
+    bytes
 }
 
 /// `MeshExtensions.CalculateMeshMetric`.
@@ -574,5 +650,55 @@ mod tests {
             ),
             0.0
         );
+    }
+
+    /// The lane conversions guard their length, widen exactly, and narrow by wrapping.
+    #[test]
+    fn index_lane_conversions_match_the_source_guards() {
+        assert_eq!(ushort_to_uint(&[1, 2, 3], 2), Ok(vec![1, 2]));
+        assert_eq!(ushort_to_uint(&[0xFFFF], 1), Ok(vec![0xFFFF]));
+        assert_eq!(
+            ushort_to_uint(&[1, 2], 3),
+            Err(MeshMetricError::IndexBufferTooShort {
+                available: 2,
+                required: 3
+            })
+        );
+        assert_eq!(uint_to_ushort(&[1, 2, 3], 3), Ok(vec![1, 2, 3]));
+        assert_eq!(uint_to_ushort(&[70_000], 1), Ok(vec![4_464]));
+        assert_eq!(
+            uint_to_ushort(&[1], 2),
+            Err(MeshMetricError::IndexBufferTooShort {
+                available: 1,
+                required: 2
+            })
+        );
+    }
+
+    /// The processed-index assembly spells both widths and both byte orders.
+    #[test]
+    fn processed_index_encoding_matches_the_source_branches() {
+        assert_eq!(
+            encode_processed_index_buffer(&[0x1234], true, false),
+            vec![0x34, 0x12]
+        );
+        assert_eq!(
+            encode_processed_index_buffer(&[0x1234], true, true),
+            vec![0x12, 0x34]
+        );
+        assert_eq!(
+            encode_processed_index_buffer(&[1], false, false),
+            vec![1, 0, 0, 0]
+        );
+        assert_eq!(
+            encode_processed_index_buffer(&[1], false, true),
+            vec![0, 0, 0, 1]
+        );
+        assert_eq!(
+            encode_processed_index_buffer(&[0xABCD_FFFF], true, false),
+            vec![0xFF, 0xFF],
+            "16-bit lanes narrow by wrapping like the source cast"
+        );
+        assert!(encode_processed_index_buffer(&[], true, false).is_empty());
     }
 }

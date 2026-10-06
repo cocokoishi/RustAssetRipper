@@ -1350,6 +1350,51 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn scalar_coercions_and_rejections_follow_the_declared_schema() {
+        // Unsigned fields reject negative payloads instead of wrapping.
+        let root =
+            SerializedValue::Struct(vec![field("m_LightmapFlags", SerializedValue::I32(-1))]);
+        assert_eq!(
+            MaterialView::from_value(&root),
+            Err(MaterialViewError::NegativeValue {
+                field: "m_LightmapFlags",
+                value: -1,
+            })
+        );
+        // Legacy byte-sized bools decode by nonzero comparison.
+        let root = SerializedValue::Struct(vec![
+            field("m_EnableInstancingVariants", SerializedValue::U8(2)),
+            field("m_DoubleSidedGI", SerializedValue::U8(0)),
+        ]);
+        let view = MaterialView::from_value(&root).unwrap();
+        assert_eq!(view.enable_instancing_variants, Some(true));
+        assert_eq!(view.double_sided_gi, Some(false));
+        // Unsigned bit patterns reinterpret as signed, matching the unchecked cast.
+        let root = SerializedValue::Struct(vec![field(
+            "m_CustomRenderQueue",
+            SerializedValue::U32(u32::MAX),
+        )]);
+        let view = MaterialView::from_value(&root).unwrap();
+        assert_eq!(view.custom_render_queue, Some(-1));
+        // Names that are not valid UTF-8 are explicit errors, not replacements.
+        let root =
+            SerializedValue::Struct(vec![field("m_Name", SerializedValue::Bytes(vec![0xFF]))]);
+        assert_eq!(
+            MaterialView::from_value(&root),
+            Err(MaterialViewError::InvalidPropertyName {
+                field: "m_Name",
+                index: 0,
+            })
+        );
+        // Keys outside the two dictionary shapes classify as no shape.
+        assert_eq!(
+            MaterialTexEnvKeyShape::classify(&SerializedValue::I32(1)),
+            None
+        );
+        assert_eq!(MaterialTexEnvKeyShape::Absent.gate_name(), None);
+    }
+
     /// Generated-API evidence for the serialized field-name mapping.
     #[test]
     fn generated_api_fixture_supports_the_field_name_mapping() {

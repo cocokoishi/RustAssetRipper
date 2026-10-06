@@ -20,12 +20,18 @@
 //! predicates were found under `AssetRipper/Source`; the kernels pin the decision shapes
 //! for the render-state emission.
 //!
+//! Also ports the serialized-pass program selection (`SerializedPassExtensions` with
+//! `ShaderType`, plus `SerializedPassType`): the program mask bits, the program-type
+//! strings, the ordered program list, and the pass-type words. The program objects and
+//! the per-subprogram shader-model versions stay caller-side.
+//!
 //! Open: `Name` resolution across the `Utf8String`/`FastPropertyName` backings (needs the
 //! generated `Has_*` gates; the resolved name arrives as a caller fact), the generic
 //! `GetValue<T>` enum-cast machinery (an `i32` identity on the Rust side),
 //! name-or-value string emission (float formatting belongs to the export-side invariant
-//! renderer), and the remaining typed render-state casts (`BlendMode`, `ZTest`, ...),
-//! whose discriminants stay in the snapshot enums.
+//! renderer), the remaining typed render-state casts (`BlendMode`, `ZTest`, ...),
+//! whose discriminants stay in the snapshot enums, and `MaxShaderModelVersion` (needs the
+//! subprogram program-type tables).
 //!
 //! Differential evidence: `shader_dummy_fixture.txt` (probe `Temp/opencode/shaderexport`,
 //! real `Shader.Create` instances per version with `Script` set, calling the shipped
@@ -495,6 +501,120 @@ pub fn shader_stencil_is_default(
         && op_back_is_default
 }
 
+/// `ShaderType` discriminants (`Enums/Shader/ShaderType.cs`); `RayTracing`
+/// exists from Unity 2019.3.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ShaderProgramType {
+    /// No program.
+    None,
+    /// Vertex program.
+    Vertex,
+    /// Fragment program.
+    Fragment,
+    /// Geometry program.
+    Geometry,
+    /// Hull program.
+    Hull,
+    /// Domain program.
+    Domain,
+    /// Ray-tracing program.
+    RayTracing,
+}
+
+impl ShaderProgramType {
+    /// The raw discriminant.
+    pub const fn discriminant(self) -> i32 {
+        match self {
+            Self::None => 0,
+            Self::Vertex => 1,
+            Self::Fragment => 2,
+            Self::Geometry => 3,
+            Self::Hull => 4,
+            Self::Domain => 5,
+            Self::RayTracing => 6,
+        }
+    }
+
+    /// `ShaderTypeExtensions.ToProgramMask`: `1 << type`.
+    pub const fn to_program_mask(self) -> i32 {
+        1 << self.discriminant()
+    }
+
+    /// `ShaderTypeExtensions.ToProgramTypeString`: `None` has no program string
+    /// and throws on the source side.
+    pub const fn to_program_type_string(self) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            Self::Vertex => Some("vp"),
+            Self::Fragment => Some("fp"),
+            Self::Geometry => Some("gp"),
+            Self::Hull => Some("hp"),
+            Self::Domain => Some("dp"),
+            Self::RayTracing => Some("rtp"),
+        }
+    }
+}
+
+/// `SerializedPassExtensions.HasProgram`: the program's mask bit is set.
+pub const fn pass_has_program(program_mask: i32, program: ShaderProgramType) -> bool {
+    program_mask & program.to_program_mask() != 0
+}
+
+/// `SerializedPassExtensions.GetPrograms` selection order over caller facts:
+/// Vertex, Fragment, Geometry, Hull, and Domain programs by mask bit, then the
+/// ray-tracing program only when the mask hits and the pass serializes
+/// `ProgRayTracing`. The program objects stay caller-side.
+pub fn pass_program_types(program_mask: i32, has_prog_ray_tracing: bool) -> Vec<ShaderProgramType> {
+    let mut programs = Vec::new();
+    for program in [
+        ShaderProgramType::Vertex,
+        ShaderProgramType::Fragment,
+        ShaderProgramType::Geometry,
+        ShaderProgramType::Hull,
+        ShaderProgramType::Domain,
+    ] {
+        if pass_has_program(program_mask, program) {
+            programs.push(program);
+        }
+    }
+    if has_prog_ray_tracing && pass_has_program(program_mask, ShaderProgramType::RayTracing) {
+        programs.push(ShaderProgramType::RayTracing);
+    }
+    programs
+}
+
+/// `SerializedPassType` discriminants.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum SerializedPassType {
+    /// A regular pass.
+    Pass,
+    /// A `UsePass` reference.
+    UsePass,
+    /// A grab pass.
+    GrabPass,
+}
+
+impl SerializedPassType {
+    /// `SerializedPassExtensions.GetType_`: the raw discriminant selects the variant.
+    pub const fn from_discriminant(value: i32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Pass),
+            1 => Some(Self::UsePass),
+            2 => Some(Self::GrabPass),
+            _ => None,
+        }
+    }
+
+    /// `SerializedPassTypeExtensions.ToSerializedString`.
+    pub const fn to_serialized_string(self) -> &'static str {
+        match self {
+            Self::Pass => "Pass",
+            Self::UsePass => "UsePass",
+            Self::GrabPass => "GrabPass",
+        }
+    }
+}
+
 fn serialized_kind(value: &SerializedValue) -> &'static str {
     match value {
         SerializedValue::Bool(_) => "bool",
@@ -716,5 +836,77 @@ mod tests {
         assert!(!shader_stencil_is_default(
             true, false, true, true, true, true
         ));
+    }
+
+    #[test]
+    fn pass_program_selection_follows_mask_bits_and_source_order() {
+        use ShaderProgramType::{Domain, Fragment, Geometry, Hull, RayTracing, Vertex};
+        // Discriminants mirror the source enum.
+        assert_eq!(
+            [
+                ShaderProgramType::None.discriminant(),
+                Vertex.discriminant(),
+                Fragment.discriminant(),
+                Geometry.discriminant(),
+                Hull.discriminant(),
+                Domain.discriminant(),
+                RayTracing.discriminant(),
+            ],
+            [0, 1, 2, 3, 4, 5, 6]
+        );
+        // One mask bit per type.
+        assert_eq!(Vertex.to_program_mask(), 2);
+        assert_eq!(Fragment.to_program_mask(), 4);
+        assert_eq!(RayTracing.to_program_mask(), 64);
+        // Program strings; `None` has none and throws on the source side.
+        assert_eq!(Vertex.to_program_type_string(), Some("vp"));
+        assert_eq!(Fragment.to_program_type_string(), Some("fp"));
+        assert_eq!(Geometry.to_program_type_string(), Some("gp"));
+        assert_eq!(Hull.to_program_type_string(), Some("hp"));
+        assert_eq!(Domain.to_program_type_string(), Some("dp"));
+        assert_eq!(RayTracing.to_program_type_string(), Some("rtp"));
+        assert_eq!(ShaderProgramType::None.to_program_type_string(), None);
+        // Mask membership.
+        assert!(pass_has_program(0b0000_0110, Vertex));
+        assert!(pass_has_program(0b0000_0110, Fragment));
+        assert!(!pass_has_program(0b0000_0110, Geometry));
+        // Selection order skips unset bits and gates ray tracing on the
+        // serialized program.
+        assert_eq!(
+            pass_program_types(0b0111_1110, true),
+            vec![Vertex, Fragment, Geometry, Hull, Domain, RayTracing]
+        );
+        assert_eq!(
+            pass_program_types(0b0111_1110, false),
+            vec![Vertex, Fragment, Geometry, Hull, Domain]
+        );
+        assert_eq!(
+            pass_program_types(0b0100_0100, true),
+            vec![Fragment, RayTracing]
+        );
+        assert!(pass_program_types(0, true).is_empty());
+        // Pass types round-trip through discriminants and words.
+        assert_eq!(
+            SerializedPassType::from_discriminant(0),
+            Some(SerializedPassType::Pass)
+        );
+        assert_eq!(
+            SerializedPassType::from_discriminant(1),
+            Some(SerializedPassType::UsePass)
+        );
+        assert_eq!(
+            SerializedPassType::from_discriminant(2),
+            Some(SerializedPassType::GrabPass)
+        );
+        assert_eq!(SerializedPassType::from_discriminant(3), None);
+        assert_eq!(SerializedPassType::Pass.to_serialized_string(), "Pass");
+        assert_eq!(
+            SerializedPassType::UsePass.to_serialized_string(),
+            "UsePass"
+        );
+        assert_eq!(
+            SerializedPassType::GrabPass.to_serialized_string(),
+            "GrabPass"
+        );
     }
 }

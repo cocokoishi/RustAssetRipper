@@ -1035,3 +1035,10 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Gates: `cargo fmt --check` 0, full tests 1197 lib + 55 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
 - Next: twenty-ninth team round (mesh-view/index-format/bone-weight gaps), then `SetBoneGeometry`/outline mesh internals.
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 139. Checkpoint: twenty-ninth team round integrated (2026-10-06)
+
+- Three teammates shipped disjoint scopes, all lead-verified (targeted suites re-run: 13/13, 12/12, 25/25) and integrated: `texture-meta` ported the index codec (`RES-MESH-METRIC-001`); `sprite-fill` ported pass-program selection (`RES-SHADER-STATE-001`); `texture-export` pinned material scalars (`RES-MATERIAL-VIEW-001`). Batch note: the original file targets did not exist — all three asked before writing and were retargeted to verified files. No scope violations, no placeholders.
+- Gates: `cargo fmt --check` 0, full tests 1201 lib + 55 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
+- Next: thirtieth team round (renderer/texture-importer/audio gaps), then `SetBoneGeometry`/outline mesh internals.
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
