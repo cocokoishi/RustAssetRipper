@@ -1,8 +1,8 @@
-//! `AnimationCurveExtensions` single-float curve construction.
+//! `AnimationCurveExtensions` curve construction.
 //!
-//! Mirrors `AssetRipper.SourceGenerated.Extensions/AnimationCurveExtensions.cs` for the
-//! `IAnimationCurve_Single` overloads used by the exporters: the default-rotation/loop envelope,
-//! and the two-keyframe value and slope builders.
+//! Mirrors `AssetRipper.SourceGenerated.Extensions/AnimationCurveExtensions.cs`: the
+//! default-rotation/loop envelope for the `Single`, `Vector3f`, and `Quaternionf` curve
+//! flavors, and the `IAnimationCurve_Single` value/slope/copy builders used by the exporters.
 
 use super::keyframe::{
     keyframe_presence, set_values_slopes as set_keyframe_slopes,
@@ -63,9 +63,78 @@ pub struct AnimationCurveView {
 
 /// `AnimationCurveExtensions.SetDefaultRotationOrderAndCurveLoopType`.
 pub fn set_default_rotation_order_and_curve_loop_type(curve: &mut AnimationCurveView) {
-    curve.pre_infinity = CURVE_LOOP_CYCLE_WITH_OFFSET;
-    curve.post_infinity = CURVE_LOOP_CYCLE_WITH_OFFSET;
-    if let Some(slot) = &mut curve.rotation_order {
+    set_envelope_fields(
+        &mut curve.pre_infinity,
+        &mut curve.post_infinity,
+        &mut curve.rotation_order,
+    );
+}
+
+/// A Vector3f animation curve envelope view.
+///
+/// Models the loop/rotation fields of `AnimationCurve_Vector3f`; the keyframe payload
+/// itself is built through the `Keyframe_Vector3f` helpers elsewhere. Recorded open: no
+/// `AnimationCurve_Vector3f.SetValues` builders exist in the source extensions file, so
+/// none are mirrored here either.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AnimationCurveVector3View {
+    /// `PreInfinity`.
+    pub pre_infinity: i32,
+    /// `PostInfinity`.
+    pub post_infinity: i32,
+    /// `RotationOrder`.
+    pub rotation_order: Option<i32>,
+}
+
+/// `AnimationCurveExtensions.SetDefaultRotationOrderAndCurveLoopType` for
+/// `IAnimationCurve_Vector3f`.
+pub fn set_default_rotation_order_and_curve_loop_type_vector3(
+    curve: &mut AnimationCurveVector3View,
+) {
+    set_envelope_fields(
+        &mut curve.pre_infinity,
+        &mut curve.post_infinity,
+        &mut curve.rotation_order,
+    );
+}
+
+/// A Quaternionf animation curve envelope view.
+///
+/// Models the loop/rotation fields of `AnimationCurve_Quaternionf`; same recorded open
+/// as the Vector3f view: the source has no `SetValues` builders for this flavor.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AnimationCurveQuaternionView {
+    /// `PreInfinity`.
+    pub pre_infinity: i32,
+    /// `PostInfinity`.
+    pub post_infinity: i32,
+    /// `RotationOrder`.
+    pub rotation_order: Option<i32>,
+}
+
+/// `AnimationCurveExtensions.SetDefaultRotationOrderAndCurveLoopType` for
+/// `IAnimationCurve_Quaternionf`.
+pub fn set_default_rotation_order_and_curve_loop_type_quaternion(
+    curve: &mut AnimationCurveQuaternionView,
+) {
+    set_envelope_fields(
+        &mut curve.pre_infinity,
+        &mut curve.post_infinity,
+        &mut curve.rotation_order,
+    );
+}
+
+/// The shared envelope decision behind all three `SetDefaultRotationOrderAndCurveLoopType`
+/// overloads: both infinities become `CycleWithOffset` and a present rotation slot becomes
+/// `OrderZXY`. The slot stays `None` on pre-5.4 curves, matching the generated `Has_*` gates.
+fn set_envelope_fields(
+    pre_infinity: &mut i32,
+    post_infinity: &mut i32,
+    rotation_order: &mut Option<i32>,
+) {
+    *pre_infinity = CURVE_LOOP_CYCLE_WITH_OFFSET;
+    *post_infinity = CURVE_LOOP_CYCLE_WITH_OFFSET;
+    if let Some(slot) = rotation_order {
         *slot = ROTATION_ORDER_ZXY;
     }
 }
@@ -496,5 +565,47 @@ mod tests {
             rows += 1;
         }
         assert_eq!(rows, 16);
+    }
+
+    /// The `Vector3f`/`Quaternionf` `SetDefaultRotationOrderAndCurveLoopType` overloads apply
+    /// the same envelope as the `Single` overload: `CycleWithOffset` infinities and `OrderZXY`
+    /// rotation, leaving an absent (pre-5.4) rotation slot untouched.
+    #[test]
+    fn vector3_and_quaternion_envelopes_match_the_single_flavor() {
+        let mut vector = AnimationCurveVector3View {
+            rotation_order: Some(0),
+            ..AnimationCurveVector3View::default()
+        };
+        set_default_rotation_order_and_curve_loop_type_vector3(&mut vector);
+        assert_eq!(vector.pre_infinity, CURVE_LOOP_CYCLE_WITH_OFFSET);
+        assert_eq!(vector.post_infinity, CURVE_LOOP_CYCLE_WITH_OFFSET);
+        assert_eq!(vector.rotation_order, Some(ROTATION_ORDER_ZXY));
+
+        let mut quaternion = AnimationCurveQuaternionView {
+            rotation_order: Some(0),
+            ..AnimationCurveQuaternionView::default()
+        };
+        set_default_rotation_order_and_curve_loop_type_quaternion(&mut quaternion);
+        assert_eq!(quaternion.pre_infinity, CURVE_LOOP_CYCLE_WITH_OFFSET);
+        assert_eq!(quaternion.post_infinity, CURVE_LOOP_CYCLE_WITH_OFFSET);
+        assert_eq!(quaternion.rotation_order, Some(ROTATION_ORDER_ZXY));
+
+        // Without a rotation slot the envelope still applies and nothing is created.
+        let mut bare_vector = AnimationCurveVector3View::default();
+        set_default_rotation_order_and_curve_loop_type_vector3(&mut bare_vector);
+        assert_eq!(bare_vector.rotation_order, None);
+        let mut bare_quaternion = AnimationCurveQuaternionView::default();
+        set_default_rotation_order_and_curve_loop_type_quaternion(&mut bare_quaternion);
+        assert_eq!(bare_quaternion.rotation_order, None);
+
+        // The shared helper keeps the Single overload on the same values.
+        let mut single = AnimationCurveView {
+            rotation_order: Some(0),
+            ..AnimationCurveView::default()
+        };
+        set_default_rotation_order_and_curve_loop_type(&mut single);
+        assert_eq!(single.pre_infinity, vector.pre_infinity);
+        assert_eq!(single.post_infinity, quaternion.post_infinity);
+        assert_eq!(single.rotation_order, vector.rotation_order);
     }
 }

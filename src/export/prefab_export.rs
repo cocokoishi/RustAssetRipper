@@ -1,4 +1,6 @@
-//! Prefab collection export rules ported from `PrefabExportCollection`.
+//! Prefab collection export rules ported from `PrefabExportCollection`
+//! (`AssetRipper/Source/AssetRipper.Export.UnityProjects/Project/PrefabExportCollection.cs`;
+//! base mechanics in `Project/AssetsExportCollection.cs` and `AssetExportCollection.cs`).
 //!
 //! A prefab collection gathers the hierarchy's assets plus the hierarchy object itself, in
 //! that order, through the shared multi-asset mechanics (`multi_asset.rs`): the primary
@@ -12,10 +14,15 @@
 //! with the collection GUID and the legacy/modern asset type (`export_type.rs`): a legacy
 //! prefab marker points at `Serialized`, a modern instance at `Meta`. That class ID lives
 //! in the external generated package, so callers supply it. Collection flags OR the
-//! prefab-system bit (`transfer_flags.rs`).
+//! prefab-system bit (`serialized_file::transfer_flags`).
 //!
 //! Which hierarchy members are exportable lives in the processing object model and arrives
-//! here as an ordered caller-supplied list.
+//! here as an ordered caller-supplied list. Importer construction (including the
+//! `EmitPrefabAsset` branch), the `prefab` extension, and the full plan live in
+//! `importer_fields.rs`, `collection_kind.rs`, and `prefab_collection.rs`; this module
+//! keeps only the order, pointer, and exportable-set kernels. The pointer constructor
+//! cannot fail for the modifier it uses (zero), but returns `Result` to match the
+//! fallible ID API it wraps.
 
 use super::export_type::{prefab_pointer_type, ExportAssetType};
 use super::ids::{get_main_export_id, ExportIdError};
@@ -81,6 +88,18 @@ mod tests {
         assert_eq!(legacy.asset_type, ExportAssetType::Serialized);
         let modern = prefab_instance_pointer(1001, [1, 2, 3, 4], false).unwrap();
         assert_eq!(modern.file_id, 100_100_000);
+        assert_eq!(modern.asset_type, ExportAssetType::Meta);
+    }
+
+    #[test]
+    fn pointers_keep_unprefixed_class_ids_verbatim() {
+        // `GetMainExportID` answers the bare class ID past the prefixed range; the
+        // legacy/modern branch still applies on top of it.
+        let legacy = prefab_instance_pointer(30_000, [5, 6, 7, 8], true).unwrap();
+        assert_eq!(legacy.file_id, 30_000);
+        assert_eq!(legacy.asset_type, ExportAssetType::Serialized);
+        let modern = prefab_instance_pointer(30_000, [5, 6, 7, 8], false).unwrap();
+        assert_eq!(modern.file_id, 30_000);
         assert_eq!(modern.asset_type, ExportAssetType::Meta);
     }
 

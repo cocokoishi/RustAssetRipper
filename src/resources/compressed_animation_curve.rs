@@ -3,7 +3,9 @@
 //! Mirrors `AssetRipper.SourceGenerated.Extensions/CompressedAnimationCurveExtensions.cs`.
 //! A compressed quaternion curve stores times as packed hundredths, rotations as packed
 //! quaternions, and slopes as a packed float array with a four-float stride; the unpacker rebuilds
-//! the destination quaternion curve's keyframes and copies the loop settings.
+//! the destination quaternion curve's keyframes and copies the loop settings. The slope stride
+//! decision lives in a dedicated kernel; short time/slope arrays are explicit errors where the
+//! source indexes past the end.
 
 use crate::numerics::Quat;
 
@@ -128,6 +130,38 @@ impl From<PackedFloatVectorError> for CompressedAnimationCurveError {
     }
 }
 
+/// Slope offsets for one keyframe.
+///
+/// The packed array strides four floats per keyframe with a four-float lead, so
+/// keyframe `i` reads its in-slope at `i * 4` and its out-slope at `i * 4 + 4`
+/// (the source's `slopes[j - 4 .. j + 4]` with `j = 4 + i * 4`). Short arrays are
+/// an explicit [`CompressedAnimationCurveError::TruncatedSlopes`].
+fn slope_window(
+    keyframe_index: usize,
+    slope_count: usize,
+) -> Result<(usize, usize), CompressedAnimationCurveError> {
+    let in_start =
+        keyframe_index
+            .checked_mul(4)
+            .ok_or(CompressedAnimationCurveError::TruncatedSlopes {
+                needed: usize::MAX,
+                available: slope_count,
+            })?;
+    let needed = in_start
+        .checked_add(8)
+        .ok_or(CompressedAnimationCurveError::TruncatedSlopes {
+            needed: usize::MAX,
+            available: slope_count,
+        })?;
+    if needed > slope_count {
+        return Err(CompressedAnimationCurveError::TruncatedSlopes {
+            needed,
+            available: slope_count,
+        });
+    }
+    Ok((in_start, in_start + 4))
+}
+
 /// `CompressedAnimationCurveExtensions.Unpack`.
 pub fn unpack(
     compressed: &CompressedAnimationCurveView,
@@ -151,13 +185,7 @@ pub fn unpack(
                 needed: rotations.len(),
                 available: times.len(),
             })?;
-        let base = 4 + i * 4;
-        if base + 4 > slopes.len() {
-            return Err(CompressedAnimationCurveError::TruncatedSlopes {
-                needed: base + 4,
-                available: slopes.len(),
-            });
-        }
+        let (in_start, out_start) = slope_window(i, slopes.len())?;
         let value = Quat {
             x: rotation.x,
             y: rotation.y,
@@ -165,16 +193,16 @@ pub fn unpack(
             w: rotation.w,
         };
         let in_slope = Quat {
-            x: slopes[base - 4],
-            y: slopes[base - 3],
-            z: slopes[base - 2],
-            w: slopes[base - 1],
+            x: slopes[in_start],
+            y: slopes[in_start + 1],
+            z: slopes[in_start + 2],
+            w: slopes[in_start + 3],
         };
         let out_slope = Quat {
-            x: slopes[base],
-            y: slopes[base + 1],
-            z: slopes[base + 2],
-            w: slopes[base + 3],
+            x: slopes[out_start],
+            y: slopes[out_start + 1],
+            z: slopes[out_start + 2],
+            w: slopes[out_start + 3],
         };
         let mut keyframe = KeyframeQuaternionView::for_version(version);
         set_values_slopes_scalar(
@@ -353,5 +381,96 @@ mod tests {
             rows += 1;
         }
         assert_eq!(rows, 4);
+    }
+
+    fn build_compressed_with(
+        time_values: &[i32],
+        slope_values: &[f32],
+    ) -> CompressedAnimationCurveView {
+        let limits = PackedBitVectorLimits::default();
+        let mut compressed = build_compressed();
+        let mut times = PackedBitVector::default();
+        times.pack_ints(time_values, limits).unwrap();
+        compressed.times = times;
+        let mut slopes = PackedBitVectorSingle::default();
+        slopes.pack(slope_values, limits).unwrap();
+        compressed.slopes = slopes;
+        compressed
+    }
+
+    #[test]
+    fn slope_window_follows_the_four_float_stride() {
+        assert_eq!(slope_window(0, 8).unwrap(), (0, 4));
+        assert_eq!(slope_window(1, 12).unwrap(), (4, 8));
+        assert_eq!(slope_window(3, 20).unwrap(), (12, 16));
+        assert_eq!(
+            slope_window(0, 7).unwrap_err(),
+            CompressedAnimationCurveError::TruncatedSlopes {
+                needed: 8,
+                available: 7,
+            }
+        );
+        assert_eq!(
+            slope_window(2, 15).unwrap_err(),
+            CompressedAnimationCurveError::TruncatedSlopes {
+                needed: 16,
+                available: 15,
+            }
+        );
+        assert!(matches!(
+            slope_window(usize::MAX / 4 + 1, 0).unwrap_err(),
+            CompressedAnimationCurveError::TruncatedSlopes {
+                needed: usize::MAX,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn unpack_reports_short_time_and_slope_arrays() {
+        let limits = PackedBitVectorLimits::default();
+        let version = UnityVersion::parse("2019.4.0f1").unwrap();
+        // Four rotations but a single time.
+        let compressed =
+            build_compressed_with(&[0], &(0..20).map(|i| i as f32 * 0.1).collect::<Vec<_>>());
+        let mut destination = QuaternionCurveView::for_version(version);
+        assert_eq!(
+            unpack(&compressed, version, &mut destination, limits).unwrap_err(),
+            CompressedAnimationCurveError::TruncatedTimes {
+                needed: 4,
+                available: 1,
+            }
+        );
+        // Matching times but only two keyframes of slopes.
+        let compressed = build_compressed_with(
+            &[0, 50, 100, 150],
+            &(0..8).map(|i| i as f32 * 0.1).collect::<Vec<_>>(),
+        );
+        let mut destination = QuaternionCurveView::for_version(version);
+        assert_eq!(
+            unpack(&compressed, version, &mut destination, limits).unwrap_err(),
+            CompressedAnimationCurveError::TruncatedSlopes {
+                needed: 12,
+                available: 8,
+            }
+        );
+    }
+
+    #[test]
+    fn unpack_accepts_an_empty_curve() {
+        let limits = PackedBitVectorLimits::default();
+        let version = UnityVersion::parse("5.0.0f1").unwrap();
+        let compressed = CompressedAnimationCurveView {
+            path: "Root/Bone".to_string(),
+            pre_infinity: 5,
+            post_infinity: 7,
+            ..CompressedAnimationCurveView::default()
+        };
+        let mut destination = QuaternionCurveView::for_version(version);
+        unpack(&compressed, version, &mut destination, limits).unwrap();
+        assert!(destination.curve.is_empty());
+        assert_eq!(destination.path, "Root/Bone");
+        assert_eq!(destination.pre_infinity, 5);
+        assert_eq!(destination.post_infinity, 7);
     }
 }
