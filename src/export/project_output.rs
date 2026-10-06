@@ -1,4 +1,27 @@
 //! Add-only, path-confined writes for Unity project sidecar output.
+//!
+//! Ports the output mechanics of `ExportCollection.ExportMeta` and
+//! `AssetExportCollection.Export`
+//! (`AssetRipper/Source/AssetRipper.Export.UnityProjects/ExportCollection.cs`,
+//! `AssetRipper/Source/AssetRipper.Export.UnityProjects/AssetExportCollection.cs`):
+//!
+//! - Sidecars land beside the asset as `{filePath}.meta`, serialized without a BOM,
+//!   tag, or version, with formatted keys.
+//! - Asset bytes are written before the `.meta` record is built; a failed export
+//!   writes neither file, mirroring the source `false` return.
+//! - A zero export GUID fails the meta step while the asset bytes stay written,
+//!   matching the source construction order (`Meta(GUID, importer)` after export).
+//! - Unique-name resolution and the `.meta` length reservation live in `asset_path`;
+//!   the importer record (including its bundle-name propagation) is a caller fact.
+//!
+//! Deliberately stricter than the source, by pipeline design:
+//! - Both files are created add-only; the source overwrites existing files.
+//! - Every relative path is confined (no traversal, absolute paths, device names,
+//!   or unsafe components) and each created ancestor is verified to be a real
+//!   directory under the canonical output root. A file blocking a directory, or a
+//!   file at the output root, fails instead of writing outside the project.
+//! - The random per-collection source GUID is replaced by a caller-supplied nonzero
+//!   GUID so repeated exports stay deterministic.
 
 use std::error::Error;
 use std::ffi::OsString;
@@ -736,5 +759,60 @@ mod tests {
             b"asset-bytes"
         );
         assert!(!root.path().join("Icon.png.meta").exists());
+    }
+
+    #[test]
+    fn file_at_the_output_root_fails_before_any_write() {
+        let root = TestOutputRoot::new();
+        let blocker = root.path().join("blocking-file");
+        fs::write(&blocker, b"not a directory").unwrap();
+        assert!(matches!(
+            write_unity_meta_sidecar(
+                &blocker,
+                "Icon.png",
+                meta(),
+                UnityProjectOutputLimits::default(),
+                UnityYamlWriteLimits::default(),
+            ),
+            Err(UnityProjectOutputError::CreateOutputRoot { .. })
+        ));
+        assert_eq!(fs::read(&blocker).unwrap(), b"not a directory");
+    }
+
+    #[test]
+    fn file_blocking_a_subdirectory_fails_as_an_unsafe_ancestor() {
+        let root = TestOutputRoot::new();
+        fs::write(root.path().join("Assets"), b"not a directory").unwrap();
+        assert!(matches!(
+            write_unity_meta_sidecar(
+                root.path(),
+                "Assets/Icon.png",
+                meta(),
+                UnityProjectOutputLimits::default(),
+                UnityYamlWriteLimits::default(),
+            ),
+            Err(UnityProjectOutputError::UnsafeOutputAncestor { .. })
+        ));
+        assert_eq!(
+            fs::read(root.path().join("Assets")).unwrap(),
+            b"not a directory"
+        );
+    }
+
+    #[test]
+    fn asset_steps_reject_unsafe_paths_before_touching_the_filesystem() {
+        let root = TestOutputRoot::new();
+        assert!(matches!(
+            export_asset_with_meta(
+                root.path(),
+                export_plan("../outside.asset"),
+                true,
+                |_| panic!("an unsafe path must not reach the asset writer"),
+                UnityProjectOutputLimits::default(),
+                UnityYamlWriteLimits::default(),
+            ),
+            Err(UnityProjectOutputError::InvalidRelativePath { .. })
+        ));
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
     }
 }

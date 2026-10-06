@@ -150,6 +150,46 @@ fn main() {
     }
 }
 
+/// The top-level CLI command selected by the first argument.
+///
+/// The baseline product surface is the GUI/Web UI rather than a command line, so these
+/// command names are this CLI's own contract; the classifier pins the exact accepted
+/// spellings (including `-h`/`help` and `-V`) so dispatch and usage cannot drift apart
+/// silently. Servant commands needing a web server stay out of scope: there is no
+/// `serve` arm because no server ships in this binary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CliCommand {
+    Help,
+    Version,
+    ExportObjectYaml,
+    ExportFileYaml,
+    ExportTexture,
+    ExportMesh,
+    ExportShader,
+    ExportAudio,
+    Inspect,
+    InspectFiles,
+    Unknown,
+}
+
+/// Map the first command-line word to its [`CliCommand`]. Matching is exact and case
+/// sensitive: `Inspect`, `-v`, and `--he` are all [`CliCommand::Unknown`].
+fn classify_cli_command(name: &str) -> CliCommand {
+    match name {
+        "--help" | "-h" | "help" => CliCommand::Help,
+        "--version" | "-V" => CliCommand::Version,
+        "export-object-yaml" => CliCommand::ExportObjectYaml,
+        "export-file-yaml" => CliCommand::ExportFileYaml,
+        "export-texture" => CliCommand::ExportTexture,
+        "export-mesh" => CliCommand::ExportMesh,
+        "export-shader" => CliCommand::ExportShader,
+        "export-audio" => CliCommand::ExportAudio,
+        "inspect" => CliCommand::Inspect,
+        "inspect-files" => CliCommand::InspectFiles,
+        _ => CliCommand::Unknown,
+    }
+}
+
 fn run(arguments: impl Iterator<Item = OsString>) -> Result<(), Box<dyn Error>> {
     let mut arguments = arguments;
     let Some(command) = arguments.next() else {
@@ -159,57 +199,48 @@ fn run(arguments: impl Iterator<Item = OsString>) -> Result<(), Box<dyn Error>> 
     let command = command
         .into_string()
         .map_err(|_| invalid_input("the command name must be valid UTF-8"))?;
-    if command == "--help" || command == "-h" || command == "help" {
-        print_usage();
-        return Ok(());
-    }
-    if command == "--version" || command == "-V" {
-        println!("assetripper-rs {}", env!("CARGO_PKG_VERSION"));
-        return Ok(());
-    }
-    if command == "export-object-yaml" {
-        return export_object_yaml_from_arguments(arguments);
-    }
-    if command == "export-file-yaml" {
-        return export_file_yaml_from_arguments(arguments);
-    }
-    if command == "export-texture" {
-        return export_texture_from_arguments(arguments);
-    }
-    if command == "export-mesh" {
-        return export_mesh_from_arguments(arguments);
-    }
-    if command == "export-shader" {
-        return export_shader_from_arguments(arguments);
-    }
-    if command == "export-audio" {
-        return export_audio_from_arguments(arguments);
-    }
-    if command != "inspect" && command != "inspect-files" {
-        print_usage();
-        return Err(invalid_input(format!("unknown command '{command}'")));
-    }
-
-    let mut input_paths = Vec::new();
-    for argument in arguments {
-        if input_paths.len() >= MAX_INPUT_PATHS {
-            return Err(invalid_input(format!(
-                "input path count exceeds {MAX_INPUT_PATHS}"
-            )));
+    match classify_cli_command(&command) {
+        CliCommand::Help => {
+            print_usage();
+            Ok(())
         }
-        input_paths.push(PathBuf::from(argument));
-    }
-    if input_paths.is_empty() {
-        print_usage();
-        return Err(invalid_input(format!(
-            "{command} requires at least one input"
-        )));
-    }
+        CliCommand::Version => {
+            println!("assetripper-rs {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
+        CliCommand::ExportObjectYaml => export_object_yaml_from_arguments(arguments),
+        CliCommand::ExportFileYaml => export_file_yaml_from_arguments(arguments),
+        CliCommand::ExportTexture => export_texture_from_arguments(arguments),
+        CliCommand::ExportMesh => export_mesh_from_arguments(arguments),
+        CliCommand::ExportShader => export_shader_from_arguments(arguments),
+        CliCommand::ExportAudio => export_audio_from_arguments(arguments),
+        CliCommand::Inspect | CliCommand::InspectFiles => {
+            let mut input_paths = Vec::new();
+            for argument in arguments {
+                if input_paths.len() >= MAX_INPUT_PATHS {
+                    return Err(invalid_input(format!(
+                        "input path count exceeds {MAX_INPUT_PATHS}"
+                    )));
+                }
+                input_paths.push(PathBuf::from(argument));
+            }
+            if input_paths.is_empty() {
+                print_usage();
+                return Err(invalid_input(format!(
+                    "{command} requires at least one input"
+                )));
+            }
 
-    if command == "inspect-files" {
-        inspect_explicit_files(&input_paths)
-    } else {
-        inspect_directories(&input_paths)
+            if command == "inspect-files" {
+                inspect_explicit_files(&input_paths)
+            } else {
+                inspect_directories(&input_paths)
+            }
+        }
+        CliCommand::Unknown => {
+            print_usage();
+            Err(invalid_input(format!("unknown command '{command}'")))
+        }
     }
 }
 
@@ -7421,5 +7452,89 @@ mod tests {
             }
         );
         super::inspect_directories(std::slice::from_ref(&input.directory)).unwrap();
+    }
+
+    fn os_args(words: &[&str]) -> Vec<std::ffi::OsString> {
+        words.iter().map(std::ffi::OsString::from).collect()
+    }
+
+    #[test]
+    fn cli_command_classifier_pins_every_accepted_spelling() {
+        use super::{classify_cli_command, CliCommand};
+        assert_eq!(classify_cli_command("--help"), CliCommand::Help);
+        assert_eq!(classify_cli_command("-h"), CliCommand::Help);
+        assert_eq!(classify_cli_command("help"), CliCommand::Help);
+        assert_eq!(classify_cli_command("--version"), CliCommand::Version);
+        assert_eq!(classify_cli_command("-V"), CliCommand::Version);
+        assert_eq!(
+            classify_cli_command("export-object-yaml"),
+            CliCommand::ExportObjectYaml
+        );
+        assert_eq!(
+            classify_cli_command("export-file-yaml"),
+            CliCommand::ExportFileYaml
+        );
+        assert_eq!(
+            classify_cli_command("export-texture"),
+            CliCommand::ExportTexture
+        );
+        assert_eq!(classify_cli_command("export-mesh"), CliCommand::ExportMesh);
+        assert_eq!(
+            classify_cli_command("export-shader"),
+            CliCommand::ExportShader
+        );
+        assert_eq!(
+            classify_cli_command("export-audio"),
+            CliCommand::ExportAudio
+        );
+        assert_eq!(classify_cli_command("inspect"), CliCommand::Inspect);
+        assert_eq!(
+            classify_cli_command("inspect-files"),
+            CliCommand::InspectFiles
+        );
+        // Matching is exact and case sensitive; near misses stay unknown.
+        for unknown in [
+            "",
+            "Inspect",
+            "INSPECT",
+            "export",
+            "--he",
+            "--hel",
+            "-v",
+            "--Version",
+            "serve",
+            "inspect files",
+        ] {
+            assert_eq!(
+                classify_cli_command(unknown),
+                CliCommand::Unknown,
+                "{unknown:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cli_dispatch_rejects_missing_and_unknown_commands() {
+        // No command at all.
+        let error = super::run(Vec::new().into_iter()).unwrap_err();
+        assert_eq!(error.to_string(), "a command is required");
+        // Unknown commands name the offender.
+        let error = super::run(os_args(&["frobnicate"]).into_iter()).unwrap_err();
+        assert_eq!(error.to_string(), "unknown command 'frobnicate'");
+        // Inspect commands without inputs name the command.
+        let error = super::run(os_args(&["inspect"]).into_iter()).unwrap_err();
+        assert_eq!(error.to_string(), "inspect requires at least one input");
+        let error = super::run(os_args(&["inspect-files"]).into_iter()).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "inspect-files requires at least one input"
+        );
+    }
+
+    #[test]
+    fn cli_dispatch_accepts_help_and_version_flags() {
+        for command in ["--help", "-h", "help", "--version", "-V"] {
+            super::run(os_args(&[command]).into_iter()).unwrap();
+        }
     }
 }

@@ -23,8 +23,8 @@
 //!   `Reset` always runs and every command redirects to `/` unless stated otherwise.
 //!
 //! Page bodies, JSON shapes, dialog backends, and request handling stay outside this module;
-//! only the launch defaults, the route inventory, the command rules, and the two pure name
-//! builders are ported.
+//! only the launch defaults, the route inventory, the command rules, the log rotation
+//! decisions, and the two pure name builders are ported.
 
 /// Default `--port`: zero selects a random unused port.
 pub const DEFAULT_PORT: i32 = 0;
@@ -34,7 +34,11 @@ pub const DEFAULT_LOG: bool = true;
 pub const DEFAULT_HEADLESS: bool = false;
 /// The loopback address the baseline binds.
 pub const LOOPBACK_BIND_ADDRESS: &str = "127.0.0.1";
-/// Log files kept by rotation besides the newest one.
+/// File budget after rotation, including the incoming log file.
+///
+/// `RotateLogs` runs before the new file is created and deletes
+/// `matching - (KEPT - 1)` oldest matches, so at most this many files exist
+/// once the new one lands.
 pub const ROTATED_LOG_FILES_KEPT: usize = 5;
 /// The log name pattern is `AssetRipper_{yyyyMMdd_HHmmss}.log`.
 pub const LOG_FILE_PREFIX: &str = "AssetRipper_";
@@ -323,7 +327,6 @@ pub fn automatic_log_file_name(timestamp_text: &str) -> String {
 }
 
 /// Append the timestamped export subfolder when `CreateSubfolder` is `true`.
-///
 /// The timestamp text uses the baseline `yyyyMMdd_HHmmss` UTC rendering; the `false` case
 /// returns the path unchanged.
 pub fn maybe_append_timestamped_subfolder(
@@ -342,6 +345,39 @@ pub fn maybe_append_timestamped_subfolder(
     joined.push_str(EXPORT_SUBFOLDER_PREFIX);
     joined.push_str(timestamp_text);
     joined
+}
+
+/// File-name glob `RotateLogs` scans for (`GetFiles("AssetRipper_*.log")`).
+pub const ROTATED_LOG_FILE_PATTERN: &str = "AssetRipper_*.log";
+
+/// Whether `Launch` rotates logs for this log path.
+///
+/// Rotation runs only for the automatic path (`string.IsNullOrEmpty(logPath)`):
+/// a user-supplied path is logged to as-is.
+pub fn automatic_log_path_selected(log_path: Option<&str>) -> bool {
+    log_path.is_none_or(str::is_empty)
+}
+
+/// How many of the oldest matching log files `RotateLogs` deletes.
+///
+/// Mirrors the loop bound `i <= logFiles.Length - MaxLogFiles` exactly: with
+/// four or fewer matches nothing is deleted, with five one is deleted, and so
+/// on. The apparent off-by-one is load-bearing — rotation runs before the new
+/// file is created, so one slot stays reserved for it and at most
+/// [`ROTATED_LOG_FILES_KEPT`] files exist once it lands.
+pub fn rotated_log_deletion_count(matching_log_file_count: usize) -> usize {
+    matching_log_file_count.saturating_sub(ROTATED_LOG_FILES_KEPT - 1)
+}
+
+/// Selects the log files `RotateLogs` deletes.
+///
+/// `ordinal_sorted_names` holds the `AssetRipper_*.log` matches in ascending
+/// ordinal-name order (the source's `OrderBy(f => f.Name, Ordinal)`); the
+/// returned prefix is deleted oldest-first. Directory lookup, the glob match,
+/// and the per-file deletion with its swallowed IO failures stay caller-side.
+pub fn select_rotated_log_deletions(sorted_names: &[String]) -> &[String] {
+    let count = rotated_log_deletion_count(sorted_names.len());
+    &sorted_names[..count]
 }
 
 /// `GameFileLoader` load state: `GameData` present or null.
@@ -428,11 +464,13 @@ pub fn resolve_export_flow(
 #[cfg(test)]
 mod tests {
     use super::{
-        automatic_log_file_name, deletion_consent, is_valid_export_directory,
-        local_web_file_prefix, maybe_append_timestamped_subfolder, reset_transition,
-        resolve_export_flow, ExportFlow, LoaderState, ProductCommand, RouteMethod,
+        automatic_log_file_name, automatic_log_path_selected, deletion_consent,
+        is_valid_export_directory, local_web_file_prefix, maybe_append_timestamped_subfolder,
+        reset_transition, resolve_export_flow, rotated_log_deletion_count,
+        select_rotated_log_deletions, ExportFlow, LoaderState, ProductCommand, RouteMethod,
         EXPORT_SUBFOLDER_PREFIX, LOG_FILE_EXTENSION, LOG_FILE_PREFIX, LOOPBACK_BIND_ADDRESS,
-        PROTECTED_EXPORT_DIRECTORY_NAMES, ROTATED_LOG_FILES_KEPT, WEB_ROUTES,
+        PROTECTED_EXPORT_DIRECTORY_NAMES, ROTATED_LOG_FILES_KEPT, ROTATED_LOG_FILE_PATTERN,
+        WEB_ROUTES,
     };
 
     #[test]
@@ -577,5 +615,51 @@ mod tests {
             resolve_export_flow(true, true, true, false),
             ExportFlow::AbortedDeclined
         );
+    }
+
+    #[test]
+    fn rotation_runs_only_for_automatic_log_paths() {
+        assert!(automatic_log_path_selected(None));
+        assert!(automatic_log_path_selected(Some("")));
+        assert!(!automatic_log_path_selected(Some("custom.log")));
+        assert!(!automatic_log_path_selected(Some(
+            "AssetRipper_20261004_120000.log"
+        )));
+    }
+
+    #[test]
+    fn rotation_deletion_count_reserves_room_for_the_incoming_file() {
+        assert_eq!(ROTATED_LOG_FILE_PATTERN, "AssetRipper_*.log");
+        assert_eq!(rotated_log_deletion_count(0), 0);
+        assert_eq!(rotated_log_deletion_count(1), 0);
+        assert_eq!(rotated_log_deletion_count(4), 0);
+        // Five matches delete one: rotation runs before the new file lands, so
+        // the survivor count plus the incoming file never exceeds the budget.
+        assert_eq!(rotated_log_deletion_count(5), 1);
+        assert_eq!(rotated_log_deletion_count(6), 2);
+        assert_eq!(rotated_log_deletion_count(9), 5);
+    }
+
+    #[test]
+    fn rotation_deletes_the_oldest_ordinal_names_first() {
+        let names: Vec<String> = (0..7)
+            .map(|day| format!("AssetRipper_2026100{day}_120000.log"))
+            .collect();
+        let deleted = select_rotated_log_deletions(&names);
+        assert_eq!(
+            deleted,
+            &names[..3],
+            "seven matches delete the three oldest"
+        );
+        let survivors = &names[deleted.len()..];
+        assert_eq!(survivors.len(), 4);
+        assert!(survivors.last().unwrap().ends_with("20261006_120000.log"));
+        // At or below budget only the exact overflow goes.
+        let names: Vec<String> = (0..5)
+            .map(|day| format!("AssetRipper_2026100{day}_120000.log"))
+            .collect();
+        assert_eq!(select_rotated_log_deletions(&names), &names[..1]);
+        assert!(select_rotated_log_deletions(&names[..4]).is_empty());
+        assert!(select_rotated_log_deletions(&[]).is_empty());
     }
 }
