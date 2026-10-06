@@ -1049,3 +1049,10 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Gates: `cargo fmt --check` 0, full tests 1205 lib + 55 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
 - Next: thirty-first team round (decode/texture/array gaps), then `SetBoneGeometry`/outline mesh internals.
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 141. Checkpoint: thirty-first team round integrated (2026-10-06)
+
+- Three teammates shipped disjoint scopes, all lead-verified (targeted suites re-run: 2/2, 12/12, 8/8) and integrated: `texture-meta` closed the ETC grid hole (`EXP-TEXDEC-ETC-001`); `sprite-fill` closed the converter gap (`EXP-TEXTCONV-DISPATCH-001`); `texture-export` pinned array unions (`RES-TEXTURE-ARRAY-001`). No scope violations, no placeholders.
+- Gates: `cargo fmt --check` 0, full tests 1208 lib + 55 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
+- Next: thirty-second team round (EAC/ASTC/sprite gaps), then `SetBoneGeometry`/outline mesh internals.
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

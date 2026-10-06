@@ -712,4 +712,35 @@ mod tests {
         }
         assert_eq!(rows, 23);
     }
+
+    /// Partial block grids and buffer bounds, beyond the 4x4 differential rows.
+    ///
+    /// The expected pixels are hand-derived from the block formats (an all-zero ETC1
+    /// block is uniform `[2, 2, 2, 255]` through the first modifier-table entry; a
+    /// zero-multiplier EAC block is a flat channel fill), and the consumed counts
+    /// follow the ceiling block grid exactly.
+    #[test]
+    fn partial_dimensions_and_bounds_match_the_family_layout() {
+        // 5x5 spans a 2x2 block grid with partial right and bottom edges.
+        let input = vec![0u8; 32];
+        let mut output = vec![0u8; 5 * 5 * 4];
+        assert_eq!(decode_etc1(&input, 5, 5, &mut output).unwrap(), 32);
+        assert!(output.chunks_exact(4).all(|pixel| pixel == [2, 2, 2, 255]));
+        // A 1x1 image still consumes one whole block.
+        let mut tiny = vec![0u8; 4];
+        assert_eq!(decode_etc1(&input[..8], 1, 1, &mut tiny).unwrap(), 8);
+        assert_eq!(tiny, vec![2, 2, 2, 255]);
+        // A flat EAC unsigned block fills the channel over a 2x1 grid.
+        let eac = [0xAB, 0x00, 0, 0, 0, 0, 0, 0, 0xAB, 0x00, 0, 0, 0, 0, 0, 0];
+        let mut output = vec![0u8; 6 * 3 * 4];
+        assert_eq!(decode_eac_r_unsigned(&eac, 6, 3, &mut output).unwrap(), 16);
+        assert!(output
+            .chunks_exact(4)
+            .all(|pixel| pixel == [0xAB, 0, 0, 255]));
+        // Short inputs and outputs report bounds instead of panicking.
+        let mut output = vec![0u8; 4 * 4 * 4];
+        assert!(decode_etc1(&[0u8; 7], 4, 4, &mut output).is_err());
+        let mut short = vec![0u8; 4 * 4 * 4 - 1];
+        assert!(decode_etc1(&[0u8; 8], 4, 4, &mut short).is_err());
+    }
 }

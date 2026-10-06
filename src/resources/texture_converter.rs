@@ -799,4 +799,74 @@ mod tests {
         assert_eq!(bitmap.depth, 2);
         assert_eq!(bitmap.pixels, vec![1, 2, 3, 4, 5, 6, 7, 8]);
     }
+
+    #[test]
+    fn conversion_guards_and_texture3d_stride_match_the_source() {
+        // Zero dimensions fail before any decoding.
+        let empty = TextureImage {
+            texture_format: 4,
+            graphics_format: 0,
+            width: 0,
+            height: 4,
+            depth: 1,
+            image_size: 0,
+            data: &[],
+        };
+        assert!(matches!(
+            convert_to_bitmap(&empty),
+            Err(TextureConvertError::InvalidDimensions { .. })
+        ));
+        // `width * height * depth * 4` past `i32::MAX` fails.
+        let huge = TextureImage {
+            texture_format: 4,
+            graphics_format: 0,
+            width: 1 << 16,
+            height: 1 << 16,
+            depth: 1 << 8,
+            image_size: 0,
+            data: &[],
+        };
+        assert!(matches!(
+            convert_to_bitmap(&huge),
+            Err(TextureConvertError::TextureTooLarge { .. })
+        ));
+        // A Texture3D whose data is exactly one image takes the per-layer
+        // stride from the decoder's consumed byte count.
+        let data = [1, 2, 3, 4, 5, 6, 7, 8];
+        let image = TextureImage {
+            texture_format: 4,
+            graphics_format: 0,
+            width: 1,
+            height: 1,
+            depth: 2,
+            image_size: 8,
+            data: &data,
+        };
+        let bitmap = convert_to_bitmap(&image).unwrap();
+        assert_eq!(bitmap.depth, 2);
+        assert_eq!(bitmap.pixels, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        // The wrapper applies the caller flip and normal-map flags.
+        let tall = TextureImage {
+            texture_format: 4,
+            graphics_format: 0,
+            width: 1,
+            height: 2,
+            depth: 1,
+            image_size: 8,
+            data: &data,
+        };
+        let bitmap = try_convert_to_bitmap(&tall, true, false).unwrap();
+        assert_eq!(bitmap.pixels, vec![5, 6, 7, 8, 1, 2, 3, 4]);
+        let normal = TextureImage {
+            texture_format: 4,
+            graphics_format: 0,
+            width: 1,
+            height: 1,
+            depth: 1,
+            image_size: 4,
+            data: &[128, 128, 0, 255],
+        };
+        let bitmap = try_convert_to_bitmap(&normal, false, true).unwrap();
+        assert_eq!(bitmap.pixels, vec![128, 128, 254, 255]);
+    }
 }

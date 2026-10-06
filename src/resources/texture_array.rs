@@ -900,4 +900,54 @@ mod tests {
         ]);
         assert!(CubemapArrayView::from_value(&root).is_ok());
     }
+
+    #[test]
+    fn union_precedence_and_passthroughs_match_the_source_branches() {
+        fn view() -> Texture3DView {
+            Texture3DView {
+                width: 4,
+                height: 4,
+                depth: 1,
+                format_i32: None,
+                format_u32: None,
+                image_data: Vec::new(),
+                stream_data: None,
+                lightmap_format: None,
+                usage_mode: 1,
+                mip_count: None,
+                mip_map: false,
+                complete_image_size_u32: None,
+                complete_image_size_i32: None,
+            }
+        }
+        // When both spellings are present the documented winner takes the field.
+        let both = Texture3DView {
+            format_i32: Some(7),
+            format_u32: Some(8),
+            complete_image_size_u32: Some(64),
+            complete_image_size_i32: Some(32),
+            ..view()
+        };
+        assert_eq!(both.format_value(), 7);
+        assert_eq!(both.complete_image_size_value(), 64);
+        // With neither spelling the format reads zero, which no graphics format
+        // converts, so the `RGBA32` fallback applies.
+        assert_eq!(view().format_value(), 0);
+        assert_eq!(view().texture_format_or_default(), 4);
+        // A present lightmap field wins over the usage mode.
+        let lit = Texture3DView {
+            lightmap_format: Some(5),
+            ..view()
+        };
+        assert_eq!(lit.lightmap_value(), 5);
+        // A present mip count passes through without validation.
+        let flat = Texture3DView {
+            mip_count: Some(0),
+            mip_map: true,
+            ..view()
+        };
+        assert_eq!(flat.mip_count_value().unwrap(), 0);
+        // An unrepresentable depth keeps the whole data size.
+        assert_eq!(texture2d_array_complete_image_size(100, usize::MAX), 100);
+    }
 }
