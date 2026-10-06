@@ -6,7 +6,7 @@
 //! the `ReadMonoBehaviour` structure-source decision, the `MakeError_*` and
 //! `LogMonoBehaviorReadException` diagnostic texts, the `RawDataObject`/`UnknownObject`/
 //! `UnreadableObject` hash and synthetic-name rules, and the `ReadExtraTextureFields`
-//! 24-byte tail layout. Byte reading,
+//! 24-byte tail layout, plus the structure-resolver selection. Byte reading,
 //! node building, and assembly-backed MonoBehaviour structures stay outside: they need
 //! generated objects and live assemblies. Version facts arrive precomputed because the
 //! Rust tree has no parsed Unity-version model yet.
@@ -393,6 +393,31 @@ pub fn unreadable_asset_name(
     }
 }
 
+/// Which type resolver a freshly created asset reads its TypeTree structure with.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum StructureResolverKind {
+    /// Engine `TypeTreeObject`s from Tpk roots: engine assets cannot have
+    /// `[SerializeReference]` fields, so they never need (and never get) a resolver.
+    Null,
+    /// MonoBehaviour structures from a file TypeTree: resolved against the file's
+    /// reference types.
+    FromReferenceTypes,
+}
+
+/// `GameAssetFactory` resolver selection over caller facts: the `CreateAsset` Tpk
+/// fallback always reads with `ITypeResolver.Null`, while a MonoBehaviour TypeTree
+/// structure reads with `TypeTreeResolver.Create(referenceTypes)`. The fact is true
+/// exactly for Tpk-backed engine `TypeTreeObject`s; generated reads take no resolver
+/// at all and never reach this gate. Resolver construction needs live assemblies;
+/// only the selection is pinned here.
+pub const fn select_structure_resolver(is_engine_typetree_object: bool) -> StructureResolverKind {
+    if is_engine_typetree_object {
+        StructureResolverKind::Null
+    } else {
+        StructureResolverKind::FromReferenceTypes
+    }
+}
+
 /// Caller facts behind one `ReadMonoBehaviour` structure decision
 /// (`GameAssetFactory.ReadMonoBehaviour`).
 ///
@@ -675,6 +700,21 @@ mod tests {
                 TryReadOutcome::UseCreatedAsset,
                 TryReadLog::ErrorIncorrectByteCount
             )
+        );
+    }
+
+    #[test]
+    fn structure_resolvers_follow_the_creation_path() {
+        // Engine TypeTreeObjects from Tpk roots never get a resolver, so
+        // SerializeReference fields can never resolve inside them.
+        assert_eq!(
+            super::select_structure_resolver(true),
+            super::StructureResolverKind::Null
+        );
+        // MonoBehaviour TypeTree structures resolve against the reference types.
+        assert_eq!(
+            super::select_structure_resolver(false),
+            super::StructureResolverKind::FromReferenceTypes
         );
     }
 

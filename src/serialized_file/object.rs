@@ -513,6 +513,22 @@ pub fn classify_type_tree_usability(type_tree: Option<&TypeTree>) -> TypeTreeUsa
     }
 }
 
+/// `GameAssetFactory.ReadAsset` version gate over caller facts: assets from Unity
+/// versions before 3.5 (stripped-version assets compare below it) cannot be read,
+/// so the reader refuses them before touching the payload. Callers supply the parsed
+/// major/minor pair; unknown or unparseable versions are NOT refused here, preserving
+/// current behavior for files without version text.
+pub const fn version_is_unsupported(major: u32, minor: u32) -> bool {
+    major < 3 || (major == 3 && minor < 5)
+}
+
+/// Split `major.minor` off a Unity version string for the readability gate; anything
+/// else proceeds like today.
+fn version_major_minor(text: &str) -> Option<(u32, u32)> {
+    let mut parts = text.split('.');
+    Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+}
+
 impl SerializedFileMetadata {
     /// Decode one object's payload using its resolved serialized type and TypeTree.
     ///
@@ -546,6 +562,21 @@ impl SerializedFileMetadata {
             limits,
             allocated_bytes: 0,
         };
+        // The source refuses pre-3.5 assets before reading anything; refused payloads
+        // flow into the existing raw-retention path downstream like any decode failure.
+        if let Some((major, minor)) = self
+            .prefix
+            .unity_version_text
+            .as_deref()
+            .and_then(version_major_minor)
+        {
+            if version_is_unsupported(major, minor) {
+                return Err(ObjectDecodeError::new(
+                    0,
+                    ObjectDecodeErrorKind::UnreadableUnsupportedVersion { object_index },
+                ));
+            }
+        }
         header
             .validate_for_file_size(file_bytes.len())
             .map_err(ObjectDecodeError::from_header)?;
@@ -1701,6 +1732,11 @@ pub enum ObjectDecodeErrorKind {
     ObjectTypeUnresolved {
         object_index: usize,
     },
+    /// The file declares a Unity version before 3.5, whose assets the source
+    /// does not read.
+    UnreadableUnsupportedVersion {
+        object_index: usize,
+    },
     InvalidResolvedTypeIndex {
         object_index: usize,
         type_index: usize,
@@ -1818,6 +1854,10 @@ impl Display for ObjectDecodeErrorKind {
             Self::ObjectTypeUnresolved { object_index } => {
                 write!(f, "object {object_index} has no resolved serialized type")
             }
+            Self::UnreadableUnsupportedVersion { object_index } => write!(
+                f,
+                "object {object_index} comes from a Unity version before 3.5 and cannot be read"
+            ),
             Self::InvalidResolvedTypeIndex {
                 object_index,
                 type_index,
@@ -2571,6 +2611,34 @@ mod tests {
             error.kind(),
             ObjectDecodeErrorKind::MissingTypeTree { object_index: 0 }
         ));
+    }
+
+    #[test]
+    fn pre_3_5_payloads_are_refused_before_decoding() {
+        assert!(!super::version_is_unsupported(3, 5));
+        assert!(!super::version_is_unsupported(4, 0));
+        assert!(!super::version_is_unsupported(2022, 3));
+        assert!(super::version_is_unsupported(3, 4));
+        assert!(super::version_is_unsupported(2, 6));
+        assert!(super::version_is_unsupported(0, 0));
+        // A positively identified pre-3.5 file is refused with its own error.
+        let full = [0x78, 0x56, 0x34, 0x12, 1];
+        let (file, header, mut metadata) = make_file(&full);
+        metadata.prefix.unity_version_text = Some("3.4.2f3".to_owned());
+        let error = metadata
+            .decode_object_payload(&file, &header, 0)
+            .unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            ObjectDecodeErrorKind::UnreadableUnsupportedVersion { object_index: 0 }
+        ));
+        // The 3.5 boundary itself, missing text, and garbage text all proceed.
+        metadata.prefix.unity_version_text = Some("3.5.0b1".to_owned());
+        assert!(metadata.decode_object_payload(&file, &header, 0).is_ok());
+        metadata.prefix.unity_version_text = None;
+        assert!(metadata.decode_object_payload(&file, &header, 0).is_ok());
+        metadata.prefix.unity_version_text = Some("not-a-version".to_owned());
+        assert!(metadata.decode_object_payload(&file, &header, 0).is_ok());
     }
 
     #[test]

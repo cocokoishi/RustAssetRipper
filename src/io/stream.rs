@@ -585,6 +585,11 @@ impl SmartStream {
         }
     }
 
+    /// `Stream.SetLength`: resize the backing store, zero-filling growth like the source.
+    ///
+    /// Memory streams clamp a past-the-end position down to the new length
+    /// (`MemoryStream.SetLength`); file and temporary streams preserve the position
+    /// (`FileStream.SetLength` leaves the cursor, which may then sit past the end).
     pub fn set_len(&self, length: u64) -> io::Result<()> {
         let mut backend = self.lock_backend()?;
         if !self.can_write() {
@@ -608,6 +613,7 @@ impl SmartStream {
                     })?;
                 }
                 bytes.resize(length, 0);
+                cursor.set_position(cursor.position().min(length as u64));
                 Ok(())
             }
             SmartStreamBackend::File(file) => file
@@ -1523,7 +1529,35 @@ mod tests {
 
         source.set_len(3).unwrap();
         assert_eq!(source.to_vec(3).unwrap(), b"abc");
-        assert_eq!(source.position().unwrap(), 4);
+        // Memory truncation clamps a past-the-end position, like `MemoryStream`.
+        assert_eq!(source.position().unwrap(), 3);
+    }
+
+    /// `SetLength` position rules by backend: memory streams clamp to the new length
+    /// while file streams preserve the cursor, each matching its source stream type.
+    #[test]
+    fn smart_stream_set_len_clamps_memory_but_preserves_file_positions() {
+        let mut memory = SmartStream::create_memory();
+        memory.write_all(b"abcdef").unwrap();
+        memory.seek(SeekFrom::Start(4)).unwrap();
+        memory.set_len(3).unwrap();
+        assert_eq!(memory.length().unwrap(), 3);
+        assert_eq!(memory.position().unwrap(), 3);
+        // Growth zero-fills and leaves the position alone.
+        memory.set_len(6).unwrap();
+        assert_eq!(memory.to_vec(6).unwrap(), b"abc\0\0\0");
+        assert_eq!(memory.position().unwrap(), 3);
+        // Truncating to zero resets the position, so reuse starts at the beginning.
+        memory.set_len(0).unwrap();
+        assert_eq!(memory.position().unwrap(), 0);
+
+        let mut file = SmartStream::create_temp().unwrap();
+        file.write_all(b"abcdef").unwrap();
+        file.seek(SeekFrom::Start(5)).unwrap();
+        file.set_len(3).unwrap();
+        assert_eq!(file.length().unwrap(), 3);
+        assert_eq!(file.position().unwrap(), 5);
+        file.free_reference();
     }
 
     #[test]

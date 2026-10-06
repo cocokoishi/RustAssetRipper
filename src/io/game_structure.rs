@@ -42,6 +42,10 @@ impl Default for MixedGameStructureLimits {
 }
 
 /// Selected VFS files and the dependency-search roots discovered for a mixed input set.
+///
+/// When platform detection already consumed some selections (`PlatformChecker` removes matched
+/// paths before the mixed pass), pass them as consumed paths so the union does not scan them
+/// again; the skip count is retained in the report.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct MixedGameStructure {
     /// Source-style `Files` entries: serialized files, bundle containers, and web data files.
@@ -60,6 +64,8 @@ pub struct MixedGameStructureReport {
     pub selected_paths: usize,
     pub scanned_files: usize,
     pub scanned_bytes: u64,
+    /// Normalized selections skipped because platform detection consumed them.
+    pub skipped_consumed_paths: usize,
 }
 
 impl MixedGameStructure {
@@ -69,6 +75,20 @@ impl MixedGameStructure {
     pub fn from_vfs_paths(
         filesystem: &VirtualFileSystem,
         selected_paths: &[String],
+        limits: MixedGameStructureLimits,
+    ) -> Result<Self, MixedGameStructureError> {
+        Self::from_vfs_paths_with_consumed_paths(filesystem, selected_paths, &[], limits)
+    }
+
+    /// Build the registry while skipping selections platform detection already consumed.
+    ///
+    /// Mirrors `PlatformChecker`: matched platform paths are removed before the mixed pass, so a
+    /// normalized selection equal to a consumed path is not scanned again. Consumed paths are
+    /// normalized with the same rules as selections.
+    pub fn from_vfs_paths_with_consumed_paths(
+        filesystem: &VirtualFileSystem,
+        selected_paths: &[String],
+        consumed_paths: &[String],
         limits: MixedGameStructureLimits,
     ) -> Result<Self, MixedGameStructureError> {
         let mut report = MixedGameStructureReport::default();
@@ -94,10 +114,21 @@ impl MixedGameStructure {
         let mut data_paths = BTreeSet::new();
         let mut unique_selections = BTreeSet::new();
         let mut scanned_paths = BTreeSet::new();
+        let mut consumed = BTreeSet::new();
+        for consumed_path in consumed_paths {
+            consumed.insert(normalize_selected_path(
+                consumed_path,
+                limits.max_path_bytes,
+            )?);
+        }
 
         for selected_path in selected_paths {
             let selected_path = normalize_selected_path(selected_path, limits.max_path_bytes)?;
             if !unique_selections.insert(selected_path.clone()) {
+                continue;
+            }
+            if is_consumed_path(&selected_path, &consumed) {
+                report.skipped_consumed_paths += 1;
                 continue;
             }
 
@@ -318,6 +349,15 @@ fn normalize_selected_path(
     } else {
         format!("/{}", normalized.join("/"))
     })
+}
+
+/// Detection-side consumed-path skip for the platform+mixed union.
+///
+/// `PlatformChecker` removes matched platform paths before the mixed pass, so a normalized
+/// selection equal to an already-consumed path is not scanned again. Only exact normalized
+/// matches skip; sub-paths of consumed roots still scan, like the source leftover list.
+fn is_consumed_path(normalized_selected: &str, consumed_paths: &BTreeSet<String>) -> bool {
+    consumed_paths.contains(normalized_selected)
 }
 
 fn parent_path(path: &str) -> String {
@@ -702,5 +742,34 @@ mod tests {
             .any(|file| file.virtual_path == "/web/plain.unityweb"));
         assert_eq!(structure.data_paths, ["/web"]);
         assert_eq!(structure.report.scanned_files, 3);
+    }
+
+    #[test]
+    fn platform_consumed_paths_are_not_scanned_again() {
+        let mut filesystem = VirtualFileSystem::new();
+        insert_file(
+            &mut filesystem,
+            "/apk/assets/bin/Data/globalgamemanagers",
+            &serialized_file_header(61),
+        );
+        insert_file(&mut filesystem, "/loose/bundle.BUNDLE", &bundle_header());
+        let structure = MixedGameStructure::from_vfs_paths_with_consumed_paths(
+            &filesystem,
+            &["/apk".to_owned(), "/apk".to_owned(), "/loose".to_owned()],
+            &["\\apk\\".to_owned()],
+            MixedGameStructureLimits::default(),
+        )
+        .unwrap();
+
+        // The consumed selection skips once (the duplicate never reaches the gate),
+        // the loose directory scans normally, and nothing from `/apk` registers.
+        assert_eq!(structure.report.selected_paths, 2);
+        assert_eq!(structure.report.skipped_consumed_paths, 1);
+        assert_eq!(structure.report.scanned_files, 1);
+        assert!(structure
+            .registered_files
+            .iter()
+            .all(|file| file.virtual_path.starts_with("/loose")));
+        assert_eq!(structure.data_paths, ["/loose"]);
     }
 }

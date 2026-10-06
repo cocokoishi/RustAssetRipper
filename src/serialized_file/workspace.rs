@@ -1,4 +1,8 @@
 //! Bounded loading of named SerializedFiles from the mounted VFS.
+//!
+//! Deliberately open: files that fail to parse abort the load with context instead of
+//! becoming baseline `FailedFile` records, so workspace resolution only ever sees files
+//! that loaded successfully.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::error::Error;
@@ -207,6 +211,35 @@ struct SourceBundleCollectionLookup<'a> {
     child_bundle_entries: Vec<Vec<(usize, usize)>>,
 }
 
+/// `Bundle.ResolveCollection(string)`: the ordered lookup names for one request — the raw
+/// name, then the fixed name (skipped when the request is already normalized, since the
+/// source walk would just repeat itself), then the engine-resource spelling alias. The
+/// caller runs each candidate through the full bundle-hierarchy walk before trying the next.
+fn collection_lookup_candidates<'a>(
+    requested_name: &'a str,
+    fixed_name: &'a str,
+) -> [Option<&'a str>; 3] {
+    [
+        Some(requested_name),
+        (fixed_name != requested_name).then_some(fixed_name),
+        engine_resource_collection_alias(fixed_name),
+    ]
+}
+
+/// `Bundle.ResolveCollection`'s engine-resource fallback: each fixed engine name also tries
+/// its space/underscore twin (`unity default resources` ↔ `unity_default_resources`,
+/// `unity builtin extra` ↔ `unity_builtin_extra`). Other names, including the editor
+/// resources name, have no alias.
+fn engine_resource_collection_alias(fixed_name: &str) -> Option<&str> {
+    match fixed_name {
+        DEFAULT_RESOURCE_NAME_1 => Some(DEFAULT_RESOURCE_NAME_2),
+        DEFAULT_RESOURCE_NAME_2 => Some(DEFAULT_RESOURCE_NAME_1),
+        BUILTIN_EXTRA_NAME_1 => Some(BUILTIN_EXTRA_NAME_2),
+        BUILTIN_EXTRA_NAME_2 => Some(BUILTIN_EXTRA_NAME_1),
+        _ => None,
+    }
+}
+
 impl<'a> SourceBundleCollectionLookup<'a> {
     fn build(
         workspace: &'a SerializedFileWorkspace,
@@ -348,28 +381,18 @@ impl<'a> SourceBundleCollectionLookup<'a> {
 
     fn resolve(&self, source_file_index: usize, requested_name: &str) -> Option<usize> {
         let source_file = self.workspace.files.get(source_file_index)?;
-        if let Some(file_index) =
-            self.resolve_name_in_source_scope(source_file.container_bundle_index, requested_name)
-        {
-            return Some(file_index);
-        }
-
         let fixed_name = fix_file_identifier(requested_name);
-        if fixed_name != requested_name {
+        for candidate in collection_lookup_candidates(requested_name, &fixed_name)
+            .into_iter()
+            .flatten()
+        {
             if let Some(file_index) =
-                self.resolve_name_in_source_scope(source_file.container_bundle_index, &fixed_name)
+                self.resolve_name_in_source_scope(source_file.container_bundle_index, candidate)
             {
                 return Some(file_index);
             }
         }
-        let alias = match fixed_name.as_str() {
-            DEFAULT_RESOURCE_NAME_1 => Some(DEFAULT_RESOURCE_NAME_2),
-            DEFAULT_RESOURCE_NAME_2 => Some(DEFAULT_RESOURCE_NAME_1),
-            BUILTIN_EXTRA_NAME_1 => Some(BUILTIN_EXTRA_NAME_2),
-            BUILTIN_EXTRA_NAME_2 => Some(BUILTIN_EXTRA_NAME_1),
-            _ => None,
-        }?;
-        self.resolve_name_in_source_scope(source_file.container_bundle_index, alias)
+        None
     }
 
     fn resolve_name_in_source_scope(
@@ -3803,8 +3826,9 @@ fn workspace_error(
 #[cfg(test)]
 mod tests {
     use super::{
-        append_mounted_container_bundles, SerializedFileDependencyOutcome, SerializedFileWorkspace,
-        SerializedFileWorkspaceErrorKind, SerializedFileWorkspaceLimits,
+        append_mounted_container_bundles, collection_lookup_candidates,
+        engine_resource_collection_alias, fix_file_identifier, SerializedFileDependencyOutcome,
+        SerializedFileWorkspace, SerializedFileWorkspaceErrorKind, SerializedFileWorkspaceLimits,
         SerializedFileWorkspaceReport, WorkspaceSerializedBundle,
     };
     use crate::io::dependency::{DependencyFilePath, DependencyIndexLimits};
@@ -3828,6 +3852,71 @@ mod tests {
     use crate::serialized_file::reference_graph::{
         MultiFilePPtrResolution, MultiFileReferenceGraphLimits, ObjectReferenceGraph,
     };
+
+    #[test]
+    fn collection_lookup_candidates_follow_the_resolve_collection_fallback() {
+        use crate::io::special_names::{
+            BUILTIN_EXTRA_NAME_1, BUILTIN_EXTRA_NAME_2, DEFAULT_RESOURCE_NAME_1,
+            DEFAULT_RESOURCE_NAME_2,
+        };
+        // Normalized non-engine names try only themselves; the source would repeat the same
+        // walk, so the fixed stage is skipped.
+        assert_eq!(
+            collection_lookup_candidates("shared.assets", "shared.assets"),
+            [Some("shared.assets"), None, None]
+        );
+        // Non-normalized names try the raw request before the fixed form.
+        assert_eq!(
+            collection_lookup_candidates("LIBRARY/Shared.Assets", "shared.assets"),
+            [Some("LIBRARY/Shared.Assets"), Some("shared.assets"), None]
+        );
+        // Engine names add the space/underscore twin in both directions.
+        assert_eq!(
+            collection_lookup_candidates(DEFAULT_RESOURCE_NAME_1, DEFAULT_RESOURCE_NAME_1),
+            [
+                Some(DEFAULT_RESOURCE_NAME_1),
+                None,
+                Some(DEFAULT_RESOURCE_NAME_2)
+            ]
+        );
+        assert_eq!(
+            collection_lookup_candidates(DEFAULT_RESOURCE_NAME_2, DEFAULT_RESOURCE_NAME_2),
+            [
+                Some(DEFAULT_RESOURCE_NAME_2),
+                None,
+                Some(DEFAULT_RESOURCE_NAME_1)
+            ]
+        );
+        assert_eq!(
+            collection_lookup_candidates("library/unity builtin extra", "unity builtin extra"),
+            [
+                Some("library/unity builtin extra"),
+                Some("unity builtin extra"),
+                Some(BUILTIN_EXTRA_NAME_2)
+            ]
+        );
+        assert_eq!(
+            collection_lookup_candidates(BUILTIN_EXTRA_NAME_1, BUILTIN_EXTRA_NAME_1),
+            [Some(BUILTIN_EXTRA_NAME_1), None, Some(BUILTIN_EXTRA_NAME_2)]
+        );
+        // The editor resources name and ordinary names have no alias.
+        assert_eq!(
+            engine_resource_collection_alias("unity editor resources"),
+            None
+        );
+        assert_eq!(engine_resource_collection_alias("shared.assets"), None);
+        // The fixed form feeds the alias even when the request carried a folder prefix.
+        let fixed = fix_file_identifier("resources/unity_default_resources");
+        assert_eq!(fixed, DEFAULT_RESOURCE_NAME_2);
+        assert_eq!(
+            collection_lookup_candidates("resources/unity_default_resources", &fixed),
+            [
+                Some("resources/unity_default_resources"),
+                Some(DEFAULT_RESOURCE_NAME_2),
+                Some(DEFAULT_RESOURCE_NAME_1)
+            ]
+        );
+    }
 
     #[test]
     fn bundled_resource_resolution_matches_bundle_scope_order_and_name_rules() {
