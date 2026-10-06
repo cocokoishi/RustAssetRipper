@@ -19,9 +19,23 @@
 //! Differential evidence: the CRC words reuse the shipped-`AssetRipper.Checksum.dll`
 //! probe rows in `crc28_fixture.txt` (`Crc32Algorithm.HashUTF8` plus the `MatchUTF8`
 //! accept/reject columns); the branch dispatch is asserted directly.
+//!
+//! The `BlendShape` branch of `CustomCurveResolver.ToAttributeName` resolves through
+//! this file's lookup: unknown paths keep their path, each hierarchy root contributes
+//! its `FindBlendShapeNameByCRC` hit in order with misses continuing the walk, and a
+//! miss everywhere falls back to the `Crc32Algorithm.ReverseAscii` manufactured name.
+//! Scene-graph walks and the reverse checksum stay caller-side (the checksum package
+//! is outside the frozen snapshot); `blend_shape_attribute_name` pins the branch
+//! composition over those caller facts.
+//!
+//! Open: channel `frameIndex`/`frameCount` ranges and `fullWeights` have no readers in
+//! the frozen snapshot (a whole-`Source` search for `fullWeights`/`FullWeights` finds
+//! only serialized declarations), so no frame-selection kernel is asserted here.
 
 use std::error::Error;
 use std::fmt::{self, Display};
+
+use super::custom_curve::BLEND_SHAPE_PREFIX;
 
 use crate::serialized_file::object::{
     SerializedFieldValue, SerializedValue, SerializedValueLookupError,
@@ -190,6 +204,32 @@ impl BlendShapeLookupView {
         }
         None
     }
+}
+
+/// The `BindingCustomType.BlendShape` branch of
+/// `CustomCurveResolver.ToAttributeName` over caller facts.
+///
+/// An unknown path (see `custom_curve::is_unknown_path`) bypasses lookup and keeps the
+/// path verbatim after the prefix. Otherwise each hierarchy root contributes its
+/// `FindBlendShapeNameByCRC` hit in walk order: a root without a child, skin, mesh, or
+/// matching name contributes `None` and lookup continues, and the first name wins. With
+/// no hit anywhere, the source falls back to the `Crc32Algorithm.ReverseAscii`
+/// manufactured name, which stays caller-side and arrives here as `fallback_name`
+/// (`AssetRipper/Source/AssetRipper.Processing/AnimationClips/CustomCurveResolver.cs`
+/// lines 41-76).
+pub fn blend_shape_attribute_name(
+    path_is_unknown: bool,
+    path: &str,
+    resolved_names: &[Option<&str>],
+    fallback_name: &str,
+) -> String {
+    if path_is_unknown {
+        return format!("{BLEND_SHAPE_PREFIX}{path}");
+    }
+    if let Some(name) = resolved_names.iter().flatten().next() {
+        return format!("{BLEND_SHAPE_PREFIX}{name}");
+    }
+    format!("{BLEND_SHAPE_PREFIX}{fallback_name}")
 }
 
 fn read_channel(value: &SerializedValue) -> Result<BlendShapeChannelName, BlendShapeViewError> {
@@ -542,6 +582,39 @@ mod tests {
         assert_eq!(
             view.find_shape_name_by_crc(crc32_ieee(b"Smile")),
             Some("Smile")
+        );
+    }
+
+    #[test]
+    fn blend_shape_branch_composes_unknown_first_hit_and_fallback() {
+        // Unknown paths bypass lookup entirely, even when resolutions exist.
+        assert_eq!(
+            blend_shape_attribute_name(true, "path_0x1A2B_HJKLMNN", &[Some("Smile")], "fallback"),
+            "blendShape.path_0x1A2B_HJKLMNN"
+        );
+        // The first hit in walk order wins; later roots are ignored.
+        assert_eq!(
+            blend_shape_attribute_name(
+                false,
+                "Hips/Face",
+                &[Some("Smile"), Some("Frown")],
+                "fallback"
+            ),
+            "blendShape.Smile"
+        );
+        // Misses continue the walk to the next root.
+        assert_eq!(
+            blend_shape_attribute_name(false, "Hips/Face", &[None, Some("Blink_L")], "fallback"),
+            "blendShape.Blink_L"
+        );
+        // No hit anywhere falls back to the manufactured name.
+        assert_eq!(
+            blend_shape_attribute_name(false, "Hips/Face", &[None, None], "path_0xDEAD_XYZABC"),
+            "blendShape.path_0xDEAD_XYZABC"
+        );
+        assert_eq!(
+            blend_shape_attribute_name(false, "Hips/Face", &[], "path_0xDEAD_XYZABC"),
+            "blendShape.path_0xDEAD_XYZABC"
         );
     }
 }

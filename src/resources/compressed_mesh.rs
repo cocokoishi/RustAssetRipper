@@ -1,8 +1,14 @@
 //! `CompressedMesh` geometry decompression ported from `CompressedMeshExtensions`.
 //!
 //! This ports the channels whose behavior the snapshot fully determines: vertices, normals,
-//! tangents, triangle indices, and bone weights. UV channels (`UVInfo`), colors
-//! (`ColorFloat`/`Color32`), and bind poses are separate follow-ups.
+//! tangents, triangle indices, bone weights, UV channels (the `UVInfo` word plus the
+//! two-channel fast path), colors (`ColorFloat`/`Color32`), and pre-Unity-5 bind poses,
+//! assembled in the `Decompress` channel order.
+//!
+//! The packed-primitive layers live beside this module (`packed_bit_vector.rs`,
+//! `packed_float_vector.rs`, `packed_quat_vector.rs`); vertex-data-blob assembly lives
+//! in `vertex_data_blob.rs` and processed-mesh assembly in `mesh_data.rs`, which stay
+//! open from here.
 //!
 //! Notable source behaviors reproduced exactly:
 //!
@@ -320,20 +326,7 @@ impl CompressedMesh {
                 requested: count,
             })?;
         for i in 0..count {
-            let mut x = data[i * 2];
-            let mut y = data[i * 2 + 1];
-            let zsqr = 1.0 - x * x - y * y;
-            let mut z = if zsqr >= 0.0 {
-                zsqr.sqrt()
-            } else {
-                let normalized = normalize(Vec3::new(x, y, 0.0));
-                x = normalized.x;
-                y = normalized.y;
-                normalized.z
-            };
-            if signs[i] == 0 {
-                z = -z;
-            }
+            let (x, y, z) = reconstruct_signed_z(data[i * 2], data[i * 2 + 1], signs[i] != 0);
             normals.push(Vec3::new(x, y, z));
         }
         Ok(normals)
@@ -373,20 +366,7 @@ impl CompressedMesh {
                 requested: count,
             })?;
         for i in 0..count {
-            let mut x = data[i * 2];
-            let mut y = data[i * 2 + 1];
-            let zsqr = 1.0 - x * x - y * y;
-            let mut z = if zsqr >= 0.0 {
-                zsqr.sqrt()
-            } else {
-                let normalized = normalize(Vec3::new(x, y, 0.0));
-                x = normalized.x;
-                y = normalized.y;
-                normalized.z
-            };
-            if signs[i * 2] == 0 {
-                z = -z;
-            }
+            let (x, y, z) = reconstruct_signed_z(data[i * 2], data[i * 2 + 1], signs[i * 2] != 0);
             let w = if signs[i * 2 + 1] == 0 { -1.0 } else { 1.0 };
             tangents.push(Vec4::new(x, y, z, w));
         }
@@ -529,7 +509,7 @@ impl CompressedMesh {
         if self.uv.num_items == 0 {
             return Ok(result);
         }
-        let vertex_count = self.vertices.num_items as usize / 3;
+        let vertex_count = vertex_count(self.vertices.num_items);
         if self.has_uv_info && self.uv_info != 0 {
             let mut uv_src_offset = 0usize;
             for (channel, slot) in result.iter_mut().enumerate() {
@@ -743,6 +723,35 @@ fn normalize(value: Vec3) -> Vec3 {
     let length_squared = value.x * value.x + value.y * value.y + value.z * value.z;
     let length = length_squared.sqrt();
     Vec3::new(value.x / length, value.y / length, value.z / length)
+}
+
+/// Packed vertex floats per vertex: three floats in a `Vector3`.
+///
+/// Mirrors the private `GetVertexCount` (`(int)Vertices.NumItems / 3`), including
+/// the truncating division.
+fn vertex_count(vertex_items: u32) -> usize {
+    vertex_items as usize / 3
+}
+
+/// Reconstructs the dropped third component of a compressed normal or tangent.
+///
+/// Mirrors the shared `GetNormals`/`GetTangents` core: `z = sqrt(1 - x^2 - y^2)`
+/// when that is non-negative, otherwise the input is renormalized with `z = 0`
+/// (`Vector3.Normalize` divides, so a zero input yields NaN exactly like the
+/// reference) and all three components are overwritten. A cleared sign flips
+/// the reconstructed component. Returns `(x, y, z)`.
+fn reconstruct_signed_z(x: f32, y: f32, z_positive: bool) -> (f32, f32, f32) {
+    let zsqr = 1.0 - x * x - y * y;
+    let (x, y, mut z) = if zsqr >= 0.0 {
+        (x, y, zsqr.sqrt())
+    } else {
+        let normalized = normalize(Vec3::new(x, y, 0.0));
+        (normalized.x, normalized.y, normalized.z)
+    };
+    if !z_positive {
+        z = -z;
+    }
+    (x, y, z)
 }
 
 fn vector3_to_float_array(vertices: &[Vec3]) -> Vec<f32> {
@@ -1332,5 +1341,59 @@ mod tests {
         assert!(decompressed.bind_pose.is_none());
         assert!(decompressed.processed_index_buffer.is_none());
         assert!(decompressed.uvs.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn signed_z_reconstruction_covers_the_negative_fallback() {
+        // Non-negative remainder: plain square root, then the sign.
+        assert_eq!(super::reconstruct_signed_z(0.0, 0.0, true), (0.0, 0.0, 1.0));
+        assert_eq!(
+            super::reconstruct_signed_z(0.0, 0.0, false),
+            (0.0, 0.0, -1.0)
+        );
+        // A zero remainder keeps the inputs and yields a zero z.
+        let (x, y, z) = super::reconstruct_signed_z(0.6, 0.8, true);
+        assert_eq!((x, y), (0.6, 0.8));
+        assert_eq!(z, 0.0);
+        // A negative remainder renormalizes the input with z = 0.
+        let (x, y, z) = super::reconstruct_signed_z(2.0, 0.0, true);
+        assert_eq!(x.to_bits(), 1.0f32.to_bits());
+        assert_eq!(y.to_bits(), 0.0f32.to_bits());
+        assert_eq!(z.to_bits(), 0.0f32.to_bits());
+        let (_, _, z) = super::reconstruct_signed_z(2.0, 0.0, false);
+        assert_eq!(z.to_bits(), (-0.0f32).to_bits());
+    }
+
+    #[test]
+    fn normal_and_tangent_fallbacks_match_through_packed_vectors() {
+        // Hand-packed (2, 0): x^2 + y^2 exceeds one, so decoding renormalizes.
+        // Normalization is scale-invariant, so packing precision cannot move
+        // the result off the unit axis.
+        let mut mesh = CompressedMesh::default();
+        mesh.normals.pack(&[2.0, 0.0], limits()).unwrap();
+        mesh.normal_signs.pack_uints(&[0], limits()).unwrap();
+        let normals = mesh.get_normals(limits()).unwrap();
+        assert_eq!(normals.len(), 1);
+        assert_eq!(normals[0].x.to_bits(), 1.0f32.to_bits());
+        assert_eq!(normals[0].y.to_bits(), 0.0f32.to_bits());
+        assert_eq!(normals[0].z.to_bits(), (-0.0f32).to_bits());
+
+        let mut mesh = CompressedMesh::default();
+        mesh.tangents.pack(&[2.0, 0.0], limits()).unwrap();
+        mesh.tangent_signs.pack_uints(&[1, 0], limits()).unwrap();
+        let tangents = mesh.get_tangents(limits()).unwrap();
+        assert_eq!(tangents.len(), 1);
+        assert_eq!(tangents[0].x.to_bits(), 1.0f32.to_bits());
+        assert_eq!(tangents[0].y.to_bits(), 0.0f32.to_bits());
+        assert_eq!(tangents[0].z.to_bits(), 0.0f32.to_bits());
+        assert_eq!(tangents[0].w, -1.0);
+    }
+
+    #[test]
+    fn vertex_count_truncates_packed_floats_per_vertex() {
+        assert_eq!(super::vertex_count(0), 0);
+        assert_eq!(super::vertex_count(5), 1);
+        assert_eq!(super::vertex_count(6), 2);
+        assert_eq!(super::vertex_count(7), 2);
     }
 }

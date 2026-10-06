@@ -5,6 +5,19 @@
 //! `m_IndexBuffer`, `m_IndexFormat`, `m_SubMeshes`, `m_BindPose`, and `m_Skin` — then runs the
 //! vertex-data-blob and compressed-mesh decoders and merges them into a [`MeshData`].
 //!
+//! Also ports the `MeshExtensions` status and streamed-data predicates: `IsCombinedMesh`,
+//! `HasAnyVertices`, the `CheckAssetIntegrity` stream gate, and the `GetChannelsData` /
+//! `GetVertexDataBytes` source rules over the decoded `m_StreamData` descriptor. Stream
+//! content fetching and integrity checks need the asset collection and stay caller-side;
+//! this module resolves only which source applies.
+//!
+//! Deliberately open: the mutating fill/set paths (`FillWithCompressedMeshData`,
+//! `SetProcessedIndexBuffer`, `SetIndexFormat`, optimization-flag and compression setters),
+//! whose generated-enum values and collection writes have no read-side counterpart here;
+//! `VertexDataBlob.IsSet` facts arrive precomputed because the blob lives in its own module;
+//! the UV-distribution metric lives in `mesh_metric`, and blend-shape CRC search in
+//! `blend_shape`.
+//!
 //! Field-name basis: `m_VertexData`/`m_DataSize` are already used by the streamed-asset path; the
 //! `SubMesh` children use Unity's serialized TypeTree names (`firstByte`, `indexCount`, `topology`,
 //! `baseVertex`, `firstVertex`, `vertexCount`, `localAABB`, `m_IsTriStrip`/`isTriStrip`). The
@@ -21,6 +34,9 @@ use std::error::Error;
 use std::fmt::{self, Display};
 
 use crate::numerics::BoneWeight4;
+use crate::resource::{
+    extract_streamed_resource_info, StreamedResourceInfo, StreamedResourceInfoError,
+};
 use crate::serialized_file::object::{SerializedValue, SerializedValueLookupError};
 
 use super::compressed_mesh::{decompress, CompressedMesh, CompressedMeshError};
@@ -60,6 +76,13 @@ pub enum MeshViewError {
         /// The offending field.
         field: &'static str,
     },
+    /// A present streamed-data descriptor is malformed.
+    StreamInfo {
+        /// The field being read.
+        field: &'static str,
+        /// The extraction failure.
+        source: StreamedResourceInfoError,
+    },
     /// The vertex-data blob could not be built or read.
     VertexData(VertexDataError),
     /// The compressed mesh could not be decompressed.
@@ -94,6 +117,9 @@ impl Display for MeshViewError {
             Self::NegativeValue { field } => {
                 write!(formatter, "Mesh field '{field}' is negative")
             }
+            Self::StreamInfo { field, source } => {
+                write!(formatter, "could not read Mesh field '{field}': {source}")
+            }
             Self::VertexData(error) => write!(formatter, "{error}"),
             Self::CompressedMesh(error) => write!(formatter, "{error}"),
         }
@@ -104,6 +130,7 @@ impl Error for MeshViewError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::FieldLookup { source, .. } => Some(source),
+            Self::StreamInfo { source, .. } => Some(source),
             Self::VertexData(error) => Some(error),
             Self::CompressedMesh(error) => Some(error),
             _ => None,
@@ -145,6 +172,8 @@ pub struct MeshView {
     pub bind_pose: Option<Vec<[[f32; 4]; 4]>>,
     /// `m_Skin`.
     pub skin: Option<Vec<BoneWeight4>>,
+    /// `m_StreamData`, when present.
+    pub stream_data: Option<StreamedResourceInfo>,
 }
 
 impl MeshView {
@@ -161,6 +190,7 @@ impl MeshView {
         let sub_meshes = read_sub_meshes(root)?;
         let bind_pose = read_bind_pose(root)?;
         let skin = read_skin(root)?;
+        let stream_data = optional_stream(root)?;
         Ok(Self {
             version,
             endian,
@@ -171,6 +201,7 @@ impl MeshView {
             sub_meshes,
             bind_pose,
             skin,
+            stream_data,
         })
     }
 
@@ -196,6 +227,54 @@ impl MeshView {
             });
         }
         result
+    }
+
+    /// `MeshExtensions.CheckAssetIntegrity`: a present `m_StreamData` defers to the
+    /// caller-supplied collection check only when the vertex data is set; everything
+    /// else passes trivially. The `IsSet` fact arrives precomputed because the blob
+    /// lives in its own module.
+    pub fn check_asset_integrity(
+        &self,
+        vertex_data_is_set: bool,
+        check_stream: impl FnOnce() -> bool,
+    ) -> bool {
+        if self.stream_data.is_some() && vertex_data_is_set {
+            check_stream()
+        } else {
+            true
+        }
+    }
+
+    /// `MeshExtensions.GetChannelsData` source rule: streamed content wins when a set
+    /// `m_StreamData` exists, otherwise the inline `m_VertexData` bytes apply.
+    /// Content fetching stays caller-side.
+    pub fn channels_data_source(&self) -> MeshChannelDataSource {
+        if self
+            .stream_data
+            .as_ref()
+            .is_some_and(StreamedResourceInfo::is_set)
+        {
+            MeshChannelDataSource::Streamed
+        } else {
+            MeshChannelDataSource::Inline
+        }
+    }
+
+    /// `MeshExtensions.GetVertexDataBytes` source rule: nonempty inline `m_VertexData`
+    /// bytes win; empty inline data defers to the stream, which reads empty when the
+    /// descriptor itself is absent. Content fetching stays caller-side.
+    pub fn vertex_data_bytes_source(&self) -> MeshVertexBytesSource {
+        let inline_is_empty = self
+            .vertex_data
+            .as_ref()
+            .is_none_or(|vertex_data| vertex_data.data.is_empty());
+        if !inline_is_empty {
+            MeshVertexBytesSource::Inline
+        } else if self.stream_data.is_some() {
+            MeshVertexBytesSource::Streamed
+        } else {
+            MeshVertexBytesSource::Empty
+        }
     }
 
     /// `MeshExtensions.ReadData` + `MeshData.TryMakeFromMesh`.
@@ -234,6 +313,48 @@ impl MeshView {
             sub_meshes,
         }))
     }
+}
+
+/// Where `MeshExtensions.GetChannelsData` reads the channel bytes from.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum MeshChannelDataSource {
+    /// A set `m_StreamData` descriptor; content fetching stays caller-side.
+    Streamed,
+    /// The inline `m_VertexData` bytes.
+    Inline,
+}
+
+/// Where `MeshExtensions.GetVertexDataBytes` reads the vertex bytes from.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum MeshVertexBytesSource {
+    /// Nonempty inline `m_VertexData` bytes.
+    Inline,
+    /// Empty inline data with a stream descriptor; content fetching stays caller-side.
+    Streamed,
+    /// Empty inline data and no stream descriptor: reads empty.
+    Empty,
+}
+
+/// `MeshExtensions.IsCombinedMesh`: the `^Combined Mesh \(root scene\)( [0-9]+)?$`
+/// name rule, without a regex engine: the bare scene name matches, otherwise a single
+/// space followed by one or more ASCII digits must close the name. The `[0-9]` class
+/// is ASCII-only, so non-ASCII digits never match.
+pub fn is_combined_mesh(name: &str) -> bool {
+    const PREFIX: &str = "Combined Mesh (root scene)";
+    let Some(rest) = name.strip_prefix(PREFIX) else {
+        return false;
+    };
+    if rest.is_empty() {
+        return true;
+    }
+    rest.strip_prefix(' ').is_some_and(|digits| {
+        !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+    })
+}
+
+/// `MeshExtensions.HasAnyVertices`: compressed vertex items or plain vertex count.
+pub fn has_any_vertices(compressed_vertex_items: u32, vertex_count: u32) -> bool {
+    compressed_vertex_items > 0 || vertex_count > 0
 }
 
 fn read_u16(bytes: &[u8], endian: EndianType) -> u16 {
@@ -390,6 +511,18 @@ fn read_array<'a>(
         }
     }
     Ok(None)
+}
+
+fn optional_stream(root: &SerializedValue) -> Result<Option<StreamedResourceInfo>, MeshViewError> {
+    match lookup(root, "m_StreamData")? {
+        None => Ok(None),
+        Some(value) => extract_streamed_resource_info(value)
+            .map(Some)
+            .map_err(|source| MeshViewError::StreamInfo {
+                field: "m_StreamData",
+                source,
+            }),
+    }
 }
 
 fn read_vertex_data(root: &SerializedValue) -> Result<Option<VertexDataFields>, MeshViewError> {
@@ -1385,5 +1518,125 @@ mod tests {
                 field("m_BitSize", SerializedValue::U8(0)),
             ]),
         )
+    }
+
+    fn stream_info(path: &str) -> SerializedValue {
+        SerializedValue::Struct(vec![
+            field(
+                "path",
+                SerializedValue::StringBytes(path.as_bytes().to_vec()),
+            ),
+            field("offset", SerializedValue::U64(8)),
+            field("size", SerializedValue::U32(4)),
+        ])
+    }
+
+    fn vertex_data_with(bytes: Vec<u8>) -> SerializedValue {
+        SerializedValue::Struct(vec![
+            field("m_VertexCount", SerializedValue::U32(1)),
+            field("m_DataSize", SerializedValue::Bytes(bytes)),
+        ])
+    }
+
+    #[test]
+    fn combined_mesh_names_match_the_source_pattern() {
+        assert!(is_combined_mesh("Combined Mesh (root scene)"));
+        assert!(is_combined_mesh("Combined Mesh (root scene) 1"));
+        assert!(is_combined_mesh("Combined Mesh (root scene) 42"));
+        assert!(is_combined_mesh("Combined Mesh (root scene) 007"));
+        assert!(!is_combined_mesh(""));
+        assert!(!is_combined_mesh("Combined Mesh"));
+        assert!(!is_combined_mesh("Combined Mesh (root scene) "));
+        assert!(!is_combined_mesh("Combined Mesh (root scene) 1 "));
+        assert!(!is_combined_mesh("Combined Mesh (root scene) x"));
+        assert!(!is_combined_mesh("Combined Mesh (root scene) 1x"));
+        assert!(!is_combined_mesh("My Combined Mesh (root scene)"));
+        assert!(!is_combined_mesh("Combined Mesh (root scene) ١٢٣"));
+    }
+
+    #[test]
+    fn any_vertices_come_from_either_source() {
+        assert!(!has_any_vertices(0, 0));
+        assert!(has_any_vertices(1, 0));
+        assert!(has_any_vertices(0, 3));
+        assert!(has_any_vertices(2, 5));
+    }
+
+    #[test]
+    fn channel_data_prefers_a_set_stream() {
+        let root = SerializedValue::Struct(vec![field("m_StreamData", stream_info("mesh.resS"))]);
+        let view = make_view(&root);
+        assert_eq!(view.channels_data_source(), MeshChannelDataSource::Streamed);
+        // An unset (empty-path) stream falls back to the inline bytes.
+        let root = SerializedValue::Struct(vec![field("m_StreamData", stream_info(""))]);
+        let view = make_view(&root);
+        assert_eq!(view.channels_data_source(), MeshChannelDataSource::Inline);
+        // No descriptor at all reads inline.
+        let root = SerializedValue::Struct(Vec::new());
+        assert_eq!(
+            make_view(&root).channels_data_source(),
+            MeshChannelDataSource::Inline
+        );
+    }
+
+    #[test]
+    fn vertex_bytes_follow_the_emptiness_rule() {
+        // Nonempty inline bytes win even with a stream present.
+        let root = SerializedValue::Struct(vec![
+            field("m_VertexData", vertex_data_with(vec![1, 2, 3])),
+            field("m_StreamData", stream_info("mesh.resS")),
+        ]);
+        assert_eq!(
+            make_view(&root).vertex_data_bytes_source(),
+            MeshVertexBytesSource::Inline
+        );
+        // Empty inline data with a stream defers to the stream.
+        let root = SerializedValue::Struct(vec![
+            field("m_VertexData", vertex_data_with(Vec::new())),
+            field("m_StreamData", stream_info("mesh.resS")),
+        ]);
+        assert_eq!(
+            make_view(&root).vertex_data_bytes_source(),
+            MeshVertexBytesSource::Streamed
+        );
+        // Empty inline data and no stream reads empty.
+        let root =
+            SerializedValue::Struct(vec![field("m_VertexData", vertex_data_with(Vec::new()))]);
+        assert_eq!(
+            make_view(&root).vertex_data_bytes_source(),
+            MeshVertexBytesSource::Empty
+        );
+        // No vertex data at all counts as empty inline data.
+        let root = SerializedValue::Struct(Vec::new());
+        assert_eq!(
+            make_view(&root).vertex_data_bytes_source(),
+            MeshVertexBytesSource::Empty
+        );
+    }
+
+    #[test]
+    fn integrity_defers_to_the_stream_only_when_set() {
+        let root = SerializedValue::Struct(vec![field("m_StreamData", stream_info("mesh.resS"))]);
+        let view = make_view(&root);
+        assert!(view.check_asset_integrity(true, || true));
+        assert!(!view.check_asset_integrity(true, || false));
+        // Set stream but unset vertex data passes without consulting the closure.
+        assert!(view.check_asset_integrity(false, || panic!("must not check")));
+        // No stream descriptor passes trivially.
+        let bare = SerializedValue::Struct(Vec::new());
+        let view = make_view(&bare);
+        assert!(view.check_asset_integrity(true, || panic!("must not check")));
+    }
+
+    #[test]
+    fn a_malformed_stream_descriptor_is_an_explicit_error() {
+        let root = SerializedValue::Struct(vec![field(
+            "m_StreamData",
+            SerializedValue::Struct(vec![field("path", SerializedValue::I32(1))]),
+        )]);
+        assert!(matches!(
+            MeshView::from_value(&root, version(), EndianType::Little),
+            Err(MeshViewError::StreamInfo { .. })
+        ));
     }
 }
