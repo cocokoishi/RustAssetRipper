@@ -2,7 +2,8 @@
 //!
 //! Mirrors `AssetRipper.SourceGenerated.Extensions/PPtrExtensions.cs`. A pointer resolves to an
 //! asset when the path ids match and the collection matches: directly when the file id is zero, or
-//! through the file's dependency table otherwise.
+//! through the file's dependency table otherwise. Out-of-range dependency indexes report `false`
+//! instead of the source's throw. `TryGetAsset` needs the live collection and stays caller-side.
 
 /// A pointer view.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -117,5 +118,21 @@ mod tests {
             path_id: 5,
             file_id: 0
         }));
+        // Nullness ignores the file id, like the source.
+        assert!(is_null(PPtrView {
+            path_id: 0,
+            file_id: 3
+        }));
+        // A negative file id cannot index the table, so it reports false
+        // instead of the source's throw.
+        assert!(!is_asset(
+            PPtrView {
+                path_id: 5,
+                file_id: -1
+            },
+            2,
+            &[1],
+            asset
+        ));
     }
 }

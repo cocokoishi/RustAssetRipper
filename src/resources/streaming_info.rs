@@ -146,4 +146,37 @@ mod tests {
         }
         assert_eq!(rows, 3);
     }
+
+    #[test]
+    fn offset_truncation_and_value_round_trips_match_the_unchecked_cast() {
+        // `SetValues`/`GetValues` round-trip, and the old layout truncates the offset
+        // exactly like the baseline's unchecked `(uint)` cast.
+        let mut old = StreamingInfoView {
+            has_offset_u64: false,
+            ..StreamingInfoView::default()
+        };
+        old.set_values("archive:/level0", u64::MAX, 41);
+        assert!(old.is_set());
+        assert_eq!(
+            old.get_values(),
+            ("archive:/level0", u64::from(u32::MAX), 41)
+        );
+
+        let mut new = StreamingInfoView {
+            has_offset_u64: true,
+            ..StreamingInfoView::default()
+        };
+        new.set_values("archive:/level0", u64::MAX, 41);
+        assert_eq!(new.get_values(), ("archive:/level0", u64::MAX, 41));
+
+        // Copying a wide offset into the old layout truncates through the same path.
+        let mut narrowed = StreamingInfoView {
+            has_offset_u64: false,
+            ..StreamingInfoView::default()
+        };
+        narrowed.copy_values(&new);
+        assert_eq!(narrowed.get_offset(), u64::from(u32::MAX));
+        assert_eq!(narrowed.path, "archive:/level0");
+        assert_eq!(narrowed.size, 41);
+    }
 }

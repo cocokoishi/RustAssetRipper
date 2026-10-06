@@ -118,6 +118,13 @@ pub fn get_streams(view: &VertexDataView<'_>) -> Option<Vec<StreamInfo>> {
         .or_else(|| view.streams_0.map(|streams| streams.to_vec()))
 }
 
+/// `VertexDataExtensions.IsSet`: vertices exist and either inline data or a set streaming
+/// info backs them. `streaming_info_is_set` is `None` when the caller has no streaming info;
+/// otherwise it answers `StreamingInfoExtensions.IsSet` (a non-empty streaming path).
+pub fn is_set(vertex_count: u32, data_len: usize, streaming_info_is_set: Option<bool>) -> bool {
+    vertex_count > 0 && (data_len > 0 || streaming_info_is_set == Some(true))
+}
+
 fn has_streams_invariant(view: &VertexDataView<'_>) -> bool {
     view.streams.is_some() || view.streams_0.is_some()
 }
@@ -652,5 +659,19 @@ mod tests {
         assert_eq!(int32_slot, 0xABCD);
         set_current_channels(false, &mut uint32_slot, &mut int32_slot, 0x1234);
         assert_eq!(uint32_slot, 0x1234);
+    }
+
+    /// `VertexDataExtensions.IsSet`: a zero vertex count is never set; otherwise inline
+    /// data or a set streaming info is required.
+    #[test]
+    fn is_set_matches_the_source_branches() {
+        assert!(!is_set(0, 0, None));
+        assert!(!is_set(0, 16, None));
+        assert!(!is_set(0, 16, Some(true)));
+        assert!(is_set(2, 16, None));
+        assert!(is_set(2, 16, Some(false)));
+        assert!(is_set(2, 0, Some(true)));
+        assert!(!is_set(2, 0, Some(false)));
+        assert!(!is_set(2, 0, None));
     }
 }
