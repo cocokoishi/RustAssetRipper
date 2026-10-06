@@ -1,8 +1,10 @@
 //! `TransformExtensions` hierarchy helpers.
 //!
 //! Mirrors `AssetRipper.SourceGenerated.Extensions/TransformExtensions.cs` for the root-path,
-//! child-lookup, and sibling-order behaviors. The Rust model uses an arena of transform nodes so
-//! the hierarchy can be walked without owning asset objects.
+//! child-lookup, sibling-order, and local-matrix behaviors. The Rust model uses an arena of
+//! transform nodes so the hierarchy can be walked without owning asset objects.
+
+use crate::numerics::{Quat, Transformation, Vec3};
 
 /// A failure while walking a transform hierarchy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -134,11 +136,49 @@ impl TransformLocalView {
             *hint = [0.0; 3];
         }
     }
+
+    fn translation(&self) -> Vec3 {
+        Vec3 {
+            x: self.position[0],
+            y: self.position[1],
+            z: self.position[2],
+        }
+    }
+
+    fn rotation(&self) -> Quat {
+        Quat {
+            x: self.rotation[0],
+            y: self.rotation[1],
+            z: self.rotation[2],
+            w: self.rotation[3],
+        }
+    }
+
+    fn scale_vec(&self) -> Vec3 {
+        Vec3 {
+            x: self.scale[0],
+            y: self.scale[1],
+            z: self.scale[2],
+        }
+    }
+}
+
+/// `TransformExtensions.ToTransformation`: the local position/rotation/scale as a
+/// `Transformation`. Root order and the euler hint do not feed the matrix.
+pub fn to_transformation(local: &TransformLocalView) -> Transformation {
+    Transformation::create(local.translation(), local.rotation(), local.scale_vec())
+}
+
+/// `TransformExtensions.ToInverseTransformation`: the inverse-parameter
+/// `Transformation` (negated translation, inverted rotation, reciprocal scale).
+pub fn to_inverse_transformation(local: &TransformLocalView) -> Transformation {
+    Transformation::create_inverse(local.translation(), local.rotation(), local.scale_vec())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::numerics::Mat4;
 
     fn tree() -> Vec<TransformNode> {
         vec![
@@ -296,5 +336,49 @@ mod tests {
             rows += 1;
         }
         assert_eq!(rows, 3);
+    }
+
+    #[test]
+    fn local_matrices_follow_the_source_projection() {
+        // The default local frame is the identity in both directions.
+        let mut default = TransformLocalView {
+            position: [0.0; 3],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: [1.0; 3],
+            root_order: 0,
+            euler_hint: None,
+        };
+        assert_eq!(to_transformation(&default).matrix, Mat4::identity());
+        assert_eq!(to_inverse_transformation(&default).matrix, Mat4::identity());
+        // Translation lands in the last row; root order and the euler hint do
+        // not feed the matrix.
+        default.position = [1.0, 2.0, 3.0];
+        default.root_order = 7;
+        default.euler_hint = Some([9.0; 3]);
+        let matrix = to_transformation(&default).matrix;
+        assert_eq!(
+            (matrix.m41, matrix.m42, matrix.m43, matrix.m44),
+            (1.0, 2.0, 3.0, 1.0)
+        );
+        assert_eq!((matrix.m11, matrix.m22, matrix.m33), (1.0, 1.0, 1.0));
+        let inverse = to_inverse_transformation(&default).matrix;
+        assert_eq!(
+            (inverse.m41, inverse.m42, inverse.m43, inverse.m44),
+            (-1.0, -2.0, -3.0, 1.0)
+        );
+        // Scale lands on the diagonal.
+        default.position = [0.0; 3];
+        default.scale = [2.0, 3.0, 4.0];
+        let scaled = to_transformation(&default).matrix;
+        assert_eq!(
+            (scaled.m11, scaled.m22, scaled.m33, scaled.m44),
+            (2.0, 3.0, 4.0, 1.0)
+        );
+        assert_eq!((scaled.m41, scaled.m42, scaled.m43), (0.0, 0.0, 0.0));
+        let scaled_inverse = to_inverse_transformation(&default).matrix;
+        assert_eq!(
+            (scaled_inverse.m11, scaled_inverse.m22, scaled_inverse.m33),
+            (0.5, 1.0 / 3.0, 0.25)
+        );
     }
 }

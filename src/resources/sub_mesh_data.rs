@@ -444,4 +444,36 @@ mod tests {
             IndexFormat::UInt32
         );
     }
+
+    #[test]
+    fn index_math_edges_match_unchecked_source_semantics() {
+        // Unknown topology names decode as absent.
+        assert_eq!(MeshTopology::from_name("Triangle"), None);
+        assert_eq!(MeshTopology::from_name(""), None);
+        // `GetFirstIndex` truncates like the source unsigned division.
+        let view = SubMeshView {
+            first_byte: 7,
+            ..SubMeshView::default()
+        };
+        assert_eq!(view.get_first_index(true), 3);
+        assert_eq!(view.get_first_index(false), 1);
+        // The source multiplies in an unchecked context, so full-range products wrap
+        // instead of saturating or failing; `wrapping_mul` preserves that exactly.
+        let mut view = SubMeshView::default();
+        view.set_first_index(true, u32::MAX);
+        assert_eq!(view.first_byte, u32::MAX.wrapping_mul(2));
+        let data = SubMeshData {
+            base_vertex: 0,
+            first_index: -1,
+            first_vertex: 0,
+            index_count: 0,
+            triangle_count: 0,
+            vertex_count: 0,
+            topology: MeshTopology::TRIANGLES,
+            local_bounds: Bounds::default(),
+        };
+        let mut destination = SubMeshView::default();
+        data.copy_to(&mut destination, IndexFormat::UInt16);
+        assert_eq!(destination.first_byte, (-1i32).wrapping_mul(2) as u32);
+    }
 }
