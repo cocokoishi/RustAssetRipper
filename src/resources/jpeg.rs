@@ -424,9 +424,9 @@ fn dct_basis(u: usize, x: usize) -> f32 {
 /// with the precomputed basis, giving `mean * 8` in the DC term of a flat block.
 fn forward_dct(samples: &[f32; 64]) -> [f32; 64] {
     let mut basis = [[0.0f32; 8]; 8];
-    for u in 0..8 {
-        for x in 0..8 {
-            basis[u][x] = dct_basis(u, x);
+    for (u, row) in basis.iter_mut().enumerate() {
+        for (x, cell) in row.iter_mut().enumerate() {
+            *cell = dct_basis(u, x);
         }
     }
     let mut rows = [0.0f32; 64];
