@@ -4,8 +4,8 @@
 //! (construction validation, `ToUniqueName` overloads, `ToString`, `IsDefault`,
 //! `UniqueName`), the `ScriptingBackend` discriminants, the `MonoManager.IsMonoAssembly`
 //! file-name predicate and mscorlib discovery (`TryGetMscorlibPath`), the pure string kernels
-//! behind `MonoScriptExtensions.GetFullName` and `GetValidAssemblyName`, and the
-//! `PropertiesHash` fallback bytes behind `GetPropertiesHash` (the
+//! behind `MonoScriptExtensions.GetFullName`, `GetValidAssemblyName`, and `HasAssemblyName`,
+//! and the `PropertiesHash` fallback bytes behind `GetPropertiesHash` (the
 //! `IMonoScript`/assembly-manager lookups themselves stay outside: they need live
 //! managed assemblies).
 //!
@@ -202,6 +202,14 @@ pub fn get_valid_assembly_name(assembly: &str) -> String {
     } else {
         fixed
     }
+}
+
+/// `MonoScriptExtensions.HasAssemblyName` over caller facts: the assembly name is present
+/// in release collections, and otherwise exactly when the field is not release-only
+/// (the source note reads "Before 2018.2 or Release or after 2022.2"). The generated
+/// field gate arrives pre-evaluated; only the outcome is modeled here.
+pub fn has_assembly_name(collection_is_release: bool, assembly_name_is_release_only: bool) -> bool {
+    collection_is_release || !assembly_name_is_release_only
 }
 
 /// The `TypeTreeResolver.TryGetSerializableType` failure when no reference matches.
@@ -410,6 +418,16 @@ mod tests {
         assert_eq!(get_valid_assembly_name(""), "Assembly-CSharp");
         assert_eq!(get_valid_assembly_name("MyLib.dll"), "MyLib");
         assert_eq!(get_valid_assembly_name("CSharp"), "Assembly - CSharp");
+    }
+
+    #[test]
+    fn assembly_name_presence_follows_release_and_field_gates() {
+        // Release collections always have the name.
+        assert!(has_assembly_name(true, false));
+        assert!(has_assembly_name(true, true));
+        // Otherwise only a non-release-only field is present.
+        assert!(has_assembly_name(false, false));
+        assert!(!has_assembly_name(false, true));
     }
 
     fn script_reference(

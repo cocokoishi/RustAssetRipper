@@ -794,11 +794,7 @@ fn map_enum<T>(
 ) -> Result<T, SettingsFileError> {
     match value {
         JsonValue::Integer(number) => {
-            let discriminant =
-                i32::try_from(*number).map_err(|_| SettingsFileError::InvalidJson {
-                    path: path.to_owned(),
-                    reason: "expected a 32-bit integer",
-                })?;
+            let discriminant = enum_discriminant(*number, path)?;
             convert(discriminant).ok_or(SettingsFileError::UnknownEnumValue {
                 path: path.to_owned(),
                 value: discriminant,
@@ -809,6 +805,18 @@ fn map_enum<T>(
             reason: "expected an integer discriminant",
         }),
     }
+}
+
+/// Checked `i64`-to-`i32` narrowing for enum discriminants over caller facts: JSON
+/// integers are 64-bit here, but the source enums are 32-bit, so out-of-range values
+/// fail with the naming path instead of wrapping into a valid discriminant. Every enum
+/// property funnels through `map_enum`, giving all of them one decision point; the
+/// overflow arms are unreachable in realistic files, so the kernel keeps them provable.
+fn enum_discriminant(number: i64, path: &str) -> Result<i32, SettingsFileError> {
+    i32::try_from(number).map_err(|_| SettingsFileError::InvalidJson {
+        path: path.to_owned(),
+        reason: "expected a 32-bit integer",
+    })
 }
 
 fn map_version(
@@ -1432,6 +1440,48 @@ mod tests {
                 "{shallow}: {error:?}"
             );
         }
+    }
+
+    #[test]
+    fn enum_discriminants_narrow_to_i32_or_fail() {
+        assert_eq!(
+            super::enum_discriminant(0, "$.Export.AudioExportFormat"),
+            Ok(0)
+        );
+        assert_eq!(
+            super::enum_discriminant(-1, "$.Export.ScriptLanguageVersion"),
+            Ok(-1)
+        );
+        assert_eq!(super::enum_discriminant(i32::MAX as i64, "$"), Ok(i32::MAX));
+        assert_eq!(super::enum_discriminant(i32::MIN as i64, "$"), Ok(i32::MIN));
+        for out_of_range in [i32::MAX as i64 + 1, i32::MIN as i64 - 1, 9_999_999_999] {
+            let error =
+                super::enum_discriminant(out_of_range, "$.Export.AudioExportFormat").unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    SettingsFileError::InvalidJson { ref path, reason }
+                        if path == "$.Export.AudioExportFormat"
+                            && reason == "expected a 32-bit integer"
+                ),
+                "{out_of_range}: {error:?}"
+            );
+        }
+        // The production path reports the same decision for every enum property.
+        let error = parse_settings_file(
+            "{\"Import\": {}, \"Processing\": {}, \"Export\": {\"AudioExportFormat\": 9999999999}}",
+            SettingsFileLimits::default(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                SettingsFileError::InvalidJson { ref path, reason }
+                    if path == "$.Export.AudioExportFormat"
+                        && reason == "expected a 32-bit integer"
+            ),
+            "{error:?}"
+        );
     }
 
     #[test]

@@ -900,24 +900,33 @@ fn detect_ios(
         return Ok(None);
     }
     for app_path in top_level_directories(filesystem, &payload_path)? {
-        let app_name = file_name(&app_path);
-        if !app_name.ends_with(".app") {
-            continue;
-        }
-        let game_data_path = join_path(&app_path, "Data");
-        if exists_directory(filesystem, &game_data_path)? {
+        let data_path = join_path(&app_path, "Data");
+        if let Some((name, game_data_path)) =
+            ios_app_data(&app_path, exists_directory(filesystem, &data_path)?)
+        {
             return Ok(Some(make_structure(
                 PlatformKind::Ios,
                 selected_path,
                 vec![selected_path.to_owned()],
                 selected_path.to_owned(),
-                Some(file_stem(app_name).to_owned()),
+                Some(name),
                 Some(game_data_path.clone()),
                 vec![game_data_path],
             )));
         }
     }
     Ok(None)
+}
+
+/// `GetDataiOSDirectory` candidate step over caller facts: a `Payload` child whose name ends
+/// in `.app` (ordinal) yields its stemmed app name and data path when its `Data` directory
+/// exists; anything else is skipped like the source loop.
+fn ios_app_data(app_path: &str, data_directory_exists: bool) -> Option<(String, String)> {
+    let app_name = file_name(app_path);
+    if !app_name.ends_with(".app") || !data_directory_exists {
+        return None;
+    }
+    Some((file_stem(app_name).to_owned(), join_path(app_path, "Data")))
 }
 
 fn detect_ps4(
@@ -1370,11 +1379,11 @@ impl Error for PlatformStructureError {
 mod tests {
     use super::{
         android_data_layout, android_root_role, desktop_data_fallback, detect_desktop_platform,
-        detect_platform_structure, ios_data_layout, ps4_data_layout, switch_data_layout,
-        web_player_bundle_path, wiiu_data_layout, AndroidRootRole, DesktopPlatform, PlatformKind,
-        PlatformResourceLookup, PlatformResourceProvider, PlatformResourceSource,
-        PlatformStructure, PlatformStructureErrorKind, PlatformStructureLimits,
-        WEBGL_BUILD_FLAVORS,
+        detect_platform_structure, ios_app_data, ios_data_layout, ps4_data_layout,
+        switch_data_layout, web_player_bundle_path, wiiu_data_layout, AndroidRootRole,
+        DesktopPlatform, PlatformKind, PlatformResourceLookup, PlatformResourceProvider,
+        PlatformResourceSource, PlatformStructure, PlatformStructureErrorKind,
+        PlatformStructureLimits, WEBGL_BUILD_FLAVORS,
     };
     use crate::io::filesystem::VirtualFileSystem;
 
@@ -1777,6 +1786,34 @@ mod tests {
                 count: 2
             }
         ));
+    }
+
+    #[test]
+    fn ios_app_candidates_skip_dataless_bundles_and_non_app_names() {
+        // Stemming follows the source suffix strip.
+        assert_eq!(
+            ios_app_data("/ios/Payload/Game.app", true),
+            Some(("Game".to_owned(), "/ios/Payload/Game.app/Data".to_owned(),))
+        );
+        // Dataless bundles and non-`.app` names never match, like the source loop.
+        assert_eq!(ios_app_data("/ios/Payload/Stale.app", false), None);
+        assert_eq!(ios_app_data("/ios/Payload/notes", true), None);
+        // The suffix match is ordinal, like the source check.
+        assert_eq!(ios_app_data("/ios/Payload/Game.APP", true), None);
+
+        // End-to-end: a dataless bundle does not shadow a later valid one.
+        let mut filesystem = VirtualFileSystem::new();
+        insert_directory(&mut filesystem, "/ios/Payload/Aaa.app");
+        insert_directory(&mut filesystem, "/ios/Payload/Game.app/Data");
+        let ios = detect_platform_structure(
+            &filesystem,
+            &["/ios".to_owned()],
+            PlatformStructureLimits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(ios.name.as_deref(), Some("Game"));
+        assert_eq!(ios.data_paths, ["/ios/Payload/Game.app/Data"]);
     }
 
     #[test]

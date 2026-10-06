@@ -4936,13 +4936,16 @@ mod tests {
         let summary = String::from_utf8(output).unwrap();
 
         assert!(summary.contains("Explicit GameBundle root ResourceFiles: 2"));
-        let second_resource_index = summary
-            .find("root resource[0]: name=\"second.resS\"")
-            .unwrap();
+        // Root resources enumerate in file-stack pop order (last input first),
+        // matching baseline `GameBundle.FromPaths` — proven by the round-60
+        // runtime differential on `IO-RESOURCE-RESOLUTION-001`.
         let first_resource_index = summary
-            .find("root resource[1]: name=\"direct.resS\"")
+            .find("root resource[0]: name=\"direct.resS\"")
             .unwrap();
-        assert!(second_resource_index < first_resource_index);
+        let second_resource_index = summary
+            .find("root resource[1]: name=\"second.resS\"")
+            .unwrap();
+        assert!(first_resource_index < second_resource_index);
         assert!(!summary.contains("unselected.resS"));
         assert!(summary.contains("explicit file import: 3 logical inputs"));
         drop(input);

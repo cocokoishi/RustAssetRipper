@@ -127,7 +127,12 @@ impl Default for RootResourceCatalogLimits {
     }
 }
 
-/// Ordered root GameBundle ResourceFiles from explicitly selected paths.
+/// Root GameBundle ResourceFiles from explicitly selected paths, stored in reverse
+/// input order. `GameBundle.InitializeFromPaths` pops its file stack from the end, so
+/// the last input is added first and wins duplicate names through
+/// `Bundle.ResolveResource`'s first match; this catalog keeps that file-stack pop
+/// order (verified against the real runtime: `FromPaths([A, B])` resolves B's file).
+/// Diagnostic input indexes still number the original input order.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RootResourceFileCatalog {
     files: Vec<WorkspaceRootResourceFile>,
@@ -414,7 +419,9 @@ impl<'a> RootResourceCatalogBuilder<'a> {
         Ok(())
     }
 
-    fn finish(self) -> RootResourceFileCatalog {
+    fn finish(mut self) -> RootResourceFileCatalog {
+        // Last input first, like the source file-stack pop order.
+        self.files.reverse();
         RootResourceFileCatalog { files: self.files }
     }
 }
@@ -1135,6 +1142,12 @@ fn serialized_value_kind(value: &SerializedValue) -> &'static str {
 
 /// Resolves a ResourceFile using the baseline order: bundle hierarchy first, then the
 /// GameBundle's platform/mixed external provider.
+///
+/// One deliberate difference is documented, not changed: `GameBundle` caches a
+/// provider hit back into its resources (`AddResource`), so a second lookup skips the
+/// provider, while this immutable model re-queries every time (verified against the
+/// real runtime: same instance returned, one provider call). Outcomes match for
+/// deterministic providers; only provider side-effect counts differ.
 pub fn resolve_resource_file<'a>(
     filesystem: &VirtualFileSystem,
     workspace: &'a SerializedFileWorkspace,
@@ -1172,7 +1185,8 @@ pub fn resolve_resource_file<'a>(
 }
 
 /// Resolves an explicit GameBundle root ResourceFile between mounted Bundle resources and the
-/// external Platform/Mixed provider.
+/// external Platform/Mixed provider. Provider hits are not cached back (see
+/// `resolve_resource_file`); explicit root duplicates resolve last-input-first.
 pub fn resolve_resource_file_with_root_catalog<'a>(
     filesystem: &VirtualFileSystem,
     workspace: &'a SerializedFileWorkspace,
@@ -1714,8 +1728,12 @@ mod tests {
         ])
     }
 
+    /// Explicit inputs are stored in reverse (file-stack pop) order so the last input
+    /// wins duplicate names, matching `GameBundle.InitializeFromPaths`. Proven by a
+    /// direct runtime differential: real `FromPaths([A/dup.ress, B/dup.ress])`
+    /// resolves B's file.
     #[test]
-    fn explicit_root_resource_catalog_preserves_order_and_validates_inputs() {
+    fn explicit_root_resource_catalog_applies_file_stack_pop_order() {
         let mut filesystem = VirtualFileSystem::new();
         filesystem.create_directory(Some("/root")).unwrap();
         filesystem
@@ -1754,12 +1772,12 @@ mod tests {
             catalog.files(),
             [
                 WorkspaceRootResourceFile {
-                    name: "SHARED.resS".to_owned(),
-                    virtual_path: "/root/first.resS".to_owned(),
-                },
-                WorkspaceRootResourceFile {
                     name: "shared.ress".to_owned(),
                     virtual_path: "/root/second.resS".to_owned(),
+                },
+                WorkspaceRootResourceFile {
+                    name: "SHARED.resS".to_owned(),
+                    virtual_path: "/root/first.resS".to_owned(),
                 },
             ]
         );
@@ -1823,6 +1841,65 @@ mod tests {
             ),
             Err(RootResourceCatalogError::FileNotFound { input_index: 0, .. })
         ));
+    }
+
+    #[test]
+    fn explicit_root_duplicates_resolve_last_input_first() {
+        use super::resolve_resource_file_with_root_catalog;
+        use crate::io::platform_structure::{PlatformResourceProvider, PlatformStructureLimits};
+        use crate::serialized_file::workspace::SerializedFileWorkspace;
+
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem.create_directory(Some("/root")).unwrap();
+        filesystem
+            .write_all_bytes("/root/first.resS", b"first")
+            .unwrap();
+        filesystem
+            .write_all_bytes("/root/second.resS", b"second")
+            .unwrap();
+        let first_dispatch =
+            SchemeReader::read_with_limits(b"first resource", SchemeReaderLimits::default())
+                .unwrap();
+        let second_dispatch =
+            SchemeReader::read_with_limits(b"second resource", SchemeReaderLimits::default())
+                .unwrap();
+        let inputs = [
+            ExplicitRootResourceInput {
+                file_name: "dup.resS",
+                virtual_path: "/root/first.resS",
+                dispatched_file: &first_dispatch,
+            },
+            ExplicitRootResourceInput {
+                file_name: "DUP.ress",
+                virtual_path: "/root/second.resS",
+                dispatched_file: &second_dispatch,
+            },
+        ];
+        let catalog = RootResourceFileCatalog::from_explicit_resource_inputs(
+            &filesystem,
+            &inputs,
+            RootResourceCatalogLimits::default(),
+        )
+        .unwrap();
+        let workspace = SerializedFileWorkspace::default();
+        let provider = PlatformResourceProvider::new(None, None);
+        assert_eq!(
+            resolve_resource_file_with_root_catalog(
+                &filesystem,
+                &workspace,
+                None,
+                "dup.resS",
+                &catalog,
+                &provider,
+                PlatformStructureLimits::default(),
+            )
+            .unwrap(),
+            ResolvedResourceFile::ExplicitRoot {
+                resource_index: 0,
+                virtual_path: "/root/second.resS",
+            },
+            "last explicit input wins, like real FromPaths([first, second]) resolving second's file"
+        );
     }
 
     #[test]

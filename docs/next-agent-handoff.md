@@ -1282,3 +1282,11 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Gates: `cargo fmt --check` 0, full tests 1335 lib + 57 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
 - Next: sixtieth team round (gate-first: iOS/Switch lanes, script identity, export records).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 170. Checkpoint: sixtieth team round integrated — gate-first (2026-10-06)
+
+- All five shipped, all lead-verified (targeted suites re-run: 22/22, 438/438 + 29/29, 11/11, 9/9, 11/11) and integrated: `sprite-fill` named the iOS step (`IO-PLATFORM-IOS-001`); `texture-meta` fixed duplicate order with runtime proof (`IO-RESOURCE-RESOLUTION-001`, stays verified); `anim-graph` ported the presence gate (`TYPE-SCRIPT-001`); `mesh-deform` returned NO-GAP on managed types (`SER-MANAGED-REFS-001`); `texture-export` named enum narrowing (`EXP-SETTINGS-FILE-001`). Lead corrections: the dispatch mislabeled RESOLUTION-001 as 实现中 (it is verified) — the bug-evidence exception applies and is recorded; r55-r58 managed-reference units sat on the TT-ABSENT row, now cross-cited on their home row. No scope violations, no placeholders.
+- Gate question answered YES with the documented exception.
+- Gates: `cargo fmt --check` 0, full tests 1339 lib + 57 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
+- Next: sixty-first team round (gate-first: Switch lane, streaming info, collection workspace).
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
