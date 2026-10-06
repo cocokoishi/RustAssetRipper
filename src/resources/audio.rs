@@ -603,4 +603,76 @@ mod tests {
             })
         );
     }
+
+    #[test]
+    fn empty_inline_data_still_prefers_the_resource() {
+        // Empty inline bytes fall through to the resource for both source selection
+        // and integrity, exactly like a missing field.
+        let root = SerializedValue::Struct(vec![
+            field("m_AudioData", SerializedValue::Bytes(Vec::new())),
+            field(
+                "m_Resource",
+                SerializedValue::Struct(vec![
+                    field("path", string_value("audio.resS")),
+                    field("offset", SerializedValue::U64(8)),
+                    field("size", SerializedValue::U32(4)),
+                ]),
+            ),
+        ]);
+        let view = AudioClipView::from_value(&root).unwrap();
+        match view.audio_data_source() {
+            AudioDataSource::Resource(info) => assert_eq!(info.path, "audio.resS"),
+            other => panic!("unexpected source {other:?}"),
+        }
+        assert!(!view.check_asset_integrity(|| false));
+        assert!(view.check_asset_integrity(|| true));
+    }
+
+    #[test]
+    fn reader_arms_coerce_arrays_wrap_ints_and_reject_malformed_streams() {
+        // Byte arrays decode element-wise; a non-byte element is an explicit error.
+        let root = SerializedValue::Struct(vec![field(
+            "m_AudioData",
+            SerializedValue::Array(vec![SerializedValue::U8(9)]),
+        )]);
+        assert_eq!(
+            AudioClipView::from_value(&root).unwrap().audio_data,
+            Some(vec![9])
+        );
+        let root = SerializedValue::Struct(vec![field(
+            "m_AudioData",
+            SerializedValue::Array(vec![SerializedValue::I32(9)]),
+        )]);
+        assert_eq!(
+            AudioClipView::from_value(&root),
+            Err(AudioClipViewError::WrongType {
+                field: "m_AudioData",
+                actual: "int"
+            })
+        );
+        // Unsigned bit patterns reinterpret as signed, matching the unchecked cast.
+        let root = SerializedValue::Struct(vec![field("m_Type", SerializedValue::U32(u32::MAX))]);
+        assert_eq!(
+            AudioClipView::from_value(&root).unwrap().sound_type,
+            Some(-1)
+        );
+        // A present-but-malformed resource descriptor is a stream error, not silence.
+        let root = SerializedValue::Struct(vec![field("m_Resource", SerializedValue::I32(1))]);
+        assert!(matches!(
+            AudioClipView::from_value(&root),
+            Err(AudioClipViewError::StreamInfo {
+                field: "m_Resource",
+                ..
+            })
+        ));
+        // The failure messages name the field and the observed kind.
+        assert_eq!(
+            AudioClipViewError::WrongType {
+                field: "m_Type",
+                actual: "string"
+            }
+            .to_string(),
+            "AudioClip field 'm_Type' has kind string, expected bytes, a resource, or a number"
+        );
+    }
 }

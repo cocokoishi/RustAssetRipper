@@ -6,6 +6,11 @@
 //! caller-side (`TextureConverter`, `SpriteConverter`, `TerrainHeatmap`); these
 //! kernels route an asset kind to its source so the dispatch stays auditable
 //! without managed objects or HTTP plumbing.
+//!
+//! Also mirrors the endpoint URL facts (`Urls.Image`, the `Path`/`Extension`
+//! query names, `GetExtensionQuerySuffix`) and the `GetImageData` response
+//! routing (encoded bitmap bytes, raw bytes, or 404 on an empty bitmap). Path
+//! JSON encoding, bitmap encoding, and the HTTP plumbing stay caller-side.
 
 use super::sprite::sprite_supported;
 
@@ -112,6 +117,53 @@ pub fn preview_raw_source(
         PreviewAssetKind::Sprite if sprite_has_texture => PreviewRawSource::TextureBytes,
         PreviewAssetKind::Terrain => PreviewRawSource::TerrainHeights,
         _ => PreviewRawSource::Empty,
+    }
+}
+
+/// `AssetAPI.Urls.Image`.
+pub const PREVIEW_IMAGE_URL: &str = "/Assets/Image";
+
+/// The asset-path query parameter name.
+pub const ASSET_PATH_QUERY: &str = "Path";
+
+/// The image-extension query parameter name.
+pub const ASSET_EXTENSION_QUERY: &str = "Extension";
+
+/// `GetExtensionQuerySuffix`: an empty or missing extension contributes no suffix.
+pub fn preview_image_extension_suffix(extension: Option<&str>) -> String {
+    match extension {
+        Some(text) if !text.is_empty() => format!("&{ASSET_EXTENSION_QUERY}={text}"),
+        _ => String::new(),
+    }
+}
+
+/// Where `AssetAPI.GetImageData` draws the response from.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PreviewImageResponse {
+    /// The encoded bitmap bytes (`image/{extension}`); the extension and the
+    /// encoding stay caller-side.
+    BitmapBytes,
+    /// The raw image bytes (`application/octet-stream`).
+    RawBytes,
+    /// 404: the bitmap decoded empty ("Image data could not be decoded.").
+    BitmapNotFound,
+}
+
+/// `AssetAPI.GetImageData` response routing over caller facts.
+///
+/// `extension_parses` is the `TryGetImageExtensionFromQuery` outcome (the query
+/// carries an `Extension` the export format recognizes); `bitmap_is_empty` is
+/// the decoded bitmap's `IsEmpty`.
+pub const fn preview_image_response(
+    extension_parses: bool,
+    bitmap_is_empty: bool,
+) -> PreviewImageResponse {
+    if !extension_parses {
+        PreviewImageResponse::RawBytes
+    } else if bitmap_is_empty {
+        PreviewImageResponse::BitmapNotFound
+    } else {
+        PreviewImageResponse::BitmapBytes
     }
 }
 
@@ -254,6 +306,37 @@ mod tests {
         assert_eq!(
             preview_raw_source(PreviewAssetKind::Other, true, true),
             PreviewRawSource::Empty
+        );
+    }
+
+    #[test]
+    fn endpoint_url_facts_and_response_routing_match_the_source() {
+        assert_eq!(PREVIEW_IMAGE_URL, "/Assets/Image");
+        assert_eq!(ASSET_PATH_QUERY, "Path");
+        assert_eq!(ASSET_EXTENSION_QUERY, "Extension");
+        assert_eq!(preview_image_extension_suffix(None), "");
+        assert_eq!(preview_image_extension_suffix(Some("")), "");
+        assert_eq!(
+            preview_image_extension_suffix(Some("png")),
+            "&Extension=png"
+        );
+        // Without a recognized extension the endpoint serves raw bytes.
+        assert_eq!(
+            preview_image_response(false, false),
+            PreviewImageResponse::RawBytes
+        );
+        assert_eq!(
+            preview_image_response(false, true),
+            PreviewImageResponse::RawBytes
+        );
+        // With one, an empty bitmap is a 404 and a decoded bitmap is served.
+        assert_eq!(
+            preview_image_response(true, true),
+            PreviewImageResponse::BitmapNotFound
+        );
+        assert_eq!(
+            preview_image_response(true, false),
+            PreviewImageResponse::BitmapBytes
         );
     }
 }

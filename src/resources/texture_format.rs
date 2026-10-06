@@ -1,8 +1,16 @@
-//! `TextureFormatExtensions`.
+//! `TextureFormatExtensions` and the importer texture-settings dual fields.
 //!
 //! Mirrors `AssetRipper.SourceGenerated.Extensions/TextureFormatExtensions.cs`. The three
 //! classifiers answer whether a texture format is block-crunched, DXT-family, or carried as
 //! RGBA-family data. `Alpha8` is classified as RGB by the baseline despite being single-channel.
+//!
+//! Also mirrors the version-union readers and writers of
+//! `AssetRipper.SourceGenerated.Extensions/TextureSettingsExtensions.cs`: several settings
+//! exist as both an `Int32` and a `UInt32`/`Boolean` spelling, and the getters prefer one
+//! spelling while the setters write both. The `ColorSpace`-valued members stay open: the
+//! `ColorSpace`, `TextureImporterCompression`, and `FilterMode` member values live in the
+//! published `AssetRipper.SourceGenerated` package rather than the frozen baseline, so only
+//! the `GetSRGB` fallback reads the color space through a caller-resolved gamma fact.
 //!
 //! Differential fixture: `texture_format_fixture.txt` (probe `Temp/opencode/texprobe`).
 
@@ -95,6 +103,164 @@ pub fn swap_adjacent_bytes(data: &[u8]) -> Result<Vec<u8>, SwapBytesError> {
     Ok(swapped)
 }
 
+/// An importer texture-settings view (`ITextureSettings`).
+///
+/// Each setting carries the presence and value of its serialized spellings; the color-space
+/// field itself stays caller-side and only its resolved gamma fact is kept.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TextureSettingsView {
+    /// `Has_SRGB_Boolean`.
+    pub has_srgb_boolean: bool,
+    /// `SRGB_Boolean`.
+    pub srgb_boolean: bool,
+    /// `Has_SRGB_Int32`.
+    pub has_srgb_int32: bool,
+    /// `SRGB_Int32`.
+    pub srgb_int32: i32,
+    /// Whether the stored `ColorSpace` equals `ColorSpace.Gamma`, resolved by the caller.
+    pub color_space_is_gamma: bool,
+    /// `Has_AnisoLevel_Int32`.
+    pub has_aniso_int32: bool,
+    /// `AnisoLevel_Int32`.
+    pub aniso_int32: i32,
+    /// `AnisoLevel_UInt32`.
+    pub aniso_uint32: u32,
+    /// `Has_CompressionQuality_Int32`.
+    pub has_compression_quality_int32: bool,
+    /// `CompressionQuality_Int32`.
+    pub compression_quality_int32: i32,
+    /// `CompressionQuality_UInt32`.
+    pub compression_quality_uint32: u32,
+    /// `Has_MaxTextureSize_Int32`.
+    pub has_max_texture_size_int32: bool,
+    /// `MaxTextureSize_Int32`.
+    pub max_texture_size_int32: i32,
+    /// `MaxTextureSize_UInt32`.
+    pub max_texture_size_uint32: u32,
+    /// `Has_GenerateMipMaps_Int32`.
+    pub has_generate_mip_maps_int32: bool,
+    /// `GenerateMipMaps_Int32`.
+    pub generate_mip_maps_int32: i32,
+    /// `GenerateMipMaps_Boolean`.
+    pub generate_mip_maps_boolean: bool,
+    /// `Has_Readable_Int32`.
+    pub has_readable_int32: bool,
+    /// `Readable_Int32`.
+    pub readable_int32: i32,
+    /// `Readable_Boolean`.
+    pub readable_boolean: bool,
+    /// `Has_CrunchedCompression_Int32`.
+    pub has_crunched_compression_int32: bool,
+    /// `CrunchedCompression_Int32`.
+    pub crunched_compression_int32: i32,
+    /// `CrunchedCompression_Boolean`.
+    pub crunched_compression_boolean: bool,
+}
+
+impl TextureSettingsView {
+    /// `TextureSettingsExtensions.GetSRGB`: the boolean spelling wins, then the integer
+    /// spelling, then anything but `Gamma` counts as sRGB.
+    pub fn get_srgb(&self) -> bool {
+        if self.has_srgb_boolean {
+            self.srgb_boolean
+        } else if self.has_srgb_int32 {
+            self.srgb_int32 != 0
+        } else {
+            !self.color_space_is_gamma
+        }
+    }
+
+    /// `TextureSettingsExtensions.GetAnisoLevel`, with the source unchecked cast.
+    pub fn get_aniso_level(&self) -> i32 {
+        if self.has_aniso_int32 {
+            self.aniso_int32
+        } else {
+            self.aniso_uint32 as i32
+        }
+    }
+
+    /// `TextureSettingsExtensions.SetAnisoLevel`: writes both spellings unconditionally.
+    pub fn set_aniso_level(&mut self, value: i32) {
+        self.aniso_int32 = value;
+        self.aniso_uint32 = value as u32;
+    }
+
+    /// `TextureSettingsExtensions.GetCompressionQuality`, with the source unchecked cast.
+    pub fn get_compression_quality(&self) -> i32 {
+        if self.has_compression_quality_int32 {
+            self.compression_quality_int32
+        } else {
+            self.compression_quality_uint32 as i32
+        }
+    }
+
+    /// `TextureSettingsExtensions.SetCompressionQuality`: writes both spellings.
+    pub fn set_compression_quality(&mut self, value: i32) {
+        self.compression_quality_int32 = value;
+        self.compression_quality_uint32 = value as u32;
+    }
+
+    /// `TextureSettingsExtensions.GetMaxTextureSize`, with the source unchecked cast.
+    pub fn get_max_texture_size(&self) -> i32 {
+        if self.has_max_texture_size_int32 {
+            self.max_texture_size_int32
+        } else {
+            self.max_texture_size_uint32 as i32
+        }
+    }
+
+    /// `TextureSettingsExtensions.SetMaxTextureSize`: writes both spellings.
+    pub fn set_max_texture_size(&mut self, value: i32) {
+        self.max_texture_size_int32 = value;
+        self.max_texture_size_uint32 = value as u32;
+    }
+
+    /// `TextureSettingsExtensions.GetGenerateMipMaps`.
+    pub fn get_generate_mip_maps(&self) -> bool {
+        if self.has_generate_mip_maps_int32 {
+            self.generate_mip_maps_int32 != 0
+        } else {
+            self.generate_mip_maps_boolean
+        }
+    }
+
+    /// `TextureSettingsExtensions.SetGenerateMipMaps`: writes both spellings.
+    pub fn set_generate_mip_maps(&mut self, value: bool) {
+        self.generate_mip_maps_int32 = i32::from(value);
+        self.generate_mip_maps_boolean = value;
+    }
+
+    /// `TextureSettingsExtensions.GetReadable`.
+    pub fn get_readable(&self) -> bool {
+        if self.has_readable_int32 {
+            self.readable_int32 != 0
+        } else {
+            self.readable_boolean
+        }
+    }
+
+    /// `TextureSettingsExtensions.SetReadable`: writes both spellings.
+    pub fn set_readable(&mut self, value: bool) {
+        self.readable_int32 = i32::from(value);
+        self.readable_boolean = value;
+    }
+
+    /// `TextureSettingsExtensions.GetCrunchedCompression`.
+    pub fn get_crunched_compression(&self) -> bool {
+        if self.has_crunched_compression_int32 {
+            self.crunched_compression_int32 != 0
+        } else {
+            self.crunched_compression_boolean
+        }
+    }
+
+    /// `TextureSettingsExtensions.SetCrunchedCompression`: writes both spellings.
+    pub fn set_crunched_compression(&mut self, value: bool) {
+        self.crunched_compression_int32 = i32::from(value);
+        self.crunched_compression_boolean = value;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,5 +309,99 @@ mod tests {
             swap_adjacent_bytes(&[1, 2, 3]),
             Err(SwapBytesError::OddByteCount { byte_count: 3 })
         );
+    }
+
+    /// The dual-spelling readers prefer their first spelling and the writers fill both.
+    #[test]
+    fn texture_settings_union_fields_match_the_source_branches() {
+        // sRGB: boolean, then integer, then the gamma fallback.
+        let boolean = TextureSettingsView {
+            has_srgb_boolean: true,
+            srgb_boolean: true,
+            has_srgb_int32: true,
+            color_space_is_gamma: true,
+            ..TextureSettingsView::default()
+        };
+        assert!(boolean.get_srgb());
+        let integer = TextureSettingsView {
+            has_srgb_int32: true,
+            srgb_int32: 2,
+            color_space_is_gamma: true,
+            ..TextureSettingsView::default()
+        };
+        assert!(integer.get_srgb());
+        let off = TextureSettingsView {
+            has_srgb_int32: true,
+            color_space_is_gamma: false,
+            ..TextureSettingsView::default()
+        };
+        assert!(!off.get_srgb());
+        assert!(!TextureSettingsView {
+            color_space_is_gamma: true,
+            ..TextureSettingsView::default()
+        }
+        .get_srgb());
+        assert!(TextureSettingsView::default().get_srgb());
+
+        // Integer unions: present spelling wins, otherwise the other wraps like the
+        // source unchecked cast.
+        let present = TextureSettingsView {
+            has_aniso_int32: true,
+            aniso_int32: -3,
+            aniso_uint32: 9,
+            has_compression_quality_int32: true,
+            compression_quality_int32: 50,
+            compression_quality_uint32: 60,
+            has_max_texture_size_int32: true,
+            max_texture_size_int32: 1024,
+            max_texture_size_uint32: 2048,
+            ..TextureSettingsView::default()
+        };
+        assert_eq!(present.get_aniso_level(), -3);
+        assert_eq!(present.get_compression_quality(), 50);
+        assert_eq!(present.get_max_texture_size(), 1024);
+        let wrapped = TextureSettingsView {
+            aniso_uint32: u32::MAX,
+            compression_quality_uint32: u32::MAX,
+            max_texture_size_uint32: u32::MAX,
+            ..TextureSettingsView::default()
+        };
+        assert_eq!(wrapped.get_aniso_level(), -1);
+        assert_eq!(wrapped.get_compression_quality(), -1);
+        assert_eq!(wrapped.get_max_texture_size(), -1);
+
+        // Boolean unions: nonzero integers count as set.
+        let flags = TextureSettingsView {
+            has_generate_mip_maps_int32: true,
+            generate_mip_maps_int32: 7,
+            has_readable_int32: true,
+            has_crunched_compression_int32: true,
+            crunched_compression_int32: -1,
+            ..TextureSettingsView::default()
+        };
+        assert!(flags.get_generate_mip_maps());
+        assert!(!flags.get_readable());
+        assert!(flags.get_crunched_compression());
+
+        // Writers fill both spellings, including the wrapping and 0/1 encodings.
+        let mut written = TextureSettingsView::default();
+        written.set_aniso_level(-1);
+        written.set_compression_quality(50);
+        written.set_max_texture_size(2048);
+        written.set_generate_mip_maps(true);
+        written.set_readable(false);
+        written.set_crunched_compression(true);
+        assert_eq!(written.aniso_int32, -1);
+        assert_eq!(written.aniso_uint32, u32::MAX);
+        assert_eq!(written.compression_quality_int32, 50);
+        assert_eq!(written.compression_quality_uint32, 50);
+        assert_eq!(written.max_texture_size_int32, 2048);
+        assert_eq!(written.max_texture_size_uint32, 2048);
+        assert_eq!(written.generate_mip_maps_int32, 1);
+        assert!(written.generate_mip_maps_boolean);
+        assert_eq!(written.readable_int32, 0);
+        assert!(!written.readable_boolean);
+        assert_eq!(written.crunched_compression_int32, 1);
+        assert!(written.crunched_compression_boolean);
     }
 }
