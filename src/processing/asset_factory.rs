@@ -2,12 +2,20 @@
 //!
 //! Covers the first audited slice of `SER-TT-ABSENT-001`: the `ReadAsset` top dispatch,
 //! the `ReadNormalObject` fallback chain, the `TryReadNormalObject` tail rules, the
-//! `CreateAsset` three outcomes, the `CreateEngineAsset` name switch, and the
-//! `RawDataObject`/`UnknownObject`/`UnreadableObject` hash and synthetic-name rules.
-//! Byte reading,
+//! `CreateAsset` three outcomes, the `CreateEngineAsset` name switch,
+//! the `ReadMonoBehaviour` structure-source decision, the `MakeError_*` and
+//! `LogMonoBehaviorReadException` diagnostic texts, the `RawDataObject`/`UnknownObject`/
+//! `UnreadableObject` hash and synthetic-name rules, and the `ReadExtraTextureFields`
+//! 24-byte tail layout. Byte reading,
 //! node building, and assembly-backed MonoBehaviour structures stay outside: they need
 //! generated objects and live assemblies. Version facts arrive precomputed because the
 //! Rust tree has no parsed Unity-version model yet.
+//!
+//! Deliberately open: the generated `AssetFactory.CreateSerialized` class switch (emitted
+//! by `AssetRipper.AssemblyDumper` `Pass940_MakeAssetFactory`, not snapshot logic), the
+//! `TypeTreeNodeStruct`/`SerializableStructure` node building behind the MonoBehaviour
+//! structure facts, the live-assembly `UnloadedStructure` materialization, and the actual
+//! `EndianSpanReader` byte consumption behind the tail-layout offsets.
 //!
 //! Differential evidence: the `ENGINE` rows of `mono_utils_fixture.txt` (probe
 //! `Temp/opencode/monoutilsprobe` resolving all 21 engine names at 2019.4.0f1, SDK
@@ -299,6 +307,149 @@ pub fn unreadable_asset_name(
     }
 }
 
+/// Caller facts behind one `ReadMonoBehaviour` structure decision
+/// (`GameAssetFactory.ReadMonoBehaviour`).
+///
+/// Node building, `SerializableStructure` reads, and assembly-backed `UnloadedStructure`
+/// materialization stay caller-side: they need generated objects and live assemblies.
+/// This kernel only decides which source the structure comes from and what is logged.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MonoBehaviourReadFacts {
+    /// `monoBehaviour.Read` or the structure path threw; the layout-mismatch error
+    /// fires and the previously stored structure is left untouched.
+    pub read_threw: bool,
+    /// `type is not null`: a serialized type carrying an old-type TypeTree is present.
+    pub has_type_tree: bool,
+    /// `TypeTreeNodeStruct.TryMakeFromTypeTree` accepted the old type.
+    pub type_tree_parse_ok: bool,
+    /// `structure.TryRead(...)` consumed the remainder cleanly.
+    pub structure_try_read_ok: bool,
+}
+
+/// Where a freshly read MonoBehaviour's structure comes from.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum MonoBehaviourStructureOutcome {
+    /// The TypeTree-built structure read cleanly and is assigned to the behaviour.
+    UseParsedStructure,
+    /// The TypeTree-built structure failed its read: `Structure` is cleared to null.
+    ClearStructure,
+    /// No usable TypeTree: an `UnloadedStructure` lazily covers the bytes left unread
+    /// by `monoBehaviour.Read` (`assetData.Slice(reader.Position)`).
+    UseUnloadedRemainder,
+    /// The read threw: no assignment happens; the prior structure stands.
+    KeepExisting,
+}
+
+/// The log accompanying a MonoBehaviour read.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum MonoBehaviourReadLog {
+    /// Parsed-structure assignments and lazy fallbacks stay silent.
+    Silent,
+    /// Thrown reads log the layout-mismatch error.
+    ErrorLayoutMismatch,
+}
+
+/// `ReadMonoBehaviour`: a thrown read keeps the prior structure with an error log; a
+/// parsed TypeTree structure is assigned on a clean `TryRead` and cleared otherwise;
+/// without a usable TypeTree the unread remainder backs an `UnloadedStructure`.
+///
+/// Both TypeTree conditions are required together: a present-but-unparseable type tree
+/// falls through to the lazy remainder exactly like an absent one.
+pub fn decide_monobehaviour_structure(
+    facts: &MonoBehaviourReadFacts,
+) -> (MonoBehaviourStructureOutcome, MonoBehaviourReadLog) {
+    if facts.read_threw {
+        (
+            MonoBehaviourStructureOutcome::KeepExisting,
+            MonoBehaviourReadLog::ErrorLayoutMismatch,
+        )
+    } else if facts.has_type_tree && facts.type_tree_parse_ok {
+        if facts.structure_try_read_ok {
+            (
+                MonoBehaviourStructureOutcome::UseParsedStructure,
+                MonoBehaviourReadLog::Silent,
+            )
+        } else {
+            (
+                MonoBehaviourStructureOutcome::ClearStructure,
+                MonoBehaviourReadLog::Silent,
+            )
+        }
+    } else {
+        (
+            MonoBehaviourStructureOutcome::UseUnloadedRemainder,
+            MonoBehaviourReadLog::Silent,
+        )
+    }
+}
+
+/// `MakeError_IncorrectNumberOfBytesRead`: the exact diagnostic text. The class type
+/// name, Unity version, platform, collection name, and file path arrive preformatted
+/// as caller facts because the Rust tree has no parsed version or collection model.
+pub fn incorrect_byte_count_message(
+    position: i32,
+    length: i32,
+    class_type_name: &str,
+    version: &str,
+    platform: &str,
+    collection_name: &str,
+    file_path: &str,
+) -> String {
+    format!(
+        "Read {position} but expected {length} for asset type {class_type_name}. \
+         V: {version} P: {platform} N: {collection_name} Path: {file_path}"
+    )
+}
+
+/// `MakeError_ReadException`: the exact diagnostic text with the appended exception.
+pub fn read_exception_message(
+    class_type_name: &str,
+    version: &str,
+    platform: &str,
+    collection_name: &str,
+    file_path: &str,
+    exception: &str,
+) -> String {
+    format!(
+        "Error during reading of asset type {class_type_name}. \
+         V: {version} P: {platform} N: {collection_name} Path: {file_path}\n{exception}"
+    )
+}
+
+/// `LogMonoBehaviorReadException`: the exact layout-mismatch error text (note the
+/// source's `MonoBehavior` spelling). Behaviour and structure displays arrive as caller
+/// facts; only the exception type name is embedded, not the full exception text.
+pub fn monobehaviour_layout_mismatch_message(
+    behaviour: &str,
+    structure: &str,
+    exception_type: &str,
+) -> String {
+    format!(
+        "Unable to read {behaviour}, because script {structure} layout mismatched \
+         binary content ({exception_type})."
+    )
+}
+
+/// Byte offset of `m_OriginalWidth` (little-endian Int32) in the non-standard Chinese
+/// texture tail (`GameAssetFactory.ReadExtraTextureFields`).
+pub const CHINESE_TEXTURE_ORIGINAL_WIDTH_OFFSET: usize = 0;
+/// Byte offset of `m_OriginalHeight` (little-endian Int32) in the tail.
+pub const CHINESE_TEXTURE_ORIGINAL_HEIGHT_OFFSET: usize = 4;
+/// Byte offset of `m_OriginalAssetGuid` (GUID release read, 16 bytes) in the tail.
+pub const CHINESE_TEXTURE_ORIGINAL_GUID_OFFSET: usize = 8;
+/// Byte size of the GUID release read: 8 + 16 fills the 24-byte tail exactly, so the
+/// trailing `data[0..3]` lines in the source comments describe reserved slots the
+/// reader deliberately does not consume.
+pub const CHINESE_TEXTURE_ORIGINAL_GUID_SIZE: usize = 16;
+
+/// `ReadExtraTextureFields` warning: the exact text logged after consuming the tail.
+pub fn chinese_texture_warning_message(texture_name: &str) -> String {
+    format!(
+        "Texture {texture_name} had an extra 24 bytes, which were assumed to be \
+         non-standard Chinese fields."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,6 +604,121 @@ mod tests {
                 NormalObjectLog::ErrorReadError
             )
         );
+    }
+
+    #[test]
+    fn monobehaviour_structure_follows_the_source_branches() {
+        let parsed = MonoBehaviourReadFacts {
+            read_threw: false,
+            has_type_tree: true,
+            type_tree_parse_ok: true,
+            structure_try_read_ok: true,
+        };
+        assert_eq!(
+            decide_monobehaviour_structure(&parsed),
+            (
+                MonoBehaviourStructureOutcome::UseParsedStructure,
+                MonoBehaviourReadLog::Silent
+            )
+        );
+        // A failed TryRead clears the structure instead of assigning it.
+        let unreadable_tree = MonoBehaviourReadFacts {
+            structure_try_read_ok: false,
+            ..parsed
+        };
+        assert_eq!(
+            decide_monobehaviour_structure(&unreadable_tree),
+            (
+                MonoBehaviourStructureOutcome::ClearStructure,
+                MonoBehaviourReadLog::Silent
+            )
+        );
+        // An absent type tree and an unparseable one both fall to the lazy remainder.
+        for facts in [
+            MonoBehaviourReadFacts {
+                has_type_tree: false,
+                type_tree_parse_ok: true,
+                structure_try_read_ok: true,
+                ..parsed
+            },
+            MonoBehaviourReadFacts {
+                has_type_tree: true,
+                type_tree_parse_ok: false,
+                structure_try_read_ok: true,
+                ..parsed
+            },
+            MonoBehaviourReadFacts {
+                has_type_tree: false,
+                type_tree_parse_ok: false,
+                structure_try_read_ok: false,
+                ..parsed
+            },
+        ] {
+            assert_eq!(
+                decide_monobehaviour_structure(&facts),
+                (
+                    MonoBehaviourStructureOutcome::UseUnloadedRemainder,
+                    MonoBehaviourReadLog::Silent
+                )
+            );
+        }
+        // A thrown read keeps the prior structure and logs the mismatch, winning over
+        // every structure fact.
+        let thrown = MonoBehaviourReadFacts {
+            read_threw: true,
+            has_type_tree: true,
+            type_tree_parse_ok: true,
+            structure_try_read_ok: true,
+        };
+        assert_eq!(
+            decide_monobehaviour_structure(&thrown),
+            (
+                MonoBehaviourStructureOutcome::KeepExisting,
+                MonoBehaviourReadLog::ErrorLayoutMismatch
+            )
+        );
+    }
+
+    #[test]
+    fn factory_diagnostic_texts_match_the_source_formats() {
+        assert_eq!(
+            incorrect_byte_count_message(12, 48, "Texture2D", "2019.4.0f1", "Windows", "res", "a/b"),
+            "Read 12 but expected 48 for asset type Texture2D. V: 2019.4.0f1 P: Windows N: res Path: a/b"
+        );
+        assert_eq!(
+            read_exception_message(
+                "Mesh",
+                "2022.3.1f1",
+                "Android",
+                "level0",
+                "c/d",
+                "System.IO.EndOfStreamException: boom"
+            ),
+            "Error during reading of asset type Mesh. V: 2022.3.1f1 P: Android N: level0 Path: c/d\nSystem.IO.EndOfStreamException: boom"
+        );
+        // Note the source's `MonoBehavior` (single-u) spelling is in the method name only;
+        // the message body has no such word.
+        assert_eq!(
+            monobehaviour_layout_mismatch_message("MonoBehaviour MB", "Script S", "InvalidCastException"),
+            "Unable to read MonoBehaviour MB, because script Script S layout mismatched binary content (InvalidCastException)."
+        );
+        assert_eq!(
+            chinese_texture_warning_message("Logo"),
+            "Texture Logo had an extra 24 bytes, which were assumed to be non-standard Chinese fields."
+        );
+    }
+
+    #[test]
+    fn chinese_tail_layout_fills_the_24_byte_suffix() {
+        assert_eq!(CHINESE_TEXTURE_ORIGINAL_WIDTH_OFFSET, 0);
+        assert_eq!(CHINESE_TEXTURE_ORIGINAL_HEIGHT_OFFSET, 4);
+        assert_eq!(CHINESE_TEXTURE_ORIGINAL_GUID_OFFSET, 8);
+        // Two Int32 reads plus the 16-byte GUID release read consume the tail exactly.
+        assert_eq!(
+            CHINESE_TEXTURE_ORIGINAL_GUID_OFFSET + CHINESE_TEXTURE_ORIGINAL_GUID_SIZE,
+            CHINESE_TEXTURE_EXTRA_BYTES
+        );
+        assert_eq!(CHINESE_TEXTURE_EXTRA_BYTES, 24);
     }
 
     #[test]

@@ -1,13 +1,15 @@
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
-use crate::io::binary::{BinaryError, BinaryReader};
+use crate::io::binary::{BinaryError, BinaryReader, Endian};
 
+use super::format_version::FormatVersion;
 use super::header::{HeaderError, SerializedFileHeader};
 use super::managed_types::managed_reference as managed_names;
 use super::metadata::{
     unity_version_aligns_arrays, SerializedFileMetadata, TypeTree, TypeTreeNode,
 };
+use super::transfer_flags::TransferInstructionFlags;
 
 const ALIGN_BYTES_FLAG: u32 = 0x4000;
 const CHAR_PROPERTY_MASK_FLAG: u32 = 0x0200_0000;
@@ -1889,6 +1891,95 @@ impl Display for ObjectDecodeErrorKind {
     }
 }
 
+/// Raw `BuildTarget` value meaning "no target".
+///
+/// Mirrors `BuildTarget.NoTarget` (`0xFFFFFFFE`, from
+/// `AssetRipper/Source/AssetRipper.IO.Files/BuildTarget.cs`). The full
+/// platform-enum mapping stays open (see `SER-META-PLATFORM-001`); the flags
+/// kernel only needs this one comparison, exactly like `SerializedFile.Flags`.
+pub const BUILD_TARGET_NO_TARGET: u32 = 0xFFFFFFFE;
+
+/// First engine default-resource file name in `SpecialFileNames`.
+pub const DEFAULT_RESOURCE_NAME_1: &str = "unity default resources";
+/// Second engine default-resource file name in `SpecialFileNames`.
+pub const DEFAULT_RESOURCE_NAME_2: &str = "unity_default_resources";
+/// Engine editor-resource file name in `SpecialFileNames`.
+pub const EDITOR_RESOURCE_NAME: &str = "unity editor resources";
+/// First builtin-extra file name in `SpecialFileNames`.
+pub const BUILTIN_EXTRA_NAME_1: &str = "unity builtin extra";
+/// Second builtin-extra file name in `SpecialFileNames`.
+pub const BUILTIN_EXTRA_NAME_2: &str = "unity_builtin_extra";
+
+/// `SpecialFileNames.IsEngineResource` over a caller-supplied file name.
+///
+/// The source compares with ordinal, case-sensitive equality against the raw
+/// `FileBase.Name` (not `NameFixed`), so this does the same: callers must pass
+/// the raw name unchanged. A `FixFileIdentifier` output such as
+/// `"library/unity default resources"` therefore never matches here.
+pub fn is_engine_resource_name(file_name: &str) -> bool {
+    file_name == DEFAULT_RESOURCE_NAME_1
+        || file_name == DEFAULT_RESOURCE_NAME_2
+        || file_name == EDITOR_RESOURCE_NAME
+}
+
+/// `SpecialFileNames.IsBuiltinExtra` over a caller-supplied file name.
+///
+/// Same exact-match semantics as [`is_engine_resource_name`].
+pub fn is_builtin_extra_name(file_name: &str) -> bool {
+    file_name == BUILTIN_EXTRA_NAME_1 || file_name == BUILTIN_EXTRA_NAME_2
+}
+
+/// Transfer flags governing how a SerializedFile's objects are read.
+///
+/// Mirrors `SerializedFile.Flags`
+/// (`AssetRipper/Source/AssetRipper.IO.Files/SerializedFiles/SerializedFile.cs`):
+/// a `NoTarget` platform on a platform-carrying generation reads editor scenes
+/// (`.unity` paths) as `SerializeEditorMinimalScene` and anything else with bare
+/// flags, while every other file reads as `SerializeGameRelease`. Engine
+/// resources (and, below generation 10, builtin-extra files) additionally set
+/// `IsBuiltinResourcesFile`, and big-endian bodies set `SwapEndianess`.
+///
+/// Caller facts: `generation` is the file generation (`HasPlatform` is
+/// `generation >= Unknown_8`, shared with the metadata prefix reader);
+/// `platform` is the parsed target-platform value (`None` when the generation
+/// carries no platform field — only `Some(BUILD_TARGET_NO_TARGET)` on a
+/// platform-carrying generation takes the scene branch); `file_path` is the raw
+/// `FileBase.FilePath` (the `.unity` check is an ordinal, case-sensitive suffix
+/// on the full path, matching `EndsWith(".unity", Ordinal)`); `file_name` is
+/// the raw `FileBase.Name` (not `NameFixed`); `body_endian` is the file body
+/// endianness (the source's `EndianType` after `GetEndianType`).
+///
+/// The generated per-class release/editor read dispatch and the export
+/// collections that carry `Flags` stay caller-side: this kernel only derives the
+/// flag word. `SpecialFileNames.FixFileIdentifier` (`NameFixed`) normalization
+/// is likewise out of scope here.
+pub fn serialized_file_object_read_flags(
+    generation: FormatVersion,
+    platform: Option<u32>,
+    file_path: &str,
+    file_name: &str,
+    body_endian: Endian,
+) -> TransferInstructionFlags {
+    let mut flags = if generation.has_platform() && platform == Some(BUILD_TARGET_NO_TARGET) {
+        if file_path.ends_with(".unity") {
+            TransferInstructionFlags::SERIALIZE_EDITOR_MINIMAL_SCENE
+        } else {
+            TransferInstructionFlags::NONE
+        }
+    } else {
+        TransferInstructionFlags::SERIALIZE_GAME_RELEASE
+    };
+    let builtin_extra_below_generation_10 =
+        generation.raw() < FormatVersion::Unknown10.raw() && is_builtin_extra_name(file_name);
+    if is_engine_resource_name(file_name) || builtin_extra_below_generation_10 {
+        flags = flags.with(TransferInstructionFlags::IS_BUILTIN_RESOURCES_FILE);
+    }
+    if body_endian == Endian::Big {
+        flags = flags.with(TransferInstructionFlags::SWAP_ENDIANESS);
+    }
+    flags
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -2768,5 +2859,199 @@ mod tests {
             ])
         );
         assert_eq!(object.consumed_bytes, payload.len());
+    }
+
+    #[test]
+    fn object_read_flags_select_release_for_ordinary_game_files() {
+        use super::TransferInstructionFlags;
+        use crate::serialized_file::format_version::FormatVersion;
+
+        // An ordinary platformed file reads as a game release.
+        let flags = super::serialized_file_object_read_flags(
+            FormatVersion::LargeFilesSupport,
+            Some(7),
+            "/game/level0",
+            "level0",
+            crate::io::binary::Endian::Little,
+        );
+        assert_eq!(flags, TransferInstructionFlags::SERIALIZE_GAME_RELEASE);
+        assert!(flags.is_release());
+        // A generation without a platform field never takes the scene branch,
+        // even with a NoTarget stand-in and a `.unity` path.
+        let flags = super::serialized_file_object_read_flags(
+            FormatVersion::Unknown7,
+            None,
+            "/game/Level.unity",
+            "Level",
+            crate::io::binary::Endian::Little,
+        );
+        assert_eq!(flags, TransferInstructionFlags::SERIALIZE_GAME_RELEASE);
+    }
+
+    #[test]
+    fn object_read_flags_select_editor_scene_for_unity_paths_without_target() {
+        use super::TransferInstructionFlags;
+        use crate::io::binary::Endian;
+        use crate::serialized_file::format_version::FormatVersion;
+
+        let scene = super::serialized_file_object_read_flags(
+            FormatVersion::LargeFilesSupport,
+            Some(super::BUILD_TARGET_NO_TARGET),
+            "Assets/Scenes/Main.unity",
+            "Main",
+            Endian::Little,
+        );
+        assert_eq!(
+            scene,
+            TransferInstructionFlags::SERIALIZE_EDITOR_MINIMAL_SCENE
+        );
+        assert!(scene.is_editor_scene());
+        assert!(!scene.is_release());
+        // A NoTarget platform without a `.unity` path carries bare flags.
+        let bare = super::serialized_file_object_read_flags(
+            FormatVersion::LargeFilesSupport,
+            Some(super::BUILD_TARGET_NO_TARGET),
+            "/game/sharedassets0.assets",
+            "sharedassets0.assets",
+            Endian::Little,
+        );
+        assert_eq!(bare, TransferInstructionFlags::NONE);
+        // The suffix check is ordinal and case-sensitive, like the source.
+        let upper = super::serialized_file_object_read_flags(
+            FormatVersion::LargeFilesSupport,
+            Some(super::BUILD_TARGET_NO_TARGET),
+            "Assets/Scenes/Main.UNITY",
+            "Main",
+            Endian::Little,
+        );
+        assert_eq!(upper, TransferInstructionFlags::NONE);
+        let backup = super::serialized_file_object_read_flags(
+            FormatVersion::LargeFilesSupport,
+            Some(super::BUILD_TARGET_NO_TARGET),
+            "Assets/Scenes/Main.unity.backup",
+            "Main",
+            Endian::Little,
+        );
+        assert_eq!(backup, TransferInstructionFlags::NONE);
+        // A real platform target always reads as a game release.
+        let release = super::serialized_file_object_read_flags(
+            FormatVersion::LargeFilesSupport,
+            Some(7),
+            "Assets/Scenes/Main.unity",
+            "Main",
+            Endian::Little,
+        );
+        assert_eq!(release, TransferInstructionFlags::SERIALIZE_GAME_RELEASE);
+    }
+
+    #[test]
+    fn object_read_flags_mark_builtin_resource_files() {
+        use super::TransferInstructionFlags;
+        use crate::io::binary::Endian;
+        use crate::serialized_file::format_version::FormatVersion;
+
+        // Engine resources set the builtin bit on any generation.
+        for name in [
+            super::DEFAULT_RESOURCE_NAME_1,
+            super::DEFAULT_RESOURCE_NAME_2,
+            super::EDITOR_RESOURCE_NAME,
+        ] {
+            let flags = super::serialized_file_object_read_flags(
+                FormatVersion::LargeFilesSupport,
+                Some(7),
+                "/game/resources.assets",
+                name,
+                Endian::Little,
+            );
+            assert_eq!(
+                flags,
+                TransferInstructionFlags::SERIALIZE_GAME_RELEASE
+                    .with(TransferInstructionFlags::IS_BUILTIN_RESOURCES_FILE)
+            );
+            assert!(flags.is_builtin_resources());
+        }
+        // Builtin-extra names only count below generation 10.
+        for name in [super::BUILTIN_EXTRA_NAME_1, super::BUILTIN_EXTRA_NAME_2] {
+            let old = super::serialized_file_object_read_flags(
+                FormatVersion::Unknown9,
+                Some(super::BUILD_TARGET_NO_TARGET),
+                "/game/extra.assets",
+                name,
+                Endian::Little,
+            );
+            assert!(old.is_builtin_resources());
+            let cutoff = super::serialized_file_object_read_flags(
+                FormatVersion::Unknown10,
+                Some(7),
+                "/game/extra.assets",
+                name,
+                Endian::Little,
+            );
+            assert!(!cutoff.is_builtin_resources());
+            assert_eq!(cutoff, TransferInstructionFlags::SERIALIZE_GAME_RELEASE);
+        }
+        // Ordinary names never set the builtin bit.
+        let plain = super::serialized_file_object_read_flags(
+            FormatVersion::Unknown9,
+            None,
+            "/game/sharedassets0.assets",
+            "sharedassets0.assets",
+            Endian::Little,
+        );
+        assert!(!plain.is_builtin_resources());
+    }
+
+    #[test]
+    fn object_read_flags_swap_endianness_for_big_endian_bodies() {
+        use super::TransferInstructionFlags;
+        use crate::io::binary::Endian;
+        use crate::serialized_file::format_version::FormatVersion;
+
+        let big = super::serialized_file_object_read_flags(
+            FormatVersion::LargeFilesSupport,
+            Some(7),
+            "/game/data.assets",
+            "data.assets",
+            Endian::Big,
+        );
+        assert_eq!(
+            big,
+            TransferInstructionFlags::SERIALIZE_GAME_RELEASE
+                .with(TransferInstructionFlags::SWAP_ENDIANESS)
+        );
+        // The endian bit composes with the scene and builtin bits.
+        let scene_big = super::serialized_file_object_read_flags(
+            FormatVersion::LargeFilesSupport,
+            Some(super::BUILD_TARGET_NO_TARGET),
+            "Assets/Scenes/Main.unity",
+            super::DEFAULT_RESOURCE_NAME_2,
+            Endian::Big,
+        );
+        assert!(scene_big.is_editor_scene());
+        assert!(scene_big.is_builtin_resources());
+        assert_eq!(
+            scene_big.0,
+            TransferInstructionFlags::SERIALIZE_EDITOR_MINIMAL_SCENE.0
+                | TransferInstructionFlags::IS_BUILTIN_RESOURCES_FILE.0
+                | TransferInstructionFlags::SWAP_ENDIANESS.0
+        );
+    }
+
+    #[test]
+    fn special_file_name_predicates_match_exact_names_only() {
+        assert!(super::is_engine_resource_name("unity default resources"));
+        assert!(super::is_engine_resource_name("unity_default_resources"));
+        assert!(super::is_engine_resource_name("unity editor resources"));
+        assert!(!super::is_engine_resource_name("unity builtin extra"));
+        // Ordinal comparison: case and normalization matter.
+        assert!(!super::is_engine_resource_name("Unity Default Resources"));
+        assert!(!super::is_engine_resource_name(
+            "library/unity default resources"
+        ));
+        assert!(!super::is_engine_resource_name(""));
+        assert!(super::is_builtin_extra_name("unity builtin extra"));
+        assert!(super::is_builtin_extra_name("unity_builtin_extra"));
+        assert!(!super::is_builtin_extra_name("Unity Builtin Extra"));
+        assert!(!super::is_builtin_extra_name("unity editor resources"));
     }
 }

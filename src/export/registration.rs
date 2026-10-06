@@ -24,6 +24,22 @@
 //! order. Resolving which registration wins for a concrete generated type needs the generated
 //! hierarchy, which the frozen snapshot does not contain; the table therefore records the stack
 //! without claiming resolution.
+//!
+//! Deliberately out of this table (audited, not missing):
+//! - `RawTextureExporter` is `internal` and never constructed or registered anywhere in the
+//!   frozen baseline, so it contributes no row.
+//! - `AssemblyDefinitionExporter` is a static helper called by the script collections, not
+//!   an `IAssetExporter`, so it contributes no row.
+//! - The five `ExportHandler.GetPostExporters` post-exporters (`ProjectVersionPostExporter`,
+//!   `PackageManifestPostExporter`, `StreamingAssetsPostExporter`, `DllPostExporter`,
+//!   `PathIdMapExporter`) run after export through `IPostExporter`, not through the asset
+//!   exporter stack, so they contribute no rows.
+//! - The abstract bases (`BinaryAssetExporter`, `YamlExporterBase`, `ShaderExporterBase`,
+//!   `DummyAssetExporter` with its private empty/skip implementers selected by
+//!   `DummyAssetExporter.Get`) never register directly; the dummy rows record the selected
+//!   `(isEmptyCollection, isMetaType)` arguments instead.
+//! - `PrimaryContentExporter` keeps its own `OverrideHandler` stack outside `ProjectExporter`
+//!   and is not part of this order.
 
 use super::settings::ImageExportFormat;
 
@@ -31,7 +47,8 @@ use super::settings::ImageExportFormat;
 ///
 /// `LightmapTextureExportFormat.Exr` forces `ImageExportFormat.Exr`; the `Image` mode reuses
 /// the configured image format. (The `Yaml` mode never constructs this exporter, so it has
-/// no mapping here.)
+/// no mapping here.) The exporter's `PreferOriginalTextureExtension` passes the settings
+/// value through unchanged; only the format argument is decided here.
 pub const fn lightmap_conversion_format(
     is_exr_mode: bool,
     configured: ImageExportFormat,
@@ -770,5 +787,134 @@ mod tests {
             .map(|registration| registration.exporter)
             .collect();
         assert_eq!(font_material, ["FontAssetExporter"]);
+    }
+
+    #[test]
+    fn full_registry_shape_matches_source_call_order() {
+        // Every OverrideExporter/OverrideDummyExporter call in ProjectExporter..ctor plus
+        // the two DoFinalOverrides calls, in source order: target, exporter, inheritance,
+        // gate, final-override flag, and dummy arguments. The IShader switch contributes
+        // two rows (one call site, two mutually exclusive gates); the unreadable-assets
+        // if/else contributes two rows (one branch runs per configuration).
+        let shape: Vec<String> = EXPORTER_REGISTRATIONS
+            .iter()
+            .map(|registration| {
+                format!(
+                    "{}|{}|{}|{:?}|{}|{:?}|{:?}",
+                    registration.target,
+                    registration.exporter,
+                    registration.allow_inheritance,
+                    registration.gate,
+                    registration.final_override,
+                    registration.dummy_is_empty_collection,
+                    registration.dummy_is_meta_type,
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                "IUnityObjectBase|DefaultYamlExporter|true|Always|false|None|None",
+                "IGlobalGameManager|ManagerAssetExporter|true|Always|false|None|None",
+                "TypeTreeObject|ManagerAssetExporter|true|Always|false|None|None",
+                "IMonoBehaviour|ScriptableObjectExporter|true|Always|false|None|None",
+                "IPrefabInstance|SceneYamlExporter|true|Always|false|None|None",
+                "IGameObject|SceneYamlExporter|true|Always|false|None|None",
+                "IComponent|SceneYamlExporter|true|Always|false|None|None",
+                "ILevelGameManager|SceneYamlExporter|true|Always|false|None|None",
+                "IBuildSettings|DummyAssetExporter|true|Always|false|Some(true)|Some(false)",
+                "IPreloadData|DummyAssetExporter|true|Always|false|Some(true)|Some(false)",
+                "IAssetBundle|DummyAssetExporter|true|Always|false|Some(true)|Some(false)",
+                "IAssetBundleManifest|DummyAssetExporter|true|Always|false|Some(true)|Some(false)",
+                "IMonoManager|DummyAssetExporter|true|Always|false|Some(true)|Some(false)",
+                "IResourceManager|DummyAssetExporter|true|Always|false|Some(true)|Some(false)",
+                "IShaderNameRegistry|DummyAssetExporter|true|Always|false|Some(true)|Some(false)",
+                "ISceneAsset|SceneAssetExporter|true|Always|false|None|None",
+                "UnknownObject|UnknownObjectExporter|false|ExportUnreadableAssets|false|None|None",
+                "UnreadableObject|UnreadableObjectExporter|false|ExportUnreadableAssets|false|None|None",
+                "UnknownObject|DummyAssetExporter|true|NoExportUnreadableAssets|false|Some(false)|Some(false)",
+                "UnreadableObject|DummyAssetExporter|true|NoExportUnreadableAssets|false|Some(false)|Some(false)",
+                "IMesh|YamlStreamedAssetExporter|true|Always|false|None|None",
+                "IImageTexture|YamlStreamedAssetExporter|true|Always|false|None|None",
+                "ITextAsset|TextAssetExporter|true|Always|false|None|None",
+                "IMovieTexture|MovieTextureAssetExporter|true|Always|false|None|None",
+                "IVideoClip|VideoClipExporter|true|Always|false|None|None",
+                "ITexture2D|TextureAssetExporter|true|Always|false|None|None",
+                "ISprite|TextureAssetExporter|true|Always|false|None|None",
+                "SpriteInformationObject|TextureAssetExporter|true|Always|false|None|None",
+                "ISprite|YamlSpriteExporter|true|SpriteExportModeYaml|false|None|None",
+                "ISpriteAtlas|YamlSpriteExporter|true|SpriteExportModeYaml|false|None|None",
+                "ITexture2D|LightmapTextureAssetExporter|true|LightmapTextureExportFormatNonYaml|false|None|None",
+                "ICubemapArray|TextureArrayAssetExporter|true|VersionAtLeast2020_2|false|None|None",
+                "ITexture2DArray|TextureArrayAssetExporter|true|VersionAtLeast2020_2|false|None|None",
+                "ITexture3D|TextureArrayAssetExporter|true|VersionAtLeast2020_2|false|None|None",
+                "IFont|FontAssetExporter|true|Always|false|None|None",
+                "IMaterial|FontAssetExporter|true|Always|false|None|None",
+                "ITexture|FontAssetExporter|true|Always|false|None|None",
+                "IShader|YamlShaderExporter|true|ShaderExportModeYaml|false|None|None",
+                "IShader|DummyShaderTextExporter|true|ShaderExportModeNonYaml|false|None|None",
+                "IShader|SimpleShaderExporter|true|Always|false|None|None",
+                "IAudioClip|YamlAudioExporter|true|Always|false|None|None",
+                "IAudioClip|NativeAudioExporter|true|AudioExportFormatNative|false|None|None",
+                "IAudioClip|AudioClipExporter|true|AudioExportFormatSupported|false|None|None",
+                "IAudioMixer|AudioMixerExporter|true|Always|false|None|None",
+                "IAudioMixerEffectController|AudioMixerExporter|true|Always|false|None|None",
+                "IAudioMixerGroup|AudioMixerExporter|true|Always|false|None|None",
+                "IAudioMixerSnapshot|AudioMixerExporter|true|Always|false|None|None",
+                "ITerrainData|TerrainYamlExporter|true|Always|false|None|None",
+                "ITexture2D|TerrainYamlExporter|true|Always|false|None|None",
+                "IMonoScript|ScriptExporter|true|Always|false|None|None",
+                "IUnityObjectBase|AnimatorControllerExporter|true|Always|false|None|None",
+                "IMonoBehaviour|ScriptableObjectGroupExporter|true|Always|false|None|None",
+                "ScriptableObjectGroup|ScriptableObjectGroupExporter|true|Always|false|None|None",
+                "IUnityObjectBase|EngineAssetsExporter|true|Always|true|None|None",
+                "IUnityObjectBase|DeletedAssetsExporter|true|Always|true|None|None",
+            ]
+        );
+    }
+
+    #[test]
+    fn distinct_exporter_census_matches_baseline() {
+        let mut exporters: Vec<&str> = EXPORTER_REGISTRATIONS
+            .iter()
+            .map(|registration| registration.exporter)
+            .collect();
+        exporters.sort_unstable();
+        exporters.dedup();
+        assert_eq!(
+            exporters,
+            [
+                "AnimatorControllerExporter",
+                "AudioClipExporter",
+                "AudioMixerExporter",
+                "DefaultYamlExporter",
+                "DeletedAssetsExporter",
+                "DummyAssetExporter",
+                "DummyShaderTextExporter",
+                "EngineAssetsExporter",
+                "FontAssetExporter",
+                "LightmapTextureAssetExporter",
+                "ManagerAssetExporter",
+                "MovieTextureAssetExporter",
+                "NativeAudioExporter",
+                "SceneAssetExporter",
+                "SceneYamlExporter",
+                "ScriptExporter",
+                "ScriptableObjectExporter",
+                "ScriptableObjectGroupExporter",
+                "SimpleShaderExporter",
+                "TerrainYamlExporter",
+                "TextAssetExporter",
+                "TextureArrayAssetExporter",
+                "TextureAssetExporter",
+                "UnknownObjectExporter",
+                "UnreadableObjectExporter",
+                "VideoClipExporter",
+                "YamlAudioExporter",
+                "YamlShaderExporter",
+                "YamlSpriteExporter",
+                "YamlStreamedAssetExporter",
+            ]
+        );
     }
 }
