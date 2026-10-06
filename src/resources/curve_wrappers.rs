@@ -278,6 +278,19 @@ mod tests {
         vector3_curve_set_values_with_rotation_order(&mut curve, "new", ROTATION_ORDER_YZX);
         assert_eq!(curve.path, "new");
         assert_eq!(curve.envelope.rotation_order, Some(ROTATION_ORDER_YZX));
+        // The plain Vector3 overload resets junk the same way, without an order.
+        let mut plain = Vector3CurveView {
+            path: "old".to_string(),
+            envelope: junk,
+        };
+        vector3_curve_set_values(&mut plain, "new");
+        assert_eq!(plain.path, "new");
+        assert_eq!(plain.envelope.pre_infinity, CURVE_LOOP_CYCLE_WITH_OFFSET);
+        assert_eq!(plain.envelope.post_infinity, CURVE_LOOP_CYCLE_WITH_OFFSET);
+        assert_eq!(
+            plain.envelope.rotation_order,
+            Some(crate::resources::animation_curve::ROTATION_ORDER_ZXY)
+        );
         let mut legacy = Vector3CurveView {
             path: "old".to_string(),
             envelope: CurveEnvelope {

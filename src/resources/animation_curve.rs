@@ -567,6 +567,59 @@ mod tests {
         assert_eq!(rows, 16);
     }
 
+    /// Cross-gate copies the differentials never exercise: the copy fixture only pairs
+    /// 2017.1 with 2019.4, so a missing rotation slot and absent source weights never
+    /// appear there. Expectations follow `copy_keyframe_for_version`: the target's own
+    /// presence decides the optional slots, and absent source fields read as defaults.
+    #[test]
+    fn cross_gate_copies_drop_absent_fields() {
+        let new_curve = |version: UnityVersion| AnimationCurveView {
+            rotation_order: curve_presence(version).rotation_order.then_some(0),
+            ..AnimationCurveView::default()
+        };
+        // A pre-5.4 target has no rotation slot; pre-2018.1 weights do not survive.
+        let target = UnityVersion::parse("5.0.0f1").unwrap();
+        let source = source_keyframe(UnityVersion::parse("2019.4.3f1").unwrap());
+        let mut curve = new_curve(target);
+        set_values_keyframe(&mut curve, target, &source);
+        assert_eq!(curve.pre_infinity, CURVE_LOOP_CYCLE_WITH_OFFSET);
+        assert_eq!(curve.post_infinity, CURVE_LOOP_CYCLE_WITH_OFFSET);
+        assert_eq!(curve.rotation_order, None);
+        assert_eq!(curve.curve.len(), 1);
+        let copied = &curve.curve[0];
+        assert_eq!(copied.time.to_bits(), 0.25f32.to_bits());
+        assert_eq!(copied.value.to_bits(), 1.5f32.to_bits());
+        assert_eq!(copied.in_slope.to_bits(), 2.5f32.to_bits());
+        assert_eq!(copied.out_slope.to_bits(), 3.5f32.to_bits());
+        assert_eq!(copied.in_weight, None);
+        assert_eq!(copied.out_weight, None);
+        assert_eq!(copied.tangent_mode, 0);
+        assert_eq!(copied.weighted_mode, None);
+        // The enveloped overload honors an absent slot the same way.
+        let mut curve = new_curve(target);
+        set_values_keyframes_enveloped(
+            &mut curve,
+            target,
+            &[source],
+            CURVE_LOOP_LINEAR,
+            CURVE_LOOP_CONSTANT,
+        );
+        assert_eq!(curve.pre_infinity, CURVE_LOOP_LINEAR);
+        assert_eq!(curve.post_infinity, CURVE_LOOP_CONSTANT);
+        assert_eq!(curve.rotation_order, None);
+        assert_eq!(curve.curve.len(), 1);
+        // Absent source weights read as their defaults on a gated target.
+        let target = UnityVersion::parse("2019.4.3f1").unwrap();
+        let source = source_keyframe(UnityVersion::parse("5.0.0f1").unwrap());
+        let mut curve = new_curve(target);
+        set_values_keyframe(&mut curve, target, &source);
+        assert_eq!(curve.rotation_order, Some(ROTATION_ORDER_ZXY));
+        let copied = &curve.curve[0];
+        assert_eq!(copied.in_weight, Some(0.0));
+        assert_eq!(copied.out_weight, Some(0.0));
+        assert_eq!(copied.weighted_mode, Some(0));
+    }
+
     /// The `Vector3f`/`Quaternionf` `SetDefaultRotationOrderAndCurveLoopType` overloads apply
     /// the same envelope as the `Single` overload: `CycleWithOffset` infinities and `OrderZXY`
     /// rotation, leaving an absent (pre-5.4) rotation slot untouched.

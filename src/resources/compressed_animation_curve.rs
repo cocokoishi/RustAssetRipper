@@ -473,4 +473,55 @@ mod tests {
         assert_eq!(destination.pre_infinity, 5);
         assert_eq!(destination.post_infinity, 7);
     }
+
+    #[test]
+    fn unpack_error_messages_and_sources_pin_the_reporting() {
+        use std::error::Error;
+        let times = CompressedAnimationCurveError::Times(PackedBitVectorError::TruncatedData {
+            byte_index: 3,
+            length: 5,
+        });
+        assert_eq!(
+            times.to_string(),
+            "compressed time vector: packed vector data ended at byte 3 of 5"
+        );
+        assert!(times.source().is_some());
+        let values =
+            CompressedAnimationCurveError::Values(PackedQuatVectorError::ItemLimitExceeded {
+                requested: 9,
+                limit: 8,
+            });
+        assert_eq!(
+            values.to_string(),
+            "compressed rotation vector: quaternion vector has 9 items, over the limit of 8"
+        );
+        assert!(values.source().is_some());
+        let slopes = CompressedAnimationCurveError::Slopes(PackedFloatVectorError::TruncatedData {
+            byte_index: 1,
+            length: 2,
+        });
+        assert_eq!(
+            slopes.to_string(),
+            "compressed slope vector: float vector data ended at byte 1 of 2"
+        );
+        assert!(slopes.source().is_some());
+        let short_times = CompressedAnimationCurveError::TruncatedTimes {
+            needed: 4,
+            available: 1,
+        };
+        assert_eq!(
+            short_times.to_string(),
+            "compressed curve needs 4 times but only 1 are available"
+        );
+        assert!(short_times.source().is_none());
+        let short_slopes = CompressedAnimationCurveError::TruncatedSlopes {
+            needed: 12,
+            available: 8,
+        };
+        assert_eq!(
+            short_slopes.to_string(),
+            "compressed curve needs 12 slopes but only 8 are available"
+        );
+        assert!(short_slopes.source().is_none());
+    }
 }
