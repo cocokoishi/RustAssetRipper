@@ -743,6 +743,6 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 
 ## 96. Checkpoint: Switch GOB unswizzle (2026-10-06)
 
-- Ported `Unswizzle` with 8 tests incl. byte-exact cross-model vectors; new row `RES-TEXTURE-SWIZZLE-001`. Lib 997/997 locally, workspace Clippy clean; full validation via Actions after push.
+- Ported `Unswizzle` with 8 tests incl. byte-exact cross-model vectors; new row `RES-TEXTURE-SWIZZLE-001`. Lib 997/997 locally, workspace Clippy clean; CI run `37394130404` green (all five jobs) for remote `main` = `2ca4eda`; local matches.
 - Next: the remaining product rows (`PRODUCT-CONFIG-001`, `PRODUCT-GUI-001`, `GENERATORS-001`, `TOOLS-001` remainders).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
