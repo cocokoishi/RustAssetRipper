@@ -4,6 +4,11 @@
 //! `Matrix4x4f` and the runtime `Matrix4x4` have transposed memory layouts, so `CopyValues` stores
 //! the transpose and `CastToStruct` reads it back.
 //!
+//! Also mirrors `MatrixParameterExtensions`: the shader matrix-parameter view pins the fixed
+//! fields (`NameIndex`, `ArraySize`) and the caller-supplied type, offset, and row count. The
+//! `name` argument is unused in the source (commented out) and `ColumnCount` does not exist on
+//! the source subclass (its default is 4), so neither is modeled.
+//!
 //! Differential fixture: `matrix4x4_fixture.txt` (probe `Temp/opencode/miscprobe`).
 
 /// `Matrix4x4fExtensions.CopyValues`: store the transpose of a row-major `Matrix4x4` into the
@@ -26,6 +31,41 @@ pub fn cast_to_struct(fields: &[f32; 16]) -> [f32; 16] {
         }
     }
     matrix
+}
+
+/// A shader matrix-parameter view.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MatrixParameterView {
+    /// `NameIndex`.
+    pub name_index: i32,
+    /// `OffsetInConstantBuffer`.
+    pub offset_in_constant_buffer: i32,
+    /// `ArraySize`.
+    pub array_size: i32,
+    /// `Type` as the raw `ShaderParamType` discriminant.
+    pub param_type: i8,
+    /// `RowCount`.
+    pub row_count: i8,
+}
+
+impl MatrixParameterView {
+    /// `MatrixParameterExtensions.SetValues`.
+    ///
+    /// The `name` argument is unused in the source (the assignment is commented out), so it
+    /// is not taken; `ColumnCount` is likewise absent. The row count narrows to a byte
+    /// exactly like the source cast.
+    pub fn set_values(&mut self, param_type: i8, offset_in_constant_buffer: i32, row_count: i32) {
+        self.name_index = -1;
+        self.offset_in_constant_buffer = offset_in_constant_buffer;
+        self.array_size = 0;
+        self.param_type = param_type;
+        self.row_count = row_count as i8;
+    }
+
+    /// `MatrixParameterExtensions.GetType_`: the raw `ShaderParamType` discriminant.
+    pub fn get_type(&self) -> i8 {
+        self.param_type
+    }
 }
 
 #[cfg(test)]
@@ -68,5 +108,32 @@ mod tests {
         assert_eq!(raw_rows, 16);
         assert_eq!(round_rows, 16);
         assert_eq!(back, matrix);
+    }
+
+    #[test]
+    fn matrix_parameter_set_values_matches_the_source_shape() {
+        use crate::resources::vector::SHADER_PARAM_TYPE_FLOAT;
+        let mut view = MatrixParameterView {
+            name_index: 3,
+            offset_in_constant_buffer: 7,
+            array_size: 5,
+            param_type: 2,
+            row_count: 2,
+        };
+        view.set_values(SHADER_PARAM_TYPE_FLOAT, 16, 4);
+        assert_eq!(
+            view,
+            MatrixParameterView {
+                name_index: -1,
+                offset_in_constant_buffer: 16,
+                array_size: 0,
+                param_type: SHADER_PARAM_TYPE_FLOAT,
+                row_count: 4,
+            }
+        );
+        assert_eq!(view.get_type(), SHADER_PARAM_TYPE_FLOAT);
+        // The row count narrows to a byte exactly like the source cast.
+        view.set_values(SHADER_PARAM_TYPE_FLOAT, 0, 260);
+        assert_eq!(view.row_count, 4);
     }
 }

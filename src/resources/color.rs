@@ -60,6 +60,17 @@ pub fn set_alpha(rgba: &mut u32, value: u8) {
     set_values(rgba, red(*rgba), green(*rgba), blue(*rgba), value);
 }
 
+/// `ColorRGBA32Extensions.ToColorFloat`: the packed word through `Color32.FromRgba`
+/// widened channel-by-channel over 255, matching the `(ColorFloat)` cast.
+pub fn to_color_float(rgba: u32) -> [f32; 4] {
+    [
+        f32::from(red(rgba)) / 255.0,
+        f32::from(green(rgba)) / 255.0,
+        f32::from(blue(rgba)) / 255.0,
+        f32::from(alpha(rgba)) / 255.0,
+    ]
+}
+
 /// `ColorRGBAfExtensions.SetAsBlack`.
 pub fn rgbaf_set_as_black(color: &mut [f32; 4]) {
     *color = [0.0, 0.0, 0.0, 1.0];
@@ -135,5 +146,32 @@ mod tests {
         assert_eq!(float, [0.0, 0.0, 0.0, 1.0]);
         rgbaf_set_as_white(&mut float);
         assert_eq!(float, [1.0, 1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn packed_to_float_widens_each_channel_over_255() {
+        fn bits(color: [f32; 4]) -> [u32; 4] {
+            [
+                color[0].to_bits(),
+                color[1].to_bits(),
+                color[2].to_bits(),
+                color[3].to_bits(),
+            ]
+        }
+        // Endpoints are exact.
+        assert_eq!(
+            bits(to_color_float(0xFF00_0000)),
+            [0x0000_0000, 0x0000_0000, 0x0000_0000, 0x3F80_0000]
+        );
+        assert_eq!(
+            bits(to_color_float(u32::MAX)),
+            [0x3F80_0000, 0x3F80_0000, 0x3F80_0000, 0x3F80_0000]
+        );
+        // Channels (10, 20, 30, 40) reproduce the probed `Color32`-to-`ColorFloat`
+        // words, pinning both the order and the widening.
+        assert_eq!(
+            bits(to_color_float(0x281E_140A)),
+            [0x3D20_A0A1, 0x3DA0_A0A1, 0x3DF0_F0F1, 0x3E20_A0A1]
+        );
     }
 }

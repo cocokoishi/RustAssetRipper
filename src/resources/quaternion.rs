@@ -1,8 +1,15 @@
-//! `QuaternionfExtensions`.
+//! `QuaternionfExtensions` plus the editor euler-hint computation.
 //!
 //! Mirrors the cast/copy/identity helpers for the serialized quaternion subtype.
 //!
+//! Also mirrors the `EditorFormatConverterAsync` euler-hint assignment: `LocalEulerAnglesHint`
+//! is recomputed from `LocalRotation` through the degrees `ToEulerAngle` conversion. It lives
+//! here (rather than with the transform views) because only this pure rotation math ports —
+//! field presence and transform assembly stay caller-side.
+//!
 //! Differential fixture: `vector_fixture.txt` (probe `Temp/opencode/vecprobe`).
+
+use crate::numerics::Quat;
 
 /// A quaternion view.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -35,6 +42,21 @@ impl QuaternionView {
     pub fn cast_to_struct(&self) -> [f32; 4] {
         [self.x, self.y, self.z, self.w]
     }
+}
+
+/// `EditorFormatConverterAsync` euler-hint computation: `LocalEulerAnglesHint` from a
+/// `LocalRotation` (x, y, z, w) via the degrees `ToEulerAngle` conversion.
+///
+/// Total like the source: no input validation, and callers decide field presence.
+pub fn euler_hint_from_rotation(rotation: [f32; 4]) -> [f32; 3] {
+    let quaternion = Quat {
+        x: rotation[0],
+        y: rotation[1],
+        z: rotation[2],
+        w: rotation[3],
+    };
+    let euler = quaternion.to_euler_angle(true);
+    [euler.x, euler.y, euler.z]
 }
 
 #[cfg(test)]
@@ -75,5 +97,38 @@ mod tests {
             rows += 1;
         }
         assert_eq!(rows, 1);
+    }
+
+    /// The euler-hint conversion recovers degree angles through the forward path.
+    #[test]
+    fn euler_hint_from_rotation_matches_axis_rotations() {
+        use crate::numerics::Vec3;
+
+        fn hint_for(angles: [f32; 3]) -> [f32; 3] {
+            let euler = Vec3 {
+                x: angles[0],
+                y: angles[1],
+                z: angles[2],
+            };
+            let quaternion = euler.to_quaternion(true);
+            euler_hint_from_rotation([quaternion.x, quaternion.y, quaternion.z, quaternion.w])
+        }
+
+        fn close(actual: [f32; 3], expected: [f32; 3]) {
+            for (lane, want) in actual.iter().zip(expected.iter()) {
+                assert!(
+                    (lane - want).abs() < 1e-3,
+                    "got {actual:?}, wanted {expected:?}"
+                );
+            }
+        }
+
+        // Identity stays at the origin; axis and compound angles round-trip like the
+        // numerics reference vectors.
+        close(hint_for([0.0, 0.0, 0.0]), [0.0, 0.0, 0.0]);
+        close(hint_for([0.0, 90.0, 0.0]), [0.0, 90.0, 0.0]);
+        close(hint_for([90.0, 0.0, 0.0]), [90.0, 0.0, 0.0]);
+        close(hint_for([0.0, 45.0, 0.0]), [0.0, 45.0, 0.0]);
+        close(hint_for([-67.0, 45.0, -162.0]), [-67.0, 45.0, -162.0]);
     }
 }
