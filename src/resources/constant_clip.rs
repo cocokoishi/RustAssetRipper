@@ -47,4 +47,15 @@ mod tests {
         }
         assert_eq!(rows, 9);
     }
+
+    #[test]
+    fn is_set_holds_at_count_extremes() {
+        // A plain `> 0` comparison, so even the largest count cannot overflow the check.
+        assert!(!ConstantClipView::default().is_set());
+        assert!(ConstantClipView { data_count: 1 }.is_set());
+        assert!(ConstantClipView {
+            data_count: usize::MAX
+        }
+        .is_set());
+    }
 }
