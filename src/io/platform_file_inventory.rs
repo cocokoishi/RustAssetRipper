@@ -830,7 +830,9 @@ impl InventoryState<'_> {
         let detected = if self.has_il2cpp_files(structure, managed_path.as_deref())? {
             ScriptingBackend::Il2Cpp
         } else if let Some(path) = managed_path.as_deref() {
-            if self.has_mono_assemblies(path)? {
+            if platform_supports_mono_backend(structure.platform)
+                && self.has_mono_assemblies(path)?
+            {
                 ScriptingBackend::Mono
             } else {
                 ScriptingBackend::Unknown
@@ -1348,6 +1350,16 @@ pub const fn select_scripting_backend(
     ScriptingBackend::Unknown
 }
 
+/// Platforms whose baseline backend rule has no Mono arm, over caller facts.
+///
+/// Switch resolves IL2Cpp-or-Unknown (`SwitchGameStructure` ternary), so managed assemblies
+/// never promote it to Mono. Every other platform keeps the shared IL2Cpp-to-Mono-to-Unknown
+/// cascade: WiiU and the web platforms cannot reach IL2Cpp through their own marker arms,
+/// and WebGL/WebPlayer additionally have no managed directory to consult.
+fn platform_supports_mono_backend(platform: PlatformKind) -> bool {
+    !matches!(platform, PlatformKind::Switch)
+}
+
 /// Where a Mono backend gathers assemblies from.
 ///
 /// Mirrors the `CollectMainAssemblies` location dispatch
@@ -1802,9 +1814,9 @@ impl Error for PlatformWorkspaceLoadErrorKind {
 mod tests {
     use super::{
         is_compressed_data_bundle_name, is_primary_engine_file, plan_mono_assembly_collection,
-        register_assembly, select_scripting_backend, MainAssemblyCollection,
-        PlatformFileInventoryErrorKind, PlatformFileInventoryLimits, PlatformFileInventoryOptions,
-        ScriptingBackend,
+        platform_supports_mono_backend, register_assembly, select_scripting_backend,
+        MainAssemblyCollection, PlatformFileInventoryErrorKind, PlatformFileInventoryLimits,
+        PlatformFileInventoryOptions, ScriptingBackend,
     };
     use crate::io::filesystem::VirtualFileSystem;
     use crate::io::platform_structure::{PlatformKind, PlatformStructure};
@@ -2309,6 +2321,51 @@ mod tests {
                 .unwrap();
             assert_eq!(inventory.scripting_backend, ScriptingBackend::Mono);
             assert_eq!(inventory.assemblies.len(), 1);
+        }
+    }
+
+    #[test]
+    fn switch_never_reports_mono_even_with_managed_assemblies() {
+        assert!(platform_supports_mono_backend(PlatformKind::Windows));
+        assert!(!platform_supports_mono_backend(PlatformKind::Switch));
+        // Any incomplete marker set leaves Switch Unknown: the source ternary has no Mono arm.
+        for (assembly_marker, metadata_marker) in [(true, false), (false, true), (false, false)] {
+            let mut filesystem = VirtualFileSystem::new();
+            if assembly_marker {
+                write_file(&mut filesystem, "/switch/exefs/main", b"player marker");
+            }
+            if metadata_marker {
+                write_file(
+                    &mut filesystem,
+                    "/switch/romfs/Data/Managed/Metadata/global-metadata.dat",
+                    b"metadata marker",
+                );
+            }
+            write_file(
+                &mut filesystem,
+                "/switch/romfs/Data/Managed/Assembly-CSharp.dll",
+                b"managed assembly",
+            );
+            let structure = structure(
+                PlatformKind::Switch,
+                "/switch",
+                &["/switch/romfs/Data"],
+                Some("/switch/romfs/Data"),
+                Some("switch"),
+            );
+
+            let inventory = structure
+                .collect_game_files(
+                    &filesystem,
+                    PlatformFileInventoryOptions {
+                        skip_streaming_assets: true,
+                        disable_script_import: false,
+                    },
+                    PlatformFileInventoryLimits::default(),
+                )
+                .unwrap();
+            assert_eq!(inventory.scripting_backend, ScriptingBackend::Unknown);
+            assert!(inventory.assemblies.is_empty());
         }
     }
 

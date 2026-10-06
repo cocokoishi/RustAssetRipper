@@ -5,7 +5,8 @@
 //! `UniqueName`), the `ScriptingBackend` discriminants, the `MonoManager.IsMonoAssembly`
 //! file-name predicate and mscorlib discovery (`TryGetMscorlibPath`), the pure string kernels
 //! behind `MonoScriptExtensions.GetFullName`, `GetValidAssemblyName`, and `HasAssemblyName`,
-//! and the `PropertiesHash` fallback bytes behind `GetPropertiesHash` (the
+//! the `ModuleExtensions.GetType` match rule with the `BaseManager.IsPresent`/`IsValid`
+//! gates, and the `PropertiesHash` fallback bytes behind `GetPropertiesHash` (the
 //! `IMonoScript`/assembly-manager lookups themselves stay outside: they need live
 //! managed assemblies).
 //!
@@ -248,6 +249,36 @@ pub fn find_type_reference_index(
     references
         .iter()
         .position(|reference| type_reference_matches_script(reference, script))
+}
+
+/// `ModuleExtensions.GetType` over caller facts: the index of the first top-level type
+/// whose namespace (a null namespace reads empty) and name match, both compared
+/// ordinally. Callers pass the module's top-level types in order; nested types are
+/// never consulted. Live Cecil lookup stays outside: only the match rule is modeled.
+pub fn find_module_type_index(
+    types: &[(Option<&str>, &str)],
+    namespace: &str,
+    name: &str,
+) -> Option<usize> {
+    types.iter().position(|(type_namespace, type_name)| {
+        type_namespace.unwrap_or_default() == namespace && *type_name == name
+    })
+}
+
+/// `BaseManager.IsPresent` over caller facts: a set manager finds a non-default script.
+pub const fn script_is_present(is_set: bool, is_default: bool, found: bool) -> bool {
+    is_set && !is_default && found
+}
+
+/// `BaseManager.IsValid` over caller facts: like `IsPresent`, and the found type is
+/// not abstract.
+pub const fn script_is_valid(
+    is_set: bool,
+    is_default: bool,
+    found: bool,
+    is_abstract: bool,
+) -> bool {
+    is_set && !is_default && found && !is_abstract
 }
 
 #[cfg(test)]
@@ -511,6 +542,34 @@ mod tests {
         let first = script_reference(Some("Player"), Some("Game"), Some("Assembly-CSharp"));
         let references = vec![script_reference(Some("Other"), None, None), first];
         assert_eq!(find_type_reference_index(&references, &script), Some(1));
+    }
+
+    #[test]
+    fn module_type_lookup_and_script_gates_follow_the_manager_rules() {
+        // A null namespace reads empty; duplicates resolve first-wins in order.
+        let types: [(Option<&str>, &str); 4] = [
+            (Some("Game"), "Player"),
+            (None, "Global"),
+            (Some("Game"), "Player"),
+            (Some(""), "EmptyNs"),
+        ];
+        assert_eq!(find_module_type_index(&types, "Game", "Player"), Some(0));
+        assert_eq!(find_module_type_index(&types, "", "Global"), Some(1));
+        assert_eq!(find_module_type_index(&types, "", "EmptyNs"), Some(3));
+        assert_eq!(find_module_type_index(&types, "Game", "Missing"), None);
+        assert_eq!(find_module_type_index(&types, "Other", "Player"), None);
+        assert_eq!(find_module_type_index(&[], "Game", "Player"), None);
+        // `IsPresent`: a set manager finds a non-default script.
+        assert!(script_is_present(true, false, true));
+        assert!(!script_is_present(false, false, true));
+        assert!(!script_is_present(true, true, true));
+        assert!(!script_is_present(true, false, false));
+        // `IsValid` adds the abstract gate.
+        assert!(script_is_valid(true, false, true, false));
+        assert!(!script_is_valid(true, false, true, true));
+        assert!(!script_is_valid(false, false, true, false));
+        assert!(!script_is_valid(true, true, true, false));
+        assert!(!script_is_valid(true, false, false, false));
     }
 
     #[test]

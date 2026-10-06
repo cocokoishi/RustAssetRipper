@@ -1694,6 +1694,37 @@ const fn plan_load_process(asset_collection_count: usize) -> LoadProcessPlan {
     }
 }
 
+/// What `inspect-files` does with its recognized inputs, over caller facts.
+///
+/// Serialized inputs always load the workspace. With none, explicit root resources
+/// still report: baseline `GameBundle.FromPaths` keeps `ResourceFile` inputs without
+/// any `SerializedFile` (`GameBundle.FromPaths.cs`, lines 49-51). With neither, the
+/// selection names nothing to inspect and the command fails.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExplicitInspectPlan {
+    /// No recognized inputs: fail the command.
+    FailNoRecognizedInputs,
+    /// Roots only: print the catalog plus the no-SerializedFile notice.
+    ReportRootsOnly,
+    /// Serialized inputs present: load the workspace.
+    LoadWorkspace,
+}
+
+/// Selects the `inspect-files` outcome from the recognized SerializedFile and
+/// explicit root resource counts.
+const fn plan_explicit_inspect(
+    serialized_input_count: usize,
+    root_resource_count: usize,
+) -> ExplicitInspectPlan {
+    if serialized_input_count > 0 {
+        ExplicitInspectPlan::LoadWorkspace
+    } else if root_resource_count > 0 {
+        ExplicitInspectPlan::ReportRootsOnly
+    } else {
+        ExplicitInspectPlan::FailNoRecognizedInputs
+    }
+}
+
 fn inspect_explicit_files(input_files: &[PathBuf]) -> Result<(), Box<dyn Error>> {
     let stdout = io::stdout();
     let mut output = stdout.lock();
@@ -1717,14 +1748,20 @@ fn inspect_explicit_files_to<W: io::Write>(
     )?;
     print_explicit_root_resource_catalog_to(output, &root_resources)?;
 
-    if plan_load_process(mixed.serialized_file_inputs.len()) == LoadProcessPlan::ReturnUnprocessed {
-        if root_resources.files().is_empty() {
+    match plan_explicit_inspect(
+        mixed.serialized_file_inputs.len(),
+        root_resources.files().len(),
+    ) {
+        ExplicitInspectPlan::FailNoRecognizedInputs => {
             return Err(invalid_input(
                 "the selected files contain no recognized SerializedFile or root ResourceFile inputs",
             ));
         }
-        writeln!(output, "No SerializedFile inputs were selected.")?;
-        return Ok(());
+        ExplicitInspectPlan::ReportRootsOnly => {
+            writeln!(output, "No SerializedFile inputs were selected.")?;
+            return Ok(());
+        }
+        ExplicitInspectPlan::LoadWorkspace => {}
     }
 
     let (workspace, dependencies) = SerializedFileWorkspace::load_from_vfs_with_dependencies(
@@ -7622,5 +7659,79 @@ mod tests {
         assert_eq!(plan_load_process(usize::MAX), LoadProcessPlan::Process);
         // An empty bundle warns, skips processing, and still returns.
         assert_eq!(plan_load_process(0), LoadProcessPlan::ReturnUnprocessed);
+    }
+
+    #[test]
+    fn explicit_inspect_plan_prefers_workspace_then_roots_then_failure() {
+        use super::{plan_explicit_inspect, ExplicitInspectPlan};
+        // Serialized inputs always load, even alongside roots.
+        assert_eq!(
+            plan_explicit_inspect(1, 0),
+            ExplicitInspectPlan::LoadWorkspace
+        );
+        assert_eq!(
+            plan_explicit_inspect(2, 3),
+            ExplicitInspectPlan::LoadWorkspace
+        );
+        // Roots without serialized inputs still report, like `FromPaths` keeping
+        // `ResourceFile` inputs without any `SerializedFile`.
+        assert_eq!(
+            plan_explicit_inspect(0, 1),
+            ExplicitInspectPlan::ReportRootsOnly
+        );
+        // Neither names nothing to inspect.
+        assert_eq!(
+            plan_explicit_inspect(0, 0),
+            ExplicitInspectPlan::FailNoRecognizedInputs
+        );
+    }
+
+    #[test]
+    fn explicit_file_inspection_reports_roots_without_serialized_inputs() {
+        let directory = TestInputDirectory::new_root();
+        let resource_path = directory.join("direct.resS");
+        fs::write(&resource_path, b"explicit root stream").unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![resource_path.clone()],
+            subdirectories: Vec::new(),
+        };
+
+        let mut output = Vec::new();
+        super::inspect_explicit_files_to(std::slice::from_ref(&resource_path), &mut output)
+            .unwrap();
+        let summary = String::from_utf8(output).unwrap();
+        assert!(summary.contains("Explicit GameBundle root ResourceFiles: 1"));
+        assert!(summary.contains("No SerializedFile inputs were selected."));
+        assert!(!summary.contains("explicit file import:"));
+        drop(input);
+    }
+
+    #[test]
+    fn explicit_file_inspection_fails_without_recognized_inputs() {
+        let directory = TestInputDirectory::new_root();
+        // A web-data container with no serialized entries mounts cleanly but
+        // registers nothing, so the selection names nothing to inspect.
+        let container_path = directory.join("payload.bin");
+        fs::write(
+            &container_path,
+            make_webdata_fixture(&[("notes.txt", b"plain resource bytes")]),
+        )
+        .unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![container_path.clone()],
+            subdirectories: Vec::new(),
+        };
+
+        let mut output = Vec::new();
+        let error =
+            super::inspect_explicit_files_to(std::slice::from_ref(&container_path), &mut output)
+                .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "the selected files contain no recognized SerializedFile or root ResourceFile inputs"
+        );
+        drop(input);
     }
 }

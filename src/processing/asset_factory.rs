@@ -8,7 +8,8 @@
 //! `UnreadableObject` hash and synthetic-name rules, and the `ReadExtraTextureFields`
 //! 24-byte tail layout, plus the structure-resolver selection, the player-settings
 //! class predicate, the MonoBehaviour structure field-start rule, and the `ReadData`
-//! stripped-TypeID fallback with its `ReadAsset` handoff. Byte reading,
+//! stripped-TypeID fallback with its `ReadAsset` handoff, and the `TypeTreeObject`
+//! read/convert plan. Byte reading,
 //! node building, and assembly-backed MonoBehaviour structures stay outside: they need
 //! generated objects and live assemblies. Version facts arrive precomputed because the
 //! Rust tree has no parsed Unity-version model yet.
@@ -478,6 +479,37 @@ pub const fn select_structure_resolver(is_engine_typetree_object: bool) -> Struc
     }
 }
 
+/// Which field tree a `TypeTreeObject` read consumes and where it converts
+/// (`TypeTreeObject.ReadRelease`/`ReadEditor` without the byte reads, which need
+/// live structures).
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum TypeTreeReadPlan {
+    /// Single-tree objects read their only fields in either mode; nothing converts.
+    SingleFields,
+    /// Double-tree release reads consume release fields, then convert into editor fields.
+    ReleaseThenConvertToEditor,
+    /// Double-tree editor reads consume editor fields, then convert into release fields.
+    EditorThenConvertToRelease,
+}
+
+/// `TypeTreeObject` read routing over caller facts: single-tree objects always read
+/// their shared fields, while double-tree objects read the mode-matching tree and
+/// convert it into the other one (same-collection `PPtrConverter`, which stays
+/// caller-side with the value copies). Reversing the conversion direction would
+/// corrupt the target tree, so the plan pins it alongside the read side.
+pub const fn select_typetree_read_plan(
+    is_double_tree_object: bool,
+    release_mode: bool,
+) -> TypeTreeReadPlan {
+    if !is_double_tree_object {
+        TypeTreeReadPlan::SingleFields
+    } else if release_mode {
+        TypeTreeReadPlan::ReleaseThenConvertToEditor
+    } else {
+        TypeTreeReadPlan::EditorThenConvertToRelease
+    }
+}
+
 /// Caller facts behind one `ReadMonoBehaviour` structure decision
 /// (`GameAssetFactory.ReadMonoBehaviour`).
 ///
@@ -835,6 +867,30 @@ mod tests {
         assert_eq!(
             super::select_structure_resolver(false),
             super::StructureResolverKind::FromReferenceTypes
+        );
+    }
+
+    #[test]
+    fn typetree_reads_consume_the_matching_tree_and_convert_into_the_other() {
+        use super::TypeTreeReadPlan;
+        // Single-tree objects read their only fields in either mode.
+        assert_eq!(
+            super::select_typetree_read_plan(false, true),
+            TypeTreeReadPlan::SingleFields
+        );
+        assert_eq!(
+            super::select_typetree_read_plan(false, false),
+            TypeTreeReadPlan::SingleFields
+        );
+        // Double-tree release reads consume release fields, then convert to editor.
+        assert_eq!(
+            super::select_typetree_read_plan(true, true),
+            TypeTreeReadPlan::ReleaseThenConvertToEditor
+        );
+        // Double-tree editor reads consume editor fields, then convert to release.
+        assert_eq!(
+            super::select_typetree_read_plan(true, false),
+            TypeTreeReadPlan::EditorThenConvertToRelease
         );
     }
 

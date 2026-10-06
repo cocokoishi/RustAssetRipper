@@ -370,26 +370,7 @@ pub fn export_asset_with_meta(
         return Ok(AssetExportStep::SkippedFailedExport);
     }
     let asset_path = directory.join(file_name);
-    let mut asset_file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&asset_path)
-        .map_err(|source| UnityProjectOutputError::CreateAsset {
-            path: asset_path.clone(),
-            source,
-        })?;
-    let asset_bytes =
-        write_asset_bytes(&asset_path).map_err(|source| UnityProjectOutputError::WriteAsset {
-            path: asset_path.clone(),
-            source,
-        })?;
-    asset_file
-        .flush()
-        .map_err(|source| UnityProjectOutputError::WriteAsset {
-            path: asset_path.clone(),
-            source,
-        })?;
-    drop(asset_file);
+    let asset_bytes = write_asset_bytes_to_new_file(&asset_path, write_asset_bytes)?;
     let meta = UnityMetaFile::new(
         plan.guid,
         &plan.importer_class,
@@ -409,6 +390,37 @@ pub fn export_asset_with_meta(
         asset_bytes,
         sidecar,
     })
+}
+
+/// Create one asset file add-only, run the caller writer into it, and flush before
+/// returning the written byte count. A writer failure leaves the partial asset behind
+/// with no `.meta` beside it, matching the source asset-first order where a throwing
+/// exporter aborts before `ExportMeta`.
+fn write_asset_bytes_to_new_file(
+    asset_path: &Path,
+    write_asset_bytes: impl FnOnce(&Path) -> io::Result<usize>,
+) -> Result<usize, UnityProjectOutputError> {
+    let mut asset_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(asset_path)
+        .map_err(|source| UnityProjectOutputError::CreateAsset {
+            path: asset_path.to_path_buf(),
+            source,
+        })?;
+    let asset_bytes =
+        write_asset_bytes(asset_path).map_err(|source| UnityProjectOutputError::WriteAsset {
+            path: asset_path.to_path_buf(),
+            source,
+        })?;
+    asset_file
+        .flush()
+        .map_err(|source| UnityProjectOutputError::WriteAsset {
+            path: asset_path.to_path_buf(),
+            source,
+        })?;
+    drop(asset_file);
+    Ok(asset_bytes)
 }
 
 /// `AssetExportCollection<T>.Contains`: identity with the collection asset.
@@ -826,6 +838,30 @@ mod tests {
             Err(UnityProjectOutputError::SidecarAlreadyExists { .. })
         ));
         assert_eq!(fs::read(&sidecar_path).unwrap(), b"existing user meta");
+    }
+
+    #[test]
+    fn failing_asset_writers_leave_the_partial_asset_without_a_sidecar() {
+        let root = TestOutputRoot::new();
+        let outcome = export_asset_with_meta(
+            root.path(),
+            export_plan("Icon.png"),
+            true,
+            |path| -> std::io::Result<usize> {
+                std::fs::write(path, b"partial")?;
+                Err(std::io::Error::other("writer blew up"))
+            },
+            UnityProjectOutputLimits::default(),
+            UnityYamlWriteLimits::default(),
+        );
+        assert!(
+            matches!(outcome, Err(UnityProjectOutputError::WriteAsset { .. })),
+            "a throwing exporter aborts before the meta step"
+        );
+        // The source asset-first order: written bytes (partial here) land before any
+        // meta record is built, so no sidecar exists beside the partial asset.
+        assert_eq!(fs::read(root.path().join("Icon.png")).unwrap(), b"partial");
+        assert!(!root.path().join("Icon.png.meta").exists());
     }
 
     #[test]

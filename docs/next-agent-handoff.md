@@ -1306,3 +1306,11 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Gates: `cargo fmt --check` 0, full tests 1346 lib + 57 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
 - Next: sixty-third team round (gate-first: assemblies lane, export records, CLI surface).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 173. Checkpoint: sixty-third team round integrated — gate-first (2026-10-06)
+
+- All five shipped, all lead-verified (targeted suites re-run: 19/19, bin 60/60, 17/17, 12/12, 14/14) and integrated: `sprite-fill` fixed the Switch backend (`IO-PLATFORM-ASSEMBLIES-001`); `anim-graph` named the inspect tri-state (`PRODUCT-CLI-INSPECT-001`); `mesh-deform` ported read routing (`SER-TT-ABSENT-001`); `texture-export` ported the lookup trio (`TYPE-SCRIPT-001`); `texture-meta` extracted the write atom (`EXP-META-PIPELINE-001`). Clean round: all five dispatch rows STATUS-checked, zero verified-row touches, zero exceptions needed. No scope violations, no placeholders, no probe residue.
+- Gate question answered YES, cleanly.
+- Gates: `cargo fmt --check` 0, full tests 1350 lib + 60 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
+- Next: sixty-fourth team round (gate-first: UnityFS lanes, typetree reader, export settings).
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
