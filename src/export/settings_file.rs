@@ -819,6 +819,20 @@ fn enum_discriminant(number: i64, path: &str) -> Result<i32, SettingsFileError> 
     })
 }
 
+/// Checked decoded-string bound over caller facts: strings accumulate
+/// attacker-controlled bytes, so the closing-quote and per-character checks share one
+/// decision point against `max_string_bytes`. The overflow arms are unreachable in
+/// realistic files, so the kernel keeps them provable.
+fn check_string_bound(len: usize, max_string_bytes: usize) -> Result<(), SettingsFileError> {
+    if len > max_string_bytes {
+        return Err(SettingsFileError::InputTooLong {
+            byte_count: len,
+            limit: max_string_bytes,
+        });
+    }
+    Ok(())
+}
+
 fn map_version(
     value: &JsonValue,
     path: &str,
@@ -1009,12 +1023,7 @@ impl<'a> JsonParser<'a> {
             match byte {
                 b'"' => {
                     self.position += 1;
-                    if output.len() > self.limits.max_string_bytes {
-                        return Err(SettingsFileError::InputTooLong {
-                            byte_count: output.len(),
-                            limit: self.limits.max_string_bytes,
-                        });
-                    }
+                    check_string_bound(output.len(), self.limits.max_string_bytes)?;
                     return Ok(output);
                 }
                 b'\\' => {
@@ -1096,12 +1105,7 @@ impl<'a> JsonParser<'a> {
                     self.position += character.len_utf8();
                 }
             }
-            if output.len() > self.limits.max_string_bytes {
-                return Err(SettingsFileError::InputTooLong {
-                    byte_count: output.len(),
-                    limit: self.limits.max_string_bytes,
-                });
-            }
+            check_string_bound(output.len(), self.limits.max_string_bytes)?;
         }
     }
 
@@ -1482,6 +1486,42 @@ mod tests {
             ),
             "{error:?}"
         );
+    }
+
+    #[test]
+    fn decoded_strings_respect_the_byte_bound() {
+        assert!(super::check_string_bound(0, 8).is_ok());
+        assert!(super::check_string_bound(8, 8).is_ok());
+        assert!(matches!(
+            super::check_string_bound(9, 8),
+            Err(SettingsFileError::InputTooLong {
+                byte_count: 9,
+                limit: 8
+            })
+        ));
+        // The production path enforces the same bound: a code exactly at the limit
+        // parses, one byte more fails while scanning.
+        let limits = SettingsFileLimits::default();
+        let at_limit = "a".repeat(limits.max_string_bytes);
+        let over_limit = "a".repeat(limits.max_string_bytes + 1);
+        for text in [at_limit, over_limit] {
+            let input = format!(
+                "{{\"Import\": {{}}, \"Processing\": {{}}, \"Export\": {{\"LanguageCode\": \"{text}\"}}}}"
+            );
+            let parsed = parse_settings_file(&input, limits);
+            if text.len() > limits.max_string_bytes {
+                assert!(
+                    matches!(
+                        parsed,
+                        Err(SettingsFileError::InputTooLong { limit, .. })
+                            if limit == limits.max_string_bytes
+                    ),
+                    "over-limit string must fail"
+                );
+            } else {
+                assert!(parsed.is_ok(), "at-limit string must parse");
+            }
+        }
     }
 
     #[test]

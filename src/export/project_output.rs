@@ -8,7 +8,9 @@
 //! - Sidecars land beside the asset as `{filePath}.meta`, serialized without a BOM,
 //!   tag, or version, with formatted keys.
 //! - Asset bytes are written before the `.meta` record is built; a failed export
-//!   writes neither file, mirroring the source `false` return.
+//!   writes neither file, mirroring the source `false` return. The export
+//!   subdirectory itself is still created first (`Directory.Create(subPath)` runs
+//!   ahead of `ExportInner`), so a failed export leaves the empty directory behind.
 //! - A zero export GUID fails the meta step while the asset bytes stay written,
 //!   matching the source construction order (`Meta(GUID, importer)` after export).
 //! - Unique-name resolution and the `.meta` length reservation live in `asset_path`;
@@ -352,18 +354,21 @@ pub fn export_asset_with_meta(
     path_limits: UnityProjectOutputLimits,
     yaml_limits: UnityYamlWriteLimits,
 ) -> Result<AssetExportStep, UnityProjectOutputError> {
-    // No site writes the sidecar for a failed asset export. The shared outcome kernel owns
-    // this gate so its two spellings cannot diverge.
-    if !decide_asset_collection_export(export_succeeded).emits_meta() {
-        return Ok(AssetExportStep::SkippedFailedExport);
-    }
     let components = validated_path_components(&plan.relative_asset_path, path_limits)?;
     let (dir_components, [file_name]) = components.split_at(components.len() - 1) else {
         return Err(UnityProjectOutputError::InvalidRelativePath {
             reason: "path must contain only ordinary, portable relative components",
         });
     };
+    // The source creates the export subdirectory before the asset writer runs
+    // (`Directory.Create(subPath)` ahead of `ExportInner`), so a failed export still
+    // leaves the (empty) directory behind. Only file writes stay gated.
     let directory = ensure_output_directory(output_root, dir_components)?;
+    // No site writes the sidecar for a failed asset export. The shared outcome kernel owns
+    // this gate so its two spellings cannot diverge.
+    if !decide_asset_collection_export(export_succeeded).emits_meta() {
+        return Ok(AssetExportStep::SkippedFailedExport);
+    }
     let asset_path = directory.join(file_name);
     let mut asset_file = OpenOptions::new()
         .write(true)
@@ -730,7 +735,11 @@ mod tests {
             .unwrap(),
             AssetExportStep::SkippedFailedExport
         );
-        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+        // The source creates the subdirectory before the asset writer runs, so a failed
+        // export leaves the empty directory tree but no files.
+        assert!(root.path().join("Assets/Textures").is_dir());
+        assert!(!root.path().join("Assets/Textures/Icon.png").exists());
+        assert!(!root.path().join("Assets/Textures/Icon.png.meta").exists());
     }
 
     #[test]

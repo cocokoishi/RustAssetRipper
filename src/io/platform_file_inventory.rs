@@ -715,7 +715,7 @@ impl InventoryState<'_> {
     fn collect_data_path(&mut self, root: &str) -> Result<(), PlatformFileInventoryError> {
         for path in self.top_level_files(root)? {
             let name = file_name(&path);
-            if matches!(name, "data.unity3d" | "datapack.unity3d") {
+            if is_compressed_data_bundle_name(name) {
                 self.register(name.to_owned(), path);
             } else if is_primary_engine_file(name) {
                 let logical_name = logical_file_name(&path).ok_or_else(|| {
@@ -1412,6 +1412,14 @@ pub fn plan_mono_assembly_collection<'a>(
     MainAssemblyCollection::None
 }
 
+/// `CollectCompressedGameFiles` name rule over caller facts: only the literal
+/// `data.unity3d` and `datapack.unity3d` names count here. Split parts of those bundles
+/// resolve through the split-aware branch below instead, and the match is ordinal like
+/// the source joins.
+fn is_compressed_data_bundle_name(name: &str) -> bool {
+    matches!(name, "data.unity3d" | "datapack.unity3d")
+}
+
 /// `CollectCompressedGameFiles` split awareness over caller facts: `MultiFileStream.Exists`
 /// resolves split parts, so a `data.unity3d`/`datapack.unity3d` split part registers under
 /// its logical bundle name exactly like a literal bundle file. Returns the logical bundle
@@ -1793,9 +1801,10 @@ impl Error for PlatformWorkspaceLoadErrorKind {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_primary_engine_file, plan_mono_assembly_collection, register_assembly,
-        select_scripting_backend, MainAssemblyCollection, PlatformFileInventoryErrorKind,
-        PlatformFileInventoryLimits, PlatformFileInventoryOptions, ScriptingBackend,
+        is_compressed_data_bundle_name, is_primary_engine_file, plan_mono_assembly_collection,
+        register_assembly, select_scripting_backend, MainAssemblyCollection,
+        PlatformFileInventoryErrorKind, PlatformFileInventoryLimits, PlatformFileInventoryOptions,
+        ScriptingBackend,
     };
     use crate::io::filesystem::VirtualFileSystem;
     use crate::io::platform_structure::{PlatformKind, PlatformStructure};
@@ -2590,6 +2599,21 @@ mod tests {
             "sharedassets1.assets.split1",
         ] {
             assert!(!is_primary_engine_file(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn compressed_data_bundle_names_match_the_source_literals() {
+        assert!(is_compressed_data_bundle_name("data.unity3d"));
+        assert!(is_compressed_data_bundle_name("datapack.unity3d"));
+        // Ordinal: case, longer names, and split parts stay with the other branches.
+        for name in [
+            "Data.unity3d",
+            "data.unity3d.bak",
+            "data.unity3d.split0",
+            "level0",
+        ] {
+            assert!(!is_compressed_data_bundle_name(name), "{name}");
         }
     }
 

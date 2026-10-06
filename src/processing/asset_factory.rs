@@ -7,7 +7,8 @@
 //! `LogMonoBehaviorReadException` diagnostic texts, the `RawDataObject`/`UnknownObject`/
 //! `UnreadableObject` hash and synthetic-name rules, and the `ReadExtraTextureFields`
 //! 24-byte tail layout, plus the structure-resolver selection, the player-settings
-//! class predicate, and the MonoBehaviour structure field-start rule. Byte reading,
+//! class predicate, the MonoBehaviour structure field-start rule, and the `ReadData`
+//! stripped-TypeID fallback with its `ReadAsset` handoff. Byte reading,
 //! node building, and assembly-backed MonoBehaviour structures stay outside: they need
 //! generated objects and live assemblies. Version facts arrive precomputed because the
 //! Rust tree has no parsed Unity-version model yet.
@@ -15,8 +16,11 @@
 //! Deliberately open: the generated `AssetFactory.CreateSerialized` class switch (emitted
 //! by `AssetRipper.AssemblyDumper` `Pass940_MakeAssetFactory`, not snapshot logic), the
 //! `TypeTreeNodeStruct`/`SerializableStructure` node building behind the MonoBehaviour
-//! structure facts, the live-assembly `UnloadedStructure` materialization, and the actual
-//! `EndianSpanReader` byte consumption behind the tail-layout offsets.
+//! structure facts, the live-assembly `UnloadedStructure` materialization, the actual
+//! `EndianSpanReader` byte consumption behind the tail-layout offsets, and the
+//! `FromSerializedFile` stripped-version default (a zero version takes the configured
+//! default, which needs a unified parsed Unity-version model; versions still travel
+//! as caller facts and texts).
 //!
 //! Differential evidence: the `ENGINE` rows of `mono_utils_fixture.txt` (probe
 //! `Temp/opencode/monoutilsprobe` resolving all 21 engine names at 2019.4.0f1, SDK
@@ -61,6 +65,26 @@ pub fn classify_read_path(version_before_3_5: bool, class_id: i32) -> AssetReadP
     } else {
         AssetReadPath::Normal
     }
+}
+
+/// `SerializedAssetCollection.ReadData` class fallback over caller facts: a stripped
+/// (negative) object type ID reads as `MonoBehaviour` (114), because stripped files
+/// keep no usable type mapping; every other type ID passes through unchanged.
+pub const fn resolve_read_class_id(type_id: i32) -> i32 {
+    if type_id < 0 {
+        MONO_BEHAVIOUR_CLASS_ID
+    } else {
+        type_id
+    }
+}
+
+/// The `ReadData` into `ReadAsset` handoff: each file object resolves its read class
+/// through the stripped-TypeID fallback before the top dispatch. This is the
+/// production caller behind `resolve_read_class_id`: collection loading never
+/// dispatches a raw negative type ID, and the version gate still wins over the
+/// fallback exactly like the source call order.
+pub fn classify_read_data_path(version_before_3_5: bool, type_id: i32) -> AssetReadPath {
+    classify_read_path(version_before_3_5, resolve_read_class_id(type_id))
 }
 
 /// How a normal read consumes its payload (`TryReadNormalObject` tail rules).
@@ -831,6 +855,34 @@ mod tests {
             AssetReadPath::UnreadableUnsupportedVersion
         );
         assert_eq!(MONO_BEHAVIOUR_CLASS_ID, 114);
+    }
+
+    #[test]
+    fn stripped_type_ids_read_as_monobehaviours_before_dispatch() {
+        // The `ReadData` fallback: negatives become 114, everything else is identity.
+        assert_eq!(super::resolve_read_class_id(-1), MONO_BEHAVIOUR_CLASS_ID);
+        assert_eq!(super::resolve_read_class_id(-2), MONO_BEHAVIOUR_CLASS_ID);
+        assert_eq!(
+            super::resolve_read_class_id(i32::MIN),
+            MONO_BEHAVIOUR_CLASS_ID
+        );
+        for type_id in [0, 1, 28, 113, 114, 115, 129, i32::MAX] {
+            assert_eq!(super::resolve_read_class_id(type_id), type_id);
+        }
+        // The handoff routes a stripped object down the script path, while the
+        // version gate still wins over the fallback like the source call order.
+        assert_eq!(
+            super::classify_read_data_path(false, -1),
+            AssetReadPath::MonoBehaviour
+        );
+        assert_eq!(
+            super::classify_read_data_path(false, 28),
+            AssetReadPath::Normal
+        );
+        assert_eq!(
+            super::classify_read_data_path(true, -1),
+            AssetReadPath::UnreadableUnsupportedVersion
+        );
     }
 
     #[test]

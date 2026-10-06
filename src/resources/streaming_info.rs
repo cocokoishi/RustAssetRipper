@@ -35,8 +35,13 @@ impl StreamingInfoView {
         }
     }
 
-    /// `StreamingInfoExtensions.SetOffset`: truncates to 32 bits on the old layout, matching the
-    /// baseline's unchecked `(uint)` cast.
+    /// `StreamingInfoExtensions.SetOffset`: stores the value in the layout's width.
+    ///
+    /// The baseline's `(uint)` narrowing looks like a truncation, but the whole baseline
+    /// builds overflow-checked (`<CheckForOverflowUnderflow>true</CheckForOverflowUnderflow>`),
+    /// so the real runtime throws `OverflowException` on values above `u32::MAX` instead of
+    /// truncating (observed directly against `StreamingInfoExtensions.SetOffset`). This
+    /// infallible view keeps Rust `as` wrap instead; the narrowing test records the difference.
     pub fn set_offset(&mut self, value: u64) {
         if self.has_offset_u64 {
             self.offset_u64 = value;
@@ -147,10 +152,14 @@ mod tests {
         assert_eq!(rows, 3);
     }
 
+    /// Narrowing offsets wrap with Rust `as` semantics instead of truncating like an
+    /// unchecked cast. The baseline's `(uint)` cast looks unchecked, but the whole baseline
+    /// builds overflow-checked, so the real runtime throws `OverflowException` on narrowing
+    /// overflow (observed directly against `StreamingInfoExtensions.SetOffset`; wrap-around
+    /// quirks do not exist). This infallible view keeps the wrap — a throwing or saturating
+    /// parity has no production caller — and records the difference here.
     #[test]
-    fn offset_truncation_and_value_round_trips_match_the_unchecked_cast() {
-        // `SetValues`/`GetValues` round-trip, and the old layout truncates the offset
-        // exactly like the baseline's unchecked `(uint)` cast.
+    fn narrowing_offsets_wrap_where_the_checked_baseline_throws() {
         let mut old = StreamingInfoView {
             has_offset_u64: false,
             ..StreamingInfoView::default()
@@ -162,6 +171,11 @@ mod tests {
             ("archive:/level0", u64::from(u32::MAX), 41)
         );
 
+        // Low-bits wrap, not saturation: only the bottom 32 bits survive.
+        old.set_values("archive:/level0", 0x1_0000_0005, 7);
+        assert_eq!(old.get_offset(), 5);
+        assert_eq!(old.get_values(), ("archive:/level0", 5, 7));
+
         let mut new = StreamingInfoView {
             has_offset_u64: true,
             ..StreamingInfoView::default()
@@ -169,7 +183,7 @@ mod tests {
         new.set_values("archive:/level0", u64::MAX, 41);
         assert_eq!(new.get_values(), ("archive:/level0", u64::MAX, 41));
 
-        // Copying a wide offset into the old layout truncates through the same path.
+        // Copying a wide offset into the old layout wraps through the same path.
         let mut narrowed = StreamingInfoView {
             has_offset_u64: false,
             ..StreamingInfoView::default()

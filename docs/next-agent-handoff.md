@@ -1298,3 +1298,11 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Gates: `cargo fmt --check` 0, full tests 1343 lib + 57 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
 - Next: sixty-second team round (gate-first: streaming-info premise, factory fallback, iOS/Switch registry).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 172. Checkpoint: sixty-second team round integrated — gate-first (2026-10-06)
+
+- All five shipped, all lead-verified (targeted suites re-run: 16/16, 18/18, 13/13, 12/12, 2/2) and integrated: `mesh-deform` ported the ReadData fallback (`SER-TT-ABSENT-001`); `sprite-fill` named the compressed literal (`IO-PLATFORM-FILES-001`); `anim-graph` fixed the subdirectory order (`EXP-META-PIPELINE-001`); `texture-export` named the string bound (`EXP-SETTINGS-FILE-001`); `texture-meta` replaced the false truncation premise with runtime truth (`IO-RESOURCE-STREAMINGINFO-FIELDS-001`, stays verified). All five dispatch rows STATUS-checked as text (no LEN use); 240 is the documented verified-row exception. No scope violations, no placeholders, no probe residue.
+- Gate question answered YES with the documented exception note.
+- Gates: `cargo fmt --check` 0, full tests 1346 lib + 57 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
+- Next: sixty-third team round (gate-first: assemblies lane, export records, CLI surface).
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
