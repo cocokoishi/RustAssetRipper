@@ -3,7 +3,8 @@
 //!
 //! Ports the format dispatch and structural guards, which need no type resolver:
 //! the terminated/counted format discriminants, the terminus triple, the
-//! unknown/null reference identifiers, and the counted-format capacity guard.
+//! unknown/null reference identifiers, the counted-format capacity guard, and
+//! per-entry framing (identifier classification plus the content-presence gate).
 //! Reading entry type triples and object payloads stays open: content decoding
 //! needs `ITypeResolver.TryGetSerializableType` (live assemblies or TypeTrees).
 //!
@@ -140,6 +141,50 @@ pub const fn classify_reference_id(identifier: i64) -> ReferenceIdKind {
     }
 }
 
+/// One framed registry entry: the decisions `ReadReferencedObject` makes without
+/// the type resolver. Callers read the managed-type triple first (stopping on
+/// `is_terminus` in the terminated format, where entries carry no stored
+/// identifier), then the entry identifier in the counted format, and use
+/// `has_content` to decide whether content bytes follow.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct RegistryEntryFrame {
+    pub reference_id: i64,
+    pub kind: ReferenceIdKind,
+    /// Whether content bytes follow: sentinels and empty class/assembly names
+    /// carry no content (`ReadReferencedObjectData`).
+    pub has_content: bool,
+}
+
+/// Frames one registry entry identifier with its content decision, giving the
+/// content gate below its production caller.
+pub const fn frame_registry_entry(
+    reference_id: i64,
+    class_name_is_empty: bool,
+    assembly_name_is_empty: bool,
+) -> RegistryEntryFrame {
+    let kind = classify_reference_id(reference_id);
+    RegistryEntryFrame {
+        reference_id,
+        kind,
+        has_content: referenced_object_has_content(
+            kind,
+            class_name_is_empty,
+            assembly_name_is_empty,
+        ),
+    }
+}
+
+/// `ReadReferencedObjectData` content gate over caller facts: null and unknown
+/// references have no content, and neither does an entry whose class or assembly
+/// name is empty. Everything else proceeds to type resolution.
+pub const fn referenced_object_has_content(
+    kind: ReferenceIdKind,
+    class_name_is_empty: bool,
+    assembly_name_is_empty: bool,
+) -> bool {
+    matches!(kind, ReferenceIdKind::Content) && !class_name_is_empty && !assembly_name_is_empty
+}
+
 /// The counted-format capacity guard: the stream must hold at least one byte per
 /// object (`remainingBytes < count`), mirroring the source `EndOfStreamException`.
 /// A negative count is refused explicitly where the source allocation throws.
@@ -164,10 +209,10 @@ pub const fn check_counted_capacity(
 #[cfg(test)]
 mod tests {
     use super::{
-        check_counted_capacity, classify_reference_id, classify_registry_format, is_terminus,
-        ManagedRegistryError, ReferenceIdKind, RegistryFormat, COUNTED_FORMAT, NULL_REFERENCE_ID,
-        TERMINATED_FORMAT, TERMINUS_ASSEMBLY_NAME, TERMINUS_CLASS_NAME, TERMINUS_NAMESPACE,
-        UNKNOWN_REFERENCE_ID,
+        check_counted_capacity, classify_reference_id, classify_registry_format,
+        frame_registry_entry, is_terminus, referenced_object_has_content, ManagedRegistryError,
+        ReferenceIdKind, RegistryFormat, COUNTED_FORMAT, NULL_REFERENCE_ID, TERMINATED_FORMAT,
+        TERMINUS_ASSEMBLY_NAME, TERMINUS_CLASS_NAME, TERMINUS_NAMESPACE, UNKNOWN_REFERENCE_ID,
     };
 
     #[test]
@@ -227,5 +272,37 @@ mod tests {
             check_counted_capacity(100, -1),
             Err(ManagedRegistryError::NegativeObjectCount { count: -1 })
         );
+    }
+
+    #[test]
+    fn entry_frames_carry_the_content_decision() {
+        let entry = frame_registry_entry(7, false, false);
+        assert_eq!(entry.reference_id, 7);
+        assert_eq!(entry.kind, ReferenceIdKind::Content);
+        assert!(entry.has_content);
+        // Sentinels carry no content, even with names present.
+        assert!(!frame_registry_entry(-1, false, false).has_content);
+        assert!(!frame_registry_entry(-2, false, false).has_content);
+        // Empty class or assembly names carry no content either.
+        assert!(!frame_registry_entry(7, true, false).has_content);
+        assert!(!frame_registry_entry(7, false, true).has_content);
+        assert!(!frame_registry_entry(7, true, true).has_content);
+        // Other negative identifiers still classify as content, like the source.
+        assert!(frame_registry_entry(-3, false, false).has_content);
+        assert!(referenced_object_has_content(
+            ReferenceIdKind::Content,
+            false,
+            false
+        ));
+        assert!(!referenced_object_has_content(
+            ReferenceIdKind::Unknown,
+            false,
+            false
+        ));
+        assert!(!referenced_object_has_content(
+            ReferenceIdKind::Null,
+            false,
+            false
+        ));
     }
 }

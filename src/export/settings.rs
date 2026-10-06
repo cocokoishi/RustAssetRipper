@@ -3,8 +3,11 @@
 //! Three records drive import, processing, and export, all persisted as JSON singletons:
 //!
 //! - `ImportSettings`: `ScriptContentLevel` (default `Level2`), `StreamingAssetsMode` (default
-//!   `Extract` with an `IgnoreStreamingAssets` shorthand), and the package-defaulted
-//!   `DefaultVersion`/`TargetVersion` Unity versions.
+//!   `Extract`) with the `IgnoreStreamingAssets` get/set shorthand, and the package-defaulted
+//!   `DefaultVersion`/`TargetVersion` Unity versions. The shorthand feeds the
+//!   game-structure collection and streaming-assets post-export skip flags caller-side;
+//!   settings-file persistence keeps using `StreamingAssetsMode` itself, matching the
+//!   baseline `JsonIgnore`.
 //! - `ProcessingSettings`: prefab outlining off, static mesh separation on, asset
 //!   deduplication off, nullable removal off, assembly publicizing off, and
 //!   `BundledAssetsExportMode::DirectExport`.
@@ -82,6 +85,16 @@ impl StreamingAssetsMode {
             1 => Some(Self::Extract),
             _ => None,
         }
+    }
+
+    /// Whether this mode skips the StreamingAssets tree.
+    ///
+    /// Mirrors the `ImportSettings.IgnoreStreamingAssets` getter
+    /// (`AssetRipper/Source/AssetRipper.Import/Configuration/ImportSettings.cs`, lines
+    /// 17-24): only `Ignore` skips. The game-structure collection and the streaming-assets
+    /// post-exporter read this decision through their caller-side skip flags.
+    pub const fn skip_streaming_assets(self) -> bool {
+        matches!(self, Self::Ignore)
     }
 }
 
@@ -537,6 +550,25 @@ impl Default for ImportDefaults {
     }
 }
 
+impl ImportDefaults {
+    /// `ImportSettings.IgnoreStreamingAssets` getter: only `Ignore` mode skips.
+    pub const fn ignore_streaming_assets(self) -> bool {
+        self.streaming_assets_mode.skip_streaming_assets()
+    }
+
+    /// `ImportSettings.IgnoreStreamingAssets` setter: `true` selects `Ignore`,
+    /// `false` unconditionally reselects `Extract`, like the source. The property
+    /// carries `JsonIgnore` in the baseline, so settings-file persistence keeps
+    /// reading and writing `StreamingAssetsMode` itself.
+    pub fn set_ignore_streaming_assets(&mut self, ignore: bool) {
+        self.streaming_assets_mode = if ignore {
+            StreamingAssetsMode::Ignore
+        } else {
+            StreamingAssetsMode::Extract
+        };
+    }
+}
+
 /// Default `ProcessingSettings` values from the source record.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProcessingDefaults {
@@ -727,6 +759,29 @@ mod tests {
         let _ = TerrainExportMode::Yaml;
         let _ = TerrainExportMode::Mesh;
         let _ = TerrainExportMode::Heatmap;
+    }
+
+    #[test]
+    fn ignore_streaming_assets_shorthand_follows_the_source_property() {
+        use super::{ImportDefaults, StreamingAssetsMode};
+        // The getter reads the mode: only `Ignore` skips.
+        assert!(StreamingAssetsMode::Ignore.skip_streaming_assets());
+        assert!(!StreamingAssetsMode::Extract.skip_streaming_assets());
+        assert!(!ImportDefaults::default().ignore_streaming_assets());
+        // The setter maps back onto the mode, unconditionally reselecting
+        // `Extract` on `false`, like the source.
+        for start in [StreamingAssetsMode::Ignore, StreamingAssetsMode::Extract] {
+            let mut defaults = ImportDefaults {
+                streaming_assets_mode: start,
+                ..ImportDefaults::default()
+            };
+            defaults.set_ignore_streaming_assets(true);
+            assert_eq!(defaults.streaming_assets_mode, StreamingAssetsMode::Ignore);
+            assert!(defaults.ignore_streaming_assets());
+            defaults.set_ignore_streaming_assets(false);
+            assert_eq!(defaults.streaming_assets_mode, StreamingAssetsMode::Extract);
+            assert!(!defaults.ignore_streaming_assets());
+        }
     }
 
     /// Differential against the shipped configuration assemblies

@@ -1170,3 +1170,11 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Gates: `cargo fmt --check` 0, full tests 1268 lib + 56 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
 - Next: forty-sixth team round (gate-first: multfile stream, Switch/PS4 structures, registry reader).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 156. Checkpoint: forty-sixth team round integrated — gate-first (2026-10-06)
+
+- Five teammates shipped disjoint scopes, all lead-verified (targeted suites re-run: 21/21, 14/14, 5/5, 43/43, 16/16) and integrated: `texture-meta` hardened split names (`IO-STREAM-MULTIFILE-001`); `sprite-fill` ported the Switch layout (`IO-PLATFORM-SWITCH-001`); `texture-export` ported the content gate (`SER-MANAGED-REFS-001`); `mesh-deform` named the partition (`IO-STREAM-INPUT-001`); `anim-graph` ported the streaming-assets shorthand (`PRODUCT-CONFIG-001`). Standing production-caller rule held (kernels wired; settings API is `pub` by file pattern). No scope violations, no placeholders, no verified row touched.
+- Gate question answered YES: all five units reduce the Phase 1 incomplete count.
+- Gates: `cargo fmt --check` 0, full tests 1275 lib + 56 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
+- Next: forty-seventh team round (gate-first: PS4/WebGL structures, typetree absent, import directory).
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

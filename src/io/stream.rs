@@ -852,6 +852,35 @@ fn split_base_path(path: &Path) -> Option<PathBuf> {
     Some(path.with_file_name(base))
 }
 
+/// `MultiFileStream` part-name decision: an entry belongs to `base_name` only as
+/// exactly `{base}.split<digits>`, returning the numeric index (`IsMultiFile`
+/// plus the `SplitNameComparer` index rule).
+///
+/// One deliberate difference is documented, not changed: the source lists
+/// directory entries with the loose `*.split*` glob and parses trailing digits
+/// anywhere after `.split`, so `data.split+5` sorts as part 5 and its bytes are
+/// incorporated. This port fails closed on such decoy names instead, because
+/// real split parts are always strictly numeric and the alternative is silent
+/// bundle corruption. Overflowing indices fail the same way the source
+/// `int.Parse` throws. Called by `open_split_file`; non-matching names return
+/// `None` so unrelated files stay ignored.
+fn split_part_index(base_name: &str, entry_name: &str) -> Option<io::Result<i32>> {
+    let suffix = entry_name.strip_prefix(base_name)?.strip_prefix(".split")?;
+    if suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Some(Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("split part name {entry_name:?} has a non-numeric suffix"),
+        )));
+    }
+    let index = suffix.parse::<i32>().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("split part index in {entry_name:?} is outside the supported range"),
+        )
+    });
+    Some(index)
+}
+
 fn open_split_file(base_path: &Path, max_parts: usize) -> io::Result<MultiFileStream> {
     let directory = base_path
         .parent()
@@ -866,7 +895,6 @@ fn open_split_file(base_path: &Path, max_parts: usize) -> io::Result<MultiFileSt
                 "split file has no valid UTF-8 filename",
             )
         })?;
-    let prefix = format!("{base_name}.split");
     let mut parts = Vec::<(i32, PathBuf)>::new();
 
     for result in std::fs::read_dir(directory)? {
@@ -874,8 +902,9 @@ fn open_split_file(base_path: &Path, max_parts: usize) -> io::Result<MultiFileSt
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        let Some(suffix) = name.strip_prefix(&prefix) else {
-            continue;
+        let index = match split_part_index(base_name, &name) {
+            None => continue,
+            Some(result) => result?,
         };
         let file_type = entry.file_type()?;
         if file_type.is_symlink() {
@@ -887,18 +916,6 @@ fn open_split_file(base_path: &Path, max_parts: usize) -> io::Result<MultiFileSt
         if !file_type.is_file() {
             continue;
         }
-        if suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("split part name {name:?} has a non-numeric suffix"),
-            ));
-        }
-        let index = suffix.parse::<i32>().map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("split part index in {name:?} is outside the supported range"),
-            )
-        })?;
         if parts.len() >= max_parts {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -1106,8 +1123,8 @@ fn seek_target(position: u64, length: u64, from: SeekFrom) -> io::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        logical_file_name, logical_file_path, open_logical_file, FileRangeStream, MultiFileStream,
-        PartialStream, SmartStream, SmartStreamBackend, SmartStreamType,
+        logical_file_name, logical_file_path, open_logical_file, split_part_index, FileRangeStream,
+        MultiFileStream, PartialStream, SmartStream, SmartStreamBackend, SmartStreamType,
     };
     use crate::compression::wrappers::compress_gzip;
     use crate::scheme::{FileKind, SchemeReader, SchemeReaderLimits};
@@ -1286,6 +1303,49 @@ mod tests {
         remove_test_files(
             &directory,
             &["sample.bundle.split0", "sample.bundle.split2"],
+        );
+    }
+
+    /// The part-name decision: strict `{base}.split<digits>` shapes resolve to
+    /// their index, unrelated names stay ignored, and decoy suffixes fail
+    /// instead of sorting as a part the way the source trailing-digit parse would.
+    #[test]
+    fn split_part_names_resolve_strictly_numeric_indices() {
+        assert_eq!(split_part_index("data", "data.split0").unwrap().unwrap(), 0);
+        assert_eq!(
+            split_part_index("data", "data.split007").unwrap().unwrap(),
+            7
+        );
+        assert!(split_part_index("data", "other.split0").is_none());
+        assert!(split_part_index("data", "data.split").unwrap().is_err());
+        assert!(split_part_index("data", "data.split+1").unwrap().is_err());
+        assert!(split_part_index("data", "data.split 1").unwrap().is_err());
+        assert!(split_part_index("data", "data.split99999999999999999999")
+            .unwrap()
+            .is_err());
+    }
+
+    #[test]
+    fn split_assembly_rejects_decoy_part_names() {
+        let directory = create_test_directory("decoy");
+        let base = directory.join("sample.bundle");
+        std::fs::write(directory.join("sample.bundle.split0"), b"first").unwrap();
+        std::fs::write(directory.join("sample.bundle.split1"), b"second").unwrap();
+        std::fs::write(directory.join("sample.bundle.split+1"), b"decoy").unwrap();
+
+        let error = match open_logical_file(&base) {
+            Ok(_) => panic!("decoy split part names must be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("non-numeric suffix"));
+        remove_test_files(
+            &directory,
+            &[
+                "sample.bundle.split0",
+                "sample.bundle.split1",
+                "sample.bundle.split+1",
+            ],
         );
     }
 

@@ -1,9 +1,9 @@
 //! Platform root and DataPath discovery for mounted Unity game layouts.
 //!
 //! Covers the root/marker decisions per platform (including the Android APK/OBB bitmask and the
-//! `assets/bin/Data` gate) plus the Android and iOS directory layouts. Backend selection, assembly
-//! and metadata collection, and bundle gathering live in the file inventory; bundle-hierarchy
-//! lookups live in the serialized-file workspace.
+//! `assets/bin/Data` gate) plus the Android, iOS, and Switch directory layouts. Backend selection,
+//! assembly and metadata collection, and bundle gathering live in the file inventory;
+//! bundle-hierarchy lookups live in the serialized-file workspace.
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -747,6 +747,38 @@ pub fn ios_data_layout(root_path: &str, app_path: &str, app_name: &str) -> IosDa
     }
 }
 
+/// `SwitchGameStructure` directory layout for one title root.
+///
+/// Mirrors the constructor joins: `romfs/Data` under the root, `StreamingAssets`, `Resources`,
+/// and `Managed` under it, the IL2Cpp game assembly as `exefs/main`, and `global-metadata.dat`
+/// under `Managed/Metadata`. `UnityPlayerPath` stays unset on Switch, like the source, so it has
+/// no slot here.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SwitchDataLayout {
+    pub game_data_path: String,
+    pub streaming_assets_path: String,
+    pub resources_path: String,
+    pub managed_path: String,
+    pub exefs_path: String,
+    pub il2cpp_game_assembly_path: String,
+    pub il2cpp_metadata_path: String,
+}
+
+pub fn switch_data_layout(root_path: &str) -> SwitchDataLayout {
+    let game_data_path = join_path(root_path, "romfs/Data");
+    let managed_path = join_path(&game_data_path, "Managed");
+    let exefs_path = join_path(root_path, "exefs");
+    SwitchDataLayout {
+        streaming_assets_path: join_path(&game_data_path, "StreamingAssets"),
+        resources_path: join_path(&game_data_path, "Resources"),
+        il2cpp_game_assembly_path: join_path(&exefs_path, "main"),
+        il2cpp_metadata_path: join_path(&managed_path, "Metadata/global-metadata.dat"),
+        managed_path,
+        exefs_path,
+        game_data_path,
+    }
+}
+
 fn detect_ios(
     filesystem: &VirtualFileSystem,
     selected_path: &str,
@@ -808,13 +840,11 @@ fn detect_switch(
     filesystem: &VirtualFileSystem,
     selected_path: &str,
 ) -> Result<Option<PlatformStructure>, PlatformStructureError> {
+    let layout = switch_data_layout(selected_path);
     if !exists_directory(filesystem, selected_path)?
-        || !exists_directory(filesystem, &join_path(selected_path, "exefs"))?
+        || !exists_directory(filesystem, &layout.exefs_path)?
+        || !exists_directory(filesystem, &layout.game_data_path)?
     {
-        return Ok(None);
-    }
-    let game_data_path = join_path(selected_path, "romfs/Data");
-    if !exists_directory(filesystem, &game_data_path)? {
         return Ok(None);
     }
     Ok(Some(make_structure(
@@ -823,8 +853,8 @@ fn detect_switch(
         vec![selected_path.to_owned()],
         selected_path.to_owned(),
         Some(file_name(selected_path).to_owned()),
-        Some(game_data_path.clone()),
-        vec![game_data_path],
+        Some(layout.game_data_path.clone()),
+        vec![layout.game_data_path],
     )))
 }
 
@@ -1236,9 +1266,9 @@ impl Error for PlatformStructureError {
 mod tests {
     use super::{
         android_data_layout, detect_desktop_platform, detect_platform_structure, ios_data_layout,
-        DesktopPlatform, PlatformKind, PlatformResourceLookup, PlatformResourceProvider,
-        PlatformResourceSource, PlatformStructure, PlatformStructureErrorKind,
-        PlatformStructureLimits,
+        switch_data_layout, DesktopPlatform, PlatformKind, PlatformResourceLookup,
+        PlatformResourceProvider, PlatformResourceSource, PlatformStructure,
+        PlatformStructureErrorKind, PlatformStructureLimits,
     };
     use crate::io::filesystem::VirtualFileSystem;
 
@@ -1615,6 +1645,25 @@ mod tests {
         assert_eq!(
             layout.il2cpp_metadata_path,
             "/ios/Payload/Example.app/Data/Managed/Metadata/global-metadata.dat"
+        );
+    }
+
+    #[test]
+    fn switch_directory_layout_matches_the_constructor_joins() {
+        let layout = switch_data_layout("/switch");
+        assert_eq!(layout.game_data_path, "/switch/romfs/Data");
+        assert_eq!(
+            layout.streaming_assets_path,
+            "/switch/romfs/Data/StreamingAssets"
+        );
+        assert_eq!(layout.resources_path, "/switch/romfs/Data/Resources");
+        assert_eq!(layout.managed_path, "/switch/romfs/Data/Managed");
+        assert_eq!(layout.exefs_path, "/switch/exefs");
+        // The IL2Cpp assembly is the `main` binary under `exefs`.
+        assert_eq!(layout.il2cpp_game_assembly_path, "/switch/exefs/main");
+        assert_eq!(
+            layout.il2cpp_metadata_path,
+            "/switch/romfs/Data/Managed/Metadata/global-metadata.dat"
         );
     }
 

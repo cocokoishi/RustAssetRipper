@@ -40,6 +40,23 @@ pub enum WrapperKind {
     Brotli,
 }
 
+/// Whether a dispatched kind expands into mounted entries.
+///
+/// Bundle files mount their entries (recursively for nested containers), while
+/// SerializedFiles and bare resources mount as single leaves. UnityArchive counts as
+/// a container for dispatch even though its reader is unsupported, matching the
+/// source detection precedence that registers its detector.
+pub const fn is_container_kind(kind: FileKind) -> bool {
+    matches!(
+        kind,
+        FileKind::UnityFs
+            | FileKind::UnityRaw
+            | FileKind::UnityWebBundle
+            | FileKind::UnityWebData
+            | FileKind::UnityArchive
+    )
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WrapperLayer {
     pub kind: WrapperKind,
@@ -1630,34 +1647,29 @@ fn mount_tree_child<'a, 'b>(
         source_name: resource_name,
         entry_index,
     } = entry;
-    match child.kind {
-        FileKind::UnityFs
-        | FileKind::UnityRaw
-        | FileKind::UnityWebBundle
-        | FileKind::UnityWebData
-        | FileKind::UnityArchive => {
-            let depth = parent_depth.checked_add(1).ok_or_else(|| {
+    if is_container_kind(child.kind) {
+        let depth = parent_depth.checked_add(1).ok_or_else(|| {
+            ContainerMountError::new(
+                state.report.clone(),
+                ContainerMountErrorKind::NestingDepthLimitExceeded {
+                    depth: usize::MAX,
+                    limit: state.limits.max_depth,
+                },
+            )
+        })?;
+        let child_owned_bytes = match &child.contents {
+            Cow::Owned(bytes) => u64::try_from(bytes.len()).map_err(|_| {
                 ContainerMountError::new(
                     state.report.clone(),
-                    ContainerMountErrorKind::NestingDepthLimitExceeded {
-                        depth: usize::MAX,
-                        limit: state.limits.max_depth,
-                    },
+                    ContainerMountErrorKind::TotalOutputSizeOverflow { entry_index },
                 )
-            })?;
-            let child_owned_bytes = match &child.contents {
-                Cow::Owned(bytes) => u64::try_from(bytes.len()).map_err(|_| {
-                    ContainerMountError::new(
-                        state.report.clone(),
-                        ContainerMountErrorKind::TotalOutputSizeOverflow { entry_index },
-                    )
-                })?,
-                Cow::Borrowed(_) => 0,
-            };
-            let requested_active_bytes = state
-                .active_nested_bytes
-                .checked_add(child_owned_bytes)
-                .ok_or_else(|| {
+            })?,
+            Cow::Borrowed(_) => 0,
+        };
+        let requested_active_bytes = state
+            .active_nested_bytes
+            .checked_add(child_owned_bytes)
+            .ok_or_else(|| {
                 ContainerMountError::new(
                     state.report.clone(),
                     ContainerMountErrorKind::ActiveNestedContainerLimitExceeded {
@@ -1667,77 +1679,75 @@ fn mount_tree_child<'a, 'b>(
                     },
                 )
             })?;
-            if requested_active_bytes > state.limits.max_active_nested_bytes {
-                return Err(ContainerMountError::new(
-                    state.report.clone(),
-                    ContainerMountErrorKind::ActiveNestedContainerLimitExceeded {
-                        entry_index,
-                        requested_total: requested_active_bytes,
-                        limit: state.limits.max_active_nested_bytes,
-                    },
-                ));
-            }
-            state.active_nested_bytes = requested_active_bytes;
-            let result = child.mount_container_tree_at(
-                Some(&entry_path),
-                depth,
-                Some(container_bundle_index),
-                Some(entry_index),
-                Some(resource_name),
-                state,
-            );
-            state.active_nested_bytes -= child_owned_bytes;
-            result
+        if requested_active_bytes > state.limits.max_active_nested_bytes {
+            return Err(ContainerMountError::new(
+                state.report.clone(),
+                ContainerMountErrorKind::ActiveNestedContainerLimitExceeded {
+                    entry_index,
+                    requested_total: requested_active_bytes,
+                    limit: state.limits.max_active_nested_bytes,
+                },
+            ));
         }
-        FileKind::SerializedFile | FileKind::Resource => {
-            let serialized_file = if child.kind == FileKind::SerializedFile {
-                Some(prepare_mounted_serialized_file(
-                    &entry_path,
-                    entry_index,
-                    container_scope_index,
-                    container_bundle_index,
-                    state,
-                )?)
-            } else {
-                None
-            };
-            let resource_file = if child.kind == FileKind::Resource {
-                Some(prepare_mounted_resource_file(
-                    &entry_path,
-                    resource_name,
-                    entry_index,
-                    container_scope_index,
-                    container_bundle_index,
-                    state,
-                )?)
-            } else {
-                None
-            };
-            mount_container_entry_at_path(
-                state.filesystem,
+        state.active_nested_bytes = requested_active_bytes;
+        let result = child.mount_container_tree_at(
+            Some(&entry_path),
+            depth,
+            Some(container_bundle_index),
+            Some(entry_index),
+            Some(resource_name),
+            state,
+        );
+        state.active_nested_bytes -= child_owned_bytes;
+        result
+    } else {
+        let serialized_file = if child.kind == FileKind::SerializedFile {
+            Some(prepare_mounted_serialized_file(
                 &entry_path,
                 entry_index,
-                child.contents,
-                state.limits,
-                &mut state.report,
-            )?;
-            if let Some(serialized_file) = serialized_file {
-                state.report.serialized_file_path_bytes = serialized_file.total_path_bytes;
-                state.report.serialized_files.push(serialized_file.record);
-                state.bundle_serialized_file_counts[container_bundle_index] =
-                    serialized_file.next_bundle_collection_count;
-            }
-            if let Some(resource_file) = resource_file {
-                state.resource_file_path_bytes = resource_file.total_path_bytes;
-                state.report.resource_file_path_bytes = resource_file.total_path_bytes;
-                state.resource_file_name_bytes = resource_file.total_name_bytes;
-                state.report.resource_file_name_bytes = resource_file.total_name_bytes;
-                state.report.resource_files.push(resource_file.record);
-                state.bundle_resource_file_counts[container_bundle_index] =
-                    resource_file.next_bundle_resource_count;
-            }
-            Ok(())
+                container_scope_index,
+                container_bundle_index,
+                state,
+            )?)
+        } else {
+            None
+        };
+        let resource_file = if child.kind == FileKind::Resource {
+            Some(prepare_mounted_resource_file(
+                &entry_path,
+                resource_name,
+                entry_index,
+                container_scope_index,
+                container_bundle_index,
+                state,
+            )?)
+        } else {
+            None
+        };
+        mount_container_entry_at_path(
+            state.filesystem,
+            &entry_path,
+            entry_index,
+            child.contents,
+            state.limits,
+            &mut state.report,
+        )?;
+        if let Some(serialized_file) = serialized_file {
+            state.report.serialized_file_path_bytes = serialized_file.total_path_bytes;
+            state.report.serialized_files.push(serialized_file.record);
+            state.bundle_serialized_file_counts[container_bundle_index] =
+                serialized_file.next_bundle_collection_count;
         }
+        if let Some(resource_file) = resource_file {
+            state.resource_file_path_bytes = resource_file.total_path_bytes;
+            state.report.resource_file_path_bytes = resource_file.total_path_bytes;
+            state.resource_file_name_bytes = resource_file.total_name_bytes;
+            state.report.resource_file_name_bytes = resource_file.total_name_bytes;
+            state.report.resource_files.push(resource_file.record);
+            state.bundle_resource_file_counts[container_bundle_index] =
+                resource_file.next_bundle_resource_count;
+        }
+        Ok(())
     }
 }
 
@@ -2143,56 +2153,44 @@ impl SchemeReader {
         destination_root: Option<&str>,
         mount_limits: ContainerMountLimits,
     ) -> Result<ContainerMountReport, ContainerMountError> {
-        match dispatched.kind {
-            FileKind::UnityFs
-            | FileKind::UnityRaw
-            | FileKind::UnityWebBundle
-            | FileKind::UnityWebData
-            | FileKind::UnityArchive => {
-                let source_name = logical_file_name(input_path).ok_or_else(|| {
-                    ContainerMountError::new(
-                        ContainerMountReport::default(),
-                        ContainerMountErrorKind::InputPathHasNoFileName,
-                    )
-                })?;
-                dispatched.mount_container_tree_with_source_name(
-                    filesystem,
-                    destination_root,
-                    Some(&source_name),
-                    mount_limits,
+        if is_container_kind(dispatched.kind) {
+            let source_name = logical_file_name(input_path).ok_or_else(|| {
+                ContainerMountError::new(
+                    ContainerMountReport::default(),
+                    ContainerMountErrorKind::InputPathHasNoFileName,
                 )
-            }
-            FileKind::SerializedFile | FileKind::Resource => {
-                dispatched.parse().map_err(|error| {
-                    ContainerMountError::new(
-                        ContainerMountReport::default(),
-                        ContainerMountErrorKind::Scheme(error),
-                    )
-                })?;
-                let file_name = logical_file_name(input_path).ok_or_else(|| {
-                    ContainerMountError::new(
-                        ContainerMountReport::default(),
-                        ContainerMountErrorKind::InputPathHasNoFileName,
-                    )
-                })?;
-                let mut report = ContainerMountReport::default();
-                let virtual_path = checked_container_entry_path(
-                    filesystem,
-                    destination_root,
-                    &file_name,
-                    0,
-                    &report,
-                )?;
-                mount_container_entry_at_path(
-                    filesystem,
-                    &virtual_path,
-                    0,
-                    dispatched.contents,
-                    mount_limits,
-                    &mut report,
-                )?;
-                Ok(report)
-            }
+            })?;
+            dispatched.mount_container_tree_with_source_name(
+                filesystem,
+                destination_root,
+                Some(&source_name),
+                mount_limits,
+            )
+        } else {
+            dispatched.parse().map_err(|error| {
+                ContainerMountError::new(
+                    ContainerMountReport::default(),
+                    ContainerMountErrorKind::Scheme(error),
+                )
+            })?;
+            let file_name = logical_file_name(input_path).ok_or_else(|| {
+                ContainerMountError::new(
+                    ContainerMountReport::default(),
+                    ContainerMountErrorKind::InputPathHasNoFileName,
+                )
+            })?;
+            let mut report = ContainerMountReport::default();
+            let virtual_path =
+                checked_container_entry_path(filesystem, destination_root, &file_name, 0, &report)?;
+            mount_container_entry_at_path(
+                filesystem,
+                &virtual_path,
+                0,
+                dispatched.contents,
+                mount_limits,
+                &mut report,
+            )?;
+            Ok(report)
         }
     }
 
@@ -2641,14 +2639,7 @@ impl SchemeReader {
                     ))),
                 )
             })?;
-            let is_container = matches!(
-                dispatched.kind,
-                FileKind::UnityFs
-                    | FileKind::UnityRaw
-                    | FileKind::UnityWebBundle
-                    | FileKind::UnityWebData
-                    | FileKind::UnityArchive
-            );
+            let is_container = is_container_kind(dispatched.kind);
             let destination = if is_container {
                 input.container_destination.as_deref()
             } else {
@@ -4517,6 +4508,52 @@ mod tests {
             SchemeReader::read(web_data).unwrap().kind(),
             FileKind::UnityWebData
         );
+    }
+
+    #[test]
+    fn container_kinds_follow_the_source_bundle_and_leaf_partition() {
+        for kind in [
+            FileKind::UnityFs,
+            FileKind::UnityRaw,
+            FileKind::UnityWebBundle,
+            FileKind::UnityWebData,
+            FileKind::UnityArchive,
+        ] {
+            assert!(
+                super::is_container_kind(kind),
+                "{kind:?} expands into mounted entries"
+            );
+        }
+        for kind in [FileKind::SerializedFile, FileKind::Resource] {
+            assert!(
+                !super::is_container_kind(kind),
+                "{kind:?} mounts as a single leaf"
+            );
+        }
+    }
+
+    #[test]
+    fn archive_inputs_take_the_container_mount_branch() {
+        let mut bytes = vec![0; 32];
+        bytes[..12].copy_from_slice(b"UnityArchive");
+        let file = SchemeReader::read(&bytes).unwrap();
+        assert_eq!(file.kind(), FileKind::UnityArchive);
+        let mut filesystem = VirtualFileSystem::new();
+        let error = file
+            .mount_container_tree(
+                &mut filesystem,
+                Some("/tree"),
+                ContainerMountLimits::default(),
+            )
+            .unwrap_err();
+        // The container branch parses the bundle: only the unsupported-reader error
+        // surfaces, never a leaf mount or a not-a-container rejection.
+        assert!(matches!(
+            error.kind,
+            ContainerMountErrorKind::Scheme(error)
+            if matches!(error.kind(), SchemeErrorKind::ArchiveReadUnsupported)
+        ));
+        assert_eq!(filesystem.count(), 1);
     }
 
     #[test]
