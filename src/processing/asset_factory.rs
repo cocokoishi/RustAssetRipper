@@ -1,8 +1,8 @@
 //! Asset-creation dispatch ported from `AssetRipper.Import.AssetCreation.GameAssetFactory`.
 //!
 //! Covers the first audited slice of `SER-TT-ABSENT-001`: the `ReadAsset` top dispatch,
-//! the `ReadNormalObject` fallback chain, the `TryReadNormalObject` tail rules, the
-//! `CreateAsset` three outcomes, the `CreateEngineAsset` name switch,
+//! the `ReadNormalObject` fallback chain with its engine-collection gate, the
+//! `TryReadNormalObject` tail rules, the `CreateAsset` three outcomes, the `CreateEngineAsset` name switch,
 //! the `ReadMonoBehaviour` structure-source decision, the `MakeError_*` and
 //! `LogMonoBehaviorReadException` diagnostic texts, the `RawDataObject`/`UnknownObject`/
 //! `UnreadableObject` hash and synthetic-name rules, and the `ReadExtraTextureFields`
@@ -101,6 +101,26 @@ pub enum NormalObjectLog {
     WarningReadError,
     /// Final failures log the read error.
     ErrorReadError,
+}
+
+/// `SpecialFileNames.IsDefaultResourceOrBuiltinExtra` as `ReadNormalObject` calls it:
+/// the owning collection's raw name is a default resource or a builtin-extra file.
+///
+/// This is narrower than the engine-resource predicate (editor resources count as
+/// engine resources but are not tolerated here), so the fallback chain must use
+/// exactly this gate: only these collections keep failed reads instead of turning
+/// them unreadable. The caller feeds the result into `NormalReadFacts.is_engine_collection`.
+/// A missing name never matches, mirroring the source null comparison.
+pub fn is_engine_collection_name(name: Option<&str>) -> bool {
+    matches!(
+        name,
+        Some(
+            "unity default resources"
+                | "unity_default_resources"
+                | "unity builtin extra"
+                | "unity_builtin_extra"
+        )
+    )
 }
 
 /// Caller facts behind one `ReadNormalObject` decision.
@@ -477,6 +497,46 @@ mod tests {
         assert_eq!(
             unreadable_asset_name("Mesh", Some(""), 0x1234_ABCD),
             "UnreadableMesh_1234ABCD"
+        );
+    }
+
+    #[test]
+    fn engine_collection_gate_matches_the_factory_tolerance_switch() {
+        assert!(is_engine_collection_name(Some("unity default resources")));
+        assert!(is_engine_collection_name(Some("unity_default_resources")));
+        assert!(is_engine_collection_name(Some("unity builtin extra")));
+        assert!(is_engine_collection_name(Some("unity_builtin_extra")));
+        // Editor resources are engine resources but not tolerated collections here.
+        assert!(!is_engine_collection_name(Some("unity editor resources")));
+        assert!(!is_engine_collection_name(Some("level0")));
+        assert!(!is_engine_collection_name(Some("Unity Default Resources")));
+        assert!(!is_engine_collection_name(Some("")));
+        assert!(!is_engine_collection_name(None));
+        // The gate drives the tolerance branch end to end.
+        let tolerated = NormalReadFacts {
+            first_read_ok: false,
+            is_engine_collection: is_engine_collection_name(Some("unity builtin extra")),
+            is_shader: false,
+            version_is_patch: false,
+            retry_read_ok: false,
+        };
+        assert_eq!(
+            decide_normal_object(&tolerated),
+            (
+                NormalObjectOutcome::UseFirstAsset,
+                NormalObjectLog::WarningReadError
+            )
+        );
+        let ordinary = NormalReadFacts {
+            is_engine_collection: is_engine_collection_name(Some("level0")),
+            ..tolerated
+        };
+        assert_eq!(
+            decide_normal_object(&ordinary),
+            (
+                NormalObjectOutcome::UseUnreadable,
+                NormalObjectLog::ErrorReadError
+            )
         );
     }
 

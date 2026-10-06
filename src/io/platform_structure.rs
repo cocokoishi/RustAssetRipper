@@ -1,9 +1,9 @@
 //! Platform root and DataPath discovery for mounted Unity game layouts.
 //!
 //! Covers the root/marker decisions per platform (including the Android APK/OBB bitmask and the
-//! `assets/bin/Data` gate) plus the Android directory layout. Backend selection, assembly and
-//! metadata collection, and bundle gathering live in the file inventory; bundle-hierarchy lookups
-//! live in the serialized-file workspace.
+//! `assets/bin/Data` gate) plus the Android and iOS directory layouts. Backend selection, assembly
+//! and metadata collection, and bundle gathering live in the file inventory; bundle-hierarchy
+//! lookups live in the serialized-file workspace.
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -718,6 +718,35 @@ pub fn android_data_layout(root_path: &str) -> AndroidDataLayout {
     }
 }
 
+/// `iOSGameStructure` directory layout for one `.app` directory.
+///
+/// Mirrors the constructor joins: `Data` under the app directory, `Resources` and `Managed`
+/// under it, the IL2Cpp game assembly as the app binary itself (`appPath` plus the `.app`-less
+/// name), `global-metadata.dat` under `Managed/Metadata`, and `Raw` streaming assets under the
+/// selected root. `UnityPlayerPath` stays unset on iOS, like the source, so it has no slot here.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IosDataLayout {
+    pub game_data_path: String,
+    pub streaming_assets_path: String,
+    pub resources_path: String,
+    pub managed_path: String,
+    pub il2cpp_game_assembly_path: String,
+    pub il2cpp_metadata_path: String,
+}
+
+pub fn ios_data_layout(root_path: &str, app_path: &str, app_name: &str) -> IosDataLayout {
+    let game_data_path = join_path(app_path, "Data");
+    let managed_path = join_path(&game_data_path, "Managed");
+    IosDataLayout {
+        streaming_assets_path: join_path(root_path, "Raw"),
+        resources_path: join_path(&game_data_path, "Resources"),
+        il2cpp_game_assembly_path: join_path(app_path, app_name),
+        il2cpp_metadata_path: join_path(&managed_path, "Metadata/global-metadata.dat"),
+        managed_path,
+        game_data_path,
+    }
+}
+
 fn detect_ios(
     filesystem: &VirtualFileSystem,
     selected_path: &str,
@@ -1206,9 +1235,10 @@ impl Error for PlatformStructureError {
 #[cfg(test)]
 mod tests {
     use super::{
-        android_data_layout, detect_desktop_platform, detect_platform_structure, DesktopPlatform,
-        PlatformKind, PlatformResourceLookup, PlatformResourceProvider, PlatformResourceSource,
-        PlatformStructure, PlatformStructureErrorKind, PlatformStructureLimits,
+        android_data_layout, detect_desktop_platform, detect_platform_structure, ios_data_layout,
+        DesktopPlatform, PlatformKind, PlatformResourceLookup, PlatformResourceProvider,
+        PlatformResourceSource, PlatformStructure, PlatformStructureErrorKind,
+        PlatformStructureLimits,
     };
     use crate::io::filesystem::VirtualFileSystem;
 
@@ -1564,6 +1594,27 @@ mod tests {
         assert_eq!(
             obb.il2cpp_metadata_path,
             "/obb/assets/bin/Data/Managed/Metadata/global-metadata.dat"
+        );
+    }
+
+    #[test]
+    fn ios_directory_layout_matches_the_constructor_joins() {
+        let layout = ios_data_layout("/ios", "/ios/Payload/Example.app", "Example");
+        assert_eq!(layout.game_data_path, "/ios/Payload/Example.app/Data");
+        assert_eq!(layout.streaming_assets_path, "/ios/Raw");
+        assert_eq!(
+            layout.resources_path,
+            "/ios/Payload/Example.app/Data/Resources"
+        );
+        assert_eq!(layout.managed_path, "/ios/Payload/Example.app/Data/Managed");
+        // The IL2Cpp assembly is the app binary itself, not a lib file.
+        assert_eq!(
+            layout.il2cpp_game_assembly_path,
+            "/ios/Payload/Example.app/Example"
+        );
+        assert_eq!(
+            layout.il2cpp_metadata_path,
+            "/ios/Payload/Example.app/Data/Managed/Metadata/global-metadata.dat"
         );
     }
 

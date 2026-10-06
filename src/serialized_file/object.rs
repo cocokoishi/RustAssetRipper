@@ -628,15 +628,8 @@ fn decode_root(
         let node_name = node.name.as_deref().unwrap_or("");
         // `TypeTreeNodeStruct.IsManagedReference`: a `managedReference` (or array-item)
         // node holding one `rid` (or legacy `id`) child.
-        let managed_reference_node = matches!(
-            type_name,
-            managed_names::MANAGED_REFERENCE_NAME
-                | managed_names::MANAGED_REFERENCE_ARRAY_ITEM_NAME
-        ) && children.len() == 1
-            && matches!(
-                type_tree.nodes[children[0]].name.as_deref(),
-                Some(managed_names::REFERENCE_ID_FIELD_NAME | managed_names::INDEX_FIELD_NAME)
-            );
+        let managed_reference_node =
+            is_managed_reference_element(type_tree, node_index, object_index, reader.offset())?;
         // `TypeTreeNodeStruct.IsManagedReferencesRegistry`.
         let registry_node = type_name == managed_names::REGISTRY_NAME
             && node_name == managed_names::REGISTRY_FIELD_NAME
@@ -644,12 +637,23 @@ fn decode_root(
         let dynamic_managed_data = type_name == managed_names::REFERENCED_OBJECT_DATA_NAME
             && node_name == managed_names::DATA_FIELD_NAME;
         if managed_reference_node || registry_node || dynamic_managed_data {
+            // `TypeTreeNodeStruct.IsIndexedManagedReference` selects the legacy `id`
+            // field shape over the `rid`-addressed shape for the rejection report,
+            // mirroring the source field-shape selection.
+            let is_indexed = managed_reference_node
+                && is_indexed_managed_reference_element(
+                    type_tree,
+                    node_index,
+                    object_index,
+                    reader.offset(),
+                )?;
             return Err(ObjectDecodeError::new(
                 reader.offset(),
                 ObjectDecodeErrorKind::UnsupportedManagedReferences {
                     object_index,
                     type_name: type_name.to_owned(),
                     field_name: node_name.to_owned(),
+                    is_indexed,
                 },
             ));
         }
@@ -1402,6 +1406,25 @@ fn is_managed_reference_element(
         ))
 }
 
+/// `TypeTreeNodeStruct.IsIndexedManagedReference` for an array element node: a
+/// managed-reference element (see `is_managed_reference_element`) whose identifier
+/// child is the legacy `id` field. The source uses this to select the
+/// `IndexedManagedReference` field shape over the `rid`-addressed
+/// `ManagedReference` shape.
+fn is_indexed_managed_reference_element(
+    type_tree: &TypeTreeLayout<'_>,
+    node_index: usize,
+    object_index: usize,
+    offset: usize,
+) -> Result<bool, ObjectDecodeError> {
+    if !is_managed_reference_element(type_tree, node_index, object_index, offset)? {
+        return Ok(false);
+    }
+    let children = direct_children(type_tree, node_index, object_index, offset)?;
+    Ok(children.len() == 1
+        && type_tree.nodes[children[0]].name.as_deref() == Some(managed_names::INDEX_FIELD_NAME))
+}
+
 fn direct_children(
     type_tree: &TypeTreeLayout<'_>,
     node_index: usize,
@@ -1648,6 +1671,8 @@ pub enum ObjectDecodeErrorKind {
         object_index: usize,
         type_name: String,
         field_name: String,
+        /// The legacy `id` flavor (`IsIndexedManagedReference`) versus `rid`-addressed.
+        is_indexed: bool,
     },
     InvalidPPtrComponent {
         object_index: usize,
@@ -1766,9 +1791,15 @@ impl Display for ObjectDecodeErrorKind {
                 object_index,
                 type_name,
                 field_name,
+                is_indexed,
             } => write!(
                 f,
-                "object {object_index} contains managed-reference TypeTree node {type_name} {field_name}; registry decoding is not implemented"
+                "object {object_index} contains {} managed-reference TypeTree node {type_name} {field_name}; registry decoding is not implemented",
+                if *is_indexed {
+                    "legacy indexed"
+                } else {
+                    "rid-addressed"
+                }
             ),
             Self::InvalidPPtrComponent {
                 object_index,
@@ -2052,6 +2083,41 @@ mod tests {
             layout_node(1, "rid", "SInt64"),
         ]);
         assert!(!super::is_managed_reference_element(&layout, 0, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn indexed_managed_references_require_the_legacy_identifier() {
+        // The legacy `id` child selects the indexed shape.
+        let layout = element_layout(vec![
+            layout_node(0, "item", "managedReference"),
+            layout_node(1, "id", "SInt32"),
+        ]);
+        assert!(super::is_indexed_managed_reference_element(&layout, 0, 0, 0).unwrap());
+        // The modern `rid` child does not.
+        let layout = element_layout(vec![
+            layout_node(0, "item", "managedReference"),
+            layout_node(1, "rid", "SInt64"),
+        ]);
+        assert!(!super::is_indexed_managed_reference_element(&layout, 0, 0, 0).unwrap());
+        // The array-item spelling participates as well.
+        let layout = element_layout(vec![
+            layout_node(0, "item", "managedRefArrayItem"),
+            layout_node(1, "id", "SInt32"),
+        ]);
+        assert!(super::is_indexed_managed_reference_element(&layout, 0, 0, 0).unwrap());
+        // Non-reference elements never select the indexed shape.
+        let layout = element_layout(vec![
+            layout_node(0, "item", "Generic Mono"),
+            layout_node(1, "id", "SInt32"),
+        ]);
+        assert!(!super::is_indexed_managed_reference_element(&layout, 0, 0, 0).unwrap());
+        // Two children do not match, even when the first is `id`.
+        let layout = element_layout(vec![
+            layout_node(0, "item", "managedReference"),
+            layout_node(1, "id", "SInt32"),
+            layout_node(1, "extra", "SInt32"),
+        ]);
+        assert!(!super::is_indexed_managed_reference_element(&layout, 0, 0, 0).unwrap());
     }
 
     #[test]
@@ -2461,8 +2527,32 @@ mod tests {
             .unwrap_err();
         assert!(matches!(
             error.kind(),
-            ObjectDecodeErrorKind::UnsupportedManagedReferences { .. }
+            ObjectDecodeErrorKind::UnsupportedManagedReferences {
+                is_indexed: false,
+                ..
+            }
         ));
+
+        // The legacy `id` flavor reports the indexed selection instead.
+        metadata.types[0].type_tree = Some(TypeTree {
+            nodes: vec![
+                node(0, "Root", "Root", -1, 0),
+                node(1, "m_Target", "managedReference", 4, 0),
+                node(2, "id", "SInt32", 4, 0),
+            ],
+            string_buffer: Vec::new(),
+        });
+        let error = metadata
+            .decode_object_payload(&file, &header, 0)
+            .unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            ObjectDecodeErrorKind::UnsupportedManagedReferences {
+                is_indexed: true,
+                ..
+            }
+        ));
+        assert!(error.to_string().contains("legacy indexed"));
     }
 
     #[test]

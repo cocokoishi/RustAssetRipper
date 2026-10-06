@@ -1370,6 +1370,63 @@ mod tests {
         assert_eq!(range.to_vec(2).unwrap(), b"cd");
     }
 
+    /// The null-stream member matrix against the reference `SmartStreamTests`
+    /// (`DisposedStreamThrowsForManyMembers`, `FreedStreamsMustBeNull`): total
+    /// members stay total on null streams, every I/O member fails instead of
+    /// touching a backend, and a freed stream rejoins the same matrix.
+    #[test]
+    fn null_smart_stream_matrix_matches_the_disposed_contract() {
+        let mut null = SmartStream::create_null();
+        null.flush().unwrap();
+        assert!(!null.can_read());
+        assert!(!null.can_write());
+        assert!(!null.can_seek());
+        assert_eq!(null.position().unwrap(), 0);
+        assert_eq!(null.length().unwrap(), 0);
+        assert_eq!(null.ref_count(), 0);
+        assert!(null.is_null());
+        assert_eq!(null.stream_type(), SmartStreamType::Null);
+        assert_eq!(
+            null.read(&mut [0]).unwrap_err().kind(),
+            std::io::ErrorKind::NotConnected
+        );
+        assert_eq!(
+            null.write(&[0]).unwrap_err().kind(),
+            std::io::ErrorKind::NotConnected
+        );
+        assert_eq!(
+            null.seek(SeekFrom::Start(0)).unwrap_err().kind(),
+            std::io::ErrorKind::NotConnected
+        );
+        assert_eq!(
+            null.set_len(2).unwrap_err().kind(),
+            std::io::ErrorKind::NotConnected
+        );
+        assert_eq!(
+            null.to_vec(8).unwrap_err().kind(),
+            std::io::ErrorKind::NotConnected
+        );
+        assert!(matches!(
+            null.create_partial(0, 0),
+            Err(error) if error.kind() == std::io::ErrorKind::NotConnected
+        ));
+        assert_eq!(
+            null.read_exact_at(0, &mut [0; 1]).unwrap_err().kind(),
+            std::io::ErrorKind::NotConnected
+        );
+
+        let mut stream = SmartStream::from_memory(b"data".to_vec());
+        stream.free_reference();
+        assert_eq!(stream.ref_count(), 0);
+        assert!(stream.is_null());
+        assert_eq!(stream.stream_type(), SmartStreamType::Null);
+        assert_eq!(stream.length().unwrap(), 0);
+        assert_eq!(
+            stream.to_vec(4).unwrap_err().kind(),
+            std::io::ErrorKind::NotConnected
+        );
+    }
+
     #[test]
     fn smart_stream_references_share_position_and_release_ownership() {
         let mut first = SmartStream::from_memory(b"abcd".to_vec());

@@ -3,7 +3,8 @@
 //! Ports the `WebFile`/`WebFileEntry` directory parsing and writing plus the
 //! `WebFileScheme` sniff shape (`is_web_file` needs the signature and its zero
 //! terminator, mirroring the strict `Length - Position > Signature.Length`
-//! room check). Entry payload mounting as `ResourceFile` objects stays with the
+//! room check). Entry display names follow `WebFileEntry.ToString`
+//! (`FixFileIdentifier`). Entry payload mounting as `ResourceFile` objects stays with the
 //! scheme dispatcher, and inputs not starting at the container base are the
 //! caller's to slice.
 
@@ -11,6 +12,7 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
 use crate::io::binary::{BinaryError, BinaryReader, Endian};
+use crate::io::special_names::fix_file_identifier;
 
 const WEB_FILE_SIGNATURE: &str = "UnityWebData1.0";
 
@@ -43,6 +45,15 @@ pub struct WebFileEntry {
     pub offset: u32,
     pub size: u32,
     range: std::ops::Range<usize>,
+}
+
+impl Display for WebFileEntry {
+    /// `WebFileEntry.ToString`: the entry name normalized like every container file
+    /// identifier. Mounting applies the same rule through the scheme dispatcher;
+    /// this display keeps entry listings consistent without touching entry bytes.
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&fix_file_identifier(&self.name))
+    }
 }
 
 /// A borrowed view of a Unity WebData file.
@@ -586,7 +597,7 @@ impl Display for WebFileErrorKind {
 
 #[cfg(test)]
 mod tests {
-    use super::{WebFile, WebFileErrorKind, WebFileLimits};
+    use super::{WebFile, WebFileEntry, WebFileErrorKind, WebFileLimits};
 
     fn encoded_7bit_length(mut length: usize) -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -779,5 +790,20 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn entry_display_normalizes_names_like_container_identifiers() {
+        fn entry(name: &str) -> WebFileEntry {
+            WebFileEntry {
+                name: name.to_owned(),
+                offset: 0,
+                size: 0,
+                range: 0..0,
+            }
+        }
+        assert_eq!(entry("Resource.resource").to_string(), "resource.resource");
+        assert_eq!(entry("library/Shared.Assets").to_string(), "shared.assets");
+        assert_eq!(entry("archive:/Bundles/MainData").to_string(), "maindata");
     }
 }
