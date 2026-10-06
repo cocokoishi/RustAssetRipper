@@ -444,10 +444,7 @@ pub(crate) fn discover_directory_inputs(
                 ));
             }
             (None, false) => {
-                group
-                    .split_parts
-                    .sort_by(|(left, _), (right, _)| left.file_name().cmp(&right.file_name()));
-                let path = group.split_parts[0].0.clone();
+                let path = split_group_representative(&mut group.split_parts).clone();
                 let mut total = 0u64;
                 for (_, part_size) in group.split_parts {
                     total = total.checked_add(part_size).ok_or_else(|| {
@@ -483,6 +480,18 @@ fn split_logical_path(path: &Path) -> (PathBuf, bool) {
         return (path.to_path_buf(), false);
     }
     (path.with_file_name(base), true)
+}
+
+/// Representative path for a discovered split group: the lexically-first part.
+///
+/// Discovery only needs a stable handle the opener accepts; read order follows the numeric
+/// `SplitNameComparer` rule in the opener (`io::stream`), so the lexical pick here never
+/// decides byte order — even when it differs from the numeric-first part. Callers pass a
+/// nonempty part list; empty input would have no representative.
+fn split_group_representative(parts: &mut [(PathBuf, u64)]) -> &PathBuf {
+    debug_assert!(!parts.is_empty());
+    parts.sort_by(|(left, _), (right, _)| left.file_name().cmp(&right.file_name()));
+    &parts[0].0
 }
 
 /// Logical relative name for an explicitly passed import file.
@@ -567,7 +576,7 @@ impl Error for DirectoryDiscoveryErrorKind {
 mod tests {
     use super::{
         discover_directory_inputs, expand_import_paths, explicit_file_logical_path,
-        split_logical_path, DirectoryDiscoveryErrorKind,
+        split_group_representative, split_logical_path, DirectoryDiscoveryErrorKind,
     };
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -793,6 +802,20 @@ mod tests {
         assert_eq!(report.discovered_inputs, 2);
         assert_eq!(report.skipped_inputs, 1);
         assert_eq!(report.source_bytes, 8);
+    }
+
+    #[test]
+    fn split_group_representative_is_the_lexically_first_part() {
+        // Numeric read order lives in the opener; discovery keeps a stable lexical handle,
+        // even when it differs from the numeric-first part.
+        let mut parts = vec![
+            (PathBuf::from("data.bundle.split2"), 2),
+            (PathBuf::from("data.bundle.split10"), 10),
+        ];
+        assert_eq!(
+            split_group_representative(&mut parts),
+            &PathBuf::from("data.bundle.split10")
+        );
     }
 
     #[test]

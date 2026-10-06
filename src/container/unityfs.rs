@@ -528,9 +528,9 @@ impl<'a> UnityFsBundle<'a> {
                         UnityFsErrorKind::AddressSpaceOverflow("block output range"),
                     )
                 })?;
-            let overlap_start = entry_start.max(block_uncompressed_offset);
-            let overlap_end = entry_end.min(block_end);
-            if overlap_start < overlap_end {
+            if let Some((overlap_start, overlap_end)) =
+                entry_block_window(entry_start, entry_end, block_uncompressed_offset, block_end)
+            {
                 let compressed_start = usize::try_from(compressed_offset)
                     .ok()
                     .and_then(|offset| self.data_offset.checked_add(offset))
@@ -637,6 +637,25 @@ impl<'a> UnityFsBundle<'a> {
         }
         Ok(Cow::Owned(output))
     }
+}
+
+/// Half-open overlap of one storage block with the entry byte range, if any.
+///
+/// This is the `BundleFileBlockReader.ReadEntry` block walk as a pure interval: the
+/// first block whose end passes the entry start opens the window (the source's
+/// `blockDecompressedOffset + UncompressedSize <= entry.Offset` search), and every
+/// later block contributes up to the entry end (the source's
+/// `Math.Min(blockSize, left)` copy). Adjacent ranges do not overlap, and an empty
+/// entry never reaches this kernel because `read_entry` returns early for it.
+fn entry_block_window(
+    entry_start: u64,
+    entry_end: u64,
+    block_start: u64,
+    block_end: u64,
+) -> Option<(u64, u64)> {
+    let start = entry_start.max(block_start);
+    let end = entry_end.min(block_end);
+    (start < end).then_some((start, end))
 }
 
 fn parse_metadata(
@@ -1900,5 +1919,21 @@ mod tests {
         assert!(combined.is_serialized_file());
         let bare = UnityFsNode { flags: 0, ..node };
         assert!(!bare.is_serialized_file());
+    }
+
+    #[test]
+    fn entry_block_windows_cover_exactly_the_overlap() {
+        // Disjoint and merely adjacent ranges contribute nothing.
+        assert_eq!(super::entry_block_window(10, 20, 30, 40), None);
+        assert_eq!(super::entry_block_window(10, 20, 0, 10), None);
+        assert_eq!(super::entry_block_window(10, 20, 20, 30), None);
+        // Partial overlaps clip to the shared window.
+        assert_eq!(super::entry_block_window(10, 20, 0, 15), Some((10, 15)));
+        assert_eq!(super::entry_block_window(10, 20, 15, 30), Some((15, 20)));
+        // Containment runs either way.
+        assert_eq!(super::entry_block_window(10, 20, 0, 30), Some((10, 20)));
+        assert_eq!(super::entry_block_window(10, 20, 12, 18), Some((12, 18)));
+        // An empty entry has no window anywhere.
+        assert_eq!(super::entry_block_window(10, 10, 0, 30), None);
     }
 }

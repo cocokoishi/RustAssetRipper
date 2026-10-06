@@ -458,6 +458,18 @@ impl TerrainExportMode {
             Self::Heatmap => 2,
         }
     }
+
+    /// Reverse of [`TerrainExportMode::discriminant`]: unknown values stay unmapped instead
+    /// of silently becoming a valid mode, like every other settings enum. The mode still
+    /// has no consumer; this only completes the shipped enum mapping.
+    pub const fn from_discriminant(value: i32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Yaml),
+            1 => Some(Self::Mesh),
+            2 => Some(Self::Heatmap),
+            _ => None,
+        }
+    }
 }
 
 /// The C# language version for decompiled scripts (`ScriptLanguageVersion`); default `AutoSafe`.
@@ -909,6 +921,21 @@ mod tests {
         let _ = TerrainExportMode::Yaml;
         let _ = TerrainExportMode::Mesh;
         let _ = TerrainExportMode::Heatmap;
+        // Its reverse mapping still rejects unknown discriminants like the live enums.
+        assert_eq!(
+            TerrainExportMode::from_discriminant(0),
+            Some(TerrainExportMode::Yaml)
+        );
+        assert_eq!(
+            TerrainExportMode::from_discriminant(1),
+            Some(TerrainExportMode::Mesh)
+        );
+        assert_eq!(
+            TerrainExportMode::from_discriminant(2),
+            Some(TerrainExportMode::Heatmap)
+        );
+        assert_eq!(TerrainExportMode::from_discriminant(3), None);
+        assert_eq!(TerrainExportMode::from_discriminant(-1), None);
     }
 
     #[test]

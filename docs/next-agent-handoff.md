@@ -1250,3 +1250,11 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Gates: `cargo fmt --check` 0, full tests 1318 lib + 57 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
 - Next: fifty-sixth team round (gate-first: UnityFS meta/entries, bundle dispatch, typetree walker).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 166. Checkpoint: fifty-sixth team round integrated — gate-first (2026-10-06)
+
+- Four teammates shipped disjoint scopes, all lead-verified (targeted suites re-run: 16/16, 10/10, 19/19 combined, 38/38) and integrated: `texture-export` named the copy window (`IO-BUNDLE-UNITYFS-ENTRY-001`); `sprite-fill` named the representative pick (`IO-FS-IMPORT-DIRECTORY-001`); `anim-graph` closed the last settings reverse-map with zero new fns (`PRODUCT-CONFIG-001`); `texture-meta` ported the ClassName producer (`SER-TT-ABSENT-001`). `mesh-deform` returned an honest NO-GAP on raw-web (`IO-BUNDLE-DISPATCH-001`, 7/7, zero edits) plus a routed version-string note. Lead untangled a settings-count ambiguity (combined filter covers both settings files). No scope violations, no placeholders, no verified row touched.
+- Gate question answered YES: all five assignments reduce or document the Phase 1 incomplete count.
+- Gates: `cargo fmt --check` 0, full tests 1321 lib + 57 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
+- Next: fifty-seventh team round (gate-first: bundle version strings, UnityFS meta, platform registry).
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
