@@ -240,4 +240,49 @@ mod tests {
             .convert_value_array_to_generic_binding()
             .is_empty());
     }
+
+    #[test]
+    fn value_array_strides_tolerate_truncated_tails() {
+        // Both runtimes only read the classification entry before skipping ahead, so a
+        // tail cut mid-stride still yields its binding instead of failing.
+        let truncated = ClipView {
+            binding: Some(vec![ValueArrayEntry {
+                id: 7,
+                type_id: CRC_QUATERNION_X,
+            }]),
+            ..ClipView::default()
+        };
+        assert_eq!(
+            truncated.convert_value_array_to_generic_binding(),
+            vec![GenericBindingView {
+                path: 7,
+                attribute: ATTRIBUTE_TRANSFORM_ROTATION,
+                class_id: CLASS_ID_TRANSFORM,
+            }]
+        );
+        let short_pair = ClipView {
+            binding: Some(vec![
+                ValueArrayEntry {
+                    id: 9,
+                    type_id: CRC_POSITION_X,
+                },
+                ValueArrayEntry::default(),
+            ]),
+            ..ClipView::default()
+        };
+        assert_eq!(
+            short_pair.convert_value_array_to_generic_binding(),
+            vec![GenericBindingView {
+                path: 9,
+                attribute: ATTRIBUTE_TRANSFORM_POSITION,
+                class_id: CLASS_ID_TRANSFORM,
+            }]
+        );
+        // A present-but-empty value array converts to no bindings.
+        let empty = ClipView {
+            binding: Some(Vec::new()),
+            ..ClipView::default()
+        };
+        assert!(empty.convert_value_array_to_generic_binding().is_empty());
+    }
 }

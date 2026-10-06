@@ -1,8 +1,13 @@
-//! `ControllerConstantExtensions`.
+//! `ControllerConstantExtensions` plus the `Animator` update-mode read.
 //!
 //! Mirrors `AssetRipper.SourceGenerated.Extensions/ControllerConstantExtensions.cs`. Layers are
 //! addressed by their state-machine index; synchronized layers share an index and are skipped by
 //! the state-machine lookups.
+//!
+//! Also mirrors `AnimatorExtensions.GetUpdateMode`: the stored `UpdateMode` when the version
+//! serializes it, else `Normal`. The `AnimatorUpdateMode` discriminant is the stable UnityEditor
+//! API value; like the project-settings enums it is referenced from an external package rather
+//! than declared in the frozen baseline, so it is recorded here as an external-API dependency.
 
 /// A layer-constant view.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -92,6 +97,19 @@ impl ControllerConstantView {
                         == layer.state_machine_synchronized_layer_index
             })
             .ok_or(ControllerConstantError::LayerNotPresent)
+    }
+}
+
+/// `AnimatorUpdateMode.Normal`, the fallback when `UpdateMode` is absent.
+pub const ANIMATOR_UPDATE_MODE_NORMAL: i32 = 0;
+
+/// `AnimatorExtensions.GetUpdateMode`: the stored `AnimatorUpdateMode` discriminant when
+/// `has_update_mode` answers `Has_UpdateMode`, else `Normal`.
+pub fn animator_update_mode(has_update_mode: bool, update_mode: i32) -> i32 {
+    if has_update_mode {
+        update_mode
+    } else {
+        ANIMATOR_UPDATE_MODE_NORMAL
     }
 }
 
@@ -209,5 +227,16 @@ mod tests {
             rows += 1;
         }
         assert_eq!(rows, 2);
+    }
+
+    #[test]
+    fn animator_update_mode_defaults_to_normal_without_the_field() {
+        assert_eq!(ANIMATOR_UPDATE_MODE_NORMAL, 0);
+        assert_eq!(animator_update_mode(false, 2), 0);
+        assert_eq!(animator_update_mode(false, 0), 0);
+        // A present field passes through untouched, including non-default modes.
+        assert_eq!(animator_update_mode(true, 0), 0);
+        assert_eq!(animator_update_mode(true, 1), 1);
+        assert_eq!(animator_update_mode(true, 2), 2);
     }
 }

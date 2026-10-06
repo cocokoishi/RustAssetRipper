@@ -2,7 +2,8 @@
 //!
 //! Mirrors `AssetRipper.SourceGenerated.Extensions/MuscleClipInfoExtensions.cs`. The initialization
 //! either applies the neutral defaults or copies every humanoid root-motion field from a
-//! `MuscleClipConstant`.
+//! `MuscleClipConstant`. The clip lists (`DenseClip`/`StreamedClip`/`ConstantClip`) and the
+//! binding curve list that consume this info stay open elsewhere.
 
 /// The `MuscleClipConstant` source fields.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -208,5 +209,71 @@ mod tests {
             rows += 1;
         }
         assert_eq!(rows, 5);
+    }
+
+    fn seeded_info() -> MuscleClipInfoView {
+        MuscleClipInfoView {
+            start_time: 2.0,
+            stop_time: 3.0,
+            orientation_offset_y: 4.0,
+            level: 5.0,
+            cycle_offset: 6.0,
+            loop_time: true,
+            loop_blend: true,
+            loop_blend_orientation: true,
+            loop_blend_position_y: true,
+            loop_blend_position_xz: true,
+            keep_original_orientation: true,
+            keep_original_position_y: false,
+            keep_original_position_xz: true,
+            height_from_feet: true,
+            additive_reference_pose_time: 7.0,
+            has_additive_reference_pose: true,
+            mirror: true,
+        }
+    }
+
+    #[test]
+    fn neutral_initialize_touches_only_stop_time_and_position_flag() {
+        let before = seeded_info();
+        let mut info = before;
+        initialize(&mut info);
+        assert_eq!(
+            info,
+            MuscleClipInfoView {
+                stop_time: 1.0,
+                keep_original_position_y: true,
+                ..before
+            }
+        );
+    }
+
+    #[test]
+    fn constant_initialize_clears_stale_destination_fields() {
+        // A junk-filled destination must come out fully determined: copies land
+        // and the three cleared fields do not survive, so no deleted-clear
+        // regression can hide behind default-constructed destinations.
+        let mut info = seeded_info();
+        initialize_from_constant(&mut info, &constant());
+        let expected = MuscleClipInfoView {
+            start_time: 1.1,
+            stop_time: 2.2,
+            orientation_offset_y: 3.3,
+            level: 4.4,
+            cycle_offset: 5.5,
+            loop_time: true,
+            loop_blend: true,
+            loop_blend_orientation: true,
+            loop_blend_position_y: true,
+            loop_blend_position_xz: true,
+            keep_original_orientation: true,
+            keep_original_position_y: true,
+            keep_original_position_xz: true,
+            height_from_feet: true,
+            additive_reference_pose_time: 0.0,
+            has_additive_reference_pose: false,
+            mirror: false,
+        };
+        assert_eq!(info, expected);
     }
 }
