@@ -245,6 +245,14 @@ fn engine_resource_collection_alias(fixed_name: &str) -> Option<&str> {
     }
 }
 
+/// `Bundle.ResolveResource` hierarchy-walk step bound over caller facts: the walk
+/// ascends one level per step and finishes at the root scope, so `bundle_count + 1`
+/// steps always suffice; anything beyond that is a parent cycle (the source would
+/// loop forever here), reported as `BundleParentCycle` instead of hanging.
+fn bundle_walk_step_limit(bundle_count: usize) -> usize {
+    bundle_count.saturating_add(1)
+}
+
 impl<'a> SourceBundleCollectionLookup<'a> {
     fn build(
         workspace: &'a SerializedFileWorkspace,
@@ -1752,7 +1760,7 @@ impl SerializedFileWorkspace {
         let fixed_name = fix_file_identifier(requested_name);
         let mut current_bundle_index = source_bundle_index;
         let mut excluded_child_bundle = None;
-        for _ in 0..=self.container_bundles.len() {
+        for _ in 0..=bundle_walk_step_limit(self.container_bundles.len()) {
             if let Some(bundle_index) = current_bundle_index {
                 if let Some(resource_index) =
                     self.find_resource_in_bundle(bundle_index, &fixed_name)?
@@ -4061,6 +4069,43 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn resource_hierarchy_walk_reports_parent_cycles() {
+        use super::WorkspaceResourceLookupError;
+
+        // One step per level plus the root-scope step always suffices.
+        assert_eq!(super::bundle_walk_step_limit(0), 1);
+        assert_eq!(super::bundle_walk_step_limit(2), 3);
+        // Two bundles parenting each other never reach the root scope: the walk
+        // reports the cycle instead of hanging (the source would loop forever).
+        let workspace = SerializedFileWorkspace {
+            container_bundles: vec![
+                WorkspaceSerializedBundle {
+                    scope_path: Some("/a".to_owned()),
+                    name_fixed: None,
+                    parent_bundle_index: Some(1),
+                    parent_entry_index: None,
+                    direct_collection_file_indices: Vec::new(),
+                    direct_resource_file_indices: Vec::new(),
+                },
+                WorkspaceSerializedBundle {
+                    scope_path: Some("/b".to_owned()),
+                    name_fixed: None,
+                    parent_bundle_index: Some(0),
+                    parent_entry_index: None,
+                    direct_collection_file_indices: Vec::new(),
+                    direct_resource_file_indices: Vec::new(),
+                },
+            ],
+            resource_files: Vec::new(),
+            ..SerializedFileWorkspace::default()
+        };
+        assert!(matches!(
+            workspace.resolve_bundled_resource_file(Some(0), "missing.ress"),
+            Err(WorkspaceResourceLookupError::BundleParentCycle)
+        ));
     }
 
     #[test]

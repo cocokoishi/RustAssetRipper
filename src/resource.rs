@@ -2457,6 +2457,30 @@ mod tests {
     }
 
     #[test]
+    fn check_integrity_rejects_short_and_huge_ranges_like_the_baseline() {
+        // Edge outcomes from a direct runtime differential over the real
+        // `StreamingInfo` extensions against a 10-byte resource: a range past the
+        // end fails, and an offset outside the signed stream range fails. Where the
+        // overflow-checked baseline throws `OverflowException`, this port returns
+        // `InvalidRange`; both reject loudly instead of yielding a short buffer.
+        let filesystem = filesystem_with_resource();
+        assert!(
+            !check_streamed_resource_integrity(&filesystem, "/bundle/shared.resS", 8, 4).unwrap(),
+            "range past the end fails, like baseline `GetContent` returning null"
+        );
+        assert!(
+            !check_streamed_resource_integrity(
+                &filesystem,
+                "/bundle/shared.resS",
+                (i64::MAX as u64) + 1,
+                4,
+            )
+            .unwrap(),
+            "offset outside the signed range fails, like the baseline bounds check"
+        );
+    }
+
+    #[test]
     fn enforces_memory_copy_and_materialized_output_limits() {
         let filesystem = filesystem_with_resource();
         let limits = StreamedResourceLimits {

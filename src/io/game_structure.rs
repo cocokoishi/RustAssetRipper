@@ -24,6 +24,7 @@ use std::io::{self, Read, Seek, SeekFrom};
 use crate::io::dependency::DependencyFilePath;
 use crate::io::filesystem::{SearchOption, VirtualFileSystem};
 use crate::io::stream::logical_file_name;
+use crate::io::stream::logical_file_path;
 use crate::processing::script_identity::is_mono_assembly;
 use crate::scheme::{FileKind, SchemeReader};
 
@@ -124,6 +125,7 @@ impl MixedGameStructure {
         let mut assemblies = BTreeMap::new();
         let mut data_paths = BTreeSet::new();
         let mut unique_selections = BTreeSet::new();
+        let mut unique_logical_paths = BTreeSet::new();
         let mut scanned_paths = BTreeSet::new();
         let mut consumed = BTreeSet::new();
         for consumed_path in consumed_paths {
@@ -140,6 +142,9 @@ impl MixedGameStructure {
             }
             if is_consumed_path(&selected_path, &consumed) {
                 report.skipped_consumed_paths += 1;
+                continue;
+            }
+            if !select_unique_logical_path(&mut unique_logical_paths, &selected_path) {
                 continue;
             }
 
@@ -369,6 +374,21 @@ fn normalize_selected_path(
 /// matches skip; sub-paths of consumed roots still scan, like the source leftover list.
 fn is_consumed_path(normalized_selected: &str, consumed_paths: &BTreeSet<String>) -> bool {
     consumed_paths.contains(normalized_selected)
+}
+
+/// `MixedGameStructure.SelectUniquePaths` over caller facts: selections collapse by
+/// logical path (`MultiFileStream.GetFilePath`), so a file and its split parts count as
+/// one selection with the first occurrence winning. Directories keep their path unless
+/// it carries a split suffix, exactly like the source mapping.
+fn select_unique_logical_path(
+    seen_logical_paths: &mut BTreeSet<String>,
+    normalized_selected: &str,
+) -> bool {
+    seen_logical_paths.insert(
+        logical_file_path(normalized_selected)
+            .to_string_lossy()
+            .replace('\\', "/"),
+    )
 }
 
 /// `CollectAssemblies` name rule over caller facts: assemblies are keyed by file name and
@@ -770,6 +790,53 @@ mod tests {
             .any(|file| file.virtual_path == "/web/plain.unityweb"));
         assert_eq!(structure.data_paths, ["/web"]);
         assert_eq!(structure.report.scanned_files, 3);
+    }
+
+    #[test]
+    fn split_part_selections_collapse_to_their_logical_path() {
+        let mut filesystem = VirtualFileSystem::new();
+        insert_file(&mut filesystem, "/mix/level5", b"base");
+        insert_file(&mut filesystem, "/mix/level5.split0", b"part");
+        insert_file(&mut filesystem, "/mix/other", b"other");
+        let structure = MixedGameStructure::from_vfs_paths(
+            &filesystem,
+            &[
+                "/mix/level5".to_owned(),
+                "/mix/level5.split0".to_owned(),
+                "/mix/level5.split0".to_owned(),
+                "/mix/other".to_owned(),
+            ],
+            MixedGameStructureLimits::default(),
+        )
+        .unwrap();
+
+        // A file and its split part count as one selection with the first occurrence
+        // winning (the exact duplicate never reaches the gate); only two paths scan.
+        assert_eq!(structure.report.selected_paths, 3);
+        assert_eq!(structure.report.scanned_files, 2);
+        let level: Vec<_> = structure
+            .registered_files
+            .iter()
+            .filter(|file| file.file_name == "level5")
+            .collect();
+        assert_eq!(level.len(), 1);
+        assert_eq!(level[0].virtual_path, "/mix/level5");
+
+        // Reversed order keeps the split part instead, like `Distinct` keeping the
+        // first logical path.
+        let reversed = MixedGameStructure::from_vfs_paths(
+            &filesystem,
+            &["/mix/level5.split0".to_owned(), "/mix/level5".to_owned()],
+            MixedGameStructureLimits::default(),
+        )
+        .unwrap();
+        let level: Vec<_> = reversed
+            .registered_files
+            .iter()
+            .filter(|file| file.file_name == "level5")
+            .collect();
+        assert_eq!(level.len(), 1);
+        assert_eq!(level[0].virtual_path, "/mix/level5.split0");
     }
 
     #[test]

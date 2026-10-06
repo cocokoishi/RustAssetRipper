@@ -1290,3 +1290,11 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Gates: `cargo fmt --check` 0, full tests 1339 lib + 57 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
 - Next: sixty-first team round (gate-first: Switch lane, streaming info, collection workspace).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 171. Checkpoint: sixty-first team round integrated — gate-first (2026-10-06)
+
+- All five shipped, all lead-verified (targeted suites re-run: 23/23, 440/440, 9/9, 2/2, 30/30) and integrated: `sprite-fill` named Switch consts (`IO-PLATFORM-SWITCH-001`); `texture-meta` pinned integrity cells (`IO-RESOURCE-STREAMINGINFO-FIELDS-001`, stays verified); `anim-graph` fixed selection dedup (`IO-RESOURCE-PLATFORM-PROVIDER-001`, stays verified); `mesh-deform` returned NO-GAP on collections (`SER-REF-GRAPH-001`); `texture-export` named the walk bound (`IO-RESOURCE-001`). Lead corrections: two dispatches mislabeled verified rows (LEN-trap — dispatch now reads STATUS text); 233's fix carries the bug-evidence exception, 232 is evidence-only; no residue from probes (tree verified clean). Follow-ups queued: streaming_info.rs truncation premise, factory TypeID<0→114.
+- Gate question answered YES with the documented corrections.
+- Gates: `cargo fmt --check` 0, full tests 1343 lib + 57 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
+- Next: sixty-second team round (gate-first: streaming-info premise, factory fallback, iOS/Switch registry).
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

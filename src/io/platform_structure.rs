@@ -792,14 +792,20 @@ pub struct SwitchDataLayout {
     pub il2cpp_metadata_path: String,
 }
 
+/// `SwitchGameStructure` directory names: the executable filesystem, the game-data
+/// filesystem, and the IL2Cpp `main` binary inside the former.
+pub const SWITCH_EXEFS_DIR: &str = "exefs";
+pub const SWITCH_ROMFS_DIR: &str = "romfs";
+pub const SWITCH_MAIN_BINARY: &str = "main";
+
 pub fn switch_data_layout(root_path: &str) -> SwitchDataLayout {
-    let game_data_path = join_path(root_path, "romfs/Data");
+    let game_data_path = join_path(&join_path(root_path, SWITCH_ROMFS_DIR), "Data");
     let managed_path = join_path(&game_data_path, "Managed");
-    let exefs_path = join_path(root_path, "exefs");
+    let exefs_path = join_path(root_path, SWITCH_EXEFS_DIR);
     SwitchDataLayout {
         streaming_assets_path: join_path(&game_data_path, "StreamingAssets"),
         resources_path: join_path(&game_data_path, "Resources"),
-        il2cpp_game_assembly_path: join_path(&exefs_path, "main"),
+        il2cpp_game_assembly_path: join_path(&exefs_path, SWITCH_MAIN_BINARY),
         il2cpp_metadata_path: join_path(&managed_path, "Metadata/global-metadata.dat"),
         managed_path,
         exefs_path,
@@ -1383,7 +1389,8 @@ mod tests {
         switch_data_layout, web_player_bundle_path, wiiu_data_layout, AndroidRootRole,
         DesktopPlatform, PlatformKind, PlatformResourceLookup, PlatformResourceProvider,
         PlatformResourceSource, PlatformStructure, PlatformStructureErrorKind,
-        PlatformStructureLimits, WEBGL_BUILD_FLAVORS,
+        PlatformStructureLimits, SWITCH_EXEFS_DIR, SWITCH_MAIN_BINARY, SWITCH_ROMFS_DIR,
+        WEBGL_BUILD_FLAVORS,
     };
     use crate::io::filesystem::VirtualFileSystem;
 
@@ -1853,6 +1860,32 @@ mod tests {
         assert_eq!(
             layout.il2cpp_metadata_path,
             "/switch/romfs/Data/Managed/Metadata/global-metadata.dat"
+        );
+    }
+
+    #[test]
+    fn switch_directory_names_match_the_source_constants() {
+        // `SwitchGameStructure` names its executable/data filesystems and IL2Cpp binary.
+        assert_eq!(SWITCH_EXEFS_DIR, "exefs");
+        assert_eq!(SWITCH_ROMFS_DIR, "romfs");
+        assert_eq!(SWITCH_MAIN_BINARY, "main");
+
+        // The names flow into detection: name and data path resolve off the root.
+        let mut filesystem = VirtualFileSystem::new();
+        insert_directory(&mut filesystem, "/game/exefs");
+        insert_directory(&mut filesystem, "/game/romfs/Data");
+        let structure = detect_platform_structure(
+            &filesystem,
+            &["/game".to_owned()],
+            PlatformStructureLimits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(structure.platform, PlatformKind::Switch);
+        assert_eq!(structure.name.as_deref(), Some("game"));
+        assert_eq!(
+            structure.game_data_path.as_deref(),
+            Some("/game/romfs/Data")
         );
     }
 
