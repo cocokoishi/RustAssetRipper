@@ -20,6 +20,10 @@
 //!   shape, earlier versions with the 32-bit index shape.
 //! - The `FieldSerializer.GetManagedReferenceArrayDepth` nesting rule: each enclosing
 //!   single-dimension array or `List<T>` adds one array level around the element type.
+//! - The `FieldSerializer` Registry-field placement: the reference flag propagates to
+//!   derived types, a trailing registry is dropped from the inherited prefix, and the
+//!   derived type appends its own `RegistryField` when it holds referenced objects on a
+//!   behaviour/scriptable root. Cecil-backed field building stays caller-side.
 //! - The `EngineTypePredicates` string tables with the direct-comparison rules
 //!   (`IsSerializableUnityStruct` including the `LazyLoadReference` prefix, and the
 //!   should-have-had-serializable value-type set). Assignability checks need a runtime type
@@ -352,6 +356,44 @@ pub fn managed_reference_array_depth(layers: &[ManagedReferenceContainerLayer]) 
     depth
 }
 
+/// `FieldSerializer.AddInheritedFields` flag propagation over caller facts: a derived
+/// type carries references when its own fields do or when its base is a
+/// reference-carrying `MonoType`. Callers pass the base side precomputed because only
+/// `MonoType` bases carry the flag.
+pub const fn propagate_contains_serialize_reference(
+    own_contains: bool,
+    base_contains: bool,
+) -> bool {
+    own_contains || base_contains
+}
+
+/// `FieldSerializer.AddInheritedFields` inherited-prefix length over caller facts: the
+/// registry is always the last field of the most derived type, so a derived type drops
+/// a trailing registry field and adds its own instead of inheriting one. The empty
+/// guard mirrors the source `count > 0` check, which also protects the last-field read.
+pub const fn inherited_field_count(
+    base_field_count: usize,
+    base_trailing_is_registry: bool,
+) -> usize {
+    if base_trailing_is_registry && base_field_count > 0 {
+        base_field_count - 1
+    } else {
+        base_field_count
+    }
+}
+
+/// `FieldSerializer.TryCreateSerializableType` registry-append gate over caller facts:
+/// a type that holds referenced objects appends `RegistryField` when it derives from
+/// `MonoBehaviour` or `ScriptableObject`. This is the `TypeDefinition` creation path
+/// only; the generic-instance path never appends.
+pub const fn needs_registry_field(
+    contains_serialize_reference: bool,
+    inherits_mono_behaviour: bool,
+    inherits_scriptable_object: bool,
+) -> bool {
+    contains_serialize_reference && (inherits_mono_behaviour || inherits_scriptable_object)
+}
+
 /// Unity value types that should have had the serializable attribute.
 pub const UNITY_VALUE_TYPES_NEEDING_SERIALIZABLE: [&str; 14] = [
     "Vector3",
@@ -416,10 +458,12 @@ pub fn max_depth_of(field_depths: &[Option<i32>]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        element_type, is_serializable_unity_struct, is_unity_engine_value_type, managed_reference,
-        managed_reference_array_depth, managed_reference_shape_for_stable_ids, max_depth_of,
-        FieldShape, ManagedReferenceContainerLayer, PrimitiveType, MANAGED_REFERENCE_SHAPES,
-        SERIALIZABLE_UNITY_STRUCTS, UNITY_VALUE_TYPES_NEEDING_SERIALIZABLE,
+        element_type, inherited_field_count, is_serializable_unity_struct,
+        is_unity_engine_value_type, managed_reference, managed_reference_array_depth,
+        managed_reference_shape_for_stable_ids, max_depth_of, needs_registry_field,
+        propagate_contains_serialize_reference, FieldShape, ManagedReferenceContainerLayer,
+        PrimitiveType, MANAGED_REFERENCE_SHAPES, SERIALIZABLE_UNITY_STRUCTS,
+        UNITY_VALUE_TYPES_NEEDING_SERIALIZABLE,
     };
 
     #[test]
@@ -621,6 +665,29 @@ mod tests {
             managed_reference_array_depth(&[Layer::Array, Layer::Element, Layer::Array]),
             1
         );
+    }
+
+    #[test]
+    fn registry_field_placement_follows_inherit_and_append_rules() {
+        // The reference flag propagates from either side.
+        assert!(propagate_contains_serialize_reference(true, false));
+        assert!(propagate_contains_serialize_reference(false, true));
+        assert!(propagate_contains_serialize_reference(true, true));
+        assert!(!propagate_contains_serialize_reference(false, false));
+        // A trailing registry is dropped from the inherited prefix; anything else,
+        // including the empty base, is inherited whole.
+        assert_eq!(inherited_field_count(3, true), 2);
+        assert_eq!(inherited_field_count(1, true), 0);
+        assert_eq!(inherited_field_count(3, false), 3);
+        assert_eq!(inherited_field_count(0, false), 0);
+        // The append needs reference content plus a behaviour/scriptable root.
+        assert!(needs_registry_field(true, true, false));
+        assert!(needs_registry_field(true, false, true));
+        assert!(needs_registry_field(true, true, true));
+        assert!(!needs_registry_field(false, true, false));
+        assert!(!needs_registry_field(false, false, true));
+        assert!(!needs_registry_field(true, false, false));
+        assert!(!needs_registry_field(false, false, false));
     }
 
     #[test]

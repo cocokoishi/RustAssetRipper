@@ -1242,3 +1242,11 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Gates: `cargo fmt --check` 0, full tests 1314 lib + 57 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
 - Next: fifty-fifth team round (gate-first: wrapped-input suspicion first, then platform registry, container headers).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 165. Checkpoint: fifty-fifth team round integrated — gate-first (2026-10-06)
+
+- All five shipped, all lead-verified (targeted suites re-run: 7/7, 16/16, 15/15, 9/9, 14/14) and integrated: `sprite-fill` + `anim-graph` independently exonerated the wrapped-input suspicion on both sides (MISREAD, evidence-closed, no silent drop); `texture-meta` pinned the slack boundary and confirmed a source misread (`IO-BUNDLE-UNITYFS-HEADER-001`); `texture-export` ported Registry placement (`SER-MANAGED-REFS-001`); `mesh-deform` ported the player-settings predicate (`SER-ASSET-FACTORY-001`). Momentary shared-build breakage during verification was transient teammate churn (re-run green). No scope violations, no placeholders, no verified row touched.
+- Gate question answered YES: all five assignments shrink or evidence-close the Phase 1 incomplete count.
+- Gates: `cargo fmt --check` 0, full tests 1318 lib + 57 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
+- Next: fifty-sixth team round (gate-first: UnityFS meta/entries, bundle dispatch, typetree walker).
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

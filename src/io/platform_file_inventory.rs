@@ -1115,6 +1115,19 @@ impl InventoryState<'_> {
         Ok(())
     }
 
+    /// Bundle-header probe for directory scans.
+    ///
+    /// This intentionally inspects the raw header without decoding wrappers
+    /// (`SchemeReader::probe_raw_kind` reports wrapper bytes as `FileKind::Resource`), matching
+    /// `PlatformGameStructure.CollectAssetBundles`, which only registers files passing
+    /// `BundleHeader.IsBundleHeader` (`AssetRipper/Source/AssetRipper.IO.Files/BundleFiles/BundleHeader.cs`,
+    /// lines 67-73). GZip/Brotli wrappers are decoded downstream instead: the load step
+    /// dispatches every registered file through `SchemeReader::read_stream`, which strips
+    /// wrappers recursively and reports the inner kind, mirroring `SchemeReader.LoadFile`
+    /// plus the `CompressedFile` unwrap in `GameBundle.FromPaths`
+    /// (`AssetRipper/Source/AssetRipper.Assets/Bundles/GameBundle.FromPaths.cs`, lines 88-91).
+    /// Data-path, web-platform, and assembly registrations stay name-based on both sides, so
+    /// wrapper-compressed inputs there reach the same downstream decoder.
     fn probe_bundle_header(&mut self, path: &str) -> Result<bool, PlatformFileInventoryError> {
         if !self.inspected_paths.insert(path.to_owned()) {
             return Ok(false);

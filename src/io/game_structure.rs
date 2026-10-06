@@ -7,6 +7,14 @@
 //! resource bodies. Explicitly selected files register even when they probe as resources, and all
 //! counts and byte totals are bounded by [`MixedGameStructureLimits`] instead of failing like the
 //! source's unbounded enumeration.
+//!
+//! Wrapper-input verdict (the task-201 suspicion, exonerated): GZip/Brotli bytes probe as
+//! `Resource` and register nothing from directory scans, mirroring the baseline `Collect*`
+//! arms, which have no wrapper branch (`BundleHeader.IsBundleHeader` matches bundle signatures,
+//! so wrapper magic cannot match). Explicitly selected wrappers still register — like
+//! `MultiFileStream.Exists` falling through to `AddFile` for any existing file — and unwrap
+//! downstream in both implementations (the source GZip/Brotli schemes versus the
+//! `SchemeReader::read` wrapper loop), so nothing is silently dropped.
 
 use std::collections::BTreeSet;
 use std::error::Error;
@@ -496,6 +504,7 @@ impl Error for MixedGameStructureError {
 #[cfg(test)]
 mod tests {
     use super::{MixedGameStructure, MixedGameStructureErrorKind, MixedGameStructureLimits};
+    use crate::compression::wrappers::compress_gzip;
     use crate::io::filesystem::VirtualFileSystem;
 
     fn insert_file(filesystem: &mut VirtualFileSystem, path: &str, bytes: &[u8]) {
@@ -771,5 +780,34 @@ mod tests {
             .iter()
             .all(|file| file.virtual_path.starts_with("/loose")));
         assert_eq!(structure.data_paths, ["/loose"]);
+    }
+
+    #[test]
+    fn directory_wrappers_match_the_baseline_collect_arms() {
+        let wrapped = compress_gzip(b"payload", 1024).unwrap();
+        let mut filesystem = VirtualFileSystem::new();
+        insert_file(&mut filesystem, "/scan/wrapped.gz", &wrapped);
+
+        // Directory scans register no wrapper input, like the source Collect* arms.
+        let scanned = MixedGameStructure::from_vfs_paths(
+            &filesystem,
+            &["/scan".to_owned()],
+            MixedGameStructureLimits::default(),
+        )
+        .unwrap();
+        assert!(scanned.registered_files.is_empty());
+        assert!(scanned.serialized_file_inputs.is_empty());
+
+        // An explicitly selected wrapper still registers, like Exists -> AddFile.
+        let explicit = MixedGameStructure::from_vfs_paths(
+            &filesystem,
+            &["/scan/wrapped.gz".to_owned()],
+            MixedGameStructureLimits::default(),
+        )
+        .unwrap();
+        assert!(explicit
+            .registered_files
+            .iter()
+            .any(|file| file.virtual_path == "/scan/wrapped.gz"));
     }
 }

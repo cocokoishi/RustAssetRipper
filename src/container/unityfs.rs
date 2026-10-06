@@ -315,6 +315,12 @@ impl<'a> UnityFsBundle<'a> {
         let mut data_offset = if blocks_at_end {
             header_size
         } else {
+            // Block data starts after the declared metadata size even when the
+            // alignment slack above was tolerated: the slack pad bytes are not
+            // entry data, so continuing after the consumed bytes would shift every
+            // entry by the slack (the source falls through without repositioning
+            // and reads the pad as data). The source writer upholds the same
+            // invariant from the other side by rejecting inexact metadata writes.
             metadata_end
         };
         if blocks_at_end && version >= BUNDLE_VERSION_LARGE_FILES_SUPPORT {
@@ -1658,6 +1664,37 @@ mod tests {
             bundle.read_entry(0).unwrap(),
             std::borrow::Cow::Borrowed(_)
         ));
+    }
+
+    /// Uncompressed metadata with tolerated 4-byte-alignment slack (the source
+    /// `#1470` case): the slack pad is accepted but is not entry data, so block
+    /// data still starts after the declared size and the entry reads intact.
+    /// Continuing after the consumed bytes instead (as the source fall-through
+    /// does) would shift the entry by the slack.
+    #[test]
+    fn uncompressed_metadata_slack_starts_data_after_declared_size() {
+        let entry = b"slack entry payload";
+        let mut slack = make_bundle_variant(entry, 0, false, 7, 0, false);
+        // The v7 fixture header is 54 bytes plus 10 alignment bytes, so metadata
+        // starts at 64; its struct is 68 bytes ending with the `data/file.bin`
+        // NUL. Growing the path by one byte makes the struct 69 bytes; three pad
+        // bytes bring the region to the declared 72, which the alignment
+        // tolerance accepts: (69 + 3) & !3 == 72.
+        const METADATA_OFFSET: usize = 64;
+        slack.insert(METADATA_OFFSET + 67, b'1');
+        slack.splice(METADATA_OFFSET + 69..METADATA_OFFSET + 69, [0, 0, 0]);
+        let total_size = i64::from_be_bytes(slack[34..42].try_into().unwrap()) + 4;
+        slack[34..42].copy_from_slice(&total_size.to_be_bytes());
+        let compressed = i32::from_be_bytes(slack[42..46].try_into().unwrap()) + 4;
+        slack[42..46].copy_from_slice(&compressed.to_be_bytes());
+        let uncompressed = i32::from_be_bytes(slack[46..50].try_into().unwrap()) + 4;
+        slack[46..50].copy_from_slice(&uncompressed.to_be_bytes());
+
+        let bundle = UnityFsBundle::parse(&slack).unwrap();
+        assert_eq!(bundle.metadata_offset, METADATA_OFFSET);
+        assert_eq!(bundle.data_offset, METADATA_OFFSET + 72);
+        assert_eq!(bundle.nodes[0].path, "data/file.bin1");
+        assert_eq!(bundle.read_entry(0).unwrap().as_ref(), entry);
     }
 
     #[test]

@@ -6,7 +6,8 @@
 //! the `ReadMonoBehaviour` structure-source decision, the `MakeError_*` and
 //! `LogMonoBehaviorReadException` diagnostic texts, the `RawDataObject`/`UnknownObject`/
 //! `UnreadableObject` hash and synthetic-name rules, and the `ReadExtraTextureFields`
-//! 24-byte tail layout, plus the structure-resolver selection. Byte reading,
+//! 24-byte tail layout, plus the structure-resolver selection and the player-settings
+//! class predicate. Byte reading,
 //! node building, and assembly-backed MonoBehaviour structures stay outside: they need
 //! generated objects and live assemblies. Version facts arrive precomputed because the
 //! Rust tree has no parsed Unity-version model yet.
@@ -25,6 +26,16 @@ use crate::resources::blend_shape::crc32_ieee;
 
 /// The class ID routed to the MonoBehaviour read path.
 pub const MONO_BEHAVIOUR_CLASS_ID: i32 = 114;
+
+/// The class ID of the player-settings asset (`TypeTreeObject.IsPlayerSettings`).
+pub const PLAYER_SETTINGS_CLASS_ID: i32 = 129;
+
+/// Whether a class ID identifies the player-settings asset. Downstream export
+/// decisions key off this predicate (`ManagerAssetExporter`, `EditorFormatProcessor`):
+/// player-settings `TypeTreeObject`s are handled as manager assets.
+pub const fn is_player_settings_class(class_id: i32) -> bool {
+    class_id == PLAYER_SETTINGS_CLASS_ID
+}
 
 /// Trailing bytes that mark the non-standard Chinese texture layout.
 pub const CHINESE_TEXTURE_EXTRA_BYTES: usize = 24;
@@ -701,6 +712,16 @@ mod tests {
                 TryReadLog::ErrorIncorrectByteCount
             )
         );
+    }
+
+    #[test]
+    fn player_settings_class_matches_the_typetree_predicate() {
+        assert!(super::is_player_settings_class(
+            super::PLAYER_SETTINGS_CLASS_ID
+        ));
+        for class_id in [0, 28, 48, 114, 115, 128, 130, -1, i32::MAX] {
+            assert!(!super::is_player_settings_class(class_id), "{class_id}");
+        }
     }
 
     #[test]
