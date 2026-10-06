@@ -790,6 +790,19 @@ mod tests {
         image_count.value = SerializedValue::I32(2);
         let view = Texture2DView::from_value(&layered).unwrap();
         assert_eq!(view.actual_image_size(), 4);
+
+        // With layers that do not divide the data, the whole length is kept.
+        let mut ragged = root.clone();
+        let SerializedValue::Struct(fields) = &mut ragged else {
+            unreachable!()
+        };
+        let image_count = fields
+            .iter_mut()
+            .find(|f| f.name == "m_ImageCount")
+            .unwrap();
+        image_count.value = SerializedValue::I32(3);
+        let view = Texture2DView::from_value(&ragged).unwrap();
+        assert_eq!(view.actual_image_size(), 8);
     }
 
     #[test]

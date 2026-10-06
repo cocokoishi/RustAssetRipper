@@ -544,6 +544,93 @@ mod tests {
         assert_eq!(corrected_switch_format(4 /* RGBA32 */), 4);
     }
 
+    /// Every format row of `GetBlockDimensions`/`GetBlockSize` transcribed from
+    /// `SwitchSwizzle.cs`, so a literal slip fails here even when the end-to-end
+    /// vectors do not exercise that format.
+    #[test]
+    fn block_table_sweep_matches_every_source_row() {
+        let flat_1x1 = [
+            1, 2, 13, 5, 14, 37, 7, 63, 75, 62, 76, 4, 78, 9, 79, 15, 72, 80, 16, 74, 82, 17, 18,
+            19, 20, 6,
+        ];
+        for format in flat_1x1 {
+            assert_eq!(block_dimensions(format), Some((1, 1)), "format {format}");
+        }
+        let blocks_4x4 = [10, 12, 26, 27, 24, 25];
+        for format in blocks_4x4 {
+            assert_eq!(block_dimensions(format), Some((4, 4)), "format {format}");
+        }
+        let astc = [
+            (-48, -54, 66, 4),
+            (-49, -55, 67, 5),
+            (-50, -56, 68, 6),
+            (-51, -57, 69, 8),
+            (-52, -58, 70, 10),
+            (-53, -59, 71, 12),
+        ];
+        for (rgb, rgba, hdr, side) in astc {
+            for format in [rgb, rgba, hdr] {
+                assert_eq!(
+                    block_dimensions(format),
+                    Some((side as u32, side as u32)),
+                    "format {format}"
+                );
+                assert_eq!(block_size(format), Ok(16), "format {format}");
+            }
+        }
+        // The source backs out on anything else, including DXT3 and the RGB layouts
+        // that only exist pre-correction.
+        for format in [11, 3, 73, 77, 81, 8, 0, -1, 1000] {
+            assert_eq!(block_dimensions(format), None, "format {format}");
+            assert!(block_size(format).is_err(), "format {format}");
+        }
+        // Byte sizes for the non-ASTC rows.
+        let sizes = [
+            (1, 1),
+            (2, 2),
+            (13, 2),
+            (5, 4),
+            (14, 4),
+            (37, 4),
+            (7, 2),
+            (10, 8),
+            (12, 16),
+            (26, 8),
+            (27, 16),
+            (24, 16),
+            (25, 16),
+            (63, 1),
+            (75, 1),
+            (62, 2),
+            (76, 2),
+            (4, 4),
+            (78, 4),
+            (9, 2),
+            (79, 2),
+            (15, 2),
+            (72, 4),
+            (80, 4),
+            (16, 4),
+            (74, 8),
+            (82, 8),
+            (17, 8),
+            (18, 4),
+            (19, 8),
+            (20, 16),
+            (6, 16),
+        ];
+        for (format, size) in sizes {
+            assert_eq!(block_size(format), Ok(size), "format {format}");
+        }
+        // The RGB-to-RGBA correction covers exactly five layouts.
+        for (from, to) in [(3, 4), (73, 74), (77, 78), (81, 82), (8, 14)] {
+            assert_eq!(corrected_switch_format(from), to, "format {from}");
+        }
+        for format in [1, 4, 10, 12, 24, 63, -48, 71, 999] {
+            assert_eq!(corrected_switch_format(format), format, "format {format}");
+        }
+    }
+
     #[test]
     fn texel_height_reads_the_blob_shift() {
         assert_eq!(

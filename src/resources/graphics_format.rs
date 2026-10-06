@@ -230,4 +230,31 @@ mod tests {
             Err(GraphicsFormatError::ArgumentOutOfRange { format: 1_000_000 })
         );
     }
+
+    #[test]
+    fn graphics_format_edges_cover_negatives_and_messages() {
+        // Negative values fall through to the out-of-range arm, like the
+        // source switch: no unsigned conversion may silently accept them.
+        assert_eq!(
+            to_texture_format(-1),
+            Err(GraphicsFormatError::ArgumentOutOfRange { format: -1 })
+        );
+        assert_eq!(
+            to_texture_format(i32::MIN),
+            Err(GraphicsFormatError::ArgumentOutOfRange { format: i32::MIN })
+        );
+        // The error messages pin the reporting strings.
+        assert_eq!(
+            GraphicsFormatError::NotSupported.to_string(),
+            "GraphicsFormat has no TextureFormat conversion"
+        );
+        assert_eq!(
+            GraphicsFormatError::NotImplemented.to_string(),
+            "GraphicsFormat conversion is not implemented"
+        );
+        assert_eq!(
+            GraphicsFormatError::ArgumentOutOfRange { format: 152 }.to_string(),
+            "GraphicsFormat value 152 is out of range"
+        );
+    }
 }
