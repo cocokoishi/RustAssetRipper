@@ -19,7 +19,10 @@
 //!   values behind the names stay open.
 //! - `NativeAudioExporter` refuses empty payloads with a warning and otherwise writes raw
 //!   bytes; its collection extension follows the sound type when present and the
-//!   compression format otherwise.
+//!   compression format otherwise. Both exporter warning texts are pinned below.
+//! - `AudioConverter.OggToWav` has no codec owner in this tree: only the conversion
+//!   trigger is pinned here, and the pipeline reports the conversion unavailable when it
+//!   fires. The converter's empty-input and failure edges stay open with it.
 //! - `YamlAudioExportCollection.ExportInner` stages streamed content into a `.resS`
 //!   sidecar, rewrites the resource reference to a relative path, exports, then restores
 //!   the original reference; missing content zeroes the reference instead. The relative
@@ -248,6 +251,20 @@ pub const fn plan_native_audio_export(data_is_empty: bool) -> NativeAudioExport 
     }
 }
 
+/// `NativeAudioExporter.Export` warning for an empty payload.
+///
+/// The source names the asset with `GetBestName`.
+pub fn native_audio_empty_warning(best_name: &str) -> String {
+    format!("Can't export '{best_name}' because no valid data was found")
+}
+
+/// `AudioClipExporter.TryCreateCollection` warning when decoding yields no bytes.
+///
+/// The source names the asset with its plain `Name`.
+pub fn empty_decoded_audio_warning(name: &str) -> String {
+    format!("Decoded audio data is empty for '{name}'")
+}
+
 /// `NativeAudioExportCollection.GetExportExtension`: the sound type wins when the asset
 /// exposes one, otherwise the compression format decides. Names follow the snapshot
 /// enums; resolution of the names themselves stays caller-side.
@@ -380,7 +397,8 @@ impl std::error::Error for AudioDecodeError {}
 mod tests {
     use super::{
         check_magic, classify_audio_data, compression_format_raw_extension, converts_ogg_to_wav,
-        diagnostic_hex, diagnostic_printable, is_supported_export_format, native_audio_extension,
+        diagnostic_hex, diagnostic_printable, empty_decoded_audio_warning,
+        is_supported_export_format, native_audio_empty_warning, native_audio_extension,
         plan_audio_clip_collection, plan_native_audio_export, plan_streamed_resource,
         sound_type_raw_extension, tracker_extension, try_decode_audio, AudioDataKind,
         AudioDecodeError, AudioDecodeFact, AudioRefusal, NativeAudioExport, StreamedResourcePlan,
@@ -649,6 +667,10 @@ mod tests {
             try_decode_audio("clip", None, b"FSB5...."),
             Err(AudioDecodeError::FmodContainerUnsupported)
         );
+        assert_eq!(
+            AudioDecodeError::FmodContainerUnsupported.to_string(),
+            "FSB5 audio needs the external Fmod5Sharp decoder"
+        );
         let error = try_decode_audio("clip", None, b"ABCD").unwrap_err();
         assert_eq!(
             error.to_string(),
@@ -660,6 +682,18 @@ mod tests {
         assert_eq!(
             try_decode_audio("clip", None, &mod_data).map(|pair| pair.1),
             Ok("mod")
+        );
+    }
+
+    #[test]
+    fn exporter_warnings_name_the_asset_like_the_source() {
+        assert_eq!(
+            native_audio_empty_warning("Music"),
+            "Can't export 'Music' because no valid data was found"
+        );
+        assert_eq!(
+            empty_decoded_audio_warning("Music"),
+            "Decoded audio data is empty for 'Music'"
         );
     }
 }

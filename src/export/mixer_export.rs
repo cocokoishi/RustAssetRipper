@@ -14,6 +14,13 @@
 //!   the version-gated shader patches — then runs the base YAML export. The patch text is
 //!   vendored verbatim under `shader_data/` (same mechanical extraction as the shader
 //!   texts) and written through the shared patch mechanics (skip-if-exists, UTF-8 bytes).
+//! - The processor's pure domain kernels: plugin-effect classification, the negative
+//!   effect-type names, the `Param_{j}` dummy parameter names (recovered by the patch
+//!   at Unity import), and the NUL-separated plugin-effect name buffer split. The
+//!   non-negative effect-type names resolve through the FMOD `FmodDspType` numerics,
+//!   which the frozen snapshot does not contain, so they stay open; the processor
+//!   orchestration itself (virtual collections, GUID tables, snapshot wiring) stays
+//!   caller-side with the generated mixer classes.
 
 /// The mixer patch name passed to `ApplyPatchFromText`.
 pub const AUDIO_MIXER_PATCH_NAME: &str = "AudioMixerPostprocessor";
@@ -80,12 +87,60 @@ pub const fn next_strided_counter(counter: i64) -> i64 {
     counter + MIXER_EXPORT_ID_STRIDE
 }
 
+/// `AudioEffectDefinitions.IsPluginEffect`: custom plugin effects start at 1000.
+pub const fn is_plugin_effect(effect_type: i32) -> bool {
+    effect_type >= 1000
+}
+
+/// The negative `UnityEffectType` arm of `AudioEffectDefinitions.EffectTypeToName`.
+///
+/// Non-negative types resolve through the FMOD `FmodDspType` numerics, which the
+/// frozen snapshot does not contain, so they (and plugin types, which the source
+/// refuses) read as `None` here; that mapping stays open.
+pub const fn unity_effect_type_name(effect_type: i32) -> Option<&'static str> {
+    match effect_type {
+        -2 => Some("Attenuation"),
+        -3 => Some("Send"),
+        -4 => Some("Receive"),
+        -5 => Some("Duck Volume"),
+        _ => None,
+    }
+}
+
+/// The dummy effect parameter name (`$"Param_{j}"`).
+///
+/// The processor assigns these because release assets carry no parameter names;
+/// the vendored `AudioMixerPostprocessor` patch recovers the real names when
+/// Unity imports the exported mixer.
+pub fn dummy_effect_parameter_name(parameter_index: usize) -> String {
+    format!("Param_{parameter_index}")
+}
+
+/// Splits a `PluginEffectNameBuffer` into its NUL-separated effect names.
+///
+/// Mirrors `AudioMixerProcessor.ParseNameBuffer`'s loop, which terminates at the
+/// first empty segment (real buffers are NUL-padded fixed arrays, so the names
+/// are always a leading run). Two deliberate hardenings: an empty or
+/// unterminated input yields the successfully split prefix instead of throwing
+/// past the end, and non-UTF-8 bytes become the replacement character.
+pub fn parse_plugin_effect_names(buffer: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    for segment in buffer.split(|byte| *byte == 0) {
+        if segment.is_empty() {
+            break;
+        }
+        names.push(String::from_utf8_lossy(segment).into_owned());
+    }
+    names
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        next_strided_counter, plan_mixer_collection, MixerCollectionKind, AUDIO_MIXER_PATCH_NAME,
-        AUDIO_MIXER_PATCH_TEXT, MIXER_EXPORT_EXTENSION, MIXER_EXPORT_ID_SEED,
-        MIXER_EXPORT_ID_STRIDE, MIXER_GATHER_READS,
+        dummy_effect_parameter_name, is_plugin_effect, next_strided_counter,
+        parse_plugin_effect_names, plan_mixer_collection, unity_effect_type_name,
+        MixerCollectionKind, AUDIO_MIXER_PATCH_NAME, AUDIO_MIXER_PATCH_TEXT,
+        MIXER_EXPORT_EXTENSION, MIXER_EXPORT_ID_SEED, MIXER_EXPORT_ID_STRIDE, MIXER_GATHER_READS,
     };
 
     #[test]
@@ -119,5 +174,54 @@ mod tests {
         assert!(AUDIO_MIXER_PATCH_TEXT.contains("AudioMixerPostprocessor"));
         assert!(AUDIO_MIXER_PATCH_TEXT.contains("PreallocateGUIDs"));
         assert!(AUDIO_MIXER_PATCH_TEXT.contains("\r\n"));
+    }
+
+    #[test]
+    fn mixer_effect_classification_matches_the_definitions_source() {
+        assert!(!is_plugin_effect(999));
+        assert!(is_plugin_effect(1000));
+        assert!(is_plugin_effect(1001));
+        assert!(!is_plugin_effect(0));
+        assert!(!is_plugin_effect(-2));
+        assert_eq!(unity_effect_type_name(-2), Some("Attenuation"));
+        assert_eq!(unity_effect_type_name(-3), Some("Send"));
+        assert_eq!(unity_effect_type_name(-4), Some("Receive"));
+        assert_eq!(unity_effect_type_name(-5), Some("Duck Volume"));
+        // Unknown negative types read as None like the source switch default;
+        // non-negative names need the FMOD numerics and stay open.
+        assert_eq!(unity_effect_type_name(-1), None);
+        assert_eq!(unity_effect_type_name(-6), None);
+        assert_eq!(unity_effect_type_name(0), None);
+        assert_eq!(unity_effect_type_name(3), None);
+        assert_eq!(unity_effect_type_name(1000), None);
+    }
+
+    #[test]
+    fn mixer_dummy_parameter_names_follow_the_processor_format() {
+        assert_eq!(dummy_effect_parameter_name(0), "Param_0");
+        assert_eq!(dummy_effect_parameter_name(7), "Param_7");
+    }
+
+    #[test]
+    fn mixer_plugin_effect_names_split_at_nul_boundaries() {
+        assert_eq!(
+            parse_plugin_effect_names(b"Echo\0SFX Reverb\0\0\0"),
+            ["Echo".to_string(), "SFX Reverb".to_string()]
+        );
+        assert_eq!(parse_plugin_effect_names(b"Single"), ["Single".to_string()]);
+        assert_eq!(
+            parse_plugin_effect_names(b"a\0b"),
+            ["a".to_string(), "b".to_string()]
+        );
+        assert_eq!(
+            parse_plugin_effect_names(b"a\0b\0"),
+            ["a".to_string(), "b".to_string()]
+        );
+        assert!(parse_plugin_effect_names(b"").is_empty());
+        assert!(parse_plugin_effect_names(b"\0padding").is_empty());
+        assert_eq!(
+            parse_plugin_effect_names(b"a\xffb\0"),
+            ["a\u{fffd}b".to_string()]
+        );
     }
 }

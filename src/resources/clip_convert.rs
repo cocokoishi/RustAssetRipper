@@ -12,6 +12,9 @@
 //! - `ProcessStreams` first-frame fix (`frames[0].Time = 0` past the first frame).
 //! - `ProcessDenses` frame-time math and the `ProcessConstant` one-or-two-frames
 //!   rule, plus the `DefaultFloatWeight` constant.
+//! - `TryGetNextFrame`: the forward scan for the next frame holding a curve id.
+//! - `AddAnimatorMuscleCurve`: the humanoid binding-name decision behind the emitted
+//!   animator-muscle curve (`GetHumanoidMuscle` + `ToAttributeString`).
 //!
 //! The curve-emission half (`AddTransformCurve`, `AddDefaultCurve`,
 //! `AddCustomCurve`, keyframe creation on clip objects) needs mutable generated clip
@@ -21,8 +24,10 @@
 use std::error::Error;
 use std::fmt::{self, Display};
 
+use super::avatar::{humanoid_muscle_attribute, update_humanoid_muscle};
 use super::custom_curve::{CustomCurveError, TransformType};
 use super::streamed_curve::StreamedFrame;
+use super::vertex_data_blob::UnityVersion;
 
 /// `ClassIDType.Transform`.
 pub const CLASS_ID_TRANSFORM: i32 = 4;
@@ -195,6 +200,41 @@ pub fn constant_frame_count(last_frame: f32) -> usize {
     } else {
         2
     }
+}
+
+/// `AnimationClipConverter.TryGetNextFrame`: the first frame strictly after
+/// `current_frame` holding a curve with `curve_id`, with its curve position.
+///
+/// Returns `None` where the source reports `false` (leaving its `nextFrame` null and
+/// `curveIdx` at -1): no later frame, no matching curve, or a `current_frame` at the
+/// address-space end.
+pub fn try_get_next_frame(
+    frames: &[StreamedFrame],
+    current_frame: usize,
+    curve_id: i32,
+) -> Option<(usize, usize)> {
+    let later = current_frame.checked_add(1)?;
+    frames
+        .iter()
+        .enumerate()
+        .skip(later)
+        .find_map(|(frame_index, frame)| {
+            frame
+                .curves
+                .iter()
+                .position(|curve| curve.index == curve_id)
+                .map(|curve_index| (frame_index, curve_index))
+        })
+}
+
+/// `AddAnimatorMuscleCurve` attribute decision: `HumanoidMuscleType.ToAttributeString`
+/// of `GenericBinding.GetHumanoidMuscle` (the binding attribute updated to the clip
+/// version). The `u32` attribute wraps to `i32` exactly like the source unchecked enum
+/// cast; ids outside the muscle table read `None`. Curve emission (empty path,
+/// `Animator` class id, float keyframe) needs mutable clip objects and stays open.
+pub fn animator_muscle_attribute(attribute: u32, version: UnityVersion) -> Option<String> {
+    let muscle = update_humanoid_muscle(attribute as i32, version);
+    humanoid_muscle_attribute(muscle)
 }
 
 #[cfg(test)]
@@ -391,5 +431,42 @@ mod tests {
         assert_eq!(constant_frame_count(0.0), 1);
         assert_eq!(constant_frame_count(2.0), 2);
         assert_eq!(DEFAULT_FLOAT_WEIGHT.to_bits(), (1.0f32 / 3.0).to_bits());
+    }
+
+    #[test]
+    fn next_frame_scan_skips_current_and_reports_positions() {
+        let frames = [frame(0.0, &[0, 1]), frame(1.0, &[1, 0]), frame(2.0, &[2])];
+        // The current frame never matches, even when it holds the id.
+        assert_eq!(try_get_next_frame(&frames, 0, 0), Some((1, 1)));
+        assert_eq!(try_get_next_frame(&frames, 0, 1), Some((1, 0)));
+        assert_eq!(try_get_next_frame(&frames, 1, 2), Some((2, 0)));
+        // Past the last holder, or with no holder at all, the scan misses.
+        assert_eq!(try_get_next_frame(&frames, 1, 0), None);
+        assert_eq!(try_get_next_frame(&frames, 2, 0), None);
+        assert_eq!(try_get_next_frame(&frames, 0, 9), None);
+        assert_eq!(try_get_next_frame(&[], 0, 0), None);
+        assert_eq!(try_get_next_frame(&frames, usize::MAX, 0), None);
+    }
+
+    #[test]
+    fn animator_muscle_names_follow_the_updated_attribute() {
+        let modern = UnityVersion::parse("2022.3.1f1").unwrap();
+        let legacy = UnityVersion::parse("5.0.0f1").unwrap();
+        assert_eq!(
+            animator_muscle_attribute(42, modern).as_deref(),
+            Some("Spine Front-Back")
+        );
+        // Attribute 48 is UpperChest on modern layouts but shifts pre-5.6.
+        assert_eq!(
+            animator_muscle_attribute(48, modern).as_deref(),
+            Some("UpperChest Front-Back")
+        );
+        assert_eq!(
+            animator_muscle_attribute(48, legacy).as_deref(),
+            Some("Neck Nod Down-Up")
+        );
+        // Out-of-range attributes read None on every version.
+        assert_eq!(animator_muscle_attribute(200, modern), None);
+        assert_eq!(animator_muscle_attribute(u32::MAX, legacy), None);
     }
 }
