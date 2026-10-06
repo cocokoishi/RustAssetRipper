@@ -1,3 +1,18 @@
+//! Raw LZ4 block decoding and fast-level encoding for Unity bundle blocks.
+//!
+//! Decoding mirrors the K4os raw block decoder behavior behind UnityFS
+//! compression types 2 (`Lz4`) and 3 (`Lz4HC`), following the
+//! [LZ4 Block Format Description](https://github.com/lz4/lz4/blob/dev/doc/lz4_Block_format.md).
+//! Encoding fills the matching write-path role (`LZ4Codec.Encode(..., L00_FAST)`
+//! in `FileStreamBundleFile.WriteFileStreamMetadata`): a fast-level match finder
+//! over a 12-bit hash table emitting spec-valid blocks — minimum match length 4,
+//! 16-bit offsets, nibble-15 length extensions, and a literal-only five-byte tail.
+//! Byte-identity with K4os output is not promised (match selection affects only
+//! density); every emitted block round-trips through [`decompress_block`].
+//!
+//! Open: the LZ4 frame container, preset dictionaries, and the HC optimal parser
+//! stay unported; UnityFS consumes raw blocks only.
+
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
@@ -97,6 +112,117 @@ pub fn decompress_block(
         ));
     }
     Ok(output)
+}
+
+/// Multiplier of the 32-bit LZ4 sequence hash.
+const LZ4_HASH_MULTIPLIER: u32 = 2654435761;
+/// Hash table bits of the fast-level match finder.
+const LZ4_HASH_BITS: u32 = 12;
+/// Minimum match length the block format can encode.
+const LZ4_MIN_MATCH: usize = 4;
+/// Remaining input bytes required to keep scanning for matches; the loop exits
+/// earlier so the tail is always emitted as literals.
+const LZ4_SEARCH_LIMIT: usize = 12;
+/// Trailing bytes always emitted as literals, per the block format.
+const LZ4_LAST_LITERALS: usize = 5;
+/// Largest encodable match distance (offsets are 16-bit; zero is invalid).
+const LZ4_MAX_DISTANCE: usize = 0xFFFF;
+
+/// Compress a byte string into a raw LZ4 block at the baseline's fast level.
+///
+/// Fills the `LZ4Codec.Encode(uncompressedBytes, compressedBytes, LZ4Level.L00_FAST)`
+/// role on the UnityFS write path (`FileStreamBundleFile.WriteFileStreamMetadata`):
+/// a single-pass match finder over a 12-bit hash table emitting spec-valid blocks
+/// with minimum match length 4, 16-bit match offsets, nibble-15 length extensions,
+/// and a literal-only five-byte tail. An empty input encodes to the canonical
+/// single endmark token. `maximum_output_size` bounds the reservation up front
+/// against the worst case (`len + len / 255 + 16`); match selection affects only
+/// density, so byte-identity with K4os output is not promised, but every emitted
+/// block decodes back through [`decompress_block`].
+pub fn compress_block(input: &[u8], maximum_output_size: usize) -> Result<Vec<u8>, Lz4BlockError> {
+    let worst_case = input
+        .len()
+        .checked_add(input.len() / 255 + 16)
+        .ok_or_else(|| Lz4BlockError::new(0, Lz4BlockErrorKind::LengthOverflow))?;
+    if worst_case > maximum_output_size {
+        return Err(Lz4BlockError::new(
+            0,
+            Lz4BlockErrorKind::OutputLimitExceeded {
+                expected: worst_case,
+                limit: maximum_output_size,
+            },
+        ));
+    }
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(worst_case)
+        .map_err(|_| Lz4BlockError::new(0, Lz4BlockErrorKind::AllocationFailed(worst_case)))?;
+
+    if input.is_empty() {
+        output.push(0x00);
+        return Ok(output);
+    }
+
+    let mut table = vec![usize::MAX; 1 << LZ4_HASH_BITS];
+    let mut anchor = 0usize;
+    let mut position = 0usize;
+    while input.len() - position >= LZ4_SEARCH_LIMIT {
+        let sequence = u32::from_le_bytes([
+            input[position],
+            input[position + 1],
+            input[position + 2],
+            input[position + 3],
+        ]);
+        let hash = (sequence.wrapping_mul(LZ4_HASH_MULTIPLIER) >> (32 - LZ4_HASH_BITS)) as usize
+            & ((1 << LZ4_HASH_BITS) - 1);
+        let reference = table[hash];
+        table[hash] = position;
+        let distance = position.wrapping_sub(reference);
+        if reference != usize::MAX
+            && distance <= LZ4_MAX_DISTANCE
+            && input[reference..reference + LZ4_MIN_MATCH]
+                == input[position..position + LZ4_MIN_MATCH]
+        {
+            let literal_length = position - anchor;
+            let mut match_length = LZ4_MIN_MATCH;
+            let extension_cap = input.len() - LZ4_LAST_LITERALS;
+            while position + match_length < extension_cap
+                && input[reference + match_length] == input[position + match_length]
+            {
+                match_length += 1;
+            }
+            let token =
+                ((literal_length.min(15) << 4) | (match_length - LZ4_MIN_MATCH).min(15)) as u8;
+            output.push(token);
+            push_extension_bytes(&mut output, literal_length);
+            output.extend_from_slice(&input[anchor..position]);
+            output.extend_from_slice(&(distance as u16).to_le_bytes());
+            push_extension_bytes(&mut output, match_length - LZ4_MIN_MATCH);
+            anchor = position + match_length;
+            position = anchor;
+        } else {
+            position += 1;
+        }
+    }
+
+    let literal_length = input.len() - anchor;
+    output.push((literal_length.min(15) << 4) as u8);
+    push_extension_bytes(&mut output, literal_length);
+    output.extend_from_slice(&input[anchor..]);
+    Ok(output)
+}
+
+/// Appends the nibble-15 extension bytes for one token length.
+fn push_extension_bytes(output: &mut Vec<u8>, mut length: usize) {
+    if length < 15 {
+        return;
+    }
+    length -= 15;
+    while length >= 255 {
+        output.push(255);
+        length -= 255;
+    }
+    output.push(length as u8);
 }
 
 fn read_extended_length(
@@ -243,7 +369,7 @@ impl Display for Lz4BlockErrorKind {
 
 #[cfg(test)]
 mod tests {
-    use super::{decompress_block, Lz4BlockErrorKind};
+    use super::{compress_block, decompress_block, Lz4BlockErrorKind};
 
     #[test]
     fn decodes_overlapping_matches_and_exact_literal_sequences() {
@@ -303,5 +429,84 @@ mod tests {
                 expected: 1
             }
         ));
+    }
+
+    #[test]
+    fn encoder_emits_exact_bytes_for_canonical_shapes() {
+        // Empty input is the canonical single endmark token.
+        assert_eq!(compress_block(&[], 64).unwrap(), vec![0x00]);
+        // Fewer than 12 bytes never enter the match finder: one literal token.
+        assert_eq!(
+            compress_block(&[1, 2, 3, 4, 5, 6, 7, 8], 64).unwrap(),
+            vec![0x80, 1, 2, 3, 4, 5, 6, 7, 8]
+        );
+        // Twenty distinct bytes stay one literal run with a nibble-15 extension.
+        let distinct: Vec<u8> = (0..20).map(|index| index * 13 + 7).collect();
+        let mut expected = vec![0xf0, 0x05];
+        expected.extend_from_slice(&distinct);
+        assert_eq!(compress_block(&distinct, 64).unwrap(), expected);
+        // A repeat is a literal run, a short match, and a literal-only tail:
+        // the match stops at `len - 5` even though the run continues.
+        let mut repeated = b"01234567".to_vec();
+        repeated.extend_from_slice(b"012345670123");
+        assert_eq!(
+            compress_block(&repeated, 64).unwrap(),
+            [
+                0x83, b'0', b'1', b'2', b'3', b'4', b'5', b'6', b'7', 0x08, 0x00, 0x50, b'7', b'0',
+                b'1', b'2', b'3',
+            ]
+        );
+        // Thirteen identical bytes match at distance one with overlap.
+        assert_eq!(
+            compress_block(&[b'a'; 13], 64).unwrap(),
+            [0x13, b'a', 0x01, 0x00, 0x50, b'a', b'a', b'a', b'a', b'a']
+        );
+    }
+
+    #[test]
+    fn encoder_round_trips_through_the_decoder() {
+        let mut inputs: Vec<Vec<u8>> = vec![
+            vec![],
+            vec![0x00],
+            b"Hello, Unity bundle world! ".repeat(8),
+            (0..256).map(|index| index as u8).collect(),
+            vec![0xab; 1024],
+        ];
+        // Deterministic pseudo-random bytes with scattered repeats.
+        let mut random = vec![0u8; 4096];
+        let mut state = 0x1234_5678u32;
+        for byte in random.iter_mut() {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            *byte = (state >> 16) as u8;
+        }
+        let seed = random[8..16].to_vec();
+        random[1000..1008].copy_from_slice(&seed);
+        let early = random[2000..2020].to_vec();
+        random[3000..3020].copy_from_slice(&early);
+        inputs.push(random);
+        // Repeats beyond the 16-bit offset range stay literals but stay valid.
+        let mut far = vec![0x55u8; 70_000];
+        let head = far[..64].to_vec();
+        far.extend_from_slice(&head);
+        inputs.push(far);
+        for input in &inputs {
+            let compressed = compress_block(input, input.len() + input.len() / 255 + 16).unwrap();
+            assert_eq!(
+                decompress_block(&compressed, input.len(), input.len()).unwrap(),
+                *input
+            );
+        }
+    }
+
+    #[test]
+    fn encoder_enforces_the_output_limit() {
+        let error = compress_block(&[1, 2, 3], 0).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            Lz4BlockErrorKind::OutputLimitExceeded { .. }
+        ));
+        let input = b"compressible compressible compressible input bytes";
+        let worst_case = input.len() + input.len() / 255 + 16;
+        compress_block(input, worst_case).unwrap();
     }
 }

@@ -1,4 +1,11 @@
 //! In-memory virtual filesystem used by containers and recovered Unity files.
+//!
+//! Covers the `VirtualFileSystem` CRUD, enumeration, `Count`, `Clear`, `ReadAllBytes`/
+//! `WriteAllBytes`, UTF-8 `ReadAllText`/`WriteAllText`, and `TemporaryDirectory` rules.
+//!
+//! Deliberately open: the `Encoding` text overloads (only UTF-8 ports), GUID-named
+//! temporary file/directory creation, `DeleteTemporaryDirectory` (which needs the
+//! still-unported recursive directory delete), and real-filesystem mounting.
 
 use std::collections::BTreeMap;
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -46,6 +53,8 @@ pub struct VirtualFileSystem {
     root: DirectoryEntry,
     entry_count: usize,
     limits: VirtualFileSystemLimits,
+    /// The `TemporaryDirectory` path backing temporary-file creation (default `"/temp"`).
+    temporary_directory: String,
 }
 
 impl VirtualFileSystem {
@@ -54,6 +63,7 @@ impl VirtualFileSystem {
             root: DirectoryEntry::default(),
             entry_count: 1,
             limits: VirtualFileSystemLimits::default(),
+            temporary_directory: String::from("/temp"),
         }
     }
 
@@ -68,6 +78,7 @@ impl VirtualFileSystem {
             root: DirectoryEntry::default(),
             entry_count: 1,
             limits,
+            temporary_directory: String::from("/temp"),
         })
     }
 
@@ -85,6 +96,36 @@ impl VirtualFileSystem {
         self.root.directories.clear();
         self.root.files.clear();
         self.entry_count = 1;
+    }
+
+    /// The `TemporaryDirectory` path backing temporary-file creation.
+    pub fn temporary_directory(&self) -> &str {
+        &self.temporary_directory
+    }
+
+    /// Set `TemporaryDirectory`, mirroring the source setter: blank or whitespace-only
+    /// values are ignored; anything else is stored as a full path, resolved against the
+    /// process working directory when it is not already rooted. A working directory
+    /// that cannot be read leaves a relative value stored as given.
+    pub fn set_temporary_directory(&mut self, value: &str) {
+        if value.trim().is_empty() {
+            return;
+        }
+        if value.starts_with('/') || value.starts_with('\\') {
+            self.temporary_directory = value.to_owned();
+            return;
+        }
+        match std::env::current_dir() {
+            Ok(current) => {
+                let mut joined = current.to_string_lossy().into_owned();
+                if !joined.ends_with('/') && !joined.ends_with('\\') {
+                    joined.push('/');
+                }
+                joined.push_str(value);
+                self.temporary_directory = joined;
+            }
+            Err(_) => self.temporary_directory = value.to_owned(),
+        }
     }
 
     /// Creates all directories named by `path`; an empty or root path is a no-op.
@@ -420,6 +461,27 @@ impl VirtualFileSystem {
         })?)?;
         stream.seek(SeekFrom::Start(0))?;
         stream.write_all(bytes)
+    }
+
+    /// `File.ReadAllText(path)`: UTF-8 text decoded from the whole file, bounded like
+    /// [`VirtualFileSystem::read_all_bytes`]. Non-UTF-8 content is an explicit
+    /// `InvalidData` error rather than a lossy replacement. The `Encoding` overloads
+    /// stay open: only UTF-8 has a portable counterpart here.
+    pub fn read_all_text(&self, path: &str, maximum_bytes: usize) -> io::Result<String> {
+        let bytes = self.read_all_bytes(path, maximum_bytes)?;
+        String::from_utf8(bytes).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("file '{path}' is not valid UTF-8: {error}"),
+            )
+        })
+    }
+
+    /// `File.WriteAllText(path, contents)`: UTF-8 bytes written through
+    /// [`VirtualFileSystem::write_all_bytes`], so the parent directory must exist and
+    /// an existing file is truncated first.
+    pub fn write_all_text(&mut self, path: &str, contents: &str) -> io::Result<()> {
+        self.write_all_bytes(path, contents.as_bytes())
     }
 
     pub fn enumerate_directories(
@@ -927,5 +989,73 @@ mod tests {
         );
         assert_eq!(filesystem.count(), 1);
         assert!(!filesystem.directory_exists(Some("/one")).unwrap());
+    }
+
+    #[test]
+    fn text_helpers_round_trip_utf8_through_the_byte_paths() {
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem.create_directory(Some("/docs")).unwrap();
+        filesystem
+            .write_all_text("/docs/readme.txt", "héllo")
+            .unwrap();
+        assert_eq!(
+            filesystem.read_all_text("/docs/readme.txt", 64).unwrap(),
+            "héllo"
+        );
+        // Overwriting with shorter text truncates first, like WriteAllBytes.
+        filesystem.write_all_text("/docs/readme.txt", "hi").unwrap();
+        assert_eq!(
+            filesystem.read_all_text("/docs/readme.txt", 64).unwrap(),
+            "hi"
+        );
+        // Missing files and over-limit reads report through the byte path.
+        assert_eq!(
+            filesystem
+                .read_all_text("/docs/absent.txt", 64)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            filesystem
+                .read_all_text("/docs/readme.txt", 1)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        // Non-UTF-8 bytes are an explicit error, never lossy text.
+        filesystem
+            .write_all_bytes("/docs/raw.bin", &[0xff, 0xfe])
+            .unwrap();
+        let error = filesystem.read_all_text("/docs/raw.bin", 64).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("/docs/raw.bin"));
+        // Writing text still requires an existing parent directory.
+        assert_eq!(
+            filesystem
+                .write_all_text("/nodir/file.txt", "x")
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+    }
+
+    #[test]
+    fn temporary_directory_defaults_and_ignores_blank_values() {
+        let mut filesystem = VirtualFileSystem::new();
+        assert_eq!(filesystem.temporary_directory(), "/temp");
+        for blank in ["", "   ", "\t\n"] {
+            filesystem.set_temporary_directory(blank);
+            assert_eq!(filesystem.temporary_directory(), "/temp", "{blank:?}");
+        }
+        filesystem.set_temporary_directory("/scratch/tmp");
+        assert_eq!(filesystem.temporary_directory(), "/scratch/tmp");
+        // Relative values resolve against the process working directory.
+        filesystem.set_temporary_directory("relative-tmp");
+        let resolved = filesystem.temporary_directory().to_owned();
+        assert!(
+            resolved.ends_with("/relative-tmp") || resolved == "relative-tmp",
+            "{resolved}"
+        );
     }
 }

@@ -1,4 +1,19 @@
 //! Bounded discovery of regular files beneath a local input directory.
+//!
+//! Ports the split-file recognition of `MultiFileStream`
+//! (`AssetRipper/Source/AssetRipper.IO.Files/Streams/MultiFileStream.cs`): a
+//! nonempty base plus `.split` plus a nonempty ASCII-digit suffix folds into one
+//! logical input, matching `SplitFileRegex` (`.+\.split[0-9]+$`). Part contiguity
+//! and numeric read order (the `SplitNameComparer` rule) live in the opener
+//! (`io::stream`), which rejects gapped groups, so the lexical part order kept here
+//! only selects the representative path. Platform file classification
+//! (`IsPrimaryEngineFile`, bundle sniffing, assemblies) runs downstream in
+//! `platform_file_inventory` and `game_structure`, never here.
+//!
+//! Deliberately stricter than the source enumeration: lexical traversal order,
+//! rejected symlinks and non-regular files, depth/entry/input/size bounds, and an
+//! explicit error when a regular file collides with a split group on the same
+//! logical path.
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -411,5 +426,209 @@ impl Error for DirectoryDiscoveryErrorKind {
             Self::Io(error) => Some(error),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{discover_directory_inputs, split_logical_path, DirectoryDiscoveryErrorKind};
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct TestDiscoveryRoot(PathBuf);
+
+    impl TestDiscoveryRoot {
+        fn new() -> Self {
+            static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+            let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir()
+                .join(format!("assetripper-discovery-{}-{id}", std::process::id()));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+
+        fn write(&self, relative: &str, bytes: &[u8]) -> PathBuf {
+            let path = self.0.join(relative);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&path, bytes).unwrap();
+            path
+        }
+    }
+
+    impl Drop for TestDiscoveryRoot {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    fn logical_file_name(path: &Path) -> String {
+        split_logical_path(path)
+            .0
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap()
+            .to_owned()
+    }
+
+    #[test]
+    fn split_suffix_recognition_matches_the_source_regex_shape() {
+        // `SplitFileRegex` (`.+\.split[0-9]+$`): split parts.
+        for name in [
+            "a.bundle.split0",
+            "a.bundle.split12",
+            "level0.split0",
+            "sharedassets0.assets.split3",
+            "a.split.split1",
+        ] {
+            assert!(
+                split_logical_path(Path::new(name)).1,
+                "{name} should fold into a split group"
+            );
+        }
+        // Bare names, missing bases or suffixes, and non-digit tails stay regular.
+        for name in [
+            "a.bundle",
+            "split0",
+            "a.split",
+            ".split0",
+            "a.split0x",
+            "a.SPLIT0",
+            "sharedassets.assets",
+        ] {
+            assert!(
+                !split_logical_path(Path::new(name)).1,
+                "{name} should stay a regular file"
+            );
+        }
+        assert_eq!(logical_file_name(Path::new("a.bundle.split2")), "a.bundle");
+        assert_eq!(logical_file_name(Path::new("a.split.split1")), "a.split");
+    }
+
+    #[test]
+    fn discovers_regular_files_in_lexical_order_with_byte_totals() {
+        let root = TestDiscoveryRoot::new();
+        root.write("b.bin", b"bbb");
+        root.write("a.bin", b"aaaaa");
+        root.write("sub/c.bin", b"cc");
+        let (inputs, report) = discover_directory_inputs(root.path(), 10_000, 16, 10_000).unwrap();
+        let relative: Vec<&Path> = inputs
+            .iter()
+            .map(|input| input.relative_path.as_path())
+            .collect();
+        assert_eq!(
+            relative,
+            [
+                Path::new("a.bin"),
+                Path::new("b.bin"),
+                &Path::new("sub").join("c.bin"),
+            ]
+        );
+        assert_eq!(
+            inputs
+                .iter()
+                .map(|input| input.source_bytes)
+                .collect::<Vec<_>>(),
+            [5, 3, 2]
+        );
+        assert_eq!(inputs[2].path, root.path().join("sub/c.bin"));
+        assert_eq!(report.directory_entries_scanned, 4);
+        assert_eq!(report.discovered_inputs, 3);
+        assert_eq!(report.source_bytes, 10);
+    }
+
+    #[test]
+    fn folds_split_parts_into_one_logical_input() {
+        let root = TestDiscoveryRoot::new();
+        root.write("data.bundle.split2", b"cccccc");
+        root.write("data.bundle.split0", b"dddd");
+        root.write("data.bundle.split1", b"eeeee");
+        root.write("other.bin", b"o");
+        let (inputs, report) = discover_directory_inputs(root.path(), 10_000, 16, 10_000).unwrap();
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0].relative_path, PathBuf::from("data.bundle"));
+        assert_eq!(inputs[0].path, root.path().join("data.bundle.split0"));
+        assert_eq!(inputs[0].source_bytes, 15);
+        assert_eq!(inputs[1].relative_path, PathBuf::from("other.bin"));
+        assert_eq!(report.discovered_inputs, 2);
+        assert_eq!(report.source_bytes, 16);
+    }
+
+    #[test]
+    fn rejects_roots_that_are_not_directories() {
+        let root = TestDiscoveryRoot::new();
+        let file = root.write("input.bin", b"data");
+        let error = discover_directory_inputs(&file, 10_000, 16, 10_000).unwrap_err();
+        assert!(
+            matches!(error.kind, DirectoryDiscoveryErrorKind::InputIsNotDirectory),
+            "unexpected kind: {}",
+            error.kind
+        );
+        let missing = root.path().join("missing");
+        let error = discover_directory_inputs(&missing, 10_000, 16, 10_000).unwrap_err();
+        assert!(
+            matches!(error.kind, DirectoryDiscoveryErrorKind::Io(_)),
+            "unexpected kind: {}",
+            error.kind
+        );
+    }
+
+    #[test]
+    fn enforces_depth_entry_and_input_limits() {
+        let root = TestDiscoveryRoot::new();
+        root.write("sub/nested/deep.bin", b"deep");
+        let error = discover_directory_inputs(root.path(), 10_000, 1, 10_000).unwrap_err();
+        assert!(
+            matches!(
+                error.kind,
+                DirectoryDiscoveryErrorKind::DepthLimitExceeded { .. }
+            ),
+            "unexpected kind: {}",
+            error.kind
+        );
+
+        let root = TestDiscoveryRoot::new();
+        root.write("one.bin", b"1");
+        root.write("two.bin", b"2");
+        let error = discover_directory_inputs(root.path(), 1, 16, 10_000).unwrap_err();
+        assert!(
+            matches!(
+                error.kind,
+                DirectoryDiscoveryErrorKind::EntryLimitExceeded { .. }
+            ),
+            "unexpected kind: {}",
+            error.kind
+        );
+
+        let error = discover_directory_inputs(root.path(), 10_000, 16, 1).unwrap_err();
+        assert!(
+            matches!(
+                error.kind,
+                DirectoryDiscoveryErrorKind::InputLimitExceeded { .. }
+            ),
+            "unexpected kind: {}",
+            error.kind
+        );
+    }
+
+    #[test]
+    fn rejects_a_regular_file_colliding_with_a_split_group() {
+        let root = TestDiscoveryRoot::new();
+        root.write("data", b"regular");
+        root.write("data.split0", b"part");
+        let error = discover_directory_inputs(root.path(), 10_000, 16, 10_000).unwrap_err();
+        assert!(
+            matches!(
+                error.kind,
+                DirectoryDiscoveryErrorKind::DuplicateLogicalPath
+            ),
+            "unexpected kind: {}",
+            error.kind
+        );
     }
 }
