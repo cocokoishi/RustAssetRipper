@@ -1091,3 +1091,10 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Gates: `cargo fmt --check` 0, full tests 1224 lib + 55 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
 - Next: thirty-seventh team round (compressed-mesh/streamed-curve/keyframe gaps), then `SetBoneGeometry`/outline mesh internals.
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 147. Checkpoint: thirty-seventh team round integrated (2026-10-06)
+
+- Three teammates shipped disjoint scopes, all lead-verified (targeted suites re-run: 10/10, 8/8, 7/7) and integrated: `texture-meta` pinned set-side gates (`RES-COMPRESSED-MESH-001`); `sprite-fill` pinned limit arms (`PROC-ANIM-STREAMED-001`); `texture-export` pinned presence boundary (`ANIM-KEYFRAME-DEFAULT-001`). No scope violations, no placeholders.
+- Gates: `cargo fmt --check` 0, full tests 1227 lib + 55 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
+- Next: thirty-eighth team round (animation-curve/compressed-curve/curve-wrapper gaps), then `SetBoneGeometry`/outline mesh internals.
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

@@ -764,4 +764,38 @@ mod tests {
         let (_, legacy_next) = StreamedFrame::read(&buffer, EndianType::Little, legacy, 2).unwrap();
         assert_eq!(legacy_next, 10);
     }
+
+    #[test]
+    fn discontinuous_limits_rewrite_the_key_value() {
+        // An estimated left limit far from the right limit is discontinuous:
+        // the key value is rewritten from it and the zero-coefficient next
+        // key inherits the old right limit.
+        let mut key = make_key(7, [0.0, 0.0, 0.0], 1.0);
+        key.left_sided_limit = 2.0;
+        key.exact_left_sided_limit = false;
+        let mut next = make_key(7, [0.0, 0.0, 0.0], 2.0);
+        key.calculate_slopes(0.0, 2.0, &mut next, true);
+        assert_eq!(key.out_slope, f32::NEG_INFINITY);
+        assert_eq!(key.right_sided_limit, 2.0);
+        assert_eq!(next.left_sided_limit, 1.0);
+        // Like the source, the negative-infinity path leaves the exactness
+        // flag untouched even though the limit was arithmetically assigned.
+        assert!(next.exact_left_sided_limit);
+        // An estimated limit within the rounding threshold counts as
+        // continuous: the key value is untouched.
+        let mut near = make_key(7, [0.0, 0.0, 0.0], 1.0);
+        near.left_sided_limit = 1.0 + 1e-8;
+        near.exact_left_sided_limit = false;
+        let mut near_next = make_key(7, [0.0, 0.0, 0.0], 1.0);
+        near.calculate_slopes(0.0, 2.0, &mut near_next, true);
+        assert_eq!(near.out_slope, f32::NEG_INFINITY);
+        assert_eq!(near.right_sided_limit, 1.0);
+        // A buffer-exact differing limit is discontinuous without estimating.
+        let mut exact = make_key(7, [0.0, 0.0, 0.0], 1.0);
+        exact.left_sided_limit = 3.0;
+        let mut exact_next = make_key(7, [0.0, 0.0, 0.0], 2.0);
+        exact.calculate_slopes(0.0, 2.0, &mut exact_next, true);
+        assert_eq!(exact.out_slope, f32::NEG_INFINITY);
+        assert_eq!(exact.right_sided_limit, 3.0);
+    }
 }

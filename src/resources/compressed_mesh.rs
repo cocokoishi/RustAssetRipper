@@ -951,7 +951,7 @@ fn make_float_and_sign_arrays_vec4(tangents: &[Vec4]) -> (Vec<f32>, Vec<u32>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize, CompressedMesh, Vec2, Vec3, Vec4};
+    use super::{normalize, CompressedMesh, CompressedMeshError, Vec2, Vec3, Vec4};
     use crate::numerics::{BoneWeight4, ColorFloat};
     use crate::resources::packed_bit_vector::PackedBitVectorLimits;
 
@@ -1395,5 +1395,71 @@ mod tests {
         assert_eq!(super::vertex_count(5), 1);
         assert_eq!(super::vertex_count(6), 2);
         assert_eq!(super::vertex_count(7), 2);
+    }
+
+    /// Set-side gates and error branches the differentials do not reach.
+    ///
+    /// Each expectation mirrors its source branch: `SetUV` throws on mismatched
+    /// channels, `SetWeights` resets both vectors on empty input, `SetBindPoses`
+    /// without the pre-Unity-5 gate is a no-op, colors without either gate read
+    /// empty, and a short sign array is an explicit error rather than an over-read.
+    #[test]
+    fn set_side_gates_and_errors_match_the_source_branches() {
+        // Mismatched UV channels.
+        let mut mesh = CompressedMesh {
+            has_uv_info: false,
+            ..CompressedMesh::default()
+        };
+        let one = [Vec2::new(0.0, 0.0)];
+        let two = [Vec2::new(0.0, 0.0), Vec2::new(1.0, 1.0)];
+        let empty: [Vec2; 0] = [];
+        assert_eq!(
+            mesh.set_uv(
+                [&one, &two, &empty, &empty, &empty, &empty, &empty, &empty],
+                limits()
+            ),
+            Err(CompressedMeshError::MismatchedUvLengths {
+                first: 1,
+                second: 2
+            })
+        );
+        // Without the gate the fast path still zeroes UVInfo.
+        mesh.set_uv(
+            [&one, &empty, &empty, &empty, &empty, &empty, &empty, &empty],
+            limits(),
+        )
+        .unwrap();
+        assert_eq!(mesh.uv_info, 0);
+        // Empty skin resets both packed vectors, matching `Reset()` twice.
+        let mut mesh = CompressedMesh::default();
+        mesh.set_weights(
+            &[BoneWeight4::new(1.0, 0.0, 0.0, 0.0, 3, 0, 0, 0)],
+            limits(),
+        )
+        .unwrap();
+        assert!(mesh.weights.num_items > 0);
+        assert!(mesh.bone_indices.num_items > 0);
+        mesh.set_weights(&[], limits()).unwrap();
+        assert_eq!(mesh.weights.num_items, 0);
+        assert_eq!(mesh.bone_indices.num_items, 0);
+        assert!(mesh.get_weights(limits()).unwrap().is_empty());
+        // SetBindPoses without the gate writes nothing.
+        let mut mesh = CompressedMesh::default();
+        mesh.set_bind_poses(&[[[1.0; 4]; 4]], limits()).unwrap();
+        assert_eq!(mesh.bind_poses.num_items, 0);
+        assert!(mesh.get_bind_poses(limits()).unwrap().is_empty());
+        // Neither color gate yields no colors.
+        let mesh = CompressedMesh::default();
+        assert!(mesh.get_float_colors(limits()).unwrap().is_empty());
+        // Packed normals without signs fail closed.
+        let mut mesh = CompressedMesh::default();
+        mesh.normals.pack(&[0.5, 0.0], limits()).unwrap();
+        assert_eq!(
+            mesh.get_normals(limits()),
+            Err(CompressedMeshError::MissingElementData {
+                needed: 1,
+                available: 0
+            })
+        );
     }
 }

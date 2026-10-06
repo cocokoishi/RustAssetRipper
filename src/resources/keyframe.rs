@@ -227,4 +227,22 @@ mod tests {
         assert_eq!(sloped.out_slope.to_bits(), 4.0f32.to_bits());
         assert_eq!(sloped.tangent_mode, to_tangent(FREE_FREE, version));
     }
+
+    #[test]
+    fn presence_gate_and_weighted_none_match_the_source() {
+        // The optional fields appear exactly at Unity 2018.1.
+        let before = UnityVersion::parse("2017.4.0f1").unwrap();
+        assert_eq!(keyframe_presence(before), KeyframePresence::default());
+        let at = UnityVersion::parse("2018.1.0f1").unwrap();
+        assert_eq!(
+            keyframe_presence(at),
+            KeyframePresence {
+                in_weight: true,
+                out_weight: true,
+                weighted_mode: true,
+            }
+        );
+        // `WeightedMode.None` is the zero discriminant the setters write.
+        assert_eq!(WEIGHTED_MODE_NONE, 0);
+    }
 }
