@@ -2546,6 +2546,48 @@ fn ensure_scene_processed_collection(
     Ok(collection_index)
 }
 
+/// How a scene hierarchy records its asset-bundle name.
+///
+/// Mirrors the `PrefabProcessor.Process` scene pass
+/// (`AssetRipper/Source/AssetRipper.Processing/Prefabs/PrefabProcessor.cs`,
+/// lines 28-48): the first `SerializedBundle` among the scene collections
+/// supplies the name; its first `IAssetBundle` asset's `GetAssetBundleName`
+/// wins when present, otherwise the bundle name is used; with no
+/// `SerializedBundle` the hierarchy keeps its default (empty) name.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WorkspaceSceneHierarchyBundleName {
+    /// No `SerializedBundle` among the scene collections: `AssetBundleName` untouched.
+    Unset,
+    /// A `SerializedBundle` without an `IAssetBundle` asset: `bundle.Name`.
+    BundleName(String),
+    /// The first `IAssetBundle` asset's `GetAssetBundleName()`.
+    AssetName(String),
+}
+
+/// Selects a scene hierarchy's asset-bundle name over caller facts.
+///
+/// `has_serialized_bundle` records the `FirstOrDefault(b => b is SerializedBundle)`
+/// lookup and gates everything, matching the nested `if (bundle is not null)`;
+/// `bundle_name` is that bundle's `Name`; `asset_bundle_name` carries the first
+/// `IAssetBundle` asset's resolved `GetAssetBundleName()` (`Some` when such an
+/// asset exists, `None` otherwise). Collection traversal order, the
+/// `FetchAssets` order, and the `GetAssetBundleName` resolution itself (see
+/// `asset_bundle.rs`) stay caller-side, as does the debug-only streamed-scene
+/// assertion, which is intentionally not modeled.
+pub fn scene_hierarchy_asset_bundle_name(
+    has_serialized_bundle: bool,
+    bundle_name: &str,
+    asset_bundle_name: Option<&str>,
+) -> WorkspaceSceneHierarchyBundleName {
+    if !has_serialized_bundle {
+        return WorkspaceSceneHierarchyBundleName::Unset;
+    }
+    match asset_bundle_name {
+        Some(name) => WorkspaceSceneHierarchyBundleName::AssetName(name.to_owned()),
+        None => WorkspaceSceneHierarchyBundleName::BundleName(bundle_name.to_owned()),
+    }
+}
+
 fn add_processed_asset(
     plan: &mut WorkspaceProcessedPrefabAssetPlan,
     collection_index: usize,
@@ -4182,5 +4224,40 @@ mod tests {
         assert!(dependency_error
             .to_string()
             .contains("does not uniquely target its source SerializedFile"));
+    }
+
+    #[test]
+    fn scene_hierarchy_bundle_name_stays_unset_without_a_serialized_bundle() {
+        assert_eq!(
+            scene_hierarchy_asset_bundle_name(false, "level0", None),
+            WorkspaceSceneHierarchyBundleName::Unset
+        );
+        // The bundle lookup gates everything: even a resolved asset name is
+        // ignored when no SerializedBundle was selected.
+        assert_eq!(
+            scene_hierarchy_asset_bundle_name(false, "level0", Some("scenes")),
+            WorkspaceSceneHierarchyBundleName::Unset
+        );
+    }
+
+    #[test]
+    fn scene_hierarchy_bundle_name_falls_back_to_the_bundle_name() {
+        assert_eq!(
+            scene_hierarchy_asset_bundle_name(true, "level0", None),
+            WorkspaceSceneHierarchyBundleName::BundleName("level0".to_owned())
+        );
+    }
+
+    #[test]
+    fn scene_hierarchy_bundle_name_prefers_the_asset_bundle_asset() {
+        assert_eq!(
+            scene_hierarchy_asset_bundle_name(true, "level0", Some("scenes")),
+            WorkspaceSceneHierarchyBundleName::AssetName("scenes".to_owned())
+        );
+        // The resolved name wins even when it differs from the bundle name.
+        assert_eq!(
+            scene_hierarchy_asset_bundle_name(true, "shared", Some("shared")),
+            WorkspaceSceneHierarchyBundleName::AssetName("shared".to_owned())
+        );
     }
 }

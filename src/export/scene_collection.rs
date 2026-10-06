@@ -1,4 +1,9 @@
 //! Ordered export-ID assignment for one Scene YAML collection.
+//!
+//! The ID-assignment order runs over the unfiltered hierarchy membership, while the YAML
+//! display order runs over the exportable selection below before the `Compare` display
+//! sort (`scene_member_order.rs`); selection therefore stays a separate step here rather
+//! than folded into either order.
 
 use std::collections::HashSet;
 use std::error::Error;
@@ -736,6 +741,107 @@ pub fn order_scene_yaml_assignments(
     Ok(ordered)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SceneExportableAssetLimits {
+    pub max_assets: usize,
+}
+
+impl Default for SceneExportableAssetLimits {
+    fn default() -> Self {
+        Self {
+            max_assets: 20_000_000,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SceneExportableAssetError {
+    AssetLimitExceeded {
+        requested: usize,
+        limit: usize,
+    },
+    HiddenLimitExceeded {
+        requested: usize,
+        limit: usize,
+    },
+    AllocationFailed {
+        resource: &'static str,
+        requested: usize,
+    },
+}
+
+impl Display for SceneExportableAssetError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AssetLimitExceeded { requested, limit } => write!(
+                f,
+                "Scene hierarchy has {requested} members, exceeding limit {limit}"
+            ),
+            Self::HiddenLimitExceeded { requested, limit } => write!(
+                f,
+                "Scene hierarchy has {requested} hidden assets, exceeding limit {limit}"
+            ),
+            Self::AllocationFailed {
+                resource,
+                requested,
+            } => {
+                write!(f, "could not allocate {requested} entries for {resource}")
+            }
+        }
+    }
+}
+
+impl Error for SceneExportableAssetError {}
+
+/// `GameObjectHierarchyObject.ExportableAssets` for the scene path: hierarchy members
+/// minus hidden assets, in hierarchy order.
+///
+/// The scene collection snapshots `componentArray` from this selection before the
+/// `Compare` display sort. Hidden membership compares by object key (collection scope
+/// plus object-table index), matching the prefab path's hidden index; the source
+/// reference-equality check and this key check agree because one key identifies one
+/// object instance. Members sharing a hidden key are all removed; the source `Where`
+/// likewise never deduplicates.
+pub fn select_scene_exportable_assets(
+    members_in_hierarchy_order: &[ExportAssetIdentity],
+    hidden_assets: &[ExportAssetObjectKey],
+    limits: SceneExportableAssetLimits,
+) -> Result<Vec<ExportAssetIdentity>, SceneExportableAssetError> {
+    if members_in_hierarchy_order.len() > limits.max_assets {
+        return Err(SceneExportableAssetError::AssetLimitExceeded {
+            requested: members_in_hierarchy_order.len(),
+            limit: limits.max_assets,
+        });
+    }
+    if hidden_assets.len() > limits.max_assets {
+        return Err(SceneExportableAssetError::HiddenLimitExceeded {
+            requested: hidden_assets.len(),
+            limit: limits.max_assets,
+        });
+    }
+    let mut hidden = HashSet::new();
+    hidden.try_reserve(hidden_assets.len()).map_err(|_| {
+        SceneExportableAssetError::AllocationFailed {
+            resource: "Scene hidden-asset index",
+            requested: hidden_assets.len(),
+        }
+    })?;
+    hidden.extend(hidden_assets.iter().copied());
+    let mut exportable = Vec::new();
+    exportable
+        .try_reserve_exact(members_in_hierarchy_order.len())
+        .map_err(|_| SceneExportableAssetError::AllocationFailed {
+            resource: "Scene exportable hierarchy assets",
+            requested: members_in_hierarchy_order.len(),
+        })?;
+    for member in members_in_hierarchy_order {
+        if !hidden.contains(&member.object_key()) {
+            exportable.push(*member);
+        }
+    }
+    Ok(exportable)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -994,5 +1100,58 @@ mod tests {
             order_scene_yaml_assignments(&assignments, SceneYamlAssetOrderLimits { max_assets: 3 }),
             Err(SceneYamlAssetOrderError::AssetLimitExceeded { count: 4, limit: 3 })
         ));
+    }
+
+    #[test]
+    fn scene_exportable_selection_keeps_order_and_removes_hidden() {
+        let members = [
+            source(0, 0, 10, 1),
+            source(0, 1, 11, 4),
+            source(0, 2, 12, 104),
+            source(0, 3, 13, 1),
+        ];
+        // Hidden keys remove their members; unknown keys are ignored.
+        let hidden = [members[1].object_key(), source(7, 7, 70, 4).object_key()];
+        assert_eq!(
+            select_scene_exportable_assets(
+                &members,
+                &hidden,
+                SceneExportableAssetLimits::default()
+            ),
+            Ok(vec![members[0], members[2], members[3]])
+        );
+        // No hidden assets keeps every member in hierarchy order.
+        assert_eq!(
+            select_scene_exportable_assets(&members, &[], SceneExportableAssetLimits::default()),
+            Ok(members.to_vec())
+        );
+    }
+
+    #[test]
+    fn scene_exportable_selection_rejects_overruns() {
+        let members = [source(0, 0, 10, 1), source(0, 1, 11, 4)];
+        assert_eq!(
+            select_scene_exportable_assets(
+                &members,
+                &[],
+                SceneExportableAssetLimits { max_assets: 1 }
+            ),
+            Err(SceneExportableAssetError::AssetLimitExceeded {
+                requested: 2,
+                limit: 1,
+            })
+        );
+        let hidden = [members[0].object_key(), members[1].object_key()];
+        assert_eq!(
+            select_scene_exportable_assets(
+                &members[..1],
+                &hidden,
+                SceneExportableAssetLimits { max_assets: 1 }
+            ),
+            Err(SceneExportableAssetError::HiddenLimitExceeded {
+                requested: 2,
+                limit: 1,
+            })
+        );
     }
 }

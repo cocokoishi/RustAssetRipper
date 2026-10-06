@@ -1,4 +1,9 @@
 //! File-scoped GameObject and Transform relationship recovery.
+//!
+//! Also ports the `SceneHierarchyObject` assembly decisions: the `Create` asset-sort
+//! dispatch and the `FetchDependencies` edge order. Live interface checks, pointer
+//! resolution, generated `SceneAsset` allocation, and `SetMainAsset` plumbing stay
+//! caller-side; repeated `SceneRoots` assignments overwrite, so callers keep the last.
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -3152,14 +3157,110 @@ impl Display for SceneGraphBuildError {
 
 impl Error for SceneGraphBuildError {}
 
+/// The asset kinds `SceneHierarchyObject.Create` sorts on, in source arm order.
+///
+/// Interface checks (`IGameObject`, `ILevelGameManager`, `ISceneRoots`, …) and the
+/// `IsComponentOnGameObject` pointer test need live objects and stay caller-side;
+/// the caller reports the winning arm, including which side of the MonoBehaviour
+/// gate the asset falls on.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum SceneHierarchyAssetKind {
+    /// `IGameObject`.
+    GameObject,
+    /// `IMonoBehaviour` with `IsComponentOnGameObject`.
+    AttachedMonoBehaviour,
+    /// `IMonoBehaviour` without a GameObject: matched by no arm, ignored.
+    DetachedMonoBehaviour,
+    /// Any other `IComponent`.
+    Component,
+    /// `ILevelGameManager`.
+    LevelGameManager,
+    /// `IPrefabInstance`.
+    PrefabInstance,
+    /// `ISceneRoots`.
+    SceneRoots,
+    /// Anything else: matched by no arm, ignored.
+    Other,
+}
+
+/// Which list `SceneHierarchyObject.Create` files the asset into.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum SceneHierarchySlot {
+    /// `GameObjects`.
+    GameObjects,
+    /// `Components`.
+    Components,
+    /// `Managers`.
+    Managers,
+    /// `PrefabInstances`.
+    PrefabInstances,
+    /// `SceneRoots` (a single assignment: repeated roots overwrite, caller keeps last).
+    SceneRoots,
+    /// Matched by no arm; the asset lands in no list.
+    Ignored,
+}
+
+/// `SceneHierarchyObject.Create` (`AssetRipper/Source/AssetRipper.Processing/Prefabs/SceneHierarchyObject.cs`
+/// lines 82-108): GameObjects, attached MonoBehaviours, and other components file into
+/// their lists; managers, prefab instances, and scene roots file into theirs; detached
+/// MonoBehaviours and anything else are ignored.
+pub const fn classify_scene_hierarchy_asset(kind: SceneHierarchyAssetKind) -> SceneHierarchySlot {
+    match kind {
+        SceneHierarchyAssetKind::GameObject => SceneHierarchySlot::GameObjects,
+        SceneHierarchyAssetKind::AttachedMonoBehaviour | SceneHierarchyAssetKind::Component => {
+            SceneHierarchySlot::Components
+        }
+        SceneHierarchyAssetKind::LevelGameManager => SceneHierarchySlot::Managers,
+        SceneHierarchyAssetKind::PrefabInstance => SceneHierarchySlot::PrefabInstances,
+        SceneHierarchyAssetKind::SceneRoots => SceneHierarchySlot::SceneRoots,
+        SceneHierarchyAssetKind::DetachedMonoBehaviour | SceneHierarchyAssetKind::Other => {
+            SceneHierarchySlot::Ignored
+        }
+    }
+}
+
+/// `SceneHierarchyObject.FetchDependencies` edge labels in walk order
+/// (`AssetRipper/Source/AssetRipper.Processing/Prefabs/SceneHierarchyObject.cs` lines 43-54
+/// with `GameObjectHierarchyObject.FetchDependencies` first): one `{List}[]` label per
+/// member of `GameObjects`, `Components`, `PrefabInstances`, and `Managers`, then a single
+/// `SceneRoots` label when a root block applies. Counts arrive as caller facts; pointer
+/// resolution stays caller-side.
+pub fn scene_hierarchy_dependency_fields(
+    game_objects: usize,
+    components: usize,
+    prefab_instances: usize,
+    managers: usize,
+    has_scene_roots: bool,
+) -> Vec<String> {
+    let mut fields = Vec::new();
+    for _ in 0..game_objects {
+        fields.push("GameObjects[]".to_owned());
+    }
+    for _ in 0..components {
+        fields.push("Components[]".to_owned());
+    }
+    for _ in 0..prefab_instances {
+        fields.push("PrefabInstances[]".to_owned());
+    }
+    for _ in 0..managers {
+        fields.push("Managers[]".to_owned());
+    }
+    if has_scene_roots {
+        fields.push("SceneRoots".to_owned());
+    }
+    fields
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        reference_field_path_matches, MultiFileReferenceGraph, SceneGraph, SceneGraphIssueKind,
-        SceneGraphLimits, SceneHierarchyAuditLimits, SceneHierarchyIssueKind, SceneQuaternion,
-        SceneRectTransformValues, SceneRelationshipKind, SceneRelationshipTarget,
-        SceneRootDiscoveryIssueKind, SceneRootDiscoveryLimits, SceneRootReason,
-        SceneTransformValues, SceneVector2, SceneVector3,
+        classify_scene_hierarchy_asset, reference_field_path_matches,
+        scene_hierarchy_dependency_fields, MultiFileReferenceGraph, SceneGraph,
+        SceneGraphIssueKind, SceneGraphLimits, SceneHierarchyAssetKind, SceneHierarchyAuditLimits,
+        SceneHierarchyIssueKind, SceneHierarchySlot, SceneQuaternion, SceneRectTransformValues,
+        SceneRelationshipKind, SceneRelationshipTarget, SceneRootDiscoveryIssueKind,
+        SceneRootDiscoveryLimits, SceneRootReason, SceneTransformValues, SceneVector2,
+        SceneVector3,
     };
     use crate::io::binary::Endian;
     use crate::serialized_file::file::SerializedFile;
@@ -5543,5 +5644,63 @@ mod tests {
             SceneGraph::from_decoded_roots(&metadata, &roots, SceneGraphLimits::default()),
             Err(super::SceneGraphBuildError::DuplicateDecodedRoot { object_index: 0 })
         ));
+    }
+
+    #[test]
+    fn hierarchy_create_sorts_every_arm_into_its_list() {
+        assert_eq!(
+            classify_scene_hierarchy_asset(SceneHierarchyAssetKind::GameObject),
+            SceneHierarchySlot::GameObjects
+        );
+        // Only MonoBehaviours on a GameObject join Components; detached ones are ignored.
+        assert_eq!(
+            classify_scene_hierarchy_asset(SceneHierarchyAssetKind::AttachedMonoBehaviour),
+            SceneHierarchySlot::Components
+        );
+        assert_eq!(
+            classify_scene_hierarchy_asset(SceneHierarchyAssetKind::Component),
+            SceneHierarchySlot::Components
+        );
+        assert_eq!(
+            classify_scene_hierarchy_asset(SceneHierarchyAssetKind::DetachedMonoBehaviour),
+            SceneHierarchySlot::Ignored
+        );
+        assert_eq!(
+            classify_scene_hierarchy_asset(SceneHierarchyAssetKind::LevelGameManager),
+            SceneHierarchySlot::Managers
+        );
+        assert_eq!(
+            classify_scene_hierarchy_asset(SceneHierarchyAssetKind::PrefabInstance),
+            SceneHierarchySlot::PrefabInstances
+        );
+        assert_eq!(
+            classify_scene_hierarchy_asset(SceneHierarchyAssetKind::SceneRoots),
+            SceneHierarchySlot::SceneRoots
+        );
+        assert_eq!(
+            classify_scene_hierarchy_asset(SceneHierarchyAssetKind::Other),
+            SceneHierarchySlot::Ignored
+        );
+    }
+
+    #[test]
+    fn hierarchy_dependency_fields_follow_the_fetch_order() {
+        assert_eq!(
+            scene_hierarchy_dependency_fields(2, 1, 1, 1, true),
+            vec![
+                "GameObjects[]",
+                "GameObjects[]",
+                "Components[]",
+                "PrefabInstances[]",
+                "Managers[]",
+                "SceneRoots",
+            ]
+        );
+        // The SceneRoots edge exists only when a root block applies.
+        assert_eq!(
+            scene_hierarchy_dependency_fields(1, 0, 0, 0, false),
+            vec!["GameObjects[]"]
+        );
+        assert!(scene_hierarchy_dependency_fields(0, 0, 0, 0, false).is_empty());
     }
 }
