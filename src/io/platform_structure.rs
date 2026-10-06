@@ -1,10 +1,10 @@
 //! Platform root and DataPath discovery for mounted Unity game layouts.
 //!
 //! Covers the root/marker decisions per platform (including the Android APK/OBB bitmask and the
-//! `assets/bin/Data` gate), the Android, iOS, Switch, and PS4 directory layouts, and the WebGL
-//! build-flavor preference. Backend selection, assembly and metadata collection, and bundle
-//! gathering live in the file inventory; bundle-hierarchy lookups live in the serialized-file
-//! workspace.
+//! `assets/bin/Data` gate), the Android, iOS, Switch, and PS4 directory layouts, the WebGL
+//! build-flavor preference, and the WebPlayer html-to-bundle pairing. Backend selection, assembly
+//! and metadata collection, and bundle gathering live in the file inventory; bundle-hierarchy
+//! lookups live in the serialized-file workspace.
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -819,6 +819,24 @@ pub const WEBGL_BUILD_FLAVORS: [(&str, &str); 3] = [
     ("Release", ".datagz"),
 ];
 
+/// The WebPlayer html marker extension.
+pub const WEB_PLAYER_HTML_EXTENSION: &str = ".html";
+
+/// The asset-bundle extension a WebPlayer html file pairs with.
+pub const WEB_PLAYER_BUNDLE_EXTENSION: &str = ".unity3d";
+
+/// `WebPlayerGameStructure.GetWebPlayerName` pairing rule over caller facts: an `.html` file
+/// stem names the player, and its bundle sits beside it with the asset-bundle extension.
+/// Returns the player name and the sibling bundle path.
+pub fn web_player_bundle_path(root_path: &str, html_file_name: &str) -> Option<(String, String)> {
+    if extension(html_file_name) != WEB_PLAYER_HTML_EXTENSION {
+        return None;
+    }
+    let name = file_stem(html_file_name).to_owned();
+    let bundle_path = join_path(root_path, &format!("{name}{WEB_PLAYER_BUNDLE_EXTENSION}"));
+    Some((name, bundle_path))
+}
+
 fn detect_ios(
     filesystem: &VirtualFileSystem,
     selected_path: &str,
@@ -985,19 +1003,18 @@ fn detect_web_player(
         return Ok(None);
     }
     for html_path in top_level_files(filesystem, selected_path)? {
-        let html_name = file_name(&html_path);
-        if extension(html_name) != ".html" {
+        let Some((name, bundle_path)) =
+            web_player_bundle_path(selected_path, file_name(&html_path))
+        else {
             continue;
-        }
-        let name = file_stem(html_name);
-        let bundle_path = join_path(selected_path, &format!("{name}.unity3d"));
+        };
         if exists_file(filesystem, &bundle_path)? {
             return Ok(Some(make_structure(
                 PlatformKind::WebPlayer,
                 selected_path,
                 vec![selected_path.to_owned()],
                 selected_path.to_owned(),
-                Some(name.to_owned()),
+                Some(name),
                 None,
                 vec![selected_path.to_owned()],
             )));
@@ -1302,9 +1319,10 @@ impl Error for PlatformStructureError {
 mod tests {
     use super::{
         android_data_layout, detect_desktop_platform, detect_platform_structure, ios_data_layout,
-        ps4_data_layout, switch_data_layout, DesktopPlatform, PlatformKind, PlatformResourceLookup,
-        PlatformResourceProvider, PlatformResourceSource, PlatformStructure,
-        PlatformStructureErrorKind, PlatformStructureLimits, WEBGL_BUILD_FLAVORS,
+        ps4_data_layout, switch_data_layout, web_player_bundle_path, DesktopPlatform, PlatformKind,
+        PlatformResourceLookup, PlatformResourceProvider, PlatformResourceSource,
+        PlatformStructure, PlatformStructureErrorKind, PlatformStructureLimits,
+        WEBGL_BUILD_FLAVORS,
     };
     use crate::io::filesystem::VirtualFileSystem;
 
@@ -1828,6 +1846,19 @@ mod tests {
         .unwrap();
         assert_eq!(release.platform, PlatformKind::WebGl);
         assert_eq!(release.data_paths, ["/rel", "/rel/Release"]);
+    }
+
+    #[test]
+    fn web_player_pairing_follows_the_source_name_rule() {
+        // An `.html` stem names the player beside its `.unity3d` bundle.
+        assert_eq!(
+            web_player_bundle_path("/player", "index.html"),
+            Some(("index".to_owned(), "/player/index.unity3d".to_owned()))
+        );
+        // The extension match is ordinal, like the source switch.
+        assert_eq!(web_player_bundle_path("/player", "INDEX.HTML"), None);
+        assert_eq!(web_player_bundle_path("/player", "index.unity3d"), None);
+        assert_eq!(web_player_bundle_path("/player", "notes.txt"), None);
     }
 
     #[test]

@@ -22,8 +22,9 @@
 //!   fail fast rather than corrupt an export.
 //!
 //! The reader mirrors the source load behavior otherwise: unknown properties are ignored,
-//! missing properties keep record defaults, duplicate keys resolve last-wins, and both CRLF
-//! and LF inputs are accepted (committed fixtures check out as LF under `eol=lf`).
+//! missing properties keep record defaults, duplicate keys resolve last-wins, a leading
+//! UTF-8 BOM is stripped like `File.ReadAllText` strips it before deserialization, and
+//! both CRLF and LF inputs are accepted (committed fixtures check out as LF under `eol=lf`).
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -580,6 +581,9 @@ pub fn parse_settings_file(
     text: &str,
     limits: SettingsFileLimits,
 ) -> Result<SerializedSettingsFile, SettingsFileError> {
+    // `File.ReadAllText` strips a UTF-8 BOM before STJ parses; editors (notably Windows
+    // Notepad) add one when users hand-edit the file, so accept it here too.
+    let text = strip_leading_bom(text);
     if text.len() > limits.max_file_bytes {
         return Err(SettingsFileError::InputTooLong {
             byte_count: text.len(),
@@ -612,6 +616,13 @@ pub fn parse_settings_file(
         processing,
         export,
     })
+}
+
+/// Strip one leading UTF-8 BOM, mirroring the `File.ReadAllText` decoding the source
+/// deserializer sees. Only a prefix is stripped; interior zero-width no-break spaces
+/// keep their normal string handling on both sides.
+fn strip_leading_bom(text: &str) -> &str {
+    text.strip_prefix('\u{FEFF}').unwrap_or(text)
 }
 
 fn map_import(
@@ -1299,6 +1310,23 @@ mod tests {
             parsed.export.language_code.as_deref(),
             Some("A\"\u{e9}\u{1f600}")
         );
+        // A leading BOM is stripped like `File.ReadAllText` strips it; only the prefix
+        // is special, and a lone BOM is still an empty document.
+        let parsed = parse_settings_file(
+            "\u{FEFF}{\"Import\": {}, \"Processing\": {}, \"Export\": {}}",
+            SettingsFileLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            parsed,
+            SerializedSettingsFile::from_defaults(
+                ImportDefaults::default(),
+                ProcessingDefaults::default(),
+                ExportDefaults::default(),
+            )
+        );
+        assert!(parse_settings_file("\u{FEFF}", SettingsFileLimits::default()).is_err());
+        assert!(parse_settings_file("\u{FEFF}\u{FEFF}{}", SettingsFileLimits::default()).is_err());
     }
 
     #[test]

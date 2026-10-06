@@ -1194,3 +1194,11 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Gates: `cargo fmt --check` 0, full tests 1288 lib + 56 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
 - Next: forty-ninth team round (gate-first: WebPlayer/WiiU structures, resource leaves, export settings).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 159. Checkpoint: forty-ninth team round integrated — gate-first (2026-10-06)
+
+- Five teammates shipped disjoint scopes, all lead-verified (targeted suites re-run: 17/17, 436 broad-filter, 9/9, 57/57 bin, 10/10) and integrated: `sprite-fill` named WebPlayer pairing (`IO-PLATFORM-WEBPLAYER-001`); `texture-meta` ported stream values (`IO-RESOURCE-001`); `anim-graph` ported BOM tolerance (`EXP-SETTINGS-FILE-001`); `mesh-deform` ported input dedup (`PRODUCT-CLI-INSPECT-001`); `texture-export` ported mscorlib discovery (`TYPE-SCRIPT-001`). No scope violations, no placeholders, no verified row touched.
+- Gate question answered YES: all five units reduce the Phase 1 incomplete count.
+- Gates: `cargo fmt --check` 0, full tests 1291 lib + 57 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
+- Next: fiftieth team round (gate-first: WiiU structure, resource ranges, managed resolver).
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

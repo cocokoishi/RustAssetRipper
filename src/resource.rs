@@ -1,10 +1,12 @@
 //! Bounded access to byte ranges stored in Unity ResourceFiles.
 //!
 //! Covers `ResourceFile` (`IsDefaultResourceFile` plus the streamed-range read surface behind
-//! `Write`/`ToByteArray`), `Bundle.ResolveResource` (bundle-hierarchy order, then the external
-//! provider), and `StreamedResourceExtensions` (`CheckIntegrity`/`GetContent` gates). Bundle
-//! construction, stream ownership, and the parent-chain walk stay caller-side; the hierarchy
-//! lookup itself lives in the serialized-file workspace.
+//! `Write`/`ToByteArray`), the export-time `StreamingInfo` value operations (`ClearValues`/
+//! `SetValues`, used by `YamlStreamedAssetExportCollection` around inline exports),
+//! `Bundle.ResolveResource` (bundle-hierarchy order, then the external provider), and
+//! `StreamedResourceExtensions` (`CheckIntegrity`/`GetContent` gates). Bundle construction,
+//! stream ownership, the export save/clear/restore orchestration itself, and the parent-chain
+//! walk stay caller-side; the hierarchy lookup itself lives in the serialized-file workspace.
 
 use std::fmt;
 use std::fmt::Write as FmtWrite;
@@ -561,6 +563,28 @@ impl StreamedResourceInfo {
     /// Matches the source `StreamingInfo.IsSet` rule, which checks whether Path is nonempty.
     pub fn is_set(&self) -> bool {
         !self.path.is_empty()
+    }
+
+    /// `StreamingInfoExtensions.ClearValues`: empty the path and zero the offset and size.
+    ///
+    /// The export collections (`YamlStreamedAssetExportCollection`) clear the values before
+    /// writing the asset so the streamed payload is exported inline, then restore them with
+    /// [`Self::set_values`].
+    pub fn clear_values(&mut self) {
+        self.path.clear();
+        self.offset = 0;
+        self.size = 0;
+    }
+
+    /// `StreamingInfoExtensions.SetValues`: replace the path, offset, and size wholesale.
+    ///
+    /// This mirrors the source blind assignment (`uint` size included); range validity stays
+    /// with the read-time range checks, not with this setter.
+    /// Field reads need no helper: they are plain field accesses like `GetValues` out-params.
+    pub fn set_values(&mut self, path: String, offset: u64, size: u32) {
+        self.path = path;
+        self.offset = offset;
+        self.size = size;
     }
 }
 
@@ -2383,5 +2407,31 @@ mod tests {
         assert!(!is_default_resource_file("shared"));
         assert!(!is_default_resource_file("shared.ress.txt"));
         assert!(!is_default_resource_file(""));
+    }
+
+    /// The export-time value operations (`StreamingInfoExtensions`): snapshot the values,
+    /// clear them for the inline export, then restore them exactly, as
+    /// `YamlStreamedAssetExportCollection` does around `ExportInner`.
+    #[test]
+    fn streaming_info_values_clear_and_restore_around_exports() {
+        use super::StreamedResourceInfo;
+        let mut info = StreamedResourceInfo {
+            path: String::from("archive:/level0"),
+            offset: 128,
+            size: 64,
+        };
+        assert!(info.is_set());
+        let snapshot = (info.path.clone(), info.offset, info.size);
+
+        info.clear_values();
+        assert!(!info.is_set());
+        assert_eq!(info.offset, 0);
+        assert_eq!(info.size, 0);
+
+        info.set_values(snapshot.0.clone(), snapshot.1, snapshot.2);
+        assert!(info.is_set());
+        assert_eq!(info.path, snapshot.0);
+        assert_eq!(info.offset, snapshot.1);
+        assert_eq!(info.size, snapshot.2);
     }
 }

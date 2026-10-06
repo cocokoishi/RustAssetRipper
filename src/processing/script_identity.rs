@@ -3,7 +3,7 @@
 //! Covers the first audited slice of `TYPE-SCRIPT-001`: `ScriptIdentifier`
 //! (construction validation, `ToUniqueName` overloads, `ToString`, `IsDefault`,
 //! `UniqueName`), the `ScriptingBackend` discriminants, the `MonoManager.IsMonoAssembly`
-//! file-name predicate, the pure string kernels
+//! file-name predicate and mscorlib discovery (`TryGetMscorlibPath`), the pure string kernels
 //! behind `MonoScriptExtensions.GetFullName` and `GetValidAssemblyName`, and the
 //! `PropertiesHash` fallback bytes behind `GetPropertiesHash` (the
 //! `IMonoScript`/assembly-manager lookups themselves stay outside: they need live
@@ -77,6 +77,22 @@ pub const ASSEMBLY_EXTENSION: &str = ".dll";
 /// name ends with `.dll` under an ordinal (case-sensitive) comparison.
 pub fn is_mono_assembly(file_name: &str) -> bool {
     file_name.ends_with(ASSEMBLY_EXTENSION)
+}
+
+/// `MonoManager` mscorlib discovery over caller facts (`TryGetMscorlibPath`).
+///
+/// The exact `mscorlib.dll` entry wins first; otherwise the first
+/// case-insensitive match in iteration order wins; otherwise there is none.
+/// Callers pass the discovered assemblies in enumeration order. The scan uses
+/// ASCII case folding like the tree's other ordinal-ignorecase renderings.
+pub fn find_mscorlib_path(assemblies: &[(String, String)]) -> Option<&str> {
+    if let Some((_, path)) = assemblies.iter().find(|(name, _)| name == "mscorlib.dll") {
+        return Some(path);
+    }
+    assemblies
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("mscorlib.dll"))
+        .map(|(_, path)| path.as_str())
 }
 
 /// `MonoScriptExtensions.GetPropertiesHash` fallback over caller facts.
@@ -284,6 +300,38 @@ mod tests {
         assert!(!is_mono_assembly("global-metadata.dat"));
         assert!(!is_mono_assembly(""));
         assert!(!is_mono_assembly(".dll.bak"));
+    }
+
+    #[test]
+    fn mscorlib_discovery_prefers_the_exact_entry() {
+        fn assemblies(names: &[(&str, &str)]) -> Vec<(String, String)> {
+            names
+                .iter()
+                .map(|(name, path)| ((*name).to_owned(), (*path).to_owned()))
+                .collect()
+        }
+        // The exact entry wins even when a case-variant comes first.
+        let listed = assemblies(&[
+            ("MSCorLib.DLL", "/lib/upper.dll"),
+            ("mscorlib.dll", "/lib/exact.dll"),
+        ]);
+        assert_eq!(find_mscorlib_path(&listed), Some("/lib/exact.dll"));
+        // Otherwise the first case-insensitive match in order wins.
+        let listed = assemblies(&[
+            ("MSCorLib.DLL", "/lib/first.dll"),
+            ("Mscorlib.dll", "/lib/second.dll"),
+        ]);
+        assert_eq!(find_mscorlib_path(&listed), Some("/lib/first.dll"));
+        // A lone exact entry matches, and an empty table matches nothing.
+        let listed = assemblies(&[("mscorlib.dll", "/lib/only.dll")]);
+        assert_eq!(find_mscorlib_path(&listed), Some("/lib/only.dll"));
+        assert_eq!(find_mscorlib_path(&[]), None);
+        // Near misses are not matches.
+        let listed = assemblies(&[
+            ("mscorlib.dll.bak", "/lib/bak.dll"),
+            ("Assembly-CSharp.dll", "/lib/game.dll"),
+        ]);
+        assert_eq!(find_mscorlib_path(&listed), None);
     }
 
     #[test]

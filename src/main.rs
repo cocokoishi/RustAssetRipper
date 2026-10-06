@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::ffi::OsString;
 use std::fs;
@@ -40,6 +40,7 @@ use assetripper::io::platform_file_inventory::{
 use assetripper::io::platform_structure::{
     detect_platform_structure, PlatformResourceProvider, PlatformStructureLimits,
 };
+use assetripper::io::stream::logical_file_path;
 use assetripper::processing::prefab_processing::{
     animator_controller_source_dependency_inventory, plan_workspace_prefab_processing,
     plan_workspace_processed_prefab_assets, WorkspacePrefabProcessingEvent,
@@ -1773,9 +1774,28 @@ fn print_explicit_root_resource_catalog_to<W: io::Write>(
     Ok(())
 }
 
+/// `MixedGameStructure.SelectUniquePaths` over caller facts: explicit inputs naming
+/// the same logical file load once, mirroring the source `Distinct()` after
+/// `MultiFileStream.GetFilePath` (split-part spellings collapse to their base path).
+/// Comparison is exact on the logical spelling without filesystem canonicalization,
+/// and the first occurrence wins so CLI order is preserved. This runs before mounting
+/// because per-input destination roots would otherwise defeat the mount-level
+/// duplicate-input gate and load the same file twice.
+fn deduplicate_logical_input_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
+    let mut unique = Vec::new();
+    for path in paths {
+        if seen.insert(logical_file_path(path)) {
+            unique.push(path.clone());
+        }
+    }
+    unique
+}
+
 fn mount_input_files(
     input_files: &[PathBuf],
 ) -> Result<(VirtualFileSystem, Vec<String>, BatchMountReport), Box<dyn Error>> {
+    let input_files = deduplicate_logical_input_paths(input_files);
     let mut filesystem = VirtualFileSystem::new();
     let mut mount_inputs = Vec::new();
     mount_inputs
@@ -1898,6 +1918,7 @@ fn mount_input_directories(
     input_directories: &[PathBuf],
     preserve_containers: bool,
 ) -> Result<(VirtualFileSystem, Vec<String>, BatchMountReport), Box<dyn Error>> {
+    let input_directories = deduplicate_logical_input_paths(input_directories);
     let mut filesystem = VirtualFileSystem::new();
     let batch_limits = BatchMountLimits::default();
     let mut total_mount_report = BatchMountReport::default();
@@ -4850,6 +4871,28 @@ mod tests {
         assert_eq!(total.completed_inputs, 4);
         assert_eq!(total.mounted_entries, 8);
         assert_eq!(total.mounted_bytes, 42);
+    }
+
+    #[test]
+    fn logical_input_dedup_keeps_first_occurrences_like_select_unique_paths() {
+        let inputs = [
+            PathBuf::from("game/main.assets"),
+            PathBuf::from("game/main.assets"),
+            PathBuf::from("game/main.assets.split0"),
+            PathBuf::from("other/shared.assets"),
+            PathBuf::from("other/shared.assets.split1"),
+        ];
+        let unique = super::deduplicate_logical_input_paths(&inputs);
+        assert_eq!(
+            unique,
+            [
+                PathBuf::from("game/main.assets"),
+                PathBuf::from("other/shared.assets"),
+            ]
+        );
+        // Distinct inputs keep their order; exact spellings still compare unequal.
+        let distinct = [PathBuf::from("a/x.assets"), PathBuf::from("b/x.assets")];
+        assert_eq!(super::deduplicate_logical_input_paths(&distinct), distinct);
     }
 
     #[test]
