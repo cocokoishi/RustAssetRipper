@@ -4,10 +4,10 @@
 //! Covers the pure string kernels behind script/type resolution: the namespace+name
 //! predicates (`IsPrimitive`, `IsObject`, `IsEngineStruct`, ...), `ToPrimitiveType`
 //! with its `PrimitiveType` discriminants, the CorLib element-type branch, the
-//! `GetSize`/`IsCSharpPrimitive` serialization tables, and the
+//! `GetSize`/`IsCSharpPrimitive`/`ToSystemTypeName` serialization tables, and the
 //! engine-asset name switch (which arm takes a Unity version and which concrete
-//! subclass 2019.4.0f1 resolves). `ToSystemTypeName` stays open: it is naming-only
-//! (no classification decision).
+//! subclass 2019.4.0f1 resolves). Non-primitive kinds have no system name: the
+//! source `ToSystemTypeName` throw reads as an explicit absence here.
 //! Assembly loading, type resolution, and object construction stay outside: they need
 //! live managed assemblies. The `ToPrimitiveType` enum branch takes only their outcomes
 //! (whether the definition resolved to an enum, plus each field's resolved type).
@@ -250,6 +250,29 @@ impl PrimitiveType {
     /// serialization dispatches on this predicate, not on raw sizes.
     pub const fn is_c_sharp_primitive(self) -> bool {
         matches!(self, Self::String) || self.byte_size() > 0
+    }
+
+    /// `PrimitiveTypeExtensions.ToSystemTypeName`: the `System` long name behind a
+    /// primitive kind, feeding `SerializablePrimitiveType` construction. Void,
+    /// pairs, and complex kinds have no system name: the source
+    /// `NotSupportedException` reads as an explicit absence here.
+    pub const fn system_type_name(self) -> Option<&'static str> {
+        match self {
+            Self::Bool => Some("Boolean"),
+            Self::Char => Some("Char"),
+            Self::Byte => Some("Byte"),
+            Self::SByte => Some("SByte"),
+            Self::Short => Some("Int16"),
+            Self::UShort => Some("UInt16"),
+            Self::Int => Some("Int32"),
+            Self::UInt => Some("UInt32"),
+            Self::Long => Some("Int64"),
+            Self::ULong => Some("UInt64"),
+            Self::Single => Some("Single"),
+            Self::Double => Some("Double"),
+            Self::String => Some("String"),
+            Self::Void | Self::Pair | Self::MapPair | Self::Complex => None,
+        }
     }
 }
 
@@ -664,6 +687,39 @@ mod tests {
         assert_eq!(PrimitiveType::Pair.byte_size(), -1);
         assert_eq!(PrimitiveType::MapPair.byte_size(), -1);
         assert_eq!(PrimitiveType::Complex.byte_size(), -1);
+    }
+
+    #[test]
+    fn system_type_names_match_the_source_table() {
+        use super::PrimitiveType;
+        let cases = [
+            (PrimitiveType::Bool, "Boolean"),
+            (PrimitiveType::Char, "Char"),
+            (PrimitiveType::Byte, "Byte"),
+            (PrimitiveType::SByte, "SByte"),
+            (PrimitiveType::Short, "Int16"),
+            (PrimitiveType::UShort, "UInt16"),
+            (PrimitiveType::Int, "Int32"),
+            (PrimitiveType::UInt, "UInt32"),
+            (PrimitiveType::Long, "Int64"),
+            (PrimitiveType::ULong, "UInt64"),
+            (PrimitiveType::Single, "Single"),
+            (PrimitiveType::Double, "Double"),
+            (PrimitiveType::String, "String"),
+        ];
+        for (kind, expected) in cases {
+            assert_eq!(kind.system_type_name(), Some(expected), "{kind:?}");
+        }
+        // Void, pairs, and complex kinds have no system name: the source throw
+        // reads as an explicit absence.
+        for kind in [
+            PrimitiveType::Void,
+            PrimitiveType::Pair,
+            PrimitiveType::MapPair,
+            PrimitiveType::Complex,
+        ] {
+            assert_eq!(kind.system_type_name(), None, "{kind:?}");
+        }
     }
 
     #[test]

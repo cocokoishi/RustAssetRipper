@@ -7,7 +7,8 @@
 //!
 //! Independent-encoder coverage comes from SharpCompress 0.50.4 vectors (the
 //! baseline's own LZMA library): `decodes_sharpcompress_encoded_unity_payloads`
-//! decodes payloads no `lzma-rs` code has touched.
+//! and `decodes_sharpcompress_encoded_size_prefixed_payloads` decode payloads no
+//! `lzma-rs` code has touched.
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -403,6 +404,45 @@ mod tests {
         let error = decompress_block(&[93, 0, 0, 16, 0, 1], 32, 64).unwrap_err();
         assert!(matches!(error.kind, LzmaBlockErrorKind::Decoder(_)));
         assert!(error.input_offset >= 5);
+    }
+
+    /// Independent-encoder vectors for the size-prefixed lane: each payload was
+    /// encoded with SharpCompress 0.50.4 (the baseline's own LZMA library) in an
+    /// offline dotnet probe, framed as five property bytes plus the little-endian
+    /// decoded length plus the raw stream (the `DecompressLzmaSizeStream` layout),
+    /// and round-tripped through the SharpCompress decoder as validity proof.
+    /// Nothing here was produced by `lzma-rs`. Both use properties
+    /// `5D 00 00 10 00` (lc=3, lp=0, pb=2, 1 MiB dictionary).
+    #[test]
+    fn decodes_sharpcompress_encoded_size_prefixed_payloads() {
+        let scene_text = parse_hex(
+            "5D000010007800000000000000002A9B89277861869378C2126627CA9A4A37B67458E0262ACF8BB3465C1FCB99398063CF8000",
+        );
+        assert_eq!(scene_text.len(), 51);
+        let expected_scene_text =
+            b"UnityWeb scene chunk payload. UnityWeb scene chunk payload. UnityWeb scene chunk payload. UnityWeb scene chunk payload. ";
+        assert_eq!(expected_scene_text.len(), 120);
+        assert_eq!(
+            decompress_size_block(
+                &scene_text,
+                expected_scene_text.len(),
+                expected_scene_text.len()
+            )
+            .unwrap()
+            .as_slice(),
+            expected_scene_text
+        );
+
+        let sequence = parse_hex(
+            "5D00001000000100000000000000000052500A84F99BB28021A969D627E03E065A5F048D53D404BA39570509C15524DE9DB871593160A19FF96F4973F2C8EA8CBA1A8B29692180FE338366AF466DEC9E898A0B83F03C0E898E3FED5FE79E90D91CFF32F4B2E03951B2D21415B4C571BADB06E3799A9FBB38C1B000AC930BAA0619031208155B9BC848F0322EFE2DA087C8F0A4E0D251EB8D675692B24D84C5F18631DF6A625BC2792DD9F73C73BA747407D83CA9562224A166F85A845F3067D2F64B492E7F20EBDBF8100E947877C73F6BEFB4CD95E26FF6446E06CF0B821ACBDB7AF0578D98FF90C03EE6C1124175EE032896EB09370E1E",
+        );
+        assert_eq!(sequence.len(), 248);
+        let expected_sequence: Vec<u8> = (0u8..=255).collect();
+        assert_eq!(
+            decompress_size_block(&sequence, expected_sequence.len(), expected_sequence.len())
+                .unwrap(),
+            expected_sequence
+        );
     }
 
     fn parse_hex(hex: &str) -> Vec<u8> {

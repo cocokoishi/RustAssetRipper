@@ -1274,3 +1274,11 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Gates: `cargo fmt --check` 0, full tests 1329 lib + 57 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
 - Next: fifty-ninth team round (gate-first: LZMA size lane, mono tables, platform registry).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 169. Checkpoint: fifty-ninth team round integrated — gate-first (2026-10-06)
+
+- All five shipped, all lead-verified (targeted suites re-run: 9/9, 7/7, 21/21, 17/17, 12/12) and integrated: `texture-meta` closed the size encoder gap (`IO-COMP-LZMA-SIZE-001`); `mesh-deform` ported the last open table (`TYPE-MONO-UTILS-001`); `sprite-fill` named the APK/OBB split (`IO-PLATFORM-ANDROID-001`); `anim-graph` fixed a real silent skip of split-only data bundles (`IO-PLATFORM-FILES-001`); `texture-export` named the i32 narrowing (`IO-BUNDLE-WEBDATA-001`). Ledger fix: mono-utils row belatedly refreshed (was stale at 1300 since round 51). No scope violations, no placeholders, no verified row touched.
+- Gate question answered YES: all five units reduce the Phase 1 incomplete count.
+- Gates: `cargo fmt --check` 0, full tests 1335 lib + 57 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
+- Next: sixtieth team round (gate-first: iOS/Switch lanes, script identity, export records).
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

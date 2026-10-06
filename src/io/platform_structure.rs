@@ -633,10 +633,10 @@ fn detect_android(
         }
         let marker = android_root_marker(filesystem, path)?;
         let data_path = join_path(path, "assets/bin/Data");
-        if marker > 8 && exists_directory(filesystem, &data_path)? {
-            apk_roots.push(path.clone());
-        } else if marker == 8 && exists_directory(filesystem, &data_path)? {
-            obb_roots.push(path.clone());
+        match android_root_role(marker, exists_directory(filesystem, &data_path)?) {
+            AndroidRootRole::Apk => apk_roots.push(path.clone()),
+            AndroidRootRole::Obb => obb_roots.push(path.clone()),
+            AndroidRootRole::Neither => {}
         }
     }
     if apk_roots.len() > 1 {
@@ -692,6 +692,31 @@ fn android_root_marker(
         }
     }
     Ok(marker)
+}
+
+/// An Android root's role in the APK/OBB pairing.
+///
+/// Mirrors the `CheckAndroid` split: `IsAndroidStructure` (assets plus `lib` and/or
+/// `META-INF` with the data directory present) claims the APK slot, `IsAndroidObbStructure`
+/// (assets alone with the data directory present) claims the OBB slot, and anything else
+/// stays out of the pairing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AndroidRootRole {
+    Apk,
+    Obb,
+    Neither,
+}
+
+fn android_root_role(marker: u8, data_directory_exists: bool) -> AndroidRootRole {
+    if !data_directory_exists {
+        AndroidRootRole::Neither
+    } else if marker > 8 {
+        AndroidRootRole::Apk
+    } else if marker == 8 {
+        AndroidRootRole::Obb
+    } else {
+        AndroidRootRole::Neither
+    }
 }
 
 /// `AndroidGameStructure` directory layout for one APK or OBB root.
@@ -1344,9 +1369,9 @@ impl Error for PlatformStructureError {
 #[cfg(test)]
 mod tests {
     use super::{
-        android_data_layout, desktop_data_fallback, detect_desktop_platform,
+        android_data_layout, android_root_role, desktop_data_fallback, detect_desktop_platform,
         detect_platform_structure, ios_data_layout, ps4_data_layout, switch_data_layout,
-        web_player_bundle_path, wiiu_data_layout, DesktopPlatform, PlatformKind,
+        web_player_bundle_path, wiiu_data_layout, AndroidRootRole, DesktopPlatform, PlatformKind,
         PlatformResourceLookup, PlatformResourceProvider, PlatformResourceSource,
         PlatformStructure, PlatformStructureErrorKind, PlatformStructureLimits,
         WEBGL_BUILD_FLAVORS,
@@ -1706,6 +1731,52 @@ mod tests {
             obb.il2cpp_metadata_path,
             "/obb/assets/bin/Data/Managed/Metadata/global-metadata.dat"
         );
+    }
+
+    #[test]
+    fn android_root_roles_follow_the_apk_obb_split() {
+        // Assets plus `lib` and/or `META-INF` claim the APK slot ...
+        assert_eq!(android_root_role(14, true), AndroidRootRole::Apk);
+        assert_eq!(android_root_role(12, true), AndroidRootRole::Apk);
+        assert_eq!(android_root_role(10, true), AndroidRootRole::Apk);
+        // ... assets alone claim the OBB slot ...
+        assert_eq!(android_root_role(8, true), AndroidRootRole::Obb);
+        // ... and anything without the data directory stays out of the pairing.
+        assert_eq!(android_root_role(14, false), AndroidRootRole::Neither);
+        assert_eq!(android_root_role(8, false), AndroidRootRole::Neither);
+        assert_eq!(android_root_role(6, true), AndroidRootRole::Neither);
+        assert_eq!(android_root_role(0, true), AndroidRootRole::Neither);
+    }
+
+    #[test]
+    fn android_obb_without_apk_is_no_structure_and_obb_roots_must_be_unique() {
+        let mut filesystem = VirtualFileSystem::new();
+        insert_directory(&mut filesystem, "/obb/assets/bin/Data");
+
+        // An OBB root alone is no structure, like the source `androidStructure != null` gate.
+        assert!(detect_platform_structure(
+            &filesystem,
+            &["/obb".to_owned()],
+            PlatformStructureLimits::default(),
+        )
+        .unwrap()
+        .is_none());
+
+        // A second OBB root errors, mirroring the source duplicate-OBB throw.
+        insert_directory(&mut filesystem, "/obb2/assets/bin/Data");
+        let ambiguous = detect_platform_structure(
+            &filesystem,
+            &["/obb".to_owned(), "/obb2".to_owned()],
+            PlatformStructureLimits::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            ambiguous.kind,
+            PlatformStructureErrorKind::AmbiguousAndroidRoots {
+                role: "OBB",
+                count: 2
+            }
+        ));
     }
 
     #[test]

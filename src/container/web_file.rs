@@ -250,20 +250,10 @@ impl<'a> WebFile<'a> {
                     input_size: self.input.len(),
                 })
             })?;
-            if data.len() > i32::MAX as usize {
-                return Err(WebFileError::new(WebFileErrorKind::WriteIntegerOverflow {
-                    field: "entry size",
-                    value: data.len(),
-                }));
-            }
-
             offset_positions.push(output.len());
             push_bytes(&mut output, &[0; 4], maximum_output_size)?;
-            push_bytes(
-                &mut output,
-                &(data.len() as i32).to_le_bytes(),
-                maximum_output_size,
-            )?;
+            let size = write_i32_length(data.len(), "entry size")?;
+            push_bytes(&mut output, &size.to_le_bytes(), maximum_output_size)?;
             let name = entry.name.as_bytes();
             let name_length = u32::try_from(name.len()).map_err(|_| {
                 WebFileError::new(WebFileErrorKind::WriteIntegerOverflow {
@@ -275,13 +265,7 @@ impl<'a> WebFile<'a> {
             push_bytes(&mut output, name, maximum_output_size)?;
         }
 
-        if output.len() > i32::MAX as usize {
-            return Err(WebFileError::new(WebFileErrorKind::WriteIntegerOverflow {
-                field: "header length",
-                value: output.len(),
-            }));
-        }
-        let header_length = output.len() as i32;
+        let header_length = write_i32_length(output.len(), "header length")?;
         output[header_length_position..header_length_position + 4]
             .copy_from_slice(&header_length.to_le_bytes());
 
@@ -290,13 +274,7 @@ impl<'a> WebFile<'a> {
                 let padding = entry_padding(output.len());
                 push_bytes(&mut output, &[0; 3][..padding], maximum_output_size)?;
             }
-            if output.len() > i32::MAX as usize {
-                return Err(WebFileError::new(WebFileErrorKind::WriteIntegerOverflow {
-                    field: "entry offset",
-                    value: output.len(),
-                }));
-            }
-            let offset = output.len() as i32;
+            let offset = write_i32_length(output.len(), "entry offset")?;
             let position = offset_positions[index];
             output[position..position + 4].copy_from_slice(&offset.to_le_bytes());
             let data = self.entry_data(index).ok_or_else(|| {
@@ -352,6 +330,21 @@ fn entry_byte_range(
         }));
     }
     Ok(start..end)
+}
+
+/// Checked `usize`-to-`i32` narrowing for written directory integers over caller facts:
+/// the baseline's unchecked `(int)` casts would wrap past 2 GiB, so values that do not
+/// fit fail with the naming field instead. One decision point serves the entry size,
+/// header length, and entry offset alike; the overflow arms are unreachable through
+/// `write` on realistic inputs, so the kernel keeps them provable.
+fn write_i32_length(value: usize, field: &'static str) -> Result<i32, WebFileError> {
+    if value > i32::MAX as usize {
+        return Err(WebFileError::new(WebFileErrorKind::WriteIntegerOverflow {
+            field,
+            value,
+        }));
+    }
+    Ok(value as i32)
 }
 
 fn read_7bit_length(reader: &mut BinaryReader<'_>) -> Result<usize, WebFileError> {
@@ -772,6 +765,21 @@ mod tests {
         assert!(matches!(
             WebFile::parse(&overrun).unwrap_err().kind(),
             WebFileErrorKind::EntryOutOfBounds { .. }
+        ));
+    }
+
+    #[test]
+    fn written_integers_narrow_to_i32_or_fail() {
+        assert_eq!(super::write_i32_length(0, "entry size"), Ok(0));
+        assert_eq!(
+            super::write_i32_length(i32::MAX as usize, "header length"),
+            Ok(i32::MAX)
+        );
+        let error = super::write_i32_length(i32::MAX as usize + 1, "entry offset").unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            WebFileErrorKind::WriteIntegerOverflow { field, value }
+                if *field == "entry offset" && *value == i32::MAX as usize + 1
         ));
     }
 

@@ -730,6 +730,11 @@ impl InventoryState<'_> {
                 self.primary_file_inputs
                     .insert((logical_name.clone(), logical_path.clone()));
                 self.register(logical_name, logical_path);
+            } else if let Some(bundle_name) = split_data_bundle_name(&path) {
+                let logical_path = logical_file_path(&path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                self.register(bundle_name, logical_path);
             }
         }
         Ok(())
@@ -1407,6 +1412,23 @@ pub fn plan_mono_assembly_collection<'a>(
     MainAssemblyCollection::None
 }
 
+/// `CollectCompressedGameFiles` split awareness over caller facts: `MultiFileStream.Exists`
+/// resolves split parts, so a `data.unity3d`/`datapack.unity3d` split part registers under
+/// its logical bundle name exactly like a literal bundle file. Returns the logical bundle
+/// name only for split parts; whole files (split or not) stay with the literal and
+/// primary branches above, and non-bundle splits return `None`.
+fn split_data_bundle_name(path: &str) -> Option<String> {
+    let logical_name = logical_file_name(path)?;
+    if logical_name == file_name(path) {
+        return None;
+    }
+    if matches!(logical_name.as_str(), "data.unity3d" | "datapack.unity3d") {
+        Some(logical_name)
+    } else {
+        None
+    }
+}
+
 fn is_number_with_optional_split_zero(suffix: &str) -> bool {
     let digits = suffix.strip_suffix(".split0").unwrap_or(suffix);
     !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
@@ -1870,6 +1892,83 @@ mod tests {
             .iter()
             .any(|entry| entry.file_name == "data.unity3d"));
         assert!(!entries.iter().any(|(name, _)| *name == "unrelated.assets"));
+    }
+
+    #[test]
+    fn split_data_bundle_parts_register_under_their_logical_bundle_name() {
+        use super::split_data_bundle_name;
+        // The kernel only fires for split parts of the two data bundles.
+        assert_eq!(
+            split_data_bundle_name("/game/Game_Data/data.unity3d.split0").as_deref(),
+            Some("data.unity3d")
+        );
+        assert_eq!(
+            split_data_bundle_name("/game/Game_Data/datapack.unity3d.split12").as_deref(),
+            Some("datapack.unity3d")
+        );
+        assert_eq!(split_data_bundle_name("/game/Game_Data/data.unity3d"), None);
+        assert_eq!(
+            split_data_bundle_name("/game/Game_Data/datapack.unity3d"),
+            None
+        );
+        assert_eq!(
+            split_data_bundle_name("/game/Game_Data/level2.split0"),
+            None
+        );
+        assert_eq!(
+            split_data_bundle_name("/game/Game_Data/unrelated.assets"),
+            None
+        );
+        // Non-numeric split suffixes are not split parts on either side.
+        assert_eq!(
+            split_data_bundle_name("/game/Game_Data/data.unity3d.split"),
+            None
+        );
+        assert_eq!(
+            split_data_bundle_name("/game/Game_Data/data.unity3d.splitX"),
+            None
+        );
+
+        // Split-only data bundles register exactly like literal bundle files.
+        let mut filesystem = VirtualFileSystem::new();
+        make_directory(&mut filesystem, "/game/Game_Data");
+        for name in [
+            "data.unity3d.split0",
+            "data.unity3d.split1",
+            "datapack.unity3d.split0",
+            "level2.split0",
+            "data.unity3d.splitX",
+            "unrelated.assets",
+        ] {
+            write_file(&mut filesystem, &format!("/game/Game_Data/{name}"), b"x");
+        }
+        let structure = structure(
+            PlatformKind::Windows,
+            "/game",
+            &["/game/Game_Data"],
+            Some("/game/Game_Data"),
+            Some("Game"),
+        );
+        let inventory = structure
+            .collect_game_files(
+                &filesystem,
+                PlatformFileInventoryOptions {
+                    skip_streaming_assets: true,
+                    disable_script_import: false,
+                },
+                PlatformFileInventoryLimits::default(),
+            )
+            .unwrap();
+        let entries: Vec<_> = inventory
+            .registered_files
+            .iter()
+            .map(|entry| (entry.file_name.as_str(), entry.virtual_path.as_str()))
+            .collect();
+        assert!(entries.contains(&("data.unity3d", "/game/Game_Data/data.unity3d")));
+        assert!(entries.contains(&("datapack.unity3d", "/game/Game_Data/datapack.unity3d")));
+        assert!(entries.contains(&("level2", "/game/Game_Data/level2")));
+        assert!(!entries.iter().any(|(name, _)| *name == "unrelated.assets"));
+        assert!(!entries.iter().any(|(name, _)| name.contains("split")));
     }
 
     #[test]
