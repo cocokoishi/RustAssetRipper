@@ -1,7 +1,7 @@
 //! Platform root and DataPath discovery for mounted Unity game layouts.
 //!
 //! Covers the root/marker decisions per platform (including the Android APK/OBB bitmask and the
-//! `assets/bin/Data` gate), the Android, iOS, Switch, and PS4 directory layouts, the WebGL
+//! `assets/bin/Data` gate), the Android, iOS, Switch, PS4, and WiiU directory layouts, the WebGL
 //! build-flavor preference, and the WebPlayer html-to-bundle pairing. Backend selection, assembly
 //! and metadata collection, and bundle gathering live in the file inventory; bundle-hierarchy
 //! lookups live in the serialized-file workspace.
@@ -811,6 +811,30 @@ pub fn ps4_data_layout(root_path: &str) -> Ps4DataLayout {
     }
 }
 
+/// `WiiUGameStructure` directory layout for one title root.
+///
+/// Mirrors the constructor joins: `content/Data` under the root, `StreamingAssets`, `Resources`,
+/// and `Managed` under it. The Unity player, version, and IL2Cpp paths stay unset on WiiU —
+/// WiiU does not support IL2Cpp, so the backend rule never takes an IL2Cpp arm — and they have
+/// no slots here.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WiiUDataLayout {
+    pub game_data_path: String,
+    pub streaming_assets_path: String,
+    pub resources_path: String,
+    pub managed_path: String,
+}
+
+pub fn wiiu_data_layout(root_path: &str) -> WiiUDataLayout {
+    let game_data_path = join_path(root_path, "content/Data");
+    WiiUDataLayout {
+        streaming_assets_path: join_path(&game_data_path, "StreamingAssets"),
+        resources_path: join_path(&game_data_path, "Resources"),
+        managed_path: join_path(&game_data_path, "Managed"),
+        game_data_path,
+    }
+}
+
 /// `WebGLGameStructure` build-flavor search order: `Build` (`*.data.unityweb`), then
 /// `Development` (`*.data`), then `Release` (`*.datagz`), mirroring the constructor preference.
 pub const WEBGL_BUILD_FLAVORS: [(&str, &str); 3] = [
@@ -920,8 +944,8 @@ fn detect_wiiu(
     filesystem: &VirtualFileSystem,
     selected_path: &str,
 ) -> Result<Option<PlatformStructure>, PlatformStructureError> {
-    let game_data_path = join_path(selected_path, "content/Data");
-    if !exists_directory(filesystem, &game_data_path)? {
+    let layout = wiiu_data_layout(selected_path);
+    if !exists_directory(filesystem, &layout.game_data_path)? {
         return Ok(None);
     }
     Ok(Some(make_structure(
@@ -930,8 +954,8 @@ fn detect_wiiu(
         vec![selected_path.to_owned()],
         selected_path.to_owned(),
         Some(file_name(selected_path).to_owned()),
-        Some(game_data_path.clone()),
-        vec![game_data_path],
+        Some(layout.game_data_path.clone()),
+        vec![layout.game_data_path],
     )))
 }
 
@@ -1319,10 +1343,10 @@ impl Error for PlatformStructureError {
 mod tests {
     use super::{
         android_data_layout, detect_desktop_platform, detect_platform_structure, ios_data_layout,
-        ps4_data_layout, switch_data_layout, web_player_bundle_path, DesktopPlatform, PlatformKind,
-        PlatformResourceLookup, PlatformResourceProvider, PlatformResourceSource,
-        PlatformStructure, PlatformStructureErrorKind, PlatformStructureLimits,
-        WEBGL_BUILD_FLAVORS,
+        ps4_data_layout, switch_data_layout, web_player_bundle_path, wiiu_data_layout,
+        DesktopPlatform, PlatformKind, PlatformResourceLookup, PlatformResourceProvider,
+        PlatformResourceSource, PlatformStructure, PlatformStructureErrorKind,
+        PlatformStructureLimits, WEBGL_BUILD_FLAVORS,
     };
     use crate::io::filesystem::VirtualFileSystem;
 
@@ -1859,6 +1883,18 @@ mod tests {
         assert_eq!(web_player_bundle_path("/player", "INDEX.HTML"), None);
         assert_eq!(web_player_bundle_path("/player", "index.unity3d"), None);
         assert_eq!(web_player_bundle_path("/player", "notes.txt"), None);
+    }
+
+    #[test]
+    fn wiiu_directory_layout_matches_the_constructor_joins() {
+        let layout = wiiu_data_layout("/wiiu");
+        assert_eq!(layout.game_data_path, "/wiiu/content/Data");
+        assert_eq!(
+            layout.streaming_assets_path,
+            "/wiiu/content/Data/StreamingAssets"
+        );
+        assert_eq!(layout.resources_path, "/wiiu/content/Data/Resources");
+        assert_eq!(layout.managed_path, "/wiiu/content/Data/Managed");
     }
 
     #[test]

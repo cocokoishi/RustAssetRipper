@@ -3,8 +3,9 @@
 //!
 //! Ports the format dispatch and structural guards, which need no type resolver:
 //! the terminated/counted format discriminants, the terminus triple, the
-//! unknown/null reference identifiers, the counted-format capacity guard, and
-//! per-entry framing (identifier classification plus the content-presence gate).
+//! unknown/null reference identifiers, the counted-format capacity guard, the
+//! terminated-loop control decisions, and per-entry framing (identifier
+//! classification plus the content-presence gate).
 //! Reading entry type triples and object payloads stays open: content decoding
 //! needs `ITypeResolver.TryGetSerializableType` (live assemblies or TypeTrees).
 //!
@@ -66,6 +67,9 @@ pub enum ManagedRegistryError {
         remaining_bytes: u64,
         object_count: i32,
     },
+    /// The terminated objects ended without a terminus entry, which the source
+    /// answers with an end-of-stream throw carrying the objects read so far.
+    UnterminatedRegistry { objects_read: usize },
 }
 
 impl Display for ManagedRegistryError {
@@ -85,6 +89,10 @@ impl Display for ManagedRegistryError {
             } => write!(
                 formatter,
                 "the stream only has {remaining_bytes} bytes remaining, so {object_count} referenced objects cannot be read"
+            ),
+            Self::UnterminatedRegistry { objects_read } => write!(
+                formatter,
+                "the managed reference registry ended after {objects_read} objects without a terminus"
             ),
         }
     }
@@ -128,6 +136,43 @@ const fn const_str_eq(left: &str, right: &str) -> bool {
         index += 1;
     }
     true
+}
+
+/// One terminated-format loop decision (`ReadTerminatedObjects` control flow
+/// without the content reads, which need the type resolver).
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum TerminatedLoopAction {
+    /// The triple is the terminus: the object list is complete.
+    Finish,
+    /// A content-bearing entry follows, addressed by its index like the source
+    /// passes `referencedObjects.Count` as the reference identifier.
+    ReadIndexedObject { reference_id: i64 },
+}
+
+/// Advances the terminated object loop over caller facts: an exhausted stream
+/// is the source end-of-stream error carrying the objects read so far (checked
+/// before the triple, like the source); otherwise the terminus triple ends the
+/// list and any other triple opens an index-addressed entry. Callers supply the
+/// already-read managed-type triple alongside the stream state. The `as` cast
+/// mirrors the source `int`-to-`long` widening: object counts never approach the
+/// 64-bit range.
+pub const fn step_terminated_loop(
+    stream_exhausted: bool,
+    objects_read: usize,
+    triple_class: &str,
+    triple_namespace: &str,
+    triple_assembly: &str,
+) -> Result<TerminatedLoopAction, ManagedRegistryError> {
+    if stream_exhausted {
+        return Err(ManagedRegistryError::UnterminatedRegistry { objects_read });
+    }
+    if is_terminus(triple_class, triple_namespace, triple_assembly) {
+        Ok(TerminatedLoopAction::Finish)
+    } else {
+        Ok(TerminatedLoopAction::ReadIndexedObject {
+            reference_id: objects_read as i64,
+        })
+    }
 }
 
 /// Classifies one registry reference identifier: unknown and null references carry
@@ -210,9 +255,10 @@ pub const fn check_counted_capacity(
 mod tests {
     use super::{
         check_counted_capacity, classify_reference_id, classify_registry_format,
-        frame_registry_entry, is_terminus, referenced_object_has_content, ManagedRegistryError,
-        ReferenceIdKind, RegistryFormat, COUNTED_FORMAT, NULL_REFERENCE_ID, TERMINATED_FORMAT,
-        TERMINUS_ASSEMBLY_NAME, TERMINUS_CLASS_NAME, TERMINUS_NAMESPACE, UNKNOWN_REFERENCE_ID,
+        frame_registry_entry, is_terminus, referenced_object_has_content, step_terminated_loop,
+        ManagedRegistryError, ReferenceIdKind, RegistryFormat, TerminatedLoopAction,
+        COUNTED_FORMAT, NULL_REFERENCE_ID, TERMINATED_FORMAT, TERMINUS_ASSEMBLY_NAME,
+        TERMINUS_CLASS_NAME, TERMINUS_NAMESPACE, UNKNOWN_REFERENCE_ID,
     };
 
     #[test]
@@ -304,5 +350,29 @@ mod tests {
             false,
             false
         ));
+    }
+
+    #[test]
+    fn terminated_loop_steps_follow_the_source_control_flow() {
+        // The terminus triple finishes the list.
+        assert_eq!(
+            step_terminated_loop(false, 0, "Terminus", "UnityEngine.DMAT", "FAKE_ASM"),
+            Ok(TerminatedLoopAction::Finish)
+        );
+        // Any other triple opens an entry addressed by its index.
+        assert_eq!(
+            step_terminated_loop(false, 2, "Player", "", "Assembly-CSharp"),
+            Ok(TerminatedLoopAction::ReadIndexedObject { reference_id: 2 })
+        );
+        // An exhausted stream errors with the objects read so far, even when
+        // the (unread) triple would have been the terminus.
+        assert_eq!(
+            step_terminated_loop(true, 3, "Terminus", "UnityEngine.DMAT", "FAKE_ASM"),
+            Err(ManagedRegistryError::UnterminatedRegistry { objects_read: 3 })
+        );
+        assert_eq!(
+            step_terminated_loop(true, 0, "Player", "", "Assembly-CSharp"),
+            Err(ManagedRegistryError::UnterminatedRegistry { objects_read: 0 })
+        );
     }
 }

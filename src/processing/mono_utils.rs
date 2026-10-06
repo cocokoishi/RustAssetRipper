@@ -3,8 +3,9 @@
 //!
 //! Covers the pure string kernels behind script/type resolution: the namespace+name
 //! predicates (`IsPrimitive`, `IsObject`, `IsEngineStruct`, ...), `ToPrimitiveType`
-//! with its `PrimitiveType` discriminants, and the engine-asset name switch (which
-//! arm takes a Unity version and which concrete subclass 2019.4.0f1 resolves).
+//! with its `PrimitiveType` discriminants, the CorLib element-type branch, and the
+//! engine-asset name switch (which arm takes a Unity version and which concrete
+//! subclass 2019.4.0f1 resolves).
 //! Assembly loading, type resolution, and object construction stay outside: they need
 //! live managed assemblies. The `ToPrimitiveType` enum branch takes only their outcomes
 //! (whether the definition resolved to an enum, plus each field's resolved type).
@@ -251,6 +252,50 @@ pub fn to_primitive_type(namespace: Option<&str>, name: Option<&str>) -> Primiti
         }
     } else {
         PrimitiveType::Complex
+    }
+}
+
+/// The ECMA-335 element types behind `CorLibTypeSignature.ElementType`, restricted
+/// to the spellings `PrimitiveTypeExtensions.ToPrimitiveType` classifies.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum MonoElementType {
+    Boolean,
+    Char,
+    I1,
+    U1,
+    I2,
+    U2,
+    I4,
+    U4,
+    I8,
+    U8,
+    R4,
+    R8,
+    String,
+    /// Any other element type (including `Void`, pointers, and managed composites):
+    /// the source `_ => Complex` default arm.
+    Other,
+}
+
+/// `PrimitiveTypeExtensions.ToPrimitiveType(ElementType)`: the CorLib signature fast
+/// path that field serialization tries before name resolution. Signature decoding
+/// stays caller-side; only the decoded element type arrives here.
+pub const fn element_type_to_primitive(element: MonoElementType) -> PrimitiveType {
+    match element {
+        MonoElementType::Boolean => PrimitiveType::Bool,
+        MonoElementType::Char => PrimitiveType::Char,
+        MonoElementType::I1 => PrimitiveType::SByte,
+        MonoElementType::U1 => PrimitiveType::Byte,
+        MonoElementType::I2 => PrimitiveType::Short,
+        MonoElementType::U2 => PrimitiveType::UShort,
+        MonoElementType::I4 => PrimitiveType::Int,
+        MonoElementType::U4 => PrimitiveType::UInt,
+        MonoElementType::I8 => PrimitiveType::Long,
+        MonoElementType::U8 => PrimitiveType::ULong,
+        MonoElementType::R4 => PrimitiveType::Single,
+        MonoElementType::R8 => PrimitiveType::Double,
+        MonoElementType::String => PrimitiveType::String,
+        MonoElementType::Other => PrimitiveType::Complex,
     }
 }
 
@@ -542,6 +587,37 @@ mod tests {
         assert!(EngineAssetKind::Gradient.takes_version());
         assert!(!EngineAssetKind::Vector3.takes_version());
         assert!(!EngineAssetKind::Guid.takes_version());
+    }
+
+    #[test]
+    fn element_types_classify_like_the_corlib_signature_branch() {
+        use super::MonoElementType;
+        use super::PrimitiveType;
+        let cases = [
+            (MonoElementType::Boolean, PrimitiveType::Bool),
+            (MonoElementType::Char, PrimitiveType::Char),
+            (MonoElementType::I1, PrimitiveType::SByte),
+            (MonoElementType::U1, PrimitiveType::Byte),
+            (MonoElementType::I2, PrimitiveType::Short),
+            (MonoElementType::U2, PrimitiveType::UShort),
+            (MonoElementType::I4, PrimitiveType::Int),
+            (MonoElementType::U4, PrimitiveType::UInt),
+            (MonoElementType::I8, PrimitiveType::Long),
+            (MonoElementType::U8, PrimitiveType::ULong),
+            (MonoElementType::R4, PrimitiveType::Single),
+            (MonoElementType::R8, PrimitiveType::Double),
+            (MonoElementType::String, PrimitiveType::String),
+            // Every other element type falls through to `Complex`.
+            (MonoElementType::Other, PrimitiveType::Complex),
+        ];
+        for (element, expected) in cases {
+            assert_eq!(super::element_type_to_primitive(element), expected);
+        }
+        // The fast path agrees with name resolution on the overlapping primitives.
+        assert_eq!(
+            super::element_type_to_primitive(MonoElementType::I4),
+            super::to_primitive_type(Some(super::SYSTEM_NAMESPACE), Some("Int32"))
+        );
     }
 
     #[test]

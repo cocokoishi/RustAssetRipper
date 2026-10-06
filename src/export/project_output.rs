@@ -35,6 +35,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use super::meta::{UnityMetaFile, UnityMetaFileError, UnityMetaFileOptions};
+use super::meta_emission::export_meta_mechanics::META_EXTENSION;
 use super::unity_yaml::{UnityYamlNode, UnityYamlWriteLimits};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -196,15 +197,7 @@ pub fn write_unity_meta_sidecar(
     let current_directory =
         ensure_output_directory(output_root, &components[..components.len() - 1])?;
 
-    let mut sidecar_name = OsString::new();
-    sidecar_name
-        .try_reserve(components[components.len() - 1].len() + ".meta".len())
-        .map_err(|_| UnityProjectOutputError::AllocationFailed {
-            resource: "Unity meta sidecar filename",
-            requested: components[components.len() - 1].len() + ".meta".len(),
-        })?;
-    sidecar_name.push(components[components.len() - 1]);
-    sidecar_name.push(".meta");
+    let sidecar_name = meta_sidecar_file_name(components[components.len() - 1])?;
     let sidecar_path = current_directory.join(sidecar_name);
     let mut sidecar = match OpenOptions::new()
         .write(true)
@@ -453,6 +446,22 @@ pub const fn single_asset_export_pointer(
     }
 }
 
+/// `ExportCollection.ExportMeta` sidecar naming (`ExportCollection.cs`, `MetaExtension`):
+/// the sidecar appends `.meta` to the full asset path, never replacing the extension, so
+/// `Icon.png` maps to `Icon.png.meta` and extensionless names gain the suffix directly.
+fn meta_sidecar_file_name(file_name: &str) -> Result<OsString, UnityProjectOutputError> {
+    let mut sidecar_name = OsString::new();
+    sidecar_name
+        .try_reserve(file_name.len() + META_EXTENSION.len())
+        .map_err(|_| UnityProjectOutputError::AllocationFailed {
+            resource: "Unity meta sidecar filename",
+            requested: file_name.len() + META_EXTENSION.len(),
+        })?;
+    sidecar_name.push(file_name);
+    sidecar_name.push(META_EXTENSION);
+    Ok(sidecar_name)
+}
+
 fn validated_path_components(
     path: &str,
     limits: UnityProjectOutputLimits,
@@ -519,11 +528,12 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    use super::{meta_sidecar_file_name, write_unity_meta_sidecar};
     use super::{
         single_asset_contains, single_asset_export_id, single_asset_export_pointer,
         SingleAssetExportId, SingleAssetExportPointer,
     };
-    use super::{write_unity_meta_sidecar, UnityProjectOutputError, UnityProjectOutputLimits};
+    use super::{UnityProjectOutputError, UnityProjectOutputLimits};
     use crate::export::meta::{UnityMetaFile, UnityMetaFileOptions};
     use crate::export::unity_yaml::{UnityYamlMappingStyle, UnityYamlNode, UnityYamlWriteLimits};
 
@@ -874,6 +884,25 @@ mod tests {
             Err(UnityProjectOutputError::InvalidRelativePath { .. })
         ));
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn sidecar_names_append_the_meta_suffix_without_replacing_extensions() {
+        use std::ffi::OsString;
+        // The source concatenates `$"{filePath}{MetaExtension}"`: suffix-append, never
+        // stem replacement, so multi-dot and extensionless names keep their full text.
+        for (file_name, sidecar_name) in [
+            ("Icon.png", "Icon.png.meta"),
+            ("data.tar.gz", "data.tar.gz.meta"),
+            ("archive", "archive.meta"),
+            (".meta", ".meta.meta"),
+        ] {
+            assert_eq!(
+                meta_sidecar_file_name(file_name).unwrap(),
+                OsString::from(sidecar_name),
+                "{file_name:?}"
+            );
+        }
     }
 
     #[test]

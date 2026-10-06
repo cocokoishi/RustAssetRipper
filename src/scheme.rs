@@ -2925,7 +2925,7 @@ fn detect_file_kind(input: &[u8]) -> FileKind {
 }
 
 fn detect_file_kind_with_length(input: &[u8], total_length: u64) -> FileKind {
-    if let Some(kind) = detect_primary_file_kind(input) {
+    if let Some(kind) = detect_primary_file_kind_with_length(input, total_length) {
         return kind;
     }
     if is_serialized_file_with_length(input, total_length) {
@@ -2936,13 +2936,17 @@ fn detect_file_kind_with_length(input: &[u8], total_length: u64) -> FileKind {
 }
 
 fn detect_primary_file_kind(input: &[u8]) -> Option<FileKind> {
-    if has_bundle_signature(input, b"UnityFS") {
+    detect_primary_file_kind_with_length(input, input.len() as u64)
+}
+
+fn detect_primary_file_kind_with_length(input: &[u8], total_length: u64) -> Option<FileKind> {
+    if has_bundle_signature_with_length(input, b"UnityFS", total_length) {
         Some(FileKind::UnityFs)
-    } else if has_bundle_signature(input, b"UnityRaw") {
+    } else if has_bundle_signature_with_length(input, b"UnityRaw", total_length) {
         Some(FileKind::UnityRaw)
-    } else if has_bundle_signature(input, b"UnityWeb") {
+    } else if has_bundle_signature_with_length(input, b"UnityWeb", total_length) {
         Some(FileKind::UnityWebBundle)
-    } else if has_bundle_signature(input, b"UnityArchive") {
+    } else if has_bundle_signature_with_length(input, b"UnityArchive", total_length) {
         Some(FileKind::UnityArchive)
     } else if WebFile::is_web_file(input) {
         Some(FileKind::UnityWebData)
@@ -2951,9 +2955,13 @@ fn detect_primary_file_kind(input: &[u8]) -> Option<FileKind> {
     }
 }
 
-fn has_bundle_signature(input: &[u8], magic: &[u8]) -> bool {
-    const SOURCE_MINIMUM_STREAM_LENGTH: usize = 0x20;
-    input.len() >= SOURCE_MINIMUM_STREAM_LENGTH
+/// The source `BundleHeader.IsBundleHeader` minimum applies to the whole stream length,
+/// not the buffered prefix: a short prefix of a long stream still detects when it holds
+/// the magic and its terminator. Full-buffer callers pass the buffer length, which keeps
+/// their behavior unchanged.
+fn has_bundle_signature_with_length(input: &[u8], magic: &[u8], total_length: u64) -> bool {
+    const SOURCE_MINIMUM_STREAM_LENGTH: u64 = 0x20;
+    total_length >= SOURCE_MINIMUM_STREAM_LENGTH
         && input.get(..magic.len()) == Some(magic)
         && input.get(magic.len()) == Some(&0)
 }
@@ -4626,5 +4634,34 @@ mod tests {
         assert_eq!(wrapped_file.kind(), FileKind::Resource);
         assert!(wrapped_file.is_readable());
         assert!(SchemeReader::is_readable(&wrapped));
+    }
+
+    /// The source `BundleHeader.IsBundleHeader` minimum applies to the whole stream
+    /// length, not the buffered prefix: a short prefix of a long stream still detects
+    /// when it holds the magic and its terminator.
+    #[test]
+    fn bundle_signature_probes_use_the_total_stream_length() {
+        let mut archive_prefix = vec![0; 13];
+        archive_prefix[..12].copy_from_slice(b"UnityArchive");
+        assert_eq!(
+            SchemeReader::probe_raw_kind(&archive_prefix, 100),
+            FileKind::UnityArchive
+        );
+        let mut fs_prefix = vec![0; 8];
+        fs_prefix[..7].copy_from_slice(b"UnityFS");
+        assert_eq!(
+            SchemeReader::probe_raw_kind(&fs_prefix, 64),
+            FileKind::UnityFs
+        );
+        // Below the total-length minimum nothing dispatches, even with a full magic.
+        assert_eq!(
+            SchemeReader::probe_raw_kind(&archive_prefix, 20),
+            FileKind::Resource
+        );
+        // A prefix cut inside the magic never matches.
+        assert_eq!(
+            SchemeReader::probe_raw_kind(b"Unity", 100),
+            FileKind::Resource
+        );
     }
 }
