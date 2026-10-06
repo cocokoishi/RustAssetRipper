@@ -1106,3 +1106,19 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Team note: user asked for 8 agents, then corrected to 5 agents for the next round; two new teammates will be spawned before dispatch.
 - Next: thirty-ninth team round (five-agent formation), then `SetBoneGeometry`/outline mesh internals.
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## Standing dispatch policy: gate-first (adopted 2026-10-06, enforced from round 39)
+
+- Never select a 已验证 row for new work unless fresh evidence proves a bug/regression in it or it blocks a gate. Polish on verified rows (extra edge tests, Display strings, presence gates on green rows) is banned by default.
+- Priority order: 未调查 → 已调查 → 实现中 → 已实现但未验证 → 已验证. Prefer work that closes macro Phase 1 gate items (IO containers, reference graph, scene/prefab processing, animation processing, model/texture export, project export loop, product surface).
+- Each round, a majority of agents must advance incomplete rows. Matrix status at adoption: 377 rows, 254 verified, 99 implemented-but-unverified, 16 in-progress, 8 investigated.
+- Before every commit, lead must answer: "does this commit reduce the Phase 1 incomplete count?" If it only adds tests to a green row without unblocking anything, do not commit it.
+- Round 39 was redirected mid-flight under this policy: tasks 115–119 (all on verified rows) were superseded before delivery with zero code landed; tree restored to `04e3c80`; replaced by gate-first tasks 120–124 (PROC-ANIM-001 ×2, RES-MODEL-001, OBJ-REF-001, PROC-SCENE-001).
+
+## 149. Checkpoint: thirty-ninth team round integrated — first gate-first round (2026-10-06)
+
+- Five teammates shipped disjoint scopes, all lead-verified (targeted suites re-run: 3/3, 25/25, 12/12, 99/99, 9/9) and integrated: `texture-meta` ported state gates (`PROC-ANIM-001`); `sprite-fill` ported GLB dispatch (`RES-MODEL-001`); `texture-export` closed the alias gap (`OBJ-REF-001`); `mesh-deform` ported the root filter (`PROC-SCENE-001`); `anim-graph` ported emission routing (`PROC-ANIM-001`). No scope violations, no placeholders, no verified row touched.
+- Gate question answered YES: all five units reduce the Phase 1 incomplete count.
+- Gates: `cargo fmt --check` 0, full tests 1236 lib + 55 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
+- Next: fortieth team round (gate-first: IO containers, export loop, product surface gaps).
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.

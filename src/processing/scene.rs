@@ -1,9 +1,12 @@
 //! File-scoped GameObject and Transform relationship recovery.
 //!
 //! Also ports the `SceneHierarchyObject` assembly decisions: the `Create` asset-sort
-//! dispatch and the `FetchDependencies` edge order. Live interface checks, pointer
+//! dispatch, the `FetchDependencies` edge order, and the `GetRoots` root filter over
+//! caller-reported `IsRoot` facts. Live interface checks, pointer
 //! resolution, generated `SceneAsset` allocation, and `SetMainAsset` plumbing stay
 //! caller-side; repeated `SceneRoots` assignments overwrite, so callers keep the last.
+//! The root facts arrive post-resolution, so this filter never invents roots from
+//! unresolved links: the caller reports only whether each father pointer is null.
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -3251,6 +3254,41 @@ pub fn scene_hierarchy_dependency_fields(
     fields
 }
 
+/// Caller-reported `GameObjectExtensions.IsRoot` facts for one hierarchy GameObject.
+///
+/// Facts arrive in `GameObjects` order; the component lookup and the father-pointer
+/// resolution (including cross-file targets) stay caller-side.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SceneHierarchyRootFact {
+    /// Whether the GameObject carries a Transform component.
+    pub has_transform: bool,
+    /// Whether that Transform's father pointer resolved to null.
+    /// Ignored when there is no Transform.
+    pub father_is_null: bool,
+}
+
+/// `GameObjectExtensions.IsRoot` (`AssetRipper/Source/AssetRipper.SourceGenerated.Extensions/GameObjectExtensions.cs`
+/// lines 117-120) over caller facts: a GameObject is a root when it has no Transform
+/// (the source `?.` yields null) or its Transform father is null.
+pub const fn is_scene_hierarchy_root(fact: SceneHierarchyRootFact) -> bool {
+    !fact.has_transform || fact.father_is_null
+}
+
+/// `SceneHierarchyObject.GetRoots` (`AssetRipper/Source/AssetRipper.Processing/Prefabs/SceneHierarchyObject.cs`
+/// lines 73-76): hierarchy-order indexes of the GameObjects that are roots.
+///
+/// This is the export-time filter over the assembled hierarchy; `discover_local_roots`
+/// runs the same rule during graph discovery with diagnostics for unresolved links.
+pub fn scene_hierarchy_root_indexes(facts: &[SceneHierarchyRootFact]) -> Vec<usize> {
+    let mut roots = Vec::new();
+    for (index, fact) in facts.iter().enumerate() {
+        if is_scene_hierarchy_root(*fact) {
+            roots.push(index);
+        }
+    }
+    roots
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -5702,5 +5740,50 @@ mod tests {
             vec!["GameObjects[]"]
         );
         assert!(scene_hierarchy_dependency_fields(0, 0, 0, 0, false).is_empty());
+    }
+
+    #[test]
+    fn hierarchy_root_predicate_matches_the_is_root_rule() {
+        use super::SceneHierarchyRootFact;
+        // No Transform: the source `?.` yields null, so the GameObject is a root.
+        assert!(super::is_scene_hierarchy_root(SceneHierarchyRootFact {
+            has_transform: false,
+            father_is_null: false,
+        }));
+        // A Transform with a null father is a root; a set father is not.
+        assert!(super::is_scene_hierarchy_root(SceneHierarchyRootFact {
+            has_transform: true,
+            father_is_null: true,
+        }));
+        assert!(!super::is_scene_hierarchy_root(SceneHierarchyRootFact {
+            has_transform: true,
+            father_is_null: false,
+        }));
+    }
+
+    #[test]
+    fn get_roots_keeps_hierarchy_order_and_reports_no_roots_explicitly() {
+        use super::SceneHierarchyRootFact;
+        let facts = [
+            SceneHierarchyRootFact {
+                has_transform: true,
+                father_is_null: false,
+            },
+            SceneHierarchyRootFact {
+                has_transform: true,
+                father_is_null: true,
+            },
+            SceneHierarchyRootFact {
+                has_transform: false,
+                father_is_null: false,
+            },
+            SceneHierarchyRootFact {
+                has_transform: true,
+                father_is_null: false,
+            },
+        ];
+        assert_eq!(super::scene_hierarchy_root_indexes(&facts), vec![1, 2]);
+        assert!(super::scene_hierarchy_root_indexes(&facts[0..1]).is_empty());
+        assert!(super::scene_hierarchy_root_indexes(&[]).is_empty());
     }
 }

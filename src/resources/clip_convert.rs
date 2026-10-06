@@ -15,10 +15,15 @@
 //! - `TryGetNextFrame`: the forward scan for the next frame holding a curve id.
 //! - `AddAnimatorMuscleCurve`: the humanoid binding-name decision behind the emitted
 //!   animator-muscle curve (`GetHumanoidMuscle` + `ToAttributeString`).
+//! - `AddDefaultCurve` routing: the class-id dispatch (GameObject/Script/Engine paths)
+//!   and the shared PPtr-vs-float keyframe split behind the script, engine, and
+//!   custom-curve fallback emission sites.
 //!
-//! The curve-emission half (`AddTransformCurve`, `AddDefaultCurve`,
-//! `AddCustomCurve`, keyframe creation on clip objects) needs mutable generated clip
-//! objects and stays open. `ROUND` fixture rows come from the `sclipprobe`
+//! The curve-emission half that remains open needs mutable generated clip objects:
+//! `AddTransformCurve` bucket writes (including the missing-`EulerCurves` skip),
+//! attribute resolution (`GameObject.TryGetPath`, checksum-cache and `FieldHashes`
+//! lookups with their `GetReversedPath` fallbacks), PPtr value mapping, and keyframe
+//! creation on clip objects. `ROUND` fixture rows come from the `sclipprobe`
 //! differential; the remaining arithmetic is verified against synthetic inputs.
 
 use std::error::Error;
@@ -33,6 +38,10 @@ use super::vertex_data_blob::UnityVersion;
 pub const CLASS_ID_TRANSFORM: i32 = 4;
 /// `ClassIDType.RectTransform`.
 pub const CLASS_ID_RECT_TRANSFORM: i32 = 224;
+/// `ClassIDType.GameObject`.
+pub const CLASS_ID_GAME_OBJECT: i32 = 1;
+/// `ClassIDType.MonoBehaviour`.
+pub const CLASS_ID_MONO_BEHAVIOUR: i32 = 114;
 
 /// `AnimationClipConverter.DefaultFloatWeight` (`1/3`).
 pub const DEFAULT_FLOAT_WEIGHT: f32 = 1.0 / 3.0;
@@ -235,6 +244,53 @@ pub fn try_get_next_frame(
 pub fn animator_muscle_attribute(attribute: u32, version: UnityVersion) -> Option<String> {
     let muscle = update_humanoid_muscle(attribute as i32, version);
     humanoid_muscle_attribute(muscle)
+}
+
+/// `AnimationClipConverter.AddDefaultCurve` routing: the class id alone decides
+/// which emission path a default (non-transform, non-custom) binding takes.
+/// Attribute resolution, PPtr mapping, and keyframe creation on generated clip
+/// objects stay open in the converter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DefaultCurveTarget {
+    /// `AddGameObjectCurve`.
+    GameObject,
+    /// `AddScriptCurve`.
+    Script,
+    /// `AddEngineCurve`.
+    Engine,
+}
+
+/// The source `switch` on the binding class id: `GameObject` and `MonoBehaviour`
+/// take their dedicated paths, every other class id falls into the engine path.
+pub const fn default_curve_target(class_id: i32) -> DefaultCurveTarget {
+    if class_id == CLASS_ID_GAME_OBJECT {
+        DefaultCurveTarget::GameObject
+    } else if class_id == CLASS_ID_MONO_BEHAVIOUR {
+        DefaultCurveTarget::Script
+    } else {
+        DefaultCurveTarget::Engine
+    }
+}
+
+/// Keyframe flavor selected by `GenericBindingExtensions.IsPPtrCurve` (`IsPPtrCurve
+/// != 0`, carried by the caller). The same split steers the custom-curve fallback,
+/// the script path, and the engine path: PPtr curves index the PPtr mapping with an
+/// integer key, everything else emits a float key with tangents.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum KeyframeKind {
+    /// `AddPPtrKeyframe`.
+    PPtr,
+    /// `AddFloatKeyframe`.
+    Float,
+}
+
+/// The shared `IsPPtrCurve` branch behind the three PPtr/float emission sites.
+pub const fn keyframe_kind(is_pptr_curve: bool) -> KeyframeKind {
+    if is_pptr_curve {
+        KeyframeKind::PPtr
+    } else {
+        KeyframeKind::Float
+    }
 }
 
 #[cfg(test)]
@@ -446,6 +502,47 @@ mod tests {
         assert_eq!(try_get_next_frame(&frames, 0, 9), None);
         assert_eq!(try_get_next_frame(&[], 0, 0), None);
         assert_eq!(try_get_next_frame(&frames, usize::MAX, 0), None);
+    }
+
+    #[test]
+    fn default_curve_routing_follows_the_source_switch() {
+        assert_eq!(
+            default_curve_target(CLASS_ID_GAME_OBJECT),
+            DefaultCurveTarget::GameObject
+        );
+        assert_eq!(
+            default_curve_target(CLASS_ID_MONO_BEHAVIOUR),
+            DefaultCurveTarget::Script
+        );
+        // The source default arm catches everything else, including other component
+        // class ids and out-of-range garbage.
+        for class_id in [
+            0,
+            -1,
+            CLASS_ID_TRANSFORM,
+            CLASS_ID_RECT_TRANSFORM,
+            95,
+            137,
+            100_000,
+            i32::MIN,
+            i32::MAX,
+        ] {
+            assert_eq!(
+                default_curve_target(class_id),
+                DefaultCurveTarget::Engine,
+                "{class_id}"
+            );
+        }
+        assert_eq!(CLASS_ID_GAME_OBJECT, 1);
+        assert_eq!(CLASS_ID_MONO_BEHAVIOUR, 114);
+    }
+
+    #[test]
+    fn keyframe_flavor_follows_the_pptr_flag() {
+        // The custom-curve fallback, the script path, and the engine path all
+        // branch on `IsPPtrCurve` before emitting.
+        assert_eq!(keyframe_kind(true), KeyframeKind::PPtr);
+        assert_eq!(keyframe_kind(false), KeyframeKind::Float);
     }
 
     #[test]

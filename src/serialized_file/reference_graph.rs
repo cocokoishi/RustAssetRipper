@@ -497,6 +497,10 @@ pub enum MultiFilePPtrResolution {
 ///
 /// This joins existing per-file graphs by normalized serialized-file name. It does not discover
 /// or load missing files from disk or containers; those remain `MissingDependency` results.
+/// Engine-resource externals additionally try their `Bundle.ResolveCollection` spelling alias
+/// (`unity default resources` / `unity_default_resources`, `unity builtin extra` /
+/// `unity_builtin_extra`) when the exact name has no loaded file; resolver-driven builds
+/// delegate that fallback to the caller resolver instead.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MultiFileReferenceGraph<'a> {
     normalized_file_names: Vec<String>,
@@ -908,6 +912,40 @@ impl<'a> MultiFileReferenceGraph<'a> {
         })
     }
 
+    fn name_range(&self, normalized_name: &str) -> (usize, usize) {
+        let first = self.name_index.partition_point(|file_index| {
+            self.normalized_file_names[*file_index].as_str() < normalized_name
+        });
+        let end = self.name_index.partition_point(|file_index| {
+            self.normalized_file_names[*file_index].as_str() <= normalized_name
+        });
+        (first, end)
+    }
+
+    fn resolve_external_target(
+        &self,
+        target_file_index: usize,
+        path_id: i64,
+    ) -> MultiFilePPtrResolution {
+        match local_path_id_resolution(self.file_graphs[target_file_index], path_id) {
+            LocalPathIdResolution::Unique(object_index) => MultiFilePPtrResolution::Object {
+                target_file_index,
+                target_object_index: object_index,
+            },
+            LocalPathIdResolution::Missing => MultiFilePPtrResolution::MissingExternalObject {
+                target_file_index,
+                path_id,
+            },
+            LocalPathIdResolution::Ambiguous(match_count) => {
+                MultiFilePPtrResolution::AmbiguousExternalObject {
+                    target_file_index,
+                    path_id,
+                    match_count,
+                }
+            }
+        }
+    }
+
     fn resolve_reference(
         &self,
         source_file_index: usize,
@@ -953,41 +991,30 @@ impl<'a> MultiFileReferenceGraph<'a> {
             };
         };
         let dependency_name = identifier.fixed_path_name();
-        let first = self.name_index.partition_point(|file_index| {
-            self.normalized_file_names[*file_index].as_str() < dependency_name.as_str()
-        });
-        let end = self.name_index.partition_point(|file_index| {
-            self.normalized_file_names[*file_index].as_str() <= dependency_name.as_str()
-        });
+        let (first, end) = self.name_range(&dependency_name);
         match end - first {
-            0 => MultiFilePPtrResolution::MissingDependency {
-                external_index,
-                path_id,
-            },
-            1 => {
-                let target_file_index = self.name_index[first];
-                match local_path_id_resolution(self.file_graphs[target_file_index], path_id) {
-                    LocalPathIdResolution::Unique(object_index) => {
-                        MultiFilePPtrResolution::Object {
-                            target_file_index,
-                            target_object_index: object_index,
-                        }
-                    }
-                    LocalPathIdResolution::Missing => {
-                        MultiFilePPtrResolution::MissingExternalObject {
-                            target_file_index,
-                            path_id,
-                        }
-                    }
-                    LocalPathIdResolution::Ambiguous(match_count) => {
-                        MultiFilePPtrResolution::AmbiguousExternalObject {
-                            target_file_index,
-                            path_id,
-                            match_count,
-                        }
-                    }
+            0 => {
+                let Some(alias) = engine_resource_alias(&dependency_name) else {
+                    return MultiFilePPtrResolution::MissingDependency {
+                        external_index,
+                        path_id,
+                    };
+                };
+                let (alias_first, alias_end) = self.name_range(alias);
+                match alias_end - alias_first {
+                    0 => MultiFilePPtrResolution::MissingDependency {
+                        external_index,
+                        path_id,
+                    },
+                    1 => self.resolve_external_target(self.name_index[alias_first], path_id),
+                    candidate_count => MultiFilePPtrResolution::AmbiguousDependency {
+                        external_index,
+                        path_id,
+                        candidate_count,
+                    },
                 }
             }
+            1 => self.resolve_external_target(self.name_index[first], path_id),
             candidate_count => MultiFilePPtrResolution::AmbiguousDependency {
                 external_index,
                 path_id,
@@ -1086,6 +1113,28 @@ enum LocalPathIdResolution {
     Unique(usize),
     Missing,
     Ambiguous(usize),
+}
+
+/// `Bundle.ResolveCollection` engine-resource fallback: when the fixed dependency
+/// name has no loaded file, these spellings alias each other before the dependency
+/// counts as missing. Resolver-driven builds delegate this fallback to the caller
+/// resolver; it applies here to the flat name join only.
+fn engine_resource_alias(normalized_name: &str) -> Option<&'static str> {
+    match normalized_name {
+        crate::io::special_names::DEFAULT_RESOURCE_NAME_1 => {
+            Some(crate::io::special_names::DEFAULT_RESOURCE_NAME_2)
+        }
+        crate::io::special_names::DEFAULT_RESOURCE_NAME_2 => {
+            Some(crate::io::special_names::DEFAULT_RESOURCE_NAME_1)
+        }
+        crate::io::special_names::BUILTIN_EXTRA_NAME_1 => {
+            Some(crate::io::special_names::BUILTIN_EXTRA_NAME_2)
+        }
+        crate::io::special_names::BUILTIN_EXTRA_NAME_2 => {
+            Some(crate::io::special_names::BUILTIN_EXTRA_NAME_1)
+        }
+        _ => None,
+    }
 }
 
 fn local_path_id_resolution(graph: &ObjectReferenceGraph, path_id: i64) -> LocalPathIdResolution {
@@ -1818,6 +1867,126 @@ mod tests {
             [1, 2]
         );
         assert!(!ambiguous.is_complete());
+    }
+
+    fn metadata_with_external(path_ids: &[i64], external_path: &str) -> SerializedFileMetadata {
+        let mut source_metadata = metadata(path_ids);
+        source_metadata.externals = vec![external(external_path)];
+        source_metadata
+    }
+
+    fn named_file<'a>(
+        file_name: &'a str,
+        metadata: &'a SerializedFileMetadata,
+        graph: &'a ObjectReferenceGraph,
+    ) -> NamedObjectReferenceGraph<'a> {
+        NamedObjectReferenceGraph {
+            file_name,
+            metadata,
+            graph,
+        }
+    }
+
+    #[test]
+    fn engine_resource_alias_fallback_matches_the_bundle_resolver() {
+        // The alias table itself mirrors `Bundle.ResolveCollection` exactly.
+        assert_eq!(
+            super::engine_resource_alias("unity default resources"),
+            Some("unity_default_resources")
+        );
+        assert_eq!(
+            super::engine_resource_alias("unity_default_resources"),
+            Some("unity default resources")
+        );
+        assert_eq!(
+            super::engine_resource_alias("unity builtin extra"),
+            Some("unity_builtin_extra")
+        );
+        assert_eq!(
+            super::engine_resource_alias("unity_builtin_extra"),
+            Some("unity builtin extra")
+        );
+        assert_eq!(super::engine_resource_alias("shared.assets"), None);
+
+        // `library/unity default resources` resolves into a loaded
+        // `unity_default_resources` file the exact-name join would miss.
+        let source_metadata = metadata_with_external(&[11], "library/unity default resources");
+        let source_graph = graph_with_reference(&[11], 11, 1, 22);
+        let target_metadata = metadata(&[22]);
+        let target_graph = empty_graph(&[22]);
+        let files = [
+            named_file("main.assets", &source_metadata, &source_graph),
+            named_file("unity_default_resources", &target_metadata, &target_graph),
+        ];
+        let graph = MultiFileReferenceGraph::build(&files).unwrap();
+        assert_eq!(
+            graph.references()[0].resolution,
+            MultiFilePPtrResolution::Object {
+                target_file_index: 1,
+                target_object_index: 0,
+            }
+        );
+        assert!(graph.is_complete());
+
+        // The reverse spelling and the builtin-extra pair behave the same way.
+        let source_metadata = metadata_with_external(&[11], "resources/unity builtin extra");
+        let source_graph = graph_with_reference(&[11], 11, 1, 22);
+        let files = [
+            named_file("main.assets", &source_metadata, &source_graph),
+            named_file(
+                "Library/unity_builtin_extra",
+                &target_metadata,
+                &target_graph,
+            ),
+        ];
+        let graph = MultiFileReferenceGraph::build(&files).unwrap();
+        assert_eq!(
+            graph.references()[0].resolution,
+            MultiFilePPtrResolution::Object {
+                target_file_index: 1,
+                target_object_index: 0,
+            }
+        );
+
+        // An exact-name hit wins over the alias: the alias file is not consulted.
+        let exact_metadata = metadata(&[99]);
+        let exact_graph = empty_graph(&[99]);
+        let source_metadata = metadata_with_external(&[11], "library/unity default resources");
+        let source_graph = graph_with_reference(&[11], 11, 1, 22);
+        let files = [
+            named_file("main.assets", &source_metadata, &source_graph),
+            named_file("unity default resources", &exact_metadata, &exact_graph),
+            named_file("unity_default_resources", &target_metadata, &target_graph),
+        ];
+        let graph = MultiFileReferenceGraph::build(&files).unwrap();
+        assert_eq!(
+            graph.references()[0].resolution,
+            MultiFilePPtrResolution::MissingExternalObject {
+                target_file_index: 1,
+                path_id: 22,
+            }
+        );
+
+        // Duplicate alias spellings stay ambiguous instead of merging.
+        let files = [
+            named_file("main.assets", &source_metadata, &source_graph),
+            named_file("unity_default_resources", &target_metadata, &target_graph),
+            named_file(
+                "ARCHIVE:/UNITY_DEFAULT_RESOURCES",
+                &target_metadata,
+                &target_graph,
+            ),
+        ];
+        let graph = MultiFileReferenceGraph::build(&files).unwrap();
+        assert_eq!(
+            graph.references()[0].resolution,
+            MultiFilePPtrResolution::AmbiguousDependency {
+                external_index: 0,
+                path_id: 22,
+                candidate_count: 2,
+            }
+        );
+        assert!(!graph.is_complete());
     }
 
     #[test]

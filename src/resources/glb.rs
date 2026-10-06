@@ -46,6 +46,11 @@
 //! Vertex deduplication mirrors `VertexBuilder.CreateCompatibleMesh`: vertices with bit-identical
 //! attributes share a glTF vertex. Ordering is deterministic (first use within each sub-mesh, then
 //! sub-meshes in file order).
+//!
+//! The per-renderer hierarchy decisions from `GlbLevelBuilder` live here as caller-fact kernels:
+//! `references_dynamic_mesh` (the static-vs-dynamic mesh dispatch) and `subset_indices` (the
+//! explicit-subset versus static-batch-range selection). Transform accumulation, the material and
+//! mesh caches, and the SharpGLTF scene assembly stay caller-side.
 
 use std::collections::HashMap;
 use std::error::Error;
@@ -1328,6 +1333,36 @@ pub fn emitted_index_count(topology: MeshTopology, index_count: u64) -> u64 {
     }
 }
 
+/// `GlbLevelBuilder.ReferencesDynamicMesh` over caller facts.
+///
+/// Like the source (`&&` binds tighter than `||`), an empty static-batch list or an empty
+/// subset list each force the dynamic path on their own.
+pub fn references_dynamic_mesh(
+    has_static_batch_info: bool,
+    static_sub_mesh_count: u32,
+    has_subset_indices: bool,
+    subset_indices_count: usize,
+) -> bool {
+    has_static_batch_info && static_sub_mesh_count == 0
+        || has_subset_indices && subset_indices_count == 0
+}
+
+/// `GlbLevelBuilder.GetSubsetIndices` over caller facts.
+///
+/// Explicit subset indices win; otherwise a static-batch range expands from its first sub-mesh;
+/// otherwise the renderer contributes no sub-meshes.
+pub fn subset_indices(subset: Option<&[u32]>, static_batch_info: Option<(u32, u32)>) -> Vec<u32> {
+    if let Some(explicit) = subset {
+        return explicit.to_vec();
+    }
+    match static_batch_info {
+        Some((first_sub_mesh, sub_mesh_count)) => {
+            (first_sub_mesh..).take(sub_mesh_count as usize).collect()
+        }
+        None => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1741,5 +1776,27 @@ mod tests {
         let exported = build_glb("a\"b\\c", &mesh).unwrap();
         let text = String::from_utf8_lossy(&exported.bytes);
         assert!(text.contains("a\\\"b\\\\c"));
+    }
+
+    #[test]
+    fn renderer_mesh_dispatch_matches_the_source_gates() {
+        // An empty static-batch list forces the dynamic path.
+        assert!(references_dynamic_mesh(true, 0, false, 0));
+        // An empty subset list forces the dynamic path.
+        assert!(references_dynamic_mesh(false, 5, true, 0));
+        // Either empty list wins on its own, even beside a non-empty one.
+        assert!(references_dynamic_mesh(true, 0, true, 3));
+        assert!(references_dynamic_mesh(true, 2, true, 0));
+        // Non-empty lists stay on the static path.
+        assert!(!references_dynamic_mesh(true, 2, false, 0));
+        assert!(!references_dynamic_mesh(false, 5, true, 3));
+        assert!(!references_dynamic_mesh(false, 5, false, 9));
+        // Explicit subset indices win over the static-batch range.
+        assert_eq!(subset_indices(Some(&[2, 0]), Some((0, 3))), vec![2, 0]);
+        // Otherwise the batch range expands from its first sub-mesh.
+        assert_eq!(subset_indices(None, Some((1, 3))), vec![1, 2, 3]);
+        assert_eq!(subset_indices(None, Some((5, 0))), Vec::<u32>::new());
+        // Otherwise the renderer contributes no sub-meshes.
+        assert!(subset_indices(None, None).is_empty());
     }
 }
