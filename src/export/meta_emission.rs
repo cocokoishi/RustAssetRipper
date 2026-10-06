@@ -142,10 +142,81 @@ pub fn plan_meta_write(collision: MetaCollision, sidecar_exists: bool) -> MetaWr
     }
 }
 
+/// Outcome of `AssetExportCollection<T>.Export` for one asset export.
+///
+/// The source runs `ExportInner` first and emits the `Meta` sidecar only when it returns
+/// true, returning the inner result either way
+/// (`AssetRipper/Source/AssetRipper.Export.UnityProjects/AssetExportCollection.cs` lines
+/// 23-30). This is the per-export half of the "no site writes the sidecar for a failed
+/// asset export" rule; the family-level half (which families ever emit one) lives in
+/// `collection_kind::ExportCollectionKind::emits_meta`.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum AssetExportOutcome {
+    /// `ExportInner` succeeded: the sidecar is exported and `Export` returns true.
+    ExportedWithMeta,
+    /// `ExportInner` failed: no sidecar is written and `Export` returns false.
+    InnerFailed,
+}
+
+impl AssetExportOutcome {
+    /// The boolean the source `Export` returns: the inner result either way.
+    pub const fn succeeded(self) -> bool {
+        match self {
+            Self::ExportedWithMeta => true,
+            Self::InnerFailed => false,
+        }
+    }
+
+    /// Whether the `Meta` sidecar is emitted on this outcome.
+    pub const fn emits_meta(self) -> bool {
+        match self {
+            Self::ExportedWithMeta => true,
+            Self::InnerFailed => false,
+        }
+    }
+}
+
+/// `AssetExportCollection<T>.Export` over the `ExportInner` result.
+pub const fn decide_asset_collection_export(export_inner_ok: bool) -> AssetExportOutcome {
+    if export_inner_ok {
+        AssetExportOutcome::ExportedWithMeta
+    } else {
+        AssetExportOutcome::InnerFailed
+    }
+}
+
+/// Outcome of the `SceneExportCollection.Export` duplicate check.
+///
+/// When the scene index is a duplicate (see
+/// `scene_helpers::is_scene_duplicate`) and the destination file already exists, the source
+/// logs a warning and returns false without exporting the scene or its sidecar; otherwise
+/// export proceeds to directory creation and `ExportScene`
+/// (`AssetRipper/Source/AssetRipper.Export.UnityProjects/Project/SceneExportCollection.cs`
+/// lines 41-48).
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum SceneExportGate {
+    /// Export proceeds to directory creation and `ExportScene`.
+    Proceed,
+    /// A duplicate scene whose file already exists: warn and skip everything.
+    SkipDuplicateWithWarning,
+}
+
+/// `SceneExportCollection.Export` over the duplicate flag plus destination existence.
+pub const fn decide_scene_export(is_duplicate: bool, file_exists: bool) -> SceneExportGate {
+    if is_duplicate && file_exists {
+        SceneExportGate::SkipDuplicateWithWarning
+    } else {
+        SceneExportGate::Proceed
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::export_meta_mechanics;
-    use super::{plan_meta_write, MetaCollision, MetaWriteDecision, META_EMISSION_SITES};
+    use super::{
+        decide_asset_collection_export, decide_scene_export, plan_meta_write, AssetExportOutcome,
+        MetaCollision, MetaWriteDecision, SceneExportGate, META_EMISSION_SITES,
+    };
 
     #[test]
     fn emission_table_covers_all_five_product_sites() {
@@ -221,5 +292,37 @@ mod tests {
         assert!(!writes_version);
         let formats_keys = export_meta_mechanics::FORMATS_MAPPING_KEYS;
         assert!(formats_keys);
+    }
+
+    #[test]
+    fn asset_collection_sidecar_follows_the_inner_result() {
+        // ExportInner success exports the sidecar and reports success.
+        let outcome = decide_asset_collection_export(true);
+        assert_eq!(outcome, AssetExportOutcome::ExportedWithMeta);
+        assert!(outcome.succeeded());
+        assert!(outcome.emits_meta());
+        // ExportInner failure writes no sidecar and reports failure.
+        let outcome = decide_asset_collection_export(false);
+        assert_eq!(outcome, AssetExportOutcome::InnerFailed);
+        assert!(!outcome.succeeded());
+        assert!(!outcome.emits_meta());
+    }
+
+    #[test]
+    fn scene_export_skips_only_a_duplicate_with_an_existing_file() {
+        // (is_duplicate, file_exists, expected).
+        let rows = [
+            (false, false, SceneExportGate::Proceed),
+            (false, true, SceneExportGate::Proceed),
+            (true, false, SceneExportGate::Proceed),
+            (true, true, SceneExportGate::SkipDuplicateWithWarning),
+        ];
+        for (is_duplicate, file_exists, expected) in rows {
+            assert_eq!(
+                decide_scene_export(is_duplicate, file_exists),
+                expected,
+                "is_duplicate={is_duplicate} file_exists={file_exists}"
+            );
+        }
     }
 }

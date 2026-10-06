@@ -6,6 +6,18 @@
 //! clip has no data. Content fetching and resource integrity checks need the asset
 //! collection and stay caller-side; this module resolves only which source applies.
 //!
+//! Also ports the gated discriminants behind `GetSoundType`/`GetSoundFormat`: the
+//! `m_Type`/`m_Format` Int32s surface as `Some` only when the field is present
+//! (`Has_Type`/`Has_Format`); the int-backed enum casts are identity on the stored
+//! value, so callers map the discriminant with the extension tables. `GetSoundFormat`
+//! has no callers in the frozen baseline; it is pinned for surface completeness.
+//!
+//! Deliberately open: the commented-out `StreamingInfo`/`LoadType` branches in
+//! `AudioClipExtensions` are not live behavior (commented in the source) and stay
+//! unported; FSB-container decoding needs the external `Fmod5Sharp` owner (see
+//! `export::audio_export`); numeric `FmodSoundFormat` discriminants have no
+//! `ToRawExtension` in the baseline, so no format-extension table is invented here.
+//!
 //! The version gates are read by field presence: Unity 3.5 carries inline
 //! `m_AudioData` with `m_Type`/`m_Format` (`Has_AudioData`/`Has_Type`/`Has_Format`
 //! true, `Has_Resource` false on `AudioClip_3_5`); Unity 5.0+ carries `m_Resource`
@@ -32,6 +44,8 @@ pub const AUDIO_DATA_FIELD: &str = "m_AudioData";
 pub const AUDIO_RESOURCE_FIELD: &str = "m_Resource";
 /// The serialized sound-type field (Unity 3.5 layouts).
 pub const AUDIO_TYPE_FIELD: &str = "m_Type";
+/// The serialized sound-format field (Unity 3.5 layouts, behind `GetSoundFormat`).
+pub const AUDIO_FORMAT_FIELD: &str = "m_Format";
 /// The serialized clip name field.
 pub const AUDIO_NAME_FIELD: &str = "m_Name";
 
@@ -113,6 +127,8 @@ pub struct AudioClipView {
     pub resource: Option<StreamedResourceInfo>,
     /// Raw `m_Type` value, when present.
     pub sound_type: Option<i32>,
+    /// Raw `m_Format` value, when present.
+    pub format: Option<i32>,
 }
 
 impl AudioClipView {
@@ -123,6 +139,7 @@ impl AudioClipView {
             audio_data: optional_bytes(root, AUDIO_DATA_FIELD)?,
             resource: optional_stream(root, AUDIO_RESOURCE_FIELD)?,
             sound_type: optional_i32(root, AUDIO_TYPE_FIELD)?,
+            format: optional_i32(root, AUDIO_FORMAT_FIELD)?,
         })
     }
 
@@ -149,6 +166,19 @@ impl AudioClipView {
                 None => true,
             },
         }
+    }
+
+    /// `AudioClipExtensions.GetSoundType`: the `FmodSoundType` discriminant, present
+    /// only when `Has_Type` holds. Field presence is the gate, so a stored value
+    /// surfaces as-is (the int-backed cast is identity) and an absent field is `None`.
+    pub fn sound_type_discriminant(&self) -> Option<i32> {
+        self.sound_type
+    }
+
+    /// `AudioClipExtensions.GetSoundFormat`: the `FmodSoundFormat` discriminant,
+    /// present only when `Has_Format` holds, with the same presence-as-gate rule.
+    pub fn sound_format_discriminant(&self) -> Option<i32> {
+        self.format
     }
 }
 
@@ -312,6 +342,8 @@ mod tests {
     fn generated_api_fixture_supports_the_field_name_mapping() {
         let fixture = include_str!("audio_generated_api_fixture.txt");
         let mut relied_upon = std::collections::HashSet::new();
+        let mut sound_types: Vec<(&str, i32)> = Vec::new();
+        let mut sound_formats: Vec<(&str, i32)> = Vec::new();
         for line in fixture.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -344,17 +376,12 @@ mod tests {
                         _ => panic!("unexpected gate row {line}"),
                     }
                 }
-                "ACLASS" | "FSF" => {}
+                "ACLASS" => {}
+                "FSF" => {
+                    sound_formats.push((parts[1], parts[2].parse().expect("a value")));
+                }
                 "FST" => {
-                    // Spot-check the discriminants behind the extension table.
-                    match parts[1] {
-                        "Unknown" => assert_eq!(parts[2], "0", "{line}"),
-                        "Oggvorbis" => assert_eq!(parts[2], "14", "{line}"),
-                        "Wav" => assert_eq!(parts[2], "20", "{line}"),
-                        "Xma" => assert_eq!(parts[2], "22", "{line}"),
-                        "Audioqueue" => assert_eq!(parts[2], "24", "{line}"),
-                        _ => {}
-                    }
+                    sound_types.push((parts[1], parts[2].parse().expect("a value")));
                 }
                 _ => panic!("unexpected fixture row {line}"),
             }
@@ -371,6 +398,84 @@ mod tests {
         ] {
             assert!(relied_upon.contains(relied), "missing {relied}");
         }
+        // Every shipped `FmodSoundType` member resolves through the numeric extension
+        // table; expectations are name-based (read off the C# switch) while the kernel
+        // is value-based, so the fixture's name|value rows join the two sides.
+        let expected_types: Vec<(&str, i32, &str)> = vec![
+            ("Unknown", 0, "audioClip"),
+            ("Acc", 1, "m4a"),
+            ("Aiff", 2, "aif"),
+            ("Asf", 3, "audioClip"),
+            ("At3", 4, "audioClip"),
+            ("Cdda", 5, "audioClip"),
+            ("Dls", 6, "audioClip"),
+            ("Flac", 7, "audioClip"),
+            ("Fsb", 8, "audioClip"),
+            ("Gcadpcm", 9, "audioClip"),
+            ("It", 10, "it"),
+            ("Midi", 11, "audioClip"),
+            ("Mod", 12, "mod"),
+            ("Mpeg", 13, "mp3"),
+            ("Oggvorbis", 14, "ogg"),
+            ("Playlist", 15, "audioClip"),
+            ("Raw", 16, "audioClip"),
+            ("S3m", 17, "s3m"),
+            ("Sf2", 18, "audioClip"),
+            ("User", 19, "audioClip"),
+            ("Wav", 20, "wav"),
+            ("Xm", 21, "xm"),
+            ("Xma", 22, "wav"),
+            ("Vag", 23, "vag"),
+            ("Audioqueue", 24, "fsb"),
+            ("Xwma", 25, "audioClip"),
+            ("Bcwav", 26, "audioClip"),
+            ("At9", 27, "audioClip"),
+            ("Vorbis", 28, "audioClip"),
+            ("MediaFoundation", 29, "audioClip"),
+            ("Max", 30, "audioClip"),
+            ("Forceint", 65536, "audioClip"),
+        ];
+        assert_eq!(
+            sound_types,
+            expected_types
+                .iter()
+                .map(|(name, value, _)| (*name, *value))
+                .collect::<Vec<_>>(),
+            "the shipped FmodSoundType layout"
+        );
+        for (name, value, extension) in &expected_types {
+            assert_eq!(
+                fmod_sound_type_raw_extension(*value),
+                *extension,
+                "extension for {name}"
+            );
+        }
+        // The `FmodSoundFormat` discriminants behind `sound_format_discriminant` run
+        // 0..=16 with the same 65536 force-int sentinel; the baseline defines no
+        // `ToRawExtension` for them, so the table pins values only.
+        assert_eq!(
+            sound_formats,
+            vec![
+                ("None", 0),
+                ("Pcm8", 1),
+                ("Pcm16", 2),
+                ("Pcm24", 3),
+                ("Pcm32", 4),
+                ("Pcmfloat", 5),
+                ("Gcadpcm", 6),
+                ("Imaadpcm", 7),
+                ("Vag", 8),
+                ("Hevag", 9),
+                ("Xma", 10),
+                ("Mpeg", 11),
+                ("Celt", 12),
+                ("At9", 13),
+                ("Xwma", 14),
+                ("Vorbis", 15),
+                ("Max", 16),
+                ("Forceint", 65536),
+            ]
+        );
     }
 
     #[test]
@@ -450,6 +555,33 @@ mod tests {
         }
         assert!(view.check_asset_integrity(|| true));
         assert!(!view.check_asset_integrity(|| false));
+    }
+
+    #[test]
+    fn gated_discriminants_follow_field_presence() {
+        // Unity 3.5 layouts carry m_Type/m_Format; the discriminants surface as-is.
+        let legacy = SerializedValue::Struct(vec![
+            field("m_Type", SerializedValue::I32(14)),
+            field("m_Format", SerializedValue::I32(15)),
+        ]);
+        let view = AudioClipView::from_value(&legacy).unwrap();
+        assert_eq!(view.sound_type_discriminant(), Some(14));
+        assert_eq!(view.sound_format_discriminant(), Some(15));
+        assert_eq!(view.format, Some(15));
+        // Modern layouts carry neither: both gates read absent.
+        let modern = SerializedValue::Struct(Vec::new());
+        let view = AudioClipView::from_value(&modern).unwrap();
+        assert_eq!(view.sound_type_discriminant(), None);
+        assert_eq!(view.sound_format_discriminant(), None);
+        // A mistyped m_Format is an explicit error, like m_Type.
+        let root = SerializedValue::Struct(vec![field("m_Format", string_value("vorbis"))]);
+        assert_eq!(
+            AudioClipView::from_value(&root),
+            Err(AudioClipViewError::WrongType {
+                field: "m_Format",
+                actual: "string"
+            })
+        );
     }
 
     #[test]

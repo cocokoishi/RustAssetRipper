@@ -853,3 +853,10 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Gates: `cargo fmt --check` 0, full tests 1070 lib + 52 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
 - Next: third team round (mesh/animation/audio gaps), then `SetBoneGeometry`/outline mesh internals.
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 113. Checkpoint: third team round integrated (2026-10-06)
+
+- Three teammates shipped disjoint scopes, all lead-verified (targeted suites re-run: 8/8, 4/4, 6/6) and integrated: `texture-meta` covered the `AudioClipExtensions` remainder with a full FST/FSF fixture differential (`RES-AUDIO-001`); `sprite-fill` ported `GetStateBehaviours` + list routing (`ANIM-STATE-BEHAVIOUR-001`); `texture-export` ported the two sidecar site-flow gates (`EXP-META-EMISSION-001`). No scope violations, no placeholders.
+- Gates: `cargo fmt --check` 0, full tests 1076 lib + 52 CLI + 0 doc, warnings-denied Clippy 0, baseline verifier 1,449 unchanged, `git diff --check` 0.
+- Next: fourth team round (material/shader/texture gaps), then `SetBoneGeometry`/outline mesh internals.
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
