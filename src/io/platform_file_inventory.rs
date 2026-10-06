@@ -1,5 +1,11 @@
 //! Platform game file registration matching `PlatformGameStructure.CollectFiles`.
+//!
+//! Deliberately open: assembly manager selection and loading (`MonoManager`,
+//! `IL2CppManager`, `BaseManager`, `AssemblyManager.Initialize` and its failure fallback,
+//! `OnRequestAssembly`) need a managed-assembly reader and stay out; this module only
+//! discovers assembly file paths.
 
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -1025,13 +1031,12 @@ impl InventoryState<'_> {
                 ));
             }
             self.report.assembly_candidates = next_count;
-            if self
-                .assemblies
-                .insert(name.to_owned(), path.clone())
-                .is_some()
-            {
-                self.report.duplicate_assembly_names.push(name.to_owned());
-            }
+            register_assembly(
+                &mut self.assemblies,
+                &mut self.report.duplicate_assembly_names,
+                name.to_owned(),
+                path.clone(),
+            );
         }
         Ok(())
     }
@@ -1334,6 +1339,27 @@ pub enum MainAssemblyCollection<'a> {
     Managed(&'a str),
     /// Collect from the game data directory and its `lib` child.
     GameDataAndLib(&'a str, &'a str),
+}
+
+/// `PlatformGameStructure.CollectAssemblies` duplicate rule
+/// (`AssetRipper/Source/AssetRipper.Import/Platforms/PlatformGameStructure.cs`, lines
+/// 275-288): `Assemblies.TryAdd` keeps the first path registered for a repeated assembly
+/// name; the later path is dropped and its name is reported (the source warning) in scan
+/// order.
+fn register_assembly(
+    assemblies: &mut BTreeMap<String, String>,
+    duplicate_names: &mut Vec<String>,
+    name: String,
+    path: String,
+) {
+    match assemblies.entry(name) {
+        Entry::Vacant(slot) => {
+            slot.insert(path);
+        }
+        Entry::Occupied(slot) => {
+            duplicate_names.push(slot.key().clone());
+        }
+    }
 }
 
 /// Selects the Mono assembly location from caller facts: the candidate managed and
@@ -1724,9 +1750,9 @@ impl Error for PlatformWorkspaceLoadErrorKind {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_primary_engine_file, plan_mono_assembly_collection, select_scripting_backend,
-        MainAssemblyCollection, PlatformFileInventoryErrorKind, PlatformFileInventoryLimits,
-        PlatformFileInventoryOptions, ScriptingBackend,
+        is_primary_engine_file, plan_mono_assembly_collection, register_assembly,
+        select_scripting_backend, MainAssemblyCollection, PlatformFileInventoryErrorKind,
+        PlatformFileInventoryLimits, PlatformFileInventoryOptions, ScriptingBackend,
     };
     use crate::io::filesystem::VirtualFileSystem;
     use crate::io::platform_structure::{PlatformKind, PlatformStructure};
@@ -1976,6 +2002,49 @@ mod tests {
             error.kind,
             super::PlatformWorkspaceLoadErrorKind::NoSerializedFileInputs
         ));
+    }
+
+    #[test]
+    fn duplicate_assembly_names_keep_the_first_path_like_try_add() {
+        use std::collections::BTreeMap;
+        let mut assemblies = BTreeMap::new();
+        let mut duplicates = Vec::new();
+        register_assembly(
+            &mut assemblies,
+            &mut duplicates,
+            "A.dll".to_owned(),
+            "/first/A.dll".to_owned(),
+        );
+        register_assembly(
+            &mut assemblies,
+            &mut duplicates,
+            "B.dll".to_owned(),
+            "/first/B.dll".to_owned(),
+        );
+        // Later paths for a repeated name are dropped; the name is reported in scan
+        // order while the first path stays registered.
+        register_assembly(
+            &mut assemblies,
+            &mut duplicates,
+            "A.dll".to_owned(),
+            "/lib/A.dll".to_owned(),
+        );
+        register_assembly(
+            &mut assemblies,
+            &mut duplicates,
+            "A.dll".to_owned(),
+            "/other/A.dll".to_owned(),
+        );
+        register_assembly(
+            &mut assemblies,
+            &mut duplicates,
+            "B.dll".to_owned(),
+            "/lib/B.dll".to_owned(),
+        );
+        assert_eq!(assemblies.len(), 2);
+        assert_eq!(assemblies["A.dll"], "/first/A.dll");
+        assert_eq!(assemblies["B.dll"], "/first/B.dll");
+        assert_eq!(duplicates, vec!["A.dll", "A.dll", "B.dll"]);
     }
 
     #[test]

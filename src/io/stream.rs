@@ -1110,8 +1110,9 @@ impl Seek for MultiFileStream {
 /// Shared end-relative seek decision for the partial, file-range, and multi-file views:
 /// `End` offsets add to the length (BCL semantics), so `End(0)` is the end, negative
 /// offsets count back, and positive offsets may run past the end (reads then clamp).
-/// This deliberately does not follow `RandomAccessStream.Seek`, which subtracts its
-/// offset (`Length - offset`); the port stays BCL-correct on every view instead.
+/// This deliberately follows neither `RandomAccessStream.Seek` nor `MultiFileStream.Seek`,
+/// which both subtract their offset (`Length - offset`); the port stays BCL-correct on
+/// every view instead.
 fn seek_target(position: u64, length: u64, from: SeekFrom) -> io::Result<u64> {
     let base = match from {
         SeekFrom::Start(value) => return Ok(value),
@@ -1249,6 +1250,25 @@ mod tests {
         let mut suffix = [0; 3];
         assert_eq!(stream.read(&mut suffix).unwrap(), 2);
         assert_eq!(&suffix[..2], b"fg");
+    }
+
+    /// End-relative seeks follow BCL semantics on the multi-file view, like on the
+    /// partial views: `End(0)` is the end, negative offsets count back, and positive
+    /// offsets may run past the end (reads then clamp to zero). This locks the port
+    /// against the source `MultiFileStream.Seek` inversion (`Length - offset`).
+    #[test]
+    fn multi_file_stream_seeks_from_end_with_standard_offsets() {
+        let parts = [b"abc".as_slice(), b"".as_slice(), b"defg".as_slice()]
+            .into_iter()
+            .map(|part| Cursor::new(part.to_vec()));
+        let mut stream = MultiFileStream::new(parts).unwrap();
+        assert_eq!(stream.length(), 7);
+        assert_eq!(stream.seek(SeekFrom::End(0)).unwrap(), 7);
+        assert_eq!(stream.seek(SeekFrom::End(-2)).unwrap(), 5);
+        assert_eq!(stream.seek(SeekFrom::End(2)).unwrap(), 9);
+        let mut tail = [0; 4];
+        assert_eq!(stream.read(&mut tail).unwrap(), 0);
+        assert!(stream.seek(SeekFrom::End(i64::MIN)).is_err());
     }
 
     #[test]

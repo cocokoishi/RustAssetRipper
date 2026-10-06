@@ -893,6 +893,16 @@ struct JsonParser<'a> {
 }
 
 impl<'a> JsonParser<'a> {
+    /// One nesting level for objects and arrays against the depth bound, so both
+    /// containers share a single decision point.
+    fn enter_nesting(&mut self, path: &str) -> Result<(), SettingsFileError> {
+        self.depth += 1;
+        if self.depth > self.limits.max_nesting_depth {
+            return Err(self.error(path, "nesting depth exceeds the limit"));
+        }
+        Ok(())
+    }
+
     fn parse_value(&mut self, path: &str) -> Result<JsonValue, SettingsFileError> {
         self.skip_whitespace();
         match self.bytes.get(self.position) {
@@ -908,10 +918,7 @@ impl<'a> JsonParser<'a> {
     }
 
     fn parse_object(&mut self, path: &str) -> Result<JsonValue, SettingsFileError> {
-        self.depth += 1;
-        if self.depth > self.limits.max_nesting_depth {
-            return Err(self.error(path, "nesting depth exceeds the limit"));
-        }
+        self.enter_nesting(path)?;
         // `position` is at `{`.
         self.position += 1;
         let mut members = Vec::new();
@@ -950,10 +957,7 @@ impl<'a> JsonParser<'a> {
     }
 
     fn parse_array(&mut self, path: &str) -> Result<JsonValue, SettingsFileError> {
-        self.depth += 1;
-        if self.depth > self.limits.max_nesting_depth {
-            return Err(self.error(path, "nesting depth exceeds the limit"));
-        }
+        self.enter_nesting(path)?;
         // `position` is at `[`.
         self.position += 1;
         let mut items = Vec::new();
@@ -1392,6 +1396,42 @@ mod tests {
             VersionText::new("", SettingsFileLimits::default()),
             Err(SettingsFileError::InvalidJson { .. })
         ));
+    }
+
+    #[test]
+    fn nesting_depth_guard_fires_through_both_containers() {
+        let limits = SettingsFileLimits {
+            max_nesting_depth: 3,
+            ..Default::default()
+        };
+        // Objects and arrays share one decision point.
+        for deep in ["[[[[]]]]", "{\"a\":{\"b\":{\"c\":{}}}}"] {
+            let error = parse_settings_file(deep, limits).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    SettingsFileError::InvalidJson {
+                        reason: "nesting depth exceeds the limit",
+                        ..
+                    }
+                ),
+                "{deep}: {error:?}"
+            );
+        }
+        // Exactly at the boundary the guard stays silent (later stages fail instead).
+        for shallow in ["[[[]]]", "{\"a\":{\"b\":1}}"] {
+            let error = parse_settings_file(shallow, limits).unwrap_err();
+            assert!(
+                !matches!(
+                    error,
+                    SettingsFileError::InvalidJson {
+                        reason: "nesting depth exceeds the limit",
+                        ..
+                    }
+                ),
+                "{shallow}: {error:?}"
+            );
+        }
     }
 
     #[test]

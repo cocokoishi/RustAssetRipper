@@ -1,7 +1,10 @@
 //! In-memory virtual filesystem used by containers and recovered Unity files.
 //!
 //! Covers the `VirtualFileSystem` CRUD, enumeration, `Count`, `Clear`, `ReadAllBytes`/
-//! `WriteAllBytes`, UTF-8 `ReadAllText`/`WriteAllText`, and `TemporaryDirectory` rules.
+//! `WriteAllBytes`, UTF-8 `ReadAllText`/`WriteAllText`, `TemporaryDirectory` rules,
+//! and logical split-group open/existence (including the `GetFilePath` base
+//! resolution that explicit path-list batches use so one path represents each
+//! split group).
 //!
 //! Deliberately open: the `Encoding` text overloads (only UTF-8 ports), GUID-named
 //! temporary file/directory creation, `DeleteTemporaryDirectory` (which needs the
@@ -377,9 +380,8 @@ impl VirtualFileSystem {
     /// Opens a direct file or joins a contiguous `.splitN` group from this virtual filesystem.
     pub fn open_logical_file(&self, path: &str) -> io::Result<SmartStream> {
         let normalized = normalize_path(Some(path), self.limits)?;
-        let split_base = logical_split_base(&normalized);
-        let base_path = split_base.unwrap_or(&normalized);
-        if split_base.is_none() {
+        let base_path = logical_file_path(&normalized);
+        if base_path == normalized {
             match self.open_file(&normalized) {
                 Ok(stream) => return Ok(stream),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -408,9 +410,8 @@ impl VirtualFileSystem {
     /// Checks whether a direct file or a contiguous `.splitN` group exists.
     pub fn logical_file_exists(&self, path: &str) -> io::Result<bool> {
         let normalized = normalize_path(Some(path), self.limits)?;
-        let split_base = logical_split_base(&normalized);
-        let base_path = split_base.unwrap_or(&normalized);
-        if split_base.is_none() && self.file_exists(Some(&normalized))? {
+        let base_path = logical_file_path(&normalized);
+        if base_path == normalized && self.file_exists(Some(&normalized))? {
             return Ok(true);
         }
         match self.find_contiguous_split_parts(base_path) {
@@ -735,6 +736,15 @@ fn logical_split_base(path: &str) -> Option<&str> {
     path.get(..path.len().checked_sub(suffix.len() + ".split".len())?)
 }
 
+/// `MultiFileStream.GetFilePath` over caller facts: the split-group base when
+/// `normalized_path` names a split part, otherwise the path itself. Explicit
+/// path-list batches resolve every input through this so one path represents
+/// each split group (`MixedGameStructure.SelectUniquePaths`); the open/existence
+/// probes below share it instead of repeating the base decision.
+fn logical_file_path(normalized_path: &str) -> &str {
+    logical_split_base(normalized_path).unwrap_or(normalized_path)
+}
+
 /// Split-part suffix decision for virtual sibling scans: the numeric part index
 /// when `file_name` is exactly `{base}.split<digits>`, or `None` for unrelated
 /// siblings. This recognizes with a known base, unlike `logical_split_base`,
@@ -804,7 +814,8 @@ fn unsupported_pattern(pattern: &str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::{
-        split_sibling_part_index, SearchOption, VirtualFileSystem, VirtualFileSystemLimits,
+        logical_file_path, split_sibling_part_index, SearchOption, VirtualFileSystem,
+        VirtualFileSystemLimits,
     };
     use crate::io::stream::SmartStream;
     use std::io::{Read, Seek, SeekFrom, Write};
@@ -827,6 +838,25 @@ mod tests {
                 .enumerate_directories(None, "*", SearchOption::AllDirectories)
                 .unwrap(),
             ["/assets", "/assets/textures"]
+        );
+    }
+
+    /// The `GetFilePath` base resolution behind explicit path-list batches: split
+    /// parts fold to their group base so one path represents each group, while
+    /// anything else resolves to itself.
+    #[test]
+    fn logical_file_paths_fold_split_parts_to_their_group_base() {
+        assert_eq!(logical_file_path("/data/archive.split0"), "/data/archive");
+        assert_eq!(logical_file_path("/data/archive.split12"), "/data/archive");
+        assert_eq!(logical_file_path("/data/archive"), "/data/archive");
+        assert_eq!(
+            logical_file_path("/data/archive.split"),
+            "/data/archive.split"
+        );
+        assert_eq!(logical_file_path("/data/.split0"), "/data/.split0");
+        assert_eq!(
+            logical_file_path("/data/other.split0x"),
+            "/data/other.split0x"
         );
     }
 
