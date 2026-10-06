@@ -795,3 +795,9 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Added `src/resources/sprite.rs` (`SPRITE_CLASS_ID`, `sprite_supported`, `sprite_try_convert_to_bitmap`) mirroring `SpriteConverter.Supported`/`TryConvertToBitmap` over caller facts; new row `RES-SPRITE-CONVERT-001`. Targeted lib tests 3/3 locally, fmt clean; full workspace + CI pending (Actions still blocked: billing `spending limit` annotation, no runner).
 - Next: sprite atlas rect math, then Crunch/EXR/JPEG, meta fields, then core SER/OBJ/PROC rows.
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+
+## 105. Checkpoint: sprite atlas coordinates (2026-10-06)
+
+- Extended `src/resources/sprite.rs` with `get_sprite_coordinates_in_atlas` in source f32 order; new row `RES-SPRITE-ATLAS-001`. Targeted lib tests 6/6 locally, fmt + targeted lib Clippy clean; full workspace + CI pending (Actions still blocked by billing).
+- Next: Crunch/EXR/JPEG, meta fields, then core SER/OBJ/PROC rows.
+- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
