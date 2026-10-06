@@ -13,9 +13,10 @@ use crate::serialized_file::object::{SerializedFieldValue, SerializedValue};
 use super::pointer_map::ProjectPointerResolution;
 use super::scene_collection::ExportAssetIdentity;
 use super::unity_yaml::{
-    format_hash128, format_unity_guid_words, project_pointer_to_unity_yaml, UnityYamlDocument,
-    UnityYamlMappingStyle, UnityYamlNode, UnityYamlNodeBuildError, UnityYamlNodeKind,
-    UnityYamlScalar, UnityYamlSequenceStyle, UnityYamlWriteError,
+    format_dotnet_f32, format_dotnet_f64, format_hash128, format_unity_guid_words,
+    project_pointer_to_unity_yaml, UnityYamlDocument, UnityYamlMappingStyle, UnityYamlNode,
+    UnityYamlNodeBuildError, UnityYamlNodeKind, UnityYamlScalar, UnityYamlSequenceStyle,
+    UnityYamlWriteError,
 };
 
 const TRANSFER_USING_FLOW_MAPPING_STYLE: u32 = 0x0020_0000;
@@ -2238,16 +2239,8 @@ fn primitive_dictionary_key(
             field_path,
             element_index,
         )?),
-        SerializedValue::F32(value) => Some(format_dictionary_float32_key(
-            *value,
-            field_path,
-            element_index,
-        )?),
-        SerializedValue::F64(value) => Some(format_dictionary_float64_key(
-            *value,
-            field_path,
-            element_index,
-        )?),
+        SerializedValue::F32(value) => Some(format_dictionary_float32_key(*value)?),
+        SerializedValue::F64(value) => Some(format_dictionary_float64_key(*value)?),
         _ => None,
     };
     Ok(key.map(UnityYamlNode::string))
@@ -2273,11 +2266,10 @@ fn format_dictionary_numeric_key<T: Display>(
     Ok(key)
 }
 
-fn format_dictionary_float32_key(
-    value: f32,
-    field_path: &str,
-    element_index: usize,
-) -> Result<String, UnityYamlObjectConversionError> {
+/// Render a `float` dictionary key exactly like the source `ToString`: the same
+/// invariant-culture shortest form the YAML value scalars use, not Rust `Display`
+/// (which disagrees on fixed/scientific notation choices and exponent padding).
+fn format_dictionary_float32_key(value: f32) -> Result<String, UnityYamlObjectConversionError> {
     if value.is_nan() {
         try_copy_string("NaN", "Unity dictionary floating-point key")
     } else if value == f32::INFINITY {
@@ -2285,15 +2277,15 @@ fn format_dictionary_float32_key(
     } else if value == f32::NEG_INFINITY {
         try_copy_string("-Infinity", "Unity dictionary floating-point key")
     } else {
-        format_dictionary_numeric_key(value, field_path, element_index)
+        try_copy_string(
+            &format_dotnet_f32(value),
+            "Unity dictionary floating-point key",
+        )
     }
 }
 
-fn format_dictionary_float64_key(
-    value: f64,
-    field_path: &str,
-    element_index: usize,
-) -> Result<String, UnityYamlObjectConversionError> {
+/// Render a `double` dictionary key exactly like the source `ToString`.
+fn format_dictionary_float64_key(value: f64) -> Result<String, UnityYamlObjectConversionError> {
     if value.is_nan() {
         try_copy_string("NaN", "Unity dictionary floating-point key")
     } else if value == f64::INFINITY {
@@ -2301,7 +2293,10 @@ fn format_dictionary_float64_key(
     } else if value == f64::NEG_INFINITY {
         try_copy_string("-Infinity", "Unity dictionary floating-point key")
     } else {
-        format_dictionary_numeric_key(value, field_path, element_index)
+        try_copy_string(
+            &format_dotnet_f64(value),
+            "Unity dictionary floating-point key",
+        )
     }
 }
 
@@ -5083,6 +5078,30 @@ mod tests {
         )
         .unwrap();
         assert_eq!(legacy_output.matches("    data:").count(), 2);
+    }
+
+    #[test]
+    fn float_dictionary_keys_use_dotnet_tostring_not_rust_display() {
+        // Negative zero keeps its sign, exactly like the source `ToString` (the
+        // float fixture pins `-0` for these bits through the same call).
+        assert_eq!(format_dictionary_float32_key(-0.0).unwrap(), "-0");
+        assert_eq!(format_dictionary_float64_key(-0.0).unwrap(), "-0");
+        // Fixed/scientific choices follow the invariant-culture shortest form:
+        // fixed while the base-10 exponent is in -4..9 for floats (-4..17 for
+        // doubles), matching the probed ToString fixture (`16777216`, `1E+10`).
+        assert_eq!(format_dictionary_float32_key(0.5).unwrap(), "0.5");
+        assert_eq!(format_dictionary_float32_key(1e-7).unwrap(), "1E-07");
+        assert_eq!(format_dictionary_float32_key(1e7).unwrap(), "10000000");
+        assert_eq!(format_dictionary_float32_key(1e10).unwrap(), "1E+10");
+        assert_eq!(format_dictionary_float64_key(0.5).unwrap(), "0.5");
+        assert_eq!(format_dictionary_float64_key(1e-7).unwrap(), "1E-07");
+        assert_eq!(format_dictionary_float64_key(1e17).unwrap(), "1E+17");
+        // Special values keep their source spellings.
+        assert_eq!(format_dictionary_float32_key(f32::NAN).unwrap(), "NaN");
+        assert_eq!(
+            format_dictionary_float64_key(f64::NEG_INFINITY).unwrap(),
+            "-Infinity"
+        );
     }
 
     #[test]

@@ -18,6 +18,11 @@
 //!   empty/skip and meta/serialized flags; empty exporters hand out the shared
 //!   `EmptyExportCollection.Instance` while skip exporters build a fresh
 //!   `SkipExportCollection`, both always succeeding.
+//! - `FailExportCollection` warns and reports failure on export, matches only its own
+//!   asset, resolves the main export ID for that asset and throws otherwise, always
+//!   throws on GUID requests, and mints missing-reference pointers for non-local
+//!   requests only. The main ID, the exporter type, and the missing-reference GUID
+//!   arrive as caller facts.
 //!
 //! Callback invocation order is modeled as data because the callbacks themselves are
 //! caller behavior; byte writing stays with the concrete exporters.
@@ -173,13 +178,75 @@ pub const fn dummy_try_create_collection(
     }
 }
 
+/// `FailExportCollection.Export` always warns and reports failure.
+pub const fn fail_collection_export_result() -> bool {
+    false
+}
+
+/// The warning text: `$"Unable to export asset {Name}"` with the collection name.
+pub fn fail_collection_warning(collection_name: &str) -> String {
+    format!("Unable to export asset {collection_name}")
+}
+
+/// `FailExportCollection.Contains`: identity with the failed asset.
+pub const fn fail_collection_contains(is_same_asset: bool) -> bool {
+    is_same_asset
+}
+
+/// `FailExportCollection.GetExportID`: the main export ID for the failed asset
+/// (resolved caller-side via `ExportIdHandler`), `ArgumentException` otherwise.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum FailExportId {
+    /// The failed asset: take the main export ID.
+    MainExportId,
+    /// Anything else: throw `ArgumentException`.
+    ThrowsArgument,
+}
+
+/// Selects the `GetExportID` behavior from asset identity.
+pub const fn fail_collection_export_id(is_same_asset: bool) -> FailExportId {
+    if is_same_asset {
+        FailExportId::MainExportId
+    } else {
+        FailExportId::ThrowsArgument
+    }
+}
+
+/// `FailExportCollection.CreateExportPointer`: non-local requests for the failed
+/// asset mint a missing-reference pointer (main ID plus the missing-reference
+/// GUID plus the exporter type, all caller facts); local requests throw, and
+/// foreign assets fail through the ID rule first.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum FailExportPointer {
+    /// Mint the missing-reference pointer.
+    MissingReference,
+    /// Throw `ArgumentException`.
+    ThrowsArgument,
+}
+
+/// Selects the pointer behavior from locality and asset identity.
+pub const fn fail_collection_pointer(is_local: bool, is_same_asset: bool) -> FailExportPointer {
+    if !is_local && is_same_asset {
+        FailExportPointer::MissingReference
+    } else {
+        FailExportPointer::ThrowsArgument
+    }
+}
+
+/// `FailExportCollection.GetExportGUID` always throws `NotSupportedException`.
+pub const fn fail_collection_guid() -> BaseCallOutcome {
+    BaseCallOutcome::ThrowsNotSupported
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         binary_base_call, binary_try_create_collection, dummy_exporter_kind,
-        dummy_try_create_collection, interface_default_call, is_valid_data, yaml_base_call,
+        dummy_try_create_collection, fail_collection_contains, fail_collection_export_id,
+        fail_collection_export_result, fail_collection_guid, fail_collection_pointer,
+        fail_collection_warning, interface_default_call, is_valid_data, yaml_base_call,
         yaml_base_layout, BaseCallOutcome, BinaryCollectionShape, DummyCollectionShape,
-        DummyExporterKind, ExporterCall, YamlExportLayout,
+        DummyExporterKind, ExporterCall, FailExportId, FailExportPointer, YamlExportLayout,
     };
 
     #[test]
@@ -277,5 +344,43 @@ mod tests {
             dummy_try_create_collection(false),
             (DummyCollectionShape::NewSkipCollection, true)
         );
+    }
+
+    #[test]
+    fn fail_collection_warns_and_routes_by_identity_and_locality() {
+        // Export always warns and reports failure.
+        assert!(!fail_collection_export_result());
+        assert_eq!(
+            fail_collection_warning("Main Mixer"),
+            "Unable to export asset Main Mixer"
+        );
+        // Only the failed asset is contained or ID-resolved.
+        assert!(fail_collection_contains(true));
+        assert!(!fail_collection_contains(false));
+        assert_eq!(fail_collection_export_id(true), FailExportId::MainExportId);
+        assert_eq!(
+            fail_collection_export_id(false),
+            FailExportId::ThrowsArgument
+        );
+        // Non-local requests for the failed asset mint missing references;
+        // local requests and foreign assets throw.
+        assert_eq!(
+            fail_collection_pointer(false, true),
+            FailExportPointer::MissingReference
+        );
+        assert_eq!(
+            fail_collection_pointer(true, true),
+            FailExportPointer::ThrowsArgument
+        );
+        assert_eq!(
+            fail_collection_pointer(false, false),
+            FailExportPointer::ThrowsArgument
+        );
+        assert_eq!(
+            fail_collection_pointer(true, false),
+            FailExportPointer::ThrowsArgument
+        );
+        // GUID requests always throw.
+        assert_eq!(fail_collection_guid(), BaseCallOutcome::ThrowsNotSupported);
     }
 }

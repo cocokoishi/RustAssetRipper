@@ -1,8 +1,11 @@
-//! `BlendTreeNodeConstantExtensions`.
+//! `BlendTreeNodeConstantExtensions` plus the `BlendTree` blend-type read.
 //!
-//! Mirrors `AssetRipper.SourceGenerated.Extensions/BlendTreeNodeConstantExtensions.cs`. Blend trees
-//! store 1D thresholds, 2D positions, and direct-blend parameter ids in different sub-objects
-//! depending on the Unity version and the blend type, so the accessors dispatch on both.
+//! Mirrors `AssetRipper.SourceGenerated.Extensions/BlendTreeNodeConstantExtensions.cs` and
+//! `BlendTreeExtensions.cs`. Blend trees store 1D thresholds, 2D positions, and direct-blend
+//! parameter ids in different sub-objects depending on the Unity version and the blend type,
+//! so the accessors dispatch on both. The `BlendTree` blend type itself is stored as `Int32`
+//! on newer versions and `UInt32` on older ones; that representation choice arrives as a
+//! caller fact (the generated `Has_BlendType_Int32` gate stays caller-side).
 
 use crate::numerics::Vec2;
 
@@ -156,6 +159,18 @@ impl BlendTreeNodeView {
     }
 }
 
+/// `BlendTreeExtensions.GetBlendType`: the stored `BlendTreeType_1` discriminant.
+///
+/// `has_int32` answers `Has_BlendType_Int32`; exactly one of the two slots is present per
+/// version. The `UInt32` read wraps to `i32` exactly like the source enum conversion.
+pub fn blend_tree_blend_type(has_int32: bool, int32_value: i32, uint32_value: u32) -> i32 {
+    if has_int32 {
+        int32_value
+    } else {
+        uint32_value as i32
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,5 +257,20 @@ mod tests {
             rows += 1;
         }
         assert_eq!(rows, 15);
+    }
+
+    /// `BlendTreeExtensions.GetBlendType` reads the versioned representation: `Int32`
+    /// when present, otherwise the wrapping `UInt32` slot.
+    #[test]
+    fn blend_type_follows_the_int32_presence_gate() {
+        // The Int32 slot wins whenever the gate says it exists.
+        assert_eq!(blend_tree_blend_type(true, BLEND_TREE_DIRECT, 0), 4);
+        assert_eq!(blend_tree_blend_type(true, BLEND_TREE_SIMPLE_1D, 4), 0);
+        // Otherwise the UInt32 slot converts, wrapping like the source enum cast.
+        assert_eq!(
+            blend_tree_blend_type(false, 0, BLEND_TREE_FREEFORM_CARTESIAN_2D as u32),
+            3
+        );
+        assert_eq!(blend_tree_blend_type(false, 0, u32::MAX), -1);
     }
 }
