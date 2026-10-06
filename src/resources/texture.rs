@@ -256,6 +256,58 @@ impl Texture2DView {
     }
 }
 
+/// The class ID of `ImageTexture` (class 189), the format-less texture base whose
+/// concrete subtypes carry the `GraphicsFormat`.
+pub const IMAGE_TEXTURE_CLASS_ID: i32 = 189;
+
+/// The fields `ImageTextureExtensions` reads from a class-189 `ImageTexture`.
+///
+/// Unlike class 28, the 189 base carries no format field, no mip/size fields, and
+/// no platform blob: format selection lives on the concrete subtypes, and neither
+/// the Xbox360 byte swap nor the Switch unswizzle applies.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImageTextureView {
+    /// `m_Width`.
+    pub width: usize,
+    /// `m_Height`.
+    pub height: usize,
+    /// Inline image bytes (`image data`, `m_ImageData`, `m_ImageData_C189`).
+    pub image_data: Vec<u8>,
+    /// `m_StreamData` (`m_StreamData_C189`), if present.
+    pub stream_data: Option<StreamedResourceInfo>,
+}
+
+impl ImageTextureView {
+    /// Reads the export-relevant fields from a decoded `ImageTexture` payload.
+    pub fn from_value(root: &SerializedValue) -> Result<Self, TextureViewError> {
+        let width = required_i32(root, &["m_Width"])?;
+        let height = required_i32(root, &["m_Height"])?;
+        let image_data = optional_bytes(root, &["image data", "m_ImageData", "m_ImageData_C189"])?
+            .unwrap_or_default();
+        let stream_data = optional_stream(root, &["m_StreamData", "m_StreamData_C189"])?;
+
+        Ok(Self {
+            width: nonnegative(width, "m_Width")?,
+            height: nonnegative(height, "m_Height")?,
+            image_data,
+            stream_data,
+        })
+    }
+
+    /// `ImageTextureExtensions.GetImageData` over caller-resolved streamed content:
+    /// inline bytes win when non-empty, otherwise the streamed content (already
+    /// gated on presence by the caller, like `IsSet`), otherwise nothing.
+    ///
+    /// `CheckAssetIntegrity`'s collection-backed stream check stays caller-side.
+    pub fn image_bytes<'a>(&'a self, stream_content: Option<&'a [u8]>) -> Option<&'a [u8]> {
+        if !self.image_data.is_empty() {
+            Some(self.image_data.as_slice())
+        } else {
+            stream_content
+        }
+    }
+}
+
 /// Exports one `Texture2D` to an encoded image.
 ///
 /// `stream_content` must be the exact byte range for `m_StreamData` when the texture has no inline
@@ -608,5 +660,60 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    fn image_texture(fields: Vec<SerializedFieldValue>) -> SerializedValue {
+        let mut root = vec![
+            field("m_Width", SerializedValue::I32(2)),
+            field("m_Height", SerializedValue::I32(1)),
+        ];
+        root.extend(fields);
+        SerializedValue::Struct(root)
+    }
+
+    fn stream_info() -> SerializedValue {
+        SerializedValue::Struct(vec![
+            field("path", SerializedValue::StringBytes(b"tex.resS".to_vec())),
+            field("offset", SerializedValue::U32(0)),
+            field("size", SerializedValue::U32(4)),
+        ])
+    }
+
+    #[test]
+    fn image_texture_view_reads_base_fields() {
+        assert_eq!(IMAGE_TEXTURE_CLASS_ID, 189);
+        let root = image_texture(vec![
+            field("m_ImageData_C189", SerializedValue::Bytes(vec![9, 9])),
+            field("m_StreamData_C189", stream_info()),
+        ]);
+        let view = ImageTextureView::from_value(&root).unwrap();
+        assert_eq!((view.width, view.height), (2, 1));
+        assert_eq!(view.image_data, vec![9, 9]);
+        assert!(view.stream_data.is_some());
+        // The legacy `image data` alias reads too.
+        let legacy = image_texture(vec![field("image data", SerializedValue::Bytes(vec![7]))]);
+        assert_eq!(
+            ImageTextureView::from_value(&legacy).unwrap().image_data,
+            vec![7]
+        );
+        // Width is required.
+        let missing = SerializedValue::Struct(vec![field("m_Height", SerializedValue::I32(1))]);
+        assert!(ImageTextureView::from_value(&missing).is_err());
+    }
+
+    #[test]
+    fn image_texture_bytes_prefer_inline_data() {
+        // Inline bytes win even when streamed content is available.
+        let root = image_texture(vec![
+            field("m_ImageData", SerializedValue::Bytes(vec![1, 2])),
+            field("m_StreamData", stream_info()),
+        ]);
+        let view = ImageTextureView::from_value(&root).unwrap();
+        assert_eq!(view.image_bytes(Some(&[3, 4])), Some([1, 2].as_slice()));
+        // Empty inline bytes fall through to the streamed content.
+        let root = image_texture(vec![field("m_StreamData", stream_info())]);
+        let view = ImageTextureView::from_value(&root).unwrap();
+        assert_eq!(view.image_bytes(Some(&[3, 4])), Some([3, 4].as_slice()));
+        assert_eq!(view.image_bytes(None), None);
     }
 }
