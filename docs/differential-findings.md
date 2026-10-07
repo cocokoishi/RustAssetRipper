@@ -768,3 +768,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | src/serialized_file/object.rs test object_encode_reproduces_reference_authored_payload; src/serialized_file/file.rs test rewrites_reference_constructed_files_across_generations; fixture src/serialized_file/object_rewrite_fixture.txt. No production change. |
 | Regression evidence | Both new tests pass; full suite 1372 plus 60 pass with warnings-denied Clippy. |
 | Remaining comparison | Managed-reference payloads stay explicit errors; add/remove objects and table changes stay out of scope by design; exact pad bytes are Rust policy with no baseline counterpart. |
+
+## DIFF-SET-SAVEDEL-001 - Settings save/delete product surface
+
+| Field | Finding |
+|---|---|
+| Status | Source-behavior parity recorded; settings-file row ported and pinned |
+| Source location | AssetRipper/Source/AssetRipper.Export/Configuration/SerializedSettings.cs (SaveToDefaultPath, DeleteDefaultPath, TryLoadFromDefaultPath) |
+| Input evidence | Source read (no runtime probe needed: semantics are file overwrite and existence-checked delete on the executable-adjacent path); hermetic temp-directory round-trip tests in src/main.rs. |
+| Source-derived behavior | Save overwrites unconditionally; delete is a no-op success when absent; load keeps built-in defaults when absent and fails loudly on corrupt content. |
+| Root cause | No deviation; the CLI commands are the product equivalent of the GUI save/delete triggers. |
+| Rust change | src/main.rs (save_serialized_settings_to_dir, delete_serialized_settings_in_dir, save/delete_default_settings_from_arguments, CLI dispatch, usage, four tests plus classifier pin). |
+| Regression evidence | Four new CLI tests pass; full suite 1373 plus 64 pass with warnings-denied Clippy. |
+| Remaining comparison | Unknown enum discriminants stay explicit errors per the row disposition. |

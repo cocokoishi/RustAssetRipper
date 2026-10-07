@@ -170,6 +170,8 @@ enum CliCommand {
     ExportAudio,
     Inspect,
     InspectFiles,
+    SaveDefaultSettings,
+    DeleteDefaultSettings,
     Unknown,
 }
 
@@ -187,6 +189,8 @@ fn classify_cli_command(name: &str) -> CliCommand {
         "export-audio" => CliCommand::ExportAudio,
         "inspect" => CliCommand::Inspect,
         "inspect-files" => CliCommand::InspectFiles,
+        "save-default-settings" => CliCommand::SaveDefaultSettings,
+        "delete-default-settings" => CliCommand::DeleteDefaultSettings,
         _ => CliCommand::Unknown,
     }
 }
@@ -238,6 +242,8 @@ fn run(arguments: impl Iterator<Item = OsString>) -> Result<(), Box<dyn Error>> 
                 inspect_directories(&input_paths)
             }
         }
+        CliCommand::SaveDefaultSettings => save_default_settings_from_arguments(arguments),
+        CliCommand::DeleteDefaultSettings => delete_default_settings_from_arguments(arguments),
         CliCommand::Unknown => {
             print_usage();
             Err(invalid_input(format!("unknown command '{command}'")))
@@ -762,43 +768,13 @@ fn export_mesh_to<W: io::Write>(
 /// future commands. Missing files, invalid UTF-8, oversized files, and schema violations
 /// are explicit input errors carrying the path.
 fn load_cli_export_settings(path: &Path) -> Result<ExportSettingsFile, Box<dyn Error>> {
-    read_export_settings_file(path)
+    read_serialized_settings_file(path).map(|settings| settings.export)
 }
 
 /// Reads one `AssetRipper.Settings.json` file, shared by the explicit `--settings` flag
 /// and the default-path fallback. Every failure mode names the file.
 fn read_export_settings_file(path: &Path) -> Result<ExportSettingsFile, Box<dyn Error>> {
-    use assetripper::export::settings_file::{parse_settings_file, SettingsFileLimits};
-
-    let limits = SettingsFileLimits::default();
-    let bytes = fs::read(path).map_err(|source| {
-        invalid_input(format!(
-            "could not read settings file {}: {source}",
-            path.display()
-        ))
-    })?;
-    if bytes.len() > limits.max_file_bytes {
-        return Err(invalid_input(format!(
-            "settings file {} uses {} bytes, exceeding limit {}",
-            path.display(),
-            bytes.len(),
-            limits.max_file_bytes
-        )));
-    }
-    let text = String::from_utf8(bytes).map_err(|_| {
-        invalid_input(format!(
-            "settings file {} is not valid UTF-8",
-            path.display()
-        ))
-    })?;
-    parse_settings_file(&text, limits)
-        .map(|settings| settings.export)
-        .map_err(|error| {
-            invalid_input(format!(
-                "settings file {} could not be parsed: {error}",
-                path.display()
-            ))
-        })
+    read_serialized_settings_file(path).map(|settings| settings.export)
 }
 
 /// `SerializedSettings.TryLoadFromDefaultPath` for one caller-supplied directory: an
@@ -827,17 +803,197 @@ fn load_default_export_settings_from_dir(
     read_export_settings_file(&path).map(Some)
 }
 
+/// Resolve the executable directory (`AppContext.BaseDirectory` in the source).
+/// The process query stays in product code; tests pass directories explicitly.
+fn executable_directory() -> Result<PathBuf, Box<dyn Error>> {
+    let executable = std::env::current_exe()
+        .map_err(|source| invalid_input(format!("could not locate the executable: {source}")))?;
+    executable
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| invalid_input("the executable path has no parent directory"))
+}
+
+/// `SerializedSettings.SaveToDefaultPath` for one caller-supplied directory: the
+/// record is rendered byte-exactly (same writer as the load path) and overwritten
+/// unconditionally, mirroring `File.Create`. Every failure mode names the file.
+/// Returns the written path. The directory is a parameter so tests stay hermetic;
+/// product code passes the executable directory.
+fn save_serialized_settings_to_dir(
+    settings: &assetripper::export::settings_file::SerializedSettingsFile,
+    directory: &Path,
+) -> Result<PathBuf, Box<dyn Error>> {
+    use assetripper::export::asset_path::HostPathPlatform;
+    use assetripper::export::settings_file::{default_settings_file_path, write_settings_file};
+
+    let platform = if cfg!(windows) {
+        HostPathPlatform::Windows
+    } else {
+        HostPathPlatform::Unix
+    };
+    let directory_text = directory
+        .to_str()
+        .ok_or_else(|| invalid_input("the executable directory is not valid UTF-8"))?;
+    let path = PathBuf::from(default_settings_file_path(directory_text, platform));
+    let text = write_settings_file(settings).map_err(|error| {
+        invalid_input(format!(
+            "settings for {} could not be rendered: {error}",
+            path.display()
+        ))
+    })?;
+    fs::write(&path, text).map_err(|source| {
+        invalid_input(format!(
+            "could not write settings file {}: {source}",
+            path.display()
+        ))
+    })?;
+    Ok(path)
+}
+
+/// `SerializedSettings.DeleteDefaultPath` for one caller-supplied directory: an
+/// absent file is a success without effect (mirroring the source existence check),
+/// a present file is removed. Returns whether a file was removed. Every failure
+/// mode names the file.
+fn delete_serialized_settings_in_dir(directory: &Path) -> Result<bool, Box<dyn Error>> {
+    use assetripper::export::asset_path::HostPathPlatform;
+    use assetripper::export::settings_file::default_settings_file_path;
+
+    let platform = if cfg!(windows) {
+        HostPathPlatform::Windows
+    } else {
+        HostPathPlatform::Unix
+    };
+    let directory_text = directory
+        .to_str()
+        .ok_or_else(|| invalid_input("the executable directory is not valid UTF-8"))?;
+    let path = PathBuf::from(default_settings_file_path(directory_text, platform));
+    if !path.exists() {
+        return Ok(false);
+    }
+    fs::remove_file(&path).map_err(|source| {
+        invalid_input(format!(
+            "could not delete settings file {}: {source}",
+            path.display()
+        ))
+    })?;
+    Ok(true)
+}
+
+/// Read one full `AssetRipper.Settings.json` record, shared by `--settings` inputs
+/// that need more than the export section. Every failure mode names the file.
+fn read_serialized_settings_file(
+    path: &Path,
+) -> Result<assetripper::export::settings_file::SerializedSettingsFile, Box<dyn Error>> {
+    use assetripper::export::settings_file::{parse_settings_file, SettingsFileLimits};
+
+    let limits = SettingsFileLimits::default();
+    let bytes = fs::read(path).map_err(|source| {
+        invalid_input(format!(
+            "could not read settings file {}: {source}",
+            path.display()
+        ))
+    })?;
+    if bytes.len() > limits.max_file_bytes {
+        return Err(invalid_input(format!(
+            "settings file {} uses {} bytes, exceeding limit {}",
+            path.display(),
+            bytes.len(),
+            limits.max_file_bytes
+        )));
+    }
+    let text = String::from_utf8(bytes).map_err(|_| {
+        invalid_input(format!(
+            "settings file {} is not valid UTF-8",
+            path.display()
+        ))
+    })?;
+    parse_settings_file(&text, limits).map_err(|error| {
+        invalid_input(format!(
+            "settings file {} could not be parsed: {error}",
+            path.display()
+        ))
+    })
+}
+
 /// `SerializedSettings.TryLoadFromDefaultPath` plus the `LoadFromDefaultPath` startup
 /// step for the CLI: settings stored next to the executable apply when the caller gave
 /// no explicit `--settings` flag. `AppContext.BaseDirectory` arrives here as the
 /// executable directory, keeping the process query in product code.
 fn try_load_default_export_settings() -> Result<Option<ExportSettingsFile>, Box<dyn Error>> {
-    let executable = std::env::current_exe()
-        .map_err(|source| invalid_input(format!("could not locate the executable: {source}")))?;
-    let directory = executable
-        .parent()
-        .ok_or_else(|| invalid_input("the executable path has no parent directory"))?;
-    load_default_export_settings_from_dir(directory)
+    let directory = executable_directory()?;
+    load_default_export_settings_from_dir(&directory)
+}
+
+/// `save-default-settings [--settings <path>]`: persist settings next to the
+/// executable (`SerializedSettings.SaveToDefaultPath`). With `--settings`, the
+/// named file is validated and stored; without it, built-in defaults are stored.
+/// The file is overwritten unconditionally, mirroring `File.Create`.
+fn save_default_settings_from_arguments(
+    arguments: impl Iterator<Item = OsString>,
+) -> Result<(), Box<dyn Error>> {
+    use assetripper::export::settings::{ExportDefaults, ImportDefaults, ProcessingDefaults};
+    use assetripper::export::settings_file::SerializedSettingsFile;
+
+    let mut arguments = arguments;
+    let mut source: Option<PathBuf> = None;
+    while let Some(next) = arguments.next() {
+        let text = next
+            .into_string()
+            .map_err(|_| invalid_input("the --settings value must be valid UTF-8"))?;
+        if text == "--settings" {
+            if source.is_some() {
+                return Err(invalid_input(
+                    "save-default-settings accepts --settings at most once",
+                ));
+            }
+            let path = arguments.next().ok_or_else(|| {
+                invalid_input("save-default-settings --settings requires a settings file path")
+            })?;
+            source = Some(PathBuf::from(path));
+        } else {
+            return Err(invalid_input(format!(
+                "unexpected save-default-settings argument '{text}'; expected --settings <path>"
+            )));
+        }
+    }
+    let settings = match source {
+        Some(path) => read_serialized_settings_file(&path)?,
+        None => SerializedSettingsFile::from_defaults(
+            ImportDefaults::default(),
+            ProcessingDefaults::default(),
+            ExportDefaults::default(),
+        ),
+    };
+    let directory = executable_directory()?;
+    let path = save_serialized_settings_to_dir(&settings, &directory)?;
+    println!("saved settings to {}", path.display());
+    Ok(())
+}
+
+/// `delete-default-settings`: remove the executable-adjacent settings file
+/// (`SerializedSettings.DeleteDefaultPath`). An absent file is a success without
+/// effect, mirroring the source existence check.
+fn delete_default_settings_from_arguments(
+    arguments: impl Iterator<Item = OsString>,
+) -> Result<(), Box<dyn Error>> {
+    let mut arguments = arguments;
+    if let Some(next) = arguments.next() {
+        let text = next
+            .into_string()
+            .unwrap_or_else(|_| "<invalid UTF-8>".to_owned());
+        return Err(invalid_input(format!(
+            "unexpected delete-default-settings argument '{text}'; this command takes no arguments"
+        )));
+    }
+    let directory = executable_directory()?;
+    // Recompute the display path through the same helper so the report cannot drift.
+    let removed = delete_serialized_settings_in_dir(&directory)?;
+    if removed {
+        println!("deleted the default settings file");
+    } else {
+        println!("no default settings file exists");
+    }
+    Ok(())
 }
 
 /// Parses the optional leading `--shader-export-mode <dummy|yaml|decompile>` flag of
@@ -3703,7 +3859,7 @@ fn invalid_data_owned(message: String) -> io::Error {
 
 fn print_usage() {
     println!(
-        "Usage:\n  assetripper-rs inspect <input-directory> [input-directory ...]\n  assetripper-rs inspect-files <input-file> [input-file ...]\n  assetripper-rs export-object-yaml <serialized-file-index> <path-id> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-file-yaml <serialized-file-index> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-texture [--settings <path>] <serialized-file-index> <path-id> <new-output-image> <input-file> [input-file ...]\n  assetripper-rs export-mesh <serialized-file-index> <path-id> <new-output-glb> <input-file> [input-file ...]\n  assetripper-rs export-shader [--shader-export-mode <dummy|yaml|decompile>] [--settings <path>] <serialized-file-index> <path-id> <new-output-shader> <input-file> [input-file ...]\n  assetripper-rs export-audio [--settings <path>] <serialized-file-index> <path-id> <new-output-audio> <input-file> [input-file ...]\n  assetripper-rs --help\n  assetripper-rs --version\n\n`inspect` mounts directories into isolated VFS roots. `inspect-files` dispatches explicitly selected file paths, registers top-level ResourceFiles as GameBundle root inputs, and reports the parsed SerializedFiles. `export-object-yaml` writes one decoded object as YAML. `export-file-yaml` writes YAML-exportable objects from one SerializedFile in object-table order, resolves streamed Mesh and image-texture bytes, preserves intra-file references through source PathIDs, and refuses unresolved or cross-file references. It reports ImageTexture objects omitted by the baseline when they have no usable image data. `export-texture` decodes one class-28 Texture2D, resolves its inline or streamed image data, and writes a PNG/BMP/TGA image; the output extension selects the format (otherwise the configured settings format, default PNG). `export-mesh` decodes one class-43 Mesh, resolves its vertex data and compressed mesh, and writes a glTF 2.0 binary file with one node per sub-mesh, converting Unity's left-handed coordinates to glTF's right-handed space and rewriting the sub-mesh topology. `export-shader` decodes one class-48 Shader and writes `.shader` text: decompiled script text is written verbatim under every mode, otherwise `dummy` (the default) and `decompile` render the fallback dummy body and `yaml` reports that YAML mode writes a YAML asset instead. `export-audio` decodes one class-83 AudioClip, resolves its inline or streamed audio data, and writes the decoded bytes; tracker audio passes through, `FSB5` reports the external-decoder requirement, and unknown bytes fail with the reference diagnostic. None of these commands replaces an existing output file. These are YAML, texture, single-mesh, single-shader, and single-clip paths, not a complete Unity project export."
+        "Usage:\n  assetripper-rs inspect <input-directory> [input-directory ...]\n  assetripper-rs inspect-files <input-file> [input-file ...]\n  assetripper-rs export-object-yaml <serialized-file-index> <path-id> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-file-yaml <serialized-file-index> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-texture [--settings <path>] <serialized-file-index> <path-id> <new-output-image> <input-file> [input-file ...]\n  assetripper-rs export-mesh <serialized-file-index> <path-id> <new-output-glb> <input-file> [input-file ...]\n  assetripper-rs export-shader [--shader-export-mode <dummy|yaml|decompile>] [--settings <path>] <serialized-file-index> <path-id> <new-output-shader> <input-file> [input-file ...]\n  assetripper-rs export-audio [--settings <path>] <serialized-file-index> <path-id> <new-output-audio> <input-file> [input-file ...]\n  assetripper-rs save-default-settings [--settings <path>]\n  assetripper-rs delete-default-settings\n  assetripper-rs --help\n  assetripper-rs --version\n\n`inspect` mounts directories into isolated VFS roots. `inspect-files` dispatches explicitly selected file paths, registers top-level ResourceFiles as GameBundle root inputs, and reports the parsed SerializedFiles. `export-object-yaml` writes one decoded object as YAML. `export-file-yaml` writes YAML-exportable objects from one SerializedFile in object-table order, resolves streamed Mesh and image-texture bytes, preserves intra-file references through source PathIDs, and refuses unresolved or cross-file references. It reports ImageTexture objects omitted by the baseline when they have no usable image data. `export-texture` decodes one class-28 Texture2D, resolves its inline or streamed image data, and writes a PNG/BMP/TGA image; the output extension selects the format (otherwise the configured settings format, default PNG). `export-mesh` decodes one class-43 Mesh, resolves its vertex data and compressed mesh, and writes a glTF 2.0 binary file with one node per sub-mesh, converting Unity's left-handed coordinates to glTF's right-handed space and rewriting the sub-mesh topology. `export-shader` decodes one class-48 Shader and writes `.shader` text: decompiled script text is written verbatim under every mode, otherwise `dummy` (the default) and `decompile` render the fallback dummy body and `yaml` reports that YAML mode writes a YAML asset instead. `export-audio` decodes one class-83 AudioClip, resolves its inline or streamed audio data, and writes the decoded bytes; tracker audio passes through, `FSB5` reports the external-decoder requirement, and unknown bytes fail with the reference diagnostic. None of these commands replaces an existing output file. These are YAML, texture, single-mesh, single-shader, and single-clip paths, not a complete Unity project export."
     );
 }
 
@@ -6191,6 +6347,120 @@ mod tests {
             "{error}"
         );
         drop(input);
+    }
+
+    #[test]
+    fn default_path_save_then_load_round_trips_builtin_defaults() {
+        use assetripper::export::settings::{
+            ExportDefaults, ImageExportFormat, ImportDefaults, ProcessingDefaults,
+        };
+        use assetripper::export::settings_file::SerializedSettingsFile;
+
+        let directory = TestInputDirectory::new_root();
+        let subdir = directory.join("exe");
+        std::fs::create_dir(&subdir).unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: Vec::new(),
+            subdirectories: vec![subdir.clone()],
+        };
+
+        let defaults = SerializedSettingsFile::from_defaults(
+            ImportDefaults::default(),
+            ProcessingDefaults::default(),
+            ExportDefaults::default(),
+        );
+        let path = super::save_serialized_settings_to_dir(&defaults, &subdir).unwrap();
+        assert!(path.exists());
+        let loaded = super::load_default_export_settings_from_dir(&subdir)
+            .unwrap()
+            .expect("the stored file must load");
+        assert_eq!(loaded.image_export_format, ImageExportFormat::Png);
+        // Overwriting is unconditional, mirroring `File.Create`.
+        let path_again = super::save_serialized_settings_to_dir(&defaults, &subdir).unwrap();
+        assert_eq!(path, path_again);
+        drop(input);
+    }
+
+    #[test]
+    fn default_path_save_explicit_source_stores_the_validated_record() {
+        use assetripper::export::settings::ImageExportFormat;
+
+        let directory = TestInputDirectory::new_root();
+        let subdir = directory.join("exe");
+        std::fs::create_dir(&subdir).unwrap();
+        let source = subdir.join("source.json");
+        std::fs::write(
+            &source,
+            "{\"Import\": {\"ScriptContentLevel\": 2, \"StreamingAssetsMode\": 1, \"DefaultVersion\": \"0.0.0a0\", \"TargetVersion\": \"0.0.0a0\"}, \"Processing\": {\"EnablePrefabOutlining\": false, \"EnableStaticMeshSeparation\": true, \"EnableAssetDeduplication\": false, \"RemoveNullableAttributes\": false, \"PublicizeAssemblies\": false, \"BundledAssetsExportMode\": 2}, \"Export\": {\"AudioExportFormat\": 3, \"ImageExportFormat\": 0, \"LightmapTextureExportFormat\": 2, \"ScriptExportMode\": 1, \"ScriptLanguageVersion\": -1, \"ScriptTypesFullyQualified\": false, \"ShaderExportMode\": 2, \"SpriteExportMode\": 0, \"TextExportMode\": 2, \"ExportUnreadableAssets\": false, \"PreferOriginalTextureExtension\": true, \"SaveSettingsToDisk\": false, \"LanguageCode\": null}}",
+        )
+        .unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![source.clone()],
+            subdirectories: vec![subdir.clone()],
+        };
+
+        let settings = super::read_serialized_settings_file(&source).unwrap();
+        super::save_serialized_settings_to_dir(&settings, &subdir).unwrap();
+        let loaded = super::load_default_export_settings_from_dir(&subdir)
+            .unwrap()
+            .expect("the stored file must load");
+        assert_eq!(loaded.image_export_format, ImageExportFormat::Bmp);
+
+        let broken = subdir.join("broken.json");
+        std::fs::write(&broken, b"{\"Import\": {}}").unwrap();
+        let error = super::read_serialized_settings_file(&broken).unwrap_err();
+        assert!(error.to_string().contains("broken.json"), "{error}");
+        drop(input);
+    }
+
+    #[test]
+    fn default_path_delete_removes_present_and_ignores_absent() {
+        use assetripper::export::settings::{ExportDefaults, ImportDefaults, ProcessingDefaults};
+        use assetripper::export::settings_file::SerializedSettingsFile;
+
+        let directory = TestInputDirectory::new_root();
+        let subdir = directory.join("exe");
+        std::fs::create_dir(&subdir).unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: Vec::new(),
+            subdirectories: vec![subdir.clone()],
+        };
+
+        // Absent is a success without effect, mirroring the source check.
+        assert!(!super::delete_serialized_settings_in_dir(&subdir).unwrap());
+        let defaults = SerializedSettingsFile::from_defaults(
+            ImportDefaults::default(),
+            ProcessingDefaults::default(),
+            ExportDefaults::default(),
+        );
+        super::save_serialized_settings_to_dir(&defaults, &subdir).unwrap();
+        assert!(super::delete_serialized_settings_in_dir(&subdir).unwrap());
+        assert!(super::load_default_export_settings_from_dir(&subdir)
+            .unwrap()
+            .is_none());
+        assert!(!super::delete_serialized_settings_in_dir(&subdir).unwrap());
+        drop(input);
+    }
+
+    #[test]
+    fn cli_classifier_pins_the_settings_persistence_spellings() {
+        use super::{classify_cli_command, CliCommand};
+
+        assert_eq!(
+            classify_cli_command("save-default-settings"),
+            CliCommand::SaveDefaultSettings
+        );
+        assert_eq!(
+            classify_cli_command("delete-default-settings"),
+            CliCommand::DeleteDefaultSettings
+        );
+        assert_eq!(
+            classify_cli_command("Save-Default-Settings"),
+            CliCommand::Unknown
+        );
     }
 
     /// A class-43 `Mesh` whose vertex data is a single Float32 position channel and whose index
