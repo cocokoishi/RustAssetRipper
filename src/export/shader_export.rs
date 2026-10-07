@@ -1013,6 +1013,7 @@ mod tests {
         let mut current_tag = String::new();
         let mut form = ParsedShaderForm::default();
         let mut expected: Vec<u8> = Vec::new();
+        let mut threw_case = false;
         let mut rows = 0;
         let flush = |tag: &str, form: &ParsedShaderForm, expected: &[u8]| {
             assert!(!expected.is_empty(), "{tag} has no probed output");
@@ -1051,17 +1052,20 @@ mod tests {
         };
         for line in fixture.lines() {
             let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
+            if line.is_empty() || line.starts_with('#') || line.starts_with("PROPNAME|") {
                 continue;
             }
             let mut parts = line.splitn(4, '|');
             assert_eq!(parts.next(), Some("SPARSED"), "{line}");
             let tag = parts.next().expect("a probe tag").to_owned();
             if tag != current_tag && !current_tag.is_empty() {
-                flush(&current_tag, &form, &expected);
+                if !threw_case {
+                    flush(&current_tag, &form, &expected);
+                }
                 rows += 1;
                 form = ParsedShaderForm::default();
                 expected = Vec::new();
+                threw_case = false;
             }
             current_tag = tag;
             match parts.next().expect("a row kind") {
@@ -1111,12 +1115,82 @@ mod tests {
                 "text" => {
                     expected = unescape_fixture_text(parts.next().expect("escaped text"));
                 }
+                "threw" => {
+                    let exception = parts.next().expect("an exception name");
+                    assert_eq!(exception, "NotSupportedException", "{line}");
+                    let dimensions: Vec<i32> = form
+                        .properties
+                        .iter()
+                        .filter(|property| property.type_number == 4)
+                        .map(|property| property.texture_dimension)
+                        .collect();
+                    assert_eq!(dimensions.len(), 1, "{line}");
+                    assert_eq!(
+                        export_parsed_dummy(&form),
+                        Err(ShaderTextExportError::UnsupportedTextureDimension {
+                            value: dimensions[0]
+                        }),
+                        "{current_tag}",
+                    );
+                    threw_case = true;
+                }
                 other => panic!("unexpected row kind {other}"),
             }
         }
-        flush(&current_tag, &form, &expected);
+        if !threw_case {
+            flush(&current_tag, &form, &expected);
+        }
         rows += 1;
-        assert_eq!(rows, 3, "all probed parsed cases are asserted");
+        assert_eq!(rows, 7, "all probed parsed cases are asserted");
+    }
+
+    /// Every `m_*` field `ShaderView::from_value` reads has a same-named generated
+    /// property on the 2019.4 versioned subclasses (Unity convention: property
+    /// `Foo` is serialized as field `m_Foo`), proven by the probe dumping the
+    /// runtime property lists of a created `Shader` and its parsed-form chain.
+    /// This replaces the open class-48 TypeTree-dump question with shipped-runtime
+    /// evidence: the names the decoder addresses all exist on the objects the
+    /// reference exporter itself reads.
+    #[test]
+    fn generated_property_names_back_every_m_field_read() {
+        let fixture = include_str!("shader_parsed_fixture.txt");
+        let mut dumped: Vec<String> = Vec::new();
+        for line in fixture.lines() {
+            let line = line.trim();
+            if !line.starts_with("PROPNAME|") {
+                continue;
+            }
+            dumped.push(line.to_owned());
+        }
+        assert_eq!(dumped.len(), 6, "all probed runtime types are asserted");
+        let names = dumped.join("|");
+        for required in [
+            "Script",
+            "ParsedForm",
+            "Name",
+            "FallbackName",
+            "CustomEditorName",
+            "PropInfo",
+            "Props",
+            "Attributes",
+            "DefTexture",
+            "DefValue_0_",
+            "DefValue_1_",
+            "DefValue_2_",
+            "DefValue_3_",
+            "Flags",
+            "Type",
+            "Description",
+            "TexDim",
+            "DefaultName",
+        ] {
+            assert!(
+                names
+                    .split('|')
+                    .any(|cell| cell.split(',').any(|candidate| candidate == required)),
+                "{required} has a generated property",
+            );
+        }
     }
 
     #[test]
