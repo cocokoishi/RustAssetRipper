@@ -414,10 +414,10 @@ pub fn shader_float_is_max_and_nameless(value: f32, name: &str) -> bool {
 /// expected discriminant and the value is nameless.
 ///
 /// The reference bit-casts `(int)value` to the enum; the Rust side compares the
-/// truncated `i32` against the caller-supplied discriminant. Truncation agrees
-/// for finite in-`i32`-range inputs, which covers every enum-typed shader state;
-/// NaN and out-of-range magnitudes convert differently across runtimes and are
-/// out of scope here.
+/// truncated `i32` against the caller-supplied discriminant. The live probe
+/// (`shader_state_fixture.txt` `csint` rows) shows the reference cast agrees
+/// with the saturating Rust cast on every probed input, including NaN and
+/// out-of-range magnitudes, so the truncation comparison holds generally.
 pub fn shader_float_is_default(value: f32, name: &str, default: i32) -> bool {
     value as i32 == default && !shader_state_name_is_set(name)
 }
@@ -907,6 +907,282 @@ mod tests {
         assert_eq!(
             SerializedPassType::GrabPass.to_serialized_string(),
             "GrabPass"
+        );
+    }
+
+    /// Differential against the shipped serialized-shader render-state
+    /// extensions over live generated objects (probe
+    /// `Temp/opencode/shstateprobe`, fixture `shader_state_fixture.txt`):
+    /// real `SerializedShaderFloatValue_5_5`, `...VectorValue_5_5`,
+    /// `...State_2017_2`, `...StencilOp_5_5`, and `SerializedPass_2017` /
+    /// `_2019_3_0_a7` instances with `m_` backing-field writes, calling the
+    /// shipped predicates. Every row replays through the Rust kernels,
+    /// including the full six-way `StencilIsDefault` conjunction, the
+    /// ordered `GetPrograms` selection with the ray-tracing gate, and the
+    /// live `ShaderType`/`SerializedPassType` tables. A whole-tree caller
+    /// audit over the frozen snapshot finds no external callers of any of
+    /// these members (definitions only), so the kernels pin decision shapes
+    /// with no observable product behavior behind them.
+    #[test]
+    fn render_state_predicates_match_the_reference_runtime() {
+        use ShaderProgramType::{Domain, Fragment, Geometry, Hull, RayTracing, Vertex};
+
+        fn bits(word: &str) -> f32 {
+            f32::from_bits(u32::from_str_radix(word, 16).expect("hex word"))
+        }
+
+        fn bit(flag: &str) -> bool {
+            match flag {
+                "0" => false,
+                "1" => true,
+                other => panic!("unexpected bit {other}"),
+            }
+        }
+
+        fn program_type(name: &str) -> ShaderProgramType {
+            match name {
+                "Vertex" => Vertex,
+                "Fragment" => Fragment,
+                "Geometry" => Geometry,
+                "Hull" => Hull,
+                "Domain" => Domain,
+                "RayTracing" => RayTracing,
+                other => panic!("unexpected program {other}"),
+            }
+        }
+
+        let fixture = include_str!("shader_state_fixture.txt");
+        let mut counts = [0usize; 10];
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut cells = line.split('|');
+            assert_eq!(cells.next(), Some("SHSTATE"), "{line}");
+            match cells.next().expect("a row kind") {
+                "impl" => {
+                    let slot = cells.next().expect("a slot");
+                    let class = cells.next().expect("a class");
+                    assert_ne!(class, "MISSING", "{slot}");
+                    counts[0] += 1;
+                }
+                "float" => {
+                    let value = bits(cells.next().expect("bits"));
+                    let name = cells.next().expect("a name");
+                    let expected: Vec<bool> = cells.map(bit).collect();
+                    assert_eq!(expected.len(), 4, "{line}");
+                    assert_eq!(shader_float_is_zero(value), expected[0], "{line}");
+                    assert_eq!(shader_float_is_max(value), expected[1], "{line}");
+                    assert_eq!(
+                        shader_float_is_zero_and_nameless(value, name),
+                        expected[2],
+                        "{line}"
+                    );
+                    assert_eq!(
+                        shader_float_is_max_and_nameless(value, name),
+                        expected[3],
+                        "{line}"
+                    );
+                    counts[1] += 1;
+                }
+                "floatdefault" => {
+                    let value = bits(cells.next().expect("bits"));
+                    let name = cells.next().expect("a name");
+                    let default: i32 = cells.next().expect("a default").parse().unwrap();
+                    let expected = bit(cells.next().expect("a bit"));
+                    assert_eq!(
+                        shader_float_is_default(value, name, default),
+                        expected,
+                        "{line}"
+                    );
+                    counts[2] += 1;
+                }
+                "csint" => {
+                    let value = bits(cells.next().expect("bits"));
+                    let expected: i32 = cells.next().expect("an int").parse().unwrap();
+                    // The reference `(int)` cast agrees with the saturating
+                    // Rust cast on every probed input, including NaN and
+                    // out-of-range magnitudes.
+                    assert_eq!(value as i32, expected, "{line}");
+                    counts[3] += 1;
+                }
+                "vector" => {
+                    let lanes = [
+                        bits(cells.next().expect("x")),
+                        bits(cells.next().expect("y")),
+                        bits(cells.next().expect("z")),
+                        bits(cells.next().expect("w")),
+                    ];
+                    let name = cells.next().expect("a name");
+                    let expected: Vec<bool> = cells.map(bit).collect();
+                    assert_eq!(expected.len(), 2, "{line}");
+                    assert_eq!(shader_vector_is_zero(lanes), expected[0], "{line}");
+                    assert_eq!(
+                        shader_vector_is_zero_and_nameless(lanes, name),
+                        expected[1],
+                        "{line}"
+                    );
+                    counts[4] += 1;
+                }
+                "stencilop" => {
+                    let mut quads = cells;
+                    let (pass, fail, z_fail, comp) = (
+                        quads
+                            .next()
+                            .expect("pass")
+                            .parse::<i32>()
+                            .expect("pass int"),
+                        quads
+                            .next()
+                            .expect("fail")
+                            .parse::<i32>()
+                            .expect("fail int"),
+                        quads
+                            .next()
+                            .expect("z-fail")
+                            .parse::<i32>()
+                            .expect("z-fail int"),
+                        quads
+                            .next()
+                            .expect("comp")
+                            .parse::<i32>()
+                            .expect("comp int"),
+                    );
+                    let expected = bit(quads.next().expect("a bit"));
+                    assert_eq!(
+                        stencil_op_is_default(pass, fail, z_fail, comp),
+                        expected,
+                        "{line}"
+                    );
+                    counts[5] += 1;
+                }
+                "state" => {
+                    let reference = bits(cells.next().expect("ref bits"));
+                    let read = bits(cells.next().expect("read bits"));
+                    let write = bits(cells.next().expect("write bits"));
+                    let ops: Vec<i32> = cells
+                        .next()
+                        .expect("op quads")
+                        .split(',')
+                        .map(|quad| quad.parse().expect("a discriminant"))
+                        .collect();
+                    assert_eq!(ops.len(), 12, "{line}");
+                    let alpha: i32 = cells.next().expect("alpha").parse().unwrap();
+                    let lighting = bit(cells.next().expect("light bit"));
+                    let expected: Vec<&str> = cells.collect();
+                    assert_eq!(expected.len(), 6, "{line}");
+                    // The probe leaves every state name at its default, so
+                    // the replay does too.
+                    let ref_is_default = stencil_ref_is_default(reference, "");
+                    let read_is_default = stencil_mask_is_default(read, "");
+                    let write_is_default = stencil_mask_is_default(write, "");
+                    assert_eq!(ref_is_default, bit(expected[0]), "{line}");
+                    assert_eq!(read_is_default, bit(expected[1]), "{line}");
+                    assert_eq!(write_is_default, bit(expected[2]), "{line}");
+                    let op_defaults: Vec<bool> = ops
+                        .chunks_exact(4)
+                        .map(|quad| stencil_op_is_default(quad[0], quad[1], quad[2], quad[3]))
+                        .collect();
+                    assert_eq!(
+                        shader_stencil_is_default(
+                            ref_is_default,
+                            read_is_default,
+                            write_is_default,
+                            op_defaults[0],
+                            op_defaults[1],
+                            op_defaults[2],
+                        ),
+                        bit(expected[3]),
+                        "{line}"
+                    );
+                    assert_eq!(
+                        shader_alpha_to_mask_enabled(alpha),
+                        bit(expected[4]),
+                        "{line}"
+                    );
+                    assert_eq!(shader_lighting_word(lighting), expected[5], "{line}");
+                    counts[6] += 1;
+                }
+                "shprog" => {
+                    let name = cells.next().expect("a name");
+                    let value: i32 = cells.next().expect("a value").parse().unwrap();
+                    let mask: i32 = cells.next().expect("a mask").parse().unwrap();
+                    let word = cells.next().expect("a word");
+                    let program = match name {
+                        "None" => ShaderProgramType::None,
+                        _ => program_type(name),
+                    };
+                    assert_eq!(program.discriminant(), value, "{line}");
+                    assert_eq!(program.to_program_mask(), mask, "{line}");
+                    assert_eq!(
+                        program.to_program_type_string(),
+                        if word == "THROW" { None } else { Some(word) },
+                        "{line}"
+                    );
+                    counts[7] += 1;
+                }
+                "passtype" => {
+                    let name = cells.next().expect("a name");
+                    let value: i32 = cells.next().expect("a value").parse().unwrap();
+                    let word = cells.next().expect("a word");
+                    let pass = match name {
+                        "Pass" => SerializedPassType::Pass,
+                        "UsePass" => SerializedPassType::UsePass,
+                        "GrabPass" => SerializedPassType::GrabPass,
+                        other => panic!("unexpected pass type {other}"),
+                    };
+                    assert_eq!(
+                        SerializedPassType::from_discriminant(value),
+                        Some(pass),
+                        "{line}"
+                    );
+                    assert_eq!(pass.to_serialized_string(), word, "{line}");
+                    counts[8] += 1;
+                }
+                "pass" => {
+                    let mask: i32 = cells.next().expect("a mask").parse().unwrap();
+                    let expected: Vec<bool> = cells
+                        .next()
+                        .expect("bits")
+                        .chars()
+                        .map(|flag| bit(&flag.to_string()))
+                        .collect();
+                    assert_eq!(expected.len(), 6, "{line}");
+                    let order: Vec<ShaderProgramType> = cells
+                        .next()
+                        .expect("an order")
+                        .split("),")
+                        .filter(|item| !item.trim().is_empty())
+                        .map(|item| {
+                            // Items look like
+                            // "ValueTuple`2:(SerializedProgram_2019, Vertex".
+                            let name = item
+                                .rsplit(", ")
+                                .next()
+                                .expect("a program")
+                                .trim_end_matches(')');
+                            program_type(name)
+                        })
+                        .collect();
+                    let programs = [Vertex, Fragment, Geometry, Hull, Domain, RayTracing];
+                    for (program, expected) in programs.into_iter().zip(expected) {
+                        assert_eq!(pass_has_program(mask, program), expected, "{line}");
+                    }
+                    // The probe runs against a 2019 pass, so the serialized
+                    // ray-tracing gate is live exactly when the reference
+                    // selects it.
+                    let gate = order.contains(&RayTracing);
+                    assert_eq!(pass_program_types(mask, gate), order, "{line}");
+                    counts[9] += 1;
+                }
+                other => panic!("unexpected row kind {other}"),
+            }
+        }
+        assert_eq!(
+            counts,
+            [6, 8, 4, 5, 4, 4, 4, 7, 3, 4],
+            "all probed render-state rows are asserted"
         );
     }
 }

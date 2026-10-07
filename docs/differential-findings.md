@@ -963,3 +963,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | Test texture_exporter_matches_the_reference_runtime in export/export_extension.rs; fixture src/export/texture_exporter_fixture.txt. No production change. |
 | Regression evidence | All 8 admissions and all 6 selections reproduce through the decision kernels with the probed integrity/conversion facts; export suite 18/18. |
 | Remaining comparison | Bitmap encode and file IO stay caller-side; Unity-produced projects stay out per the row disposition. |
+
+## DIFF-SHADER-STATE-001 - render-state predicates and pass selection
+
+| Field | Finding |
+|---|---|
+| Status | Reference-runtime differential recorded; 43 behavior rows ported and pinned |
+| Source location | AssetRipper/Source/AssetRipper.SourceGenerated.Extensions/SerializedShaderFloatValueExtensions.cs, SerializedShaderVectorValueExtensions.cs, SerializedShaderStateExtensions.cs, SerializedStencilOpExtensions.cs, SerializedShaderRTBlendStateExtensions.cs, SerializedPassExtensions.cs; Enums/Shader/ShaderType.cs, Enums/Shader/SerializedShader/StencilOp.cs, StencilComp.cs |
+| Input evidence | Probe Temp/opencode/shstateprobe (shipped SourceGenerated.Extensions + SourceGenerated DLLs, SDK 10.0.401) with real SerializedShaderFloatValue_5_5, SerializedShaderVectorValue_5_5, SerializedShaderState_2017_2, SerializedStencilOp_5_5, SerializedPass_2017, and SerializedPass_2019_3_0_a7 instances plus `m_` backing-field writes, calling the shipped predicates. Committed as src/resources/shader_state_fixture.txt (49 rows). |
+| Source-derived behavior | Exact float equality (-0.0 is zero, denormals are not), 255-max, `<noninit>`/empty namelessness, postfix-free search order, Keep/Keep/Keep/Always stencil default, alpha-nonzero/conservative-present-nonzero/On-Off words, the six-way stencil conjunction, mask-bit program membership with source order, the 2019 ray-tracing gate, live ShaderType/SerializedPassType tables, and C# `(int)`-cast agreement with Rust on NaN/out-of-range magnitudes. |
+| Root cause | No Rust deviation found; this increment replaces source-derived expectations with live-object vectors and upgrades the `IsDefault` truncation scope note from assumed to probe-backed. A whole-tree caller audit over the frozen snapshot finds zero external call sites for any of these members, so the kernels pin decision shapes with no observable product behavior behind them. |
+| Rust change | Test render_state_predicates_match_the_reference_runtime in resources/shader.rs; fixture src/resources/shader_state_fixture.txt; `IsDefault` doc now cites probe evidence. No production change. |
+| Regression evidence | All 43 behavior rows replay through the kernels; shader suite 13/13. |
+| Remaining comparison | Name backing selection, generic enum-cast machinery, name-or-value emission strings, remaining typed casts, and MaxShaderModelVersion stay caller-side; Unity-produced shaders stay out per the row disposition. |

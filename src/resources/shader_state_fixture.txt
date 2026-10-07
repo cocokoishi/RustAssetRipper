@@ -1,0 +1,71 @@
+# Live serialized-shader render-state differential.
+# Probe Temp/opencode/shstateprobe: real generated objects
+# (SerializedShaderFloatValue_5_5, SerializedShaderVectorValue_5_5,
+# SerializedShaderState_2017_2, SerializedStencilOp_5_5, SerializedPass_2017,
+# SerializedPass_2019_3_0_a7) with m_ backing-field writes, calling the shipped
+# SerializedShader*Extensions plus SerializedPassExtensions predicates
+# (shipped SourceGenerated.Extensions DLL, SDK 10.0.401).
+# Format: SHSTATE|impl|<slot>|<concrete class>;
+# SHSTATE|float|<bits>|<name>|<iszero>|<ismax>|<zeroandnameless>|<maxandnameless>;
+# SHSTATE|floatdefault|<bits>|<name>|<default>|<isdefault> (StencilOp enum);
+# SHSTATE|csint|<bits>|<unchecked (int)value> (NaN and out-of-range agree
+# with Rust saturating casts on every probed input);
+# SHSTATE|vector|<x>|<y>|<z>|<w>|<name>|<iszero>|<zeroandnameless>;
+# SHSTATE|stencilop|<pass>|<fail>|<zfail>|<comp>|<isdefault>;
+# SHSTATE|state|<refbits>|<readbits>|<writebits>|<12 op discriminants>|<alpha>|<lightbit>|<ref>|<read>|<write>|<conjunction>|<alpha>|<On|Off>;
+# SHSTATE|shprog|<name>|<value>|<mask>|<vp|fp|gp|hp|dp|rtp|THROW>;
+# SHSTATE|passtype|<name>|<value>|<Pass|UsePass|GrabPass>;
+# SHSTATE|pass|<mask>|<vertex|fragment|geometry|hull|domain|raytracing bits>|<order>.
+# Bits conventions: float lanes as IEEE-754 hex words; empty names print empty.
+# A whole-tree caller audit over the frozen snapshot finds no external callers
+# of any of these members (definitions only), so the kernels pin decision
+# shapes with no observable product behavior behind them.
+SHSTATE|impl|float|AssetRipper.SourceGenerated.Subclasses.SerializedShaderFloatValue.SerializedShaderFloatValue_5_5
+SHSTATE|impl|vector|AssetRipper.SourceGenerated.Subclasses.SerializedShaderVectorValue.SerializedShaderVectorValue_5_5
+SHSTATE|impl|state|AssetRipper.SourceGenerated.Subclasses.SerializedShaderState.SerializedShaderState_2017_2
+SHSTATE|impl|stencilop|AssetRipper.SourceGenerated.Subclasses.SerializedStencilOp.SerializedStencilOp_5_5
+SHSTATE|impl|pass|AssetRipper.SourceGenerated.Subclasses.SerializedPass.SerializedPass_2017
+SHSTATE|float|00000000||1|0|1|0
+SHSTATE|float|00000000|<noninit>|1|0|1|0
+SHSTATE|float|00000000|n|1|0|0|0
+SHSTATE|float|80000000||1|0|1|0
+SHSTATE|float|00000001||0|0|0|0
+SHSTATE|float|437F0000||0|1|0|1
+SHSTATE|float|437F0000|n|0|1|0|0
+SHSTATE|float|3FC00000||0|0|0|0
+SHSTATE|floatdefault|00000000||0|1
+SHSTATE|floatdefault|3F800000||0|0
+SHSTATE|floatdefault|00000000|n|0|0
+SHSTATE|floatdefault|41000000||8|1
+SHSTATE|csint|3FF33333|1
+SHSTATE|csint|BFF33333|-1
+SHSTATE|csint|FFC00000|0
+SHSTATE|csint|60AD78EC|2147483647
+SHSTATE|csint|E0AD78EC|-2147483648
+SHSTATE|vector|00000000|00000000|00000000|00000000||1|1
+SHSTATE|vector|00000000|00000000|00000000|00000000|n|1|0
+SHSTATE|vector|00000000|00000000|00000000|3F800000||0|0
+SHSTATE|vector|80000000|00000000|00000000|00000000||1|1
+SHSTATE|stencilop|0|0|0|8|1
+SHSTATE|stencilop|1|0|0|8|0
+SHSTATE|stencilop|0|0|0|0|0
+SHSTATE|stencilop|0|0|0|7|0
+SHSTATE|state|00000000|437F0000|437F0000|0,0,0,8,0,0,0,8,0,0,0,8|0|0|1|1|1|1|0|Off
+SHSTATE|state|3F800000|437F0000|437F0000|0,0,0,8,0,0,0,8,0,0,0,8|0|0|0|1|1|0|0|Off
+SHSTATE|state|00000000|437F0000|437F0000|0,0,0,8,0,0,0,8,0,0,0,0|0|0|1|1|1|0|0|Off
+SHSTATE|state|00000000|437F0000|437F0000|0,0,0,8,0,0,0,8,0,0,0,8|1|1|1|1|1|1|1|On
+SHSTATE|shprog|None|0|1|THROW
+SHSTATE|shprog|Vertex|1|2|vp
+SHSTATE|shprog|Fragment|2|4|fp
+SHSTATE|shprog|Geometry|3|8|gp
+SHSTATE|shprog|Hull|4|16|hp
+SHSTATE|shprog|Domain|5|32|dp
+SHSTATE|shprog|RayTracing|6|64|rtp
+SHSTATE|passtype|Pass|0|Pass
+SHSTATE|passtype|UsePass|1|UsePass
+SHSTATE|passtype|GrabPass|2|GrabPass
+SHSTATE|impl|pass-rt|AssetRipper.SourceGenerated.Subclasses.SerializedPass.SerializedPass_2019_3_0_a7
+SHSTATE|pass|0|000000|
+SHSTATE|pass|62|111110|ValueTuple`2:(SerializedProgram_2019, Vertex),ValueTuple`2:(SerializedProgram_2019, Fragment),ValueTuple`2:(SerializedProgram_2019, Geometry),ValueTuple`2:(SerializedProgram_2019, Hull),ValueTuple`2:(SerializedProgram_2019, Domain)
+SHSTATE|pass|64|000001|ValueTuple`2:(SerializedProgram_2019, RayTracing)
+SHSTATE|pass|126|111111|ValueTuple`2:(SerializedProgram_2019, Vertex),ValueTuple`2:(SerializedProgram_2019, Fragment),ValueTuple`2:(SerializedProgram_2019, Geometry),ValueTuple`2:(SerializedProgram_2019, Hull),ValueTuple`2:(SerializedProgram_2019, Domain),ValueTuple`2:(SerializedProgram_2019, RayTracing)
