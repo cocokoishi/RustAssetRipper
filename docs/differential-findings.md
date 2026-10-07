@@ -716,3 +716,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | src/serialized_file/metadata.rs test type_records_match_reference_constructed_files; fixture src/serialized_file/metadata_type_fixture.txt. |
 | Regression evidence | All five records reproduce IDs, flags, indices, hashes, trees, dependencies, and managed names on both sides; full suite 1364 plus 60 pass with warnings-denied Clippy. |
 | Remaining comparison | Type-to-object matching and script recovery stay with their downstream rows; managed field resolution stays downstream. |
+
+## DIFF-COMP-ENC-001 - Independently-encoded Brotli/LZ4/Zstd
+
+| Field | Finding |
+|---|---|
+| Status | Independent-encoder differential recorded; three rows ported and pinned |
+| Source location | AssetRipper.IO.Files/CompressedFiles/Brotli/BrotliFile.cs (BrotliStream decode, Write NotImplemented); BundleFileBlockReader.cs with K4os raw blocks; BundleFiles/ZstdCompression.cs (PartialStream-wrapped DecompressStream, pre-sized output) |
+| Input evidence | Probe Temp/opencode/compencodeprobe (SDK 10.0.401) with .NET/K4os/ZstdSharp encoders and reference round-trip oracles. Committed as src/compression/reference_encoded_fixture.txt (25 lines). |
+| Source-derived behavior | Brotli text/binary/empty, LZ4 match-heavy and literal blocks, and Zstd entropy-coded frames all decode byte-exact in Rust. |
+| Root cause | No deviation found; this increment replaces hand-only evidence with independently encoded vectors (Zstd is the first Huffman/FSE evidence). |
+| Rust change | Three per-codec tests in wrappers.rs, lz4_block.rs, zstd.rs; shared fixture src/compression/reference_encoded_fixture.txt. |
+| Regression evidence | All seven vectors decode byte-exact on both sides; full suite 1367 plus 60 pass with warnings-denied Clippy. |
+| Remaining comparison | Broad fuzz stays future work; Unity Zstd uses standard framing covered here. |

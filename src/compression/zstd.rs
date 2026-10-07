@@ -232,4 +232,63 @@ mod tests {
         );
         assert!(allocation.to_string().contains("could not allocate"));
     }
+
+    #[test]
+    fn zstdsharp_encoded_frames_decode_to_the_same_bytes() {
+        fn hex_to_bytes(hex: &str) -> Vec<u8> {
+            assert!(hex.len().is_multiple_of(2), "odd hex length for {hex}");
+            let mut out = Vec::with_capacity(hex.len() / 2);
+            let bytes = hex.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                let hi = match bytes[i] {
+                    b'0'..=b'9' => bytes[i] - b'0',
+                    b'a'..=b'f' => bytes[i] - b'a' + 10,
+                    b'A'..=b'F' => bytes[i] - b'A' + 10,
+                    b => panic!("invalid hex byte {b}"),
+                };
+                let lo = match bytes[i + 1] {
+                    b'0'..=b'9' => bytes[i + 1] - b'0',
+                    b'a'..=b'f' => bytes[i + 1] - b'a' + 10,
+                    b'A'..=b'F' => bytes[i + 1] - b'A' + 10,
+                    b => panic!("invalid hex byte {b}"),
+                };
+                out.push((hi << 4) | lo);
+                i += 2;
+            }
+            out
+        }
+
+        // Probe Temp/opencode/compencodeprobe (ZstdSharp Compressor(3)
+        // entropy-coded frames, decoded by reference ZstdCompression as
+        // oracle): Z1 compressible text, Z2 0..255 binary. Independent of the
+        // Rust codec and the first entropy-coded (Huffman/FSE) evidence.
+        let fixture = include_str!("reference_encoded_fixture.txt");
+        let mut raws: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
+        let mut encs: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
+        for line in fixture.lines() {
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+            if line.starts_with("COMP_RAW|") {
+                let parts: Vec<&str> = line.splitn(3, '|').collect();
+                assert_eq!(parts.len(), 3, "bad COMP_RAW {line}");
+                raws.insert(parts[1].to_string(), hex_to_bytes(parts[2]));
+            } else if line.starts_with("COMP_ENC|") {
+                let parts: Vec<&str> = line.splitn(3, '|').collect();
+                assert_eq!(parts.len(), 3, "bad COMP_ENC {line}");
+                encs.insert(parts[1].to_string(), hex_to_bytes(parts[2]));
+            } else if line.starts_with("COMP_REF|") {
+                assert!(line.ends_with("|OK"), "reference round-trip {line}");
+            }
+        }
+
+        for case in ["Z1", "Z2"] {
+            let raw = raws.get(case).unwrap_or_else(|| panic!("missing {case}"));
+            let enc = encs.get(case).unwrap_or_else(|| panic!("missing {case}"));
+            let decoded = decompress_block(enc, raw.len(), raw.len() + 64, 1 << 20)
+                .unwrap_or_else(|e| panic!("{case} Rust decode failed: {e:?}"));
+            assert_eq!(&decoded, raw, "{case} bytes");
+        }
+    }
 }

@@ -572,4 +572,64 @@ mod tests {
         assert_eq!(concat_plain, b"first second");
         assert_eq!(&decompress_gzip(concat_comp, 64).unwrap(), concat_plain);
     }
+
+    #[test]
+    fn dotnet_encoded_brotli_streams_decode_to_the_same_bytes() {
+        fn hex_to_bytes(hex: &str) -> Vec<u8> {
+            assert!(hex.len().is_multiple_of(2), "odd hex length for {hex}");
+            let mut out = Vec::with_capacity(hex.len() / 2);
+            let bytes = hex.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                let hi = match bytes[i] {
+                    b'0'..=b'9' => bytes[i] - b'0',
+                    b'a'..=b'f' => bytes[i] - b'a' + 10,
+                    b'A'..=b'F' => bytes[i] - b'A' + 10,
+                    b => panic!("invalid hex byte {b}"),
+                };
+                let lo = match bytes[i + 1] {
+                    b'0'..=b'9' => bytes[i + 1] - b'0',
+                    b'a'..=b'f' => bytes[i + 1] - b'a' + 10,
+                    b'A'..=b'F' => bytes[i + 1] - b'A' + 10,
+                    b => panic!("invalid hex byte {b}"),
+                };
+                out.push((hi << 4) | lo);
+                i += 2;
+            }
+            out
+        }
+
+        // Probe Temp/opencode/compencodeprobe (.NET BrotliStream Optimal,
+        // SDK 10.0.401): B1 compressible text, B2 0..255 binary, B3 empty.
+        // These replace the hand-only Brotli evidence with independently
+        // encoded streams (the reference decodes with the same .NET library,
+        // so the oracle is the independent encoder, not a second decoder).
+        let fixture = include_str!("reference_encoded_fixture.txt");
+        let mut raws: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
+        let mut encs: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
+        for line in fixture.lines() {
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+            if line.starts_with("COMP_RAW|") {
+                let parts: Vec<&str> = line.splitn(3, '|').collect();
+                assert_eq!(parts.len(), 3, "bad COMP_RAW {line}");
+                raws.insert(parts[1].to_string(), hex_to_bytes(parts[2]));
+            } else if line.starts_with("COMP_ENC|") {
+                let parts: Vec<&str> = line.splitn(3, '|').collect();
+                assert_eq!(parts.len(), 3, "bad COMP_ENC {line}");
+                encs.insert(parts[1].to_string(), hex_to_bytes(parts[2]));
+            } else if line.starts_with("COMP_REF|") {
+                assert!(line.ends_with("|OK"), "reference round-trip {line}");
+            }
+        }
+
+        for case in ["B1", "B2", "B3"] {
+            let raw = raws.get(case).unwrap_or_else(|| panic!("missing {case}"));
+            let enc = encs.get(case).unwrap_or_else(|| panic!("missing {case}"));
+            let decoded = decompress_brotli(enc, raw.len().max(1) * 2 + 16)
+                .unwrap_or_else(|e| panic!("{case} Rust decode failed: {e:?}"));
+            assert_eq!(&decoded, raw, "{case} bytes");
+        }
+    }
 }
