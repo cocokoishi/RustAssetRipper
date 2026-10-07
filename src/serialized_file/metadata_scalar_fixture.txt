@@ -1,0 +1,10 @@
+﻿# SerializedFile metadata scalar reference-runtime differential (probe Temp/opencode/sermetascalarprobe, .NET SDK 10.0.401)
+# Reference: SerializedFileMetadata.Read (shipped IO.Files.dll) over C#-constructed full files (not Rust-constructed) with empty tables.
+# Cases: S1 gen8 parseable 2019.4.1f1/Long1/user (pre-9 metadata-at-end, DataOffset 0); S2 gen8 unparseable custom-private (reference normalizes to 0.0.0a0, Rust preserves raw text; both signal stripped); S3 gen14 (no LongFileID field, enableTT, script types; DataOffset at end).
+# Format: SCALAR_HEX|case|hex(file); SCALAR_READ|case|dump
+SCALAR_HEX|S1|0000002F0000003F000000080000000000323031392E342E31663100130000000000000001000000000000000000000074657374207573657220696E666F00
+SCALAR_READ|S1|V=8|Plat=19|Long=1|User=test user info|Types=0|Objs=0|Ext=0|UV=2019.4.1f1
+SCALAR_HEX|S2|0000002500000035000000080000000000637573746F6D2D7072697661746500130000000000000001000000000000000000000000
+SCALAR_READ|S2|V=8|Plat=19|Long=1|User=|Types=0|Objs=0|Ext=0|UV=0.0.0a0
+SCALAR_HEX|S3|0000002B0000003F0000000E0000003F00000000323032312E322E3066310013000000010000000000000000000000000000000067656E3134207573657200
+SCALAR_READ|S3|V=14|Plat=19|Long=0|User=gen14 user|Types=0|Objs=0|Ext=0|UV=2021.2.0f1

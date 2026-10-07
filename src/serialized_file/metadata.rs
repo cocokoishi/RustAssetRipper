@@ -2682,4 +2682,131 @@ mod tests {
             assert!(format!("{err:?}").len() > 8, "error carries context");
         }
     }
+
+    #[test]
+    fn scalar_fields_match_reference_constructed_files() {
+        fn hex_to_bytes(hex: &str) -> Vec<u8> {
+            assert!(hex.len().is_multiple_of(2), "odd hex length for {hex}");
+            let mut out = Vec::with_capacity(hex.len() / 2);
+            let bytes = hex.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                let hi = match bytes[i] {
+                    b'0'..=b'9' => bytes[i] - b'0',
+                    b'a'..=b'f' => bytes[i] - b'a' + 10,
+                    b'A'..=b'F' => bytes[i] - b'A' + 10,
+                    b => panic!("invalid hex byte {b}"),
+                };
+                let lo = match bytes[i + 1] {
+                    b'0'..=b'9' => bytes[i + 1] - b'0',
+                    b'a'..=b'f' => bytes[i + 1] - b'a' + 10,
+                    b'A'..=b'F' => bytes[i + 1] - b'A' + 10,
+                    b => panic!("invalid hex byte {b}"),
+                };
+                out.push((hi << 4) | lo);
+                i += 2;
+            }
+            out
+        }
+
+        fn field<'a>(parts: &[&'a str], key: &str) -> &'a str {
+            let prefix = format!("{key}=");
+            for part in parts {
+                if let Some(v) = part.strip_prefix(&prefix) {
+                    return v;
+                }
+            }
+            panic!("missing {key} in {parts:?}");
+        }
+
+        // Probe Temp/opencode/sermetascalarprobe (SerializedFileMetadata.Read
+        // over C#-constructed full files, SDK 10.0.401): S1 gen8 parseable,
+        // S2 gen8 unparseable (reference normalizes to 0.0.0a0 while Rust
+        // preserves the raw text; both signal stripped), S3 gen14 without
+        // the LongFileID field. Nothing here was produced by Rust.
+        let fixture = include_str!("metadata_scalar_fixture.txt");
+        let mut hexes: std::collections::HashMap<String, Vec<u8>> =
+            std::collections::HashMap::new();
+        let mut reads: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for line in fixture.lines() {
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+            if line.starts_with("SCALAR_HEX|") {
+                let parts: Vec<&str> = line.splitn(3, '|').collect();
+                assert_eq!(parts.len(), 3, "bad SCALAR_HEX {line}");
+                hexes.insert(parts[1].to_string(), hex_to_bytes(parts[2]));
+            } else if line.starts_with("SCALAR_READ|") {
+                let parts: Vec<&str> = line.splitn(3, '|').collect();
+                assert_eq!(parts.len(), 3, "bad SCALAR_READ {line}");
+                reads.insert(parts[1].to_string(), parts[2].to_string());
+            }
+        }
+
+        // S1: gen8 parseable signature, LongFileID, user info, platform.
+        {
+            let bytes = hexes.get("S1").expect("S1 hex");
+            let dump = reads.get("S1").expect("S1 dump");
+            let parts: Vec<&str> = dump.split('|').collect();
+            assert_eq!(field(&parts, "V"), "8");
+            assert_eq!(field(&parts, "UV"), "2019.4.1f1");
+            assert_eq!(field(&parts, "Plat"), "19");
+            assert_eq!(field(&parts, "Long"), "1");
+            assert_eq!(field(&parts, "User"), "test user info");
+            let header = SerializedFileHeader::parse(bytes).expect("S1 header");
+            assert_eq!(header.format_version, FormatVersion::Unknown8);
+            let metadata = SerializedFileMetadata::parse_file(bytes, &header).expect("S1 metadata");
+            assert_eq!(
+                metadata.prefix.unity_version_text.as_deref(),
+                Some("2019.4.1f1")
+            );
+            assert_eq!(metadata.prefix.target_platform, Some(19));
+            assert_eq!(metadata.long_file_id, Some(1));
+            assert_eq!(metadata.user_information.as_deref(), Some("test user info"));
+            assert!(metadata.types.is_empty());
+            assert!(metadata.objects.is_empty());
+            assert!(metadata.externals.is_empty());
+        }
+
+        // S2: unparseable signatures fall back on both sides.
+        {
+            let bytes = hexes.get("S2").expect("S2 hex");
+            let dump = reads.get("S2").expect("S2 dump");
+            let parts: Vec<&str> = dump.split('|').collect();
+            assert_eq!(field(&parts, "UV"), "0.0.0a0");
+            let header = SerializedFileHeader::parse(bytes).expect("S2 header");
+            let metadata = SerializedFileMetadata::parse_file(bytes, &header).expect("S2 metadata");
+            assert_eq!(
+                metadata.prefix.unity_version_text.as_deref(),
+                Some("custom-private")
+            );
+            assert_eq!(metadata.long_file_id, Some(1));
+            assert_eq!(metadata.user_information.as_deref(), Some(""));
+        }
+
+        // S3: gen14 has no LongFileID field and carries script types.
+        {
+            let bytes = hexes.get("S3").expect("S3 hex");
+            let dump = reads.get("S3").expect("S3 dump");
+            let parts: Vec<&str> = dump.split('|').collect();
+            assert_eq!(field(&parts, "V"), "14");
+            assert_eq!(field(&parts, "UV"), "2021.2.0f1");
+            assert_eq!(field(&parts, "Long"), "0");
+            assert_eq!(field(&parts, "User"), "gen14 user");
+            let header = SerializedFileHeader::parse(bytes).expect("S3 header");
+            assert_eq!(header.format_version, FormatVersion::Unknown14);
+            let metadata = SerializedFileMetadata::parse_file(bytes, &header).expect("S3 metadata");
+            assert_eq!(
+                metadata.prefix.unity_version_text.as_deref(),
+                Some("2021.2.0f1")
+            );
+            assert_eq!(metadata.prefix.target_platform, Some(19));
+            assert_eq!(metadata.long_file_id, None);
+            assert!(metadata.script_types.is_empty());
+            assert_eq!(metadata.user_information.as_deref(), Some("gen14 user"));
+            assert!(metadata.types.is_empty());
+            assert!(metadata.objects.is_empty());
+            assert!(metadata.externals.is_empty());
+        }
+    }
 }

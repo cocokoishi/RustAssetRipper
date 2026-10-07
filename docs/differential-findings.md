@@ -651,3 +651,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | src/container/unityfs.rs test entry_bytes_match_reference_constructed_bundles; fixture src/container/unityfs_entry_fixture.txt. |
 | Regression evidence | All five decodable entries reproduce byte-for-byte; non-combined empty and LZHAM loud pinned; full suite 1358 plus 60 pass with warnings-denied Clippy. |
 | Remaining comparison | Real-file comparison stays open as noted; the UnityFS header/meta/entry vertical is now fully reference-differentially covered. |
+
+## DIFF-SER-SCALAR-001 - SerializedFile metadata scalar fields
+
+| Field | Finding |
+|---|---|
+| Status | Reference-runtime differential recorded; three rows ported and pinned |
+| Source location | AssetRipper.IO.Files/SerializedFiles/Parser/SerializedFileMetadata.cs (HasSignature, HasPlatform, HasLongFileID, HasUserInformation, stripped-version fallback); SerializedFileHeader.cs (pre-9 metadata-at-end) |
+| Input evidence | Probe Temp/opencode/sermetascalarprobe (shipped IO.Files DLL, SDK 10.0.401) reading three C#-constructed files with empty tables across gen8 parseable/unparseable and gen14. Committed as src/serialized_file/metadata_scalar_fixture.txt (10 lines). |
+| Source-derived behavior | Version text gates the layout branch with stripped fallback; LongFileID exists only for generations 7-13; user information is a trailing zero-term string; pre-9 metadata sits at the end with DataOffset 0 while gen14 data follows metadata. |
+| Root cause | No deviation found except representation: unparseable versions normalize to 0.0.0a0 on the reference while Rust preserves the raw text (both signal stripped, documented). |
+| Rust change | src/serialized_file/metadata.rs test scalar_fields_match_reference_constructed_files; fixture src/serialized_file/metadata_scalar_fixture.txt. |
+| Regression evidence | All three files reproduce version/platform/LongFileID/user/tables on both sides; bounds for both layouts pinned; full suite 1359 plus 60 pass with warnings-denied Clippy. |
+| Remaining comparison | Type/object/external/script tables plus TypeTree payloads stay with SER-META-TYPES/OBJECTS/EXTERNALS rows; full UnityVersion grammar stays out by design. |
