@@ -1678,4 +1678,177 @@ mod tests {
         drop(reference);
         assert!(!path.exists());
     }
+
+    #[test]
+    fn stream_operations_match_reference_runtime() {
+        fn seq(n: u8) -> Vec<u8> {
+            (0..n).collect()
+        }
+
+        fn read_n(read: &mut impl Read, n: usize) -> Vec<u8> {
+            let mut buf = vec![0; n];
+            let mut got = 0;
+            while got < n {
+                let r = read.read(&mut buf[got..]).unwrap();
+                if r == 0 {
+                    break;
+                }
+                got += r;
+            }
+            buf.truncate(got);
+            buf
+        }
+
+        fn read_byte(read: &mut impl Read) -> Option<u8> {
+            let mut b = [0; 1];
+            loop {
+                let r = read.read(&mut b).unwrap();
+                if r == 1 {
+                    return Some(b[0]);
+                }
+                if r == 0 {
+                    return None;
+                }
+            }
+        }
+
+        // Probe Temp/opencode/streamprobe (.NET SDK 10.0.401, shipped
+        // IO.Files.dll): S1 SmartStream memory ops, S2 temp write/read, S3
+        // null Length plus loud Read, M1 split cross-boundary, P1 range ops,
+        // R1 bounded file range. Committed as io/stream_fixture.txt.
+        let fixture = include_str!("stream_fixture.txt");
+        let mut reads: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for line in fixture.lines() {
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+            if line.starts_with("STREAM_READ|") {
+                let parts: Vec<&str> = line.splitn(3, '|').collect();
+                assert_eq!(parts.len(), 3, "bad STREAM_READ {line}");
+                reads.insert(parts[1].to_string(), parts[2].to_string());
+            }
+        }
+
+        // S1: memory reads, positions, and EOF match.
+        {
+            let dump = reads.get("S1").expect("S1 dump");
+            assert!(dump.contains("LEN=64"), "S1 {dump}");
+            assert!(dump.contains("R1:got=10|00010203040506070809"), "S1 {dump}");
+            let mut s = SmartStream::from_memory(seq(64));
+            assert_eq!(s.length().unwrap(), 64);
+            assert_eq!(read_n(&mut s, 10), (0..10).collect::<Vec<u8>>());
+            assert_eq!(s.position().unwrap(), 10);
+            s.seek(SeekFrom::Start(20)).unwrap();
+            assert_eq!(read_n(&mut s, 10), (20..30).collect::<Vec<u8>>());
+            assert_eq!(s.position().unwrap(), 30);
+            assert_eq!(read_byte(&mut s), Some(30));
+            s.seek(SeekFrom::End(-5)).unwrap();
+            assert_eq!(s.position().unwrap(), 59);
+            assert_eq!(read_n(&mut s, 5), (59..64).collect::<Vec<u8>>());
+            assert_eq!(read_n(&mut s, 1).len(), 0);
+            assert!(dump.contains("R2:got=10|1415161718191A1B1C1D"), "S1 {dump}");
+            assert!(dump.contains("RB=30"), "S1 {dump}");
+            assert!(dump.contains("R3:got=5|3B3C3D3E3F"), "S1 {dump}");
+            assert!(dump.contains("REOF:got=0"), "S1 {dump}");
+        }
+
+        // S2: temp write/read round trip matches.
+        {
+            let dump = reads.get("S2").expect("S2 dump");
+            assert!(dump.contains("LEN=32"), "S2 {dump}");
+            let mut s = SmartStream::create_temp().unwrap();
+            s.write_all(&seq(32)).unwrap();
+            s.seek(SeekFrom::Start(0)).unwrap();
+            assert_eq!(s.length().unwrap(), 32);
+            assert_eq!(read_n(&mut s, 32), seq(32));
+            assert_eq!(s.position().unwrap(), 32);
+        }
+
+        // S3: null Length is zero and reads fail loud on both sides
+        // (reference throws NullReferenceException).
+        {
+            let dump = reads.get("S3").expect("S3 dump");
+            assert!(dump.contains("LEN=0"), "S3 {dump}");
+            assert!(
+                dump.contains("THROW:System.NullReferenceException"),
+                "S3 {dump}"
+            );
+            let mut s = SmartStream::create_null();
+            assert_eq!(s.length().unwrap(), 0);
+            assert!(s.read(&mut [0; 10]).is_err(), "S3 Rust fails loud");
+        }
+
+        // M1: split reads across the part boundary match.
+        {
+            let dump = reads.get("M1").expect("M1 dump");
+            assert!(dump.contains("LEN=32"), "M1 {dump}");
+            assert!(
+                dump.contains("R1:got=20|000102030405060708090A0B0C0D0E0F10111213"),
+                "M1 {dump}"
+            );
+            let dir = create_test_directory("stream-m1");
+            let base = dir.join("part");
+            let mut first = seq(16);
+            let mut second: Vec<u8> = (16..32).collect();
+            std::fs::write(base.with_extension("split0"), &first).unwrap();
+            std::fs::write(base.with_extension("split1"), &second).unwrap();
+            first.append(&mut second);
+            let mut s = open_logical_file(&base).unwrap();
+            assert_eq!(read_n(&mut s, 20), first[..20].to_vec());
+            assert_eq!(s.stream_position().unwrap(), 20);
+            s.seek(SeekFrom::Start(24)).unwrap();
+            assert_eq!(read_n(&mut s, 8), first[24..32].to_vec());
+            s.seek(SeekFrom::Start(10)).unwrap();
+            assert_eq!(read_byte(&mut s), Some(10));
+            assert_eq!(s.stream_position().unwrap(), 11);
+            assert!(dump.contains("R2:got=8|18191A1B1C1D1E1F"), "M1 {dump}");
+            assert!(dump.contains("RB=10"), "M1 {dump}");
+            remove_test_files(&dir, &["part.split0", "part.split1"]);
+        }
+
+        // P1: post-Seek range ops match. The reference reads-before-first-seek
+        // go to the base stream's current position (PartialStream never
+        // positions on construction; only Seek/Begin/End add the base offset),
+        // so callers must Seek first. Rust positions on every access, which is
+        // strictly more correct and identical after any Seek; the difference is
+        // documented here, not hidden.
+        {
+            let dump = reads.get("P1").expect("P1 dump");
+            assert!(dump.contains("LEN=20"), "P1 {dump}");
+            let mut s = PartialStream::new(Cursor::new(seq(64)), 10, 20).unwrap();
+            assert_eq!(s.length(), 20);
+            assert_eq!(read_n(&mut s, 20), (10..30).collect::<Vec<u8>>());
+            s.seek(SeekFrom::Start(5)).unwrap();
+            assert_eq!(read_byte(&mut s), Some(15));
+            s.seek(SeekFrom::End(-2)).unwrap();
+            assert_eq!(s.position(), 18);
+            assert_eq!(read_n(&mut s, 2), vec![28, 29]);
+            assert_eq!(read_n(&mut s, 1).len(), 0);
+            assert!(dump.contains("RB=15"), "P1 {dump}");
+            assert!(dump.contains("R2:got=2|1C1D"), "P1 {dump}");
+            assert!(dump.contains("REOF:got=0"), "P1 {dump}");
+        }
+
+        // R1: bounded file-range reads and positions match (mutex-serialized
+        // seeks instead of OS positional reads, same observable bytes).
+        {
+            let dump = reads.get("R1").expect("R1 dump");
+            assert!(dump.contains("LEN=20"), "R1 {dump}");
+            assert!(
+                dump.contains("R:got=20|0A0B0C0D0E0F101112131415161718191A1B1C1D"),
+                "R1 {dump}"
+            );
+            let dir = create_test_directory("stream-r1");
+            let fp = dir.join("rand.bin");
+            std::fs::write(&fp, seq(64)).unwrap();
+            let file = std::fs::File::open(&fp).unwrap();
+            let mut s = FileRangeStream::from_file(file, 10, 20).unwrap();
+            assert_eq!(s.length(), 20);
+            assert_eq!(read_n(&mut s, 20), (10..30).collect::<Vec<u8>>());
+            s.seek(SeekFrom::Start(5)).unwrap();
+            assert_eq!(read_byte(&mut s), Some(15));
+            assert!(dump.contains("RB=15"), "R1 {dump}");
+            remove_test_files(&dir, &["rand.bin"]);
+        }
+    }
 }

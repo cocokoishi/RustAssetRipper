@@ -690,3 +690,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | src/container/raw_web.rs test headers_and_entries_match_reference_constructed_bundles; src/container/web_file.rs test directory_and_entries_match_reference_written_files plus the 7-bit to four-byte fix across read/write/tests/fixtures; fixture src/container/legacy_bundle_fixture.txt. |
 | Regression evidence | All version gates, both entry lanes, both WebFile alignments, and both refusals reproduce; the name-codec fix is regression-covered by D1/D2; full suite 1362 plus 60 pass with warnings-denied Clippy. |
 | Remaining comparison | Real-file comparison stays open as noted; legacy container lanes are now fully reference-differentially covered. |
+
+## DIFF-STREAM-001 - Stream wrappers Smart/MultiFile/Partial/RandomAccess
+
+| Field | Finding |
+|---|---|
+| Status | Reference-runtime op differential recorded; four rows ported and pinned |
+| Source location | AssetRipper.IO.Files/Streams/Smart/SmartStream.cs (null fails loud); MultiFileStream.cs (splitN OpenRead); PartialStream.cs (no construction positioning, Seek adds base offset); RandomAccessStream.cs (internal, bounded file range) |
+| Input evidence | Probe Temp/opencode/streamprobe (shipped IO.Files DLL, SDK 10.0.401) executing identical op sequences (lengths, reads, seeks, positions, EOF, ReadByte) over memory, temp, null, split parts, ranges, and file ranges. Committed as src/io/stream_fixture.txt (10 lines). |
+| Source-derived behavior | Lengths, cross-boundary and cross-seek reads, positions, EOF short reads, and null loudness all reproduce; split part naming and ordering reproduce; bounded ranges clamp identically. |
+| Root cause | One deliberate hardening, not a deviation: reads-before-first-seek hit the unpositioned base in the source while Rust positions on every access; post-Seek bytes are identical and callers Seek first. Otherwise no deviation found. |
+| Rust change | src/io/stream.rs test stream_operations_match_reference_runtime; fixture src/io/stream_fixture.txt. |
+| Regression evidence | All six op sequences reproduce field-for-field; full suite 1363 plus 60 pass with warnings-denied Clippy. |
+| Remaining comparison | OS positional I/O and direct VFS mount APIs stay with their tracked rows; wrapper observable behavior is now fully reference-differentially covered. |

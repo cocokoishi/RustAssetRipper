@@ -1,0 +1,10 @@
+﻿# Stream wrapper reference-runtime differential (probe Temp/opencode/streamprobe, .NET SDK 10.0.401)
+# Reference: SmartStream (memory/temp/null), MultiFileStream.OpenRead over temp .split0/.split1, PartialStream over MemoryStream, RandomAccessStream (internal, via reflection) over temp file.
+# Cases: S1 memory ops; S2 temp write/read; S3 null Length plus loud Read (NullReferenceException); M1 split cross-boundary; P1 range ops (note: reference reads-before-first-seek go to the base current position, a source quirk; post-Seek ops match); R1 bounded file range.
+# Format: STREAM_READ|case|dump (got=n|hex, POS, RB decimal, LEN)
+STREAM_READ|S1|LEN=64|R1:got=10|00010203040506070809|POS=10|R2:got=10|1415161718191A1B1C1D|POS=30|RB=30|POS=59|R3:got=5|3B3C3D3E3F|REOF:got=0|
+STREAM_READ|S2|LEN=32|R:got=32|000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F|POS=32
+STREAM_READ|S3|LEN=0|R:THROW:System.NullReferenceException
+STREAM_READ|M1|LEN=32|R1:got=20|000102030405060708090A0B0C0D0E0F10111213|POS=20|R2:got=8|18191A1B1C1D1E1F|RB=10|POS=11
+STREAM_READ|P1|LEN=20|R:got=20|000102030405060708090A0B0C0D0E0F10111213|RB=15|POS=18|R2:got=2|1C1D|REOF:got=0|
+STREAM_READ|R1|LEN=20|R:got=20|0A0B0C0D0E0F101112131415161718191A1B1C1D|POS=20|RB=15|POS=6
