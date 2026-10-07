@@ -575,9 +575,9 @@ impl ScriptLanguageVersion {
 }
 
 /// Caller facts for `GetAutomaticCSharpLanguageVersion`: whether the Unity version reaches
-/// each threshold, in source evaluation order. The release-type-sensitive gates (notably
-/// `HasCSharp9Support`, which needs alpha/beta ordering) arrive pre-evaluated because
-/// version ordering lives outside the settings records.
+/// each threshold, in source evaluation order. Callers holding a version string derive
+/// them with [`UnityReleaseVersion::language_version_facts`], which implements the
+/// release-type-sensitive `HasCSharp9Support` ordering.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct AutomaticLanguageVersionFacts {
     /// `HasCSharp9Support`: at least 2022.1.0a3, or at least 2021.2.0b6 within major 2021.
@@ -610,6 +610,97 @@ pub const fn automatic_script_language_version(
         ScriptLanguageVersion::CSharp6
     } else {
         ScriptLanguageVersion::CSharp4
+    }
+}
+
+/// Release channel of a Unity version string, in source `UnityVersionType` rank order
+/// (`Alpha < Beta < China < Final < Patch < Experimental`, probed discriminants 0-5).
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum UnityReleaseType {
+    Alpha,
+    Beta,
+    China,
+    Final,
+    Patch,
+    Experimental,
+}
+
+/// A Unity version with its release channel and build number, ordered by
+/// `(major, minor, patch, release type, build)` like the source `UnityVersion`
+/// comparisons used by the automatic language-version table.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct UnityReleaseVersion {
+    pub major: u32,
+    pub minor: u32,
+    pub patch: u32,
+    pub release_type: UnityReleaseType,
+    pub build: u32,
+}
+
+impl UnityReleaseVersion {
+    /// Parse `major.minor.patch<channel><build>` (`2021.2.0b6`, `2022.1.0a3`,
+    /// `2019.4.1f1`). Only the shipped single-letter channels are accepted;
+    /// anything else yields `None`.
+    pub fn parse(text: &str) -> Option<Self> {
+        let mut parts = text.split('.');
+        let major = parts.next()?.parse().ok()?;
+        let minor = parts.next()?.parse().ok()?;
+        let tail = parts.next()?;
+        if parts.next().is_some() {
+            return None;
+        }
+        let digits: String = tail.chars().take_while(char::is_ascii_digit).collect();
+        let rest = &tail[digits.len()..];
+        let patch = digits.parse().ok()?;
+        let mut rest = rest.chars();
+        let release_type = match rest.next()? {
+            'a' => UnityReleaseType::Alpha,
+            'b' => UnityReleaseType::Beta,
+            'c' => UnityReleaseType::China,
+            'f' => UnityReleaseType::Final,
+            'p' => UnityReleaseType::Patch,
+            'x' => UnityReleaseType::Experimental,
+            _ => return None,
+        };
+        let build: String = rest.collect();
+        if build.is_empty() || !build.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        Some(Self {
+            major,
+            minor,
+            patch,
+            release_type,
+            build: build.parse().ok()?,
+        })
+    }
+
+    /// Evaluate the `GetAutomaticCSharpLanguageVersion` threshold facts for one
+    /// parsed version, including the release-type-sensitive `HasCSharp9Support`
+    /// gate (at least 2022.1.0a3, or at least 2021.2.0b6 within major 2021).
+    pub fn language_version_facts(self) -> AutomaticLanguageVersionFacts {
+        let at = |major: u32, minor: u32| (self.major, self.minor) >= (major, minor);
+        let csharp9 = Self {
+            major: 2022,
+            minor: 1,
+            patch: 0,
+            release_type: UnityReleaseType::Alpha,
+            build: 3,
+        };
+        let csharp9_2021 = Self {
+            major: 2021,
+            minor: 2,
+            patch: 0,
+            release_type: UnityReleaseType::Beta,
+            build: 6,
+        };
+        AutomaticLanguageVersionFacts {
+            has_csharp9_support: self >= csharp9 || (self >= csharp9_2021 && self.major == 2021),
+            at_least_2020_2: at(2020, 2),
+            at_least_2019_2: at(2019, 2),
+            at_least_2018_3: at(2018, 3),
+            at_least_2017_1: at(2017, 1),
+        }
     }
 }
 
@@ -909,6 +1000,59 @@ mod tests {
         // Without a version, both automatic members become Latest.
         assert_eq!(AutoSafe.resolve_without_version(), Latest);
         assert_eq!(AutoExperimental.resolve_without_version(), Latest);
+    }
+
+    /// Automatic language selection differential against the reference
+    /// `ToCSharpLanguageVersion` dump committed in
+    /// `settings_version_fixture.txt` (probe `Temp/opencode/versionprobe`,
+    /// isolated reference bins, SDK 10.0.401). The same version strings are
+    /// parsed with `UnityReleaseVersion` and resolved through the same table,
+    /// covering the release-type-sensitive `HasCSharp9Support` gate on both
+    /// sides of every boundary.
+    #[test]
+    fn automatic_language_selection_reproduces_the_reference_version_dump() {
+        use super::{automatic_script_language_version, UnityReleaseVersion};
+        use ScriptLanguageVersion::{AutoExperimental, AutoSafe};
+
+        let fixture = include_str!("settings_version_fixture.txt");
+        let mut cases = 0;
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let body = line
+                .strip_prefix("VCS|")
+                .unwrap_or_else(|| panic!("unknown fixture row {line}"));
+            let parts: Vec<&str> = body.split('|').collect();
+            assert_eq!(parts.len(), 3, "bad VCS {line}");
+            let version = UnityReleaseVersion::parse(parts[0])
+                .unwrap_or_else(|| panic!("unparsable {}", parts[0]));
+            let facts = version.language_version_facts();
+            let safe = format!("{:?}", automatic_script_language_version(false, facts));
+            let exp = format!("{:?}", automatic_script_language_version(true, facts));
+            assert_eq!(
+                safe,
+                parts[1].strip_prefix("safe=").unwrap(),
+                "{}",
+                parts[0]
+            );
+            assert_eq!(exp, parts[2].strip_prefix("exp=").unwrap(), "{}", parts[0]);
+            assert_eq!(
+                format!("{:?}", AutoSafe.resolve_with_version(facts)),
+                parts[1].strip_prefix("safe=").unwrap(),
+                "member {}",
+                parts[0]
+            );
+            assert_eq!(
+                format!("{:?}", AutoExperimental.resolve_with_version(facts)),
+                parts[2].strip_prefix("exp=").unwrap(),
+                "member {}",
+                parts[0]
+            );
+            cases += 1;
+        }
+        assert!(cases >= 17, "the fixture pins every boundary version");
     }
 
     #[test]

@@ -1,0 +1,23 @@
+# Automatic C# language-version differential (probe Temp/opencode/versionprobe).
+# Reference: ScriptLanguageVersion.AutoSafe/AutoExperimental resolved with a
+# parsed UnityVersion via ToCSharpLanguageVersion (shipped Export + Primitives
+# DLLs, SDK 10.0.401). Rust parity parses the same strings with
+# UnityReleaseVersion (release-type rank Alpha<Beta<China<Final<Patch<
+# Experimental, probed discriminants 0-5) and evaluates the same table.
+VCS|5.6.0f1|safe=CSharp4|exp=CSharp4
+VCS|2017.1.0a1|safe=CSharp4|exp=CSharp6
+VCS|2017.1.0f1|safe=CSharp4|exp=CSharp6
+VCS|2018.1.0f1|safe=CSharp4|exp=CSharp6
+VCS|2018.3.0f1|safe=CSharp4|exp=CSharp7_3
+VCS|2019.2.0f1|safe=CSharp7_3|exp=CSharp7_3
+VCS|2019.4.1f1|safe=CSharp7_3|exp=CSharp7_3
+VCS|2020.2.0f1|safe=CSharp8_0|exp=CSharp8_0
+VCS|2020.3.0f1|safe=CSharp8_0|exp=CSharp8_0
+VCS|2021.2.0b5|safe=CSharp8_0|exp=CSharp8_0
+VCS|2021.2.0b6|safe=CSharp9_0|exp=CSharp9_0
+VCS|2021.2.0f1|safe=CSharp9_0|exp=CSharp9_0
+VCS|2021.3.0f1|safe=CSharp9_0|exp=CSharp9_0
+VCS|2022.1.0a2|safe=CSharp8_0|exp=CSharp8_0
+VCS|2022.1.0a3|safe=CSharp9_0|exp=CSharp9_0
+VCS|2022.1.0f1|safe=CSharp9_0|exp=CSharp9_0
+VCS|2022.3.1f1|safe=CSharp9_0|exp=CSharp9_0

@@ -846,3 +846,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | Test pptr_values_external_table_and_join_reproduce_the_reference_dump; fixture src/serialized_file/pptr_probe_fixture.txt. No production change. |
 | Regression evidence | New test passes; full suite 1377 plus 65 pass with warnings-denied Clippy. |
 | Remaining comparison | Meta-type GUID-name matching and Unity-produced inputs stay out per the row dispositions. |
+
+## DIFF-EXP-SETTINGS-VERSION-001 - automatic C# language selection
+
+| Field | Finding |
+|---|---|
+| Status | Reference-product-path evidence recorded; one file-reference row ported and pinned |
+| Source location | AssetRipper/Source/AssetRipper.Export/Configuration/ScriptLanguageVersion.cs; AssetRipper.Primitives dependency rank order |
+| Input evidence | Probe Temp/opencode/versionprobe (shipped Export + Primitives DLLs, SDK 10.0.401) resolving both automatic modes over 17 boundary Unity versions. Committed as src/export/settings_version_fixture.txt. |
+| Source-derived behavior | Both automatic modes match the reference on every version; the HasCSharp9Support gate lands exactly on 2021.2.0b6 and 2022.1.0a3. |
+| Root cause | No Rust deviation found. Release-channel rank order plus the source threshold table ported and pinned mid-batch. |
+| Rust change | UnityReleaseVersion/UnityReleaseType plus language_version_facts in src/export/settings.rs; fixture src/export/settings_version_fixture.txt; test automatic_language_selection_reproduces_the_reference_version_dump. |
+| Regression evidence | New test passes; full suite 1378 plus 65 pass with warnings-denied Clippy. |
+| Remaining comparison | Unity-produced inputs stay out per the row disposition. |
