@@ -143,7 +143,7 @@ pub struct FileRangeStream {
 
 impl FileRangeStream {
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
-        let file = File::open(path)?;
+        let file = open_os_read(path.as_ref())?;
         let length = file.metadata()?.len();
         Self::from_file(file, 0, length)
     }
@@ -413,7 +413,7 @@ impl SmartStream {
 
     pub fn open_read(path: impl AsRef<Path>) -> io::Result<Self> {
         Ok(Self::new(
-            SmartStreamBackend::File(Arc::new(Mutex::new(File::open(path)?))),
+            SmartStreamBackend::File(Arc::new(Mutex::new(open_os_read(path.as_ref())?))),
             SmartStreamType::File,
             true,
             false,
@@ -826,13 +826,36 @@ pub fn open_logical_file(path: impl AsRef<Path>) -> io::Result<Box<dyn ReadSeek 
             .map(|stream| Box::new(stream) as Box<dyn ReadSeek + Send>);
     }
 
-    match File::open(path) {
+    match open_os_read(path) {
         Ok(file) => Ok(Box::new(file)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             open_split_file(path, DEFAULT_MAX_PARTS)
                 .map(|stream| Box::new(stream) as Box<dyn ReadSeek + Send>)
         }
         Err(error) => Err(error),
+    }
+}
+
+/// Open a filesystem input using the reference `File.OpenRead` share contract.
+///
+/// On Windows, AssetRipper shares read access only while the stream is open, so other
+/// processes cannot replace or delete an input being retained by the workspace.
+/// Rust's default `File::open` also shares write and delete access; narrow those flags
+/// to match the source. Other platforms use their native read-only open semantics.
+fn open_os_read(path: &Path) -> io::Result<File> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        const FILE_SHARE_READ: u32 = 0x0000_0001;
+        OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(path)
+    }
+    #[cfg(not(windows))]
+    {
+        File::open(path)
     }
 }
 
@@ -859,17 +882,14 @@ fn split_base_path(path: &Path) -> Option<PathBuf> {
 }
 
 /// `MultiFileStream` part-name decision: an entry belongs to `base_name` only as
-/// exactly `{base}.split<digits>`, returning the numeric index (`IsMultiFile`
-/// plus the `SplitNameComparer` index rule).
-///
-/// One deliberate difference is documented, not changed: the source lists
-/// directory entries with the loose `*.split*` glob and parses trailing digits
-/// anywhere after `.split`, so `data.split+5` sorts as part 5 and its bytes are
-/// incorporated. This port fails closed on such decoy names instead, because
-/// real split parts are always strictly numeric and the alternative is silent
-/// bundle corruption. Overflowing indices fail the same way the source
-/// `int.Parse` throws. Called by `open_split_file`; non-matching names return
-/// `None` so unrelated files stay ignored.
+/// exactly `{base}.split<canonical decimal index>`. The source enumerates a loose
+/// `*.split*` glob, but before sorting it requires the exact names
+/// `{base}.split0` through `{base}.split{count - 1}`. A source-runtime probe confirms
+/// that padded names such as `.split00` are rejected when `.split0` is missing.
+/// Rust rejects noncanonical numeric spellings and nonnumeric decoys explicitly,
+/// before they can change the assembled byte stream. Overflowing indices fail as
+/// the source's `int.Parse` does. Called by `open_split_file`; unrelated names
+/// return `None` so they stay ignored.
 fn split_part_index(base_name: &str, entry_name: &str) -> Option<io::Result<i32>> {
     let suffix = entry_name.strip_prefix(base_name)?.strip_prefix(".split")?;
     if suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -884,7 +904,16 @@ fn split_part_index(base_name: &str, entry_name: &str) -> Option<io::Result<i32>
             format!("split part index in {entry_name:?} is outside the supported range"),
         )
     });
-    Some(index)
+    Some(index.and_then(|index| {
+        if index.to_string() == suffix {
+            Ok(index)
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("split part index in {entry_name:?} is not canonical"),
+            ))
+        }
+    }))
 }
 
 fn open_split_file(base_path: &Path, max_parts: usize) -> io::Result<MultiFileStream> {
@@ -901,17 +930,19 @@ fn open_split_file(base_path: &Path, max_parts: usize) -> io::Result<MultiFileSt
                 "split file has no valid UTF-8 filename",
             )
         })?;
-    let mut parts = Vec::<(i32, PathBuf)>::new();
+    let mut candidates = Vec::<(String, PathBuf)>::new();
 
     for result in std::fs::read_dir(directory)? {
         let entry = result?;
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        let index = match split_part_index(base_name, &name) {
-            None => continue,
-            Some(result) => result?,
-        };
+        if !name
+            .strip_prefix(base_name)
+            .is_some_and(|suffix| suffix.starts_with(".split"))
+        {
+            continue;
+        }
         let file_type = entry.file_type()?;
         if file_type.is_symlink() {
             return Err(io::Error::new(
@@ -922,26 +953,60 @@ fn open_split_file(base_path: &Path, max_parts: usize) -> io::Result<MultiFileSt
         if !file_type.is_file() {
             continue;
         }
-        if parts.len() >= max_parts {
+        if candidates.len() >= max_parts {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("split part count exceeds configured limit {max_parts}"),
             ));
         }
-        parts.try_reserve(1).map_err(|_| {
+        candidates.try_reserve(1).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::OutOfMemory,
                 "could not allocate split part paths",
             )
         })?;
-        parts.push((index, entry.path()));
+        candidates.push((name, entry.path()));
     }
 
-    if parts.is_empty() {
+    if candidates.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             format!("no split parts found for {}", base_path.display()),
         ));
+    }
+
+    // The reference first enumerates `base.split*`, then requires exact canonical
+    // names for every index below the candidate count before it sorts or opens any
+    // stream. This rejects padded aliases (`split00`) and decoys as missing the
+    // corresponding canonical part instead of parsing them as numeric indexes.
+    candidates.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    for expected in 0..candidates.len() {
+        let expected_name = format!("{base_name}.split{expected}");
+        if candidates
+            .binary_search_by(|(name, _)| name.as_str().cmp(&expected_name))
+            .is_err()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "split part {expected} is missing: expected {}",
+                    directory.join(expected_name).display()
+                ),
+            ));
+        }
+    }
+
+    let mut parts = Vec::<(i32, PathBuf)>::new();
+    parts.try_reserve_exact(candidates.len()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::OutOfMemory,
+            "could not allocate indexed split part paths",
+        )
+    })?;
+    for (name, path) in candidates {
+        let index = split_part_index(base_name, &name)
+            .expect("a split candidate starts with the expected base and suffix")?;
+        parts.push((index, path));
     }
     parts.sort_unstable_by_key(|(index, _)| *index);
     for (expected, (actual, path)) in parts.iter().enumerate() {
@@ -965,7 +1030,7 @@ fn open_split_file(base_path: &Path, max_parts: usize) -> io::Result<MultiFileSt
         )
     })?;
     for (_, part_path) in parts {
-        streams.push(Box::new(File::open(part_path)?));
+        streams.push(Box::new(open_os_read(&part_path)?));
     }
     MultiFileStream::from_boxed(streams)
 }
@@ -1135,8 +1200,9 @@ fn seek_target(position: u64, length: u64, from: SeekFrom) -> io::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        logical_file_name, logical_file_path, open_logical_file, split_part_index, FileRangeStream,
-        MultiFileStream, PartialStream, SmartStream, SmartStreamBackend, SmartStreamType,
+        logical_file_name, logical_file_path, open_logical_file, split_base_path, split_part_index,
+        FileRangeStream, MultiFileStream, PartialStream, SmartStream, SmartStreamBackend,
+        SmartStreamType,
     };
     use crate::compression::wrappers::compress_gzip;
     use crate::scheme::{FileKind, SchemeReader, SchemeReaderLimits};
@@ -1164,6 +1230,38 @@ mod tests {
             std::fs::remove_file(directory.join(name)).unwrap();
         }
         std::fs::remove_dir(directory).unwrap();
+    }
+
+    fn source_multifile_fixture_fields(prefix: &str) -> Vec<&'static str> {
+        include_str!("multifile_path_fixture.txt")
+            .lines()
+            .find(|line| line.starts_with(prefix))
+            .unwrap_or_else(|| panic!("missing source MultiFile fixture row {prefix:?}"))
+            .split('|')
+            .collect()
+    }
+
+    #[cfg(windows)]
+    fn source_local_filesystem_fixture_fields(prefix: &str) -> Vec<&'static str> {
+        include_str!("local_filesystem_fixture.txt")
+            .lines()
+            .find(|line| line.starts_with(prefix))
+            .unwrap_or_else(|| panic!("missing source LocalFileSystem fixture row {prefix:?}"))
+            .split('|')
+            .collect()
+    }
+
+    fn decode_hex_fixture(value: &str) -> Vec<u8> {
+        assert!(value.len().is_multiple_of(2));
+        value
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let high = (pair[0] as char).to_digit(16).unwrap();
+                let low = (pair[1] as char).to_digit(16).unwrap();
+                u8::try_from((high << 4) | low).unwrap()
+            })
+            .collect()
     }
 
     #[test]
@@ -1258,6 +1356,9 @@ mod tests {
     /// against the source `MultiFileStream.Seek` inversion (`Length - offset`).
     #[test]
     fn multi_file_stream_seeks_from_end_with_standard_offsets() {
+        let reference = source_multifile_fixture_fields("SEEK_END|");
+        assert_eq!(reference, ["SEEK_END", "10", "10", "12", "8"]);
+
         let parts = [b"abc".as_slice(), b"".as_slice(), b"defg".as_slice()]
             .into_iter()
             .map(|part| Cursor::new(part.to_vec()));
@@ -1269,6 +1370,210 @@ mod tests {
         let mut tail = [0; 4];
         assert_eq!(stream.read(&mut tail).unwrap(), 0);
         assert!(stream.seek(SeekFrom::End(i64::MIN)).is_err());
+    }
+
+    #[test]
+    fn multi_file_paths_match_reference_runtime_fixture() {
+        for (label, path) in [
+            ("plain", "stream.bundle"),
+            ("split0", "stream.bundle.split0"),
+            ("split007", "stream.bundle.split007"),
+            ("split-plus", "stream.bundle.split+1"),
+            ("split-upper", "stream.bundle.SPLIT0"),
+            ("split-no-index", "stream.bundle.split"),
+        ] {
+            let record = source_multifile_fixture_fields(&format!("IS_MULTI|{label}|"));
+            assert_eq!(record.len(), 3);
+            assert_eq!(
+                record[2] == "True",
+                split_base_path(Path::new(path)).is_some()
+            );
+        }
+
+        let split_record = source_multifile_fixture_fields("SPLIT_PART|");
+        assert_eq!(
+            split_record,
+            [
+                "SPLIT_PART",
+                "stream.bundle",
+                "stream.bundle",
+                "616C7068613A62657461"
+            ]
+        );
+        let directory = create_test_directory("reference-multifile-path");
+        let regular_path = directory
+            .join(split_record[1])
+            .with_file_name("regular.bundle");
+        let split_base = directory.join(split_record[1]);
+        let split0 = PathBuf::from(format!("{}.split0", split_base.display()));
+        let split1 = PathBuf::from(format!("{}.split1", split_base.display()));
+        std::fs::write(
+            &regular_path,
+            decode_hex_fixture(source_multifile_fixture_fields("REGULAR|")[3]),
+        )
+        .unwrap();
+        std::fs::write(&split0, b"alpha:").unwrap();
+        std::fs::write(&split1, b"beta").unwrap();
+        let mut base_open = open_logical_file(&split_base).unwrap();
+        let mut base_open_bytes = Vec::new();
+        base_open.read_to_end(&mut base_open_bytes).unwrap();
+        assert_eq!(base_open_bytes, decode_hex_fixture(split_record[3]));
+
+        let mut regular = open_logical_file(&regular_path).unwrap();
+        let mut regular_bytes = Vec::new();
+        regular.read_to_end(&mut regular_bytes).unwrap();
+        assert_eq!(
+            regular_bytes,
+            decode_hex_fixture(source_multifile_fixture_fields("REGULAR|")[3],)
+        );
+
+        let part_path = PathBuf::from(format!("{}.split1", split_base.display()));
+        assert_eq!(logical_file_path(&part_path), split_base);
+        assert_eq!(
+            logical_file_name(&part_path).as_deref(),
+            Some(split_record[2])
+        );
+        let mut joined = open_logical_file(&part_path).unwrap();
+        let mut joined_bytes = Vec::new();
+        joined.read_to_end(&mut joined_bytes).unwrap();
+        assert_eq!(joined_bytes, decode_hex_fixture(split_record[3]));
+
+        let boundary = source_multifile_fixture_fields("BOUNDARY|");
+        assert_eq!(boundary, ["BOUNDARY", "1", "3A", "2", "6265", "8"]);
+        let mut boundary_stream = MultiFileStream::new([
+            Cursor::new(b"alpha:".to_vec()),
+            Cursor::new(b"beta".to_vec()),
+        ])
+        .unwrap();
+        assert_eq!(boundary_stream.seek(SeekFrom::Start(5)).unwrap(), 5);
+        let mut boundary_bytes = Vec::new();
+        boundary_stream.read_to_end(&mut boundary_bytes).unwrap();
+        assert_eq!(boundary_bytes, b":beta");
+
+        let order_record = source_multifile_fixture_fields("NUMERIC_ORDER|");
+        let ordered_base = directory.join("ordered.bundle");
+        for index in 0..=10 {
+            std::fs::write(
+                format!("{}.split{index}", ordered_base.display()),
+                [b'A' + u8::try_from(index).unwrap()],
+            )
+            .unwrap();
+        }
+        let mut ordered = open_logical_file(&ordered_base).unwrap();
+        let mut ordered_bytes = Vec::new();
+        ordered.read_to_end(&mut ordered_bytes).unwrap();
+        assert_eq!(
+            std::str::from_utf8(&ordered_bytes).unwrap(),
+            order_record[1]
+        );
+
+        let gap_record = source_multifile_fixture_fields("GAP|");
+        let gap_base = directory.join("gap.bundle");
+        std::fs::write(format!("{}.split0", gap_base.display()), b"first").unwrap();
+        std::fs::write(format!("{}.split2", gap_base.display()), b"third").unwrap();
+        assert_eq!(gap_record[1], "REJECTED");
+        let gap_error = match open_logical_file(&gap_base) {
+            Ok(_) => panic!("gapped split parts must be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(gap_error.kind(), std::io::ErrorKind::NotFound);
+
+        let padded_record = source_multifile_fixture_fields("ZERO_PADDED_INDEX|");
+        let padded_base = directory.join("padded.bundle");
+        std::fs::write(format!("{}.split00", padded_base.display()), b"zero").unwrap();
+        std::fs::write(format!("{}.split1", padded_base.display()), b"one").unwrap();
+        assert_eq!(padded_record[1], "REJECTED");
+        let padded_error = match open_logical_file(&padded_base) {
+            Ok(_) => panic!("zero-padded split paths must be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(padded_error.kind(), std::io::ErrorKind::NotFound);
+        assert!(padded_error.to_string().contains("padded.bundle.split0"));
+
+        drop(base_open);
+        drop(regular);
+        drop(joined);
+        drop(ordered);
+
+        remove_test_files(
+            &directory,
+            &[
+                "regular.bundle",
+                "stream.bundle.split0",
+                "stream.bundle.split1",
+                "ordered.bundle.split0",
+                "ordered.bundle.split1",
+                "ordered.bundle.split2",
+                "ordered.bundle.split3",
+                "ordered.bundle.split4",
+                "ordered.bundle.split5",
+                "ordered.bundle.split6",
+                "ordered.bundle.split7",
+                "ordered.bundle.split8",
+                "ordered.bundle.split9",
+                "ordered.bundle.split10",
+                "gap.bundle.split0",
+                "gap.bundle.split2",
+                "padded.bundle.split00",
+                "padded.bundle.split1",
+            ],
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn physical_file_read_sharing_matches_local_filesystem_runtime_fixture() {
+        let directory = create_test_directory("source-file-sharing");
+        let regular_path = directory.join("write-while-open.bin");
+        std::fs::write(&regular_path, b"source-bytes").unwrap();
+        let write_record = source_local_filesystem_fixture_fields("WRITE_WHILE_OPEN|");
+        let read_record = source_local_filesystem_fixture_fields("READ_AFTER_WRITE_ATTEMPT|");
+        let delete_record = source_local_filesystem_fixture_fields("DELETE_WHILE_OPEN|");
+        assert_eq!(write_record[1], "REJECTED");
+        assert_eq!(delete_record[1], "REJECTED");
+
+        let mut regular_stream = open_logical_file(&regular_path).unwrap();
+        assert!(std::fs::write(&regular_path, b"replacement").is_err());
+        let mut regular_bytes = Vec::new();
+        regular_stream.read_to_end(&mut regular_bytes).unwrap();
+        assert_eq!(hex_encode(&regular_bytes), read_record[1]);
+        assert!(std::fs::remove_file(&regular_path).is_err());
+        drop(regular_stream);
+        std::fs::write(&regular_path, b"after-close").unwrap();
+        std::fs::remove_file(&regular_path).unwrap();
+
+        let split_base = directory.join("split.bundle");
+        let split0 = PathBuf::from(format!("{}.split0", split_base.display()));
+        let split1 = PathBuf::from(format!("{}.split1", split_base.display()));
+        std::fs::write(&split0, b"split-left:").unwrap();
+        std::fs::write(&split1, b"split-right").unwrap();
+        let split_write_record = source_local_filesystem_fixture_fields("WRITE_SPLIT_WHILE_OPEN|");
+        let split_delete_record =
+            source_local_filesystem_fixture_fields("DELETE_SPLIT_WHILE_OPEN|");
+        let split_read_record =
+            source_local_filesystem_fixture_fields("SPLIT_READ_AFTER_MUTATION_ATTEMPTS|");
+        assert_eq!(split_write_record[1], "REJECTED");
+        assert_eq!(split_delete_record[1], "REJECTED");
+
+        let mut split_stream = open_logical_file(&split_base).unwrap();
+        assert!(std::fs::write(&split0, b"replacement").is_err());
+        assert!(std::fs::remove_file(&split1).is_err());
+        let mut split_bytes = Vec::new();
+        split_stream.read_to_end(&mut split_bytes).unwrap();
+        assert_eq!(hex_encode(&split_bytes), split_read_record[1]);
+        drop(split_stream);
+        remove_test_files(&directory, &["split.bundle.split0", "split.bundle.split1"]);
+    }
+
+    #[cfg(windows)]
+    fn hex_encode(bytes: &[u8]) -> String {
+        const DIGITS: &[u8; 16] = b"0123456789ABCDEF";
+        let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
+        for byte in bytes {
+            encoded.push(char::from(DIGITS[usize::from(byte >> 4)]));
+            encoded.push(char::from(DIGITS[usize::from(byte & 0x0F)]));
+        }
+        encoded
     }
 
     #[test]
@@ -1340,6 +1645,8 @@ mod tests {
         let mut joined = Vec::new();
         opened.read_to_end(&mut joined).unwrap();
         assert_eq!(joined, encoded);
+        drop(file);
+        drop(opened);
         remove_test_files(
             &directory,
             &["sample.bundle.split0", "sample.bundle.split1"],
@@ -1365,20 +1672,18 @@ mod tests {
         );
     }
 
-    /// The part-name decision: strict `{base}.split<digits>` shapes resolve to
-    /// their index, unrelated names stay ignored, and decoy suffixes fail
-    /// instead of sorting as a part the way the source trailing-digit parse would.
+    /// The source requires canonical `{base}.splitN` directory entry names before
+    /// its numeric sort; leading-zero aliases and nonnumeric decoys must not become
+    /// accepted parts even though the input path recognizer accepts `.split007`.
     #[test]
     fn split_part_names_resolve_strictly_numeric_indices() {
         assert_eq!(split_part_index("data", "data.split0").unwrap().unwrap(), 0);
-        assert_eq!(
-            split_part_index("data", "data.split007").unwrap().unwrap(),
-            7
-        );
+        assert_eq!(split_part_index("data", "data.split7").unwrap().unwrap(), 7);
         assert!(split_part_index("data", "other.split0").is_none());
         assert!(split_part_index("data", "data.split").unwrap().is_err());
         assert!(split_part_index("data", "data.split+1").unwrap().is_err());
         assert!(split_part_index("data", "data.split 1").unwrap().is_err());
+        assert!(split_part_index("data", "data.split007").unwrap().is_err());
         assert!(split_part_index("data", "data.split99999999999999999999")
             .unwrap()
             .is_err());
@@ -1396,8 +1701,8 @@ mod tests {
             Ok(_) => panic!("decoy split part names must be rejected"),
             Err(error) => error,
         };
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
-        assert!(error.to_string().contains("non-numeric suffix"));
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert!(error.to_string().contains("split part 2 is missing"));
         remove_test_files(
             &directory,
             &[
@@ -1652,6 +1957,7 @@ mod tests {
         drop(source);
 
         assert_eq!(partial.to_vec(4).unwrap(), b"bcde");
+        drop(nested);
         drop(partial);
         remove_test_files(&directory, &["input.bin"]);
     }
@@ -1803,6 +2109,7 @@ mod tests {
             assert_eq!(s.stream_position().unwrap(), 11);
             assert!(dump.contains("R2:got=8|18191A1B1C1D1E1F"), "M1 {dump}");
             assert!(dump.contains("RB=10"), "M1 {dump}");
+            drop(s);
             remove_test_files(&dir, &["part.split0", "part.split1"]);
         }
 
@@ -1848,6 +2155,7 @@ mod tests {
             s.seek(SeekFrom::Start(5)).unwrap();
             assert_eq!(read_byte(&mut s), Some(15));
             assert!(dump.contains("RB=15"), "R1 {dump}");
+            drop(s);
             remove_test_files(&dir, &["rand.bin"]);
         }
     }

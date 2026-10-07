@@ -32,6 +32,7 @@ pub mod project_container;
 pub mod project_order;
 pub mod project_output;
 pub mod project_plan;
+pub mod project_workflow;
 pub mod redirect_collection;
 pub mod registration;
 pub mod resource_extensions;

@@ -14,18 +14,21 @@ cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
-On this workstation Cargo is installed under `%USERPROFILE%\.cargo\bin` but that directory is not on `PATH`; in PowerShell, prefix each command with `& "$env:USERPROFILE\.cargo\bin\cargo.exe"`. The latest Rust run and outstanding validation status are recorded in the [validation log](docs/validation-log.md). The local AssetRipper source tests remain unrun because `dotnet` is unavailable. See also the [continuation status](docs/continuation.md) and [dependency/license record](docs/dependencies-and-licenses.md).
+On this workstation Cargo is installed under `%USERPROFILE%\.cargo\bin` but that directory is not on `PATH`; in PowerShell, prefix each command with `& "$env:USERPROFILE\.cargo\bin\cargo.exe"`. The latest Rust run and outstanding validation status are recorded in the [validation log](docs/validation-log.md). The isolated AssetRipper reference solution builds with .NET SDK 10.0.401; its suite reports 339 passes and 20 CRLF-versus-LF assertion failures, documented in the handoff. See also the [continuation status](docs/continuation.md) and [dependency/license record](docs/dependencies-and-licenses.md).
 
 ## Current command-line entry point
 
-The current partial CLI has two inspection paths. `inspect` mounts local input directories, detects a platform layout when possible, loads recognized SerializedFiles and their external dependencies, and prints a structural summary. `inspect-files` mounts explicitly selected local file paths in input order, registers top-level files dispatched as ResourceFiles as GameBundle root resources, then inspects any selected SerializedFiles:
+The partial CLI provides directory inspection, explicit-file inspection, and an initial YAML project export. `inspect` mounts local input directories, detects a platform layout when possible, loads recognized SerializedFiles and their external dependencies, and prints a structural summary. `inspect-files` mounts explicitly selected local file paths in input order, registers top-level files dispatched as ResourceFiles as GameBundle root resources, then inspects any selected SerializedFiles:
 
 ```powershell
 cargo run -- inspect <input-directory> [input-directory ...]
 cargo run -- inspect-files <input-file> [input-file ...]
+cargo run -- export-project <new-empty-output-directory> <input-file-or-directory> [input-file-or-directory ...]
 ```
 
-`cargo run -- --help` and `cargo run -- --version` show command help and version. This is an import and inspection path only; it does not yet produce Unity projects or provide the source product's full options, exporters, or GUI. Root ResourceFiles are registered and reported, but complete streamed-resource decoding and exporter integration remain unfinished.
+`export-project` loads mixed file and directory inputs, resolves workspace references and streamed resources, and writes one YAML `.asset` file per SerializedFile, NativeFormatImporter `.meta` sidecars, `ProjectSettings/ProjectVersion.txt`, and a default `Packages/manifest.json`. It stages YAML before writing and rejects undecoded objects, unresolved references, or objects omitted by YAML conversion. This is an initial project workflow; Scene and Prefab reconstruction, generated assets, class-specific exporter families, importer variants, full settings application, and the source product's GUI and remaining user workflows are still unfinished. The repository is not yet a complete AssetRipper replacement. Root ResourceFiles are registered and reported, but complete streamed-resource decoding and exporter integration remain unfinished.
+
+`cargo run -- --help` and `cargo run -- --version` show command help and version. The local .NET SDK is available at `C:\Users\koishi\AppData\Local\Microsoft\dotnet\dotnet.exe`; the isolated reference solution builds, while 20 reference tests have documented CRLF/LF assertion differences. Baseline integrity and Rust validation status are recorded in the [validation log](docs/validation-log.md) and [handoff](docs/next-agent-handoff.md).
 
 The source baseline and its local checksum manifest are documented in [baseline.md](docs/baseline.md). Port coverage is tracked in [feature-parity.md](docs/feature-parity.md).
 

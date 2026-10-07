@@ -14,6 +14,9 @@ use assetripper::export::pointer_map::{
     ExportCollectionPointerMetadata, ExportPointerMapLimits, ExportedAssetPointerEntry,
     ProjectExportPointerMap, UnityProjectAssetType,
 };
+use assetripper::export::project_workflow::{
+    export_workspace_yaml_project, WorkspaceProjectExportLimits,
+};
 use assetripper::export::scene_collection::{
     ExportAssetCollectionIdentity, ExportAssetIdentity, SceneExportIdAssignment,
 };
@@ -168,6 +171,7 @@ enum CliCommand {
     ExportMesh,
     ExportShader,
     ExportAudio,
+    ExportProject,
     Inspect,
     InspectFiles,
     SaveDefaultSettings,
@@ -187,6 +191,7 @@ fn classify_cli_command(name: &str) -> CliCommand {
         "export-mesh" => CliCommand::ExportMesh,
         "export-shader" => CliCommand::ExportShader,
         "export-audio" => CliCommand::ExportAudio,
+        "export-project" => CliCommand::ExportProject,
         "inspect" => CliCommand::Inspect,
         "inspect-files" => CliCommand::InspectFiles,
         "save-default-settings" => CliCommand::SaveDefaultSettings,
@@ -219,6 +224,7 @@ fn run(arguments: impl Iterator<Item = OsString>) -> Result<(), Box<dyn Error>> 
         CliCommand::ExportMesh => export_mesh_from_arguments(arguments),
         CliCommand::ExportShader => export_shader_from_arguments(arguments),
         CliCommand::ExportAudio => export_audio_from_arguments(arguments),
+        CliCommand::ExportProject => export_project_from_arguments(arguments),
         CliCommand::Inspect | CliCommand::InspectFiles => {
             let mut input_paths = Vec::new();
             for argument in arguments {
@@ -1220,6 +1226,103 @@ where
     )
 }
 
+fn export_project_from_arguments<I>(arguments: I) -> Result<(), Box<dyn Error>>
+where
+    I: Iterator<Item = OsString>,
+{
+    let mut arguments = arguments;
+    let output_root = arguments
+        .next()
+        .map(PathBuf::from)
+        .ok_or_else(|| invalid_input("export-project requires a new output directory"))?;
+    let mut inputs = Vec::new();
+    for argument in arguments {
+        if inputs.len() >= MAX_INPUT_PATHS {
+            return Err(invalid_input(format!(
+                "input path count exceeds {MAX_INPUT_PATHS}"
+            )));
+        }
+        inputs.push(PathBuf::from(argument));
+    }
+    if inputs.is_empty() {
+        return Err(invalid_input(
+            "export-project requires at least one input file or directory",
+        ));
+    }
+    let stdout = io::stdout();
+    let mut status_output = stdout.lock();
+    export_project_to(&inputs, &output_root, &mut status_output)
+}
+
+fn export_project_to<W: io::Write>(
+    input_paths: &[PathBuf],
+    output_root: &Path,
+    status_output: &mut W,
+) -> Result<(), Box<dyn Error>> {
+    let (mut filesystem, selected_paths, mount_report) = mount_project_inputs(input_paths)?;
+    let mixed = MixedGameStructure::from_vfs_paths(
+        &filesystem,
+        &selected_paths,
+        MixedGameStructureLimits::default(),
+    )?;
+    if mixed.serialized_file_inputs.is_empty() {
+        return Err(invalid_input(
+            "the selected paths contain no recognized SerializedFile inputs",
+        ));
+    }
+    let root_catalog = RootResourceFileCatalog::from_mounted_explicit_resource_files(
+        &filesystem,
+        &mount_report.explicit_root_resource_files,
+        RootResourceCatalogLimits::default(),
+    )?;
+    let (workspace, _) = SerializedFileWorkspace::load_from_vfs_with_dependencies(
+        &mut filesystem,
+        &mixed.serialized_file_inputs,
+        &mixed.registered_files,
+        &mixed.data_paths,
+        SerializedFileWorkspaceLimits::default(),
+        DependencyIndexLimits::default(),
+        ContainerMountLimits::default(),
+    )?;
+    let objects =
+        ObjectWorkspace::load_from_vfs(&filesystem, &workspace, ObjectWorkspaceLimits::default())?;
+    let reference_graph = workspace.reference_graph(MultiFileReferenceGraphLimits::default())?;
+    let platform = detect_platform_structure(
+        &filesystem,
+        &selected_paths,
+        PlatformStructureLimits::default(),
+    )?;
+    let provider =
+        PlatformResourceProvider::with_mixed_data_paths(platform.as_ref(), Some(&mixed.data_paths));
+    let report = export_workspace_yaml_project(
+        output_root,
+        &filesystem,
+        &root_catalog,
+        &provider,
+        &workspace,
+        &objects,
+        &reference_graph,
+        WorkspaceProjectExportLimits::default(),
+    )?;
+    writeln!(
+        status_output,
+        "Wrote a Unity YAML project to {:?}: {} SerializedFiles, {} objects in {} asset files, {} YAML bytes (project version {}).",
+        output_root,
+        report.serialized_file_count,
+        report.exported_object_count,
+        report.asset_file_count,
+        report.total_yaml_bytes,
+        report.project_version.major
+    )?;
+    writeln!(
+        status_output,
+        "Mounted {} logical inputs ({} bytes). Scene/Prefab reconstruction and class-specific binary export remain outside this YAML workflow.",
+        mount_report.discovered_inputs,
+        mount_report.discovered_source_bytes
+    )?;
+    Ok(())
+}
+
 fn export_audio_to<W: io::Write>(
     input_files: &[PathBuf],
     serialized_file_index: usize,
@@ -2014,6 +2117,92 @@ fn mount_input_files(
         BatchMountLimits::default(),
     )?;
     Ok((filesystem, selected_paths, mount_report))
+}
+
+fn mount_project_inputs(
+    input_paths: &[PathBuf],
+) -> Result<(VirtualFileSystem, Vec<String>, BatchMountReport), Box<dyn Error>> {
+    let input_paths = deduplicate_logical_input_paths(input_paths);
+    if input_paths.is_empty() {
+        return Err(invalid_input(
+            "project export needs at least one input path",
+        ));
+    }
+    let mut filesystem = VirtualFileSystem::new();
+    let limits = BatchMountLimits::default();
+    let mut total = BatchMountReport::default();
+    let mut selected_paths = Vec::new();
+    selected_paths
+        .try_reserve_exact(input_paths.len())
+        .map_err(|_| invalid_input("could not allocate project input roots"))?;
+
+    for (index, input_path) in input_paths.iter().enumerate() {
+        let metadata = fs::symlink_metadata(input_path).map_err(|source| {
+            io::Error::new(
+                source.kind(),
+                format!("could not inspect project input {:?}: {source}", input_path),
+            )
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(invalid_input(format!(
+                "project input {:?} is a symbolic link",
+                input_path
+            )));
+        }
+        let destination_root = format!("/project-input/{index}");
+        let remaining = BatchMountLimits {
+            max_inputs: remaining_budget_usize(
+                limits.max_inputs,
+                total.discovered_inputs,
+                "logical input count",
+            )?,
+            max_directory_entries: remaining_budget_usize(
+                limits.max_directory_entries,
+                total.directory_entries_scanned,
+                "directory entry count",
+            )?,
+            max_directory_depth: limits.max_directory_depth,
+            max_total_input_bytes: remaining_budget_u64(
+                limits.max_total_input_bytes,
+                total.discovered_source_bytes,
+                "source input byte count",
+            )?,
+            max_total_output_bytes: remaining_budget_u64(
+                limits.max_total_output_bytes,
+                total.mounted_bytes,
+                "mounted output byte count",
+            )?,
+        };
+        let next = if metadata.is_dir() {
+            SchemeReader::mount_directory(
+                input_path,
+                &mut filesystem,
+                Some(&destination_root),
+                SchemeReaderLimits::default(),
+                ContainerMountLimits::default(),
+                remaining,
+            )?
+        } else if metadata.is_file() {
+            SchemeReader::mount_paths(
+                &[PathMountInput {
+                    path: input_path.clone(),
+                    destination_root: Some(destination_root.clone()),
+                }],
+                &mut filesystem,
+                SchemeReaderLimits::default(),
+                ContainerMountLimits::default(),
+                remaining,
+            )?
+        } else {
+            return Err(invalid_input(format!(
+                "project input {:?} is not a regular file or directory",
+                input_path
+            )));
+        };
+        merge_mount_report(&mut total, &next)?;
+        selected_paths.push(destination_root);
+    }
+    Ok((filesystem, selected_paths, total))
 }
 
 fn inspect_directories(input_directories: &[PathBuf]) -> Result<(), Box<dyn Error>> {
@@ -3857,7 +4046,7 @@ fn invalid_data_owned(message: String) -> io::Error {
 
 fn print_usage() {
     println!(
-        "Usage:\n  assetripper-rs inspect <input-directory> [input-directory ...]\n  assetripper-rs inspect-files <input-file> [input-file ...]\n  assetripper-rs export-object-yaml <serialized-file-index> <path-id> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-file-yaml <serialized-file-index> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-texture [--settings <path>] <serialized-file-index> <path-id> <new-output-image> <input-file> [input-file ...]\n  assetripper-rs export-mesh <serialized-file-index> <path-id> <new-output-glb> <input-file> [input-file ...]\n  assetripper-rs export-shader [--shader-export-mode <dummy|yaml|decompile>] [--settings <path>] <serialized-file-index> <path-id> <new-output-shader> <input-file> [input-file ...]\n  assetripper-rs export-audio [--settings <path>] <serialized-file-index> <path-id> <new-output-audio> <input-file> [input-file ...]\n  assetripper-rs save-default-settings [--settings <path>]\n  assetripper-rs delete-default-settings\n  assetripper-rs --help\n  assetripper-rs --version\n\n`inspect` mounts directories into isolated VFS roots. `inspect-files` dispatches explicitly selected file paths, registers top-level ResourceFiles as GameBundle root inputs, and reports the parsed SerializedFiles. `export-object-yaml` writes one decoded object as YAML. `export-file-yaml` writes YAML-exportable objects from one SerializedFile in object-table order, resolves streamed Mesh and image-texture bytes, preserves intra-file references through source PathIDs, and refuses unresolved or cross-file references. It reports ImageTexture objects omitted by the baseline when they have no usable image data. `export-texture` decodes one class-28 Texture2D, resolves its inline or streamed image data, and writes a PNG/BMP/TGA image; the output extension selects the format (otherwise the configured settings format, default PNG). `export-mesh` decodes one class-43 Mesh, resolves its vertex data and compressed mesh, and writes a glTF 2.0 binary file with one node per sub-mesh, converting Unity's left-handed coordinates to glTF's right-handed space and rewriting the sub-mesh topology. `export-shader` decodes one class-48 Shader and writes `.shader` text: decompiled script text is written verbatim under every mode, otherwise `dummy` (the default) and `decompile` render the fallback dummy body and `yaml` reports that YAML mode writes a YAML asset instead. `export-audio` decodes one class-83 AudioClip, resolves its inline or streamed audio data, and writes the decoded bytes; tracker audio passes through, `FSB5` reports the external-decoder requirement, and unknown bytes fail with the reference diagnostic. None of these commands replaces an existing output file. These are YAML, texture, single-mesh, single-shader, and single-clip paths, not a complete Unity project export."
+        "Usage:\n  assetripper-rs inspect <input-directory> [input-directory ...]\n  assetripper-rs inspect-files <input-file> [input-file ...]\n  assetripper-rs export-project <new-empty-output-directory> <input-file-or-directory> [input-file-or-directory ...]\n  assetripper-rs export-object-yaml <serialized-file-index> <path-id> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-file-yaml <serialized-file-index> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-texture [--settings <path>] <serialized-file-index> <path-id> <new-output-image> <input-file> [input-file ...]\n  assetripper-rs export-mesh <serialized-file-index> <path-id> <new-output-glb> <input-file> [input-file ...]\n  assetripper-rs export-shader [--shader-export-mode <dummy|yaml|decompile>] [--settings <path>] <serialized-file-index> <path-id> <new-output-shader> <input-file> [input-file ...]\n  assetripper-rs export-audio [--settings <path>] <serialized-file-index> <path-id> <new-output-audio> <input-file> [input-file ...]\n  assetripper-rs save-default-settings [--settings <path>]\n  assetripper-rs delete-default-settings\n  assetripper-rs --help\n  assetripper-rs --version\n\n`inspect` mounts directories into isolated VFS roots. `inspect-files` dispatches explicitly selected file paths, registers top-level ResourceFiles as GameBundle root inputs, and reports the parsed SerializedFiles. `export-project` loads mixed file and directory inputs, resolves cross-file references and streamed resources, and writes one YAML `.asset` per SerializedFile plus `NativeFormatImporter` metadata, `ProjectVersion.txt`, and the default package manifest. It stages all YAML before writing and refuses undecoded objects, unresolved pointers, or objects omitted by YAML conversion. This is the initial workspace YAML workflow; Scene/Prefab reconstruction, class-specific binary collections, importer variants, settings application, and the remaining post-exporters are still open parity work. `export-object-yaml` writes one decoded object as YAML. `export-file-yaml` writes YAML-exportable objects from one SerializedFile in object-table order, resolves streamed Mesh and image-texture bytes, preserves intra-file references through source PathIDs, and refuses unresolved or cross-file references. It reports ImageTexture objects omitted by the baseline when they have no usable image data. `export-texture` decodes one class-28 Texture2D, resolves its inline or streamed image data, and writes a PNG/BMP/TGA image; the output extension selects the format (otherwise the configured settings format, default PNG). `export-mesh` decodes one class-43 Mesh, resolves its vertex data and compressed mesh, and writes a glTF 2.0 binary file with one node per sub-mesh, converting Unity's left-handed coordinates to glTF's right-handed space and rewriting the sub-mesh topology. `export-shader` decodes one class-48 Shader and writes `.shader` text: decompiled script text is written verbatim under every mode, otherwise `dummy` (the default) and `decompile` render the fallback dummy body and `yaml` reports that YAML mode writes a YAML asset instead. `export-audio` decodes one class-83 AudioClip, resolves its inline or streamed audio data, and writes the decoded bytes; tracker audio passes through, `FSB5` reports the external-decoder requirement, and unknown bytes fail with the reference diagnostic. None of the commands replaces an existing output file."
     );
 }
 
@@ -7089,6 +7278,144 @@ mod tests {
     }
 
     #[test]
+    fn export_project_writes_a_cross_file_yaml_workspace() {
+        let directory = TestInputDirectory::new_root();
+        let source_path = directory.join("main.assets");
+        let target_directory = directory.join("dependencies");
+        fs::create_dir(&target_directory).unwrap();
+        let target_path = target_directory.join("other.assets");
+        let output_root = directory.join("project");
+        fs::write(
+            &source_path,
+            make_generation_10_file_with_pointer(&["other.assets"], 1, 42),
+        )
+        .unwrap();
+        fs::write(&target_path, make_generation_10_file()).unwrap();
+        fs::create_dir(&output_root).unwrap();
+
+        let mut input = TestInputDirectory {
+            directory: directory.clone(),
+            files: vec![source_path.clone(), target_path.clone()],
+            // Drop removes directories in reverse order, so keep parents before children.
+            subdirectories: vec![
+                target_directory.clone(),
+                output_root.clone(),
+                output_root.join("Assets"),
+                output_root.join("Assets/AssetRipper"),
+                output_root.join("Assets/AssetRipper/SerializedFiles"),
+                output_root.join("ProjectSettings"),
+                output_root.join("Packages"),
+            ],
+        };
+
+        super::run(
+            [
+                std::ffi::OsString::from("export-project"),
+                output_root.clone().into_os_string(),
+                source_path.clone().into_os_string(),
+                target_directory.clone().into_os_string(),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+
+        let source_asset = output_root.join("Assets/AssetRipper/SerializedFiles/file_000000.asset");
+        let source_meta =
+            output_root.join("Assets/AssetRipper/SerializedFiles/file_000000.asset.meta");
+        let target_asset = output_root.join("Assets/AssetRipper/SerializedFiles/file_000001.asset");
+        let target_meta =
+            output_root.join("Assets/AssetRipper/SerializedFiles/file_000001.asset.meta");
+        let source_yaml = fs::read_to_string(&source_asset).unwrap();
+        let target_meta_text = fs::read_to_string(&target_meta).unwrap();
+        let target_guid = target_meta_text
+            .lines()
+            .find_map(|line| line.strip_prefix("guid: "))
+            .expect("target asset sidecar has a GUID")
+            .to_owned();
+
+        assert!(source_yaml.contains("--- !u!1 &42"));
+        assert!(source_yaml.contains("m_Target: {fileID: 42,"));
+        assert!(source_yaml.contains(&format!("guid: {target_guid}")));
+        assert!(fs::read_to_string(&target_asset)
+            .unwrap()
+            .contains("--- !u!1 &42"));
+        assert!(fs::read_to_string(&source_meta)
+            .unwrap()
+            .contains("NativeFormatImporter:"));
+        assert!(
+            fs::read_to_string(output_root.join("ProjectSettings/ProjectVersion.txt"))
+                .unwrap()
+                .contains("2019.4.0f1")
+        );
+        assert!(
+            fs::read_to_string(output_root.join("Packages/manifest.json"))
+                .unwrap()
+                .contains("\"dependencies\"")
+        );
+        input.files.extend([
+            source_asset,
+            source_meta,
+            target_asset,
+            target_meta,
+            output_root.join("ProjectSettings/ProjectVersion.txt"),
+            output_root.join("Packages/manifest.json"),
+        ]);
+    }
+
+    #[test]
+    fn export_project_rejects_unresolved_references_before_writing_project_files() {
+        let directory = TestInputDirectory::new_root();
+        let source_path = directory.join("main.assets");
+        let output_root = directory.join("project");
+        fs::write(
+            &source_path,
+            make_generation_10_file_with_pointer_path_id(&[], 99),
+        )
+        .unwrap();
+        fs::create_dir(&output_root).unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![source_path.clone()],
+            subdirectories: vec![output_root.clone()],
+        };
+
+        let error =
+            super::export_project_to(&[source_path], &output_root, &mut Vec::new()).unwrap_err();
+
+        assert!(
+            error.to_string().contains("unresolved")
+                || error.to_string().contains("complete workspace PPtr scan"),
+            "unexpected project export rejection: {error}"
+        );
+        assert_eq!(fs::read_dir(&output_root).unwrap().count(), 0);
+        drop(input);
+    }
+
+    #[test]
+    fn export_project_refuses_a_nonempty_output_directory_without_touching_it() {
+        let directory = TestInputDirectory::new_root();
+        let source_path = directory.join("main.assets");
+        let output_root = directory.join("project");
+        let existing_file = output_root.join("keep.txt");
+        fs::write(&source_path, make_generation_10_file()).unwrap();
+        fs::create_dir(&output_root).unwrap();
+        fs::write(&existing_file, b"existing project file").unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![source_path.clone(), existing_file.clone()],
+            subdirectories: vec![output_root.clone()],
+        };
+
+        let error =
+            super::export_project_to(&[source_path], &output_root, &mut Vec::new()).unwrap_err();
+
+        assert!(error.to_string().contains("must be empty"));
+        assert_eq!(fs::read(&existing_file).unwrap(), b"existing project file");
+        assert_eq!(fs::read_dir(&output_root).unwrap().count(), 1);
+        drop(input);
+    }
+
+    #[test]
     fn export_file_yaml_reports_baseline_omitted_image_textures_without_creating_output() {
         let directory = TestInputDirectory::new_root();
         let serialized_path = directory.join("main.assets");
@@ -7956,6 +8283,10 @@ mod tests {
         assert_eq!(
             classify_cli_command("export-audio"),
             CliCommand::ExportAudio
+        );
+        assert_eq!(
+            classify_cli_command("export-project"),
+            CliCommand::ExportProject
         );
         assert_eq!(classify_cli_command("inspect"), CliCommand::Inspect);
         assert_eq!(

@@ -1,0 +1,20 @@
+# AssetRipper MultiFileStream/SchemeReader path differential
+# Probe: tools/probes/multifile, .NET SDK 10.0.401, reference root %LOCALAPPDATA%\Temp\opencode\ar-ref.
+# The C# probe creates ordinary resource bytes and split siblings beneath a unique directory under target/multifile-probe.
+# Lines below are observed output from the frozen source; hex fields are the source-returned bytes.
+REGULAR|regular.bundle|regular.bundle|726567756C61722D64617461
+SPLIT_BASE|stream.bundle|stream.bundle|616C7068613A62657461
+SPLIT_PART|stream.bundle|stream.bundle|616C7068613A62657461
+IS_MULTI|plain|False
+IS_MULTI|split0|True
+IS_MULTI|split007|True
+IS_MULTI|split-plus|False
+IS_MULTI|split-upper|False
+IS_MULTI|split-no-index|False
+LOGICAL_NAMES|stream.bundle|stream.bundle
+BOUNDARY|1|3A|2|6265|8
+SEEK_END|10|10|12|8
+JOINED|616C7068613A62657461
+NUMERIC_ORDER|ABCDEFGHIJK
+GAP|REJECTED|Exception|True
+ZERO_PADDED_INDEX|REJECTED|Exception|True

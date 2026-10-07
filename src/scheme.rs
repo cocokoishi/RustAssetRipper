@@ -3162,6 +3162,28 @@ mod tests {
         ))
     }
 
+    fn source_multifile_path_fields(prefix: &str) -> Vec<&'static str> {
+        include_str!("io/multifile_path_fixture.txt")
+            .lines()
+            .find(|line| line.starts_with(prefix))
+            .unwrap_or_else(|| panic!("missing source MultiFile fixture row {prefix:?}"))
+            .split('|')
+            .collect()
+    }
+
+    fn decode_hex_fixture(value: &str) -> Vec<u8> {
+        assert!(value.len().is_multiple_of(2));
+        value
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let high = (pair[0] as char).to_digit(16).unwrap();
+                let low = (pair[1] as char).to_digit(16).unwrap();
+                u8::try_from((high << 4) | low).unwrap()
+            })
+            .collect()
+    }
+
     fn webdata_fixture(entries: &[(&str, &[u8])]) -> Vec<u8> {
         assert!(entries.iter().all(|(name, _)| name.len() < 1024 * 1024));
         let header_size = 20
@@ -3864,11 +3886,16 @@ mod tests {
 
     #[test]
     fn mount_path_assembles_split_inputs_and_uses_the_logical_base_name() {
-        let base_path = unique_temp_file_path("bin");
+        let source_record = source_multifile_path_fields("SPLIT_PART|");
+        assert_eq!(source_record.len(), 4);
+        let expected_bytes = decode_hex_fixture(source_record[3]);
+        let directory = unique_temp_file_path("dir");
+        std::fs::create_dir(&directory).unwrap();
+        let base_path = directory.join(source_record[1]);
         let first_part = PathBuf::from(format!("{}.split0", base_path.display()));
         let second_part = PathBuf::from(format!("{}.split1", base_path.display()));
-        std::fs::write(&first_part, b"split ").unwrap();
-        std::fs::write(&second_part, b"resource").unwrap();
+        std::fs::write(&first_part, b"alpha:").unwrap();
+        std::fs::write(&second_part, b"beta").unwrap();
         let supplied_part = PathBuf::from(format!("{}.split1", base_path.display()));
         let mut filesystem = VirtualFileSystem::new();
 
@@ -3883,19 +3910,49 @@ mod tests {
 
         assert_eq!(report.mounted_entries, 1);
         assert_eq!(
+            source_record[1], source_record[2],
+            "the reference FilePath basename and Name agree for this resource"
+        );
+        assert_eq!(
             filesystem
-                .read_all_bytes(
-                    &format!(
-                        "/inputs/{}",
-                        base_path.file_name().unwrap().to_string_lossy()
-                    ),
-                    64,
-                )
+                .read_all_bytes(&format!("/inputs/{}", source_record[1]), 64,)
                 .unwrap(),
-            b"split resource"
+            expected_bytes
         );
         std::fs::remove_file(first_part).unwrap();
         std::fs::remove_file(second_part).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn mount_path_rejects_zero_padded_parts_the_reference_cannot_open() {
+        assert_eq!(
+            source_multifile_path_fields("ZERO_PADDED_INDEX|")[1],
+            "REJECTED"
+        );
+        let directory = unique_temp_file_path("dir");
+        std::fs::create_dir(&directory).unwrap();
+        let base_path = directory.join("padded.bundle");
+        std::fs::write(format!("{}.split00", base_path.display()), b"zero").unwrap();
+        std::fs::write(format!("{}.split1", base_path.display()), b"one").unwrap();
+        let mut filesystem = VirtualFileSystem::new();
+
+        let error = SchemeReader::mount_path(
+            &base_path,
+            &mut filesystem,
+            Some("/inputs"),
+            SchemeReaderLimits::default(),
+            ContainerMountLimits::default(),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("padded.bundle.split0"));
+        assert!(filesystem
+            .read_all_bytes("/inputs/padded.bundle", 32)
+            .is_err());
+        std::fs::remove_file(directory.join("padded.bundle.split00")).unwrap();
+        std::fs::remove_file(directory.join("padded.bundle.split1")).unwrap();
+        std::fs::remove_dir(directory).unwrap();
     }
 
     #[test]
@@ -4026,6 +4083,13 @@ mod tests {
             FileKind::UnityWebData
         );
 
+        #[cfg(windows)]
+        {
+            assert!(std::fs::write(root.join("data.unity3d.split0"), b"replacement").is_err());
+            assert!(std::fs::remove_file(root.join("data.unity3d.split1")).is_err());
+        }
+
+        drop(filesystem);
         std::fs::remove_file(root.join("data.unity3d.split0")).unwrap();
         std::fs::remove_file(root.join("data.unity3d.split1")).unwrap();
         std::fs::remove_dir(root).unwrap();

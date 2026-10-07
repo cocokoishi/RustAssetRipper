@@ -1,0 +1,9 @@
+# AssetRipper LocalFileSystem read-share differential
+# Probe: tools/probes/local-filesystem, .NET SDK 10.0.401, isolated reference root %LOCALAPPDATA%\Temp\opencode\ar-ref.
+# All files are generated under the Rust repository's ignored target directory.
+WRITE_WHILE_OPEN|REJECTED|IOException
+READ_AFTER_WRITE_ATTEMPT|736F757263652D6279746573
+DELETE_WHILE_OPEN|REJECTED|IOException
+WRITE_SPLIT_WHILE_OPEN|REJECTED|IOException
+DELETE_SPLIT_WHILE_OPEN|REJECTED|IOException
+SPLIT_READ_AFTER_MUTATION_ATTEMPTS|73706C69742D6C6566743A73706C69742D7269676874

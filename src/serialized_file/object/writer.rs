@@ -1097,7 +1097,7 @@ impl PayloadEncoder<'_, '_, '_> {
             endian: self.endian,
             arrays_align: self.arrays_align,
             reference_types: self.reference_types,
-            allow_managed_registry: false,
+            allow_managed_registry: true,
             object_index: self.object_index,
             limits: dynamic_limits,
             output: Vec::new(),

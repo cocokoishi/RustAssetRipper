@@ -9,7 +9,7 @@ This log records behavior differences found between the Rust port and the frozen
 | Status | Rust detector corrected and regression-covered; C# execution and Unity-produced-file comparison remain unrun |
 | Source location | `AssetRipper/Source/AssetRipper.IO.Files/CompressedFiles/Brotli/BrotliFile.cs`, `BrotliFile.IsBrotliFile` |
 | Input evidence | `scheme::tests::dispatches_a_spec_encoded_unity_brotli_metadata_wrapper` constructs a Brotli stream with Unity's 36-byte marker in an empty metadata meta-block, followed by an uncompressed meta-block containing `webdata payload` and a final empty block. The fixture is assembled from RFC 7932 bit fields; the pinned decoder returns the exact payload for every WBITS value from 10 through 24. |
-| Source-derived behavior | The source reads the encoded `MSKIPLEN - 1` value and compares it directly with `BrotliSignature.Length`. For the valid 36-byte marker, the encoded value is 35, so the signature comparison fails. This is derived from the inspected implementation; the C# method was not executed because `dotnet` is unavailable. |
+| Source-derived behavior | The source reads the encoded `MSKIPLEN - 1` value and compares it directly with `BrotliSignature.Length`. For the valid 36-byte marker, the encoded value is 35, so the signature comparison fails. This is derived from the inspected implementation; a C# runtime differential for this case has not been run. .NET SDK 10.0.401 is available. |
 | Root cause | RFC 7932 §9.2 stores metadata length minus one. The detector omitted the `+1` needed to obtain the number of metadata bytes before comparing the marker length. |
 | Rust change | `has_brotli_file_signature` now parses the Brotli window header, validates the empty metadata block fields and zero alignment bits, adds one to the encoded length, bounds the marker read, and compares the metadata bytes. The recursive scheme reader then decodes the same input under the configured output limit. |
 | Regression evidence | The constructed marker streams are recognized and decoded for WBITS 10–24. `docs/validation-log.md` records the full test run. |
@@ -20,12 +20,37 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 
 | Field | Finding |
 |---|---|
-| Status | Rust follows standard End-relative seek semantics; source discrepancy is identified by static inspection; C# execution is unavailable |
+| Status | Rust follows standard End-relative seek semantics; the opposite source behavior is confirmed by an isolated C# runtime probe and retained as documented hardening |
 | Source location | AssetRipper/Source/AssetRipper.IO.Files/Streams/MultiFileStream.cs, MultiFileStream.Seek |
-| Input evidence | io::stream::tests::multi_file_stream_reads_across_parts_and_seeks_logically seeks to End(-2) over a seven-byte logical stream and reads the final two bytes. |
-| Source-derived behavior | The inspected source sets Position to Length - offset for SeekOrigin.End. With the conventional negative offset used to seek backward from end, this moves beyond the stream length. |
-| Rust behavior | MultiFileStream implements Rust Seek semantics: the End-relative offset is added to the logical stream length. |
-| Remaining comparison | This is a source-code discrepancy, not an executed C# differential. The local AssetRipper cannot be built here because dotnet is unavailable. |
+| Input evidence | `tools/probes/multifile/MultiFileProbe.cs` runs against the isolated frozen `AssetRipper.IO.Files.dll` and records `SEEK_END|10|10|12|8` in `src/io/multifile_path_fixture.txt`. Rust test `multi_file_stream_seeks_from_end_with_standard_offsets` asserts those source results and its own End seeks. |
+| Source-runtime behavior | For length 10, the source returns 10 for End(0), 12 for End(-2), and 8 for End(+2), confirming `Position = Length - offset`. |
+| Rust behavior | MultiFileStream implements Rust Seek semantics: the End-relative offset is added to the logical stream length, so End(-2) is 8 and End(+2) is 12. |
+| Resolution | The Rust behavior is retained as standard seek semantics. The source difference is explicit and runtime-confirmed; this probe does not establish compatibility with any caller that relies on the source's inverted sign. |
+
+## DIFF-MULTIFILE-PATH-001 — canonical split names and path-backed mounting
+
+| Field | Finding |
+|---|---|
+| Status | Canonical path behavior now matches the frozen source's acceptance/rejection outcomes; source-runtime differential and mount regression pass |
+| Source location | `AssetRipper.IO.Files/Streams/MultiFileStream.cs` (`IsMultiFile`, `OpenRead`); `SplitNameComparer.cs`; `AssetRipper.IO.Files/SchemeReader.cs` (`LoadFile`) |
+| Input evidence | `tools/probes/multifile/MultiFileProbe.cs` runs only synthetic files under the Rust repository's ignored `target` directory against the isolated reference copy at `%LOCALAPPDATA%\Temp\opencode\ar-ref`. Its committed fixture records regular and split base/part names, `IsMultiFile` cases, part ordering through split10, boundary reads, missing-part rejection, and zero-padded-name rejection. |
+| Source-runtime behavior | `SchemeReader.LoadFile` exposes the same logical base name for a regular path, split base, or supplied split part. Parts are numerically ordered; gaps and `.split00` plus `.split1` are rejected because the source requires exact `.split0` through `.splitN` names. |
+| Rust change | `open_split_file` now checks the exact canonical names across the enumerated `.split*` candidate count before sorting/opening. This rejects `.split00` as a substitute for `.split0`; `SchemeReader::mount_path` carries the logical name into the VFS. |
+| Regression evidence | `multi_file_paths_match_reference_runtime_fixture` compares path classification, bytes, names, numeric order, boundary reads, gap rejection, and padded-name rejection. `mount_path_assembles_split_inputs_and_uses_the_logical_base_name` and `mount_path_rejects_zero_padded_parts_the_reference_cannot_open` exercise the integrated mount path. |
+| Remaining difference | Rust reports `NotFound` with the expected canonical path; the C# fixture records a rejected `Exception`. Both reject the malformed family. End-relative seek sign remains the separate documented difference in `DIFF-MULTIFILE-SEEK-END-001`. |
+
+## DIFF-LOCAL-FS-SHARING-001 — Rust's default Windows file sharing allowed input mutation
+
+| Field | Finding |
+|---|---|
+| Status | Windows behavior fixed and source-runtime regression-covered; non-Windows host behavior remains unverified |
+| Source location | `AssetRipper.IO.Files/LocalFileSystem.g.cs` (`LocalFileImplementation.OpenRead`); `LocalFileSystem.cs`; `Streams/MultiFileStream.cs`; `SchemeReader.LoadFile` |
+| Input evidence | `tools/probes/local-filesystem/Program.cs` ran against the isolated frozen AssetRipper IO.Files project using synthetic files under the Rust repository's ignored `target` directory. `src/io/local_filesystem_fixture.txt` records that writes and deletes are rejected while ordinary and split input streams are open, and that their original bytes remain readable. |
+| Source-runtime behavior | On Windows, `LocalFileSystem.File.OpenRead` uses the .NET `File.OpenRead` contract (`FileShare.Read`): write and delete attempts fail with `IOException` while the handle is retained. `MultiFileStream.OpenRead` retains the same read-only share contract for each split part. |
+| Root cause | Rust `File::open` used Windows' default read/write/delete sharing, allowing other handles to replace or remove an input while a workspace reader still referenced it. |
+| Rust change | `open_os_read` uses `OpenOptionsExt::share_mode(FILE_SHARE_READ)` on Windows and is used by regular path opens, split-part opens, `SmartStream::open_read`, and `FileRangeStream::open`. Other platforms keep their native read-only open behavior. |
+| Regression evidence | Windows test `physical_file_read_sharing_matches_local_filesystem_runtime_fixture` checks mutation rejection and byte stability for regular and split paths. `mount_directory_preserving_containers_keeps_split_container_identity` additionally checks that VFS-held split readers keep source parts locked while retaining raw container bytes. Full workspace tests, Clippy, format, and diff checks pass. |
+| Remaining comparison | The C# probe ran on Windows only. Directory enumeration order and sharing behavior on non-Windows host platforms still require source-runtime comparison before `IO-FS-IMPORT-PRESERVE-DIRECTORY-001` can be marked verified. |
 
 ## DIFF-REFERENCE-TEST-NEWLINE-001 — 20 reference test failures are a checkout artifact, and they confirm LF is the intended YAML newline
 
@@ -1042,13 +1067,13 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Regression evidence | `cargo test --workspace --locked custom_curve::tests` passes 12/12. The fixture includes 14 `ReverseAscii` outputs and 2 direct `HashAscii` marker hashes. The full Rust workspace passes 1,397 library tests and 65 CLI tests; formatting, warnings-denied Clippy, and the 1,449-file baseline verifier pass. |
 | Remaining comparison | `AnimationClipConverter` does not call the Rust `to_attribute_name`; production code still lacks root/child traversal and asset-backed blend-shape/material CRC lookup to populate `CustomCurveSceneFacts`. Full clip conversion, independent Unity-file evidence, and dynamic Unity animation sampling remain unrun. Keep `PROC-ANIM-CUSTOM-CURVE-001` open. |
 
-## DIFF-MANAGED-REFS-002 - typed root registries and nested-registry gap
+## DIFF-MANAGED-REFS-002 - nested managed-reference registries
 
 | Field | Finding |
 |---|---|
-| Status | Root registry path implemented and synthetically exercised; source audit identifies an open nested-registry difference |
-| Source location | `AssetRipper.Import/Structure/Assembly/Serializable/ManagedReferenceRegistryReader.cs` (`Read`, `ReadManagedType`, `ReadReferencedObject`); `TypeTreeResolver.cs`; `TypeTrees/SerializableTreeType.cs` (`FromReferencedObjectNode`, `FromRootNode`, `AddNode`); `AssetRipper.SerializationLogic/ManagedReferenceTypes.cs` |
-| Source evidence | Read-only audit of the frozen baseline: `FromReferencedObjectNode` builds from the referenced object's root with root-only registry handling disabled; `AddNode` still recognizes and builds Registry nodes encountered below that root. The registry reader resolves each type triple against file reference types and decodes each content-bearing entry. No UABEA, Unity, or user AssetBundle data was used. |
-| Rust change | Root object decoding now reads format 1 terminated and format 2 counted registries, resolves class/namespace/assembly tuples, decodes typed payloads, preserves `rid` and legacy indexed `id`, builds graph objects and managed-ID edges, visits PPtrs in payload data, emits registry YAML, and writes root registry formats. Synthetic fixtures cover two cyclic/shared entries, nested PPtrs, and exact root-registry writer round trips. |
-| Regression evidence | Focused suites: `managed_reference` 8/8; `managed_registry` 11/11; counted typed cyclic payload round trip, terminated legacy round trip, and malformed-path diagnostics each pass. Full workspace: 1,405 library + 65 CLI tests; formatter, warnings-denied Clippy, baseline verifier (1,449 files), and `git diff --check` pass. |
-| Remaining difference | Rust rejects a Registry field encountered inside a referenced payload's TypeTree, while source `AddNode` can represent that nested field. Current managed-ID graph resolution is tested within the root registry only. Nested registry scope semantics and writer support are not implemented; no independent source-runtime payload or Unity-produced fixture validates typed cyclic payload bytes. Keep `SER-MANAGED-REFS-001` open. |
+| Status | Closed for the source reader paths exercised by independent modern and legacy nested-registry fixtures; no Unity-produced or dynamic Unity result is claimed |
+| Source location | `AssetRipper.Import/Structure/Assembly/Serializable/ManagedReferenceRegistryReader.cs` (`Read`, `ReadManagedType`, `ReadReferencedObject`, `ReadReferencedObjectData`); `SerializableStructure.cs` (`Read`); `TypeTreeResolver.cs`; `TypeTrees/SerializableTreeType.cs` (`FromReferencedObjectNode`, `AddNode`); `AssetRipper.SerializationLogic/ManagedReferenceTypes.cs` |
+| Source evidence | The frozen source's `FromReferencedObjectNode` excludes only a direct root Registry marker. `AddNode` retains and constructs a Registry node below a nested structure, and `SerializableStructure.Read` dispatches that field through `ManagedReferenceRegistryReader.Read`. The checked-in probe builds those TypeTrees and runs the shipped reader on the same fixture bytes used by Rust. No UABEA or user AssetBundle data was used. |
+| Rust change | `decode_typetree_payload` now recursively decodes nested registries with inherited object-stream offsets, allocation limits, and a configurable recursion bound. The writer uses the same recursive TypeTree path. The reference graph assigns stable preorder scopes to structs owning a Registry field; entries and ID edges resolve by `(scope, id)`, so duplicate IDs in different scopes remain distinct. Scope count, object count, edge count, and path bounds produce explicit errors. |
+| Regression evidence | `tools/probes/managed-nested/Program.cs` consumes counted modern `rid` and terminated legacy indexed `id` fixtures to exactly 152/152 and 200/200 bytes. Rust's `nested_registry_decodes_writes_and_resolves_equal_ids_in_distinct_scopes` decodes and re-encodes both fixtures byte-for-byte, resolves equal IDs to the proper local entries, and checks depth/scope bounds. Existing root tests retain shared/cyclic IDs, nested PPtrs, YAML, and framing errors. |
+| Remaining difference | No discrepancy remains in the source paths exercised. The source reader does not publish a separate managed-ID resolution graph; Rust's graph scope mapping follows the nested `SerializableStructure` ownership and is checked with equal IDs on both sides of the scope boundary. Unity-produced fixture and dynamic Unity validation remain unrun. `SER-MANAGED-REFS-001` is verified; the Phase 1 gate remains open. |

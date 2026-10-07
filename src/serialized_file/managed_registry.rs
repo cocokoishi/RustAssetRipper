@@ -363,6 +363,7 @@ mod tests {
             endian: crate::io::binary::Endian::Big,
             arrays_align: true,
             stream_offset: 1,
+            registry_depth: 1,
             object_decode_limits: decode_limits,
             max_entries: 8,
             max_total_decoded_allocation_bytes: decode_limits.max_decoded_allocation_bytes,
@@ -601,6 +602,7 @@ mod tests {
             endian: Endian::Little,
             arrays_align: true,
             stream_offset: 0,
+            registry_depth: 1,
             object_decode_limits: crate::serialized_file::object::ObjectDecodeLimits::default(),
             max_entries: crate::serialized_file::object::ObjectDecodeLimits::default()
                 .max_array_elements,
@@ -804,6 +806,13 @@ pub enum ManagedRegistryReadError {
     },
     /// The registry exceeds a caller-supplied product bound.
     EntryCountLimitExceeded { count: usize, limit: usize },
+    /// Nested registries exceed the caller-supplied recursion bound.
+    RegistryDepthLimitExceeded { requested: usize, limit: usize },
+    /// The stream-relative start of a nested payload overflows the address space.
+    StreamOffsetOverflow {
+        registry_offset: usize,
+        relative_offset: usize,
+    },
     /// Decoding all registry payloads would exceed the owning object allocation budget.
     AllocationLimitExceeded { requested: usize, limit: usize },
     /// A bounded registry allocation could not be reserved.
@@ -842,6 +851,17 @@ impl Display for ManagedRegistryReadError {
                 formatter,
                 "managed reference registry has {count} entries, exceeding limit {limit}"
             ),
+            Self::RegistryDepthLimitExceeded { requested, limit } => write!(
+                formatter,
+                "managed reference registry depth {requested} exceeds limit {limit}"
+            ),
+            Self::StreamOffsetOverflow {
+                registry_offset,
+                relative_offset,
+            } => write!(
+                formatter,
+                "managed reference payload offset {registry_offset} + {relative_offset} overflows the address space"
+            ),
             Self::AllocationLimitExceeded { requested, limit } => write!(
                 formatter,
                 "managed reference registry would allocate {requested} bytes, exceeding limit {limit}"
@@ -872,6 +892,8 @@ pub struct ManagedRegistryReadOptions {
     pub arrays_align: bool,
     /// Position of this registry slice in the owning object payload, used for stream alignment.
     pub stream_offset: usize,
+    /// One-based depth of this registry relative to the owning serialized object.
+    pub registry_depth: usize,
     /// Allocation and nesting limits for each dynamic payload.
     pub object_decode_limits: super::object::ObjectDecodeLimits,
     /// Maximum number of registry entries.
@@ -928,6 +950,12 @@ pub fn read_managed_registry(
     options: ManagedRegistryReadOptions,
     references: &[super::metadata::SerializedTypeReference],
 ) -> Result<ManagedRegistryRead, ManagedRegistryReadError> {
+    if options.registry_depth > options.object_decode_limits.max_managed_registry_depth {
+        return Err(ManagedRegistryReadError::RegistryDepthLimitExceeded {
+            requested: options.registry_depth,
+            limit: options.object_decode_limits.max_managed_registry_depth,
+        });
+    }
     let mut cursor = Cursor::new(bytes, options.endian, options.stream_offset);
     let version = cursor.read_i32("registry version word")?;
     let format = classify_registry_format(version)?;
@@ -1132,59 +1160,70 @@ fn read_entry(
         triple.assembly_name.is_empty(),
     );
     let mut payload_allocated_bytes = 0usize;
-    let data =
-        if !frame.has_content {
-            ManagedRegistryEntryData::Empty
-        } else {
-            let script = ScriptIdentifier {
-                assembly: remove_assembly_file_extension(&triple.assembly_name),
-                namespace: triple.namespace_name.clone(),
-                name: Some(triple.class_name.clone()),
-            };
-            let matched =
-                crate::processing::script_identity::find_type_reference_index(references, &script)
-                    .ok_or_else(|| ManagedRegistryReadError::UnresolvableType {
-                        entry_index,
-                        unique_name: script.unique_name(),
-                        reason: TYPE_REFERENCE_NOT_FOUND.to_owned(),
-                    })?;
-            let tree = references[matched].type_tree.as_ref().ok_or_else(|| {
+    let data = if !frame.has_content {
+        ManagedRegistryEntryData::Empty
+    } else {
+        let script = ScriptIdentifier {
+            assembly: remove_assembly_file_extension(&triple.assembly_name),
+            namespace: triple.namespace_name.clone(),
+            name: Some(triple.class_name.clone()),
+        };
+        let matched =
+            crate::processing::script_identity::find_type_reference_index(references, &script)
+                .ok_or_else(|| ManagedRegistryReadError::UnresolvableType {
+                    entry_index,
+                    unique_name: script.unique_name(),
+                    reason: TYPE_REFERENCE_NOT_FOUND.to_owned(),
+                })?;
+        let tree = references[matched].type_tree.as_ref().ok_or_else(|| {
+            ManagedRegistryReadError::UnresolvableType {
+                entry_index,
+                unique_name: script.unique_name(),
+                reason: TYPE_TREE_NODE_BUILD_FAILED.to_owned(),
+            }
+        })?;
+        let built =
+            crate::processing::script_identity::build_type_nodes(&tree.nodes).ok_or_else(|| {
                 ManagedRegistryReadError::UnresolvableType {
                     entry_index,
                     unique_name: script.unique_name(),
                     reason: TYPE_TREE_NODE_BUILD_FAILED.to_owned(),
                 }
             })?;
-            let built = crate::processing::script_identity::build_type_nodes(&tree.nodes)
-                .ok_or_else(|| ManagedRegistryReadError::UnresolvableType {
-                    entry_index,
-                    unique_name: script.unique_name(),
-                    reason: TYPE_TREE_NODE_BUILD_FAILED.to_owned(),
-                })?;
-            let flat = flatten_built_tree(&built);
-            let payload_tree = super::metadata::TypeTree {
-                nodes: flat,
-                string_buffer: Vec::new(),
-            };
-            let payload = cursor.remaining_bytes();
-            let mut decode_limits = options.object_decode_limits;
-            decode_limits.max_decoded_allocation_bytes = decode_limits
-                .max_decoded_allocation_bytes
-                .min(options.max_total_decoded_allocation_bytes);
-            let (value, consumed, allocated) = super::object::decode_typetree_payload(
-                &payload_tree,
-                payload,
-                options.endian,
-                options.arrays_align,
-                references,
-                entry_index,
-                &decode_limits,
-            )
-            .map_err(|error| ManagedRegistryReadError::PayloadDecode { entry_index, error })?;
-            cursor.advance(consumed, "registry object payload")?;
-            payload_allocated_bytes = allocated;
-            ManagedRegistryEntryData::Content(value)
+        let flat = flatten_built_tree(&built);
+        let payload_tree = super::metadata::TypeTree {
+            nodes: flat,
+            string_buffer: Vec::new(),
         };
+        let payload = cursor.remaining_bytes();
+        let payload_stream_offset = options.stream_offset.checked_add(cursor.position()).ok_or(
+            ManagedRegistryReadError::StreamOffsetOverflow {
+                registry_offset: options.stream_offset,
+                relative_offset: cursor.position(),
+            },
+        )?;
+        let mut decode_limits = options.object_decode_limits;
+        decode_limits.max_decoded_allocation_bytes = decode_limits
+            .max_decoded_allocation_bytes
+            .min(options.max_total_decoded_allocation_bytes);
+        let (value, consumed, allocated) = super::object::decode_typetree_payload(
+            &payload_tree,
+            payload,
+            options.endian,
+            options.arrays_align,
+            references,
+            super::object::ManagedPayloadDecodeContext {
+                entry_index,
+                stream_offset: payload_stream_offset,
+                managed_registry_depth: options.registry_depth,
+            },
+            &decode_limits,
+        )
+        .map_err(|error| ManagedRegistryReadError::PayloadDecode { entry_index, error })?;
+        cursor.advance(consumed, "registry object payload")?;
+        payload_allocated_bytes = allocated;
+        ManagedRegistryEntryData::Content(value)
+    };
     let entry = ManagedRegistryEntry {
         reference_id,
         class_name: triple.class_name,
@@ -1197,9 +1236,9 @@ fn read_entry(
 
 /// Flatten a built node back into a level-nested node list in declaration order,
 /// preserving versions and meta flags for the payload decoder. Root registry
-/// children are skipped exactly like `FromRootNode` skips them when building
-/// the referenced-object type; a nested registry node stays in the list and
-/// fails payload decoding explicitly (no silent mis-decode).
+/// children are skipped exactly like `FromReferencedObjectNode` skips them
+/// when building a referenced-object type; registries nested below structs are
+/// retained and recursively decoded.
 pub(crate) fn flatten_built_tree(
     root: &crate::processing::script_identity::BuiltTypeNode,
 ) -> Vec<super::metadata::TypeTreeNode> {
@@ -1222,10 +1261,8 @@ pub(crate) fn flatten_built_tree(
             push(child, level + 1, out);
         }
     }
-    // Node-list levels fit in a byte: file trees never nest deeper.
-    // Root registry children are skipped exactly like `FromRootNode` skips
-    // them when building the referenced-object type; deeper registry nodes
-    // stay in the list and fail payload decoding explicitly.
+    // Node-list levels fit in a byte: file trees never nest deeper. The source
+    // excludes the direct root registry marker but retains nested Registry fields.
     let mut out = Vec::new();
     push(root, 0, &mut out);
     // Drop root-registry subtrees (a level-1 marker plus its deeper nodes).

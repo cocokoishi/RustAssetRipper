@@ -392,6 +392,41 @@ pub fn export_asset_with_meta(
     })
 }
 
+/// Write a project-owned file such as `ProjectSettings/ProjectVersion.txt` or
+/// `Packages/manifest.json` below the output root. The path is validated with the
+/// same traversal and symlink checks as asset exports, and the destination is
+/// created add-only.
+pub fn write_new_project_file(
+    output_root: &Path,
+    relative_path: &str,
+    bytes: &[u8],
+    path_limits: UnityProjectOutputLimits,
+) -> Result<PathBuf, UnityProjectOutputError> {
+    let components = validated_path_components(relative_path, path_limits)?;
+    let (directory_components, [file_name]) = components.split_at(components.len() - 1) else {
+        return Err(UnityProjectOutputError::InvalidRelativePath {
+            reason: "path must contain only ordinary, portable relative components",
+        });
+    };
+    let directory = ensure_output_directory(output_root, directory_components)?;
+    let path = directory.join(file_name);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|source| UnityProjectOutputError::CreateAsset {
+            path: path.clone(),
+            source,
+        })?;
+    file.write_all(bytes)
+        .and_then(|()| file.flush())
+        .map_err(|source| UnityProjectOutputError::WriteAsset {
+            path: path.clone(),
+            source,
+        })?;
+    Ok(path)
+}
+
 /// Create one asset file add-only, run the caller writer into it, and flush before
 /// returning the written byte count. A writer failure leaves the partial asset behind
 /// with no `.meta` beside it, matching the source asset-first order where a throwing
@@ -716,7 +751,42 @@ mod tests {
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
     }
 
-    use super::{export_asset_with_meta, AssetExportStep, AssetExportWithMetaPlan};
+    use super::{
+        export_asset_with_meta, write_new_project_file, AssetExportStep, AssetExportWithMetaPlan,
+    };
+
+    #[test]
+    fn project_auxiliary_files_are_confined_and_add_only() {
+        let root = TestOutputRoot::new();
+        let path = write_new_project_file(
+            root.path(),
+            "ProjectSettings/ProjectVersion.txt",
+            b"m_EditorVersion: 2022.3.0f1\n",
+            UnityProjectOutputLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"m_EditorVersion: 2022.3.0f1\n");
+        assert!(matches!(
+            write_new_project_file(
+                root.path(),
+                "ProjectSettings/ProjectVersion.txt",
+                b"replacement",
+                UnityProjectOutputLimits::default(),
+            ),
+            Err(UnityProjectOutputError::CreateAsset { .. })
+        ));
+        assert!(matches!(
+            write_new_project_file(
+                root.path(),
+                "../outside.txt",
+                b"unsafe",
+                UnityProjectOutputLimits::default(),
+            ),
+            Err(UnityProjectOutputError::InvalidRelativePath { .. })
+        ));
+        assert_eq!(fs::read(&path).unwrap(), b"m_EditorVersion: 2022.3.0f1\n");
+        assert!(!root.path().parent().unwrap().join("outside.txt").exists());
+    }
 
     fn export_plan(path: &str) -> AssetExportWithMetaPlan {
         AssetExportWithMetaPlan {

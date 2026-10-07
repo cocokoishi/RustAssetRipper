@@ -29,6 +29,8 @@ pub struct ObjectDecodeLimits {
     pub max_array_elements: usize,
     pub max_string_bytes: usize,
     pub max_type_tree_depth: usize,
+    /// Maximum number of managed-reference registries recursively nested in payload data.
+    pub max_managed_registry_depth: usize,
 }
 
 impl Default for ObjectDecodeLimits {
@@ -38,6 +40,7 @@ impl Default for ObjectDecodeLimits {
             max_array_elements: 16 * 1024 * 1024,
             max_string_bytes: 64 * 1024 * 1024,
             max_type_tree_depth: MAX_TYPE_TREE_DEPTH,
+            max_managed_registry_depth: 64,
         }
     }
 }
@@ -46,7 +49,14 @@ struct DecodeBudget<'a> {
     limits: &'a ObjectDecodeLimits,
     allocated_bytes: usize,
     managed_type_references: &'a [super::metadata::SerializedTypeReference],
-    decode_managed_registry: bool,
+    stream_offset: usize,
+    managed_registry_depth: usize,
+}
+
+pub(crate) struct ManagedPayloadDecodeContext {
+    pub entry_index: usize,
+    pub stream_offset: usize,
+    pub managed_registry_depth: usize,
 }
 
 impl DecodeBudget<'_> {
@@ -957,7 +967,8 @@ impl SerializedFileMetadata {
             limits,
             allocated_bytes: 0,
             managed_type_references: &self.reference_types,
-            decode_managed_registry: true,
+            stream_offset: 0,
+            managed_registry_depth: 0,
         };
         // The source refuses pre-3.5 assets before reading anything; refused payloads
         // flow into the existing raw-retention path downstream like any decode failure.
@@ -1091,38 +1102,40 @@ impl SerializedFileMetadata {
 /// reference registry entries, whose trees come from the type resolver rather
 /// than a file). The node list must be level-nested exactly like a file
 /// TypeTree. Managed-reference ID nodes use the same ID representation as
-/// ordinary file-object fields; nested registries remain explicit errors.
+/// ordinary file-object fields. Nested registries inherit the owning object
+/// stream offset and registry-depth bound.
 pub(crate) fn decode_typetree_payload(
     type_tree: &TypeTree,
     payload: &[u8],
     endian: Endian,
     arrays_align: bool,
     managed_type_references: &[super::metadata::SerializedTypeReference],
-    entry_index: usize,
+    context: ManagedPayloadDecodeContext,
     limits: &ObjectDecodeLimits,
 ) -> Result<(SerializedValue, usize, usize), ObjectDecodeError> {
     let mut budget = DecodeBudget {
         limits,
         allocated_bytes: 0,
         managed_type_references,
-        decode_managed_registry: false,
+        stream_offset: context.stream_offset,
+        managed_registry_depth: context.managed_registry_depth,
     };
     let type_root = type_tree.nodes.first().ok_or_else(|| {
         ObjectDecodeError::new(
             0,
             ObjectDecodeErrorKind::EmptyTypeTree {
-                object_index: entry_index,
+                object_index: context.entry_index,
             },
         )
     })?;
-    let type_layout = TypeTreeLayout::new(type_tree, entry_index, 0)?;
-    let mut reader = BinaryReader::with_base_offset(payload, endian, 0)
+    let type_layout = TypeTreeLayout::new(type_tree, context.entry_index, 0)?;
+    let mut reader = BinaryReader::with_base_offset(payload, endian, context.stream_offset)
         .map_err(ObjectDecodeError::from_binary)?;
     let root = decode_root(
         &mut reader,
         &type_layout,
         arrays_align,
-        entry_index,
+        context.entry_index,
         type_root.type_name.as_deref().unwrap_or(""),
         &mut budget,
     )?;
@@ -1308,12 +1321,28 @@ fn decode_node_value(
     }
 
     if is_managed_references_registry(type_name, node_name, children.len()) {
-        if !budget.decode_managed_registry {
+        let registry_depth = budget
+            .managed_registry_depth
+            .checked_add(1)
+            .ok_or_else(|| {
+                ObjectDecodeError::new(
+                    reader.offset(),
+                    ObjectDecodeErrorKind::ManagedRegistryDepthExceeded {
+                        object_index,
+                        path: path.to_owned(),
+                        requested: usize::MAX,
+                        limit: budget.limits.max_managed_registry_depth,
+                    },
+                )
+            })?;
+        if registry_depth > budget.limits.max_managed_registry_depth {
             return Err(ObjectDecodeError::new(
                 reader.offset(),
-                ObjectDecodeErrorKind::NestedManagedReferenceRegistry {
+                ObjectDecodeErrorKind::ManagedRegistryDepthExceeded {
                     object_index,
                     path: path.to_owned(),
+                    requested: registry_depth,
+                    limit: budget.limits.max_managed_registry_depth,
                 },
             ));
         }
@@ -1324,7 +1353,16 @@ fn decode_node_value(
         let options = super::managed_registry::ManagedRegistryReadOptions {
             endian: reader.endian(),
             arrays_align,
-            stream_offset: reader.position(),
+            stream_offset: budget
+                .stream_offset
+                .checked_add(reader.position())
+                .ok_or_else(|| {
+                    ObjectDecodeError::new(
+                        reader.offset(),
+                        ObjectDecodeErrorKind::ObjectDataRangeOverflow { object_index },
+                    )
+                })?,
+            registry_depth,
             object_decode_limits: registry_limits,
             max_entries: budget.limits.max_array_elements,
             max_total_decoded_allocation_bytes: budget.remaining_allocation_bytes(),
@@ -1360,7 +1398,7 @@ fn decode_node_value(
     if is_referenced_object_data(type_name, node_name, children.len()) {
         return Err(ObjectDecodeError::new(
             reader.offset(),
-            ObjectDecodeErrorKind::NestedManagedReferenceRegistry {
+            ObjectDecodeErrorKind::UnsupportedReferencedObjectData {
                 object_index,
                 path: path.to_owned(),
             },
@@ -2324,9 +2362,15 @@ pub enum ObjectDecodeErrorKind {
         path: String,
         message: String,
     },
-    NestedManagedReferenceRegistry {
+    UnsupportedReferencedObjectData {
         object_index: usize,
         path: String,
+    },
+    ManagedRegistryDepthExceeded {
+        object_index: usize,
+        path: String,
+        requested: usize,
+        limit: usize,
     },
     InvalidPPtrComponent {
         object_index: usize,
@@ -2477,9 +2521,18 @@ impl Display for ObjectDecodeErrorKind {
                 f,
                 "object {object_index} managed-reference registry at {path} could not be decoded: {message}"
             ),
-            Self::NestedManagedReferenceRegistry { object_index, path } => write!(
+            Self::UnsupportedReferencedObjectData { object_index, path } => write!(
                 f,
-                "object {object_index} field {path} contains a nested managed-reference registry, which the baseline does not serialize"
+                "object {object_index} field {path} contains an unresolved ReferencedObjectData placeholder"
+            ),
+            Self::ManagedRegistryDepthExceeded {
+                object_index,
+                path,
+                requested,
+                limit,
+            } => write!(
+                f,
+                "object {object_index} field {path} nests managed-reference registry depth {requested}, exceeding limit {limit}"
             ),
             Self::InvalidPPtrComponent {
                 object_index,
@@ -4450,7 +4503,8 @@ mod tests {
                 limits: &limits,
                 allocated_bytes: 0,
                 managed_type_references: &[],
-                decode_managed_registry: false,
+                stream_offset: 0,
+                managed_registry_depth: 0,
             };
             let mut reader = BinaryReader::new(&payload, Endian::Little);
             let start = Instant::now();
@@ -4486,7 +4540,8 @@ mod tests {
                 limits: &limits,
                 allocated_bytes: 0,
                 managed_type_references: &[],
-                decode_managed_registry: false,
+                stream_offset: 0,
+                managed_registry_depth: 0,
             };
             let mut reader = BinaryReader::new(&payload, Endian::Little);
             let start = Instant::now();
@@ -4520,7 +4575,8 @@ mod tests {
                 limits: &limits,
                 allocated_bytes: 0,
                 managed_type_references: &[],
-                decode_managed_registry: false,
+                stream_offset: 0,
+                managed_registry_depth: 0,
             };
             let mut reader = BinaryReader::new(&payload, Endian::Little);
             let start = Instant::now();

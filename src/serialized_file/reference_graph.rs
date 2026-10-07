@@ -23,6 +23,7 @@ struct ReferenceSource<'a> {
 pub struct ReferenceGraphLimits {
     pub object_decode: ObjectDecodeLimits,
     pub max_objects: usize,
+    pub max_managed_registry_scopes: usize,
     pub max_edges: usize,
     pub max_issues: usize,
     pub max_field_path_bytes: usize,
@@ -33,6 +34,7 @@ impl Default for ReferenceGraphLimits {
         Self {
             object_decode: ObjectDecodeLimits::default(),
             max_objects: 4_000_000,
+            max_managed_registry_scopes: 1_000_000,
             max_edges: 1_000_000,
             max_issues: 100_000,
             max_field_path_bytes: 1024 * 1024,
@@ -56,6 +58,12 @@ pub struct SerializedObjectReference {
 pub struct SerializedManagedObject {
     pub source_object_index: usize,
     pub source_path_id: i64,
+    /// Stable preorder scope assigned to the struct that owns this registry.
+    pub registry_scope_id: Option<usize>,
+    /// TypeTree path of the owning struct's registry field.
+    pub registry_scope_path: Option<String>,
+    /// Path to this specific registry field (distinct if a struct has more than one).
+    pub registry_field_path: String,
     /// Zero-based order in this owning object's registry.
     pub registry_entry_index: usize,
     pub reference_id: i64,
@@ -72,6 +80,9 @@ pub enum SerializedManagedReferenceResolution {
     Null,
     Unknown,
     Object {
+        registry_scope_id: usize,
+        /// Index into `ObjectReferenceGraph::managed_objects()` for this file object.
+        managed_object_index: usize,
         registry_entry_index: usize,
     },
     Missing {
@@ -89,6 +100,8 @@ pub struct SerializedManagedReference {
     pub source_object_index: usize,
     pub source_path_id: i64,
     pub field_path: String,
+    /// The lexical registry scope selected by the nearest owning struct.
+    pub registry_scope_id: Option<usize>,
     pub reference_id: i64,
     pub indexed: bool,
     pub resolution: SerializedManagedReferenceResolution,
@@ -133,6 +146,12 @@ pub enum ReferenceGraphIssue {
         limit: usize,
     },
     ManagedReferenceLimitExceeded {
+        object_index: usize,
+        path_id: i64,
+        field_path: String,
+        limit: usize,
+    },
+    ManagedRegistryScopeLimitExceeded {
         object_index: usize,
         path_id: i64,
         field_path: String,
@@ -284,6 +303,17 @@ impl ObjectReferenceGraph {
                         limits.max_issues,
                     )?;
                 }
+                Err(WalkIssue::ManagedRegistryScopeLimitExceeded { field_path }) => {
+                    graph.push_issue(
+                        ReferenceGraphIssue::ManagedRegistryScopeLimitExceeded {
+                            object_index,
+                            path_id: object.path_id,
+                            field_path,
+                            limit: limits.max_managed_registry_scopes,
+                        },
+                        limits.max_issues,
+                    )?;
+                }
                 Err(WalkIssue::AllocationFailed {
                     resource,
                     requested,
@@ -371,6 +401,17 @@ impl ObjectReferenceGraph {
                             path_id: object.path_id,
                             field_path,
                             limit: limits.max_edges,
+                        },
+                        limits.max_issues,
+                    )?;
+                }
+                Err(WalkIssue::ManagedRegistryScopeLimitExceeded { field_path }) => {
+                    graph.push_issue(
+                        ReferenceGraphIssue::ManagedRegistryScopeLimitExceeded {
+                            object_index,
+                            path_id: object.path_id,
+                            field_path,
+                            limit: limits.max_managed_registry_scopes,
                         },
                         limits.max_issues,
                     )?;
@@ -593,6 +634,11 @@ impl ObjectReferenceGraph {
                 object_index,
                 path_id,
                 ..
+            }
+            | ReferenceGraphIssue::ManagedRegistryScopeLimitExceeded {
+                object_index,
+                path_id,
+                ..
             } => (*object_index, *path_id),
         };
         if self.issues.len() >= maximum_issues {
@@ -618,7 +664,10 @@ fn reference_issue_object_index(issue: &ReferenceGraphIssue) -> usize {
         | ReferenceGraphIssue::FieldPathLimitExceeded { object_index, .. }
         | ReferenceGraphIssue::EdgeLimitExceeded { object_index, .. }
         | ReferenceGraphIssue::ManagedObjectLimitExceeded { object_index, .. }
-        | ReferenceGraphIssue::ManagedReferenceLimitExceeded { object_index, .. } => *object_index,
+        | ReferenceGraphIssue::ManagedReferenceLimitExceeded { object_index, .. }
+        | ReferenceGraphIssue::ManagedRegistryScopeLimitExceeded { object_index, .. } => {
+            *object_index
+        }
     }
 }
 
@@ -931,8 +980,9 @@ impl<'a> MultiFileReferenceGraph<'a> {
 
     /// Returns the scoped managed-reference object/edge graph for one loaded file.
     ///
-    /// Managed IDs are file-object-local, so their edge targets remain registry entry indexes
-    /// within the owning PathID instead of being flattened into the cross-file PPtr namespace.
+    /// Managed IDs are local to the nearest struct that owns a Registry field. Scope IDs are
+    /// stable preorder indexes within the owning PathID, and edge targets index this object's
+    /// managed-object slice. They are separate from the cross-file PPtr namespace.
     pub fn managed_graph_for_file(&self, file_index: usize) -> Option<&'a ObjectReferenceGraph> {
         self.file_graphs.get(file_index).copied()
     }
@@ -1469,6 +1519,9 @@ enum WalkIssue {
     ManagedReferenceLimitExceeded {
         field_path: String,
     },
+    ManagedRegistryScopeLimitExceeded {
+        field_path: String,
+    },
     AllocationFailed {
         resource: &'static str,
         requested: usize,
@@ -1486,8 +1539,16 @@ struct LocalManagedReferenceGraph {
     references: Vec<SerializedManagedReference>,
 }
 
+#[derive(Clone, Copy)]
+struct ManagedReferenceScanContext {
+    source_object_index: usize,
+    source_path_id: i64,
+    limits: ReferenceGraphLimits,
+}
+
 struct PendingManagedReference {
     field_path: String,
+    registry_scope_id: Option<usize>,
     reference_id: i64,
     indexed: bool,
 }
@@ -1499,17 +1560,63 @@ fn collect_managed_reference_graph(
     source_path_id: i64,
     limits: ReferenceGraphLimits,
 ) -> Result<LocalManagedReferenceGraph, WalkIssue> {
+    fn register_scope(
+        field_path: &str,
+        registry_field_name: Option<&str>,
+        scope_paths: &mut Vec<String>,
+        limits: ReferenceGraphLimits,
+    ) -> Result<usize, WalkIssue> {
+        let mut scope_path = copy_field_path(field_path)?;
+        if let Some(registry_field_name) = registry_field_name {
+            let separator = !scope_path.is_empty();
+            append_path_component(
+                &mut scope_path,
+                registry_field_name,
+                separator,
+                limits.max_field_path_bytes,
+            )?;
+        }
+        if scope_paths.len() >= limits.max_managed_registry_scopes {
+            return Err(WalkIssue::ManagedRegistryScopeLimitExceeded {
+                field_path: scope_path,
+            });
+        }
+        scope_paths
+            .try_reserve(1)
+            .map_err(|_| WalkIssue::AllocationFailed {
+                resource: "managed-reference registry scopes",
+                requested: 1,
+            })?;
+        let scope_id = scope_paths.len();
+        scope_paths.push(scope_path);
+        Ok(scope_id)
+    }
+
     fn visit(
         value: &SerializedValue,
         field_path: &mut String,
-        source_object_index: usize,
-        source_path_id: i64,
-        limits: ReferenceGraphLimits,
+        inherited_scope_id: Option<usize>,
         graph: &mut LocalManagedReferenceGraph,
         pending: &mut Vec<PendingManagedReference>,
+        scope_paths: &mut Vec<String>,
+        context: ManagedReferenceScanContext,
     ) -> Result<(), WalkIssue> {
+        let source_object_index = context.source_object_index;
+        let source_path_id = context.source_path_id;
+        let limits = context.limits;
         match value {
             SerializedValue::Struct(fields) => {
+                // A struct's direct Registry field owns the ID table for all of that
+                // struct's fields and the payloads stored in that table. Structs without
+                // one inherit the nearest enclosing registry scope.
+                let active_scope_id = fields
+                    .iter()
+                    .find(|field| {
+                        matches!(&field.value, SerializedValue::ManagedReferenceRegistry(_))
+                    })
+                    .map(|field| register_scope(field_path, Some(&field.name), scope_paths, limits))
+                    .transpose()?
+                    .or(inherited_scope_id);
                 for field in fields {
                     let old_length = append_path_component(
                         field_path,
@@ -1520,11 +1627,11 @@ fn collect_managed_reference_graph(
                     let nested = visit(
                         &field.value,
                         field_path,
-                        source_object_index,
-                        source_path_id,
-                        limits,
+                        active_scope_id,
                         graph,
                         pending,
+                        scope_paths,
+                        context,
                     );
                     field_path.truncate(old_length);
                     nested?;
@@ -1542,11 +1649,11 @@ fn collect_managed_reference_graph(
                     let nested = visit(
                         value,
                         field_path,
-                        source_object_index,
-                        source_path_id,
-                        limits,
+                        inherited_scope_id,
                         graph,
                         pending,
+                        scope_paths,
+                        context,
                     );
                     field_path.truncate(old_length);
                     nested?;
@@ -1569,11 +1676,26 @@ fn collect_managed_reference_graph(
                     })?;
                 pending.push(PendingManagedReference {
                     field_path: copy_field_path(field_path)?,
+                    registry_scope_id: inherited_scope_id,
                     reference_id: *reference_id,
                     indexed: *indexed,
                 });
             }
             SerializedValue::ManagedReferenceRegistry(registry) => {
+                let registry_scope_id = match inherited_scope_id {
+                    Some(scope_id) => scope_id,
+                    None => register_scope(field_path, None, scope_paths, limits)?,
+                };
+                let registry_scope_path = copy_owned_string(
+                    scope_paths.get(registry_scope_id).ok_or_else(|| {
+                        WalkIssue::AllocationFailed {
+                            resource: "managed-reference scope lookup",
+                            requested: registry_scope_id.saturating_add(1),
+                        }
+                    })?,
+                    "managed-reference scope path",
+                )?;
+                let registry_field_path = copy_field_path(field_path)?;
                 let registry_parent_length = append_path_component(
                     field_path,
                     "RefIds",
@@ -1604,6 +1726,15 @@ fn collect_managed_reference_graph(
                     graph.objects.push(SerializedManagedObject {
                         source_object_index,
                         source_path_id,
+                        registry_scope_id: Some(registry_scope_id),
+                        registry_scope_path: Some(copy_owned_string(
+                            &registry_scope_path,
+                            "managed-reference scope path",
+                        )?),
+                        registry_field_path: copy_owned_string(
+                            &registry_field_path,
+                            "managed-reference registry field path",
+                        )?,
                         registry_entry_index: entry_index,
                         reference_id: entry.reference_id,
                         class_name,
@@ -1628,11 +1759,11 @@ fn collect_managed_reference_graph(
                         super::managed_registry::ManagedRegistryEntryData::Content(data) => visit(
                             data,
                             field_path,
-                            source_object_index,
-                            source_path_id,
-                            limits,
+                            Some(registry_scope_id),
                             graph,
                             pending,
+                            scope_paths,
+                            context,
                         ),
                     };
                     field_path.truncate(registry_field_length);
@@ -1647,24 +1778,30 @@ fn collect_managed_reference_graph(
 
     let mut graph = LocalManagedReferenceGraph::default();
     let mut pending = Vec::new();
-    visit(
-        root,
-        field_path,
+    let mut scope_paths = Vec::new();
+    let context = ManagedReferenceScanContext {
         source_object_index,
         source_path_id,
         limits,
+    };
+    visit(
+        root,
+        field_path,
+        None,
         &mut graph,
         &mut pending,
+        &mut scope_paths,
+        context,
     )?;
 
-    let mut identifiers = HashMap::<i64, (usize, usize)>::new();
+    let mut identifiers = HashMap::<(usize, i64), (usize, usize)>::new();
     identifiers
         .try_reserve(graph.objects.len())
         .map_err(|_| WalkIssue::AllocationFailed {
             resource: "managed-reference identifier index",
             requested: graph.objects.len(),
         })?;
-    for object in &graph.objects {
+    for (managed_object_index, object) in graph.objects.iter().enumerate() {
         if matches!(
             object.reference_id,
             super::managed_registry::UNKNOWN_REFERENCE_ID
@@ -1672,10 +1809,13 @@ fn collect_managed_reference_graph(
         ) {
             continue;
         }
+        let Some(registry_scope_id) = object.registry_scope_id else {
+            continue;
+        };
         identifiers
-            .entry(object.reference_id)
+            .entry((registry_scope_id, object.reference_id))
             .and_modify(|(_, count)| *count = count.saturating_add(1))
-            .or_insert((object.registry_entry_index, 1));
+            .or_insert((managed_object_index, 1));
     }
     graph
         .references
@@ -1692,12 +1832,22 @@ fn collect_managed_reference_graph(
             super::managed_registry::UNKNOWN_REFERENCE_ID => {
                 SerializedManagedReferenceResolution::Unknown
             }
-            reference_id => match identifiers.get(&reference_id).copied() {
+            reference_id => match edge.registry_scope_id.and_then(|scope_id| {
+                identifiers
+                    .get(&(scope_id, reference_id))
+                    .copied()
+                    .map(|resolved| (scope_id, resolved))
+            }) {
                 None => SerializedManagedReferenceResolution::Missing { reference_id },
-                Some((registry_entry_index, 1)) => SerializedManagedReferenceResolution::Object {
-                    registry_entry_index,
-                },
-                Some((_, match_count)) => SerializedManagedReferenceResolution::Ambiguous {
+                Some((registry_scope_id, (managed_object_index, 1))) => {
+                    SerializedManagedReferenceResolution::Object {
+                        registry_scope_id,
+                        managed_object_index,
+                        registry_entry_index: graph.objects[managed_object_index]
+                            .registry_entry_index,
+                    }
+                }
+                Some((_, (_, match_count))) => SerializedManagedReferenceResolution::Ambiguous {
                     reference_id,
                     match_count,
                 },
@@ -1707,6 +1857,7 @@ fn collect_managed_reference_graph(
             source_object_index,
             source_path_id,
             field_path: edge.field_path,
+            registry_scope_id: edge.registry_scope_id,
             reference_id: edge.reference_id,
             indexed: edge.indexed,
             resolution,
@@ -2773,6 +2924,8 @@ mod tests {
                     "m_First",
                     7,
                     super::SerializedManagedReferenceResolution::Object {
+                        registry_scope_id: 0,
+                        managed_object_index: 0,
                         registry_entry_index: 0,
                     },
                 ),
@@ -2780,6 +2933,8 @@ mod tests {
                     "m_Shared",
                     7,
                     super::SerializedManagedReferenceResolution::Object {
+                        registry_scope_id: 0,
+                        managed_object_index: 0,
                         registry_entry_index: 0,
                     },
                 ),
@@ -2787,6 +2942,8 @@ mod tests {
                     "m_Second",
                     9,
                     super::SerializedManagedReferenceResolution::Object {
+                        registry_scope_id: 0,
+                        managed_object_index: 1,
                         registry_entry_index: 1,
                     },
                 ),
@@ -2794,6 +2951,8 @@ mod tests {
                     "references.RefIds[0].data.m_Link",
                     9,
                     super::SerializedManagedReferenceResolution::Object {
+                        registry_scope_id: 0,
+                        managed_object_index: 1,
                         registry_entry_index: 1,
                     },
                 ),
@@ -2801,6 +2960,8 @@ mod tests {
                     "references.RefIds[1].data.m_Link",
                     7,
                     super::SerializedManagedReferenceResolution::Object {
+                        registry_scope_id: 0,
+                        managed_object_index: 0,
                         registry_entry_index: 0,
                     },
                 ),
@@ -2870,6 +3031,8 @@ mod tests {
                     0,
                     true,
                     super::SerializedManagedReferenceResolution::Object {
+                        registry_scope_id: 0,
+                        managed_object_index: 0,
                         registry_entry_index: 0,
                     },
                 ),
@@ -2877,6 +3040,8 @@ mod tests {
                     0,
                     true,
                     super::SerializedManagedReferenceResolution::Object {
+                        registry_scope_id: 0,
+                        managed_object_index: 0,
                         registry_entry_index: 0,
                     },
                 ),
@@ -2884,6 +3049,8 @@ mod tests {
                     1,
                     true,
                     super::SerializedManagedReferenceResolution::Object {
+                        registry_scope_id: 0,
+                        managed_object_index: 1,
                         registry_entry_index: 1,
                     },
                 ),
@@ -2891,6 +3058,8 @@ mod tests {
                     1,
                     true,
                     super::SerializedManagedReferenceResolution::Object {
+                        registry_scope_id: 0,
+                        managed_object_index: 1,
                         registry_entry_index: 1,
                     },
                 ),
@@ -2898,11 +3067,233 @@ mod tests {
                     0,
                     true,
                     super::SerializedManagedReferenceResolution::Object {
+                        registry_scope_id: 0,
+                        managed_object_index: 0,
                         registry_entry_index: 0,
                     },
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn nested_registry_decodes_writes_and_resolves_equal_ids_in_distinct_scopes() {
+        let fixture = crate::serialized_file::managed_reference_test_support::
+            nested_scope_managed_reference_fixture();
+        let payload = fixture
+            .metadata
+            .decode_object_payload(&fixture.file, &fixture.header, 0)
+            .expect("source-runtime-authored nested registry fixture decodes");
+        assert_eq!(payload.consumed_bytes, 152);
+        assert!(payload.trailing_bytes.is_empty());
+
+        let encoded = fixture
+            .metadata
+            .encode_object_payload(
+                &payload,
+                super::super::object::ObjectEncodeLimits::default(),
+            )
+            .expect("nested registries encode recursively");
+        let original = &fixture.file[fixture.header.data_offset as usize
+            ..fixture.header.data_offset as usize + payload.consumed_bytes];
+        assert_eq!(encoded, original, "nested managed payload bytes round-trip");
+
+        let managed = super::collect_managed_reference_graph(
+            &payload.root,
+            &mut String::new(),
+            0,
+            payload.path_id,
+            ReferenceGraphLimits::default(),
+        )
+        .expect("nested registry graph resolves");
+        assert_eq!(
+            managed
+                .objects
+                .iter()
+                .map(|object| (
+                    object.registry_scope_id,
+                    object.registry_scope_path.as_deref(),
+                    object.registry_field_path.as_str(),
+                    object.registry_entry_index,
+                    object.reference_id,
+                    object.class_name.as_str(),
+                ))
+                .collect::<Vec<_>>(),
+            [
+                (Some(0), Some("references"), "references", 0, 100, "NodeA"),
+                (
+                    Some(1),
+                    Some("references.RefIds[0].data.m_Nested.references"),
+                    "references.RefIds[0].data.m_Nested.references",
+                    0,
+                    100,
+                    "NodeB",
+                ),
+            ]
+        );
+        assert_eq!(
+            managed
+                .references
+                .iter()
+                .map(|reference| (
+                    reference.field_path.as_str(),
+                    reference.registry_scope_id,
+                    reference.resolution.clone(),
+                ))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    "m_Root",
+                    Some(0),
+                    super::SerializedManagedReferenceResolution::Object {
+                        registry_scope_id: 0,
+                        managed_object_index: 0,
+                        registry_entry_index: 0,
+                    },
+                ),
+                (
+                    "references.RefIds[0].data.m_Link",
+                    Some(0),
+                    super::SerializedManagedReferenceResolution::Object {
+                        registry_scope_id: 0,
+                        managed_object_index: 0,
+                        registry_entry_index: 0,
+                    },
+                ),
+                (
+                    "references.RefIds[0].data.m_Nested.m_NestedLink",
+                    Some(1),
+                    super::SerializedManagedReferenceResolution::Object {
+                        registry_scope_id: 1,
+                        managed_object_index: 1,
+                        registry_entry_index: 0,
+                    },
+                ),
+                (
+                    "references.RefIds[0].data.m_Nested.references.RefIds[0].data.m_Link",
+                    Some(1),
+                    super::SerializedManagedReferenceResolution::Object {
+                        registry_scope_id: 1,
+                        managed_object_index: 1,
+                        registry_entry_index: 0,
+                    },
+                ),
+            ]
+        );
+
+        let depth_limited = fixture
+            .metadata
+            .decode_object_payload_with_limits(
+                &fixture.file,
+                &fixture.header,
+                0,
+                &crate::serialized_file::object::ObjectDecodeLimits {
+                    max_managed_registry_depth: 1,
+                    ..Default::default()
+                },
+            )
+            .expect_err("the nested level exceeds a configured depth of one");
+        let depth_message = depth_limited.to_string();
+        assert!(
+            depth_message.contains("depth 2") && depth_message.contains("limit 1"),
+            "unexpected depth-bound diagnostic: {depth_message}"
+        );
+
+        let legacy_fixture = crate::serialized_file::managed_reference_test_support::
+            nested_scope_terminated_managed_reference_fixture();
+        let legacy_payload = legacy_fixture
+            .metadata
+            .decode_object_payload(&legacy_fixture.file, &legacy_fixture.header, 0)
+            .expect("source-runtime-authored terminated nested registry fixture decodes");
+        assert_eq!(legacy_payload.consumed_bytes, 200);
+        let legacy_encoded = legacy_fixture
+            .metadata
+            .encode_object_payload(
+                &legacy_payload,
+                super::super::object::ObjectEncodeLimits::default(),
+            )
+            .expect("terminated nested registries encode recursively");
+        let legacy_original = &legacy_fixture.file[legacy_fixture.header.data_offset as usize
+            ..legacy_fixture.header.data_offset as usize + legacy_payload.consumed_bytes];
+        assert_eq!(legacy_encoded, legacy_original);
+
+        let legacy_graph = super::collect_managed_reference_graph(
+            &legacy_payload.root,
+            &mut String::new(),
+            0,
+            legacy_payload.path_id,
+            ReferenceGraphLimits::default(),
+        )
+        .expect("legacy indexed IDs resolve in their nearest registry scopes");
+        assert_eq!(
+            legacy_graph
+                .references
+                .iter()
+                .map(|reference| (
+                    reference.reference_id,
+                    reference.indexed,
+                    reference.registry_scope_id,
+                    reference.resolution.clone(),
+                ))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    0,
+                    true,
+                    Some(0),
+                    super::SerializedManagedReferenceResolution::Object {
+                        registry_scope_id: 0,
+                        managed_object_index: 0,
+                        registry_entry_index: 0,
+                    },
+                ),
+                (
+                    0,
+                    true,
+                    Some(0),
+                    super::SerializedManagedReferenceResolution::Object {
+                        registry_scope_id: 0,
+                        managed_object_index: 0,
+                        registry_entry_index: 0,
+                    },
+                ),
+                (
+                    0,
+                    true,
+                    Some(1),
+                    super::SerializedManagedReferenceResolution::Object {
+                        registry_scope_id: 1,
+                        managed_object_index: 1,
+                        registry_entry_index: 0,
+                    },
+                ),
+                (
+                    0,
+                    true,
+                    Some(1),
+                    super::SerializedManagedReferenceResolution::Object {
+                        registry_scope_id: 1,
+                        managed_object_index: 1,
+                        registry_entry_index: 0,
+                    },
+                ),
+            ]
+        );
+
+        let scope_limited = super::collect_managed_reference_graph(
+            &payload.root,
+            &mut String::new(),
+            0,
+            payload.path_id,
+            ReferenceGraphLimits {
+                max_managed_registry_scopes: 1,
+                ..ReferenceGraphLimits::default()
+            },
+        );
+        assert!(matches!(
+            scope_limited,
+            Err(super::WalkIssue::ManagedRegistryScopeLimitExceeded { .. })
+        ));
     }
 
     #[test]
