@@ -5,7 +5,7 @@ This is the current continuation record. Read it before changing code. The dated
 ## Current checkpoint (2026-10-07)
 
 - The user asked to read this hand-off. Phase 1 remains the active task; the Phase 1 gate is open, and Phase 2 stays locked. No user AssetBundle bytes or UABEA contents have been read.
-- The custom-curve source and evidence increment is committed as `b7a4e2d3c0689ad7c78d1a0546a92561d9045f5c`, tree `20ebb243ecf55c55e8e26b15757a33705c554883`. Before pushing, the live remote was `7228f0e`; after the normal push, live `origin/main`, fetched `origin/main`, and local `HEAD` all matched the new commit and tree. This hand-off refresh is a documentation-only follow-up and will also be synced.
+- The custom-curve source and evidence increment is committed as `b7a4e2d3c0689ad7c78d1a0546a92561d9045f5c`, tree `20ebb243ecf55c55e8e26b15757a33705c554883`. Before pushing, the live remote was `7228f0e`; after the normal push, live `origin/main`, fetched `origin/main`, and local `HEAD` all matched the new commit and tree. Documentation-only hand-off updates followed and are also pushed; `git log -1` identifies the current documentation head.
 - The feature ledger has 377 stable IDs: 338 `已验证`, 20 `已实现但未验证`, 14 `实现中`, 5 `已调查`, and 0 `未调查` or externally blocked. All 39 non-verified rows still block the Phase 1 gate. `docs/phase1-closure-inventory.md` enumerates them and their shortest complete work units.
 - The custom-curve resolver kernel now matches 39 live `ToAttributeName` cases, 14 `ReverseAscii` outputs, 2 `HashAscii` marker hashes, and 2,551 entries across 11 component dictionaries. Its focused module suite passes 12/12. The row remains `已实现但未验证`: no production `AnimationClipConverter` call constructs scene facts or routes clip bindings through the resolver.
 - Current Rust checks pass: `cargo fmt --all -- --check`; full workspace tests with `TEMP`/`TMP` redirected to `target/test-tmp` (1,397 library + 65 CLI, 0 doc tests); warnings-denied Clippy; and baseline verification (1,449 unchanged files). `git diff --check` passes after this hand-off edit.
@@ -87,7 +87,7 @@ The worktree has significant incremental work. Use the source ledger for exact I
 - Unity YAML and `.meta` envelope serializers, plus a standalone add-only filesystem `.meta` sidecar helper that is not connected to a complete project-export pipeline.
 - A narrow CLI can inspect selected inputs and report inventory/decoded information. It does not provide the complete original application experience.
 
-### Current uncommitted implementation increment
+### Implementation increment — custom-curve resolver (commit `b7a4e2d`)
 
 The custom-curve resolver increment changes `src/resources/blend_shape.rs`, `src/resources/custom_curve.rs`, `src/resources/custom_curve_resolve_fixture.txt`, and `src/resources/custom_curve_tables.rs`; the new `docs/phase1-closure-inventory.md` and evidence updates describe the current open queue.
 
@@ -114,7 +114,7 @@ The Rust suite is evidence for this implementation snapshot, not evidence that A
 
 ## 7. Git / cloud state and required final sync
 
-The validated custom-curve implementation and evidence increment was committed as `b7a4e2d3c0689ad7c78d1a0546a92561d9045f5c`, tree `20ebb243ecf55c55e8e26b15757a33705c554883`, and pushed normally to the authorized `main`. The live ref and fetched ref both returned that commit; local and remote trees matched. This hand-off refresh is the only follow-up change. Continue checking live state before future pushes and never force-push or overwrite remote/user work.
+The validated custom-curve implementation and evidence increment was committed as `b7a4e2d3c0689ad7c78d1a0546a92561d9045f5c`, tree `20ebb243ecf55c55e8e26b15757a33705c554883`, and pushed normally to the authorized `main`. The live ref and fetched ref returned that commit; local and remote trees matched. Documentation-only hand-off updates followed and are pushed; use `git log -1` for the current documentation head. Continue checking live state before future pushes and never force-push or overwrite remote/user work.
 
 For future increments: check `git status --short`, `git diff --check`, and the exact diff; stage only the intended source/docs (never `target/`, sample data, reference sources, credentials, or unrelated files); check the live ref using `git ls-remote origin refs/heads/main` and `git fetch origin main`; reconcile unexpected ancestry movement safely; then commit, normal-push, fetch, and compare local/fetched trees. Never say “pushed” unless the live ref and fetched tree match. A commit cannot store its own hash in its tree; identify the final handoff revision from `git log` in the user-facing update.
 
@@ -1323,5 +1323,5 @@ Continue Phase 1 only. Do not inspect user bundles or UABEA.
 - Rust validation passes: focused custom-curve suite 12/12; full suite 1,397 library + 65 CLI + 0 doc tests; `cargo fmt --all -- --check`; warnings-denied workspace Clippy; and baseline verification of all 1,449 reference files. Full tests use process-scoped `TEMP`/`TMP=target/test-tmp` to avoid Windows temporary-directory access-denied failures.
 - The resolver remains a standalone kernel. `rg` finds no production caller of `to_attribute_name`; root/child walks and asset-backed blend-shape/material lookups are not connected to `AnimationClipConverter`. Do not flip the ledger row based on the resolver tests.
 - The isolated reference solution restores and builds under .NET SDK 10.0.401. Its suite has 339 passes and 20 CRLF/LF assertion failures documented in the validation and differential logs. Unity-produced-file and dynamic Unity checks remain unrun.
-- The source/evidence increment includes `src/resources/blend_shape.rs`, `src/resources/custom_curve.rs`, its live fixture and generated path tables, plus parity, differential, validation, and closure-inventory updates. It is committed and pushed as `b7a4e2d3c0689ad7c78d1a0546a92561d9045f5c`; post-push live/fetched commit and tree matched. This hand-off status refresh is being synced as a documentation-only follow-up.
+- The source/evidence increment includes `src/resources/blend_shape.rs`, `src/resources/custom_curve.rs`, its live fixture and generated path tables, plus parity, differential, validation, and closure-inventory updates. It is committed and pushed as `b7a4e2d3c0689ad7c78d1a0546a92561d9045f5c`; post-push live/fetched commit and tree matched. Subsequent documentation-only hand-off updates are pushed; use `git log -1` for the latest hand-off revision.
 - No user AssetBundle or UABEA content has been read. Phase 2 remains locked. Next implementation work is production `AnimationClipConverter` integration, followed by the dependency-ordered Phase 1 closure inventory.
