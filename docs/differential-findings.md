@@ -1002,3 +1002,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | Test material_view_matches_the_reference_runtime in resources/material.rs; fixture src/resources/material_view_fixture.txt. No production change. |
 | Regression evidence | All five material cases replay through the view; material suite 26/26. |
 | Remaining comparison | FastPropertyName shapes stay synthetic (cross-version dict writes are invisible to the version-gated extension); Material `.mat` YAML export and the shader exporters remain open. |
+
+## DIFF-ANIM-HIERARCHY-001 - animator editor-hierarchy walk
+
+| Field | Finding |
+|---|---|
+| Status | Reference-runtime differential recorded; 27 yields plus slot order ported and pinned |
+| Source location | AssetRipper/Source/AssetRipper.SourceGenerated.Extensions/AnimatorControllerExtensions.cs (`GetStateBehaviours` lines 44-72, `FetchEditorHierarchy` lines 74-299); live callers AssetRipper/Source/AssetRipper.Processing/AnimatorControllers/AnimatorControllerProcessor.cs and AssetRipper/Source/AssetRipper.Export.UnityProjects/AnimatorControllers/AnimatorControllerExportCollection.cs |
+| Input evidence | Probe Temp/opencode/animhierprobe (shipped SourceGenerated DLL, SDK 10.0.401) with a real versioned controller graph (2022.3 layers/pairs/machines plus 5.0 and 4.0 machines/states, FileID-0 PPtrs) through the shipped walk and behaviour lookup. Committed as src/resources/animator_hierarchy_fixture.txt (194 rows). |
+| Source-derived behavior | Exact 27-yield claim order: layer behaviour/motion pairs, nested blend-tree recursion, the modern machine order, and the 4.0 legacy else-branch order (child machines, local, ordered, states); animation clips never yield; no deduplication on double-claimed states; slot order follows the index array ([1,0]); missing keys yield empty; resolved behaviours get `HideInHierarchy` (0->1). |
+| Root cause | No Rust deviation found; this increment adds the fetch-order kernels and replaces synthetic-only slot/gate coverage with live-object vectors. Probe mechanics of note: same-version PPtrs resolve through the composite `PathID` while the _4 family needs the `m_PathID_` int field (the split slot silently mis-resolves); PPtrAccessList views reject AddNew over null backings, so file-reader-style backing fills are required; the 5.0 machine is modern-layout, only 4.0 takes the legacy branch. |
+| Rust change | Fetch-order kernels (`fetch_editor_hierarchy` plus `FetchController/Layer/Pair/StateMachine/State/BlendTree` facts) and test editor_hierarchy_matches_the_reference_runtime in resources/animator_controller.rs; fixture src/resources/animator_hierarchy_fixture.txt. |
+| Regression evidence | All 27 yields plus the live slot vector replay through the kernels; animator suite 6/6. |
+| Remaining comparison | Pointer resolution and the flag mutation stay caller-side per the row disposition; transition-destination context rebuilds remain with their own coverage. |

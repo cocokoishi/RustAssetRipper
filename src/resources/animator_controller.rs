@@ -432,6 +432,304 @@ pub const fn decode_transition_destination(
     TransitionDestination::StateMachinePort { selector_index }
 }
 
+/// One claimed asset in `FetchEditorHierarchy` order.
+///
+/// Mirrors `AnimatorControllerExtensions.FetchEditorHierarchy`
+/// (`AssetRipper/Source/AssetRipper.SourceGenerated.Extensions/AnimatorControllerExtensions.cs`,
+/// lines 74-299) as an order kernel over caller facts: every yield is a
+/// `(kind, path)` pair where `path` is `None` for an unresolvable pointer
+/// (the source yields the null). Pointer resolution, the layer/mask/skeleton
+/// ignores, the `DefaultState`/`ParentStateMachine` ignores, the skipped
+/// transition-map keys, and the `HideInHierarchy` mutation stay caller-side
+/// with the generated objects and the caller collection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FetchKind {
+    /// The controller itself, then its layers.
+    Controller,
+    /// A state machine (modern or legacy layout).
+    StateMachine,
+    /// An animator state.
+    State,
+    /// A blend tree (animation clips never yield).
+    BlendTree,
+    /// An any-state, entry, machine-map, local, ordered, or state transition.
+    Transition,
+    /// A state-machine behaviour.
+    Behaviour,
+}
+
+/// One `FetchEditorHierarchy` yield: the asset kind and its resolved path
+/// (`None` stands for the source's null yield).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FetchYield {
+    /// What the source yielded.
+    pub kind: FetchKind,
+    /// The resolved path id, or `None` for an unresolvable pointer.
+    pub path: Option<i64>,
+}
+
+/// A motion edge: only a resolved blend tree yields (and recurses);
+/// animation clips, missing motions, and nulls yield nothing.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FetchMotion {
+    /// The resolved child blend tree, if the motion is one.
+    pub blend_tree: Option<Box<FetchBlendTree>>,
+}
+
+/// A blend tree: itself, then the child blend trees in order.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FetchBlendTree {
+    /// The tree's own path.
+    pub path: i64,
+    /// The child motions in serialized order.
+    pub childs: Vec<FetchMotion>,
+}
+
+/// An animator state: itself, then motions (plural list when
+/// `has_motions`, else the single `MotionP` blend-tree check), then
+/// behaviours, then transitions.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FetchState {
+    /// The state's own path.
+    pub path: i64,
+    /// `Has_Motions()`: plural `MotionsP` list versus the single `MotionP`.
+    pub has_motions: bool,
+    /// The plural motions (only read when `has_motions`).
+    pub motions: Vec<FetchMotion>,
+    /// The single-motion blend tree (only read when `!has_motions`).
+    pub motion_single: Option<FetchBlendTree>,
+    /// The resolved `StateMachineBehavioursP` in order (`None` yields null).
+    pub behaviours: Vec<Option<i64>>,
+    /// The resolved `TransitionsP` in order (`None` yields null).
+    pub transitions: Vec<Option<i64>>,
+}
+
+/// A layer behaviour pair: the state hierarchy, then the behaviours.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FetchBehaviourPair {
+    /// The resolved pair state, if any.
+    pub state: Option<FetchState>,
+    /// The resolved pair behaviours in order (`None` yields null).
+    pub behaviours: Vec<Option<i64>>,
+}
+
+/// A layer motion pair: the state hierarchy, then the motion blend tree.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FetchMotionPair {
+    /// The resolved pair state, if any.
+    pub state: Option<FetchState>,
+    /// The pair motion: a blend tree yields and recurses, anything else
+    /// yields nothing.
+    pub motion: FetchMotion,
+}
+
+/// One controller layer: behaviour pairs, motion pairs (only when
+/// `has_behaviours`), then the state machine.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FetchLayer {
+    /// `Has_Behaviours()`.
+    pub has_behaviours: bool,
+    /// The `Behaviours` pairs in order.
+    pub behaviour_pairs: Vec<FetchBehaviourPair>,
+    /// The `Motions` pairs in order.
+    pub motion_pairs: Vec<FetchMotionPair>,
+    /// The resolved layer state machine, if any.
+    pub state_machine: Option<FetchStateMachine>,
+}
+
+/// A state machine: itself, then the modern (`Has_ChildStateMachines()`)
+/// or legacy child layout. Child machines recurse in both layouts; the map
+/// keys are skipped; `DefaultState` is ignored as redundant.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FetchStateMachine {
+    /// The machine's own path.
+    pub path: i64,
+    /// `Has_ChildStateMachines()`: modern child lists versus the legacy
+    /// `ChildStateMachineP`/`LocalTransitions`/`OrderedTransitions`/`StatesP`.
+    pub modern: bool,
+    /// The resolved `AnyStateTransitionsP` (modern only).
+    pub any_state_transitions: Vec<Option<i64>>,
+    /// Resolved child machines in order (modern `ChildStateMachines`,
+    /// legacy `ChildStateMachineP`).
+    pub child_machines: Vec<Option<FetchStateMachine>>,
+    /// Resolved modern `ChildStates` in order.
+    pub child_states: Vec<Option<FetchState>>,
+    /// The resolved `EntryTransitionsP` (modern only).
+    pub entry_transitions: Vec<Option<i64>>,
+    /// The resolved modern `StateMachineBehavioursP` in order.
+    pub behaviours: Vec<Option<i64>>,
+    /// The modern `StateMachineTransitions` values in order: each entry's
+    /// transition list, keys skipped.
+    pub machine_transitions: Vec<Vec<Option<i64>>>,
+    /// The legacy `LocalTransitions` entries in order: the state hierarchy,
+    /// then the entry's transitions.
+    pub local_transitions: Vec<(Option<FetchState>, Vec<Option<i64>>)>,
+    /// The legacy `OrderedTransitions` entries, same shape as local.
+    pub ordered_transitions: Vec<(Option<FetchState>, Vec<Option<i64>>)>,
+    /// The resolved legacy `StatesP` in order.
+    pub states: Vec<Option<FetchState>>,
+}
+
+/// The controller root for the fetch: itself, then its layers.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FetchController {
+    /// The controller's own path.
+    pub path: i64,
+    /// The `AnimatorLayers` in order.
+    pub layers: Vec<FetchLayer>,
+}
+
+fn fetch_blend_tree(tree: &FetchBlendTree, yields: &mut Vec<FetchYield>) {
+    yields.push(FetchYield {
+        kind: FetchKind::BlendTree,
+        path: Some(tree.path),
+    });
+    for child in &tree.childs {
+        if let Some(child_tree) = &child.blend_tree {
+            fetch_blend_tree(child_tree, &mut *yields);
+        }
+    }
+}
+
+fn fetch_state(state: &FetchState, yields: &mut Vec<FetchYield>) {
+    yields.push(FetchYield {
+        kind: FetchKind::State,
+        path: Some(state.path),
+    });
+    if state.has_motions {
+        for motion in &state.motions {
+            if let Some(tree) = &motion.blend_tree {
+                fetch_blend_tree(tree, &mut *yields);
+            }
+        }
+    } else if let Some(tree) = &state.motion_single {
+        fetch_blend_tree(tree, &mut *yields);
+    }
+    for behaviour in &state.behaviours {
+        yields.push(FetchYield {
+            kind: FetchKind::Behaviour,
+            path: *behaviour,
+        });
+    }
+    for transition in &state.transitions {
+        yields.push(FetchYield {
+            kind: FetchKind::Transition,
+            path: *transition,
+        });
+    }
+}
+
+fn fetch_state_machine(machine: &FetchStateMachine, yields: &mut Vec<FetchYield>) {
+    yields.push(FetchYield {
+        kind: FetchKind::StateMachine,
+        path: Some(machine.path),
+    });
+    if machine.modern {
+        for transition in &machine.any_state_transitions {
+            yields.push(FetchYield {
+                kind: FetchKind::Transition,
+                path: *transition,
+            });
+        }
+        for child_machine in machine.child_machines.iter().flatten() {
+            fetch_state_machine(child_machine, &mut *yields);
+        }
+        for state in machine.child_states.iter().flatten() {
+            fetch_state(state, &mut *yields);
+        }
+        for transition in &machine.entry_transitions {
+            yields.push(FetchYield {
+                kind: FetchKind::Transition,
+                path: *transition,
+            });
+        }
+        for behaviour in &machine.behaviours {
+            yields.push(FetchYield {
+                kind: FetchKind::Behaviour,
+                path: *behaviour,
+            });
+        }
+        for transitions in &machine.machine_transitions {
+            for transition in transitions {
+                yields.push(FetchYield {
+                    kind: FetchKind::Transition,
+                    path: *transition,
+                });
+            }
+        }
+    } else {
+        for child_machine in machine.child_machines.iter().flatten() {
+            fetch_state_machine(child_machine, &mut *yields);
+        }
+        for (state, transitions) in &machine.local_transitions {
+            if let Some(state) = state {
+                fetch_state(state, &mut *yields);
+            }
+            for transition in transitions {
+                yields.push(FetchYield {
+                    kind: FetchKind::Transition,
+                    path: *transition,
+                });
+            }
+        }
+        for (state, transitions) in &machine.ordered_transitions {
+            if let Some(state) = state {
+                fetch_state(state, &mut *yields);
+            }
+            for transition in transitions {
+                yields.push(FetchYield {
+                    kind: FetchKind::Transition,
+                    path: *transition,
+                });
+            }
+        }
+        for state in machine.states.iter().flatten() {
+            fetch_state(state, &mut *yields);
+        }
+    }
+}
+
+/// Claims the editor hierarchy in source order: the controller, then per
+/// layer the behaviour pairs (state hierarchy, behaviours), the motion
+/// pairs (state hierarchy, blend tree), and the state machine — exactly the
+/// `AnimatorControllerProcessor`/`AnimatorControllerExportCollection` claim
+/// sequence. Unresolvable pointers yield `(kind, None)` like the source's
+/// nulls; there is no deduplication.
+pub fn fetch_editor_hierarchy(controller: &FetchController) -> Vec<FetchYield> {
+    let mut yields = Vec::new();
+    yields.push(FetchYield {
+        kind: FetchKind::Controller,
+        path: Some(controller.path),
+    });
+    for layer in &controller.layers {
+        if layer.has_behaviours {
+            for pair in &layer.behaviour_pairs {
+                if let Some(state) = &pair.state {
+                    fetch_state(state, &mut yields);
+                }
+                for behaviour in &pair.behaviours {
+                    yields.push(FetchYield {
+                        kind: FetchKind::Behaviour,
+                        path: *behaviour,
+                    });
+                }
+            }
+            for pair in &layer.motion_pairs {
+                if let Some(state) = &pair.state {
+                    fetch_state(state, &mut yields);
+                }
+                if let Some(tree) = &pair.motion.blend_tree {
+                    fetch_blend_tree(tree, &mut yields);
+                }
+            }
+        }
+        if let Some(machine) = &layer.state_machine {
+            fetch_state_machine(machine, &mut yields);
+        }
+    }
+    yields
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -738,5 +1036,300 @@ mod tests {
             }
         );
         assert_eq!(STATE_MACHINE_TRANSITION_FLAG, 30_000);
+    }
+
+    /// Differential against the shipped hierarchy walk over live generated
+    /// objects (probe `Temp/opencode/animhierprobe`, fixture
+    /// `animator_hierarchy_fixture.txt`): a 2022.3 controller graph plus 5.0
+    /// and 4.0 machines through the shipped `FetchEditorHierarchy` and
+    /// `GetStateBehaviours`. The replay feeds the probed gates plus the
+    /// probe-design graph (pinned in the fixture header) through
+    /// `fetch_editor_hierarchy` and must reproduce all 27 yields in order —
+    /// including the layer pair order, the nested blend-tree recursion, the
+    /// modern machine order, the 4.0 legacy else-branch order, the
+    /// clip-exclusion (116 never yields), and the missing-key empty slots
+    /// with the live `[1, 0]` slot order. The `HideInHierarchy` write stays
+    /// caller-side; the replay consumes the live before/after bits as the
+    /// mutation witness.
+    #[test]
+    fn editor_hierarchy_matches_the_reference_runtime() {
+        fn plain_state(path: i64) -> FetchState {
+            FetchState {
+                path,
+                has_motions: false,
+                motions: Vec::new(),
+                motion_single: None,
+                behaviours: Vec::new(),
+                transitions: Vec::new(),
+            }
+        }
+
+        fn empty_machine(path: i64, modern: bool) -> FetchStateMachine {
+            FetchStateMachine {
+                path,
+                modern,
+                any_state_transitions: Vec::new(),
+                child_machines: Vec::new(),
+                child_states: Vec::new(),
+                entry_transitions: Vec::new(),
+                behaviours: Vec::new(),
+                machine_transitions: Vec::new(),
+                local_transitions: Vec::new(),
+                ordered_transitions: Vec::new(),
+                states: Vec::new(),
+            }
+        }
+
+        let state_a = FetchState {
+            path: 103,
+            has_motions: false,
+            motions: Vec::new(),
+            motion_single: None,
+            behaviours: vec![Some(113)],
+            transitions: vec![Some(108)],
+        };
+        let child_blend = FetchBlendTree {
+            path: 107,
+            childs: Vec::new(),
+        };
+        let blend = FetchBlendTree {
+            path: 106,
+            childs: vec![FetchMotion {
+                blend_tree: Some(Box::new(child_blend)),
+            }],
+        };
+        let mut root = empty_machine(101, true);
+        root.any_state_transitions = vec![Some(108)];
+        root.child_machines = vec![Some(empty_machine(102, true))];
+        root.child_states = vec![Some(state_a.clone())];
+        root.entry_transitions = vec![Some(114)];
+        root.behaviours = vec![Some(113)];
+        root.machine_transitions = vec![vec![Some(115)]];
+
+        let state_124 = FetchState {
+            path: 124,
+            has_motions: true,
+            motions: vec![
+                FetchMotion { blend_tree: None },
+                FetchMotion {
+                    blend_tree: Some(Box::new(FetchBlendTree {
+                        path: 107,
+                        childs: Vec::new(),
+                    })),
+                },
+            ],
+            motion_single: None,
+            behaviours: Vec::new(),
+            transitions: Vec::new(),
+        };
+        let mut ancient = empty_machine(123, false);
+        ancient.child_machines = vec![Some(empty_machine(102, true))];
+        ancient.local_transitions = vec![(Some(state_a.clone()), vec![Some(122)])];
+        ancient.ordered_transitions = vec![(Some(plain_state(121)), vec![Some(122)])];
+        ancient.states = vec![Some(plain_state(121)), Some(state_124)];
+
+        let controller = FetchController {
+            path: 100,
+            layers: vec![
+                FetchLayer {
+                    has_behaviours: true,
+                    behaviour_pairs: vec![FetchBehaviourPair {
+                        state: Some(plain_state(104)),
+                        behaviours: vec![Some(113)],
+                    }],
+                    motion_pairs: vec![FetchMotionPair {
+                        state: Some(plain_state(105)),
+                        motion: FetchMotion {
+                            blend_tree: Some(Box::new(blend)),
+                        },
+                    }],
+                    state_machine: Some(root),
+                },
+                FetchLayer {
+                    has_behaviours: true,
+                    behaviour_pairs: Vec::new(),
+                    motion_pairs: Vec::new(),
+                    state_machine: Some(empty_machine(120, true)),
+                },
+                FetchLayer {
+                    has_behaviours: true,
+                    behaviour_pairs: Vec::new(),
+                    motion_pairs: Vec::new(),
+                    state_machine: Some(ancient),
+                },
+            ],
+        };
+
+        let fixture = include_str!("animator_hierarchy_fixture.txt");
+        let mut gates: Vec<(String, String, bool)> = Vec::new();
+        let mut yields: Vec<FetchYield> = Vec::new();
+        let mut failures = 0;
+        let mut stepfailed = false;
+        let mut hide_before = [0; 2];
+        let mut hide_after = [0; 2];
+        let mut hit_paths: Vec<i64> = Vec::new();
+        let mut miss_count = 0;
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut cells = line.split('|');
+            let prefix = cells.next().expect("a prefix");
+            match prefix {
+                "ANIM" => {
+                    let kind = cells.next().expect("a row kind");
+                    if kind == "gates" {
+                        let owner = cells.next().expect("an owner").to_owned();
+                        let rest: Vec<&str> = cells.collect();
+                        for entry in rest.join(",").split(',') {
+                            let (name, flag) = entry.split_once('=').expect("a gate assignment");
+                            gates.push((
+                                owner.clone(),
+                                name.to_owned(),
+                                match flag {
+                                    "0" => false,
+                                    "1" => true,
+                                    other => panic!("unexpected gate {other}"),
+                                },
+                            ));
+                        }
+                    } else if kind == "failures" {
+                        failures = cells.next().expect("a count").parse().expect("count");
+                    } else if kind == "stepfail" {
+                        stepfailed = true;
+                    }
+                }
+                "FHIER" => {
+                    let seq = cells.next().expect("a sequence");
+                    if seq == "count" {
+                        continue;
+                    }
+                    let what: Vec<&str> = cells.next().expect("a yield").split(':').collect();
+                    let kind = match what[0].split('_').next().expect("a type") {
+                        "AnimatorController" => FetchKind::Controller,
+                        "AnimatorStateMachine" => FetchKind::StateMachine,
+                        "AnimatorState" => FetchKind::State,
+                        "AnimatorStateTransition" | "AnimatorTransition" => FetchKind::Transition,
+                        "MonoBehaviour" => FetchKind::Behaviour,
+                        "BlendTree" => FetchKind::BlendTree,
+                        other => panic!("unexpected yield {other}"),
+                    };
+                    yields.push(FetchYield {
+                        kind,
+                        path: if what[1] == "null" {
+                            None
+                        } else {
+                            Some(what[1].parse().expect("a path"))
+                        },
+                    });
+                }
+                "SBEH" => match cells.next().expect("a row kind") {
+                    "before" => {
+                        assert_eq!(cells.next().expect("a path"), "111");
+                        hide_before[0] = cells.next().expect("bits").parse().expect("bits");
+                        assert_eq!(cells.next().expect("a path"), "112");
+                        hide_before[1] = cells.next().expect("bits").parse().expect("bits");
+                    }
+                    "hit" => {
+                        assert_eq!(cells.next().expect("a count"), "2");
+                        for entry in cells.next().expect("paths").split(',') {
+                            let path: Vec<&str> = entry.split(':').collect();
+                            hit_paths.push(path[1].parse().expect("a path"));
+                        }
+                    }
+                    "after" => {
+                        assert_eq!(cells.next().expect("a path"), "111");
+                        hide_after[0] = cells.next().expect("bits").parse().expect("bits");
+                        assert_eq!(cells.next().expect("a path"), "112");
+                        hide_after[1] = cells.next().expect("bits").parse().expect("bits");
+                    }
+                    "miss" => {
+                        miss_count = cells.next().expect("a count").parse().expect("count");
+                    }
+                    other => panic!("unexpected sbeh row {other}"),
+                },
+                other => panic!("unexpected prefix {other}"),
+            }
+        }
+        assert!(!stepfailed, "the probe wired the whole graph");
+        assert_eq!(failures, 0, "no probe step failed");
+
+        fn gate(gates: &[(String, String, bool)], owner: &str, name: &str) -> bool {
+            gates
+                .iter()
+                .find(|(gate_owner, gate_name, _)| gate_owner == owner && gate_name == name)
+                .map(|(_, _, value)| *value)
+                .expect("a probed gate")
+        }
+        // The probed branch facts: modern layouts on 2022/5.0, the legacy
+        // else-branch on 4.0, plural motions only on the 4.0 state.
+        assert!(gate(&gates, "machine", "Has_ChildStateMachines"));
+        assert!(!gate(&gates, "machine", "Has_LocalTransitions"));
+        assert!(!gate(&gates, "state", "Has_Motions"));
+        assert!(gate(&gates, "state", "Has_StateMachineBehaviours"));
+        assert!(gate(&gates, "state", "Has_Transitions"));
+        assert!(gate(&gates, "layer", "Has_Behaviours"));
+        assert!(gate(&gates, "legacymachine", "Has_ChildStateMachines"));
+        assert!(!gate(&gates, "ancientmachine", "Has_ChildStateMachines"));
+        assert!(gate(&gates, "ancientmachine", "Has_LocalTransitions"));
+        assert!(gate(&gates, "ancientstate", "Has_Motions"));
+        assert!(!gate(&gates, "ancientstate", "Has_StateMachineBehaviours"));
+        assert!(!gate(&gates, "ancientstate", "Has_Transitions"));
+
+        assert_eq!(yields.len(), 27, "all probed yields are asserted");
+        assert_eq!(fetch_editor_hierarchy(&controller), yields);
+        // The excluded clip never yields.
+        assert!(
+            yields.iter().all(|item| item.path != Some(116)),
+            "animation clips stay out of the hierarchy"
+        );
+
+        // The live slot order plus the missing-key arm through the slots
+        // kernel; the HideFlags write is caller-side and witnessed live.
+        assert_eq!(
+            state_behaviour_slots(
+                true,
+                &[(
+                    StateBehaviourKey {
+                        layer_index: 0,
+                        state_id: 7,
+                    },
+                    StateBehaviourRange {
+                        start_index: 0,
+                        count: 2,
+                    },
+                )],
+                &[1, 0],
+                2,
+                0,
+                7,
+            ),
+            Ok(vec![1, 0])
+        );
+        assert_eq!(hit_paths, vec![112, 111]);
+        assert_eq!(
+            state_behaviour_slots(
+                true,
+                &[(
+                    StateBehaviourKey {
+                        layer_index: 0,
+                        state_id: 7,
+                    },
+                    StateBehaviourRange {
+                        start_index: 0,
+                        count: 2,
+                    },
+                )],
+                &[1, 0],
+                2,
+                0,
+                999,
+            ),
+            Ok(Vec::new())
+        );
+        assert_eq!(miss_count, 0);
+        assert_eq!(hide_before, [0, 0]);
+        assert_eq!(hide_after, [1, 1]);
     }
 }

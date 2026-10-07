@@ -1,0 +1,221 @@
+# Live animator hierarchy differential.
+# Probe Temp/opencode/animhierprobe: real versioned objects (2022.3 graph
+# plus 5.0 and 4.0 machines/states) with collection-registered assets and
+# FileID-0 PPtrs through the shipped FetchEditorHierarchy and
+# GetStateBehaviours (shipped SourceGenerated DLL, SDK 10.0.401).
+# Graph (PathID:class): 100 controller; 101 root 2022 machine; 102 child
+# machine (empty); 103 stateA (2022, Transitions=[108], Behaviours=[113]);
+# 104 stateB (layer Behaviours pair); 105 stateC (layer Motions pair);
+# 106 blend tree with child motion 107 (nested blend tree); 108 any-state
+# transition; 111/112 description behaviours (indices [1,0], proving slot
+# order); 113 shared behaviour; 114 entry transition (1109); 115 machine-map
+# transition (1109); 116 animation clip (wired into the 4.0 Motions and
+# EXCLUDED from the yields); 120 5.0 machine (modern, empty); 121 5.0 state;
+# 122 legacy transition; 123 4.0 machine (legacy else-branch: ChildStateMa-
+# chine=[102], Local={(103):[122]}, Ordered={(121):[122]}, States=[121,124]);
+# 124 4.0 state (Has_Motions=1, Motions=[116 clip, 107 blend]).
+# Format: ANIM|class|<what>|<concrete>; ANIM|gates|<what>|<Has_*=0|1,...>;
+# ANIM|list|<prop>|<type>; ANIM|prop|<owner>|<prop>|<type|null>;
+# ANIM|mapkey|1; ANIM|mapvalue|1; ANIM|ppmode|<PPtr>|<resolving slot>;
+# ANIM|ensure/pcount/pcount2/backingval/ancientbacking (construction notes:
+# same-version backings auto-create, cross-version ones start null; the P
+# views observe backing fills; the _4 family resolves through the m_PathID_
+# int field while the split PathID__Int64 slot silently mis-resolves);
+# ANIM|legacymap|<machine>|<map>|pair|1; ANIM|rangekey/keyset/rangeset/
+# indexcount/descfill (description population); FHIER|<seq>|<Type>:<PathID>
+# (null for unresolvable); SBEH|before|after (HideFlags bits), SBEH|hit|...,
+# SBEH|miss|<n>.
+ANIM|class|legacymachine|AssetRipper.SourceGenerated.Classes.ClassID_1107.AnimatorStateMachine_5
+ANIM|gates|legacymachine|Has_ChildStateMachines=1|Has_LocalTransitions=0
+ANIM|class|ancientmachine|AssetRipper.SourceGenerated.Classes.ClassID_1107.AnimatorStateMachine_4
+ANIM|gates|ancientmachine|Has_ChildStateMachines=0|Has_LocalTransitions=1
+ANIM|class|ancientstate|AssetRipper.SourceGenerated.Classes.ClassID_1102.AnimatorState_4
+ANIM|gates|ancientstate|Has_Motions=1|Has_StateMachineBehaviours=0|Has_Transitions=0
+ANIM|class|controller|AssetRipper.SourceGenerated.Classes.ClassID_91.AnimatorController_2018_3
+ANIM|class|machine|AssetRipper.SourceGenerated.Classes.ClassID_1107.AnimatorStateMachine_2020_2_0_b2
+ANIM|class|state|AssetRipper.SourceGenerated.Classes.ClassID_1102.AnimatorState_2020_2_0_b2
+ANIM|class|blend|AssetRipper.SourceGenerated.Classes.ClassID_206.BlendTree_2018_3
+ANIM|gates|controller|Has_StateMachineBehaviourVectorDescription=1
+ANIM|gates|machine|Has_ChildStateMachines=1|Has_LocalTransitions=0
+ANIM|gates|state|Has_Motions=0|Has_StateMachineBehaviours=1|Has_Transitions=1
+ANIM|list|AnimatorLayers|AssetRipper.Assets.Generics.AccessList`2[[AssetRipper.SourceGenerated.Subclasses.AnimatorControllerLayer.AnimatorControllerLayer_2017, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null],[AssetRipper.SourceGenerated.Subclasses.AnimatorControllerLayer.IAnimatorControllerLayer, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|class|layer|AssetRipper.SourceGenerated.Subclasses.AnimatorControllerLayer.AnimatorControllerLayer_2017
+ANIM|gates|layer|Has_Behaviours=1
+ANIM|prop|layer|Behaviours|AssetRipper.Assets.Generics.AccessList`2[[AssetRipper.SourceGenerated.Subclasses.StateBehavioursPair.StateBehavioursPair_2017, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null],[AssetRipper.SourceGenerated.Subclasses.StateBehavioursPair.IStateBehavioursPair, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|prop|layer|Motions|AssetRipper.Assets.Generics.AccessList`2[[AssetRipper.SourceGenerated.Subclasses.StateMotionPair.StateMotionPair_5_2, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null],[AssetRipper.SourceGenerated.Subclasses.StateMotionPair.IStateMotionPair, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|prop|layer|StateMachine|AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorStateMachine.PPtr_AnimatorStateMachine_5
+ANIM|prop|machine|AnyStateTransitionsP|AssetRipper.Assets.Generics.PPtrAccessList`2[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorStateTransition.PPtr_AnimatorStateTransition_5, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null],[AssetRipper.SourceGenerated.Classes.ClassID_1101.IAnimatorStateTransition, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|prop|machine|ChildStateMachines|AssetRipper.Assets.Generics.AssetList`1[[AssetRipper.SourceGenerated.Subclasses.ChildAnimatorStateMachine.ChildAnimatorStateMachine, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|prop|machine|ChildStates|AssetRipper.Assets.Generics.AssetList`1[[AssetRipper.SourceGenerated.Subclasses.ChildAnimatorState.ChildAnimatorState, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|prop|machine|EntryTransitionsP|AssetRipper.Assets.Generics.PPtrAccessList`2[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorTransition.PPtr_AnimatorTransition, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null],[AssetRipper.SourceGenerated.Classes.ClassID_1109.IAnimatorTransition, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|prop|machine|StateMachineBehavioursP|AssetRipper.Assets.Generics.PPtrAccessList`2[[AssetRipper.SourceGenerated.Subclasses.PPtr_MonoBehaviour.PPtr_MonoBehaviour_5, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null],[AssetRipper.SourceGenerated.Classes.ClassID_114.IMonoBehaviour, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|prop|machine|StateMachineTransitions|AssetRipper.Assets.Generics.AssetDictionary`2[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorStateMachine.PPtr_AnimatorStateMachine_5, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null],[AssetRipper.Assets.Generics.AssetList`1[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorTransition.PPtr_AnimatorTransition, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]], AssetRipper.Assets, Version=2.0.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|prop|machine|ChildStateMachineP|AssetRipper.Assets.Generics.PPtrAccessList`2[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorStateMachine.PPtr_AnimatorStateMachine_4, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null],[AssetRipper.SourceGenerated.Classes.ClassID_1107.IAnimatorStateMachine, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|prop|machine|LocalTransitions|null
+ANIM|prop|machine|OrderedTransitions|null
+ANIM|prop|machine|StatesP|AssetRipper.Assets.Generics.PPtrAccessList`2[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorState.PPtr_AnimatorState_4, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null],[AssetRipper.SourceGenerated.Classes.ClassID_1102.IAnimatorState, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|prop|state|MotionsP|AssetRipper.Assets.Generics.PPtrAccessList`2[[AssetRipper.SourceGenerated.Subclasses.PPtr_Motion.PPtr_Motion_4, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null],[AssetRipper.SourceGenerated.Classes.ClassID_207.IMotion, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|prop|state|MotionP|null
+ANIM|prop|state|StateMachineBehavioursP|AssetRipper.Assets.Generics.PPtrAccessList`2[[AssetRipper.SourceGenerated.Subclasses.PPtr_MonoBehaviour.PPtr_MonoBehaviour_5, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null],[AssetRipper.SourceGenerated.Classes.ClassID_114.IMonoBehaviour, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|prop|state|TransitionsP|AssetRipper.Assets.Generics.PPtrAccessList`2[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorStateTransition.PPtr_AnimatorStateTransition_5, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null],[AssetRipper.SourceGenerated.Classes.ClassID_1101.IAnimatorStateTransition, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|prop|blend|Childs|AssetRipper.Assets.Generics.AccessList`2[[AssetRipper.SourceGenerated.Subclasses.ChildMotion.ChildMotion_5, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null],[AssetRipper.SourceGenerated.Subclasses.ChildMotion.IChildMotion, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|backing|state|CorrespondingSourceObject|AssetRipper.SourceGenerated.Subclasses.PPtr_EditorExtension.IPPtr_EditorExtension
+ANIM|backing|state|Motion|AssetRipper.SourceGenerated.Subclasses.PPtr_Motion.PPtr_Motion_5
+ANIM|backing|state|Motions|AssetRipper.Assets.Generics.AssetList`1[[AssetRipper.SourceGenerated.Subclasses.PPtr_Motion.PPtr_Motion_4, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|backing|state|ParentStateMachine|AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorStateMachine.PPtr_AnimatorStateMachine_4
+ANIM|backing|state|PrefabAsset|AssetRipper.SourceGenerated.Subclasses.PPtr_Prefab.PPtr_Prefab_2018_3
+ANIM|backing|state|PrefabInstance|AssetRipper.SourceGenerated.Subclasses.PPtr_PrefabInstance.PPtr_PrefabInstance
+ANIM|backing|state|PrefabInternal|AssetRipper.SourceGenerated.Subclasses.PPtr_Prefab.IPPtr_Prefab
+ANIM|backing|state|StateMachineBehaviours|AssetRipper.Assets.Generics.AssetList`1[[AssetRipper.SourceGenerated.Subclasses.PPtr_MonoBehaviour.PPtr_MonoBehaviour_5, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|backing|state|Transitions|AssetRipper.Assets.Generics.AssetList`1[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorStateTransition.PPtr_AnimatorStateTransition_5, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|backing|state|MotionsP|AssetRipper.Assets.Generics.PPtrAccessList`2[[AssetRipper.SourceGenerated.Subclasses.PPtr_Motion.PPtr_Motion_4, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null],[AssetRipper.SourceGenerated.Classes.ClassID_207.IMotion, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|backing|state|StateMachineBehavioursP|AssetRipper.Assets.Generics.PPtrAccessList`2[[AssetRipper.SourceGenerated.Subclasses.PPtr_MonoBehaviour.PPtr_MonoBehaviour_5, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null],[AssetRipper.SourceGenerated.Classes.ClassID_114.IMonoBehaviour, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|backing|state|TransitionsP|AssetRipper.Assets.Generics.PPtrAccessList`2[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorStateTransition.PPtr_AnimatorStateTransition_5, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null],[AssetRipper.SourceGenerated.Classes.ClassID_1101.IAnimatorStateTransition, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|backing|state|CorrespondingSourceObject_C130|AssetRipper.SourceGenerated.Subclasses.PPtr_EditorExtension.IPPtr_EditorExtension
+ANIM|backing|state|PrefabAsset_C130|AssetRipper.SourceGenerated.Subclasses.PPtr_Prefab.PPtr_Prefab_2018_3
+ANIM|backing|state|PrefabInstance_C130|AssetRipper.SourceGenerated.Subclasses.PPtr_PrefabInstance.PPtr_PrefabInstance
+ANIM|backing|state|PrefabInternal_C130|AssetRipper.SourceGenerated.Subclasses.PPtr_Prefab.IPPtr_Prefab
+ANIM|backing|state|CorrespondingSourceObject_C18|AssetRipper.SourceGenerated.Subclasses.PPtr_EditorExtension.IPPtr_EditorExtension
+ANIM|backing|state|PrefabAsset_C18|AssetRipper.SourceGenerated.Subclasses.PPtr_Prefab.PPtr_Prefab_2018_3
+ANIM|backing|state|PrefabInstance_C18|AssetRipper.SourceGenerated.Subclasses.PPtr_PrefabInstance.PPtr_PrefabInstance
+ANIM|backing|state|PrefabInternal_C18|AssetRipper.SourceGenerated.Subclasses.PPtr_Prefab.IPPtr_Prefab
+ANIM|backing|legacy|AnyStateTransitions|AssetRipper.Assets.Generics.AssetList`1[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorStateTransition.PPtr_AnimatorStateTransition_5, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|backing|legacy|ChildStateMachine|AssetRipper.Assets.Generics.AssetList`1[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorStateMachine.PPtr_AnimatorStateMachine_4, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|backing|legacy|ChildStateMachinePosition|AssetRipper.Assets.Generics.AssetList`1[[AssetRipper.SourceGenerated.Subclasses.Vector3f.Vector3f, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|backing|legacy|ChildStateMachines|AssetRipper.Assets.Generics.AssetList`1[[AssetRipper.SourceGenerated.Subclasses.ChildAnimatorStateMachine.ChildAnimatorStateMachine, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|backing|legacy|ChildStates|AssetRipper.Assets.Generics.AssetList`1[[AssetRipper.SourceGenerated.Subclasses.ChildAnimatorState.ChildAnimatorState, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|backing|legacy|CorrespondingSourceObject|AssetRipper.SourceGenerated.Subclasses.PPtr_EditorExtension.IPPtr_EditorExtension
+ANIM|backing|legacy|DefaultState|AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorState.IPPtr_AnimatorState
+ANIM|backing|legacy|EntryTransitions|AssetRipper.Assets.Generics.AssetList`1[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorTransition.PPtr_AnimatorTransition, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|backing|legacy|LocalTransitions|AssetRipper.Assets.Generics.AssetDictionary`2[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorState.PPtr_AnimatorState_4, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null],[AssetRipper.Assets.Generics.AssetList`1[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorStateTransition.PPtr_AnimatorStateTransition_4, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]], AssetRipper.Assets, Version=2.0.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|backing|legacy|OrderedTransitions|AssetRipper.Assets.Generics.AssetDictionary`2[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorState.PPtr_AnimatorState_4, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null],[AssetRipper.Assets.Generics.AssetList`1[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorStateTransition.PPtr_AnimatorStateTransition_4, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]], AssetRipper.Assets, Version=2.0.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|backing|legacy|PrefabAsset|AssetRipper.SourceGenerated.Subclasses.PPtr_Prefab.PPtr_Prefab_2018_3
+ANIM|backing|legacy|PrefabInstance|AssetRipper.SourceGenerated.Subclasses.PPtr_PrefabInstance.PPtr_PrefabInstance
+ANIM|backing|legacy|PrefabInternal|AssetRipper.SourceGenerated.Subclasses.PPtr_Prefab.IPPtr_Prefab
+ANIM|backing|legacy|StateMachineBehaviours|AssetRipper.Assets.Generics.AssetList`1[[AssetRipper.SourceGenerated.Subclasses.PPtr_MonoBehaviour.PPtr_MonoBehaviour_5, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|backing|legacy|StateMachineTransitions|AssetRipper.Assets.Generics.AssetDictionary`2[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorStateMachine.PPtr_AnimatorStateMachine_5, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null],[AssetRipper.Assets.Generics.AssetList`1[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorTransition.PPtr_AnimatorTransition, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]], AssetRipper.Assets, Version=2.0.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|backing|legacy|States|AssetRipper.Assets.Generics.AssetList`1[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorState.PPtr_AnimatorState_4, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|backing|legacy|AnyStateTransitionsP|AssetRipper.Assets.Generics.PPtrAccessList`2[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorStateTransition.PPtr_AnimatorStateTransition_5, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null],[AssetRipper.SourceGenerated.Classes.ClassID_1101.IAnimatorStateTransition, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|backing|legacy|ChildStateMachineP|AssetRipper.Assets.Generics.PPtrAccessList`2[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorStateMachine.PPtr_AnimatorStateMachine_4, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null],[AssetRipper.SourceGenerated.Classes.ClassID_1107.IAnimatorStateMachine, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|backing|legacy|EntryTransitionsP|AssetRipper.Assets.Generics.PPtrAccessList`2[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorTransition.PPtr_AnimatorTransition, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null],[AssetRipper.SourceGenerated.Classes.ClassID_1109.IAnimatorTransition, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|backing|legacy|StateMachineBehavioursP|AssetRipper.Assets.Generics.PPtrAccessList`2[[AssetRipper.SourceGenerated.Subclasses.PPtr_MonoBehaviour.PPtr_MonoBehaviour_5, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null],[AssetRipper.SourceGenerated.Classes.ClassID_114.IMonoBehaviour, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|backing|legacy|StatesP|AssetRipper.Assets.Generics.PPtrAccessList`2[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorState.PPtr_AnimatorState_4, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null],[AssetRipper.SourceGenerated.Classes.ClassID_1102.IAnimatorState, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|backing|legacy|CorrespondingSourceObject_C130|AssetRipper.SourceGenerated.Subclasses.PPtr_EditorExtension.IPPtr_EditorExtension
+ANIM|backing|legacy|PrefabAsset_C130|AssetRipper.SourceGenerated.Subclasses.PPtr_Prefab.PPtr_Prefab_2018_3
+ANIM|backing|legacy|PrefabInstance_C130|AssetRipper.SourceGenerated.Subclasses.PPtr_PrefabInstance.PPtr_PrefabInstance
+ANIM|backing|legacy|PrefabInternal_C130|AssetRipper.SourceGenerated.Subclasses.PPtr_Prefab.IPPtr_Prefab
+ANIM|backing|legacy|CorrespondingSourceObject_C18|AssetRipper.SourceGenerated.Subclasses.PPtr_EditorExtension.IPPtr_EditorExtension
+ANIM|backing|legacy|PrefabAsset_C18|AssetRipper.SourceGenerated.Subclasses.PPtr_Prefab.PPtr_Prefab_2018_3
+ANIM|backing|legacy|PrefabInstance_C18|AssetRipper.SourceGenerated.Subclasses.PPtr_PrefabInstance.PPtr_PrefabInstance
+ANIM|backing|legacy|PrefabInternal_C18|AssetRipper.SourceGenerated.Subclasses.PPtr_Prefab.IPPtr_Prefab
+ANIM|backing|ancient|AnyStateTransitions|AssetRipper.Assets.Generics.AssetList`1[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorStateTransition.PPtr_AnimatorStateTransition_5, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|backing|ancient|ChildStateMachine|AssetRipper.Assets.Generics.AssetList`1[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorStateMachine.PPtr_AnimatorStateMachine_4, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|backing|ancient|ChildStateMachinePosition|AssetRipper.Assets.Generics.AssetList`1[[AssetRipper.SourceGenerated.Subclasses.Vector3f.Vector3f, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|backing|ancient|ChildStateMachines|AssetRipper.Assets.Generics.AssetList`1[[AssetRipper.SourceGenerated.Subclasses.ChildAnimatorStateMachine.ChildAnimatorStateMachine, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|backing|ancient|ChildStates|AssetRipper.Assets.Generics.AssetList`1[[AssetRipper.SourceGenerated.Subclasses.ChildAnimatorState.ChildAnimatorState, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|backing|ancient|CorrespondingSourceObject|AssetRipper.SourceGenerated.Subclasses.PPtr_EditorExtension.IPPtr_EditorExtension
+ANIM|backing|ancient|DefaultState|AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorState.IPPtr_AnimatorState
+ANIM|backing|ancient|EntryTransitions|AssetRipper.Assets.Generics.AssetList`1[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorTransition.PPtr_AnimatorTransition, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|backing|ancient|LocalTransitions|AssetRipper.Assets.Generics.AssetDictionary`2[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorState.PPtr_AnimatorState_4, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null],[AssetRipper.Assets.Generics.AssetList`1[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorStateTransition.PPtr_AnimatorStateTransition_4, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]], AssetRipper.Assets, Version=2.0.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|backing|ancient|OrderedTransitions|AssetRipper.Assets.Generics.AssetDictionary`2[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorState.PPtr_AnimatorState_4, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null],[AssetRipper.Assets.Generics.AssetList`1[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorStateTransition.PPtr_AnimatorStateTransition_4, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]], AssetRipper.Assets, Version=2.0.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|backing|ancient|PrefabAsset|AssetRipper.SourceGenerated.Subclasses.PPtr_Prefab.PPtr_Prefab_2018_3
+ANIM|backing|ancient|PrefabInstance|AssetRipper.SourceGenerated.Subclasses.PPtr_PrefabInstance.PPtr_PrefabInstance
+ANIM|backing|ancient|PrefabInternal|AssetRipper.SourceGenerated.Subclasses.PPtr_Prefab.IPPtr_Prefab
+ANIM|backing|ancient|StateMachineBehaviours|AssetRipper.Assets.Generics.AssetList`1[[AssetRipper.SourceGenerated.Subclasses.PPtr_MonoBehaviour.PPtr_MonoBehaviour_5, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|backing|ancient|StateMachineTransitions|AssetRipper.Assets.Generics.AssetDictionary`2[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorStateMachine.PPtr_AnimatorStateMachine_5, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null],[AssetRipper.Assets.Generics.AssetList`1[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorTransition.PPtr_AnimatorTransition, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]], AssetRipper.Assets, Version=2.0.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|backing|ancient|States|AssetRipper.Assets.Generics.AssetList`1[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorState.PPtr_AnimatorState_4, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|backing|ancient|AnyStateTransitionsP|AssetRipper.Assets.Generics.PPtrAccessList`2[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorStateTransition.PPtr_AnimatorStateTransition_5, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null],[AssetRipper.SourceGenerated.Classes.ClassID_1101.IAnimatorStateTransition, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|backing|ancient|ChildStateMachineP|AssetRipper.Assets.Generics.PPtrAccessList`2[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorStateMachine.PPtr_AnimatorStateMachine_4, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null],[AssetRipper.SourceGenerated.Classes.ClassID_1107.IAnimatorStateMachine, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|backing|ancient|EntryTransitionsP|AssetRipper.Assets.Generics.PPtrAccessList`2[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorTransition.PPtr_AnimatorTransition, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null],[AssetRipper.SourceGenerated.Classes.ClassID_1109.IAnimatorTransition, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|backing|ancient|StateMachineBehavioursP|AssetRipper.Assets.Generics.PPtrAccessList`2[[AssetRipper.SourceGenerated.Subclasses.PPtr_MonoBehaviour.PPtr_MonoBehaviour_5, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null],[AssetRipper.SourceGenerated.Classes.ClassID_114.IMonoBehaviour, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|backing|ancient|StatesP|AssetRipper.Assets.Generics.PPtrAccessList`2[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorState.PPtr_AnimatorState_4, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null],[AssetRipper.SourceGenerated.Classes.ClassID_1102.IAnimatorState, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|backing|ancient|CorrespondingSourceObject_C130|AssetRipper.SourceGenerated.Subclasses.PPtr_EditorExtension.IPPtr_EditorExtension
+ANIM|backing|ancient|PrefabAsset_C130|AssetRipper.SourceGenerated.Subclasses.PPtr_Prefab.PPtr_Prefab_2018_3
+ANIM|backing|ancient|PrefabInstance_C130|AssetRipper.SourceGenerated.Subclasses.PPtr_PrefabInstance.PPtr_PrefabInstance
+ANIM|backing|ancient|PrefabInternal_C130|AssetRipper.SourceGenerated.Subclasses.PPtr_Prefab.IPPtr_Prefab
+ANIM|backing|ancient|CorrespondingSourceObject_C18|AssetRipper.SourceGenerated.Subclasses.PPtr_EditorExtension.IPPtr_EditorExtension
+ANIM|backing|ancient|PrefabAsset_C18|AssetRipper.SourceGenerated.Subclasses.PPtr_Prefab.PPtr_Prefab_2018_3
+ANIM|backing|ancient|PrefabInstance_C18|AssetRipper.SourceGenerated.Subclasses.PPtr_PrefabInstance.PPtr_PrefabInstance
+ANIM|backing|ancient|PrefabInternal_C18|AssetRipper.SourceGenerated.Subclasses.PPtr_Prefab.IPPtr_Prefab
+ANIM|prop|controller|StateMachineBehaviourVectorDescription|AssetRipper.SourceGenerated.Subclasses.StateMachineBehaviourVectorDescription.StateMachineBehaviourVectorDescription_2017
+ANIM|ppmode|PPtr_AnimatorStateMachine_5|F:m_PathID_
+ANIM|class|behavpair|AssetRipper.SourceGenerated.Subclasses.StateBehavioursPair.StateBehavioursPair_2017
+ANIM|ppmode|PPtr_AnimatorState_5|F:m_PathID_
+ANIM|ppmode|PPtr_MonoBehaviour_5|F:m_PathID_
+ANIM|class|motionpair|AssetRipper.SourceGenerated.Subclasses.StateMotionPair.StateMotionPair_5_2
+ANIM|ppmode|PPtr_Motion_5|F:m_PathID_
+ANIM|class|childmotion|AssetRipper.SourceGenerated.Subclasses.ChildMotion.ChildMotion_5
+ANIM|ppmode|PPtr_AnimatorStateTransition_5|F:m_PathID_
+ANIM|ppmode|PPtr_AnimatorTransition|F:m_PathID_
+ANIM|class|smmmap|AssetRipper.Assets.Generics.AssetDictionary`2[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorStateMachine.PPtr_AnimatorStateMachine_5, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null],[AssetRipper.Assets.Generics.AssetList`1[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorTransition.PPtr_AnimatorTransition, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]], AssetRipper.Assets, Version=2.0.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|class|smmpair|AssetRipper.Assets.Generics.AssetPair`2[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorStateMachine.PPtr_AnimatorStateMachine_5, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null],[AssetRipper.Assets.Generics.AssetList`1[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorTransition.PPtr_AnimatorTransition, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]], AssetRipper.Assets, Version=2.0.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|mapkey|1
+ANIM|mapvalue|1
+ANIM|backingval|Motions|null
+ANIM|backingval|Transitions|present
+ANIM|backingval|StateMachineBehaviours|present
+ANIM|pcount2|TransitionsP|1
+ANIM|pcount2|StateMachineBehavioursP|1
+ANIM|gates|legacystate|Has_Motions=0|Has_StateMachineBehaviours=1|Has_Transitions=1
+ANIM|ppmode|PPtr_AnimatorState_4|F:m_PathID_
+ANIM|ppdump|PPtr_AnimatorState_4|FileID|0
+ANIM|ppdump|PPtr_AnimatorState_4|PathID|103
+ANIM|ppdump|PPtr_AnimatorState_4|PathID__Int32|103
+ANIM|ppdump|PPtr_AnimatorState_4|PathID__Int64|0
+ANIM|ppdump|resolve|null
+ANIM|prop|legacy|ChildStateMachine|null
+ANIM|prop|MAP:legacy|LocalTransitions|null
+ANIM|prop|MAP:legacy|OrderedTransitions|null
+ANIM|prop|legacy|States|null
+ANIM|ppmode|PPtr_AnimatorStateMachine_4|F:m_PathID_
+ANIM|prop|MAP:ancient|LocalTransitions|AssetRipper.Assets.Generics.AssetDictionary`2[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorState.PPtr_AnimatorState_4, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null],[AssetRipper.Assets.Generics.AssetList`1[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorStateTransition.PPtr_AnimatorStateTransition_4, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]], AssetRipper.Assets, Version=2.0.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|ppmode|PPtr_AnimatorStateTransition_4|F:m_PathID_
+ANIM|legacymap|ancient|LocalTransitions|pair|1
+ANIM|prop|MAP:ancient|OrderedTransitions|AssetRipper.Assets.Generics.AssetDictionary`2[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorState.PPtr_AnimatorState_4, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null],[AssetRipper.Assets.Generics.AssetList`1[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorStateTransition.PPtr_AnimatorStateTransition_4, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]], AssetRipper.Assets, Version=2.0.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|legacymap|ancient|OrderedTransitions|pair|1
+ANIM|prop|ancient|States|AssetRipper.Assets.Generics.AssetList`1[[AssetRipper.SourceGenerated.Subclasses.PPtr_AnimatorState.PPtr_AnimatorState_4, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]
+ANIM|ancientbacking|Motions|present
+ANIM|ancientbacking|Transitions|null
+ANIM|ancientbacking|StateMachineBehaviours|null
+ANIM|ppmode|PPtr_Motion_4|F:m_PathID_
+ANIM|ancientmotions|visible|2
+ANIM|class|desc|AssetRipper.SourceGenerated.Subclasses.StateMachineBehaviourVectorDescription.StateMachineBehaviourVectorDescription_2017
+ANIM|class|ranges|AssetRipper.Assets.Generics.AssetDictionary`2[[AssetRipper.SourceGenerated.Subclasses.StateKey.StateKey, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null],[AssetRipper.SourceGenerated.Subclasses.StateRange.StateRange, AssetRipper.SourceGenerated, Version=1.4.0.0, Culture=neutral, PublicKeyToken=null]]|indices|AssetRipper.Assets.Generics.AssetList`1[[System.UInt32, System.Private.CoreLib, Version=10.0.0.0, Culture=neutral, PublicKeyToken=7cec85d7bea7798e]]
+ANIM|rangekey|AssetRipper.SourceGenerated.Subclasses.StateKey.StateKey|AssetRipper.SourceGenerated.Subclasses.StateRange.StateRange
+ANIM|keyset|1
+ANIM|rangeset|1
+ANIM|indexcount|2
+ANIM|descfill|1
+FHIER|0|AnimatorController_2018_3:100
+FHIER|1|AnimatorState_2020_2_0_b2:104
+FHIER|2|MonoBehaviour_2019_1_0_b4:113
+FHIER|3|AnimatorState_2020_2_0_b2:105
+FHIER|4|BlendTree_2018_3:106
+FHIER|5|BlendTree_2018_3:107
+FHIER|6|AnimatorStateMachine_2020_2_0_b2:101
+FHIER|7|AnimatorStateTransition_2018_3:108
+FHIER|8|AnimatorStateMachine_2020_2_0_b2:102
+FHIER|9|AnimatorState_2020_2_0_b2:103
+FHIER|10|MonoBehaviour_2019_1_0_b4:113
+FHIER|11|AnimatorStateTransition_2018_3:108
+FHIER|12|AnimatorTransition_2018_3:114
+FHIER|13|MonoBehaviour_2019_1_0_b4:113
+FHIER|14|AnimatorTransition_2018_3:115
+FHIER|15|AnimatorStateMachine_5:120
+FHIER|16|AnimatorStateMachine_4:123
+FHIER|17|AnimatorStateMachine_2020_2_0_b2:102
+FHIER|18|AnimatorState_2020_2_0_b2:103
+FHIER|19|MonoBehaviour_2019_1_0_b4:113
+FHIER|20|AnimatorStateTransition_2018_3:108
+FHIER|21|AnimatorStateTransition_5:122
+FHIER|22|AnimatorState_5:121
+FHIER|23|AnimatorStateTransition_5:122
+FHIER|24|AnimatorState_5:121
+FHIER|25|AnimatorState_4:124
+FHIER|26|BlendTree_2018_3:107
+FHIER|count|27
+SBEH|before|111|0|112|0
+SBEH|hit|2|MonoBehaviour_2019_1_0_b4:112,MonoBehaviour_2019_1_0_b4:111
+SBEH|after|111|1|112|1
+SBEH|miss|0
+ANIM|failures|0
