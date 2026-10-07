@@ -572,4 +572,181 @@ mod tests {
             "Failed to export 'Main' (TextureExportCollection)"
         );
     }
+
+    /// End-to-end project-export execution over synthetic collections: the planned
+    /// loop drives the real asset-plus-`.meta` step into a fresh temporary project
+    /// root, proving the plan/loop/write composition writes exactly the exportable
+    /// successes, records the failure warning index, never invokes the skipped
+    /// collection, and emits the full lifecycle event order. Collection creation
+    /// runs through the real handler trial order (last registration wins).
+    #[test]
+    fn export_loop_writes_a_real_project_tree_through_asset_and_meta_steps() {
+        use crate::export::meta::UnityMetaFileOptions;
+        use crate::export::project_output::{
+            export_asset_with_meta, AssetExportStep, AssetExportWithMetaPlan,
+            UnityProjectOutputLimits,
+        };
+        use crate::export::unity_yaml::{
+            UnityYamlMappingStyle, UnityYamlNode, UnityYamlWriteLimits,
+        };
+        use std::cell::RefCell;
+        use std::fs;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        struct FakeCollection {
+            name: &'static str,
+            exportable: bool,
+            relative_path: &'static str,
+            guid: [u8; 16],
+            bytes: &'static [u8],
+            fail: bool,
+        }
+
+        struct TestRoot(std::path::PathBuf);
+        impl TestRoot {
+            fn new() -> Self {
+                static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+                let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+                let path = std::env::temp_dir().join(format!(
+                    "assetripper-project-loop-{}-{id}",
+                    std::process::id()
+                ));
+                fs::create_dir(&path).unwrap();
+                Self(path)
+            }
+        }
+        impl Drop for TestRoot {
+            fn drop(&mut self) {
+                fs::remove_dir_all(&self.0).unwrap();
+            }
+        }
+
+        fn plan_for(collection: &FakeCollection) -> AssetExportWithMetaPlan {
+            AssetExportWithMetaPlan {
+                relative_asset_path: collection.relative_path.to_owned(),
+                guid: collection.guid,
+                importer_class: "DefaultImporter".to_owned(),
+                importer: UnityYamlNode::mapping(UnityYamlMappingStyle::Block),
+                meta_options: UnityMetaFileOptions {
+                    has_license_data: false,
+                    ..Default::default()
+                },
+            }
+        }
+
+        let collections = [
+            FakeCollection {
+                name: "First",
+                exportable: true,
+                relative_path: "Assets/First.txt",
+                guid: [17; 16],
+                bytes: b"first-bytes",
+                fail: false,
+            },
+            FakeCollection {
+                name: "Second",
+                exportable: true,
+                relative_path: "Assets/Second.txt",
+                guid: [34; 16],
+                bytes: b"second-bytes",
+                fail: true,
+            },
+            FakeCollection {
+                name: "Skipped",
+                exportable: false,
+                relative_path: "Assets/Skipped.txt",
+                guid: [51; 16],
+                bytes: b"skipped-bytes",
+                fail: false,
+            },
+        ];
+        let assets = [0usize, 1, 2];
+        // Two handlers stay registered for asset 0; the real trial order tries the
+        // last registration first, so the winning exporter is `new-handler`.
+        let winners: Rc<RefCell<Vec<&'static str>>> = Rc::new(RefCell::new(Vec::new()));
+        let planned = plan_project_export_order(
+            &assets,
+            |asset: &usize| collections[*asset].exportable,
+            |asset: &usize| {
+                use crate::export::exporter_match::handler_try_order;
+                let registered: &[&'static str] = match asset {
+                    0 => &["old-handler", "new-handler"],
+                    _ => &["only-handler"],
+                };
+                let winner = handler_try_order(registered)[0];
+                winners.borrow_mut().push(winner);
+                Ok(*asset)
+            },
+            |asset: &usize| vec![*asset],
+            ProjectOrderLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(planned.collections, vec![0, 1, 2]);
+        assert_eq!(planned.exportable_count, 2);
+        assert_eq!(
+            *winners.borrow(),
+            vec!["new-handler", "only-handler", "only-handler"]
+        );
+
+        let root = TestRoot::new();
+        let called: Rc<RefCell<Vec<usize>>> = Rc::new(RefCell::new(Vec::new()));
+        let run = run_project_export_loop(
+            &planned,
+            |asset: &usize| collections[*asset].exportable,
+            |index: usize, asset: &usize| {
+                called.borrow_mut().push(index);
+                let collection = &collections[*asset];
+                let bytes = collection.bytes;
+                match export_asset_with_meta(
+                    &root.0,
+                    plan_for(collection),
+                    !collection.fail,
+                    |path| {
+                        fs::write(path, bytes)
+                            .map(|()| bytes.len())
+                            .map_err(|error| {
+                                std::io::Error::new(error.kind(), "synthetic asset writer")
+                            })
+                    },
+                    UnityProjectOutputLimits::default(),
+                    UnityYamlWriteLimits::default(),
+                ) {
+                    Ok(AssetExportStep::Exported { .. }) => true,
+                    Ok(AssetExportStep::SkippedFailedExport) => false,
+                    Err(error) => panic!("synthetic export step failed: {error}"),
+                }
+            },
+        );
+        // The skipped collection is never invoked; the failed one records its warning index.
+        assert_eq!(*called.borrow(), vec![0, 1]);
+        assert_eq!(run.failed_collections, vec![1]);
+        assert_eq!(
+            run.events,
+            vec![
+                ProjectExportEvent::ExportStarted,
+                ProjectExportEvent::ProgressUpdated { index: 0, total: 3 },
+                ProjectExportEvent::ProgressUpdated { index: 1, total: 3 },
+                ProjectExportEvent::ProgressUpdated { index: 2, total: 3 },
+                ProjectExportEvent::ExportFinished,
+            ]
+        );
+        // The success wrote asset bytes plus the GUID sidecar; the failure wrote
+        // neither (its empty directory stays behind like the source order); the
+        // skipped collection left no trace at all.
+        assert_eq!(
+            fs::read(root.0.join("Assets/First.txt")).unwrap(),
+            b"first-bytes"
+        );
+        let sidecar = fs::read_to_string(root.0.join("Assets/First.txt.meta")).unwrap();
+        assert!(
+            sidecar.contains("guid: 11111111111111111111111111111111"),
+            "{sidecar}"
+        );
+        assert!(!root.0.join("Assets/Second.txt").exists());
+        assert!(!root.0.join("Assets/Second.txt.meta").exists());
+        assert!(root.0.join("Assets").exists());
+        assert!(!root.0.join("Assets/Skipped.txt").exists());
+        assert!(!root.0.join("Assets/Skipped.txt.meta").exists());
+        let _ = collections[0].name;
+    }
 }
