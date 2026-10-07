@@ -781,3 +781,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | src/main.rs (save_serialized_settings_to_dir, delete_serialized_settings_in_dir, save/delete_default_settings_from_arguments, CLI dispatch, usage, four tests plus classifier pin). |
 | Regression evidence | Four new CLI tests pass; full suite 1373 plus 64 pass with warnings-denied Clippy. |
 | Remaining comparison | Unknown enum discriminants stay explicit errors per the row disposition. |
+
+## DIFF-ANIM-CACHE-001 - PathChecksumCache add/get/reset
+
+| Field | Finding |
+|---|---|
+| Status | Reference-method evidence recorded; cache row ported and pinned |
+| Source location | AssetRipper/Source/AssetRipper.Processing/AnimationClips/PathChecksumCache.cs |
+| Input evidence | Probe Temp/opencode/animcacheprobe (shipped Processing/Checksum DLLs, SDK 10.0.401) calling the real Add/TryGetPath/Reset via reflection. Committed as src/resources/anim_cache_fixture.txt (24 lines). |
+| Source-derived behavior | Seed present; eight Add words, idempotent re-adds, all reverse lookups, miss, and reset-clears-seed plus re-add all reproduce exactly. |
+| Root cause | No Rust deviation found. Two probe-side construction facts: parameterless construction leaves field-initializer dictionaries null, and Reset touches processedAssets (both restored via reflection). |
+| Rust change | src/resources/path_checksum.rs test cache_reproduces_the_reference_add_get_reset_sequence; fixture src/resources/anim_cache_fixture.txt. No production change. |
+| Regression evidence | New test passes (module 7/7); full suite 1374 plus 64 pass with warnings-denied Clippy. |
+| Remaining comparison | BuildPathsCache population and Add(IMonoScript) stay caller-side per the row disposition. |

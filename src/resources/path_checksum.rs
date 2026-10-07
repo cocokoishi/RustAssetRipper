@@ -240,6 +240,58 @@ mod tests {
         assert_eq!(cache.add("Root/Hip").unwrap(), checksum);
     }
 
+    /// Differential against the real `PathChecksumCache` methods committed in
+    /// `anim_cache_fixture.txt` (probe `Temp/opencode/animcacheprobe`, isolated
+    /// reference bins, SDK 10.0.401): every `Add` word, every reverse lookup,
+    /// the miss, and the reset-then-re-add sequence reproduce exactly.
+    #[test]
+    fn cache_reproduces_the_reference_add_get_reset_sequence() {
+        let fixture = include_str!("anim_cache_fixture.txt");
+        let mut cache = cache();
+        let mut rows = 0;
+        let mut reset_seen = false;
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let parts: Vec<&str> = line.split('|').collect();
+            match parts[0] {
+                "SEED" => {
+                    assert_eq!(cache.try_get_path(0), Some(""), "{line}");
+                }
+                "ADD" | "READD" | "POSTRESETADD" => {
+                    assert_eq!(parts.len(), 3, "{line}");
+                    let expected: u32 = parts[2].parse().unwrap();
+                    assert_eq!(cache.add(parts[1]).unwrap(), expected, "{line}");
+                    rows += 1;
+                }
+                "GET" | "POSTRESETGET" => {
+                    assert_eq!(parts.len(), 4, "{line}");
+                    let identifier: u32 = parts[1].parse().unwrap();
+                    assert_eq!(cache.try_get_path(identifier), Some(parts[3]), "{line}");
+                    rows += 1;
+                }
+                "MISS" => {
+                    // Normalized from the probe line: the queried identifier in
+                    // decimal plus whether a path was found.
+                    assert_eq!(parts.len(), 3, "{line}");
+                    let identifier: u32 = parts[1].parse().unwrap();
+                    assert_eq!(cache.try_get_path(identifier), None, "{line}");
+                    assert_eq!(parts[2], "False", "{line}");
+                }
+                "POSTRESET" => {
+                    cache.reset();
+                    reset_seen = true;
+                    assert_eq!(cache.try_get_path(0), None, "{line}");
+                }
+                kind => panic!("unknown fixture row {kind}: {line}"),
+            }
+        }
+        assert!(reset_seen, "the fixture pins the reset sequence");
+        assert!(rows >= 18, "the fixture pins adds and reverse lookups");
+    }
+
     #[test]
     fn field_recursion_builds_dotted_primitive_paths() {
         let mut cache = cache();

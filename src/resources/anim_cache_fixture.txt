@@ -1,0 +1,28 @@
+# PathChecksumCache reference differential (probe Temp/opencode/animcacheprobe, SDK 10.0.401).
+# The box is default-constructed via reflection with its three field-initializer
+# dictionaries restored (cachedPropertyNames/cachedChecksums seeded with the empty
+# path, processedAssets empty), so SEED/ADD/GET/RESET exercise the real methods.
+# Format: KIND|arg|result. ADD/GET paths are raw UTF-8 (no row contains '|').
+SEED|EMPTY|True,True
+ADD||0
+ADD|Root|3066451557
+ADD|Root/Child|536284554
+ADD|m_Transform.position.x|2338964816
+ADD|m_IsActive|2086281974
+ADD|骨骼/位置|1271886827
+ADD|A/Very/Long/Path/With/Many/Segments/Leaf|4261812070
+ADD|m_BlendShape.weight 0|3983467968
+READD|Root|3066451557
+READD||0
+GET|0|True|
+GET|3066451557|True|Root
+GET|536284554|True|Root/Child
+GET|2338964816|True|m_Transform.position.x
+GET|2086281974|True|m_IsActive
+GET|1271886827|True|骨骼/位置
+GET|4261812070|True|A/Very/Long/Path/With/Many/Segments/Leaf
+GET|3983467968|True|m_BlendShape.weight 0
+MISS|3735928559|False
+POSTRESET|EMPTY|False
+POSTRESETADD|Root|3066451557
+POSTRESETGET|3066451557|True|Root
