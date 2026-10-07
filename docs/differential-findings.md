@@ -1,4 +1,4 @@
-# Source behavior and differential findings
+﻿# Source behavior and differential findings
 
 This log records behavior differences found between the Rust port and the frozen local source. A source-code analysis is identified as such; it is not described as an executed C# differential.
 
@@ -560,3 +560,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | `resources::texture::{Texture2DView::platform_blob, resolved_image_data}` with `Cow` aliasing; `SWITCH_BUILD_TARGET`/`SWITCH2_BUILD_TARGET` consts; `TextureExportError::Swap`/`Unswizzle`; CLI threads `metadata.prefix.target_platform`/`body_endian` through `export_texture2d_image`/`export_texture2d_value` |
 | Regression evidence | All 12 fixture rows reproduce byte-for-byte, including both Switch vectors through the full orchestration; view-immutability, borrow-vs-own, streamed-swap, and blob-spelling tests; full lib suite passes 1008/1008 locally with warnings-denied Clippy |
 | Remaining comparison | Streamed fetching stays caller-side; unknown platforms (discriminant 0) transform nothing by construction |
+
+## DIFF-TYPETREE-READER-001 - TypeTree old/new reader parity
+
+| Field | Finding |
+|---|---|
+| Status | Reference-runtime differential recorded; both rows ported and pinned |
+| Source location | AssetRipper.IO.Files/SerializedFiles/Parser/TypeTrees/TypeTreeNode.cs (IsFormat5, HasRefTypeHash, Read, Write); TypeTree.cs (Read, SetNamesFromBuffer, GetTypeName, ReadTreeNode); CommonString.cs (113-entry StringBuffer) |
+| Input evidence | Probe Temp/opencode/typetreeprobe (shipped AssetRipper.IO.Files.dll plus AssetRipper.IO.Endian.dll, SDK 10.0.401) dumping 21 generation predicates, all 113 common entries, plus C#-constructed nested payloads: legacy BE gen8 and LE gen11 (GameObject/int/Vector3f/float, 4 nodes, levels 0,1,1,2); modern LE gen10 (custom MyCustomType plus common int, no hash), BE gen19 (same with hashes), LE gen22 (common Vector3f/float with hashes); negative-count refusal. Committed as src/serialized_file/typetree_reader_fixture.txt (156 lines). |
+| Source-derived behavior | Legacy form is null-terminated type/name plus size/index/flags/version/meta plus child count with depth-assigned levels; modern form is count plus buffer size plus fixed 24-byte nodes (19+ adds 8-byte hash for 32 bytes) plus string buffer with custom offsets versus 0x80000000-masked common offsets; negative counts throw InvalidDataException. |
+| Root cause | No deviation found; this increment ports the previously open nested and full-table coverage. Rust names IsFormat5 as is_format5 and HasRefTypeHash as has_ref_type_hash and wires all three call sites behavior-identically. |
+| Rust change | src/serialized_file/metadata.rs (is_format5, has_ref_type_hash, read_type_tree, read_modern_type_tree_node, read_legacy_type_tree_node) plus test typetree_reader_matches_reference_runtime; fixture src/serialized_file/typetree_reader_fixture.txt. |
+| Regression evidence | All 21 predicates, all 113 common offsets plus gap refusals, all 5 payloads (nodes, buffer bytes, offsets, levels, hashes, trailing checks) and the fail-loud negative-count case reproduce the reference dumps; full lib suite 1351 plus 60 CLI pass with warnings-denied Clippy. |
+| Remaining comparison | Unity-produced SerializedFile TypeTrees and managed-reference payload decoding stay outside these two reader rows (tracked by SER-TT-ABSENT-001, SER-MANAGED-REFS-001 and related object rows). |

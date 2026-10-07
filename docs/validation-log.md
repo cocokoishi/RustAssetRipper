@@ -1,4 +1,4 @@
-# Validation log
+﻿# Validation log
 
 ## Environment
 
@@ -2977,3 +2977,11 @@ These results do not pass the first-phase gate. AssetRipper's .NET build and tes
 - `texture-meta` extracted the write atom in `src/export/project_output.rs` (`write_asset_bytes_to_new_file`, pinning the throwing-exporter partial-asset path; 1 new test; module suite 14/14; advances `EXP-META-PIPELINE-001`).
 - Gate question answered YES, cleanly: all five units land on incomplete rows (all five dispatch rows STATUS-checked as text). No verified row touched.
 - Final verification on Windows with Rust/Cargo 1.98.1: `cargo fmt --all -- --check` exit 0; `cargo test --workspace --locked` exit 0 (1350 library, 60 CLI, 0 doc tests, `TEMP`/`TMP` redirected to `target/test-tmp`); `cargo clippy --workspace --all-targets --locked -- -D warnings` exit 0; `tools/verify-baseline.ps1` exit 0 (1,449/1,449 reference files unchanged); `git diff --check` exit 0. No Unity-produced file, user AssetBundle, or UABEA content was used. Phase 1 remains open.
+
+## Phase 1 closure: TypeTree reader OLD+NEW (2026-10-06)
+
+- Closure question answered YES: this batch closes 2 Phase 1 blockers with complete reference-runtime evidence, not a synthetic-only kernel. BEFORE 122 (8 investigated, 15 in-progress, 99 implemented-unverified) -> AFTER 120 (8, 15, 97). Closed rows: SER-TT-OLD-001, SER-TT-NEW-001 (both to verified). No verified row touched except via additive test/helpers.
+- Probe Temp/opencode/typetreeprobe (.NET SDK 10.0.401, isolated ar-ref bins AssetRipper.IO.Files.dll plus AssetRipper.IO.Endian.dll, reflection over internal SerializedReader/TypeTree.Read): IsFormat5/HasRefTypeHash predicates for 21 generations; full 113-entry CommonString table; C#-constructed nested legacy hierarchy (GameObject/int/Vector3f/float, BE gen8 and LE gen11, levels 0,1,1,2); C#-constructed modern buffers with custom MyCustomType plus common int/Vector3f/float (LE gen10 no-hash, BE gen19 with-hash, LE gen22 with-hash); negative-count refusal (InvalidDataException). Output committed as src/serialized_file/typetree_reader_fixture.txt (156 lines, C#-constructed bytes, not Rust-constructed).
+- Rust change: named source predicates is_format5 and has_ref_type_hash in src/serialized_file/metadata.rs (behavior-identical refactor of three inline sites) plus comprehensive test typetree_reader_matches_reference_runtime that asserts all 21 predicates, all 113 common offsets plus gap refusals, all 5 payloads byte-for-byte (nodes, buffer, offsets, levels, hashes, trailing-byte checks) and fail-loud negative-count parity.
+- Gate status: Phase 1 remains OPEN (120 blockers left). This batch does not claim project export, missing-TypeTree recovery, managed payload decoding, or Unity-produced fixture coverage.
+- Final verification on Windows with Rust/Cargo 1.98.1: cargo fmt --all -- --check exit 0; cargo test --workspace --locked exit 0 (1351 library, 60 CLI, 0 doc tests, TEMP/TMP redirected to target/test-tmp); cargo clippy --workspace --all-targets --locked -- -D warnings exit 0; tools/verify-baseline.ps1 exit 0 (1,449/1,449 reference files unchanged); git diff --check exit 0. No Unity-produced file, user AssetBundle, or UABEA content was used. Reference tree untouched; probe ran in isolated Temp copy and bins.

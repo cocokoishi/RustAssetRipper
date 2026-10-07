@@ -664,16 +664,37 @@ fn parse_ascii_decimal(bytes: &[u8]) -> Option<u32> {
     })
 }
 
+/// Whether a generation uses the string-buffer TypeTree node form.
+///
+/// Ports `TypeTreeNode.IsFormat5` (`AssetRipper/Source/AssetRipper.IO.Files/SerializedFiles/Parser/TypeTrees/TypeTreeNode.cs`
+/// lines 12, 42-43, 72-73): generation 10 or 12+. Generation 11 is the distinct
+/// later legacy branch that stays on the null-terminated form.
+pub(crate) fn is_format5(generation: FormatVersion) -> bool {
+    generation.raw() == 10 || generation.raw() >= 12
+}
+
+/// Whether a generation carries the per-node reference-type hash.
+///
+/// Ports `TypeTreeNode.HasRefTypeHash` (`TypeTreeNode.cs` lines 17, 53-56, 82-85):
+/// generation 19+ (`FormatVersion.TypeTreeNodeWithTypeFlags`).
+pub(crate) fn has_ref_type_hash(generation: FormatVersion) -> bool {
+    generation.raw() >= 19
+}
+
 fn read_type_tree(
     reader: &mut BinaryReader<'_>,
     generation: FormatVersion,
     context: &str,
 ) -> Result<TypeTree, SerializedFileMetadataError> {
-    if generation.raw() == 10 || generation.raw() >= 12 {
+    if is_format5(generation) {
         let nodes_count = read_nonnegative_count(reader, &format!("{context} TypeTree nodes"), 24)?;
         let string_buffer_size =
             read_nonnegative_count(reader, &format!("{context} TypeTree string buffer size"), 1)?;
-        let node_size = if generation.raw() >= 19 { 32 } else { 24 };
+        let node_size = if has_ref_type_hash(generation) {
+            32
+        } else {
+            24
+        };
         let encoded_nodes_size = nodes_count.checked_mul(node_size).ok_or_else(|| {
             SerializedFileMetadataError::new(
                 reader.offset(),
@@ -833,7 +854,7 @@ fn read_modern_type_tree_node(
         reader,
         &format!("{context} TypeTree node {node_index} meta flags"),
     )?;
-    let reference_type_hash = if generation.raw() >= 19 {
+    let reference_type_hash = if has_ref_type_hash(generation) {
         Some(read_u64(
             reader,
             &format!("{context} TypeTree node {node_index} reference type hash"),
@@ -2418,5 +2439,247 @@ mod tests {
             error.kind(),
             SerializedFileMetadataErrorKind::NegativeObjectSize(-5)
         ));
+    }
+
+    #[test]
+    fn typetree_reader_matches_reference_runtime() {
+        use super::{has_ref_type_hash, is_format5, read_type_tree};
+        use crate::io::binary::BinaryReader;
+        use crate::serialized_file::common_strings;
+
+        fn hex_to_bytes(hex: &str) -> Vec<u8> {
+            assert!(hex.len().is_multiple_of(2), "odd hex length for {hex}");
+            let mut out = Vec::with_capacity(hex.len() / 2);
+            let bytes = hex.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                let hi = hex_val(bytes[i]);
+                let lo = hex_val(bytes[i + 1]);
+                out.push((hi << 4) | lo);
+                i += 2;
+            }
+            out
+        }
+
+        fn hex_val(b: u8) -> u8 {
+            match b {
+                b'0'..=b'9' => b - b'0',
+                b'a'..=b'f' => b - b'a' + 10,
+                b'A'..=b'F' => b - b'A' + 10,
+                _ => panic!("invalid hex byte {b}"),
+            }
+        }
+
+        fn parse_kv<'a>(chunk: &'a str, key: &str) -> &'a str {
+            let prefix = format!("{key}=");
+            for part in chunk.split(' ') {
+                if let Some(v) = part.strip_prefix(&prefix) {
+                    return v;
+                }
+            }
+            panic!("missing {key} in {chunk}");
+        }
+
+        let fixture = include_str!("typetree_reader_fixture.txt");
+        let mut preds: Vec<(i32, bool, bool)> = Vec::new();
+        let mut commons: Vec<(u32, String)> = Vec::new();
+        let mut hexes: std::collections::HashMap<String, Vec<u8>> =
+            std::collections::HashMap::new();
+        let mut reads: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for line in fixture.lines() {
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+            if line.starts_with("PRED|") {
+                let parts: Vec<&str> = line.split('|').collect();
+                assert_eq!(parts.len(), 4, "bad PRED {line}");
+                preds.push((
+                    parts[1].parse::<i32>().unwrap(),
+                    parts[2] == "True",
+                    parts[3] == "True",
+                ));
+            } else if line.starts_with("COMMON|") {
+                let parts: Vec<&str> = line.splitn(4, '|').collect();
+                assert_eq!(parts.len(), 4, "bad COMMON {line}");
+                commons.push((parts[1].parse::<u32>().unwrap(), parts[3].to_string()));
+            } else if line.contains("_HEX|") {
+                let (name, hex) = line.split_once('|').unwrap();
+                let name = name.strip_suffix("_HEX").unwrap().to_string();
+                hexes.insert(name, hex_to_bytes(hex));
+            } else if line.contains("_READ|") {
+                let (name, dump) = line.split_once('|').unwrap();
+                let name = name.strip_suffix("_READ").unwrap().to_string();
+                reads.insert(name, dump.to_string());
+            }
+        }
+
+        // Generation predicates cover every supported generation from the probe.
+        assert!(preds.len() >= 21, "expected PRED rows, got {}", preds.len());
+        for (raw, want_format5, want_hash) in preds {
+            let generation = FormatVersion::try_from(raw).unwrap();
+            assert_eq!(is_format5(generation), want_format5, "IsFormat5 gen {raw}");
+            assert_eq!(
+                has_ref_type_hash(generation),
+                want_hash,
+                "HasRefTypeHash gen {raw}"
+            );
+        }
+        // The legacy/modern split is exactly generation 10 or 12+.
+        for raw in [1, 2, 3, 5, 6, 7, 8, 9, 11] {
+            assert!(
+                !is_format5(FormatVersion::try_from(raw).unwrap()),
+                "gen {raw}"
+            );
+        }
+        for raw in [10, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22] {
+            assert!(
+                is_format5(FormatVersion::try_from(raw).unwrap()),
+                "gen {raw}"
+            );
+        }
+
+        // Full common-string table: every reference entry resolves identically.
+        assert_eq!(commons.len(), 113, "expected 113 COMMON rows");
+        for (offset, plain) in &commons {
+            assert_eq!(
+                common_strings::get(*offset).map(str::to_string),
+                Some(plain.clone()),
+                "common offset {offset}"
+            );
+        }
+        for gap in [1u32, 2, 223, 9999, 5000] {
+            assert_eq!(common_strings::get(gap), None, "gap offset {gap}");
+        }
+
+        // Nested and string-buffer payloads are C#-constructed in the probe.
+        let cases: &[(&str, FormatVersion, Endian, bool)] = &[
+            ("LEGACY_BE8", FormatVersion::Unknown8, Endian::Big, false),
+            (
+                "LEGACY_LE11",
+                FormatVersion::HasScriptTypeIndex,
+                Endian::Little,
+                false,
+            ),
+            (
+                "MODERN_LE10",
+                FormatVersion::Unknown10,
+                Endian::Little,
+                false,
+            ),
+            (
+                "MODERN_BE19",
+                FormatVersion::TypeTreeNodeWithTypeFlags,
+                Endian::Big,
+                true,
+            ),
+            (
+                "MODERN_LE22",
+                FormatVersion::LargeFilesSupport,
+                Endian::Little,
+                true,
+            ),
+        ];
+        for (name, generation, endian, want_hash) in cases {
+            let bytes = hexes
+                .get(*name)
+                .unwrap_or_else(|| panic!("missing {name}_HEX"));
+            let dump = reads
+                .get(*name)
+                .unwrap_or_else(|| panic!("missing {name}_READ"));
+            assert!(!dump.starts_with("THROW"), "{name} unexpectedly threw");
+            let mut reader = BinaryReader::new(bytes, *endian);
+            let tree = read_type_tree(&mut reader, *generation, "fixture")
+                .unwrap_or_else(|e| panic!("{name} Rust read failed: {e:?}"));
+            assert_eq!(reader.remaining(), 0, "{name} trailing bytes");
+
+            let (head, nodes_part) = dump.split_once(';').unwrap();
+            let want_nodes: usize = parse_kv(head, "NODES").parse().unwrap();
+            let want_buf_len: usize = parse_kv(head, "BUF").parse().unwrap();
+            let want_buf_hex = parse_kv(head, "HEXBUF");
+            assert_eq!(tree.nodes.len(), want_nodes, "{name} node count");
+            assert_eq!(tree.string_buffer.len(), want_buf_len, "{name} buf len");
+            assert_eq!(
+                hex_to_bytes(want_buf_hex),
+                tree.string_buffer,
+                "{name} string buffer"
+            );
+            // Split `[i ...]` blocks without external crates.
+            let mut blocks: Vec<String> = Vec::new();
+            let mut cur = String::new();
+            let mut open = false;
+            for ch in nodes_part.chars() {
+                if ch == '[' {
+                    open = true;
+                    cur.clear();
+                } else if ch == ']' {
+                    open = false;
+                    blocks.push(std::mem::take(&mut cur));
+                } else if open {
+                    cur.push(ch);
+                }
+            }
+            assert_eq!(blocks.len(), want_nodes, "{name} dump blocks");
+            for (i, block) in blocks.iter().enumerate() {
+                let node = &tree.nodes[i];
+                let want_level: u8 = parse_kv(block, "L").parse().unwrap();
+                let want_version: i32 = parse_kv(block, "V").parse().unwrap();
+                let want_flags: i32 = parse_kv(block, "F").parse().unwrap();
+                let want_type = parse_kv(block, "T");
+                let want_name = parse_kv(block, "N");
+                let want_size: i32 = parse_kv(block, "S").parse().unwrap();
+                let want_index: i32 = parse_kv(block, "I").parse().unwrap();
+                let want_meta: u32 = parse_kv(block, "M").parse().unwrap();
+                let want_hash_hex = parse_kv(block, "H");
+                let want_to_hex = parse_kv(block, "TO");
+                let want_no_hex = parse_kv(block, "NO");
+                assert_eq!(node.level, want_level, "{name} node {i} level");
+                assert_eq!(node.version, want_version, "{name} node {i} version");
+                assert_eq!(node.type_flags, want_flags, "{name} node {i} flags");
+                assert_eq!(
+                    node.type_name.as_deref(),
+                    Some(want_type),
+                    "{name} node {i} type"
+                );
+                assert_eq!(
+                    node.name.as_deref(),
+                    Some(want_name),
+                    "{name} node {i} name"
+                );
+                assert_eq!(node.byte_size, want_size, "{name} node {i} size");
+                assert_eq!(node.index, want_index, "{name} node {i} index");
+                assert_eq!(node.meta_flags, want_meta, "{name} node {i} meta");
+                if name.starts_with("LEGACY") {
+                    assert_eq!(node.type_string_offset, None, "{name} node {i} TO");
+                    assert_eq!(node.name_string_offset, None, "{name} node {i} NO");
+                    assert_eq!(node.reference_type_hash, None, "{name} node {i} hash");
+                } else {
+                    let want_to = u32::from_str_radix(want_to_hex, 16).unwrap();
+                    let want_no = u32::from_str_radix(want_no_hex, 16).unwrap();
+                    assert_eq!(node.type_string_offset, Some(want_to), "{name} node {i} TO");
+                    assert_eq!(node.name_string_offset, Some(want_no), "{name} node {i} NO");
+                    if *want_hash {
+                        let want_h = u64::from_str_radix(want_hash_hex, 16).unwrap();
+                        assert_eq!(
+                            node.reference_type_hash,
+                            Some(want_h),
+                            "{name} node {i} hash"
+                        );
+                    } else {
+                        assert_eq!(node.reference_type_hash, None, "{name} node {i} hash");
+                    }
+                }
+            }
+        }
+
+        // Negative node counts fail loudly on both sides.
+        {
+            let bytes = hexes.get("MODERN_NEG").expect("missing MODERN_NEG_HEX");
+            let dump = reads.get("MODERN_NEG").expect("missing MODERN_NEG_READ");
+            assert!(dump.starts_with("THROW:"), "reference should throw");
+            let mut reader = BinaryReader::new(bytes, Endian::Little);
+            let err = read_type_tree(&mut reader, FormatVersion::Unknown10, "fixture")
+                .expect_err("negative count must fail");
+            assert!(format!("{err:?}").len() > 8, "error carries context");
+        }
     }
 }
