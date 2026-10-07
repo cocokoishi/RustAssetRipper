@@ -1547,4 +1547,235 @@ mod tests {
             None
         );
     }
+
+    /// Differential against the shipped material property surface over live
+    /// generated objects (probe `Temp/opencode/matprobe`, fixture
+    /// `material_view_fixture.txt`): real `Material.Create` sheets on four
+    /// Unity versions (empty and populated) through the shipped
+    /// `GetTextureProperties`/`TryGetTextureProperty`/`FindPropertyNameByCRC28`
+    /// with shipped `Crc28Algorithm` words. The replay pins the per-version
+    /// gate vectors (exactly one tex-env/float/color gate per version;
+    /// `Has_Ints` is off on 3.5 and 5.6), the serialized texture order, the
+    /// hit/miss lookups, and every CRC search (postfix hits, plain float
+    /// hit, and misses) through the kernels. Empty-but-gated sheets return
+    /// null without throwing on all four live versions; the unversioned base
+    /// sheet is abstract, so the `NotSupportedException` arm is unreachable
+    /// through construction and stays a documented disposition. `m_Ints`
+    /// never throws (empty when gated off), which the Rust empty-list
+    /// treatment already matches.
+    #[test]
+    fn material_view_matches_the_reference_runtime() {
+        fn bit(flag: &str) -> bool {
+            match flag {
+                "0" => false,
+                "1" => true,
+                other => panic!("unexpected bit {other}"),
+            }
+        }
+
+        fn view_with(tex_envs: &[&str], floats: &[&str]) -> MaterialView {
+            let sheet = SerializedValue::Struct(vec![
+                field(
+                    "m_TexEnvs",
+                    SerializedValue::Array(
+                        tex_envs
+                            .iter()
+                            .map(|name| pair(string(name), tex_env(Some((2, 100)))))
+                            .collect(),
+                    ),
+                ),
+                field(
+                    "m_Floats",
+                    SerializedValue::Array(
+                        floats
+                            .iter()
+                            .map(|name| pair(string(name), SerializedValue::F32(1.5)))
+                            .collect(),
+                    ),
+                ),
+            ]);
+            let root = SerializedValue::Struct(vec![field("m_SavedProperties", sheet)]);
+            MaterialView::from_value(&root).unwrap()
+        }
+
+        let fixture = include_str!("material_view_fixture.txt");
+        struct Search {
+            probe: String,
+            crc: u32,
+            hit: Option<String>,
+        }
+        struct Case {
+            tag: String,
+            sheet: String,
+            gates: Vec<(String, bool)>,
+            texprops: Vec<String>,
+            lookups: Vec<(String, bool)>,
+            searches: Vec<Search>,
+        }
+        let mut cases: Vec<Case> = Vec::new();
+        let mut base_abstract = false;
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut cells = line.split('|');
+            let prefix = cells.next().expect("a prefix");
+            let tag = cells.next().expect("a case").to_owned();
+            if prefix == "MMAT" && tag == "base" {
+                base_abstract = cells.next().expect("a shape") == "abstract";
+                continue;
+            }
+            assert_eq!(prefix, "MMAT", "{line}");
+            if cases.is_empty() || cases.last().expect("a case").tag != tag {
+                cases.push(Case {
+                    tag: tag.clone(),
+                    sheet: String::new(),
+                    gates: Vec::new(),
+                    texprops: Vec::new(),
+                    lookups: Vec::new(),
+                    searches: Vec::new(),
+                });
+            }
+            let case = cases.last_mut().expect("a case");
+            match cells.next().expect("a row kind") {
+                "sheet" => case.sheet = cells.next().expect("a class").to_owned(),
+                "gates" => {
+                    for entry in cells.next().expect("gates").split(',') {
+                        let (name, flag) = entry.split_once('=').expect("a gate assignment");
+                        case.gates.push((name.to_owned(), bit(flag)));
+                    }
+                }
+                "texprops" => {
+                    let count: usize = cells.next().expect("a count").parse().expect("count");
+                    let names = cells.next().unwrap_or("");
+                    case.texprops = if names.is_empty() {
+                        Vec::new()
+                    } else {
+                        names.split(',').map(str::to_owned).collect()
+                    };
+                    assert_eq!(case.texprops.len(), count, "{line}");
+                }
+                "tryget" => {
+                    let name = cells.next().expect("a name").to_owned();
+                    case.lookups.push((name, bit(cells.next().expect("a bit"))));
+                }
+                "find" => {
+                    let probe = cells.next().expect("a probe").to_owned();
+                    let crc =
+                        u32::from_str_radix(cells.next().expect("a crc"), 16).expect("crc word");
+                    let hit = cells.next().expect("a hit");
+                    case.searches.push(Search {
+                        probe,
+                        crc,
+                        hit: if hit == "null" {
+                            None
+                        } else {
+                            Some(hit.to_owned())
+                        },
+                    });
+                    assert!(
+                        cells.next().expect("an error").is_empty(),
+                        "the live search never threw: {line}"
+                    );
+                }
+                "fastfill" => {
+                    // The cross-version Fast dictionary property is null on
+                    // the 2021 sheet, so the write is invisible to the
+                    // version-gated extension.
+                    assert_eq!(cells.next().expect("a bit"), "0", "{line}");
+                }
+                other => panic!("unexpected row {other}"),
+            }
+        }
+        assert!(base_abstract, "the unversioned base sheet is abstract");
+        assert_eq!(cases.len(), 5, "all probed material cases are asserted");
+
+        fn gate(case: &Case, name: &str) -> bool {
+            case.gates
+                .iter()
+                .find(|(gate, _)| gate == name)
+                .map(|(_, value)| *value)
+                .expect("a probed gate")
+        }
+        for case in &cases {
+            // Exactly one tex-env/float/color gate per version; `Has_Ints`
+            // is off on 3.5 and 5.6, on from 2019.4.
+            let tex_gates = [
+                gate(case, "Has_TexEnvs_AssetDictionary_Utf8String_UnityTexEnv_5"),
+                gate(
+                    case,
+                    "Has_TexEnvs_AssetDictionary_FastPropertyName_UnityTexEnv_5",
+                ),
+                gate(
+                    case,
+                    "Has_TexEnvs_AssetDictionary_FastPropertyName_UnityTexEnv_3_5",
+                ),
+            ];
+            let float_gates = [
+                gate(case, "Has_Floats_AssetDictionary_Utf8String_Single"),
+                gate(case, "Has_Floats_AssetDictionary_FastPropertyName_Single"),
+            ];
+            let color_gates = [
+                gate(case, "Has_Colors_AssetDictionary_Utf8String_ColorRGBAf"),
+                gate(
+                    case,
+                    "Has_Colors_AssetDictionary_FastPropertyName_ColorRGBAf",
+                ),
+            ];
+            assert_eq!(
+                tex_gates.iter().filter(|gate| **gate).count(),
+                1,
+                "{tag}",
+                tag = case.tag
+            );
+            assert_eq!(
+                float_gates.iter().filter(|gate| **gate).count(),
+                1,
+                "{tag}",
+                tag = case.tag
+            );
+            assert_eq!(
+                color_gates.iter().filter(|gate| **gate).count(),
+                1,
+                "{tag}",
+                tag = case.tag
+            );
+            assert!(!case.sheet.is_empty(), "{tag}", tag = case.tag);
+
+            // The populated case carries the probe-design payload; the empty
+            // cases carry nothing. The tex-env names come from the live
+            // `texprops` rows.
+            let populated = case.tag == "full-2022";
+            let float_names: Vec<&str> = if populated { vec!["_MyFloat"] } else { vec![] };
+            let tex_names: Vec<&str> = case.texprops.iter().map(String::as_str).collect();
+            if populated {
+                assert_eq!(tex_names, ["_MainTex", "_BumpMap"], "{tag}", tag = case.tag);
+            }
+            let view = view_with(&tex_names, &float_names);
+            let live_names: Vec<&str> = view
+                .texture_properties()
+                .iter()
+                .map(|property| property.name.as_str())
+                .collect();
+            assert_eq!(live_names, tex_names, "{tag}", tag = case.tag);
+            for (name, expected) in &case.lookups {
+                assert_eq!(
+                    view.try_get_texture_property(name).is_some(),
+                    *expected,
+                    "{tag} {name}",
+                    tag = case.tag
+                );
+            }
+            for search in &case.searches {
+                assert_eq!(
+                    view.find_property_name_by_crc28(search.crc),
+                    search.hit,
+                    "{tag} {probe}",
+                    tag = case.tag,
+                    probe = search.probe
+                );
+            }
+        }
+    }
 }

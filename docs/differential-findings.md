@@ -989,3 +989,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | Test sprite_metadata_fill_matches_the_reference_runtime in resources/sprite.rs; fixture src/resources/sprite_metadata_fixture.txt. No production change. |
 | Regression evidence | All three fill cases replay field-for-field through the kernel; sprite suite 19/19. |
 | Remaining comparison | Mesh-vertex extraction bodies (`SetBoneGeometry`, `VertexDataBlob` reads, `GenerateOutline`/`GeneratePhysicsShape`, `MeshOutlineGenerator`) stay open by baseline size; real skinned-sprite vertex payloads stay out per the row disposition. |
+
+## DIFF-MATERIAL-VIEW-001 - material property surface
+
+| Field | Finding |
+|---|---|
+| Status | Reference-runtime differential recorded; five material cases ported and pinned |
+| Source location | AssetRipper/Source/AssetRipper.SourceGenerated.Extensions/MaterialExtensions.cs (`FindPropertyNameByCRC28`, `TryGetTextureProperty`, `GetTextureProperties`); UnityPropertySheetExtensions.cs; AssetRipper/Source/AssetRipper.Processing/AnimationClips/CustomCurveResolver.cs (line 107 live caller); AssetRipper/Source/AssetRipper.Export.Modules.Models/GlbLevelBuilder.cs (line 244 live caller) |
+| Input evidence | Probe Temp/opencode/matprobe (shipped SourceGenerated/Checksum DLLs, SDK 10.0.401) with real `Material.Create` sheets on 3.5, 5.6, 2019.4, and 2022.3 (empty and populated) through the shipped property surface with shipped CRC28 words. Committed as src/resources/material_view_fixture.txt (62 rows). |
+| Source-derived behavior | Exactly one tex-env/float/color gate per version (`Has_Ints` off on 3.5 and 5.6, on from 2019.4); serialized texture order; hit/miss lookups; CRC searches (postfix hits, plain float hit, misses); empty-but-gated sheets return null without throwing on all four versions. |
+| Root cause | No Rust deviation found; this increment replaces source-derived expectations with live-object vectors. The `NotSupportedException` arm is bounded: every shipped version matches exactly one tex-env gate and the unversioned base sheet is abstract, so it fires only for file-reader-produced unknown layouts. |
+| Rust change | Test material_view_matches_the_reference_runtime in resources/material.rs; fixture src/resources/material_view_fixture.txt. No production change. |
+| Regression evidence | All five material cases replay through the view; material suite 26/26. |
+| Remaining comparison | FastPropertyName shapes stay synthetic (cross-version dict writes are invisible to the version-gated extension); Material `.mat` YAML export and the shader exporters remain open. |
