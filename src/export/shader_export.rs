@@ -753,6 +753,66 @@ mod tests {
     }
 
     #[test]
+    fn template_catalog_and_bodies_match_the_source_template_list() {
+        use super::property_type_numbers;
+        // Requirement sets mirror Templates.json: Default needs nothing,
+        // SingleTexture needs a Texture _MainTex, SingleColor needs a Color
+        // _Color, and TransparentDiffuse needs both. The PropertyType numbers
+        // mirror the source enum (Color = 0 .. Texture = 4).
+        let expected: &[(&str, &[(&str, i32)])] = &[
+            ("Default", &[]),
+            (
+                "SingleTexture",
+                &[("_MainTex", property_type_numbers::TEXTURE)],
+            ),
+            ("SingleColor", &[("_Color", property_type_numbers::COLOR)]),
+            (
+                "TransparentDiffuse",
+                &[
+                    ("_MainTex", property_type_numbers::TEXTURE),
+                    ("_Color", property_type_numbers::COLOR),
+                ],
+            ),
+        ];
+        assert_eq!(TEMPLATE_CATALOG.len(), expected.len());
+        for ((name, requirements), (expected_name, expected_requirements)) in
+            TEMPLATE_CATALOG.iter().zip(expected.iter())
+        {
+            assert_eq!(*name, *expected_name);
+            let actual: Vec<(&str, i32)> = requirements
+                .iter()
+                .map(|requirement| (requirement.name, requirement.type_number))
+                .collect();
+            assert_eq!(actual, *expected_requirements, "{name}");
+        }
+        // The vendored bodies are the source .txt resources with carriage
+        // returns stripped (like GetTextFromResource): same names, same
+        // stripped lengths, matched by name at render time.
+        let bodies = templates::all();
+        let lengths: Vec<(&str, usize)> = bodies
+            .iter()
+            .map(|(name, body)| (*name, body.len()))
+            .collect();
+        for (name, expected_len) in [
+            ("Default", 655),
+            ("SingleColor", 652),
+            ("SingleTexture", 942),
+            ("TransparentDiffuse", 969),
+        ] {
+            let actual = lengths
+                .iter()
+                .find(|(body_name, _)| *body_name == name)
+                .map(|(_, len)| *len);
+            assert_eq!(actual, Some(expected_len), "{name}");
+        }
+        let mut catalog_names: Vec<&str> = TEMPLATE_CATALOG.iter().map(|(name, _)| *name).collect();
+        let mut body_names: Vec<&str> = lengths.iter().map(|(name, _)| *name).collect();
+        catalog_names.sort_unstable();
+        body_names.sort_unstable();
+        assert_eq!(catalog_names, body_names);
+    }
+
+    #[test]
     fn vendored_texts_match_runtime_values_and_strip_rules() {
         // The fallback strips carriage returns, has no CR left, and matches the probed
         // 317-byte runtime value in length and boundary lines.

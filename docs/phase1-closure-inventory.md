@@ -6,15 +6,15 @@ The status counts below come from the `Status` cell in each stable-ID row of `do
 
 | Ledger status | Rows |
 |---|---:|
-| `已验证` | 343 |
-| `已实现但未验证` | 16 |
+| `已验证` | 344 |
+| `已实现但未验证` | 15 |
 | `实现中` | 14 |
 | `已调查` | 4 |
 | `未调查` | 0 |
 | `受外部条件阻塞` | 0 |
-| **Open rows** | **34** |
+| **Open rows** | **33** |
 
-All 34 queued rows currently block the Phase 1 gate: each maps to baseline shipping behavior, and no exact verified disposition removes it from the product scope. `TYPE-SCRIPT-001` still needs a source-backed runtime-versus-tooling disposition. Unity-only evidence is a real gap where listed; it is not counted as passed. The inventory is the Phase 1 work queue and should be refreshed only after closing a complete behavior or finding a new source-backed disposition.
+All 33 queued rows currently block the Phase 1 gate: each maps to baseline shipping behavior, and no exact verified disposition removes it from the product scope. `TYPE-SCRIPT-001` still needs a source-backed runtime-versus-tooling disposition. Unity-only evidence is a real gap where listed; it is not counted as passed. The inventory is the Phase 1 work queue and should be refreshed only after closing a complete behavior or finding a new source-backed disposition.
 
 ## Closed behavior units
 
@@ -25,6 +25,7 @@ All 34 queued rows currently block the Phase 1 gate: each maps to baseline shipp
 | `PROC-PREFAB-SCENE-BUNDLE-001` | The integrated `plan_workspace_scene_hierarchy_bundle_names` planner composes source-order scene/collection traversal, per-bundle `FetchAssets()`-ordered asset facts, real `get_asset_bundle_name` resolution, and the streamed-scene `Debug.Assert` as an explicit release-continue warning. CLI `print_workspace_summary_to` resolves live class-142 payloads and reports per-scene hierarchy bundle names. See `DIFF-PREFAB-SCENE-BUNDLE-001` and the planner plus CLI regression tests named in `docs/feature-parity.md`. |
 | `IO-FS-IMPORT-PATH-001` | An isolated AssetRipper IO.Files runtime probe wrote aligned and unaligned WebData containers and pinned entry inventory, truncation fallback to a raw leaf, split base/part resolution, and missing-part rejection. Rust replays every row through production `mount_path` with byte-identical mounts and fail-closed gaps. See `DIFF-SINGLEFILE-IMPORT-001` and the regression test named in `docs/feature-parity.md`. |
 | `PROC-SCENE-INSPECT-001` | A GameObject-rich CLI end-to-end fixture inspects a manager plus cross-file GameObject/Transform pairs (external father, dangling local reference) and pins graph counts, PPtr resolution outcomes, root candidates, hierarchy diagnostics, indeterminate `GetRoot` reasons, SceneDefinition attachment, and the dependency report. Root ordering stays covered by the ported `calculate_root_order` plus fixture. See the regression test named in `docs/feature-parity.md`. |
+| `RES-SHADER-PARSED-001` | The exporter stack (decompiled text wins under every mode, `Decompile` falls to dummy), the four-template catalog with its requirement sets, the `PropertyType` numbers, and the subset-match/earliest-winner selection are source-audited and mirrored; the vendored template bodies are hash-identical to the source resources. The `export-shader` CLI covers all four modes end to end. Importer creation stays with the project-export rows; a Unity-produced export stays Phase 2 work. See `DIFF-SHADER-PARSED-001` and the tests named in `docs/feature-parity.md`. |
 
 ## Dependency order
 
@@ -87,7 +88,6 @@ The row-level work units below are the smallest complete closures justified by d
 | `RES-AUDIO-001` | `已实现但未验证` | `AudioClipDecoder`; `AudioConverter`; UnityProjects Audio; AudioClip/FMOD extensions | **Implementation/integration:** port required FSB5 and Vorbis conversion behavior in Rust, finish generated class-field routing and resource streams, and exercise inline and external audio on independent/reference fixtures. | Yes |
 | `RES-MESH-VIEW-001` | `已实现但未验证` | `MeshExtensions.ReadData`; `VertexDataBlob.Create`; `MeshData.TryMakeFromMesh` | **Implementation/integration:** settle versioned field naming from reference runtime, complete metric/blend-shape/streamed-data reads, and build `MeshData` from real serialized class-43 objects through its export callers. | Yes |
 | `EXP-GLB-001` | `已实现但未验证` | `GlbMeshBuilder`; `GlbSubMeshBuilder`; `GlbMeshType`; coordinate conversion; `GlbWriter` | **Implementation/integration:** finish scene-level and terrain GLB export and blend-shape output, connect processed assets and resolved materials to the writer, and validate full output semantics in an independent viewer/Unity import. | Yes |
-| `RES-SHADER-PARSED-001` | `已实现但未验证` | `DummyShaderTextExporter`; serialized property extensions; template and property metadata | **Implementation/integration:** consume parsed-form properties from generated shader objects and emit the full dummy shader output through shader collection dispatch; validate with serialized Unity-produced shader data. | Yes |
 | `RES-BLENDSHAPE-001` | `已实现但未验证` | `MeshBlendShapeExtensions`; `BlendShapeDataExtensions`; `MeshExtensions.FindBlendShapeNameByCRC`; `SetValues` | **Implementation/integration:** connect name/hash resolution to geometry frame/delta/weight decoding and animation binding; cover legacy list and channel layouts with independent versioned inputs. | Yes |
 | `EXP-YAML-STREAMED-ASSET-PREP-001` | `实现中` | `YamlStreamedAssetExportCollection.ExportMesh` and `ExportTexture` | **Integration:** feed resolved streamed resources and version-specific inline fields into actual YAML collection exporters, preserve the input object, and validate complete mesh/texture YAML plus sidecar resources from an external fixture. | Yes |
 
