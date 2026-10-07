@@ -2809,4 +2809,117 @@ mod tests {
             assert!(metadata.externals.is_empty());
         }
     }
+
+    #[test]
+    fn table_records_match_reference_constructed_files() {
+        fn hex_to_bytes(hex: &str) -> Vec<u8> {
+            assert!(hex.len().is_multiple_of(2), "odd hex length for {hex}");
+            let mut out = Vec::with_capacity(hex.len() / 2);
+            let bytes = hex.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                let hi = match bytes[i] {
+                    b'0'..=b'9' => bytes[i] - b'0',
+                    b'a'..=b'f' => bytes[i] - b'a' + 10,
+                    b'A'..=b'F' => bytes[i] - b'A' + 10,
+                    b => panic!("invalid hex byte {b}"),
+                };
+                let lo = match bytes[i + 1] {
+                    b'0'..=b'9' => bytes[i + 1] - b'0',
+                    b'a'..=b'f' => bytes[i + 1] - b'a' + 10,
+                    b'A'..=b'F' => bytes[i + 1] - b'A' + 10,
+                    b => panic!("invalid hex byte {b}"),
+                };
+                out.push((hi << 4) | lo);
+                i += 2;
+            }
+            out
+        }
+
+        // Probe Temp/opencode/sermetatableprobe (SerializedFileMetadata.Read
+        // over C#-constructed full files, SDK 10.0.401, zero types so no
+        // type matching): T1 gen8, T2 gen12 with scripts, T3 gen20 with
+        // 64-bit IDs and an empty ref-types table. Nothing Rust-generated.
+        let fixture = include_str!("metadata_table_fixture.txt");
+        let mut hexes: std::collections::HashMap<String, Vec<u8>> =
+            std::collections::HashMap::new();
+        let mut reads: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for line in fixture.lines() {
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+            if line.starts_with("TABLE_HEX|") {
+                let parts: Vec<&str> = line.splitn(3, '|').collect();
+                assert_eq!(parts.len(), 3, "bad TABLE_HEX {line}");
+                hexes.insert(parts[1].to_string(), hex_to_bytes(parts[2]));
+            } else if line.starts_with("TABLE_READ|") {
+                let parts: Vec<&str> = line.splitn(3, '|').collect();
+                assert_eq!(parts.len(), 3, "bad TABLE_READ {line}");
+                reads.insert(parts[1].to_string(), parts[2].to_string());
+            }
+        }
+
+        // T1: gen8 32-bit PathID with ClassID and IsDestroyed.
+        {
+            let bytes = hexes.get("T1").expect("T1 hex");
+            let dump = reads.get("T1").expect("T1 dump");
+            assert!(dump.contains("OBJ:1001,1,1,4"), "T1 object {dump}");
+            assert!(dump.contains("EXT:library/extra.bin,0"), "T1 ext {dump}");
+            let header = SerializedFileHeader::parse(bytes).expect("T1 header");
+            assert_eq!(header.format_version, FormatVersion::Unknown8);
+            let metadata = SerializedFileMetadata::parse_file(bytes, &header).expect("T1 metadata");
+            assert_eq!(metadata.objects.len(), 1);
+            let object = &metadata.objects[0];
+            assert_eq!(object.path_id, 1001);
+            assert_eq!(object.byte_size, 4);
+            assert_eq!(object.raw_type_id, 1);
+            assert_eq!(object.class_id, Some(1));
+            assert_eq!(object.is_destroyed, Some(0));
+            assert_eq!(metadata.externals.len(), 1);
+            let external = &metadata.externals[0];
+            assert_eq!(external.path_name_origin, "library/extra.bin");
+            assert_eq!(external.guid, Some([0, 0, 0, 0]));
+            assert!(metadata.script_types.is_empty());
+        }
+
+        // T2: gen12 adds ScriptTypeIndex plus a script-identifier table.
+        {
+            let bytes = hexes.get("T2").expect("T2 hex");
+            let dump = reads.get("T2").expect("T2 dump");
+            assert!(dump.contains("OBJ:1001,1,1,0"), "T2 object {dump}");
+            assert!(dump.contains("SCR:0,3003"), "T2 script {dump}");
+            let header = SerializedFileHeader::parse(bytes).expect("T2 header");
+            assert_eq!(header.format_version.raw(), 12);
+            let metadata = SerializedFileMetadata::parse_file(bytes, &header).expect("T2 metadata");
+            assert_eq!(metadata.objects.len(), 1);
+            let object = &metadata.objects[0];
+            assert_eq!(object.path_id, 1001);
+            assert_eq!(object.script_type_index, Some(0));
+            assert_eq!(metadata.script_types.len(), 1);
+            assert_eq!(metadata.script_types[0].local_serialized_file_index, 0);
+            assert_eq!(metadata.script_types[0].local_identifier_in_file, 3003);
+            assert_eq!(metadata.externals.len(), 1);
+            assert_eq!(metadata.externals[0].path_name_origin, "library/extra.bin");
+        }
+
+        // T3: gen20 uses 64-bit IDs, a type-table index, and ref types.
+        {
+            let bytes = hexes.get("T3").expect("T3 hex");
+            let dump = reads.get("T3").expect("T3 dump");
+            assert!(dump.contains("OBJ:2002,0,0,0"), "T3 object {dump}");
+            assert!(dump.contains("SCR:0,4004"), "T3 script {dump}");
+            let header = SerializedFileHeader::parse(bytes).expect("T3 header");
+            assert_eq!(header.format_version.raw(), 20);
+            let metadata = SerializedFileMetadata::parse_file(bytes, &header).expect("T3 metadata");
+            assert_eq!(metadata.objects.len(), 1);
+            let object = &metadata.objects[0];
+            assert_eq!(object.path_id, 2002);
+            assert_eq!(object.serialized_type_index, Some(-1));
+            assert_eq!(object.byte_size, 0);
+            assert_eq!(metadata.script_types.len(), 1);
+            assert_eq!(metadata.script_types[0].local_identifier_in_file, 4004);
+            assert!(metadata.reference_types.is_empty());
+            assert_eq!(metadata.externals.len(), 1);
+        }
+    }
 }

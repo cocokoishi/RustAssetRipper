@@ -664,3 +664,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | src/serialized_file/metadata.rs test scalar_fields_match_reference_constructed_files; fixture src/serialized_file/metadata_scalar_fixture.txt. |
 | Regression evidence | All three files reproduce version/platform/LongFileID/user/tables on both sides; bounds for both layouts pinned; full suite 1359 plus 60 pass with warnings-denied Clippy. |
 | Remaining comparison | Type/object/external/script tables plus TypeTree payloads stay with SER-META-TYPES/OBJECTS/EXTERNALS rows; full UnityVersion grammar stays out by design. |
+
+## DIFF-SER-TABLE-001 - SerializedFile object/external/script tables
+
+| Field | Finding |
+|---|---|
+| Status | Reference-runtime differential recorded; three rows ported and pinned |
+| Source location | AssetRipper.IO.Files/SerializedFiles/Parser/ObjectInfo.cs (IsLongID, HasClassID, HasScriptTypeIndex, HasIsDestroyed, HasSerializedTypeIndex); FileIdentifier.cs; LocalSerializedObjectIdentifier.cs |
+| Input evidence | Probe Temp/opencode/sermetatableprobe (shipped IO.Files DLL, SDK 10.0.401) reading three C#-constructed files with one object, one external, and zero/one script records across gen8/12/20. Committed as src/serialized_file/metadata_table_fixture.txt (10 lines). |
+| Source-derived behavior | PathID is 32-bit before generation 14 and 64-bit with 4-byte alignment after; pre-17 files carry raw type IDs with ClassID/ScriptTypeIndex/IsDestroyed branches while gen20 carries a type-table index; script identifiers mirror the PathID width; externals carry asset path, GUID, type, and origin. |
+| Root cause | No deviation found; this increment ports the previously synthetic-only table reads. Zero types keep type matching out of scope by construction on both sides. |
+| Rust change | src/serialized_file/metadata.rs test table_records_match_reference_constructed_files; fixture src/serialized_file/metadata_table_fixture.txt. |
+| Regression evidence | All records reproduce FileID/TypeID/ClassID/scripts/externals on both sides; full suite 1360 plus 60 pass with warnings-denied Clippy. |
+| Remaining comparison | Type records with TypeTree payloads stay with SER-META-TYPES-001; identifier-to-object integration and script recovery stay downstream. |
