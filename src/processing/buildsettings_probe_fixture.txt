@@ -1,0 +1,31 @@
+# Reference-materialized BuildSettings differential (probe tools/probes/buildsettings, .NET SDK 10.0.401).
+# Rust-built full-layout class-141 payloads following the TPK release trees
+# (see buildsettings_tpk_fixture.txt); the reference parses them and materializes REAL
+# generated objects via GameAssetFactory (DependenceGrapher pattern), proving the bytes
+# match the true fixed layouts byte-exactly (else UnreadableObject).
+# Format: FILE|name|version|assets; ASSET|path|class|type; SCENE|path (ordered);
+# VERSION|text; AUTHTOKEN|text; GUID|w0..w3 or ABSENT; BOOL|name|value.
+## modern.assets
+FILE|modern.assets|version=2019.4.40f1|assets=1
+ASSET|42|class=141|type=BuildSettings_2018_3_0_b4
+SCENE|Assets/Scenes/Main.unity
+SCENE|Assets/Scenes/Extra.unity
+VERSION|2019.4.40f1
+AUTHTOKEN|
+GUID|16909060,84281096,151653132,219025168
+BOOL|HasShadows|True
+BOOL|EnableDynamicBatching|True
+BOOL|HasPROVersion|False
+BOOL|HasPublishingRights|True
+## legacy.assets
+FILE|legacy.assets|version=5.0.0f1|assets=1
+ASSET|42|class=141|type=BuildSettings_5
+SCENE|Assets/Legacy/First.unity
+SCENE|Assets/Legacy/Second.unity
+VERSION|5.0.0f1
+AUTHTOKEN|
+GUID|ABSENT
+BOOL|HasShadows|True
+BOOL|EnableDynamicBatching|True
+BOOL|HasPROVersion|False
+BOOL|HasPublishingRights|True
