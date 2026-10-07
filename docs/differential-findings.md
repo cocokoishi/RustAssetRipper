@@ -742,3 +742,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | src/serialized_file/metadata.rs test metadata_envelopes_match_reference_constructed_files; fixture src/serialized_file/metadata_envelope_fixture.txt. |
 | Regression evidence | All twelve files reproduce envelope plus payload on both sides; full suite 1368 plus 60 pass with warnings-denied Clippy. |
 | Remaining comparison | Object field semantics stay with the object-value rows; container extraction stays with its row. |
+
+## DIFF-SER-OBJF-001 - Object field reading (values and arrays)
+
+| Field | Finding |
+|---|---|
+| Status | Reference-runtime differential recorded; two rows ported and pinned |
+| Source location | AssetRipper.Import/Structure/Assembly/Serializable/SerializableStructure.cs; TypeTrees/SerializableTreeType.cs (ToPrimititeType, IsString, AlignBytes); SerializableValue.cs (ReadUtf8StringAligned, per-field Align) |
+| Input evidence | Probe Temp/opencode/objfieldprobe (shipped Import DLL, SDK 10.0.401) reading one VALUES file plus one ARRAYS file. Committed as src/serialized_file/object_field_fixture.txt (9 lines). |
+| Source-derived behavior | All scalar, string, nested, and array values reproduce; string nodes need Array children; strings self-align; byte vectors align with AlignBytes plus pad. |
+| Root cause | No value deviation found. One latent rule difference noted: Rust aligns some arrays by Unity-version rule where the source uses the per-field AlignBytes flag; realistic files (flag plus pad together, or neither) agree on both sides. |
+| Rust change | src/serialized_file/object.rs tests object_scalar_string_nested_fields_match_reference and object_string_nested_empty_arrays_match_reference; fixture src/serialized_file/object_field_fixture.txt. No production change. |
+| Regression evidence | Both files reproduce every field on both sides; full suite 1370 plus 60 pass with warnings-denied Clippy. |
+| Remaining comparison | Managed-reference payloads, enum/generated semantics, fixed buffers, and unusual engine layouts stay with their rows; the full version/flag alignment matrix stays open. |

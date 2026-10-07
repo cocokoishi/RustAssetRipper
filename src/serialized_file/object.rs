@@ -3772,4 +3772,154 @@ mod tests {
         assert!(!super::is_builtin_extra_name("Unity Builtin Extra"));
         assert!(!super::is_builtin_extra_name("unity editor resources"));
     }
+
+    fn object_field_fixture(case: &str) -> (Vec<u8>, String) {
+        fn hex_to_bytes(hex: &str) -> Vec<u8> {
+            assert!(hex.len().is_multiple_of(2), "odd hex length for {hex}");
+            let mut out = Vec::with_capacity(hex.len() / 2);
+            let bytes = hex.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                let hi = match bytes[i] {
+                    b'0'..=b'9' => bytes[i] - b'0',
+                    b'a'..=b'f' => bytes[i] - b'a' + 10,
+                    b'A'..=b'F' => bytes[i] - b'A' + 10,
+                    b => panic!("invalid hex byte {b}"),
+                };
+                let lo = match bytes[i + 1] {
+                    b'0'..=b'9' => bytes[i + 1] - b'0',
+                    b'a'..=b'f' => bytes[i + 1] - b'a' + 10,
+                    b'A'..=b'F' => bytes[i + 1] - b'A' + 10,
+                    b => panic!("invalid hex byte {b}"),
+                };
+                out.push((hi << 4) | lo);
+                i += 2;
+            }
+            out
+        }
+
+        // Probe Temp/opencode/objfieldprobe (SerializableTreeType.FromRootNode
+        // plus SerializableStructure.Read over C#-constructed gen12 files with
+        // ITypeResolver.Null, SDK 10.0.401). Nothing Rust-generated.
+        let fixture = include_str!("object_field_fixture.txt");
+        let mut file = None;
+        let mut dump = None;
+        for line in fixture.lines() {
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+            if line.starts_with("OBJ_HEX|") {
+                let parts: Vec<&str> = line.splitn(3, '|').collect();
+                assert_eq!(parts.len(), 3, "bad OBJ_HEX {line}");
+                if parts[1] == case {
+                    file = Some(hex_to_bytes(parts[2]));
+                }
+            } else if line.starts_with("OBJ_READ|") {
+                let parts: Vec<&str> = line.splitn(3, '|').collect();
+                assert_eq!(parts.len(), 3, "bad OBJ_READ {line}");
+                if parts[1] == case {
+                    dump = Some(parts[2].to_string());
+                }
+            }
+        }
+        (
+            file.unwrap_or_else(|| panic!("missing {case} hex")),
+            dump.unwrap_or_else(|| panic!("missing {case} dump")),
+        )
+    }
+
+    fn decode_fixture_object(case: &str, expected_dump: &str) -> super::ParsedObjectPayload {
+        let (bytes, dump) = object_field_fixture(case);
+        assert!(dump.contains(expected_dump), "{case} oracle {dump}");
+        let header =
+            SerializedFileHeader::parse(&bytes).unwrap_or_else(|e| panic!("{case} header: {e:?}"));
+        let metadata = SerializedFileMetadata::parse_file(&bytes, &header)
+            .unwrap_or_else(|e| panic!("{case} metadata: {e:?}"));
+        metadata
+            .decode_object_payload(&bytes, &header, 0)
+            .unwrap_or_else(|e| panic!("{case} decode: {e:?}"))
+    }
+
+    fn require_field<'a>(root: &'a SerializedValue, name: &str) -> &'a SerializedValue {
+        root.unique_field(name)
+            .unwrap_or_else(|e| panic!("{name} lookup: {e:?}"))
+            .unwrap_or_else(|| panic!("missing field {name}"))
+    }
+
+    #[test]
+    fn object_scalar_string_nested_fields_match_reference() {
+        let payload = decode_fixture_object(
+            "F1",
+            "INT=305419896|FLT=1.5|STR=hi|NEST=-5,2.5|INTS=10,20,30|BYTES=1,2,3,4,5",
+        );
+        assert_eq!(payload.path_id, 7001);
+        let root = &payload.root;
+        assert_eq!(
+            require_field(root, "m_Int"),
+            &SerializedValue::I32(0x12345678)
+        );
+        assert_eq!(
+            require_field(root, "m_Float"),
+            &SerializedValue::F32(1.5f32)
+        );
+        assert_eq!(
+            require_field(root, "m_String"),
+            &SerializedValue::StringBytes(b"hi".to_vec())
+        );
+        let nested = require_field(root, "m_Nested");
+        let nested_fields = nested.struct_fields().expect("m_Nested is a struct");
+        assert_eq!(nested_fields.len(), 2);
+        assert_eq!(nested_fields[0].name, "a");
+        assert_eq!(nested_fields[0].value, SerializedValue::I32(-5));
+        assert_eq!(nested_fields[1].name, "b");
+        assert_eq!(nested_fields[1].value, SerializedValue::F32(2.5f32));
+        assert_eq!(
+            require_field(root, "m_Ints"),
+            &SerializedValue::Array(vec![
+                SerializedValue::I32(10),
+                SerializedValue::I32(20),
+                SerializedValue::I32(30),
+            ])
+        );
+        assert_eq!(
+            require_field(root, "m_Bytes"),
+            &SerializedValue::Array(vec![
+                SerializedValue::U8(1),
+                SerializedValue::U8(2),
+                SerializedValue::U8(3),
+                SerializedValue::U8(4),
+                SerializedValue::U8(5),
+            ])
+        );
+        // The byte vector carries AlignBytes (0x4000) with pad on both
+        // sides, so no bytes remain after the last field either.
+        assert!(payload.trailing_bytes.is_empty());
+    }
+
+    #[test]
+    fn object_string_nested_empty_arrays_match_reference() {
+        let payload = decode_fixture_object("F2", "STRS=a,bb,ccc|MAT=1,2;3|EMPTY=0");
+        assert_eq!(payload.path_id, 7001);
+        let root = &payload.root;
+        assert_eq!(
+            require_field(root, "m_Strings"),
+            &SerializedValue::Array(vec![
+                SerializedValue::StringBytes(b"a".to_vec()),
+                SerializedValue::StringBytes(b"bb".to_vec()),
+                SerializedValue::StringBytes(b"ccc".to_vec()),
+            ])
+        );
+        assert_eq!(
+            require_field(root, "m_Matrix"),
+            &SerializedValue::Array(vec![
+                SerializedValue::Array(vec![SerializedValue::I32(1), SerializedValue::I32(2),]),
+                SerializedValue::Array(vec![SerializedValue::I32(3)]),
+            ])
+        );
+        assert_eq!(
+            require_field(root, "m_Empty"),
+            &SerializedValue::Array(vec![])
+        );
+        assert!(payload.trailing_bytes.is_empty());
+    }
 }
