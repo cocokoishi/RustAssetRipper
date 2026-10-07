@@ -2085,4 +2085,269 @@ mod tests {
         .unwrap();
         assert_eq!(structure.platform, PlatformKind::Windows);
     }
+
+    /// End-to-end platform differential against the reference `CheckPlatform`
+    /// plus `CollectFiles` dump committed in `platform_probe_fixture.txt` (probe
+    /// `Temp/opencode/platformprobe`, isolated reference bins, SDK 10.0.401).
+    /// Every case rebuilds the reference directory tree in a scratch VFS (with
+    /// the same readable version/container bytes) and requires the same
+    /// platform kind, name, backend, DataPaths, registered files, and
+    /// assemblies. The fixture `version=` column is recorded for the record
+    /// only: the inventory carries no version field by row scope.
+    #[test]
+    fn detection_and_registration_reproduce_the_reference_platform_dump() {
+        use crate::io::game_structure::{MixedGameStructure, MixedGameStructureLimits};
+        use crate::io::platform_file_inventory::{
+            PlatformFileInventoryLimits, PlatformFileInventoryOptions,
+        };
+
+        fn decode_hex(hex: &str) -> Vec<u8> {
+            assert!(hex.len().is_multiple_of(2), "odd hex length");
+            hex.as_bytes()
+                .chunks(2)
+                .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+                .collect()
+        }
+
+        fn platform_class(platform: PlatformKind) -> &'static str {
+            match platform {
+                PlatformKind::Windows => "WindowsGameStructure",
+                PlatformKind::Linux => "LinuxGameStructure",
+                PlatformKind::Mac => "MacGameStructure",
+                PlatformKind::Android => "AndroidGameStructure",
+                PlatformKind::Ios => "iOSGameStructure",
+                PlatformKind::Switch => "SwitchGameStructure",
+                PlatformKind::Ps4 => "PS4GameStructure",
+                PlatformKind::WebGl => "WebGLGameStructure",
+                PlatformKind::WebPlayer => "WebPlayerGameStructure",
+                PlatformKind::WiiU => "WiiUGameStructure",
+                PlatformKind::WindowsPhone => "WindowsPhoneGameStructure",
+            }
+        }
+
+        let fixture = include_str!("platform_probe_fixture.txt");
+        let mut sf_hex = String::new();
+        let mut bundle_hex = String::new();
+        let mut specs: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        let mut extras: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        let mut expectations: std::collections::HashMap<String, Vec<(String, String)>> =
+            std::collections::HashMap::new();
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let parts: Vec<&str> = line.splitn(3, '|').collect();
+            match parts[0] {
+                "SFHEX" => sf_hex = parts[1].to_owned(),
+                "BUNDLEHEX" => bundle_hex = parts[1].to_owned(),
+                "PTREE" => {
+                    specs.insert(
+                        parts[1].to_owned(),
+                        parts[2].split(';').map(str::to_owned).collect(),
+                    );
+                }
+                "PTREE_EXTRA" => {
+                    extras.insert(
+                        parts[1].to_owned(),
+                        parts[2].split(';').map(str::to_owned).collect(),
+                    );
+                }
+                "PREF" => {
+                    let mut fields = Vec::new();
+                    for field in parts[2].split('|') {
+                        let (key, value) = field.split_once('=').unwrap();
+                        fields.push((key.to_owned(), value.to_owned()));
+                    }
+                    expectations.insert(parts[1].to_owned(), fields);
+                }
+                kind => panic!("unknown fixture row {kind}: {line}"),
+            }
+        }
+        assert!(!sf_hex.is_empty() && !bundle_hex.is_empty());
+
+        fn build_tree(
+            filesystem: &mut VirtualFileSystem,
+            root: &str,
+            spec: &[String],
+            sf_hex: &str,
+            bundle_hex: &str,
+        ) {
+            for entry in spec {
+                let entry_parts: Vec<&str> = entry.splitn(3, '|').collect();
+                let path = format!("{root}/{}", entry_parts[1]);
+                match entry_parts[0] {
+                    "D" => filesystem.create_directory(Some(path.as_str())).unwrap(),
+                    "F" => {
+                        filesystem
+                            .create_directory(Some(
+                                path.rsplit_once('/').map(|(p, _)| p).unwrap_or(""),
+                            ))
+                            .unwrap();
+                        filesystem.write_all_bytes(path.as_str(), &[]).unwrap();
+                    }
+                    "C" => {
+                        let hex = match entry_parts[2] {
+                            "{SF}" => sf_hex,
+                            "{BUNDLE}" => bundle_hex,
+                            token => panic!("unknown content token {token}"),
+                        };
+                        filesystem
+                            .create_directory(Some(
+                                path.rsplit_once('/').map(|(p, _)| p).unwrap_or(""),
+                            ))
+                            .unwrap();
+                        filesystem
+                            .write_all_bytes(path.as_str(), &decode_hex(hex))
+                            .unwrap();
+                    }
+                    kind => panic!("unknown spec entry {kind}"),
+                }
+            }
+        }
+
+        let mut tags: Vec<String> = expectations.keys().cloned().collect();
+        tags.sort();
+        assert!(tags.len() >= 21, "the fixture pins every platform case");
+        for tag in tags {
+            let mut filesystem = VirtualFileSystem::new();
+            let root = format!("/{tag}");
+            let spec = specs.get(&tag).unwrap();
+            build_tree(&mut filesystem, &root, spec, &sf_hex, &bundle_hex);
+            let mut roots = vec![root.clone()];
+            let mut obb_root = String::new();
+            if let Some(extra) = extras.get(&tag) {
+                obb_root = format!("/{tag}_obb");
+                build_tree(&mut filesystem, &obb_root, extra, &sf_hex, &bundle_hex);
+                roots.push(obb_root.clone());
+            }
+            // The Mac platform root is the `.app` bundle directory itself.
+            if tag == "mac_mono" {
+                roots = vec![format!("{root}/game.app")];
+            }
+            let expected = expectations.get(&tag).unwrap();
+            let field = |key: &str| {
+                expected
+                    .iter()
+                    .find(|(k, _)| k == key)
+                    .unwrap_or_else(|| panic!("{tag} misses {key}"))
+                    .1
+                    .clone()
+            };
+            let resolve = |value: String| {
+                value
+                    .replace("{ROOT}", root.as_str())
+                    .replace("{OBB}", obb_root.as_str())
+            };
+
+            let detected =
+                detect_platform_structure(&filesystem, &roots, PlatformStructureLimits::default())
+                    .unwrap();
+            if field("platform") == "MixedGameStructure" {
+                assert!(detected.is_none(), "{tag}: expected mixed");
+                let mixed = MixedGameStructure::from_vfs_paths(
+                    &filesystem,
+                    &roots,
+                    MixedGameStructureLimits::default(),
+                )
+                .unwrap();
+                let mut files: Vec<String> = mixed
+                    .registered_files
+                    .iter()
+                    .map(|f| format!("{}={}", f.file_name, f.virtual_path))
+                    .collect();
+                files.sort();
+                let expected_files: Vec<String> = if field("files").is_empty() {
+                    Vec::new()
+                } else {
+                    field("files")
+                        .split(',')
+                        .map(|f| resolve(f.to_owned()))
+                        .collect()
+                };
+                assert_eq!(files, expected_files, "{tag} files");
+                let mut datapaths = mixed.data_paths.clone();
+                datapaths.sort();
+                let mut expected_datapaths: Vec<String> = field("datapaths")
+                    .split(',')
+                    .map(|d| resolve(d.to_owned()))
+                    .collect();
+                expected_datapaths.sort();
+                assert_eq!(datapaths, expected_datapaths, "{tag} datapaths");
+                continue;
+            }
+
+            let structure = detected.unwrap_or_else(|| panic!("{tag}: expected platform"));
+            assert_eq!(
+                platform_class(structure.platform),
+                field("platform"),
+                "{tag} kind"
+            );
+            let expected_name =
+                field("name").replace("{ROOT}", root.rsplit('/').next().unwrap_or(root.as_str()));
+            assert_eq!(
+                structure.name.as_deref().unwrap_or(""),
+                expected_name,
+                "{tag} name"
+            );
+            let mut datapaths = structure.data_paths.clone();
+            datapaths.sort();
+            let mut expected_datapaths: Vec<String> = field("datapaths")
+                .split(',')
+                .map(|d| resolve(d.to_owned()))
+                .collect();
+            expected_datapaths.sort();
+            assert_eq!(datapaths, expected_datapaths, "{tag} datapaths");
+
+            let inventory = structure
+                .collect_game_files(
+                    &filesystem,
+                    PlatformFileInventoryOptions::default(),
+                    PlatformFileInventoryLimits::default(),
+                )
+                .unwrap();
+            assert_eq!(
+                format!("{:?}", inventory.scripting_backend).to_uppercase(),
+                field("backend").to_uppercase(),
+                "{tag} backend"
+            );
+            let mut files: Vec<String> = inventory
+                .registered_files
+                .iter()
+                .map(|f| format!("{}={}", f.file_name, f.virtual_path))
+                .collect();
+            files.sort();
+            let expected_files: Vec<String> = if field("files").is_empty() {
+                Vec::new()
+            } else {
+                field("files")
+                    .split(',')
+                    .map(|f| resolve(f.to_owned()))
+                    .collect()
+            };
+            // The reference sorts file rows; the comparison sorts both sides.
+            let mut expected_files = expected_files;
+            expected_files.sort();
+            assert_eq!(files, expected_files, "{tag} files");
+            let mut assemblies: Vec<String> = inventory
+                .assemblies
+                .iter()
+                .map(|f| format!("{}={}", f.file_name, f.virtual_path))
+                .collect();
+            assemblies.sort();
+            let expected_assemblies: Vec<String> = if field("assemblies").is_empty() {
+                Vec::new()
+            } else {
+                field("assemblies")
+                    .split(',')
+                    .map(|a| resolve(a.to_owned()))
+                    .collect()
+            };
+            let mut expected_assemblies = expected_assemblies;
+            expected_assemblies.sort();
+            assert_eq!(assemblies, expected_assemblies, "{tag} assemblies");
+        }
+    }
 }

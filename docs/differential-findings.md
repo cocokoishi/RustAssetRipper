@@ -807,3 +807,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | src/main.rs test directory_inspection_reproduces_the_reference_bundle_inventory; inspect_directories_to refactor (dead printer removed); fixture src/io/bundle_discovery_fixture.txt. |
 | Regression evidence | New test passes; full suite 1374 plus 65 pass with warnings-denied Clippy. |
 | Remaining comparison | Engine injection and Unity-produced files stay out per the row dispositions. |
+
+## DIFF-IO-PLATFORM-001 - Platform detection and registration
+
+| Field | Finding |
+|---|---|
+| Status | Reference-product-path evidence recorded; twelve platform rows ported and pinned |
+| Source location | AssetRipper/Source/AssetRipper.Import/Platforms/; AssetRipper/Source/AssetRipper.Import/Structure/Platforms/ |
+| Input evidence | Probe Temp/opencode/platformprobe (shipped Import/IO DLLs, SDK 10.0.401) running CheckPlatform plus CollectFiles over 21 constructed trees. Committed as src/io/platform_probe_fixture.txt (specs plus reference dump plus readable version/container bytes). |
+| Source-derived behavior | All 21 cases reproduce on kind, name, backend, DataPaths, files, and assemblies, including OBB ordering, dual Mac DataPaths, PS4 null version, and WinPhone shadowing. |
+| Root cause | No Rust deviation found. Presence-only decisions plus content reads limited to version files and bundle/SerializedFile header checks (documented per platform). |
+| Rust change | src/io/platform_structure.rs test detection_and_registration_reproduce_the_reference_platform_dump; fixture src/io/platform_probe_fixture.txt. No production change. |
+| Regression evidence | New test passes (21/21 cases); full suite 1375 plus 65 pass with warnings-denied Clippy. |
+| Remaining comparison | Unity-produced builds and version-field scope stay out per the row dispositions. |

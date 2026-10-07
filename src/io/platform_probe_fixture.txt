@@ -1,0 +1,53 @@
+# Platform detection and file-registration differential (probe Temp/opencode/platformprobe, SDK 10.0.401).
+# Reference: PlatformChecker.CheckPlatform plus CollectFiles(false) over temp
+# dirs (LocalFileSystem). Trees are built from PTREE specs: D|dir, F|empty file,
+# C|file|{SF} (readable gen12 SerializedFile, 264 bytes) or C|file|{BUNDLE}
+# (readable UnityFS ver 6, 384 bytes). PREF rows carry the reference dump with
+# {ROOT} for the case root name and {OBB} for the Android OBB root.
+# version= is recorded for the record only (Unity-produced version work stays
+# out of these rows; the Rust inventory carries no version field).
+SFHEX|000000E8000001080000000C000000FC00000000323031392E342E316631001300000001000000010000000600000014000000010000000000000000000000FFFFFFFF000000000000000001000100DE0000800500000004000000010000000000000001000100480300800B000000FFFFFFFF0200000000000000010002003100008031000080FFFFFFFF030000000000000001000300DE0000801B03008004000000040000000000000001000300510000806A00008001000000050000000000000042617365006D5F496E74006D5F537472696E67000100000001000000411F0000000000000C00000001000000010000000000000000000000000B00000002000000676F0000
+BUNDLEHEX|556E69747946530000000006323032322E332E31663100323032322E332E3166310000000000000001800000004200000042000000400000000000000000000000000000000000000001000001080000010800000000000100000000000000000000000000000108000000006D61696E2E61737365747300000000E8000001080000000C000000FC00000000323031392E342E316631001300000001000000010000000600000014000000010000000000000000000000FFFFFFFF000000000000000001000100DE0000800500000004000000010000000000000001000100480300800B000000FFFFFFFF0200000000000000010002003100008031000080FFFFFFFF030000000000000001000300DE0000801B03008004000000040000000000000001000300510000806A00008001000000050000000000000042617365006D5F496E74006D5F537472696E67000100000001000000411F0000000000000C00000001000000010000000000000000000000000B00000002000000676F0000
+PTREE|win_mono|F|game.exe;D|game_Data;D|game_Data/Managed;F|game_Data/Managed/Assembly-CSharp.dll;F|game_Data/data.unity3d
+PREF|win_mono|platform=WindowsGameStructure|name=game|backend=Mono|version=|datapaths={ROOT}/game_Data|files=data.unity3d={ROOT}/game_Data/data.unity3d|assemblies=Assembly-CSharp.dll={ROOT}/game_Data/Managed/Assembly-CSharp.dll
+PTREE|win_il2cpp|F|game.exe;D|game_Data;F|GameAssembly.dll;D|game_Data/il2cpp_data/Metadata;F|game_Data/il2cpp_data/Metadata/global-metadata.dat
+PREF|win_il2cpp|platform=WindowsGameStructure|name=game|backend=IL2Cpp|version=|datapaths={ROOT}/game_Data|files=|assemblies=
+PTREE|win_unknown|F|game.exe;D|game_Data
+PREF|win_unknown|platform=WindowsGameStructure|name=game|backend=Unknown|version=|datapaths={ROOT}/game_Data|files=|assemblies=
+PTREE|linux_mono|F|game.x86_64;D|game_Data;D|game_Data/Managed;F|game_Data/Managed/Assembly-CSharp.dll;F|game_Data/data.unity3d
+PREF|linux_mono|platform=LinuxGameStructure|name=game|backend=Mono|version=|datapaths={ROOT}/game_Data|files=data.unity3d={ROOT}/game_Data/data.unity3d|assemblies=Assembly-CSharp.dll={ROOT}/game_Data/Managed/Assembly-CSharp.dll
+PTREE|mac_mono|D|game.app/Contents/Resources/Data/Managed;F|game.app/Contents/Resources/Data/Managed/Assembly-CSharp.dll
+PREF|mac_mono|platform=MacGameStructure|name=game|backend=Mono|version=|datapaths={ROOT}/game.app/Contents/Resources/Data,{ROOT}/game.app/Contents/Resources|files=|assemblies=Assembly-CSharp.dll={ROOT}/game.app/Contents/Resources/Data/Managed/Assembly-CSharp.dll
+PTREE|android_mono|D|assets/bin/Data;D|assets/bin/Data/Managed;F|assets/bin/Data/Managed/Assembly-CSharp.dll;D|META-INF;D|lib;C|assets/bin/Data/globalgamemanagers|{SF};F|assets/bin/Data/data.unity3d;C|assets/patch.unity3d|{BUNDLE}
+PREF|android_mono|platform=AndroidGameStructure|name=|backend=Mono|version=2019.4.1f1|datapaths={ROOT}/assets/bin/Data|files=data.unity3d={ROOT}/assets/bin/Data/data.unity3d,globalgamemanagers={ROOT}/assets/bin/Data/globalgamemanagers,patch={ROOT}/assets/patch.unity3d|assemblies=Assembly-CSharp.dll={ROOT}/assets/bin/Data/Managed/Assembly-CSharp.dll
+PTREE|android_il2cpp|D|assets/bin/Data;D|META-INF;D|lib/arm64-v8a;F|lib/arm64-v8a/libil2cpp.so;D|assets/bin/Data/Managed/Metadata;F|assets/bin/Data/Managed/Metadata/global-metadata.dat;C|assets/bin/Data/globalgamemanagers|{SF}
+PREF|android_il2cpp|platform=AndroidGameStructure|name=|backend=IL2Cpp|version=2019.4.1f1|datapaths={ROOT}/assets/bin/Data|files=globalgamemanagers={ROOT}/assets/bin/Data/globalgamemanagers|assemblies=
+PTREE|android_obb|D|assets/bin/Data;D|META-INF;D|lib;C|assets/bin/Data/globalgamemanagers|{SF}
+PTREE_EXTRA|android_obb|D|assets/bin/Data
+PREF|android_obb|platform=AndroidGameStructure|name=|backend=Unknown|version=2019.4.1f1|datapaths={ROOT}/assets/bin/Data,{OBB}/assets/bin/Data|files=globalgamemanagers={ROOT}/assets/bin/Data/globalgamemanagers|assemblies=
+PTREE|android_databundle|D|assets/bin/Data;D|META-INF;D|lib;C|assets/bin/Data/data.unity3d|{BUNDLE}
+PREF|android_databundle|platform=AndroidGameStructure|name=|backend=Unknown|version=2022.3.1f1|datapaths={ROOT}/assets/bin/Data|files=data.unity3d={ROOT}/assets/bin/Data/data.unity3d|assemblies=
+PTREE|ios_mono|D|Payload/game.app/Data/Managed;F|Payload/game.app/Data/Managed/Assembly-CSharp.dll;C|Payload/game.app/Data/globalgamemanagers|{SF}
+PREF|ios_mono|platform=iOSGameStructure|name=game|backend=Mono|version=2019.4.1f1|datapaths={ROOT}/Payload/game.app/Data|files=globalgamemanagers={ROOT}/Payload/game.app/Data/globalgamemanagers|assemblies=Assembly-CSharp.dll={ROOT}/Payload/game.app/Data/Managed/Assembly-CSharp.dll
+PTREE|ios_il2cpp|D|Payload/game.app/Data/Managed/Metadata;F|Payload/game.app/game;F|Payload/game.app/Data/Managed/Metadata/global-metadata.dat;C|Payload/game.app/Data/globalgamemanagers|{SF}
+PREF|ios_il2cpp|platform=iOSGameStructure|name=game|backend=IL2Cpp|version=2019.4.1f1|datapaths={ROOT}/Payload/game.app/Data|files=globalgamemanagers={ROOT}/Payload/game.app/Data/globalgamemanagers|assemblies=
+PTREE|switch_il2cpp|D|exefs;F|exefs/main;D|romfs/Data/Managed/Metadata;F|romfs/Data/Managed/Metadata/global-metadata.dat;C|romfs/Data/globalgamemanagers|{SF}
+PREF|switch_il2cpp|platform=SwitchGameStructure|name={ROOT}|backend=IL2Cpp|version=2019.4.1f1|datapaths={ROOT}/romfs/Data|files=globalgamemanagers={ROOT}/romfs/Data/globalgamemanagers|assemblies=
+PTREE|switch_unknown|D|exefs;D|romfs/Data
+PREF|switch_unknown|platform=SwitchGameStructure|name={ROOT}|backend=Unknown|version=|datapaths={ROOT}/romfs/Data|files=|assemblies=
+PTREE|ps4_mono|F|eboot.bin;D|Media/Managed;F|Media/Managed/Assembly-CSharp.dll
+PREF|ps4_mono|platform=PS4GameStructure|name={ROOT}|backend=Mono|version=|datapaths={ROOT}/Media|files=|assemblies=Assembly-CSharp.dll={ROOT}/Media/Managed/Assembly-CSharp.dll
+PTREE|ps4_il2cpp|F|eboot.bin;D|Media/Modules;F|Media/Modules/Il2CppUserAssemblies.prx;D|Media/Metadata;F|Media/Metadata/global-metadata.dat
+PREF|ps4_il2cpp|platform=PS4GameStructure|name={ROOT}|backend=IL2Cpp|version=|datapaths={ROOT}/Media|files=|assemblies=
+PTREE|webgl_build|F|index.html;D|Build;F|Build/game.data.unityweb
+PREF|webgl_build|platform=WebGLGameStructure|name={ROOT}|backend=Unknown|version=|datapaths={ROOT},{ROOT}/Build|files=game={ROOT}/Build/game.data.unityweb|assemblies=
+PTREE|webplayer|F|game.html;F|game.unity3d
+PREF|webplayer|platform=WebPlayerGameStructure|name=game|backend=Unknown|version=|datapaths={ROOT}|files=game={ROOT}/game.unity3d|assemblies=
+PTREE|wiiu_mono|D|content/Data/Managed;F|content/Data/Managed/Assembly-CSharp.dll
+PREF|wiiu_mono|platform=WiiUGameStructure|name={ROOT}|backend=Mono|version=|datapaths={ROOT}/content/Data|files=|assemblies=Assembly-CSharp.dll={ROOT}/content/Data/Managed/Assembly-CSharp.dll
+PTREE|wiiu_unknown|D|content/Data
+PREF|wiiu_unknown|platform=WiiUGameStructure|name={ROOT}|backend=Unknown|version=|datapaths={ROOT}/content/Data|files=|assemblies=
+PTREE|winphone_shadowed|D|Assets;D|Data;F|game.exe;F|GameAssembly.dll;D|Data/il2cpp_data/Metadata;F|Data/il2cpp_data/Metadata/global-metadata.dat;C|Data/globalgamemanagers|{SF}
+PREF|winphone_shadowed|platform=WindowsGameStructure|name=game|backend=IL2Cpp|version=|datapaths={ROOT}/Data|files=globalgamemanagers={ROOT}/Data/globalgamemanagers|assemblies=
+PTREE|mixed_bare|C|main.assets|{SF}
+PREF|mixed_bare|platform=MixedGameStructure|name=main.assets|backend=Unknown|version=|datapaths={ROOT}|files=main.assets={ROOT}/main.assets|assemblies=
