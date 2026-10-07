@@ -202,27 +202,32 @@ impl Bitmap {
 
     /// `TextureConverter.UnpackNormal` for a `ColorRGBA<byte>` bitmap.
     ///
-    /// The reference reads `(a, g, _, r)`, recomputes blue from the red/green tangent-space
-    /// components, and writes `(r, g, b, a)` back. It only acts when the bitmap is RGBA8.
+    /// The reference calls `GetChannels(out a, out g, out _, out r)` whose out
+    /// parameters are ordered `(r, g, b, a)`, so the locals receive the input
+    /// red channel in `a` and the input alpha channel in `r`; it then writes
+    /// `SetChannels(r, g, b, a)`, swapping alpha and red. Blue is recomputed
+    /// from the swapped red/green tangent-space components. It only acts when
+    /// the bitmap is RGBA8. Pinned by the live-cubemap differential
+    /// (`cubemap_convert_fixture.txt`, probe `Temp/opencode/cubeconvprobe`).
     pub fn unpack_normal(&mut self) {
         if !self.is_rgba8 {
             return;
         }
         const MAGNITUDE_SQR: f64 = 255.0 * 255.0;
         for pixel in self.pixels.chunks_exact_mut(4) {
-            let a = pixel[3];
+            let swapped_r = pixel[3];
             let g = pixel[1];
-            let r = pixel[0];
-            let vr = f64::from(r) * 2.0 - 255.0;
+            let swapped_a = pixel[0];
+            let vr = f64::from(swapped_r) * 2.0 - 255.0;
             let vg = f64::from(g) * 2.0 - 255.0;
             let hypotenuse_sqr = (vr * vr + vg * vg).min(MAGNITUDE_SQR);
             let vb = (MAGNITUDE_SQR - hypotenuse_sqr).sqrt();
             let b_exact = (vb + 255.0) / 2.0;
             let b = double_to_byte(b_exact / 255.0);
-            pixel[0] = r;
+            pixel[0] = swapped_r;
             pixel[1] = g;
             pixel[2] = b;
-            pixel[3] = a;
+            pixel[3] = swapped_a;
         }
     }
 }
@@ -718,8 +723,10 @@ mod tests {
 
     #[test]
     fn unpack_normal_reconstructs_blue() {
-        // A tangent-space normal of (128, 128) reconstructs blue to 254 under the reference's
-        // truncating `Convert<double, byte>`.
+        // The reference swaps alpha and red: the output red is the input
+        // alpha and the output alpha is the input red; blue is recomputed
+        // from the swapped pair. A tangent-space normal of (128, 128) with
+        // alpha 255 reconstructs blue to 127 under the truncating conversion.
         let mut bitmap = Bitmap {
             width: 1,
             height: 1,
@@ -729,7 +736,7 @@ mod tests {
             pixels: vec![128, 128, 0, 255],
         };
         bitmap.unpack_normal();
-        assert_eq!(bitmap.pixels, vec![128, 128, 254, 255]);
+        assert_eq!(bitmap.pixels, vec![255, 128, 127, 128]);
     }
 
     #[test]
@@ -744,6 +751,107 @@ mod tests {
         };
         bitmap.unpack_normal();
         assert_eq!(bitmap.pixels, vec![128, 128, 0, 255]);
+    }
+
+    /// Byte-for-byte differential against the shipped `TextureConverter` over
+    /// live generated objects (probe `Temp/opencode/cubeconvprobe`): a real
+    /// class-89 `Cubemap` and a class-28 `Texture2D` built through the
+    /// generated `Create` API with hand-crafted DXT5 blocks. The replay drives
+    /// `try_convert_to_bitmap` with the source's own gates (no `FlipY` for the
+    /// cubemap, flip for the plain texture, `UnpackNormal` only for the
+    /// `NormalmapDXT5nm` lightmap) and must reproduce every output pixel.
+    /// This differential caught and fixed the swapped red/alpha channels in
+    /// `unpack_normal`.
+    #[test]
+    fn live_cubemap_conversion_matches_the_reference_runtime() {
+        fn decode_hex(text: &str) -> Vec<u8> {
+            let bytes = text.as_bytes();
+            assert!(bytes.len().is_multiple_of(2), "odd hex input");
+            bytes
+                .chunks_exact(2)
+                .map(|pair| {
+                    let digit = |c: u8| (c as char).to_digit(16).expect("hex digit") as u8;
+                    digit(pair[0]) << 4 | digit(pair[1])
+                })
+                .collect()
+        }
+
+        let fixture = include_str!("cubemap_convert_fixture.txt");
+        struct Case {
+            tag: String,
+            lightmap: i32,
+            input: Vec<u8>,
+            width: usize,
+            height: usize,
+            depth: usize,
+            expected: Vec<u8>,
+        }
+        let mut cases: Vec<Case> = Vec::new();
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut parts = line.splitn(4, '|');
+            assert_eq!(parts.next(), Some("CCASE"), "{line}");
+            let tag = parts.next().expect("a probe tag");
+            if cases.is_empty() || cases.last().expect("a case").tag != tag {
+                cases.push(Case {
+                    tag: tag.to_owned(),
+                    lightmap: -1,
+                    input: Vec::new(),
+                    width: 0,
+                    height: 0,
+                    depth: 0,
+                    expected: Vec::new(),
+                });
+            }
+            let case = cases.last_mut().expect("a case");
+            match parts.next().expect("a row kind") {
+                "lightmap" => {
+                    let mut fields = parts.next().expect("lightmap fields").split('|');
+                    fields.next().expect("a lightmap name");
+                    case.lightmap = fields.next().expect("a lightmap value").parse().unwrap();
+                }
+                "input" => {
+                    let mut fields = parts.next().expect("input fields").split('|');
+                    let length: usize = fields.next().expect("an input length").parse().unwrap();
+                    case.input = decode_hex(fields.next().expect("input hex"));
+                    assert_eq!(case.input.len(), length, "{line}");
+                }
+                "ok" => assert_eq!(parts.next(), Some("1"), "{line}"),
+                "size" => {
+                    let mut fields = parts.next().expect("size fields").split('|');
+                    case.width = fields.next().expect("a width").parse().unwrap();
+                    case.height = fields.next().expect("a height").parse().unwrap();
+                    case.depth = fields.next().expect("a depth").parse().unwrap();
+                    assert_eq!(fields.next(), Some("4"), "{line}");
+                }
+                "pixels" => {
+                    case.expected = decode_hex(parts.next().expect("pixel hex"));
+                }
+                other => panic!("unexpected row kind {other}"),
+            }
+        }
+        assert_eq!(cases.len(), 3, "all probed conversions are asserted");
+        for case in &cases {
+            let cubemap = !case.tag.starts_with("tex2d");
+            let image = TextureImage {
+                texture_format: 12, // DXT5, like the probed objects.
+                graphics_format: 0,
+                width: case.width,
+                height: case.height,
+                depth: case.depth,
+                image_size: case.input.len(),
+                data: &case.input,
+            };
+            let bitmap = try_convert_to_bitmap(&image, !cubemap, case.lightmap == 3)
+                .expect("probed conversion succeeds");
+            assert_eq!(bitmap.width, case.width, "{tag}", tag = case.tag);
+            assert_eq!(bitmap.height, case.height, "{tag}", tag = case.tag);
+            assert_eq!(bitmap.depth, case.depth, "{tag}", tag = case.tag);
+            assert_eq!(bitmap.pixels, case.expected, "{tag}", tag = case.tag);
+        }
     }
 
     #[test]
@@ -867,6 +975,6 @@ mod tests {
             data: &[128, 128, 0, 255],
         };
         let bitmap = try_convert_to_bitmap(&normal, false, true).unwrap();
-        assert_eq!(bitmap.pixels, vec![128, 128, 254, 255]);
+        assert_eq!(bitmap.pixels, vec![255, 128, 127, 128]);
     }
 }

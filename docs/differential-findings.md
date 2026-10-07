@@ -898,3 +898,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | build_type_nodes, unwrap_primitive, SerializableTreeType model with shared substitutions, and resolve_serializable_tree in processing/script_identity.rs; test serializable_trees_reproduce_the_reference_node_dump. |
 | Regression evidence | New test passes; full suite 1381 plus 65 pass with warnings-denied Clippy. |
 | Remaining comparison | Live assembly loading and Cecil type resolution stay TYPE-SCRIPT-001; MonoBehaviour-structure root mode and Tpk trees stay outside this row. |
+
+## DIFF-CUBEMAP-CONVERT-001 - live-cubemap conversion (flip gate and UnpackNormal)
+
+| Field | Finding |
+|---|---|
+| Status | Reference-runtime differential recorded; three rows ported and pinned |
+| Source location | AssetRipper/Source/AssetRipper.Export.Modules.Textures/TextureConverter.cs (`TryConvertToBitmap(ITexture2D, ...)`, `UnpackNormal`); AssetRipper/Source/AssetRipper.SourceGenerated/Classes/ClassID_89 (27 versioned `Cubemap_*` classes) |
+| Input evidence | Probe Temp/opencode/cubeconvprobe (shipped Export.Modules.Textures + SourceGenerated DLLs, SDK 10.0.401) converting a real class-89 Cubemap (6 DXT5 faces, hand-crafted flip-asymmetric blocks) with and without the `NormalmapDXT5nm` lightmap plus a class-28 Texture2D over the same face bytes. Committed as src/resources/cubemap_convert_fixture.txt (15 rows). |
+| Source-derived behavior | Cubemap output stacks six 8x8 faces with no FlipY; the plain texture flips; `UnpackNormal` swaps alpha and red (the `GetChannels` out-parameter order is `(r, g, b, a)`, so the caller locals named `(a, g, _, r)` receive input red in `a` and input alpha in `r`) and recomputes blue with truncating conversion. |
+| Root cause | One real deviation found and fixed: `Bitmap::unpack_normal` kept red/alpha in place and only recomputed blue. The old synthetic-only tests encoded the bug (e.g. `(128,128,0,255)` expected `(128,128,254,255)`); the reference produces `(255,128,127,128)`. Two stale expectations corrected alongside the fix. |
+| Rust change | Swapped red/alpha lanes in `Bitmap::unpack_normal` (src/resources/texture_converter.rs); fixture src/resources/cubemap_convert_fixture.txt; test live_cubemap_conversion_matches_the_reference_runtime. |
+| Regression evidence | All three probed conversions reproduce every output pixel plus dimensions; full suite 1384 plus 65 pass with warnings-denied Clippy. |
+| Remaining comparison | Live-sprite/atlas conversion and Unity-produced textures stay with their own rows; external decoders (Crunch) stay unsupported like the 2D path. |
