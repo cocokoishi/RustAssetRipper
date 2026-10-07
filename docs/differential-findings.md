@@ -612,3 +612,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | src/compression/wrappers.rs test dotnet_encoded_members_decode_to_the_same_bytes; fixture src/compression/gzip_dotnet_fixture.txt. |
 | Regression evidence | All three .NET vectors plus concat reproduce byte-for-byte through Rust decompress_gzip with magic checks; full suite 1355 plus 60 pass with warnings-denied Clippy. |
 | Remaining comparison | Real wrapped Unity file comparison and recursive dispatch over user content stay open; encoder byte-identity is explicitly not owed. |
+
+## DIFF-LZMA-001 - LZMA unity and size-prefix lanes
+
+| Field | Finding |
+|---|---|
+| Status | Reference-runtime differential recorded; both rows ported and pinned |
+| Source location | AssetRipper.IO.Files/BundleFiles/LzmaCompression.cs (DecompressLzmaStream, DecompressLzmaSizeStream, CompressLzmaStream, CompressLzmaSizeStream); FileStreamBundleFile.cs (LZMA metadata write throws NotImplementedException) |
+| Input evidence | Probe Temp/opencode/lzmaprobe (shipped IO.Files DLL, SDK 10.0.401) decoding existing SharpCompress vectors through the reference entry points, generating new unity-gen/size-gen vectors via the reference Compress methods, proving the write refusal and the -1 silent-empty. Committed as src/compression/lzma_reference_fixture.txt (13 lines). |
+| Source-derived behavior | Unity lane is five property bytes plus raw stream; size lane adds an eight-byte LE decoded length; short streams are left short by the source loop for downstream rejection while Rust fails closed; long streams truncate to the requested count on both sides; LZMA metadata cannot be written by the baseline. |
+| Root cause | No deviation found in decode; short/negative hardening and the missing write unit are documented deliberate dispositions (fail-closed, no success, no silent drop). |
+| Rust change | src/compression/lzma.rs test reference_runtime_outputs_match_the_rust_decoder; fixture src/compression/lzma_reference_fixture.txt. |
+| Regression evidence | All reference outputs match Rust byte-for-byte; write refusal and negative fail-closed pinned; full suite 1356 plus 60 pass with warnings-denied Clippy. |
+| Remaining comparison | UnityFS metadata/entry integration over LZMA and real UnityWeb file comparison stay open as noted; encoder byte-identity is not owed. |

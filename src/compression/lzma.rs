@@ -507,4 +507,141 @@ mod tests {
             expected_metadata
         );
     }
+
+    #[test]
+    fn reference_runtime_outputs_match_the_rust_decoder() {
+        fn hex_to_bytes(hex: &str) -> Vec<u8> {
+            assert!(hex.len().is_multiple_of(2), "odd hex length for {hex}");
+            let mut out = Vec::with_capacity(hex.len() / 2);
+            let bytes = hex.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                let hi = match bytes[i] {
+                    b'0'..=b'9' => bytes[i] - b'0',
+                    b'a'..=b'f' => bytes[i] - b'a' + 10,
+                    b'A'..=b'F' => bytes[i] - b'A' + 10,
+                    b => panic!("invalid hex byte {b}"),
+                };
+                let lo = match bytes[i + 1] {
+                    b'0'..=b'9' => bytes[i + 1] - b'0',
+                    b'a'..=b'f' => bytes[i + 1] - b'a' + 10,
+                    b'A'..=b'F' => bytes[i + 1] - b'A' + 10,
+                    b => panic!("invalid hex byte {b}"),
+                };
+                out.push((hi << 4) | lo);
+                i += 2;
+            }
+            out
+        }
+
+        // Probe Temp/opencode/lzmaprobe (LzmaCompression over SharpCompress,
+        // SDK 10.0.401): existing SharpCompress vectors decoded through the
+        // reference entry points, plus reference-generated GEN vectors, plus
+        // the LZMA-metadata write refusal and the -1 size silent-empty proof.
+        // Nothing here was produced by lzma-rs.
+        let fixture = include_str!("lzma_reference_fixture.txt");
+        let mut refs: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
+        let mut gen_unity: Option<(Vec<u8>, Vec<u8>)> = None;
+        let mut gen_size: Option<(Vec<u8>, Vec<u8>)> = None;
+        let mut write_outcome: Option<String> = None;
+        let mut neg_outcome: Option<String> = None;
+        for line in fixture.lines() {
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+            if line.starts_with("LZMA_REF|") {
+                // LZMA_REF|name|out=HEX|outlen=N|want=N
+                let parts: Vec<&str> = line.split('|').collect();
+                assert_eq!(parts.len(), 5, "bad LZMA_REF {line}");
+                let out_hex = parts[2].strip_prefix("out=").unwrap();
+                let outlen: usize = parts[3].strip_prefix("outlen=").unwrap().parse().unwrap();
+                let want: usize = parts[4].strip_prefix("want=").unwrap().parse().unwrap();
+                assert_eq!(outlen, want, "probe self-consistent {line}");
+                refs.insert(parts[1].to_string(), hex_to_bytes(out_hex));
+            } else if line.starts_with("LZMA_GEN|") {
+                // LZMA_GEN|name|plain=HEX|comp=HEX|back=HEX
+                let parts: Vec<&str> = line.split('|').collect();
+                assert_eq!(parts.len(), 5, "bad LZMA_GEN {line}");
+                let plain = hex_to_bytes(parts[2].strip_prefix("plain=").unwrap());
+                let comp = hex_to_bytes(parts[3].strip_prefix("comp=").unwrap());
+                let back = hex_to_bytes(parts[4].strip_prefix("back=").unwrap());
+                assert_eq!(plain, back, "probe round-trip {}", parts[1]);
+                if parts[1] == "unity-gen" {
+                    gen_unity = Some((plain, comp));
+                } else {
+                    gen_size = Some((plain, comp));
+                }
+            } else if line.starts_with("LZMA_WRITE|") {
+                write_outcome = Some(line.strip_prefix("LZMA_WRITE|").unwrap().to_string());
+            } else if line.starts_with("LZMA_NEG|") {
+                neg_outcome = Some(line.strip_prefix("LZMA_NEG|").unwrap().to_string());
+            }
+        }
+
+        // Baseline cannot write LZMA metadata; no Rust write unit is owed.
+        let write_outcome = write_outcome.expect("LZMA_WRITE row");
+        assert!(
+            write_outcome.contains("NotImplementedException"),
+            "write refusal {write_outcome}"
+        );
+
+        // Baseline silently yields empty on a -1 size prefix; Rust fails
+        // closed instead (documented hardening, never silent success).
+        let neg_outcome = neg_outcome.expect("LZMA_NEG row");
+        assert!(
+            neg_outcome.contains("outlen=0"),
+            "negative yields empty {neg_outcome}"
+        );
+        let neg_comp = hex_to_bytes("5D00001000FFFFFFFFFFFFFFFF002A9B89277861869378C2126627CA9A4A37B67458E0262ACF8BB3465C1FCB99398063CF8000");
+        assert!(decompress_size_block(&neg_comp, 120, 120).is_err());
+
+        // Reference-decoded outputs match the Rust decoder byte-for-byte.
+        // Unity lane (DecompressLzmaStream layout).
+        for (name, comp_hex, want_len) in [
+            (
+                "unity-repeated",
+                "5D0000100000241949986F1011485D43E4F891745C8A47E9D66EE801B113E65249BE5E8000",
+                72usize,
+            ),
+            (
+                "unity-sequence",
+                "5D0000100000000052500A84F99BB28021A969D627E03E065A5F048D53D404BA39570509C15524DE9DB871593160A19FF96F4973F2C8EA8CBA1A8B29692180FE338366AF466DEC9E898A0B83F03C0E898E3FED5FE79E90D91CFF32F4B2E03951B2D21415B4C571BADB06E3799A9FBB38C1B000AC930BAA0619031208155B9BC848F0322EFE2DA087C8F0A4E0D251EB8D675692B24D84C5F18631DF6A625BC2792DD9F73C73BA747407D83CA9562224A166F85A845F3067D2F64B492E7F20EBDBF8100E947877C73F6BEFB4CD95E26FF6446E06CF0B821ACBDB7AF0578D98FF90C03EE6C1124175EE032896EB09370E1E",
+                256usize,
+            ),
+        ] {
+            let ref_out = refs.get(name).unwrap_or_else(|| panic!("missing {name}"));
+            let comp = hex_to_bytes(comp_hex);
+            let rust_out = decompress_block(&comp, want_len, want_len).unwrap();
+            assert_eq!(&rust_out, ref_out, "{name} matches reference");
+        }
+        // Size lane (DecompressLzmaSizeStream layout).
+        for (name, comp_hex, want_len) in [
+            (
+                "size-scene",
+                "5D000010007800000000000000002A9B89277861869378C2126627CA9A4A37B67458E0262ACF8BB3465C1FCB99398063CF8000",
+                120usize,
+            ),
+            (
+                "size-sequence",
+                "5D00001000000100000000000000000052500A84F99BB28021A969D627E03E065A5F048D53D404BA39570509C15524DE9DB871593160A19FF96F4973F2C8EA8CBA1A8B29692180FE338366AF466DEC9E898A0B83F03C0E898E3FED5FE79E90D91CFF32F4B2E03951B2D21415B4C571BADB06E3799A9FBB38C1B000AC930BAA0619031208155B9BC848F0322EFE2DA087C8F0A4E0D251EB8D675692B24D84C5F18631DF6A625BC2792DD9F73C73BA747407D83CA9562224A166F85A845F3067D2F64B492E7F20EBDBF8100E947877C73F6BEFB4CD95E26FF6446E06CF0B821ACBDB7AF0578D98FF90C03EE6C1124175EE032896EB09370E1E",
+                256usize,
+            ),
+        ] {
+            let ref_out = refs.get(name).unwrap_or_else(|| panic!("missing {name}"));
+            let comp = hex_to_bytes(comp_hex);
+            let rust_out = decompress_size_block(&comp, want_len, want_len).unwrap();
+            assert_eq!(&rust_out, ref_out, "{name} matches reference");
+        }
+        // Reference-generated vectors decode through Rust as well.
+        let (plain, comp) = gen_unity.expect("unity-gen");
+        assert_eq!(
+            &decompress_block(&comp, plain.len(), plain.len()).unwrap(),
+            &plain
+        );
+        let (plain, comp) = gen_size.expect("size-gen");
+        assert_eq!(
+            &decompress_size_block(&comp, plain.len(), plain.len()).unwrap(),
+            &plain
+        );
+    }
 }
