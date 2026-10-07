@@ -976,3 +976,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | Test render_state_predicates_match_the_reference_runtime in resources/shader.rs; fixture src/resources/shader_state_fixture.txt; `IsDefault` doc now cites probe evidence. No production change. |
 | Regression evidence | All 43 behavior rows replay through the kernels; shader suite 13/13. |
 | Remaining comparison | Name backing selection, generic enum-cast machinery, name-or-value emission strings, remaining typed casts, and MaxShaderModelVersion stay caller-side; Unity-produced shaders stay out per the row disposition. |
+
+## DIFF-SPRITE-METADATA-001 - sprite sheet entry fill
+
+| Field | Finding |
+|---|---|
+| Status | Reference-runtime differential recorded; three fill cases ported and pinned |
+| Source location | AssetRipper/Source/AssetRipper.SourceGenerated.Extensions/SpriteMetaDataExtensions.cs (`FillSpriteMetaData` lines 26-71); AssetRipper/Source/AssetRipper.Export.UnityProjects/Textures/TextureExportCollection.cs (`AddSpriteSheet` lines 140-165, `SpriteMetaData.Create` per version) |
+| Input evidence | Probe Temp/opencode/smetaprobe (shipped SourceGenerated DLL, SDK 10.0.401) with real 2022.3 sprites (plain, boned, atlas-hit, atlas-miss) plus `SpriteMetaData.Create` instances through the shipped fill. Committed as src/resources/sprite_metadata_fixture.txt (19 rows). |
+| Source-derived behavior | Verbatim name carry, atlas-hit rect/pivot/border (with the border shift), miss-path RD rect/pivot/border, `Custom` alignment, zero tessellation, gate decisions, PPU bone scaling with the sprite-Rect (not atlas) root offset, and SpriteID assignment on version gates alone (even with an empty bone list). The vertex-less reference leaves outline/physics/vertices/indices/weights empty. |
+| Root cause | No Rust deviation found; this increment replaces synthetic-only gate coverage with live-object vectors over the exact exporter-called factory and entry point. |
+| Rust change | Test sprite_metadata_fill_matches_the_reference_runtime in resources/sprite.rs; fixture src/resources/sprite_metadata_fixture.txt. No production change. |
+| Regression evidence | All three fill cases replay field-for-field through the kernel; sprite suite 19/19. |
+| Remaining comparison | Mesh-vertex extraction bodies (`SetBoneGeometry`, `VertexDataBlob` reads, `GenerateOutline`/`GeneratePhysicsShape`, `MeshOutlineGenerator`) stay open by baseline size; real skinned-sprite vertex payloads stay out per the row disposition. |

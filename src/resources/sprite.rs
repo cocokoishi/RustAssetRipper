@@ -1167,4 +1167,264 @@ mod tests {
         assert!(!out.copy_border);
         assert_eq!(out.border, [-3.0, 0.0, -25.0, -10.0]);
     }
+
+    /// Differential against the shipped `FillSpriteMetaData` over live
+    /// generated objects (probe `Temp/opencode/smetaprobe`, fixture
+    /// `sprite_metadata_fixture.txt`): real 2022.3 sprites (plain, boned,
+    /// atlas-hit, atlas-miss) with `SpriteMetaData.Create` instances. The
+    /// replay feeds the probed atlas inputs (fixed per probe design, pinned
+    /// in the fixture header) plus the probed gates, PPU, and input bones
+    /// through `fill_sprite_metadata` and must reproduce every filled field:
+    /// the atlas/miss rect, pivot, and border, `Custom` alignment, zero
+    /// tessellation, the border copy, the gate decisions, the PPU-scaled
+    /// bones with the sprite-Rect root offset, and the carried sprite ID.
+    /// The outline/physics/vertex/index/weight bodies stay open; on these
+    /// vertex-less sprites the reference leaves them empty, which the replay
+    /// asserts as the empty result of the open bodies.
+    #[test]
+    fn sprite_metadata_fill_matches_the_reference_runtime() {
+        fn word(text: &str) -> f32 {
+            f32::from_bits(u32::from_str_radix(text, 16).expect("hex word"))
+        }
+
+        fn bit(flag: &str) -> bool {
+            match flag {
+                "0" => false,
+                "1" => true,
+                other => panic!("unexpected bit {other}"),
+            }
+        }
+
+        struct Case {
+            tag: String,
+            atlas_hit: bool,
+            instance_gates: [bool; 4],
+            sprite_gates: [bool; 2],
+            ppu: f32,
+            rect_size: [f32; 2],
+            input_bones: Vec<SpriteBoneFacts>,
+            name: String,
+            rect: [f32; 4],
+            pivot: [f32; 2],
+            border: Option<[f32; 4]>,
+            tessellation: i32,
+            outline: usize,
+            physics: usize,
+            bones: usize,
+            sprite_id: bool,
+            vertices: usize,
+            indices: usize,
+            weights: usize,
+            output_bones: Vec<SpriteBoneFacts>,
+        }
+
+        let fixture = include_str!("sprite_metadata_fixture.txt");
+        let mut cases: Vec<Case> = Vec::new();
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut cells = line.split('|');
+            let prefix = cells.next().expect("a prefix");
+            let tag = cells.next().expect("a case").to_owned();
+            if cases.is_empty() || cases.last().expect("a case").tag != tag {
+                cases.push(Case {
+                    tag: tag.clone(),
+                    atlas_hit: tag.ends_with("hit"),
+                    instance_gates: [false; 4],
+                    sprite_gates: [false; 2],
+                    ppu: 0.0,
+                    rect_size: [0.0; 2],
+                    input_bones: Vec::new(),
+                    name: String::new(),
+                    rect: [0.0; 4],
+                    pivot: [0.0; 2],
+                    border: None,
+                    tessellation: 0,
+                    outline: 0,
+                    physics: 0,
+                    bones: 0,
+                    sprite_id: false,
+                    vertices: 0,
+                    indices: 0,
+                    weights: 0,
+                    output_bones: Vec::new(),
+                });
+            }
+            let case = cases.last_mut().expect("a case");
+            if prefix == "SPPU" {
+                case.ppu = word(cells.next().expect("ppu"));
+                case.rect_size = [
+                    word(cells.next().expect("width")),
+                    word(cells.next().expect("height")),
+                ];
+                continue;
+            }
+            if prefix == "SBONEIN" || prefix == "SBONE" {
+                let index: usize = cells.next().expect("an index").parse().expect("index");
+                let bone = SpriteBoneFacts {
+                    parent_id: cells.next().expect("a parent").parse().expect("parent"),
+                    position: [
+                        word(cells.next().expect("x")),
+                        word(cells.next().expect("y")),
+                    ],
+                    length: word(cells.next().expect("length")),
+                };
+                if prefix == "SBONEIN" {
+                    assert_eq!(index, case.input_bones.len(), "{line}");
+                    case.input_bones.push(bone);
+                } else {
+                    assert_eq!(index, case.output_bones.len(), "{line}");
+                    case.output_bones.push(bone);
+                }
+                continue;
+            }
+            assert_eq!(prefix, "SMETA", "{line}");
+            match cells.next().expect("a row kind") {
+                "smetaclass" => {}
+                "sgate" => {
+                    for (slot, cell) in cells.enumerate() {
+                        case.instance_gates[slot] = bit(cell);
+                    }
+                }
+                "sprgate" => {
+                    for (slot, cell) in cells.enumerate() {
+                        case.sprite_gates[slot] = bit(cell);
+                    }
+                }
+                "entry" => {
+                    case.name = cells.next().expect("a name").to_owned();
+                    case.rect = [
+                        word(cells.next().expect("rx")),
+                        word(cells.next().expect("ry")),
+                        word(cells.next().expect("rw")),
+                        word(cells.next().expect("rh")),
+                    ];
+                    assert_eq!(
+                        cells.next().expect("alignment"),
+                        SPRITE_ALIGNMENT_CUSTOM.to_string()
+                    );
+                    case.pivot = [
+                        word(cells.next().expect("px")),
+                        word(cells.next().expect("py")),
+                    ];
+                    let border = cells.next().expect("border");
+                    case.border = if border == "null" {
+                        None
+                    } else {
+                        Some([
+                            word(border),
+                            word(cells.next().expect("b1")),
+                            word(cells.next().expect("b2")),
+                            word(cells.next().expect("b3")),
+                        ])
+                    };
+                    case.tessellation = cells
+                        .next()
+                        .expect("tessellation")
+                        .parse()
+                        .expect("tessellation int");
+                    assert_eq!(case.tessellation, SPRITE_TESSELLATION_DETAIL);
+                    case.outline = cells.next().expect("outline").parse().expect("count");
+                    case.physics = cells.next().expect("physics").parse().expect("count");
+                    case.bones = cells.next().expect("bones").parse().expect("count");
+                    case.sprite_id = bit(cells.next().expect("sprite id"));
+                    case.vertices = cells.next().expect("vertices").parse().expect("count");
+                    case.indices = cells.next().expect("indices").parse().expect("count");
+                    case.weights = cells.next().expect("weights").parse().expect("count");
+                }
+                _ => panic!("unexpected row {line}"),
+            }
+        }
+        assert_eq!(cases.len(), 3, "all probed fill cases are asserted");
+        for case in &cases {
+            let out = fill_sprite_metadata(
+                [10.0, 20.0, 100.0, 50.0],
+                [0.0, 0.0, 64.0, 64.0],
+                [2.0, 3.0],
+                case.atlas_hit,
+                [5.0, 6.0, 32.0, 32.0],
+                [0.0, 1.0],
+                true,
+                [0.25, 0.75],
+                [1.0, -2.0],
+                true,
+                [4.0, 5.0, 6.0, 7.0],
+                case.border.is_some(),
+                case.instance_gates[0],
+                case.instance_gates[1],
+                case.sprite_gates[1],
+                case.instance_gates[2],
+                case.sprite_gates[0],
+                case.instance_gates[3],
+                case.ppu,
+                &case.input_bones,
+                "probe-id",
+            );
+            assert_eq!(out.rect, case.rect, "{tag}", tag = case.tag);
+            assert_eq!(out.pivot, case.pivot, "{tag}", tag = case.tag);
+            assert_eq!(
+                out.alignment,
+                SPRITE_ALIGNMENT_CUSTOM,
+                "{tag}",
+                tag = case.tag
+            );
+            assert_eq!(
+                out.tessellation_detail,
+                SPRITE_TESSELLATION_DETAIL,
+                "{tag}",
+                tag = case.tag
+            );
+            match case.border {
+                Some(border) => {
+                    assert!(out.copy_border, "{tag}", tag = case.tag);
+                    assert_eq!(out.border, border, "{tag}", tag = case.tag);
+                }
+                None => assert!(!out.copy_border, "{tag}", tag = case.tag),
+            }
+            assert_eq!(
+                out.generate_outline,
+                case.instance_gates[0],
+                "{tag}",
+                tag = case.tag
+            );
+            assert_eq!(
+                out.generate_physics_shape,
+                case.instance_gates[1] && case.sprite_gates[1],
+                "{tag}",
+                tag = case.tag
+            );
+            let fill_bones =
+                case.instance_gates[2] && case.sprite_gates[0] && case.instance_gates[3];
+            assert_eq!(out.fill_bones, fill_bones, "{tag}", tag = case.tag);
+            assert_eq!(out.scaled_bones.len(), case.bones, "{tag}", tag = case.tag);
+            for (scaled, expected) in out.scaled_bones.iter().zip(&case.output_bones) {
+                assert_eq!(scaled, expected, "{tag}", tag = case.tag);
+            }
+            // The source mints a random GUID; the kernel carries the caller
+            // ID, so the replay pins the assignment arm, not the value.
+            assert_eq!(
+                out.sprite_id.is_some(),
+                case.sprite_id,
+                "{tag}",
+                tag = case.tag
+            );
+            if case.sprite_id {
+                assert_eq!(
+                    out.sprite_id.as_deref(),
+                    Some("probe-id"),
+                    "{tag}",
+                    tag = case.tag
+                );
+            }
+            // The vertex-less reference leaves every open body empty.
+            assert_eq!(case.outline, 0, "{tag}", tag = case.tag);
+            assert_eq!(case.physics, 0, "{tag}", tag = case.tag);
+            assert_eq!(case.vertices, 0, "{tag}", tag = case.tag);
+            assert_eq!(case.indices, 0, "{tag}", tag = case.tag);
+            assert_eq!(case.weights, 0, "{tag}", tag = case.tag);
+            assert_eq!(case.name, "ProbeSprite", "{tag}", tag = case.tag);
+        }
+    }
 }

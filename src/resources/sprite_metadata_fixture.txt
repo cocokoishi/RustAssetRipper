@@ -1,0 +1,39 @@
+# Live sprite-metadata fill differential.
+# Probe Temp/opencode/smetaprobe: real 2022.3 Sprite objects (sprite Rect
+# 10,20,100,50, Offset 1,-2, stored Pivot 0.25,0.75, stored Border 4,5,6,7,
+# PixelsToUnits 100, RD TextureRect 0,0,64,64 with a registered texture and
+# FileID-0 PPtr) with a real SpriteAtlas (hit: map filled with the sprite key;
+# miss: empty map) through SpriteMetaData.Create plus the shipped
+# FillSpriteMetaData (shipped SourceGenerated DLL, SDK 10.0.401).
+# Format: SMETA|<case>|smetaclass|<class>;
+# SMETA|<case>|sgate|<outline>|<physics>|<bones>|<spriteid> (instance Has_ gates);
+# SMETA|<case>|sprgate|<hasbones>|<hasphysics> (sprite version gates, always 1
+# on 2022.3 even with no bone content);
+# SPPU|<case>|<ppu>|<rectw>|<recth>; SBONEIN|<case>|<i>|<parent>|<x>|<y>|<len>;
+# SMETA|<case>|entry|<name>|<rx>|<ry>|<rw>|<rh>|<align>|<px>|<py>|<border or
+# null>|<tess>|<outline#>|<physics#>|<bones#>|<spriteid01>|<vert#>|<idx#>|<w#>
+# (floats as IEEE-754 hex words; spriteid01 is 1 for a 32-hex-digit Guid);
+# SBONE|<case>|<i>|<parent>|<x>|<y>|<len> (post-fill sprite bones).
+# Cases: plain-hit (atlas hit), boned-hit (two bones, second parented to the
+# first), plain-miss (empty atlas map). The bones arm runs on version gates
+# alone: even the boneless cases assign a SpriteID. The root-bone offset uses
+# the sprite Rect (100x50), not the atlas rect.
+SMETA|plain-hit|smetaclass|AssetRipper.SourceGenerated.Subclasses.SpriteMetaData.SpriteMetaData_2021
+SPPU|plain-hit|42C80000|42C80000|42480000
+SMETA|plain-hit|sgate|1|1|1|1
+SMETA|plain-hit|sprgate|1|1
+SMETA|plain-hit|entry|ProbeSprite|40A00000|40C00000|42000000|42000000|9|3F480000|3F920000|40800000|40800000|C2780000|C1200000|0|0|0|0|1|0|0|0
+SMETA|boned-hit|smetaclass|AssetRipper.SourceGenerated.Subclasses.SpriteMetaData.SpriteMetaData_2021
+SBONEIN|boned-hit|0|-1|41200000|41A00000|40A00000
+SBONEIN|boned-hit|1|0|3F800000|40000000|40400000
+SPPU|boned-hit|42C80000|42C80000|42480000
+SMETA|boned-hit|sgate|1|1|1|1
+SMETA|boned-hit|sprgate|1|1
+SMETA|boned-hit|entry|ProbeSprite|40A00000|40C00000|42000000|42000000|9|3F480000|3F920000|40800000|40800000|C2780000|C1200000|0|0|0|2|1|0|0|0
+SBONE|boned-hit|0|-1|44834000|44FD2000|43FA0000
+SBONE|boned-hit|1|0|42C80000|43480000|43960000
+SMETA|plain-miss|smetaclass|AssetRipper.SourceGenerated.Subclasses.SpriteMetaData.SpriteMetaData_2021
+SPPU|plain-miss|42C80000|42C80000|42480000
+SMETA|plain-miss|sgate|1|1|1|1
+SMETA|plain-miss|sprgate|1|1
+SMETA|plain-miss|entry|ProbeSprite|00000000|00000000|42800000|42800000|9|3EB80000|3F0A0000|40000000|40000000|C1E00000|41C00000|0|0|0|0|1|0|0|0
