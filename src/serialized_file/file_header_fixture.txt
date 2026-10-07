@@ -1,0 +1,56 @@
+﻿# SerializedFile header reference-runtime differential (probe Temp/opencode/fileheaderprobe, .NET SDK 10.0.401)
+# Assemblies: AssetRipper.IO.Files.dll plus AssetRipper.IO.Endian.dll from isolated ar-ref bins (Source/0Bins/AssetRipper.GUI.Free/Release)
+# Reference types: FormatVersion enum; SerializedFileHeader.HasEndianess/HasLargeFilesSupport (public static); SerializedFileHeader.Write/Read (public, reference-written headers for generations 5,8,9,21,22)
+# Format: FORMATVERSION|name|value; HEADERPRED|gen|HasEndianess|HasLargeFilesSupport; HEADER_HEX|gen|hex(header); HEADER_READ|gen|Meta|File|V|Data|Endian|Len
+FORMATVERSION|Unsupported|1
+FORMATVERSION|Unknown_2|2
+FORMATVERSION|Unknown_3|3
+FORMATVERSION|Unknown_5|5
+FORMATVERSION|Unknown_6|6
+FORMATVERSION|Unknown_7|7
+FORMATVERSION|Unknown_8|8
+FORMATVERSION|Unknown_9|9
+FORMATVERSION|Unknown_10|10
+FORMATVERSION|HasScriptTypeIndex|11
+FORMATVERSION|Unknown_12|12
+FORMATVERSION|HasTypeTreeHashes|13
+FORMATVERSION|Unknown_14|14
+FORMATVERSION|SupportsStrippedObject|15
+FORMATVERSION|RefactoredClassId|16
+FORMATVERSION|RefactorTypeData|17
+FORMATVERSION|RefactorShareableTypeTreeData|18
+FORMATVERSION|TypeTreeNodeWithTypeFlags|19
+FORMATVERSION|SupportsRefObject|20
+FORMATVERSION|StoresTypeDependencies|21
+FORMATVERSION|LargeFilesSupport|22
+HEADERPRED|1|False|False
+HEADERPRED|2|False|False
+HEADERPRED|3|False|False
+HEADERPRED|5|False|False
+HEADERPRED|6|False|False
+HEADERPRED|7|False|False
+HEADERPRED|8|False|False
+HEADERPRED|9|True|False
+HEADERPRED|10|True|False
+HEADERPRED|11|True|False
+HEADERPRED|12|True|False
+HEADERPRED|13|True|False
+HEADERPRED|14|True|False
+HEADERPRED|15|True|False
+HEADERPRED|16|True|False
+HEADERPRED|17|True|False
+HEADERPRED|18|True|False
+HEADERPRED|19|True|False
+HEADERPRED|20|True|False
+HEADERPRED|21|True|False
+HEADERPRED|22|True|True
+HEADER_HEX|5|00000040000001000000000500000080
+HEADER_READ|5|Meta=64|File=256|V=5|Data=128|Endian=False|Len=16
+HEADER_HEX|8|000000640000020000000008000000C8
+HEADER_READ|8|Meta=100|File=512|V=8|Data=200|Endian=False|Len=16
+HEADER_HEX|9|000000780000028000000009000000F001000000
+HEADER_READ|9|Meta=120|File=640|V=9|Data=240|Endian=True|Len=20
+HEADER_HEX|21|000000C800000400000000150000019000000000
+HEADER_READ|21|Meta=200|File=1024|V=21|Data=400|Endian=False|Len=20
+HEADER_HEX|22|00000000000000000000001600000000010000000000012C000000000000080000000000000002580000000000000000
+HEADER_READ|22|Meta=300|File=2048|V=22|Data=600|Endian=True|Len=48

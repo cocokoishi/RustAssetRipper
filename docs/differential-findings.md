@@ -586,3 +586,29 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | src/container/unityfs.rs test bundle_headers_match_reference_generated_bundles; src/scheme.rs test archive_detection_and_unsupported_read_match_reference; fixture src/container/bundle_header_fixture.txt. |
 | Regression evidence | All detection vectors, both Archive throw types, all four reference bundles (fields, Total/HeadLen/Pad, zero blocks/nodes/hash, metadata/data offsets, v7+ alignment, v5 older proof) reproduce; full lib suite 1353 plus 60 CLI pass with warnings-denied Clippy. |
 | Remaining comparison | UnityFS metadata compression and directory/entry lanes stay with IO-BUNDLE-UNITYFS-META-001 and IO-BUNDLE-UNITYFS-ENTRY-001; no Unity-produced bundle file has been compared. |
+
+## DIFF-FILE-HEADER-001 - SerializedFile header generation branches
+
+| Field | Finding |
+|---|---|
+| Status | Reference-runtime differential recorded; row ported and pinned |
+| Source location | AssetRipper.IO.Files/SerializedFiles/Parser/SerializedFileHeader.cs (Read, Write, HasEndianess, HasLargeFilesSupport, IsSerializedFileHeader); FormatVersion.cs |
+| Input evidence | Probe Temp/opencode/fileheaderprobe (shipped IO.Files plus IO.Endian DLLs, SDK 10.0.401) dumping the FormatVersion enum, 21 generation predicates, plus reference-written headers for gens 5,8,9,21,22 with read-back dumps. Committed as src/serialized_file/file_header_fixture.txt (56 lines). |
+| Source-derived behavior | Pre-9 headers are 16-byte legacy with no endian marker; 9+ adds the marker plus 4-byte alignment; 22+ writes zeros at legacy positions and real values at the 0x14 extended block; MetadataSize 0 or below throws; undefined generations throw. |
+| Root cause | No deviation found; this increment ports the previously open pre-9 plus reference-generated coverage. Rust keeps the same branches with stricter fail-closed bounds (documented hardening over Debug-only asserts). |
+| Rust change | src/serialized_file/header.rs test headers_match_reference_written_fixtures; fixture src/serialized_file/file_header_fixture.txt. |
+| Regression evidence | All 21 predicates, all five reference headers (version, sizes, offsets, marker, reserved, header size) reproduce; full suite 1355 plus 60 pass with warnings-denied Clippy. |
+| Remaining comparison | Full SerializedFile metadata/object integration and container extraction stay with SER-META and SER-FILE-ENTRY rows; no Unity-produced file compared. |
+
+## DIFF-GZIP-001 - GZip wrapper decode parity with .NET
+
+| Field | Finding |
+|---|---|
+| Status | .NET interop differential recorded; decode direction pinned |
+| Source location | AssetRipper.IO.Files/CompressedFiles/GZip/GZipFile.cs; GZipFileScheme.CanRead |
+| Input evidence | Probe Temp/opencode/gzipprobe (System.IO.Compression.GZipStream Optimal, SDK 10.0.401) emitting hello/sequence/concat vectors plus .NET round-trip proof; empty is degenerate with zero bytes. Committed as src/compression/gzip_dotnet_fixture.txt (7 lines, independently encoded). |
+| Source-derived behavior | Any valid GZip member with 1F 8B is accepted; concatenated members decode as one stream; encoder settings affect bytes but not validity. |
+| Root cause | No deviation found in decode; encoder bytes intentionally differ by settings (documented valid-member difference, round-trip proven on both sides for the decode direction). |
+| Rust change | src/compression/wrappers.rs test dotnet_encoded_members_decode_to_the_same_bytes; fixture src/compression/gzip_dotnet_fixture.txt. |
+| Regression evidence | All three .NET vectors plus concat reproduce byte-for-byte through Rust decompress_gzip with magic checks; full suite 1355 plus 60 pass with warnings-denied Clippy. |
+| Remaining comparison | Real wrapped Unity file comparison and recursive dispatch over user content stay open; encoder byte-identity is explicitly not owed. |

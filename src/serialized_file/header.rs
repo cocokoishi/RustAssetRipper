@@ -455,4 +455,127 @@ mod tests {
         assert_eq!(error.offset(), 8);
         assert!(error.to_string().contains("format generation"));
     }
+
+    #[test]
+    fn headers_match_reference_written_fixtures() {
+        fn hex_to_bytes(hex: &str) -> Vec<u8> {
+            assert!(hex.len().is_multiple_of(2), "odd hex length for {hex}");
+            let mut out = Vec::with_capacity(hex.len() / 2);
+            let bytes = hex.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                let hi = match bytes[i] {
+                    b'0'..=b'9' => bytes[i] - b'0',
+                    b'a'..=b'f' => bytes[i] - b'a' + 10,
+                    b'A'..=b'F' => bytes[i] - b'A' + 10,
+                    b => panic!("invalid hex byte {b}"),
+                };
+                let lo = match bytes[i + 1] {
+                    b'0'..=b'9' => bytes[i + 1] - b'0',
+                    b'a'..=b'f' => bytes[i + 1] - b'a' + 10,
+                    b'A'..=b'F' => bytes[i + 1] - b'A' + 10,
+                    b => panic!("invalid hex byte {b}"),
+                };
+                out.push((hi << 4) | lo);
+                i += 2;
+            }
+            out
+        }
+
+        fn field<'a>(parts: &[&'a str], key: &str) -> &'a str {
+            let prefix = format!("{key}=");
+            for part in parts {
+                if let Some(v) = part.strip_prefix(&prefix) {
+                    return v;
+                }
+            }
+            panic!("missing {key} in {parts:?}");
+        }
+
+        let fixture = include_str!("file_header_fixture.txt");
+        let mut preds: Vec<(i32, bool, bool)> = Vec::new();
+        let mut hexes: std::collections::HashMap<String, Vec<u8>> =
+            std::collections::HashMap::new();
+        let mut reads: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for line in fixture.lines() {
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+            if line.starts_with("HEADERPRED|") {
+                let parts: Vec<&str> = line.split('|').collect();
+                assert_eq!(parts.len(), 4, "bad HEADERPRED {line}");
+                preds.push((
+                    parts[1].parse().unwrap(),
+                    parts[2] == "True",
+                    parts[3] == "True",
+                ));
+            } else if line.starts_with("HEADER_HEX|") {
+                let parts: Vec<&str> = line.splitn(3, '|').collect();
+                assert_eq!(parts.len(), 3, "bad HEADER_HEX {line}");
+                hexes.insert(parts[1].to_string(), hex_to_bytes(parts[2]));
+            } else if line.starts_with("HEADER_READ|") {
+                let parts: Vec<&str> = line.splitn(3, '|').collect();
+                assert_eq!(parts.len(), 3, "bad HEADER_READ {line}");
+                reads.insert(parts[1].to_string(), parts[2].to_string());
+            }
+        }
+
+        assert!(preds.len() >= 21, "expected HEADERPRED rows");
+        for (raw, want_endian, want_large) in preds {
+            let generation = FormatVersion::try_from(raw).unwrap();
+            assert_eq!(
+                generation.has_endianness(),
+                want_endian,
+                "HasEndianess gen {raw}"
+            );
+            assert_eq!(
+                generation.has_large_file_support(),
+                want_large,
+                "HasLargeFilesSupport gen {raw}"
+            );
+        }
+
+        for ver in ["5", "8", "9", "21", "22"] {
+            let bytes = hexes
+                .get(ver)
+                .unwrap_or_else(|| panic!("missing HEADER_HEX {ver}"));
+            let dump = reads
+                .get(ver)
+                .unwrap_or_else(|| panic!("missing HEADER_READ {ver}"));
+            let parts: Vec<&str> = dump.split('|').collect();
+            let want_meta: u64 = field(&parts, "Meta").parse().unwrap();
+            let want_file: u64 = field(&parts, "File").parse().unwrap();
+            let want_v: i32 = field(&parts, "V").parse().unwrap();
+            let want_data: u64 = field(&parts, "Data").parse().unwrap();
+            let want_endian = field(&parts, "Endian") == "True";
+            let want_len: usize = field(&parts, "Len").parse().unwrap();
+
+            assert_eq!(bytes.len(), want_len, "v{ver} byte length");
+            let header = SerializedFileHeader::parse(bytes)
+                .unwrap_or_else(|e| panic!("v{ver} parse: {e:?}"));
+            assert_eq!(header.format_version.raw(), want_v, "v{ver} version");
+            assert_eq!(header.metadata_size, want_meta, "v{ver} meta");
+            assert_eq!(header.file_size, want_file, "v{ver} file size");
+            assert_eq!(header.data_offset, want_data, "v{ver} data offset");
+            assert_eq!(header.header_size, want_len, "v{ver} header size");
+            if want_v >= 9 {
+                assert_eq!(
+                    header.data_endian,
+                    Some(if want_endian {
+                        Endian::Big
+                    } else {
+                        Endian::Little
+                    }),
+                    "v{ver} endian marker"
+                );
+            } else {
+                assert_eq!(header.data_endian, None, "v{ver} pre-9 has no marker");
+            }
+            if want_v >= 22 {
+                assert!(header.reserved_v22.is_some(), "v{ver} reserved field");
+            } else {
+                assert_eq!(header.reserved_v22, None, "v{ver} no reserved field");
+            }
+        }
+    }
 }
