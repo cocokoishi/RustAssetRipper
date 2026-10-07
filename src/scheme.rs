@@ -3981,6 +3981,174 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
 
+    /// Single-path import against reference-written bytes.
+    ///
+    /// The WebData containers below were written by the frozen
+    /// `AssetRipper.IO.Files` runtime (`tools/probes/singlefile/Program.cs`;
+    /// rows in `scheme/singlefile_probe_fixture.txt`), not by the Rust encoder:
+    /// aligned and unaligned variants carrying `alpha.bin` (13 bytes) and
+    /// `beta.bin` (5 bytes). The probe also pins the source outcomes this test
+    /// replays: an 8-byte truncation falls through dispatch to a raw
+    /// `ResourceFile` leaf (no error), split base/part paths resolve to the
+    /// same entries, and a missing middle part is rejected.
+    #[test]
+    fn mount_path_matches_reference_written_webdata_and_fails_loud_on_gap() {
+        fn singlefile_fields(prefix: &str) -> Vec<&'static str> {
+            include_str!("scheme/singlefile_probe_fixture.txt")
+                .lines()
+                .find(|line| line.starts_with(prefix))
+                .unwrap_or_else(|| panic!("missing single-file fixture row {prefix:?}"))
+                .split('|')
+                .collect()
+        }
+
+        fn assert_reference_entries(filesystem: &VirtualFileSystem, destination: &str) {
+            for (entry_prefix, expected_name, expected_len, expected_hex) in [
+                (
+                    "ALIGNED_ENTRY|",
+                    "alpha.bin",
+                    13usize,
+                    "616C7068612D7061796C6F6164",
+                ),
+                ("ALIGNED_ENTRY|", "beta.bin", 5usize, "6265746121"),
+            ] {
+                let _ = entry_prefix;
+                let expected = decode_hex_fixture(expected_hex);
+                assert_eq!(expected.len(), expected_len);
+                assert_eq!(
+                    filesystem
+                        .read_all_bytes(&format!("{destination}/{expected_name}"), 64)
+                        .unwrap(),
+                    expected,
+                    "reference entry {expected_name} mounts with exact bytes",
+                );
+            }
+        }
+
+        let aligned = decode_hex_fixture(singlefile_fields("FILE_HEX|aligned|")[2]);
+        let noalign = decode_hex_fixture(singlefile_fields("FILE_HEX|noalign|")[2]);
+        // Both alignment variants carry the same entries on the source side.
+        for (variant, entry_prefix) in
+            [("aligned", "ALIGNED_ENTRY|"), ("noalign", "NOALIGN_ENTRY|")]
+        {
+            for (entry_row, expected_hex) in [
+                (
+                    format!("{entry_prefix}alpha.bin|"),
+                    "616C7068612D7061796C6F6164",
+                ),
+                (format!("{entry_prefix}beta.bin|"), "6265746121"),
+            ] {
+                let fields = singlefile_fields(&entry_row);
+                assert_eq!(fields[3], expected_hex, "{variant} reference entry bytes");
+            }
+        }
+        assert_eq!(
+            singlefile_fields("TRUNCATED|")[1],
+            "ACCEPTED",
+            "the source falls through truncated input to a raw leaf"
+        );
+        assert_eq!(singlefile_fields("GAP|")[1], "REJECTED");
+
+        // Regular-file imports of both reference-written variants.
+        for bytes in [&aligned, &noalign] {
+            let path = unique_temp_file_path("webdata");
+            std::fs::write(&path, bytes).unwrap();
+            let mut filesystem = VirtualFileSystem::new();
+            let report = SchemeReader::mount_path(
+                &path,
+                &mut filesystem,
+                Some("/inputs"),
+                SchemeReaderLimits::default(),
+                ContainerMountLimits::default(),
+            )
+            .unwrap();
+            assert_eq!(report.mounted_entries, 2);
+            assert_reference_entries(&filesystem, "/inputs");
+            std::fs::remove_file(path).unwrap();
+        }
+
+        // Split base and split part paths resolve to the same entries.
+        let directory = unique_temp_file_path("dir");
+        std::fs::create_dir(&directory).unwrap();
+        let base_path = directory.join("single.webdata");
+        let half = aligned.len() / 2;
+        std::fs::write(format!("{}.split0", base_path.display()), &aligned[..half]).unwrap();
+        std::fs::write(format!("{}.split1", base_path.display()), &aligned[half..]).unwrap();
+        for probe_row in ["SPLIT_BASE|", "SPLIT_PART|"] {
+            assert_eq!(singlefile_fields(probe_row)[1], "OK");
+        }
+        for supplied in [
+            base_path.clone(),
+            PathBuf::from(format!("{}.split1", base_path.display())),
+        ] {
+            let mut filesystem = VirtualFileSystem::new();
+            let report = SchemeReader::mount_path(
+                &supplied,
+                &mut filesystem,
+                Some("/inputs"),
+                SchemeReaderLimits::default(),
+                ContainerMountLimits::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                report.mounted_entries,
+                2,
+                "split import via {}",
+                supplied.display()
+            );
+            assert_reference_entries(&filesystem, "/inputs");
+        }
+
+        // A missing middle part fails instead of mounting a partial stream,
+        // and leaves no partial entries behind.
+        std::fs::remove_file(format!("{}.split1", base_path.display())).unwrap();
+        std::fs::write(format!("{}.split2", base_path.display()), &aligned[half..]).unwrap();
+        let mut filesystem = VirtualFileSystem::new();
+        let error = SchemeReader::mount_path(
+            &base_path,
+            &mut filesystem,
+            Some("/inputs"),
+            SchemeReaderLimits::default(),
+            ContainerMountLimits::default(),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("single.webdata.split1"),
+            "gap error names the missing part: {error}"
+        );
+        assert!(filesystem.read_all_bytes("/inputs/alpha.bin", 32).is_err());
+        assert!(filesystem.read_all_bytes("/inputs/beta.bin", 32).is_err());
+        std::fs::remove_file(format!("{}.split0", base_path.display())).unwrap();
+        std::fs::remove_file(format!("{}.split2", base_path.display())).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+
+        // Truncated input falls through to a raw leaf on both sides.
+        let truncated = &aligned[..8];
+        let path = unique_temp_file_path("webdata");
+        std::fs::write(&path, truncated).unwrap();
+        let mut filesystem = VirtualFileSystem::new();
+        let report = SchemeReader::mount_path(
+            &path,
+            &mut filesystem,
+            Some("/inputs"),
+            SchemeReaderLimits::default(),
+            ContainerMountLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(report.mounted_entries, 1);
+        assert_eq!(
+            filesystem
+                .read_all_bytes(
+                    &format!("/inputs/{}", path.file_name().unwrap().to_string_lossy()),
+                    64,
+                )
+                .unwrap(),
+            truncated,
+            "truncated bytes survive verbatim as a raw leaf, matching the source ResourceFile fallback",
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn mount_directory_preserves_paths_and_assembles_split_groups() {
         let root = unique_temp_file_path("directory");

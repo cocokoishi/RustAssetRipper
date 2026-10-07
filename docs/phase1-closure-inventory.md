@@ -6,15 +6,15 @@ The status counts below come from the `Status` cell in each stable-ID row of `do
 
 | Ledger status | Rows |
 |---|---:|
-| `已验证` | 341 |
-| `已实现但未验证` | 18 |
+| `已验证` | 342 |
+| `已实现但未验证` | 17 |
 | `实现中` | 14 |
 | `已调查` | 4 |
 | `未调查` | 0 |
 | `受外部条件阻塞` | 0 |
-| **Open rows** | **36** |
+| **Open rows** | **35** |
 
-All 36 queued rows currently block the Phase 1 gate: each maps to baseline shipping behavior, and no exact verified disposition removes it from the product scope. `TYPE-SCRIPT-001` still needs a source-backed runtime-versus-tooling disposition. Unity-only evidence is a real gap where listed; it is not counted as passed. The inventory is the Phase 1 work queue and should be refreshed only after closing a complete behavior or finding a new source-backed disposition.
+All 35 queued rows currently block the Phase 1 gate: each maps to baseline shipping behavior, and no exact verified disposition removes it from the product scope. `TYPE-SCRIPT-001` still needs a source-backed runtime-versus-tooling disposition. Unity-only evidence is a real gap where listed; it is not counted as passed. The inventory is the Phase 1 work queue and should be refreshed only after closing a complete behavior or finding a new source-backed disposition.
 
 ## Closed behavior units
 
@@ -23,6 +23,7 @@ All 36 queued rows currently block the Phase 1 gate: each maps to baseline shipp
 | `SER-MANAGED-REFS-001` | The frozen source reader consumes independent modern counted and legacy terminated nested-Registry fixtures fully. Rust decode/write byte round trips match both fixtures, and duplicate IDs resolve in their nearest registry-owning struct scope. See `DIFF-MANAGED-REFS-002` and the source probe and regression test named in `docs/feature-parity.md`. |
 | `IO-STREAM-PATH-001` | An isolated AssetRipper IO.Files runtime probe compared regular paths, split base/part paths, logical names, recognition rules, numeric ordering through `.split10`, boundary reads, missing parts, and `.split00` rejection. Rust's path fixture test matches the observable outcomes, and `SchemeReader::mount_path` integration tests verify logical-name mounting and padded-part rejection. The source's End-seek sign difference is recorded separately under `DIFF-MULTIFILE-SEEK-END-001`. |
 | `PROC-PREFAB-SCENE-BUNDLE-001` | The integrated `plan_workspace_scene_hierarchy_bundle_names` planner composes source-order scene/collection traversal, per-bundle `FetchAssets()`-ordered asset facts, real `get_asset_bundle_name` resolution, and the streamed-scene `Debug.Assert` as an explicit release-continue warning. CLI `print_workspace_summary_to` resolves live class-142 payloads and reports per-scene hierarchy bundle names. See `DIFF-PREFAB-SCENE-BUNDLE-001` and the planner plus CLI regression tests named in `docs/feature-parity.md`. |
+| `IO-FS-IMPORT-PATH-001` | An isolated AssetRipper IO.Files runtime probe wrote aligned and unaligned WebData containers and pinned entry inventory, truncation fallback to a raw leaf, split base/part resolution, and missing-part rejection. Rust replays every row through production `mount_path` with byte-identical mounts and fail-closed gaps. See `DIFF-SINGLEFILE-IMPORT-001` and the regression test named in `docs/feature-parity.md`. |
 
 ## Dependency order
 
@@ -47,7 +48,6 @@ The row-level work units below are the smallest complete closures justified by d
 | `IO-BUNDLE-001` | `实现中` | `SchemeReader`; `BundleHeader`; `FileStream`; `Archive`; `RawWeb` | **Implementation/integration:** support every baseline-supported bundle form, entry layout, placement, recursive mount, and dependency path. Keep UnityArchive explicitly rejected if the frozen source also throws; verify that disposition from source and runtime. | Yes |
 | `IO-COMP-001` | `实现中` | `CompressionType`; `CompressedFiles/Brotli`; `CompressedFiles/GZip`; bundle codec dispatch | **Implementation/differential:** close each source-supported codec and every wrapper/bundle dispatch lane with independent codec fixtures and real reference-generated outputs; make unsupported source cases explicit. | Yes |
 | `IO-RESOURCE-001` | `实现中` | `ResourceFile`; `Bundle.ResolveResource`; `GameBundle.FromPaths`; `GameBundle.ResolveExternalResource`; `StreamedResourceExtensions`; `StreamingInfoExtensions` | **Integration:** connect root and external resource lookup plus validated offset/size reads to generated object decoding and exporters, including version-specific `StreamingInfo` field access and missing-resource diagnostics. | Yes |
-| `IO-FS-IMPORT-PATH-001` | `已实现但未验证` | `SchemeReader.LoadFile`; `SchemeReader.ReadFile`; `FileContainer.ReadContentsRecursively` | **Integration/differential:** close the one-path import contract from regular or `.splitN` file through recursive container contents and resource dependency resolution; test an independently produced input and source error behavior. | Yes |
 
 ### Serialization, generated objects, and reference graph
 
