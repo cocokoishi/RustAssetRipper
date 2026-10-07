@@ -1070,4 +1070,145 @@ mod tests {
         let drift_error = RawWebBundle::parse(&drifted.bytes).unwrap_err();
         assert!(drift_error.to_string().contains("but declares"));
     }
+
+    #[test]
+    fn headers_and_entries_match_reference_constructed_bundles() {
+        fn hex_to_bytes(hex: &str) -> Vec<u8> {
+            assert!(hex.len().is_multiple_of(2), "odd hex length for {hex}");
+            let mut out = Vec::with_capacity(hex.len() / 2);
+            let bytes = hex.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                let hi = match bytes[i] {
+                    b'0'..=b'9' => bytes[i] - b'0',
+                    b'a'..=b'f' => bytes[i] - b'a' + 10,
+                    b'A'..=b'F' => bytes[i] - b'A' + 10,
+                    b => panic!("invalid hex byte {b}"),
+                };
+                let lo = match bytes[i + 1] {
+                    b'0'..=b'9' => bytes[i + 1] - b'0',
+                    b'a'..=b'f' => bytes[i + 1] - b'a' + 10,
+                    b'A'..=b'F' => bytes[i + 1] - b'A' + 10,
+                    b => panic!("invalid hex byte {b}"),
+                };
+                out.push((hi << 4) | lo);
+                i += 2;
+            }
+            out
+        }
+
+        fn field<'a>(parts: &[&'a str], key: &str) -> &'a str {
+            let prefix = format!("{key}=");
+            for part in parts {
+                if let Some(v) = part.strip_prefix(&prefix) {
+                    return v;
+                }
+            }
+            panic!("missing {key} in {parts:?}");
+        }
+
+        // Probe Temp/opencode/legacybundleprobe (Raw/WebBundleHeader.Read and
+        // Raw/WebBundleFile.Read over C#-constructed bundles, SDK 10.0.401;
+        // Web scene via LzmaCompression): H1-H6 version gates v1/2/3/4/8 and
+        // Web v6, R1 Raw entry, W1 Web LZMA entry, M1 corrupt HeaderSize.
+        // Nothing here was produced by the Rust writer (Raw/Web Write throws
+        // NotImplementedException in the baseline, proven by HW).
+        let fixture = include_str!("legacy_bundle_fixture.txt");
+        let mut hexes: std::collections::HashMap<String, Vec<u8>> =
+            std::collections::HashMap::new();
+        let mut reads: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for line in fixture.lines() {
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+            if line.starts_with("LEGACY_HEX|") {
+                let parts: Vec<&str> = line.splitn(3, '|').collect();
+                assert_eq!(parts.len(), 3, "bad LEGACY_HEX {line}");
+                hexes.insert(parts[1].to_string(), hex_to_bytes(parts[2]));
+            } else if line.starts_with("LEGACY_READ|") {
+                let parts: Vec<&str> = line.splitn(3, '|').collect();
+                assert_eq!(parts.len(), 3, "bad LEGACY_READ {line}");
+                reads.insert(parts[1].to_string(), parts[2].to_string());
+            }
+        }
+
+        // Baseline cannot write Raw/Web bundles; no Rust write unit is owed.
+        let hw = reads.get("HW").expect("HW row");
+        assert!(hw.contains("NotImplementedException"), "HW refusal {hw}");
+
+        // Version gates reproduce across v1/2/3/4/8 Raw (full bundles with
+        // an empty directory); H6 Web v6 header gates are reference-proven
+        // here and Rust-covered via W1 below.
+        for (case, want_version, want_kind, want_scenes, want_comp, want_unc, want_hash) in [
+            ("H1", 1, RawWebKind::UnityRaw, 0, None, None, false),
+            ("H2", 2, RawWebKind::UnityRaw, 1, Some(500), None, false),
+            ("H3", 3, RawWebKind::UnityRaw, 1, Some(500), Some(4), false),
+            ("H4", 4, RawWebKind::UnityRaw, 2, Some(500), Some(4), true),
+            ("H5", 8, RawWebKind::UnityRaw, 0, Some(500), Some(4), true),
+        ] {
+            let bytes = hexes.get(case).unwrap_or_else(|| panic!("missing {case}"));
+            let dump = reads.get(case).unwrap_or_else(|| panic!("missing {case}"));
+            let parts: Vec<&str> = dump.split('|').collect();
+            assert_eq!(field(&parts, "V").parse::<i32>().unwrap(), want_version);
+            let bundle = RawWebBundle::parse(bytes)
+                .unwrap_or_else(|e| panic!("{case} Rust parse failed: {e:?}"));
+            assert_eq!(bundle.header.kind, want_kind, "{case} kind");
+            assert_eq!(bundle.header.version, want_version, "{case} version");
+            assert_eq!(bundle.header.scenes.len(), want_scenes, "{case} scenes");
+            assert_eq!(
+                bundle.header.complete_file_size, want_comp,
+                "{case} complete"
+            );
+            assert_eq!(
+                bundle.header.uncompressed_blocks_info_size, want_unc,
+                "{case} uncomp"
+            );
+            assert_eq!(bundle.header.hash.is_some(), want_hash, "{case} hash");
+            assert_eq!(bundle.header.crc.is_some(), want_hash, "{case} crc");
+            assert_eq!(bundle.header.minimum_streamed_bytes, 100);
+            assert_eq!(bundle.header.unity_version, "2022.3.1f1");
+            assert!(bundle.entries.is_empty(), "{case} empty directory");
+        }
+
+        // Raw entry bytes reproduce.
+        {
+            let bytes = hexes.get("R1").expect("R1 hex");
+            let dump = reads.get("R1").expect("R1 dump");
+            assert!(
+                dump.contains("FILE:a.bin=30313233343536373839"),
+                "R1 {dump}"
+            );
+            let bundle = RawWebBundle::parse(bytes).expect("R1 Rust parse");
+            assert_eq!(bundle.entries.len(), 1);
+            assert_eq!(bundle.entries[0].path, "a.bin");
+            assert_eq!(bundle.read_entry(0).unwrap(), b"0123456789");
+        }
+
+        // Web LZMA scene entry bytes reproduce (also covering Web v6 header
+        // gates: version, kind, scenes, complete, uncomp, hash).
+        {
+            let bytes = hexes.get("W1").expect("W1 hex");
+            let dump = reads.get("W1").expect("W1 dump");
+            assert!(
+                dump.contains("FILE:w.bin=4142434445464748494A"),
+                "W1 {dump}"
+            );
+            let bundle = RawWebBundle::parse(bytes).expect("W1 Rust parse");
+            assert_eq!(bundle.header.kind, RawWebKind::UnityWeb);
+            assert_eq!(bundle.header.version, 6);
+            assert_eq!(bundle.header.scenes.len(), 1);
+            assert_eq!(bundle.header.complete_file_size, Some(0));
+            assert!(bundle.header.hash.is_some());
+            assert_eq!(bundle.entries.len(), 1);
+            assert_eq!(bundle.read_entry(0).unwrap(), b"ABCDEFGHIJ");
+        }
+
+        // Corrupt HeaderSize fails loud on both sides.
+        {
+            let bytes = hexes.get("M1").expect("M1 hex");
+            let dump = reads.get("M1").expect("M1 dump");
+            assert!(dump.starts_with("THROW:"), "M1 refusal {dump}");
+            assert!(RawWebBundle::parse(bytes).is_err(), "M1 Rust fails loud");
+        }
+    }
 }

@@ -3163,11 +3163,11 @@ mod tests {
     }
 
     fn webdata_fixture(entries: &[(&str, &[u8])]) -> Vec<u8> {
-        assert!(entries.iter().all(|(name, _)| name.len() < 128));
+        assert!(entries.iter().all(|(name, _)| name.len() < 1024 * 1024));
         let header_size = 20
             + entries
                 .iter()
-                .map(|(name, _)| 9 + name.len())
+                .map(|(name, _)| 12 + name.len())
                 .sum::<usize>();
         let mut input = b"UnityWebData1.0\0".to_vec();
         input.extend_from_slice(&(header_size as i32).to_le_bytes());
@@ -3176,7 +3176,7 @@ mod tests {
         for (name, payload) in entries {
             input.extend_from_slice(&(data_offset as i32).to_le_bytes());
             input.extend_from_slice(&(payload.len() as i32).to_le_bytes());
-            input.push(name.len() as u8);
+            input.extend_from_slice(&(name.len() as u32).to_le_bytes());
             input.extend_from_slice(name.as_bytes());
             data_offset += payload.len();
         }
@@ -3320,12 +3320,12 @@ mod tests {
     fn recursively_dispatches_webdata_entries() {
         let payload = compress_gzip(b"embedded asset", 1024).unwrap();
         let name = b"main.asset";
-        let header_size = 16 + 4 + 4 + 4 + 1 + name.len();
+        let header_size = 16 + 4 + 4 + 4 + 4 + name.len();
         let mut input = b"UnityWebData1.0\0".to_vec();
         input.extend_from_slice(&(header_size as i32).to_le_bytes());
         input.extend_from_slice(&(header_size as i32).to_le_bytes());
         input.extend_from_slice(&(payload.len() as i32).to_le_bytes());
-        input.push(name.len() as u8);
+        input.extend_from_slice(&(name.len() as u32).to_le_bytes());
         input.extend_from_slice(name);
         input.extend_from_slice(&payload);
 

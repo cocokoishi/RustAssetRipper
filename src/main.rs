@@ -4855,7 +4855,7 @@ mod tests {
         let header_size = 20usize
             + entries
                 .iter()
-                .map(|(name, _)| 9usize + name.len())
+                .map(|(name, _)| 12usize + name.len())
                 .sum::<usize>();
         let mut container = b"UnityWebData1.0\0".to_vec();
         container.extend_from_slice(&i32::try_from(header_size).unwrap().to_le_bytes());
@@ -4863,7 +4863,7 @@ mod tests {
         for (name, bytes) in entries {
             container.extend_from_slice(&i32::try_from(data_offset).unwrap().to_le_bytes());
             container.extend_from_slice(&i32::try_from(bytes.len()).unwrap().to_le_bytes());
-            container.push(u8::try_from(name.len()).unwrap());
+            container.extend_from_slice(&u32::try_from(name.len()).unwrap().to_le_bytes());
             container.extend_from_slice(name.as_bytes());
             data_offset += bytes.len();
         }

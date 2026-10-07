@@ -677,3 +677,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | src/serialized_file/metadata.rs test table_records_match_reference_constructed_files; fixture src/serialized_file/metadata_table_fixture.txt. |
 | Regression evidence | All records reproduce FileID/TypeID/ClassID/scripts/externals on both sides; full suite 1360 plus 60 pass with warnings-denied Clippy. |
 | Remaining comparison | Type records with TypeTree payloads stay with SER-META-TYPES-001; identifier-to-object integration and script recovery stay downstream. |
+
+## DIFF-LEGACY-001 - Legacy Raw/Web/WebData containers
+
+| Field | Finding |
+|---|---|
+| Status | Reference-runtime differential recorded; three rows ported and pinned; one real Rust bug fixed |
+| Source location | AssetRipper.IO.Files/BundleFiles/BundleHeader.cs; RawWeb/RawWebBundleHeader.cs (HasHash/HasCompleteFileSize/HasUncompressedBlocksInfoSize, Write throws); RawWeb/RawWebBundleFile.cs (header-size check, last-chunk LZMA, metadata-size check); WebFiles/WebFile.cs; WebFiles/WebFileEntry.cs (Offset/Size plus four-byte LE name) |
+| Input evidence | Probe Temp/opencode/legacybundleprobe (shipped IO.Files DLL, SDK 10.0.401) over C#-constructed Raw/Web bundles plus reference-written WebFiles with align on/off and a 200-char name, plus corrupt-header and bad-offset refusals. Committed as src/container/legacy_bundle_fixture.txt (30 lines). |
+| Source-derived behavior | Version gates 1-8 select hash/CRC, complete size, and uncompressed size with 4-byte alignment; Raw reads post-header bytes while Web decompresses the last LZMA size-prefixed scene; entry names are four-byte LE (not 7-bit); corrupt sizes and bad ranges fail loud. |
+| Root cause | One real deviation found and fixed: Rust used 7-bit name lengths while the reference uses four-byte LE (bytes proven from reference-written files). All other lanes match; malformed inputs fail loud on both sides with different messages (no silent success). Raw/Web Write is unsupported-by-the-baseline (proven refusal). |
+| Rust change | src/container/raw_web.rs test headers_and_entries_match_reference_constructed_bundles; src/container/web_file.rs test directory_and_entries_match_reference_written_files plus the 7-bit to four-byte fix across read/write/tests/fixtures; fixture src/container/legacy_bundle_fixture.txt. |
+| Regression evidence | All version gates, both entry lanes, both WebFile alignments, and both refusals reproduce; the name-codec fix is regression-covered by D1/D2; full suite 1362 plus 60 pass with warnings-denied Clippy. |
+| Remaining comparison | Real-file comparison stays open as noted; legacy container lanes are now fully reference-differentially covered. |

@@ -152,7 +152,13 @@ impl<'a> WebFile<'a> {
                 ));
             }
 
-            let name_length = read_7bit_length(&mut reader)?;
+            // Entry names use a four-byte little-endian length prefix, matching
+            // `EndianWriter.Write(string)` behind `WebFileEntry.Write` (proven
+            // against reference-written files; see the differential test).
+            let name_length = reader
+                .read_u32()
+                .map_err(|error| WebFileError::binary(error, "WebData entry name length"))?
+                as usize;
             if name_length > limits.max_entry_name_bytes {
                 return Err(WebFileError::new(WebFileErrorKind::NameLimitExceeded {
                     entry: entries.len(),
@@ -261,7 +267,7 @@ impl<'a> WebFile<'a> {
                     value: name.len(),
                 })
             })?;
-            push_7bit_length(&mut output, name_length, maximum_output_size)?;
+            push_bytes(&mut output, &name_length.to_le_bytes(), maximum_output_size)?;
             push_bytes(&mut output, name, maximum_output_size)?;
         }
 
@@ -345,39 +351,6 @@ fn write_i32_length(value: usize, field: &'static str) -> Result<i32, WebFileErr
         }));
     }
     Ok(value as i32)
-}
-
-fn read_7bit_length(reader: &mut BinaryReader<'_>) -> Result<usize, WebFileError> {
-    let mut value = 0u32;
-    for index in 0..5 {
-        let byte = reader
-            .read_u8()
-            .map_err(|error| WebFileError::binary(error, "WebData string length"))?;
-        if index == 4 && byte & 0xf0 != 0 {
-            return Err(WebFileError::new(
-                WebFileErrorKind::InvalidStringLengthEncoding,
-            ));
-        }
-        value |= u32::from(byte & 0x7f) << (index * 7);
-        if byte & 0x80 == 0 {
-            return Ok(value as usize);
-        }
-    }
-    Err(WebFileError::new(
-        WebFileErrorKind::InvalidStringLengthEncoding,
-    ))
-}
-
-fn push_7bit_length(
-    output: &mut Vec<u8>,
-    mut value: u32,
-    maximum_output_size: usize,
-) -> Result<(), WebFileError> {
-    while value >= 0x80 {
-        push_bytes(output, &[value as u8 | 0x80], maximum_output_size)?;
-        value >>= 7;
-    }
-    push_bytes(output, &[value as u8], maximum_output_size)
 }
 
 fn push_bytes(
@@ -557,7 +530,7 @@ impl Display for WebFileErrorKind {
                 "WebData entry {entry} name length {declared} exceeds limit {limit}"
             ),
             Self::InvalidStringLengthEncoding => {
-                write!(formatter, "invalid WebData 7-bit string length")
+                write!(formatter, "invalid WebData string length")
             }
             Self::DirectoryEntryCrossesHeader {
                 entry,
@@ -609,20 +582,14 @@ impl Display for WebFileErrorKind {
 mod tests {
     use super::{WebFile, WebFileEntry, WebFileErrorKind, WebFileLimits};
 
-    fn encoded_7bit_length(mut length: usize) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        while length >= 0x80 {
-            bytes.push((length as u8) | 0x80);
-            length >>= 7;
-        }
-        bytes.push(length as u8);
-        bytes
+    fn encoded_name_length(length: usize) -> Vec<u8> {
+        (length as u32).to_le_bytes().to_vec()
     }
 
     fn web_file_with_one_entry(name: &str, data: &[u8]) -> Vec<u8> {
         let mut bytes = b"UnityWebData1.0\0".to_vec();
         bytes.extend_from_slice(&[0; 4]);
-        let name_length = encoded_7bit_length(name.len());
+        let name_length = encoded_name_length(name.len());
         let header_size = bytes.len() + 4 + 4 + name_length.len() + name.len();
         let entry_offset = header_size;
         bytes.extend_from_slice(&(entry_offset as i32).to_le_bytes());
@@ -663,18 +630,18 @@ mod tests {
     }
 
     #[test]
-    fn reads_and_writes_multibyte_seven_bit_name_lengths() {
+    fn reads_and_writes_long_names_with_four_byte_lengths() {
         let name = "a".repeat(130);
         let input = web_file_with_one_entry(&name, b"data");
-        assert_eq!(&input[28..30], &[0x82, 0x01]);
+        assert_eq!(&input[28..32], &[0x82, 0x00, 0x00, 0x00]);
 
         let parsed = WebFile::parse(&input).unwrap();
         assert_eq!(parsed.entries[0].name, name);
         let written = parsed.write(false, 1024).unwrap();
         let name_length_position = 28;
         assert_eq!(
-            &written[name_length_position..name_length_position + 2],
-            &[0x82, 0x01]
+            &written[name_length_position..name_length_position + 4],
+            &[0x82, 0x00, 0x00, 0x00]
         );
         assert_eq!(WebFile::parse(&written).unwrap().entries[0].name, name);
     }
@@ -786,7 +753,7 @@ mod tests {
     fn web_file_with_entries(records: &[(&str, &[u8])]) -> Vec<u8> {
         let mut directory_len = 0usize;
         for (name, _) in records {
-            directory_len += 4 + 4 + encoded_7bit_length(name.len()).len() + name.len();
+            directory_len += 4 + 4 + encoded_name_length(name.len()).len() + name.len();
         }
         let header_size = 20 + directory_len;
         let mut bytes = b"UnityWebData1.0\0".to_vec();
@@ -795,7 +762,7 @@ mod tests {
         for (name, data) in records {
             bytes.extend_from_slice(&(offset as i32).to_le_bytes());
             bytes.extend_from_slice(&(data.len() as i32).to_le_bytes());
-            bytes.extend_from_slice(&encoded_7bit_length(name.len()));
+            bytes.extend_from_slice(&encoded_name_length(name.len()));
             bytes.extend_from_slice(name.as_bytes());
             offset += data.len();
         }
@@ -853,5 +820,86 @@ mod tests {
         assert_eq!(entry("Resource.resource").to_string(), "resource.resource");
         assert_eq!(entry("library/Shared.Assets").to_string(), "shared.assets");
         assert_eq!(entry("archive:/Bundles/MainData").to_string(), "maindata");
+    }
+
+    #[test]
+    fn directory_and_entries_match_reference_written_files() {
+        fn hex_to_bytes(hex: &str) -> Vec<u8> {
+            assert!(hex.len().is_multiple_of(2), "odd hex length for {hex}");
+            let mut out = Vec::with_capacity(hex.len() / 2);
+            let bytes = hex.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                let hi = match bytes[i] {
+                    b'0'..=b'9' => bytes[i] - b'0',
+                    b'a'..=b'f' => bytes[i] - b'a' + 10,
+                    b'A'..=b'F' => bytes[i] - b'A' + 10,
+                    b => panic!("invalid hex byte {b}"),
+                };
+                let lo = match bytes[i + 1] {
+                    b'0'..=b'9' => bytes[i + 1] - b'0',
+                    b'a'..=b'f' => bytes[i + 1] - b'a' + 10,
+                    b'A'..=b'F' => bytes[i + 1] - b'A' + 10,
+                    b => panic!("invalid hex byte {b}"),
+                };
+                out.push((hi << 4) | lo);
+                i += 2;
+            }
+            out
+        }
+
+        // Probe Temp/opencode/legacybundleprobe (WebFile.Write plus Read over
+        // reference-written files with align on/off, SDK 10.0.401; D3 is a
+        // C#-constructed bad offset): D1/D2 carry a 200-char name exercising
+        // the four-byte length; D3 fails loud on both sides.
+        // D1/D2 are reference-generated, not Rust-generated.
+        let fixture = include_str!("legacy_bundle_fixture.txt");
+        let mut hexes: std::collections::HashMap<String, Vec<u8>> =
+            std::collections::HashMap::new();
+        let mut reads: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for line in fixture.lines() {
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+            if line.starts_with("LEGACY_HEX|") {
+                let parts: Vec<&str> = line.splitn(3, '|').collect();
+                assert_eq!(parts.len(), 3, "bad LEGACY_HEX {line}");
+                hexes.insert(parts[1].to_string(), hex_to_bytes(parts[2]));
+            } else if line.starts_with("LEGACY_READ|") {
+                let parts: Vec<&str> = line.splitn(3, '|').collect();
+                assert_eq!(parts.len(), 3, "bad LEGACY_READ {line}");
+                reads.insert(parts[1].to_string(), parts[2].to_string());
+            }
+        }
+
+        let long_name = format!("{}.bin", "n".repeat(200));
+        for case in ["D1", "D2"] {
+            let bytes = hexes.get(case).unwrap_or_else(|| panic!("missing {case}"));
+            let dump = reads.get(case).unwrap_or_else(|| panic!("missing {case}"));
+            assert!(
+                dump.contains("FILE:a.bin=68656C6C6F20776562"),
+                "{case} {dump}"
+            );
+            assert!(
+                dump.contains("7365636F6E6420656E747279207061796C6F6164"),
+                "{case} {dump}"
+            );
+            assert!(WebFile::is_web_file(bytes), "{case} sniff");
+            let file =
+                WebFile::parse(bytes).unwrap_or_else(|e| panic!("{case} Rust parse failed: {e:?}"));
+            assert_eq!(file.entries.len(), 2, "{case} entries");
+            assert_eq!(file.entries[0].name, "a.bin");
+            assert_eq!(file.entries[1].name, long_name, "{case} long name");
+            assert_eq!(file.entry_data(0).unwrap(), b"hello web");
+            assert_eq!(file.entry_data(1).unwrap(), b"second entry payload");
+        }
+
+        // Bad offsets fail loud on both sides (source behavior now executed).
+        {
+            let bytes = hexes.get("D3").expect("D3 hex");
+            let dump = reads.get("D3").expect("D3 dump");
+            assert!(dump.starts_with("THROW:"), "D3 refusal {dump}");
+            assert!(WebFile::parse(bytes).is_err(), "D3 Rust fails loud");
+        }
     }
 }
