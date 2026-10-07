@@ -6,15 +6,15 @@ The status counts below come from the `Status` cell in each stable-ID row of `do
 
 | Ledger status | Rows |
 |---|---:|
-| `已验证` | 342 |
-| `已实现但未验证` | 17 |
+| `已验证` | 343 |
+| `已实现但未验证` | 16 |
 | `实现中` | 14 |
 | `已调查` | 4 |
 | `未调查` | 0 |
 | `受外部条件阻塞` | 0 |
-| **Open rows** | **35** |
+| **Open rows** | **34** |
 
-All 35 queued rows currently block the Phase 1 gate: each maps to baseline shipping behavior, and no exact verified disposition removes it from the product scope. `TYPE-SCRIPT-001` still needs a source-backed runtime-versus-tooling disposition. Unity-only evidence is a real gap where listed; it is not counted as passed. The inventory is the Phase 1 work queue and should be refreshed only after closing a complete behavior or finding a new source-backed disposition.
+All 34 queued rows currently block the Phase 1 gate: each maps to baseline shipping behavior, and no exact verified disposition removes it from the product scope. `TYPE-SCRIPT-001` still needs a source-backed runtime-versus-tooling disposition. Unity-only evidence is a real gap where listed; it is not counted as passed. The inventory is the Phase 1 work queue and should be refreshed only after closing a complete behavior or finding a new source-backed disposition.
 
 ## Closed behavior units
 
@@ -24,6 +24,7 @@ All 35 queued rows currently block the Phase 1 gate: each maps to baseline shipp
 | `IO-STREAM-PATH-001` | An isolated AssetRipper IO.Files runtime probe compared regular paths, split base/part paths, logical names, recognition rules, numeric ordering through `.split10`, boundary reads, missing parts, and `.split00` rejection. Rust's path fixture test matches the observable outcomes, and `SchemeReader::mount_path` integration tests verify logical-name mounting and padded-part rejection. The source's End-seek sign difference is recorded separately under `DIFF-MULTIFILE-SEEK-END-001`. |
 | `PROC-PREFAB-SCENE-BUNDLE-001` | The integrated `plan_workspace_scene_hierarchy_bundle_names` planner composes source-order scene/collection traversal, per-bundle `FetchAssets()`-ordered asset facts, real `get_asset_bundle_name` resolution, and the streamed-scene `Debug.Assert` as an explicit release-continue warning. CLI `print_workspace_summary_to` resolves live class-142 payloads and reports per-scene hierarchy bundle names. See `DIFF-PREFAB-SCENE-BUNDLE-001` and the planner plus CLI regression tests named in `docs/feature-parity.md`. |
 | `IO-FS-IMPORT-PATH-001` | An isolated AssetRipper IO.Files runtime probe wrote aligned and unaligned WebData containers and pinned entry inventory, truncation fallback to a raw leaf, split base/part resolution, and missing-part rejection. Rust replays every row through production `mount_path` with byte-identical mounts and fail-closed gaps. See `DIFF-SINGLEFILE-IMPORT-001` and the regression test named in `docs/feature-parity.md`. |
+| `PROC-SCENE-INSPECT-001` | A GameObject-rich CLI end-to-end fixture inspects a manager plus cross-file GameObject/Transform pairs (external father, dangling local reference) and pins graph counts, PPtr resolution outcomes, root candidates, hierarchy diagnostics, indeterminate `GetRoot` reasons, SceneDefinition attachment, and the dependency report. Root ordering stays covered by the ported `calculate_root_order` plus fixture. See the regression test named in `docs/feature-parity.md`. |
 
 ## Dependency order
 
@@ -65,7 +66,6 @@ The row-level work units below are the smallest complete closures justified by d
 | `PROC-SCENE-001` | `实现中` | `Processing/Scenes`; `Prefabs`; `SceneHierarchyObject.GetRoots`; `TraversalHelperMethods`; `TransformExtensions`; `EditorFormatConverterAsync` | **Integration:** create typed GameObject/component/Transform graphs from the workspace, preserve cross-file relationships and ordered components, then run Scene and Prefab processors including generated/missing objects and diagnostics. | Yes |
 | `PROC-SCENE-NAMING-001` | `实现中` | `SceneHelpers`; `SceneDefinitionProcessor` | **Integration:** materialize the source scene collections and definitions, resolve BuildSettings indexes, paths, GUIDs, duplicate entries, and streamed-scene hashes/container mappings from serialized input. | Yes |
 | `PROC-SCENE-BUILDSETTINGS-001` | `实现中` | BuildSettings class ID 141; `Pass002_RenameSubnodes` | **Implementation/integration:** decode real legacy and modern BuildSettings objects, preserve ordered paths, and apply the source rename/association pass to project objects; compare an independently created SerializedFile to the reference. | Yes |
-| `PROC-SCENE-INSPECT-001` | `已实现但未验证` | `SceneHierarchyObject.GetRoots`; `TransformExtensions.CalculateRootOrder`; workspace inspect | **Integration:** make inspection operate on the same typed SceneHierarchy objects used by processing/export, with root order, ownership, cross-file edges, and unresolved-reference outcomes; retain a CLI end-to-end fixture. | Yes |
 
 ### Animation processing and export
 

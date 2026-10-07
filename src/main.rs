@@ -5308,6 +5308,257 @@ mod tests {
         file
     }
 
+    fn put_i64_le(output: &mut Vec<u8>, value: i64) {
+        output.extend_from_slice(&value.to_le_bytes());
+    }
+
+    /// Single-`GameObject` SerializedFile mirroring the proven layout in
+    /// `processing::scene` tests: `m_Name`, `m_IsActive`, and an
+    /// `m_Component` PPtr vector whose entries address `(file_id, path_id)`
+    /// with `file_id` indexing this file's own external table.
+    fn make_inspect_game_object_file(
+        name: &str,
+        path_id: i32,
+        components: &[(i32, i32)],
+        external_path: Option<&str>,
+    ) -> Vec<u8> {
+        let mut strings = Vec::new();
+        let root_type = push_type_tree_string(&mut strings, "GameObject");
+        let empty = push_type_tree_string(&mut strings, "");
+        let name_field = push_type_tree_string(&mut strings, "m_Name");
+        let string_type = push_type_tree_string(&mut strings, "string");
+        let array = push_type_tree_string(&mut strings, "Array");
+        let size = push_type_tree_string(&mut strings, "size");
+        let int_type = push_type_tree_string(&mut strings, "int");
+        let data = push_type_tree_string(&mut strings, "data");
+        let char_type = push_type_tree_string(&mut strings, "char");
+        let active_field = push_type_tree_string(&mut strings, "m_IsActive");
+        let bool_type = push_type_tree_string(&mut strings, "bool");
+        let component_field = push_type_tree_string(&mut strings, "m_Component");
+        let vector_type = push_type_tree_string(&mut strings, "vector");
+        let pptr_type = push_type_tree_string(&mut strings, "PPtr<Component>");
+        let file_id_field = push_type_tree_string(&mut strings, "m_FileID");
+        let path_id_field = push_type_tree_string(&mut strings, "m_PathID");
+        let int32_type = push_type_tree_string(&mut strings, "SInt32");
+
+        let mut metadata = Vec::new();
+        metadata.extend_from_slice(b"2019.4.0f1\0");
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 1);
+        put_i32_le(&mut metadata, 1);
+        put_i32_le(&mut metadata, 12);
+        put_i32_le(&mut metadata, i32::try_from(strings.len()).unwrap());
+        for (level, type_offset, name_offset, byte_size, index) in [
+            (0, root_type, empty, -1, 0),
+            (1, string_type, name_field, -1, 1),
+            (2, array, array, -1, 2),
+            (3, int_type, size, 4, 3),
+            (3, char_type, data, 1, 4),
+            (1, bool_type, active_field, 1, 5),
+            (1, vector_type, component_field, -1, 6),
+            (2, array, array, -1, 7),
+            (3, int_type, size, 4, 8),
+            (3, pptr_type, data, -1, 9),
+            (4, int32_type, file_id_field, 4, 10),
+            (4, int32_type, path_id_field, 4, 11),
+        ] {
+            put_node(
+                &mut metadata,
+                level,
+                type_offset,
+                name_offset,
+                byte_size,
+                index,
+            );
+        }
+        metadata.extend_from_slice(&strings);
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 1);
+        put_i32_le(&mut metadata, path_id);
+        put_u32_le(&mut metadata, 0);
+
+        let mut payload = Vec::new();
+        put_i32_le(&mut payload, i32::try_from(name.len()).unwrap());
+        payload.extend_from_slice(name.as_bytes());
+        let name_padding = (4 - name.len() % 4) % 4;
+        payload.resize(payload.len() + name_padding, 0);
+        payload.push(1);
+        put_i32_le(&mut payload, i32::try_from(components.len()).unwrap());
+        for &(file_id, target_path_id) in components {
+            put_i32_le(&mut payload, file_id);
+            put_i32_le(&mut payload, target_path_id);
+        }
+        put_i32_le(&mut metadata, i32::try_from(payload.len()).unwrap());
+        put_i32_le(&mut metadata, 1);
+        put_u16_le(&mut metadata, 1);
+        put_u16_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, i32::from(external_path.is_some()));
+        if let Some(external_path) = external_path {
+            metadata.push(0);
+            metadata.extend_from_slice(&[0; 16]);
+            put_i32_le(&mut metadata, 0);
+            metadata.extend_from_slice(external_path.as_bytes());
+            metadata.push(0);
+        }
+        metadata.push(0);
+
+        finish_inspect_serialized_file(metadata, payload)
+    }
+
+    /// Single-`Transform` SerializedFile with the same node layout as the
+    /// `processing::scene` fixture: `m_GameObject`, rotation/position/scale,
+    /// `m_Children`, `m_Father`, `m_RootOrder`, and the euler hint.
+    #[allow(clippy::too_many_arguments)]
+    fn make_inspect_transform_file(
+        path_id: i32,
+        game_object: (i32, i64),
+        children: &[(i32, i64)],
+        father: (i32, i64),
+        root_order: i32,
+        external_names: &[&str],
+    ) -> Vec<u8> {
+        let mut strings = Vec::new();
+        let root_type = push_type_tree_string(&mut strings, "Transform");
+        let empty = push_type_tree_string(&mut strings, "");
+        let pptr_game_object = push_type_tree_string(&mut strings, "PPtr<GameObject>");
+        let pptr_transform = push_type_tree_string(&mut strings, "PPtr<Transform>");
+        let quaternion_type = push_type_tree_string(&mut strings, "Quaternion");
+        let vector3_type = push_type_tree_string(&mut strings, "Vector3");
+        let float_type = push_type_tree_string(&mut strings, "float");
+        let int_type = push_type_tree_string(&mut strings, "int");
+        let vector_type = push_type_tree_string(&mut strings, "vector");
+        let array_type = push_type_tree_string(&mut strings, "Array");
+        let file_id_field = push_type_tree_string(&mut strings, "m_FileID");
+        let file_id_type = push_type_tree_string(&mut strings, "SInt32");
+        let path_id_field = push_type_tree_string(&mut strings, "m_PathID");
+        let path_id_type = push_type_tree_string(&mut strings, "SInt64");
+        let game_object_field = push_type_tree_string(&mut strings, "m_GameObject");
+        let local_rotation_field = push_type_tree_string(&mut strings, "m_LocalRotation");
+        let local_position_field = push_type_tree_string(&mut strings, "m_LocalPosition");
+        let local_scale_field = push_type_tree_string(&mut strings, "m_LocalScale");
+        let children_field = push_type_tree_string(&mut strings, "m_Children");
+        let father_field = push_type_tree_string(&mut strings, "m_Father");
+        let root_order_field = push_type_tree_string(&mut strings, "m_RootOrder");
+        let euler_hint_field = push_type_tree_string(&mut strings, "m_LocalEulerAnglesHint");
+        let x_field = push_type_tree_string(&mut strings, "x");
+        let y_field = push_type_tree_string(&mut strings, "y");
+        let z_field = push_type_tree_string(&mut strings, "z");
+        let w_field = push_type_tree_string(&mut strings, "w");
+        let size_field = push_type_tree_string(&mut strings, "size");
+        let data_field = push_type_tree_string(&mut strings, "data");
+
+        let mut nodes = Vec::new();
+        let mut add_node = |level, type_offset, name_offset, byte_size: i32| {
+            let index = i32::try_from(nodes.len()).unwrap();
+            nodes.push((level, type_offset, name_offset, byte_size, index));
+        };
+        add_node(0, root_type, empty, -1);
+        add_node(1, pptr_game_object, game_object_field, -1);
+        add_node(2, file_id_type, file_id_field, 4);
+        add_node(2, path_id_type, path_id_field, 8);
+        add_node(1, quaternion_type, local_rotation_field, 16);
+        add_node(2, float_type, x_field, 4);
+        add_node(2, float_type, y_field, 4);
+        add_node(2, float_type, z_field, 4);
+        add_node(2, float_type, w_field, 4);
+        add_node(1, vector3_type, local_position_field, 12);
+        add_node(2, float_type, x_field, 4);
+        add_node(2, float_type, y_field, 4);
+        add_node(2, float_type, z_field, 4);
+        add_node(1, vector3_type, local_scale_field, 12);
+        add_node(2, float_type, x_field, 4);
+        add_node(2, float_type, y_field, 4);
+        add_node(2, float_type, z_field, 4);
+        add_node(1, vector_type, children_field, -1);
+        add_node(2, array_type, array_type, -1);
+        add_node(3, int_type, size_field, 4);
+        add_node(3, pptr_transform, data_field, -1);
+        add_node(4, file_id_type, file_id_field, 4);
+        add_node(4, path_id_type, path_id_field, 8);
+        add_node(1, pptr_transform, father_field, -1);
+        add_node(2, file_id_type, file_id_field, 4);
+        add_node(2, path_id_type, path_id_field, 8);
+        add_node(1, int_type, root_order_field, 4);
+        add_node(1, vector3_type, euler_hint_field, 12);
+        add_node(2, float_type, x_field, 4);
+        add_node(2, float_type, y_field, 4);
+        add_node(2, float_type, z_field, 4);
+
+        let mut metadata = Vec::new();
+        metadata.extend_from_slice(b"2019.4.0f1\0");
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 1);
+        put_i32_le(&mut metadata, 4);
+        put_i32_le(&mut metadata, i32::try_from(nodes.len()).unwrap());
+        put_i32_le(&mut metadata, i32::try_from(strings.len()).unwrap());
+        for (level, type_offset, name_offset, byte_size, index) in nodes {
+            put_node(
+                &mut metadata,
+                level,
+                type_offset,
+                name_offset,
+                byte_size,
+                index,
+            );
+        }
+        metadata.extend_from_slice(&strings);
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 1);
+        put_i32_le(&mut metadata, path_id);
+        put_u32_le(&mut metadata, 0);
+
+        let mut payload = Vec::new();
+        put_i32_le(&mut payload, game_object.0);
+        put_i64_le(&mut payload, game_object.1);
+        for value in [0.0, 0.0, 0.0, 1.0] {
+            put_f32_le(&mut payload, value);
+        }
+        for value in [0.0, 0.0, 0.0, 1.0, 1.0, 1.0] {
+            put_f32_le(&mut payload, value);
+        }
+        put_i32_le(&mut payload, i32::try_from(children.len()).unwrap());
+        for &(file_id, child_path_id) in children {
+            put_i32_le(&mut payload, file_id);
+            put_i64_le(&mut payload, child_path_id);
+        }
+        put_i32_le(&mut payload, father.0);
+        put_i64_le(&mut payload, father.1);
+        put_i32_le(&mut payload, root_order);
+        for value in [0.0, 0.0, 0.0] {
+            put_f32_le(&mut payload, value);
+        }
+
+        put_i32_le(&mut metadata, i32::try_from(payload.len()).unwrap());
+        put_i32_le(&mut metadata, 4);
+        put_u16_le(&mut metadata, 4);
+        put_u16_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, i32::try_from(external_names.len()).unwrap());
+        for external_name in external_names {
+            metadata.push(0);
+            metadata.extend_from_slice(&[0; 16]);
+            put_i32_le(&mut metadata, 0);
+            metadata.extend_from_slice(external_name.as_bytes());
+            metadata.push(0);
+        }
+        metadata.push(0);
+
+        finish_inspect_serialized_file(metadata, payload)
+    }
+
+    fn finish_inspect_serialized_file(metadata: Vec<u8>, payload: Vec<u8>) -> Vec<u8> {
+        let data_offset = 20usize + metadata.len();
+        let file_size = data_offset + payload.len();
+        let mut file = Vec::with_capacity(file_size);
+        file.extend_from_slice(&i32::try_from(metadata.len()).unwrap().to_be_bytes());
+        file.extend_from_slice(&u32::try_from(file_size).unwrap().to_be_bytes());
+        file.extend_from_slice(&10i32.to_be_bytes());
+        file.extend_from_slice(&u32::try_from(data_offset).unwrap().to_be_bytes());
+        file.extend_from_slice(&[0, 0, 0, 0]);
+        file.extend_from_slice(&metadata);
+        file.extend_from_slice(&payload);
+        file
+    }
+
     fn make_webdata_fixture(entries: &[(&str, &[u8])]) -> Vec<u8> {
         let header_size = 20usize
             + entries
@@ -7757,6 +8008,92 @@ mod tests {
         ));
         assert!(summary.contains("Non-scene hierarchy collection graphs: 1"));
         assert!(summary.contains(": 1 GameObjects, 0 Transforms,"));
+    }
+
+    #[test]
+    fn workspace_summary_reports_game_object_hierarchy_with_cross_file_roots() {
+        let directory = TestInputDirectory::new_root();
+        fs::write(
+            directory.join("level0"),
+            make_occlusion_settings_file([1, 2, 3, 4]),
+        )
+        .unwrap();
+        fs::write(
+            directory.join("hero-go"),
+            make_inspect_game_object_file("Hero", 10, &[(1, 20)], Some("hero-transform")),
+        )
+        .unwrap();
+        fs::write(
+            directory.join("hero-transform"),
+            make_inspect_transform_file(20, (1, 10), &[], (0, 0), 3, &["hero-go"]),
+        )
+        .unwrap();
+        fs::write(
+            directory.join("side-go"),
+            make_inspect_game_object_file("Sidekick", 11, &[(1, 21)], Some("side-transform")),
+        )
+        .unwrap();
+        fs::write(
+            directory.join("side-transform"),
+            make_inspect_transform_file(21, (0, 9999), &[], (1, 20), 5, &["hero-transform"]),
+        )
+        .unwrap();
+        let (mut filesystem, selected_paths, _) =
+            super::mount_input_directories(std::slice::from_ref(&directory), false).unwrap();
+        let mixed = super::MixedGameStructure::from_vfs_paths(
+            &filesystem,
+            &selected_paths,
+            super::MixedGameStructureLimits::default(),
+        )
+        .unwrap();
+        let (workspace, dependencies) =
+            super::SerializedFileWorkspace::load_from_vfs_with_dependencies(
+                &mut filesystem,
+                &mixed.serialized_file_inputs,
+                &mixed.registered_files,
+                &mixed.data_paths,
+                super::SerializedFileWorkspaceLimits::default(),
+                super::DependencyIndexLimits::default(),
+                super::ContainerMountLimits::default(),
+            )
+            .unwrap();
+        let mut output = Vec::new();
+        super::print_workspace_summary_to(&mut output, &filesystem, &workspace, &dependencies)
+            .unwrap();
+        let summary = String::from_utf8(output).unwrap();
+        // All five objects decode; the six PPtrs split into 1 null (hero
+        // father), 4 cross-file resolutions, and 1 explicit local miss.
+        assert!(summary
+            .contains("Object payload decode: 5/5 decoded, 0 undecoded, 0 raw fallback bytes"));
+        assert!(summary.contains(
+            "TypeTree reference graph: 6 recognized PPtrs, 1 null, 4 uniquely resolved, 1 unresolved"
+        ));
+        assert!(summary.contains(
+            "Unresolved PPtr: file 4 \"/inputs/0/side-transform\" (name \"side-transform\"), object 0, PathID 21, field \"m_GameObject\": MissingLocalObject { path_id: 9999 }"
+        ));
+        // The hero pair joins across files: the GameObject graph reports its
+        // component edge, and root discovery follows the external Transform
+        // with a null father and its stored root order.
+        assert!(summary.contains("Scene graph: 1 GameObjects, 0 Transforms, 1 relationships"));
+        assert!(summary.contains(
+            "root candidate file 0 PathID 10 (Transform file 1 object 0 PathID Some(20); NullFather)"
+        ));
+        // The orphan side Transform (dangling m_GameObject, external father)
+        // stays explicit: incomplete graph plus a hierarchy issue, never a
+        // silent null root.
+        assert!(summary.contains("Scene graph: 0 GameObjects, 1 Transforms, 2 relationships"));
+        assert!(summary.contains("workspace hierarchy issues: 1, audit complete=false"));
+        assert!(summary.contains("Non-scene hierarchy collection graphs: 4"));
+        assert!(summary.contains(
+            "GameObject 3:0 PathID 11 GetRoot is indeterminate: Some(IncompleteCollectionGraph { file_index: 4 })"
+        ));
+        // The manager file still owns the only SceneDefinition; standalone
+        // files have no SerializedBundle so the hierarchy bundle name is unset.
+        assert!(summary.contains("SceneDefinitions: 1"));
+        assert!(summary.contains("hierarchy AssetBundleName: unset (no SerializedBundle)"));
+        assert!(
+            summary.contains("external requests: 4; newly loaded dependencies: 0; resolved: true")
+        );
     }
 
     #[test]
