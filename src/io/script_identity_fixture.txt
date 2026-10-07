@@ -1,4 +1,4 @@
-# Assembly-name and script-identity reference values.
+﻿# Assembly-name and script-identity reference values.
 # Probe Temp/opencode/scriptidprobe: shipped AssetRipper.IO.Files.dll
 # (SpecialFileNames) and AssetRipper.Import.dll (ScriptingBackend,
 # ScriptIdentifier, TypeTreeResolver), SDK 10.0.401. No escaping: fields contain no
@@ -61,3 +61,110 @@ THROW|A|G||ArgumentException
 THROW|A|<null>|N|ArgumentNullException
 RESOLVE|empty|0|The type reference was not found in the set of available type trees.
 RESOLVE|broken-tree|0|Failed to create nodes from the type tree.
+# SerializableTreeType.FromReferencedObjectNode; the Rust port replays every
+# row in processing::script_identity tests. Formats:
+# Node-building rows (extended probe Temp/opencode/scriptidprobe, SDK 10.0.401).
+# Hand-built OldType node lists drive the shipped TypeTreeResolver plus
+# SerializableTreeType.FromReferencedObjectNode; the Rust port replays every
+# row in processing::script_identity tests. Formats:
+# NODESRC|<case>|<type>|<name>|<level>|<meta flags int>;
+# NODETREE|<case>|<found 0|1>|<failure reason or empty>;
+# NTTYPE|<case>|<dotted path>|<FullName>|<PrimitiveType>|<version>|<flow 0|1>|<max depth>;
+# NTFIELD|<case>|<dotted path>|<name>|<array depth>|<align 0|1>|<is array 0|1>
+# followed by the field type NTTYPE row. All cases resolve the Player script in
+# Assembly-CSharp with an empty namespace.
+NODESRC|flat|Player|Base|0|0
+NODESRC|flat|int|m_Health|1|0
+NODESRC|flat|float|m_Speed|1|0
+NODETREE|flat|1|<null>
+NTTYPE|flat||Player|Complex|1|0|1
+NTFIELD|flat|m_Health|m_Health|0|0|0
+NTTYPE|flat|m_Health|int|Int|1|0|0
+NTFIELD|flat|m_Speed|m_Speed|0|0|0
+NTTYPE|flat|m_Speed|float|Single|1|0|0
+NODESRC|nested-string-vector|Player|Base|0|0
+NODESRC|nested-string-vector|string|m_Name|1|0
+NODESRC|nested-string-vector|Array|Array|2|0
+NODESRC|nested-string-vector|int|size|3|0
+NODESRC|nested-string-vector|char|data|3|0
+NODESRC|nested-string-vector|vector|m_Items|1|0
+NODESRC|nested-string-vector|Array|Array|2|0
+NODESRC|nested-string-vector|int|size|3|0
+NODESRC|nested-string-vector|float|data|3|0
+NODETREE|nested-string-vector|1|<null>
+NTTYPE|nested-string-vector||Player|Complex|1|0|1
+NTFIELD|nested-string-vector|m_Name|m_Name|0|0|0
+NTTYPE|nested-string-vector|m_Name|string|String|1|0|0
+NTFIELD|nested-string-vector|m_Items|m_Items|1|0|1
+NTTYPE|nested-string-vector|m_Items|float|Single|1|0|0
+NODESRC|pptr-align|Player|Base|0|0
+NODESRC|pptr-align|PPtr<GameObject>|m_Target|1|16384
+NODESRC|pptr-align|int|m_FileID|2|0
+NODESRC|pptr-align|SInt64|m_PathID|2|0
+NODESRC|pptr-align|UInt16|m_Flags|1|33554432
+NODETREE|pptr-align|1|<null>
+NTTYPE|pptr-align||Player|Complex|1|0|1
+NTFIELD|pptr-align|m_Target|m_Target|0|1|0
+NTTYPE|pptr-align|m_Target|UnityEngine.Object|Complex|1|0|0
+NTFIELD|pptr-align|m_Flags|m_Flags|0|0|0
+NTTYPE|pptr-align|m_Flags|UInt16|Char|1|0|0
+NODESRC|managed|Player|Base|0|0
+NODESRC|managed|managedReference|m_Ref|1|0
+NODESRC|managed|SInt64|rid|2|0
+NODESRC|managed|ManagedReferencesRegistry|references|1|0
+NODESRC|managed|int|version|2|0
+NODESRC|managed|int|dummy|2|0
+NODETREE|managed|1|<null>
+NTTYPE|managed||Player|Complex|1|0|2
+NTFIELD|managed|m_Ref|m_Ref|0|0|0
+NTTYPE|managed|m_Ref|managedReference|Complex|1|0|1
+NTFIELD|managed|m_Ref.rid|rid|0|0|0
+NTTYPE|managed|m_Ref.rid|System.Int64|Long|1|0|0
+NODESRC|map|Player|Base|0|0
+NODESRC|map|map|m_Lookup|1|0
+NODESRC|map|Array|Array|2|0
+NODESRC|map|int|size|3|0
+NODESRC|map|pair|data|3|0
+NODESRC|map|int|first|4|0
+NODESRC|map|int|second|4|0
+NODETREE|map|1|<null>
+NTTYPE|map||Player|Complex|1|0|2
+NTFIELD|map|m_Lookup|m_Lookup|1|0|1
+NTTYPE|map|m_Lookup|pair|MapPair|1|0|1
+NTFIELD|map|m_Lookup.first|first|0|0|0
+NTTYPE|map|m_Lookup.first|int|Int|1|0|0
+NTFIELD|map|m_Lookup.second|second|0|0|0
+NTTYPE|map|m_Lookup.second|int|Int|1|0|0
+NODESRC|nested-registry|Player|Base|0|0
+NODESRC|nested-registry|Inner|m_Inner|1|0
+NODESRC|nested-registry|managedReference|m_Ref|2|0
+NODESRC|nested-registry|SInt64|rid|3|0
+NODESRC|nested-registry|ManagedReferencesRegistry|references|2|0
+NODESRC|nested-registry|int|version|3|0
+NODESRC|nested-registry|int|dummy|3|0
+NODETREE|nested-registry|1|<null>
+NTTYPE|nested-registry||Player|Complex|1|0|5
+NTFIELD|nested-registry|m_Inner|m_Inner|0|0|0
+NTTYPE|nested-registry|m_Inner|Inner|Complex|1|0|4
+NTFIELD|nested-registry|m_Inner.m_Ref|m_Ref|0|0|0
+NTTYPE|nested-registry|m_Inner.m_Ref|managedReference|Complex|1|0|1
+NTFIELD|nested-registry|m_Inner.m_Ref.rid|rid|0|0|0
+NTTYPE|nested-registry|m_Inner.m_Ref.rid|System.Int64|Long|1|0|0
+NTFIELD|nested-registry|m_Inner.references|references|0|0|0
+NTTYPE|nested-registry|m_Inner.references|ManagedReferencesRegistry|Complex|1|0|3
+NTFIELD|nested-registry|m_Inner.references.version|version|0|0|0
+NTTYPE|nested-registry|m_Inner.references.version|System.Int32|Int|1|0|0
+NTFIELD|nested-registry|m_Inner.references.RefIds|RefIds|1|1|1
+NTTYPE|nested-registry|m_Inner.references.RefIds|ReferencedObject|Complex|1|0|2
+NTFIELD|nested-registry|m_Inner.references.RefIds.rid|rid|0|0|0
+NTTYPE|nested-registry|m_Inner.references.RefIds.rid|System.Int64|Long|1|0|0
+NTFIELD|nested-registry|m_Inner.references.RefIds.type|type|0|0|0
+NTTYPE|nested-registry|m_Inner.references.RefIds.type|ReferencedManagedType|Complex|1|1|1
+NTFIELD|nested-registry|m_Inner.references.RefIds.type.class|class|0|0|0
+NTTYPE|nested-registry|m_Inner.references.RefIds.type.class|System.String|String|1|0|0
+NTFIELD|nested-registry|m_Inner.references.RefIds.type.ns|ns|0|0|0
+NTTYPE|nested-registry|m_Inner.references.RefIds.type.ns|System.String|String|1|0|0
+NTFIELD|nested-registry|m_Inner.references.RefIds.type.asm|asm|0|0|0
+NTTYPE|nested-registry|m_Inner.references.RefIds.type.asm|System.String|String|1|0|0
+NTFIELD|nested-registry|m_Inner.references.RefIds.data|data|0|0|0
+NTTYPE|nested-registry|m_Inner.references.RefIds.data|ReferencedObjectData|Complex|1|0|0

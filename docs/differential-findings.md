@@ -885,3 +885,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | HumanoidMuscleError plus Result return in avatar.rs and clip_convert.rs; fixture src/resources/muscle_probe_fixture.txt; test humanoid_muscles_reproduce_the_reference_probe_dump. |
 | Regression evidence | New test passes; full suite 1380 plus 65 pass with warnings-denied Clippy. |
 | Remaining comparison | Binding-to-muscle cast, curve emission, and Unity-produced inputs stay out per the row disposition. |
+
+## DIFF-SCRIPT-RESOLVER-001 - resolver node building
+
+| Field | Finding |
+|---|---|
+| Status | Reference-product-path evidence recorded; one file-reference row ported and pinned |
+| Source location | AssetRipper/Source/AssetRipper.Import/Structure/Assembly/Serializable/TypeTreeResolver.cs; .../TypeTrees/TypeTreeNodeStruct.cs; .../TypeTrees/SerializableTreeType.cs; AssetRipper.SerializationLogic (PrimitiveType, ManagedReferenceTypes, SerializablePointerType) |
+| Input evidence | Extended probe Temp/opencode/scriptidprobe (shipped Import/IO.Files DLLs, SDK 10.0.401) with six hand-built OldType node lists. Committed as NODESRC/NODETREE/NTTYPE/NTFIELD rows in src/io/script_identity_fixture.txt. |
+| Source-derived behavior | Every built type and field matches in exact order. Malformed level steps fail the build where the source throws (explicit None, no silent tree). |
+| Root cause | One real deviation found and fixed: ReferencedManagedType flow mapping (true, per its shared constructor). No silent drop remains on this path. |
+| Rust change | build_type_nodes, unwrap_primitive, SerializableTreeType model with shared substitutions, and resolve_serializable_tree in processing/script_identity.rs; test serializable_trees_reproduce_the_reference_node_dump. |
+| Regression evidence | New test passes; full suite 1381 plus 65 pass with warnings-denied Clippy. |
+| Remaining comparison | Live assembly loading and Cecil type resolution stay TYPE-SCRIPT-001; MonoBehaviour-structure root mode and Tpk trees stay outside this row. |
