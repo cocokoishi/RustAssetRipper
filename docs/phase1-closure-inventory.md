@@ -1,6 +1,6 @@
 # Phase 1 closure inventory
 
-Current inventory basis: local `main` and fetched `origin/main` are both `0572537cbd56f732ad7814451b338830171aa7dc`. The working tree also contains the uncommitted nested-registry implementation, initial workspace YAML export, multi-file path differential, and Windows local-file sharing fix recorded below. Reference source: `C:\Users\koishi\Desktop\RustAssetripper\AssetRipper`, frozen by `docs/baseline-files.sha256` (1,449 entries; manifest SHA-256 `29d1fd27f66b974c43750f30aa99117eb423cb318f3062daf05e1489f10f08f9`).
+Current inventory basis: local `main` and fetched `origin/main` are both `a63437d501c721c24948eff66b3b982dd7a052e4` (tree `e4358b42aa1344751059e267d0f0f67d37916851`), pushed and verified. This commit contains the nested-registry implementation, initial workspace YAML export, multi-file path differential, and Windows local-file sharing fix recorded below. The working tree may retain untracked probe `bin`/`obj` build outputs; they were not committed. Reference source: `C:\Users\koishi\Desktop\RustAssetripper\AssetRipper`, frozen by `docs/baseline-files.sha256` (1,449 entries; manifest SHA-256 `29d1fd27f66b974c43750f30aa99117eb423cb318f3062daf05e1489f10f08f9`).
 
 The status counts below come from the `Status` cell in each stable-ID row of `docs/feature-parity.md`, matched against the required status vocabulary; prose mentions elsewhere do not affect the count.
 
