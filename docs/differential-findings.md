@@ -794,3 +794,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | src/resources/path_checksum.rs test cache_reproduces_the_reference_add_get_reset_sequence; fixture src/resources/anim_cache_fixture.txt. No production change. |
 | Regression evidence | New test passes (module 7/7); full suite 1374 plus 64 pass with warnings-denied Clippy. |
 | Remaining comparison | BuildPathsCache population and Add(IMonoScript) stay caller-side per the row disposition. |
+
+## DIFF-IO-DISCOVERY-001 - Bundle discovery end to end
+
+| Field | Finding |
+|---|---|
+| Status | Reference-product-path evidence recorded; three discovery rows ported and pinned |
+| Source location | AssetRipper/Source/AssetRipper.Import/Structure/GameStructure.cs; AssetRipper/Source/AssetRipper.Assets/Bundles/GameBundle.FromPaths.cs |
+| Input evidence | Probe Temp/opencode/bundleprobe2 (shipped Import/Assets/IO DLLs, SDK 10.0.401) running GameStructure.Load over two synthesized UnityFS bundles. Committed as src/io/bundle_discovery_fixture.txt (bundle hexes plus reference dump). |
+| Source-derived behavior | Both entry namings (extension and CAB-) discover, parse, and materialize without assemblies; collections are entry-named; unknown ClassIDs yield zero collections; engine collections are injected. |
+| Root cause | No Rust deviation on the shared inventory (files, entries, collections, ClassIDs, PathIDs, decode counts). Object models differ by design (generated vs TypeTree). |
+| Rust change | src/main.rs test directory_inspection_reproduces_the_reference_bundle_inventory; inspect_directories_to refactor (dead printer removed); fixture src/io/bundle_discovery_fixture.txt. |
+| Regression evidence | New test passes; full suite 1374 plus 65 pass with warnings-denied Clippy. |
+| Remaining comparison | Engine injection and Unity-produced files stay out per the row dispositions. |

@@ -2017,6 +2017,15 @@ fn mount_input_files(
 }
 
 fn inspect_directories(input_directories: &[PathBuf]) -> Result<(), Box<dyn Error>> {
+    let stdout = std::io::stdout();
+    let mut output = stdout.lock();
+    inspect_directories_to(input_directories, &mut output)
+}
+
+fn inspect_directories_to<W: io::Write>(
+    input_directories: &[PathBuf],
+    output: &mut W,
+) -> Result<(), Box<dyn Error>> {
     let (mut filesystem, selected_paths, total_mount_report) =
         mount_input_directories(input_directories, true)?;
     let structure = detect_platform_structure(
@@ -2034,24 +2043,27 @@ fn inspect_directories(input_directories: &[PathBuf]) -> Result<(), Box<dyn Erro
             &mut filesystem,
             PlatformWorkspaceLoadOptions::default(),
         )?;
-        println!(
+        writeln!(
+            output,
             "platform: {:?}; source registrations: {}; scripting backend: {:?}; assemblies: {}; initial containers: {}",
             structure.platform,
             inventory.registered_files.len(),
             inventory.scripting_backend,
             inventory.assemblies.len(),
             loaded.initial_container_expansions.len()
-        );
-        println!(
+        )?;
+        writeln!(
+            output,
             "platform directory import: {} logical files, {} source bytes",
             total_mount_report.discovered_inputs, total_mount_report.discovered_source_bytes
-        );
+        )?;
         let root_catalog = RootResourceFileCatalog::default();
         let resource_context = StreamedResourceSummaryContext {
             root_catalog: &root_catalog,
             provider: PlatformResourceProvider::new(Some(&structure), None),
         };
-        print_workspace_summary_with_streamed_resources(
+        print_workspace_summary_with_streamed_resources_to(
+            output,
             &filesystem,
             &loaded.workspace,
             &loaded.dependencies,
@@ -2082,23 +2094,26 @@ fn inspect_directories(input_directories: &[PathBuf]) -> Result<(), Box<dyn Erro
         DependencyIndexLimits::default(),
         ContainerMountLimits::default(),
     )?;
-    println!(
+    writeln!(
+        output,
         "platform: mixed; registered files: {}; assemblies: {}",
         mixed.registered_files.len(),
         mixed.assemblies.len()
-    );
-    println!(
+    )?;
+    writeln!(
+        output,
         "recursively mounted directory import: {} logical inputs, {} leaf files, {} output bytes",
         total_mount_report.discovered_inputs,
         total_mount_report.mounted_entries,
         total_mount_report.mounted_bytes
-    );
+    )?;
     let root_catalog = RootResourceFileCatalog::default();
     let resource_context = StreamedResourceSummaryContext {
         root_catalog: &root_catalog,
         provider: PlatformResourceProvider::with_mixed_data_paths(None, Some(&mixed.data_paths)),
     };
-    print_workspace_summary_with_streamed_resources(
+    print_workspace_summary_with_streamed_resources_to(
+        output,
         &filesystem,
         &workspace,
         &dependencies,
@@ -2607,23 +2622,6 @@ fn print_workspace_summary_with_streamed_resources_to<W: io::Write>(
         workspace,
         dependencies,
         Some(context),
-    )
-}
-
-fn print_workspace_summary_with_streamed_resources(
-    filesystem: &VirtualFileSystem,
-    workspace: &SerializedFileWorkspace,
-    dependencies: &SerializedFileDependencyReport,
-    context: &StreamedResourceSummaryContext<'_>,
-) -> Result<(), Box<dyn Error>> {
-    let stdout = io::stdout();
-    let mut output = stdout.lock();
-    print_workspace_summary_with_streamed_resources_to(
-        &mut output,
-        filesystem,
-        workspace,
-        dependencies,
-        context,
     )
 }
 
@@ -5092,6 +5090,96 @@ mod tests {
     fn directory_inspection_loads_a_synthetic_serialized_file() {
         let input = TestInputDirectory::new();
         super::inspect_directories(std::slice::from_ref(&input.directory)).unwrap();
+    }
+
+    /// End-to-end discovery differential against the reference `GameStructure`
+    /// dump committed in `bundle_discovery_fixture.txt` (probe
+    /// `Temp/opencode/bundleprobe2`): the same two C#-constructed UnityFS
+    /// bundles are written to a temp dir, inspected, and the summary must show
+    /// the reference file/collection/object inventory (both entry namings
+    /// discovered, both SerializedFiles parsed, both objects with PathID 8001
+    /// decoded). The reference-only injected engine collections stay outside:
+    /// the Rust workspace holds exactly the two file collections.
+    #[test]
+    fn directory_inspection_reproduces_the_reference_bundle_inventory() {
+        fn decode_hex(hex: &str) -> Vec<u8> {
+            assert!(hex.len().is_multiple_of(2), "odd hex length");
+            let bytes: Vec<u8> = hex
+                .as_bytes()
+                .chunks(2)
+                .map(|pair| {
+                    let text = std::str::from_utf8(pair).unwrap();
+                    u8::from_str_radix(text, 16).unwrap()
+                })
+                .collect();
+            assert_eq!(bytes.len(), hex.len() / 2);
+            bytes
+        }
+
+        let fixture = include_str!("io/bundle_discovery_fixture.txt");
+        let directory = TestInputDirectory::new_root();
+        let mut bundle_names = Vec::new();
+        let mut reference_assets = Vec::new();
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let parts: Vec<&str> = line.split('|').collect();
+            match parts[0] {
+                "BUNDLE_HEX" => {
+                    assert_eq!(parts.len(), 3, "{line}");
+                    fs::write(directory.join(parts[1]), decode_hex(parts[2])).unwrap();
+                    bundle_names.push(parts[1].to_owned());
+                }
+                "REF" => {
+                    if parts[1] == "ASSET" {
+                        reference_assets.push(parts.join("|"));
+                    }
+                }
+                kind => panic!("unknown fixture row {kind}: {line}"),
+            }
+        }
+        assert_eq!(bundle_names.len(), 2, "two reference bundles pin the input");
+        assert_eq!(
+            reference_assets,
+            vec![
+                "REF|ASSET|1|8001|GameObject".to_owned(),
+                "REF|ASSET|1|8001|GameObject".to_owned(),
+            ]
+        );
+        let input = TestInputDirectory {
+            directory: directory.clone(),
+            files: bundle_names
+                .iter()
+                .map(|name| directory.join(name))
+                .collect(),
+            subdirectories: Vec::new(),
+        };
+
+        let mut output = Vec::new();
+        super::inspect_directories_to(std::slice::from_ref(&directory), &mut output).unwrap();
+        let summary = String::from_utf8(output).unwrap();
+
+        assert!(
+            summary.contains("platform: mixed; registered files: 2; assemblies: 0"),
+            "{summary}"
+        );
+        assert!(summary.contains("SerializedFiles: 2"), "{summary}");
+        assert!(
+            summary.contains("Workspace collections: 2 (2 objects, 0 external identifiers)"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("Object payload decode: 2/2 decoded"),
+            "{summary}"
+        );
+        // Collections are named by UnityFS entry name on both sides; indices
+        // follow discovery order, so only the names are pinned.
+        assert!(summary.contains("\"cab-test\""), "{summary}");
+        assert!(summary.contains("\"main.assets\""), "{summary}");
+        assert!(summary.contains("PathID 8001"), "{summary}");
+        drop(input);
     }
 
     #[test]
