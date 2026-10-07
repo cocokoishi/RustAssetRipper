@@ -1,0 +1,29 @@
+# Live array/3D texture conversion differential.
+# Probe Temp/opencode/arrayconvprobe: real Texture2DArray (class 187, 2x2 depth 2),
+# Texture3D (class 117, 2x2x2), and CubemapArray (class 188, width 2 count 1) objects
+# built through the generated Create API on 2022.3 collections with full inline
+# R8G8B8A8_UNorm (GraphicsFormat 8) image data, calling the shipped
+# TextureConverter.TryConvertToBitmap overloads
+# (AssetRipper.Export.Modules.Textures.dll, SDK 10.0.401).
+# Format: ACONV|input2x2x2|<hex>; ACONV|inputcube|<hex>;
+# ACONV|<tag>|ok|<0|1>; ACONV|<tag>|size|<w>|<h>|<d>;
+# ACONV|<tag>|pixels|<hex RGBA bytes>.
+# Cases: arr187 (per-layer FlipY), t3-117 (per-layer FlipY), cube188 (per-face
+# FlipY over 6 faces), arr-empty (empty buffer refuses), t3-normal (UsageMode 5
+# with stored LightmapFormat 0 does NOT UnpackNormal: the converter reads the
+# stored LightmapFormatE, not the usage-backed GetLightmapFormat).
+ACONV|input2x2x2|101112FF202122FF303132FF404142FF505152FF606162FF707172FF808182FF
+ACONV|inputcube|101112FF141516FF18191AFF1C1D1EFF202122FF242526FF28292AFF2C2D2EFF303132FF343536FF38393AFF3C3D3EFF404142FF444546FF48494AFF4C4D4EFF505152FF545556FF58595AFF5C5D5EFF606162FF646566FF68696AFF6C6D6EFF
+ACONV|arr187|ok|1
+ACONV|arr187|size|2|2|2
+ACONV|arr187|pixels|303132FF404142FF101112FF202122FF707172FF808182FF505152FF606162FF
+ACONV|t3-117|ok|1
+ACONV|t3-117|size|2|2|2
+ACONV|t3-117|pixels|303132FF404142FF101112FF202122FF707172FF808182FF505152FF606162FF
+ACONV|cube188|ok|1
+ACONV|cube188|size|2|2|6
+ACONV|cube188|pixels|18191AFF1C1D1EFF101112FF141516FF28292AFF2C2D2EFF202122FF242526FF38393AFF3C3D3EFF303132FF343536FF48494AFF4C4D4EFF404142FF444546FF58595AFF5C5D5EFF505152FF545556FF68696AFF6C6D6EFF606162FF646566FF
+ACONV|arr-empty|ok|0
+ACONV|t3-normal|ok|1
+ACONV|t3-normal|size|2|2|2
+ACONV|t3-normal|pixels|303132FF404142FF101112FF202122FF707172FF808182FF505152FF606162FF

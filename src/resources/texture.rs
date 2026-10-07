@@ -468,7 +468,9 @@ pub fn export_texture2d_value(
 /// `stream_content` follows the same inline-wins contract as `GetImageData`.
 /// The converter runs the `GraphicsFormat` route with the derived format, the
 /// derived complete size, and the vertical flip; the DXT5nm unpack follows the
-/// derived lightmap value.
+/// *stored* lightmap field only (`TextureConverter` reads `LightmapFormatE`,
+/// not the usage-backed `GetLightmapFormat`), so a normal-mapped usage mode
+/// with a default stored lightmap does not unpack.
 pub fn export_texture3d_image(
     view: &Texture3DView,
     stream_content: Option<&[u8]>,
@@ -485,7 +487,8 @@ pub fn export_texture3d_image(
         image_size: usize::try_from(view.complete_image_size_value()).unwrap_or(0),
         data: &data,
     };
-    let unpack_normal = view.lightmap_value() == i32::from(TEXTURE_USAGE_MODE_NORMALMAP_DXT5NM);
+    let unpack_normal =
+        view.lightmap_format == Some(i32::from(TEXTURE_USAGE_MODE_NORMALMAP_DXT5NM));
     let bitmap = try_convert_to_bitmap(&image, true, unpack_normal)?;
     let mut output = Vec::new();
     bitmap.save(&mut output, format)?;
@@ -1303,6 +1306,202 @@ mod tests {
             .unwrap()
             .platform_blob
             .is_empty());
+    }
+
+    /// Byte-for-byte differential against the shipped `TextureConverter` array/3D
+    /// overloads over live generated objects (probe
+    /// `Temp/opencode/arrayconvprobe`, fixture
+    /// `texture_array_convert_fixture.txt`): real class-187/117/188 assets on
+    /// 2022.3 collections with full inline `R8G8B8A8_UNorm` image data. The
+    /// replay builds the same `TextureImage` values the export functions use
+    /// (graphics route, derived complete sizes, flip on, unpack off except for
+    /// a stored `NormalmapDXT5nm` lightmap) and must reproduce every output
+    /// pixel. The `t3-normal` row pins the fixed unpack gate: a normal-mapped
+    /// usage mode with a default stored lightmap does not unpack, because the
+    /// source reads the stored `LightmapFormatE` rather than the usage-backed
+    /// `GetLightmapFormat`. The export functions themselves are exercised for
+    /// PNG wiring on every convertible row.
+    #[test]
+    fn array_conversions_match_the_reference_runtime() {
+        let fixture = include_str!("texture_array_convert_fixture.txt");
+        let mut input_2x2x2: Vec<u8> = Vec::new();
+        let mut input_cube: Vec<u8> = Vec::new();
+        struct Case {
+            tag: String,
+            ok: bool,
+            width: usize,
+            height: usize,
+            depth: usize,
+            expected: Vec<u8>,
+        }
+        let mut cases: Vec<Case> = Vec::new();
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut cells = line.splitn(4, '|');
+            assert_eq!(cells.next(), Some("ACONV"), "{line}");
+            let tag = cells.next().expect("a probe tag");
+            // Compact input rows carry the hex directly: `ACONV|<tag>|<hex>`.
+            if tag == "input2x2x2" {
+                input_2x2x2 = parse_hex_bytes(cells.next().expect("input hex"));
+                assert_eq!(input_2x2x2.len(), 32, "{line}");
+                continue;
+            }
+            if tag == "inputcube" {
+                input_cube = parse_hex_bytes(cells.next().expect("input hex"));
+                assert_eq!(input_cube.len(), 96, "{line}");
+                continue;
+            }
+            if cases.is_empty() || cases.last().expect("a case").tag != tag {
+                cases.push(Case {
+                    tag: tag.to_owned(),
+                    ok: false,
+                    width: 0,
+                    height: 0,
+                    depth: 0,
+                    expected: Vec::new(),
+                });
+            }
+            let case = cases.last_mut().expect("a case");
+            match cells.next().expect("a row kind") {
+                "ok" => case.ok = cells.next() == Some("1"),
+                "size" => {
+                    let mut fields = cells.next().expect("size fields").split('|');
+                    case.width = fields.next().expect("a width").parse().unwrap();
+                    case.height = fields.next().expect("a height").parse().unwrap();
+                    case.depth = fields.next().expect("a depth").parse().unwrap();
+                }
+                "pixels" => case.expected = parse_hex_bytes(cells.next().expect("pixel hex")),
+                other => panic!("unexpected row kind {other}"),
+            }
+        }
+        assert_eq!(cases.len(), 5, "all probed array conversions are asserted");
+
+        let array_view = Texture2DArrayView {
+            width: 2,
+            height: 2,
+            depth: 2,
+            format: 8,
+            data_size: 32,
+            image_data: input_2x2x2.clone(),
+            stream_data: None,
+        };
+        let plain_3d = Texture3DView {
+            width: 2,
+            height: 2,
+            depth: 2,
+            format_i32: None,
+            format_u32: Some(8),
+            image_data: input_2x2x2.clone(),
+            stream_data: None,
+            lightmap_format: Some(0),
+            usage_mode: 1,
+            mip_count: Some(1),
+            mip_map: false,
+            complete_image_size_u32: Some(32),
+            complete_image_size_i32: None,
+        };
+        let normal_3d = Texture3DView {
+            usage_mode: 5,
+            ..plain_3d.clone()
+        };
+        let cube_view = CubemapArrayView {
+            width: 2,
+            cubemap_count: 1,
+            format: 8,
+            data_size: 96,
+            image_data: input_cube.clone(),
+            stream_data: None,
+        };
+        let empty_view = Texture2DArrayView {
+            width: 0,
+            height: 0,
+            depth: 0,
+            format: 8,
+            data_size: 0,
+            image_data: Vec::new(),
+            stream_data: None,
+        };
+        for case in &cases {
+            if !case.ok {
+                assert!(case.expected.is_empty(), "{tag}", tag = case.tag);
+                assert_eq!(case.tag, "arr-empty", "only the empty row refuses");
+                assert!(
+                    export_texture2d_array_image(&empty_view, None, ImageExportFormat::Png)
+                        .is_err()
+                );
+                continue;
+            }
+            let image = match case.tag.as_str() {
+                "arr187" => {
+                    let png =
+                        export_texture2d_array_image(&array_view, None, ImageExportFormat::Png)
+                            .unwrap();
+                    assert_eq!(&png[..8], &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
+                    TextureImage {
+                        texture_format: 0,
+                        graphics_format: array_view.format,
+                        width: array_view.width,
+                        height: array_view.height,
+                        depth: array_view.depth,
+                        image_size: usize::try_from(texture2d_array_complete_image_size(
+                            array_view.data_size,
+                            array_view.depth,
+                        ))
+                        .unwrap_or(0),
+                        data: &array_view.image_data,
+                    }
+                }
+                "t3-117" | "t3-normal" => {
+                    let view = if case.tag == "t3-normal" {
+                        &normal_3d
+                    } else {
+                        &plain_3d
+                    };
+                    let png = export_texture3d_image(view, None, ImageExportFormat::Png).unwrap();
+                    assert_eq!(&png[..8], &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
+                    TextureImage {
+                        texture_format: 0,
+                        graphics_format: view.format_value(),
+                        width: view.width,
+                        height: view.height,
+                        depth: view.depth,
+                        image_size: usize::try_from(view.complete_image_size_value()).unwrap_or(0),
+                        data: &view.image_data,
+                    }
+                }
+                "cube188" => {
+                    let png = export_cubemap_array_image(&cube_view, None, ImageExportFormat::Png)
+                        .unwrap();
+                    assert_eq!(&png[..8], &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
+                    let depth = cubemap_array_depth(cube_view.cubemap_count).unwrap();
+                    TextureImage {
+                        texture_format: 0,
+                        graphics_format: cube_view.format,
+                        width: cube_view.width,
+                        height: cube_view.width,
+                        depth: usize::try_from(depth).unwrap_or(0),
+                        image_size: usize::try_from(cubemap_array_complete_image_size(
+                            cube_view.data_size,
+                            depth,
+                        ))
+                        .unwrap_or(0),
+                        data: &cube_view.image_data,
+                    }
+                }
+                other => panic!("unexpected case {other}"),
+            };
+            // The export functions flip every convertible row and never unpack
+            // it here (no row stores `NormalmapDXT5nm`); `t3-normal` proves the
+            // stored-lightmap gate because the old derived gate would unpack it.
+            let bitmap = try_convert_to_bitmap(&image, true, false).unwrap();
+            assert_eq!(bitmap.width, case.width, "{tag}", tag = case.tag);
+            assert_eq!(bitmap.height, case.height, "{tag}", tag = case.tag);
+            assert_eq!(bitmap.depth, case.depth, "{tag}", tag = case.tag);
+            assert_eq!(bitmap.pixels, case.expected, "{tag}", tag = case.tag);
+        }
     }
 
     fn parse_hex_bytes(text: &str) -> Vec<u8> {

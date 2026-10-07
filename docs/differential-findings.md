@@ -937,3 +937,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | Test sprite_conversion_matches_the_reference_runtime in src/resources/sprite.rs; fixture src/resources/sprite_convert_fixture.txt. No production change. |
 | Regression evidence | All three probed conversions reproduce both decisions plus every pixel; full suite 1386 plus 65 pass with warnings-denied Clippy. |
 | Remaining comparison | Exporter wiring stays with the exporter rows; Unity-produced sprites stay out per the row disposition. |
+
+## DIFF-TEXTURE-ARRAY-CONVERT-001 - array/3D conversion pixels and the 117 unpack gate
+
+| Field | Finding |
+|---|---|
+| Status | Reference-runtime differential recorded; five rows ported and pinned; one real bug fixed |
+| Source location | AssetRipper/Source/AssetRipper.Export.Modules.Textures/TextureConverter.cs (ITexture2DArray lines 86-113, ITexture3D lines 51-84 with the FlipY plus stored-lightmap UnpackNormal, ICubemapArray lines 115-142 with the FlipY kept despite `Maybe not needed?`); AssetRipper/Source/AssetRipper.SourceGenerated.Extensions/Texture3DExtensions.cs (`GetLightmapFormat` lines 88-98, usage-backed) |
+| Input evidence | Probe Temp/opencode/arrayconvprobe (shipped Export.Modules.Textures + Assets DLLs, SDK 10.0.401) driving real class-187 (2x2 depth 2), class-117 (2x2x2 plain and UsageMode-5), and class-188 (width 2 count 1) assets with full inline R8G8B8A8_UNorm bytes. Committed as src/resources/texture_array_convert_fixture.txt (15 rows). |
+| Source-derived behavior | All three overloads FlipY per layer (array rows land [r1,r0,r3,r2], cubemap faces flip pairwise); empty buffers refuse; UsageMode 5 with stored LightmapFormat 0 does NOT unpack because the converter reads the stored `LightmapFormatE`, not `GetLightmapFormat`. |
+| Root cause | One real Rust deviation found and fixed: `export_texture3d_image` unpacked on the derived (usage-backed) lightmap value, so a normal-mapped usage with a default stored field unpacked where the reference does not. The gate now reads the stored field only. An early probe scare (ArgumentOutOfRange on every conversion) traced to short probe buffers (one pixel per stacked row); full buffers convert. |
+| Rust change | `resources::texture::export_texture3d_image` unpack gate plus doc comment; test `array_conversions_match_the_reference_runtime` in `resources::texture`; fixture `src/resources/texture_array_convert_fixture.txt`. No other production change (`flip_y` already flips per layer). |
+| Regression evidence | All five probed conversions reproduce ok/size/pixels through the export functions with PNG wiring asserted; the `t3-normal` row fails under the old derived gate. Full suite 1387 plus 65 pass with warnings-denied Clippy. |
+| Remaining comparison | Crunch stays unsupported on these paths like the 2D one; streamed fetching stays caller-side; Unity-produced array textures stay out per the row disposition. |
