@@ -1,6 +1,6 @@
 # Phase 1 closure inventory
 
-Base snapshot before the custom-curve increment: local `main` at `7228f0e32817886ff04095c1baace0c79f0b9b98`, matching the live `origin/main` commit and tree after fetch. This inventory reflects the resolver changes validated and committed as `b7a4e2d3c0689ad7c78d1a0546a92561d9045f5c`. Reference source: `C:\Users\koishi\Desktop\RustAssetripper\AssetRipper`, frozen by `docs/baseline-files.sha256` (1,449 entries; manifest SHA-256 `29d1fd27f66b974c43750f30aa99117eb423cb318f3062daf05e1489f10f08f9`).
+Base snapshot before the custom-curve increment: local `main` at `7228f0e32817886ff04095c1baace0c79f0b9b98`, matching the live `origin/main` commit and tree after fetch. This inventory reflects the resolver changes committed as `b7a4e2d3c0689ad7c78d1a0546a92561d9045f5c` and the managed-reference root-registry increment committed as `3422c4800152d1e06304e7413953b3549e339473`; no ledger status changed in that increment, and 39 rows remain open. Reference source: `C:\Users\koishi\Desktop\RustAssetripper\AssetRipper`, frozen by `docs/baseline-files.sha256` (1,449 entries; manifest SHA-256 `29d1fd27f66b974c43750f30aa99117eb423cb318f3062daf05e1489f10f08f9`).
 
 The status counts below come from the `Status` cell in each stable-ID row of `docs/feature-parity.md`, matched against the required status vocabulary; prose mentions elsewhere do not affect the count.
 
