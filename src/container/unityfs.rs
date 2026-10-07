@@ -2238,4 +2238,93 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn entry_bytes_match_reference_constructed_bundles() {
+        fn hex_to_bytes(hex: &str) -> Vec<u8> {
+            assert!(hex.len().is_multiple_of(2), "odd hex length for {hex}");
+            let mut out = Vec::with_capacity(hex.len() / 2);
+            let bytes = hex.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                let hi = match bytes[i] {
+                    b'0'..=b'9' => bytes[i] - b'0',
+                    b'a'..=b'f' => bytes[i] - b'a' + 10,
+                    b'A'..=b'F' => bytes[i] - b'A' + 10,
+                    b => panic!("invalid hex byte {b}"),
+                };
+                let lo = match bytes[i + 1] {
+                    b'0'..=b'9' => bytes[i + 1] - b'0',
+                    b'a'..=b'f' => bytes[i + 1] - b'a' + 10,
+                    b'A'..=b'F' => bytes[i + 1] - b'A' + 10,
+                    b => panic!("invalid hex byte {b}"),
+                };
+                out.push((hi << 4) | lo);
+                i += 2;
+            }
+            out
+        }
+
+        // Probe Temp/opencode/unityfsentryprobe (FileStreamBundleFile.Read with
+        // ResourceFiles/FailedFiles over C#-constructed bundles, SDK 10.0.401;
+        // LZ4 via K4os, LZMA via LzmaCompression, Zstd via ZstdSharp with
+        // Huffman/FSE for D): A None, B LZ4, C LZMA, D Zstd, E reassembly,
+        // F non-combined empty, G LZHAM unsupported (Failed, loud).
+        let fixture = include_str!("unityfs_entry_fixture.txt");
+        let mut hexes: std::collections::HashMap<String, Vec<u8>> =
+            std::collections::HashMap::new();
+        let mut reads: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for line in fixture.lines() {
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+            if line.starts_with("ENTRY_HEX|") {
+                let parts: Vec<&str> = line.splitn(3, '|').collect();
+                assert_eq!(parts.len(), 3, "bad ENTRY_HEX {line}");
+                hexes.insert(parts[1].to_string(), hex_to_bytes(parts[2]));
+            } else if line.starts_with("ENTRY_READ|") {
+                let parts: Vec<&str> = line.splitn(3, '|').collect();
+                assert_eq!(parts.len(), 3, "bad ENTRY_READ {line}");
+                reads.insert(parts[1].to_string(), parts[2].to_string());
+            }
+        }
+
+        // Decodable lanes reproduce entry bytes on both sides.
+        for case in ["A", "B", "C", "D", "E"] {
+            let bytes = hexes.get(case).unwrap_or_else(|| panic!("missing {case}"));
+            let dump = reads.get(case).unwrap_or_else(|| panic!("missing {case}"));
+            let file_hex = dump
+                .split('|')
+                .find_map(|p| p.strip_prefix("FILE:data/file.bin="))
+                .unwrap_or_else(|| panic!("{case} no FILE row in {dump}"));
+            let expected = hex_to_bytes(file_hex);
+            let bundle = UnityFsBundle::parse(bytes)
+                .unwrap_or_else(|e| panic!("{case} Rust parse failed: {e:?}"));
+            assert_eq!(bundle.nodes.len(), 1, "{case} one node");
+            let entry = bundle
+                .read_entry(0)
+                .unwrap_or_else(|e| panic!("{case} Rust entry failed: {e:?}"));
+            assert_eq!(&entry[..], &expected[..], "{case} entry bytes");
+        }
+
+        // Non-combined directories carry zero entries on both sides.
+        {
+            let bytes = hexes.get("F").expect("F hex");
+            let dump = reads.get("F").expect("F dump");
+            assert!(dump.contains("Nodes=0"), "F no nodes {dump}");
+            assert!(dump.contains("Res=0"), "F no resources {dump}");
+            let bundle = UnityFsBundle::parse(bytes).expect("F Rust parse");
+            assert!(bundle.nodes.is_empty(), "F Rust no nodes");
+        }
+
+        // LZHAM entries stay loud failures on both sides, never silent.
+        {
+            let bytes = hexes.get("G").expect("G hex");
+            let dump = reads.get("G").expect("G dump");
+            assert!(dump.contains("Failed=1"), "G reference failed {dump}");
+            let bundle = UnityFsBundle::parse(bytes).expect("G Rust parse");
+            assert_eq!(bundle.nodes.len(), 1, "G one node");
+            assert!(bundle.read_entry(0).is_err(), "G Rust fails loud");
+        }
+    }
 }

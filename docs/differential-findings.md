@@ -638,3 +638,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | src/container/unityfs.rs test metadata_tables_match_reference_constructed_bundles; fixture src/container/unityfs_meta_fixture.txt. |
 | Regression evidence | All six decodable lanes reproduce blocks/nodes/header/offsets/table values; LZHAM and truncated pinned fail-loud; full suite 1357 plus 60 pass with warnings-denied Clippy. |
 | Remaining comparison | Entry extraction over storage blocks (Zstd Huffman/FSE, non-combined variants) stays with IO-BUNDLE-UNITYFS-ENTRY-001; real-file comparison stays open as noted. |
+
+## DIFF-UNITYFS-ENTRY-001 - UnityFS entry all lanes
+
+| Field | Finding |
+|---|---|
+| Status | Reference-runtime differential recorded; row ported and pinned |
+| Source location | AssetRipper.IO.Files/BundleFiles/BundleFileBlockReader.cs (block dispatch with ZstdCompression.IsZstd fallback); FileStreamBundleFile.cs (ReadFileStreamData with AddFailedFile); ZstdCompression.cs; ResourceFile.cs |
+| Input evidence | Probe Temp/opencode/unityfsentryprobe (shipped IO.Files DLL, SDK 10.0.401) reading seven C#-constructed bundles with entry payloads across None/LZ4/LZMA/Zstd-Huffman-FSE blocks, two-block reassembly, non-combined empty, and LZHAM refusal. Committed as src/container/unityfs_entry_fixture.txt (18 lines). |
+| Source-derived behavior | Entry bytes reassemble across storage blocks with per-block compression; Zstd blocks decode by frame-signature fallback; non-combined directories yield zero entries; LZHAM entries record FailedFile loudly instead of succeeding. |
+| Root cause | No deviation found; this increment ports the previously synthetic-only lanes including Zstd Huffman/FSE (previously RFC-built only). LZHAM is unsupported-by-the-baseline with loud proof on both sides. |
+| Rust change | src/container/unityfs.rs test entry_bytes_match_reference_constructed_bundles; fixture src/container/unityfs_entry_fixture.txt. |
+| Regression evidence | All five decodable entries reproduce byte-for-byte; non-combined empty and LZHAM loud pinned; full suite 1358 plus 60 pass with warnings-denied Clippy. |
+| Remaining comparison | Real-file comparison stays open as noted; the UnityFS header/meta/entry vertical is now fully reference-differentially covered. |
