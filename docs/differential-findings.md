@@ -859,3 +859,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | UnityReleaseVersion/UnityReleaseType plus language_version_facts in src/export/settings.rs; fixture src/export/settings_version_fixture.txt; test automatic_language_selection_reproduces_the_reference_version_dump. |
 | Regression evidence | New test passes; full suite 1378 plus 65 pass with warnings-denied Clippy. |
 | Remaining comparison | Unity-produced inputs stay out per the row disposition. |
+
+## DIFF-IO-VFS-001 - VirtualFileSystem operations and enumeration
+
+| Field | Finding |
+|---|---|
+| Status | Reference-product-path evidence recorded; one file-reference row ported and pinned |
+| Source location | AssetRipper/Source/AssetRipper.IO.Files/VirtualFileSystem.cs; AssetRipper/Source/AssetRipper.IO.Files.Tests/VirtualFileSystemTests.cs |
+| Input evidence | Probe Temp/opencode/vfsprobe (shipped IO.Files DLL, SDK 10.0.401) replaying 26 scenarios. Committed as src/io/vfs_probe_fixture.txt. |
+| Source-derived behavior | Every operation outcome matches; enumeration membership matches on all shapes while raw order differs (insertion vs lexical). |
+| Root cause | No Rust deviation beyond the documented order hardening. Insertion order proven by reverse-creation and nested-shape discriminators. |
+| Rust change | Test virtual_file_system_reproduces_the_reference_probe_dump; fixture src/io/vfs_probe_fixture.txt. No production change. |
+| Regression evidence | New test passes; full suite 1379 plus 65 pass with warnings-denied Clippy. |
+| Remaining comparison | GetUniqueName counter loop, local adapter (IO-STREAM-001), and Unity-produced inputs stay out per the row disposition. |

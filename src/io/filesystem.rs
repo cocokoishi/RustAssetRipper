@@ -827,6 +827,220 @@ mod tests {
     use crate::io::stream::SmartStream;
     use std::io::{Read, Seek, SeekFrom, Write};
 
+    /// VirtualFileSystem differential against the reference `VirtualFileSystem`
+    /// dump committed in `vfs_probe_fixture.txt` (probe
+    /// `Temp/opencode/vfsprobe`, isolated reference bins, SDK 10.0.401). The
+    /// same scenarios run against this port and every outcome is compared.
+    /// Enumeration rows record the reference raw order, which is insertion
+    /// order on the source side; the replay compares membership (sorted) and
+    /// pins the raw-vs-sorted split explicitly because Rust enumeration is
+    /// deterministic lexical order by design (see the row disposition).
+    /// The full `GetUniqueName` counter loop stays open; only outcomes for
+    /// ported behavior are replayed here.
+    #[test]
+    fn virtual_file_system_reproduces_the_reference_probe_dump() {
+        use std::collections::HashMap;
+
+        let fixture = include_str!("vfs_probe_fixture.txt");
+        let mut oracle: HashMap<&str, (&str, &str)> = HashMap::new();
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let body = line
+                .strip_prefix("VFS|")
+                .unwrap_or_else(|| panic!("unknown fixture row {line}"));
+            let parts: Vec<&str> = body.splitn(3, '|').collect();
+            assert_eq!(parts.len(), 3, "bad VFS {line}");
+            oracle.insert(parts[0], (parts[1], parts[2]));
+        }
+        let expect = |name: &str| -> (&str, &str) {
+            *oracle
+                .get(name)
+                .unwrap_or_else(|| panic!("missing oracle {name}"))
+        };
+        let ok = |name: &str| -> &str {
+            let (status, payload) = expect(name);
+            assert_eq!(status, "OK", "{name} threw {payload}");
+            payload
+        };
+
+        assert_eq!(ok("starts_with_root"), "True");
+        assert_eq!(VirtualFileSystem::new().count(), 1);
+        assert_eq!(ok("root_exists"), "True");
+        assert!(VirtualFileSystem::new()
+            .directory_exists(Some("/"))
+            .unwrap());
+        assert_eq!(ok("empty_root_exists"), "True");
+        assert!(VirtualFileSystem::new().directory_exists(Some("")).unwrap());
+        assert!(VirtualFileSystem::new().directory_exists(None).unwrap());
+        assert_eq!(ok("nonexistent_dir"), "False");
+        assert!(!VirtualFileSystem::new()
+            .directory_exists(Some("/test"))
+            .unwrap());
+
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem.create_directory(Some("/test")).unwrap();
+        assert_eq!(ok("create_rooted_dir"), "True");
+        assert!(filesystem.directory_exists(Some("/test")).unwrap());
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem.create_directory(Some("test")).unwrap();
+        assert_eq!(ok("create_nonrooted_dir"), "True");
+        assert!(filesystem.directory_exists(Some("test")).unwrap());
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem.create_directory(Some("/test")).unwrap();
+        assert_eq!(ok("nonroot_path_valid"), "True");
+        assert!(filesystem.directory_exists(Some("test")).unwrap());
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem.create_directory(Some("/test")).unwrap();
+        filesystem.create_directory(Some("/test")).unwrap();
+        assert_eq!(ok("create_dir_twice"), "count=2");
+        assert_eq!(filesystem.count(), 2);
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem.create_directory(Some("/test/child")).unwrap();
+        assert_eq!(ok("child_no_parent"), "child=True,parent=True");
+        assert!(filesystem.directory_exists(Some("/test/child")).unwrap());
+        assert!(filesystem.directory_exists(Some("/test")).unwrap());
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem.create_directory(Some("/test/")).unwrap();
+        assert_eq!(ok("trailing_slash"), "exists=True,count=2");
+        assert!(filesystem.directory_exists(Some("/test")).unwrap());
+        assert_eq!(filesystem.count(), 2);
+
+        let mut filesystem = VirtualFileSystem::new();
+        let error = match filesystem.create_file("/test/file") {
+            Ok(_) => panic!("creating a file without its directory must fail"),
+            Err(error) => error,
+        };
+        let (status, payload) = expect("create_file_no_dir");
+        assert_eq!((status, payload), ("THROW", "DirectoryNotFoundException"));
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem.create_directory(Some("/test")).unwrap();
+        filesystem
+            .write_all_bytes("/test/file", &[1, 2, 3])
+            .unwrap();
+        let stream = filesystem.create_file("/test/file").unwrap();
+        assert_eq!(ok("create_file_twice_truncate"), "len=0");
+        assert_eq!(stream.length().unwrap(), 0);
+        let mut filesystem = VirtualFileSystem::new();
+        let stream = filesystem.create_file("/test").unwrap();
+        assert_eq!(ok("new_file_zero_len"), "len=0");
+        assert_eq!(stream.length().unwrap(), 0);
+
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem.write_all_text("/test", "Hello, world!").unwrap();
+        assert_eq!(ok("rw_text"), "Hello, world!");
+        assert_eq!(
+            filesystem.read_all_text("/test", usize::MAX).unwrap(),
+            "Hello, world!"
+        );
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem
+            .write_all_bytes("/test", &[0x48, 0x65, 0x6C, 0x6C, 0x6F])
+            .unwrap();
+        assert_eq!(ok("rw_bytes"), "48-65-6C-6C-6F");
+        let bytes = filesystem.read_all_bytes("/test", usize::MAX).unwrap();
+        let hex: Vec<String> = bytes.iter().map(|b| format!("{b:02X}")).collect();
+        assert_eq!(hex.join("-"), "48-65-6C-6C-6F");
+
+        fn check_enumeration(oracle_payload: &str, mut actual: Vec<String>) {
+            let mut expected: Vec<String> = oracle_payload.split(';').map(str::to_owned).collect();
+            actual.sort();
+            expected.sort();
+            assert_eq!(actual, expected);
+        }
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem.create_directory(Some("/dir")).unwrap();
+        filesystem.create_file("/dir/deep").unwrap();
+        filesystem.create_file("/test").unwrap();
+        let files = filesystem
+            .enumerate_files(Some("/"), "*", SearchOption::TopDirectoryOnly)
+            .unwrap();
+        assert_eq!(ok("enum_top"), "/test");
+        check_enumeration("/test", files);
+        let files = filesystem
+            .enumerate_files(Some("/"), "*", SearchOption::AllDirectories)
+            .unwrap();
+        // The reference raw order is insertion order (/test first); Rust is
+        // lexical (/dir/deep first). Membership matches; order is the
+        // documented difference.
+        assert_eq!(ok("enum_recursive"), "/test;/dir/deep");
+        check_enumeration("/test;/dir/deep", files.clone());
+        assert_ne!(files.join(";"), "/test;/dir/deep");
+
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem.create_file("/a.txt").unwrap();
+        filesystem.create_file("/b.bin").unwrap();
+        filesystem.create_file("/c.txt").unwrap();
+        let files = filesystem
+            .enumerate_files(Some("/"), "*.txt", SearchOption::TopDirectoryOnly)
+            .unwrap();
+        assert_eq!(ok("enum_pattern"), "/a.txt;/c.txt");
+        check_enumeration("/a.txt;/c.txt", files);
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem.create_directory(Some("/d1")).unwrap();
+        filesystem.create_directory(Some("/d2")).unwrap();
+        filesystem.create_file("/f").unwrap();
+        let directories = filesystem
+            .enumerate_directories(Some("/"), "*", SearchOption::TopDirectoryOnly)
+            .unwrap();
+        assert_eq!(ok("enum_dirs"), "/d1;/d2");
+        check_enumeration("/d1;/d2", directories);
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem.create_file("/z").unwrap();
+        filesystem.create_file("/a").unwrap();
+        filesystem.create_file("/m").unwrap();
+        let files = filesystem
+            .enumerate_files(Some("/"), "*", SearchOption::TopDirectoryOnly)
+            .unwrap();
+        assert_eq!(ok("enum_same_dir_reverse"), "/z;/a;/m");
+        check_enumeration("/z;/a;/m", files.clone());
+        assert_ne!(files.join(";"), "/z;/a;/m");
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem.create_directory(Some("/sub")).unwrap();
+        filesystem.create_file("/sub/b").unwrap();
+        filesystem.create_file("/top_z").unwrap();
+        filesystem.create_file("/sub/a").unwrap();
+        filesystem.create_file("/top_a").unwrap();
+        let files = filesystem
+            .enumerate_files(Some("/"), "*", SearchOption::AllDirectories)
+            .unwrap();
+        assert_eq!(ok("enum_nested_shape"), "/top_z;/top_a;/sub/b;/sub/a");
+        check_enumeration("/top_z;/top_a;/sub/b;/sub/a", files.clone());
+        assert_ne!(files.join(";"), "/top_z;/top_a;/sub/b;/sub/a");
+
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem.write_all_text("/test", "x").unwrap();
+        assert!(filesystem.delete_file("/test").unwrap());
+        assert_eq!(ok("delete_file"), "exists=False");
+        assert!(!filesystem.file_exists(Some("/test")).unwrap());
+        let mut filesystem = VirtualFileSystem::new();
+        assert_eq!(ok("delete_missing"), "nothrow");
+        assert!(!filesystem.delete_file("/nope").unwrap());
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem.create_directory(Some("/d")).unwrap();
+        filesystem.create_file("/f").unwrap();
+        filesystem.clear();
+        assert_eq!(ok("clear"), "count=1");
+        assert_eq!(filesystem.count(), 1);
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem.write_all_text("/a", "x").unwrap();
+        assert_eq!(ok("file_exists"), "a=True,b=False");
+        assert!(filesystem.file_exists(Some("/a")).unwrap());
+        assert!(!filesystem.file_exists(Some("/b")).unwrap());
+
+        let mut filesystem = VirtualFileSystem::new();
+        assert_eq!(ok("temp_dir"), "was_set=True,was_empty=False");
+        assert!(!filesystem.temporary_directory().is_empty());
+        filesystem.set_temporary_directory("/tmp2");
+        assert_eq!(filesystem.temporary_directory(), "/tmp2");
+
+        assert!(oracle.len() >= 26, "the fixture pins every scenario");
+    }
+
     #[test]
     fn root_and_path_normalization_match_virtual_paths() {
         let mut filesystem = VirtualFileSystem::new();

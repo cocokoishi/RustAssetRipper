@@ -1,0 +1,33 @@
+# VirtualFileSystem differential (probe Temp/opencode/vfsprobe).
+# Reference: VirtualFileSystem ops against shipped AssetRipper.IO.Files.dll (SDK 10.0.401).
+# Rust parity replays the same scenarios in filesystem.rs and compares outcomes.
+# Enumeration rows record the reference RAW order (insertion-ordered); the replay
+# compares membership (sorted) and pins the raw-vs-sorted difference explicitly:
+# Rust enumeration is deterministic lexical order (documented hardening).
+# The full GetUniqueName counter loop stays open (only the truncate stage is ported).
+VFS|starts_with_root|OK|True
+VFS|root_exists|OK|True
+VFS|empty_root_exists|OK|True
+VFS|nonexistent_dir|OK|False
+VFS|create_rooted_dir|OK|True
+VFS|create_nonrooted_dir|OK|True
+VFS|nonroot_path_valid|OK|True
+VFS|create_dir_twice|OK|count=2
+VFS|child_no_parent|OK|child=True,parent=True
+VFS|trailing_slash|OK|exists=True,count=2
+VFS|create_file_no_dir|THROW|DirectoryNotFoundException
+VFS|create_file_twice_truncate|OK|len=0
+VFS|new_file_zero_len|OK|len=0
+VFS|rw_text|OK|Hello, world!
+VFS|rw_bytes|OK|48-65-6C-6C-6F
+VFS|enum_top|OK|/test
+VFS|enum_recursive|OK|/test;/dir/deep
+VFS|enum_pattern|OK|/a.txt;/c.txt
+VFS|enum_dirs|OK|/d1;/d2
+VFS|enum_same_dir_reverse|OK|/z;/a;/m
+VFS|enum_nested_shape|OK|/top_z;/top_a;/sub/b;/sub/a
+VFS|delete_file|OK|exists=False
+VFS|delete_missing|OK|nothrow
+VFS|clear|OK|count=1
+VFS|file_exists|OK|a=True,b=False
+VFS|temp_dir|OK|was_set=True,was_empty=False
