@@ -1,0 +1,9 @@
+4DD8D896|m_AllowInstancing
+C50BCE51|m_Enabled
+D257A4E0|m_InitialEventName
+87AE3600|m_InitialEventNameOverriden
+2EC65E13|m_ObjectHideFlags
+4EAC5E6C|m_ReleaseInstanceOnDisable
+9D84D4BF|m_ResetSeedOnPlay
+F07F70A0|m_ResourceVersion
+79956B7F|m_StartSeed

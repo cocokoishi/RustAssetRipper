@@ -1,0 +1,58 @@
+# CustomCurveResolver.ToAttributeName reference values.
+# Probe Temp/opencode/curveresolve: a real 2022.3 scene (root plus Arm/Leg children,
+# an Animation referencing the clip, a skinned Arm mesh with a Smile channel, a Leg
+# MeshRenderer with a _MainTex material) through the shipped ToAttributeName
+# (SDK 10.0.401). CURVE|<type>|<attr-hex>|<path>|<result>| (THROW rows carry the
+# shipped exception); CURVE|crcst|<crc28(_MainTex_ST)> and CURVE|smilecrc|<crc32(Smile)>
+# record the live hashes; CREV|<attr-hex>|<prefix>|<manufactured> rows pin
+# Crc32Algorithm.ReverseAscii (IL-decoded from the shipped Checksum DLL).
+CURVE|smilecrc|C34B2C0B
+CURVE|20|12345678|Arm|blendShape.path_0x12345678_mHWqIrN|
+CURVE|20|C34B2C0B|Arm|blendShape.Smile|
+CURVE|20|12345678|path_0x1A2B_HJKLMNN|blendShape.path_0x1A2B_HJKLMNN|
+CURVE|20|12345678|Nope|blendShape.path_0x12345678_mHWqIrN|
+CURVE|21|00000003||m_Materials.Array.data[3]|
+CURVE|crcst|0686C589
+CURVE|22|8686C589|Leg|material._MainTex_ST|
+CURVE|22|1686C589|Leg|material._MainTex_ST.y|
+CURVE|22|5686C589|Leg|material._MainTex_ST.g|
+CURVE|22|12345678|Leg|material.path_0x12345678_mHWqIrN|
+CURVE|22|12345678|Nope|material.path_0x12345678_mHWqIrN|
+CURVE|23|00000000||m_Sprite|
+CURVE|23|00000005||THROW|ArgumentException:Unknown attribute 0x5 (5) for SpriteRenderer
+CURVE|24|9299AC34||m_EditorClassIdentifier|
+CURVE|24|FFFFFFFE||THROW|ArgumentException:Unknown attribute 0xFFFFFFFE (4294967294) for MonoBehaviour
+CURVE|25|D9164902||m_ActuallyLightmapped|
+CURVE|25|FFFFFFFE||THROW|ArgumentException:Unknown attribute 0xFFFFFFFE (4294967294) for Light
+CURVE|26|53447190||m_AABB.m_Center.x|
+CURVE|26|FFFFFFFE||THROW|ArgumentException:Unknown attribute 0xFFFFFFFE (4294967294) for RendererShadows
+CURVE|27|924284C0||autoRandomSeed|
+CURVE|27|FFFFFFFE||ParticleSystem_0xFFFFFFFE_vPHSwkL|
+CURVE|28|571305A5||m_AnchoredPosition.x|
+CURVE|28|FFFFFFFE||THROW|ArgumentException:Unknown attribute 0xFFFFFFFE (4294967294) for RectTransform
+CURVE|29|54AFF36E||m_ApplyActiveColorSpace|
+CURVE|29|FFFFFFFE||THROW|ArgumentException:Unknown attribute 0xFFFFFFFE (4294967294) for LineRenderer
+CURVE|30|54AFF36E||m_ApplyActiveColorSpace|
+CURVE|30|FFFFFFFE||THROW|ArgumentException:Unknown attribute 0xFFFFFFFE (4294967294) for TrailRenderer
+CURVE|37|9B5A57EC||far clip plane|
+CURVE|37|FFFFFFFE||THROW|ArgumentException:Unknown attribute 0xFFFFFFFE (4294967294) for Camera
+CURVE|38|4DD8D896||m_AllowInstancing|
+CURVE|38|FFFFFFFE||VisualEffect_0xFFFFFFFE_iKoPIUL|
+CURVE|39|C50BCE51||m_Enabled|
+CURVE|39|FFFFFFFE||ParticleForceField_0xFFFFFFFE_ontinlN|
+CURVE|41|2EC65E13||m_ObjectHideFlags|
+CURVE|41|FFFFFFFE||MeshFilter_0xFFFFFFFE_lsjUllH|
+CREV|00000000|P_|P_NHMUuOJ
+CREV|00000001|P_|P_mSliPjN
+CREV|00000002|P_|P_TMIliwL
+CREV|00000003|P_|P_wVhPLRH
+CREV|12345678|P_|P_iuRTmjJ
+CREV|DEADBEEF|P_|P_PPWRHsH
+CREV|FFFFFFFF|P_|P_jIrwrPH
+CREV|ABCDEF01|P_|P_uWTVHmN
+CREV|C34B2C0B|P_|P_TUwnjKJ
+CREV|0686C589|P_|P_HNUPuQJ
+CREV|12345678|path_0x12345678_|path_0x12345678_mHWqIrN
+CREV|00000000|UserDefined_0x0_|UserDefined_0x0_ohUuWpH
+CREV|12345678||imNrWnN
+CREV|00000000||NPQsOKN

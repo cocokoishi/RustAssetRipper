@@ -1,0 +1,5 @@
+9299AC34|m_EditorClassIdentifier
+9C78476E|m_EditorHideFlags
+C50BCE51|m_Enabled
+60BEEB19|m_Name
+2EC65E13|m_ObjectHideFlags

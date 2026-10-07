@@ -1,0 +1,46 @@
+9B5A57EC|far clip plane
+BB13F23F|field of view
+B0A4848F|m_AllowDynamicResolution
+E70EAD2C|m_AllowMSAA
+9C198324|m_Anamorphism
+2EBA45DC|m_Aperture
+A4C92264|m_BackGroundColor.a
+3DC073DE|m_BackGroundColor.b
+4DAA8751|m_BackGroundColor.g
+207763BA|m_BackGroundColor.r
+AF09655D|m_BarrelClipping
+BFCDED07|m_BladeCount
+1672909F|m_ClearFlags
+5A01B00D|m_CullingMask.m_Bits
+B5578D6E|m_Curvature.x
+C250BDF8|m_Curvature.y
+77958C09|m_Depth
+C50BCE51|m_Enabled
+94FFB47C|m_FocalLength
+CF6C9027|m_FocusDistance
+02E219A2|m_ForceIntoRT
+E5C52199|m_FOVAxisMode
+EE9809AC|m_GateFitMode
+5B173DB4|m_HDR
+92BABBA6|m_Iso
+2F7242D6|m_LensShift.x
+58757240|m_LensShift.y
+60A1E66A|m_NormalizedViewPortRect.height
+DF53A2E7|m_NormalizedViewPortRect.width
+87BE4600|m_NormalizedViewPortRect.x
+F0B97696|m_NormalizedViewPortRect.y
+2EC65E13|m_ObjectHideFlags
+B43C02EB|m_OcclusionCulling
+C92941A9|m_projectionMatrixMode
+6E94AE1F|m_RenderingPath
+DB43B8C5|m_SensorSize.x
+AC448853|m_SensorSize.y
+67003178|m_ShutterSpeed
+DD91CF14|m_StereoConvergence
+515E4037|m_StereoMirrorMode
+FF9EB49B|m_StereoSeparation
+97230D18|m_TargetDisplay
+E5DA2E1C|m_TargetEye
+4E1E5581|near clip plane
+77593039|orthographic
+8E6EFB37|orthographic size
