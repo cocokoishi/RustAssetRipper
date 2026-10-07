@@ -357,6 +357,52 @@ mod tests {
     }
 
     #[test]
+    fn registry_cursor_uses_file_endian_stream_offset_and_string_bounds() {
+        let decode_limits = crate::serialized_file::object::ObjectDecodeLimits::default();
+        let options = ManagedRegistryReadOptions {
+            endian: crate::io::binary::Endian::Big,
+            arrays_align: true,
+            stream_offset: 1,
+            object_decode_limits: decode_limits,
+            max_entries: 8,
+            max_total_decoded_allocation_bytes: decode_limits.max_decoded_allocation_bytes,
+        };
+        let mut empty = Vec::new();
+        empty.extend_from_slice(&COUNTED_FORMAT.to_be_bytes());
+        empty.extend_from_slice(&0i32.to_be_bytes());
+        empty.extend_from_slice(&[0, 0, 0]);
+        let read = read_managed_registry(&empty, options, &[]).unwrap();
+        assert_eq!(read.version, COUNTED_FORMAT);
+        assert!(read.entries.is_empty());
+        assert_eq!(read.consumed_bytes, 11);
+
+        let mut oversized_name = Vec::new();
+        oversized_name.extend_from_slice(&COUNTED_FORMAT.to_be_bytes());
+        oversized_name.extend_from_slice(&1i32.to_be_bytes());
+        oversized_name.extend_from_slice(&7i64.to_be_bytes());
+        oversized_name.extend_from_slice(&3i32.to_be_bytes());
+        oversized_name.extend_from_slice(b"Long");
+        oversized_name.extend_from_slice(&0i32.to_be_bytes());
+        oversized_name.extend_from_slice(&0i32.to_be_bytes());
+        let bounded = ManagedRegistryReadOptions {
+            stream_offset: 0,
+            object_decode_limits: crate::serialized_file::object::ObjectDecodeLimits {
+                max_string_bytes: 2,
+                ..decode_limits
+            },
+            ..options
+        };
+        assert!(matches!(
+            read_managed_registry(&oversized_name, bounded, &[]),
+            Err(ManagedRegistryReadError::StringLimitExceeded {
+                length: 3,
+                limit: 2,
+                what: "managed type class name",
+            })
+        ));
+    }
+
+    #[test]
     fn entry_frames_carry_the_content_decision() {
         let entry = frame_registry_entry(7, false, false);
         assert_eq!(entry.reference_id, 7);
@@ -507,6 +553,10 @@ mod tests {
                 SerializedValue::PPtr { file_id, path_id } => {
                     format!("<pptr {file_id} {path_id}>")
                 }
+                SerializedValue::ManagedReferenceId { reference_id, .. } => {
+                    format!("<managed-reference {reference_id}>")
+                }
+                SerializedValue::ManagedReferenceRegistry(_) => "<managed-registry>".to_owned(),
                 SerializedValue::Raw { type_name, .. } => format!("<raw {type_name}>"),
             }
         }
@@ -550,6 +600,13 @@ mod tests {
         let options = ManagedRegistryReadOptions {
             endian: Endian::Little,
             arrays_align: true,
+            stream_offset: 0,
+            object_decode_limits: crate::serialized_file::object::ObjectDecodeLimits::default(),
+            max_entries: crate::serialized_file::object::ObjectDecodeLimits::default()
+                .max_array_elements,
+            max_total_decoded_allocation_bytes:
+                crate::serialized_file::object::ObjectDecodeLimits::default()
+                    .max_decoded_allocation_bytes,
         };
         let fixture = include_str!("managed_registry_fixture.txt");
         let mut blobs = std::collections::HashMap::new();
@@ -720,6 +777,14 @@ pub enum ManagedRegistryReadError {
         /// What was being read.
         what: &'static str,
     },
+    /// A serialized string has a negative byte length.
+    InvalidStringLength { length: i32, what: &'static str },
+    /// A serialized string exceeds the owning object decoder's byte bound.
+    StringLimitExceeded {
+        length: usize,
+        limit: usize,
+        what: &'static str,
+    },
     /// A content-bearing entry names a type the resolver cannot build, which the
     /// source answers with an invalid-data error naming the type and the reason.
     UnresolvableType {
@@ -737,6 +802,15 @@ pub enum ManagedRegistryReadError {
         /// The payload decode failure.
         error: super::object::ObjectDecodeError,
     },
+    /// The registry exceeds a caller-supplied product bound.
+    EntryCountLimitExceeded { count: usize, limit: usize },
+    /// Decoding all registry payloads would exceed the owning object allocation budget.
+    AllocationLimitExceeded { requested: usize, limit: usize },
+    /// A bounded registry allocation could not be reserved.
+    AllocationFailed {
+        resource: &'static str,
+        requested: usize,
+    },
 }
 
 impl Display for ManagedRegistryReadError {
@@ -747,6 +821,14 @@ impl Display for ManagedRegistryReadError {
                 formatter,
                 "managed reference registry ends at offset {offset} while reading {what}"
             ),
+            Self::InvalidStringLength { length, what } => write!(
+                formatter,
+                "managed reference registry has invalid {what} byte length {length}"
+            ),
+            Self::StringLimitExceeded { length, limit, what } => write!(
+                formatter,
+                "managed reference registry {what} has {length} bytes, exceeding limit {limit}"
+            ),
             Self::UnresolvableType {
                 unique_name,
                 reason,
@@ -756,6 +838,18 @@ impl Display for ManagedRegistryReadError {
                 "Could not resolve the referenced type {unique_name}. Reason: {reason}"
             ),
             Self::PayloadDecode { error, .. } => write!(formatter, "{error}"),
+            Self::EntryCountLimitExceeded { count, limit } => write!(
+                formatter,
+                "managed reference registry has {count} entries, exceeding limit {limit}"
+            ),
+            Self::AllocationLimitExceeded { requested, limit } => write!(
+                formatter,
+                "managed reference registry would allocate {requested} bytes, exceeding limit {limit}"
+            ),
+            Self::AllocationFailed { resource, requested } => write!(
+                formatter,
+                "could not allocate {requested} entries for managed reference {resource}"
+            ),
         }
     }
 }
@@ -776,6 +870,14 @@ pub struct ManagedRegistryReadOptions {
     pub endian: crate::io::binary::Endian,
     /// Whether arrays align (Unity 2017 and newer).
     pub arrays_align: bool,
+    /// Position of this registry slice in the owning object payload, used for stream alignment.
+    pub stream_offset: usize,
+    /// Allocation and nesting limits for each dynamic payload.
+    pub object_decode_limits: super::object::ObjectDecodeLimits,
+    /// Maximum number of registry entries.
+    pub max_entries: usize,
+    /// Total memory budget for decoded payloads and registry records.
+    pub max_total_decoded_allocation_bytes: usize,
 }
 
 /// One decoded registry entry (`ReadReferencedObject`).
@@ -813,6 +915,8 @@ pub struct ManagedRegistryRead {
     pub entries: Vec<ManagedRegistryEntry>,
     /// The aligned consumed byte count.
     pub consumed_bytes: usize,
+    /// Estimated owned allocation bytes, including decoded payload values and registry records.
+    pub allocated_bytes: usize,
 }
 
 /// `ManagedReferenceRegistryReader.Read`: decode one registry blob against the
@@ -824,26 +928,74 @@ pub fn read_managed_registry(
     options: ManagedRegistryReadOptions,
     references: &[super::metadata::SerializedTypeReference],
 ) -> Result<ManagedRegistryRead, ManagedRegistryReadError> {
-    let mut cursor = Cursor::new(bytes);
+    let mut cursor = Cursor::new(bytes, options.endian, options.stream_offset);
     let version = cursor.read_i32("registry version word")?;
     let format = classify_registry_format(version)?;
     let mut entries = Vec::new();
+    let mut allocated_bytes = 0usize;
     match format {
         RegistryFormat::Counted => {
             let count = cursor.read_i32("registry object count")?;
             check_counted_capacity(bytes.len().saturating_sub(cursor.position()) as u64, count)?;
+            let count = usize::try_from(count).map_err(|_| {
+                ManagedRegistryReadError::Framing(ManagedRegistryError::NegativeObjectCount {
+                    count,
+                })
+            })?;
+            if count > options.max_entries {
+                return Err(ManagedRegistryReadError::EntryCountLimitExceeded {
+                    count,
+                    limit: options.max_entries,
+                });
+            }
+            let entry_bytes = count
+                .checked_mul(std::mem::size_of::<ManagedRegistryEntry>())
+                .ok_or(ManagedRegistryReadError::AllocationLimitExceeded {
+                    requested: usize::MAX,
+                    limit: options.max_total_decoded_allocation_bytes,
+                })?;
+            if entry_bytes > options.max_total_decoded_allocation_bytes {
+                return Err(ManagedRegistryReadError::AllocationLimitExceeded {
+                    requested: entry_bytes,
+                    limit: options.max_total_decoded_allocation_bytes,
+                });
+            }
+            entries.try_reserve_exact(count).map_err(|_| {
+                ManagedRegistryReadError::AllocationFailed {
+                    resource: "registry entries",
+                    requested: count,
+                }
+            })?;
+            allocated_bytes = entry_bytes;
             for _ in 0..count {
                 let entry_index = entries.len();
                 let reference_id = cursor.read_i64("registry reference identifier")?;
-                let triple = cursor.read_managed_type_triple()?;
-                entries.push(read_entry(
+                let (triple, triple_bytes) = cursor.read_managed_type_triple(
+                    options.object_decode_limits.max_string_bytes,
+                    options
+                        .max_total_decoded_allocation_bytes
+                        .saturating_sub(allocated_bytes),
+                )?;
+                allocated_bytes = add_registry_allocation(
+                    allocated_bytes,
+                    triple_bytes,
+                    options.max_total_decoded_allocation_bytes,
+                )?;
+                let entry_options = options_with_remaining_budget(options, allocated_bytes);
+                let (entry, payload_bytes) = read_entry(
                     &mut cursor,
-                    options,
+                    entry_options,
                     references,
                     entry_index,
                     reference_id,
                     triple,
-                )?);
+                )?;
+                allocated_bytes = add_registry_allocation(
+                    allocated_bytes,
+                    payload_bytes,
+                    options.max_total_decoded_allocation_bytes,
+                )?;
+                entries.push(entry);
             }
         }
         RegistryFormat::Terminated => loop {
@@ -853,7 +1005,12 @@ pub fn read_managed_registry(
                 }
                 .into());
             }
-            let triple = cursor.read_managed_type_triple()?;
+            let (triple, triple_bytes) = cursor.read_managed_type_triple(
+                options.object_decode_limits.max_string_bytes,
+                options
+                    .max_total_decoded_allocation_bytes
+                    .saturating_sub(allocated_bytes),
+            )?;
             if is_terminus(
                 &triple.class_name,
                 &triple.namespace_name,
@@ -862,22 +1019,87 @@ pub fn read_managed_registry(
                 break;
             }
             let entry_index = entries.len();
-            entries.push(read_entry(
+            if entry_index >= options.max_entries {
+                return Err(ManagedRegistryReadError::EntryCountLimitExceeded {
+                    count: entry_index.saturating_add(1),
+                    limit: options.max_entries,
+                });
+            }
+            entries
+                .try_reserve(1)
+                .map_err(|_| ManagedRegistryReadError::AllocationFailed {
+                    resource: "registry entries",
+                    requested: entry_index.saturating_add(1),
+                })?;
+            allocated_bytes = add_registry_allocation(
+                allocated_bytes,
+                std::mem::size_of::<ManagedRegistryEntry>(),
+                options.max_total_decoded_allocation_bytes,
+            )?;
+            allocated_bytes = add_registry_allocation(
+                allocated_bytes,
+                triple_bytes,
+                options.max_total_decoded_allocation_bytes,
+            )?;
+            let entry_options = options_with_remaining_budget(options, allocated_bytes);
+            let (entry, payload_bytes) = read_entry(
                 &mut cursor,
-                options,
+                entry_options,
                 references,
                 entry_index,
                 entry_index as i64,
                 triple,
-            )?);
+            )?;
+            allocated_bytes = add_registry_allocation(
+                allocated_bytes,
+                payload_bytes,
+                options.max_total_decoded_allocation_bytes,
+            )?;
+            entries.push(entry);
         },
     }
-    cursor.align(4);
+    cursor.align(4, "registry array alignment")?;
     Ok(ManagedRegistryRead {
         version,
         entries,
         consumed_bytes: cursor.position(),
+        allocated_bytes,
     })
+}
+
+fn add_registry_allocation(
+    allocated: usize,
+    requested: usize,
+    limit: usize,
+) -> Result<usize, ManagedRegistryReadError> {
+    let total = allocated.checked_add(requested).ok_or(
+        ManagedRegistryReadError::AllocationLimitExceeded {
+            requested: usize::MAX,
+            limit,
+        },
+    )?;
+    if total > limit {
+        return Err(ManagedRegistryReadError::AllocationLimitExceeded {
+            requested: total,
+            limit,
+        });
+    }
+    Ok(total)
+}
+
+fn options_with_remaining_budget(
+    mut options: ManagedRegistryReadOptions,
+    already_allocated: usize,
+) -> ManagedRegistryReadOptions {
+    let remaining = options
+        .max_total_decoded_allocation_bytes
+        .saturating_sub(already_allocated);
+    options.max_total_decoded_allocation_bytes = remaining;
+    options.object_decode_limits.max_decoded_allocation_bytes = options
+        .object_decode_limits
+        .max_decoded_allocation_bytes
+        .min(remaining);
+    options
 }
 
 /// A managed-type triple: the class, namespace, and assembly names identifying
@@ -898,7 +1120,7 @@ fn read_entry(
     entry_index: usize,
     reference_id: i64,
     triple: ManagedTypeTriple,
-) -> Result<ManagedRegistryEntry, ManagedRegistryReadError> {
+) -> Result<(ManagedRegistryEntry, usize), ManagedRegistryReadError> {
     use crate::io::special_names::remove_assembly_file_extension;
     use crate::processing::script_identity::{
         ScriptIdentifier, TYPE_REFERENCE_NOT_FOUND, TYPE_TREE_NODE_BUILD_FAILED,
@@ -909,6 +1131,7 @@ fn read_entry(
         triple.class_name.is_empty(),
         triple.assembly_name.is_empty(),
     );
+    let mut payload_allocated_bytes = 0usize;
     let data =
         if !frame.has_content {
             ManagedRegistryEntryData::Empty
@@ -944,26 +1167,32 @@ fn read_entry(
                 string_buffer: Vec::new(),
             };
             let payload = cursor.remaining_bytes();
-            let (value, consumed) = super::object::decode_typetree_payload(
+            let mut decode_limits = options.object_decode_limits;
+            decode_limits.max_decoded_allocation_bytes = decode_limits
+                .max_decoded_allocation_bytes
+                .min(options.max_total_decoded_allocation_bytes);
+            let (value, consumed, allocated) = super::object::decode_typetree_payload(
                 &payload_tree,
                 payload,
                 options.endian,
                 options.arrays_align,
-                true,
+                references,
                 entry_index,
-                &super::object::ObjectDecodeLimits::default(),
+                &decode_limits,
             )
             .map_err(|error| ManagedRegistryReadError::PayloadDecode { entry_index, error })?;
             cursor.advance(consumed, "registry object payload")?;
+            payload_allocated_bytes = allocated;
             ManagedRegistryEntryData::Content(value)
         };
-    Ok(ManagedRegistryEntry {
+    let entry = ManagedRegistryEntry {
         reference_id,
         class_name: triple.class_name,
         namespace_name: triple.namespace_name,
         assembly_name: triple.assembly_name,
         data,
-    })
+    };
+    Ok((entry, payload_allocated_bytes))
 }
 
 /// Flatten a built node back into a level-nested node list in declaration order,
@@ -971,7 +1200,7 @@ fn read_entry(
 /// children are skipped exactly like `FromRootNode` skips them when building
 /// the referenced-object type; a nested registry node stays in the list and
 /// fails payload decoding explicitly (no silent mis-decode).
-fn flatten_built_tree(
+pub(crate) fn flatten_built_tree(
     root: &crate::processing::script_identity::BuiltTypeNode,
 ) -> Vec<super::metadata::TypeTreeNode> {
     use crate::processing::script_identity::BuiltTypeNode;
@@ -1023,15 +1252,22 @@ fn flatten_built_tree(
     swept
 }
 
-/// A checked little cursor over the registry blob.
+/// A checked cursor over the registry blob.
 struct Cursor<'a> {
     bytes: &'a [u8],
     position: usize,
+    endian: crate::io::binary::Endian,
+    stream_offset: usize,
 }
 
 impl<'a> Cursor<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, position: 0 }
+    fn new(bytes: &'a [u8], endian: crate::io::binary::Endian, stream_offset: usize) -> Self {
+        Self {
+            bytes,
+            position: 0,
+            endian,
+            stream_offset,
+        }
     }
 
     fn position(&self) -> usize {
@@ -1075,48 +1311,140 @@ impl<'a> Cursor<'a> {
 
     fn read_i32(&mut self, what: &'static str) -> Result<i32, ManagedRegistryReadError> {
         let taken = self.take(4, what)?;
-        Ok(i32::from_le_bytes([taken[0], taken[1], taken[2], taken[3]]))
+        let bytes = [taken[0], taken[1], taken[2], taken[3]];
+        Ok(match self.endian {
+            crate::io::binary::Endian::Little => i32::from_le_bytes(bytes),
+            crate::io::binary::Endian::Big => i32::from_be_bytes(bytes),
+        })
     }
 
     fn read_i64(&mut self, what: &'static str) -> Result<i64, ManagedRegistryReadError> {
         let taken = self.take(8, what)?;
-        Ok(i64::from_le_bytes([
+        let bytes = [
             taken[0], taken[1], taken[2], taken[3], taken[4], taken[5], taken[6], taken[7],
-        ]))
+        ];
+        Ok(match self.endian {
+            crate::io::binary::Endian::Little => i64::from_le_bytes(bytes),
+            crate::io::binary::Endian::Big => i64::from_be_bytes(bytes),
+        })
     }
 
     /// One length-prefixed aligned string, mirroring the structure string reads.
     fn read_aligned_string(
         &mut self,
         what: &'static str,
+        max_string_bytes: usize,
+        max_allocation_bytes: usize,
     ) -> Result<String, ManagedRegistryReadError> {
         let length = self.read_i32(what)?;
-        let length =
-            usize::try_from(length).map_err(|_| ManagedRegistryReadError::TruncatedInput {
-                offset: self.position,
+        let length = usize::try_from(length)
+            .map_err(|_| ManagedRegistryReadError::InvalidStringLength { length, what })?;
+        if length > max_string_bytes {
+            return Err(ManagedRegistryReadError::StringLimitExceeded {
+                length,
+                limit: max_string_bytes,
                 what,
-            })?;
+            });
+        }
+        if length > max_allocation_bytes {
+            return Err(ManagedRegistryReadError::AllocationLimitExceeded {
+                requested: length,
+                limit: max_allocation_bytes,
+            });
+        }
         let taken = self.take(length, what)?;
-        let value = String::from_utf8_lossy(taken).into_owned();
-        let aligned = length.next_multiple_of(4);
-        self.advance(aligned - length, what)?;
+        let value = match std::str::from_utf8(taken) {
+            Ok(text) => {
+                let mut value = String::new();
+                value.try_reserve_exact(text.len()).map_err(|_| {
+                    ManagedRegistryReadError::AllocationFailed {
+                        resource: "managed type string",
+                        requested: text.len(),
+                    }
+                })?;
+                value.push_str(text);
+                value
+            }
+            Err(_) => {
+                let maximum_lossy_bytes = length.checked_mul(3).ok_or(
+                    ManagedRegistryReadError::AllocationLimitExceeded {
+                        requested: usize::MAX,
+                        limit: max_allocation_bytes,
+                    },
+                )?;
+                if maximum_lossy_bytes > max_allocation_bytes {
+                    return Err(ManagedRegistryReadError::AllocationLimitExceeded {
+                        requested: maximum_lossy_bytes,
+                        limit: max_allocation_bytes,
+                    });
+                }
+                match String::from_utf8_lossy(taken) {
+                    std::borrow::Cow::Borrowed(text) => {
+                        let mut value = String::new();
+                        value.try_reserve_exact(text.len()).map_err(|_| {
+                            ManagedRegistryReadError::AllocationFailed {
+                                resource: "managed type string",
+                                requested: text.len(),
+                            }
+                        })?;
+                        value.push_str(text);
+                        value
+                    }
+                    std::borrow::Cow::Owned(value) => value,
+                }
+            }
+        };
+        self.align(4, what)?;
         Ok(value)
     }
 
     /// `ReadManagedType`: the class/namespace/assembly triple.
-    fn read_managed_type_triple(&mut self) -> Result<ManagedTypeTriple, ManagedRegistryReadError> {
-        Ok(ManagedTypeTriple {
-            class_name: self.read_aligned_string("managed type class name")?,
-            namespace_name: self.read_aligned_string("managed type namespace name")?,
-            assembly_name: self.read_aligned_string("managed type assembly name")?,
-        })
+    fn read_managed_type_triple(
+        &mut self,
+        max_string_bytes: usize,
+        max_allocation_bytes: usize,
+    ) -> Result<(ManagedTypeTriple, usize), ManagedRegistryReadError> {
+        let mut allocated_bytes = 0usize;
+        let mut read = |cursor: &mut Self, what| {
+            let available = max_allocation_bytes.saturating_sub(allocated_bytes);
+            let value = cursor.read_aligned_string(what, max_string_bytes, available)?;
+            allocated_bytes = allocated_bytes.checked_add(value.len()).ok_or(
+                ManagedRegistryReadError::AllocationLimitExceeded {
+                    requested: usize::MAX,
+                    limit: max_allocation_bytes,
+                },
+            )?;
+            Ok::<String, ManagedRegistryReadError>(value)
+        };
+        let class_name = read(self, "managed type class name")?;
+        let namespace_name = read(self, "managed type namespace name")?;
+        let assembly_name = read(self, "managed type assembly name")?;
+        Ok((
+            ManagedTypeTriple {
+                class_name,
+                namespace_name,
+                assembly_name,
+            },
+            allocated_bytes,
+        ))
     }
 
     /// The trailing array alignment (`Read` aligns after the entries).
-    fn align(&mut self, boundary: usize) {
-        let remainder = self.position % boundary;
+    fn align(
+        &mut self,
+        boundary: usize,
+        what: &'static str,
+    ) -> Result<(), ManagedRegistryReadError> {
+        let stream_position = self.stream_offset.checked_add(self.position).ok_or(
+            ManagedRegistryReadError::TruncatedInput {
+                offset: self.position,
+                what,
+            },
+        )?;
+        let remainder = stream_position % boundary;
         if remainder != 0 {
-            self.position += boundary - remainder;
+            self.advance(boundary - remainder, what)?;
         }
+        Ok(())
     }
 }

@@ -45,6 +45,8 @@ impl Default for ObjectDecodeLimits {
 struct DecodeBudget<'a> {
     limits: &'a ObjectDecodeLimits,
     allocated_bytes: usize,
+    managed_type_references: &'a [super::metadata::SerializedTypeReference],
+    decode_managed_registry: bool,
 }
 
 impl DecodeBudget<'_> {
@@ -91,6 +93,12 @@ impl DecodeBudget<'_> {
             )
         })?;
         self.charge(bytes, offset, resource)
+    }
+
+    fn remaining_allocation_bytes(&self) -> usize {
+        self.limits
+            .max_decoded_allocation_bytes
+            .saturating_sub(self.allocated_bytes)
     }
 }
 
@@ -207,6 +215,14 @@ pub enum SerializedValue {
         file_id: i32,
         path_id: i64,
     },
+    /// A SerializeReference identifier. Its registry lives on the owning serialized object;
+    /// keeping the identifier as an edge avoids recursive expansion and preserves cycles.
+    ManagedReferenceId {
+        reference_id: i64,
+        indexed: bool,
+    },
+    /// The dynamically typed SerializeReference registry attached to one serialized object.
+    ManagedReferenceRegistry(Box<super::managed_registry::ManagedRegistryRead>),
     /// Unknown leaf data with a nonnegative TypeTree byte size is preserved without decoding.
     Raw {
         type_name: String,
@@ -940,6 +956,8 @@ impl SerializedFileMetadata {
         let mut budget = DecodeBudget {
             limits,
             allocated_bytes: 0,
+            managed_type_references: &self.reference_types,
+            decode_managed_registry: true,
         };
         // The source refuses pre-3.5 assets before reading anything; refused payloads
         // flow into the existing raw-retention path downstream like any decode failure.
@@ -1044,7 +1062,6 @@ impl SerializedFileMetadata {
             arrays_align,
             object_index,
             type_root.type_name.as_deref().unwrap_or(""),
-            false,
             &mut budget,
         )?;
         let consumed_bytes = reader.position();
@@ -1073,20 +1090,22 @@ impl SerializedFileMetadata {
 /// Decode one freestanding payload against a caller-built node list (managed
 /// reference registry entries, whose trees come from the type resolver rather
 /// than a file). The node list must be level-nested exactly like a file
-/// TypeTree; `allow_managed_nodes` decodes `managedReference` identifier
-/// structs as plain structs, which file-object payloads keep refusing.
+/// TypeTree. Managed-reference ID nodes use the same ID representation as
+/// ordinary file-object fields; nested registries remain explicit errors.
 pub(crate) fn decode_typetree_payload(
     type_tree: &TypeTree,
     payload: &[u8],
     endian: Endian,
     arrays_align: bool,
-    allow_managed_nodes: bool,
+    managed_type_references: &[super::metadata::SerializedTypeReference],
     entry_index: usize,
     limits: &ObjectDecodeLimits,
-) -> Result<(SerializedValue, usize), ObjectDecodeError> {
+) -> Result<(SerializedValue, usize, usize), ObjectDecodeError> {
     let mut budget = DecodeBudget {
         limits,
         allocated_bytes: 0,
+        managed_type_references,
+        decode_managed_registry: false,
     };
     let type_root = type_tree.nodes.first().ok_or_else(|| {
         ObjectDecodeError::new(
@@ -1105,10 +1124,9 @@ pub(crate) fn decode_typetree_payload(
         arrays_align,
         entry_index,
         type_root.type_name.as_deref().unwrap_or(""),
-        allow_managed_nodes,
         &mut budget,
     )?;
-    Ok((root, reader.position()))
+    Ok((root, reader.position(), budget.allocated_bytes))
 }
 
 fn decode_root(
@@ -1117,47 +1135,8 @@ fn decode_root(
     arrays_align: bool,
     object_index: usize,
     root_name: &str,
-    allow_managed_nodes: bool,
     budget: &mut DecodeBudget<'_>,
 ) -> Result<SerializedValue, ObjectDecodeError> {
-    for (node_index, node) in type_tree.nodes.iter().enumerate() {
-        let children = direct_children(type_tree, node_index, object_index, reader.offset())?;
-        let type_name = node.type_name.as_deref().unwrap_or("");
-        let node_name = node.name.as_deref().unwrap_or("");
-        // `TypeTreeNodeStruct.IsManagedReference`: a `managedReference` (or array-item)
-        // node holding one `rid` (or legacy `id`) child.
-        let managed_reference_node =
-            is_managed_reference_element(type_tree, node_index, object_index, reader.offset())?;
-        // `TypeTreeNodeStruct.IsManagedReferencesRegistry`.
-        let registry_node = is_managed_references_registry(type_name, node_name, children.len());
-        let dynamic_managed_data = is_referenced_object_data(type_name, node_name, children.len());
-        // Managed-reference registry payloads carry `managedReference` identifier
-        // structs (a bare `rid`), which decode as plain structs on the registry
-        // path; file-object payloads keep refusing them like the source, which
-        // routes those nodes through the registry reader instead.
-        if (managed_reference_node && !allow_managed_nodes) || registry_node || dynamic_managed_data
-        {
-            // `TypeTreeNodeStruct.IsIndexedManagedReference` selects the legacy `id`
-            // field shape over the `rid`-addressed shape for the rejection report,
-            // mirroring the source field-shape selection.
-            let is_indexed = managed_reference_node
-                && is_indexed_managed_reference_element(
-                    type_tree,
-                    node_index,
-                    object_index,
-                    reader.offset(),
-                )?;
-            return Err(ObjectDecodeError::new(
-                reader.offset(),
-                ObjectDecodeErrorKind::UnsupportedManagedReferences {
-                    object_index,
-                    type_name: type_name.to_owned(),
-                    field_name: node_name.to_owned(),
-                    is_indexed,
-                },
-            ));
-        }
-    }
     decode_node_value(
         reader,
         type_tree,
@@ -1222,6 +1201,32 @@ fn decode_field(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn serialized_value_kind(value: &SerializedValue) -> &'static str {
+    match value {
+        SerializedValue::Bool(_) => "bool",
+        SerializedValue::I8(_) => "i8",
+        SerializedValue::U8(_) => "u8",
+        SerializedValue::I16(_) => "i16",
+        SerializedValue::U16(_) => "u16",
+        SerializedValue::Char(_) => "char",
+        SerializedValue::I32(_) => "i32",
+        SerializedValue::U32(_) => "u32",
+        SerializedValue::I64(_) => "i64",
+        SerializedValue::U64(_) => "u64",
+        SerializedValue::F32(_) => "f32",
+        SerializedValue::F64(_) => "f64",
+        SerializedValue::StringBytes(_) => "string",
+        SerializedValue::Bytes(_) => "bytes",
+        SerializedValue::Array(_) => "array",
+        SerializedValue::Struct(_) => "struct",
+        SerializedValue::PPtr { .. } => "PPtr",
+        SerializedValue::ManagedReferenceId { .. } => "managed-reference ID",
+        SerializedValue::ManagedReferenceRegistry(_) => "managed-reference registry",
+        SerializedValue::Raw { .. } => "raw",
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn decode_node_value(
     reader: &mut BinaryReader<'_>,
     type_tree: &TypeTreeLayout<'_>,
@@ -1250,6 +1255,117 @@ fn decode_node_value(
         )
     })?;
     let type_name = node.type_name.as_deref().unwrap_or("");
+    let node_name = node.name.as_deref().unwrap_or("");
+
+    let children = direct_children(type_tree, node_index, object_index, reader.offset())?;
+    if is_managed_reference_element(type_tree, node_index, object_index, reader.offset())? {
+        let is_indexed = is_indexed_managed_reference_element(
+            type_tree,
+            node_index,
+            object_index,
+            reader.offset(),
+        )?;
+        let child_index = *children.first().ok_or_else(|| {
+            ObjectDecodeError::new(
+                reader.offset(),
+                ObjectDecodeErrorKind::UnsupportedManagedReferences {
+                    object_index,
+                    type_name: type_name.to_owned(),
+                    field_name: node_name.to_owned(),
+                    is_indexed,
+                },
+            )
+        })?;
+        let identifier = decode_field(
+            reader,
+            type_tree,
+            child_index,
+            arrays_align,
+            object_index,
+            path,
+            depth + 1,
+            budget,
+        )?;
+        let reference_id = match identifier.value {
+            SerializedValue::I32(value) if is_indexed => i64::from(value),
+            SerializedValue::I64(value) if !is_indexed => value,
+            value => {
+                return Err(ObjectDecodeError::new(
+                    reader.offset(),
+                    ObjectDecodeErrorKind::InvalidManagedReferenceId {
+                        object_index,
+                        path: path.to_owned(),
+                        indexed: is_indexed,
+                        value: serialized_value_kind(&value).to_owned(),
+                    },
+                ));
+            }
+        };
+        return Ok(SerializedValue::ManagedReferenceId {
+            reference_id,
+            indexed: is_indexed,
+        });
+    }
+
+    if is_managed_references_registry(type_name, node_name, children.len()) {
+        if !budget.decode_managed_registry {
+            return Err(ObjectDecodeError::new(
+                reader.offset(),
+                ObjectDecodeErrorKind::NestedManagedReferenceRegistry {
+                    object_index,
+                    path: path.to_owned(),
+                },
+            ));
+        }
+        let registry_limits = ObjectDecodeLimits {
+            max_decoded_allocation_bytes: budget.remaining_allocation_bytes(),
+            ..*budget.limits
+        };
+        let options = super::managed_registry::ManagedRegistryReadOptions {
+            endian: reader.endian(),
+            arrays_align,
+            stream_offset: reader.position(),
+            object_decode_limits: registry_limits,
+            max_entries: budget.limits.max_array_elements,
+            max_total_decoded_allocation_bytes: budget.remaining_allocation_bytes(),
+        };
+        let registry = super::managed_registry::read_managed_registry(
+            reader.remaining_slice(),
+            options,
+            budget.managed_type_references,
+        )
+        .map_err(|error| {
+            ObjectDecodeError::new(
+                reader.offset(),
+                ObjectDecodeErrorKind::ManagedRegistryDecode {
+                    object_index,
+                    path: path.to_owned(),
+                    message: error.to_string(),
+                },
+            )
+        })?;
+        reader
+            .skip(registry.consumed_bytes)
+            .map_err(ObjectDecodeError::from_binary)?;
+        budget.charge(
+            registry.allocated_bytes,
+            reader.offset(),
+            "managed reference registry",
+        )?;
+        return Ok(SerializedValue::ManagedReferenceRegistry(Box::new(
+            registry,
+        )));
+    }
+
+    if is_referenced_object_data(type_name, node_name, children.len()) {
+        return Err(ObjectDecodeError::new(
+            reader.offset(),
+            ObjectDecodeErrorKind::NestedManagedReferenceRegistry {
+                object_index,
+                path: path.to_owned(),
+            },
+        ));
+    }
 
     if matches!(type_name, "string" | "Utf8String")
         && is_string_node(type_tree, node_index, object_index, reader.offset())?
@@ -1409,7 +1525,6 @@ fn decode_node_value(
         return Ok(value);
     }
 
-    let children = direct_children(type_tree, node_index, object_index, reader.offset())?;
     if !children.is_empty() {
         let mut fields = reserve_fields(children.len(), reader.offset(), path, budget)?;
         for child_index in children {
@@ -2198,6 +2313,21 @@ pub enum ObjectDecodeErrorKind {
         /// The legacy `id` flavor (`IsIndexedManagedReference`) versus `rid`-addressed.
         is_indexed: bool,
     },
+    InvalidManagedReferenceId {
+        object_index: usize,
+        path: String,
+        indexed: bool,
+        value: String,
+    },
+    ManagedRegistryDecode {
+        object_index: usize,
+        path: String,
+        message: String,
+    },
+    NestedManagedReferenceRegistry {
+        object_index: usize,
+        path: String,
+    },
     InvalidPPtrComponent {
         object_index: usize,
         path: String,
@@ -2322,12 +2452,34 @@ impl Display for ObjectDecodeErrorKind {
                 is_indexed,
             } => write!(
                 f,
-                "object {object_index} contains {} managed-reference TypeTree node {type_name} {field_name}; registry decoding is not implemented",
+                "object {object_index} contains {} managed-reference TypeTree node {type_name} {field_name} without an ID child",
                 if *is_indexed {
                     "legacy indexed"
                 } else {
                     "rid-addressed"
                 }
+            ),
+            Self::InvalidManagedReferenceId {
+                object_index,
+                path,
+                indexed,
+                value,
+            } => write!(
+                f,
+                "object {object_index} field {path} has {value} for a {} managed-reference identifier",
+                if *indexed { "legacy indexed" } else { "rid-addressed" }
+            ),
+            Self::ManagedRegistryDecode {
+                object_index,
+                path,
+                message,
+            } => write!(
+                f,
+                "object {object_index} managed-reference registry at {path} could not be decoded: {message}"
+            ),
+            Self::NestedManagedReferenceRegistry { object_index, path } => write!(
+                f,
+                "object {object_index} field {path} contains a nested managed-reference registry, which the baseline does not serialize"
             ),
             Self::InvalidPPtrComponent {
                 object_index,
@@ -3189,7 +3341,12 @@ mod tests {
             error.kind(),
             ObjectDecodeErrorKind::MissingTypeTree { object_index: 0 }
         ));
+    }
 
+    #[test]
+    fn decodes_modern_and_legacy_managed_reference_ids() {
+        let modern_id = 7i64;
+        let (file, header, mut metadata) = make_file(&modern_id.to_le_bytes());
         metadata.types[0].type_tree = Some(TypeTree {
             nodes: vec![
                 node(0, "Root", "Root", -1, 0),
@@ -3198,18 +3355,20 @@ mod tests {
             ],
             string_buffer: Vec::new(),
         });
-        let error = metadata
-            .decode_object_payload(&file, &header, 0)
-            .unwrap_err();
-        assert!(matches!(
-            error.kind(),
-            ObjectDecodeErrorKind::UnsupportedManagedReferences {
-                is_indexed: false,
-                ..
-            }
-        ));
+        let decoded = metadata.decode_object_payload(&file, &header, 0).unwrap();
+        assert_eq!(
+            decoded.root,
+            SerializedValue::Struct(vec![super::SerializedFieldValue {
+                name: "m_Target".to_owned(),
+                value: SerializedValue::ManagedReferenceId {
+                    reference_id: 7,
+                    indexed: false,
+                },
+            }])
+        );
 
-        // The legacy `id` flavor reports the indexed selection instead.
+        let legacy_id = 3i32;
+        let (file, header, mut metadata) = make_file(&legacy_id.to_le_bytes());
         metadata.types[0].type_tree = Some(TypeTree {
             nodes: vec![
                 node(0, "Root", "Root", -1, 0),
@@ -3218,17 +3377,259 @@ mod tests {
             ],
             string_buffer: Vec::new(),
         });
-        let error = metadata
-            .decode_object_payload(&file, &header, 0)
-            .unwrap_err();
-        assert!(matches!(
-            error.kind(),
-            ObjectDecodeErrorKind::UnsupportedManagedReferences {
-                is_indexed: true,
-                ..
+        let decoded = metadata.decode_object_payload(&file, &header, 0).unwrap();
+        assert_eq!(
+            decoded.root,
+            SerializedValue::Struct(vec![super::SerializedFieldValue {
+                name: "m_Target".to_owned(),
+                value: SerializedValue::ManagedReferenceId {
+                    reference_id: 3,
+                    indexed: true,
+                },
+            }])
+        );
+    }
+
+    #[test]
+    fn decodes_and_encodes_named_vectors_of_managed_reference_array_items() {
+        let mut modern_payload = Vec::new();
+        modern_payload.extend_from_slice(&2i32.to_le_bytes());
+        modern_payload.extend_from_slice(&7i64.to_le_bytes());
+        modern_payload.extend_from_slice(&9i64.to_le_bytes());
+        let (file, header, mut metadata) = make_file(&modern_payload);
+        metadata.types[0].type_tree = Some(TypeTree {
+            nodes: vec![
+                node(0, "Root", "Root", -1, 0),
+                node(1, "m_Items", "managedReference", -1, 0),
+                node(2, "Array", "Array", -1, 0),
+                node(3, "size", "int", 4, 0),
+                node(3, "data", "managedRefArrayItem", -1, 0),
+                node(4, "rid", "SInt64", 8, 0),
+            ],
+            string_buffer: Vec::new(),
+        });
+        let decoded = metadata.decode_object_payload(&file, &header, 0).unwrap();
+        assert_eq!(
+            decoded.root.unique_field("m_Items").unwrap(),
+            Some(&SerializedValue::Array(vec![
+                SerializedValue::ManagedReferenceId {
+                    reference_id: 7,
+                    indexed: false,
+                },
+                SerializedValue::ManagedReferenceId {
+                    reference_id: 9,
+                    indexed: false,
+                },
+            ]))
+        );
+        assert_eq!(
+            metadata
+                .encode_object_payload(&decoded, ObjectEncodeLimits::default())
+                .unwrap(),
+            modern_payload
+        );
+
+        let mut legacy_payload = Vec::new();
+        legacy_payload.extend_from_slice(&2i32.to_le_bytes());
+        legacy_payload.extend_from_slice(&0i32.to_le_bytes());
+        legacy_payload.extend_from_slice(&1i32.to_le_bytes());
+        let (file, header, mut metadata) = make_file(&legacy_payload);
+        metadata.types[0].type_tree = Some(TypeTree {
+            nodes: vec![
+                node(0, "Root", "Root", -1, 0),
+                node(1, "m_Items", "managedReference", -1, 0),
+                node(2, "Array", "Array", -1, 0),
+                node(3, "size", "int", 4, 0),
+                node(3, "data", "managedRefArrayItem", -1, 0),
+                node(4, "id", "SInt32", 4, 0),
+            ],
+            string_buffer: Vec::new(),
+        });
+        let decoded = metadata.decode_object_payload(&file, &header, 0).unwrap();
+        assert_eq!(
+            decoded.root.unique_field("m_Items").unwrap(),
+            Some(&SerializedValue::Array(vec![
+                SerializedValue::ManagedReferenceId {
+                    reference_id: 0,
+                    indexed: true,
+                },
+                SerializedValue::ManagedReferenceId {
+                    reference_id: 1,
+                    indexed: true,
+                },
+            ]))
+        );
+        assert_eq!(
+            metadata
+                .encode_object_payload(&decoded, ObjectEncodeLimits::default())
+                .unwrap(),
+            legacy_payload
+        );
+    }
+
+    #[test]
+    fn decodes_runtime_types_shared_ids_and_cyclic_managed_payloads() {
+        let fixture =
+            crate::serialized_file::managed_reference_test_support::managed_reference_fixture();
+        let decoded = fixture
+            .metadata
+            .decode_object_payload(&fixture.file, &fixture.header, 0)
+            .unwrap();
+        assert!(decoded.trailing_bytes.is_empty());
+        assert_eq!(decoded.path_id, 500);
+        let SerializedValue::Struct(fields) = decoded.root else {
+            panic!("expected object struct");
+        };
+        assert_eq!(
+            fields[0].value,
+            SerializedValue::ManagedReferenceId {
+                reference_id: 7,
+                indexed: false,
             }
-        ));
-        assert!(error.to_string().contains("legacy indexed"));
+        );
+        assert_eq!(
+            fields[1].value,
+            SerializedValue::ManagedReferenceId {
+                reference_id: 7,
+                indexed: false,
+            }
+        );
+        assert_eq!(
+            fields[2].value,
+            SerializedValue::ManagedReferenceId {
+                reference_id: 9,
+                indexed: false,
+            }
+        );
+        let SerializedValue::ManagedReferenceRegistry(registry) = &fields[3].value else {
+            panic!("expected decoded registry");
+        };
+        assert_eq!(registry.entries.len(), 2);
+        assert_eq!(registry.entries[0].reference_id, 7);
+        assert_eq!(registry.entries[0].class_name, "NodeA");
+        assert_eq!(registry.entries[1].reference_id, 9);
+        assert_eq!(registry.entries[1].class_name, "NodeB");
+        let crate::serialized_file::managed_registry::ManagedRegistryEntryData::Content(node_a) =
+            &registry.entries[0].data
+        else {
+            panic!("expected NodeA content");
+        };
+        let crate::serialized_file::managed_registry::ManagedRegistryEntryData::Content(node_b) =
+            &registry.entries[1].data
+        else {
+            panic!("expected NodeB content");
+        };
+        assert_eq!(
+            node_a.unique_field("m_Value").unwrap(),
+            Some(&SerializedValue::I32(100))
+        );
+        assert_eq!(
+            node_b.unique_field("m_Value").unwrap(),
+            Some(&SerializedValue::I32(200))
+        );
+        assert_eq!(
+            node_a.unique_field("m_Link").unwrap(),
+            Some(&SerializedValue::ManagedReferenceId {
+                reference_id: 9,
+                indexed: false,
+            })
+        );
+        assert_eq!(
+            node_b.unique_field("m_Link").unwrap(),
+            Some(&SerializedValue::ManagedReferenceId {
+                reference_id: 7,
+                indexed: false,
+            })
+        );
+        assert_eq!(
+            node_a.unique_field("m_Asset").unwrap(),
+            Some(&SerializedValue::PPtr {
+                file_id: 1,
+                path_id: 42,
+            })
+        );
+        assert_eq!(fields[4].value, SerializedValue::I32(0x1234_5678));
+
+        let decoded = fixture
+            .metadata
+            .decode_object_payload(&fixture.file, &fixture.header, 0)
+            .unwrap();
+        let encoded = fixture
+            .metadata
+            .encode_object_payload(&decoded, ObjectEncodeLimits::default())
+            .unwrap();
+        let start = usize::try_from(fixture.header.data_offset).unwrap();
+        assert_eq!(
+            encoded.len(),
+            fixture.metadata.objects[0].byte_size as usize
+        );
+        assert_eq!(encoded, fixture.file[start..start + encoded.len()]);
+    }
+
+    #[test]
+    fn decodes_terminated_legacy_registry_and_reencodes_exactly() {
+        let fixture = crate::serialized_file::managed_reference_test_support::
+            terminated_managed_reference_fixture();
+        let decoded = fixture
+            .metadata
+            .decode_object_payload(&fixture.file, &fixture.header, 0)
+            .unwrap();
+        let SerializedValue::Struct(fields) = &decoded.root else {
+            panic!("expected object struct");
+        };
+        for (field, expected_id) in [("m_First", 0), ("m_Shared", 0), ("m_Second", 1)] {
+            assert_eq!(
+                fields
+                    .iter()
+                    .find(|value| value.name == field)
+                    .map(|value| &value.value),
+                Some(&SerializedValue::ManagedReferenceId {
+                    reference_id: expected_id,
+                    indexed: true,
+                })
+            );
+        }
+        let SerializedValue::ManagedReferenceRegistry(registry) = &fields[3].value else {
+            panic!("expected terminated registry");
+        };
+        assert_eq!(registry.version, 1);
+        assert_eq!(registry.entries.len(), 2);
+        assert_eq!(registry.entries[0].reference_id, 0);
+        assert_eq!(registry.entries[1].reference_id, 1);
+        let encoded = fixture
+            .metadata
+            .encode_object_payload(&decoded, ObjectEncodeLimits::default())
+            .unwrap();
+        let start = usize::try_from(fixture.header.data_offset).unwrap();
+        assert_eq!(
+            encoded.len(),
+            fixture.metadata.objects[0].byte_size as usize
+        );
+        assert_eq!(encoded, fixture.file[start..start + encoded.len()]);
+    }
+
+    #[test]
+    fn registry_failures_keep_the_object_and_type_tree_path() {
+        let fixture =
+            crate::serialized_file::managed_reference_test_support::managed_reference_fixture();
+        let mut malformed = fixture.file.clone();
+        let registry_start = usize::try_from(fixture.header.data_offset).unwrap() + 24;
+        malformed[registry_start..registry_start + 4].copy_from_slice(&9i32.to_le_bytes());
+        let error = fixture
+            .metadata
+            .decode_object_payload(&malformed, &fixture.header, 0)
+            .unwrap_err();
+        assert!(
+            matches!(
+                error.kind(),
+                ObjectDecodeErrorKind::ManagedRegistryDecode {
+                    object_index: 0,
+                    path,
+                    message,
+                } if path == "Root.references" && message.contains("format 9")
+            ),
+            "unexpected contextual decode error: {error}"
+        );
     }
 
     #[test]
@@ -4048,6 +4449,8 @@ mod tests {
             let mut budget = super::DecodeBudget {
                 limits: &limits,
                 allocated_bytes: 0,
+                managed_type_references: &[],
+                decode_managed_registry: false,
             };
             let mut reader = BinaryReader::new(&payload, Endian::Little);
             let start = Instant::now();
@@ -4082,6 +4485,8 @@ mod tests {
             let mut budget = super::DecodeBudget {
                 limits: &limits,
                 allocated_bytes: 0,
+                managed_type_references: &[],
+                decode_managed_registry: false,
             };
             let mut reader = BinaryReader::new(&payload, Endian::Little);
             let start = Instant::now();
@@ -4114,6 +4519,8 @@ mod tests {
             let mut budget = super::DecodeBudget {
                 limits: &limits,
                 allocated_bytes: 0,
+                managed_type_references: &[],
+                decode_managed_registry: false,
             };
             let mut reader = BinaryReader::new(&payload, Endian::Little);
             let start = Instant::now();

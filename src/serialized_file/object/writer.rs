@@ -119,6 +119,9 @@ pub enum ObjectEncodeErrorKind {
         type_name: String,
         field_name: String,
     },
+    InvalidManagedReferenceEncoding {
+        reason: String,
+    },
     ValueTypeMismatch {
         expected: String,
         actual: &'static str,
@@ -203,6 +206,9 @@ impl Display for ObjectEncodeErrorKind {
                 f,
                 "managed-reference shape '{type_name}' at '{field_name}' is not supported by this encoder"
             ),
+            Self::InvalidManagedReferenceEncoding { reason } => {
+                write!(f, "managed-reference value cannot be encoded: {reason}")
+            }
             Self::ValueTypeMismatch { expected, actual } => {
                 write!(f, "TypeTree expects {expected}, but value is {actual}")
             }
@@ -466,6 +472,8 @@ impl SerializedFileMetadata {
             type_tree: &layout,
             endian: self.prefix.body_endian,
             arrays_align: unity_version_aligns_arrays(self.prefix.unity_version_text.as_deref()),
+            reference_types: &self.reference_types,
+            allow_managed_registry: true,
             object_index,
             limits,
             output,
@@ -826,48 +834,286 @@ fn default_primitive(type_name: &str, meta_flags: u32) -> Option<SerializedValue
     })
 }
 
-struct PayloadEncoder<'layout, 'tree> {
+struct PayloadEncoder<'layout, 'tree, 'references> {
     type_tree: &'layout TypeTreeLayout<'tree>,
     endian: Endian,
     arrays_align: bool,
+    reference_types: &'references [super::super::metadata::SerializedTypeReference],
+    allow_managed_registry: bool,
     object_index: usize,
     limits: ObjectEncodeLimits,
     output: Vec<u8>,
 }
 
-impl PayloadEncoder<'_, '_> {
+impl PayloadEncoder<'_, '_, '_> {
     fn encode_root(
         &mut self,
         value: &SerializedValue,
         root_name: &str,
     ) -> Result<(), ObjectEncodeError> {
-        for (node_index, node) in self.type_tree.nodes.iter().enumerate() {
-            let children = self.children(node_index, "<root>")?;
-            let type_name = node.type_name.as_deref().unwrap_or("");
-            let field_name = node.name.as_deref().unwrap_or("");
-            let managed_reference_node =
-                matches!(type_name, "managedReference" | "managedRefArrayItem")
-                    && children.len() == 1
-                    && matches!(
-                        self.type_tree.nodes[children[0]].name.as_deref(),
-                        Some("rid" | "id")
-                    );
-            let registry_node = type_name == "ManagedReferencesRegistry"
-                && field_name == "references"
-                && children.len() > 1;
-            let dynamic_managed_data = type_name == "ReferencedObjectData" && field_name == "data";
-            if managed_reference_node || registry_node || dynamic_managed_data {
-                return Err(ObjectEncodeError::new(
+        self.encode_node_value(0, value, root_name, 0, false)
+    }
+
+    fn encode_managed_registry(
+        &mut self,
+        registry: &super::super::managed_registry::ManagedRegistryRead,
+        path: &str,
+        depth: usize,
+    ) -> Result<(), ObjectEncodeError> {
+        use super::super::managed_registry::{
+            frame_registry_entry, COUNTED_FORMAT, TERMINATED_FORMAT, TERMINUS_ASSEMBLY_NAME,
+            TERMINUS_CLASS_NAME, TERMINUS_NAMESPACE,
+        };
+
+        if registry.entries.len() > self.limits.max_array_elements {
+            return Err(ObjectEncodeError::new(
+                self.object_index,
+                path,
+                ObjectEncodeErrorKind::ArrayElementLimitExceeded {
+                    requested: registry.entries.len(),
+                    limit: self.limits.max_array_elements,
+                },
+            ));
+        }
+        if !matches!(registry.version, TERMINATED_FORMAT | COUNTED_FORMAT) {
+            return Err(ObjectEncodeError::new(
+                self.object_index,
+                path,
+                ObjectEncodeErrorKind::InvalidManagedReferenceEncoding {
+                    reason: format!("unsupported registry format {}", registry.version),
+                },
+            ));
+        }
+        self.write_i32(path, registry.version)?;
+        if registry.version == COUNTED_FORMAT {
+            let count = i32::try_from(registry.entries.len()).map_err(|_| {
+                ObjectEncodeError::new(
                     self.object_index,
-                    field_name,
-                    ObjectEncodeErrorKind::UnsupportedManagedReferences {
-                        type_name: type_name.to_owned(),
-                        field_name: field_name.to_owned(),
+                    path,
+                    ObjectEncodeErrorKind::LengthOverflow {
+                        resource: "managed-reference registry entry count",
                     },
-                ));
+                )
+            })?;
+            self.write_i32(path, count)?;
+        }
+
+        for (entry_index, entry) in registry.entries.iter().enumerate() {
+            let entry_path = format!("{path}.RefIds[{entry_index}]");
+            if registry.version == TERMINATED_FORMAT {
+                if entry.reference_id != entry_index as i64 {
+                    return Err(ObjectEncodeError::new(
+                        self.object_index,
+                        &entry_path,
+                        ObjectEncodeErrorKind::InvalidManagedReferenceEncoding {
+                            reason: format!(
+                                "terminated registry entry has ID {}, expected its index {entry_index}",
+                                entry.reference_id
+                            ),
+                        },
+                    ));
+                }
+            } else {
+                self.write_bytes(
+                    &entry_path,
+                    &encode_u64_bytes(entry.reference_id as u64, self.endian),
+                )?;
+            }
+            self.write_registry_string(&entry_path, "class", &entry.class_name)?;
+            self.write_registry_string(&entry_path, "ns", &entry.namespace_name)?;
+            self.write_registry_string(&entry_path, "asm", &entry.assembly_name)?;
+
+            let frame = frame_registry_entry(
+                entry.reference_id,
+                entry.class_name.is_empty(),
+                entry.assembly_name.is_empty(),
+            );
+            match (&entry.data, frame.has_content) {
+                (
+                    super::super::managed_registry::ManagedRegistryEntryData::Content(value),
+                    true,
+                ) => self.encode_managed_registry_content(
+                    entry_index,
+                    entry,
+                    value,
+                    &entry_path,
+                    depth + 1,
+                )?,
+                (super::super::managed_registry::ManagedRegistryEntryData::Empty, false) => {}
+                (super::super::managed_registry::ManagedRegistryEntryData::Content(_), false) => {
+                    return Err(ObjectEncodeError::new(
+                        self.object_index,
+                        &entry_path,
+                        ObjectEncodeErrorKind::InvalidManagedReferenceEncoding {
+                            reason: "a null, unknown, or empty-type entry carries content"
+                                .to_owned(),
+                        },
+                    ));
+                }
+                (super::super::managed_registry::ManagedRegistryEntryData::Empty, true) => {
+                    return Err(ObjectEncodeError::new(
+                        self.object_index,
+                        &entry_path,
+                        ObjectEncodeErrorKind::InvalidManagedReferenceEncoding {
+                            reason: "a content-bearing entry has no decoded payload".to_owned(),
+                        },
+                    ));
+                }
             }
         }
-        self.encode_node_value(0, value, root_name, 0, false)
+
+        if registry.version == TERMINATED_FORMAT {
+            self.write_registry_string(path, "terminus class", TERMINUS_CLASS_NAME)?;
+            self.write_registry_string(path, "terminus namespace", TERMINUS_NAMESPACE)?;
+            self.write_registry_string(path, "terminus assembly", TERMINUS_ASSEMBLY_NAME)?;
+        }
+        self.align_four(path)
+    }
+
+    fn write_registry_string(
+        &mut self,
+        path: &str,
+        field_name: &str,
+        value: &str,
+    ) -> Result<(), ObjectEncodeError> {
+        let string_path = format!("{path}.type.{field_name}");
+        if value.len() > self.limits.max_string_bytes {
+            return Err(ObjectEncodeError::new(
+                self.object_index,
+                string_path,
+                ObjectEncodeErrorKind::StringByteLimitExceeded {
+                    requested: value.len(),
+                    limit: self.limits.max_string_bytes,
+                },
+            ));
+        }
+        let length = i32::try_from(value.len()).map_err(|_| {
+            ObjectEncodeError::new(
+                self.object_index,
+                &string_path,
+                ObjectEncodeErrorKind::LengthOverflow {
+                    resource: "managed-reference type-name length",
+                },
+            )
+        })?;
+        self.write_i32(&string_path, length)?;
+        self.write_bytes(&string_path, value.as_bytes())?;
+        self.align_four(&string_path)
+    }
+
+    fn encode_managed_registry_content(
+        &mut self,
+        entry_index: usize,
+        entry: &super::super::managed_registry::ManagedRegistryEntry,
+        value: &SerializedValue,
+        path: &str,
+        depth: usize,
+    ) -> Result<(), ObjectEncodeError> {
+        use crate::io::special_names::remove_assembly_file_extension;
+        use crate::processing::script_identity::{
+            find_type_reference_index, ScriptIdentifier, TYPE_REFERENCE_NOT_FOUND,
+            TYPE_TREE_NODE_BUILD_FAILED,
+        };
+
+        let script = ScriptIdentifier {
+            assembly: remove_assembly_file_extension(&entry.assembly_name),
+            namespace: entry.namespace_name.clone(),
+            name: Some(entry.class_name.clone()),
+        };
+        let type_index =
+            find_type_reference_index(self.reference_types, &script).ok_or_else(|| {
+                ObjectEncodeError::new(
+                    self.object_index,
+                    path,
+                    ObjectEncodeErrorKind::InvalidManagedReferenceEncoding {
+                        reason: format!(
+                            "could not resolve {}: {TYPE_REFERENCE_NOT_FOUND}",
+                            script.unique_name()
+                        ),
+                    },
+                )
+            })?;
+        let source_tree = self.reference_types[type_index]
+            .type_tree
+            .as_ref()
+            .ok_or_else(|| {
+                ObjectEncodeError::new(
+                    self.object_index,
+                    path,
+                    ObjectEncodeErrorKind::InvalidManagedReferenceEncoding {
+                        reason: format!(
+                            "could not build {}: {TYPE_TREE_NODE_BUILD_FAILED}",
+                            script.unique_name()
+                        ),
+                    },
+                )
+            })?;
+        let built = crate::processing::script_identity::build_type_nodes(&source_tree.nodes)
+            .ok_or_else(|| {
+                ObjectEncodeError::new(
+                    self.object_index,
+                    path,
+                    ObjectEncodeErrorKind::InvalidManagedReferenceEncoding {
+                        reason: format!(
+                            "could not build {}: {TYPE_TREE_NODE_BUILD_FAILED}",
+                            script.unique_name()
+                        ),
+                    },
+                )
+            })?;
+        let payload_tree = super::super::managed_registry::flatten_built_tree(&built);
+        let payload_tree = super::super::metadata::TypeTree {
+            nodes: payload_tree,
+            string_buffer: Vec::new(),
+        };
+        let root_name = payload_tree
+            .nodes
+            .first()
+            .and_then(|node| node.type_name.as_deref())
+            .ok_or_else(|| {
+                ObjectEncodeError::new(
+                    self.object_index,
+                    path,
+                    ObjectEncodeErrorKind::InvalidManagedReferenceEncoding {
+                        reason: format!(
+                            "{} has an empty referenced TypeTree",
+                            script.unique_name()
+                        ),
+                    },
+                )
+            })?;
+        let layout = TypeTreeLayout::new(&payload_tree, self.object_index, self.output.len())
+            .map_err(|error| invalid_tree(self.object_index, path, error))?;
+        let remaining_payload_bytes = self
+            .limits
+            .max_encoded_payload_bytes
+            .saturating_sub(self.output.len());
+        let dynamic_limits = ObjectEncodeLimits {
+            max_encoded_payload_bytes: remaining_payload_bytes,
+            ..self.limits
+        };
+        let mut encoder = PayloadEncoder {
+            type_tree: &layout,
+            endian: self.endian,
+            arrays_align: self.arrays_align,
+            reference_types: self.reference_types,
+            allow_managed_registry: false,
+            object_index: self.object_index,
+            limits: dynamic_limits,
+            output: Vec::new(),
+        };
+        encoder
+            .encode_node_value(0, value, root_name, depth, false)
+            .map_err(|error| {
+                ObjectEncodeError::new(
+                    self.object_index,
+                    path,
+                    ObjectEncodeErrorKind::InvalidManagedReferenceEncoding {
+                        reason: format!("registry entry {entry_index}: {error}"),
+                    },
+                )
+            })?;
+        self.write_bytes(path, &encoder.output)
     }
 
     fn encode_field(
@@ -921,6 +1167,113 @@ impl PayloadEncoder<'_, '_> {
             )
         })?;
         let type_name = node.type_name.as_deref().unwrap_or("");
+        let field_name = node.name.as_deref().unwrap_or("");
+        let children = self.children(node_index, path)?;
+
+        if super::is_managed_reference_element(
+            self.type_tree,
+            node_index,
+            self.object_index,
+            self.output.len(),
+        )
+        .map_err(|error| invalid_tree(self.object_index, path, error))?
+        {
+            let indexed = super::is_indexed_managed_reference_element(
+                self.type_tree,
+                node_index,
+                self.object_index,
+                self.output.len(),
+            )
+            .map_err(|error| invalid_tree(self.object_index, path, error))?;
+            let SerializedValue::ManagedReferenceId {
+                reference_id,
+                indexed: value_indexed,
+            } = value
+            else {
+                return Err(self.value_mismatch(path, "managed-reference ID", value));
+            };
+            if indexed != *value_indexed {
+                return Err(ObjectEncodeError::new(
+                    self.object_index,
+                    path,
+                    ObjectEncodeErrorKind::InvalidManagedReferenceEncoding {
+                        reason: format!(
+                            "TypeTree uses the {} identifier but value uses the {} identifier",
+                            if indexed {
+                                "legacy index"
+                            } else {
+                                "stable rid"
+                            },
+                            if *value_indexed {
+                                "legacy index"
+                            } else {
+                                "stable rid"
+                            }
+                        ),
+                    },
+                ));
+            }
+            let child_index = *children.first().ok_or_else(|| {
+                ObjectEncodeError::new(
+                    self.object_index,
+                    path,
+                    ObjectEncodeErrorKind::InvalidTypeTree {
+                        message: "managed-reference identifier child is missing".to_owned(),
+                    },
+                )
+            })?;
+            let id_name = self.type_tree.nodes[child_index]
+                .name
+                .as_deref()
+                .unwrap_or(if indexed { "id" } else { "rid" });
+            let id_path = child_path(path, id_name);
+            let id_value = if indexed {
+                SerializedValue::I32(i32::try_from(*reference_id).map_err(|_| {
+                    ObjectEncodeError::new(
+                        self.object_index,
+                        path,
+                        ObjectEncodeErrorKind::InvalidManagedReferenceEncoding {
+                            reason: format!(
+                                "indexed managed-reference ID {reference_id} is outside i32"
+                            ),
+                        },
+                    )
+                })?)
+            } else {
+                SerializedValue::I64(*reference_id)
+            };
+            self.encode_field(child_index, &id_value, &id_path, depth + 1)?;
+            return Ok(());
+        }
+
+        if super::is_managed_references_registry(type_name, field_name, children.len()) {
+            if !self.allow_managed_registry {
+                return Err(ObjectEncodeError::new(
+                    self.object_index,
+                    path,
+                    ObjectEncodeErrorKind::UnsupportedManagedReferences {
+                        type_name: type_name.to_owned(),
+                        field_name: field_name.to_owned(),
+                    },
+                ));
+            }
+            let SerializedValue::ManagedReferenceRegistry(registry) = value else {
+                return Err(self.value_mismatch(path, "managed-reference registry", value));
+            };
+            self.encode_managed_registry(registry, path, depth + 1)?;
+            return Ok(());
+        }
+
+        if super::is_referenced_object_data(type_name, field_name, children.len()) {
+            return Err(ObjectEncodeError::new(
+                self.object_index,
+                path,
+                ObjectEncodeErrorKind::UnsupportedManagedReferences {
+                    type_name: type_name.to_owned(),
+                    field_name: field_name.to_owned(),
+                },
+            ));
+        }
 
         if matches!(type_name, "string" | "Utf8String")
             && is_string_node(
@@ -1071,7 +1424,6 @@ impl PayloadEncoder<'_, '_> {
             return Ok(());
         }
 
-        let children = self.children(node_index, path)?;
         if !children.is_empty() {
             let SerializedValue::Struct(fields) = value else {
                 return Err(self.value_mismatch(path, "struct", value));
@@ -1458,6 +1810,8 @@ fn value_kind(value: &SerializedValue) -> &'static str {
         SerializedValue::Array(_) => "array",
         SerializedValue::Struct(_) => "struct",
         SerializedValue::PPtr { .. } => "PPtr",
+        SerializedValue::ManagedReferenceId { .. } => "managed reference ID",
+        SerializedValue::ManagedReferenceRegistry(_) => "managed reference registry",
         SerializedValue::Raw { .. } => "raw",
     }
 }
@@ -1554,11 +1908,13 @@ mod tests {
     fn encoder<'layout, 'tree>(
         layout: &'layout TypeTreeLayout<'tree>,
         arrays_align: bool,
-    ) -> PayloadEncoder<'layout, 'tree> {
+    ) -> PayloadEncoder<'layout, 'tree, 'static> {
         PayloadEncoder {
             type_tree: layout,
             endian: Endian::Little,
             arrays_align,
+            reference_types: &[],
+            allow_managed_registry: false,
             object_index: 7,
             limits: ObjectEncodeLimits::default(),
             output: Vec::new(),

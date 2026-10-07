@@ -51,6 +51,49 @@ pub struct SerializedObjectReference {
     pub path_id: i64,
 }
 
+/// One dynamically typed managed object stored in a SerializedFile object's registry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SerializedManagedObject {
+    pub source_object_index: usize,
+    pub source_path_id: i64,
+    /// Zero-based order in this owning object's registry.
+    pub registry_entry_index: usize,
+    pub reference_id: i64,
+    pub class_name: String,
+    pub namespace_name: String,
+    pub assembly_name: String,
+    /// False for registry entries whose source triple carries no decoded payload.
+    pub has_content: bool,
+}
+
+/// Resolution of a managed-reference ID within its owning serialized object.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SerializedManagedReferenceResolution {
+    Null,
+    Unknown,
+    Object {
+        registry_entry_index: usize,
+    },
+    Missing {
+        reference_id: i64,
+    },
+    Ambiguous {
+        reference_id: i64,
+        match_count: usize,
+    },
+}
+
+/// One managed-reference ID edge within an owning serialized object.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SerializedManagedReference {
+    pub source_object_index: usize,
+    pub source_path_id: i64,
+    pub field_path: String,
+    pub reference_id: i64,
+    pub indexed: bool,
+    pub resolution: SerializedManagedReferenceResolution,
+}
+
 /// A reason a reference scan did not decode every recognized reference.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReferenceGraphIssue {
@@ -83,6 +126,18 @@ pub enum ReferenceGraphIssue {
         field_path: String,
         limit: usize,
     },
+    ManagedObjectLimitExceeded {
+        object_index: usize,
+        path_id: i64,
+        field_path: String,
+        limit: usize,
+    },
+    ManagedReferenceLimitExceeded {
+        object_index: usize,
+        path_id: i64,
+        field_path: String,
+        limit: usize,
+    },
 }
 
 /// A per-file index and scan of TypeTree-decoded PPtr values.
@@ -97,6 +152,8 @@ pub struct ObjectReferenceGraph {
     /// Sorted by PathID, then source object index, so duplicate identities remain visible.
     path_id_index: Vec<(i64, usize)>,
     references: Vec<SerializedObjectReference>,
+    managed_objects: Vec<SerializedManagedObject>,
+    managed_references: Vec<SerializedManagedReference>,
     issues: Vec<ReferenceGraphIssue>,
 }
 
@@ -134,6 +191,8 @@ impl ObjectReferenceGraph {
             attempted_objects: 0,
             path_id_index,
             references: Vec::new(),
+            managed_objects: Vec::new(),
+            managed_references: Vec::new(),
             issues: Vec::new(),
         };
 
@@ -203,12 +262,134 @@ impl ObjectReferenceGraph {
                     )?;
                     break;
                 }
+                Err(WalkIssue::ManagedObjectLimitExceeded { field_path }) => {
+                    graph.push_issue(
+                        ReferenceGraphIssue::ManagedObjectLimitExceeded {
+                            object_index,
+                            path_id: object.path_id,
+                            field_path,
+                            limit: limits.max_objects,
+                        },
+                        limits.max_issues,
+                    )?;
+                }
+                Err(WalkIssue::ManagedReferenceLimitExceeded { field_path }) => {
+                    graph.push_issue(
+                        ReferenceGraphIssue::ManagedReferenceLimitExceeded {
+                            object_index,
+                            path_id: object.path_id,
+                            field_path,
+                            limit: limits.max_edges,
+                        },
+                        limits.max_issues,
+                    )?;
+                }
                 Err(WalkIssue::AllocationFailed {
                     resource,
                     requested,
                 }) => {
                     return Err(ReferenceGraphBuildError::allocation(resource, requested));
                 }
+                Err(WalkIssue::IssueLimitExceeded {
+                    object_index,
+                    path_id,
+                    limit,
+                }) => {
+                    return Err(ReferenceGraphBuildError::IssueLimitExceeded {
+                        object_index,
+                        path_id,
+                        limit,
+                    });
+                }
+            }
+
+            let mut managed_limits = limits;
+            managed_limits.max_objects = limits
+                .max_objects
+                .saturating_sub(graph.managed_objects.len());
+            managed_limits.max_edges = limits
+                .max_edges
+                .saturating_sub(graph.managed_references.len());
+            let mut managed_field_path = String::new();
+            match collect_managed_reference_graph(
+                &payload.root,
+                &mut managed_field_path,
+                object_index,
+                object.path_id,
+                managed_limits,
+            ) {
+                Ok(local) => {
+                    graph
+                        .managed_objects
+                        .try_reserve_exact(local.objects.len())
+                        .map_err(|_| {
+                            ReferenceGraphBuildError::allocation(
+                                "managed reference objects",
+                                local.objects.len(),
+                            )
+                        })?;
+                    graph
+                        .managed_references
+                        .try_reserve_exact(local.references.len())
+                        .map_err(|_| {
+                            ReferenceGraphBuildError::allocation(
+                                "managed reference edges",
+                                local.references.len(),
+                            )
+                        })?;
+                    graph.managed_objects.extend(local.objects);
+                    graph.managed_references.extend(local.references);
+                }
+                Err(WalkIssue::FieldPathLimitExceeded {
+                    parent_field_path,
+                    component_bytes,
+                }) => graph.push_issue(
+                    ReferenceGraphIssue::FieldPathLimitExceeded {
+                        object_index,
+                        path_id: object.path_id,
+                        parent_field_path,
+                        component_bytes,
+                        limit: limits.max_field_path_bytes,
+                    },
+                    limits.max_issues,
+                )?,
+                Err(WalkIssue::ManagedObjectLimitExceeded { field_path }) => {
+                    graph.push_issue(
+                        ReferenceGraphIssue::ManagedObjectLimitExceeded {
+                            object_index,
+                            path_id: object.path_id,
+                            field_path,
+                            limit: limits.max_objects,
+                        },
+                        limits.max_issues,
+                    )?;
+                }
+                Err(WalkIssue::ManagedReferenceLimitExceeded { field_path }) => {
+                    graph.push_issue(
+                        ReferenceGraphIssue::ManagedReferenceLimitExceeded {
+                            object_index,
+                            path_id: object.path_id,
+                            field_path,
+                            limit: limits.max_edges,
+                        },
+                        limits.max_issues,
+                    )?;
+                }
+                Err(WalkIssue::AllocationFailed {
+                    resource,
+                    requested,
+                }) => {
+                    return Err(ReferenceGraphBuildError::allocation(resource, requested));
+                }
+                Err(WalkIssue::EdgeLimitExceeded { field_path }) => graph.push_issue(
+                    ReferenceGraphIssue::ManagedReferenceLimitExceeded {
+                        object_index,
+                        path_id: object.path_id,
+                        field_path,
+                        limit: limits.max_edges,
+                    },
+                    limits.max_issues,
+                )?,
                 Err(WalkIssue::IssueLimitExceeded {
                     object_index,
                     path_id,
@@ -237,6 +418,14 @@ impl ObjectReferenceGraph {
 
     pub fn references(&self) -> &[SerializedObjectReference] {
         &self.references
+    }
+
+    pub fn managed_objects(&self) -> &[SerializedManagedObject] {
+        &self.managed_objects
+    }
+
+    pub fn managed_references(&self) -> &[SerializedManagedReference] {
+        &self.managed_references
     }
 
     pub fn issues(&self) -> &[ReferenceGraphIssue] {
@@ -281,6 +470,34 @@ impl ObjectReferenceGraph {
             .references
             .partition_point(|reference| reference.source_object_index <= object_index);
         self.references[first..end].iter()
+    }
+
+    /// Returns managed objects registered by one source object, in registry order.
+    pub fn managed_objects_from_object(
+        &self,
+        object_index: usize,
+    ) -> impl Iterator<Item = &SerializedManagedObject> {
+        let first = self
+            .managed_objects
+            .partition_point(|object| object.source_object_index < object_index);
+        let end = self
+            .managed_objects
+            .partition_point(|object| object.source_object_index <= object_index);
+        self.managed_objects[first..end].iter()
+    }
+
+    /// Returns managed-reference ID edges for one source object in field traversal order.
+    pub fn managed_references_from_object(
+        &self,
+        object_index: usize,
+    ) -> impl Iterator<Item = &SerializedManagedReference> {
+        let first = self
+            .managed_references
+            .partition_point(|reference| reference.source_object_index < object_index);
+        let end = self
+            .managed_references
+            .partition_point(|reference| reference.source_object_index <= object_index);
+        self.managed_references[first..end].iter()
     }
 
     /// True only when every object's TypeTree payload was decoded and every recognized PPtr was
@@ -366,6 +583,16 @@ impl ObjectReferenceGraph {
                 object_index,
                 path_id,
                 ..
+            }
+            | ReferenceGraphIssue::ManagedObjectLimitExceeded {
+                object_index,
+                path_id,
+                ..
+            }
+            | ReferenceGraphIssue::ManagedReferenceLimitExceeded {
+                object_index,
+                path_id,
+                ..
             } => (*object_index, *path_id),
         };
         if self.issues.len() >= maximum_issues {
@@ -389,7 +616,9 @@ fn reference_issue_object_index(issue: &ReferenceGraphIssue) -> usize {
         | ReferenceGraphIssue::UnparsedTrailingPayload { object_index, .. }
         | ReferenceGraphIssue::UnparsedRawValue { object_index, .. }
         | ReferenceGraphIssue::FieldPathLimitExceeded { object_index, .. }
-        | ReferenceGraphIssue::EdgeLimitExceeded { object_index, .. } => *object_index,
+        | ReferenceGraphIssue::EdgeLimitExceeded { object_index, .. }
+        | ReferenceGraphIssue::ManagedObjectLimitExceeded { object_index, .. }
+        | ReferenceGraphIssue::ManagedReferenceLimitExceeded { object_index, .. } => *object_index,
     }
 }
 
@@ -698,6 +927,14 @@ impl<'a> MultiFileReferenceGraph<'a> {
     /// one object's contiguous reference slice without scanning unrelated object edges.
     pub fn references(&self) -> &[MultiFileObjectReference<'a>] {
         &self.references
+    }
+
+    /// Returns the scoped managed-reference object/edge graph for one loaded file.
+    ///
+    /// Managed IDs are file-object-local, so their edge targets remain registry entry indexes
+    /// within the owning PathID instead of being flattened into the cross-file PPtr namespace.
+    pub fn managed_graph_for_file(&self, file_index: usize) -> Option<&'a ObjectReferenceGraph> {
+        self.file_graphs.get(file_index).copied()
     }
 
     /// Returns the parsed identity for a file-scoped object-table entry.
@@ -1226,6 +1463,12 @@ enum WalkIssue {
     EdgeLimitExceeded {
         field_path: String,
     },
+    ManagedObjectLimitExceeded {
+        field_path: String,
+    },
+    ManagedReferenceLimitExceeded {
+        field_path: String,
+    },
     AllocationFailed {
         resource: &'static str,
         requested: usize,
@@ -1235,6 +1478,253 @@ enum WalkIssue {
         path_id: i64,
         limit: usize,
     },
+}
+
+#[derive(Default)]
+struct LocalManagedReferenceGraph {
+    objects: Vec<SerializedManagedObject>,
+    references: Vec<SerializedManagedReference>,
+}
+
+struct PendingManagedReference {
+    field_path: String,
+    reference_id: i64,
+    indexed: bool,
+}
+
+fn collect_managed_reference_graph(
+    root: &SerializedValue,
+    field_path: &mut String,
+    source_object_index: usize,
+    source_path_id: i64,
+    limits: ReferenceGraphLimits,
+) -> Result<LocalManagedReferenceGraph, WalkIssue> {
+    fn visit(
+        value: &SerializedValue,
+        field_path: &mut String,
+        source_object_index: usize,
+        source_path_id: i64,
+        limits: ReferenceGraphLimits,
+        graph: &mut LocalManagedReferenceGraph,
+        pending: &mut Vec<PendingManagedReference>,
+    ) -> Result<(), WalkIssue> {
+        match value {
+            SerializedValue::Struct(fields) => {
+                for field in fields {
+                    let old_length = append_path_component(
+                        field_path,
+                        &field.name,
+                        !field_path.is_empty(),
+                        limits.max_field_path_bytes,
+                    )?;
+                    let nested = visit(
+                        &field.value,
+                        field_path,
+                        source_object_index,
+                        source_path_id,
+                        limits,
+                        graph,
+                        pending,
+                    );
+                    field_path.truncate(old_length);
+                    nested?;
+                }
+            }
+            SerializedValue::Array(values) => {
+                for (index, value) in values.iter().enumerate() {
+                    let component = format!("[{index}]");
+                    let old_length = append_path_component(
+                        field_path,
+                        &component,
+                        false,
+                        limits.max_field_path_bytes,
+                    )?;
+                    let nested = visit(
+                        value,
+                        field_path,
+                        source_object_index,
+                        source_path_id,
+                        limits,
+                        graph,
+                        pending,
+                    );
+                    field_path.truncate(old_length);
+                    nested?;
+                }
+            }
+            SerializedValue::ManagedReferenceId {
+                reference_id,
+                indexed,
+            } => {
+                if pending.len() >= limits.max_edges {
+                    return Err(WalkIssue::ManagedReferenceLimitExceeded {
+                        field_path: copy_field_path(field_path)?,
+                    });
+                }
+                pending
+                    .try_reserve(1)
+                    .map_err(|_| WalkIssue::AllocationFailed {
+                        resource: "managed-reference ID edges",
+                        requested: 1,
+                    })?;
+                pending.push(PendingManagedReference {
+                    field_path: copy_field_path(field_path)?,
+                    reference_id: *reference_id,
+                    indexed: *indexed,
+                });
+            }
+            SerializedValue::ManagedReferenceRegistry(registry) => {
+                let registry_parent_length = append_path_component(
+                    field_path,
+                    "RefIds",
+                    !field_path.is_empty(),
+                    limits.max_field_path_bytes,
+                )?;
+                let registry_field_length = field_path.len();
+                for (entry_index, entry) in registry.entries.iter().enumerate() {
+                    if graph.objects.len() >= limits.max_objects {
+                        let current = copy_field_path(field_path)?;
+                        field_path.truncate(registry_field_length);
+                        return Err(WalkIssue::ManagedObjectLimitExceeded {
+                            field_path: current,
+                        });
+                    }
+                    graph
+                        .objects
+                        .try_reserve(1)
+                        .map_err(|_| WalkIssue::AllocationFailed {
+                            resource: "managed-reference registry objects",
+                            requested: 1,
+                        })?;
+                    let class_name = copy_owned_string(&entry.class_name, "managed class name")?;
+                    let namespace_name =
+                        copy_owned_string(&entry.namespace_name, "managed namespace name")?;
+                    let assembly_name =
+                        copy_owned_string(&entry.assembly_name, "managed assembly name")?;
+                    graph.objects.push(SerializedManagedObject {
+                        source_object_index,
+                        source_path_id,
+                        registry_entry_index: entry_index,
+                        reference_id: entry.reference_id,
+                        class_name,
+                        namespace_name,
+                        assembly_name,
+                        has_content: matches!(
+                            &entry.data,
+                            super::managed_registry::ManagedRegistryEntryData::Content(_)
+                        ),
+                    });
+
+                    let entry_component = format!("[{entry_index}]");
+                    append_path_component(
+                        field_path,
+                        &entry_component,
+                        false,
+                        limits.max_field_path_bytes,
+                    )?;
+                    append_path_component(field_path, "data", true, limits.max_field_path_bytes)?;
+                    let nested = match &entry.data {
+                        super::managed_registry::ManagedRegistryEntryData::Empty => Ok(()),
+                        super::managed_registry::ManagedRegistryEntryData::Content(data) => visit(
+                            data,
+                            field_path,
+                            source_object_index,
+                            source_path_id,
+                            limits,
+                            graph,
+                            pending,
+                        ),
+                    };
+                    field_path.truncate(registry_field_length);
+                    nested?;
+                }
+                field_path.truncate(registry_parent_length);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    let mut graph = LocalManagedReferenceGraph::default();
+    let mut pending = Vec::new();
+    visit(
+        root,
+        field_path,
+        source_object_index,
+        source_path_id,
+        limits,
+        &mut graph,
+        &mut pending,
+    )?;
+
+    let mut identifiers = HashMap::<i64, (usize, usize)>::new();
+    identifiers
+        .try_reserve(graph.objects.len())
+        .map_err(|_| WalkIssue::AllocationFailed {
+            resource: "managed-reference identifier index",
+            requested: graph.objects.len(),
+        })?;
+    for object in &graph.objects {
+        if matches!(
+            object.reference_id,
+            super::managed_registry::UNKNOWN_REFERENCE_ID
+                | super::managed_registry::NULL_REFERENCE_ID
+        ) {
+            continue;
+        }
+        identifiers
+            .entry(object.reference_id)
+            .and_modify(|(_, count)| *count = count.saturating_add(1))
+            .or_insert((object.registry_entry_index, 1));
+    }
+    graph
+        .references
+        .try_reserve_exact(pending.len())
+        .map_err(|_| WalkIssue::AllocationFailed {
+            resource: "managed-reference resolved edges",
+            requested: pending.len(),
+        })?;
+    for edge in pending {
+        let resolution = match edge.reference_id {
+            super::managed_registry::NULL_REFERENCE_ID => {
+                SerializedManagedReferenceResolution::Null
+            }
+            super::managed_registry::UNKNOWN_REFERENCE_ID => {
+                SerializedManagedReferenceResolution::Unknown
+            }
+            reference_id => match identifiers.get(&reference_id).copied() {
+                None => SerializedManagedReferenceResolution::Missing { reference_id },
+                Some((registry_entry_index, 1)) => SerializedManagedReferenceResolution::Object {
+                    registry_entry_index,
+                },
+                Some((_, match_count)) => SerializedManagedReferenceResolution::Ambiguous {
+                    reference_id,
+                    match_count,
+                },
+            },
+        };
+        graph.references.push(SerializedManagedReference {
+            source_object_index,
+            source_path_id,
+            field_path: edge.field_path,
+            reference_id: edge.reference_id,
+            indexed: edge.indexed,
+            resolution,
+        });
+    }
+    Ok(graph)
+}
+
+fn copy_owned_string(value: &str, resource: &'static str) -> Result<String, WalkIssue> {
+    let mut copied = String::new();
+    copied
+        .try_reserve_exact(value.len())
+        .map_err(|_| WalkIssue::AllocationFailed {
+            resource,
+            requested: value.len(),
+        })?;
+    copied.push_str(value);
+    Ok(copied)
 }
 
 fn collect_references(
@@ -1289,6 +1779,42 @@ fn collect_references(
                 field_path.truncate(old_length);
                 nested_result?;
             }
+        }
+        SerializedValue::ManagedReferenceRegistry(registry) => {
+            let registry_parent_length = append_path_component(
+                field_path,
+                "RefIds",
+                !field_path.is_empty(),
+                limits.max_field_path_bytes,
+            )?;
+            let registry_path_length = field_path.len();
+            for (entry_index, entry) in registry.entries.iter().enumerate() {
+                let entry_component = format!("[{entry_index}]");
+                append_path_component(
+                    field_path,
+                    &entry_component,
+                    false,
+                    limits.max_field_path_bytes,
+                )?;
+                append_path_component(field_path, "data", true, limits.max_field_path_bytes)?;
+                let nested = match &entry.data {
+                    super::managed_registry::ManagedRegistryEntryData::Empty => Ok(()),
+                    super::managed_registry::ManagedRegistryEntryData::Content(value) => {
+                        collect_references(
+                            value,
+                            field_path,
+                            object_index,
+                            source_path_id,
+                            output,
+                            issues,
+                            limits,
+                        )
+                    }
+                };
+                field_path.truncate(registry_path_length);
+                nested?;
+            }
+            field_path.truncate(registry_parent_length);
         }
         SerializedValue::PPtr { file_id, path_id } => {
             if output.len() >= limits.max_edges {
@@ -1484,6 +2010,8 @@ mod tests {
             attempted_objects: path_ids.len(),
             path_id_index,
             references: Vec::new(),
+            managed_objects: Vec::new(),
+            managed_references: Vec::new(),
             issues: Vec::new(),
         }
     }
@@ -2175,6 +2703,206 @@ mod tests {
         assert_eq!(references[0].file_id, 0);
         assert_eq!(references[0].path_id, 42);
         assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn scans_managed_registry_cycles_and_nested_pptrs_from_decoded_object() {
+        let fixture =
+            crate::serialized_file::managed_reference_test_support::managed_reference_fixture();
+        let payload = fixture
+            .metadata
+            .decode_object_payload(&fixture.file, &fixture.header, 0)
+            .unwrap();
+
+        let mut pptrs = Vec::new();
+        let mut issues = Vec::new();
+        collect_references(
+            &payload.root,
+            &mut String::new(),
+            0,
+            payload.path_id,
+            &mut pptrs,
+            &mut issues,
+            ReferenceGraphLimits::default(),
+        )
+        .unwrap();
+        assert!(issues.is_empty());
+        assert_eq!(
+            pptrs
+                .iter()
+                .map(|reference| (
+                    reference.field_path.as_str(),
+                    reference.file_id,
+                    reference.path_id,
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("references.RefIds[0].data.m_Asset", 1, 42),
+                ("references.RefIds[1].data.m_Asset", 0, 300),
+            ]
+        );
+
+        let managed = super::collect_managed_reference_graph(
+            &payload.root,
+            &mut String::new(),
+            0,
+            payload.path_id,
+            ReferenceGraphLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            managed
+                .objects
+                .iter()
+                .map(|object| (object.reference_id, object.class_name.as_str()))
+                .collect::<Vec<_>>(),
+            [(7, "NodeA"), (9, "NodeB")]
+        );
+        assert_eq!(
+            managed
+                .references
+                .iter()
+                .map(|reference| (
+                    reference.field_path.as_str(),
+                    reference.reference_id,
+                    reference.resolution.clone(),
+                ))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    "m_First",
+                    7,
+                    super::SerializedManagedReferenceResolution::Object {
+                        registry_entry_index: 0,
+                    },
+                ),
+                (
+                    "m_Shared",
+                    7,
+                    super::SerializedManagedReferenceResolution::Object {
+                        registry_entry_index: 0,
+                    },
+                ),
+                (
+                    "m_Second",
+                    9,
+                    super::SerializedManagedReferenceResolution::Object {
+                        registry_entry_index: 1,
+                    },
+                ),
+                (
+                    "references.RefIds[0].data.m_Link",
+                    9,
+                    super::SerializedManagedReferenceResolution::Object {
+                        registry_entry_index: 1,
+                    },
+                ),
+                (
+                    "references.RefIds[1].data.m_Link",
+                    7,
+                    super::SerializedManagedReferenceResolution::Object {
+                        registry_entry_index: 0,
+                    },
+                ),
+            ]
+        );
+
+        let serialized_file = crate::serialized_file::file::SerializedFile::from_parts_for_test(
+            &fixture.file,
+            fixture.header.clone(),
+            fixture.metadata.clone(),
+        );
+        let integrated = ObjectReferenceGraph::build(&serialized_file).unwrap();
+        assert!(
+            integrated.is_complete(),
+            "issues: {:?}",
+            integrated.issues()
+        );
+        assert_eq!(integrated.managed_objects().len(), 2);
+        assert_eq!(integrated.managed_references().len(), 5);
+        assert_eq!(integrated.references().len(), 2);
+        assert_eq!(
+            integrated
+                .references()
+                .iter()
+                .map(|reference| reference.field_path.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "references.RefIds[0].data.m_Asset",
+                "references.RefIds[1].data.m_Asset",
+            ]
+        );
+
+        let legacy_fixture = crate::serialized_file::managed_reference_test_support::
+            terminated_managed_reference_fixture();
+        let legacy_payload = legacy_fixture
+            .metadata
+            .decode_object_payload(&legacy_fixture.file, &legacy_fixture.header, 0)
+            .unwrap();
+        let legacy = super::collect_managed_reference_graph(
+            &legacy_payload.root,
+            &mut String::new(),
+            0,
+            legacy_payload.path_id,
+            ReferenceGraphLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            legacy
+                .objects
+                .iter()
+                .map(|object| object.reference_id)
+                .collect::<Vec<_>>(),
+            [0, 1]
+        );
+        assert_eq!(
+            legacy
+                .references
+                .iter()
+                .map(|reference| (
+                    reference.reference_id,
+                    reference.indexed,
+                    reference.resolution.clone(),
+                ))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    0,
+                    true,
+                    super::SerializedManagedReferenceResolution::Object {
+                        registry_entry_index: 0,
+                    },
+                ),
+                (
+                    0,
+                    true,
+                    super::SerializedManagedReferenceResolution::Object {
+                        registry_entry_index: 0,
+                    },
+                ),
+                (
+                    1,
+                    true,
+                    super::SerializedManagedReferenceResolution::Object {
+                        registry_entry_index: 1,
+                    },
+                ),
+                (
+                    1,
+                    true,
+                    super::SerializedManagedReferenceResolution::Object {
+                        registry_entry_index: 1,
+                    },
+                ),
+                (
+                    0,
+                    true,
+                    super::SerializedManagedReferenceResolution::Object {
+                        registry_entry_index: 0,
+                    },
+                ),
+            ]
+        );
     }
 
     #[test]

@@ -580,6 +580,8 @@ fn serialized_kind(value: &SerializedValue) -> &'static str {
         SerializedValue::Array(_) => "array",
         SerializedValue::Struct(_) => "struct",
         SerializedValue::PPtr { .. } => "PPtr",
+        SerializedValue::ManagedReferenceId { .. } => "managed reference ID",
+        SerializedValue::ManagedReferenceRegistry(_) => "managed reference registry",
         SerializedValue::Raw { .. } => "raw data",
     }
 }

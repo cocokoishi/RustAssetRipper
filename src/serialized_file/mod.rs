@@ -15,3 +15,6 @@ pub mod reference_graph;
 pub mod references;
 pub mod transfer_flags;
 pub mod workspace;
+
+#[cfg(test)]
+pub(crate) mod managed_reference_test_support;

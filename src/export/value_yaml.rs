@@ -1552,6 +1552,37 @@ where
                     source: Box::new(source),
                 })?
         }
+        SerializedValue::ManagedReferenceId {
+            reference_id,
+            indexed,
+        } => {
+            let identifier_name = if *indexed { "id" } else { "rid" };
+            let child_path =
+                child_field_path(field_path, identifier_name, limits.max_field_path_bytes)?;
+            budget.visit(depth + 1)?;
+            budget.check_field_path(&child_path)?;
+            let mut mapping = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+            mapping
+                .insert_field(
+                    identifier_name,
+                    UnityYamlNode::scalar(UnityYamlScalar::Signed(*reference_id)),
+                )
+                .map_err(UnityYamlObjectConversionError::NodeBuild)?;
+            mapping
+        }
+        SerializedValue::ManagedReferenceRegistry(registry) => convert_managed_reference_registry(
+            registry,
+            field_path,
+            depth,
+            source,
+            hints,
+            field_mode,
+            unity_version,
+            missing_reference_guid,
+            limits,
+            budget,
+            resolve_pointer,
+        )?,
         SerializedValue::Raw { type_name, .. } => {
             return Err(UnityYamlObjectConversionError::UnsupportedRawValue {
                 field_path: field_path.to_owned(),
@@ -1560,6 +1591,130 @@ where
         }
     };
     Ok(node)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn convert_managed_reference_registry<F>(
+    registry: &super::super::serialized_file::managed_registry::ManagedRegistryRead,
+    field_path: &str,
+    depth: usize,
+    source: ExportAssetIdentity,
+    hints: &UnityYamlObjectConversionHints,
+    field_mode: UnityYamlObjectFieldMode,
+    unity_version: SceneUnityVersion,
+    missing_reference_guid: Option<[u8; 16]>,
+    limits: UnityYamlObjectConversionLimits,
+    budget: &mut ConversionBudget,
+    resolve_pointer: &mut F,
+) -> Result<UnityYamlNode, UnityYamlObjectConversionError>
+where
+    F: FnMut(UnityYamlPPtrRequest<'_>) -> ProjectPointerResolution,
+{
+    let mut mapping = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    for (name, value) in [
+        ("version", SerializedValue::I32(registry.version)),
+        ("RefIds", SerializedValue::Array(Vec::new())),
+    ] {
+        let path = child_field_path(field_path, name, limits.max_field_path_bytes)?;
+        budget.visit(depth + 1)?;
+        budget.check_field_path(&path)?;
+        let converted = if name == "version" {
+            convert_value(
+                &value,
+                &path,
+                depth + 1,
+                source,
+                hints,
+                field_mode,
+                unity_version,
+                missing_reference_guid,
+                limits,
+                budget,
+                resolve_pointer,
+            )?
+        } else {
+            let mut sequence = UnityYamlNode::sequence(UnityYamlSequenceStyle::Block);
+            for (entry_index, entry) in registry.entries.iter().enumerate() {
+                let entry_path =
+                    indexed_field_path(&path, entry_index, limits.max_field_path_bytes)?;
+                budget.visit(depth + 2)?;
+                budget.check_field_path(&entry_path)?;
+                let mut entry_mapping = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+
+                let reference_path =
+                    child_field_path(&entry_path, "rid", limits.max_field_path_bytes)?;
+                budget.visit(depth + 3)?;
+                budget.check_field_path(&reference_path)?;
+                entry_mapping
+                    .insert_field(
+                        "rid",
+                        UnityYamlNode::scalar(UnityYamlScalar::Signed(entry.reference_id)),
+                    )
+                    .map_err(UnityYamlObjectConversionError::NodeBuild)?;
+
+                let type_path = child_field_path(&entry_path, "type", limits.max_field_path_bytes)?;
+                budget.visit(depth + 3)?;
+                budget.check_field_path(&type_path)?;
+                let mut type_mapping = UnityYamlNode::mapping(UnityYamlMappingStyle::Flow);
+                for (name, text) in [
+                    ("class", entry.class_name.as_str()),
+                    ("ns", entry.namespace_name.as_str()),
+                    ("asm", entry.assembly_name.as_str()),
+                ] {
+                    let path = child_field_path(&type_path, name, limits.max_field_path_bytes)?;
+                    budget.visit(depth + 4)?;
+                    budget.check_field_path(&path)?;
+                    type_mapping
+                        .insert_field(
+                            name,
+                            UnityYamlNode::string(try_copy_string(
+                                text,
+                                "managed reference type name",
+                            )?),
+                        )
+                        .map_err(UnityYamlObjectConversionError::NodeBuild)?;
+                }
+                entry_mapping
+                    .insert_field("type", type_mapping)
+                    .map_err(UnityYamlObjectConversionError::NodeBuild)?;
+
+                let data_path = child_field_path(&entry_path, "data", limits.max_field_path_bytes)?;
+                budget.visit(depth + 3)?;
+                budget.check_field_path(&data_path)?;
+                let data = match &entry.data {
+                    super::super::serialized_file::managed_registry::ManagedRegistryEntryData::Empty => {
+                        UnityYamlNode::mapping(UnityYamlMappingStyle::Block)
+                    }
+                    super::super::serialized_file::managed_registry::ManagedRegistryEntryData::Content(value) => {
+                        convert_value(
+                            value,
+                            &data_path,
+                            depth + 3,
+                            source,
+                            hints,
+                            field_mode,
+                            unity_version,
+                            missing_reference_guid,
+                            limits,
+                            budget,
+                            resolve_pointer,
+                        )?
+                    }
+                };
+                entry_mapping
+                    .insert_field("data", data)
+                    .map_err(UnityYamlObjectConversionError::NodeBuild)?;
+                sequence
+                    .push(entry_mapping)
+                    .map_err(UnityYamlObjectConversionError::NodeBuild)?;
+            }
+            sequence
+        };
+        mapping
+            .insert_field(name, converted)
+            .map_err(UnityYamlObjectConversionError::NodeBuild)?;
+    }
+    Ok(mapping)
 }
 
 fn hash128_schema_for_path<'a>(
@@ -3170,6 +3325,21 @@ mod tests {
             .expect("object field exists")
     }
 
+    fn mapping_field<'a>(mapping: &'a UnityYamlNode, field_name: &str) -> &'a UnityYamlNode {
+        let UnityYamlNodeKind::Mapping { entries, .. } = &mapping.kind else {
+            panic!("expected mapping for field {field_name}");
+        };
+        entries
+            .iter()
+            .find_map(|(key, value)| match &key.kind {
+                UnityYamlNodeKind::Scalar(
+                    UnityYamlScalar::PlainString(name) | UnityYamlScalar::String(name),
+                ) if name == field_name => Some(value),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing mapping field {field_name}"))
+    }
+
     fn version() -> SceneUnityVersion {
         SceneUnityVersion::parse("2022.3.1f1").unwrap()
     }
@@ -3254,6 +3424,85 @@ mod tests {
             file_id: 0,
             path_id: 0,
         }
+    }
+
+    #[test]
+    fn decoded_managed_reference_registry_converts_with_cycles_and_pptr_mapping() {
+        let fixture =
+            crate::serialized_file::managed_reference_test_support::managed_reference_fixture();
+        let decoded = fixture
+            .metadata
+            .decode_object_payload(&fixture.file, &fixture.header, 0)
+            .unwrap();
+        let mut observed = Vec::new();
+        let document = convert(&decoded.root, &HashMap::new(), |request| {
+            observed.push((
+                request.field_path.to_owned(),
+                request.file_id,
+                request.path_id,
+            ));
+            ProjectPointerResolution::Mapped(UnityMetaPointer {
+                file_id: 2345,
+                guid: ExportPointerGuid::None,
+                asset_type: UnityProjectAssetType::Serialized,
+            })
+        })
+        .unwrap();
+
+        let first = mapping_field(&document.root, "GameObject");
+        let first = mapping_field(first, "m_First");
+        let UnityYamlNodeKind::Mapping { .. } = &first.kind else {
+            panic!("managed identifier should serialize as a mapping");
+        };
+        assert!(matches!(
+            mapping_field(first, "rid").kind,
+            UnityYamlNodeKind::Scalar(UnityYamlScalar::Signed(7))
+        ));
+
+        let registry = object_field(&document, "references");
+        assert!(matches!(
+            mapping_field(registry, "version").kind,
+            UnityYamlNodeKind::Scalar(UnityYamlScalar::Signed(2))
+        ));
+        let UnityYamlNodeKind::Sequence { items, .. } = &mapping_field(registry, "RefIds").kind
+        else {
+            panic!("registry RefIds should serialize as a sequence");
+        };
+        assert_eq!(items.len(), 2);
+        assert!(matches!(
+            mapping_field(&items[0], "rid").kind,
+            UnityYamlNodeKind::Scalar(UnityYamlScalar::Signed(7))
+        ));
+        let type_a = mapping_field(&items[0], "type");
+        assert!(matches!(
+            mapping_field(type_a, "class").kind,
+            UnityYamlNodeKind::Scalar(UnityYamlScalar::String(ref name)) if name == "NodeA"
+        ));
+        let data_a = mapping_field(&items[0], "data");
+        let link_a = mapping_field(data_a, "m_Link");
+        assert!(matches!(
+            mapping_field(link_a, "rid").kind,
+            UnityYamlNodeKind::Scalar(UnityYamlScalar::Signed(9))
+        ));
+        assert!(matches!(
+            mapping_field(data_a, "m_Asset").kind,
+            UnityYamlNodeKind::Mapping { .. }
+        ));
+        assert_eq!(
+            observed,
+            [
+                ("references.RefIds[0].data.m_Asset".to_owned(), 1, 42),
+                ("references.RefIds[1].data.m_Asset".to_owned(), 0, 300),
+            ]
+        );
+        let text = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[document],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        assert!(text.contains("    RefIds:\n"));
+        assert!(text.contains("      type: {class: NodeA, ns: Example, asm: Assembly-CSharp}"));
+        assert!(text.contains("        m_Link:\n          rid: 9\n"));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-﻿# Source behavior and differential findings
+# Source behavior and differential findings
 
 This log records behavior differences found between the Rust port and the frozen local source. A source-code analysis is identified as such; it is not described as an executed C# differential.
 
@@ -1041,3 +1041,14 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | `src/resources/blend_shape.rs` now exposes a crate-private incremental IEEE CRC update; `src/resources/custom_curve.rs` ports the `ReverseAscii` transform, resolver dispatch, table hits, and source-compatible errors for unsupported binding enum values. |
 | Regression evidence | `cargo test --workspace --locked custom_curve::tests` passes 12/12. The fixture includes 14 `ReverseAscii` outputs and 2 direct `HashAscii` marker hashes. The full Rust workspace passes 1,397 library tests and 65 CLI tests; formatting, warnings-denied Clippy, and the 1,449-file baseline verifier pass. |
 | Remaining comparison | `AnimationClipConverter` does not call the Rust `to_attribute_name`; production code still lacks root/child traversal and asset-backed blend-shape/material CRC lookup to populate `CustomCurveSceneFacts`. Full clip conversion, independent Unity-file evidence, and dynamic Unity animation sampling remain unrun. Keep `PROC-ANIM-CUSTOM-CURVE-001` open. |
+
+## DIFF-MANAGED-REFS-002 - typed root registries and nested-registry gap
+
+| Field | Finding |
+|---|---|
+| Status | Root registry path implemented and synthetically exercised; source audit identifies an open nested-registry difference |
+| Source location | `AssetRipper.Import/Structure/Assembly/Serializable/ManagedReferenceRegistryReader.cs` (`Read`, `ReadManagedType`, `ReadReferencedObject`); `TypeTreeResolver.cs`; `TypeTrees/SerializableTreeType.cs` (`FromReferencedObjectNode`, `FromRootNode`, `AddNode`); `AssetRipper.SerializationLogic/ManagedReferenceTypes.cs` |
+| Source evidence | Read-only audit of the frozen baseline: `FromReferencedObjectNode` builds from the referenced object's root with root-only registry handling disabled; `AddNode` still recognizes and builds Registry nodes encountered below that root. The registry reader resolves each type triple against file reference types and decodes each content-bearing entry. No UABEA, Unity, or user AssetBundle data was used. |
+| Rust change | Root object decoding now reads format 1 terminated and format 2 counted registries, resolves class/namespace/assembly tuples, decodes typed payloads, preserves `rid` and legacy indexed `id`, builds graph objects and managed-ID edges, visits PPtrs in payload data, emits registry YAML, and writes root registry formats. Synthetic fixtures cover two cyclic/shared entries, nested PPtrs, and exact root-registry writer round trips. |
+| Regression evidence | Focused suites: `managed_reference` 8/8; `managed_registry` 11/11; counted typed cyclic payload round trip, terminated legacy round trip, and malformed-path diagnostics each pass. Full workspace: 1,405 library + 65 CLI tests; formatter, warnings-denied Clippy, baseline verifier (1,449 files), and `git diff --check` pass. |
+| Remaining difference | Rust rejects a Registry field encountered inside a referenced payload's TypeTree, while source `AddNode` can represent that nested field. Current managed-ID graph resolution is tested within the root registry only. Nested registry scope semantics and writer support are not implemented; no independent source-runtime payload or Unity-produced fixture validates typed cyclic payload bytes. Keep `SER-MANAGED-REFS-001` open. |

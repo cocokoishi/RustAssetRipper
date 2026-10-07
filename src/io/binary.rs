@@ -176,6 +176,11 @@ impl<'a> BinaryReader<'a> {
         self.data.len() - self.position
     }
 
+    /// Borrow the unread suffix without advancing this reader.
+    pub fn remaining_slice(&self) -> &'a [u8] {
+        &self.data[self.position..]
+    }
+
     pub fn is_empty(&self) -> bool {
         self.remaining() == 0
     }

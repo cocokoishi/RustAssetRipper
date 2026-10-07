@@ -1,4 +1,4 @@
-﻿# Validation log
+# Validation log
 
 ## Environment
 
@@ -3385,3 +3385,8 @@ These results do not pass the first-phase gate. The reference .NET solution buil
 - Residuals dispositioned: image decoding and SharpGLTF material building remain open.
 - Gate status: Phase 1 remains OPEN (39 blockers left). Next: exporter-family/meta rows and dependency-ordered high-impact rows.
 - Final verification on Windows with Rust/Cargo 1.98.1: cargo fmt --all -- --check exit 0; cargo test --workspace --locked exit 0 (1394 library, 65 CLI, 0 doc tests, TEMP/TMP redirected to target/test-tmp); cargo clippy --workspace --all-targets --locked -- -D warnings exit 0; tools/verify-baseline.ps1 exit 0 (1,449/1,449 reference files unchanged); git diff --check exit 0. No Unity-produced file, user AssetBundle, or UABEA content was used. Reference tree untouched; probes ran in isolated Temp bins.
+
+## Managed-reference root registry integration (2026-10-07)
+- Root SerializedFile TypeTrees now decode managed-reference IDs and formats 1/2 registries through file reference types, with bounded allocation and contextual errors. Runtime typed entries, shared/cyclic IDs, and PPtrs in their payloads reach the per-file reference graph; YAML and object-payload writer paths include root registries. Synthetic modern counted and legacy terminated fixtures round-trip the typed root payloads exactly.
+- Focused checks: cargo test --lib managed_reference (8 passed); cargo test --lib managed_registry (11 passed); counted cyclic typed payload, terminated legacy payload, and registry failure-path tests passed. Full cargo test --workspace --locked: 1,405 library + 65 CLI + 0 doc tests passed. cargo clippy --workspace --all-targets --all-features --locked -- -D warnings, cargo fmt --all -- --check, and git diff --check passed. powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\verify-baseline.ps1 verified all 1,449 frozen reference files unchanged.
+- Source audit finding DIFF-MANAGED-REFS-002: baseline SerializableTreeType.FromReferencedObjectNode suppresses only root registry handling; AddNode supports Registry fields nested below the referenced-object root. Rust currently rejects this nested case, so SER-MANAGED-REFS-001 remains 实现中 and the Phase 1 gate remains open. Root typed-cycle evidence is synthetic; no Unity-produced asset, managed-reference source-runtime payload differential, user AssetBundle, or UABEA content was used.

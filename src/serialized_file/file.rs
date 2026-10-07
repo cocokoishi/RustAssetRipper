@@ -32,6 +32,30 @@ pub struct SerializedFile<'a> {
 }
 
 impl<'a> SerializedFile<'a> {
+    #[cfg(test)]
+    pub(crate) fn from_parts_for_test(
+        input: &'a [u8],
+        header: SerializedFileHeader,
+        metadata: SerializedFileMetadata,
+    ) -> Self {
+        Self {
+            input,
+            object_record_layout: ObjectRecordTableLayout {
+                count_field_offset: 0,
+                records_start_offset: 0,
+                records_end_offset: 0,
+                records: Vec::new(),
+            },
+            external_file_table_layout: ExternalFileTableLayout {
+                count_field_offset: 0,
+                records_start_offset: 0,
+                records_end_offset: 0,
+            },
+            header,
+            metadata,
+        }
+    }
+
     /// Parse the header and all metadata tables from one complete SerializedFile input.
     pub fn parse(input: &'a [u8]) -> Result<Self, SerializedFileError> {
         let header =
