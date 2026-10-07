@@ -3922,4 +3922,55 @@ mod tests {
         );
         assert!(payload.trailing_bytes.is_empty());
     }
+
+    #[test]
+    fn object_encode_reproduces_reference_authored_payload() {
+        // The expected bytes below are the C#-constructed F1 payload from
+        // object_field_fixture.txt (reference-readable, never Rust-encoded).
+        // Re-encoding the decoded values must reproduce them exactly.
+        let (bytes, _) = object_field_fixture("F1");
+        let header = SerializedFileHeader::parse(&bytes).expect("F1 header");
+        let metadata = SerializedFileMetadata::parse_file(&bytes, &header).expect("F1 metadata");
+        let object = &metadata.objects[0];
+        let range = object.data_range(&header).expect("F1 range");
+        let original: Vec<u8> = bytes[range.start as usize..range.end as usize].to_vec();
+        assert_eq!(original.len(), 52);
+
+        let payload = metadata
+            .decode_object_payload(&bytes, &header, 0)
+            .expect("F1 decode");
+        let encoded = metadata
+            .encode_object_payload(&payload, ObjectEncodeLimits::default())
+            .expect("F1 encode");
+        assert_eq!(encoded, original);
+
+        // Mutating scalar and variable-length fields re-encodes with the
+        // reference layout (little-endian int, length-prefixed aligned
+        // string) while the untouched tail stays byte-identical.
+        let mut mutated = payload;
+        *mutated
+            .root
+            .unique_field_in_base_chain_mut("m_Int")
+            .expect("m_Int lookup")
+            .expect("m_Int present") = SerializedValue::I32(0x0102_0304);
+        *mutated
+            .root
+            .unique_field_in_base_chain_mut("m_String")
+            .expect("m_String lookup")
+            .expect("m_String present") = SerializedValue::StringBytes(b"hello!".to_vec());
+        let recoded = metadata
+            .encode_object_payload(&mutated, ObjectEncodeLimits::default())
+            .expect("F1 recode");
+        // "hi" section (8 bytes) becomes "hello!" (12 bytes): +4 overall.
+        // Layout is int, float, string, nested, vectors: the float sits
+        // between the mutated int and the grown string.
+        assert_eq!(recoded.len(), 56);
+        assert_eq!(recoded[0..4], [0x04, 0x03, 0x02, 0x01]);
+        assert_eq!(recoded[4..8], [0x00, 0x00, 0xC0, 0x3F]);
+        assert_eq!(recoded[8..12], [0x06, 0x00, 0x00, 0x00]);
+        assert_eq!(recoded[12..18], *b"hello!");
+        assert_eq!(recoded[18..20], [0x00, 0x00]);
+        // Nested struct onwards shifts by 4 but is otherwise unchanged.
+        assert_eq!(recoded[20..], original[16..]);
+    }
 }

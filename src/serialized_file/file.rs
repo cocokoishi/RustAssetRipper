@@ -1029,4 +1029,133 @@ mod tests {
             TransferInstructionFlags::NONE
         );
     }
+
+    fn rewrite_fixture_bytes(case: &str) -> (Vec<u8>, String) {
+        fn hex_to_bytes(hex: &str) -> Vec<u8> {
+            assert!(hex.len().is_multiple_of(2), "odd hex length for {hex}");
+            let mut out = Vec::with_capacity(hex.len() / 2);
+            let bytes = hex.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                let hi = match bytes[i] {
+                    b'0'..=b'9' => bytes[i] - b'0',
+                    b'a'..=b'f' => bytes[i] - b'a' + 10,
+                    b'A'..=b'F' => bytes[i] - b'A' + 10,
+                    b => panic!("invalid hex byte {b}"),
+                };
+                let lo = match bytes[i + 1] {
+                    b'0'..=b'9' => bytes[i + 1] - b'0',
+                    b'a'..=b'f' => bytes[i + 1] - b'a' + 10,
+                    b'A'..=b'F' => bytes[i + 1] - b'A' + 10,
+                    b => panic!("invalid hex byte {b}"),
+                };
+                out.push((hi << 4) | lo);
+                i += 2;
+            }
+            out
+        }
+
+        // Probe Temp/opencode/objrewriteprobe (SerializedFileMetadata.Read
+        // plus SerializableStructure.Read over C#-constructed decodeable
+        // files, SDK 10.0.401). Nothing Rust-generated.
+        let fixture = include_str!("object_rewrite_fixture.txt");
+        let mut file = None;
+        let mut dump = None;
+        for line in fixture.lines() {
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+            if line.starts_with("RW_HEX|") {
+                let parts: Vec<&str> = line.splitn(3, '|').collect();
+                assert_eq!(parts.len(), 3, "bad RW_HEX {line}");
+                if parts[1] == case {
+                    file = Some(hex_to_bytes(parts[2]));
+                }
+            } else if line.starts_with("RW_READ|") {
+                let parts: Vec<&str> = line.splitn(3, '|').collect();
+                assert_eq!(parts.len(), 3, "bad RW_READ {line}");
+                if parts[1] == case {
+                    dump = Some(parts[2].to_string());
+                }
+            }
+        }
+        (
+            file.unwrap_or_else(|| panic!("missing {case} hex")),
+            dump.unwrap_or_else(|| panic!("missing {case} dump")),
+        )
+    }
+
+    #[test]
+    fn rewrites_reference_constructed_files_across_generations() {
+        // (case, generation, header length, appended-data layout)
+        for (case, generation) in [("R8", 8), ("R12", 12), ("R20", 20), ("R22", 22)] {
+            let (bytes, dump) = rewrite_fixture_bytes(case);
+            assert!(
+                dump.contains("INT=11|STR=go|SIZE=12"),
+                "{case} oracle {dump}"
+            );
+            let parsed =
+                SerializedFile::parse(&bytes).unwrap_or_else(|e| panic!("{case} parse: {e:?}"));
+            assert_eq!(parsed.header.format_version.raw(), generation);
+            assert_eq!(parsed.header.file_size as usize, bytes.len());
+            let payload = parsed
+                .decode_object_payload(0)
+                .unwrap_or_else(|e| panic!("{case} decode: {e:?}"));
+            assert_eq!(parsed.metadata.objects[0].byte_size, 12);
+
+            // Grow the variable-length string: "go" (8 encoded bytes)
+            // becomes "hello!" (12 encoded bytes), so the payload grows
+            // from 12 to 16 bytes on every generation.
+            let mut replacement = payload;
+            *replacement
+                .root
+                .unique_field_in_base_chain_mut("m_String")
+                .expect("m_String lookup")
+                .expect("m_String present") = SerializedValue::StringBytes(b"hello!".to_vec());
+            let output = parsed
+                .rewrite_object_payloads(
+                    &[(0, replacement)],
+                    SerializedFileRewriteLimits::default(),
+                )
+                .unwrap_or_else(|e| panic!("{case} rewrite: {e:?}"));
+            // The payload grows by 4 ("go" to "hello!"); the rebuild may
+            // add documented data/object alignment padding on top, so only
+            // a lower bound is pinned here (exact pad layout is Rust policy;
+            // the baseline never rewrites files).
+            assert!(
+                output.len() >= bytes.len() + 4,
+                "{case} growth {}",
+                output.len()
+            );
+
+            let rewritten =
+                SerializedFile::parse(&output).unwrap_or_else(|e| panic!("{case} reparse: {e:?}"));
+            assert_eq!(rewritten.header.format_version.raw(), generation);
+            assert_eq!(rewritten.header.file_size as usize, output.len());
+            assert_eq!(rewritten.header.data_offset % 16, 0);
+            assert_eq!(rewritten.metadata.objects[0].path_id, 8001);
+            assert_eq!(rewritten.metadata.objects[0].byte_start, 0);
+            assert_eq!(rewritten.metadata.objects[0].byte_size, 16);
+            // The single external survives the rebuild byte-for-byte.
+            assert_eq!(rewritten.metadata.externals.len(), 1);
+            assert_eq!(
+                rewritten.metadata.externals[0],
+                parsed.metadata.externals[0]
+            );
+            let decoded = rewritten
+                .decode_object_payload(0)
+                .unwrap_or_else(|e| panic!("{case} redecode: {e:?}"));
+            let root = &decoded.root;
+            let int = root
+                .unique_field("m_Int")
+                .expect("m_Int lookup")
+                .expect("m_Int present");
+            assert_eq!(int, &SerializedValue::I32(11));
+            let string = root
+                .unique_field("m_String")
+                .expect("m_String lookup")
+                .expect("m_String present");
+            assert_eq!(string, &SerializedValue::StringBytes(b"hello!".to_vec()));
+        }
+    }
 }

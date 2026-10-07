@@ -755,3 +755,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | src/serialized_file/object.rs tests object_scalar_string_nested_fields_match_reference and object_string_nested_empty_arrays_match_reference; fixture src/serialized_file/object_field_fixture.txt. No production change. |
 | Regression evidence | Both files reproduce every field on both sides; full suite 1370 plus 60 pass with warnings-denied Clippy. |
 | Remaining comparison | Managed-reference payloads, enum/generated semantics, fixed buffers, and unusual engine layouts stay with their rows; the full version/flag alignment matrix stays open. |
+
+## DIFF-SER-OBJW-001 - Object encode and file rewrite
+
+| Field | Finding |
+|---|---|
+| Status | Reference-constructed-file evidence recorded; two rows ported and pinned |
+| Source location | AssetRipper.Import/Structure/Assembly/Serializable/SerializableValue.cs; AssetRipper.IO.Files/SerializedFiles/Parser/ObjectInfo.cs (gen22 i64 byteStart); SerializedTypeBase.cs (21-plus post-tree deps); SerializedFileMetadata.cs (pre-9 end-minus-size metadata) |
+| Input evidence | Probe Temp/opencode/objrewriteprobe (shipped IO.Files plus Import DLLs, SDK 10.0.401) reading four decodeable files R8/R12/R20/R22; F1 payload from DIFF-SER-OBJF-001 reused as the encode oracle. Committed as src/serialized_file/object_rewrite_fixture.txt (12 lines). |
+| Source-derived behavior | Encode reproduces reference-authored bytes exactly; rewrite with growth reparses on all four generations with correct sizes, values, alignment, and retention. |
+| Root cause | No Rust value deviation found. One layout mismatch corrected on the probe side (gen8 must be header-data-metadata, not metadata-middle). |
+| Rust change | src/serialized_file/object.rs test object_encode_reproduces_reference_authored_payload; src/serialized_file/file.rs test rewrites_reference_constructed_files_across_generations; fixture src/serialized_file/object_rewrite_fixture.txt. No production change. |
+| Regression evidence | Both new tests pass; full suite 1372 plus 60 pass with warnings-denied Clippy. |
+| Remaining comparison | Managed-reference payloads stay explicit errors; add/remove objects and table changes stay out of scope by design; exact pad bytes are Rust policy with no baseline counterpart. |
