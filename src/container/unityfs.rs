@@ -1966,4 +1966,138 @@ mod tests {
         assert!(!super::metadata_size_accepts(16, 20, 4));
         assert!(!super::metadata_size_accepts(21, 20, 4));
     }
+
+    #[test]
+    fn bundle_headers_match_reference_generated_bundles() {
+        fn hex_to_bytes(hex: &str) -> Vec<u8> {
+            assert!(hex.len().is_multiple_of(2), "odd hex length for {hex}");
+            let mut out = Vec::with_capacity(hex.len() / 2);
+            let bytes = hex.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                let hi = match bytes[i] {
+                    b'0'..=b'9' => bytes[i] - b'0',
+                    b'a'..=b'f' => bytes[i] - b'a' + 10,
+                    b'A'..=b'F' => bytes[i] - b'A' + 10,
+                    b => panic!("invalid hex byte {b}"),
+                };
+                let lo = match bytes[i + 1] {
+                    b'0'..=b'9' => bytes[i + 1] - b'0',
+                    b'a'..=b'f' => bytes[i + 1] - b'a' + 10,
+                    b'A'..=b'F' => bytes[i + 1] - b'A' + 10,
+                    b => panic!("invalid hex byte {b}"),
+                };
+                out.push((hi << 4) | lo);
+                i += 2;
+            }
+            out
+        }
+
+        fn field<'a>(parts: &[&'a str], key: &str) -> &'a str {
+            let prefix = format!("{key}=");
+            for part in parts {
+                if let Some(v) = part.strip_prefix(&prefix) {
+                    return v;
+                }
+            }
+            panic!("missing {key} in {parts:?}");
+        }
+
+        let fixture = include_str!("bundle_header_fixture.txt");
+        let mut versions: std::collections::HashMap<String, i32> = std::collections::HashMap::new();
+        let mut hexes: std::collections::HashMap<String, Vec<u8>> =
+            std::collections::HashMap::new();
+        let mut reads: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for line in fixture.lines() {
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+            if line.starts_with("BUNDLEVERSION|") {
+                let parts: Vec<&str> = line.split('|').collect();
+                assert_eq!(parts.len(), 3, "bad BUNDLEVERSION {line}");
+                versions.insert(parts[1].to_string(), parts[2].parse().unwrap());
+            } else if line.starts_with("BUNDLE_HEX|") {
+                let parts: Vec<&str> = line.splitn(3, '|').collect();
+                assert_eq!(parts.len(), 3, "bad BUNDLE_HEX {line}");
+                hexes.insert(parts[1].to_string(), hex_to_bytes(parts[2]));
+            } else if line.starts_with("BUNDLE_READ|") {
+                let parts: Vec<&str> = line.splitn(3, '|').collect();
+                assert_eq!(parts.len(), 3, "bad BUNDLE_READ {line}");
+                reads.insert(parts[1].to_string(), parts[2].to_string());
+            }
+        }
+
+        assert_eq!(
+            versions.get("BF_LargeFilesSupport"),
+            Some(&BUNDLE_VERSION_LARGE_FILES_SUPPORT)
+        );
+        assert_eq!(versions.get("BF_520_x"), Some(&6));
+        assert_eq!(versions.get("BF_2022_2"), Some(&8));
+
+        for ver in ["5", "6", "7", "8"] {
+            let bytes = hexes
+                .get(ver)
+                .unwrap_or_else(|| panic!("missing BUNDLE_HEX {ver}"));
+            let dump = reads
+                .get(ver)
+                .unwrap_or_else(|| panic!("missing BUNDLE_READ {ver}"));
+            // Dump form: ver|V=..|Size=..|Comp=..|Uncomp=..|Flags=..|Eng=..|Rev=..|Blocks=..|...
+            let head = dump.strip_prefix(&format!("{ver}|")).unwrap_or(dump);
+            let parts: Vec<&str> = head.split('|').collect();
+            let want_version: i32 = field(&parts, "V").parse().unwrap();
+            let want_size: u64 = field(&parts, "Size").parse().unwrap();
+            let want_comp: u32 = field(&parts, "Comp").parse().unwrap();
+            let want_uncomp: u32 = field(&parts, "Uncomp").parse().unwrap();
+            let want_flags: u32 = field(&parts, "Flags").parse().unwrap();
+            let want_eng = field(&parts, "Eng");
+            let want_rev = field(&parts, "Rev");
+            let want_blocks: usize = field(&parts, "Blocks").parse().unwrap();
+            let want_nodes: usize = field(&parts, "Nodes").parse().unwrap();
+            let want_total: usize = field(&parts, "Total").parse().unwrap();
+            let want_head_len: usize = field(&parts, "HeadLen").parse().unwrap();
+            let want_pad: usize = field(&parts, "Pad").parse().unwrap();
+
+            assert_eq!(bytes.len(), want_total, "v{ver} total length");
+            let bundle = UnityFsBundle::parse(bytes)
+                .unwrap_or_else(|e| panic!("v{ver} Rust parse failed: {e:?}"));
+            assert_eq!(bundle.header.version, want_version, "v{ver} version");
+            assert_eq!(bundle.header.declared_size, want_size, "v{ver} size");
+            assert_eq!(
+                bundle.header.compressed_blocks_info_size, want_comp,
+                "v{ver} comp"
+            );
+            assert_eq!(
+                bundle.header.uncompressed_blocks_info_size, want_uncomp,
+                "v{ver} uncomp"
+            );
+            assert_eq!(bundle.header.flags, want_flags, "v{ver} flags");
+            assert_eq!(bundle.header.unity_version, want_eng, "v{ver} engine");
+            assert_eq!(bundle.header.unity_revision, want_rev, "v{ver} revision");
+            assert_eq!(bundle.header.header_size, want_head_len, "v{ver} head len");
+            assert_eq!(bundle.storage_blocks.len(), want_blocks, "v{ver} blocks");
+            assert_eq!(bundle.nodes.len(), want_nodes, "v{ver} nodes");
+            assert_eq!(bundle.uncompressed_data_hash, [0; 16], "v{ver} hash");
+            assert_eq!(
+                bundle.metadata_offset,
+                want_head_len + want_pad,
+                "v{ver} metadata offset"
+            );
+            assert_eq!(bundle.data_offset, want_total, "v{ver} data offset");
+            if want_version >= BUNDLE_VERSION_LARGE_FILES_SUPPORT {
+                assert_eq!(
+                    bundle.metadata_offset % 16,
+                    0,
+                    "v{ver} v7+ metadata alignment"
+                );
+                // Versions 7 and 8 share the large-files alignment rule.
+                assert!(want_pad < 16, "v{ver} pad range");
+            } else {
+                assert_eq!(want_pad, 0, "v{ver} pre-7 has no pad");
+                assert_eq!(
+                    bundle.metadata_offset, bundle.header.header_size,
+                    "v{ver} pre-7 metadata follows header"
+                );
+            }
+        }
+    }
 }

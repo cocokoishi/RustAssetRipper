@@ -573,3 +573,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | src/serialized_file/metadata.rs (is_format5, has_ref_type_hash, read_type_tree, read_modern_type_tree_node, read_legacy_type_tree_node) plus test typetree_reader_matches_reference_runtime; fixture src/serialized_file/typetree_reader_fixture.txt. |
 | Regression evidence | All 21 predicates, all 113 common offsets plus gap refusals, all 5 payloads (nodes, buffer bytes, offsets, levels, hashes, trailing checks) and the fail-loud negative-count case reproduce the reference dumps; full lib suite 1351 plus 60 CLI pass with warnings-denied Clippy. |
 | Remaining comparison | Unity-produced SerializedFile TypeTrees and managed-reference payload decoding stay outside these two reader rows (tracked by SER-TT-ABSENT-001, SER-MANAGED-REFS-001 and related object rows). |
+
+## DIFF-BUNDLE-HEADER-001 - UnityFS header fields/alignment plus Archive unsupported parity
+
+| Field | Finding |
+|---|---|
+| Status | Reference-runtime differential recorded; both rows ported and pinned |
+| Source location | AssetRipper.IO.Files/BundleFiles/BundleHeader.cs (IsBundleHeader 0x20 minimum); BundleVersion.cs (BF_LargeFilesSupport 7); FileStreamBundleHeader.cs plus FileStreamBundleFile.cs (header fields, v7+ 16-byte alignment); Archive/ArchiveBundleHeader.cs plus ArchiveBundle.cs plus ArchiveBundleScheme.cs (detection plus NotSupported Read/Write) |
+| Input evidence | Probe Temp/opencode/bundleheaderprobe (shipped IO.Files plus IO.Endian plus Primitives DLLs, SDK 10.0.401) dumping the BundleVersion enum, Archive/UnityFS detection vectors (full/short/other-magic/empty) with total-length semantics, Archive Read/Write exception types, plus reference-written minimal empty-table uncompressed combined bundles for v5/v6/v7/v8 with read-back dumps. Committed as src/container/bundle_header_fixture.txt (27 lines). |
+| Source-derived behavior | Bundle detection requires total stream length 0x20 or more; Archive detection is UnityArchive magic while its Read/Write always throw NotSupportedException; UnityFS header carries signature, version, two engine strings, Size, Comp, Uncomp and Flags with no per-version field branch beyond the v7+ post-header 16-byte alignment; v5 parses with shorter engine strings; v8 behaves like v7. |
+| Root cause | No deviation found; this increment ports the previously open older-version and reference-generated coverage. Rust keeps the 0x20 total-length rule, the ArchiveReadUnsupported fail-loud error, the BUNDLE_VERSION_LARGE_FILES_SUPPORT 7 constant and the v7+ alignment. |
+| Rust change | src/container/unityfs.rs test bundle_headers_match_reference_generated_bundles; src/scheme.rs test archive_detection_and_unsupported_read_match_reference; fixture src/container/bundle_header_fixture.txt. |
+| Regression evidence | All detection vectors, both Archive throw types, all four reference bundles (fields, Total/HeadLen/Pad, zero blocks/nodes/hash, metadata/data offsets, v7+ alignment, v5 older proof) reproduce; full lib suite 1353 plus 60 CLI pass with warnings-denied Clippy. |
+| Remaining comparison | UnityFS metadata compression and directory/entry lanes stay with IO-BUNDLE-UNITYFS-META-001 and IO-BUNDLE-UNITYFS-ENTRY-001; no Unity-produced bundle file has been compared. |

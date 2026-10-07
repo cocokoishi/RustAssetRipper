@@ -4664,4 +4664,107 @@ mod tests {
             FileKind::Resource
         );
     }
+
+    #[test]
+    fn archive_detection_and_unsupported_read_match_reference() {
+        fn hex_to_bytes(hex: &str) -> Vec<u8> {
+            assert!(hex.len().is_multiple_of(2), "odd hex length for {hex}");
+            let mut out = Vec::with_capacity(hex.len() / 2);
+            let bytes = hex.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                let hi = match bytes[i] {
+                    b'0'..=b'9' => bytes[i] - b'0',
+                    b'a'..=b'f' => bytes[i] - b'a' + 10,
+                    b'A'..=b'F' => bytes[i] - b'A' + 10,
+                    b => panic!("invalid hex byte {b}"),
+                };
+                let lo = match bytes[i + 1] {
+                    b'0'..=b'9' => bytes[i + 1] - b'0',
+                    b'a'..=b'f' => bytes[i + 1] - b'a' + 10,
+                    b'A'..=b'F' => bytes[i + 1] - b'A' + 10,
+                    b => panic!("invalid hex byte {b}"),
+                };
+                out.push((hi << 4) | lo);
+                i += 2;
+            }
+            out
+        }
+
+        let fixture = include_str!("container/bundle_header_fixture.txt");
+        let mut detects: std::collections::HashMap<String, (Vec<u8>, bool, bool)> =
+            std::collections::HashMap::new();
+        let mut throws: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for line in fixture.lines() {
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+            if line.starts_with("ARCHIVE_DETECT|") {
+                let parts: Vec<&str> = line.split('|').collect();
+                assert_eq!(parts.len(), 5, "bad ARCHIVE_DETECT {line}");
+                detects.insert(
+                    parts[1].to_string(),
+                    (
+                        hex_to_bytes(parts[2]),
+                        parts[3] == "True",
+                        parts[4] == "True",
+                    ),
+                );
+            } else if line.starts_with("ARCHIVE_THROW|") {
+                let parts: Vec<&str> = line.split('|').collect();
+                assert_eq!(parts.len(), 3, "bad ARCHIVE_THROW {line}");
+                throws.insert(parts[1].to_string(), parts[2].to_string());
+            }
+        }
+
+        // The baseline throws NotSupportedException for both Read and Write;
+        // Rust fails loudly with ArchiveReadUnsupported instead of succeeding.
+        assert!(throws
+            .get("Read")
+            .unwrap()
+            .contains("NotSupportedException"));
+        assert!(throws
+            .get("Write")
+            .unwrap()
+            .contains("NotSupportedException"));
+
+        for (case, (bytes, want_archive, want_unityfs)) in &detects {
+            // Total-length minimum: the reference checks BaseStream.Length >= 0x20.
+            let total = bytes.len() as u64;
+            let kind = super::SchemeReader::probe_raw_kind(bytes, total);
+            if *want_archive {
+                assert_eq!(
+                    kind,
+                    super::FileKind::UnityArchive,
+                    "case {case} archive dispatch"
+                );
+                assert!(super::SchemeReader::is_readable(bytes));
+                let file = super::SchemeReader::read(bytes).unwrap();
+                assert_eq!(file.kind(), super::FileKind::UnityArchive);
+                assert!(matches!(
+                    file.parse().unwrap_err().kind(),
+                    super::SchemeErrorKind::ArchiveReadUnsupported
+                ));
+            } else if *want_unityfs {
+                assert_eq!(
+                    kind,
+                    super::FileKind::UnityFs,
+                    "case {case} unityfs dispatch"
+                );
+            } else {
+                assert_eq!(
+                    kind,
+                    super::FileKind::Resource,
+                    "case {case} stays a resource"
+                );
+            }
+            // The short and empty vectors prove the 0x20 total-length minimum:
+            // the same 13-byte UnityArchive prefix dispatches only with a long
+            // total length, which the dedicated length-threaded test pins.
+            if case == "short" || case == "empty" {
+                assert!(!want_archive && !want_unityfs);
+            }
+        }
+    }
 }
