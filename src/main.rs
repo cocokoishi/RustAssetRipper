@@ -44,10 +44,13 @@ use assetripper::io::platform_structure::{
     detect_platform_structure, PlatformResourceProvider, PlatformStructureLimits,
 };
 use assetripper::io::stream::logical_file_path;
+use assetripper::processing::asset_bundle::get_asset_bundle_name;
 use assetripper::processing::prefab_processing::{
     animator_controller_source_dependency_inventory, plan_workspace_prefab_processing,
-    plan_workspace_processed_prefab_assets, WorkspacePrefabProcessingEvent,
-    WorkspacePrefabProcessingLimits, WorkspaceProcessedPrefabAssetPlanLimits,
+    plan_workspace_processed_prefab_assets, plan_workspace_scene_hierarchy_bundle_names,
+    WorkspaceBundleAssetNameFact, WorkspacePrefabProcessingEvent, WorkspacePrefabProcessingLimits,
+    WorkspaceProcessedPrefabAssetPlanLimits, WorkspaceSceneBundleSource,
+    WorkspaceSceneHierarchyBundlePlanLimits,
 };
 use assetripper::processing::project_settings::{
     EditorBuildSettingsLimits, EditorBuildSettingsModel,
@@ -2864,6 +2867,11 @@ fn print_workspace_summary_with_optional_resources_to<W: io::Write>(
     let mut total_streamed_scene_bundle_objects = 0usize;
     let mut total_streamed_scene_bundle_entries = 0usize;
     let mut total_streamed_scene_bundle_string_bytes = 0usize;
+    // (bundle_index, source_collection_order, object_index, resolved GetAssetBundleName,
+    //  has_streamed_flag, is_streamed_value) for the PrefabProcessor scene-pass planner.
+    // Standalone files use usize::MAX as the bundle index so they never match a
+    // SerializedBundle lookup; their facts are retained only for diagnostics.
+    let mut scene_bundle_name_facts: Vec<(usize, usize, usize, String, bool, bool)> = Vec::new();
 
     writeln!(output, "SerializedFiles: {}", workspace.files().len())?;
     let decoded_objects =
@@ -3294,6 +3302,36 @@ fn print_workspace_summary_with_optional_resources_to<W: io::Write>(
                     .into());
                 }
 
+                let owner_bundle_name = match file.container_bundle_index {
+                    Some(bundle_index) => workspace
+                        .container_bundles()
+                        .get(bundle_index)
+                        .and_then(|bundle| bundle.name_fixed.clone())
+                        .unwrap_or_else(|| file.file_name.clone()),
+                    None => "GameBundle".to_owned(),
+                };
+                let resolved_bundle_name = get_asset_bundle_name(&payload.root, &owner_bundle_name)
+                    .map_err(|error| {
+                        invalid_data_owned(format!(
+                            "AssetBundle PathID {} name resolution failed: {error}",
+                            object.path_id
+                        ))
+                    })?;
+                let bundle_fact_index = file.container_bundle_index.unwrap_or(usize::MAX);
+                let bundle_fact_order = *source_collection_order_by_file
+                    .get(file_index)
+                    .ok_or_else(|| {
+                        invalid_data("scene bundle name collection order is unavailable")
+                    })?;
+                scene_bundle_name_facts.push((
+                    bundle_fact_index,
+                    bundle_fact_order,
+                    object_index,
+                    resolved_bundle_name,
+                    metadata.is_streamed_scene_asset_bundle.is_some(),
+                    metadata.is_streamed_scene_asset_bundle.unwrap_or(false),
+                ));
+
                 if metadata.is_streamed_scene_asset_bundle == Some(true) {
                     if file.container_bundle_index.is_none() {
                         writeln!(
@@ -3598,6 +3636,55 @@ fn print_workspace_summary_with_optional_resources_to<W: io::Write>(
         WorkspaceSceneDefinitionLimits::default(),
     )?;
     let scene_hierarchies = scene_hierarchy_builder.finish(&scene_definitions)?;
+    // PrefabProcessor scene pass: hierarchy bundle names in source order with
+    // FetchAssets()-ordered AssetBundle facts and the streamed-scene assert.
+    scene_bundle_name_facts.sort_unstable_by_key(|left| (left.1, left.2));
+    let mut file_bundle_sources: Vec<Option<WorkspaceSceneBundleSource>> = Vec::new();
+    file_bundle_sources
+        .try_reserve_exact(workspace.files().len())
+        .map_err(|_| invalid_data("could not reserve scene bundle source index"))?;
+    for file in workspace.files() {
+        if let Some(bundle_index) = file.container_bundle_index {
+            let bundle_name = workspace
+                .container_bundles()
+                .get(bundle_index)
+                .and_then(|bundle| bundle.name_fixed.clone())
+                .unwrap_or_else(|| file.file_name.clone());
+            file_bundle_sources.push(Some(WorkspaceSceneBundleSource {
+                bundle_index,
+                bundle_name,
+                is_serialized_bundle: true,
+            }));
+        } else {
+            file_bundle_sources.push(None);
+        }
+    }
+    let mut bundle_assets_in_fetch_order: HashMap<usize, Vec<WorkspaceBundleAssetNameFact>> =
+        HashMap::new();
+    for (bundle_index, _, _, resolved_name, has_flag, is_value) in scene_bundle_name_facts {
+        if bundle_index == usize::MAX {
+            continue;
+        }
+        bundle_assets_in_fetch_order
+            .entry(bundle_index)
+            .or_default()
+            .push(WorkspaceBundleAssetNameFact {
+                resolved_name,
+                has_streamed_scene_flag: has_flag,
+                is_streamed_scene_asset_bundle: is_value,
+            });
+    }
+    let scene_bundle_collections: Vec<Vec<usize>> = scene_definitions
+        .definitions()
+        .iter()
+        .map(|definition| definition.collection_file_indices().to_vec())
+        .collect();
+    let scene_bundle_assignments = plan_workspace_scene_hierarchy_bundle_names(
+        &scene_bundle_collections,
+        &file_bundle_sources,
+        &bundle_assets_in_fetch_order,
+        WorkspaceSceneHierarchyBundlePlanLimits::default(),
+    )?;
     let non_scene_transform_plans = generated_transform_plan_builder.finish(&scene_definitions)?;
     writeln!(
         output,
@@ -3863,6 +3950,33 @@ fn print_workspace_summary_with_optional_resources_to<W: io::Write>(
             scene_plan.collection_name, scene_plan.collection_file_index
         )?;
         writeln!(output, "        scene GUID: {}", scene_plan.guid)?;
+        let bundle_assignment = scene_bundle_assignments
+            .get(scene_index)
+            .ok_or_else(|| invalid_data("scene hierarchy bundle assignment is unavailable"))?;
+        match &bundle_assignment.name {
+            assetripper::processing::prefab_processing::WorkspaceSceneHierarchyBundleName::Unset => {
+                writeln!(output, "        hierarchy AssetBundleName: unset (no SerializedBundle)")?;
+            }
+            assetripper::processing::prefab_processing::WorkspaceSceneHierarchyBundleName::BundleName(
+                name,
+            ) => {
+                writeln!(
+                    output,
+                    "        hierarchy AssetBundleName: bundle {name:?} (no IAssetBundle asset)"
+                )?;
+            }
+            assetripper::processing::prefab_processing::WorkspaceSceneHierarchyBundleName::AssetName(
+                name,
+            ) => {
+                writeln!(
+                    output,
+                    "        hierarchy AssetBundleName: asset {name:?} (first IAssetBundle in FetchAssets order)"
+                )?;
+            }
+        }
+        if let Some(warning) = &bundle_assignment.streamed_scene_assert_warning {
+            writeln!(output, "        hierarchy AssetBundle warning: {warning}")?;
+        }
         let scene_hierarchy = scene_hierarchies
             .scenes()
             .get(scene_index)
@@ -7823,6 +7937,12 @@ mod tests {
         assert!(summary.contains("collection files: [0]"));
         assert!(summary
             .contains("scene GUID: preserve [0x00000001, 0x00000002, 0x00000003, 0x00000004]"));
+        assert!(
+            summary.contains(
+                "hierarchy AssetBundleName: asset \"data.unity3d\" (first IAssetBundle in FetchAssets order)"
+            ),
+            "{summary}"
+        );
         assert!(
             summary.contains("Generated Prefab Transforms planned for non-scene GameObjects: 0")
         );
