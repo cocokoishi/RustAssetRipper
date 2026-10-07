@@ -172,6 +172,11 @@ pub enum CustomCurveError {
         /// The custom binding type.
         custom_type: u8,
     },
+    /// `ToAttributeName`'s default branch for enum values without a resolver.
+    BindingTypeNotImplemented {
+        /// The binding type discriminant.
+        custom_type: u8,
+    },
 }
 
 impl Display for CustomCurveError {
@@ -184,7 +189,7 @@ impl Display for CustomCurveError {
                 custom_type,
                 attribute,
             } => {
-                let custom = BindingCustomType(custom_type);
+                let custom = BindingCustomType(*custom_type);
                 match custom.name() {
                     Some(name) => write!(
                         formatter,
@@ -200,6 +205,19 @@ impl Display for CustomCurveError {
                 formatter,
                 "custom binding type {custom_type} needs scene or checksum lookups"
             ),
+            Self::BindingTypeNotImplemented { custom_type } => {
+                let custom = BindingCustomType(*custom_type);
+                match custom.name() {
+                    Some(name) => write!(
+                        formatter,
+                        "Binding type {name} not implemented (Parameter 'type')"
+                    ),
+                    None => write!(
+                        formatter,
+                        "Binding type {custom_type} not implemented (Parameter 'type')"
+                    ),
+                }
+            }
         }
     }
 }
@@ -512,9 +530,10 @@ pub fn is_unknown_path(path: &str) -> bool {
 /// An empty prefix returns the seven characters alone, otherwise the prefix is
 /// prepended (both arms are pinned live).
 ///
-/// The prefix hash is the reflected CRC-32 of the ASCII bytes, reusing
-/// [`crate::resources::blend_shape::crc32_ieee`]. All resolver call sites pass
-/// ASCII prefixes, so callers must too.
+/// The source calls `HashAscii(prefix, "HHHHHHH")`, so its seven-H marker is appended to
+/// the prefix before hashing. This uses the shared reflected CRC-32 update
+/// routine without allocating a concatenated buffer. All resolver call sites
+/// pass ASCII prefixes, so callers must too.
 pub fn reverse_ascii_crc32(prefix: &str, attribute: u32) -> String {
     /// `(bit, constant)` of each of the 31 state-mixing rounds, in order; the
     /// 32nd mask (bit 31) is recorded without a further mix.
@@ -551,7 +570,8 @@ pub fn reverse_ascii_crc32(prefix: &str, attribute: u32) -> String {
         (26, -1_543_503_872),
         (29, -1_610_612_736),
     ];
-    let prefix_hash = super::blend_shape::crc32_ieee(prefix.as_bytes());
+    let state = super::blend_shape::crc32_ieee_update(0xFFFF_FFFF, prefix.as_bytes());
+    let prefix_hash = !super::blend_shape::crc32_ieee_update(state, b"HHHHHHH");
     let mut state = attribute ^ prefix_hash;
     let mut mask = [0u32; 32];
     for (index, (bit, constant)) in ROUNDS.iter().enumerate() {
@@ -578,17 +598,7 @@ pub fn reverse_ascii_crc32(prefix: &str, attribute: u32) -> String {
     v[16] ^= v[17] ^ v[18] ^ v[19] ^ v[22] ^ v[24] ^ v[27];
     v[15] ^= v[18] ^ v[20] ^ v[22] ^ v[24] ^ v[25] ^ v[26] ^ v[28];
     v[14] ^= v[16] ^ v[19] ^ v[20] ^ v[23] ^ v[25] ^ v[28];
-    v[13] ^= v[14]
-        ^ v[16]
-        ^ v[17]
-        ^ v[18]
-        ^ v[19]
-        ^ v[22]
-        ^ v[23]
-        ^ v[25]
-        ^ v[28]
-        ^ v[29]
-        ^ v[31];
+    v[13] ^= v[14] ^ v[16] ^ v[17] ^ v[18] ^ v[19] ^ v[22] ^ v[23] ^ v[25] ^ v[28] ^ v[29] ^ v[31];
     v[12] ^= v[13] ^ v[14] ^ v[19] ^ v[21] ^ v[23] ^ v[25] ^ v[30];
     v[11] ^= v[12] ^ v[13] ^ v[18] ^ v[19] ^ v[21] ^ v[23] ^ v[24] ^ v[25] ^ v[28] ^ v[31];
     v[10] ^= v[13] ^ v[18] ^ v[19] ^ v[20] ^ v[22] ^ v[24] ^ v[25] ^ v[26] ^ v[29] ^ v[30];
@@ -605,17 +615,7 @@ pub fn reverse_ascii_crc32(prefix: &str, attribute: u32) -> String {
         ^ v[24]
         ^ v[25]
         ^ v[28];
-    v[7] ^= v[8]
-        ^ v[11]
-        ^ v[13]
-        ^ v[15]
-        ^ v[16]
-        ^ v[23]
-        ^ v[25]
-        ^ v[27]
-        ^ v[28]
-        ^ v[29]
-        ^ v[31];
+    v[7] ^= v[8] ^ v[11] ^ v[13] ^ v[15] ^ v[16] ^ v[23] ^ v[25] ^ v[27] ^ v[28] ^ v[29] ^ v[31];
     v[6] ^= v[7]
         ^ v[10]
         ^ v[11]
@@ -681,30 +681,10 @@ pub fn reverse_ascii_crc32(prefix: &str, attribute: u32) -> String {
         ^ v[27]
         ^ v[29]
         ^ v[30];
-    v[2] ^= v[6]
-        ^ v[7]
-        ^ v[8]
-        ^ v[9]
-        ^ v[13]
-        ^ v[16]
-        ^ v[17]
-        ^ v[19]
-        ^ v[20]
-        ^ v[21]
-        ^ v[26]
-        ^ v[29];
-    v[1] ^= v[2]
-        ^ v[3]
-        ^ v[5]
-        ^ v[6]
-        ^ v[13]
-        ^ v[15]
-        ^ v[16]
-        ^ v[17]
-        ^ v[20]
-        ^ v[25]
-        ^ v[28]
-        ^ v[31];
+    v[2] ^=
+        v[6] ^ v[7] ^ v[8] ^ v[9] ^ v[13] ^ v[16] ^ v[17] ^ v[19] ^ v[20] ^ v[21] ^ v[26] ^ v[29];
+    v[1] ^=
+        v[2] ^ v[3] ^ v[5] ^ v[6] ^ v[13] ^ v[15] ^ v[16] ^ v[17] ^ v[20] ^ v[25] ^ v[28] ^ v[31];
     v[0] ^= v[4]
         ^ v[5]
         ^ v[7]
@@ -755,7 +735,7 @@ fn component_table(custom_type: BindingCustomType) -> Option<&'static [(u32, &'s
         BindingCustomType::TRAIL_RENDERER => Some(TRAIL_RENDERER_PATHS),
         BindingCustomType::CAMERA => Some(CAMERA_PATHS),
         BindingCustomType::VISUAL_EFFECT => Some(VISUAL_EFFECT_PATHS),
-        BindingCustomType::PARTICLE_FORCE_FIELD => Some(PARTICLE_FORCE_FIELD_PATHS),
+        BindingCustomType::PARTICLE_FORCE_FIELD => Some(PARTICLE_SYSTEM_FORCE_FIELD_PATHS),
         BindingCustomType::MESH_FILTER => Some(MESH_FILTER_PATHS),
         _ => None,
     }
@@ -865,7 +845,7 @@ pub fn to_attribute_name(
             attribute,
         )),
         other if other.is_constraint() => constraint_attribute_name(other, attribute),
-        other => Err(CustomCurveError::UnsupportedCustomType {
+        other => Err(CustomCurveError::BindingTypeNotImplemented {
             custom_type: other.0,
         }),
     }
@@ -1154,14 +1134,28 @@ mod tests {
     fn reverse_ascii_matches_the_shipped_checksum() {
         let fixture = include_str!("custom_curve_resolve_fixture.txt");
         let mut rows = 0;
+        let mut hash_rows = 0;
         for line in fixture.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
             let mut cells = line.split('|');
-            if cells.next().expect("a prefix") != "CREV" {
-                continue;
+            match cells.next().expect("a prefix") {
+                "CHASH" => {
+                    let input = cells.next().expect("a hash input");
+                    let expected = u32::from_str_radix(cells.next().expect("a hash word"), 16)
+                        .expect("a hex hash word");
+                    assert_eq!(
+                        super::super::blend_shape::crc32_ieee(input.as_bytes()),
+                        expected,
+                        "{line}"
+                    );
+                    hash_rows += 1;
+                    continue;
+                }
+                "CREV" => {}
+                _ => continue,
             }
             rows += 1;
             let attribute = u32::from_str_radix(cells.next().expect("an attribute"), 16)
@@ -1171,6 +1165,7 @@ mod tests {
             assert_eq!(reverse_ascii_crc32(prefix, attribute), expected, "{line}");
         }
         assert_eq!(rows, 14, "all manufactured-name vectors are asserted");
+        assert_eq!(hash_rows, 2, "both HashAscii marker hashes are asserted");
     }
 
     /// Differential against the shipped resolver over a live generated scene
@@ -1186,12 +1181,12 @@ mod tests {
     fn to_attribute_name_matches_the_reference_runtime() {
         assert_eq!(
             super::super::blend_shape::crc32_ieee(b"Smile"),
-            0xC34B_C20B,
+            0xC34B_2C0B,
             "the probe smile hash"
         );
         assert_eq!(
             super::super::material::crc28(b"_MainTex_ST"),
-            0x0068_C589,
+            0x0686_C589,
             "the probe material hash"
         );
         let fixture = include_str!("custom_curve_resolve_fixture.txt");
@@ -1211,17 +1206,20 @@ mod tests {
             }
             rows += 1;
             let custom = BindingCustomType(tag.parse().expect("a binding type"));
-            let attribute =
-                u32::from_str_radix(cells.next().expect("an attribute"), 16)
-                    .expect("a hex attribute");
+            let attribute = u32::from_str_radix(cells.next().expect("an attribute"), 16)
+                .expect("a hex attribute");
             let path = cells.next().expect("a path");
             let result = cells.next().expect("a result");
             // Probe-setup facts: the `Arm` skinned mesh resolves `Smile`, the
             // `Leg` renderer resolves `_MainTex_ST`, every other path misses.
             // Unknown paths short-circuit before the facts are read.
             let scene = CustomCurveSceneFacts {
-                blend_shape: if path == "Arm" { Some("Smile") } else { None },
-                material_property: if path == "Leg" {
+                blend_shape: if path == "Arm" && attribute == 0xC34B_2C0B {
+                    Some("Smile")
+                } else {
+                    None
+                },
+                material_property: if path == "Leg" && attribute & 0x0FFF_FFFF == 0x0686_C589 {
                     Some("_MainTex_ST")
                 } else {
                     None
@@ -1239,7 +1237,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(rows, 32, "all resolver vectors are asserted");
+        assert_eq!(rows, 39, "all resolver vectors are asserted");
     }
 
     /// Every committed component table matches its shipped dump entry for
@@ -1312,10 +1310,7 @@ mod tests {
             let mut dumped: Vec<(u32, &str)> = Vec::new();
             for line in text.lines() {
                 let (hash, path) = line.split_once('|').expect("a hash|path row");
-                dumped.push((
-                    u32::from_str_radix(hash, 16).expect("a hex hash"),
-                    path,
-                ));
+                dumped.push((u32::from_str_radix(hash, 16).expect("a hex hash"), path));
             }
             dumped.sort();
             let table = component_table(custom).expect("a table");

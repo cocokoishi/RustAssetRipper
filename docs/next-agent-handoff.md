@@ -1,6 +1,16 @@
-# RustAssetRipper handoff — 2026-10-03
+# RustAssetRipper handoff — 2026-10-07
 
-This is the current continuation record. Read it before changing code. `docs/continuation.md` contains useful history, but some of its older “next” bullets and cloud hashes are stale; this file supersedes those instructions for the present state. Use `docs/feature-parity.md` for the evolving source-to-Rust ledger and `docs/validation-log.md` for per-increment evidence.
+This is the current continuation record. Read it before changing code. The dated checkpoint sections below are history; the current checkpoint here and section 174 supersede their old counts and “next” instructions. `docs/continuation.md` contains additional history, while `docs/feature-parity.md` and `docs/validation-log.md` hold current scope and evidence.
+
+## Current checkpoint (2026-10-07)
+
+- The user asked to read this hand-off. Phase 1 remains the active task; the Phase 1 gate is open, and Phase 2 stays locked. No user AssetBundle bytes or UABEA contents have been read.
+- Base commit: local `main` and the live `origin/main` were both `7228f0e32817886ff04095c1baace0c79f0b9b98` with tree `f8e616927a36c4dfbf7835ffb4b7137762d320ee`. The current working tree contains the custom-curve source/fixture changes and the associated documentation update; it has not yet been committed or pushed.
+- The feature ledger has 377 stable IDs: 338 `已验证`, 20 `已实现但未验证`, 14 `实现中`, 5 `已调查`, and 0 `未调查` or externally blocked. All 39 non-verified rows still block the Phase 1 gate. `docs/phase1-closure-inventory.md` enumerates them and their shortest complete work units.
+- The custom-curve resolver kernel now matches 39 live `ToAttributeName` cases, 14 `ReverseAscii` outputs, 2 `HashAscii` marker hashes, and 2,551 entries across 11 component dictionaries. Its focused module suite passes 12/12. The row remains `已实现但未验证`: no production `AnimationClipConverter` call constructs scene facts or routes clip bindings through the resolver.
+- Current Rust checks pass: `cargo fmt --all -- --check`; full workspace tests with `TEMP`/`TMP` redirected to `target/test-tmp` (1,397 library + 65 CLI, 0 doc tests); warnings-denied Clippy; and baseline verification (1,449 unchanged files). `git diff --check` passes after this hand-off edit.
+- The .NET SDK is available at `C:\Users\koishi\AppData\Local\Microsoft\dotnet\dotnet.exe`. The isolated reference solution restores/builds; its test suite reports 339 passed and 20 CRLF-versus-LF assertion failures, documented in `DIFF-REFERENCE-TEST-NEWLINE-001`. No Unity-produced fixture or dynamic Unity run has been performed.
+- Next: integrate custom-curve root/child and asset lookups into the actual animation conversion path, then continue the dependency-ordered Phase 1 closure inventory. A detached kernel or green test alone does not close a feature row.
 
 ## 1. Goal prompt and actual project objective
 
@@ -10,7 +20,7 @@ The Goal tool currently records the startup objective as “pasted text file …
 2. Only after the complete Phase 1 parity gate passes, inspect, compare, validate, and repair **all** user-provided VRChat AssetBundles in Phase 2, using Rust AssetRipper, the original AssetRipper, and UABEA at the levels each actually supports.
 3. Prove object/reference, scene/Prefab, animation, asset, and Unity project behavior; close or explicitly leave unresolved every material difference. A CLI demo, a handful of supported formats, or successful file creation is not completion.
 
-This is intentionally a full migration goal, not an MVP. Do not narrow the target because it is large. Do not announce completion while any required gate item remains open. The user’s latest explicit pause request applies to this session; the project goal itself remains unfinished and should resume from this handoff when the user asks.
+This is intentionally a full migration goal, not an MVP. Do not narrow the target because it is large. Do not announce completion while any required gate item remains open. The project goal remains unfinished; continue Phase 1 from the checkpoint above.
 
 ## 2. Hard operating rules
 
@@ -32,7 +42,7 @@ This is intentionally a full migration goal, not an MVP. Do not narrow the targe
 | Frozen baseline | AssetRipper source version prefix `2.0.0`, target `net10.0`; 51 solution projects, including 8 test projects and 6 source-generator projects; 1,449 files in the frozen checksum manifest |
 | Baseline manifest | `docs/baseline-files.sha256`; manifest SHA-256 `29d1fd27f66b974c43750f30aa99117eb423cb318f3062daf05e1489f10f08f9`; latest verification found 1,449 unchanged files |
 | Upstream version claim | README says Unity 3.5 through 6000.4.X; this is the source’s claim, not independent compatibility evidence |
-| Reference build status | `dotnet` was unavailable on PATH when checked; original AssetRipper build/tests and runtime differential are therefore still unrun. Do not imply otherwise. |
+| Reference build status | .NET SDK 10.0.401 is available in the user-local install. The isolated source solution restored and built; reference tests produced 339 passes and 20 CRLF/LF assertion failures. Runtime probes have since executed for several source-derived behaviors. |
 | Rust toolchain | Rust/Cargo 1.98.1 on Windows (stable MSVC); binaries are under `C:\Users\koishi\.cargo\bin`, not on PATH. Manifest declares Rust 1.87; 1.87 has not been tested. |
 | Rust package | `assetripper-rs` 0.1.0, edition 2021, `rust-version = 1.87`; `Cargo.lock` is checked in. |
 | Generated source dependency | Baseline project metadata references `AssetRipper.SourceGenerated` 1.4.0. Its generated class sources were not present in the frozen source snapshot or local NuGet cache during the earlier investigation; exact package/source-generator behavior still needs tracing. |
@@ -46,7 +56,7 @@ The long `AGENTS.md` is substantially more specific than a generic migration tic
 | Goal / AGENTS plan | Required evidence | Current state | Difference / next direction |
 |---|---|---|---|
 | Complete independent Rust product | Every baseline behavior, version/platform branch, resource path, export format, config, and user workflow implemented without delegating core execution to C#/.NET or another full parser | **Not met.** Rust has substantial binary, container, SerializedFile, TypeTree, workspace, reference, processing, and YAML groundwork. It remains a partial inspection/export implementation. | Complete the source/registration/option/exporter/UI audit and implement all required branches; do not call partial parsers “full support.” |
-| Phase 1 source freeze and traceability | Reproducible baseline identity; source symbol → behavior → Rust mapping → independent fixture → result | Baseline identity and 209 feature-ledger IDs are recorded. Audit coverage is not exhaustive; reference .NET build/tests have not run. | Continue splitting ledger rows by real source branches, registrations, options, asset classes, and UI workflows. Preserve “unverified” where evidence is missing. |
+| Phase 1 source freeze and traceability | Reproducible baseline identity; source symbol → behavior → Rust mapping → independent fixture → result | Baseline identity and 377 feature-ledger IDs are recorded. Audit coverage is not exhaustive; reference .NET build/tests have run, with 20 CRLF/LF assertion failures documented. | Continue splitting ledger rows by real source branches, registrations, options, asset classes, and UI workflows. Preserve “unverified” where evidence is missing. |
 | Phase 1 input, format, and type support | All baseline input forms, containers/codecs, versions/platform layouts, TypeTrees, missing-TypeTree paths, managed references, generated classes | Several common readers and synthetic container/SerializedFile/TypeTree paths are implemented. This does not cover all source paths; missing-TypeTree recovery, managed-reference decoding, broad generated class materialization, and some codecs/version branches remain absent or unverified. | Compare every parser/dispatch registration and source generator. Build fixtures independent of the Rust decoder and obtain original-runtime comparisons when the .NET environment is available. |
 | Phase 1 object graph and processing | Fully constructed typed objects, files/bundles/dependencies, resolved references, scene and Prefab reconstruction, generated object rules | TypeTree value decoding, PPtr graphs, workspace indexes, and several bounded Scene/Prefab planning/YAML paths exist. These are not complete generated AssetRipper object graphs or complete hierarchy/export processing. | Finish source-order and dependency semantics, generated asset identities, per-class construction, unresolved reference classification, and all scene/Prefab paths. |
 | Phase 1 resources and project output | Every baseline asset processor/exporter, correct formats and mappings, `.meta`/GUID/importer/path behavior, usable Unity project | Generic YAML primitives and partial Scene/Prefab output exist. Meta envelope and a newly added standalone add-only sidecar writer exist. There is no complete exporter registry/pipeline, no full resource exporter set, no importer factory/GUID routing/folder metadata integration, and no complete project output. | Wire output as a complete, auditable pipeline; implement all baseline importers/exporters and per-resource semantics. Verify against source behavior and Unity import where possible. |
@@ -74,60 +84,51 @@ The worktree has significant incremental work. Use the source ledger for exact I
 - Partial UnityFS/Raw/Web/WebData container decoding and selected GZip/Brotli/LZ4/LZMA/Zstandard paths. UnityArchive and LZHAM are identified as unsupported by the frozen source baseline; do not invent features the source itself lacks.
 - SerializedFile header/metadata/object-range parsing, common legacy TypeTree records, TypeTree-driven value decoding with bounds, and explicit per-object decode diagnostics. This is not full no-TypeTree recovery or generated Unity class materialization.
 - Workspace collection bookkeeping and TypeTree PPtr indexing/resolution with explicit unresolved states; processing planners for AssetBundle and ResourceManager original paths; selected Scene/Prefab hierarchy planning and YAML writers. End-to-end completeness is still limited.
-- Unity YAML and `.meta` envelope serializers, plus the current standalone filesystem sidecar primitive described below.
+- Unity YAML and `.meta` envelope serializers, plus a standalone add-only filesystem `.meta` sidecar helper that is not connected to a complete project-export pipeline.
 - A narrow CLI can inspect selected inputs and report inventory/decoded information. It does not provide the complete original application experience.
 
-### Current uncommitted implementation increment (must be cloud-synced before declaring this handoff done)
+### Current uncommitted implementation increment
 
-`src/export/project_output.rs` and one export module registration were added. `write_unity_meta_sidecar`:
+The custom-curve resolver increment changes `src/resources/blend_shape.rs`, `src/resources/custom_curve.rs`, `src/resources/custom_curve_resolve_fixture.txt`, and `src/resources/custom_curve_tables.rs`; the new `docs/phase1-closure-inventory.md` and evidence updates describe the current open queue.
 
-1. Accepts an already-created `UnityMetaFile` and a portable relative asset path.
-2. Enforces 32 KiB default relative-path bytes and 256 default components; rejects empty, traversal, rooted/drive, device-name, invalid-character, and duplicate-separator paths.
-3. Creates the output root, confines normal directory creation to a canonical root, rejects symlink/non-directory ancestors, then opens exactly the `.meta` file with `create_new` so existing files are never overwritten.
-4. Writes the existing bounded `.meta` YAML bytes. It does **not** write the asset, choose/create an importer, allocate or persist GUIDs, create folder sidecars, or connect to a project export/CLI workflow.
+- `crc32_ieee_update` lets `ReverseAscii` hash the source's prefix followed by its seven `H` marker bytes without concatenating buffers. The live probe caught and fixed the missing marker in the initial port.
+- The resolver now implements the captured dispatch behavior, all 11 `TryGetPath` dictionaries (2,551 entries), exact default enum errors, and scene-fact branches. The fixture pins 39 resolver cases, 14 reverse outputs, and 2 direct marker hashes.
+- The focused module suite passes 12/12. This still is not end-to-end animation support: `AnimationClipConverter` does not call the Rust resolver, and `CustomCurveSceneFacts` is constructed only in tests. Root/child walks and object-backed material/blend-shape CRC lookup remain absent from the production route.
 
-Four tests cover successful add-only output and preservation of a sibling file, existing-sidecar collision without overwrite, unsafe-path rejection before output, and path-size/component limits. The first Windows run found only a test expectation comparing an extended canonical path with a non-canonical path; the assertion now canonicalizes its expected root and all four focused tests pass. A first Clippy run also found a needless explicit lifetime; it was removed and the final warnings-denied Clippy run passes.
-
-This helper is not a complete exporter and has not been compared with AssetRipper’s runtime output. Current tests run on Windows only. It is not crash-atomic: an I/O failure after creating a new sidecar could leave that newly created file partial, and ancestor checking is not designed to defeat a concurrent malicious filesystem race. Consider those limits when later wiring it into export tasks; never replace an existing file to “repair” a collision.
-
-## 6. Verification evidence at pause
+## 6. Current verification evidence
 
 Commands were run in this repo with binaries under `C:\Users\koishi\.cargo\bin`:
 
 | Command | Exit / result |
 |---|---|
 | `cargo fmt --all -- --check` | 0 |
-| `cargo test --workspace --locked --quiet` | 0; 491 library tests, 23 CLI tests, 0 doc tests; all passed |
+| `cargo test --workspace --locked --quiet` with `TEMP`/`TMP` redirected to `target/test-tmp` | 0; 1,397 library tests, 65 CLI tests, 0 doc tests; all passed |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | 0 |
-| `tools/verify-baseline.ps1` | 0; 1,449 baseline entries unchanged, missing, or unlisted: 0 |
-| `git diff --check` | 0 before the final handoff document was written; rerun it after documentation changes and before push |
-| AssetRipper `.NET` build/tests or runtime comparison | Not run; `dotnet` was unavailable on PATH in the earlier environment check |
+| `tools/verify-baseline.ps1` with process-scoped PowerShell `-ExecutionPolicy Bypass` | 0; all 1,449 baseline files unchanged |
+| AssetRipper `.NET` build/tests | Isolated restore/build exit 0; 339 tests passed and 20 CRLF/LF assertion failures, all documented |
+| `git diff --check` | 0 after the final hand-off edit |
 | Unity-produced fixture / Unity Editor import and runtime checks | Not run |
 | User VRChat bundle / UABEA inspection | Not run and prohibited before the gate |
 
-The complete Rust test suite is evidence for this implementation snapshot, not evidence that AssetRipper parity is complete. Current implementation test counts also do not test the source reference runtime.
+The Rust suite is evidence for this implementation snapshot, not evidence that AssetRipper parity is complete. The custom-curve reference probe used live .NET objects and source assemblies, not a Unity-produced file or an end-to-end Rust export.
 
 ## 7. Git / cloud state and required final sync
 
-Before this increment, local `main` was at `5b95e616d36bbf4020576e697fa59f89a2d6b82f` and remote `main` at `1ff88beb73b4b634cdc6a957999cf844bbaa7467`; both had tree `4984d90072e592c786dba30e4bbe07987eef3bfc`, but their histories had diverged. `git merge-tree --write-tree HEAD origin/main` previewed the exact same tree with no conflicts. A normal local merge commit `090d35a71b140ccaba0df974a3e19c1d714641f3` reconciled ancestry without changing that tree.
-
-The implementation and first version of this handoff were committed as `b786f331b5947929386b11314bd09fefe5eb2d35`, tree `4ec2b2011e43de6bd2940dca35e01b82240ba0de`. Before pushing, `ls-remote`/`fetch` confirmed remote `1ff88beb...` was an ancestor. A normal fast-forward `git push origin main:main` succeeded. Afterward, `ls-remote` returned `b786f331...`; fetch returned the same commit and tree `4ec2b201...`; `git diff --exit-code HEAD FETCH_HEAD` exited 0. This code+handoff checkpoint is live on the authorized remote.
-
-The cloud evidence above was recorded in a documentation-only follow-up to this handoff and `docs/validation-log.md`; that follow-up is pushed and verified as part of the current remote `main`. Since a commit cannot contain its own ID, use `git log -1` plus a live ref/fetched-tree check to identify the exact documentation revision.
+Base state before this increment: local `main` and live `origin/main` were both `7228f0e32817886ff04095c1baace0c79f0b9b98`, tree `f8e616927a36c4dfbf7835ffb4b7137762d320ee`. The custom-curve source and documentation changes are not committed yet. After reviewing the diff and rerunning the required local checks, check the live remote ref and fetch before committing/pushing; if history moved, reconcile normally without reset or force-push.
 
 For future increments: check `git status --short`, `git diff --check`, and the exact diff; stage only the intended source/docs (never `target/`, sample data, reference sources, credentials, or unrelated files); check the live ref using `git ls-remote origin refs/heads/main` and `git fetch origin main`; reconcile unexpected ancestry movement safely; then commit, normal-push, fetch, and compare local/fetched trees. Never say “pushed” unless the live ref and fetched tree match. A commit cannot store its own hash in its tree; identify the final handoff revision from `git log` in the user-facing update.
 
-## 8. Concrete resume plan for the next AI
+## 8. Concrete resume plan
 
-Resume Phase 1 only, in this order. Do not restart the whole project plan or jump to user samples.
+Continue Phase 1 only. Do not inspect user bundles or UABEA.
 
-1. **Re-open state safely:** read this file, `docs/continuation.md`, the last sections of `docs/validation-log.md`, and the latest rows of `docs/feature-parity.md`. Check the current branch, `git status`, and the live remote tree. If the final cloud checkpoint recorded below is present and the tree matches, start cleanly from it.
-2. **Finish `.meta` source tracing and connect output:** continue from `EXP-META-ENVELOPE-001` and `EXP-META-SIDECAR-FS-001`. Trace all actual source `CreateImporter` implementations and class-specific importer settings; the baseline reaches generated-source/package behavior that is not directly in the snapshot. Do not guess importer defaults. Identify source GUID allocation/persistence, export paths, collision rules, folder metadata, and write order. Then create an export-owned metadata/output plan and connect safe sidecar creation to the project pipeline without overwrites. Add source-derived and independent tests; mark only the exact tested slice verified.
-3. **Audit whole exporter registration and resource matrix:** inventory every baseline exporter/processor and all type/version/platform dispatch paths from the frozen source. Split ledger rows by real behavior. Implement and validate general mechanisms, then the per-resource exporters; do not stop at Scene, Prefab, or YAML. Preserve raw/unknown data without claiming a structured exporter exists.
-4. **Continue object model and product workflows:** finish generated type/object creation, dependency and reference semantics, all remaining Scene/Prefab behaviors, project layout, original CLI options/configuration, GUI/web workflows, settings, progress/cancel/error paths, and build/deployment entry points as source audit reveals. Keep Rust core independent of AssetRipper/UABEA/.NET at runtime.
-5. **Close the Phase 1 evidence gap:** independently generated or otherwise independently specified fixtures, source/runtime differential when a safe .NET environment is available, malformed-input/resource-limit/error tests, all entry points, and a machine-readable completeness report. Keep .NET and Unity runtime checks marked unrun or blocked until actually performed. Never convert inability to run a required check into a pass.
-6. **Only after every Phase 1 criterion is evidenced** may the owner unlock Phase 2. Then build the immutable complete sample manifest before parsing, compare Rust/original/UABEA only where each genuinely supports it, and complete the reference, scene, resource, animation, import/runtime, and per-sample reports described in AGENTS.md. If Phase 1 is incomplete, Phase 2 remains closed.
-7. **For each coherent increment:** update the feature ledger and validation log, run the relevant required checks, protect user changes, commit, push, and verify the remote tree. Keep this handoff/continuation current at each pause.
+1. Recheck branch, status, HEAD, live `origin/main`, and the exact uncommitted diff. The current Rust gates already pass; rerun `git diff --check` after the documentation edits.
+2. Complete the custom-curve production route: use materialized AnimationClip bindings and workspace objects to find roots and child paths, resolve component references, run blend-shape/material CRC lookup, and pass the results to the resolver during actual clip conversion. Preserve source ordering and error distinctions; do not close `PROC-ANIM-CUSTOM-CURVE-001` until the caller path is exercised end to end.
+3. Refresh the 39-row `docs/phase1-closure-inventory.md` as complete behavior units close. Prioritize source-backed vertical paths across serialized object construction, scene/Prefab graph materialization, animation, and project export; avoid accumulating more detached kernels.
+4. Continue auditing every source registration, version/platform branch, option, exporter, generator, and user workflow. Keep ledger statuses evidence-based and explain source-only, Unity-only, or external blockers.
+5. Update the feature ledger, differential findings, validation log, and hand-off for each coherent increment. Run relevant module and workspace checks, verify the frozen reference manifest, and preserve source bundles/reference files.
+6. Before each authorized cloud checkpoint, inspect and fetch the live remote. Commit only intended files, push normally, then fetch again and verify the live ref and tree. Never force-push or overwrite remote/user work.
+7. Phase 2 remains prohibited until the complete Phase 1 gate passes with evidence. Then inventory every user input and compare Rust, AssetRipper, and UABEA only at capabilities each actually provides.
 
 ## 9. Honest status
 
@@ -1315,14 +1316,12 @@ Resume Phase 1 only, in this order. Do not restart the whole project plan or jum
 - Next: sixty-fourth team round (gate-first: UnityFS lanes, typetree reader, export settings).
 - State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
 
-## 174. Checkpoint: custom-curve resolver round IN PROGRESS — commit-on-user-order (2026-10-07)
+## 174. Checkpoint: custom-curve resolver source port validated; production integration open (2026-10-07)
 
-- Target row: PROC-ANIM-CUSTOM-CURVE-001 (still `已实现但未验证`; NOT flipped). Phase 1 blockers unchanged by this commit (still 39: 20 unverified + 14 in-progress + 5 investigated at commit a8b5da3).
-- New probe `Temp/opencode/curveresolve`: a real 2022.3 scene (root plus Arm/Leg children, an Animation referencing the clip, a skinned Arm mesh with a Smile channel, a Leg MeshRenderer with a _MainTex material) through the shipped `CustomCurveResolver.ToAttributeName` plus direct `Crc32Algorithm.ReverseAscii` calls. Captured 48 CURVE/CREV rows as `src/resources/custom_curve_resolve_fixture.txt` (32 resolver vectors incl. all 11 table hits, all throw-vs-fallback misses, blendshape hit `blendShape.Smile`, three material hits `material._MainTex_ST[.y|.g]`, plus 14 manufactured-name vectors incl. the empty-prefix arm).
-- New probe `Temp/opencode/ildump` (reflection IL disassembler): recovered `ReverseAscii` exactly from the shipped Checksum DLL — `ReverseAscii(attr, prefix) = Reverse(attr, prefix, HashAscii(prefix))`; `GetMaskFromBit(v,b) = ~((v >> (b & 31)) & 1) + 1`; 31 `(bit, constant)` mixing rounds plus a bit-31 mask; a fixed 32-mask back-substitution; six 5-mask groups xored into `H` plus a 2-mask `[HJLN]` tail; empty prefix returns the 7 chars alone.
-- New probe `Temp/opencode/extdump` table step: dumped all 11 component `s_FieldPathDictionary` tables (2,551 entries) to `Temp/opencode/tabledump`. Committed as `src/resources/custom_curve_tables.rs` (generated, sorted) plus the raw dumps in `src/resources/custom_curve_table_dumps/` (11 files).
-- Rust port (UNVERIFIED — no fmt/test/clippy run yet on this code): `reverse_ascii_crc32`, `component_attribute_path`, `CustomCurveSceneFacts`, full `to_attribute_name` dispatcher, `BindingCustomType::name()`, and the `UnknownAttribute` Display now matches the source spelling exactly (`Unknown attribute 0x5 (5) for SpriteRenderer`); the old lowercase test expectation was updated. `Roots`/`FindChild`/component walks stay caller-side.
-- Source facts established: `FindRoots` only yields via an Animator/Animation referencing the clip (empty roots caused all scene-branch fallbacks until an Animation asset was wired); the sheet CRC search matches postfix names only (`_MainTex` alone never hits — the hit attribute is `crc28(_MainTex_ST)`); `FindShapeNameByCRC` compares stored `NameHash`; the 2022 mesh `Shapes` facade accepts `BlendShapeData_2017`; renderer materials resolve through the `Materials_C25P` view.
-- NOT DONE (next agent must do before flipping the row): run `cargo fmt`, full `cargo test --workspace --locked`, `cargo clippy -- -D warnings`, baseline verifier, `git diff --check`; fix any fallout; verify the 3 new tests pass (reverse 14/14, resolver 32/32, tables 2551/2551); then flip PROC-ANIM-CUSTOM-CURVE-001, add DIFF + validation-log entries, and commit that closure separately.
-- Dirty tree in THIS commit: `M src/resources/custom_curve.rs`, `M src/resources/mod.rs`, `?? src/resources/custom_curve_resolve_fixture.txt`, `?? src/resources/custom_curve_table_dumps/`, `?? src/resources/custom_curve_tables.rs`. Committed on explicit user order (`commit and push NOW`) WITHOUT running the Phase 1 gates on the new code — treat everything in this increment as unvalidated until the gates go green.
-- State: Phase 1 is still active; the gate has not passed and Phase 2 remains locked. No user sample or UABEA content has been read.
+- Target row `PROC-ANIM-CUSTOM-CURVE-001` remains `已实现但未验证`. The ledger still has 39 open rows: 20 implemented but unverified, 14 in progress, and 5 investigated. Phase 1 is not through its gate.
+- The isolated live .NET probe and IL disassembly pinned the resolver's behavior. Rust now hashes the prefix plus `HHHHHHH` for `ReverseAscii`, and its resolver fixture carries 39 `ToAttributeName` cases, 14 reverse outputs, and 2 direct `HashAscii` marker hashes. The 11 source component dictionaries contain 2,551 entries.
+- Rust validation passes: focused custom-curve suite 12/12; full suite 1,397 library + 65 CLI + 0 doc tests; `cargo fmt --all -- --check`; warnings-denied workspace Clippy; and baseline verification of all 1,449 reference files. Full tests use process-scoped `TEMP`/`TMP=target/test-tmp` to avoid Windows temporary-directory access-denied failures.
+- The resolver remains a standalone kernel. `rg` finds no production caller of `to_attribute_name`; root/child walks and asset-backed blend-shape/material lookups are not connected to `AnimationClipConverter`. Do not flip the ledger row based on the resolver tests.
+- The isolated reference solution restores and builds under .NET SDK 10.0.401. Its suite has 339 passes and 20 CRLF/LF assertion failures documented in the validation and differential logs. Unity-produced-file and dynamic Unity checks remain unrun.
+- Current source changes include `src/resources/blend_shape.rs`, `src/resources/custom_curve.rs`, its live fixture and generated path tables, plus updated parity, differential, validation, inventory, and hand-off documentation. `git diff --check` passes; review the complete diff, then perform the authorized commit/push protocol and verify the live remote tree.
+- No user AssetBundle or UABEA content has been read. Phase 2 remains locked. Next implementation work is production `AnimationClipConverter` integration, followed by the dependency-ordered Phase 1 closure inventory.

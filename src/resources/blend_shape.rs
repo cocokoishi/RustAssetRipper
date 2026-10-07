@@ -106,7 +106,15 @@ impl Error for BlendShapeViewError {}
 /// `crc28_fixture.txt` probe shows every Crc28 word equals the Crc32 word masked to
 /// 28 bits, so the unmasked word is the full CRC-32.
 pub fn crc32_ieee(bytes: &[u8]) -> u32 {
-    let mut crc = 0xFFFF_FFFFu32;
+    !crc32_ieee_update(0xFFFF_FFFF, bytes)
+}
+
+/// Update an uncomplemented IEEE CRC-32 state with another byte slice.
+///
+/// This permits source calls that append multiple spans to one CRC stream
+/// without allocating a concatenated buffer. Start with `0xFFFF_FFFF` and
+/// complement the final state once.
+pub(crate) fn crc32_ieee_update(mut crc: u32, bytes: &[u8]) -> u32 {
     for byte in bytes {
         crc ^= u32::from(*byte);
         for _ in 0..8 {
@@ -114,7 +122,7 @@ pub fn crc32_ieee(bytes: &[u8]) -> u32 {
             crc = (crc >> 1) ^ mask;
         }
     }
-    !crc
+    crc
 }
 
 /// `MeshBlendShapeExtensions.IsCRCMatch`: a present name matches when its UTF-8

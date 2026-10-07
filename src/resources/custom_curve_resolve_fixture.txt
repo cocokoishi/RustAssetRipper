@@ -4,8 +4,10 @@
 # MeshRenderer with a _MainTex material) through the shipped ToAttributeName
 # (SDK 10.0.401). CURVE|<type>|<attr-hex>|<path>|<result>| (THROW rows carry the
 # shipped exception); CURVE|crcst|<crc28(_MainTex_ST)> and CURVE|smilecrc|<crc32(Smile)>
-# record the live hashes; CREV|<attr-hex>|<prefix>|<manufactured> rows pin
+# record the live hashes; CHASH rows pin the HashAscii input marker; CREV|<attr-hex>|<prefix>|<manufactured> rows pin
 # Crc32Algorithm.ReverseAscii (IL-decoded from the shipped Checksum DLL).
+CHASH|P_HHHHHHH|84BFB420
+CHASH|path_0x12345678_HHHHHHH|2D2AE640
 CURVE|smilecrc|C34B2C0B
 CURVE|20|12345678|Arm|blendShape.path_0x12345678_mHWqIrN|
 CURVE|20|C34B2C0B|Arm|blendShape.Smile|
@@ -20,6 +22,11 @@ CURVE|22|12345678|Leg|material.path_0x12345678_mHWqIrN|
 CURVE|22|12345678|Nope|material.path_0x12345678_mHWqIrN|
 CURVE|23|00000000||m_Sprite|
 CURVE|23|00000005||THROW|ArgumentException:Unknown attribute 0x5 (5) for SpriteRenderer
+CURVE|0|00000000||THROW|ArgumentException:Binding type None not implemented (Parameter 'type')
+CURVE|4|00000000||THROW|ArgumentException:Binding type Transform not implemented (Parameter 'type')
+CURVE|8|00000000||THROW|ArgumentException:Binding type AnimatorMuscle not implemented (Parameter 'type')
+CURVE|42|00000000||THROW|ArgumentException:Binding type 42 not implemented (Parameter 'type')
+CURVE|255|00000000||THROW|ArgumentException:Binding type 255 not implemented (Parameter 'type')
 CURVE|24|9299AC34||m_EditorClassIdentifier|
 CURVE|24|FFFFFFFE||THROW|ArgumentException:Unknown attribute 0xFFFFFFFE (4294967294) for MonoBehaviour
 CURVE|25|D9164902||m_ActuallyLightmapped|

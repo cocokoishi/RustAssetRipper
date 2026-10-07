@@ -1028,3 +1028,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | New `glb_material_textures_resolved` in resources/material.rs plus test glb_material_textures_match_the_reference_runtime; fixture src/resources/glb_material_fixture.txt. |
 | Regression evidence | All five selection cases replay at resolved-path level; material suite 27/27; existing name-first tests unchanged. |
 | Remaining comparison | Image decoding and SharpGLTF material building remain open. |
+
+## DIFF-ANIM-CUSTOM-CURVE-001 — custom-curve resolver behavior and ReverseAscii salt
+
+| Field | Finding |
+|---|---|
+| Status | Resolver kernels match the captured reference-runtime vectors; production animation integration remains open |
+| Source location | `AssetRipper.Processing/AnimationClips/CustomCurveResolver.cs` (`ToAttributeName`); `AssetRipper.Checksum` `Crc32Algorithm.ReverseAscii`; generated component `TryGetPath` dictionaries |
+| Input evidence | Isolated `Temp/opencode/curveresolve` probe using the shipped .NET 10.0.401 reference assemblies and generated 2022.3 objects for an Animation, hierarchy, skinned mesh, and renderer/material. `Temp/opencode/ildump` decoded the shipped checksum method. Captured values are committed in `src/resources/custom_curve_resolve_fixture.txt`; the 11 path tables are committed in `src/resources/custom_curve_tables.rs`. These are live managed-object probes and source-derived table dumps, not Unity-produced files. |
+| Source behavior | The fixture pins 39 actual `ToAttributeName` cases, including table hits/misses, scene-dependent blend-shape/material outcomes, manufactured fallbacks, and exact unsupported-enum exceptions. `ReverseAscii` passes `HashAscii(prefix, "HHHHHHH")`, so the seven-H marker is appended to the prefix before the CRC is computed. The 11 component dictionaries contain 2,551 entries. |
+| Root cause | The initial Rust port hashed only the prefix before reversing the CRC, omitting the source's seven-H marker. The first fixture expectations also had incorrect CRC words and did not reproduce the resolver's real scene predicate. The live probe exposed these mismatches; Rust now streams the marker into the same CRC state and the fixture records the correct predicates and values. |
+| Rust change | `src/resources/blend_shape.rs` now exposes a crate-private incremental IEEE CRC update; `src/resources/custom_curve.rs` ports the `ReverseAscii` transform, resolver dispatch, table hits, and source-compatible errors for unsupported binding enum values. |
+| Regression evidence | `cargo test --workspace --locked custom_curve::tests` passes 12/12. The fixture includes 14 `ReverseAscii` outputs and 2 direct `HashAscii` marker hashes. The full Rust workspace passes 1,397 library tests and 65 CLI tests; formatting, warnings-denied Clippy, and the 1,449-file baseline verifier pass. |
+| Remaining comparison | `AnimationClipConverter` does not call the Rust `to_attribute_name`; production code still lacks root/child traversal and asset-backed blend-shape/material CRC lookup to populate `CustomCurveSceneFacts`. Full clip conversion, independent Unity-file evidence, and dynamic Unity animation sampling remain unrun. Keep `PROC-ANIM-CUSTOM-CURVE-001` open. |
