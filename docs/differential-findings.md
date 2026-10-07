@@ -729,3 +729,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | Three per-codec tests in wrappers.rs, lz4_block.rs, zstd.rs; shared fixture src/compression/reference_encoded_fixture.txt. |
 | Regression evidence | All seven vectors decode byte-exact on both sides; full suite 1367 plus 60 pass with warnings-denied Clippy. |
 | Remaining comparison | Broad fuzz stays future work; Unity Zstd uses standard framing covered here. |
+
+## DIFF-SER-ENV-001 - SerializedFile envelopes and file entry
+
+| Field | Finding |
+|---|---|
+| Status | Reference-runtime differential recorded; two rows ported and pinned |
+| Source location | AssetRipper.IO.Files/SerializedFiles/Parser/SerializedFileMetadata.cs (HasEnableTypeTree 13, SupportsRefObject 20, scripts 11); SerializedFileHeader.cs (HasEndianess 9-plus, LargeFilesSupport 22) |
+| Input evidence | Probe Temp/opencode/sermetaenvprobe (shipped IO.Files DLL, SDK 10.0.401) reading eleven minimal envelopes plus one gen10 full file. Committed as src/serialized_file/metadata_envelope_fixture.txt (28 lines). |
+| Source-derived behavior | All per-generation presence gates reproduce with empty tables; gen10 entry carries identity plus payload bytes. |
+| Root cause | No deviation found; one probe-construction correction made (gen22 needs its endian marker plus 48-byte large header). |
+| Rust change | src/serialized_file/metadata.rs test metadata_envelopes_match_reference_constructed_files; fixture src/serialized_file/metadata_envelope_fixture.txt. |
+| Regression evidence | All twelve files reproduce envelope plus payload on both sides; full suite 1368 plus 60 pass with warnings-denied Clippy. |
+| Remaining comparison | Object field semantics stay with the object-value rows; container extraction stays with its row. |

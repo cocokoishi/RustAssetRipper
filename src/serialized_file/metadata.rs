@@ -3077,4 +3077,102 @@ mod tests {
             assert!(tree.nodes.is_empty());
         }
     }
+
+    #[test]
+    fn metadata_envelopes_match_reference_constructed_files() {
+        fn hex_to_bytes(hex: &str) -> Vec<u8> {
+            assert!(hex.len().is_multiple_of(2), "odd hex length for {hex}");
+            let mut out = Vec::with_capacity(hex.len() / 2);
+            let bytes = hex.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                let hi = match bytes[i] {
+                    b'0'..=b'9' => bytes[i] - b'0',
+                    b'a'..=b'f' => bytes[i] - b'a' + 10,
+                    b'A'..=b'F' => bytes[i] - b'A' + 10,
+                    b => panic!("invalid hex byte {b}"),
+                };
+                let lo = match bytes[i + 1] {
+                    b'0'..=b'9' => bytes[i + 1] - b'0',
+                    b'a'..=b'f' => bytes[i + 1] - b'a' + 10,
+                    b'A'..=b'F' => bytes[i + 1] - b'A' + 10,
+                    b => panic!("invalid hex byte {b}"),
+                };
+                out.push((hi << 4) | lo);
+                i += 2;
+            }
+            out
+        }
+
+        // Probe Temp/opencode/sermetaenvprobe (SerializedFileMetadata.Read
+        // over C#-constructed minimal files, SDK 10.0.401): G8-G22 envelope
+        // presence gates plus E1 gen10 full file with a 16-byte object
+        // payload. Nothing Rust-generated.
+        let fixture = include_str!("metadata_envelope_fixture.txt");
+        let mut hexes: std::collections::HashMap<String, Vec<u8>> =
+            std::collections::HashMap::new();
+        let mut reads: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for line in fixture.lines() {
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+            if line.starts_with("ENV_HEX|") {
+                let parts: Vec<&str> = line.splitn(3, '|').collect();
+                assert_eq!(parts.len(), 3, "bad ENV_HEX {line}");
+                hexes.insert(parts[1].to_string(), hex_to_bytes(parts[2]));
+            } else if line.starts_with("ENV_READ|") {
+                let parts: Vec<&str> = line.splitn(3, '|').collect();
+                assert_eq!(parts.len(), 3, "bad ENV_READ {line}");
+                reads.insert(parts[1].to_string(), parts[2].to_string());
+            }
+        }
+
+        // Envelope gates reproduce across all covered generations: empty
+        // tables with presence-correct sections on both sides.
+        for gen in [8u8, 10, 11, 12, 13, 14, 17, 19, 20, 21, 22] {
+            let case = format!("G{gen}");
+            let bytes = hexes.get(&case).unwrap_or_else(|| panic!("missing {case}"));
+            let dump = reads.get(&case).unwrap_or_else(|| panic!("missing {case}"));
+            assert!(
+                dump.contains(&format!("V={gen}|Types=0|Objs=0|Scripts=0|Ext=0|Refs=0")),
+                "{case} envelope {dump}"
+            );
+            let header = SerializedFileHeader::parse(bytes)
+                .unwrap_or_else(|e| panic!("{case} header: {e:?}"));
+            assert_eq!(header.format_version.raw(), gen as i32, "{case} version");
+            let metadata = SerializedFileMetadata::parse_file(bytes, &header)
+                .unwrap_or_else(|e| panic!("{case} metadata: {e:?}"));
+            assert!(metadata.types.is_empty(), "{case} types");
+            assert!(metadata.objects.is_empty(), "{case} objects");
+            assert!(metadata.script_types.is_empty(), "{case} scripts");
+            assert!(metadata.externals.is_empty(), "{case} externals");
+            assert!(metadata.reference_types.is_empty(), "{case} reftypes");
+        }
+
+        // E1: gen10 file entry carries the 16-byte object payload.
+        {
+            let bytes = hexes.get("E1").expect("E1 hex");
+            let dump = reads.get("E1").expect("E1 dump");
+            assert!(
+                dump.contains("OBJ:5001,1,1,16=000102030405060708090A0B0C0D0E0F"),
+                "E1 object {dump}"
+            );
+            let header = SerializedFileHeader::parse(bytes).expect("E1 header");
+            assert_eq!(header.format_version.raw(), 10);
+            let metadata = SerializedFileMetadata::parse_file(bytes, &header).expect("E1 metadata");
+            assert_eq!(metadata.types.len(), 1);
+            assert_eq!(metadata.types[0].raw_type_id, 1);
+            assert_eq!(metadata.objects.len(), 1);
+            let object = &metadata.objects[0];
+            assert_eq!(object.path_id, 5001);
+            assert_eq!(object.byte_size, 16);
+            let range = object.data_range(&header).expect("E1 range");
+            let data = bytes
+                .get(range.start as usize..range.end as usize)
+                .expect("E1 data");
+            assert_eq!(data.len(), 16);
+            assert_eq!(data, (0..16).collect::<Vec<u8>>());
+            assert_eq!(metadata.externals.len(), 1);
+        }
+    }
 }
