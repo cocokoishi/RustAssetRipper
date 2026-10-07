@@ -158,9 +158,15 @@ impl MixedGameStructure {
                         MixedGameStructureErrorKind::InvalidFileName,
                     )
                 })?;
-                let is_new = files.insert((identity.clone(), selected_path.clone()));
+                // Explicit files register under their logical base path like the
+                // source `MultiFileStream.GetFilePath` mapping, so a selected
+                // split part and its group share one base identity downstream.
+                let base = logical_file_path(&selected_path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let is_new = files.insert((identity.clone(), base.clone()));
                 if is_new {
-                    data_paths.insert(parent_path(&selected_path));
+                    data_paths.insert(parent_path(&base));
                 }
                 let kind = scan_file_kind(
                     filesystem,
@@ -170,7 +176,7 @@ impl MixedGameStructure {
                     limits,
                 )?;
                 if kind == FileKind::SerializedFile {
-                    serialized_files.insert((identity, selected_path));
+                    serialized_files.insert((identity, base));
                 }
                 continue;
             }
@@ -189,18 +195,43 @@ impl MixedGameStructure {
                 .enumerate_files(Some(&selected_path), "*", SearchOption::AllDirectories)
                 .map_err(|source| MixedGameStructureError::filesystem(&selected_path, source))?;
             for path in paths {
-                let kind =
-                    scan_file_kind(filesystem, &path, &mut scanned_paths, &mut report, limits)?;
-                let filename = logical_file_name(&path).ok_or_else(|| {
+                // Split parts fold to their logical base like the source
+                // `MultiFileStream` view: the group validates and registers
+                // once under the base name and base path. Gapped groups have
+                // no source-verified directory-walk disposition, so they
+                // stay unregistered.
+                let base = logical_file_path(&path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let effective = if base == path {
+                    path.clone()
+                } else {
+                    base.clone()
+                };
+                let kind = if base == path {
+                    scan_file_kind(filesystem, &path, &mut scanned_paths, &mut report, limits)?
+                } else {
+                    match scan_folded_kind(
+                        filesystem,
+                        &base,
+                        &mut scanned_paths,
+                        &mut report,
+                        limits,
+                    )? {
+                        Some(kind) => kind,
+                        None => continue,
+                    }
+                };
+                let filename = logical_file_name(&effective).ok_or_else(|| {
                     MixedGameStructureError::new(
-                        Some(path.clone()),
+                        Some(effective.clone()),
                         MixedGameStructureErrorKind::InvalidFileName,
                     )
                 })?;
 
                 let primary_identity = match kind {
                     FileKind::SerializedFile => {
-                        serialized_files.insert((filename.clone(), path.clone()));
+                        serialized_files.insert((filename.clone(), effective.clone()));
                         Some(filename.clone())
                     }
                     FileKind::UnityFs
@@ -211,17 +242,17 @@ impl MixedGameStructure {
                 };
 
                 if let Some(identity) = primary_identity {
-                    if files.insert((identity, path.clone())) {
-                        add_parent_chain(&path, &selected_path, &mut data_paths);
+                    if files.insert((identity, effective.clone())) {
+                        add_parent_chain(&effective, &selected_path, &mut data_paths);
                     }
                 }
                 if is_web_data_filename(&filename)
-                    && files.insert((web_data_stem(&filename).to_owned(), path.clone()))
+                    && files.insert((web_data_stem(&filename).to_owned(), effective.clone()))
                 {
-                    add_parent_chain(&path, &selected_path, &mut data_paths);
+                    add_parent_chain(&effective, &selected_path, &mut data_paths);
                 }
                 if is_mono_assembly(&filename) {
-                    insert_assembly(&mut assemblies, &mut report, filename, path);
+                    insert_assembly(&mut assemblies, &mut report, filename, effective);
                 }
             }
         }
@@ -314,6 +345,79 @@ fn scan_file_kind(
     report.scanned_bytes = total_bytes;
 
     probe_file_kind(stream, path, length)
+}
+
+/// Directory-walk scan of a folded `.splitN` group under its logical base.
+///
+/// Opens the contiguous group through the logical-file view (the source
+/// `MultiFileStream` equivalent) and enforces the same single-file and total
+/// scan limits against the folded length. A missing part has no
+/// source-verified directory-walk disposition, so the group stays
+/// unregistered instead of failing the whole selection.
+fn scan_folded_kind(
+    filesystem: &VirtualFileSystem,
+    base: &str,
+    scanned_paths: &mut BTreeSet<String>,
+    report: &mut MixedGameStructureReport,
+    limits: MixedGameStructureLimits,
+) -> Result<Option<FileKind>, MixedGameStructureError> {
+    let stream = match filesystem.open_logical_file(base) {
+        Ok(stream) => stream,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(MixedGameStructureError::filesystem(base, source));
+        }
+    };
+    let length = stream
+        .length()
+        .map_err(|source| MixedGameStructureError::filesystem(base, source))?;
+    if !scanned_paths.insert(base.to_owned()) {
+        return Ok(Some(probe_file_kind(stream, base, length)?));
+    }
+
+    let next_count = report.scanned_files.checked_add(1).ok_or_else(|| {
+        MixedGameStructureError::new(
+            Some(base.to_owned()),
+            MixedGameStructureErrorKind::ScannedFileCountOverflow,
+        )
+    })?;
+    if next_count > limits.max_scanned_files {
+        return Err(MixedGameStructureError::new(
+            Some(base.to_owned()),
+            MixedGameStructureErrorKind::ScannedFileCountLimitExceeded {
+                count: next_count,
+                limit: limits.max_scanned_files,
+            },
+        ));
+    }
+    if length > limits.max_single_file_bytes {
+        return Err(MixedGameStructureError::new(
+            Some(base.to_owned()),
+            MixedGameStructureErrorKind::SingleFileLimitExceeded {
+                size: length,
+                limit: limits.max_single_file_bytes,
+            },
+        ));
+    }
+    let total_bytes = report.scanned_bytes.checked_add(length).ok_or_else(|| {
+        MixedGameStructureError::new(
+            Some(base.to_owned()),
+            MixedGameStructureErrorKind::ScannedByteCountOverflow,
+        )
+    })?;
+    if total_bytes > limits.max_total_scanned_bytes {
+        return Err(MixedGameStructureError::new(
+            Some(base.to_owned()),
+            MixedGameStructureErrorKind::TotalScanLimitExceeded {
+                size: total_bytes,
+                limit: limits.max_total_scanned_bytes,
+            },
+        ));
+    }
+    report.scanned_files = next_count;
+    report.scanned_bytes = total_bytes;
+
+    Ok(Some(probe_file_kind(stream, base, length)?))
 }
 
 fn probe_file_kind(
@@ -822,8 +926,10 @@ mod tests {
         assert_eq!(level.len(), 1);
         assert_eq!(level[0].virtual_path, "/mix/level5");
 
-        // Reversed order keeps the split part instead, like `Distinct` keeping the
-        // first logical path.
+        // Reversed order keeps one entry under the same logical base path, like
+        // the source `MultiFileStream.GetFilePath` mapping (verified against
+        // the reference mixed dump: an explicitly selected split part
+        // registers under its group base, not the part path).
         let reversed = MixedGameStructure::from_vfs_paths(
             &filesystem,
             &["/mix/level5.split0".to_owned(), "/mix/level5".to_owned()],
@@ -836,7 +942,7 @@ mod tests {
             .filter(|file| file.file_name == "level5")
             .collect();
         assert_eq!(level.len(), 1);
-        assert_eq!(level[0].virtual_path, "/mix/level5.split0");
+        assert_eq!(level[0].virtual_path, "/mix/level5");
     }
 
     #[test]
@@ -919,5 +1025,125 @@ mod tests {
             entry.file_name == "Other.dll" && entry.virtual_path == "/b/Data/Managed/Other.dll"
         }));
         assert_eq!(structure.report.duplicate_assemblies, 1);
+    }
+
+    /// Mixed-input selection differential against the reference
+    /// `MixedGameStructure` dump committed in `mixed_probe_fixture.txt` (probe
+    /// `Temp/opencode/mixedprobe`, isolated reference bins, SDK 10.0.401).
+    /// The same mixed directory (loose SerializedFile, UnityFS bundle,
+    /// unknown `.resS`, empty web `.data`, split SerializedFile parts) is
+    /// rebuilt in a scratch VFS with the same bytes, then selected both as a
+    /// directory and as an explicit two-file list. Split parts must fold to
+    /// one entry, walked bundle/web keys must use short names while explicit
+    /// file keys keep full names, and the unknown `.resS` must register
+    /// nowhere.
+    #[test]
+    fn mixed_selection_reproduces_the_reference_mixed_dump() {
+        fn decode_hex(hex: &str) -> Vec<u8> {
+            assert!(hex.len().is_multiple_of(2), "odd hex length");
+            hex.as_bytes()
+                .chunks(2)
+                .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+                .collect()
+        }
+
+        let fixture = include_str!("mixed_probe_fixture.txt");
+        let mut blobs: std::collections::HashMap<String, Vec<u8>> =
+            std::collections::HashMap::new();
+        let mut spec: Vec<String> = Vec::new();
+        let mut expected: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some(hex) = line.strip_prefix("SFHEX|") {
+                blobs.insert("SFHEX".to_owned(), decode_hex(hex));
+                continue;
+            }
+            if let Some(hex) = line.strip_prefix("SFHEX0|") {
+                blobs.insert("SFHEX0".to_owned(), decode_hex(hex));
+                continue;
+            }
+            if let Some(hex) = line.strip_prefix("SFHEX1|") {
+                blobs.insert("SFHEX1".to_owned(), decode_hex(hex));
+                continue;
+            }
+            if let Some(hex) = line.strip_prefix("BUNDLEHEX|") {
+                blobs.insert("BUNDLEHEX".to_owned(), decode_hex(hex));
+                continue;
+            }
+            if let Some(hex) = line.strip_prefix("RESHEX|") {
+                blobs.insert("RESHEX".to_owned(), decode_hex(hex));
+                continue;
+            }
+            if let Some(tree) = line.strip_prefix("MTREE|") {
+                spec = tree.split(';').map(str::to_owned).collect();
+                continue;
+            }
+            let parts: Vec<&str> = line.splitn(4, '|').collect();
+            match parts[0] {
+                "MFILE" => {
+                    expected
+                        .entry(parts[1].to_owned())
+                        .or_default()
+                        .push(parts[2].to_owned());
+                }
+                kind => panic!("unknown fixture row {kind}: {line}"),
+            }
+        }
+        assert!(!spec.is_empty());
+
+        let content = |token: &str| match token {
+            "{SF}" => blobs["SFHEX"].clone(),
+            "{SF0}" => blobs["SFHEX0"].clone(),
+            "{SF1}" => blobs["SFHEX1"].clone(),
+            "{BUNDLE}" => blobs["BUNDLEHEX"].clone(),
+            "{RES}" => blobs["RESHEX"].clone(),
+            other => panic!("unknown content token {other}"),
+        };
+        let mut filesystem = VirtualFileSystem::new();
+        let root = "/mix".to_owned();
+        for entry in &spec {
+            let entry_parts: Vec<&str> = entry.splitn(3, '|').collect();
+            let path = format!("{root}/{}", entry_parts[1]);
+            match entry_parts[0] {
+                "D" => filesystem.create_directory(Some(path.as_str())).unwrap(),
+                "F" => insert_file(&mut filesystem, &path, &[]),
+                "C" => insert_file(&mut filesystem, &path, &content(entry_parts[2])),
+                kind => panic!("unknown spec entry {kind}"),
+            }
+        }
+
+        let check = |selection: &[String], case: &str| {
+            let structure = MixedGameStructure::from_vfs_paths(
+                &filesystem,
+                selection,
+                MixedGameStructureLimits::default(),
+            )
+            .unwrap();
+            let mut files: Vec<String> = structure
+                .registered_files
+                .iter()
+                .map(|file| format!("{}={}", file.file_name, file.virtual_path))
+                .collect();
+            files.sort();
+            let mut expected_files: Vec<String> = expected[case]
+                .iter()
+                .map(|row| row.replace("{DIR}", &root).replace('\\', "/"))
+                .collect();
+            expected_files.sort();
+            assert_eq!(files, expected_files, "{case} selection");
+        };
+        check(std::slice::from_ref(&root), "dir");
+        check(
+            &[
+                format!("{root}/main.assets"),
+                format!("{root}/extra.bundle"),
+            ],
+            "list",
+        );
+        check(&[format!("{root}/split.assets.split0")], "splitlist");
     }
 }

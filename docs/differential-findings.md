@@ -820,3 +820,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | src/io/platform_structure.rs test detection_and_registration_reproduce_the_reference_platform_dump; fixture src/io/platform_probe_fixture.txt. No production change. |
 | Regression evidence | New test passes (21/21 cases); full suite 1375 plus 65 pass with warnings-denied Clippy. |
 | Remaining comparison | Unity-produced builds and version-field scope stay out per the row dispositions. |
+
+## DIFF-IO-MIXED-SELECTION-001 - Mixed-input selection
+
+| Field | Finding |
+|---|---|
+| Status | Reference-product-path evidence recorded; three file-selection rows ported and pinned |
+| Source location | AssetRipper/Source/AssetRipper.Import/Structure/Platforms/; AssetRipper/Source/AssetRipper.Import/Structure/GameStructure.cs |
+| Input evidence | Probe Temp/opencode/mixedprobe (shipped Import/IO DLLs, SDK 10.0.401) running GameStructure.Load over a mixed directory, an explicit file list, and an explicit split-part selection. Committed as src/io/mixed_probe_fixture.txt. |
+| Source-derived behavior | Directory, explicit, and split-part selections reproduce on names and paths, including split folding, short-versus-full key conventions, nested traversal, and the unknown-.resS negative. |
+| Root cause | Two Rust deviations found and fixed: directory walk dropped split groups (now folded via scan_folded_kind); explicit selections kept the part path (now the logical base path). |
+| Rust change | src/io/game_structure.rs production (split folding plus base-path registration); test mixed_selection_reproduces_the_reference_mixed_dump; fixture src/io/mixed_probe_fixture.txt. |
+| Regression evidence | New test passes (3/3 selections); full suite 1376 plus 65 pass with warnings-denied Clippy. |
+| Remaining comparison | Unity-produced inputs and external-file dependency loading stay out per the row dispositions. |
