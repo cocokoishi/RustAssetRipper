@@ -1015,3 +1015,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | Fetch-order kernels (`fetch_editor_hierarchy` plus `FetchController/Layer/Pair/StateMachine/State/BlendTree` facts) and test editor_hierarchy_matches_the_reference_runtime in resources/animator_controller.rs; fixture src/resources/animator_hierarchy_fixture.txt. |
 | Regression evidence | All 27 yields plus the live slot vector replay through the kernels; animator suite 6/6. |
 | Remaining comparison | Pointer resolution and the flag mutation stay caller-side per the row disposition; transition-destination context rebuilds remain with their own coverage. |
+
+## DIFF-GLB-MATERIAL-001 - GLB main/normal texture selection
+
+| Field | Finding |
+|---|---|
+| Status | Reference-runtime differential recorded; five selection cases ported and pinned, one production gap closed |
+| Source location | AssetRipper/Source/AssetRipper.Export.Modules.Models/GlbLevelBuilder.cs (`GetTextures` lines 239-261, `IsMainTexture`, `IsNormalTexture`, private static on the nested `BuildParameters`); `MakeMaterialBuilder` lines 224-237 |
+| Input evidence | Probe Temp/opencode/glbmatprobe (shipped Export.Modules.Models DLL, SDK 10.0.401) with real 2022.3 materials plus registered RGBA32 textures through the shipped selection. Committed as src/resources/glb_material_fixture.txt (25 rows). |
+| Source-derived behavior | First main/normal spelling wins; any other property is the replacement that fills an absent main; the `??=` applies after resolution, so a null-texture main entry keeps looking (null-skips to `_Texture`). |
+| Root cause | Real deviation found and fixed: the name-only kernel blocked later main spellings behind a null-texture first pick, while the reference skips unresolvable picks. Fixed with the resolution-aware `glb_material_textures_resolved` taking a caller predicate; the name-first kernel is unchanged. |
+| Rust change | New `glb_material_textures_resolved` in resources/material.rs plus test glb_material_textures_match_the_reference_runtime; fixture src/resources/glb_material_fixture.txt. |
+| Regression evidence | All five selection cases replay at resolved-path level; material suite 27/27; existing name-first tests unchanged. |
+| Remaining comparison | Image decoding and SharpGLTF material building remain open. |

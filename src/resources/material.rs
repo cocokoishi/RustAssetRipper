@@ -337,6 +337,58 @@ impl MaterialView {
         (main.or(replacement), normal)
     }
 
+    /// `GlbLevelBuilder.GetTextures` with caller-side resolution.
+    ///
+    /// The reference applies `??=` to the *resolved* texture: a main-named
+    /// property whose pointer is null or not an `ITexture2D` does not block a
+    /// later main-named property, and the same holds for normal and
+    /// replacement candidates. Resolution needs the asset collection, so the
+    /// caller supplies `is_texture` (file-table index and signed PathID to
+    /// whether the target is a texture); a stored null pointer never reaches
+    /// it, matching the source's null-`TryGetAsset`. The walk order and the
+    /// replacement-fills-absent-main rule are exactly `glb_material_textures`.
+    pub fn glb_material_textures_resolved(
+        &self,
+        mut is_texture: impl FnMut(i32, i64) -> bool,
+    ) -> (
+        Option<&MaterialTextureProperty>,
+        Option<&MaterialTextureProperty>,
+    ) {
+        let mut main: Option<&MaterialTextureProperty> = None;
+        let mut normal: Option<&MaterialTextureProperty> = None;
+        let mut replacement: Option<&MaterialTextureProperty> = None;
+        for property in &self.saved_properties.tex_envs {
+            let resolved = match property.texture {
+                Some((file_id, path_id)) => {
+                    if is_texture(file_id, path_id) {
+                        Some(property)
+                    } else {
+                        None
+                    }
+                }
+                None => None,
+            };
+            match property.name.as_str() {
+                "_MainTex" | "texture" | "Texture" | "_Texture" => {
+                    if main.is_none() {
+                        main = resolved;
+                    }
+                }
+                "_Normal" | "Normal" | "normal" => {
+                    if normal.is_none() {
+                        normal = resolved;
+                    }
+                }
+                _ => {
+                    if replacement.is_none() {
+                        replacement = resolved;
+                    }
+                }
+            }
+        }
+        (main.or(replacement), normal)
+    }
+
     /// The dictionary shape `m_TexEnvs` used.
     pub fn tex_env_key_shape(&self) -> MaterialTexEnvKeyShape {
         self.saved_properties.tex_env_shape
@@ -1776,6 +1828,100 @@ mod tests {
                     probe = search.probe
                 );
             }
+        }
+    }
+
+    /// Differential against the shipped GLB material builder over live
+    /// generated objects (probe `Temp/opencode/glbmatprobe`, fixture
+    /// `glb_material_fixture.txt`): real 2022.3 materials with registered
+    /// textures through the shipped `GlbLevelBuilder.GetTextures`. The replay
+    /// feeds the probed texenv order and targets through the resolved
+    /// selection and must reproduce every main/normal pick, including
+    /// replacement-filled mains, cross-spelling first-wins, and the
+    /// null-texture skip that name-only selection cannot see.
+    #[test]
+    fn glb_material_textures_match_the_reference_runtime() {
+        struct Case {
+            tag: String,
+            entries: Vec<(String, Option<i64>)>,
+            main: Option<i64>,
+            normal: Option<i64>,
+        }
+
+        let fixture = include_str!("glb_material_fixture.txt");
+        let mut cases: Vec<Case> = Vec::new();
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut cells = line.split('|');
+            assert_eq!(cells.next().expect("a prefix"), "GTEX", "{line}");
+            let tag = cells.next().expect("a case").to_owned();
+            if cases.is_empty() || cases.last().expect("a case").tag != tag {
+                cases.push(Case {
+                    tag: tag.clone(),
+                    entries: Vec::new(),
+                    main: None,
+                    normal: None,
+                });
+            }
+            let case = cases.last_mut().expect("a case");
+            match cells.next().expect("a row kind") {
+                "pptrtype" => {}
+                "map" => {
+                    let name = cells.next().expect("a name").to_owned();
+                    let target = cells.next().expect("a target");
+                    case.entries.push((
+                        name,
+                        if target == "null" {
+                            None
+                        } else {
+                            Some(target.parse().expect("a path"))
+                        },
+                    ));
+                }
+                "result" => {
+                    for (slot, cell) in cells.enumerate() {
+                        let value = if cell == "null" {
+                            None
+                        } else {
+                            Some(cell.parse().expect("a path"))
+                        };
+                        if slot == 0 {
+                            case.main = value;
+                        } else {
+                            case.normal = value;
+                        }
+                    }
+                }
+                other => panic!("unexpected row {other}"),
+            }
+        }
+        assert_eq!(cases.len(), 5, "all probed selection cases are asserted");
+        for case in &cases {
+            let sheet = SerializedValue::Struct(vec![field(
+                "m_TexEnvs",
+                SerializedValue::Array(
+                    case.entries
+                        .iter()
+                        .map(|(name, target)| {
+                            pair(string(name), tex_env(target.map(|path| (0, path))))
+                        })
+                        .collect(),
+                ),
+            )]);
+            let root = SerializedValue::Struct(vec![field("m_SavedProperties", sheet)]);
+            let view = MaterialView::from_value(&root).unwrap();
+            // Every probed texture is a registered Texture2D; anything else
+            // (never called here) would be a non-texture target.
+            let (main, normal) = view.glb_material_textures_resolved(|file_id, path_id| {
+                file_id == 0 && (path_id == 201 || path_id == 202 || path_id == 203)
+            });
+            let main_path = main.and_then(|property| property.texture.map(|(_, path)| path));
+            let normal_path = normal.and_then(|property| property.texture.map(|(_, path)| path));
+            assert_eq!(main_path, case.main, "{tag}", tag = case.tag);
+            assert_eq!(normal_path, case.normal, "{tag}", tag = case.tag);
         }
     }
 }

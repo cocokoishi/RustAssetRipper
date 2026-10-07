@@ -1,0 +1,38 @@
+# Live GLB material-texture selection differential.
+# Probe Temp/opencode/glbmatprobe: real 2022.3 materials with registered
+# RGBA32 textures (201/202/203) and populated Utf8 texenvs through the
+# shipped GlbLevelBuilder.GetTextures (private static on the nested
+# BuildParameters; shipped Export.Modules.Models DLL, SDK 10.0.401).
+# Format: GTEX|<case>|pptrtype|<PPtr_Texture_5>;
+# GTEX|<case>|map|<name>|<path|null> (serialized texenv order with the
+# texture target); GTEX|<case>|result|<main|null>|<normal|null> (resolved
+# texture PathIDs).
+# Cases: replace-first (replacement ignored when main present),
+# replace-fills (replacement fills an absent main), first-wins (earlier
+# spelling wins across main spellings), null-skips (a null-texture main
+# entry keeps looking), empty (no entries).
+GTEX|replace-first|pptrtype|AssetRipper.SourceGenerated.Subclasses.PPtr_Texture.PPtr_Texture_5
+GTEX|replace-first|map|_DetailAlbedoMap|201
+GTEX|replace-first|pptrtype|AssetRipper.SourceGenerated.Subclasses.PPtr_Texture.PPtr_Texture_5
+GTEX|replace-first|map|_MainTex|203
+GTEX|replace-first|pptrtype|AssetRipper.SourceGenerated.Subclasses.PPtr_Texture.PPtr_Texture_5
+GTEX|replace-first|map|_Normal|202
+GTEX|replace-first|result|203|202
+GTEX|replace-fills|pptrtype|AssetRipper.SourceGenerated.Subclasses.PPtr_Texture.PPtr_Texture_5
+GTEX|replace-fills|map|_DetailAlbedoMap|201
+GTEX|replace-fills|pptrtype|AssetRipper.SourceGenerated.Subclasses.PPtr_Texture.PPtr_Texture_5
+GTEX|replace-fills|map|_Normal|202
+GTEX|replace-fills|result|201|202
+GTEX|first-wins|pptrtype|AssetRipper.SourceGenerated.Subclasses.PPtr_Texture.PPtr_Texture_5
+GTEX|first-wins|map|texture|201
+GTEX|first-wins|pptrtype|AssetRipper.SourceGenerated.Subclasses.PPtr_Texture.PPtr_Texture_5
+GTEX|first-wins|map|_MainTex|203
+GTEX|first-wins|pptrtype|AssetRipper.SourceGenerated.Subclasses.PPtr_Texture.PPtr_Texture_5
+GTEX|first-wins|map|normal|202
+GTEX|first-wins|result|201|202
+GTEX|null-skips|pptrtype|AssetRipper.SourceGenerated.Subclasses.PPtr_Texture.PPtr_Texture_5
+GTEX|null-skips|map|_MainTex|null
+GTEX|null-skips|pptrtype|AssetRipper.SourceGenerated.Subclasses.PPtr_Texture.PPtr_Texture_5
+GTEX|null-skips|map|_Texture|203
+GTEX|null-skips|result|203|null
+GTEX|empty|result|null|null
