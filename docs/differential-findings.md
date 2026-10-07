@@ -833,3 +833,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | src/io/game_structure.rs production (split folding plus base-path registration); test mixed_selection_reproduces_the_reference_mixed_dump; fixture src/io/mixed_probe_fixture.txt. |
 | Regression evidence | New test passes (3/3 selections); full suite 1376 plus 65 pass with warnings-denied Clippy. |
 | Remaining comparison | Unity-produced inputs and external-file dependency loading stay out per the row dispositions. |
+
+## DIFF-SER-PPTR-001 - PPtr values, external table, and join
+
+| Field | Finding |
+|---|---|
+| Status | Reference-product-path evidence recorded; two file-reference rows ported and pinned |
+| Source location | AssetRipper/Source/AssetRipper.IO.Files/SerializedFiles/Parser/; AssetRipper/Source/AssetRipper.Import/Structure/Assembly/Serializable/; AssetRipper/Source/AssetRipper.SerializationLogic/SerializablePointerType.cs |
+| Input evidence | Probe Temp/opencode/pptrprobe (shipped Import/IO DLLs, SDK 10.0.401) building two gen12 SerializedFiles with PPtr payloads and one external entry. Committed as src/serialized_file/pptr_probe_fixture.txt. |
+| Source-derived behavior | Per-file graphs expose the same edges, the external table matches on GUID words/type/path, and the multi-file join resolves every edge with a complete graph. |
+| Root cause | No Rust deviation found. Four source facts (expanded PPtr nodes, CommonString typenames, zero-terminated FileIdentifier strings, gen12 LongFileID) proven mid-batch. |
+| Rust change | Test pptr_values_external_table_and_join_reproduce_the_reference_dump; fixture src/serialized_file/pptr_probe_fixture.txt. No production change. |
+| Regression evidence | New test passes; full suite 1377 plus 65 pass with warnings-denied Clippy. |
+| Remaining comparison | Meta-type GUID-name matching and Unity-produced inputs stay out per the row dispositions. |

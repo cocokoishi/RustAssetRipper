@@ -2254,4 +2254,148 @@ mod tests {
             }]
         );
     }
+
+    /// File-level PPtr/external differential against the reference dump
+    /// committed in `pptr_probe_fixture.txt` (probe `Temp/opencode/pptrprobe`,
+    /// isolated reference bins, SDK 10.0.401). File A carries two objects
+    /// with external, local, local-back, and null PPtrs plus one external
+    /// table entry; file B is the external target. The per-file graphs must
+    /// expose the same non-null edges, the external table must match on GUID
+    /// words/type/path, and the multi-file join must resolve every edge
+    /// (null PPtrs are field values, not graph edges, on both sides).
+    #[test]
+    fn pptr_values_external_table_and_join_reproduce_the_reference_dump() {
+        use crate::serialized_file::file::SerializedFile;
+
+        fn decode_hex(hex: &str) -> Vec<u8> {
+            assert!(hex.len().is_multiple_of(2), "odd hex length");
+            hex.as_bytes()
+                .chunks(2)
+                .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+                .collect()
+        }
+
+        let fixture = include_str!("pptr_probe_fixture.txt");
+        let mut file_a = Vec::new();
+        let mut file_b = Vec::new();
+        let mut expected_edges: Vec<(i64, String, i32, i64)> = Vec::new();
+        let mut expected_guid = String::new();
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some(hex) = line.strip_prefix("SFAHEX|") {
+                file_a = decode_hex(hex);
+            } else if let Some(hex) = line.strip_prefix("SFBHEX|") {
+                file_b = decode_hex(hex);
+            } else if let Some(row) = line.strip_prefix("PPTR|") {
+                let parts: Vec<&str> = row.split('|').collect();
+                assert_eq!(parts.len(), 5, "bad PPTR {row}");
+                let file_id: i32 = parts[3].parse().unwrap();
+                let path_id: i64 = parts[4].parse().unwrap();
+                expected_edges.push((
+                    parts[1].parse().unwrap(),
+                    parts[2].to_owned(),
+                    file_id,
+                    path_id,
+                ));
+            } else if let Some(row) = line.strip_prefix("PEXT|") {
+                let parts: Vec<&str> = row.split('|').collect();
+                assert_eq!(parts.len(), 5, "bad PEXT {row}");
+                expected_guid = parts[2].to_owned();
+                assert_eq!(parts[3], "Internal");
+                assert_eq!(parts[4], "other.assets");
+            } else {
+                panic!("unknown fixture row {line}");
+            }
+        }
+        assert!(!file_a.is_empty() && !file_b.is_empty());
+
+        let parsed_a = SerializedFile::parse(&file_a).unwrap();
+        let parsed_b = SerializedFile::parse(&file_b).unwrap();
+        assert_eq!(parsed_a.metadata.objects.len(), 2);
+        assert_eq!(parsed_b.metadata.objects.len(), 1);
+        assert_eq!(parsed_b.metadata.objects[0].path_id, 100);
+
+        let external = &parsed_a.metadata.externals;
+        assert_eq!(external.len(), 1);
+        assert_eq!(external[0].file_type, Some(0));
+        assert_eq!(external[0].path_name_origin, "other.assets");
+        let guid_words = external[0].guid.unwrap();
+        let mut guid_bytes = Vec::new();
+        for word in guid_words {
+            guid_bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        let guid_hex: String = guid_bytes.iter().map(|b| format!("{b:02X}")).collect();
+        assert_eq!(guid_hex, expected_guid);
+
+        let graph_a = ObjectReferenceGraph::build(&parsed_a).unwrap();
+        let mut edges: Vec<(i64, String, i32, i64)> = graph_a
+            .references()
+            .iter()
+            .map(|reference| {
+                (
+                    reference.source_path_id,
+                    reference.field_path.clone(),
+                    reference.file_id,
+                    reference.path_id,
+                )
+            })
+            .collect();
+        edges.sort();
+        expected_edges.sort();
+        assert_eq!(edges, expected_edges);
+        let graph_b = ObjectReferenceGraph::build(&parsed_b).unwrap();
+        assert!(graph_b.references().is_empty());
+
+        let files = [
+            NamedObjectReferenceGraph {
+                file_name: "main.assets",
+                metadata: &parsed_a.metadata,
+                graph: &graph_a,
+            },
+            NamedObjectReferenceGraph {
+                file_name: "other.assets",
+                metadata: &parsed_b.metadata,
+                graph: &graph_b,
+            },
+        ];
+        let joined = MultiFileReferenceGraph::build(&files).unwrap();
+        assert_eq!(joined.file_count(), 2);
+        let mut resolutions: Vec<(i64, String, i32, i64, usize, usize)> = Vec::new();
+        let mut nulls = 0;
+        for reference in joined.references() {
+            match reference.resolution {
+                MultiFilePPtrResolution::Object {
+                    target_file_index,
+                    target_object_index,
+                } => resolutions.push((
+                    reference.source_path_id,
+                    reference.field_path.to_owned(),
+                    reference.file_id,
+                    reference.path_id,
+                    target_file_index,
+                    target_object_index,
+                )),
+                MultiFilePPtrResolution::Null => {
+                    assert_eq!(reference.file_id, 0);
+                    assert_eq!(reference.path_id, 0);
+                    nulls += 1;
+                }
+                ref other => panic!("unresolved {other:?}"),
+            }
+        }
+        assert_eq!(nulls, 1);
+        resolutions.sort();
+        assert_eq!(
+            resolutions,
+            [
+                (8001, "m_Friend".to_owned(), 0, 8002, 0, 1),
+                (8001, "m_Target".to_owned(), 1, 100, 1, 0),
+                (8002, "m_Friend".to_owned(), 0, 8001, 0, 0),
+            ]
+        );
+        assert!(joined.is_complete());
+    }
 }
