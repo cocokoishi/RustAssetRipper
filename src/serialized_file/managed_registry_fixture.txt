@@ -1,0 +1,44 @@
+# Managed reference registry blob differential (probe Temp/opencode/mregprobe).
+# Reference: ManagedReferenceRegistryReader.Read over hand-crafted registry blobs
+# (shipped AssetRipper.Import.dll, SDK 10.0.401; UnityVersion 2019.4.1f1,
+# SerializeGameRelease flags, little-endian). The resolver registers two hand-built
+# OldType trees (Player: int m_Health, float m_Speed; Enemy: string m_Name, int
+# m_Level); every other triple is unresolvable. Rust parity replays every row in
+# serialized_file::managed_registry tests. Payload strings are length-prefixed and
+# 4-aligned exactly like the object string reads. The truncated-count row maps the
+# source span-slice ArgumentOutOfRangeException to an explicit Rust truncation: both
+# sides fail explicitly, neither succeeds.
+# Formats: REGBLOB|<case>|<lowercase hex of the input blob>;
+# REGREAD|<case>|OK|<consumed bytes>|<version>|<entry count> or
+# REGREAD|<case>|THROW|<exception>|<first message line>;
+# REGENTRY|<case>|<index>|<rid>|<class>|<namespace>|<assembly>;
+# REGDATA|<case>|<index>|<field>|<scalar> (empty field means no content).
+REGREAD|counted-two|OK|116|2|2
+REGENTRY|counted-two|0|7|Player||Assembly-CSharp
+REGDATA|counted-two|0|m_Health|100
+REGDATA|counted-two|0|m_Speed|1.5
+REGENTRY|counted-two|1|9|Enemy||Assembly-CSharp
+REGDATA|counted-two|1|m_Name|Orc
+REGDATA|counted-two|1|m_Level|5
+REGBLOB|counted-two|0200000002000000070000000000000006000000506C617965720000000000000F000000417373656D626C792D43536861727000640000000000C03F090000000000000005000000456E656D79000000000000000F000000417373656D626C792D43536861727000030000004F72630005000000
+REGREAD|counted-null|OK|28|2|1
+REGENTRY|counted-null|0|-2|||
+REGDATA|counted-null|0||EMPTY
+REGBLOB|counted-null|0200000001000000FEFFFFFFFFFFFFFF000000000000000000000000
+REGREAD|counted-unknown|OK|28|2|1
+REGENTRY|counted-unknown|0|-1|||
+REGDATA|counted-unknown|0||EMPTY
+REGBLOB|counted-unknown|0200000001000000FFFFFFFFFFFFFFFF000000000000000000000000
+REGREAD|counted-unresolvable|THROW|InvalidDataException|Could not resolve the referenced type [NoAsm]Nope. Reason: The type reference was not found in the set of available type trees.
+REGBLOB|counted-unresolvable|02000000010000000500000000000000040000004E6F706500000000050000004E6F41736D000000
+REGREAD|terminated-one|OK|92|1|1
+REGENTRY|terminated-one|0|0|Player||Assembly-CSharp
+REGDATA|terminated-one|0|m_Health|100
+REGDATA|terminated-one|0|m_Speed|1.5
+REGBLOB|terminated-one|0100000006000000506C617965720000000000000F000000417373656D626C792D43536861727000640000000000C03F080000005465726D696E757310000000556E697479456E67696E652E444D41540800000046414B455F41534D
+REGREAD|bad-format|THROW|NotSupportedException|Managed reference registry format 9 is not supported.
+REGBLOB|bad-format|09000000
+REGREAD|truncated-count|THROW|ArgumentOutOfRangeException|Specified argument was out of the range of valid values. (Parameter 'length')
+REGBLOB|truncated-count|0200000003000000070000000000000006000000506C617965720000000000000F000000417373656D626C792D43536861727000640000000000C03F
+REGREAD|unterminated|THROW|EndOfStreamException|The managed reference registry ended after 1 objects without a terminus.
+REGBLOB|unterminated|0100000006000000506C617965720000000000000F000000417373656D626C792D43536861727000640000000000C03F

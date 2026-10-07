@@ -1044,6 +1044,7 @@ impl SerializedFileMetadata {
             arrays_align,
             object_index,
             type_root.type_name.as_deref().unwrap_or(""),
+            false,
             &mut budget,
         )?;
         let consumed_bytes = reader.position();
@@ -1069,12 +1070,54 @@ impl SerializedFileMetadata {
     }
 }
 
+/// Decode one freestanding payload against a caller-built node list (managed
+/// reference registry entries, whose trees come from the type resolver rather
+/// than a file). The node list must be level-nested exactly like a file
+/// TypeTree; `allow_managed_nodes` decodes `managedReference` identifier
+/// structs as plain structs, which file-object payloads keep refusing.
+pub(crate) fn decode_typetree_payload(
+    type_tree: &TypeTree,
+    payload: &[u8],
+    endian: Endian,
+    arrays_align: bool,
+    allow_managed_nodes: bool,
+    entry_index: usize,
+    limits: &ObjectDecodeLimits,
+) -> Result<(SerializedValue, usize), ObjectDecodeError> {
+    let mut budget = DecodeBudget {
+        limits,
+        allocated_bytes: 0,
+    };
+    let type_root = type_tree.nodes.first().ok_or_else(|| {
+        ObjectDecodeError::new(
+            0,
+            ObjectDecodeErrorKind::EmptyTypeTree {
+                object_index: entry_index,
+            },
+        )
+    })?;
+    let type_layout = TypeTreeLayout::new(type_tree, entry_index, 0)?;
+    let mut reader = BinaryReader::with_base_offset(payload, endian, 0)
+        .map_err(ObjectDecodeError::from_binary)?;
+    let root = decode_root(
+        &mut reader,
+        &type_layout,
+        arrays_align,
+        entry_index,
+        type_root.type_name.as_deref().unwrap_or(""),
+        allow_managed_nodes,
+        &mut budget,
+    )?;
+    Ok((root, reader.position()))
+}
+
 fn decode_root(
     reader: &mut BinaryReader<'_>,
     type_tree: &TypeTreeLayout<'_>,
     arrays_align: bool,
     object_index: usize,
     root_name: &str,
+    allow_managed_nodes: bool,
     budget: &mut DecodeBudget<'_>,
 ) -> Result<SerializedValue, ObjectDecodeError> {
     for (node_index, node) in type_tree.nodes.iter().enumerate() {
@@ -1088,7 +1131,12 @@ fn decode_root(
         // `TypeTreeNodeStruct.IsManagedReferencesRegistry`.
         let registry_node = is_managed_references_registry(type_name, node_name, children.len());
         let dynamic_managed_data = is_referenced_object_data(type_name, node_name, children.len());
-        if managed_reference_node || registry_node || dynamic_managed_data {
+        // Managed-reference registry payloads carry `managedReference` identifier
+        // structs (a bare `rid`), which decode as plain structs on the registry
+        // path; file-object payloads keep refusing them like the source, which
+        // routes those nodes through the registry reader instead.
+        if (managed_reference_node && !allow_managed_nodes) || registry_node || dynamic_managed_data
+        {
             // `TypeTreeNodeStruct.IsIndexedManagedReference` selects the legacy `id`
             // field shape over the `rid`-addressed shape for the rejection report,
             // mirroring the source field-shape selection.

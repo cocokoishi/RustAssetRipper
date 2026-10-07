@@ -6,9 +6,12 @@
 //! unknown/null reference identifiers, the counted-format capacity guard, the
 //! terminated-loop control decisions, per-entry framing (identifier
 //! classification plus the content-presence gate), and the type-resolution
-//! failure diagnostic. Reading entry type triples and object payloads stays open:
-//! content decoding needs `ITypeResolver.TryGetSerializableType` (live assemblies
-//! or TypeTrees).
+//! failure diagnostic. Entry type triples and object payloads decode through
+//! the resolver-backed reader below:
+//! `ManagedReferenceRegistryReader.Read` plus `ReadTerminatedObjects`,
+//! `ReadCountedObjects`, `ReadManagedType`, `ReadReferencedObject`, and
+//! `ReadReferencedObjectData` over caller-supplied file reference types
+//! (`TypeTreeResolver.TryGetSerializableType`).
 //!
 //! The registry has two formats. In the terminated format the objects end with a
 //! terminus entry and an object's identifier is its index; in the counted format
@@ -287,10 +290,11 @@ pub const fn check_counted_capacity(
 mod tests {
     use super::{
         check_counted_capacity, classify_reference_id, classify_registry_format,
-        frame_registry_entry, is_terminus, referenced_object_has_content, step_terminated_loop,
-        ManagedRegistryError, ReferenceIdKind, RegistryFormat, TerminatedLoopAction,
-        COUNTED_FORMAT, NULL_REFERENCE_ID, TERMINATED_FORMAT, TERMINUS_ASSEMBLY_NAME,
-        TERMINUS_CLASS_NAME, TERMINUS_NAMESPACE, UNKNOWN_REFERENCE_ID,
+        frame_registry_entry, is_terminus, read_managed_registry, referenced_object_has_content,
+        step_terminated_loop, ManagedRegistryEntryData, ManagedRegistryError,
+        ManagedRegistryReadError, ManagedRegistryReadOptions, ReferenceIdKind, RegistryFormat,
+        TerminatedLoopAction, COUNTED_FORMAT, NULL_REFERENCE_ID, TERMINATED_FORMAT,
+        TERMINUS_ASSEMBLY_NAME, TERMINUS_CLASS_NAME, TERMINUS_NAMESPACE, UNKNOWN_REFERENCE_ID,
     };
 
     #[test]
@@ -429,5 +433,690 @@ mod tests {
             step_terminated_loop(true, 0, "Player", "", "Assembly-CSharp"),
             Err(ManagedRegistryError::UnterminatedRegistry { objects_read: 0 })
         );
+    }
+
+    /// Full-blob differential against the shipped `ManagedReferenceRegistryReader`
+    /// (probe `Temp/opencode/mregprobe`, SDK 10.0.401): every `REGBLOB` input
+    /// replays through `read_managed_registry` and every `REGREAD`/`REGENTRY`/
+    /// `REGDATA` row must match. This closes entry type-triple reads and payload
+    /// decoding: triples resolve through the file reference types, payloads
+    /// decode against the resolver-built trees, and every failure is explicit.
+    #[test]
+    fn registry_blobs_reproduce_the_reference_reader_dump() {
+        use crate::io::binary::Endian;
+        use crate::serialized_file::metadata::{SerializedTypeReference, TypeTree, TypeTreeNode};
+        use crate::serialized_file::object::SerializedValue;
+
+        fn node(type_name: &str, name: &str, level: u8) -> TypeTreeNode {
+            TypeTreeNode {
+                level,
+                version: 1,
+                type_flags: 0,
+                type_string_offset: None,
+                name_string_offset: None,
+                type_name: Some(type_name.to_owned()),
+                name: Some(name.to_owned()),
+                byte_size: 0,
+                index: 0,
+                meta_flags: 0,
+                reference_type_hash: None,
+            }
+        }
+
+        fn reference(
+            class: &str,
+            namespace: &str,
+            assembly: &str,
+            nodes: Vec<TypeTreeNode>,
+        ) -> SerializedTypeReference {
+            SerializedTypeReference {
+                raw_type_id: 0,
+                type_id_for_hash: 0,
+                is_stripped_type: false,
+                script_type_index: 0,
+                script_id: None,
+                old_type_hash: None,
+                type_tree: Some(TypeTree {
+                    nodes,
+                    string_buffer: Vec::new(),
+                }),
+                class_name: Some(class.to_owned()),
+                namespace: Some(namespace.to_owned()),
+                assembly_name: Some(assembly.to_owned()),
+            }
+        }
+
+        fn scalar(value: &SerializedValue) -> String {
+            match value {
+                SerializedValue::Bool(v) => v.to_string(),
+                SerializedValue::I8(v) => v.to_string(),
+                SerializedValue::U8(v) => v.to_string(),
+                SerializedValue::I16(v) => v.to_string(),
+                SerializedValue::U16(v) => v.to_string(),
+                SerializedValue::Char(v) => v.to_string(),
+                SerializedValue::I32(v) => v.to_string(),
+                SerializedValue::U32(v) => v.to_string(),
+                SerializedValue::I64(v) => v.to_string(),
+                SerializedValue::U64(v) => v.to_string(),
+                SerializedValue::F32(v) => format!("{v:?}"),
+                SerializedValue::F64(v) => format!("{v:?}"),
+                SerializedValue::StringBytes(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+                SerializedValue::Bytes(bytes) => format!("{bytes:02X?}"),
+                SerializedValue::Array(_) => "<array>".to_owned(),
+                SerializedValue::Struct(_) => "<struct>".to_owned(),
+                SerializedValue::PPtr { file_id, path_id } => {
+                    format!("<pptr {file_id} {path_id}>")
+                }
+                SerializedValue::Raw { type_name, .. } => format!("<raw {type_name}>"),
+            }
+        }
+
+        fn field<'a>(value: &'a SerializedValue, name: &str) -> &'a SerializedValue {
+            let SerializedValue::Struct(fields) = value else {
+                panic!("expected a struct for field {name}");
+            };
+            &fields
+                .iter()
+                .find(|field| field.name == name)
+                .unwrap_or_else(|| panic!("missing field {name}"))
+                .value
+        }
+
+        let references = vec![
+            reference(
+                "Player",
+                "",
+                "Assembly-CSharp",
+                vec![
+                    node("Player", "Base", 0),
+                    node("int", "m_Health", 1),
+                    node("float", "m_Speed", 1),
+                ],
+            ),
+            reference(
+                "Enemy",
+                "",
+                "Assembly-CSharp",
+                vec![
+                    node("Enemy", "Base", 0),
+                    node("string", "m_Name", 1),
+                    node("Array", "Array", 2),
+                    node("int", "size", 3),
+                    node("char", "data", 3),
+                    node("int", "m_Level", 1),
+                ],
+            ),
+        ];
+        let options = ManagedRegistryReadOptions {
+            endian: Endian::Little,
+            arrays_align: true,
+        };
+        let fixture = include_str!("managed_registry_fixture.txt");
+        let mut blobs = std::collections::HashMap::new();
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let parts: Vec<&str> = line.split('|').collect();
+            if parts[0] == "REGBLOB" {
+                assert_eq!(parts.len(), 3, "{line}");
+                let mut bytes = Vec::new();
+                let hex = parts[2].trim();
+                assert!(hex.len().is_multiple_of(2), "{line}");
+                for pair in 0..hex.len() / 2 {
+                    bytes.push(
+                        u8::from_str_radix(&hex[pair * 2..pair * 2 + 2], 16)
+                            .unwrap_or_else(|_| panic!("bad hex {line}")),
+                    );
+                }
+                blobs.insert(parts[1].to_owned(), bytes);
+            } else if parts[0] != "REGREAD" && parts[0] != "REGENTRY" && parts[0] != "REGDATA" {
+                panic!("unknown fixture row {} in {line}", parts[0]);
+            }
+        }
+        let mut cases = 0;
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let parts: Vec<&str> = line.split('|').collect();
+            match parts[0] {
+                "REGREAD" => {
+                    let case = parts[1];
+                    let blob = blobs
+                        .remove(case)
+                        .unwrap_or_else(|| panic!("no blob {case}"));
+                    cases += 1;
+                    match parts[2] {
+                        "OK" => {
+                            assert_eq!(parts.len(), 6, "{line}");
+                            let read = read_managed_registry(&blob, options, &references)
+                                .unwrap_or_else(|error| panic!("{case} failed to read: {error}"));
+                            assert_eq!(read.consumed_bytes.to_string(), parts[3], "{line}");
+                            assert_eq!(read.version.to_string(), parts[4], "{line}");
+                            assert_eq!(read.entries.len().to_string(), parts[5], "{line}");
+                            for (index, entry) in read.entries.iter().enumerate() {
+                                let expected_entry = fixture
+                                    .lines()
+                                    .map(str::trim)
+                                    .find(|row| {
+                                        row.starts_with(&format!("REGENTRY|{case}|{index}|"))
+                                    })
+                                    .unwrap_or_else(|| panic!("no entry {case} {index}"));
+                                let expected: Vec<&str> = expected_entry.split('|').collect();
+                                assert_eq!(expected.len(), 7, "{expected_entry}");
+                                assert_eq!(entry.reference_id.to_string(), expected[3], "{line}");
+                                assert_eq!(entry.class_name, expected[4], "{line}");
+                                assert_eq!(entry.namespace_name, expected[5], "{line}");
+                                assert_eq!(entry.assembly_name, expected[6], "{line}");
+                                let expected_data: Vec<String> = fixture
+                                    .lines()
+                                    .map(str::trim)
+                                    .filter(|row| {
+                                        row.starts_with(&format!("REGDATA|{case}|{index}|"))
+                                    })
+                                    .map(str::to_owned)
+                                    .collect();
+                                match &entry.data {
+                                    ManagedRegistryEntryData::Empty => {
+                                        assert_eq!(expected_data.len(), 1, "{line}");
+                                        assert!(
+                                            expected_data[0].ends_with(&format!(
+                                                "REGDATA|{case}|{index}||EMPTY"
+                                            )),
+                                            "{line}",
+                                        );
+                                    }
+                                    ManagedRegistryEntryData::Content(value) => {
+                                        for row in &expected_data {
+                                            let cells: Vec<&str> = row.split('|').collect();
+                                            assert_eq!(cells.len(), 5, "{row}");
+                                            assert_ne!(cells[3], "", "{row}");
+                                            assert_eq!(
+                                                scalar(field(value, cells[3])),
+                                                cells[4],
+                                                "{row}"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        "THROW" => {
+                            let error = read_managed_registry(&blob, options, &references)
+                                .err()
+                                .unwrap_or_else(|| panic!("{case} unexpectedly read clean"));
+                            match case {
+                                "counted-unresolvable" => {
+                                    assert!(
+                                        matches!(
+                                            error,
+                                            ManagedRegistryReadError::UnresolvableType { .. }
+                                        ),
+                                        "{case}: {error}",
+                                    );
+                                    assert!(
+                                        error.to_string().contains("[NoAsm]Nope")
+                                            && error.to_string().contains(
+                                                "not found in the set of available type trees"
+                                            ),
+                                        "{case}: {error}",
+                                    );
+                                }
+                                "bad-format" => assert_eq!(
+                                    error,
+                                    ManagedRegistryReadError::Framing(
+                                        ManagedRegistryError::UnsupportedFormat { version: 9 }
+                                    ),
+                                    "{case}",
+                                ),
+                                // The source span slice throws ArgumentOutOfRange
+                                // here; the port refuses the truncation
+                                // explicitly. Both sides fail; neither succeeds.
+                                "truncated-count" => assert!(
+                                    matches!(
+                                        error,
+                                        ManagedRegistryReadError::TruncatedInput { .. }
+                                    ),
+                                    "{case}: {error}",
+                                ),
+                                "unterminated" => assert_eq!(
+                                    error,
+                                    ManagedRegistryReadError::Framing(
+                                        ManagedRegistryError::UnterminatedRegistry {
+                                            objects_read: 1
+                                        }
+                                    ),
+                                    "{case}",
+                                ),
+                                other => panic!("unexpected throw case {other}"),
+                            }
+                        }
+                        other => panic!("unexpected read status {other} in {line}"),
+                    }
+                }
+                "REGENTRY" | "REGDATA" | "REGBLOB" => {}
+                other => panic!("unknown fixture row {other} in {line}"),
+            }
+        }
+        assert!(blobs.is_empty(), "every blob replays");
+        assert_eq!(cases, 8, "all probed registry cases replay");
+    }
+}
+
+/// Why a managed reference registry blob cannot be read.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ManagedRegistryReadError {
+    /// The blob framing fails (format, count, termination).
+    Framing(ManagedRegistryError),
+    /// The blob ends mid-value: the source answers with end-of-stream (or, when
+    /// the over-long counted claim reads past the span, an argument-range throw
+    /// from the span slice); here every truncation is explicit.
+    TruncatedInput {
+        /// The byte offset of the failed read.
+        offset: usize,
+        /// What was being read.
+        what: &'static str,
+    },
+    /// A content-bearing entry names a type the resolver cannot build, which the
+    /// source answers with an invalid-data error naming the type and the reason.
+    UnresolvableType {
+        /// The entry index in read order.
+        entry_index: usize,
+        /// The assembly-stripped unique type name.
+        unique_name: String,
+        /// The resolver's failure reason.
+        reason: String,
+    },
+    /// A content payload does not match its resolved tree.
+    PayloadDecode {
+        /// The entry index in read order.
+        entry_index: usize,
+        /// The payload decode failure.
+        error: super::object::ObjectDecodeError,
+    },
+}
+
+impl Display for ManagedRegistryReadError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Framing(error) => write!(formatter, "{error}"),
+            Self::TruncatedInput { offset, what } => write!(
+                formatter,
+                "managed reference registry ends at offset {offset} while reading {what}"
+            ),
+            Self::UnresolvableType {
+                unique_name,
+                reason,
+                ..
+            } => write!(
+                formatter,
+                "Could not resolve the referenced type {unique_name}. Reason: {reason}"
+            ),
+            Self::PayloadDecode { error, .. } => write!(formatter, "{error}"),
+        }
+    }
+}
+
+impl Error for ManagedRegistryReadError {}
+
+impl From<ManagedRegistryError> for ManagedRegistryReadError {
+    fn from(error: ManagedRegistryError) -> Self {
+        Self::Framing(error)
+    }
+}
+
+/// How a registry blob is read: the collection byte order and whether arrays
+/// align (`unity_version_aligns_arrays` of the owning collection version).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ManagedRegistryReadOptions {
+    /// The collection byte order.
+    pub endian: crate::io::binary::Endian,
+    /// Whether arrays align (Unity 2017 and newer).
+    pub arrays_align: bool,
+}
+
+/// One decoded registry entry (`ReadReferencedObject`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ManagedRegistryEntry {
+    /// The stored identifier (counted format) or the index (terminated format).
+    pub reference_id: i64,
+    /// The referenced class name.
+    pub class_name: String,
+    /// The referenced namespace name.
+    pub namespace_name: String,
+    /// The referenced assembly name.
+    pub assembly_name: String,
+    /// The decoded content, or empty for sentinels and empty triples.
+    pub data: ManagedRegistryEntryData,
+}
+
+/// A decoded registry entry payload.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ManagedRegistryEntryData {
+    /// Sentinels and empty triples carry no content.
+    Empty,
+    /// Content bytes decoded against the resolved tree.
+    Content(super::object::SerializedValue),
+}
+
+/// A decoded managed reference registry: the version word plus entries in read
+/// order and the aligned consumed byte count (`Read` aligns the array after the
+/// entries, which is not necessarily true of the objects themselves).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ManagedRegistryRead {
+    /// The registry version word (1 for terminated, 2 for counted).
+    pub version: i32,
+    /// The entries in read order.
+    pub entries: Vec<ManagedRegistryEntry>,
+    /// The aligned consumed byte count.
+    pub consumed_bytes: usize,
+}
+
+/// `ManagedReferenceRegistryReader.Read`: decode one registry blob against the
+/// caller-supplied file reference types. `references` are the owning file's
+/// serialized reference types backing `TypeTreeResolver.TryGetSerializableType`;
+/// unknown script types fail explicitly like the source invalid-data error.
+pub fn read_managed_registry(
+    bytes: &[u8],
+    options: ManagedRegistryReadOptions,
+    references: &[super::metadata::SerializedTypeReference],
+) -> Result<ManagedRegistryRead, ManagedRegistryReadError> {
+    let mut cursor = Cursor::new(bytes);
+    let version = cursor.read_i32("registry version word")?;
+    let format = classify_registry_format(version)?;
+    let mut entries = Vec::new();
+    match format {
+        RegistryFormat::Counted => {
+            let count = cursor.read_i32("registry object count")?;
+            check_counted_capacity(bytes.len().saturating_sub(cursor.position()) as u64, count)?;
+            for _ in 0..count {
+                let entry_index = entries.len();
+                let reference_id = cursor.read_i64("registry reference identifier")?;
+                let triple = cursor.read_managed_type_triple()?;
+                entries.push(read_entry(
+                    &mut cursor,
+                    options,
+                    references,
+                    entry_index,
+                    reference_id,
+                    triple,
+                )?);
+            }
+        }
+        RegistryFormat::Terminated => loop {
+            if cursor.position() >= bytes.len() {
+                return Err(ManagedRegistryError::UnterminatedRegistry {
+                    objects_read: entries.len(),
+                }
+                .into());
+            }
+            let triple = cursor.read_managed_type_triple()?;
+            if is_terminus(
+                &triple.class_name,
+                &triple.namespace_name,
+                &triple.assembly_name,
+            ) {
+                break;
+            }
+            let entry_index = entries.len();
+            entries.push(read_entry(
+                &mut cursor,
+                options,
+                references,
+                entry_index,
+                entry_index as i64,
+                triple,
+            )?);
+        },
+    }
+    cursor.align(4);
+    Ok(ManagedRegistryRead {
+        version,
+        entries,
+        consumed_bytes: cursor.position(),
+    })
+}
+
+/// A managed-type triple: the class, namespace, and assembly names identifying
+/// one referenced object type (`ReadManagedType`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ManagedTypeTriple {
+    class_name: String,
+    namespace_name: String,
+    assembly_name: String,
+}
+
+/// `ReadReferencedObject` plus `ReadReferencedObjectData`: frame one entry and
+/// decode its content when the gate allows it.
+fn read_entry(
+    cursor: &mut Cursor<'_>,
+    options: ManagedRegistryReadOptions,
+    references: &[super::metadata::SerializedTypeReference],
+    entry_index: usize,
+    reference_id: i64,
+    triple: ManagedTypeTriple,
+) -> Result<ManagedRegistryEntry, ManagedRegistryReadError> {
+    use crate::io::special_names::remove_assembly_file_extension;
+    use crate::processing::script_identity::{
+        ScriptIdentifier, TYPE_REFERENCE_NOT_FOUND, TYPE_TREE_NODE_BUILD_FAILED,
+    };
+
+    let frame = frame_registry_entry(
+        reference_id,
+        triple.class_name.is_empty(),
+        triple.assembly_name.is_empty(),
+    );
+    let data =
+        if !frame.has_content {
+            ManagedRegistryEntryData::Empty
+        } else {
+            let script = ScriptIdentifier {
+                assembly: remove_assembly_file_extension(&triple.assembly_name),
+                namespace: triple.namespace_name.clone(),
+                name: Some(triple.class_name.clone()),
+            };
+            let matched =
+                crate::processing::script_identity::find_type_reference_index(references, &script)
+                    .ok_or_else(|| ManagedRegistryReadError::UnresolvableType {
+                        entry_index,
+                        unique_name: script.unique_name(),
+                        reason: TYPE_REFERENCE_NOT_FOUND.to_owned(),
+                    })?;
+            let tree = references[matched].type_tree.as_ref().ok_or_else(|| {
+                ManagedRegistryReadError::UnresolvableType {
+                    entry_index,
+                    unique_name: script.unique_name(),
+                    reason: TYPE_TREE_NODE_BUILD_FAILED.to_owned(),
+                }
+            })?;
+            let built = crate::processing::script_identity::build_type_nodes(&tree.nodes)
+                .ok_or_else(|| ManagedRegistryReadError::UnresolvableType {
+                    entry_index,
+                    unique_name: script.unique_name(),
+                    reason: TYPE_TREE_NODE_BUILD_FAILED.to_owned(),
+                })?;
+            let flat = flatten_built_tree(&built);
+            let payload_tree = super::metadata::TypeTree {
+                nodes: flat,
+                string_buffer: Vec::new(),
+            };
+            let payload = cursor.remaining_bytes();
+            let (value, consumed) = super::object::decode_typetree_payload(
+                &payload_tree,
+                payload,
+                options.endian,
+                options.arrays_align,
+                true,
+                entry_index,
+                &super::object::ObjectDecodeLimits::default(),
+            )
+            .map_err(|error| ManagedRegistryReadError::PayloadDecode { entry_index, error })?;
+            cursor.advance(consumed, "registry object payload")?;
+            ManagedRegistryEntryData::Content(value)
+        };
+    Ok(ManagedRegistryEntry {
+        reference_id,
+        class_name: triple.class_name,
+        namespace_name: triple.namespace_name,
+        assembly_name: triple.assembly_name,
+        data,
+    })
+}
+
+/// Flatten a built node back into a level-nested node list in declaration order,
+/// preserving versions and meta flags for the payload decoder. Root registry
+/// children are skipped exactly like `FromRootNode` skips them when building
+/// the referenced-object type; a nested registry node stays in the list and
+/// fails payload decoding explicitly (no silent mis-decode).
+fn flatten_built_tree(
+    root: &crate::processing::script_identity::BuiltTypeNode,
+) -> Vec<super::metadata::TypeTreeNode> {
+    use crate::processing::script_identity::BuiltTypeNode;
+    fn push(node: &BuiltTypeNode, level: u8, out: &mut Vec<super::metadata::TypeTreeNode>) {
+        out.push(super::metadata::TypeTreeNode {
+            level,
+            version: node.version,
+            type_flags: 0,
+            type_string_offset: None,
+            name_string_offset: None,
+            type_name: Some(node.type_name.clone()),
+            name: Some(node.name.clone()),
+            byte_size: 0,
+            index: 0,
+            meta_flags: node.meta_flags,
+            reference_type_hash: None,
+        });
+        for child in &node.children {
+            push(child, level + 1, out);
+        }
+    }
+    // Node-list levels fit in a byte: file trees never nest deeper.
+    // Root registry children are skipped exactly like `FromRootNode` skips
+    // them when building the referenced-object type; deeper registry nodes
+    // stay in the list and fail payload decoding explicitly.
+    let mut out = Vec::new();
+    push(root, 0, &mut out);
+    // Drop root-registry subtrees (a level-1 marker plus its deeper nodes).
+    let mut swept = Vec::with_capacity(out.len());
+    let mut dropping = false;
+    for node in out {
+        let is_marker = node.level == 1
+            && node.type_name.as_deref()
+                == Some(crate::processing::script_identity::MANAGED_REGISTRY_NAME)
+            && node.name.as_deref()
+                == Some(crate::processing::script_identity::MANAGED_REGISTRY_FIELD_NAME);
+        if is_marker {
+            dropping = true;
+            continue;
+        }
+        if dropping {
+            if node.level > 1 {
+                continue;
+            }
+            dropping = false;
+        }
+        swept.push(node);
+    }
+    swept
+}
+
+/// A checked little cursor over the registry blob.
+struct Cursor<'a> {
+    bytes: &'a [u8],
+    position: usize,
+}
+
+impl<'a> Cursor<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, position: 0 }
+    }
+
+    fn position(&self) -> usize {
+        self.position
+    }
+
+    fn remaining_bytes(&self) -> &'a [u8] {
+        &self.bytes[self.position.min(self.bytes.len())..]
+    }
+
+    fn take(
+        &mut self,
+        count: usize,
+        what: &'static str,
+    ) -> Result<&'a [u8], ManagedRegistryReadError> {
+        let end =
+            self.position
+                .checked_add(count)
+                .ok_or(ManagedRegistryReadError::TruncatedInput {
+                    offset: self.position,
+                    what,
+                })?;
+        if end > self.bytes.len() {
+            return Err(ManagedRegistryReadError::TruncatedInput {
+                offset: self.position,
+                what,
+            });
+        }
+        let taken = &self.bytes[self.position..end];
+        self.position = end;
+        Ok(taken)
+    }
+
+    fn advance(
+        &mut self,
+        count: usize,
+        what: &'static str,
+    ) -> Result<(), ManagedRegistryReadError> {
+        self.take(count, what).map(|_| ())
+    }
+
+    fn read_i32(&mut self, what: &'static str) -> Result<i32, ManagedRegistryReadError> {
+        let taken = self.take(4, what)?;
+        Ok(i32::from_le_bytes([taken[0], taken[1], taken[2], taken[3]]))
+    }
+
+    fn read_i64(&mut self, what: &'static str) -> Result<i64, ManagedRegistryReadError> {
+        let taken = self.take(8, what)?;
+        Ok(i64::from_le_bytes([
+            taken[0], taken[1], taken[2], taken[3], taken[4], taken[5], taken[6], taken[7],
+        ]))
+    }
+
+    /// One length-prefixed aligned string, mirroring the structure string reads.
+    fn read_aligned_string(
+        &mut self,
+        what: &'static str,
+    ) -> Result<String, ManagedRegistryReadError> {
+        let length = self.read_i32(what)?;
+        let length =
+            usize::try_from(length).map_err(|_| ManagedRegistryReadError::TruncatedInput {
+                offset: self.position,
+                what,
+            })?;
+        let taken = self.take(length, what)?;
+        let value = String::from_utf8_lossy(taken).into_owned();
+        let aligned = length.next_multiple_of(4);
+        self.advance(aligned - length, what)?;
+        Ok(value)
+    }
+
+    /// `ReadManagedType`: the class/namespace/assembly triple.
+    fn read_managed_type_triple(&mut self) -> Result<ManagedTypeTriple, ManagedRegistryReadError> {
+        Ok(ManagedTypeTriple {
+            class_name: self.read_aligned_string("managed type class name")?,
+            namespace_name: self.read_aligned_string("managed type namespace name")?,
+            assembly_name: self.read_aligned_string("managed type assembly name")?,
+        })
+    }
+
+    /// The trailing array alignment (`Read` aligns after the entries).
+    fn align(&mut self, boundary: usize) {
+        let remainder = self.position % boundary;
+        if remainder != 0 {
+            self.position += boundary - remainder;
+        }
     }
 }
