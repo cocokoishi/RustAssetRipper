@@ -872,3 +872,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | Test virtual_file_system_reproduces_the_reference_probe_dump; fixture src/io/vfs_probe_fixture.txt. No production change. |
 | Regression evidence | New test passes; full suite 1379 plus 65 pass with warnings-denied Clippy. |
 | Remaining comparison | GetUniqueName counter loop, local adapter (IO-STREAM-001), and Unity-produced inputs stay out per the row disposition. |
+
+## DIFF-ANIM-MUSCLE-001 - humanoid muscle binding table
+
+| Field | Finding |
+|---|---|
+| Status | Reference-product-path evidence recorded; one file-reference row ported and pinned |
+| Source location | AssetRipper/Source/AssetRipper.SourceGenerated.Extensions/Enums/AnimationClip/HumanoidMuscleType.cs |
+| Input evidence | Probe Temp/opencode/muscleprobe (shipped SourceGenerated.Extensions DLL, SDK 10.0.401) dumping all ids plus versioned updates. Committed as src/resources/muscle_probe_fixture.txt. |
+| Source-derived behavior | Every attribute string and every versioned update matches; the throw boundary lands exactly at Last=200. |
+| Root cause | One real deviation found and fixed: out-of-range None replaced by HumanoidMuscleError (source throws ArgumentException). No silent drop remains on this path. |
+| Rust change | HumanoidMuscleError plus Result return in avatar.rs and clip_convert.rs; fixture src/resources/muscle_probe_fixture.txt; test humanoid_muscles_reproduce_the_reference_probe_dump. |
+| Regression evidence | New test passes; full suite 1380 plus 65 pass with warnings-denied Clippy. |
+| Remaining comparison | Binding-to-muscle cast, curve emission, and Unity-produced inputs stay out per the row disposition. |

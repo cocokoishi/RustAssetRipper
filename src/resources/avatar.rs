@@ -7,8 +7,7 @@
 //! converter for humanoid curves.
 //!
 //! Recorded opens: `GenericBinding.GetHumanoidMuscle` (the attribute-to-muscle cast) and the
-//! converter call site stay caller-side; out-of-range muscle ids read `None` here where the
-//! source throws `ArgumentException`.
+//! converter call site stay caller-side.
 
 use std::collections::HashMap;
 
@@ -242,8 +241,33 @@ fn bone_name(bone: i32) -> Option<&'static str> {
 
 /// `HumanoidMuscleType.ToAttributeString`: the humanoid binding name for a muscle id.
 ///
-/// Ids outside `[Motion, Last)` read `None` where the source throws `ArgumentException`.
-pub fn humanoid_muscle_attribute(muscle: i32) -> Option<String> {
+/// Ids outside `[Motion, Last)` fail with [`HumanoidMuscleError`] exactly where the
+/// source throws `ArgumentException`.
+pub fn humanoid_muscle_attribute(muscle: i32) -> Result<String, HumanoidMuscleError> {
+    humanoid_muscle_attribute_or_none(muscle).ok_or(HumanoidMuscleError { muscle })
+}
+
+/// A humanoid muscle id outside `[Motion, Last)`, mirroring the source
+/// `ArgumentException` from `HumanoidMuscleType.ToAttributeString`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HumanoidMuscleError {
+    /// The rejected muscle id.
+    pub muscle: i32,
+}
+
+impl std::fmt::Display for HumanoidMuscleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "humanoid muscle id {} is outside [0, {HUMANOID_MUSCLE_LAST})",
+            self.muscle
+        )
+    }
+}
+
+impl std::error::Error for HumanoidMuscleError {}
+
+fn humanoid_muscle_attribute_or_none(muscle: i32) -> Option<String> {
     if muscle < HUMANOID_MUSCLE_MOTION {
         return None;
     }
@@ -326,66 +350,54 @@ mod tests {
     #[test]
     fn humanoid_muscle_attributes_name_every_band() {
         // Motion and Root bands.
-        assert_eq!(humanoid_muscle_attribute(0).as_deref(), Some("MotionT.x"));
-        assert_eq!(humanoid_muscle_attribute(6).as_deref(), Some("MotionQ.w"));
-        assert_eq!(humanoid_muscle_attribute(7).as_deref(), Some("RootT.x"));
-        assert_eq!(humanoid_muscle_attribute(13).as_deref(), Some("RootQ.w"));
+        assert_eq!(humanoid_muscle_attribute(0).as_deref(), Ok("MotionT.x"));
+        assert_eq!(humanoid_muscle_attribute(6).as_deref(), Ok("MotionQ.w"));
+        assert_eq!(humanoid_muscle_attribute(7).as_deref(), Ok("RootT.x"));
+        assert_eq!(humanoid_muscle_attribute(13).as_deref(), Ok("RootQ.w"));
         // Limb band: bone name plus transform postfix.
-        assert_eq!(
-            humanoid_muscle_attribute(14).as_deref(),
-            Some("LeftFootT.x")
-        );
-        assert_eq!(
-            humanoid_muscle_attribute(20).as_deref(),
-            Some("LeftFootQ.w")
-        );
-        assert_eq!(
-            humanoid_muscle_attribute(21).as_deref(),
-            Some("RightFootT.x")
-        );
-        assert_eq!(
-            humanoid_muscle_attribute(28).as_deref(),
-            Some("LeftHandT.x")
-        );
-        assert_eq!(
-            humanoid_muscle_attribute(41).as_deref(),
-            Some("RightHandQ.w")
-        );
+        assert_eq!(humanoid_muscle_attribute(14).as_deref(), Ok("LeftFootT.x"));
+        assert_eq!(humanoid_muscle_attribute(20).as_deref(), Ok("LeftFootQ.w"));
+        assert_eq!(humanoid_muscle_attribute(21).as_deref(), Ok("RightFootT.x"));
+        assert_eq!(humanoid_muscle_attribute(28).as_deref(), Ok("LeftHandT.x"));
+        assert_eq!(humanoid_muscle_attribute(41).as_deref(), Ok("RightHandQ.w"));
         // Muscle band: the literal muscle names.
         assert_eq!(
             humanoid_muscle_attribute(42).as_deref(),
-            Some("Spine Front-Back")
+            Ok("Spine Front-Back")
         );
-        assert_eq!(humanoid_muscle_attribute(61).as_deref(), Some("Jaw Close"));
+        assert_eq!(humanoid_muscle_attribute(61).as_deref(), Ok("Jaw Close"));
         assert_eq!(
             humanoid_muscle_attribute(96).as_deref(),
-            Some("Right Hand In-Out")
+            Ok("Right Hand In-Out")
         );
         // Finger band: arm bone, finger, and degree of freedom.
         assert_eq!(
             humanoid_muscle_attribute(97).as_deref(),
-            Some("LeftHand.Thumb.1 Stretched")
+            Ok("LeftHand.Thumb.1 Stretched")
         );
         assert_eq!(
             humanoid_muscle_attribute(116).as_deref(),
-            Some("LeftHand.Little.3 Stretched")
+            Ok("LeftHand.Little.3 Stretched")
         );
         assert_eq!(
             humanoid_muscle_attribute(136).as_deref(),
-            Some("RightHand.Little.3 Stretched")
+            Ok("RightHand.Little.3 Stretched")
         );
         // TDoF band: bone plus translation postfix.
-        assert_eq!(
-            humanoid_muscle_attribute(137).as_deref(),
-            Some("SpineTDOF.x")
-        );
+        assert_eq!(humanoid_muscle_attribute(137).as_deref(), Ok("SpineTDOF.x"));
         assert_eq!(
             humanoid_muscle_attribute(199).as_deref(),
-            Some("RightHandTDOF.z")
+            Ok("RightHandTDOF.z")
         );
-        // Outside [Motion, Last) the source throws; the kernel reads None.
-        assert_eq!(humanoid_muscle_attribute(-1), None);
-        assert_eq!(humanoid_muscle_attribute(200), None);
+        // Outside [Motion, Last) the source throws, mirrored here as an error.
+        assert_eq!(
+            humanoid_muscle_attribute(-1),
+            Err(HumanoidMuscleError { muscle: -1 })
+        );
+        assert_eq!(
+            humanoid_muscle_attribute(200),
+            Err(HumanoidMuscleError { muscle: 200 })
+        );
     }
 
     /// The versioned `Update` shifts for pre-5.6 and pre-2017.3 layouts.
@@ -408,9 +420,9 @@ mod tests {
         assert_eq!(update_humanoid_muscle(141, legacy), 158);
     }
 
-    /// Out-of-range ids update and then read `None`, where the source throws.
+    /// Out-of-range ids update past `Last`, where the source throws.
     #[test]
-    fn out_of_range_muscles_update_then_read_none() {
+    fn out_of_range_muscles_update_then_fail() {
         let modern = UnityVersion::parse("2022.3.1f1").unwrap();
         let legacy = UnityVersion::parse("5.0.0f1").unwrap();
         // An empty skeleton map resolves nothing.
@@ -418,14 +430,68 @@ mod tests {
         // Past `Last` the update arithmetic still runs, but no band names the result.
         for muscle in [200, 1000] {
             assert!(update_humanoid_muscle(muscle, modern) >= HUMANOID_MUSCLE_LAST);
-            assert_eq!(
-                humanoid_muscle_attribute(update_humanoid_muscle(muscle, modern)),
-                None
-            );
-            assert_eq!(
-                humanoid_muscle_attribute(update_humanoid_muscle(muscle, legacy)),
-                None
-            );
+            assert!(humanoid_muscle_attribute(update_humanoid_muscle(muscle, modern)).is_err());
+            assert!(humanoid_muscle_attribute(update_humanoid_muscle(muscle, legacy)).is_err());
         }
+    }
+
+    /// Full-table differential against the reference `HumanoidMuscleType`
+    /// dump committed in `muscle_probe_fixture.txt` (probe
+    /// `Temp/opencode/muscleprobe`, isolated reference bins, SDK 10.0.401).
+    /// Every muscle id names the reference attribute string (or fails exactly
+    /// where the source throws `ArgumentException`), and every versioned
+    /// `Update` row reproduces both the shifted id and its attribute string.
+    #[test]
+    fn humanoid_muscles_reproduce_the_reference_probe_dump() {
+        let fixture = include_str!("muscle_probe_fixture.txt");
+        let mut names = 0;
+        let mut updates = 0;
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some(last) = line.strip_prefix("MLAST|") {
+                assert_eq!(last.parse::<i32>().unwrap(), HUMANOID_MUSCLE_LAST);
+            } else if let Some(body) = line.strip_prefix("MNAME|") {
+                let parts: Vec<&str> = body.split('|').collect();
+                let id: i32 = parts[0].parse().unwrap();
+                match humanoid_muscle_attribute(id) {
+                    Ok(name) => {
+                        assert_eq!(parts.len(), 2, "bad MNAME {line}");
+                        assert_eq!(name, parts[1], "id {id}");
+                    }
+                    Err(error) => {
+                        assert_eq!(parts.len(), 3, "bad MNAME {line}");
+                        assert_eq!(parts[1], "THROW", "id {id}");
+                        assert_eq!(parts[2], "ArgumentException", "id {id}");
+                        assert_eq!(error.muscle, id);
+                    }
+                }
+                names += 1;
+            } else if let Some(body) = line.strip_prefix("MUPD|") {
+                let parts: Vec<&str> = body.split('|').collect();
+                assert!(parts.len() == 4 || parts.len() == 5, "bad MUPD {line}");
+                let version = UnityVersion::parse(parts[0]).unwrap();
+                let id: i32 = parts[1].parse().unwrap();
+                let updated = update_humanoid_muscle(id, version);
+                assert_eq!(updated, parts[2].parse::<i32>().unwrap(), "{line}");
+                match humanoid_muscle_attribute(updated) {
+                    Ok(name) => {
+                        assert_eq!(parts.len(), 4, "{line}");
+                        assert_eq!(name, parts[3], "{line}");
+                    }
+                    Err(_) => {
+                        assert_eq!(parts.len(), 5, "{line}");
+                        assert_eq!(parts[3], "THROW", "{line}");
+                    }
+                }
+                updates += 1;
+            } else {
+                panic!("unknown fixture row {line}");
+            }
+        }
+        assert_eq!(names, HUMANOID_MUSCLE_LAST + 2);
+        assert!(updates >= 100, "the fixture pins every versioned row");
     }
 }

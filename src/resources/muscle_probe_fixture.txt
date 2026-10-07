@@ -1,0 +1,317 @@
+# Humanoid muscle differential (probe Temp/opencode/muscleprobe).
+# Reference: HumanoidMuscleType.ToAttributeString over ids 0..=Last+1 plus
+# Update(version) rows over five versions (shipped SourceGenerated.Extensions DLL,
+# SDK 10.0.401). Rust parity replays every row in avatar.rs.
+MLAST|200
+MNAME|0|MotionT.x
+MNAME|1|MotionT.y
+MNAME|2|MotionT.z
+MNAME|3|MotionQ.x
+MNAME|4|MotionQ.y
+MNAME|5|MotionQ.z
+MNAME|6|MotionQ.w
+MNAME|7|RootT.x
+MNAME|8|RootT.y
+MNAME|9|RootT.z
+MNAME|10|RootQ.x
+MNAME|11|RootQ.y
+MNAME|12|RootQ.z
+MNAME|13|RootQ.w
+MNAME|14|LeftFootT.x
+MNAME|15|LeftFootT.y
+MNAME|16|LeftFootT.z
+MNAME|17|LeftFootQ.x
+MNAME|18|LeftFootQ.y
+MNAME|19|LeftFootQ.z
+MNAME|20|LeftFootQ.w
+MNAME|21|RightFootT.x
+MNAME|22|RightFootT.y
+MNAME|23|RightFootT.z
+MNAME|24|RightFootQ.x
+MNAME|25|RightFootQ.y
+MNAME|26|RightFootQ.z
+MNAME|27|RightFootQ.w
+MNAME|28|LeftHandT.x
+MNAME|29|LeftHandT.y
+MNAME|30|LeftHandT.z
+MNAME|31|LeftHandQ.x
+MNAME|32|LeftHandQ.y
+MNAME|33|LeftHandQ.z
+MNAME|34|LeftHandQ.w
+MNAME|35|RightHandT.x
+MNAME|36|RightHandT.y
+MNAME|37|RightHandT.z
+MNAME|38|RightHandQ.x
+MNAME|39|RightHandQ.y
+MNAME|40|RightHandQ.z
+MNAME|41|RightHandQ.w
+MNAME|42|Spine Front-Back
+MNAME|43|Spine Left-Right
+MNAME|44|Spine Twist Left-Right
+MNAME|45|Chest Front-Back
+MNAME|46|Chest Left-Right
+MNAME|47|Chest Twist Left-Right
+MNAME|48|UpperChest Front-Back
+MNAME|49|UpperChest Left-Right
+MNAME|50|UpperChest Twist Left-Right
+MNAME|51|Neck Nod Down-Up
+MNAME|52|Neck Tilt Left-Right
+MNAME|53|Neck Turn Left-Right
+MNAME|54|Head Nod Down-Up
+MNAME|55|Head Tilt Left-Right
+MNAME|56|Head Turn Left-Right
+MNAME|57|Left Eye Down-Up
+MNAME|58|Left Eye In-Out
+MNAME|59|Right Eye Down-Up
+MNAME|60|Right Eye In-Out
+MNAME|61|Jaw Close
+MNAME|62|Jaw Left-Right
+MNAME|63|Left Upper Leg Front-Back
+MNAME|64|Left Upper Leg In-Out
+MNAME|65|Left Upper Leg Twist In-Out
+MNAME|66|Left Lower Leg Stretch
+MNAME|67|Left Lower Leg Twist In-Out
+MNAME|68|Left Foot Up-Down
+MNAME|69|Left Foot Twist In-Out
+MNAME|70|Left Toes Up-Down
+MNAME|71|Right Upper Leg Front-Back
+MNAME|72|Right Upper Leg In-Out
+MNAME|73|Right Upper Leg Twist In-Out
+MNAME|74|Right Lower Leg Stretch
+MNAME|75|Right Lower Leg Twist In-Out
+MNAME|76|Right Foot Up-Down
+MNAME|77|Right Foot Twist In-Out
+MNAME|78|Right Toes Up-Down
+MNAME|79|Left Shoulder Down-Up
+MNAME|80|Left Shoulder Front-Back
+MNAME|81|Left Arm Down-Up
+MNAME|82|Left Arm Front-Back
+MNAME|83|Left Arm Twist In-Out
+MNAME|84|Left Forearm Stretch
+MNAME|85|Left Forearm Twist In-Out
+MNAME|86|Left Hand Down-Up
+MNAME|87|Left Hand In-Out
+MNAME|88|Right Shoulder Down-Up
+MNAME|89|Right Shoulder Front-Back
+MNAME|90|Right Arm Down-Up
+MNAME|91|Right Arm Front-Back
+MNAME|92|Right Arm Twist In-Out
+MNAME|93|Right Forearm Stretch
+MNAME|94|Right Forearm Twist In-Out
+MNAME|95|Right Hand Down-Up
+MNAME|96|Right Hand In-Out
+MNAME|97|LeftHand.Thumb.1 Stretched
+MNAME|98|LeftHand.Thumb.Spread
+MNAME|99|LeftHand.Thumb.2 Stretched
+MNAME|100|LeftHand.Thumb.3 Stretched
+MNAME|101|LeftHand.Index.1 Stretched
+MNAME|102|LeftHand.Index.Spread
+MNAME|103|LeftHand.Index.2 Stretched
+MNAME|104|LeftHand.Index.3 Stretched
+MNAME|105|LeftHand.Middle.1 Stretched
+MNAME|106|LeftHand.Middle.Spread
+MNAME|107|LeftHand.Middle.2 Stretched
+MNAME|108|LeftHand.Middle.3 Stretched
+MNAME|109|LeftHand.Ring.1 Stretched
+MNAME|110|LeftHand.Ring.Spread
+MNAME|111|LeftHand.Ring.2 Stretched
+MNAME|112|LeftHand.Ring.3 Stretched
+MNAME|113|LeftHand.Little.1 Stretched
+MNAME|114|LeftHand.Little.Spread
+MNAME|115|LeftHand.Little.2 Stretched
+MNAME|116|LeftHand.Little.3 Stretched
+MNAME|117|RightHand.Thumb.1 Stretched
+MNAME|118|RightHand.Thumb.Spread
+MNAME|119|RightHand.Thumb.2 Stretched
+MNAME|120|RightHand.Thumb.3 Stretched
+MNAME|121|RightHand.Index.1 Stretched
+MNAME|122|RightHand.Index.Spread
+MNAME|123|RightHand.Index.2 Stretched
+MNAME|124|RightHand.Index.3 Stretched
+MNAME|125|RightHand.Middle.1 Stretched
+MNAME|126|RightHand.Middle.Spread
+MNAME|127|RightHand.Middle.2 Stretched
+MNAME|128|RightHand.Middle.3 Stretched
+MNAME|129|RightHand.Ring.1 Stretched
+MNAME|130|RightHand.Ring.Spread
+MNAME|131|RightHand.Ring.2 Stretched
+MNAME|132|RightHand.Ring.3 Stretched
+MNAME|133|RightHand.Little.1 Stretched
+MNAME|134|RightHand.Little.Spread
+MNAME|135|RightHand.Little.2 Stretched
+MNAME|136|RightHand.Little.3 Stretched
+MNAME|137|SpineTDOF.x
+MNAME|138|SpineTDOF.y
+MNAME|139|SpineTDOF.z
+MNAME|140|ChestTDOF.x
+MNAME|141|ChestTDOF.y
+MNAME|142|ChestTDOF.z
+MNAME|143|UpperChestTDOF.x
+MNAME|144|UpperChestTDOF.y
+MNAME|145|UpperChestTDOF.z
+MNAME|146|NeckTDOF.x
+MNAME|147|NeckTDOF.y
+MNAME|148|NeckTDOF.z
+MNAME|149|HeadTDOF.x
+MNAME|150|HeadTDOF.y
+MNAME|151|HeadTDOF.z
+MNAME|152|LeftUpperLegTDOF.x
+MNAME|153|LeftUpperLegTDOF.y
+MNAME|154|LeftUpperLegTDOF.z
+MNAME|155|LeftLowerLegTDOF.x
+MNAME|156|LeftLowerLegTDOF.y
+MNAME|157|LeftLowerLegTDOF.z
+MNAME|158|LeftFootTDOF.x
+MNAME|159|LeftFootTDOF.y
+MNAME|160|LeftFootTDOF.z
+MNAME|161|LeftToesTDOF.x
+MNAME|162|LeftToesTDOF.y
+MNAME|163|LeftToesTDOF.z
+MNAME|164|RightUpperLegTDOF.x
+MNAME|165|RightUpperLegTDOF.y
+MNAME|166|RightUpperLegTDOF.z
+MNAME|167|RightLowerLegTDOF.x
+MNAME|168|RightLowerLegTDOF.y
+MNAME|169|RightLowerLegTDOF.z
+MNAME|170|RightFootTDOF.x
+MNAME|171|RightFootTDOF.y
+MNAME|172|RightFootTDOF.z
+MNAME|173|RightToesTDOF.x
+MNAME|174|RightToesTDOF.y
+MNAME|175|RightToesTDOF.z
+MNAME|176|LeftShoulderTDOF.x
+MNAME|177|LeftShoulderTDOF.y
+MNAME|178|LeftShoulderTDOF.z
+MNAME|179|LeftUpperArmTDOF.x
+MNAME|180|LeftUpperArmTDOF.y
+MNAME|181|LeftUpperArmTDOF.z
+MNAME|182|LeftLowerArmTDOF.x
+MNAME|183|LeftLowerArmTDOF.y
+MNAME|184|LeftLowerArmTDOF.z
+MNAME|185|LeftHandTDOF.x
+MNAME|186|LeftHandTDOF.y
+MNAME|187|LeftHandTDOF.z
+MNAME|188|RightShoulderTDOF.x
+MNAME|189|RightShoulderTDOF.y
+MNAME|190|RightShoulderTDOF.z
+MNAME|191|RightUpperArmTDOF.x
+MNAME|192|RightUpperArmTDOF.y
+MNAME|193|RightUpperArmTDOF.z
+MNAME|194|RightLowerArmTDOF.x
+MNAME|195|RightLowerArmTDOF.y
+MNAME|196|RightLowerArmTDOF.z
+MNAME|197|RightHandTDOF.x
+MNAME|198|RightHandTDOF.y
+MNAME|199|RightHandTDOF.z
+MNAME|200|THROW|ArgumentException
+MNAME|201|THROW|ArgumentException
+MUPD|5.0.0f1|0|0|MotionT.x
+MUPD|5.0.0f1|6|6|MotionQ.w
+MUPD|5.0.0f1|7|7|RootT.x
+MUPD|5.0.0f1|13|13|RootQ.w
+MUPD|5.0.0f1|14|14|LeftFootT.x
+MUPD|5.0.0f1|20|20|LeftFootQ.w
+MUPD|5.0.0f1|21|21|RightFootT.x
+MUPD|5.0.0f1|28|28|LeftHandT.x
+MUPD|5.0.0f1|41|41|RightHandQ.w
+MUPD|5.0.0f1|42|42|Spine Front-Back
+MUPD|5.0.0f1|47|47|Chest Twist Left-Right
+MUPD|5.0.0f1|48|51|Neck Nod Down-Up
+MUPD|5.0.0f1|51|54|Head Nod Down-Up
+MUPD|5.0.0f1|61|64|Left Upper Leg In-Out
+MUPD|5.0.0f1|96|99|LeftHand.Thumb.2 Stretched
+MUPD|5.0.0f1|97|100|LeftHand.Thumb.3 Stretched
+MUPD|5.0.0f1|116|119|RightHand.Thumb.2 Stretched
+MUPD|5.0.0f1|136|140|ChestTDOF.x
+MUPD|5.0.0f1|137|142|ChestTDOF.z
+MUPD|5.0.0f1|141|158|LeftFootTDOF.x
+MUPD|5.0.0f1|158|175|RightToesTDOF.z
+MUPD|5.0.0f1|199|216|THROW|ArgumentException
+MUPD|5.6.0f1|0|0|MotionT.x
+MUPD|5.6.0f1|6|6|MotionQ.w
+MUPD|5.6.0f1|7|7|RootT.x
+MUPD|5.6.0f1|13|13|RootQ.w
+MUPD|5.6.0f1|14|14|LeftFootT.x
+MUPD|5.6.0f1|20|20|LeftFootQ.w
+MUPD|5.6.0f1|21|21|RightFootT.x
+MUPD|5.6.0f1|28|28|LeftHandT.x
+MUPD|5.6.0f1|41|41|RightHandQ.w
+MUPD|5.6.0f1|42|42|Spine Front-Back
+MUPD|5.6.0f1|47|47|Chest Twist Left-Right
+MUPD|5.6.0f1|48|48|UpperChest Front-Back
+MUPD|5.6.0f1|51|51|Neck Nod Down-Up
+MUPD|5.6.0f1|61|61|Jaw Close
+MUPD|5.6.0f1|96|96|Right Hand In-Out
+MUPD|5.6.0f1|97|97|LeftHand.Thumb.1 Stretched
+MUPD|5.6.0f1|116|116|LeftHand.Little.3 Stretched
+MUPD|5.6.0f1|136|136|RightHand.Little.3 Stretched
+MUPD|5.6.0f1|137|137|SpineTDOF.x
+MUPD|5.6.0f1|141|142|ChestTDOF.z
+MUPD|5.6.0f1|158|171|RightFootTDOF.y
+MUPD|5.6.0f1|199|212|THROW|ArgumentException
+MUPD|2017.1.0f1|0|0|MotionT.x
+MUPD|2017.1.0f1|6|6|MotionQ.w
+MUPD|2017.1.0f1|7|7|RootT.x
+MUPD|2017.1.0f1|13|13|RootQ.w
+MUPD|2017.1.0f1|14|14|LeftFootT.x
+MUPD|2017.1.0f1|20|20|LeftFootQ.w
+MUPD|2017.1.0f1|21|21|RightFootT.x
+MUPD|2017.1.0f1|28|28|LeftHandT.x
+MUPD|2017.1.0f1|41|41|RightHandQ.w
+MUPD|2017.1.0f1|42|42|Spine Front-Back
+MUPD|2017.1.0f1|47|47|Chest Twist Left-Right
+MUPD|2017.1.0f1|48|48|UpperChest Front-Back
+MUPD|2017.1.0f1|51|51|Neck Nod Down-Up
+MUPD|2017.1.0f1|61|61|Jaw Close
+MUPD|2017.1.0f1|96|96|Right Hand In-Out
+MUPD|2017.1.0f1|97|97|LeftHand.Thumb.1 Stretched
+MUPD|2017.1.0f1|116|116|LeftHand.Little.3 Stretched
+MUPD|2017.1.0f1|136|136|RightHand.Little.3 Stretched
+MUPD|2017.1.0f1|137|137|SpineTDOF.x
+MUPD|2017.1.0f1|141|142|ChestTDOF.z
+MUPD|2017.1.0f1|158|171|RightFootTDOF.y
+MUPD|2017.1.0f1|199|212|THROW|ArgumentException
+MUPD|2017.3.0f1|0|0|MotionT.x
+MUPD|2017.3.0f1|6|6|MotionQ.w
+MUPD|2017.3.0f1|7|7|RootT.x
+MUPD|2017.3.0f1|13|13|RootQ.w
+MUPD|2017.3.0f1|14|14|LeftFootT.x
+MUPD|2017.3.0f1|20|20|LeftFootQ.w
+MUPD|2017.3.0f1|21|21|RightFootT.x
+MUPD|2017.3.0f1|28|28|LeftHandT.x
+MUPD|2017.3.0f1|41|41|RightHandQ.w
+MUPD|2017.3.0f1|42|42|Spine Front-Back
+MUPD|2017.3.0f1|47|47|Chest Twist Left-Right
+MUPD|2017.3.0f1|48|48|UpperChest Front-Back
+MUPD|2017.3.0f1|51|51|Neck Nod Down-Up
+MUPD|2017.3.0f1|61|61|Jaw Close
+MUPD|2017.3.0f1|96|96|Right Hand In-Out
+MUPD|2017.3.0f1|97|97|LeftHand.Thumb.1 Stretched
+MUPD|2017.3.0f1|116|116|LeftHand.Little.3 Stretched
+MUPD|2017.3.0f1|136|136|RightHand.Little.3 Stretched
+MUPD|2017.3.0f1|137|137|SpineTDOF.x
+MUPD|2017.3.0f1|141|141|ChestTDOF.y
+MUPD|2017.3.0f1|158|158|LeftFootTDOF.x
+MUPD|2017.3.0f1|199|199|RightHandTDOF.z
+MUPD|2019.4.1f1|0|0|MotionT.x
+MUPD|2019.4.1f1|6|6|MotionQ.w
+MUPD|2019.4.1f1|7|7|RootT.x
+MUPD|2019.4.1f1|13|13|RootQ.w
+MUPD|2019.4.1f1|14|14|LeftFootT.x
+MUPD|2019.4.1f1|20|20|LeftFootQ.w
+MUPD|2019.4.1f1|21|21|RightFootT.x
+MUPD|2019.4.1f1|28|28|LeftHandT.x
+MUPD|2019.4.1f1|41|41|RightHandQ.w
+MUPD|2019.4.1f1|42|42|Spine Front-Back
+MUPD|2019.4.1f1|47|47|Chest Twist Left-Right
+MUPD|2019.4.1f1|48|48|UpperChest Front-Back
+MUPD|2019.4.1f1|51|51|Neck Nod Down-Up
+MUPD|2019.4.1f1|61|61|Jaw Close
+MUPD|2019.4.1f1|96|96|Right Hand In-Out
+MUPD|2019.4.1f1|97|97|LeftHand.Thumb.1 Stretched
+MUPD|2019.4.1f1|116|116|LeftHand.Little.3 Stretched
+MUPD|2019.4.1f1|136|136|RightHand.Little.3 Stretched
+MUPD|2019.4.1f1|137|137|SpineTDOF.x
+MUPD|2019.4.1f1|141|141|ChestTDOF.y
+MUPD|2019.4.1f1|158|158|LeftFootTDOF.x
+MUPD|2019.4.1f1|199|199|RightHandTDOF.z

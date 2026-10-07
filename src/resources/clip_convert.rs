@@ -29,7 +29,7 @@
 use std::error::Error;
 use std::fmt::{self, Display};
 
-use super::avatar::{humanoid_muscle_attribute, update_humanoid_muscle};
+use super::avatar::{humanoid_muscle_attribute, update_humanoid_muscle, HumanoidMuscleError};
 use super::custom_curve::{CustomCurveError, TransformType};
 use super::streamed_curve::StreamedFrame;
 use super::vertex_data_blob::UnityVersion;
@@ -239,9 +239,13 @@ pub fn try_get_next_frame(
 /// `AddAnimatorMuscleCurve` attribute decision: `HumanoidMuscleType.ToAttributeString`
 /// of `GenericBinding.GetHumanoidMuscle` (the binding attribute updated to the clip
 /// version). The `u32` attribute wraps to `i32` exactly like the source unchecked enum
-/// cast; ids outside the muscle table read `None`. Curve emission (empty path,
-/// `Animator` class id, float keyframe) needs mutable clip objects and stays open.
-pub fn animator_muscle_attribute(attribute: u32, version: UnityVersion) -> Option<String> {
+/// cast; ids outside the muscle table fail exactly where the source throws
+/// `ArgumentException`. Curve emission (empty path, `Animator` class id, float
+/// keyframe) needs mutable clip objects and stays open.
+pub fn animator_muscle_attribute(
+    attribute: u32,
+    version: UnityVersion,
+) -> Result<String, HumanoidMuscleError> {
     let muscle = update_humanoid_muscle(attribute as i32, version);
     humanoid_muscle_attribute(muscle)
 }
@@ -551,19 +555,19 @@ mod tests {
         let legacy = UnityVersion::parse("5.0.0f1").unwrap();
         assert_eq!(
             animator_muscle_attribute(42, modern).as_deref(),
-            Some("Spine Front-Back")
+            Ok("Spine Front-Back")
         );
         // Attribute 48 is UpperChest on modern layouts but shifts pre-5.6.
         assert_eq!(
             animator_muscle_attribute(48, modern).as_deref(),
-            Some("UpperChest Front-Back")
+            Ok("UpperChest Front-Back")
         );
         assert_eq!(
             animator_muscle_attribute(48, legacy).as_deref(),
-            Some("Neck Nod Down-Up")
+            Ok("Neck Nod Down-Up")
         );
-        // Out-of-range attributes read None on every version.
-        assert_eq!(animator_muscle_attribute(200, modern), None);
-        assert_eq!(animator_muscle_attribute(u32::MAX, legacy), None);
+        // Out-of-range attributes fail on every version, like the source throw.
+        assert!(animator_muscle_attribute(200, modern).is_err());
+        assert!(animator_muscle_attribute(u32::MAX, legacy).is_err());
     }
 }
