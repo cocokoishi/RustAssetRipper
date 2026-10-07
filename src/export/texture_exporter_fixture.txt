@@ -1,0 +1,37 @@
+# Live texture-exporter differential.
+# Probe Temp/opencode/texexpprobe: a real 2x2 RGBA32 Texture2D plus a real Sprite
+# grouped in a SpriteInformationObject like SpriteProcessor does (both MainAssets
+# read back as the group), a lone Texture2D, and a GameObject, driving the
+# shipped TextureAssetExporter.TryCreateCollection per SpriteExportMode plus
+# CheckAssetIntegrity, TextureConverter.TryConvertToBitmap, and the
+# GetTextureExportFormat selection matrix
+# (shipped Export/UnityProjects/Processing/Modules DLLs, SDK 10.0.401).
+# Format: TXCASE|group|texmain|<type>|spritemain|<type>;
+# TXCASE|integrity|inline|<0|1>; TXCASE|conversion|inline|<0|1>;
+# TXCASE|admit|<tex|sprite|lone-tex|gameobject>|mode<0|1|2>|<0|1>
+# (modes: 0 Yaml, 1 Native, 2 Texture2D);
+# TXCASE|fmtmethod|<type>; TXCASE|fmt|<tag>|<Png|Bmp|Jpeg|Tga>.
+# Selection inputs per tag (prefer, override, original, configured):
+# prefer-override-jpg (true, jpg, png, Png); prefer-orig-png (true, none, png, Bmp);
+# prefer-shadowed (true, zzz, png, Bmp: Override shadows Original via ??);
+# noprefer-override-jpg (false, jpg, png, Bmp);
+# prefer-none (true, none, none, Tga);
+# prefer-upper-JPEG (true, JPEG, none, Png: exact match, uppercase falls back).
+TXCASE|group|texmain|SpriteInformationObject|spritemain|SpriteInformationObject
+TXCASE|integrity|inline|1
+TXCASE|conversion|inline|1
+TXCASE|admit|tex|mode0|1
+TXCASE|admit|sprite|mode0|0
+TXCASE|admit|tex|mode1|1
+TXCASE|admit|sprite|mode1|1
+TXCASE|admit|tex|mode2|1
+TXCASE|admit|sprite|mode2|1
+TXCASE|admit|lone-tex|mode1|0
+TXCASE|admit|gameobject|mode1|0
+TXCASE|fmtmethod|AssetRipper.Export.Configuration.ImageExportFormatExtensions
+TXCASE|fmt|prefer-override-jpg|Jpeg
+TXCASE|fmt|prefer-orig-png|Png
+TXCASE|fmt|prefer-shadowed|Bmp
+TXCASE|fmt|noprefer-override-jpg|Bmp
+TXCASE|fmt|prefer-none|Tga
+TXCASE|fmt|prefer-upper-JPEG|Png

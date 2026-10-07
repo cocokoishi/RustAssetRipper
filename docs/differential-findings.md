@@ -950,3 +950,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | `resources::texture::export_texture3d_image` unpack gate plus doc comment; test `array_conversions_match_the_reference_runtime` in `resources::texture`; fixture `src/resources/texture_array_convert_fixture.txt`. No other production change (`flip_y` already flips per layer). |
 | Regression evidence | All five probed conversions reproduce ok/size/pixels through the export functions with PNG wiring asserted; the `t3-normal` row fails under the old derived gate. Full suite 1387 plus 65 pass with warnings-denied Clippy. |
 | Remaining comparison | Crunch stays unsupported on these paths like the 2D one; streamed fetching stays caller-side; Unity-produced array textures stay out per the row disposition. |
+
+## DIFF-TEXTURE-EXPORTER-001 - exporter admission and format selection
+
+| Field | Finding |
+|---|---|
+| Status | Reference-runtime differential recorded; fourteen rows ported and pinned |
+| Source location | AssetRipper/Source/AssetRipper.Export.UnityProjects/Textures/TextureAssetExporter.cs (`TryCreateCollection` lines 26-38, `Export` lines 40-60); AssetRipper/Source/AssetRipper.Export/Configuration/ImageExportFormat.cs (`GetTextureExportFormat` lines 93-100, `TryGetFromExtension` lines 61-75); AssetRipper/Source/AssetRipper.Processing/AssetGroup.cs (`SetMainAsset`); AssetRipper/Source/AssetRipper.Assets/IUnityObjectBase.cs (`GetBestExtension`, Override ?? Original) |
+| Input evidence | Probe Temp/opencode/texexpprobe (shipped UnityProjects/Processing/Export/Modules DLLs, SDK 10.0.401) with a real texture plus sprite grouped in a SpriteInformationObject (both MainAssets verified), a lone texture, and a GameObject, driving shipped `TryCreateCollection` per sprite mode, `CheckAssetIntegrity`, `TryConvertToBitmap`, and the full selection matrix. Committed as src/export/texture_exporter_fixture.txt (18 rows). |
+| Source-derived behavior | Grouped texture admits under all three modes (non-sprite bypasses the Yaml gate); grouped sprite admits everywhere except Yaml; lone texture and GameObject decline; integrity and conversion pass on the live texture; `jpg` selects Jpeg, `??` lets an unrecognized override shadow a recognized original, uppercase `JPEG` falls back to configured. |
+| Root cause | No Rust deviation found; this increment proves exporter branch selection plus format selection end-to-end through real objects. |
+| Rust change | Test texture_exporter_matches_the_reference_runtime in export/export_extension.rs; fixture src/export/texture_exporter_fixture.txt. No production change. |
+| Regression evidence | All 8 admissions and all 6 selections reproduce through the decision kernels with the probed integrity/conversion facts; export suite 18/18. |
+| Remaining comparison | Bitmap encode and file IO stay caller-side; Unity-produced projects stay out per the row disposition. |

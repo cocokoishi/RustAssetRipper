@@ -667,4 +667,143 @@ mod tests {
             }
         );
     }
+
+    /// Differential against the shipped `TextureAssetExporter` over live
+    /// generated objects (probe `Temp/opencode/texexpprobe`, fixture
+    /// `texture_exporter_fixture.txt`): a real texture plus a real sprite
+    /// grouped in a `SpriteInformationObject` (both `MainAsset`s read back as
+    /// the group), a lone texture, and a `GameObject`, driving
+    /// `TryCreateCollection` per sprite mode, plus the
+    /// `GetTextureExportFormat` selection matrix. The replay feeds the probed
+    /// grouping facts through `texture_asset_exporter_admits_collection` and
+    /// the probed integrity/conversion facts plus selection inputs through
+    /// `decide_texture_asset_export`, and must reproduce every admission bit
+    /// and every selected format, including the `??` shadowing (an
+    /// unrecognized override hides a recognized original) and the exact-match
+    /// fallback on uppercase `JPEG`.
+    #[test]
+    fn texture_exporter_matches_the_reference_runtime() {
+        use super::super::settings::SpriteExportMode;
+        use ImageExportFormat as Format;
+
+        fn parse_mode(text: &str) -> SpriteExportMode {
+            match text {
+                "mode0" => SpriteExportMode::Yaml,
+                "mode1" => SpriteExportMode::Native,
+                "mode2" => SpriteExportMode::Texture2D,
+                other => panic!("unexpected mode {other}"),
+            }
+        }
+
+        fn parse_format(text: &str) -> Format {
+            match text {
+                "Bmp" => Format::Bmp,
+                "Exr" => Format::Exr,
+                "Hdr" => Format::Hdr,
+                "Jpeg" => Format::Jpeg,
+                "Png" => Format::Png,
+                "Tga" => Format::Tga,
+                other => panic!("unexpected format {other}"),
+            }
+        }
+
+        let fixture = include_str!("texture_exporter_fixture.txt");
+        let mut integrity_ok = false;
+        let mut conversion_ok = false;
+        let mut admissions: Vec<(String, SpriteExportMode, bool)> = Vec::new();
+        struct Selection {
+            tag: String,
+            prefer: bool,
+            best: Option<String>,
+            configured: Format,
+            expected: Format,
+        }
+        let mut selections: Vec<Selection> = Vec::new();
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut cells = line.splitn(5, '|');
+            assert_eq!(cells.next(), Some("TXCASE"), "{line}");
+            match cells.next().expect("a row kind") {
+                "group" => {
+                    assert_eq!(cells.next(), Some("texmain"), "{line}");
+                    assert_eq!(cells.next(), Some("SpriteInformationObject"), "{line}");
+                }
+                "integrity" => {
+                    assert_eq!(cells.next(), Some("inline"), "{line}");
+                    integrity_ok = cells.next() == Some("1");
+                }
+                "conversion" => {
+                    assert_eq!(cells.next(), Some("inline"), "{line}");
+                    conversion_ok = cells.next() == Some("1");
+                }
+                "admit" => {
+                    let label = cells.next().expect("a label").to_owned();
+                    let mode = parse_mode(cells.next().expect("a mode"));
+                    let admitted = cells.next() == Some("1");
+                    admissions.push((label, mode, admitted));
+                }
+                "fmtmethod" => {}
+                "fmt" => {
+                    let tag = cells.next().expect("a tag").to_owned();
+                    let expected = parse_format(cells.next().expect("a format"));
+                    // Selection inputs follow the fixture header per tag.
+                    let (prefer, best, configured) = match tag.as_str() {
+                        "prefer-override-jpg" => (true, Some("jpg".to_owned()), Format::Png),
+                        "prefer-orig-png" => (true, Some("png".to_owned()), Format::Bmp),
+                        "prefer-shadowed" => (true, Some("zzz".to_owned()), Format::Bmp),
+                        "noprefer-override-jpg" => (false, Some("jpg".to_owned()), Format::Bmp),
+                        "prefer-none" => (true, None, Format::Tga),
+                        "prefer-upper-JPEG" => (true, Some("JPEG".to_owned()), Format::Png),
+                        other => panic!("unexpected selection {other}"),
+                    };
+                    selections.push(Selection {
+                        tag,
+                        prefer,
+                        best,
+                        configured,
+                        expected,
+                    });
+                }
+                other => panic!("unexpected row kind {other}"),
+            }
+        }
+        assert!(integrity_ok, "live texture passes integrity");
+        assert!(conversion_ok, "live texture converts");
+        assert_eq!(admissions.len(), 8, "all probed admissions are asserted");
+        for (label, mode, admitted) in &admissions {
+            let main_is_group = matches!(label.as_str(), "tex" | "sprite");
+            let asset_is_sprite = label == "sprite";
+            let export_sprites = texture_exporter_exports_sprites(*mode);
+            assert_eq!(
+                texture_asset_exporter_admits_collection(
+                    main_is_group,
+                    export_sprites,
+                    asset_is_sprite
+                ),
+                *admitted,
+                "{label} {mode:?}"
+            );
+        }
+        assert_eq!(selections.len(), 6, "all probed selections are asserted");
+        for selection in &selections {
+            let outcome = decide_texture_asset_export(
+                integrity_ok,
+                conversion_ok,
+                selection.prefer,
+                selection.best.as_deref(),
+                selection.configured,
+            );
+            assert_eq!(
+                outcome,
+                TextureAssetExportOutcome::Saved {
+                    format: selection.expected
+                },
+                "{tag}",
+                tag = selection.tag
+            );
+        }
+    }
 }
