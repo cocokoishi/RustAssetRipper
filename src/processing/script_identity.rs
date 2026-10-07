@@ -12,9 +12,12 @@
 //!
 //! Differential evidence: `src/io/script_identity_fixture.txt` (probe
 //! `Temp/opencode/scriptidprobe` against the shipped `AssetRipper.Import.dll` and
-//! `AssetRipper.IO.Files.dll`, SDK 10.0.401). The null-namespace rejection arm has
-//! no Rust counterpart: a Rust `&str` cannot be null, so only the empty-assembly
-//! and empty-name rejections are modeled.
+//! `AssetRipper.IO.Files.dll`, SDK 10.0.401). The null-namespace rejection arm is
+//! discharged by the type system rather than modeled: every Rust `&str`/`String`
+//! is non-null by construction, so a null namespace cannot arrive; `try_new`
+//! models exactly the two representable rejections (empty assembly, empty name),
+//! and the legal empty namespace is accepted like the source (pinned by the
+//! `THROW` rows replayed in `constructor_rejections_match_the_reference_runtime`).
 
 use std::error::Error;
 use std::fmt::{self, Display};
