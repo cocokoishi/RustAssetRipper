@@ -2922,4 +2922,159 @@ mod tests {
             assert_eq!(metadata.externals.len(), 1);
         }
     }
+
+    #[test]
+    fn type_records_match_reference_constructed_files() {
+        fn hex_to_bytes(hex: &str) -> Vec<u8> {
+            assert!(hex.len().is_multiple_of(2), "odd hex length for {hex}");
+            let mut out = Vec::with_capacity(hex.len() / 2);
+            let bytes = hex.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                let hi = match bytes[i] {
+                    b'0'..=b'9' => bytes[i] - b'0',
+                    b'a'..=b'f' => bytes[i] - b'a' + 10,
+                    b'A'..=b'F' => bytes[i] - b'A' + 10,
+                    b => panic!("invalid hex byte {b}"),
+                };
+                let lo = match bytes[i + 1] {
+                    b'0'..=b'9' => bytes[i + 1] - b'0',
+                    b'a'..=b'f' => bytes[i + 1] - b'a' + 10,
+                    b'A'..=b'F' => bytes[i + 1] - b'A' + 10,
+                    b => panic!("invalid hex byte {b}"),
+                };
+                out.push((hi << 4) | lo);
+                i += 2;
+            }
+            out
+        }
+
+        // Probe Temp/opencode/sermetatypeprobe (SerializedFileMetadata.Read
+        // over C#-constructed full files, SDK 10.0.401, zero objects so no
+        // type-index linkage): Y1 gen8 legacy 1-node tree, Y2 gen12 modern
+        // empty tree without hash, Y3 gen20 MonoBehaviour ScriptID plus hash,
+        // Y4 gen21 hash-only plus deps [0], R1 gen21 managed ref with
+        // class/namespace/assembly. Hash bytes are construction facts (AA/ BB/
+        // CC/DD); the reference structural dump proves layout alignment and
+        // Rust asserts the values. Nothing Rust-generated.
+        let fixture = include_str!("metadata_type_fixture.txt");
+        let mut hexes: std::collections::HashMap<String, Vec<u8>> =
+            std::collections::HashMap::new();
+        let mut reads: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for line in fixture.lines() {
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+            if line.starts_with("TYPE_HEX|") {
+                let parts: Vec<&str> = line.splitn(3, '|').collect();
+                assert_eq!(parts.len(), 3, "bad TYPE_HEX {line}");
+                hexes.insert(parts[1].to_string(), hex_to_bytes(parts[2]));
+            } else if line.starts_with("TYPE_READ|") {
+                let parts: Vec<&str> = line.splitn(3, '|').collect();
+                assert_eq!(parts.len(), 3, "bad TYPE_READ {line}");
+                reads.insert(parts[1].to_string(), parts[2].to_string());
+            }
+        }
+
+        // Y1: gen8 legacy 1-node TypeTree, no hash/stripped/script-index lanes.
+        {
+            let bytes = hexes.get("Y1").expect("Y1 hex");
+            let dump = reads.get("Y1").expect("Y1 dump");
+            assert!(dump.contains("TYP:1,False,-1,1,0"), "Y1 type {dump}");
+            let header = SerializedFileHeader::parse(bytes).expect("Y1 header");
+            assert_eq!(header.format_version.raw(), 8);
+            let metadata = SerializedFileMetadata::parse_file(bytes, &header).expect("Y1 metadata");
+            assert_eq!(metadata.types.len(), 1);
+            let ty = &metadata.types[0];
+            assert_eq!(ty.raw_type_id, 1);
+            assert!(!ty.is_stripped_type);
+            assert_eq!(ty.script_type_index, -1);
+            assert!(ty.script_id.is_none());
+            assert!(ty.old_type_hash.is_none());
+            let tree = ty.type_tree.as_ref().expect("Y1 tree");
+            assert_eq!(tree.nodes.len(), 1);
+            assert!(ty.type_dependencies.is_empty());
+            assert!(metadata.objects.is_empty());
+        }
+
+        // Y2: gen12 modern empty tree, still no hash lane.
+        {
+            let bytes = hexes.get("Y2").expect("Y2 hex");
+            let dump = reads.get("Y2").expect("Y2 dump");
+            assert!(dump.contains("TYP:1,False,-1,0,0"), "Y2 type {dump}");
+            let header = SerializedFileHeader::parse(bytes).expect("Y2 header");
+            assert_eq!(header.format_version.raw(), 12);
+            let metadata = SerializedFileMetadata::parse_file(bytes, &header).expect("Y2 metadata");
+            assert_eq!(metadata.types.len(), 1);
+            let ty = &metadata.types[0];
+            assert_eq!(ty.raw_type_id, 1);
+            assert!(ty.script_id.is_none());
+            assert!(ty.old_type_hash.is_none());
+            let tree = ty.type_tree.as_ref().expect("Y2 tree");
+            assert!(tree.nodes.is_empty());
+            assert!(ty.type_dependencies.is_empty());
+        }
+
+        // Y3: gen20 MonoBehaviour reads ScriptID plus OldTypeHash.
+        {
+            let bytes = hexes.get("Y3").expect("Y3 hex");
+            let dump = reads.get("Y3").expect("Y3 dump");
+            assert!(dump.contains("TYP:114,False,0,0,0"), "Y3 type {dump}");
+            let header = SerializedFileHeader::parse(bytes).expect("Y3 header");
+            assert_eq!(header.format_version.raw(), 20);
+            let metadata = SerializedFileMetadata::parse_file(bytes, &header).expect("Y3 metadata");
+            assert_eq!(metadata.types.len(), 1);
+            let ty = &metadata.types[0];
+            assert_eq!(ty.raw_type_id, 114);
+            assert!(!ty.is_stripped_type);
+            assert_eq!(ty.script_type_index, 0);
+            assert_eq!(ty.script_id, Some([0xAAAAAAAA; 4]));
+            assert_eq!(ty.old_type_hash, Some([0xBBBBBBBB; 4]));
+            let tree = ty.type_tree.as_ref().expect("Y3 tree");
+            assert!(tree.nodes.is_empty());
+            assert!(ty.type_dependencies.is_empty());
+        }
+
+        // Y4: gen21 hash-only plus type dependencies [0].
+        {
+            let bytes = hexes.get("Y4").expect("Y4 hex");
+            let dump = reads.get("Y4").expect("Y4 dump");
+            assert!(dump.contains("TYP:1,False,-1,0,1"), "Y4 type {dump}");
+            let header = SerializedFileHeader::parse(bytes).expect("Y4 header");
+            assert_eq!(header.format_version.raw(), 21);
+            let metadata = SerializedFileMetadata::parse_file(bytes, &header).expect("Y4 metadata");
+            assert_eq!(metadata.types.len(), 1);
+            let ty = &metadata.types[0];
+            assert_eq!(ty.raw_type_id, 1);
+            assert_eq!(ty.script_type_index, -1);
+            assert!(ty.script_id.is_none());
+            assert_eq!(ty.old_type_hash, Some([0xBBBBBBBB; 4]));
+            assert_eq!(ty.type_dependencies, vec![0]);
+        }
+
+        // R1: gen21 managed reference with class/namespace/assembly.
+        {
+            let bytes = hexes.get("R1").expect("R1 hex");
+            let dump = reads.get("R1").expect("R1 dump");
+            assert!(
+                dump.contains("REF:-1,0,MyClass,MyNamespace,MyAssembly,0"),
+                "R1 ref {dump}"
+            );
+            let header = SerializedFileHeader::parse(bytes).expect("R1 header");
+            assert_eq!(header.format_version.raw(), 21);
+            let metadata = SerializedFileMetadata::parse_file(bytes, &header).expect("R1 metadata");
+            assert!(metadata.types.is_empty());
+            assert_eq!(metadata.reference_types.len(), 1);
+            let rf = &metadata.reference_types[0];
+            assert_eq!(rf.raw_type_id, -1);
+            assert_eq!(rf.script_type_index, 0);
+            assert_eq!(rf.script_id, Some([0xCCCCCCCC; 4]));
+            assert_eq!(rf.old_type_hash, Some([0xDDDDDDDD; 4]));
+            assert_eq!(rf.class_name.as_deref(), Some("MyClass"));
+            assert_eq!(rf.namespace.as_deref(), Some("MyNamespace"));
+            assert_eq!(rf.assembly_name.as_deref(), Some("MyAssembly"));
+            let tree = rf.type_tree.as_ref().expect("R1 tree");
+            assert!(tree.nodes.is_empty());
+        }
+    }
 }

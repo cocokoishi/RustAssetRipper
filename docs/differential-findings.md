@@ -703,3 +703,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | src/io/stream.rs test stream_operations_match_reference_runtime; fixture src/io/stream_fixture.txt. |
 | Regression evidence | All six op sequences reproduce field-for-field; full suite 1363 plus 60 pass with warnings-denied Clippy. |
 | Remaining comparison | OS positional I/O and direct VFS mount APIs stay with their tracked rows; wrapper observable behavior is now fully reference-differentially covered. |
+
+## DIFF-SER-TYPE-001 - SerializedFile type and managed-reference records
+
+| Field | Finding |
+|---|---|
+| Status | Reference-runtime differential recorded; two rows ported and pinned |
+| Source location | AssetRipper.IO.Files/SerializedFiles/Parser/SerializedTypeBase.cs (RefactoredClassId 16, RefactorTypeData 17, HasTypeTreeHashes 13, StoresTypeDependencies 21); SerializedType.cs; SerializedTypeReference.cs (gen21-only name strings); TypeTree.cs (legacy recursive versus modern count-plus-buffer) |
+| Input evidence | Probe Temp/opencode/sermetatypeprobe (shipped IO.Files DLL, SDK 10.0.401) reading five C#-constructed files spanning gen8/12/20/21 with one type or one managed ref and zero objects. Committed as src/serialized_file/metadata_type_fixture.txt (15 lines). |
+| Source-derived behavior | RawTypeID always; stripped from 16; script index from 17; ScriptID only for -1/114/positive-index scripts with OldTypeHash from 13; TypeTree legacy 1-node versus modern empty; dependencies from 21; managed names only from 21. All reproduce. |
+| Root cause | No deviation found; this increment ports the previously synthetic-only type lanes. Hash values pin to construction facts with reference alignment proof. |
+| Rust change | src/serialized_file/metadata.rs test type_records_match_reference_constructed_files; fixture src/serialized_file/metadata_type_fixture.txt. |
+| Regression evidence | All five records reproduce IDs, flags, indices, hashes, trees, dependencies, and managed names on both sides; full suite 1364 plus 60 pass with warnings-denied Clippy. |
+| Remaining comparison | Type-to-object matching and script recovery stay with their downstream rows; managed field resolution stays downstream. |
