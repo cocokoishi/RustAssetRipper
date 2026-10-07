@@ -571,6 +571,194 @@ mod tests {
         assert_eq!(out.border, [0.0, 0.0, 0.0, 0.0]);
     }
 
+    /// Byte-for-byte differential against the shipped `SpriteExtensions`
+    /// over live generated objects (probe `Temp/opencode/spriteprobe`): real
+    /// `Sprite` instances (2022.3, 5.6, 4.5) built through the generated
+    /// `Create` API with `m_` backing fields, plus a real `SpriteAtlas`
+    /// whose `RenderDataMap` is empty or holds the sprite's own key. All six
+    /// probed cases (RD path, stored-zero pivot, atlas miss with
+    /// zero-preserving border, atlas hit with border shift, key-less 5.6
+    /// sprite, derived-pivot 4.5 sprite) must reproduce rect, pivot, and
+    /// border exactly, with the probed `Has_*` version gates selecting the
+    /// stored-vs-derived branches.
+    #[test]
+    fn atlas_coordinates_match_the_reference_runtime() {
+        fn bits_to_f32(text: &str) -> f32 {
+            f32::from_bits(u32::from_str_radix(text, 16).expect("float bits"))
+        }
+
+        fn parse_floats(text: &str) -> Vec<f32> {
+            if text == "-" {
+                return Vec::new();
+            }
+            text.split(',').map(bits_to_f32).collect()
+        }
+
+        let fixture = include_str!("sprite_atlas_fixture.txt");
+        let mut gates: Vec<(String, bool, bool)> = Vec::new();
+        struct Case {
+            tag: String,
+            version: String,
+            atlas_hit: bool,
+            rect: [f32; 4],
+            offset: [f32; 2],
+            pivot: Vec<f32>,
+            border: Vec<f32>,
+            rd_rect: [f32; 4],
+            rd_offset: [f32; 2],
+            hit_rect: [f32; 4],
+            hit_offset: [f32; 2],
+            expected_rect: [f32; 4],
+            expected_pivot: [f32; 2],
+            expected_border: [f32; 4],
+        }
+        let mut cases: Vec<Case> = Vec::new();
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("SGATE|") {
+                let mut parts = rest.split('|');
+                let version = parts.next().expect("a version").to_owned();
+                let flags = parts.next().expect("gate flags");
+                let mut has_pivot = false;
+                let mut has_border = false;
+                for flag in flags.split(',') {
+                    let mut kv = flag.split('=');
+                    match (kv.next(), kv.next()) {
+                        (Some("Has_Pivot"), Some(value)) => has_pivot = value == "True",
+                        (Some("Has_Border"), Some(value)) => has_border = value == "True",
+                        _ => {}
+                    }
+                }
+                gates.push((version, has_pivot, has_border));
+                continue;
+            }
+            let mut parts = line.splitn(4, '|');
+            assert_eq!(parts.next(), Some("SCASE"), "{line}");
+            let tag = parts.next().expect("a probe tag");
+            if cases.is_empty() || cases.last().expect("a case").tag != tag {
+                cases.push(Case {
+                    tag: tag.to_owned(),
+                    version: String::new(),
+                    atlas_hit: false,
+                    rect: [0.0; 4],
+                    offset: [0.0; 2],
+                    pivot: Vec::new(),
+                    border: Vec::new(),
+                    rd_rect: [0.0; 4],
+                    rd_offset: [0.0; 2],
+                    hit_rect: [0.0; 4],
+                    hit_offset: [0.0; 2],
+                    expected_rect: [0.0; 4],
+                    expected_pivot: [0.0; 2],
+                    expected_border: [0.0; 4],
+                });
+            }
+            let case = cases.last_mut().expect("a case");
+            match parts.next().expect("a row kind") {
+                "in" => {
+                    let mut fields = parts.next().expect("input fields").split('|');
+                    case.version = fields.next().expect("a version").to_owned();
+                    fields.next().expect("an atlas flag");
+                    case.atlas_hit = fields.next().expect("a map flag") == "1";
+                    let rect = parse_floats(fields.next().expect("a rect"));
+                    case.rect = [rect[0], rect[1], rect[2], rect[3]];
+                    let offset = parse_floats(fields.next().expect("an offset"));
+                    case.offset = [offset[0], offset[1]];
+                    case.pivot = parse_floats(fields.next().expect("a pivot"));
+                    case.border = parse_floats(fields.next().expect("a border"));
+                    let rd_rect = parse_floats(fields.next().expect("an RD rect"));
+                    case.rd_rect = [rd_rect[0], rd_rect[1], rd_rect[2], rd_rect[3]];
+                    let rd_offset = parse_floats(fields.next().expect("an RD offset"));
+                    case.rd_offset = [rd_offset[0], rd_offset[1]];
+                    let hit_rect = parse_floats(fields.next().expect("a hit rect"));
+                    case.hit_rect = [hit_rect[0], hit_rect[1], hit_rect[2], hit_rect[3]];
+                    let hit_offset = parse_floats(fields.next().expect("a hit offset"));
+                    case.hit_offset = [hit_offset[0], hit_offset[1]];
+                }
+                "ok" => assert_eq!(parts.next(), Some("1"), "{line}"),
+                "rect" => {
+                    let mut fields = parts.next().expect("rect fields").split('|');
+                    case.expected_rect = [
+                        bits_to_f32(fields.next().expect("x")),
+                        bits_to_f32(fields.next().expect("y")),
+                        bits_to_f32(fields.next().expect("w")),
+                        bits_to_f32(fields.next().expect("h")),
+                    ];
+                }
+                "pivot" => {
+                    let mut fields = parts.next().expect("pivot fields").split('|');
+                    case.expected_pivot = [
+                        bits_to_f32(fields.next().expect("x")),
+                        bits_to_f32(fields.next().expect("y")),
+                    ];
+                }
+                "border" => {
+                    let mut fields = parts.next().expect("border fields").split('|');
+                    case.expected_border = [
+                        bits_to_f32(fields.next().expect("l")),
+                        bits_to_f32(fields.next().expect("b")),
+                        bits_to_f32(fields.next().expect("r")),
+                        bits_to_f32(fields.next().expect("t")),
+                    ];
+                }
+                other => panic!("unexpected row kind {other}"),
+            }
+        }
+        assert_eq!(cases.len(), 6, "all probed atlas cases are asserted");
+        for case in &cases {
+            let (has_pivot, has_border) = gates
+                .iter()
+                .find(|(version, _, _)| *version == case.version)
+                .map(|(_, has_pivot, has_border)| (*has_pivot, *has_border))
+                .expect("a probed version gate");
+            let pivot = if has_pivot {
+                if case.pivot.is_empty() {
+                    // Stored pivot left at its default: the reference reads (0, 0).
+                    [0.0, 0.0]
+                } else {
+                    assert_eq!(case.pivot.len(), 2, "{tag}", tag = case.tag);
+                    [case.pivot[0], case.pivot[1]]
+                }
+            } else {
+                assert!(case.pivot.is_empty(), "{tag}", tag = case.tag);
+                [0.0, 0.0]
+            };
+            let border = if has_border {
+                if case.border.is_empty() {
+                    [0.0, 0.0, 0.0, 0.0]
+                } else {
+                    [
+                        case.border[0],
+                        case.border[1],
+                        case.border[2],
+                        case.border[3],
+                    ]
+                }
+            } else {
+                [0.0, 0.0, 0.0, 0.0]
+            };
+            let out = get_sprite_coordinates_in_atlas(
+                case.rect,
+                case.rd_rect,
+                case.rd_offset,
+                case.atlas_hit,
+                case.hit_rect,
+                case.hit_offset,
+                has_pivot,
+                pivot,
+                case.offset,
+                has_border,
+                border,
+            );
+            assert_eq!(out.rect, case.expected_rect, "{tag}", tag = case.tag);
+            assert_eq!(out.pivot, case.expected_pivot, "{tag}", tag = case.tag);
+            assert_eq!(out.border, case.expected_border, "{tag}", tag = case.tag);
+        }
+    }
+
     #[test]
     fn settings_raw_decodes_the_shared_packing_positions() {
         // Bit 0 is the packed flag; bit 1 the mode; bits 2-5 the rotation; bit 6

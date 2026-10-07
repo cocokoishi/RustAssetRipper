@@ -911,3 +911,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | Swapped red/alpha lanes in `Bitmap::unpack_normal` (src/resources/texture_converter.rs); fixture src/resources/cubemap_convert_fixture.txt; test live_cubemap_conversion_matches_the_reference_runtime. |
 | Regression evidence | All three probed conversions reproduce every output pixel plus dimensions; full suite 1384 plus 65 pass with warnings-denied Clippy. |
 | Remaining comparison | Live-sprite/atlas conversion and Unity-produced textures stay with their own rows; external decoders (Crunch) stay unsupported like the 2D path. |
+
+## DIFF-SPRITE-ATLAS-001 - live-sprite atlas coordinates
+
+| Field | Finding |
+|---|---|
+| Status | Reference-runtime differential recorded; six rows ported and pinned |
+| Source location | AssetRipper/Source/AssetRipper.SourceGenerated.Extensions/SpriteExtensions.cs (`GetSpriteCoordinatesInAtlas`); AssetRipper/Source/AssetRipper.Assets/Generics/AssetDictionary.cs + AssetPair.cs (map mechanics) |
+| Input evidence | Probe Temp/opencode/spriteprobe (shipped SourceGenerated.Extensions + SourceGenerated DLLs, SDK 10.0.401) driving real Sprite objects (2022.3, 5.6, 4.5) with `m_` backing fields and a real SpriteAtlas with an empty or reference-hit RenderDataMap entry. Committed as src/resources/sprite_atlas_fixture.txt (3 gate + 30 case rows). |
+| Source-derived behavior | RD path, stored and stored-zero pivots, atlas miss with zero-border preservation, atlas hit with border shift, key-less 5.6 sprite, and derived-pivot 4.5 sprite all reproduce bit-for-bit; `Has_Pivot` is false on 4.5 (true on 5.6/2022.3), `Has_RenderDataKey` false before 2022, `Has_Border` true throughout. |
+| Root cause | No Rust deviation found; this increment replaces synthetic-only atlas evidence with live-object vectors. Map population bypasses the pair property setters (reference types rejected) via backing fields, like file readers do. |
+| Rust change | Test atlas_coordinates_match_the_reference_runtime in src/resources/sprite.rs; fixture src/resources/sprite_atlas_fixture.txt. No production change. |
+| Regression evidence | All six probed cases reproduce rect, pivot, and border; full suite 1385 plus 65 pass with warnings-denied Clippy. |
+| Remaining comparison | `RD.Texture` pointer resolution and exporter wiring stay with RES-SPRITE-CONVERT-001; Unity-produced sprites stay out per the row disposition. |
