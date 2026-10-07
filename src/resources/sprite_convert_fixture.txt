@@ -1,0 +1,23 @@
+# Live-sprite conversion differential.
+# Probe Temp/opencode/spriteprobe: a real Texture2D (class 28, 4x4 RGBA32 with
+# flip-asymmetric rows) registered in a ProcessedAssetCollection plus real Sprite
+# objects (class 213) whose RD.Texture PPtr points at it (FileID 0 = same
+# collection), calling shipped SpriteConverter.Supported/TryConvertToBitmap
+# (AssetRipper.Export.Modules.Textures.dll, SDK 10.0.401).
+# Format: CCONV|<tag>|pptr|<file-id>|<path-id>; CCONV|<tag>|supported|<0|1>;
+# CCONV|<tag>|ok|<0|1>; CCONV|<tag>|size|<w>|<h>|<d>;
+# CCONV|<tag>|pixels|<hex RGBA bytes>; CCONV|texinput|<w>|<h>|<hex input bytes>.
+# Cases: texlinked (resolves, converts with FlipY), texnull (PathID 0),
+# texdangling (unregistered PathID 999).
+CCONV|texlinked|pptr|0|44
+CCONV|texlinked|supported|1
+CCONV|texlinked|ok|1
+CCONV|texlinked|size|4|4|1
+CCONV|texlinked|pixels|444400FF444400FF444400FF444400FF000033FF000033FF000033FF000033FF002200FF002200FF002200FF002200FF110000FF110000FF110000FF110000FF
+CCONV|texnull|pptr|0|0
+CCONV|texnull|supported|0
+CCONV|texnull|ok|0
+CCONV|texdangling|pptr|0|999
+CCONV|texdangling|supported|0
+CCONV|texdangling|ok|0
+CCONV|texinput|4|4|110000FF110000FF110000FF110000FF002200FF002200FF002200FF002200FF000033FF000033FF000033FF000033FF444400FF444400FF444400FF444400FF

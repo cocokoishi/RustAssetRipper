@@ -759,6 +759,137 @@ mod tests {
         }
     }
 
+    /// Differential against the shipped `SpriteConverter` over live generated
+    /// objects (probe `Temp/opencode/spriteprobe`, fixture
+    /// `sprite_convert_fixture.txt`): a real 4x4 RGBA32 texture registered in
+    /// a `ProcessedAssetCollection` plus real sprites whose `RD.Texture` PPtr
+    /// links (FileID 0, PathID 44), nulls (PathID 0), or dangles (PathID 999).
+    /// The replay feeds the probed resolution facts through `sprite_supported`
+    /// and `sprite_try_convert_to_bitmap`, delegating the linked texture bytes
+    /// through the real `try_convert_to_bitmap` (flip on, no unpack, like the
+    /// source's non-cubemap path), and must reproduce both decisions plus
+    /// every output pixel.
+    #[test]
+    fn sprite_conversion_matches_the_reference_runtime() {
+        use crate::resources::texture_converter::{try_convert_to_bitmap, TextureImage};
+
+        fn decode_hex(text: &str) -> Vec<u8> {
+            text.as_bytes()
+                .chunks_exact(2)
+                .map(|pair| {
+                    let digit = |c: u8| (c as char).to_digit(16).expect("hex digit") as u8;
+                    digit(pair[0]) << 4 | digit(pair[1])
+                })
+                .collect()
+        }
+
+        let fixture = include_str!("sprite_convert_fixture.txt");
+        let mut input: Vec<u8> = Vec::new();
+        struct Case {
+            tag: String,
+            path_id: i64,
+            supported: bool,
+            ok: bool,
+            width: usize,
+            height: usize,
+            depth: usize,
+            expected: Vec<u8>,
+        }
+        let mut cases: Vec<Case> = Vec::new();
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut parts = line.splitn(4, '|');
+            assert_eq!(parts.next(), Some("CCONV"), "{line}");
+            let tag = parts.next().expect("a probe tag");
+            if tag == "texinput" {
+                assert_eq!(parts.next(), Some("4"), "{line}");
+                let mut fields = parts.next().expect("input fields").split('|');
+                assert_eq!(fields.next(), Some("4"), "{line}");
+                input = decode_hex(fields.next().expect("input hex"));
+                assert_eq!(input.len(), 64, "{line}");
+                continue;
+            }
+            if cases.is_empty() || cases.last().expect("a case").tag != tag {
+                cases.push(Case {
+                    tag: tag.to_owned(),
+                    path_id: -1,
+                    supported: false,
+                    ok: false,
+                    width: 0,
+                    height: 0,
+                    depth: 0,
+                    expected: Vec::new(),
+                });
+            }
+            let case = cases.last_mut().expect("a case");
+            match parts.next().expect("a row kind") {
+                "pptr" => {
+                    let mut fields = parts.next().expect("pptr fields").split('|');
+                    assert_eq!(fields.next(), Some("0"), "{line}");
+                    case.path_id = fields.next().expect("a path ID").parse().unwrap();
+                }
+                "supported" => case.supported = parts.next() == Some("1"),
+                "ok" => case.ok = parts.next() == Some("1"),
+                "size" => {
+                    let mut fields = parts.next().expect("size fields").split('|');
+                    case.width = fields.next().expect("a width").parse().unwrap();
+                    case.height = fields.next().expect("a height").parse().unwrap();
+                    case.depth = fields.next().expect("a depth").parse().unwrap();
+                }
+                "pixels" => case.expected = decode_hex(parts.next().expect("pixel hex")),
+                other => panic!("unexpected row kind {other}"),
+            }
+        }
+        assert_eq!(cases.len(), 3, "all probed sprite conversions are asserted");
+        for case in &cases {
+            // FileID 0 resolves inside the sprite's own collection; only the
+            // registered texture PathID (44) is present there.
+            let has_texture = case.path_id == 44;
+            // Inline RGBA32 bytes are present and nonempty, so the texture
+            // passes `CheckAssetIntegrity` exactly when it resolves.
+            let texture_integrity = has_texture;
+            assert_eq!(
+                sprite_supported(has_texture, texture_integrity, false),
+                case.supported,
+                "{tag}",
+                tag = case.tag,
+            );
+            let delegate_ok = if has_texture {
+                let image = TextureImage {
+                    texture_format: 4, // RGBA32, like the probed texture.
+                    graphics_format: 0,
+                    width: 4,
+                    height: 4,
+                    depth: 1,
+                    image_size: input.len(),
+                    data: &input,
+                };
+                match try_convert_to_bitmap(&image, true, false) {
+                    Ok(bitmap) => {
+                        assert_eq!(bitmap.width, case.width, "{tag}", tag = case.tag);
+                        assert_eq!(bitmap.height, case.height, "{tag}", tag = case.tag);
+                        assert_eq!(bitmap.depth, case.depth, "{tag}", tag = case.tag);
+                        assert_eq!(bitmap.pixels, case.expected, "{tag}", tag = case.tag);
+                        true
+                    }
+                    Err(error) => panic!("{tag} delegate failed: {error}", tag = case.tag),
+                }
+            } else {
+                assert!(case.expected.is_empty(), "{tag}", tag = case.tag);
+                false
+            };
+            assert_eq!(
+                sprite_try_convert_to_bitmap(has_texture, delegate_ok, false),
+                case.ok,
+                "{tag}",
+                tag = case.tag,
+            );
+        }
+    }
+
     #[test]
     fn settings_raw_decodes_the_shared_packing_positions() {
         // Bit 0 is the packed flag; bit 1 the mode; bits 2-5 the rotation; bit 6

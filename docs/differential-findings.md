@@ -924,3 +924,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | Test atlas_coordinates_match_the_reference_runtime in src/resources/sprite.rs; fixture src/resources/sprite_atlas_fixture.txt. No production change. |
 | Regression evidence | All six probed cases reproduce rect, pivot, and border; full suite 1385 plus 65 pass with warnings-denied Clippy. |
 | Remaining comparison | `RD.Texture` pointer resolution and exporter wiring stay with RES-SPRITE-CONVERT-001; Unity-produced sprites stay out per the row disposition. |
+
+## DIFF-SPRITE-CONVERT-001 - live-sprite conversion (pointer resolution and delegation)
+
+| Field | Finding |
+|---|---|
+| Status | Reference-runtime differential recorded; three rows ported and pinned |
+| Source location | AssetRipper/Source/AssetRipper.Export.Modules.Textures/SpriteConverter.cs (`Supported`, `TryConvertToBitmap`); AssetRipper/Source/AssetRipper.SourceGenerated.Extensions/PPtrExtensions.cs (FileID 0 = same collection) |
+| Input evidence | Probe Temp/opencode/spriteprobe (shipped Export.Modules.Textures + Assets DLLs, SDK 10.0.401) with a real 4x4 RGBA32 texture registered via protected `AddAsset` plus real sprites whose `RD.Texture` m_ fields link (FileID 0, PathID 44), null (PathID 0), or dangle (PathID 999). Committed as src/resources/sprite_convert_fixture.txt (13 rows). |
+| Source-derived behavior | Linked sprite reports Supported with a flipped 4x4 bitmap; nulled and dangling sprites report false with empty output. FileID 0 resolves inside the sprite's own collection; only the registered PathID is present. |
+| Root cause | No Rust deviation found; this increment proves cross-object pointer resolution plus gated delegation end-to-end. |
+| Rust change | Test sprite_conversion_matches_the_reference_runtime in src/resources/sprite.rs; fixture src/resources/sprite_convert_fixture.txt. No production change. |
+| Regression evidence | All three probed conversions reproduce both decisions plus every pixel; full suite 1386 plus 65 pass with warnings-denied Clippy. |
+| Remaining comparison | Exporter wiring stays with the exporter rows; Unity-produced sprites stay out per the row disposition. |
