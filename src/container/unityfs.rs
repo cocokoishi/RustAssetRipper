@@ -2100,4 +2100,142 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn metadata_tables_match_reference_constructed_bundles() {
+        fn hex_to_bytes(hex: &str) -> Vec<u8> {
+            assert!(hex.len().is_multiple_of(2), "odd hex length for {hex}");
+            let mut out = Vec::with_capacity(hex.len() / 2);
+            let bytes = hex.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                let hi = match bytes[i] {
+                    b'0'..=b'9' => bytes[i] - b'0',
+                    b'a'..=b'f' => bytes[i] - b'a' + 10,
+                    b'A'..=b'F' => bytes[i] - b'A' + 10,
+                    b => panic!("invalid hex byte {b}"),
+                };
+                let lo = match bytes[i + 1] {
+                    b'0'..=b'9' => bytes[i + 1] - b'0',
+                    b'a'..=b'f' => bytes[i + 1] - b'a' + 10,
+                    b'A'..=b'F' => bytes[i + 1] - b'A' + 10,
+                    b => panic!("invalid hex byte {b}"),
+                };
+                out.push((hi << 4) | lo);
+                i += 2;
+            }
+            out
+        }
+
+        fn field<'a>(parts: &[&'a str], key: &str) -> &'a str {
+            let prefix = format!("{key}=");
+            for part in parts {
+                if let Some(v) = part.strip_prefix(&prefix) {
+                    return v;
+                }
+            }
+            panic!("missing {key} in {parts:?}");
+        }
+
+        // Probe Temp/opencode/unityfsmetaprobe (FileStreamBundleFile.Read over
+        // C#-constructed full bundles, SDK 10.0.401; LZ4 via K4os, LZMA via
+        // LzmaCompression.CompressLzmaStream): A None combined 1x1 start v6,
+        // B None separate 1x0 start v6, C LZ4 combined, D LZMA combined,
+        // E LZHAM unsupported, F at-end v6, G at-end v7, H truncated.
+        // Nothing here was produced by the Rust writer.
+        let fixture = include_str!("unityfs_meta_fixture.txt");
+        let mut hexes: std::collections::HashMap<String, Vec<u8>> =
+            std::collections::HashMap::new();
+        let mut reads: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for line in fixture.lines() {
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+            if line.starts_with("META_HEX|") {
+                let parts: Vec<&str> = line.splitn(3, '|').collect();
+                assert_eq!(parts.len(), 3, "bad META_HEX {line}");
+                hexes.insert(parts[1].to_string(), hex_to_bytes(parts[2]));
+            } else if line.starts_with("META_READ|") {
+                let parts: Vec<&str> = line.splitn(3, '|').collect();
+                assert_eq!(parts.len(), 3, "bad META_READ {line}");
+                reads.insert(parts[1].to_string(), parts[2].to_string());
+            }
+        }
+
+        // Baseline refuses LZHAM metadata; Rust must fail loud, never succeed.
+        let e_dump = reads.get("E").expect("E dump");
+        assert!(
+            e_dump.contains("UnsupportedBundleDecompression"),
+            "E refusal {e_dump}"
+        );
+        let e_bytes = hexes.get("E").expect("E hex");
+        assert!(UnityFsBundle::parse(e_bytes).is_err(), "E Rust fails loud");
+
+        // Truncated metadata fails loud on both sides (different messages,
+        // both loud, no silent success).
+        let h_dump = reads.get("H").expect("H dump");
+        assert!(h_dump.starts_with("THROW:"), "H refusal {h_dump}");
+        let h_bytes = hexes.get("H").expect("H hex");
+        assert!(UnityFsBundle::parse(h_bytes).is_err(), "H Rust fails loud");
+
+        // All decodable lanes reproduce blocks, nodes, header, and offset.
+        for case in ["A", "B", "C", "D", "F", "G"] {
+            let bytes = hexes.get(case).unwrap_or_else(|| panic!("missing {case}"));
+            let dump = reads.get(case).unwrap_or_else(|| panic!("missing {case}"));
+            let parts: Vec<&str> = dump.split('|').collect();
+            let want_version: i32 = field(&parts, "V").parse().unwrap();
+            let want_size: u64 = field(&parts, "Size").parse().unwrap();
+            let want_comp: u32 = field(&parts, "Comp").parse().unwrap();
+            let want_uncomp: u32 = field(&parts, "Uncomp").parse().unwrap();
+            let want_flags: u32 = field(&parts, "Flags").parse().unwrap();
+            let want_blocks: usize = field(&parts, "Blocks").parse().unwrap();
+            let want_nodes: usize = field(&parts, "Nodes").parse().unwrap();
+            let want_total: usize = field(&parts, "Total").parse().unwrap();
+
+            assert_eq!(bytes.len(), want_total, "{case} total length");
+            let bundle = UnityFsBundle::parse(bytes)
+                .unwrap_or_else(|e| panic!("{case} Rust parse failed: {e:?}"));
+            assert_eq!(bundle.header.version, want_version, "{case} version");
+            assert_eq!(bundle.header.declared_size, want_size, "{case} size");
+            assert_eq!(
+                bundle.header.compressed_blocks_info_size, want_comp,
+                "{case} comp"
+            );
+            assert_eq!(
+                bundle.header.uncompressed_blocks_info_size, want_uncomp,
+                "{case} uncomp"
+            );
+            assert_eq!(bundle.header.flags, want_flags, "{case} flags");
+            assert_eq!(bundle.storage_blocks.len(), want_blocks, "{case} blocks");
+            assert_eq!(bundle.nodes.len(), want_nodes, "{case} nodes");
+            assert_eq!(want_blocks, 1, "{case} one block");
+            let block = &bundle.storage_blocks[0];
+            assert_eq!(block.uncompressed_size, 10, "{case} block uncomp");
+            assert_eq!(block.compressed_size, 10, "{case} block comp");
+            assert_eq!(block.compression_type(), 0, "{case} block None");
+            if case == "B" {
+                assert_eq!(want_nodes, 0, "B separate has no directory");
+            } else {
+                assert_eq!(want_nodes, 1, "{case} one node");
+                let node = &bundle.nodes[0];
+                assert_eq!(node.offset, 0, "{case} node offset");
+                assert_eq!(node.size, 10, "{case} node size");
+                assert_eq!(node.path, "data/file.bin", "{case} node path");
+            }
+            // Placement: start cases follow the header; end cases sit at
+            // Size minus the compressed metadata length.
+            if case == "F" || case == "G" {
+                assert_eq!(
+                    bundle.metadata_offset as u64,
+                    want_size - u64::from(want_comp),
+                    "{case} metadata at end"
+                );
+            } else {
+                assert_eq!(
+                    bundle.metadata_offset, bundle.header.header_size,
+                    "{case} metadata follows header"
+                );
+            }
+        }
+    }
 }

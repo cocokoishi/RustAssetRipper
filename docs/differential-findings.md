@@ -625,3 +625,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | src/compression/lzma.rs test reference_runtime_outputs_match_the_rust_decoder; fixture src/compression/lzma_reference_fixture.txt. |
 | Regression evidence | All reference outputs match Rust byte-for-byte; write refusal and negative fail-closed pinned; full suite 1356 plus 60 pass with warnings-denied Clippy. |
 | Remaining comparison | UnityFS metadata/entry integration over LZMA and real UnityWeb file comparison stay open as noted; encoder byte-identity is not owed. |
+
+## DIFF-UNITYFS-META-001 - UnityFS metadata all lanes
+
+| Field | Finding |
+|---|---|
+| Status | Reference-runtime differential recorded; row ported and pinned |
+| Source location | AssetRipper.IO.Files/BundleFiles/FileStream/FileStreamBundleFile.cs (ReadFileStreamMetadata, ReadMetadata); BlocksInfo.cs; DirectoryInfo.cs; StorageBlock.cs; FileStreamNode.cs |
+| Input evidence | Probe Temp/opencode/unityfsmetaprobe (shipped IO.Files DLL, SDK 10.0.401) reading eight C#-constructed full bundles with 1-block/1-node tables (None/LZ4/LZMA, combined/separate, start/end, v6/v7) plus LZHAM and truncated refusals. Committed as src/container/unityfs_meta_fixture.txt (20 lines). |
+| Source-derived behavior | Metadata compression None/LZ4/LZMA decode via the same payload path; LZHAM throws UnsupportedBundleDecompression before reading; placement at end seeks to Size minus compressed length with v7 16-byte alignment; separate directories leave nodes empty; truncated metadata throws loudly. |
+| Root cause | No deviation found; this increment ports the previously synthetic-only lanes. LZHAM is unsupported-by-the-baseline (proven refusal). Truncated input fails loud on both sides with different messages (no silent success). |
+| Rust change | src/container/unityfs.rs test metadata_tables_match_reference_constructed_bundles; fixture src/container/unityfs_meta_fixture.txt. |
+| Regression evidence | All six decodable lanes reproduce blocks/nodes/header/offsets/table values; LZHAM and truncated pinned fail-loud; full suite 1357 plus 60 pass with warnings-denied Clippy. |
+| Remaining comparison | Entry extraction over storage blocks (Zstd Huffman/FSE, non-combined variants) stays with IO-BUNDLE-UNITYFS-ENTRY-001; real-file comparison stays open as noted. |
