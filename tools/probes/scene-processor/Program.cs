@@ -11,23 +11,32 @@ using System.Reflection;
 using AssetRipper.Assets;
 using AssetRipper.Assets.Bundles;
 using AssetRipper.Assets.Collections;
+using AssetRipper.Assets.IO.Writing;
+using AssetRipper.Assets.Metadata;
+using AssetRipper.Export.Configuration;
+using AssetRipper.Export.UnityProjects;
 using AssetRipper.Import.AssetCreation;
 using AssetRipper.Import.Logging;
 using AssetRipper.Import.Structure.Assembly.Managers;
 using AssetRipper.Import.Structure.Assembly.TypeTrees;
+using AssetRipper.IO.Endian;
 using AssetRipper.IO.Files;
 using AssetRipper.IO.Files.SerializedFiles;
+using AssetRipper.IO.Files.SerializedFiles.Parser;
 using AssetRipper.Primitives;
 using AssetRipper.Processing;
 using AssetRipper.Processing.Prefabs;
 using AssetRipper.Processing.Scenes;
 using AssetRipper.SourceGenerated;
+using AssetRipper.SourceGenerated.Classes.ClassID_1;
 using AssetRipper.SourceGenerated.Classes.ClassID_142;
+using AssetRipper.SourceGenerated.Classes.ClassID_4;
 using AssetRipper.SourceGenerated.Extensions;
+using System.Security.Cryptography;
 
 if (args.Length == 0)
 {
-	Console.Error.WriteLine("usage: tpk <version> <classId...> | naming <version> <name...> | process <rows> <file...>");
+	Console.Error.WriteLine("usage: tpk <version> <classId...> | naming <version> <name...> | process <rows> <file...> | legacy-export <input> <rows> <output>");
 	return 2;
 }
 
@@ -48,7 +57,12 @@ try
 		Process(args[1], args[2..]);
 		return 0;
 	}
-	Console.Error.WriteLine("usage: tpk <version> <classId...> | naming <version> <name...> | process <rows> <file...>");
+	if (args[0] == "legacy-export" && args.Length == 4)
+	{
+		ExportLegacyPrefab(args[1], args[2], args[3]);
+		return 0;
+	}
+	Console.Error.WriteLine("usage: tpk <version> <classId...> | naming <version> <name...> | process <rows> <file...> | legacy-export <input> <rows> <output>");
 	return 2;
 }
 catch (Exception ex)
@@ -182,6 +196,136 @@ static void Process(string rowsPath, string[] paths)
 			DumpHierarchy(rows, hierarchy);
 		}
 	}
+}
+
+static void ExportLegacyPrefab(string inputPath, string rowsPath, string outputRoot)
+{
+	string inputFullPath = Path.GetFullPath(inputPath);
+	string rowsFullPath = Path.GetFullPath(rowsPath);
+	string outputFullPath = Path.GetFullPath(outputRoot);
+	if (File.Exists(inputFullPath) || Directory.Exists(inputFullPath))
+	{
+		throw new IOException($"refusing to overwrite probe input {inputFullPath}");
+	}
+	if (File.Exists(rowsFullPath) || Directory.Exists(rowsFullPath))
+	{
+		throw new IOException($"refusing to overwrite probe rows {rowsFullPath}");
+	}
+	if (Directory.Exists(outputFullPath) && Directory.EnumerateFileSystemEntries(outputFullPath).Any())
+	{
+		throw new IOException($"refusing to export into non-empty output {outputFullPath}");
+	}
+
+	Directory.CreateDirectory(Path.GetDirectoryName(inputFullPath)!);
+	Directory.CreateDirectory(Path.GetDirectoryName(rowsFullPath)!);
+	Directory.CreateDirectory(outputFullPath);
+	File.WriteAllBytes(inputFullPath, BuildLegacyRootFile());
+
+	Logger.Add(new ConsoleLogger());
+	FullConfiguration settings = new();
+	ExportHandler handler = new(settings);
+	GameData gameData = handler.LoadAndProcess([inputFullPath], LocalFileSystem.Instance);
+	handler.Export(gameData, outputFullPath, LocalFileSystem.Instance);
+
+	string[] exportedFiles = Directory.GetFiles(outputFullPath, "*", SearchOption.AllDirectories)
+		.OrderBy(path => Path.GetRelativePath(outputFullPath, path), StringComparer.Ordinal)
+		.ToArray();
+	string[] prefabFiles = exportedFiles
+		.Where(path => string.Equals(Path.GetExtension(path), ".prefab", StringComparison.OrdinalIgnoreCase))
+		.ToArray();
+	if (prefabFiles.Length != 1)
+	{
+		throw new InvalidDataException($"expected one legacy Prefab output, found {prefabFiles.Length}");
+	}
+
+	using StreamWriter rows = new(rowsFullPath, false, new System.Text.UTF8Encoding(false)) { NewLine = "\n" };
+	rows.WriteLine("# Frozen source AssetRipper 2017.4.40f1 generated legacy Prefab project export.");
+	byte[] inputBytes = File.ReadAllBytes(inputFullPath);
+	rows.WriteLine($"INPUT|{Path.GetFileName(inputFullPath)}|{Convert.ToHexString(SHA256.HashData(inputBytes))}");
+	rows.WriteLine($"INPUT_HEX|{Convert.ToHexString(inputBytes)}");
+	rows.WriteLine($"VERSION|{gameData.ProjectVersion}");
+	foreach (string file in exportedFiles)
+	{
+		string relativePath = Path.GetRelativePath(outputFullPath, file).Replace('\\', '/');
+		byte[] content = File.ReadAllBytes(file);
+		rows.WriteLine($"FILE|{relativePath}|{content.Length}|{Convert.ToHexString(SHA256.HashData(content))}");
+		if (string.Equals(Path.GetExtension(file), ".prefab", StringComparison.OrdinalIgnoreCase)
+			|| string.Equals(Path.GetFileName(file), Path.GetFileName(prefabFiles[0]) + ".meta", StringComparison.OrdinalIgnoreCase))
+		{
+			rows.WriteLine($"CONTENT|{relativePath}|{Convert.ToBase64String(content)}");
+		}
+	}
+}
+
+static byte[] BuildLegacyRootFile()
+{
+	UnityVersion version = UnityVersion.Parse("2017.4.40f1");
+	SerializedFile template = new SerializedFileBuilder
+	{
+		Generation = FormatVersion.Unknown_10,
+		Version = version,
+		Platform = BuildTarget.NoTarget,
+		EndianType = EndianType.LittleEndian,
+		HasTypeTree = false,
+	}.Build();
+	GameAssetFactory factory = new(new BaseManager(s => { }));
+	GameBundle bundle = new();
+	SerializedAssetCollection collection = bundle.AddCollectionFromSerializedFile(template, factory);
+	IUnityObjectBase asset = AssetFactory.CreateSerialized(new AssetInfo(collection, 10, 1), version)
+		?? throw new InvalidDataException("source factory did not create the 2017.4 GameObject");
+	if (asset is not IGameObject gameObject)
+	{
+		throw new InvalidDataException($"source factory returned {asset.GetType().Name}, expected IGameObject");
+	}
+	IUnityObjectBase transformAsset = AssetFactory.CreateSerialized(new AssetInfo(collection, 11, 4), version)
+		?? throw new InvalidDataException("source factory did not create the 2017.4 Transform");
+	if (transformAsset is not ITransform transform)
+	{
+		throw new InvalidDataException($"source factory returned {transformAsset.GetType().Name}, expected ITransform");
+	}
+	transform.InitializeDefault();
+	transform.GameObject_C4P = gameObject;
+	gameObject.AddComponent(ClassIDType.Transform, transform);
+	gameObject.Name = new Utf8String("LegacyRoot");
+	using MemoryStream payloadStream = new();
+	using (AssetWriter writer = new(payloadStream, asset.Collection))
+	{
+		asset.WriteEditor(writer);
+	}
+	using MemoryStream transformPayloadStream = new();
+	using (AssetWriter writer = new(transformPayloadStream, transformAsset.Collection))
+	{
+		transformAsset.WriteEditor(writer);
+	}
+
+	SerializedType gameObjectType = new() { RawTypeID = 1 };
+	SerializedType transformType = new() { RawTypeID = 4 };
+	SerializedFile file = new SerializedFileBuilder
+	{
+		Generation = FormatVersion.Unknown_10,
+		Version = version,
+		Platform = BuildTarget.NoTarget,
+		EndianType = EndianType.LittleEndian,
+		HasTypeTree = false,
+		Types = { gameObjectType, transformType },
+		Objects =
+		{
+			new ObjectInfo(gameObjectType)
+			{
+				FileID = 10,
+				TypeID = 1,
+				ObjectData = payloadStream.ToArray(),
+			},
+			new ObjectInfo(transformType)
+			{
+				FileID = 11,
+				TypeID = 4,
+				ObjectData = transformPayloadStream.ToArray(),
+			},
+		},
+	}.Build();
+	file.FilePath = "LegacyRoot.unity";
+	return file.ToByteArray();
 }
 
 static bool IsScene(AssetCollection collection) => collection.IsScene;

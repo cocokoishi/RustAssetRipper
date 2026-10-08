@@ -11,7 +11,8 @@
 //! Scene definitions are processed into workspace hierarchies and emitted as `.unity` files
 //! through the scene collection route, with scene IDs, pointers, and `DefaultImporter` metadata.
 //! Modern PrefabProcessor hierarchies are emitted as `.prefab` collections with planned IDs,
-//! generated Transforms, pointer mapping, and `PrefabImporter` metadata. Legacy generated Prefabs,
+//! generated Transforms, pointer mapping, and `PrefabImporter` metadata. A source-matched legacy
+//! generated Prefab route covers a synthetic Unity 2017.4.40f1 hierarchy; other legacy branches,
 //! full AssetBundle-derived importer metadata, and the remaining class-specific exporters remain
 //! required integrations.
 
@@ -763,6 +764,28 @@ pub fn export_workspace_yaml_project_with_settings(
     }
 
     for prefab in &prefab_collections {
+        let mut generated_transform_context =
+            WorkspaceGeneratedTransformYamlContext::with_materialized_prefab_transforms(
+                &scene_processing.processed_assets,
+                &scene_processing.generated_transforms,
+            );
+        let generated_legacy_prefab = prefab.representation
+            == PrefabAssetRepresentation::LegacyPrefabMarker
+            && prefab
+                .export_ids
+                .registered_assets
+                .iter()
+                .any(|assignment| {
+                    assignment.is_main_asset
+                        && matches!(
+                            assignment.asset.collection,
+                            ExportAssetCollectionIdentity::ProcessedCollection { .. }
+                        )
+                });
+        if generated_legacy_prefab {
+            generated_transform_context = generated_transform_context
+                .with_legacy_prefab_export(&prefab.export_ids, editor_version_text);
+        }
         let yaml = workspace_prefab_hierarchy_to_unity_yaml_with_generated_transforms(
             workspace,
             objects,
@@ -772,10 +795,7 @@ pub fn export_workspace_yaml_project_with_settings(
             prefab.collection_index,
             None,
             limits.yaml_collection,
-            &WorkspaceGeneratedTransformYamlContext::with_materialized_prefab_transforms(
-                &scene_processing.processed_assets,
-                &scene_processing.generated_transforms,
-            ),
+            &generated_transform_context,
         )?;
         exported_object_count = exported_object_count
             .checked_add(count_unity_yaml_documents(&yaml))
@@ -1351,12 +1371,6 @@ fn prepare_prefab_collections(
                         generated_prefab.class_id
                     )));
                 }
-                if !unity_version_has_prefab_importer(project_version) {
-                    return Err(invalid_project(format!(
-                            "Unity {}.{} generated legacy Prefab payload serialization is not implemented",
-                            project_version.major, project_version.minor
-                        )));
-                }
                 let generated_collection = processing
                     .processed_assets
                     .collections()
@@ -1408,8 +1422,16 @@ fn prepare_prefab_collections(
                         },
                         unity_version: project_version,
                     },
-                    PrefabAssetRepresentation::PrefabInstanceMarker,
-                    "PrefabInstance".to_owned(),
+                    if unity_version_has_prefab_importer(project_version) {
+                        PrefabAssetRepresentation::PrefabInstanceMarker
+                    } else {
+                        PrefabAssetRepresentation::LegacyPrefabMarker
+                    },
+                    if unity_version_has_prefab_importer(project_version) {
+                        "PrefabInstance".to_owned()
+                    } else {
+                        "GameObject".to_owned()
+                    },
                 )
             }
         };
@@ -1507,18 +1529,6 @@ fn prepare_prefab_collections(
             ))
         })?;
 
-        if export_ids.emit_prefab_asset
-            && matches!(
-                prefab_reference,
-                crate::processing::prefab_processing::WorkspaceProcessedPrefabReference::Generated(
-                    _
-                )
-            )
-        {
-            return Err(invalid_project(
-                "generated legacy Prefab serialization requires a versioned generated-object walker",
-            ));
-        }
         for assignment in &export_ids.registered_assets {
             let ExportAssetCollectionIdentity::SerializedFile { file_index } =
                 assignment.asset.collection
@@ -2230,6 +2240,72 @@ mod tests {
         assert_eq!(report.meta_file_count, 1);
         assert_eq!(report.collection_count, 1);
         assert_eq!(report.exported_object_count, 2);
+
+        std::fs::remove_dir_all(output_root).unwrap();
+    }
+
+    #[test]
+    fn project_export_matches_source_for_a_generated_legacy_prefab() {
+        let bytes = include_bytes!("legacy_prefab_2017_4_input.unity");
+        let (filesystem, workspace) = load_workspace_bytes_with_source_factory(bytes);
+        let objects = ObjectWorkspace::load_from_vfs(
+            &filesystem,
+            &workspace,
+            ObjectWorkspaceLimits::default(),
+        )
+        .unwrap();
+        assert!(objects.report().is_complete(), "{:?}", objects.report());
+        assert_eq!(objects.objects().len(), 2);
+        assert!(objects.objects().iter().all(|object| matches!(
+            &object.factory.kind,
+            crate::processing::asset_factory::FactoryAssetKind::Generated(_)
+        )));
+        let reference_graph = workspace
+            .reference_graph(MultiFileReferenceGraphLimits::default())
+            .unwrap();
+        assert!(reference_graph.is_complete());
+        let root_catalog = RootResourceFileCatalog::default();
+        let provider = PlatformResourceProvider::new(None, None);
+        let settings = ExportSettingsFile::from(ExportDefaults::default());
+        let output_root = crate::test_support::unique_test_directory("project-legacy-prefab-e2e");
+
+        let report = export_workspace_yaml_project_with_settings(
+            &output_root,
+            false,
+            &filesystem,
+            &root_catalog,
+            &provider,
+            &workspace,
+            &objects,
+            &reference_graph,
+            &settings,
+            WorkspaceProjectExportLimits::default(),
+        )
+        .unwrap();
+
+        let prefab_path = output_root.join("Assets/GameObject/LegacyRoot.prefab");
+        let prefab_meta_path = output_root.join("Assets/GameObject/LegacyRoot.prefab.meta");
+        let prefab_yaml = std::fs::read_to_string(&prefab_path).unwrap();
+        let expected_yaml = include_str!("legacy_prefab_source_2017_4_fixture.yaml");
+        assert_eq!(
+            prefab_yaml.replace("\r\n", "\n"),
+            expected_yaml.replace("\r\n", "\n")
+        );
+        let prefab_meta = std::fs::read_to_string(&prefab_meta_path).unwrap();
+        assert!(
+            prefab_meta.contains("NativeFormatImporter:"),
+            "{prefab_meta}"
+        );
+        assert!(
+            prefab_meta.contains("mainObjectFileID: 100100000"),
+            "{prefab_meta}"
+        );
+        assert!(!prefab_meta.contains("PrefabImporter:"), "{prefab_meta}");
+        assert_eq!(report.asset_file_count, 1);
+        assert_eq!(report.meta_file_count, 1);
+        assert_eq!(report.collection_count, 1);
+        assert_eq!(report.exported_object_count, 3);
+        assert!(report.processing_warnings.is_empty());
 
         std::fs::remove_dir_all(output_root).unwrap();
     }

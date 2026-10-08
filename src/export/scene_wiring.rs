@@ -616,6 +616,7 @@ pub fn process_workspace_scenes_and_prefabs(
     let (graph, hierarchies) = build_typed_graph_and_hierarchies(
         filesystem,
         workspace,
+        objects,
         &definitions,
         references,
         limits,
@@ -1021,6 +1022,7 @@ fn run_scene_definition_pass(
 fn build_typed_graph_and_hierarchies(
     filesystem: &VirtualFileSystem,
     workspace: &SerializedFileWorkspace,
+    objects: &ObjectWorkspace,
     definitions: &WorkspaceSceneDefinitions,
     references: &MultiFileReferenceGraph<'_>,
     limits: WorkspaceSceneProcessingLimits,
@@ -1053,12 +1055,65 @@ fn build_typed_graph_and_hierarchies(
                 message: error.to_string(),
             }
         })?;
-        let mut scene_graph = SceneGraph::build(&parsed, limits.scene_graph).map_err(|error| {
-            WorkspaceSceneProcessingError::SceneGraph {
+        let mut decoded_roots = Vec::new();
+        let mut scene_object_count = 0usize;
+        let mut all_scene_objects_decoded = true;
+        for (object_index, metadata_object) in parsed.metadata.objects.iter().enumerate() {
+            let class_id = metadata_object.class_id.map(i32::from).or_else(|| {
+                metadata_object
+                    .resolved_type_index
+                    .map(|_| metadata_object.raw_type_id)
+            });
+            if !matches!(class_id, Some(1 | 4 | 224 | 1001)) {
+                continue;
+            }
+            scene_object_count = scene_object_count.checked_add(1).ok_or_else(|| {
+                WorkspaceSceneProcessingError::SceneGraph {
+                    file_index,
+                    message: "scene object count overflow".to_owned(),
+                }
+            })?;
+            let Some(workspace_object) = objects.get(file_index, object_index) else {
+                all_scene_objects_decoded = false;
+                break;
+            };
+            if workspace_object.file_index != file_index
+                || workspace_object.object_index != object_index
+                || workspace_object.path_id != metadata_object.path_id
+            {
+                return Err(WorkspaceSceneProcessingError::SceneGraph {
+                    file_index,
+                    message: format!(
+                        "ObjectWorkspace identity mismatch at object {object_index}: expected PathID {}, got file {} object {} PathID {}",
+                        metadata_object.path_id,
+                        workspace_object.file_index,
+                        workspace_object.object_index,
+                        workspace_object.path_id,
+                    ),
+                });
+            }
+            let Ok(payload) = &workspace_object.payload else {
+                all_scene_objects_decoded = false;
+                break;
+            };
+            decoded_roots.try_reserve(1).map_err(|_| {
+                WorkspaceSceneProcessingError::SceneGraph {
+                    file_index,
+                    message: "could not allocate decoded scene roots".to_owned(),
+                }
+            })?;
+            decoded_roots.push((object_index, payload.root.clone()));
+        }
+        let mut scene_graph =
+            if all_scene_objects_decoded && decoded_roots.len() == scene_object_count {
+                SceneGraph::from_decoded_roots(&parsed.metadata, &decoded_roots, limits.scene_graph)
+            } else {
+                SceneGraph::build(&parsed, limits.scene_graph)
+            }
+            .map_err(|error| WorkspaceSceneProcessingError::SceneGraph {
                 file_index,
                 message: error.to_string(),
-            }
-        })?;
+            })?;
         let roots = scene_graph
             .discover_workspace_roots(
                 file_index,

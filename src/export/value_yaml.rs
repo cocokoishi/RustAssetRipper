@@ -103,6 +103,9 @@ pub struct UnityYamlObjectConversionHints {
     pub property_name_schemas: HashMap<String, UnityYamlPropertyNameSchema>,
     pub scene_object_identifier_schemas: HashMap<String, UnityYamlSceneObjectIdentifierSchema>,
     pub field_name_aliases: HashMap<String, String>,
+    /// Preserve names from a recovered TypeTree when the source factory materialized the
+    /// corresponding generated engine class, whose editor walker uses its generated members.
+    pub preserve_type_tree_field_names: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1338,7 +1341,7 @@ where
         } else {
             UnityYamlMappingStyle::Block
         });
-        if !stripped {
+        if !stripped && serialized_version > 1 {
             body.insert_field(
                 "serializedVersion",
                 UnityYamlNode::scalar(UnityYamlScalar::Signed(i64::from(serialized_version))),
@@ -1627,7 +1630,11 @@ where
         )?;
         let contextual_field_name =
             field_name_alias_for_path(&field_path, hints, limits)?.unwrap_or(field.name.as_str());
-        let field_name = baseline_yaml_field_name(contextual_field_name)?;
+        let field_name = if hints.preserve_type_tree_field_names {
+            try_copy_string(contextual_field_name, "Unity TypeTree field name")?
+        } else {
+            baseline_yaml_field_name(contextual_field_name)?
+        };
         destination
             .insert_field(field_name, value)
             .map_err(UnityYamlObjectConversionError::NodeBuild)?;

@@ -8,6 +8,9 @@ use std::str;
 use crate::export::scene_wiring::MaterializedGeneratedTransform;
 use crate::io::filesystem::VirtualFileSystem;
 use crate::io::platform_structure::PlatformResourceProvider;
+use crate::processing::asset_factory::{
+    reference_class_layouts, ClassLayoutSource, FactoryAssetKind, FactoryUnityVersion,
+};
 use crate::processing::prefab_processing::{
     materialize_planned_game_object_component_append,
     materialize_planned_generated_transform_payload, WorkspaceGeneratedConstructorPointer,
@@ -21,7 +24,7 @@ use crate::resource::{
     resolve_and_read_streamed_resource_info, RootResourceFileCatalog, StreamedResourceContentError,
     StreamedResourceContentLimits, StreamedResourceContentResolution,
 };
-use crate::serialized_file::metadata::SerializedFileMetadata;
+use crate::serialized_file::metadata::{SerializedFileMetadata, SerializedType};
 use crate::serialized_file::object::{
     ObjectDefaultValueLimits, ObjectEncodeLimits, ParsedObjectPayload, SerializedValue,
 };
@@ -128,7 +131,7 @@ impl GeneratedTransformCollectionScope {
             Self::Scene { scene_index } => {
                 format!("the generated collection for Scene {scene_index}")
             }
-            Self::Prefab => "the generated collection for Prefabs".to_owned(),
+            Self::Prefab => "the generated Transform collection for Prefabs".to_owned(),
         }
     }
 }
@@ -141,8 +144,15 @@ pub struct WorkspaceGeneratedTransformYamlContext<'a> {
     materialized_transforms: Option<&'a [MaterializedGeneratedTransform]>,
     metadata: Option<&'a SerializedFileMetadata>,
     transform_type_index: Option<usize>,
+    legacy_prefab_export: Option<WorkspaceGeneratedLegacyPrefabYamlContext<'a>>,
     pub default_value_limits: ObjectDefaultValueLimits,
     pub encode_limits: ObjectEncodeLimits,
+}
+
+#[derive(Clone, Copy)]
+struct WorkspaceGeneratedLegacyPrefabYamlContext<'a> {
+    export_ids: &'a PrefabExportIdPlan,
+    unity_version_text: &'a str,
 }
 
 impl<'a> WorkspaceGeneratedTransformYamlContext<'a> {
@@ -158,6 +168,7 @@ impl<'a> WorkspaceGeneratedTransformYamlContext<'a> {
             materialized_transforms: None,
             metadata: Some(metadata),
             transform_type_index: Some(transform_type_index),
+            legacy_prefab_export: None,
             default_value_limits: ObjectDefaultValueLimits::default(),
             encode_limits: ObjectEncodeLimits::default(),
         }
@@ -174,6 +185,7 @@ impl<'a> WorkspaceGeneratedTransformYamlContext<'a> {
             materialized_transforms: None,
             metadata: Some(metadata),
             transform_type_index: Some(transform_type_index),
+            legacy_prefab_export: None,
             default_value_limits: ObjectDefaultValueLimits::default(),
             encode_limits: ObjectEncodeLimits::default(),
         }
@@ -193,6 +205,7 @@ impl<'a> WorkspaceGeneratedTransformYamlContext<'a> {
             materialized_transforms: Some(generated_transforms),
             metadata: None,
             transform_type_index: None,
+            legacy_prefab_export: None,
             default_value_limits: ObjectDefaultValueLimits::default(),
             encode_limits: ObjectEncodeLimits::default(),
         }
@@ -209,9 +222,23 @@ impl<'a> WorkspaceGeneratedTransformYamlContext<'a> {
             materialized_transforms: Some(generated_transforms),
             metadata: None,
             transform_type_index: None,
+            legacy_prefab_export: None,
             default_value_limits: ObjectDefaultValueLimits::default(),
             encode_limits: ObjectEncodeLimits::default(),
         }
+    }
+
+    /// Attach the generated legacy Prefab identity and source version for one Prefab collection.
+    pub fn with_legacy_prefab_export(
+        mut self,
+        export_ids: &'a PrefabExportIdPlan,
+        unity_version_text: &'a str,
+    ) -> Self {
+        self.legacy_prefab_export = Some(WorkspaceGeneratedLegacyPrefabYamlContext {
+            export_ids,
+            unity_version_text,
+        });
+        self
     }
 }
 
@@ -226,6 +253,12 @@ struct WorkspaceGeneratedComponentYamlPointer {
 struct WorkspaceGeneratedComponentYamlOverlay {
     payload: ParsedObjectPayload,
     pointer: WorkspaceGeneratedComponentYamlPointer,
+}
+
+#[derive(Clone, Copy)]
+struct WorkspaceGeneratedPrefabInternalPointer {
+    source: ExportAssetIdentity,
+    target: ExportAssetIdentity,
 }
 
 /// Execute one ordered Scene or Prefab YAML collection using workspace-decoded source objects.
@@ -261,9 +294,10 @@ pub fn workspace_assignments_to_unity_yaml<A: UnityYamlCollectionAssignment>(
 /// Execute the YAML members of a planned Prefab collection in baseline hierarchy order.
 ///
 /// `PrefabExportCollection.ExportableAssets` excludes hidden modern PrefabInstance markers but
-/// includes the legacy Prefab object. The latter remains an explicit error until its generated
-/// YAML payload and legacy `m_PrefabInternal` overlays are materialized. This function writes the
-/// `.prefab` YAML body only; importer `.meta` output is a separate export path.
+/// includes the legacy Prefab object. This context-free helper fails explicitly for a generated
+/// legacy main object; the generated-aware project route supplies its TPK payload schema and
+/// `m_PrefabInternal` overlays. This function writes the `.prefab` YAML body only; importer
+/// `.meta` output is a separate export path.
 #[allow(clippy::too_many_arguments)]
 pub fn workspace_prefab_hierarchy_to_unity_yaml(
     workspace: &SerializedFileWorkspace,
@@ -495,6 +529,16 @@ fn workspace_assignments_to_unity_yaml_with_context<A: UnityYamlCollectionAssign
                         source: Box::new(source),
                     })?
                     .flatten();
+                let generated_prefab_internal = if let Some(context) = generated_transforms {
+                    workspace_generated_prefab_internal_pointer(asset, context).map_err(
+                        |source| UnityYamlWorkspaceCollectionError::ObjectExport {
+                            assignment_index,
+                            source: Box::new(source),
+                        },
+                    )?
+                } else {
+                    None
+                };
                 workspace_object_to_unity_yaml_document_with_context(
                     workspace,
                     reference_graph,
@@ -507,6 +551,7 @@ fn workspace_assignments_to_unity_yaml_with_context<A: UnityYamlCollectionAssign
                     limits.object_conversion,
                     streamed_resources,
                     generated_component_overlay.as_ref(),
+                    generated_prefab_internal.as_ref(),
                 )
                 .map_err(|source| {
                     UnityYamlWorkspaceCollectionError::ObjectExport {
@@ -516,7 +561,7 @@ fn workspace_assignments_to_unity_yaml_with_context<A: UnityYamlCollectionAssign
                 })?
             }
             ExportAssetCollectionIdentity::ProcessedCollection { .. } => {
-                let Some(generated_transforms) = generated_transforms else {
+                let Some(generated_context) = generated_transforms else {
                     return Err(
                         UnityYamlWorkspaceCollectionError::ProcessedAssetRequiresGeneratedWalker {
                             assignment_index,
@@ -524,22 +569,40 @@ fn workspace_assignments_to_unity_yaml_with_context<A: UnityYamlCollectionAssign
                         },
                     );
                 };
-                let document = workspace_generated_transform_assignment_to_unity_yaml_document(
-                    workspace,
-                    reference_graph,
-                    pointer_map,
-                    asset,
-                    file_id,
-                    current_collection_index,
-                    missing_reference_guid,
-                    limits.object_conversion,
-                    generated_transforms,
-                )
-                .map_err(|source| {
-                    UnityYamlWorkspaceCollectionError::ObjectExport {
-                        assignment_index,
-                        source: Box::new(source),
+                let document = match asset.class_id {
+                    4 => workspace_generated_transform_assignment_to_unity_yaml_document(
+                        workspace,
+                        reference_graph,
+                        pointer_map,
+                        asset,
+                        file_id,
+                        current_collection_index,
+                        missing_reference_guid,
+                        limits.object_conversion,
+                        generated_context,
+                    ),
+                    1001 => workspace_generated_prefab_assignment_to_unity_yaml_document(
+                        workspace,
+                        pointer_map,
+                        asset,
+                        file_id,
+                        current_collection_index,
+                        missing_reference_guid,
+                        limits.object_conversion,
+                        generated_context,
+                    ),
+                    _ => {
+                        return Err(
+                            UnityYamlWorkspaceCollectionError::ProcessedAssetRequiresGeneratedWalker {
+                                assignment_index,
+                                asset,
+                            },
+                        );
                     }
+                }
+                .map_err(|source| UnityYamlWorkspaceCollectionError::ObjectExport {
+                    assignment_index,
+                    source: Box::new(source),
                 })?;
                 Some(document)
             }
@@ -1019,6 +1082,48 @@ impl Error for UnityYamlWorkspaceCollectionError {
     }
 }
 
+fn workspace_generated_prefab_internal_pointer(
+    source: ExportAssetIdentity,
+    context: &WorkspaceGeneratedTransformYamlContext<'_>,
+) -> Result<Option<WorkspaceGeneratedPrefabInternalPointer>, UnityYamlWorkspaceExportError> {
+    let Some(legacy) = context.legacy_prefab_export else {
+        return Ok(None);
+    };
+    let plan = legacy.export_ids;
+    if plan.representation != PrefabAssetRepresentation::LegacyPrefabMarker
+        || !plan.emit_prefab_asset
+        || !plan.exportable_assets.contains(&source)
+    {
+        return Ok(None);
+    }
+    let mut main_assets = plan
+        .registered_assets
+        .iter()
+        .filter(|asset| asset.is_main_asset);
+    let Some(main) = main_assets.next() else {
+        return Err(UnityYamlWorkspaceExportError::GeneratedPrefabInvariant {
+            source,
+            message: "legacy Prefab plan has no main asset identity".to_owned(),
+        });
+    };
+    if main_assets.next().is_some()
+        || main.asset.class_id != 1001
+        || !matches!(
+            main.asset.collection,
+            ExportAssetCollectionIdentity::ProcessedCollection { .. }
+        )
+    {
+        return Err(UnityYamlWorkspaceExportError::GeneratedPrefabInvariant {
+            source,
+            message: "legacy Prefab main asset is not one generated class-1001 asset".to_owned(),
+        });
+    }
+    Ok(Some(WorkspaceGeneratedPrefabInternalPointer {
+        source,
+        target: main.asset,
+    }))
+}
+
 fn workspace_generated_component_yaml_overlay(
     workspace: &SerializedFileWorkspace,
     object: &WorkspaceObject,
@@ -1424,6 +1529,7 @@ pub fn workspace_object_to_unity_yaml_document(
         limits,
         None,
         None,
+        None,
     )?
     else {
         return Err(UnityYamlWorkspaceExportError::ImageTextureSkippedWithoutContent { source });
@@ -1458,6 +1564,7 @@ pub fn workspace_object_to_unity_yaml_document_with_streamed_resources(
         limits,
         Some(streamed_resources),
         None,
+        None,
     )
 }
 
@@ -1474,6 +1581,7 @@ fn workspace_object_to_unity_yaml_document_with_context(
     limits: UnityYamlObjectConversionLimits,
     streamed_resources: Option<&WorkspaceStreamedYamlResourceContext<'_, '_>>,
     generated_component_overlay: Option<&WorkspaceGeneratedComponentYamlOverlay>,
+    generated_prefab_internal: Option<&WorkspaceGeneratedPrefabInternalPointer>,
 ) -> Result<Option<UnityYamlDocument>, UnityYamlWorkspaceExportError> {
     let file_index = match source.collection {
         ExportAssetCollectionIdentity::SerializedFile { file_index } => file_index,
@@ -1614,8 +1722,18 @@ fn workspace_object_to_unity_yaml_document_with_context(
             file_index,
             unity_version_text: unity_version_text.map(str::to_owned),
         })?;
-    let hints = UnityYamlObjectConversionHints::from_type_tree(type_tree, unity_version, limits)
-        .map_err(UnityYamlWorkspaceExportError::Conversion)?;
+    let mut hints =
+        UnityYamlObjectConversionHints::from_type_tree(type_tree, unity_version, limits)
+            .map_err(UnityYamlWorkspaceExportError::Conversion)?;
+    if generated_prefab_internal.is_some()
+        && matches!(&object.factory.kind, FactoryAssetKind::Generated(_))
+    {
+        // Generated source classes walk their own original member names. TPK recovery has
+        // already applied the baseline's normalized aliases, so replaying those aliases here
+        // would emit a different legacy Prefab document from the generated-class route.
+        hints.field_name_aliases.clear();
+        hints.preserve_type_tree_field_names = true;
+    }
 
     let graph_identity = reference_graph
         .object_identity(file_index, object.object_index)
@@ -1783,13 +1901,25 @@ fn workspace_object_to_unity_yaml_document_with_context(
             streamed_export_root = Some(export_root);
         }
     }
-    let source_export_root = generated_component_overlay
-        .map(|overlay| &overlay.payload.root)
-        .unwrap_or(&payload.root);
-    let export_root = streamed_export_root.as_ref().unwrap_or(source_export_root);
+    let mut export_root = streamed_export_root
+        .or_else(|| generated_component_overlay.map(|overlay| overlay.payload.root.clone()));
+    if let Some(pointer) = generated_prefab_internal {
+        if export_root.is_none() {
+            export_root = Some(payload.root.clone());
+        }
+        let Some(root) = export_root.as_mut() else {
+            return Err(UnityYamlWorkspaceExportError::GeneratedPrefabInvariant {
+                source,
+                message: "generated Prefab pointer overlay has no object value".to_owned(),
+            });
+        };
+        apply_generated_prefab_internal_overlay(root, pointer)?;
+    }
+    let export_root = export_root.as_ref().unwrap_or(&payload.root);
 
     let mut pointer_error = None;
     let mut generated_component_pointer_seen = false;
+    let mut generated_prefab_internal_pointer_seen = false;
     let document = serialized_object_value_to_unity_yaml_document(
         source,
         &payload.type_name,
@@ -1806,6 +1936,20 @@ fn workspace_object_to_unity_yaml_document_with_context(
         missing_reference_guid,
         limits,
         |request| {
+            if let Some(pointer) = generated_prefab_internal {
+                if request.source == pointer.source
+                    && request.field_path.rsplit('.').next() == Some("m_PrefabInternal")
+                {
+                    return resolve_generated_prefab_internal_pointer(
+                        request,
+                        pointer,
+                        pointer_map,
+                        current_collection_index,
+                        &mut generated_prefab_internal_pointer_seen,
+                        &mut pointer_error,
+                    );
+                }
+            }
             if let Some(overlay) = generated_component_overlay {
                 if request.source == overlay.pointer.source
                     && request.field_path == overlay.pointer.field_path
@@ -1839,6 +1983,13 @@ fn workspace_object_to_unity_yaml_document_with_context(
                 message: "generated component PPtr was not visited by the YAML walker".to_owned(),
             },
         );
+    }
+    if generated_prefab_internal.is_some() && !generated_prefab_internal_pointer_seen {
+        return Err(UnityYamlWorkspaceExportError::GeneratedPrefabInvariant {
+            source,
+            message: "generated m_PrefabInternal PPtr was not visited by the YAML walker"
+                .to_owned(),
+        });
     }
     document
         .map(Some)
@@ -1880,6 +2031,94 @@ fn resolve_generated_component_pointer(
         Ok(_) => {
             *error = Some(invariant_error(
                 "planned Transform has no exported project pointer".to_owned(),
+            ));
+            ProjectPointerResolution::Null
+        }
+        Err(error_source) => {
+            *error = Some(UnityYamlWorkspaceExportError::PointerMap(error_source));
+            ProjectPointerResolution::Null
+        }
+    }
+}
+
+fn apply_generated_prefab_internal_overlay(
+    root: &mut SerializedValue,
+    pointer: &WorkspaceGeneratedPrefabInternalPointer,
+) -> Result<(), UnityYamlWorkspaceExportError> {
+    let invariant_error =
+        |message: String| UnityYamlWorkspaceExportError::GeneratedPrefabInvariant {
+            source: pointer.source,
+            message,
+        };
+    if matches!(
+        pointer.source.collection,
+        ExportAssetCollectionIdentity::ProcessedCollection { .. }
+    ) || pointer.source.path_id == 0
+        || pointer.target.class_id != 1001
+        || pointer.target.path_id == 0
+        || !matches!(
+            pointer.target.collection,
+            ExportAssetCollectionIdentity::ProcessedCollection { .. }
+        )
+    {
+        return Err(invariant_error(
+            "source or generated Prefab identity is invalid".to_owned(),
+        ));
+    }
+    let value = root
+        .unique_field_in_base_chain_mut("m_PrefabInternal")
+        .map_err(|error| invariant_error(error.to_string()))?
+        .ok_or_else(|| {
+            invariant_error("hierarchy asset has no m_PrefabInternal field".to_owned())
+        })?;
+    let SerializedValue::PPtr { file_id, path_id } = value else {
+        return Err(invariant_error(format!(
+            "m_PrefabInternal has value shape {value:?} instead of PPtr"
+        )));
+    };
+    *file_id = 0;
+    *path_id = pointer.target.path_id;
+    Ok(())
+}
+
+fn resolve_generated_prefab_internal_pointer(
+    request: UnityYamlPPtrRequest<'_>,
+    planned: &WorkspaceGeneratedPrefabInternalPointer,
+    pointer_map: &ProjectExportPointerMap,
+    current_collection_index: usize,
+    seen: &mut bool,
+    error: &mut Option<UnityYamlWorkspaceExportError>,
+) -> ProjectPointerResolution {
+    let invariant_error =
+        |message: String| UnityYamlWorkspaceExportError::GeneratedPrefabInvariant {
+            source: planned.source,
+            message,
+        };
+    if request.source != planned.source
+        || request.file_id != 0
+        || request.path_id != planned.target.path_id
+    {
+        *error = Some(invariant_error(format!(
+            "planned m_PrefabInternal pointer at {:?} has FileID/PathID ({}, {}), expected (0, {})",
+            request.field_path, request.file_id, request.path_id, planned.target.path_id
+        )));
+        return ProjectPointerResolution::Null;
+    }
+    if *seen {
+        *error = Some(invariant_error(
+            "generated m_PrefabInternal pointer was visited more than once".to_owned(),
+        ));
+        return ProjectPointerResolution::Null;
+    }
+    *seen = true;
+    match pointer_map.resolve(
+        ProjectPointerRequest::ResolvedAsset(planned.target),
+        current_collection_index,
+    ) {
+        Ok(ProjectPointerResolution::Mapped(pointer)) => ProjectPointerResolution::Mapped(pointer),
+        Ok(_) => {
+            *error = Some(invariant_error(
+                "generated Prefab has no exported project pointer".to_owned(),
             ));
             ProjectPointerResolution::Null
         }
@@ -2018,6 +2257,10 @@ pub enum UnityYamlWorkspaceExportError {
         message: String,
     },
     GeneratedComponentOverlayInvariant {
+        source: ExportAssetIdentity,
+        message: String,
+    },
+    GeneratedPrefabInvariant {
         source: ExportAssetIdentity,
         message: String,
     },
@@ -2181,6 +2424,10 @@ impl Display for UnityYamlWorkspaceExportError {
             Self::GeneratedComponentOverlayInvariant { source, message } => write!(
                 f,
                 "generated GameObject component overlay export failed for {source:?}: {message}"
+            ),
+            Self::GeneratedPrefabInvariant { source, message } => write!(
+                f,
+                "generated legacy Prefab YAML export failed for {source:?}: {message}"
             ),
             Self::ImageTextureSkippedWithoutContent { source } => write!(
                 f,
@@ -2611,6 +2858,362 @@ pub fn generated_transform_payload_to_unity_yaml_document(
     if !found_game_object_pointer {
         return Err(invariant_error(
             "YAML walker did not encounter the planned m_GameObject PPtr".to_owned(),
+        ));
+    }
+    document.map_err(UnityYamlWorkspaceExportError::Conversion)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn workspace_generated_prefab_assignment_to_unity_yaml_document(
+    workspace: &SerializedFileWorkspace,
+    pointer_map: &ProjectExportPointerMap,
+    source: ExportAssetIdentity,
+    file_id: i64,
+    current_collection_index: usize,
+    missing_reference_guid: Option<[u8; 16]>,
+    limits: UnityYamlObjectConversionLimits,
+    context: &WorkspaceGeneratedTransformYamlContext<'_>,
+) -> Result<UnityYamlDocument, UnityYamlWorkspaceExportError> {
+    let invariant_error = |message: String| {
+        UnityYamlWorkspaceExportError::GeneratedPrefabInvariant { source, message }
+    };
+    if !context.processed_assets.is_complete() {
+        return Err(invariant_error(format!(
+            "processed asset plan is incomplete: {}",
+            context
+                .processed_assets
+                .incomplete_reason()
+                .unwrap_or("no reason was recorded")
+        )));
+    }
+    let Some(legacy) = context.legacy_prefab_export else {
+        return Err(invariant_error(
+            "generated class-1001 assignment has no legacy Prefab export context".to_owned(),
+        ));
+    };
+    if legacy.export_ids.representation != PrefabAssetRepresentation::LegacyPrefabMarker
+        || !legacy.export_ids.emit_prefab_asset
+    {
+        return Err(invariant_error(
+            "generated class-1001 assignment is not the emitted legacy Prefab asset".to_owned(),
+        ));
+    }
+    let ExportAssetCollectionIdentity::ProcessedCollection { collection_index } = source.collection
+    else {
+        return Err(invariant_error(
+            "generated Prefab assignment has SerializedFile collection scope".to_owned(),
+        ));
+    };
+    let collection = context
+        .processed_assets
+        .collections()
+        .get(collection_index)
+        .ok_or_else(|| {
+            invariant_error(format!(
+                "processed collection {collection_index} is absent from the asset plan"
+            ))
+        })?;
+    if collection.collection_index != collection_index
+        || collection.kind != WorkspaceProcessedCollectionKind::GeneratedPrefabs
+    {
+        return Err(invariant_error(format!(
+            "processed collection {collection_index} is not the GeneratedPrefabs collection"
+        )));
+    }
+    let asset = collection.assets.get(source.object_index).ok_or_else(|| {
+        invariant_error(format!(
+            "processed collection {collection_index} has no planned asset at object index {}",
+            source.object_index
+        ))
+    })?;
+    if asset.identity.collection_index != collection_index
+        || asset.identity.path_id != source.path_id
+        || asset.identity.class_id != source.class_id
+        || source.class_id != 1001
+        || source.path_id == 0
+    {
+        return Err(invariant_error(
+            "generated Prefab identity disagrees with the YAML assignment".to_owned(),
+        ));
+    }
+    let WorkspaceProcessedPrefabAssetKind::GeneratedPrefabInstance { root_game_object } =
+        &asset.kind
+    else {
+        return Err(invariant_error(format!(
+            "processed asset {}:{} is not a generated Prefab instance",
+            collection_index, source.object_index
+        )));
+    };
+    let main_assignments = legacy
+        .export_ids
+        .registered_assets
+        .iter()
+        .filter(|assignment| assignment.is_main_asset);
+    let main = main_assignments
+        .clone()
+        .next()
+        .ok_or_else(|| invariant_error("legacy Prefab plan has no main asset".to_owned()))?;
+    if main_assignments.count() != 1
+        || main.asset != source
+        || main.file_id != file_id
+        || !legacy.export_ids.exportable_assets.contains(&source)
+    {
+        return Err(invariant_error(
+            "legacy Prefab main assignment differs from the generated YAML identity".to_owned(),
+        ));
+    }
+
+    let mut constructor_pointers = context
+        .processed_assets
+        .constructor_pointers()
+        .iter()
+        .filter(|pointer| {
+            pointer.source_asset == asset.identity
+                && pointer.field == WorkspaceGeneratedPointerField::PrefabInstanceRootGameObject
+        });
+    let constructor_pointer = constructor_pointers.next().copied().ok_or_else(|| {
+        invariant_error("generated Prefab has no constructor root GameObject PPtr".to_owned())
+    })?;
+    if constructor_pointers.next().is_some()
+        || constructor_pointer.target != *root_game_object
+        || constructor_pointer.file_id <= 0
+        || constructor_pointer.path_id != root_game_object.path_id
+    {
+        return Err(invariant_error(
+            "generated Prefab root GameObject PPtr disagrees with the processed plan".to_owned(),
+        ));
+    }
+
+    let target_file = workspace
+        .files()
+        .get(root_game_object.file_index)
+        .ok_or_else(|| {
+            invariant_error(format!(
+                "root GameObject file {} is absent from the workspace",
+                root_game_object.file_index
+            ))
+        })?;
+    let target_object = target_file
+        .metadata
+        .objects
+        .get(root_game_object.object_index)
+        .ok_or_else(|| {
+            invariant_error(format!(
+                "root GameObject object {} is absent from file {}",
+                root_game_object.object_index, root_game_object.file_index
+            ))
+        })?;
+    if target_object.path_id != root_game_object.path_id || target_object.raw_type_id != 1 {
+        return Err(invariant_error(
+            "root GameObject identity disagrees with its SerializedFile object record".to_owned(),
+        ));
+    }
+
+    let Some(factory_version) = FactoryUnityVersion::parse(legacy.unity_version_text) else {
+        return Err(invariant_error(format!(
+            "legacy Prefab has no parseable Unity version: {:?}",
+            legacy.unity_version_text
+        )));
+    };
+    let Some(unity_version) = SceneUnityVersion::parse(legacy.unity_version_text) else {
+        return Err(invariant_error(format!(
+            "legacy Prefab has no parseable Unity version: {:?}",
+            legacy.unity_version_text
+        )));
+    };
+    if unity_version.major > 2018 || (unity_version.major == 2018 && unity_version.minor >= 3) {
+        return Err(invariant_error(format!(
+            "Unity {}.{} uses PrefabImporter assets instead of legacy Prefab documents",
+            unity_version.major, unity_version.minor
+        )));
+    }
+    let (_, editor_tree) = reference_class_layouts()
+        .tpk_trees(1001, &factory_version)
+        .map_err(|error| invariant_error(format!("could not load class-1001 TPK layout: {error}")))?
+        .ok_or_else(|| {
+            invariant_error(format!(
+                "source TPK has no class-1001 layout for Unity {}",
+                factory_version.text
+            ))
+        })?;
+    let editor_tree = editor_tree.as_ref();
+    let type_root = editor_tree
+        .nodes
+        .first()
+        .ok_or_else(|| invariant_error("class-1001 editor TypeTree is empty".to_owned()))?;
+    if type_root.type_name.as_deref() != Some("Prefab") {
+        return Err(invariant_error(format!(
+            "class-1001 editor TypeTree root is {:?}, expected Prefab",
+            type_root.type_name
+        )));
+    }
+
+    let type_index = target_file.metadata.types.len();
+    let mut metadata = target_file.metadata.clone();
+    metadata.types.push(SerializedType {
+        raw_type_id: 1001,
+        type_id_for_hash: 1001,
+        is_stripped_type: false,
+        script_type_index: -1,
+        script_id: None,
+        old_type_hash: None,
+        type_tree: Some(editor_tree.clone()),
+        type_dependencies: Vec::new(),
+    });
+    let mut root = metadata
+        .default_object_value_for_type(
+            metadata.objects.len(),
+            type_index,
+            context.default_value_limits,
+        )
+        .map_err(|error| {
+            invariant_error(format!(
+                "could not construct legacy Prefab payload: {error}"
+            ))
+        })?;
+
+    let hide_flags = root
+        .unique_field_in_base_chain_mut("m_ObjectHideFlags")
+        .map_err(|error| invariant_error(error.to_string()))?
+        .ok_or_else(|| {
+            invariant_error("Prefab TypeTree has no m_ObjectHideFlags field".to_owned())
+        })?;
+    match hide_flags {
+        SerializedValue::U32(value) => *value = 1,
+        value => {
+            return Err(invariant_error(format!(
+                "m_ObjectHideFlags has value shape {value:?}, expected UInt32"
+            )))
+        }
+    }
+    let root_pointer = root
+        .unique_field_in_base_chain_mut("m_RootGameObject")
+        .map_err(|error| invariant_error(error.to_string()))?
+        .ok_or_else(|| {
+            invariant_error("Prefab TypeTree has no m_RootGameObject field".to_owned())
+        })?;
+    let SerializedValue::PPtr {
+        file_id: root_file_id,
+        path_id: root_path_id,
+    } = root_pointer
+    else {
+        return Err(invariant_error(format!(
+            "m_RootGameObject has value shape {root_pointer:?}, expected PPtr"
+        )));
+    };
+    *root_file_id = constructor_pointer.file_id;
+    *root_path_id = constructor_pointer.path_id;
+    let is_prefab_parent = root
+        .unique_field_in_base_chain_mut("m_IsPrefabParent")
+        .map_err(|error| invariant_error(error.to_string()))?
+        .ok_or_else(|| {
+            invariant_error("Prefab TypeTree has no m_IsPrefabParent field".to_owned())
+        })?;
+    match is_prefab_parent {
+        SerializedValue::Bool(value) => *value = true,
+        value => {
+            return Err(invariant_error(format!(
+                "m_IsPrefabParent has value shape {value:?}, expected Bool"
+            )))
+        }
+    }
+    metadata
+        .encode_object_payload_for_type(
+            metadata.objects.len(),
+            type_index,
+            &root,
+            &[],
+            context.encode_limits,
+        )
+        .map_err(|error| {
+            invariant_error(format!(
+                "legacy Prefab payload does not match its TypeTree: {error}"
+            ))
+        })?;
+
+    let mut hints =
+        UnityYamlObjectConversionHints::from_type_tree(editor_tree, unity_version, limits)
+            .map_err(UnityYamlWorkspaceExportError::Conversion)?;
+    hints.field_name_aliases.clear();
+    hints.preserve_type_tree_field_names = true;
+    let target_asset = ExportAssetIdentity {
+        collection: ExportAssetCollectionIdentity::SerializedFile {
+            file_index: root_game_object.file_index,
+        },
+        object_index: root_game_object.object_index,
+        path_id: root_game_object.path_id,
+        class_id: 1,
+    };
+    let mut root_pointer_seen = false;
+    let mut pointer_error = None;
+    let document = serialized_object_value_to_unity_yaml_document(
+        source,
+        "Prefab",
+        type_root.version,
+        file_id,
+        false,
+        &root,
+        &hints,
+        UnityYamlObjectFieldMode::ProjectAsset,
+        unity_version,
+        missing_reference_guid,
+        limits,
+        |request: UnityYamlPPtrRequest<'_>| {
+            if request.source != source {
+                pointer_error = Some(invariant_error(
+                    "YAML walker changed the generated Prefab identity".to_owned(),
+                ));
+                return ProjectPointerResolution::Null;
+            }
+            if request.file_id == 0 && request.path_id == 0 {
+                return match pointer_map
+                    .resolve(ProjectPointerRequest::Null, current_collection_index)
+                {
+                    Ok(resolution) => resolution,
+                    Err(error) => {
+                        pointer_error = Some(UnityYamlWorkspaceExportError::PointerMap(error));
+                        ProjectPointerResolution::Null
+                    }
+                };
+            }
+            if request.field_path.rsplit('.').next() != Some("m_RootGameObject")
+                || request.file_id != constructor_pointer.file_id
+                || request.path_id != constructor_pointer.path_id
+                || root_pointer_seen
+            {
+                pointer_error = Some(invariant_error(format!(
+                    "unexpected non-null Prefab PPtr at {:?}: FileID {} PathID {}",
+                    request.field_path, request.file_id, request.path_id
+                )));
+                return ProjectPointerResolution::Null;
+            }
+            root_pointer_seen = true;
+            match pointer_map.resolve(
+                ProjectPointerRequest::ResolvedAsset(target_asset),
+                current_collection_index,
+            ) {
+                Ok(ProjectPointerResolution::Mapped(pointer)) => {
+                    ProjectPointerResolution::Mapped(pointer)
+                }
+                Ok(_) => {
+                    pointer_error = Some(invariant_error(
+                        "planned root GameObject has no exported project pointer".to_owned(),
+                    ));
+                    ProjectPointerResolution::Null
+                }
+                Err(error) => {
+                    pointer_error = Some(UnityYamlWorkspaceExportError::PointerMap(error));
+                    ProjectPointerResolution::Null
+                }
+            }
+        },
+    );
+    if let Some(error) = pointer_error {
+        return Err(error);
+    }
+    if !root_pointer_seen {
+        return Err(invariant_error(
+            "YAML walker did not encounter the planned m_RootGameObject PPtr".to_owned(),
         ));
     }
     document.map_err(UnityYamlWorkspaceExportError::Conversion)
