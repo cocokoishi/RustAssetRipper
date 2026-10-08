@@ -5905,8 +5905,18 @@ mod tests {
             Some(WrapperKind::Gzip)
         );
         assert_eq!(entry.bytes(), b"webdata gzip payload");
+        let path = crate::test_support::unique_test_path("webdata-gzip-streaming", "bin");
+        std::fs::write(&path, &source_webdata_input).expect("write source WebData bytes");
+        let streamed = SchemeReader::read_path_streaming(&path, SchemeReaderLimits::default())
+            .expect("file-backed WebData dispatch");
+        std::fs::remove_file(&path).expect("remove source WebData bytes");
+        assert_eq!(streamed.kind(), webdata.kind());
+        assert_eq!(streamed.wrappers(), webdata.wrappers());
+        let streamed_entry = streamed.dispatch_entry(0).unwrap();
+        assert_eq!(streamed_entry.wrappers(), entry.wrappers());
+        assert_eq!(streamed_entry.bytes(), entry.bytes());
         let mut filesystem = crate::io::filesystem::VirtualFileSystem::new();
-        let mounted = webdata
+        let mounted = streamed
             .mount_container_tree(
                 &mut filesystem,
                 Some("/webdata-gzip"),
@@ -5941,9 +5951,13 @@ mod tests {
             fields.iter().find_map(|field| field.strip_prefix("type=")),
             Some("FileStreamBundleFile")
         );
+        let expected_tree = fields
+            .iter()
+            .find_map(|field| field.strip_prefix("tree="))
+            .expect("source inventory");
         assert_eq!(
-            fields.iter().find_map(|field| field.strip_prefix("tree=")),
-            Some("CONTAINER:FileStreamBundleFile:ufs_v6_unknown_non_zstd_block.bin:res=0:failed=1,FAIL:data/file.bin")
+            expected_tree,
+            "CONTAINER:FileStreamBundleFile:ufs_v6_unknown_non_zstd_block.bin:res=0:failed=1,FAIL:data/file.bin"
         );
 
         let dispatched = SchemeReader::read(&input).expect("UnityFS input dispatch");
@@ -5960,8 +5974,29 @@ mod tests {
             }
         ));
 
+        let path = crate::test_support::unique_test_path("unknown-code-streaming", "bin");
+        std::fs::write(&path, &input).expect("write source UnityFS bytes");
+        let streamed = SchemeReader::read_path_streaming(&path, SchemeReaderLimits::default())
+            .expect("file-backed unknown-code UnityFS dispatch");
+        std::fs::remove_file(&path).expect("remove source UnityFS bytes");
+        assert_eq!(streamed.kind(), FileKind::UnityFs);
+        assert_eq!(streamed.wrappers(), dispatched.wrappers());
+        let super::ParsedFile::UnityFs(streamed_bundle) = streamed.parse().unwrap() else {
+            panic!("streamed unknown-code fixture must parse as UnityFS");
+        };
+        let streamed_error = streamed_bundle
+            .read_entry(0)
+            .expect_err("streamed unknown non-Zstd codec");
+        assert!(matches!(
+            streamed_error.kind(),
+            crate::container::unityfs::UnityFsErrorKind::UnsupportedCompression {
+                compression: 6,
+                context: "storage block"
+            }
+        ));
+
         let mut filesystem = crate::io::filesystem::VirtualFileSystem::new();
-        let mounted = dispatched
+        let mounted = streamed
             .mount_container_tree_with_source_name(
                 &mut filesystem,
                 Some("/unknown-codec"),
@@ -6036,6 +6071,20 @@ mod tests {
                 kind: WrapperKind::Gzip,
                 ..
             }
+        ));
+
+        // The aggregate decoded-byte budget is separate from the per-layer budget.
+        assert!(matches!(
+            SchemeReader::read_path_streaming(
+                &path,
+                SchemeReaderLimits {
+                    max_total_decompressed_bytes: 4,
+                    ..SchemeReaderLimits::default()
+                },
+            )
+            .unwrap_err()
+            .kind(),
+            SchemeErrorKind::TotalDecompressionLimitExceeded { limit: 4, .. }
         ));
 
         std::fs::remove_file(&path).unwrap();

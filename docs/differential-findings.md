@@ -767,6 +767,18 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Regression evidence | `rust_lzma_encoder_outputs_match_reference_runtime_decoding`, `rust_lz4_encoder_output_decodes_in_k4os_reference_runtime`, and `rust_gzip_encoder_output_decodes_in_the_reference_runtime` compare the product outputs to the frozen fixture and also decode them with the Rust readers. Existing independent source-encoded vectors cover the opposite direction. |
 | Remaining comparison | Unity-produced compression outputs and broad fuzz coverage remain unrun. This finding covers codec formats and the source-supported codec write helpers; it does not claim an AssetBundle creation workflow. |
 
+## DIFF-IO-STREAM-INPUT-001 - bounded seekable SchemeReader path input
+
+| Field | Finding |
+|---|---|
+| Status | Closed for the 44 source-probed file-backed scheme lanes, numbered split input, and configured wrapper/input bounds; no dispatch or mounted-byte deviation found |
+| Source location | `AssetRipper.IO.Files/SchemeReader.cs` (`LoadFile`, `ReadFile`); `AssetRipper.IO.Files/Streams/MultiFileStream.cs` (`OpenReadMulti`) |
+| Input evidence | `tools/probes/io-differential/Program.cs` creates 44 synthetic files under the ignored Rust `target` directory and records the frozen `SchemeReader.LoadFile` outcomes in `src/io/io_differential_fixture.txt` and `src/compression/wrapper_scheme_runtime_fixture.txt`. The split-path source observation is recorded in `src/io/multifile_path_fixture.txt`. No user AssetBundle bytes are involved. |
+| Source behavior | `LoadFile` opens a seekable `SmartStream` over a regular file or numbered split parts and passes it through the registered `IScheme` order. `ReadFile` returns the first matching scheme or a `ResourceFile` fallback. |
+| Rust behavior | `SchemeReader::read_path` opens the same logical regular/split input, probes only a bounded prefix, and streams outer GZip/Brotli decoding under per-layer and aggregate limits. It materializes the final decoded container/leaf under `max_input_bytes`, because downstream parsers currently require contiguous bytes. |
+| Regression evidence | `scheme_dispatch_matches_the_reference_runtime_fixture` compares file-backed dispatch, recursive inventories, mounts, and failure continuation over the 41 baseline lanes. Separate regressions exercise file-backed Brotli, WebData with a GZip entry, and unknown-code/non-Zstandard storage failure. `mount_path_assembles_split_inputs_and_uses_the_logical_base_name` replays the source split result. `streaming_dispatch_enforces_wrapper_and_input_limits` pins input size, wrapper depth, per-layer, and aggregate decompression failures. |
+| Remaining comparison | No Unity-produced input is claimed. Directory/batch discovery remains under `IO-FS-IMPORT-DIRECTORY-001`, and lower-level stream lifetime/seek semantics remain open under `IO-STREAM-001`. |
+
 ## DIFF-SER-ENV-001 - SerializedFile envelopes and file entry
 
 | Field | Finding |
