@@ -117,8 +117,30 @@ public static class Program
 		byte blockCompression,
 		bool blocksInfoAtEnd,
 		IReadOnlyList<Entry> entries)
+		=> BuildUnityFs(
+			version,
+			metaCompression,
+			new[] { blockCompression },
+			blocksInfoAtEnd,
+			needsPaddingAtStart: false,
+			directoryCombined: true,
+			entries);
+
+	private static byte[] BuildUnityFs(
+		int version,
+		byte metaCompression,
+		IReadOnlyList<byte> blockCompressions,
+		bool blocksInfoAtEnd,
+		bool needsPaddingAtStart,
+		bool directoryCombined,
+		IReadOnlyList<Entry> entries,
+		IReadOnlyList<int>? blockSplitOffsets = null)
 	{
-		// entry data blob (single storage block)
+		if (blockCompressions.Count == 0)
+		{
+			throw new ArgumentException("UnityFS fixture must contain at least one storage block", nameof(blockCompressions));
+		}
+
 		List<byte> dataBlob = new();
 		List<byte> directory = new();
 		Wu32Be(directory, (uint)entries.Count);
@@ -131,20 +153,48 @@ public static class Program
 			dataBlob.AddRange(entry.Data);
 		}
 
-		byte[] compressedBlock = CompressBlock(dataBlob.ToArray(), blockCompression);
+		List<int> blockBoundaries = new() { 0 };
+		if (blockSplitOffsets is not null)
+		{
+			blockBoundaries.AddRange(blockSplitOffsets);
+		}
+		blockBoundaries.Add(dataBlob.Count);
+		if (blockBoundaries.Count != blockCompressions.Count + 1
+			|| blockBoundaries.Zip(blockBoundaries.Skip(1), (start, end) => start <= end).Any(valid => !valid))
+		{
+			throw new ArgumentException("UnityFS fixture block boundaries do not match the storage-block count", nameof(blockSplitOffsets));
+		}
+
+		List<byte[]> compressedBlocks = new(blockCompressions.Count);
 		List<byte> metadata = new();
 		metadata.AddRange(new byte[16]); // BlocksInfo.UncompressedDataHash
-		Wu32Be(metadata, 1); // one storage block
-		Wu32Be(metadata, (uint)dataBlob.Count);
-		Wu32Be(metadata, (uint)compressedBlock.Length);
-		Wu16Be(metadata, blockCompression);
-		metadata.AddRange(directory);
+		Wu32Be(metadata, (uint)blockCompressions.Count);
+		for (int i = 0; i < blockCompressions.Count; i++)
+		{
+			int start = blockBoundaries[i];
+			int length = blockBoundaries[i + 1] - start;
+			byte compression = blockCompressions[i];
+			byte[] rawBlock = dataBlob.GetRange(start, length).ToArray();
+			byte[] compressedBlock = CompressBlock(rawBlock, compression);
+			compressedBlocks.Add(compressedBlock);
+			Wu32Be(metadata, (uint)rawBlock.Length);
+			Wu32Be(metadata, (uint)compressedBlock.Length);
+			Wu16Be(metadata, compression);
+		}
+		if (directoryCombined)
+		{
+			metadata.AddRange(directory);
+		}
 		byte[] uncompressedMetadata = metadata.ToArray();
 		byte[] metadataPayload = CompressMetadata(uncompressedMetadata, metaCompression);
 
 		const uint combined = 0x40;
 		const uint atEnd = 0x80;
-		uint flags = (uint)(metaCompression & 0x3F) | combined | (blocksInfoAtEnd ? atEnd : 0);
+		const uint needsPadding = 0x200;
+		uint flags = (uint)(metaCompression & 0x3F)
+			| (directoryCombined ? combined : 0)
+			| (blocksInfoAtEnd ? atEnd : 0)
+			| (needsPaddingAtStart ? needsPadding : 0);
 
 		List<byte> header = new();
 		Str0(header, "UnityFS");
@@ -161,9 +211,21 @@ public static class Program
 		{
 			Align(file, 16);
 		}
+		void AppendBlocks()
+		{
+			foreach (byte[] compressedBlock in compressedBlocks)
+			{
+				file.AddRange(compressedBlock);
+			}
+		}
+
 		if (blocksInfoAtEnd)
 		{
-			file.AddRange(compressedBlock);
+			if (needsPaddingAtStart)
+			{
+				Align(file, 16);
+			}
+			AppendBlocks();
 			long size = file.Count + metadataPayload.Length;
 			file.AddRange(metadataPayload);
 			PatchSize(file, size);
@@ -171,7 +233,11 @@ public static class Program
 		else
 		{
 			file.AddRange(metadataPayload);
-			file.AddRange(compressedBlock);
+			if (needsPaddingAtStart)
+			{
+				Align(file, 16);
+			}
+			AppendBlocks();
 			PatchSize(file, file.Count);
 		}
 		return file.ToArray();
@@ -251,7 +317,11 @@ public static class Program
 
 	// ---------------------------------------------------------------- Raw/Web builder
 
-	private static byte[] BuildRawWeb(bool web, int version, IReadOnlyList<Entry> entries)
+	private static byte[] BuildRawWeb(
+		bool web,
+		int version,
+		IReadOnlyList<Entry> entries,
+		bool multipleWebScenes = false)
 	{
 		List<byte> rebuilt = new();
 		Wu32Be(rebuilt, (uint)entries.Count);
@@ -297,10 +367,15 @@ public static class Program
 		Wi32Be(head, 1); // NumberOfScenesToDownloadBeforeStreaming
 		if (web)
 		{
-			Wu32Be(head, 1); // scene count
 			using MemoryStream compressed = new();
 			LzmaCompression.CompressLzmaSizeStream(new MemoryStream(inner.ToArray()), inner.Count, compressed);
 			byte[] chunk = compressed.ToArray();
+			Wu32Be(head, multipleWebScenes ? 2u : 1u); // scene count
+			if (multipleWebScenes)
+			{
+				Wu32Be(head, 0); // empty preceding scene
+				Wu32Be(head, 0);
+			}
 			Wu32Be(head, (uint)chunk.Length);
 			Wu32Be(head, (uint)inner.Count);
 			if (hasCompleteFileSize)
@@ -379,17 +454,88 @@ public static class Program
 		byte[] webData = BuildWebData(new[] { new Entry("inner.bin", Ascii("web!")), new Entry("sub/deep.bin", Ascii("deep")) });
 		var blobs = new (string Name, byte[] Data)[]
 		{
+			("ufs_v1_none", BuildUnityFs(1, 0, 0, false, new[] { new Entry("data/file.bin", Ascii("0123456789")) })),
 			("ufs_v6_none", ufsNone),
 			("ufs_v6_lz4_meta", BuildUnityFs(6, 2, 0, false, new[] { new Entry("data/file.bin", Ascii("0123456789")) })),
 			("ufs_v6_lz4hc_meta", BuildUnityFs(6, 3, 0, false, new[] { new Entry("data/file.bin", Ascii("0123456789")) })),
 			("ufs_v6_lzma_meta", BuildUnityFs(6, 1, 0, false, new[] { new Entry("data/file.bin", Ascii("0123456789")) })),
+			("ufs_v6_lzham_meta", BuildUnityFs(6, 4, 0, false, new[] { new Entry("data/file.bin", Ascii("0123456789")) })),
 			("ufs_v6_unknown_meta", BuildUnityFs(6, 5, 0, false, new[] { new Entry("data/file.bin", Ascii("0123456789")) })),
+			("ufs_v6_lzma_block", BuildUnityFs(6, 0, 1, false, new[] { new Entry("data/file.bin", Ascii("0123456789")) })),
+			("ufs_v6_lz4_block", BuildUnityFs(6, 0, 2, false, new[] { new Entry("data/file.bin", Ascii("0123456789")) })),
 			("ufs_v6_lz4hc_block", BuildUnityFs(6, 0, 3, false, new[] { new Entry("data/file.bin", Ascii("0123456789")) })),
-			("ufs_v6_lzham_block", BuildUnityFs(6, 0, 4, false, new[] { new Entry("data/file.bin", Ascii("0123456789")) })),
+			("ufs_v6_lzham_block", BuildUnityFs(
+				6,
+				0,
+				new byte[] { 0, 4 },
+				blocksInfoAtEnd: false,
+				needsPaddingAtStart: false,
+				directoryCombined: true,
+				new[]
+				{
+					new Entry("valid.bin", Ascii("GOOD")),
+					new Entry("unsupported.bin", Ascii("BAD!")),
+				},
+				new[] { 4 })),
+			("ufs_v6_zstd_block", BuildUnityFs(6, 0, 5, false, new[] { new Entry("data/file.bin", Ascii("0123456789")) })),
+			("ufs_v6_multiblock_cross_entry", BuildUnityFs(
+				6,
+				0,
+				new byte[] { 2, 0 },
+				blocksInfoAtEnd: false,
+				needsPaddingAtStart: false,
+				directoryCombined: true,
+				new[]
+				{
+					new Entry("cross.bin", Ascii("ABCDEFGHIJ")),
+					new Entry("tail.bin", Ascii("FGHIJ")),
+				},
+				new[] { 5 })),
+			("ufs_v6_padding_at_start", BuildUnityFs(
+				6,
+				0,
+				new byte[] { 0 },
+				blocksInfoAtEnd: false,
+				needsPaddingAtStart: true,
+				directoryCombined: true,
+				new[] { new Entry("data/file.bin", Ascii("0123456789")) })),
+			("ufs_v6_uncombined_directory", BuildUnityFs(
+				6,
+				0,
+				new byte[] { 0 },
+				blocksInfoAtEnd: false,
+				needsPaddingAtStart: false,
+				directoryCombined: false,
+				new[] { new Entry("not-listed.bin", Ascii("0123456789")) })),
 			("ufs_v7_atend", BuildUnityFs(7, 0, 0, true, new[] { new Entry("data/file.bin", Ascii("0123456789")) })),
+			("ufs_v8_atend_padded", BuildUnityFs(
+				8,
+				0,
+				new byte[] { 0 },
+				blocksInfoAtEnd: true,
+				needsPaddingAtStart: true,
+				directoryCombined: true,
+				new[] { new Entry("data/file.bin", Ascii("0123456789")) })),
 			("ufs_nested_webdata", BuildUnityFs(6, 0, 0, false, new[] { new Entry("inner.webdata", webData) })),
+			("raw_v1", BuildRawWeb(false, 1, new[] { new Entry("a.bin", Ascii("0123456789")) })),
+			("raw_v2", BuildRawWeb(false, 2, new[] { new Entry("a.bin", Ascii("0123456789")) })),
+			("raw_v3", BuildRawWeb(false, 3, new[] { new Entry("a.bin", Ascii("0123456789")) })),
 			("raw_v4", BuildRawWeb(false, 4, new[] { new Entry("a.bin", Ascii("0123456789")) })),
+			("raw_v5", BuildRawWeb(false, 5, new[] { new Entry("a.bin", Ascii("0123456789")) })),
+			("raw_v6", BuildRawWeb(false, 6, new[] { new Entry("a.bin", Ascii("0123456789")) })),
+			("raw_v7", BuildRawWeb(false, 7, new[] { new Entry("a.bin", Ascii("0123456789")) })),
+			("raw_v8", BuildRawWeb(false, 8, new[] { new Entry("a.bin", Ascii("0123456789")) })),
+			("raw_nested_unityfs", BuildRawWeb(false, 4, new[] { new Entry("nested.bundle", ufsNone) })),
+			("web_v1", BuildRawWeb(true, 1, new[] { new Entry("w.bin", Ascii("ABCDEFGHIJ")) })),
+			("web_v2", BuildRawWeb(true, 2, new[] { new Entry("w.bin", Ascii("ABCDEFGHIJ")) })),
+			("web_v3", BuildRawWeb(true, 3, new[] { new Entry("w.bin", Ascii("ABCDEFGHIJ")) })),
+			("web_v4", BuildRawWeb(true, 4, new[] { new Entry("w.bin", Ascii("ABCDEFGHIJ")) })),
+			("web_v5", BuildRawWeb(true, 5, new[] { new Entry("w.bin", Ascii("ABCDEFGHIJ")) })),
 			("web_v6", BuildRawWeb(true, 6, new[] { new Entry("w.bin", Ascii("ABCDEFGHIJ")) })),
+			("web_v6_last_scene", BuildRawWeb(true, 6, new[] { new Entry("w.bin", Ascii("ABCDEFGHIJ")) }, multipleWebScenes: true)),
+			("web_v7", BuildRawWeb(true, 7, new[] { new Entry("w.bin", Ascii("ABCDEFGHIJ")) })),
+			("web_v8", BuildRawWeb(true, 8, new[] { new Entry("w.bin", Ascii("ABCDEFGHIJ")) })),
+			("web_nested_webdata", BuildRawWeb(true, 6, new[] { new Entry("nested.webdata", webData) })),
 			("webdata", webData),
 			("archive", BuildArchive()),
 			("plain", Ascii("plain resource bytes")),

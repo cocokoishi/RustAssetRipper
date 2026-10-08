@@ -5156,9 +5156,12 @@ mod tests {
     /// `tools/probes/io-differential` against the shipped reference `AssetRipper.IO.Files.dll`
     /// from the frozen build. Every row replays independently built container bytes through the
     /// production `SchemeReader` and compares the recursive inventory with the reference's:
-    /// the selected scheme, UnityFS metadata codec lanes (None/LZ4/LZ4HC/LZMA/unsupported),
-    /// LZ4HC and LZHAM storage-block dispositions, UnityRaw/UnityWeb/WebData forms, the
-    /// UnityArchive rejection, the plain-resource fallback, and GZip wrapper recursion.
+    /// the selected scheme, UnityFS metadata codecs (None/LZ4/LZ4HC/LZMA/source-rejected
+    /// LZHAM/unknown), storage codecs (None/LZMA/LZ4/LZ4HC/Zstandard and source-rejected
+    /// LZHAM with valid-sibling continuation), multi-block entries crossing a boundary,
+    /// combined and uncombined directory metadata, front/end placement and padding alignment,
+    /// Raw/Web headers for every bundle version 1 through 8, Web's last-scene selection, nested
+    /// bundle entries, UnityArchive rejection, plain-resource fallback, and GZip recursion.
     #[test]
     fn scheme_dispatch_matches_the_reference_runtime_fixture() {
         fn wrapper_name(kind: WrapperKind) -> &'static str {
@@ -5329,7 +5332,7 @@ mod tests {
                         matches!(error.kind(), SchemeErrorKind::ArchiveReadUnsupported),
                         "{case}: {error}"
                     ),
-                    "ufs_v6_unknown_meta" => assert!(
+                    "ufs_v6_unknown_meta" | "ufs_v6_lzham_meta" => assert!(
                         matches!(error.kind(), SchemeErrorKind::UnityFs(_)),
                         "{case}: {error}"
                     ),
@@ -5361,6 +5364,83 @@ mod tests {
                 "{case}: recursive inventory"
             );
 
+            if matches!(
+                dispatched.kind(),
+                FileKind::UnityFs
+                    | FileKind::UnityRaw
+                    | FileKind::UnityWebBundle
+                    | FileKind::UnityWebData
+            ) && !expected_tree.contains("FAIL:")
+            {
+                let expected_resources: Vec<(&str, &str)> = expected_tree
+                    .split(',')
+                    .filter_map(|part| part.strip_prefix("RES:")?.split_once(':'))
+                    .collect();
+                let mut filesystem = crate::io::filesystem::VirtualFileSystem::new();
+                let mounted = dispatched
+                    .mount_container_tree_with_source_name(
+                        &mut filesystem,
+                        Some("/io-differential"),
+                        Some(&format!("{case}.bin")),
+                        super::ContainerMountLimits::default(),
+                    )
+                    .unwrap_or_else(|error| panic!("{case}: recursive mount failed: {error}"));
+                assert_eq!(
+                    mounted.resource_files.len(),
+                    expected_resources.len(),
+                    "{case}: mounted resource count"
+                );
+                assert_eq!(
+                    mounted.mounted_entries,
+                    expected_resources.len(),
+                    "{case}: mounted leaf count"
+                );
+                for (resource, (expected_name, expected_hex)) in mounted
+                    .resource_files
+                    .iter()
+                    .zip(expected_resources.iter().copied())
+                {
+                    assert_eq!(resource.name, expected_name, "{case}: source entry name");
+                    assert_eq!(
+                        hex(&filesystem
+                            .read_all_bytes(&resource.virtual_path, 1024)
+                            .unwrap_or_else(|error| {
+                                panic!("{case}: read mounted {}: {error}", resource.virtual_path)
+                            })),
+                        expected_hex,
+                        "{case}: mounted bytes for {}",
+                        resource.virtual_path
+                    );
+                }
+            } else if expected_tree.contains("FAIL:")
+                && matches!(dispatched.kind(), FileKind::UnityFs)
+            {
+                // The reference FileStreamBundleFile retains an entry-level FailedFile and
+                // continues. The current product mount is fail-closed: it reports an error
+                // with the successfully mounted prefix, rather than returning a report that
+                // represents the source's FailedFiles collection.
+                let mut filesystem = crate::io::filesystem::VirtualFileSystem::new();
+                let error = dispatched
+                    .mount_container_tree_with_source_name(
+                        &mut filesystem,
+                        Some("/io-differential"),
+                        Some(&format!("{case}.bin")),
+                        super::ContainerMountLimits::default(),
+                    )
+                    .expect_err("source-failed UnityFS entry must not be reported as a full mount");
+                assert_eq!(
+                    error.partial_report.mounted_entries, 1,
+                    "{case}: preserve the successful prefix in the partial report"
+                );
+                assert_eq!(
+                    filesystem
+                        .read_all_bytes("/io-differential/valid.bin", 16)
+                        .expect("successful sibling remains mounted"),
+                    b"GOOD",
+                    "{case}: failed entry must not discard a prior valid sibling"
+                );
+            }
+
             // The same independently produced bytes must dispatch identically through the
             // bounded seekable streaming path, which never materializes a compressed layer.
             let path = crate::test_support::unique_test_path("io-stream", "bin");
@@ -5383,7 +5463,7 @@ mod tests {
             );
             checked += 1;
         }
-        assert_eq!(checked, 15, "reference fixture row count");
+        assert_eq!(checked, 41, "reference fixture row count");
     }
 
     /// The streaming path enforces the same wrapper bounds before materializing a layer.
