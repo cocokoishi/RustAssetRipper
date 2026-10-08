@@ -7,6 +7,7 @@ using AssetRipper.Import.Structure.Assembly.Managers;
 using AssetRipper.IO.Files;
 using AssetRipper.Primitives;
 using AssetRipper.Processing;
+using AssetRipper.SourceGenerated.Classes.ClassID_21;
 using AssetRipper.SourceGenerated.Classes.ClassID_48;
 using System.Security.Cryptography;
 using System.Reflection;
@@ -48,6 +49,85 @@ if (args is ["--inspect-shader"])
             Console.WriteLine($"PPTR_FIELD|{field.Name}|{field.FieldType.FullName}");
         }
     }
+    return 0;
+}
+
+if (args is ["--inspect-material"])
+{
+    Assembly generatedAssembly = typeof(Shader_2022_3_20).Assembly;
+    foreach (Type type in generatedAssembly.GetTypes()
+        .Where(type => type.Namespace?.EndsWith("ClassID_21", StringComparison.Ordinal) == true
+            && type.Name.StartsWith("Material_", StringComparison.Ordinal))
+        .OrderBy(type => type.Name, StringComparer.Ordinal))
+    {
+        Console.WriteLine($"MATERIAL_TYPE|{type.FullName}");
+        foreach (PropertyInfo property in type.GetProperties().OrderBy(property => property.Name, StringComparer.Ordinal))
+        {
+            Console.WriteLine($"MATERIAL_PROPERTY|{type.Name}|{property.Name}|{property.PropertyType.FullName}|set={property.SetMethod is not null}");
+        }
+    }
+    foreach (Type type in generatedAssembly.GetTypes()
+        .Where(type => type.Namespace?.Contains("UnityPropertySheet", StringComparison.Ordinal) == true
+            || type.Namespace?.Contains("UnityTexEnv", StringComparison.Ordinal) == true)
+        .OrderBy(type => type.FullName, StringComparer.Ordinal))
+    {
+        Console.WriteLine($"MATERIAL_SUBTYPE|{type.FullName}");
+        foreach (PropertyInfo property in type.GetProperties().OrderBy(property => property.Name, StringComparer.Ordinal))
+        {
+            Console.WriteLine($"MATERIAL_SUBPROPERTY|{type.Name}|{property.Name}|{property.PropertyType.FullName}|set={property.SetMethod is not null}");
+        }
+    }
+    return 0;
+}
+
+if (args is ["--export-material", string materialOutputRoot])
+{
+    string materialOutputRootFull = Path.GetFullPath(materialOutputRoot);
+    if (Directory.Exists(materialOutputRootFull) && Directory.EnumerateFileSystemEntries(materialOutputRootFull).Any())
+    {
+        Console.Error.WriteLine($"output root is not empty: {materialOutputRootFull}");
+        return 2;
+    }
+    Logger.Add(new ConsoleLogger());
+    UnityVersion materialVersion = UnityVersion.Parse("2018.2.21f1");
+    GameBundle materialBundle = new();
+    var materialCollection = materialBundle.AddNewProcessedCollection("Material", materialVersion);
+    Shader_2018_2 shader = materialCollection.CreateAsset(48, assetInfo => new Shader_2018_2(assetInfo));
+    shader.Name = new Utf8String("ShaderFixture");
+    shader.Script = new Utf8String("Shader \"ShaderFixture\" { }\n");
+    Material_2018_2 material = materialCollection.CreateAsset(21, assetInfo => new Material_2018_2(assetInfo));
+    material.Name_C21 = new Utf8String("MaterialFixture");
+    material.Shader_C21P = shader;
+    material.CustomRenderQueue_C21 = 2450;
+    material.LightmapFlags_C21 = 4;
+    material.EnableInstancingVariants_C21 = true;
+    material.DoubleSidedGI_C21 = true;
+    material.AllowLocking_C21 = true;
+    material.ShaderKeywords_C21_Utf8String = new Utf8String("_FEATURE_A _FEATURE_B");
+    material.LockedProperties_C21 = new Utf8String("{\"renderQueue\":true}");
+    material.ModifiedSerializedProperties_C21 = 3;
+    var tag = material.StringTagMap_C21.AddNew();
+    tag.Key = new Utf8String("RenderType");
+    tag.Value = new Utf8String("TransparentCutout");
+    GameData materialData = new(materialBundle, materialVersion, new BaseManager(_ => { }), null);
+    FullConfiguration materialSettings = new();
+    ExportHandler materialHandler = new(materialSettings);
+    materialHandler.Export(materialData, materialOutputRootFull, LocalFileSystem.Instance);
+    string materialFile = Directory.GetFiles(
+            Path.Combine(materialOutputRootFull, "ExportedProject", "Assets"),
+            "*.mat",
+            SearchOption.AllDirectories)
+        .Single();
+    string normalized = File.ReadAllText(materialFile).Replace("\r\n", "\n", StringComparison.Ordinal);
+    string shaderMetaFile = Directory.GetFiles(
+            Path.Combine(materialOutputRootFull, "ExportedProject", "Assets"),
+            "*.shader.meta",
+            SearchOption.AllDirectories)
+        .Single();
+    string shaderGuid = File.ReadLines(shaderMetaFile)
+        .Single(line => line.StartsWith("guid: ", StringComparison.Ordinal))[6..];
+    normalized = normalized.Replace(shaderGuid, "<SHADER_GUID>", StringComparison.Ordinal);
+    Console.WriteLine($"MATERIAL|{Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(normalized))}");
     return 0;
 }
 

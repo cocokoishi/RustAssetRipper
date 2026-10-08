@@ -4618,14 +4618,49 @@ mod tests {
         byte_size: i32,
         index: i32,
     ) {
-        put_u16_le(output, 1);
+        put_node_with_meta(output, level, type_offset, name_offset, byte_size, index, 0);
+    }
+
+    fn put_node_with_meta(
+        output: &mut Vec<u8>,
+        level: u8,
+        type_offset: u32,
+        name_offset: u32,
+        byte_size: i32,
+        index: i32,
+        meta_flags: u32,
+    ) {
+        put_node_with_version_and_meta(
+            output,
+            1,
+            level,
+            type_offset,
+            name_offset,
+            byte_size,
+            index,
+            meta_flags,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn put_node_with_version_and_meta(
+        output: &mut Vec<u8>,
+        version: u16,
+        level: u8,
+        type_offset: u32,
+        name_offset: u32,
+        byte_size: i32,
+        index: i32,
+        meta_flags: u32,
+    ) {
+        put_u16_le(output, version);
         output.push(level);
         output.push(0);
         put_u32_le(output, type_offset);
         put_u32_le(output, name_offset);
         put_i32_le(output, byte_size);
         put_i32_le(output, index);
-        put_u32_le(output, 0);
+        put_u32_le(output, meta_flags);
     }
 
     fn insert_vfs_file(filesystem: &mut VirtualFileSystem, path: &str, bytes: &[u8]) {
@@ -7901,6 +7936,69 @@ mod tests {
         bytes
     }
 
+    fn finish_single_object_file_with_tpk_tree(
+        version: &[u8],
+        class_id: i32,
+        type_tree: &assetripper::serialized_file::metadata::TypeTree,
+        payload: &[u8],
+        path_id: i32,
+        external_names: &[&str],
+    ) -> Vec<u8> {
+        let mut metadata = Vec::new();
+        metadata.extend_from_slice(version);
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 1);
+        put_i32_le(&mut metadata, class_id);
+        put_i32_le(&mut metadata, i32::try_from(type_tree.nodes.len()).unwrap());
+        put_i32_le(
+            &mut metadata,
+            i32::try_from(type_tree.string_buffer.len()).unwrap(),
+        );
+        for node in &type_tree.nodes {
+            put_node_with_version_and_meta(
+                &mut metadata,
+                u16::try_from(node.version).unwrap(),
+                node.level,
+                node.type_string_offset.unwrap(),
+                node.name_string_offset.unwrap(),
+                node.byte_size,
+                node.index,
+                node.meta_flags,
+            );
+        }
+        metadata.extend_from_slice(&type_tree.string_buffer);
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 1);
+        put_i32_le(&mut metadata, path_id);
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, i32::try_from(payload.len()).unwrap());
+        put_i32_le(&mut metadata, class_id);
+        put_u16_le(&mut metadata, u16::try_from(class_id).unwrap());
+        put_u16_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, i32::try_from(external_names.len()).unwrap());
+        for external_name in external_names {
+            metadata.push(0);
+            metadata.extend_from_slice(&[0; 16]);
+            put_i32_le(&mut metadata, 0);
+            metadata.extend_from_slice(external_name.as_bytes());
+            metadata.push(0);
+        }
+        metadata.push(0);
+
+        let data_offset = 20 + metadata.len();
+        let file_size = data_offset + payload.len();
+        let mut bytes = Vec::with_capacity(file_size);
+        put_i32_le_as_be(&mut bytes, i32::try_from(metadata.len()).unwrap());
+        put_u32_be(&mut bytes, u32::try_from(file_size).unwrap());
+        put_u32_be(&mut bytes, 10);
+        put_u32_be(&mut bytes, u32::try_from(data_offset).unwrap());
+        bytes.push(0);
+        bytes.extend_from_slice(&[0; 3]);
+        bytes.extend_from_slice(&metadata);
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+
     /// Offsets into the synthetic TypeTree string buffer for `string` nodes.
     struct StringTreeTable {
         string_type: u32,
@@ -8141,6 +8239,108 @@ mod tests {
             &payload,
             42,
             &[external_name],
+        )
+    }
+
+    fn material_2018_tpk_release_tree() -> assetripper::serialized_file::metadata::TypeTree {
+        let mut nodes = Vec::new();
+        let mut string_buffer = Vec::new();
+        let mut in_release_tree = false;
+        for line in include_str!("export/material_tpk_2018_fixture.txt").lines() {
+            if line.starts_with("TPK|21|2018.2.21f1|release") {
+                in_release_tree = true;
+                continue;
+            }
+            if line.starts_with("TPK|") {
+                in_release_tree = false;
+                continue;
+            }
+            if !in_release_tree {
+                continue;
+            }
+            let Some(row) = line.strip_prefix("NODE|") else {
+                continue;
+            };
+            let fields = row.split('|').collect::<Vec<_>>();
+            assert_eq!(
+                fields.len(),
+                5,
+                "invalid committed Material TPK row: {line}"
+            );
+            let level = fields[0].parse::<u8>().unwrap();
+            let type_name = fields[1];
+            let name = fields[2];
+            let version = fields[3].strip_prefix('v').unwrap().parse::<i32>().unwrap();
+            let meta_flags = fields[4]
+                .strip_prefix("meta")
+                .unwrap()
+                .parse::<u32>()
+                .unwrap();
+            let type_string_offset = u32::try_from(string_buffer.len()).unwrap();
+            string_buffer.extend_from_slice(type_name.as_bytes());
+            string_buffer.push(0);
+            let name_string_offset = u32::try_from(string_buffer.len()).unwrap();
+            string_buffer.extend_from_slice(name.as_bytes());
+            string_buffer.push(0);
+            let byte_size = match type_name {
+                "char" | "UInt8" => 1,
+                "int" | "unsigned int" | "UInt32" | "SInt32" | "float" => 4,
+                "SInt64" | "UInt64" => 8,
+                _ => -1,
+            };
+            nodes.push(assetripper::serialized_file::metadata::TypeTreeNode {
+                level,
+                version,
+                type_flags: 0,
+                type_string_offset: Some(type_string_offset),
+                name_string_offset: Some(name_string_offset),
+                type_name: Some(type_name.to_owned()),
+                name: Some(name.to_owned()),
+                byte_size,
+                index: -1,
+                meta_flags,
+                reference_type_hash: None,
+            });
+        }
+        assert_eq!(
+            nodes.first().and_then(|node| node.type_name.as_deref()),
+            Some("Material")
+        );
+        assetripper::serialized_file::metadata::TypeTree {
+            nodes,
+            string_buffer,
+        }
+    }
+
+    fn make_material_file_with_reference_2018_tpk() -> Vec<u8> {
+        let type_tree = material_2018_tpk_release_tree();
+        let mut payload = Vec::new();
+        put_typetree_string_value(&mut payload, "MaterialFixture");
+        put_i32_le(&mut payload, 1);
+        put_i64_le(&mut payload, 42);
+        put_typetree_string_value(&mut payload, "_FEATURE_A _FEATURE_B");
+        put_u32_le(&mut payload, 4);
+        payload.push(1);
+        payload.push(1);
+        while !payload.len().is_multiple_of(4) {
+            payload.push(0);
+        }
+        put_i32_le(&mut payload, 2450);
+        put_i32_le(&mut payload, 1);
+        put_typetree_string_value(&mut payload, "RenderType");
+        put_typetree_string_value(&mut payload, "TransparentCutout");
+        put_i32_le(&mut payload, 0);
+        put_i32_le(&mut payload, 0);
+        put_i32_le(&mut payload, 0);
+        put_i32_le(&mut payload, 0);
+        assert!(payload.len().is_multiple_of(4), "payload is 4-byte aligned");
+        finish_single_object_file_with_tpk_tree(
+            b"2018.2.21f1\0",
+            21,
+            &type_tree,
+            &payload,
+            42,
+            &["shader.assets"],
         )
     }
 
@@ -8821,8 +9021,8 @@ mod tests {
             );
         }
 
-        // The source selects ShaderImporter for decompiled text and Material PPtrs use the
-        // shader collection's own exported file ID and GUID.
+        // The source selects ShaderImporter for decompiled text and Material shader pointers
+        // use the shader collection's exported file ID/GUID with Meta pointer type 3.
         let shader_meta_path = "Assets/Shader/Test_Simple.shader.meta";
         let shader_meta = fs::read_to_string(output_root.join(shader_meta_path)).unwrap();
         assert!(shader_meta.contains("ShaderImporter:"), "{shader_meta}");
@@ -8842,7 +9042,7 @@ mod tests {
             .expect("material YAML is readable");
         assert!(
             material_yaml.contains(&format!(
-                "m_Shader: {{fileID: 4800000, guid: {shader_guid}, type: 2}}"
+                "m_Shader: {{fileID: 4800000, guid: {shader_guid}, type: 3}}"
             )),
             "material did not preserve its cross-file Shader reference:\n{material_yaml}"
         );
@@ -9100,6 +9300,66 @@ mod tests {
                 "  - _MainTex: {{fileID: 2800000, guid: {texture_guid}, type: 2}}"
             )),
             "ShaderImporter texture entry points to the exported Texture2D sidecar: {shader_meta}"
+        );
+
+        input.files.extend(
+            project_tree(&output_root)
+                .iter()
+                .map(|path| output_root.join(path)),
+        );
+        drop(input);
+    }
+
+    #[test]
+    fn export_project_material_yaml_matches_the_reference_2018_2_project_probe() {
+        let directory = TestInputDirectory::new_root();
+        let assets_directory = directory.join("assets");
+        fs::create_dir(&assets_directory).unwrap();
+        let output_root = directory.join("project");
+        fs::create_dir(&output_root).unwrap();
+        let material_path = assets_directory.join("material.assets");
+        let shader_path = assets_directory.join("shader.assets");
+        fs::write(&material_path, make_material_file_with_reference_2018_tpk()).unwrap();
+        fs::write(
+            &shader_path,
+            make_shader_file_with_non_modifiable_texture_null(),
+        )
+        .unwrap();
+        let mut input = TestInputDirectory {
+            directory,
+            files: vec![material_path.clone(), shader_path.clone()],
+            subdirectories: vec![
+                assets_directory,
+                output_root.clone(),
+                output_root.join("Assets"),
+                output_root.join("Assets/Material"),
+                output_root.join("Assets/Shader"),
+                output_root.join("ProjectSettings"),
+                output_root.join("Packages"),
+            ],
+        };
+
+        super::export_project_to(
+            &[material_path, shader_path],
+            &output_root,
+            false,
+            &default_export_settings(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+
+        let shader_meta =
+            fs::read_to_string(output_root.join("Assets/Shader/Test_Simple.shader.meta")).unwrap();
+        let shader_guid = shader_meta
+            .lines()
+            .find_map(|line| line.strip_prefix("guid: "))
+            .expect("exported Shader sidecar has a GUID");
+        let material_yaml =
+            fs::read_to_string(output_root.join("Assets/Material/MaterialFixture.mat")).unwrap();
+        let normalized = material_yaml.replace(shader_guid, "<SHADER_GUID>");
+        assert_eq!(
+            normalized,
+            include_str!("export/material_project_fixture.yaml")
         );
 
         input.files.extend(

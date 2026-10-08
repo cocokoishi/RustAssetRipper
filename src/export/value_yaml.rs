@@ -88,6 +88,8 @@ pub enum UnityYamlDictionaryRepresentation {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct UnityYamlObjectConversionHints {
     pub empty_array_kinds: HashMap<String, UnityYamlEmptyArrayKind>,
+    /// `serializedVersion` values emitted for versioned nested TypeTree structs.
+    pub serialized_version_paths: HashMap<String, i32>,
     /// Paths may contain [*] where a TypeTree struct appears as an array element.
     pub flow_mapped_struct_paths: HashSet<String>,
     /// Paths emitted as lists even when their TypeTree shape is a dictionary.
@@ -961,6 +963,28 @@ impl<'a> UnityYamlTypeTreeLayout<'a> {
         let node = self.node(node_index)?;
         let node_type = self.type_name(node_index)?;
 
+        if node.version > 1 && self.first_child[node_index].is_some() {
+            if let Some(previous) = hints.serialized_version_paths.get(field_path) {
+                if *previous != node.version {
+                    return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                        node_index,
+                        reason: "ambiguous serialized versions share one field path",
+                    });
+                }
+            } else {
+                hints.serialized_version_paths.try_reserve(1).map_err(|_| {
+                    UnityYamlObjectConversionError::AllocationFailed {
+                        resource: "Unity YAML serialized-version hints",
+                        requested: hints.serialized_version_paths.len().saturating_add(1),
+                    }
+                })?;
+                hints.serialized_version_paths.insert(
+                    try_copy_string(field_path, "Unity YAML serialized-version path")?,
+                    node.version,
+                );
+            }
+        }
+
         let field_aliases = baseline_type_scoped_field_aliases(node_type);
         if !field_aliases.is_empty() || has_conditional_field_aliases(node_type) {
             for child_index in self.child_indices(node_index)? {
@@ -1344,8 +1368,98 @@ where
     if source.class_id == 114 {
         move_mapping_field_to_end(&mut body, "m_Structure")?;
     }
+    if source.class_id == 21
+        && field_mode == UnityYamlObjectFieldMode::ProjectAsset
+        && unity_version.major == 2018
+        && unity_version.minor == 2
+        && !stripped
+    {
+        insert_material_2018_editor_fields(&mut body)?;
+    }
     UnityYamlDocument::object(source.class_id, file_id, class_name, body, stripped)
         .map_err(UnityYamlObjectConversionError::NodeBuild)
+}
+
+fn insert_material_2018_editor_fields(
+    body: &mut UnityYamlNode,
+) -> Result<(), UnityYamlObjectConversionError> {
+    let UnityYamlNodeKind::Mapping { style, .. } = &body.kind else {
+        return Err(UnityYamlObjectConversionError::NodeBuild(
+            UnityYamlNodeBuildError::NotAMapping,
+        ));
+    };
+    let style = *style;
+    let previous = std::mem::replace(
+        &mut body.kind,
+        UnityYamlNodeKind::Mapping {
+            style,
+            entries: Vec::new(),
+        },
+    );
+    let UnityYamlNodeKind::Mapping { style, mut entries } = previous else {
+        return Err(UnityYamlObjectConversionError::NodeBuild(
+            UnityYamlNodeBuildError::NotAMapping,
+        ));
+    };
+    let requested =
+        entries
+            .len()
+            .checked_add(3)
+            .ok_or(UnityYamlObjectConversionError::AllocationFailed {
+                resource: "Material Editor YAML fields",
+                requested: usize::MAX,
+            })?;
+    let mut ordered = Vec::new();
+    ordered.try_reserve_exact(requested).map_err(|_| {
+        UnityYamlObjectConversionError::AllocationFailed {
+            resource: "Material Editor YAML fields",
+            requested,
+        }
+    })?;
+
+    if let Some(entry) = take_yaml_mapping_field(&mut entries, "serializedVersion") {
+        ordered.push(entry);
+    }
+    for field in [
+        "m_ObjectHideFlags",
+        "m_CorrespondingSourceObject",
+        "m_PrefabInternal",
+    ] {
+        ordered.push(take_yaml_mapping_field(&mut entries, field).unwrap_or((
+            UnityYamlNode::plain_string(field),
+            match field {
+                "m_ObjectHideFlags" => UnityYamlNode::scalar(UnityYamlScalar::Unsigned(0)),
+                _ => {
+                    let mut pointer = UnityYamlNode::mapping(UnityYamlMappingStyle::Flow);
+                    pointer
+                        .insert_field("fileID", UnityYamlNode::scalar(UnityYamlScalar::Signed(0)))
+                        .map_err(UnityYamlObjectConversionError::NodeBuild)?;
+                    pointer
+                }
+            },
+        )));
+    }
+    ordered.append(&mut entries);
+    body.kind = UnityYamlNodeKind::Mapping {
+        style,
+        entries: ordered,
+    };
+    Ok(())
+}
+
+fn take_yaml_mapping_field(
+    entries: &mut Vec<(UnityYamlNode, UnityYamlNode)>,
+    field_name: &str,
+) -> Option<(UnityYamlNode, UnityYamlNode)> {
+    let index = entries.iter().position(|(key, _)| {
+        matches!(
+            &key.kind,
+            UnityYamlNodeKind::Scalar(
+                UnityYamlScalar::PlainString(value) | UnityYamlScalar::String(value)
+            ) if value == field_name
+        )
+    })?;
+    Some(entries.remove(index))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1517,6 +1631,14 @@ where
                     } else {
                         UnityYamlMappingStyle::Block
                     });
+                if let Some(version) = hints.serialized_version_paths.get(field_path) {
+                    mapping
+                        .insert_field_begin(
+                            "serializedVersion",
+                            UnityYamlNode::scalar(UnityYamlScalar::Signed(i64::from(*version))),
+                        )
+                        .map_err(UnityYamlObjectConversionError::NodeBuild)?;
+                }
                 append_struct_fields(
                     &mut mapping,
                     fields,

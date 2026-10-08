@@ -31,7 +31,7 @@ use crate::serialized_file::workspace::SerializedFileWorkspace;
 
 use super::pointer_map::{
     ExportPointerMapError, ProjectExportPointerMap, ProjectPointerRequest,
-    ProjectPointerResolution, UnresolvedProjectPointer,
+    ProjectPointerResolution, UnityProjectAssetType, UnresolvedProjectPointer,
 };
 use super::prefab_collection::{
     PrefabAssetRepresentation, PrefabExportIdAssignment, PrefabExportIdPlan,
@@ -1991,6 +1991,15 @@ fn resolve_workspace_pointer(
         }),
     };
     match pointer_map.resolve(pointer_request, current_collection_index) {
+        Ok(ProjectPointerResolution::Mapped(mut pointer))
+            if request.source.class_id == 21
+                && request.field_path.rsplit('.').next() == Some("m_Shader") =>
+        {
+            // AssetRipper's Material shader converter writes a Meta pointer (type 3), while
+            // ordinary serialized asset references use type 2.
+            pointer.asset_type = UnityProjectAssetType::Meta;
+            ProjectPointerResolution::Mapped(pointer)
+        }
         Ok(resolution) => resolution,
         Err(source) => {
             *error = Some(UnityYamlWorkspaceExportError::PointerMap(source));
