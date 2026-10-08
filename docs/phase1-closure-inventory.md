@@ -1,6 +1,6 @@
 # Phase 1 closure inventory
 
-Current inventory basis: the code commit preceding this docs checkpoint is `6accb9aae57825a4845ab18b52707d2f1dc12624` (tree `aff76701039c4d052b1355a55b06816ac2a29318`), whose parent `5dc5701f2b3ff94b4fc9a15d7e8ef9b45c9002a0` (tree `2557a9d32026ec4a1a323ac02fd002ec04e0ffcf`) is pushed to `origin/main`; this checkpoint adds the sandbox-safe test temporary root and the corrected verification state below. The working tree may retain untracked probe `bin`/`obj` build outputs under `tools/probes`; they were not committed. Reference source: `C:\Users\koishi\Desktop\RustAssetripper\AssetRipper`, frozen by `docs/baseline-files.sha256` (1,449 entries; manifest SHA-256 `29d1fd27f66b974c43750f30aa99117eb423cb318f3062daf05e1489f10f08f9`).
+Current inventory basis: implementation checkpoint `9003c24ee5bcd03530ea139ea192d832ce806a4f` (tree `211e4b1ebffc3cf2818150aa7f03ee309f53028e`) is pushed to `origin/main`; fetch verification found the remote commit and tree matched. This checkpoint refreshes the feature-ledger status counts and the current verification evidence below; no feature row changed status. Reference source: `C:\Users\koishi\Desktop\RustAssetripper\AssetRipper`, frozen by `docs/baseline-files.sha256` (1,449 entries; manifest SHA-256 `29d1fd27f66b974c43750f30aa99117eb423cb318f3062daf05e1489f10f08f9`).
 
 The status counts below come from the `Status` cell in each stable-ID row of `docs/feature-parity.md`, matched against the required status vocabulary; prose mentions elsewhere do not affect the count.
 
