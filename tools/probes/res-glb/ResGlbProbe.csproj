@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>resglbprobe</AssemblyName>
+    <ReferenceRoot Condition="'$(ReferenceRoot)' == ''">$(LOCALAPPDATA)\Temp\opencode\ar-ref\Source\0Bins\AssetRipper.GUI.Free\Release</ReferenceRoot>
+    <NoWarn>$(NoWarn);CS0618</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="AssetRipper.Assets"><HintPath>$(ReferenceRoot)\AssetRipper.Assets.dll</HintPath></Reference>
+    <Reference Include="AssetRipper.Primitives"><HintPath>$(ReferenceRoot)\AssetRipper.Primitives.dll</HintPath></Reference>
+    <Reference Include="AssetRipper.IO.Endian"><HintPath>$(ReferenceRoot)\AssetRipper.IO.Endian.dll</HintPath></Reference>
+    <Reference Include="AssetRipper.SourceGenerated"><HintPath>$(ReferenceRoot)\AssetRipper.SourceGenerated.dll</HintPath></Reference>
+    <Reference Include="AssetRipper.SourceGenerated.Extensions"><HintPath>$(ReferenceRoot)\AssetRipper.SourceGenerated.Extensions.dll</HintPath></Reference>
+    <Reference Include="AssetRipper.Export.Modules.Models"><HintPath>$(ReferenceRoot)\AssetRipper.Export.Modules.Models.dll</HintPath></Reference>
+    <Reference Include="AssetRipper.Export.PrimaryContent"><HintPath>$(ReferenceRoot)\AssetRipper.Export.PrimaryContent.dll</HintPath></Reference>
+    <Reference Include="SharpGLTF.Core"><HintPath>$(ReferenceRoot)\SharpGLTF.Core.dll</HintPath></Reference>
+    <Reference Include="SharpGLTF.Toolkit"><HintPath>$(ReferenceRoot)\SharpGLTF.Toolkit.dll</HintPath></Reference>
+  </ItemGroup>
+</Project>

@@ -15,7 +15,7 @@ use assetripper::export::pointer_map::{
     ProjectExportPointerMap, UnityProjectAssetType,
 };
 use assetripper::export::project_workflow::{
-    export_workspace_yaml_project, WorkspaceProjectExportLimits,
+    export_workspace_yaml_project_with_settings, WorkspaceProjectExportLimits,
 };
 use assetripper::export::scene_collection::{
     ExportAssetCollectionIdentity, ExportAssetIdentity, SceneExportIdAssignment,
@@ -1235,10 +1235,19 @@ where
 {
     let mut output_root: Option<PathBuf> = None;
     let mut delete_existing = false;
+    let mut settings_path: Option<PathBuf> = None;
     let mut inputs = Vec::new();
-    for argument in arguments {
+    let mut arguments = arguments;
+    while let Some(argument) = arguments.next() {
         if argument == "--delete-existing" {
             delete_existing = true;
+            continue;
+        }
+        if argument == "--settings" {
+            let value = arguments
+                .next()
+                .ok_or_else(|| invalid_input("--settings requires a settings file path"))?;
+            settings_path = Some(PathBuf::from(value));
             continue;
         }
         match &output_root {
@@ -1260,15 +1269,27 @@ where
             "export-project requires at least one input file or directory",
         ));
     }
+    let settings = match settings_path {
+        Some(path) => read_export_settings_file(&path)?,
+        None => try_load_default_export_settings()?
+            .unwrap_or_else(|| ExportSettingsFile::from(ExportDefaults::default())),
+    };
     let stdout = io::stdout();
     let mut status_output = stdout.lock();
-    export_project_to(&inputs, &output_root, delete_existing, &mut status_output)
+    export_project_to(
+        &inputs,
+        &output_root,
+        delete_existing,
+        &settings,
+        &mut status_output,
+    )
 }
 
 fn export_project_to<W: io::Write>(
     input_paths: &[PathBuf],
     output_root: &Path,
     delete_existing: bool,
+    settings: &ExportSettingsFile,
     status_output: &mut W,
 ) -> Result<(), Box<dyn Error>> {
     let (mut filesystem, selected_paths, mount_report) = mount_project_inputs(input_paths)?;
@@ -1306,7 +1327,7 @@ fn export_project_to<W: io::Write>(
     )?;
     let provider =
         PlatformResourceProvider::with_mixed_data_paths(platform.as_ref(), Some(&mixed.data_paths));
-    let report = export_workspace_yaml_project(
+    let report = export_workspace_yaml_project_with_settings(
         output_root,
         delete_existing,
         &filesystem,
@@ -1315,21 +1336,43 @@ fn export_project_to<W: io::Write>(
         &workspace,
         &objects,
         &reference_graph,
+        settings,
         WorkspaceProjectExportLimits::default(),
     )?;
     writeln!(
         status_output,
-        "Wrote a Unity YAML project to {:?}: {} SerializedFiles, {} objects in {} asset files, {} YAML bytes (project version {}).",
+        "Wrote a Unity project to {:?}: {} SerializedFiles, {} objects in {} asset files ({} with importer metadata), {} bytes (project version {}).",
         output_root,
         report.serialized_file_count,
         report.exported_object_count,
         report.asset_file_count,
+        report.meta_file_count,
         report.total_yaml_bytes,
         report.project_version.major
     )?;
+    if !report.skipped_objects.is_empty() {
+        writeln!(
+            status_output,
+            "{} objects claimed a non-exportable baseline collection and were not written (the baseline writes nothing for them):",
+            report.skipped_objects.len()
+        )?;
+        for notice in report.skipped_objects.iter().take(10) {
+            writeln!(status_output, "  - {}: {}", notice.subject, notice.reason)?;
+        }
+    }
+    if !report.fallbacks.is_empty() {
+        writeln!(
+            status_output,
+            "{} files used the generic asset-family renderer because their specialized exporter is not wired yet:",
+            report.fallbacks.len()
+        )?;
+        for notice in report.fallbacks.iter().take(10) {
+            writeln!(status_output, "  - {}: {}", notice.subject, notice.reason)?;
+        }
+    }
     writeln!(
         status_output,
-        "Mounted {} logical inputs ({} bytes). Scene/Prefab reconstruction and class-specific binary export remain outside this YAML workflow.",
+        "Mounted {} logical inputs ({} bytes). Scene/Prefab processing and the remaining class-specific exporters are still separate integrations.",
         mount_report.discovered_inputs,
         mount_report.discovered_source_bytes
     )?;
@@ -4170,7 +4213,7 @@ fn invalid_data_owned(message: String) -> io::Error {
 
 fn print_usage() {
     println!(
-        "Usage:\n  assetripper-rs inspect <input-directory> [input-directory ...]\n  assetripper-rs inspect-files <input-file> [input-file ...]\n  assetripper-rs export-project [--delete-existing] <output-directory> <input-file-or-directory> [input-file-or-directory ...]\n  assetripper-rs export-object-yaml <serialized-file-index> <path-id> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-file-yaml <serialized-file-index> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-texture [--settings <path>] <serialized-file-index> <path-id> <new-output-image> <input-file> [input-file ...]\n  assetripper-rs export-mesh <serialized-file-index> <path-id> <new-output-glb> <input-file> [input-file ...]\n  assetripper-rs export-shader [--shader-export-mode <dummy|yaml|decompile>] [--settings <path>] <serialized-file-index> <path-id> <new-output-shader> <input-file> [input-file ...]\n  assetripper-rs export-audio [--settings <path>] <serialized-file-index> <path-id> <new-output-audio> <input-file> [input-file ...]\n  assetripper-rs save-default-settings [--settings <path>]\n  assetripper-rs delete-default-settings\n  assetripper-rs --help\n  assetripper-rs --version\n\n`inspect` mounts directories into isolated VFS roots. `inspect-files` dispatches explicitly selected file paths, registers top-level ResourceFiles as GameBundle root inputs, and reports the parsed SerializedFiles. `export-project` loads mixed file and directory inputs, resolves cross-file references and streamed resources, and writes one YAML `.asset` per SerializedFile plus `NativeFormatImporter` metadata, `ProjectVersion.txt`, and the default package manifest. It stages all YAML before writing and refuses undecoded objects, unresolved pointers, or objects omitted by YAML conversion. The output directory must not be empty or named `Desktop`, `Documents`, or `Downloads`; an existing non-empty directory aborts the export unless `--delete-existing` is given, which deletes and recreates it exactly like the reference exporter does after deletion consent. This is the initial workspace YAML workflow; Scene/Prefab reconstruction, class-specific binary collections, importer variants, settings application, and the remaining post-exporters are still open parity work. `export-object-yaml` writes one decoded object as YAML. `export-file-yaml` writes YAML-exportable objects from one SerializedFile in object-table order, resolves streamed Mesh and image-texture bytes, preserves intra-file references through source PathIDs, and refuses unresolved or cross-file references. It reports ImageTexture objects omitted by the baseline when they have no usable image data. `export-texture` decodes one class-28 Texture2D, resolves its inline or streamed image data, and writes a PNG/BMP/TGA image; the output extension selects the format (otherwise the configured settings format, default PNG). `export-mesh` decodes one class-43 Mesh, resolves its vertex data and compressed mesh, and writes a glTF 2.0 binary file with one node per sub-mesh, converting Unity's left-handed coordinates to glTF's right-handed space and rewriting the sub-mesh topology. `export-shader` decodes one class-48 Shader and writes `.shader` text: decompiled script text is written verbatim under every mode, otherwise `dummy` (the default) and `decompile` render the fallback dummy body and `yaml` reports that YAML mode writes a YAML asset instead. `export-audio` decodes one class-83 AudioClip, resolves its inline or streamed audio data, and writes the decoded bytes; tracker audio passes through, `FSB5` reports the external-decoder requirement, and unknown bytes fail with the reference diagnostic. None of the commands replaces an existing output file."
+        "Usage:\n  assetripper-rs inspect <input-directory> [input-directory ...]\n  assetripper-rs inspect-files <input-file> [input-file ...]\n  assetripper-rs export-project [--delete-existing] [--settings <path>] <output-directory> <input-file-or-directory> [input-file-or-directory ...]\n  assetripper-rs export-object-yaml <serialized-file-index> <path-id> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-file-yaml <serialized-file-index> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-texture [--settings <path>] <serialized-file-index> <path-id> <new-output-image> <input-file> [input-file ...]\n  assetripper-rs export-mesh <serialized-file-index> <path-id> <new-output-glb> <input-file> [input-file ...]\n  assetripper-rs export-shader [--shader-export-mode <dummy|yaml|decompile>] [--settings <path>] <serialized-file-index> <path-id> <new-output-shader> <input-file> [input-file ...]\n  assetripper-rs export-audio [--settings <path>] <serialized-file-index> <path-id> <new-output-audio> <input-file> [input-file ...]\n  assetripper-rs save-default-settings [--settings <path>]\n  assetripper-rs delete-default-settings\n  assetripper-rs --help\n  assetripper-rs --version\n\n`inspect` mounts directories into isolated VFS roots. `inspect-files` dispatches explicitly selected file paths, registers top-level ResourceFiles as GameBundle root inputs, and reports the parsed SerializedFiles. `export-project` loads mixed file and directory inputs, resolves cross-file references and streamed resources, and writes one YAML `.asset` per SerializedFile plus `NativeFormatImporter` metadata, `ProjectVersion.txt`, and the default package manifest. It stages all YAML before writing and refuses undecoded objects, unresolved pointers, or objects omitted by YAML conversion. The output directory must not be empty or named `Desktop`, `Documents`, or `Downloads`; an existing non-empty directory aborts the export unless `--delete-existing` is given, which deletes and recreates it exactly like the reference exporter does after deletion consent. This is the initial workspace YAML workflow; Scene/Prefab reconstruction, class-specific binary collections, importer variants, settings application, and the remaining post-exporters are still open parity work. `export-object-yaml` writes one decoded object as YAML. `export-file-yaml` writes YAML-exportable objects from one SerializedFile in object-table order, resolves streamed Mesh and image-texture bytes, preserves intra-file references through source PathIDs, and refuses unresolved or cross-file references. It reports ImageTexture objects omitted by the baseline when they have no usable image data. `export-texture` decodes one class-28 Texture2D, resolves its inline or streamed image data, and writes a PNG/BMP/TGA image; the output extension selects the format (otherwise the configured settings format, default PNG). `export-mesh` decodes one class-43 Mesh, resolves its vertex data and compressed mesh, and writes a glTF 2.0 binary file with one node per sub-mesh, converting Unity's left-handed coordinates to glTF's right-handed space and rewriting the sub-mesh topology. `export-shader` decodes one class-48 Shader and writes `.shader` text: decompiled script text is written verbatim under every mode, otherwise `dummy` (the default) and `decompile` render the fallback dummy body and `yaml` reports that YAML mode writes a YAML asset instead. `export-audio` decodes one class-83 AudioClip, resolves its inline or streamed audio data, and writes the decoded bytes; tracker audio passes through, `FSB5` reports the external-decoder requirement, and unknown bytes fail with the reference diagnostic. None of the commands replaces an existing output file."
     );
 }
 
@@ -4182,6 +4225,8 @@ mod tests {
         merge_mount_report, remaining_budget_u64, remaining_budget_usize,
         source_bundle_for_collection, WorkspaceSerializedBundle,
     };
+    use assetripper::export::settings::ExportDefaults;
+    use assetripper::export::settings_file::ExportSettingsFile;
     use assetripper::io::dependency::DependencyFilePath;
     use assetripper::io::filesystem::VirtualFileSystem;
     use assetripper::io::platform_file_inventory::PlatformWorkspaceLoadOptions;
@@ -4202,6 +4247,59 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static NEXT_TEST_DIRECTORY: AtomicUsize = AtomicUsize::new(0);
+
+    /// The built-in `ExportSettings` record, used by project-export tests without a settings file.
+    fn default_export_settings() -> ExportSettingsFile {
+        ExportSettingsFile::from(ExportDefaults::default())
+    }
+
+    /// The `guid:` line of one importer sidecar.
+    fn meta_guid(path: &std::path::Path) -> String {
+        fs::read_to_string(path)
+            .expect("sidecar is readable")
+            .lines()
+            .find_map(|line| line.strip_prefix("guid: "))
+            .expect("sidecar has a GUID")
+            .to_owned()
+    }
+
+    /// Every file below one directory as portable, sorted project-relative paths.
+    fn project_tree(root: &std::path::Path) -> Vec<String> {
+        fn walk(root: &std::path::Path, current: &std::path::Path, output: &mut Vec<String>) {
+            for entry in fs::read_dir(current).expect("output directory is readable") {
+                let entry = entry.expect("directory entry is readable");
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(root, &path, output);
+                } else {
+                    let relative = path
+                        .strip_prefix(root)
+                        .expect("output path is below the export root");
+                    output.push(relative.to_string_lossy().replace('\\', "/"));
+                }
+            }
+        }
+        let mut output = Vec::new();
+        walk(root, root, &mut output);
+        output.sort();
+        output
+    }
+
+    /// A class-129 `PlayerSettings` object: the `TypeTreeObject { IsPlayerSettings }` manager path.
+    fn make_player_settings_file() -> Vec<u8> {
+        let mut strings = Vec::new();
+        let root_type = push_type_tree_string(&mut strings, "PlayerSettings");
+        let empty_name = push_type_tree_string(&mut strings, "");
+        let int_type = push_type_tree_string(&mut strings, "int");
+        let value_name = push_type_tree_string(&mut strings, "m_Value");
+        let nodes = [
+            (0u8, root_type, empty_name, -1i32),
+            (1, int_type, value_name, 4),
+        ];
+        let mut payload = Vec::new();
+        put_i32_le(&mut payload, 7);
+        finish_single_object_file(b"2019.4.0f1\0", 129, &nodes, &strings, &payload, 42)
+    }
 
     #[test]
     fn streamed_scene_bundle_lookup_uses_direct_collections_without_a_scope_path() {
@@ -4231,13 +4329,23 @@ mod tests {
 
     impl TestInputDirectory {
         fn new_root() -> PathBuf {
-            let index = NEXT_TEST_DIRECTORY.fetch_add(1, Ordering::Relaxed);
-            let directory = std::env::current_dir()
-                .unwrap()
-                .join("target")
-                .join(format!("cli-input-{}-{index}", std::process::id()));
-            fs::create_dir(&directory).unwrap();
-            directory
+            loop {
+                let index = NEXT_TEST_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+                let directory = std::env::current_dir()
+                    .unwrap()
+                    .join("target")
+                    .join(format!("cli-input-{}-{index}", std::process::id()));
+                match fs::create_dir(&directory) {
+                    Ok(()) => return directory,
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => {
+                        panic!(
+                            "failed to create test input root {}: {error}",
+                            directory.display()
+                        )
+                    }
+                }
+            }
         }
 
         fn new() -> Self {
@@ -7676,8 +7784,7 @@ mod tests {
                 target_directory.clone(),
                 output_root.clone(),
                 output_root.join("Assets"),
-                output_root.join("Assets/AssetRipper"),
-                output_root.join("Assets/AssetRipper/SerializedFiles"),
+                output_root.join("Assets/GameObject"),
                 output_root.join("ProjectSettings"),
                 output_root.join("Packages"),
             ],
@@ -7694,12 +7801,10 @@ mod tests {
         )
         .unwrap();
 
-        let source_asset = output_root.join("Assets/AssetRipper/SerializedFiles/file_000000.asset");
-        let source_meta =
-            output_root.join("Assets/AssetRipper/SerializedFiles/file_000000.asset.meta");
-        let target_asset = output_root.join("Assets/AssetRipper/SerializedFiles/file_000001.asset");
-        let target_meta =
-            output_root.join("Assets/AssetRipper/SerializedFiles/file_000001.asset.meta");
+        let source_asset = output_root.join("Assets/GameObject/GameObject.asset");
+        let source_meta = output_root.join("Assets/GameObject/GameObject.asset.meta");
+        let target_asset = output_root.join("Assets/GameObject/GameObject_0.asset");
+        let target_meta = output_root.join("Assets/GameObject/GameObject_0.asset.meta");
         let source_yaml = fs::read_to_string(&source_asset).unwrap();
         let target_meta_text = fs::read_to_string(&target_meta).unwrap();
         let target_guid = target_meta_text
@@ -7717,6 +7822,11 @@ mod tests {
         assert!(fs::read_to_string(&source_meta)
             .unwrap()
             .contains("NativeFormatImporter:"));
+        assert_ne!(
+            meta_guid(&source_meta),
+            target_guid,
+            "each exported object is its own baseline collection with its own GUID"
+        );
         assert!(
             fs::read_to_string(output_root.join("ProjectSettings/ProjectVersion.txt"))
                 .unwrap()
@@ -7738,6 +7848,197 @@ mod tests {
     }
 
     #[test]
+    fn export_project_dispatches_collections_and_writes_a_complete_unity_project() {
+        let directory = TestInputDirectory::new_root();
+        let assets_directory = directory.join("assets");
+        fs::create_dir(&assets_directory).unwrap();
+        let output_root = directory.join("project");
+        fs::create_dir(&output_root).unwrap();
+
+        let main_path = directory.join("main.assets");
+        fs::write(
+            &main_path,
+            make_generation_10_file_with_pointer(&["other.assets"], 1, 42),
+        )
+        .unwrap();
+        let other_path = assets_directory.join("other.assets");
+        fs::write(&other_path, make_generation_10_file()).unwrap();
+        let texture_path = assets_directory.join("texture.assets");
+        fs::write(&texture_path, make_texture2d_file()).unwrap();
+        let material_path = assets_directory.join("material.assets");
+        fs::write(&material_path, make_material_file()).unwrap();
+        let mesh_path = assets_directory.join("mesh.assets");
+        fs::write(&mesh_path, make_mesh_file()).unwrap();
+        let player_path = assets_directory.join("player.assets");
+        fs::write(&player_path, make_player_settings_file()).unwrap();
+        let build_settings_path = assets_directory.join("settings.assets");
+        fs::write(
+            &build_settings_path,
+            make_build_settings_file(&["Assets/Scenes/level0.unity"]),
+        )
+        .unwrap();
+        let bundle_path = assets_directory.join("bundle.assets");
+        fs::write(&bundle_path, make_asset_bundle_file()).unwrap();
+        let shader_path = assets_directory.join("shader.assets");
+        fs::write(&shader_path, make_shader_file("Shader \"x\" { }")).unwrap();
+
+        let mut input = TestInputDirectory {
+            directory: directory.clone(),
+            files: vec![
+                main_path.clone(),
+                other_path.clone(),
+                texture_path.clone(),
+                material_path.clone(),
+                mesh_path.clone(),
+                player_path.clone(),
+                build_settings_path.clone(),
+                bundle_path.clone(),
+                shader_path.clone(),
+            ],
+            // Drop removes directories in reverse order, so keep parents before children.
+            subdirectories: vec![
+                assets_directory.clone(),
+                output_root.clone(),
+                output_root.join("Assets"),
+                output_root.join("Assets/GameObject"),
+                output_root.join("Assets/Material"),
+                output_root.join("Assets/Mesh"),
+                output_root.join("Assets/Shader"),
+                output_root.join("Assets/Texture2D"),
+                output_root.join("ProjectSettings"),
+                output_root.join("Packages"),
+            ],
+        };
+
+        let mut status = Vec::new();
+        super::export_project_to(
+            &[main_path, assets_directory],
+            &output_root,
+            false,
+            &default_export_settings(),
+            &mut status,
+        )
+        .unwrap();
+        let status = String::from_utf8(status).unwrap();
+
+        let actual = project_tree(&output_root);
+        assert_eq!(
+            actual,
+            vec![
+                "Assets/GameObject/GameObject.asset".to_owned(),
+                "Assets/GameObject/GameObject.asset.meta".to_owned(),
+                "Assets/GameObject/GameObject_0.asset".to_owned(),
+                "Assets/GameObject/GameObject_0.asset.meta".to_owned(),
+                "Assets/Material/TestMat.mat".to_owned(),
+                "Assets/Material/TestMat.mat.meta".to_owned(),
+                "Assets/Mesh/Tri.asset".to_owned(),
+                "Assets/Mesh/Tri.asset.meta".to_owned(),
+                "Assets/Shader/Test/Simple.shader".to_owned(),
+                "Assets/Shader/Test/Simple.shader.meta".to_owned(),
+                "Assets/Texture2D/Texture2D.texture2D".to_owned(),
+                "Assets/Texture2D/Texture2D.texture2D.meta".to_owned(),
+                "Packages/manifest.json".to_owned(),
+                "ProjectSettings/ProjectSettings.asset".to_owned(),
+                "ProjectSettings/ProjectVersion.txt".to_owned(),
+            ],
+            "actual project tree: {actual:#?}\nstatus:\n{status}"
+        );
+
+        // The cross-file PPtr renders the target object's own collection GUID.
+        let target_guid = meta_guid(&output_root.join("Assets/GameObject/GameObject_0.asset.meta"));
+        let main_yaml = fs::read_to_string(output_root.join("Assets/GameObject/GameObject.asset"))
+            .expect("cross-file asset is readable");
+        assert!(main_yaml.contains("--- !u!1 &42"), "{main_yaml}");
+        assert!(
+            main_yaml.contains(&format!("guid: {target_guid}")),
+            "{main_yaml}"
+        );
+
+        // Every asset-family sidecar is a NativeFormatImporter naming its own object.
+        for relative in [
+            "Assets/GameObject/GameObject.asset.meta",
+            "Assets/GameObject/GameObject_0.asset.meta",
+            "Assets/Material/TestMat.mat.meta",
+            "Assets/Mesh/Tri.asset.meta",
+            "Assets/Shader/Test/Simple.shader.meta",
+            "Assets/Texture2D/Texture2D.texture2D.meta",
+        ] {
+            let meta = fs::read_to_string(output_root.join(relative)).unwrap();
+            assert!(
+                meta.contains("NativeFormatImporter:"),
+                "{relative}:\n{meta}"
+            );
+            assert!(meta.contains("mainObjectFileID: 42"), "{relative}:\n{meta}");
+        }
+
+        // The settings-file family writes one file per object with unique GUIDs.
+        let mut guids: Vec<String> = [
+            "Assets/GameObject/GameObject.asset.meta",
+            "Assets/GameObject/GameObject_0.asset.meta",
+            "Assets/Material/TestMat.mat.meta",
+            "Assets/Mesh/Tri.asset.meta",
+            "Assets/Shader/Test/Simple.shader.meta",
+            "Assets/Texture2D/Texture2D.texture2D.meta",
+        ]
+        .iter()
+        .map(|relative| meta_guid(&output_root.join(relative)))
+        .collect();
+        guids.sort();
+        let guid_count = guids.len();
+        guids.dedup();
+        assert_eq!(guids.len(), guid_count, "collection GUIDs must be unique");
+
+        // The manager family has a fixed destination and no sidecar; the two non-exportable
+        // collections wrote nothing and are reported explicitly.
+        assert!(!output_root
+            .join("ProjectSettings/ProjectSettings.asset.meta")
+            .exists());
+        assert!(!output_root.join("Assets/BuildSettings").exists());
+        assert!(!output_root.join("Assets/AssetBundle").exists());
+        assert!(
+            status.contains("non-exportable baseline collection"),
+            "{status}"
+        );
+        assert!(status.contains("EmptyExportCollection"), "{status}");
+        assert!(status.contains("generic asset-family renderer"), "{status}");
+        assert!(status.contains("ShaderExportCollection"), "{status}");
+
+        // Post-exporters: ProjectVersion and the default package manifest.
+        assert!(
+            fs::read_to_string(output_root.join("ProjectSettings/ProjectVersion.txt"))
+                .unwrap()
+                .contains("2019.4.0f1")
+        );
+        let manifest = fs::read_to_string(output_root.join("Packages/manifest.json")).unwrap();
+        assert!(
+            manifest.contains("\"com.unity.modules.androidjni\""),
+            "{manifest}"
+        );
+
+        input.files.extend([
+            output_root.join("Assets/GameObject/GameObject.asset"),
+            output_root.join("Assets/GameObject/GameObject.asset.meta"),
+            output_root.join("Assets/GameObject/GameObject_0.asset"),
+            output_root.join("Assets/GameObject/GameObject_0.asset.meta"),
+            output_root.join("Assets/Material/TestMat.mat"),
+            output_root.join("Assets/Material/TestMat.mat.meta"),
+            output_root.join("Assets/Mesh/Tri.asset"),
+            output_root.join("Assets/Mesh/Tri.asset.meta"),
+            output_root.join("Assets/Shader/Test/Simple.shader"),
+            output_root.join("Assets/Shader/Test/Simple.shader.meta"),
+            output_root.join("Assets/Texture2D/Texture2D.texture2D"),
+            output_root.join("Assets/Texture2D/Texture2D.texture2D.meta"),
+            output_root.join("ProjectSettings/ProjectSettings.asset"),
+            output_root.join("ProjectSettings/ProjectVersion.txt"),
+            output_root.join("Packages/manifest.json"),
+        ]);
+        input
+            .subdirectories
+            .push(output_root.join("Assets/Shader/Test"));
+        drop(input);
+    }
+
+    #[test]
     fn export_project_rejects_unresolved_references_before_writing_project_files() {
         let directory = TestInputDirectory::new_root();
         let source_path = directory.join("main.assets");
@@ -7754,8 +8055,14 @@ mod tests {
             subdirectories: vec![output_root.clone()],
         };
 
-        let error = super::export_project_to(&[source_path], &output_root, false, &mut Vec::new())
-            .unwrap_err();
+        let error = super::export_project_to(
+            &[source_path],
+            &output_root,
+            false,
+            &default_export_settings(),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
 
         assert!(
             error.to_string().contains("unresolved")
@@ -7781,8 +8088,14 @@ mod tests {
             subdirectories: vec![output_root.clone()],
         };
 
-        let error = super::export_project_to(&[source_path], &output_root, false, &mut Vec::new())
-            .unwrap_err();
+        let error = super::export_project_to(
+            &[source_path],
+            &output_root,
+            false,
+            &default_export_settings(),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
 
         assert!(error
             .to_string()
@@ -7809,8 +8122,7 @@ mod tests {
             subdirectories: vec![
                 output_root.clone(),
                 output_root.join("Assets"),
-                output_root.join("Assets/AssetRipper"),
-                output_root.join("Assets/AssetRipper/SerializedFiles"),
+                output_root.join("Assets/GameObject"),
                 output_root.join("ProjectSettings"),
                 output_root.join("Packages"),
             ],
@@ -7827,8 +8139,8 @@ mod tests {
         )
         .unwrap();
 
-        let asset = output_root.join("Assets/AssetRipper/SerializedFiles/file_000000.asset");
-        let meta = output_root.join("Assets/AssetRipper/SerializedFiles/file_000000.asset.meta");
+        let asset = output_root.join("Assets/GameObject/GameObject.asset");
+        let meta = output_root.join("Assets/GameObject/GameObject.asset.meta");
         assert!(
             !stale_file.exists(),
             "the stale export root content survives"
@@ -7861,19 +8173,18 @@ mod tests {
         )
         .unwrap();
 
-        let asset = output_root.join("Assets/AssetRipper/SerializedFiles/file_000000.asset");
+        let asset = output_root.join("Assets/GameObject/GameObject.asset");
         assert!(asset.is_file());
         input.files.extend([
             asset,
-            output_root.join("Assets/AssetRipper/SerializedFiles/file_000000.asset.meta"),
+            output_root.join("Assets/GameObject/GameObject.asset.meta"),
             output_root.join("ProjectSettings/ProjectVersion.txt"),
             output_root.join("Packages/manifest.json"),
         ]);
         input.subdirectories.extend([
             output_root.clone(),
             output_root.join("Assets"),
-            output_root.join("Assets/AssetRipper"),
-            output_root.join("Assets/AssetRipper/SerializedFiles"),
+            output_root.join("Assets/GameObject"),
             output_root.join("ProjectSettings"),
             output_root.join("Packages"),
         ]);

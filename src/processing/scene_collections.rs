@@ -1679,8 +1679,29 @@ pub fn extract_occlusion_scene_guid(
     for (word_index, word) in data.iter_mut().enumerate() {
         let primary = GUID_WORD_FIELDS[word_index];
         let alternate = GUID_WORD_ALIASES[word_index];
-        let value = unique_alias_field(scene_guid, primary, alternate)?
-            .ok_or(SceneGuidError::MissingGuidWord { word_index })?;
+        let serialized = GUID_WORD_SERIALIZED_NAMES[word_index];
+        let mut present = Vec::new();
+        for name in [primary, alternate, serialized] {
+            if let Some(value) = scene_guid
+                .unique_field_in_base_chain(name)
+                .map_err(|source| SceneGuidError::FieldLookup {
+                    field_name: primary,
+                    source,
+                })?
+            {
+                present.push((name, value));
+            }
+        }
+        let (_, value) = match present.as_slice() {
+            [] => return Err(SceneGuidError::MissingGuidWord { word_index }),
+            [single] => *single,
+            _ => {
+                return Err(SceneGuidError::DuplicateAliases {
+                    primary,
+                    alternate: serialized,
+                })
+            }
+        };
         let SerializedValue::U32(value) = value else {
             return Err(SceneGuidError::GuidWordHasWrongType {
                 word_index,
@@ -1694,6 +1715,9 @@ pub fn extract_occlusion_scene_guid(
 
 const GUID_WORD_FIELDS: [&str; 4] = ["m_Data_0_", "m_Data_1_", "m_Data_2_", "m_Data_3_"];
 const GUID_WORD_ALIASES: [&str; 4] = ["Data_0_", "Data_1_", "Data_2_", "Data_3_"];
+/// The raw TPK spelling (`GUID` children are `data[N]`); the baseline renames these to
+/// `Data_N_` in `Pass002_RenameSubnodes`, but a fresh TypeTree read yields the serialized name.
+const GUID_WORD_SERIALIZED_NAMES: [&str; 4] = ["data[0]", "data[1]", "data[2]", "data[3]"];
 
 fn unique_alias_field<'a>(
     root: &'a SerializedValue,

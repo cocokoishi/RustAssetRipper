@@ -197,16 +197,58 @@ impl Read for FileRangeStream {
         let absolute_position = self.base_offset.checked_add(self.position).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "file range position overflows")
         })?;
-        let mut file = self
+        let file = self
             .file
             .lock()
             .map_err(|_| io::Error::other("file range handle mutex was poisoned"))?;
-        file.seek(SeekFrom::Start(absolute_position))?;
-        let read = file.read(&mut buffer[..requested])?;
+        // The baseline `RandomAccessStream` reads through `RandomAccess.Read(handle, buffer,
+        // position)`, so a range view never disturbs the parent handle's cursor. Keep the shared
+        // handle locked while using the platform positioned read; the Windows standard-library
+        // implementation may update the file cursor, so read_file_at restores it before return.
+        let read = read_file_at(&file, &mut buffer[..requested], absolute_position)?;
         self.position = self.position.checked_add(read as u64).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "file range position overflows")
         })?;
         Ok(read)
+    }
+}
+
+/// Read at an absolute offset using the platform positional file API.
+///
+/// Mirrors the baseline `RandomAccessStream`'s `RandomAccess.Read(Handle, buffer, position)`,
+/// which never uses or changes the parent stream position.
+#[cfg(windows)]
+fn read_file_at(file: &File, buffer: &mut [u8], offset: u64) -> io::Result<usize> {
+    use std::os::windows::fs::FileExt;
+    let mut file = file;
+    let original_position = file.stream_position()?;
+    let read = file.seek_read(buffer, offset);
+    let restore = file.seek(SeekFrom::Start(original_position));
+    match (read, restore) {
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Ok(count), Ok(_)) => Ok(count),
+    }
+}
+
+#[cfg(unix)]
+fn read_file_at(file: &File, buffer: &mut [u8], offset: u64) -> io::Result<usize> {
+    use std::os::unix::fs::FileExt;
+    file.read_at(buffer, offset)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn read_file_at(file: &File, buffer: &mut [u8], offset: u64) -> io::Result<usize> {
+    let mut file = file;
+    let original_position = file.stream_position()?;
+    let read = file
+        .seek(SeekFrom::Start(offset))
+        .and_then(|_| file.read(buffer));
+    let restore = file.seek(SeekFrom::Start(original_position));
+    match (read, restore) {
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Ok(count), Ok(_)) => Ok(count),
     }
 }
 
@@ -818,11 +860,18 @@ impl Seek for SmartStream {
 }
 
 /// A logical file composed of ordered, seekable streams such as `.split0`, `.split1`, etc.
+///
+/// The part cursor mirrors the baseline `MultiFileStream` state machine (`m_currentBegin`,
+/// `m_currentEnd`, `m_streamIndex`, `NextStream`, `UpdateCurrentStream`) so that a single
+/// `Read` call returns only what the current part can supply, exactly like the source.
 pub struct MultiFileStream {
     streams: Vec<Box<dyn ReadSeek + Send>>,
     stream_ends: Vec<u64>,
     length: u64,
     position: u64,
+    index: usize,
+    current_begin: u64,
+    current_end: u64,
 }
 
 const DEFAULT_MAX_PARTS: usize = 1_000_000;
@@ -1117,12 +1166,17 @@ impl MultiFileStream {
             stream_ends.push(length);
         }
 
-        Ok(Self {
+        let mut stream = Self {
             streams,
             stream_ends,
             length,
             position: 0,
-        })
+            index: 0,
+            current_begin: 0,
+            current_end: 0,
+        };
+        stream.update_current_stream()?;
+        Ok(stream)
     }
 
     pub fn length(&self) -> u64 {
@@ -1132,51 +1186,85 @@ impl MultiFileStream {
     pub fn position(&self) -> u64 {
         self.position
     }
+
+    /// The byte length of part `index`.
+    fn part_length(&self, index: usize) -> u64 {
+        let begin = if index == 0 {
+            0
+        } else {
+            self.stream_ends[index - 1]
+        };
+        self.stream_ends[index] - begin
+    }
+
+    /// `MultiFileStream.UpdateCurrentStream`: rescan parts for `position`, synchronizing the
+    /// sub-stream cursor. When the position is past every part end, the source leaves the last
+    /// part selected with its begin subtracted from the total.
+    fn update_current_stream(&mut self) -> io::Result<()> {
+        let mut begin = 0u64;
+        let mut end;
+        for index in 0..self.streams.len() {
+            self.index = index;
+            end = begin + self.part_length(index);
+            if end > self.position {
+                self.current_begin = begin;
+                self.current_end = end;
+                self.streams[index].seek(SeekFrom::Start(self.position - begin))?;
+                return Ok(());
+            }
+            begin = end;
+        }
+        let last_length = self.part_length(self.index);
+        self.current_begin = begin - last_length;
+        self.current_end = begin;
+        self.streams[self.index].seek(SeekFrom::Start(self.position - self.current_begin))?;
+        Ok(())
+    }
+
+    /// `MultiFileStream.NextStream`: advance to the next part, if any.
+    fn next_stream(&mut self) -> io::Result<()> {
+        let next = self.index + 1;
+        if next < self.streams.len() {
+            self.current_begin = self.current_end;
+            self.index = next;
+            self.streams[next].seek(SeekFrom::Start(0))?;
+            self.current_end = self.current_begin + self.part_length(next);
+        }
+        Ok(())
+    }
 }
 
 impl Read for MultiFileStream {
+    /// `MultiFileStream.Read(byte[], int, int)`: one call reads only from the current part.
+    ///
+    /// A request that spans a part boundary returns what the current part can supply; callers
+    /// that need a full buffer (`Read::read_exact`, `Read::read_to_end`, `CopyTo`) loop over the
+    /// short reads, exactly like the baseline `Stream.ReadExactly` / `CopyTo` callers.
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        if buffer.is_empty() || self.position >= self.length {
-            return Ok(0);
+        let read = self.streams[self.index].read(buffer)?;
+        self.position = self.position.checked_add(read as u64).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "multi-file position overflows")
+        })?;
+        if self.position == self.current_end {
+            self.next_stream()?;
         }
-
-        let mut total_read = 0usize;
-        while total_read < buffer.len() && self.position < self.length {
-            let stream_index = self
-                .stream_ends
-                .partition_point(|end| *end <= self.position);
-            let stream_start = if stream_index == 0 {
-                0
-            } else {
-                self.stream_ends[stream_index - 1]
-            };
-            let stream_end = self.stream_ends[stream_index];
-            let local_position = self.position - stream_start;
-            let remaining_in_part = stream_end - self.position;
-            let remaining_in_buffer = buffer.len() - total_read;
-            let requested =
-                remaining_in_buffer.min(usize::try_from(remaining_in_part).unwrap_or(usize::MAX));
-
-            self.streams[stream_index].seek(SeekFrom::Start(local_position))?;
-            let read =
-                self.streams[stream_index].read(&mut buffer[total_read..total_read + requested])?;
-            self.position = self.position.checked_add(read as u64).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "multi-file position overflows")
-            })?;
-            total_read += read;
-            if read < requested {
-                break;
-            }
-        }
-
-        Ok(total_read)
+        Ok(read)
     }
 }
 
 impl Seek for MultiFileStream {
+    /// `MultiFileStream.Position` setter plus `UpdateCurrentStream`.
+    ///
+    /// The end-relative offset itself keeps the documented BCL-correct decision in
+    /// [`seek_target`]; the part bookkeeping that follows is the source's.
     fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
         let next = seek_target(self.position, self.length, from)?;
         self.position = next;
+        if next < self.current_begin || next >= self.current_end {
+            self.update_current_stream()?;
+        } else {
+            self.streams[self.index].seek(SeekFrom::Start(next - self.current_begin))?;
+        }
         Ok(next)
     }
 }
@@ -1239,6 +1327,15 @@ mod tests {
             std::fs::remove_file(directory.join(name)).unwrap();
         }
         std::fs::remove_dir(directory).unwrap();
+    }
+
+    fn read_one_byte(read: &mut impl Read) -> Option<u8> {
+        let mut byte = [0; 1];
+        match read.read(&mut byte).unwrap() {
+            1 => Some(byte[0]),
+            0 => None,
+            _ => unreachable!("one-byte reads cannot return more than one byte"),
+        }
     }
 
     fn source_multifile_fixture_fields(prefix: &str) -> Vec<&'static str> {
@@ -1345,14 +1442,37 @@ mod tests {
     }
 
     #[test]
-    fn multi_file_stream_reads_across_parts_and_seeks_logically() {
+    fn multi_file_stream_reads_one_part_per_call_like_the_source() {
+        // `MultiFileStream.Read` reads only from the current part and advances afterwards, so a
+        // request larger than the remaining part bytes returns a short read and the next call
+        // continues in the following part.
         let parts = [b"abc".as_slice(), b"".as_slice(), b"defg".as_slice()]
             .into_iter()
             .map(|part| Cursor::new(part.to_vec()));
         let mut stream = MultiFileStream::new(parts).unwrap();
         let mut prefix = [0; 5];
-        assert_eq!(stream.read(&mut prefix).unwrap(), 5);
-        assert_eq!(&prefix, b"abcde");
+        assert_eq!(stream.read(&mut prefix).unwrap(), 3);
+        assert_eq!(&prefix[..3], b"abc");
+        // The empty middle part yields a zero-length read at the boundary, like the source's
+        // `NextStream` walk.
+        assert_eq!(stream.read(&mut prefix).unwrap(), 0);
+        assert_eq!(stream.read(&mut prefix).unwrap(), 4);
+        assert_eq!(&prefix[..4], b"defg");
+        assert_eq!(stream.read(&mut prefix).unwrap(), 0);
+
+        // ReadExactly loops over the short reads, so it still crosses the boundary.
+        let parts = [b"abc".as_slice(), b"defg".as_slice()]
+            .into_iter()
+            .map(|part| Cursor::new(part.to_vec()));
+        let mut stream = MultiFileStream::new(parts).unwrap();
+        let mut exact = [0; 7];
+        stream.read_exact(&mut exact).unwrap();
+        assert_eq!(&exact, b"abcdefg");
+
+        let parts = [b"abc".as_slice(), b"".as_slice(), b"defg".as_slice()]
+            .into_iter()
+            .map(|part| Cursor::new(part.to_vec()));
+        let mut stream = MultiFileStream::new(parts).unwrap();
         assert_eq!(stream.seek(SeekFrom::End(-2)).unwrap(), 5);
         let mut suffix = [0; 3];
         assert_eq!(stream.read(&mut suffix).unwrap(), 2);
@@ -1597,11 +1717,11 @@ mod tests {
         assert_eq!(stream.length().unwrap(), 10);
         assert!(!stream.can_write());
         let mut prefix = [0; 4];
-        assert_eq!(stream.read(&mut prefix).unwrap(), 4);
-        assert_eq!(&prefix, b"raw ");
-        assert_eq!(reference.position().unwrap(), 4);
+        assert_eq!(stream.read(&mut prefix).unwrap(), 3);
+        assert_eq!(&prefix[..3], b"raw");
+        assert_eq!(reference.position().unwrap(), 3);
         assert_eq!(stream.to_vec(10).unwrap(), b"raw bundle");
-        assert_eq!(stream.position().unwrap(), 4);
+        assert_eq!(stream.position().unwrap(), 3);
         assert!(stream.write_all(b"x").is_err());
     }
 
@@ -2145,8 +2265,8 @@ mod tests {
             assert!(dump.contains("REOF:got=0"), "P1 {dump}");
         }
 
-        // R1: bounded file-range reads and positions match (mutex-serialized
-        // seeks instead of OS positional reads, same observable bytes).
+        // R1: bounded file-range reads and positions match (OS positional reads,
+        // same observable bytes).
         {
             let dump = reads.get("R1").expect("R1 dump");
             assert!(dump.contains("LEN=20"), "R1 {dump}");
@@ -2166,6 +2286,191 @@ mod tests {
             assert!(dump.contains("RB=15"), "R1 {dump}");
             drop(s);
             remove_test_files(&dir, &["rand.bin"]);
+        }
+    }
+
+    /// Fields of one `STREAM` row in the reference-runtime IO fixture.
+    fn io_stream_fixture_fields(case: &str) -> Vec<&'static str> {
+        let prefix = format!("STREAM|{case}|");
+        include_str!("io_differential_fixture.txt")
+            .lines()
+            .find(|line| line.starts_with(&prefix))
+            .unwrap_or_else(|| panic!("missing reference IO fixture row {case:?}"))
+            .split('|')
+            .collect()
+    }
+
+    fn io_fixture_value(fields: &[&str], key: &str) -> String {
+        let prefix = format!("{key}=");
+        fields
+            .iter()
+            .find_map(|field| field.strip_prefix(&prefix))
+            .unwrap_or_else(|| panic!("missing reference IO fixture field {key:?}"))
+            .to_owned()
+    }
+
+    fn io_fixture_hex(value: &str) -> Vec<u8> {
+        decode_hex_fixture(value)
+    }
+
+    /// Reference-runtime differential for the stream rows of
+    /// `src/io/io_differential_fixture.txt` (probe `tools/probes/io-differential` against the
+    /// shipped reference `AssetRipper.IO.Files.dll`).
+    ///
+    /// R2 pins the baseline `RandomAccessStream` contract: a range view reads through the parent
+    /// handle positionally, so sibling views and the parent's own cursor never disturb each other.
+    /// R3 pins its inverted end-relative seek. M2 pins `MultiFileStream.Read` returning only the
+    /// current part's bytes while `ReadExactly` still crosses the boundary. P2/S4/S5 pin
+    /// `PartialStream` and `SmartStream` observables.
+    #[test]
+    fn stream_observables_match_the_reference_runtime_fixture() {
+        // R2: shared-handle ranges.
+        {
+            let fields = io_stream_fixture_fields("R2");
+            assert_eq!(io_fixture_value(&fields, "first_len"), "20");
+            assert_eq!(io_fixture_value(&fields, "second_len"), "16");
+            assert_eq!(
+                io_fixture_value(&fields, "parent_position_after_child_reads"),
+                "40/40/40"
+            );
+            let expected_a = io_fixture_hex(
+                io_fixture_value(&fields, "read_a")
+                    .split(':')
+                    .nth(1)
+                    .unwrap(),
+            );
+            let expected_b = io_fixture_hex(
+                io_fixture_value(&fields, "read_b")
+                    .split(':')
+                    .nth(1)
+                    .unwrap(),
+            );
+            let expected_c = io_fixture_hex(
+                io_fixture_value(&fields, "read_c")
+                    .split(':')
+                    .nth(1)
+                    .unwrap(),
+            );
+            assert_eq!(io_fixture_value(&fields, "first_position"), "8");
+            assert_eq!(io_fixture_value(&fields, "second_position"), "8");
+
+            let dir = create_test_directory("stream-r2");
+            let fp = dir.join("random.bin");
+            std::fs::write(&fp, (0..64u8).collect::<Vec<u8>>()).unwrap();
+
+            let mut parent = SmartStream::open_read(&fp).unwrap();
+            parent.seek(SeekFrom::Start(40)).unwrap();
+            let mut current = parent.create_partial(10, 20).unwrap();
+            let mut sibling = parent.create_partial(30, 16).unwrap();
+            assert_eq!(current.length().unwrap(), 20);
+            assert_eq!(sibling.length().unwrap(), 16);
+
+            let mut buffer = [0u8; 12];
+            assert_eq!(current.read(&mut buffer[..8]).unwrap(), 8);
+            assert_eq!(&buffer[..8], expected_a.as_slice());
+            assert_eq!(parent.position().unwrap(), 40, "child read moved parent");
+            assert_eq!(sibling.read(&mut buffer[..8]).unwrap(), 8);
+            assert_eq!(&buffer[..8], expected_b.as_slice());
+            assert_eq!(parent.position().unwrap(), 40, "sibling read moved parent");
+            assert_eq!(current.position().unwrap(), 8);
+            assert_eq!(sibling.position().unwrap(), 8);
+
+            current.seek(SeekFrom::Start(5)).unwrap();
+            assert_eq!(current.read(&mut buffer).unwrap(), 12);
+            assert_eq!(&buffer, expected_c.as_slice());
+            assert_eq!(parent.position().unwrap(), 40, "seek+read moved parent");
+
+            let mut parent_bytes = [0u8; 4];
+            assert_eq!(parent.read(&mut parent_bytes).unwrap(), 4);
+            assert_eq!(parent_bytes, [0x28, 0x29, 0x2A, 0x2B]);
+            assert_eq!(parent.position().unwrap(), 44);
+            drop((current, sibling, parent));
+            remove_test_files(&dir, &["random.bin"]);
+        }
+
+        // R3: the source's inverted end-relative offset (`Length - offset`).
+        {
+            let fields = io_stream_fixture_fields("R3");
+            assert_eq!(io_fixture_value(&fields, "seek_end0"), "20");
+            assert_eq!(io_fixture_value(&fields, "seek_end_minus2"), "22");
+            assert_eq!(io_fixture_value(&fields, "seek_end_plus2"), "18");
+        }
+
+        // M2: one part per `Read`, but `ReadExactly` crosses.
+        {
+            let fields = io_stream_fixture_fields("M2");
+            assert_eq!(io_fixture_value(&fields, "len"), "16");
+            let dir = create_test_directory("stream-m2");
+            let base = dir.join("parts.bundle");
+            let split0 = PathBuf::from(format!("{}.split0", base.display()));
+            let split1 = PathBuf::from(format!("{}.split1", base.display()));
+            std::fs::write(&split0, (0..10u8).collect::<Vec<u8>>()).unwrap();
+            std::fs::write(&split1, (10..16u8).collect::<Vec<u8>>()).unwrap();
+            let mut stream = open_logical_file(&base).unwrap();
+            assert_eq!(stream.stream_position().unwrap(), 0);
+            assert_eq!(stream.seek(SeekFrom::Start(4)).unwrap(), 4);
+
+            let mut buffer = [0u8; 12];
+            assert_eq!(stream.read(&mut buffer).unwrap(), 6);
+            assert_eq!(&buffer[..6], &[4, 5, 6, 7, 8, 9]);
+            assert_eq!(stream.stream_position().unwrap(), 10);
+            assert_eq!(stream.read(&mut buffer).unwrap(), 6);
+            assert_eq!(&buffer[..6], &[10, 11, 12, 13, 14, 15]);
+            assert_eq!(stream.stream_position().unwrap(), 16);
+            assert_eq!(stream.read(&mut buffer).unwrap(), 0);
+            assert_eq!(stream.read(&mut buffer).unwrap(), 0);
+
+            stream.seek(SeekFrom::Start(4)).unwrap();
+            let mut exact = [0u8; 12];
+            stream.read_exact(&mut exact).unwrap();
+            assert_eq!(exact, [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+
+            stream.seek(SeekFrom::Start(7)).unwrap();
+            assert_eq!(read_one_byte(&mut stream), Some(7));
+            assert_eq!(stream.stream_position().unwrap(), 8);
+            drop(stream);
+            remove_test_files(&dir, &["parts.bundle.split0", "parts.bundle.split1"]);
+        }
+
+        // P2: partial range reads, byte reads, and end-relative seeks.
+        {
+            let fields = io_stream_fixture_fields("P2");
+            assert_eq!(io_fixture_value(&fields, "len"), "20");
+            let mut partial =
+                PartialStream::new(Cursor::new((0..64u8).collect::<Vec<u8>>()), 10, 20).unwrap();
+            partial.seek(SeekFrom::Start(0)).unwrap();
+            let mut buffer = [0u8; 64];
+            let read = partial.read(&mut buffer).unwrap();
+            assert_eq!(read, 20);
+            assert_eq!(&buffer[..20], &(10..30u8).collect::<Vec<u8>>()[..]);
+            assert_eq!(partial.position(), 20);
+            partial.seek(SeekFrom::Start(5)).unwrap();
+            assert_eq!(read_one_byte(&mut partial), Some(15));
+            let mut tail = [0u8; 8];
+            assert_eq!(partial.read(&mut tail).unwrap(), 8);
+            assert_eq!(tail, [16, 17, 18, 19, 20, 21, 22, 23]);
+        }
+
+        // S4/S5: memory and null SmartStream modes.
+        {
+            let fields = io_stream_fixture_fields("S4");
+            assert_eq!(io_fixture_value(&fields, "len"), "4");
+            assert_eq!(
+                SmartStream::from_memory(vec![1, 2, 3, 4]).stream_type(),
+                SmartStreamType::Memory
+            );
+            let mut memory = SmartStream::from_memory(vec![1, 2, 3, 4]);
+            assert_eq!(memory.read(&mut [0u8; 8]).unwrap(), 4);
+
+            let fields = io_stream_fixture_fields("S5");
+            assert_eq!(
+                io_fixture_value(&fields, "read"),
+                "THROW:NullReferenceException"
+            );
+            let mut null_stream = SmartStream::create_null();
+            assert_eq!(null_stream.length().unwrap(), 0);
+            assert!(null_stream.is_null());
+            assert!(null_stream.read(&mut [0u8; 1]).is_err());
         }
     }
 }

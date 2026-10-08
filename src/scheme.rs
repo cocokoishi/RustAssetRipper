@@ -8,8 +8,8 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use crate::compression::wrappers::{
-    decompress_brotli, decompress_gzip, has_brotli_file_signature, has_gzip_magic,
-    WrapperCodecError,
+    decompress_brotli, decompress_brotli_stream, decompress_gzip, decompress_gzip_stream,
+    has_brotli_file_signature, has_gzip_magic, WrapperCodecError,
 };
 use crate::container::raw_web::{RawWebBundle, RawWebError, RawWebKind, RawWebLimits};
 use crate::container::unityfs::{UnityFsBundle, UnityFsError, UnityFsLimits};
@@ -2108,13 +2108,137 @@ impl SchemeReader {
     }
 
     /// Open a regular path or its numbered split parts and dispatch the logical file.
+    ///
+    /// This is the bounded seekable streaming entry point: see [`Self::read_path_streaming`].
     pub fn read_path(
+        path: impl AsRef<Path>,
+        limits: SchemeReaderLimits,
+    ) -> Result<DispatchedFile<'static>, SchemeError> {
+        Self::read_path_streaming(path, limits)
+    }
+
+    /// Read a logical path with bounded seekable streaming.
+    ///
+    /// The source `SchemeReader.LoadFile` opens a `SmartStream` and lets each scheme read what it
+    /// needs instead of buffering the whole input first. This entry point keeps that shape:
+    ///
+    /// 1. It opens the logical file (a regular file or its assembled numbered `.splitN` parts) and
+    ///    probes a bounded prefix for scheme detection, so detection never needs the whole input.
+    /// 2. When the prefix is a GZip or Brotli wrapper, the layer is decompressed *directly from the
+    ///    seekable stream* through the streaming codec entry points, so the compressed input is
+    ///    never materialized. The decoded layer is bounded per layer and cumulatively exactly like
+    ///    the in-memory dispatcher, and deeper wrapper nesting continues through that same path.
+    /// 3. Otherwise the finally dispatched layer is materialized, because every container and leaf
+    ///    parser in this port reads contiguous bytes.
+    pub fn read_path_streaming(
         path: impl AsRef<Path>,
         limits: SchemeReaderLimits,
     ) -> Result<DispatchedFile<'static>, SchemeError> {
         let mut stream = open_logical_file(path)
             .map_err(|error| SchemeError::new(SchemeErrorKind::StreamInput(error)))?;
-        Self::read_stream(&mut stream, limits)
+        let stream_length = stream
+            .seek(SeekFrom::End(0))
+            .map_err(|error| SchemeError::new(SchemeErrorKind::StreamInput(error)))?;
+        if stream_length > u64::try_from(limits.max_input_bytes).unwrap_or(u64::MAX) {
+            return Err(SchemeError::new(SchemeErrorKind::InputSizeLimitExceeded {
+                requested: stream_length,
+                limit: limits.max_input_bytes,
+            }));
+        }
+
+        let prefix = read_stream_prefix(&mut stream, stream_length)?;
+        if let Some(kind) = detect_primary_file_kind_with_length(&prefix, stream_length) {
+            let contents = Self::materialize_stream(&mut stream, stream_length)?;
+            return Ok(DispatchedFile {
+                contents: Cow::Owned(contents),
+                kind,
+                wrappers: Vec::new(),
+                limits,
+            });
+        }
+
+        let wrapper_kind = if has_gzip_magic(&prefix) {
+            Some(WrapperKind::Gzip)
+        } else if has_brotli_file_signature(&prefix) {
+            Some(WrapperKind::Brotli)
+        } else {
+            None
+        };
+        let Some(wrapper_kind) = wrapper_kind else {
+            let contents = Self::materialize_stream(&mut stream, stream_length)?;
+            let kind = detect_file_kind_with_length(&contents, stream_length);
+            return Ok(DispatchedFile {
+                contents: Cow::Owned(contents),
+                kind,
+                wrappers: Vec::new(),
+                limits,
+            });
+        };
+
+        if limits.max_wrapper_depth == 0 {
+            return Err(SchemeError::new(SchemeErrorKind::WrapperDepthExceeded {
+                limit: 0,
+            }));
+        }
+        stream
+            .seek(SeekFrom::Start(0))
+            .map_err(|error| SchemeError::new(SchemeErrorKind::StreamInput(error)))?;
+        let output = match wrapper_kind {
+            WrapperKind::Gzip => {
+                decompress_gzip_stream(&mut *stream, limits.max_decompressed_bytes_per_layer)
+            }
+            WrapperKind::Brotli => {
+                decompress_brotli_stream(&mut *stream, limits.max_decompressed_bytes_per_layer)
+            }
+        }
+        .map_err(|error| {
+            SchemeError::new(SchemeErrorKind::WrapperDecode {
+                kind: wrapper_kind,
+                source: error,
+            })
+        })?;
+        if output.len() > limits.max_total_decompressed_bytes {
+            return Err(SchemeError::new(
+                SchemeErrorKind::TotalDecompressionLimitExceeded {
+                    requested: output.len(),
+                    limit: limits.max_total_decompressed_bytes,
+                },
+            ));
+        }
+        let input_size = usize::try_from(stream_length).map_err(|_| {
+            SchemeError::new(SchemeErrorKind::InputLengthNotRepresentable {
+                length: stream_length,
+            })
+        })?;
+        let output_size = output.len();
+        let layer = WrapperLayer {
+            kind: wrapper_kind,
+            input_size,
+            output_size,
+        };
+        Self::read_cow_with_state(Cow::Owned(output), limits, vec![layer], output_size)
+    }
+
+    /// Materialize the remaining seekable layer into bounded storage.
+    fn materialize_stream<R: Read + Seek>(
+        stream: &mut R,
+        length: u64,
+    ) -> Result<Vec<u8>, SchemeError> {
+        let length = usize::try_from(length).map_err(|_| {
+            SchemeError::new(SchemeErrorKind::InputLengthNotRepresentable { length })
+        })?;
+        stream
+            .seek(SeekFrom::Start(0))
+            .map_err(|error| SchemeError::new(SchemeErrorKind::StreamInput(error)))?;
+        let mut contents = Vec::new();
+        contents.try_reserve_exact(length).map_err(|_| {
+            SchemeError::new(SchemeErrorKind::InputAllocationFailed { requested: length })
+        })?;
+        contents.resize(length, 0);
+        stream
+            .read_exact(&mut contents)
+            .map_err(|error| SchemeError::new(SchemeErrorKind::StreamInput(error)))?;
+        Ok(contents)
     }
 
     /// Read one local regular or split-file input and mount it into the virtual filesystem.
@@ -2820,8 +2944,21 @@ impl SchemeReader {
     }
 
     fn read_cow_with_limits<'a>(
+        contents: Cow<'a, [u8]>,
+        limits: SchemeReaderLimits,
+    ) -> Result<DispatchedFile<'a>, SchemeError> {
+        Self::read_cow_with_state(contents, limits, Vec::new(), 0)
+    }
+
+    /// The in-memory dispatcher, continued from an already-recorded wrapper state.
+    ///
+    /// [`Self::read_path_streaming`] uses this to hand a streamed wrapper layer to the same
+    /// detection/limit logic without re-decoding it or double-counting its bytes.
+    fn read_cow_with_state<'a>(
         mut contents: Cow<'a, [u8]>,
         limits: SchemeReaderLimits,
+        mut wrappers: Vec<WrapperLayer>,
+        mut total_decompressed: usize,
     ) -> Result<DispatchedFile<'a>, SchemeError> {
         if contents.len() > limits.max_input_bytes {
             return Err(SchemeError::new(SchemeErrorKind::InputSizeLimitExceeded {
@@ -2829,8 +2966,6 @@ impl SchemeReader {
                 limit: limits.max_input_bytes,
             }));
         }
-        let mut wrappers = Vec::new();
-        let mut total_decompressed = 0usize;
 
         loop {
             let current = contents.as_ref();
@@ -2880,6 +3015,27 @@ impl SchemeReader {
             contents = Cow::Owned(output);
         }
     }
+}
+
+/// The bounded prefix read from a seekable logical input for scheme detection.
+///
+/// 64 bytes cover every detection input: the 0x20-byte bundle-header stream minimum, the WebData
+/// signature, and the Brotli marker's bit-level header plus its 34-byte signature.
+const STREAM_PROBE_BYTES: usize = 64;
+
+/// Probe a bounded prefix of a seekable logical file without materializing the whole input.
+fn read_stream_prefix<R: Read + Seek>(stream: &mut R, length: u64) -> Result<Vec<u8>, SchemeError> {
+    let prefix_length = usize::try_from(length)
+        .unwrap_or(usize::MAX)
+        .min(STREAM_PROBE_BYTES);
+    stream
+        .seek(SeekFrom::Start(0))
+        .map_err(|error| SchemeError::new(SchemeErrorKind::StreamInput(error)))?;
+    let mut prefix = vec![0u8; prefix_length];
+    stream
+        .read_exact(&mut prefix)
+        .map_err(|error| SchemeError::new(SchemeErrorKind::StreamInput(error)))?;
+    Ok(prefix)
 }
 
 fn decode_wrapper(
@@ -4992,5 +5148,297 @@ mod tests {
                 assert!(!want_archive && !want_unityfs);
             }
         }
+    }
+
+    /// Reference-runtime differential for the container and compression dispatch rows.
+    ///
+    /// Fixture: `src/io/io_differential_fixture.txt`, produced by
+    /// `tools/probes/io-differential` against the shipped reference `AssetRipper.IO.Files.dll`
+    /// from the frozen build. Every row replays independently built container bytes through the
+    /// production `SchemeReader` and compares the recursive inventory with the reference's:
+    /// the selected scheme, UnityFS metadata codec lanes (None/LZ4/LZ4HC/LZMA/unsupported),
+    /// LZ4HC and LZHAM storage-block dispositions, UnityRaw/UnityWeb/WebData forms, the
+    /// UnityArchive rejection, the plain-resource fallback, and GZip wrapper recursion.
+    #[test]
+    fn scheme_dispatch_matches_the_reference_runtime_fixture() {
+        fn wrapper_name(kind: WrapperKind) -> &'static str {
+            match kind {
+                WrapperKind::Gzip => "GZipFile",
+                WrapperKind::Brotli => "BrotliFile",
+            }
+        }
+
+        fn kind_name(kind: FileKind) -> &'static str {
+            match kind {
+                FileKind::UnityFs => "FileStreamBundleFile",
+                FileKind::UnityRaw => "RawBundleFile",
+                FileKind::UnityWebBundle => "WebBundleFile",
+                FileKind::UnityArchive => "ArchiveBundleFile",
+                FileKind::UnityWebData => "WebFile",
+                FileKind::SerializedFile => "SerializedFile",
+                FileKind::Resource => "ResourceFile",
+            }
+        }
+
+        fn hex(bytes: &[u8]) -> String {
+            use std::fmt::Write as _;
+            let mut text = String::with_capacity(bytes.len() * 2);
+            for byte in bytes {
+                write!(text, "{byte:02X}").expect("string write");
+            }
+            text
+        }
+
+        fn walk(dispatched: &super::DispatchedFile<'_>, name: &str, out: &mut Vec<String>) {
+            for wrapper in dispatched.wrappers() {
+                out.push(format!("CODEC:{}", wrapper_name(wrapper.kind)));
+            }
+            match dispatched.kind() {
+                FileKind::Resource => out.push(format!("RES:{name}:{}", hex(dispatched.bytes()))),
+                FileKind::UnityFs => {
+                    let Ok(super::ParsedFile::UnityFs(bundle)) = dispatched.parse() else {
+                        out.push(format!("PARSE_FAIL:{name}"));
+                        return;
+                    };
+                    let header_index = out.len();
+                    out.push(String::new());
+                    let mut resources = 0usize;
+                    let mut failures = 0usize;
+                    for (index, node) in bundle.nodes.iter().enumerate() {
+                        let Ok(entry) = bundle.read_entry(index) else {
+                            failures += 1;
+                            out.push(format!("FAIL:{}", node.path));
+                            continue;
+                        };
+                        let Ok(child) = SchemeReader::read_with_limits(
+                            entry.as_ref(),
+                            SchemeReaderLimits::default(),
+                        ) else {
+                            failures += 1;
+                            out.push(format!("FAIL:{}", node.path));
+                            continue;
+                        };
+                        if child.kind() == FileKind::Resource && child.wrappers().is_empty() {
+                            resources += 1;
+                        }
+                        walk(&child, &node.path, out);
+                    }
+                    out[header_index] = format!(
+                        "CONTAINER:{}:{name}:res={resources}:failed={failures}",
+                        kind_name(FileKind::UnityFs)
+                    );
+                }
+                FileKind::UnityRaw | FileKind::UnityWebBundle => {
+                    let kind = dispatched.kind();
+                    let Ok(super::ParsedFile::RawWeb(bundle)) = dispatched.parse() else {
+                        out.push(format!("PARSE_FAIL:{name}"));
+                        return;
+                    };
+                    let header_index = out.len();
+                    out.push(String::new());
+                    let mut resources = 0usize;
+                    let mut failures = 0usize;
+                    for (index, node) in bundle.entries.iter().enumerate() {
+                        let Ok(entry) = bundle.read_entry(index) else {
+                            failures += 1;
+                            out.push(format!("FAIL:{}", node.path));
+                            continue;
+                        };
+                        let Ok(child) =
+                            SchemeReader::read_with_limits(entry, SchemeReaderLimits::default())
+                        else {
+                            failures += 1;
+                            out.push(format!("FAIL:{}", node.path));
+                            continue;
+                        };
+                        if child.kind() == FileKind::Resource && child.wrappers().is_empty() {
+                            resources += 1;
+                        }
+                        walk(&child, &node.path, out);
+                    }
+                    out[header_index] = format!(
+                        "CONTAINER:{}:{name}:res={resources}:failed={failures}",
+                        kind_name(kind)
+                    );
+                }
+                FileKind::UnityWebData => {
+                    let Ok(super::ParsedFile::WebData(web_file)) = dispatched.parse() else {
+                        out.push(format!("PARSE_FAIL:{name}"));
+                        return;
+                    };
+                    let header_index = out.len();
+                    out.push(String::new());
+                    let mut resources = 0usize;
+                    let mut failures = 0usize;
+                    let entries: Vec<String> = web_file
+                        .entries
+                        .iter()
+                        .map(|entry| entry.name.clone())
+                        .collect();
+                    for (index, entry_name) in entries.iter().enumerate() {
+                        let Some(entry) = web_file.entry_data(index) else {
+                            failures += 1;
+                            out.push(format!("FAIL:{entry_name}"));
+                            continue;
+                        };
+                        let Ok(child) =
+                            SchemeReader::read_with_limits(entry, SchemeReaderLimits::default())
+                        else {
+                            failures += 1;
+                            out.push(format!("FAIL:{entry_name}"));
+                            continue;
+                        };
+                        if child.kind() == FileKind::Resource && child.wrappers().is_empty() {
+                            resources += 1;
+                        }
+                        walk(&child, entry_name, out);
+                    }
+                    out[header_index] = format!(
+                        "CONTAINER:{}:{name}:res={resources}:failed={failures}",
+                        kind_name(FileKind::UnityWebData)
+                    );
+                }
+                FileKind::SerializedFile => out.push(format!("SER:{name}")),
+                FileKind::UnityArchive => out.push(format!("PARSE_FAIL:{name}")),
+            }
+        }
+
+        let mut checked = 0usize;
+        for line in include_str!("io/io_differential_fixture.txt").lines() {
+            let Some(rest) = line.strip_prefix("SCHEME|") else {
+                continue;
+            };
+            let fields: Vec<&str> = rest.split('|').collect();
+            let case = fields[0];
+            let input = decode_hex_fixture(
+                fields
+                    .iter()
+                    .find_map(|field| field.strip_prefix("in="))
+                    .unwrap_or_else(|| panic!("{case}: missing in=")),
+            );
+            let dispatched = SchemeReader::read_with_limits(&input, SchemeReaderLimits::default())
+                .unwrap_or_else(|error| panic!("{case}: dispatch failed: {error}"));
+
+            if let Some(throw) = fields.iter().find_map(|field| field.strip_prefix("THROW:")) {
+                let error = dispatched
+                    .parse()
+                    .err()
+                    .unwrap_or_else(|| panic!("{case}: reference threw {throw}, Rust parsed"));
+                match case {
+                    "archive" => assert!(
+                        matches!(error.kind(), SchemeErrorKind::ArchiveReadUnsupported),
+                        "{case}: {error}"
+                    ),
+                    "ufs_v6_unknown_meta" => assert!(
+                        matches!(error.kind(), SchemeErrorKind::UnityFs(_)),
+                        "{case}: {error}"
+                    ),
+                    other => panic!("unhandled reference throw row {other}"),
+                }
+                checked += 1;
+                continue;
+            }
+
+            let expected_type = fields
+                .iter()
+                .find_map(|field| field.strip_prefix("type="))
+                .unwrap_or_else(|| panic!("{case}: missing type="));
+            let expected_tree = fields
+                .iter()
+                .find_map(|field| field.strip_prefix("tree="))
+                .unwrap_or_else(|| panic!("{case}: missing tree="));
+            let detected = dispatched.wrappers().first().map_or_else(
+                || kind_name(dispatched.kind()),
+                |layer| wrapper_name(layer.kind),
+            );
+            assert_eq!(detected, expected_type, "{case}: selected scheme");
+
+            let mut inventory = Vec::new();
+            walk(&dispatched, &format!("{case}.bin"), &mut inventory);
+            assert_eq!(
+                inventory.join(","),
+                expected_tree,
+                "{case}: recursive inventory"
+            );
+
+            // The same independently produced bytes must dispatch identically through the
+            // bounded seekable streaming path, which never materializes a compressed layer.
+            let path = crate::test_support::unique_test_path("io-stream", "bin");
+            std::fs::write(&path, &input).expect("test scratch file");
+            let streamed = SchemeReader::read_path_streaming(&path, SchemeReaderLimits::default())
+                .unwrap_or_else(|error| panic!("{case}: streaming dispatch failed: {error}"));
+            std::fs::remove_file(&path).expect("remove scratch file");
+            assert_eq!(streamed.kind(), dispatched.kind(), "{case}: streaming kind");
+            assert_eq!(
+                streamed.wrappers(),
+                dispatched.wrappers(),
+                "{case}: streaming wrapper layers"
+            );
+            let mut streamed_inventory = Vec::new();
+            walk(&streamed, &format!("{case}.bin"), &mut streamed_inventory);
+            assert_eq!(
+                streamed_inventory.join(","),
+                expected_tree,
+                "{case}: streamed recursive inventory"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 15, "reference fixture row count");
+    }
+
+    /// The streaming path enforces the same wrapper bounds before materializing a layer.
+    #[test]
+    fn streaming_dispatch_enforces_wrapper_and_input_limits() {
+        let inner = b"streaming limit payload".to_vec();
+        let gzip = compress_gzip(&inner, 4096).unwrap();
+        let path = crate::test_support::unique_test_path("io-stream-limit", "bin");
+        std::fs::write(&path, &gzip).unwrap();
+
+        // Zero wrapper depth refuses the wrapper layer outright.
+        assert!(matches!(
+            SchemeReader::read_path_streaming(
+                &path,
+                SchemeReaderLimits {
+                    max_wrapper_depth: 0,
+                    ..SchemeReaderLimits::default()
+                },
+            )
+            .unwrap_err()
+            .kind(),
+            SchemeErrorKind::WrapperDepthExceeded { limit: 0 }
+        ));
+
+        // A length above the input bound is refused before any layer is read.
+        assert!(matches!(
+            SchemeReader::read_path_streaming(
+                &path,
+                SchemeReaderLimits {
+                    max_input_bytes: 4,
+                    ..SchemeReaderLimits::default()
+                },
+            )
+            .unwrap_err()
+            .kind(),
+            SchemeErrorKind::InputSizeLimitExceeded { limit: 4, .. }
+        ));
+
+        // A per-layer bound that the decoded output exceeds is reported as a wrapper decode.
+        assert!(matches!(
+            SchemeReader::read_path_streaming(
+                &path,
+                SchemeReaderLimits {
+                    max_decompressed_bytes_per_layer: 4,
+                    ..SchemeReaderLimits::default()
+                },
+            )
+            .unwrap_err()
+            .kind(),
+            SchemeErrorKind::WrapperDecode {
+                kind: WrapperKind::Gzip,
+                ..
+            }
+        ));
+
+        std::fs::remove_file(&path).unwrap();
     }
 }

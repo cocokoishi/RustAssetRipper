@@ -1,5 +1,6 @@
 //! Resource decoding and recovery primitives.
 
+pub mod animation;
 pub mod animation_clip;
 pub mod animation_curve;
 pub mod animator_controller;

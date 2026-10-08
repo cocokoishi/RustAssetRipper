@@ -105,8 +105,9 @@ The row-level work units below are the smallest complete closures justified by d
 
 ## Current verification state
 
-- `cargo fmt --all -- --check` passes.
-- Full workspace tests pass: 1,432 library tests, 72 CLI tests, and 0 doc tests (`cargo test --workspace --locked`, exit 0). Warnings-denied all-target Clippy passes. The two extra library tests are the new `src/test_support.rs` guard tests described in `docs/validation-log.md`.
-- `tools/verify-baseline.ps1` exits 0 with `Verified 1449 baseline files; no missing, changed, or unlisted files.` The 188 unlisted probe build outputs recorded by earlier rounds are gone; the reference tree now contains exactly the 1,449 manifest-listed files. `git diff --check` passes.
+- Latest local validation: `cargo fmt --all -- --check`, `cargo test --workspace --locked --quiet` (1,479 library passed, 1 ignored; 73 CLI passed; 0 doc tests), `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`, and `git diff --check` all exit 0.
+- `powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/verify-baseline.ps1` exits 0 with `Verified 1449 baseline files; no missing, changed, or unlisted files.` The reference tree contains exactly the 1,449 manifest-listed files.
+- No row status changed in this verification increment: the feature ledger remains at 31 open rows. The new workspace project-export route still has generic-renderer fallbacks and is not complete source parity. The `src/test_support.rs` tests continue to cover the writable test scratch-root selection.
+- Source-runtime animation conversion now has a repeatable output fixture, but Rust does not replay it and the converter is still disconnected from the product path; `PROC-ANIM-CONVERT-001` remains open. The export class-interface fixture is a union across version-specific generated types; it does not replace version-aware generated-class resolution. Shader/TextAsset precedence has a focused regression and `project_exporter` tests pass 9/9.
 - This evidence validates the local kernel and source-derived vectors. It does not close `PROC-ANIM-CUSTOM-CURVE-001`: the resolver is exercised with caller-supplied scene facts until a production `AnimationClipConverter` caller constructs them for real clip conversion.
 - No user AssetBundle content or UABEA content has been read. Phase 2 remains locked.

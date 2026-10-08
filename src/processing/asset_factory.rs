@@ -653,6 +653,1096 @@ pub fn chinese_texture_warning_message(texture_name: &str) -> String {
     )
 }
 
+// ---------------------------------------------------------------------------
+// GameAssetFactory engine: the dispatch and fallback chains over real
+// SerializedFile bytes.
+//
+// The kernels above decide *what* the source does; this engine drives them from a
+// parsed `SerializedFile` and materializes the same fallback objects the source
+// creates: a generated class identity, a TPK-backed `TypeTreeObject`, an
+// `UnknownObject`, or an `UnreadableObject`, with the raw payload always preserved.
+//
+// Class identity and class layouts arrive through `ClassLayoutSource`, the Rust
+// equivalent of the generated `AssetFactory.CreateSerialized` table plus
+// `TypeTreeNodeStruct.TryMakeFromTpk`: AssetRipper's generated classes are themselves
+// generated from the TPK, so the TPK trees are the class layouts.
+// ---------------------------------------------------------------------------
+
+use std::borrow::Cow;
+use std::fmt::{self, Display, Formatter};
+
+use crate::io::binary::Endian;
+use crate::serialized_file::file::SerializedFile;
+use crate::serialized_file::metadata::{
+    unity_version_aligns_arrays, ObjectInfo, TypeTree, TypeTreeNode,
+};
+use crate::serialized_file::object::{
+    classify_type_tree_usability, decode_typetree_payload, raw_data_class_name,
+    version_is_unsupported, ManagedPayloadDecodeContext, ObjectDecodeError, ObjectDecodeLimits,
+    ParsedObjectPayload, SerializedValue, TypeTreeUsability,
+};
+
+/// The release-type letter of a Unity version (`UnityVersionType`).
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum FactoryVersionType {
+    Alpha,
+    Beta,
+    Release,
+    Patch,
+    Experimental,
+    Unknown,
+}
+
+/// Unity version facts the factory dispatch reads from the SerializedFile signature.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FactoryUnityVersion {
+    pub major: u32,
+    pub minor: u32,
+    pub build: u16,
+    pub version_type: FactoryVersionType,
+    pub text: String,
+}
+
+impl FactoryUnityVersion {
+    /// Parse the `{major}.{minor}.{build}{type}{increment}` Unity version grammar.
+    ///
+    /// A stripped or malformed signature returns `None`; callers then use the
+    /// configured default version, which is `0.0.0` and therefore below the 3.5 gate.
+    pub fn parse(text: &str) -> Option<Self> {
+        let text = text.trim();
+        let mut parts = text.split('.');
+        let major = parts.next()?.parse::<u32>().ok()?;
+        let minor = parts.next()?.parse::<u32>().ok()?;
+        let rest = parts.next()?;
+        let build_digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        if build_digits.is_empty() {
+            return None;
+        }
+        let build = build_digits.parse::<u16>().ok()?;
+        let version_type = match rest.as_bytes().get(build_digits.len()).copied() {
+            Some(b'a') => FactoryVersionType::Alpha,
+            Some(b'b') => FactoryVersionType::Beta,
+            Some(b'f') => FactoryVersionType::Release,
+            Some(b'p') => FactoryVersionType::Patch,
+            Some(b'x') => FactoryVersionType::Experimental,
+            _ => FactoryVersionType::Unknown,
+        };
+        Some(Self {
+            major,
+            minor,
+            build,
+            version_type,
+            text: text.to_owned(),
+        })
+    }
+
+    /// The default configured version for a stripped signature (`UnityVersion(0,0,0)`).
+    pub fn stripped() -> Self {
+        Self {
+            major: 0,
+            minor: 0,
+            build: 0,
+            version_type: FactoryVersionType::Release,
+            text: String::new(),
+        }
+    }
+
+    /// `SerializedAssetCollection.Version.LessThan(3, 5)`.
+    pub const fn is_unsupported(&self) -> bool {
+        version_is_unsupported(self.major, self.minor)
+    }
+
+    /// `UnityVersion.Type == UnityVersionType.Patch`.
+    pub const fn is_patch(&self) -> bool {
+        matches!(self.version_type, FactoryVersionType::Patch)
+    }
+
+    /// `new UnityVersion(major, minor, unchecked((ushort)(build + 1)))`: the release
+    /// constructor keeps the release type and wraps the build counter.
+    pub fn with_bumped_build(&self) -> Self {
+        let mut bumped = self.clone();
+        bumped.build = self.build.wrapping_add(1);
+        bumped.version_type = FactoryVersionType::Release;
+        bumped.text = format!("{}.{}.{}f0", bumped.major, bumped.minor, bumped.build);
+        bumped
+    }
+}
+
+/// Collection/file facts the source reads from the owning asset info.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FactoryFileFacts<'a> {
+    /// `FileBase.NameFixed` (the owning collection name).
+    pub collection_name: &'a str,
+    /// `FileBase.FilePath`.
+    pub file_path: &'a str,
+    /// The platform display name (`BuildTarget.ToString()`), used by diagnostics.
+    pub platform: &'a str,
+}
+
+/// Class identity and class layout behind `CreateAsset`.
+pub trait ClassLayoutSource {
+    /// `AssetFactory.CreateSerialized(info, version)`: the generated class name, or
+    /// `None` when the class id has no generated class at this version.
+    fn generated_class_name(&self, class_id: i32, version: &FactoryUnityVersion) -> Option<&str>;
+
+    /// `TypeTreeNodeStruct.TryMakeFromTpk`: the class's release and editor trees.
+    fn tpk_trees(
+        &self,
+        class_id: i32,
+        version: &FactoryUnityVersion,
+    ) -> Option<(TypeTree, TypeTree)>;
+}
+
+/// Which `CreateAsset` branch produced an asset.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FactoryAssetKind {
+    /// `AssetFactory.CreateSerialized` produced a generated class.
+    Generated(String),
+    /// The TPK fallback produced a `TypeTreeObject`.
+    TypeTreeObject,
+    /// No generated class and no TPK entry: an `UnknownObject`.
+    Unknown,
+    /// A pre-3.5/stripped version, or a normal read the caller refused: an `UnreadableObject`.
+    Unreadable,
+}
+
+impl FactoryAssetKind {
+    /// Whether the branch is one of the two recoverable engine-object kinds.
+    pub const fn is_recoverable(&self) -> bool {
+        matches!(self, Self::Generated(_) | Self::TypeTreeObject)
+    }
+}
+
+/// The non-standard Chinese texture tail (`ReadExtraTextureFields`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ChineseTextureFields {
+    pub original_width: i32,
+    pub original_height: i32,
+    pub original_asset_guid: [u32; 4],
+}
+
+/// Severity of the log line a factory branch emits.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum FactoryLogLevel {
+    Silent,
+    Info,
+    Warning,
+    Error,
+}
+
+/// Where a MonoBehaviour structure came from, with the parsed fields when available.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FactoryStructure {
+    pub outcome: MonoBehaviourStructureOutcome,
+    /// The parsed script fields for `UseParsedStructure`.
+    pub fields: Option<SerializedValue>,
+    /// The unread remainder backing `UseUnloadedRemainder`.
+    pub unloaded_remainder: Vec<u8>,
+}
+
+/// One materialized asset from the factory dispatch.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FactoryAsset {
+    pub object_index: usize,
+    pub path_id: i64,
+    pub class_id: i32,
+    pub kind: FactoryAssetKind,
+    /// `RawDataObject.ClassName`: the class-id type name or its decimal form.
+    pub class_name: Cow<'static, str>,
+    /// `INamed.Name`: the stored name, or the synthetic Unknown/Unreadable form.
+    pub name: String,
+    /// The preserved raw payload (`RawDataObject.RawData`).
+    pub raw: Vec<u8>,
+    /// The decoded fields when a read consumed any of the payload.
+    pub payload: Option<ParsedObjectPayload>,
+    /// The tail classification for a completed normal read.
+    pub tail: Option<ObjectTailOutcome>,
+    /// The Chinese texture tail when it was consumed.
+    pub chinese_texture_fields: Option<ChineseTextureFields>,
+    /// The MonoBehaviour structure decision and value.
+    pub structure: Option<FactoryStructure>,
+    pub log_level: FactoryLogLevel,
+    pub log_message: Option<String>,
+}
+
+/// Structural engine failures (not classification outcomes).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FactoryEngineError {
+    ObjectIndexOutOfBounds {
+        object_index: usize,
+        object_count: usize,
+    },
+    InvalidObjectPayloadRange {
+        object_index: usize,
+    },
+    ObjectTypeUnresolved {
+        object_index: usize,
+    },
+}
+
+impl Display for FactoryEngineError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ObjectIndexOutOfBounds {
+                object_index,
+                object_count,
+            } => write!(
+                f,
+                "object index {object_index} is outside the {object_count}-object table"
+            ),
+            Self::InvalidObjectPayloadRange { object_index } => write!(
+                f,
+                "object {object_index} payload range overflows or leaves the input file"
+            ),
+            Self::ObjectTypeUnresolved { object_index } => {
+                write!(f, "object {object_index} has no resolved serialized type")
+            }
+        }
+    }
+}
+
+impl std::error::Error for FactoryEngineError {}
+
+/// The read class id the source collection uses: the file's resolved class id with
+/// the stripped (negative) fallback to MonoBehaviour.
+pub fn object_read_class_id(object: &ObjectInfo) -> i32 {
+    let class_id = object.class_id.map(i32::from).unwrap_or(object.raw_type_id);
+    resolve_read_class_id(class_id)
+}
+
+/// `GameAssetFactory.ReadAsset`: dispatch one file object through the factory.
+pub fn materialize_object(
+    file: &SerializedFile<'_>,
+    facts: &FactoryFileFacts<'_>,
+    source: &dyn ClassLayoutSource,
+    object_index: usize,
+    limits: &ObjectDecodeLimits,
+) -> Result<FactoryAsset, FactoryEngineError> {
+    let object = file.metadata.objects.get(object_index).ok_or(
+        FactoryEngineError::ObjectIndexOutOfBounds {
+            object_index,
+            object_count: file.metadata.objects.len(),
+        },
+    )?;
+    let raw = object_payload_bytes(file, object_index)?;
+    let version = file
+        .metadata
+        .prefix
+        .unity_version_text
+        .as_deref()
+        .and_then(FactoryUnityVersion::parse)
+        .unwrap_or_else(FactoryUnityVersion::stripped);
+    let class_id = object_read_class_id(object);
+    let class_name = raw_data_class_name(class_id);
+
+    let mut asset = FactoryAsset {
+        object_index,
+        path_id: object.path_id,
+        class_id,
+        kind: FactoryAssetKind::Unreadable,
+        class_name,
+        name: String::new(),
+        raw,
+        payload: None,
+        tail: None,
+        chinese_texture_fields: None,
+        structure: None,
+        log_level: FactoryLogLevel::Silent,
+        log_message: None,
+    };
+
+    if version.is_unsupported() {
+        // `ReadAsset` returns an UnreadableObject without reading or logging.
+        asset.kind = FactoryAssetKind::Unreadable;
+        asset.name = unreadable_asset_name(
+            asset.class_name.as_ref(),
+            named_field(&None),
+            raw_data_hash(&asset.raw),
+        );
+        return Ok(asset);
+    }
+
+    if class_id == MONO_BEHAVIOUR_CLASS_ID {
+        read_monobehaviour(
+            file,
+            facts,
+            source,
+            object_index,
+            limits,
+            &version,
+            &mut asset,
+        );
+        return Ok(asset);
+    }
+
+    read_normal_object(
+        file,
+        facts,
+        source,
+        object_index,
+        limits,
+        &version,
+        &mut asset,
+    );
+    Ok(asset)
+}
+
+fn object_payload_bytes(
+    file: &SerializedFile<'_>,
+    object_index: usize,
+) -> Result<Vec<u8>, FactoryEngineError> {
+    let object = &file.metadata.objects[object_index];
+    let range = object
+        .data_range(&file.header)
+        .ok_or(FactoryEngineError::InvalidObjectPayloadRange { object_index })?;
+    let start = usize::try_from(range.start)
+        .map_err(|_| FactoryEngineError::InvalidObjectPayloadRange { object_index })?;
+    let end = usize::try_from(range.end)
+        .map_err(|_| FactoryEngineError::InvalidObjectPayloadRange { object_index })?;
+    file.input()
+        .get(start..end)
+        .map(<[u8]>::to_vec)
+        .ok_or(FactoryEngineError::InvalidObjectPayloadRange { object_index })
+}
+
+fn serialized_type_tree<'a>(
+    file: &'a SerializedFile<'_>,
+    object_index: usize,
+) -> Option<&'a TypeTree> {
+    let object = file.metadata.objects.get(object_index)?;
+    let type_index = object.resolved_type_index?;
+    file.metadata.types.get(type_index)?.type_tree.as_ref()
+}
+
+/// The `INamed` name behind a decoded payload's `m_Name` field.
+fn named_field(payload: &Option<ParsedObjectPayload>) -> Option<&str> {
+    payload
+        .as_ref()
+        .and_then(|payload| named_field_of(&payload.root))
+}
+
+fn named_field_of(root: &SerializedValue) -> Option<&str> {
+    let SerializedValue::Struct(_) = root else {
+        return None;
+    };
+    let name = root.unique_field_in_base_chain("m_Name").ok().flatten()?;
+    match name {
+        SerializedValue::StringBytes(bytes) => std::str::from_utf8(bytes).ok(),
+        _ => None,
+    }
+}
+
+fn named_field_owned(payload: &Option<ParsedObjectPayload>) -> Option<String> {
+    let bytes = payload.as_ref().and_then(|payload| {
+        let SerializedValue::Struct(_) = payload.root else {
+            return None;
+        };
+        let name = payload
+            .root
+            .unique_field_in_base_chain("m_Name")
+            .ok()
+            .flatten()?;
+        match name {
+            SerializedValue::StringBytes(bytes) => Some(bytes.clone()),
+            _ => None,
+        }
+    })?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Which asset `CreateAsset` produces.
+enum CreatedAsset {
+    Generated(String),
+    TypeTreeObject,
+    Unknown,
+}
+
+fn create_asset(
+    source: &dyn ClassLayoutSource,
+    class_id: i32,
+    version: &FactoryUnityVersion,
+) -> CreatedAsset {
+    if let Some(name) = source.generated_class_name(class_id, version) {
+        CreatedAsset::Generated(name.to_owned())
+    } else if source.tpk_trees(class_id, version).is_some() {
+        CreatedAsset::TypeTreeObject
+    } else {
+        CreatedAsset::Unknown
+    }
+}
+
+/// The layout a created asset reads its fields with: TPK class layout first (the
+/// generated classes are generated from it), then the file's own TypeTree.
+fn class_layout(
+    file: &SerializedFile<'_>,
+    source: &dyn ClassLayoutSource,
+    class_id: i32,
+    version: &FactoryUnityVersion,
+    object_index: usize,
+) -> Option<TypeTree> {
+    if let Some((release, _)) = source.tpk_trees(class_id, version) {
+        return Some(release);
+    }
+    let tree = serialized_type_tree(file, object_index)?;
+    match classify_type_tree_usability(Some(tree)) {
+        TypeTreeUsability::Present => Some(tree.clone()),
+        TypeTreeUsability::Empty | TypeTreeUsability::Missing => None,
+    }
+}
+
+/// A partial or complete normal-read attempt.
+struct NormalAttempt {
+    kind: FactoryAssetKind,
+    payload: Option<ParsedObjectPayload>,
+    tail: Option<ObjectTailOutcome>,
+    chinese: Option<ChineseTextureFields>,
+    log_level: FactoryLogLevel,
+    log_message: Option<String>,
+}
+
+fn read_normal_object(
+    file: &SerializedFile<'_>,
+    facts: &FactoryFileFacts<'_>,
+    source: &dyn ClassLayoutSource,
+    object_index: usize,
+    limits: &ObjectDecodeLimits,
+    version: &FactoryUnityVersion,
+    asset: &mut FactoryAsset,
+) {
+    match try_read_normal_object(file, facts, source, object_index, limits, version) {
+        Ok(attempt) => apply_attempt(asset, attempt),
+        Err(failed) => {
+            if is_engine_collection_name(Some(facts.collection_name)) {
+                // Engine collections tolerate failed reads: shaders log info, others warn.
+                let (log_level, log_message) = if asset.class_id == SHADER_CLASS_ID {
+                    (FactoryLogLevel::Info, None)
+                } else {
+                    (FactoryLogLevel::Warning, failed.log_message.clone())
+                };
+                apply_attempt(asset, *failed);
+                asset.log_level = log_level;
+                asset.log_message = log_message;
+            } else if version.is_patch() {
+                let retry_version = version.with_bumped_build();
+                match try_read_normal_object(
+                    file,
+                    facts,
+                    source,
+                    object_index,
+                    limits,
+                    &retry_version,
+                ) {
+                    Ok(attempt) => apply_attempt(asset, attempt),
+                    Err(failed_retry) => unreadable_from_failed(asset, *failed_retry),
+                }
+            } else {
+                unreadable_from_failed(asset, *failed);
+            }
+        }
+    }
+}
+
+/// The class id of `Shader`, whose engine-collection failure logs at info level.
+const SHADER_CLASS_ID: i32 = 48;
+
+fn unreadable_from_failed(asset: &mut FactoryAsset, failed: NormalAttempt) {
+    let stored_name = named_field_owned(&failed.payload);
+    let message = failed.log_message.clone();
+    apply_attempt(asset, failed);
+    asset.kind = FactoryAssetKind::Unreadable;
+    asset.name = unreadable_asset_name(
+        asset.class_name.as_ref(),
+        stored_name.as_deref(),
+        raw_data_hash(&asset.raw),
+    );
+    asset.log_level = FactoryLogLevel::Error;
+    asset.log_message = message;
+}
+
+fn apply_attempt(asset: &mut FactoryAsset, attempt: NormalAttempt) {
+    asset.kind = attempt.kind;
+    asset.payload = attempt.payload;
+    asset.tail = attempt.tail;
+    asset.chinese_texture_fields = attempt.chinese;
+    asset.log_level = attempt.log_level;
+    asset.log_message = attempt.log_message;
+    match &asset.kind {
+        FactoryAssetKind::Unknown => {
+            asset.name = unknown_asset_name(asset.class_name.as_ref(), raw_data_hash(&asset.raw));
+        }
+        FactoryAssetKind::Generated(_) | FactoryAssetKind::TypeTreeObject => {
+            // Only named classes (`INamed`) expose a name; TPK TypeTreeObjects do not.
+            asset.name = match asset.kind {
+                FactoryAssetKind::Generated(_) => {
+                    named_field_owned(&asset.payload).unwrap_or_default()
+                }
+                _ => String::new(),
+            };
+        }
+        FactoryAssetKind::Unreadable => {}
+    }
+}
+
+fn try_read_normal_object(
+    file: &SerializedFile<'_>,
+    facts: &FactoryFileFacts<'_>,
+    source: &dyn ClassLayoutSource,
+    object_index: usize,
+    limits: &ObjectDecodeLimits,
+    version: &FactoryUnityVersion,
+) -> Result<NormalAttempt, Box<NormalAttempt>> {
+    let class_id = object_read_class_id(&file.metadata.objects[object_index]);
+    let kind = match create_asset(source, class_id, version) {
+        CreatedAsset::Unknown => {
+            // A creation miss wraps the raw bytes silently, without reading.
+            return Ok(NormalAttempt {
+                kind: FactoryAssetKind::Unknown,
+                payload: None,
+                tail: None,
+                chinese: None,
+                log_level: FactoryLogLevel::Silent,
+                log_message: None,
+            });
+        }
+        CreatedAsset::Generated(name) => FactoryAssetKind::Generated(name),
+        CreatedAsset::TypeTreeObject => FactoryAssetKind::TypeTreeObject,
+    };
+    let created = NormalAttempt {
+        kind,
+        payload: None,
+        tail: None,
+        chinese: None,
+        log_level: FactoryLogLevel::Silent,
+        log_message: None,
+    };
+    let payload_bytes = object_payload_bytes(file, object_index)
+        .map_err(|_| Box::new(created.clone_for_failure()))?;
+    let Some(layout) = class_layout(file, source, class_id, version, object_index) else {
+        return Err(Box::new(NormalAttempt {
+            log_level: FactoryLogLevel::Error,
+            log_message: None,
+            ..created
+        }));
+    };
+    let arrays_align =
+        unity_version_aligns_arrays(file.metadata.prefix.unity_version_text.as_deref());
+    let decoded = decode_with_tree(
+        &layout,
+        &payload_bytes,
+        file.metadata.prefix.body_endian,
+        arrays_align,
+        &file.metadata.reference_types,
+        object_index,
+        file.metadata.objects[object_index].path_id,
+        limits,
+    );
+    match decoded {
+        Ok(payload) => {
+            let tail =
+                classify_object_tail(&payload.trailing_bytes, class_id == TEXTURE2D_CLASS_ID);
+            match tail {
+                ObjectTailOutcome::Exact | ObjectTailOutcome::ZeroPadding => Ok(NormalAttempt {
+                    payload: Some(payload),
+                    tail: Some(tail),
+                    ..created
+                }),
+                ObjectTailOutcome::ChineseTextureFields => {
+                    let name = named_field_of_payload(&created.payload).unwrap_or_default();
+                    let chinese = parse_chinese_texture_fields(&payload.trailing_bytes);
+                    Ok(NormalAttempt {
+                        payload: Some(payload),
+                        tail: Some(tail),
+                        chinese,
+                        log_level: FactoryLogLevel::Warning,
+                        log_message: Some(chinese_texture_warning_message(&name)),
+                        ..created
+                    })
+                }
+                ObjectTailOutcome::IncorrectByteCount => {
+                    let message = incorrect_byte_count_message(
+                        i32::try_from(payload.consumed_bytes).unwrap_or(i32::MAX),
+                        i32::try_from(payload_bytes.len()).unwrap_or(i32::MAX),
+                        &raw_data_class_name(class_id),
+                        version.text_or_default(),
+                        facts.platform,
+                        facts.collection_name,
+                        facts.file_path,
+                    );
+                    Err(Box::new(NormalAttempt {
+                        payload: Some(payload),
+                        tail: Some(tail),
+                        log_level: FactoryLogLevel::Error,
+                        log_message: Some(message),
+                        ..created
+                    }))
+                }
+            }
+        }
+        Err(error) => Err(Box::new(NormalAttempt {
+            log_level: FactoryLogLevel::Error,
+            log_message: Some(read_exception_message(
+                &raw_data_class_name(class_id),
+                version.text_or_default(),
+                facts.platform,
+                facts.collection_name,
+                facts.file_path,
+                &error.to_string(),
+            )),
+            ..created
+        })),
+    }
+}
+
+impl NormalAttempt {
+    fn clone_for_failure(&self) -> Self {
+        Self {
+            kind: self.kind.clone(),
+            payload: None,
+            tail: None,
+            chinese: None,
+            log_level: FactoryLogLevel::Error,
+            log_message: None,
+        }
+    }
+}
+
+/// The class id of `Texture2D`, which may carry the 24-byte Chinese tail.
+const TEXTURE2D_CLASS_ID: i32 = 28;
+
+fn named_field_of_payload(payload: &Option<ParsedObjectPayload>) -> Option<String> {
+    named_field_owned(payload)
+}
+
+fn parse_chinese_texture_fields(trailing: &[u8]) -> Option<ChineseTextureFields> {
+    if trailing.len() != CHINESE_TEXTURE_EXTRA_BYTES {
+        return None;
+    }
+    let word = |offset: usize| -> i32 {
+        i32::from_le_bytes([
+            trailing[offset],
+            trailing[offset + 1],
+            trailing[offset + 2],
+            trailing[offset + 3],
+        ])
+    };
+    let mut guid = [0u32; 4];
+    for (index, slot) in guid.iter_mut().enumerate() {
+        let offset = CHINESE_TEXTURE_ORIGINAL_GUID_OFFSET + index * 4;
+        *slot = u32::from_le_bytes([
+            trailing[offset],
+            trailing[offset + 1],
+            trailing[offset + 2],
+            trailing[offset + 3],
+        ]);
+    }
+    Some(ChineseTextureFields {
+        original_width: word(CHINESE_TEXTURE_ORIGINAL_WIDTH_OFFSET),
+        original_height: word(CHINESE_TEXTURE_ORIGINAL_HEIGHT_OFFSET),
+        original_asset_guid: guid,
+    })
+}
+
+/// Decode a payload against a caller-supplied layout (TPK class tree or file TypeTree).
+#[allow(clippy::too_many_arguments)]
+fn decode_with_tree(
+    tree: &TypeTree,
+    payload: &[u8],
+    endian: Endian,
+    arrays_align: bool,
+    reference_types: &[crate::serialized_file::metadata::SerializedTypeReference],
+    object_index: usize,
+    path_id: i64,
+    limits: &ObjectDecodeLimits,
+) -> Result<ParsedObjectPayload, ObjectDecodeError> {
+    let context = ManagedPayloadDecodeContext {
+        entry_index: object_index,
+        stream_offset: 0,
+        managed_registry_depth: 0,
+    };
+    let (root, consumed_bytes, allocated_bytes) = decode_typetree_payload(
+        tree,
+        payload,
+        endian,
+        arrays_align,
+        reference_types,
+        context,
+        limits,
+    )?;
+    let trailing_bytes = payload.get(consumed_bytes..).unwrap_or_default().to_vec();
+    Ok(ParsedObjectPayload {
+        object_index,
+        path_id,
+        type_name: tree
+            .nodes
+            .first()
+            .and_then(|node| node.type_name.clone())
+            .unwrap_or_default(),
+        root,
+        consumed_bytes,
+        trailing_bytes,
+        allocated_bytes,
+    })
+}
+
+/// `ReadMonoBehaviour`: the generated header, then the structure source decision.
+#[allow(clippy::too_many_arguments)]
+fn read_monobehaviour(
+    file: &SerializedFile<'_>,
+    facts: &FactoryFileFacts<'_>,
+    source: &dyn ClassLayoutSource,
+    object_index: usize,
+    limits: &ObjectDecodeLimits,
+    version: &FactoryUnityVersion,
+    asset: &mut FactoryAsset,
+) {
+    let payload_bytes = match object_payload_bytes(file, object_index) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            asset.kind = FactoryAssetKind::Unreadable;
+            asset.log_level = FactoryLogLevel::Error;
+            asset.log_message = Some(read_exception_message(
+                asset.class_name.as_ref(),
+                version.text_or_default(),
+                facts.platform,
+                facts.collection_name,
+                facts.file_path,
+                "InvalidObjectPayloadRange",
+            ));
+            return;
+        }
+    };
+    asset.kind = FactoryAssetKind::Generated(
+        source
+            .generated_class_name(MONO_BEHAVIOUR_CLASS_ID, version)
+            .unwrap_or("MonoBehaviour")
+            .to_owned(),
+    );
+    let arrays_align =
+        unity_version_aligns_arrays(file.metadata.prefix.unity_version_text.as_deref());
+    let header = class_layout(file, source, MONO_BEHAVIOUR_CLASS_ID, version, object_index)
+        .map(|tree| {
+            decode_with_tree(
+                &tree,
+                &payload_bytes,
+                file.metadata.prefix.body_endian,
+                arrays_align,
+                &file.metadata.reference_types,
+                object_index,
+                file.metadata.objects[object_index].path_id,
+                limits,
+            )
+        })
+        .transpose();
+
+    let (header_ok, header_payload) = match header {
+        Ok(payload) => (true, payload),
+        Err(_) => (false, None),
+    };
+    let consumed = header_payload
+        .as_ref()
+        .map(|payload| payload.consumed_bytes)
+        .unwrap_or(0);
+    let remainder = payload_bytes.get(consumed..).unwrap_or_default().to_vec();
+
+    let file_tree = serialized_type_tree(file, object_index);
+    let has_type_tree = matches!(
+        classify_type_tree_usability(file_tree),
+        TypeTreeUsability::Present
+    );
+    let start_index = file_tree
+        .map(|tree| {
+            let names: Vec<&str> = tree
+                .nodes
+                .iter()
+                .skip(1)
+                .filter(|node| node.level == 1)
+                .map(|node| node.name.as_deref().unwrap_or(""))
+                .collect();
+            monobehaviour_structure_start_index(&names)
+        })
+        .unwrap_or(0);
+    let structure_tree = file_tree.and_then(|tree| structure_subtree(tree, start_index));
+    let structure_read = structure_tree.as_ref().map(|tree| {
+        decode_with_tree(
+            tree,
+            &remainder,
+            file.metadata.prefix.body_endian,
+            arrays_align,
+            &file.metadata.reference_types,
+            object_index,
+            file.metadata.objects[object_index].path_id,
+            limits,
+        )
+    });
+    let structure_try_read_ok = matches!(
+        structure_read.as_ref(),
+        Some(Ok(payload)) if payload.consumed_bytes == remainder.len()
+    );
+    let structure_facts = MonoBehaviourReadFacts {
+        read_threw: !header_ok,
+        has_type_tree,
+        type_tree_parse_ok: structure_tree.is_some(),
+        structure_try_read_ok,
+    };
+    let (outcome, log) = decide_monobehaviour_structure(&structure_facts);
+    let fields = match (&outcome, structure_read) {
+        (MonoBehaviourStructureOutcome::UseParsedStructure, Some(Ok(payload))) => {
+            Some(payload.root)
+        }
+        _ => None,
+    };
+    asset.payload = header_payload;
+    asset.name = named_field_owned(&asset.payload).unwrap_or_default();
+    asset.structure = Some(FactoryStructure {
+        outcome,
+        fields,
+        unloaded_remainder: match outcome {
+            MonoBehaviourStructureOutcome::UseUnloadedRemainder => remainder,
+            _ => Vec::new(),
+        },
+    });
+    match log {
+        MonoBehaviourReadLog::Silent => {
+            asset.log_level = FactoryLogLevel::Silent;
+            asset.log_message = None;
+        }
+        MonoBehaviourReadLog::ErrorLayoutMismatch => {
+            asset.log_level = FactoryLogLevel::Error;
+            asset.log_message = Some(monobehaviour_layout_mismatch_message(
+                asset.kind.generated_name().unwrap_or("MonoBehaviour"),
+                "",
+                "ArgumentOutOfRangeException",
+            ));
+        }
+    }
+}
+
+/// A TypeTree rooted at `start_index`, with levels rebased so the sub-root is level 0.
+/// This is the field list `SerializableTreeType.FromRootNode(root, true)` builds for a
+/// MonoBehaviour structure: the root plus the fields after the base MonoBehaviour fields.
+fn structure_subtree(tree: &TypeTree, start_index: usize) -> Option<TypeTree> {
+    let root = tree.nodes.first()?;
+    let mut child_indices = Vec::new();
+    for (index, node) in tree.nodes.iter().enumerate().skip(1) {
+        if node.level == 1 {
+            child_indices.push(index);
+        }
+    }
+    let first = *child_indices.get(start_index)?;
+    let base_level = tree.nodes[first].level;
+    let mut nodes = Vec::new();
+    nodes.push(root.clone());
+    for node in tree.nodes.iter().skip(first) {
+        let mut node = node.clone();
+        node.level = node.level.checked_sub(base_level)?.checked_add(1)?;
+        nodes.push(node);
+    }
+    nodes[0].level = 0;
+    // The synthesized nodes use direct names, so no string buffer is required.
+    Some(TypeTree {
+        nodes,
+        string_buffer: Vec::new(),
+    })
+}
+
+impl FactoryAssetKind {
+    fn generated_name(&self) -> Option<&str> {
+        match self {
+            Self::Generated(name) => Some(name),
+            _ => None,
+        }
+    }
+}
+
+trait VersionText {
+    fn text_or_default(&self) -> &str;
+}
+
+impl VersionText for FactoryUnityVersion {
+    fn text_or_default(&self) -> &str {
+        if self.text.is_empty() {
+            "0.0.0"
+        } else {
+            &self.text
+        }
+    }
+}
+
+/// The committed reference probe output: the `GEN` generated-class identities, the
+/// `TPK`/`NODE` real TypeTrees, and the authored case files.
+pub const PROBE_FIXTURE: &str = include_str!("asset_factory_fixture.txt");
+
+/// Class identity and class layouts pinned by the committed reference probe output
+/// (`tools/probes/ser-factory`, SDK 10.0.401). The `GEN` rows reproduce
+/// `AssetFactory.CreateSerialized` and the `TPK` rows reproduce
+/// `TypeTreeNodeStruct.TryMakeFromTpk`, so this is the data layer of `CreateAsset`.
+///
+/// The tables cover the classes the probe exercised; classes outside them fall through
+/// to `Unknown`, exactly like a generated table that does not know the class.
+#[derive(Clone, Debug, Default)]
+pub struct ReferenceClassLayouts {
+    generated: std::collections::BTreeMap<i32, String>,
+    tpk: std::collections::BTreeMap<(i32, String), (TypeTree, TypeTree)>,
+}
+
+impl ReferenceClassLayouts {
+    /// Parse the probe output rows.
+    pub fn parse(fixture: &str) -> Self {
+        let mut generated = std::collections::BTreeMap::new();
+        let mut trees: std::collections::BTreeMap<(i32, String, bool), Vec<TypeTreeNode>> =
+            std::collections::BTreeMap::new();
+        let mut current: Option<(i32, String, bool)> = None;
+        for line in fixture.lines() {
+            let mut parts = line.split('|');
+            match parts.next() {
+                Some("GEN") => {
+                    let Ok(class_id) = parts.next().unwrap_or_default().parse::<i32>() else {
+                        continue;
+                    };
+                    let name = parts.next().unwrap_or_default();
+                    if !name.is_empty() && name != "MISSING" {
+                        generated.insert(class_id, name.to_owned());
+                    }
+                }
+                Some("TPK") => {
+                    let Ok(class_id) = parts.next().unwrap_or_default().parse::<i32>() else {
+                        continue;
+                    };
+                    let third = parts.next().unwrap_or_default();
+                    if third == "yes" || third == "no" {
+                        current = None;
+                        continue;
+                    }
+                    let version = third.to_owned();
+                    let is_editor = parts.next() == Some("editor");
+                    current = Some((class_id, version.clone(), is_editor));
+                    trees.entry((class_id, version, is_editor)).or_default();
+                }
+                Some("NODE") => {
+                    let Some((class_id, version, is_editor)) = current.clone() else {
+                        continue;
+                    };
+                    let level = parts
+                        .next()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .unwrap_or(0);
+                    let type_name = parts.next().unwrap_or("").to_owned();
+                    let name = parts.next().unwrap_or("").to_owned();
+                    let node_version = parts
+                        .next()
+                        .and_then(|value| value.trim_start_matches('v').parse::<i32>().ok())
+                        .unwrap_or(1);
+                    let meta = parts
+                        .next()
+                        .and_then(|value| value.trim_start_matches("meta").parse::<u32>().ok())
+                        .unwrap_or(0);
+                    let nodes = trees.entry((class_id, version, is_editor)).or_default();
+                    let index = i32::try_from(nodes.len()).unwrap_or(i32::MAX);
+                    nodes.push(TypeTreeNode {
+                        level,
+                        version: node_version,
+                        type_flags: 0,
+                        type_string_offset: None,
+                        name_string_offset: None,
+                        type_name: Some(type_name),
+                        name: Some(name),
+                        byte_size: -1,
+                        index,
+                        meta_flags: meta,
+                        reference_type_hash: None,
+                    });
+                }
+                _ => {}
+            }
+        }
+        let mut tpk = std::collections::BTreeMap::new();
+        for (class_id, version, _) in trees.keys() {
+            let release = trees.get(&(*class_id, version.clone(), false));
+            let editor = trees.get(&(*class_id, version.clone(), true));
+            if let (Some(release), Some(editor)) = (release, editor) {
+                tpk.insert(
+                    (*class_id, version.clone()),
+                    (
+                        TypeTree {
+                            nodes: release.clone(),
+                            string_buffer: Vec::new(),
+                        },
+                        TypeTree {
+                            nodes: editor.clone(),
+                            string_buffer: Vec::new(),
+                        },
+                    ),
+                );
+            }
+        }
+        Self { generated, tpk }
+    }
+
+    /// The tables of the committed probe fixture.
+    pub fn from_probe_fixture() -> Self {
+        Self::parse(PROBE_FIXTURE)
+    }
+
+    /// The probed versions (all reference rows were produced at one version).
+    pub fn probed_version(&self) -> Option<&str> {
+        self.tpk.keys().next().map(|(_, version)| version.as_str())
+    }
+}
+
+impl ClassLayoutSource for ReferenceClassLayouts {
+    fn generated_class_name(&self, class_id: i32, version: &FactoryUnityVersion) -> Option<&str> {
+        // Every GEN row was probed at one version; other versions are unprobed.
+        if self.probed_version() != Some(version.text.as_str()) {
+            return None;
+        }
+        self.generated.get(&class_id).map(String::as_str)
+    }
+
+    fn tpk_trees(
+        &self,
+        class_id: i32,
+        version: &FactoryUnityVersion,
+    ) -> Option<(TypeTree, TypeTree)> {
+        self.tpk.get(&(class_id, version.text.clone())).cloned()
+    }
+}
+
+/// Materialize every object of one parsed SerializedFile through the ported
+/// `GameAssetFactory` engine. This is the product entry point: the CLI/inspect and
+/// export paths call it instead of the reader-side per-object decode when they need
+/// the source factory's recovery/fallback objects.
+pub fn materialize_file_objects(
+    file: &SerializedFile<'_>,
+    collection_name: &str,
+    file_path: &str,
+    platform: &str,
+    source: &dyn ClassLayoutSource,
+    limits: &ObjectDecodeLimits,
+) -> Result<Vec<FactoryAsset>, FactoryEngineError> {
+    let facts = FactoryFileFacts {
+        collection_name,
+        file_path,
+        platform,
+    };
+    let mut assets = Vec::new();
+    assets
+        .try_reserve_exact(file.metadata.objects.len())
+        .map_err(|_| FactoryEngineError::ObjectIndexOutOfBounds {
+            object_index: 0,
+            object_count: file.metadata.objects.len(),
+        })?;
+    for object_index in 0..file.metadata.objects.len() {
+        assets.push(materialize_object(
+            file,
+            &facts,
+            source,
+            object_index,
+            limits,
+        )?);
+    }
+    Ok(assets)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1218,5 +2308,280 @@ mod tests {
         assert_eq!(rows, 23, "all probed engine rows are asserted");
         assert!(EngineAssetKind::Gradient.takes_version());
         assert!(!EngineAssetKind::Vector3.takes_version());
+    }
+
+    // -----------------------------------------------------------------------
+    // Fixture-driven factory engine differential
+    // -----------------------------------------------------------------------
+
+    use crate::serialized_file::file::SerializedFile;
+
+    struct FixtureCase {
+        name: String,
+        bytes: Vec<u8>,
+        collection_name: String,
+        rows: Vec<String>,
+    }
+
+    fn fixture_cases(fixture: &str) -> Vec<FixtureCase> {
+        let mut cases: Vec<FixtureCase> = Vec::new();
+        for line in fixture.lines() {
+            if let Some(rest) = line.strip_prefix("SF_HEX|") {
+                let (name, hex) = rest.split_once('|').expect("SF_HEX name|hex");
+                cases.push(FixtureCase {
+                    name: name.to_owned(),
+                    bytes: hex_bytes(hex),
+                    collection_name: String::new(),
+                    rows: Vec::new(),
+                });
+            } else if let Some(rest) = line.strip_prefix("SF_READ|") {
+                let (name, row) = rest.split_once('|').expect("SF_READ name|row");
+                if let Some(case) = cases.iter_mut().find(|case| case.name == name) {
+                    if let Some(file_name) = row
+                        .strip_prefix("FILE|")
+                        .and_then(|fields| fields.split('|').next())
+                    {
+                        case.collection_name = file_name.to_owned();
+                    }
+                    case.rows.push(row.to_owned());
+                }
+            }
+        }
+        cases
+    }
+
+    fn hex_bytes(hex: &str) -> Vec<u8> {
+        assert!(hex.len().is_multiple_of(2), "odd hex length");
+        let bytes = hex.as_bytes();
+        let mut out = Vec::with_capacity(hex.len() / 2);
+        let mut index = 0;
+        while index < bytes.len() {
+            let digit = |byte: u8| match byte {
+                b'0'..=b'9' => byte - b'0',
+                b'a'..=b'f' => byte - b'a' + 10,
+                b'A'..=b'F' => byte - b'A' + 10,
+                other => panic!("invalid hex byte {other}"),
+            };
+            out.push((digit(bytes[index]) << 4) | digit(bytes[index + 1]));
+            index += 2;
+        }
+        out
+    }
+
+    fn row_value<'a>(case: &'a FixtureCase, prefix: &str) -> Option<&'a str> {
+        case.rows.iter().find_map(|row| row.strip_prefix(prefix))
+    }
+
+    fn assert_case(case: &FixtureCase, layouts: &ReferenceClassLayouts) {
+        let file = SerializedFile::parse(&case.bytes)
+            .unwrap_or_else(|error| panic!("{} parse: {error}", case.name));
+        let facts = FactoryFileFacts {
+            collection_name: &case.collection_name,
+            file_path: "",
+            platform: "StandaloneWin64Player",
+        };
+        let asset = materialize_object(&file, &facts, layouts, 0, &ObjectDecodeLimits::default())
+            .unwrap_or_else(|error| panic!("{} materialize: {error}", case.name));
+
+        let reference_type = row_value(case, "ASSET|42|class=")
+            .and_then(|row| row.split("|type=").nth(1))
+            .and_then(|row| row.split('|').next())
+            .expect("an ASSET row");
+        let reference_classname = row_value(case, "ASSET|42|class=")
+            .and_then(|row| row.split("|classname=").nth(1))
+            .and_then(|row| row.split('|').next())
+            .expect("a classname");
+        let reference_name = row_value(case, "ASSET|42|class=")
+            .and_then(|row| row.split("|name=").nth(1))
+            .expect("a name");
+
+        let engine_type = match &asset.kind {
+            FactoryAssetKind::Generated(name) => name.as_str(),
+            FactoryAssetKind::TypeTreeObject => "DoubleTypeTreeObject",
+            FactoryAssetKind::Unknown => "UnknownObject",
+            FactoryAssetKind::Unreadable => "UnreadableObject",
+        };
+        assert_eq!(engine_type, reference_type, "{} type", case.name);
+        match &asset.kind {
+            FactoryAssetKind::TypeTreeObject => {
+                let type_name = asset
+                    .payload
+                    .as_ref()
+                    .map(|payload| payload.type_name.as_str());
+                assert_eq!(
+                    type_name,
+                    Some(reference_classname),
+                    "{} TPK class name",
+                    case.name
+                );
+            }
+            _ => assert_eq!(
+                asset.class_name.as_ref(),
+                reference_classname,
+                "{} class name",
+                case.name
+            ),
+        }
+        let expected_name = if reference_name == "NULL" {
+            ""
+        } else {
+            reference_name
+        };
+        assert_eq!(asset.name, expected_name, "{} name", case.name);
+
+        // The reference error rows must match the engine log exactly.
+        let reference_logs: Vec<&str> = case
+            .rows
+            .iter()
+            .filter_map(|row| row.strip_prefix("LOG|Error|Import|"))
+            .collect();
+        let reference_warnings: Vec<&str> = case
+            .rows
+            .iter()
+            .filter_map(|row| row.strip_prefix("LOG|Warning|Import|"))
+            .collect();
+        if let Some(expected) = reference_logs.first() {
+            let expected = expected.replace('␠', " ");
+            assert_eq!(asset.log_level, FactoryLogLevel::Error, "{} log", case.name);
+            assert_eq!(
+                asset.log_message.as_deref(),
+                Some(expected.as_str()),
+                "{} log text",
+                case.name
+            );
+        } else if let Some(expected) = reference_warnings.first() {
+            let expected = expected.replace('␠', " ");
+            assert_eq!(
+                asset.log_level,
+                FactoryLogLevel::Warning,
+                "{} log",
+                case.name
+            );
+            assert_eq!(
+                asset.log_message.as_deref(),
+                Some(expected.as_str()),
+                "{} log text",
+                case.name
+            );
+        } else {
+            assert_eq!(
+                asset.log_level,
+                FactoryLogLevel::Silent,
+                "{} log",
+                case.name
+            );
+            assert_eq!(asset.log_message, None, "{} log text", case.name);
+        }
+
+        // Case-specific tail, structure, and field fidelity.
+        match case.name.as_str() {
+            "textasset_notree" => {
+                assert_eq!(
+                    classify_type_tree_usability(file.metadata.types[0].type_tree.as_ref()),
+                    TypeTreeUsability::Empty
+                );
+                assert_eq!(asset.tail, Some(ObjectTailOutcome::Exact));
+                assert_eq!(asset.payload.unwrap().consumed_bytes, 20);
+            }
+            "textasset_tree" => {
+                assert_eq!(
+                    classify_type_tree_usability(file.metadata.types[0].type_tree.as_ref()),
+                    TypeTreeUsability::Present
+                );
+                assert_eq!(asset.tail, Some(ObjectTailOutcome::Exact));
+            }
+            "textasset_padding" => {
+                assert_eq!(asset.tail, Some(ObjectTailOutcome::ZeroPadding));
+                assert_eq!(asset.payload.as_ref().unwrap().trailing_bytes, [0, 0, 0, 0]);
+            }
+            "textasset_bad_tail" => {
+                assert_eq!(asset.tail, Some(ObjectTailOutcome::IncorrectByteCount));
+                assert_eq!(
+                    asset.payload.as_ref().unwrap().consumed_bytes,
+                    20,
+                    "partially read fields stay available"
+                );
+                assert_eq!(asset.raw.len(), 25, "raw payload preserved");
+            }
+            "unknown_class" => {
+                assert_eq!(asset.class_name.as_ref(), "7");
+                assert_eq!(asset.raw, [1, 2, 3, 4, 5, 6, 7, 8]);
+                assert!(asset.payload.is_none());
+            }
+            "tpk_navmesh" => {
+                assert_eq!(asset.tail, Some(ObjectTailOutcome::Exact));
+                assert_eq!(
+                    asset
+                        .payload
+                        .as_ref()
+                        .unwrap()
+                        .root
+                        .unique_field("m_Name")
+                        .unwrap()
+                        .unwrap(),
+                    &SerializedValue::StringBytes(b"NavMeshData".to_vec())
+                );
+            }
+            "unreadable_version" => {
+                assert!(asset.payload.is_none());
+                assert_eq!(asset.raw.len(), 20);
+            }
+            "engine_default_resources" => {
+                assert!(asset.kind.is_recoverable());
+                assert_eq!(asset.tail, Some(ObjectTailOutcome::IncorrectByteCount));
+            }
+            "mono_unloaded" => {
+                let structure = asset.structure.as_ref().expect("a structure decision");
+                assert_eq!(
+                    structure.outcome,
+                    MonoBehaviourStructureOutcome::UseUnloadedRemainder
+                );
+                assert_eq!(structure.unloaded_remainder, [0xDE, 0xAD, 0xBE, 0xEF]);
+            }
+            "mono_with_structure" => {
+                let structure = asset.structure.as_ref().expect("a structure decision");
+                assert_eq!(
+                    structure.outcome,
+                    MonoBehaviourStructureOutcome::UseParsedStructure,
+                    "{} source structure outcome",
+                    case.name
+                );
+                let fields = structure.fields.as_ref().expect("parsed structure fields");
+                assert_eq!(
+                    fields.unique_field("health").unwrap().unwrap(),
+                    &SerializedValue::I32(100)
+                );
+                assert!(row_value(case, "STRUCTURE|SerializableStructure").is_some());
+            }
+            "monoscript_notree" => {
+                let root = &asset.payload.as_ref().unwrap().root;
+                assert_eq!(
+                    root.unique_field("m_ClassName").unwrap().unwrap(),
+                    &SerializedValue::StringBytes(b"HeroController".to_vec())
+                );
+                assert_eq!(
+                    root.unique_field("m_AssemblyName").unwrap().unwrap(),
+                    &SerializedValue::StringBytes(b"Assembly-CSharp".to_vec())
+                );
+                assert_eq!(
+                    root.unique_field("m_ExecutionOrder").unwrap().unwrap(),
+                    &SerializedValue::I32(200)
+                );
+            }
+            other => panic!("unexpected case {other}"),
+        }
+    }
+
+    /// Every reference-authored case in `asset_factory_fixture.txt` is replayed through
+    /// the production engine and compared row by row with the shipped factory.
+    #[test]
+    fn factory_differential_replays_every_reference_case() {
+        let fixture = include_str!("asset_factory_fixture.txt");
+        let layouts = ReferenceClassLayouts::parse(fixture);
+        let cases = fixture_cases(fixture);
+        assert_eq!(cases.len(), 11, "all probe cases are replayed");
+        for case in &cases {
+            assert_case(case, &layouts);
+        }
     }
 }

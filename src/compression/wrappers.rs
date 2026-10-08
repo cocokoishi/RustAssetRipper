@@ -155,7 +155,15 @@ pub fn decompress_gzip(
     input: &[u8],
     maximum_output_size: usize,
 ) -> Result<Vec<u8>, WrapperCodecError> {
-    let decoder = flate2::read::MultiGzDecoder::new(input);
+    decompress_gzip_stream(input, maximum_output_size)
+}
+
+/// Decode GZip data directly from a reader so the compressed layer never has to be materialized.
+pub fn decompress_gzip_stream<R: Read>(
+    reader: R,
+    maximum_output_size: usize,
+) -> Result<Vec<u8>, WrapperCodecError> {
+    let decoder = flate2::read::MultiGzDecoder::new(reader);
     decompress_limited(decoder, maximum_output_size, "GZip")
 }
 
@@ -163,7 +171,15 @@ pub fn decompress_brotli(
     input: &[u8],
     maximum_output_size: usize,
 ) -> Result<Vec<u8>, WrapperCodecError> {
-    let decoder = brotli_decompressor::Decompressor::new(input, 4096);
+    decompress_brotli_stream(input, maximum_output_size)
+}
+
+/// Decode Brotli data directly from a reader so the compressed layer never has to be materialized.
+pub fn decompress_brotli_stream<R: Read>(
+    reader: R,
+    maximum_output_size: usize,
+) -> Result<Vec<u8>, WrapperCodecError> {
+    let decoder = brotli_decompressor::Decompressor::new(reader, 4096);
     decompress_limited(decoder, maximum_output_size, "Brotli")
 }
 

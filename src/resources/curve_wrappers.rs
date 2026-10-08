@@ -28,7 +28,7 @@ fn set_default_envelope(envelope: &mut CurveEnvelope) {
 }
 
 /// A script pointer, modeled as the referenced asset's path id.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct ScriptReference {
     /// The referenced script's path id.
     pub path_id: i64,

@@ -1,49 +1,55 @@
-//! Executable YAML project workflow composed from workspace loading, reference
-//! mapping, resource-aware Unity YAML, importer metadata, and post-export files.
+//! Executable Unity project export composed from collection dispatch, staged planning, and
+//! the `ExportHandler.Export` write sequence.
 //!
-//! This is the first project-level execution path. It writes one multi-document
-//! `.asset` file per input SerializedFile. Scene/Prefab collection reconstruction,
-//! generated objects, class-specific binary exporters, and platform post-export
-//! outputs remain separate required integrations; this workflow refuses undecoded,
-//! unresolved, or omitted objects instead of reporting a partial export as complete.
+//! This is the product-level project path: every decoded workspace object is routed through the
+//! frozen `ProjectExporter.CreateCollection` stack walk ([`crate::export::project_exporter`]),
+//! every route is materialized into a staged [`ProjectExportPlan`], and only then does
+//! `execute_project_export` touch the disk. Objects whose baseline collection is not exportable
+//! are reported as explicit notices; families whose specialized renderer is not ported fall back
+//! to the generic Unity YAML asset family instead of being dropped.
+//!
+//! Scene/Prefab collection reconstruction (which would attach `SceneHierarchyObject`/
+//! `PrefabHierarchyObject` main assets and group objects into scene collections) is a separate
+//! required integration owned by the scene workstream; until it is connected, scene and prefab
+//! objects take the plain asset-family route, exactly like the baseline's unprocessed case.
 
-use std::collections::hash_map::RandomState;
+use std::collections::HashMap;
 use std::error::Error;
-use std::fs;
 use std::hash::BuildHasher;
 use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::export::export_root::prepare_export_root;
-use crate::export::meta::UnityMetaFileOptions;
-use crate::export::pointer_map::{
-    ExportCollectionPointerMetadata, ExportPointerMapLimits, ExportedAssetPointerEntry,
-    ProjectExportPointerMap, UnityProjectAssetType,
-};
-use crate::export::post_export::{default_package_dependencies, project_version_file_contents};
-use crate::export::project_output::{
-    export_asset_with_meta, write_new_project_file, AssetExportWithMetaPlan,
-    UnityProjectOutputLimits,
-};
-use crate::export::scene_collection::{
-    ExportAssetCollectionIdentity, ExportAssetIdentity, SceneExportIdAssignment,
-};
-use crate::export::unity_yaml::{
-    UnityYamlMappingStyle, UnityYamlNode, UnityYamlScalar, UnityYamlWriteLimits,
-};
-use crate::export::workspace_yaml::{
-    workspace_assignments_to_unity_yaml_with_streamed_resources,
-    UnityYamlWorkspaceCollectionLimits, WorkspaceStreamedYamlResourceContext,
-};
 use crate::io::filesystem::VirtualFileSystem;
 use crate::io::platform_structure::PlatformResourceProvider;
 use crate::processing::scene_naming::SceneUnityVersion;
 use crate::resource::{RootResourceFileCatalog, StreamedResourceContentLimits};
+use crate::serialized_file::object::ParsedObjectPayload;
 use crate::serialized_file::object_workspace::{ObjectWorkspace, WorkspaceObject};
 use crate::serialized_file::reference_graph::{MultiFilePPtrResolution, MultiFileReferenceGraph};
 use crate::serialized_file::workspace::SerializedFileWorkspace;
+
+use super::collection_kind::ExportCollectionKind;
+use super::export_extension::DEFAULT_EXPORT_EXTENSION;
+use super::pointer_map::{
+    ExportCollectionPointerMetadata, ExportPointerMapLimits, ExportedAssetPointerEntry,
+    ProjectExportPointerMap, UnityProjectAssetType,
+};
+use super::project_exporter::{
+    execute_project_export, export_extension_for, native_format_importer, object_class_name,
+    package_manifest_json, project_version_file, select_collection, ObjectClassFacts,
+    PlannedProjectFile, PlannedProjectMeta, ProjectExportError, ProjectExportNotice,
+    ProjectExportPlan, ProjectExportSettings, ProjectPathPlanner,
+};
+use super::scene_collection::{ExportAssetCollectionIdentity, ExportAssetIdentity};
+use super::settings_file::ExportSettingsFile;
+use super::streamed_assets::StreamedYamlAssetLimits;
+use super::unity_yaml::{write_unity_yaml_documents, UnityYamlWriteLimits};
+use super::workspace_yaml::{
+    workspace_object_to_unity_yaml_document_with_streamed_resources,
+    UnityYamlWorkspaceCollectionLimits, WorkspaceStreamedYamlResourceContext,
+};
 
 const MAX_PROJECT_OBJECTS: usize = 20_000_000;
 const MAX_PROJECT_YAML_BYTES: usize = 2 * 1024 * 1024 * 1024;
@@ -55,7 +61,7 @@ pub struct WorkspaceProjectExportLimits {
     pub max_total_yaml_bytes: usize,
     pub pointer_map: ExportPointerMapLimits,
     pub yaml_collection: UnityYamlWorkspaceCollectionLimits,
-    pub project_output: UnityProjectOutputLimits,
+    pub project_output: super::project_output::UnityProjectOutputLimits,
     pub yaml_write: UnityYamlWriteLimits,
     pub streamed_content: StreamedResourceContentLimits,
 }
@@ -67,43 +73,384 @@ impl Default for WorkspaceProjectExportLimits {
             max_total_yaml_bytes: MAX_PROJECT_YAML_BYTES,
             pointer_map: ExportPointerMapLimits::default(),
             yaml_collection: UnityYamlWorkspaceCollectionLimits::default(),
-            project_output: UnityProjectOutputLimits::default(),
+            project_output: super::project_output::UnityProjectOutputLimits::default(),
             yaml_write: UnityYamlWriteLimits::default(),
             streamed_content: StreamedResourceContentLimits::default(),
         }
     }
 }
 
-/// Summary of the files written by the current workspace YAML project path.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Summary of the files written by the workspace project path.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceProjectExportReport {
     pub serialized_file_count: usize,
     pub exported_object_count: usize,
     pub asset_file_count: usize,
+    /// Asset files that received an importer sidecar.
+    pub meta_file_count: usize,
     pub total_yaml_bytes: usize,
     pub project_version: SceneUnityVersion,
+    /// Objects that claimed an exportable collection (one collection per object today).
+    pub collection_count: usize,
+    /// Objects whose baseline collection writes nothing, with the reason.
+    pub skipped_objects: Vec<ProjectExportNotice>,
+    /// Files written through the generic asset-family renderer instead of their own.
+    pub fallbacks: Vec<ProjectExportNotice>,
 }
 
-struct PlannedSerializedFileAsset {
-    relative_path: String,
+/// One object's export route.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ObjectRoute {
+    /// `AssetExportCollection` and its subclasses: unique asset path plus `.meta`.
+    Asset,
+    /// `ManagerExportCollection`/`EditorBuildSettingsExportCollection`: fixed path, no `.meta`.
+    Manager,
+    /// `UnknownExportCollection`: raw payload bytes, no `.meta`.
+    Unknown,
+    /// `UnreadableExportCollection`: raw payload bytes, no `.meta`.
+    Unreadable,
+    /// A non-exportable collection: the baseline writes nothing.
+    Skipped,
+}
+
+/// A routed object with its resolved plan inputs.
+struct RoutedObject<'a> {
+    object: &'a WorkspaceObject,
+    class_id: i32,
+    class_name: String,
+    named_name: Option<String>,
+    facts: ObjectClassFacts,
+    selection: super::project_exporter::CollectionSelection,
+    route: ObjectRoute,
+    collection_index: usize,
     guid: [u8; 16],
-    main_file_id: i64,
-    yaml: String,
+    file_id: i64,
 }
 
-/// Execute a workspace-backed Unity YAML project export.
+/// Execute a workspace-backed Unity project export with explicit export settings.
+#[allow(clippy::too_many_arguments)]
+pub fn export_workspace_yaml_project_with_settings(
+    output_root: &Path,
+    delete_existing: bool,
+    filesystem: &VirtualFileSystem,
+    root_catalog: &RootResourceFileCatalog,
+    resource_provider: &PlatformResourceProvider<'_>,
+    workspace: &SerializedFileWorkspace,
+    objects: &ObjectWorkspace,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+    settings: &ExportSettingsFile,
+    limits: WorkspaceProjectExportLimits,
+) -> Result<WorkspaceProjectExportReport, Box<dyn Error>> {
+    let (editor_version_text, project_version) = workspace_project_version(workspace)?;
+    if objects.report().object_count > limits.max_objects {
+        return Err(invalid_project(format!(
+            "project export has {} objects, exceeding the limit {}",
+            objects.report().object_count,
+            limits.max_objects
+        )));
+    }
+    if !reference_graph.is_complete() {
+        return Err(invalid_project(
+            "project export requires a complete workspace PPtr scan",
+        ));
+    }
+    let settings_facts = ProjectExportSettings::from_export_settings(settings, project_version);
+
+    // Pass 1: route every object through the registration stack. No file is planned yet, so a
+    // mis-routed or unhandled object aborts with nothing written.
+    let mut routed = Vec::new();
+    routed
+        .try_reserve_exact(objects.report().object_count)
+        .map_err(|_| invalid_project("could not allocate routed project objects"))?;
+    let mut notices: Vec<ProjectExportNotice> = Vec::new();
+    let mut fallback_notices: Vec<ProjectExportNotice> = Vec::new();
+    let mut next_collection_index = 0usize;
+    for (file_index, file) in workspace.files().iter().enumerate() {
+        for (object_index, object_info) in file.metadata.objects.iter().enumerate() {
+            let object = objects.get(file_index, object_index).ok_or_else(|| {
+                invalid_project(format!(
+                    "workspace object is missing at file {file_index}, object {object_index}"
+                ))
+            })?;
+            if object_info.path_id == 0 {
+                return Err(invalid_project(format!(
+                    "file {file_index} object {object_index} has PathID 0, which cannot identify a Unity YAML document"
+                )));
+            }
+            let class_id = object.class_id.map(i32::from).ok_or_else(|| {
+                invalid_project(format!(
+                    "file {file_index} object {object_index} PathID {} has no class ID",
+                    object_info.path_id
+                ))
+            })?;
+            let payload = object.payload.as_ref().ok();
+            if payload.is_some() {
+                validate_decoded_object(object, object_info.path_id, reference_graph)?;
+            }
+            let facts = ObjectClassFacts::new(class_id, payload.is_none());
+            let selection = select_collection(facts, settings_facts)?;
+            let kind = selection.kind();
+            let (route, skip_reason, fallback_reason) = match kind {
+                ExportCollectionKind::Manager => (ObjectRoute::Manager, "", None),
+                ExportCollectionKind::Unknown => (ObjectRoute::Unknown, "", None),
+                ExportCollectionKind::Unreadable => (ObjectRoute::Unreadable, "", None),
+                ExportCollectionKind::Asset => {
+                    (ObjectRoute::Asset, "", asset_family_fallback(selection.collection_name))
+                }
+                ExportCollectionKind::Scene
+                | ExportCollectionKind::Prefab
+                | ExportCollectionKind::Script
+                | ExportCollectionKind::EmptyScript => (
+                    ObjectRoute::Asset,
+                    "",
+                    Some(
+                        "the specialized collection renderer is not ported; the object was written \
+                         through the generic asset family",
+                    ),
+                ),
+                ExportCollectionKind::Fail => (
+                    ObjectRoute::Skipped,
+                    "FailExportCollection writes nothing and reports a failed export",
+                    None,
+                ),
+                ExportCollectionKind::Empty => (
+                    ObjectRoute::Skipped,
+                    "EmptyExportCollection is not exportable; the baseline writes nothing",
+                    None,
+                ),
+                ExportCollectionKind::Skip => (
+                    ObjectRoute::Skipped,
+                    "SkipExportCollection is not exportable; references become missing references",
+                    None,
+                ),
+                ExportCollectionKind::Deleted => (
+                    ObjectRoute::Skipped,
+                    "DeletedAssetsExportCollection is not exportable",
+                    None,
+                ),
+                ExportCollectionKind::Redirect => (
+                    ObjectRoute::Skipped,
+                    "RedirectExportCollection is not exportable",
+                    None,
+                ),
+            };
+            let label = if route == ObjectRoute::Skipped {
+                format!("{} (class {class_id})", selection.collection_name)
+            } else {
+                selection.collection_name.to_owned()
+            };
+            if route == ObjectRoute::Skipped {
+                notices.push(ProjectExportNotice {
+                    subject: label.clone(),
+                    reason: skip_reason,
+                });
+            }
+            if let Some(reason) = fallback_reason {
+                fallback_notices.push(ProjectExportNotice {
+                    subject: label,
+                    reason,
+                });
+            }
+            let collection_index = if route == ObjectRoute::Skipped {
+                usize::MAX
+            } else {
+                let index = next_collection_index;
+                next_collection_index = next_collection_index
+                    .checked_add(1)
+                    .ok_or_else(|| invalid_project("project collection count overflows"))?;
+                index
+            };
+            let class_name =
+                object_class_name(class_id, payload.map(|payload| payload.type_name.as_str()));
+            let named_name = payload.and_then(object_asset_name);
+            routed.push(RoutedObject {
+                object,
+                class_id,
+                class_name: class_name.clone(),
+                named_name,
+                facts,
+                selection,
+                route,
+                collection_index,
+                guid: new_collection_guid(collection_index as u64),
+                file_id: object_info.path_id,
+            });
+        }
+    }
+
+    // Pass 2: build the project pointer map from exactly the objects that will be written, so a
+    // reference to a skipped asset resolves to the baseline missing-reference pointer.
+    let mut pointer_entries = Vec::new();
+    pointer_entries
+        .try_reserve_exact(routed.len())
+        .map_err(|_| invalid_project("could not allocate project export pointer entries"))?;
+    let mut collection_metadata = Vec::new();
+    collection_metadata
+        .try_reserve_exact(next_collection_index)
+        .map_err(|_| invalid_project("could not allocate project export collection metadata"))?;
+    let mut collection_count = 0usize;
+    for entry in &routed {
+        if entry.route == ObjectRoute::Skipped {
+            continue;
+        }
+        collection_count += 1;
+        collection_metadata.push(ExportCollectionPointerMetadata {
+            collection_index: entry.collection_index,
+            guid: entry.guid,
+            asset_type: UnityProjectAssetType::Serialized,
+        });
+        pointer_entries.push(ExportedAssetPointerEntry {
+            asset: identity_of(entry),
+            file_id: entry.file_id,
+            collection_index: entry.collection_index,
+        });
+    }
+    let pointer_map =
+        ProjectExportPointerMap::new(&pointer_entries, &collection_metadata, limits.pointer_map)?;
+    let streamed_resources = WorkspaceStreamedYamlResourceContext {
+        filesystem,
+        root_catalog,
+        provider: resource_provider,
+        content_limits: limits.streamed_content,
+        staging_limits: StreamedYamlAssetLimits::default(),
+    };
+
+    // Pass 3: materialize every routed object into a staged file.
+    let mut planner = ProjectPathPlanner::new(ProjectPathPlanner::host_platform());
+    let mut files = Vec::new();
+    files
+        .try_reserve_exact(collection_count)
+        .map_err(|_| invalid_project("could not allocate staged project asset files"))?;
+    let mut total_bytes = 0usize;
+    let mut raw_file_cache: HashMap<usize, Vec<u8>> = HashMap::new();
+    for entry in &routed {
+        if entry.route == ObjectRoute::Skipped {
+            continue;
+        }
+        let bytes = match entry.route {
+            ObjectRoute::Unknown | ObjectRoute::Unreadable => raw_payload_bytes(
+                filesystem,
+                workspace,
+                entry.object,
+                &mut raw_file_cache,
+                limits,
+            )?,
+            _ => {
+                let source = identity_of(entry);
+                let document = workspace_object_to_unity_yaml_document_with_streamed_resources(
+                    workspace,
+                    reference_graph,
+                    &pointer_map,
+                    entry.object,
+                    source,
+                    entry.file_id,
+                    entry.collection_index,
+                    None,
+                    limits.yaml_collection.object_conversion,
+                    &streamed_resources,
+                )?;
+                let Some(document) = document else {
+                    notices.push(ProjectExportNotice {
+                        subject: entry.selection.collection_name.to_owned(),
+                        reason:
+                            "the baseline exporter skipped an image texture with no usable data",
+                    });
+                    continue;
+                };
+                write_unity_yaml_documents(&[document], limits.yaml_write)?.into_bytes()
+            }
+        };
+        total_bytes = total_bytes
+            .checked_add(bytes.len())
+            .ok_or_else(|| invalid_project("project output byte count overflows"))?;
+        if total_bytes > limits.max_total_yaml_bytes {
+            return Err(invalid_project(format!(
+                "project output uses {total_bytes} bytes, exceeding the limit {}",
+                limits.max_total_yaml_bytes
+            )));
+        }
+        let mut identity = super::asset_path::ExportAssetPathIdentity {
+            class_name: entry.class_name.clone(),
+            named_name: entry.named_name.clone(),
+            ..Default::default()
+        };
+        if identity.class_name.is_empty() {
+            identity.class_name = entry.class_name.clone();
+        }
+        let relative_path = match entry.route {
+            ObjectRoute::Asset => {
+                let extension = export_extension_for(entry.facts);
+                let extension = if extension.is_empty() {
+                    DEFAULT_EXPORT_EXTENSION
+                } else {
+                    extension
+                };
+                planner.plan_asset_path(&identity, extension)?
+            }
+            ObjectRoute::Manager => planner.plan_manager_path(&entry.class_name)?,
+            ObjectRoute::Unknown => planner.plan_unknown_path(
+                &entry.class_name,
+                entry.named_name.as_deref().unwrap_or(&entry.class_name),
+            )?,
+            ObjectRoute::Unreadable => planner.plan_unreadable_path(
+                &entry.class_name,
+                entry.named_name.as_deref().unwrap_or(&entry.class_name),
+            )?,
+            ObjectRoute::Skipped => unreachable!("skipped routes are filtered above"),
+        };
+        let meta = match entry.route {
+            ObjectRoute::Asset => Some(PlannedProjectMeta {
+                importer_class: "NativeFormatImporter".to_owned(),
+                importer: native_format_importer(entry.file_id)?,
+            }),
+            _ => None,
+        };
+        files.push(PlannedProjectFile {
+            collection_name: entry.selection.collection_name,
+            kind: entry.selection.kind(),
+            relative_path,
+            guid: entry.guid,
+            bytes,
+            meta,
+            label: entry.selection.collection_name.to_owned(),
+        });
+    }
+
+    let manifest = package_manifest_json(project_version);
+    let plan = ProjectExportPlan {
+        project_version_text: editor_version_text.to_owned(),
+        project_version_file: project_version_file(editor_version_text, project_version),
+        package_manifest: manifest,
+        files,
+        skipped: notices,
+        fallbacks: fallback_notices,
+    };
+    let report = execute_project_export(
+        output_root,
+        delete_existing,
+        &plan,
+        limits.project_output,
+        limits.yaml_write,
+    )?;
+    Ok(WorkspaceProjectExportReport {
+        serialized_file_count: workspace.files().len(),
+        exported_object_count: report.file_count,
+        asset_file_count: report.asset_file_count,
+        meta_file_count: report.meta_file_count,
+        total_yaml_bytes: total_bytes,
+        project_version,
+        collection_count,
+        skipped_objects: report.skipped,
+        fallbacks: report.fallbacks,
+    })
+}
+
+/// Execute a workspace-backed Unity YAML project export with the built-in export settings.
 ///
-/// Every parsed object must decode, have a complete PPtr scan, resolve its references,
-/// and produce exactly one YAML document. The complete output is staged in memory before
-/// the first filesystem write, so unsupported or malformed objects do not leave a project
-/// that looks successful. Output paths are deterministic; collection GUIDs follow the
-/// source's random-per-collection policy.
-///
-/// The export root is validated and prepared exactly like the reference GUI export
-/// guard: the path must not be empty or a system directory, and an existing non-empty
-/// directory is only deleted when `delete_existing` selects the reference's consented
-/// arm. Because the root is guaranteed empty afterwards, no project file can be written
-/// over pre-existing content on this path.
+/// The output root is validated and prepared exactly like the reference GUI export guard: the
+/// path must not be empty or a system directory, and an existing non-empty directory is only
+/// deleted when `delete_existing` selects the reference's consented arm. Because the root is
+/// guaranteed empty afterwards, no project file can be written over pre-existing content.
 #[allow(clippy::too_many_arguments)]
 pub fn export_workspace_yaml_project(
     output_root: &Path,
@@ -116,30 +463,39 @@ pub fn export_workspace_yaml_project(
     reference_graph: &MultiFileReferenceGraph<'_>,
     limits: WorkspaceProjectExportLimits,
 ) -> Result<WorkspaceProjectExportReport, Box<dyn Error>> {
-    prepare_export_root(output_root, delete_existing)?;
+    let settings = ExportSettingsFile::from(super::settings::ExportDefaults::default());
+    export_workspace_yaml_project_with_settings(
+        output_root,
+        delete_existing,
+        filesystem,
+        root_catalog,
+        resource_provider,
+        workspace,
+        objects,
+        reference_graph,
+        &settings,
+        limits,
+    )
+}
+
+/// The collection type name that would wrap the object, for diagnostics.
+fn identity_of(entry: &RoutedObject<'_>) -> ExportAssetIdentity {
+    ExportAssetIdentity {
+        collection: ExportAssetCollectionIdentity::SerializedFile {
+            file_index: entry.object.file_index,
+        },
+        object_index: entry.object.object_index,
+        path_id: entry.object.path_id,
+        class_id: entry.class_id,
+    }
+}
+
+fn workspace_project_version(
+    workspace: &SerializedFileWorkspace,
+) -> Result<(&str, SceneUnityVersion), Box<dyn Error>> {
     if workspace.files().is_empty() {
         return Err(invalid_project("project export has no SerializedFiles"));
     }
-    if objects.report().object_count > limits.max_objects {
-        return Err(invalid_project(format!(
-            "project export has {} objects, exceeding the limit {}",
-            objects.report().object_count,
-            limits.max_objects
-        )));
-    }
-    if !objects.report().is_complete() {
-        return Err(invalid_project(format!(
-            "project export requires every object to decode ({} decoded, {} failed)",
-            objects.report().decoded_objects,
-            objects.report().undecoded_objects
-        )));
-    }
-    if !reference_graph.is_complete() {
-        return Err(invalid_project(
-            "project export requires a complete workspace PPtr scan",
-        ));
-    }
-
     let editor_version_text = workspace
         .files()
         .iter()
@@ -150,200 +506,91 @@ pub fn export_workspace_yaml_project(
             "project export cannot parse Unity version {editor_version_text:?}"
         ))
     })?;
-
-    let object_count = objects.objects().len();
-    let mut pointer_entries = Vec::new();
-    pointer_entries
-        .try_reserve_exact(object_count)
-        .map_err(|_| invalid_project("could not allocate project export pointer entries"))?;
-    let mut collection_metadata = Vec::new();
-    collection_metadata
-        .try_reserve_exact(workspace.files().len())
-        .map_err(|_| invalid_project("could not allocate project export collection metadata"))?;
-    let mut collection_guids = Vec::new();
-    collection_guids
-        .try_reserve_exact(workspace.files().len())
-        .map_err(|_| invalid_project("could not allocate project export collection GUIDs"))?;
-
-    for file_index in 0..workspace.files().len() {
-        let guid = new_collection_guid(file_index as u64);
-        collection_guids.push(guid);
-        collection_metadata.push(ExportCollectionPointerMetadata {
-            collection_index: file_index,
-            guid,
-            asset_type: UnityProjectAssetType::Serialized,
-        });
-    }
-
-    let mut assignments_by_file = Vec::new();
-    assignments_by_file
-        .try_reserve_exact(workspace.files().len())
-        .map_err(|_| invalid_project("could not allocate per-file project assignments"))?;
-    for (file_index, file) in workspace.files().iter().enumerate() {
-        let mut assignments = Vec::new();
-        assignments
-            .try_reserve_exact(file.metadata.objects.len())
-            .map_err(|_| invalid_project("could not allocate file project assignments"))?;
-        for (object_index, object_info) in file.metadata.objects.iter().enumerate() {
-            let object = objects.get(file_index, object_index).ok_or_else(|| {
-                invalid_project(format!(
-                    "workspace object is missing at file {file_index}, object {object_index}"
-                ))
-            })?;
-            validate_exportable_object(object, object_info.path_id, reference_graph)?;
-            let class_id = object.class_id.map(i32::from).ok_or_else(|| {
-                invalid_project(format!(
-                    "file {file_index} object {object_index} PathID {} has no class ID",
-                    object_info.path_id
-                ))
-            })?;
-            let asset = ExportAssetIdentity {
-                collection: ExportAssetCollectionIdentity::SerializedFile { file_index },
-                object_index,
-                path_id: object_info.path_id,
-                class_id,
-            };
-            let assignment = SceneExportIdAssignment {
-                asset,
-                // The input PathID is unique within a SerializedFile and remains stable
-                // while the per-file GUID provides cross-file identity.
-                file_id: object_info.path_id,
-            };
-            pointer_entries.push(ExportedAssetPointerEntry {
-                asset,
-                file_id: assignment.file_id,
-                collection_index: file_index,
-            });
-            assignments.push(assignment);
-        }
-        assignments_by_file.push(assignments);
-    }
-
-    let pointer_map =
-        ProjectExportPointerMap::new(&pointer_entries, &collection_metadata, limits.pointer_map)?;
-    let streamed_resources = WorkspaceStreamedYamlResourceContext {
-        filesystem,
-        root_catalog,
-        provider: resource_provider,
-        content_limits: limits.streamed_content,
-        staging_limits: Default::default(),
-    };
-
-    let mut planned_files = Vec::new();
-    planned_files
-        .try_reserve_exact(workspace.files().len())
-        .map_err(|_| invalid_project("could not allocate staged project asset files"))?;
-    let mut total_yaml_bytes = 0usize;
-    let mut exported_object_count = 0usize;
-    for (file_index, assignments) in assignments_by_file.iter().enumerate() {
-        if assignments.is_empty() {
-            continue;
-        }
-        let yaml = workspace_assignments_to_unity_yaml_with_streamed_resources(
-            workspace,
-            objects,
-            reference_graph,
-            &pointer_map,
-            assignments,
-            file_index,
-            None,
-            limits.yaml_collection,
-            &streamed_resources,
-        )?;
-        let document_count = yaml.match_indices("--- !u!").count();
-        if document_count != assignments.len() {
-            return Err(invalid_project(format!(
-                "file {file_index} produced {document_count} YAML documents for {} input objects; refusing an incomplete project export",
-                assignments.len()
-            )));
-        }
-        total_yaml_bytes = total_yaml_bytes
-            .checked_add(yaml.len())
-            .ok_or_else(|| invalid_project("project YAML byte count overflows"))?;
-        if total_yaml_bytes > limits.max_total_yaml_bytes {
-            return Err(invalid_project(format!(
-                "project YAML uses {total_yaml_bytes} bytes, exceeding the limit {}",
-                limits.max_total_yaml_bytes
-            )));
-        }
-        exported_object_count = exported_object_count
-            .checked_add(document_count)
-            .ok_or_else(|| invalid_project("project object count overflows"))?;
-        planned_files.push(PlannedSerializedFileAsset {
-            relative_path: format!("Assets/AssetRipper/SerializedFiles/file_{file_index:06}.asset"),
-            guid: collection_guids[file_index],
-            main_file_id: assignments[0].file_id,
-            yaml,
-        });
-    }
-
-    let major_is_five = project_version.major == 5;
-    let version_file = project_version_file_contents(editor_version_text, major_is_five);
-    write_new_project_file(
-        output_root,
-        "ProjectSettings/ProjectVersion.txt",
-        version_file.as_bytes(),
-        limits.project_output,
-    )?;
-    let manifest = package_manifest_json(
-        project_version.major > 2019
-            || (project_version.major == 2019 && project_version.minor >= 2),
-    );
-    write_new_project_file(
-        output_root,
-        "Packages/manifest.json",
-        manifest.as_bytes(),
-        limits.project_output,
-    )?;
-
-    for planned in &planned_files {
-        let importer = native_format_importer(planned.main_file_id)?;
-        let yaml = planned.yaml.as_bytes();
-        export_asset_with_meta(
-            output_root,
-            AssetExportWithMetaPlan {
-                relative_asset_path: planned.relative_path.clone(),
-                guid: planned.guid,
-                importer_class: "NativeFormatImporter".to_owned(),
-                importer,
-                meta_options: UnityMetaFileOptions::default(),
-            },
-            true,
-            |path| {
-                fs::write(path, yaml)?;
-                Ok(yaml.len())
-            },
-            limits.project_output,
-            limits.yaml_write,
-        )?;
-    }
-
-    Ok(WorkspaceProjectExportReport {
-        serialized_file_count: workspace.files().len(),
-        exported_object_count,
-        asset_file_count: planned_files.len(),
-        total_yaml_bytes,
-        project_version,
-    })
+    Ok((editor_version_text, project_version))
 }
 
-fn validate_exportable_object(
+/// The named asset name (`INamed.Name`) of one decoded payload, if the TypeTree has one.
+fn object_asset_name(payload: &ParsedObjectPayload) -> Option<String> {
+    for field in ["m_Name", "Name"] {
+        if let Ok(Some(crate::serialized_file::object::SerializedValue::StringBytes(bytes))) =
+            payload.root.unique_field_in_base_chain(field)
+        {
+            if !bytes.is_empty() {
+                return Some(String::from_utf8_lossy(bytes).into_owned());
+            }
+        }
+    }
+    None
+}
+
+/// The collection names whose generic YAML document is the baseline content.
+fn asset_family_fallback(collection_name: &str) -> Option<&'static str> {
+    match collection_name {
+        "AssetExportCollection"
+        | "ScriptableObjectExportCollection"
+        | "ScriptableObjectGroupExportCollection"
+        | "YamlStreamedAssetExportCollection" => None,
+        "AnimatorControllerExportCollection" => Some(
+            "the animator-controller renderer is not ported; the object was written through the \
+             generic asset family",
+        ),
+        "AudioMixerExportCollection" => Some(
+            "the audio-mixer renderer is not ported; the object was written through the generic \
+             asset family",
+        ),
+        "TerrainYamlExportCollection" => Some(
+            "the terrain renderer is not ported; the object was written through the generic asset \
+             family",
+        ),
+        "ShaderExportCollection" => Some(
+            "the shader exporter (dummy text, YAML mode, or decompiled source) is not wired into \
+             the project path; the object was written through the generic asset family",
+        ),
+        _ => Some(
+            "the specialized exporter for this collection is not wired into the project path; the \
+             object was written through the generic asset family",
+        ),
+    }
+}
+
+fn raw_payload_bytes(
+    filesystem: &VirtualFileSystem,
+    workspace: &SerializedFileWorkspace,
+    object: &WorkspaceObject,
+    cache: &mut HashMap<usize, Vec<u8>>,
+    limits: WorkspaceProjectExportLimits,
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    let file = workspace.files().get(object.file_index).ok_or_else(|| {
+        invalid_project(format!(
+            "raw payload needs workspace file {}",
+            object.file_index
+        ))
+    })?;
+    if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(object.file_index) {
+        let bytes = filesystem.read_all_bytes(&file.virtual_path, limits.max_total_yaml_bytes)?;
+        entry.insert(bytes);
+    }
+    let bytes = cache
+        .get(&object.file_index)
+        .expect("file bytes cached above");
+    let start = usize::try_from(object.raw_payload_range.start)
+        .map_err(|_| invalid_project("raw payload offset does not fit the host address space"))?;
+    let end = usize::try_from(object.raw_payload_range.end)
+        .map_err(|_| invalid_project("raw payload end does not fit the host address space"))?;
+    let slice = bytes
+        .get(start..end)
+        .ok_or(ProjectExportError::MissingRawPayload {
+            file_index: object.file_index,
+            object_index: object.object_index,
+        })?;
+    Ok(slice.to_vec())
+}
+
+fn validate_decoded_object(
     object: &WorkspaceObject,
     path_id: i64,
     reference_graph: &MultiFileReferenceGraph<'_>,
 ) -> Result<(), Box<dyn Error>> {
-    if path_id == 0 {
-        return Err(invalid_project(format!(
-            "file {} object {} has PathID 0, which cannot identify a Unity YAML document",
-            object.file_index, object.object_index
-        )));
-    }
-    if object.payload.is_err() {
-        return Err(invalid_project(format!(
-            "file {} object {} PathID {path_id} failed TypeTree decoding",
-            object.file_index, object.object_index
-        )));
-    }
     if reference_graph.object_scan_is_complete(object.file_index, object.object_index) != Some(true)
     {
         return Err(invalid_project(format!(
@@ -366,40 +613,6 @@ fn validate_exportable_object(
     Ok(())
 }
 
-fn native_format_importer(main_file_id: i64) -> Result<UnityYamlNode, Box<dyn Error>> {
-    let mut importer = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
-    importer.insert_field(
-        "externalObjects",
-        UnityYamlNode::mapping(UnityYamlMappingStyle::Flow),
-    )?;
-    importer.insert_field(
-        "mainObjectFileID",
-        UnityYamlNode::scalar(UnityYamlScalar::Signed(main_file_id)),
-    )?;
-    importer.insert_field("userData", UnityYamlNode::string(""))?;
-    importer.insert_field("assetBundleName", UnityYamlNode::string(""))?;
-    importer.insert_field("assetBundleVariant", UnityYamlNode::string(""))?;
-    Ok(importer)
-}
-
-fn package_manifest_json(version_at_least_2019_2: bool) -> String {
-    let dependencies = default_package_dependencies(version_at_least_2019_2);
-    let mut manifest = String::from("{\n  \"dependencies\": {\n");
-    for (index, (name, version)) in dependencies.iter().enumerate() {
-        manifest.push_str("    \"");
-        manifest.push_str(name);
-        manifest.push_str("\": \"");
-        manifest.push_str(version);
-        manifest.push('\"');
-        if index + 1 != dependencies.len() {
-            manifest.push(',');
-        }
-        manifest.push('\n');
-    }
-    manifest.push_str("  }\n}\n");
-    manifest
-}
-
 fn new_collection_guid(sequence: u64) -> [u8; 16] {
     static NEXT_GUID: AtomicU64 = AtomicU64::new(0);
     let counter = NEXT_GUID.fetch_add(1, Ordering::Relaxed);
@@ -408,8 +621,8 @@ fn new_collection_guid(sequence: u64) -> [u8; 16] {
         .unwrap_or_default()
         .as_nanos();
     let identity = (sequence, counter, std::process::id(), time);
-    let first = RandomState::new().hash_one((&identity, 0u8));
-    let second = RandomState::new().hash_one((&identity, 1u8));
+    let first = std::collections::hash_map::RandomState::new().hash_one((&identity, 0u8));
+    let second = std::collections::hash_map::RandomState::new().hash_one((&identity, 1u8));
     let mut guid = [0u8; 16];
     guid[..8].copy_from_slice(&first.to_le_bytes());
     guid[8..].copy_from_slice(&second.to_le_bytes());
@@ -425,7 +638,8 @@ fn invalid_project(message: impl Into<String>) -> Box<dyn Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{new_collection_guid, package_manifest_json};
+    use super::{asset_family_fallback, new_collection_guid, package_manifest_json};
+    use crate::processing::scene_naming::SceneUnityVersion;
 
     #[test]
     fn project_collection_guids_are_nonzero_and_unique_per_collection() {
@@ -438,7 +652,29 @@ mod tests {
 
     #[test]
     fn project_manifest_keeps_the_android_jni_version_gate() {
-        assert!(!package_manifest_json(false).contains("com.unity.modules.androidjni"));
-        assert!(package_manifest_json(true).contains("\"com.unity.modules.androidjni\""));
+        let before = SceneUnityVersion::parse("2019.1.0f1").unwrap();
+        let after = SceneUnityVersion::parse("2019.2.0f1").unwrap();
+        assert!(!package_manifest_json(before).contains("com.unity.modules.androidjni"));
+        assert!(package_manifest_json(after).contains("\"com.unity.modules.androidjni\""));
+    }
+
+    #[test]
+    fn generic_yaml_families_do_not_report_a_fallback() {
+        for name in [
+            "AssetExportCollection",
+            "ScriptableObjectExportCollection",
+            "ScriptableObjectGroupExportCollection",
+            "YamlStreamedAssetExportCollection",
+        ] {
+            assert!(asset_family_fallback(name).is_none(), "{name}");
+        }
+        for name in [
+            "ShaderExportCollection",
+            "TextAssetExportCollection",
+            "AudioClipExportCollection",
+            "TerrainYamlExportCollection",
+        ] {
+            assert!(asset_family_fallback(name).is_some(), "{name}");
+        }
     }
 }

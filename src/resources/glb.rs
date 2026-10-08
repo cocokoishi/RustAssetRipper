@@ -241,6 +241,58 @@ pub enum GlbError {
         /// The configured cap.
         limit: u64,
     },
+    /// `GlbTerrainBuilder.Build` divides `1 / (grid - 1)` in integer arithmetic; a grid
+    /// edge of one makes the source throw `DivideByZeroException`.
+    TerrainUvScaleDivisionByZero {
+        /// The serialized `Heightmap.Width`.
+        width: i32,
+        /// The serialized `Heightmap.Height`.
+        height: i32,
+        /// The serialized `Heightmap.Resolution`.
+        resolution: i32,
+    },
+    /// The serialized heights list is shorter than the `tw * th` grid the source reads.
+    TerrainHeightsTooShort {
+        /// `max(Width, Resolution) * max(Height, Resolution)`.
+        required: u64,
+        /// The supplied heights length.
+        available: usize,
+    },
+    /// A non-square terrain grid reads `float[tw, th]` outside its bounds in the source.
+    TerrainGridNotSquare {
+        /// `max(Width, Resolution)`.
+        grid_width: i32,
+        /// `max(Height, Resolution)`.
+        grid_height: i32,
+    },
+    /// A navmesh height mesh has an index count that is not a multiple of three; the source
+    /// throws `Exception("Height mesh must be triangles.")`.
+    NavMeshIndexNotTriangles {
+        /// The zero-based height-mesh position.
+        mesh_index: usize,
+        /// The offending index count.
+        index_count: usize,
+    },
+    /// A navmesh height-mesh index leaves its vertex list.
+    NavMeshIndexOutOfRange {
+        /// The zero-based height-mesh position.
+        mesh_index: usize,
+        /// The position within the index list.
+        entry: usize,
+        /// The offending index.
+        index: i32,
+        /// The available vertex count.
+        vertex_count: usize,
+    },
+    /// An emitted source index leaves the vertex list it was assembled from.
+    VertexIndexOutOfRange {
+        /// The node name supplied by the caller.
+        mesh: String,
+        /// The offending source index.
+        index: u32,
+        /// The available vertex count.
+        vertex_count: usize,
+    },
 }
 
 impl Display for GlbError {
@@ -294,6 +346,55 @@ impl Display for GlbError {
             Self::OutputTooLarge { byte_count, limit } => write!(
                 formatter,
                 "model of {byte_count} bytes exceeds the {limit}-byte GLB output cap and was too large to export"
+            ),
+            Self::TerrainUvScaleDivisionByZero {
+                width,
+                height,
+                resolution,
+            } => write!(
+                formatter,
+                "terrain heightmap {width}x{height} (resolution {resolution}) has a one-vertex \
+                 grid edge, which divides by zero in the source UV scale"
+            ),
+            Self::TerrainHeightsTooShort {
+                required,
+                available,
+            } => write!(
+                formatter,
+                "terrain heightmap needs {required} serialized heights but only {available} are present"
+            ),
+            Self::TerrainGridNotSquare {
+                grid_width,
+                grid_height,
+            } => write!(
+                formatter,
+                "terrain grid {grid_width}x{grid_height} is not square; the source indexes its \
+                 height array out of range"
+            ),
+            Self::NavMeshIndexNotTriangles {
+                mesh_index,
+                index_count,
+            } => write!(
+                formatter,
+                "navmesh height mesh {mesh_index} has {index_count} indices; height meshes must be triangles"
+            ),
+            Self::NavMeshIndexOutOfRange {
+                mesh_index,
+                entry,
+                index,
+                vertex_count,
+            } => write!(
+                formatter,
+                "navmesh height mesh {mesh_index} index {entry} is {index}, which leaves the \
+                 {vertex_count}-vertex list"
+            ),
+            Self::VertexIndexOutOfRange {
+                mesh,
+                index,
+                vertex_count,
+            } => write!(
+                formatter,
+                "mesh '{mesh}' emits source index {index}, which leaves the {vertex_count}-vertex list"
             ),
         }
     }
@@ -1363,6 +1464,385 @@ pub fn subset_indices(subset: Option<&[u32]>, static_batch_info: Option<(u32, u3
     }
 }
 
+/// `short.MaxValue`, the divisor `GlbTerrainBuilder.GetHeights` applies to every height.
+pub const TERRAIN_HEIGHT_DIVISOR: i16 = i16::MAX;
+
+/// Inputs of `GlbTerrainBuilder.Build` (`GlbTerrainBuilder.cs` lines 14-85).
+///
+/// The caller supplies the values the generated `Heightmap` property surface reads back, which
+/// differ by Unity version: the modern subclasses expose `Resolution` and stub `Width`/`Height`
+/// to zero, while 5.0 exposes `Width`/`Height` and stubs `Resolution` to zero.
+#[derive(Clone, Copy, Debug)]
+pub struct TerrainMeshInput<'a> {
+    /// `TerrainData.Name`, used as the scene node name.
+    pub name: &'a str,
+    /// `Heightmap.Width` as the generated property surface reads it.
+    pub width: i32,
+    /// `Heightmap.Height` as the generated property surface reads it.
+    pub height: i32,
+    /// `Heightmap.Resolution` as the generated property surface reads it.
+    pub resolution: i32,
+    /// `Heightmap.Scale` in Unity space.
+    pub scale: [f32; 3],
+    /// `Heightmap.Heights` in serialized order.
+    pub heights: &'a [i16],
+}
+
+/// `GlbTerrainBuilder.Build`: one node named after the terrain carrying a single triangulated
+/// heightmap mesh with `POSITION` and `TEXCOORD_0`.
+pub fn build_terrain_glb(input: &TerrainMeshInput<'_>) -> Result<GlbMeshExport, GlbError> {
+    build_terrain_glb_with_limits(input, GlbBuildLimits::default())
+}
+
+/// `GlbTerrainBuilder.Build` with a bound on the emitted container size.
+///
+/// The geometry is a line-for-line port of `AddTerrainToSceneBuilder`: the source's
+/// `1 / (grid - 1)` UV scale is **integer** division, so grids of two emit `0`/`1` texture
+/// coordinates and every larger grid emits an all-zero `TEXCOORD_0`; the two source failure
+/// modes (a one-vertex grid edge dividing by zero, a non-square grid reading `float[tw, th]`
+/// out of range) are explicit errors here instead of runtime exceptions.
+pub fn build_terrain_glb_with_limits(
+    input: &TerrainMeshInput<'_>,
+    limits: GlbBuildLimits,
+) -> Result<GlbMeshExport, GlbError> {
+    // `int tw = Math.Max(terrain.Heightmap.Width, terrain.Heightmap.Resolution);`
+    let grid_width = input.width.max(input.resolution);
+    // `int th = Math.Max(terrain.Heightmap.Height, terrain.Heightmap.Resolution);`
+    let grid_height = input.height.max(input.resolution);
+    // `Vector3 meshScale = terrain.Heightmap.Scale.CastToStruct() * new Vector3(-1, 1, 1);`
+    let mesh_scale = [-input.scale[0], input.scale[1], input.scale[2]];
+    // `Vector2 uvScale = new Vector2(1 / (tw - 1), 1 / (th - 1));` — integer division.
+    if grid_width - 1 == 0 || grid_height - 1 == 0 {
+        return Err(GlbError::TerrainUvScaleDivisionByZero {
+            width: input.width,
+            height: input.height,
+            resolution: input.resolution,
+        });
+    }
+    let uv_scale = [
+        (1i32 / (grid_width - 1)) as f32,
+        (1i32 / (grid_height - 1)) as f32,
+    ];
+    // `int w = th; int h = tw;`
+    let w = grid_height;
+    let h = grid_width;
+    // `GetHeights` reads `heights[x + y * width]` over a `float[tw, th]` array.
+    let required = (grid_width.max(0) as u64).saturating_mul(grid_height.max(0) as u64);
+    if (input.heights.len() as u64) < required {
+        return Err(GlbError::TerrainHeightsTooShort {
+            required,
+            available: input.heights.len(),
+        });
+    }
+    // The vertex loop reads `tData[x, y]` for `x < th` and `y < tw`: the source only stays in
+    // bounds while the grid is square.
+    if grid_width != grid_height {
+        return Err(GlbError::TerrainGridNotSquare {
+            grid_width,
+            grid_height,
+        });
+    }
+    let height_at = |x: i32, y: i32| -> f32 {
+        input.heights[(x + y * grid_width) as usize] as f32 / f32::from(TERRAIN_HEIGHT_DIVISOR)
+    };
+    let vertex_count = (w.max(0) as usize).saturating_mul(h.max(0) as usize);
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(vertex_count);
+    let mut tex_coords: Vec<[f32; 2]> = Vec::with_capacity(vertex_count);
+    for y in 0..h {
+        for x in 0..w {
+            // `new Vector3(-(startY + y), tData[startX + x, startY + y], startX + x) * meshScale`
+            // with both starts at zero. The negation happens on the integer first, so a zero row
+            // produces `0.0 * -1.0 = -0.0`.
+            let negated_row = (-(y)) as f32;
+            positions.push([
+                negated_row * mesh_scale[0],
+                height_at(x, y) * mesh_scale[1],
+                (x as f32) * mesh_scale[2],
+            ]);
+            tex_coords.push([(x as f32) * uv_scale[0], (y as f32) * uv_scale[1]]);
+        }
+    }
+    let mut order: Vec<u32> = Vec::new();
+    for y in 0..h - 1 {
+        for x in 0..w - 1 {
+            let base = y * w + x;
+            order.push(base as u32);
+            order.push((base + 1) as u32);
+            order.push((base + w) as u32);
+            order.push((base + w) as u32);
+            order.push((base + 1) as u32);
+            order.push((base + w + 1) as u32);
+        }
+    }
+    finish_single_mesh(
+        input.name,
+        &positions,
+        Some(&tex_coords),
+        &order,
+        TRIANGLES_MODE,
+        limits,
+    )
+}
+
+/// One `HeightMeshData` of a `NavMeshData` asset.
+#[derive(Clone, Copy, Debug)]
+pub struct NavMeshHeightMesh<'a> {
+    /// `HeightMeshData.Indices`, consumed in triples.
+    pub indices: &'a [i32],
+    /// `HeightMeshData.Vertices`.
+    pub vertices: &'a [[f32; 3]],
+}
+
+/// `GlbNavMeshExporter.AddAssetToSceneBuilder`: one node named after the asset carrying a single
+/// triangulated mesh with only `POSITION`.
+///
+/// Every triangle is emitted with its winding reversed (`indices[i + 2], indices[i + 1],
+/// indices[i]`) and every vertex negated on X, matching `FromVector`. An index count that is not
+/// a multiple of three is the source's `Exception("Height mesh must be triangles.")`.
+pub fn build_navmesh_glb(
+    name: &str,
+    height_meshes: &[NavMeshHeightMesh<'_>],
+) -> Result<GlbMeshExport, GlbError> {
+    build_navmesh_glb_with_limits(name, height_meshes, GlbBuildLimits::default())
+}
+
+/// `GlbNavMeshExporter` with a bound on the emitted container size.
+pub fn build_navmesh_glb_with_limits(
+    name: &str,
+    height_meshes: &[NavMeshHeightMesh<'_>],
+    limits: GlbBuildLimits,
+) -> Result<GlbMeshExport, GlbError> {
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut order: Vec<u32> = Vec::new();
+    let mut emitted_source_indices: Vec<u32> = Vec::new();
+    for (mesh_index, mesh) in height_meshes.iter().enumerate() {
+        if !mesh.indices.len().is_multiple_of(3) {
+            return Err(GlbError::NavMeshIndexNotTriangles {
+                mesh_index,
+                index_count: mesh.indices.len(),
+            });
+        }
+        for (entry, &index) in mesh.indices.iter().enumerate() {
+            if index < 0 || index as usize >= mesh.vertices.len() {
+                return Err(GlbError::NavMeshIndexOutOfRange {
+                    mesh_index,
+                    entry,
+                    index,
+                    vertex_count: mesh.vertices.len(),
+                });
+            }
+        }
+        for triangle in mesh.indices.chunks_exact(3) {
+            // `primitiveBuilder.AddTriangle(FromVector(vertices[i + 2]),
+            //  FromVector(vertices[i + 1]), FromVector(vertices[i]))`
+            for &index in [triangle[2], triangle[1], triangle[0]].iter() {
+                let vertex = mesh.vertices[index as usize];
+                positions.push([-vertex[0], vertex[1], vertex[2]]);
+                order.push(positions.len() as u32 - 1);
+                emitted_source_indices.push(index as u32);
+            }
+        }
+    }
+    let mut export = finish_single_mesh(name, &positions, None, &order, TRIANGLES_MODE, limits)?;
+    if let Some(source_indices) = export.emitted_source_indices.first_mut() {
+        *source_indices = emitted_source_indices;
+    }
+    Ok(export)
+}
+
+/// The glTF primitive mode of a triangle list.
+const TRIANGLES_MODE: u32 = 4;
+
+/// Assembles a single-node, single-mesh GLB from caller-supplied source vertices and indices.
+///
+/// Vertex deduplication matches `VertexBuilder.CreateCompatibleMesh` (bit-identical attributes
+/// share a vertex, first appearance wins), so the emitted vertex order is the first-use order.
+fn finish_single_mesh(
+    node_name: &str,
+    positions: &[[f32; 3]],
+    tex_coords: Option<&[[f32; 2]]>,
+    order: &[u32],
+    mode: u32,
+    limits: GlbBuildLimits,
+) -> Result<GlbMeshExport, GlbError> {
+    let primitive = dedupe_source_vertices(node_name, positions, tex_coords, order, mode)?;
+    let mut builder = GlbBuilder::with_limit(limits.max_output_bytes);
+    let mut primitive_jsons: Vec<String> = Vec::new();
+    if !primitive.indices.is_empty() {
+        primitive_jsons.push(emit_position_primitive(
+            &mut builder,
+            node_name,
+            &primitive,
+        )?);
+    }
+    let json = build_json_single_mesh(
+        node_name,
+        &primitive_jsons,
+        &builder.accessors,
+        &builder.buffer_views,
+        builder.bin.len(),
+    );
+    let total = builder.bin.len() as u64 + json.len() as u64;
+    if total > limits.max_output_bytes {
+        return Err(GlbError::OutputTooLarge {
+            byte_count: total,
+            limit: limits.max_output_bytes,
+        });
+    }
+    Ok(GlbMeshExport {
+        bytes: wrap_glb(&json, &builder.bin),
+        emitted_source_indices: vec![primitive.source_indices],
+        warnings: primitive.warnings,
+    })
+}
+
+/// Deduplicates caller-supplied source vertices into a triangle-list primitive.
+fn dedupe_source_vertices(
+    mesh_name: &str,
+    positions: &[[f32; 3]],
+    tex_coords: Option<&[[f32; 2]]>,
+    order: &[u32],
+    mode: u32,
+) -> Result<Primitive, GlbError> {
+    let mut vertices: Vec<GlbVertex> = Vec::new();
+    let mut lookup: HashMap<VertexKey, u32> = HashMap::new();
+    let mut indices: Vec<u32> = Vec::with_capacity(order.len());
+    for &source_index in order {
+        let Some(position) = positions.get(source_index as usize).copied() else {
+            return Err(GlbError::VertexIndexOutOfRange {
+                mesh: mesh_name.to_owned(),
+                index: source_index,
+                vertex_count: positions.len(),
+            });
+        };
+        for (component_index, component) in position.iter().enumerate() {
+            if !component.is_finite() {
+                return Err(GlbError::NonFinitePosition {
+                    mesh: mesh_name.to_owned(),
+                    vertex: source_index,
+                    component: match component_index {
+                        0 => "x",
+                        1 => "y",
+                        _ => "z",
+                    },
+                });
+            }
+        }
+        let vertex = GlbVertex {
+            position,
+            normal: None,
+            tangent: None,
+            tex_coords: tex_coords
+                .and_then(|uvs| uvs.get(source_index as usize))
+                .map(|uv| vec![*uv])
+                .unwrap_or_default(),
+            color: None,
+            joints: None,
+            weights: None,
+        };
+        let key = vertex.key();
+        let slot = *lookup.entry(key).or_insert_with(|| {
+            let slot = vertices.len() as u32;
+            vertices.push(vertex);
+            slot
+        });
+        indices.push(slot);
+    }
+    Ok(Primitive {
+        indices,
+        source_indices: order.to_vec(),
+        vertices,
+        mode,
+        warnings: Vec::new(),
+    })
+}
+
+/// Emits one `POSITION` (+ optional `TEXCOORD_0..N`) triangle-list primitive.
+fn emit_position_primitive(
+    builder: &mut GlbBuilder,
+    mesh_name: &str,
+    primitive: &Primitive,
+) -> Result<String, GlbError> {
+    let positions: Vec<[f32; 3]> = primitive
+        .vertices
+        .iter()
+        .map(|vertex| vertex.position)
+        .collect();
+    let mut attributes = vec![(
+        "POSITION".to_owned(),
+        builder.push_position_accessor(&positions, mesh_name)?,
+    )];
+    let tex_coord_count = primitive
+        .vertices
+        .first()
+        .map_or(0, |vertex| vertex.tex_coords.len());
+    for channel in 0..tex_coord_count {
+        let mut values = Vec::with_capacity(primitive.vertices.len() * 2);
+        for vertex in &primitive.vertices {
+            values.extend_from_slice(
+                vertex
+                    .tex_coords
+                    .get(channel)
+                    .copied()
+                    .unwrap_or([0.0, 0.0])
+                    .as_slice(),
+            );
+        }
+        attributes.push((
+            format!("TEXCOORD_{channel}"),
+            builder.push_vertex_accessor(&values, "VEC2")?,
+        ));
+    }
+    let index_accessor = builder.push_index_accessor(&primitive.indices)?;
+    let attribute_json = attributes
+        .iter()
+        .map(|(name, accessor)| format!("\"{name}\":{accessor}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    Ok(format!(
+        "{{\"attributes\":{{{attribute_json}}},\"indices\":{index_accessor},\
+         \"material\":0,\"mode\":{}}}",
+        primitive.mode
+    ))
+}
+
+/// The glTF JSON document for the single-node builders (terrain and navmesh).
+fn build_json_single_mesh(
+    node_name: &str,
+    primitives: &[String],
+    accessors: &[String],
+    buffer_views: &[String],
+    bin_length: usize,
+) -> String {
+    let mut json = String::new();
+    json.push_str("{\"asset\":{\"version\":\"2.0\",\"generator\":");
+    json.push_str(&escape_json(GENERATOR));
+    json.push_str("},\"scene\":0,\"scenes\":[{\"nodes\":[0]}]");
+    if primitives.is_empty() {
+        json.push_str(&format!(
+            ",\"nodes\":[{{\"name\":\"{}\"}}]",
+            escape_json(node_name)
+        ));
+    } else {
+        json.push_str(&format!(
+            ",\"nodes\":[{{\"name\":\"{}\",\"mesh\":0}}]",
+            escape_json(node_name)
+        ));
+        json.push_str(&format!(
+            ",\"meshes\":[{{\"name\":\"\",\"primitives\":[{}]}}]",
+            primitives.join(",")
+        ));
+        json.push_str(&format!(
+            ",\"materials\":[{{\"name\":\"{DEFAULT_MATERIAL_NAME}\",\"pbrMetallicRoughness\":\
+             {{\"baseColorFactor\":[1.0,1.0,1.0,1.0],\"metallicFactor\":1.0,\"roughnessFactor\":1.0}}}}]"
+        ));
+    }
+    json.push_str(&format!(",\"accessors\":[{}]", accessors.join(",")));
+    json.push_str(&format!(",\"bufferViews\":[{}]", buffer_views.join(",")));
+    json.push_str(&format!(",\"buffers\":[{{\"byteLength\":{bin_length}}}]}}"));
+    json
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1798,5 +2278,547 @@ mod tests {
         assert_eq!(subset_indices(None, Some((5, 0))), Vec::<u32>::new());
         // Otherwise the renderer contributes no sub-meshes.
         assert!(subset_indices(None, None).is_empty());
+    }
+
+    /// The decoded container of a GLB produced by this module.
+    struct DecodedGlb {
+        json: String,
+        bin: Vec<u8>,
+    }
+
+    /// Parses the GLB container independently of the writer (magic, version, chunk framing).
+    fn decode_glb(bytes: &[u8]) -> DecodedGlb {
+        assert!(bytes.len() >= 20, "GLB is shorter than its header");
+        assert_eq!(&bytes[0..4], b"glTF");
+        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 2);
+        assert_eq!(
+            u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize,
+            bytes.len()
+        );
+        let json_length = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+        assert_eq!(&bytes[16..20], b"JSON");
+        let json = String::from_utf8(bytes[20..20 + json_length].to_vec()).unwrap();
+        let offset = 20 + json_length;
+        let mut bin = Vec::new();
+        if offset + 8 <= bytes.len() {
+            let bin_length =
+                u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+            assert_eq!(&bytes[offset + 4..offset + 8], b"BIN\0");
+            bin = bytes[offset + 8..offset + 8 + bin_length].to_vec();
+        }
+        DecodedGlb { json, bin }
+    }
+
+    /// The raw text of a top-level JSON array value.
+    fn json_array<'a>(json: &'a str, key: &str) -> Option<&'a str> {
+        let bytes = json.as_bytes();
+        let needle = format!("\"{key}\"");
+        let mut object_depth = 0usize;
+        let mut array_depth = 0usize;
+        let mut in_string = false;
+        let mut escaped = false;
+        let mut index = 0usize;
+
+        while index < bytes.len() {
+            let byte = bytes[index];
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == b'"' {
+                    in_string = false;
+                }
+                index += 1;
+                continue;
+            }
+
+            match byte {
+                b'"' => {
+                    if object_depth == 1 && array_depth == 0 && json[index..].starts_with(&needle) {
+                        let mut cursor = index + needle.len();
+                        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+                            cursor += 1;
+                        }
+                        if bytes.get(cursor) == Some(&b':') {
+                            cursor += 1;
+                            while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+                                cursor += 1;
+                            }
+                            if bytes.get(cursor) == Some(&b'[') {
+                                let start = cursor + 1;
+                                let mut depth = 1usize;
+                                let mut array_string = false;
+                                let mut array_escape = false;
+                                for end in start..bytes.len() {
+                                    let array_byte = bytes[end];
+                                    if array_string {
+                                        if array_escape {
+                                            array_escape = false;
+                                        } else if array_byte == b'\\' {
+                                            array_escape = true;
+                                        } else if array_byte == b'"' {
+                                            array_string = false;
+                                        }
+                                    } else {
+                                        match array_byte {
+                                            b'"' => array_string = true,
+                                            b'[' => depth += 1,
+                                            b']' => {
+                                                depth -= 1;
+                                                if depth == 0 {
+                                                    return Some(&json[start..end]);
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                                return None;
+                            }
+                        }
+                    }
+                    in_string = true;
+                }
+                b'{' => object_depth += 1,
+                b'}' => object_depth = object_depth.saturating_sub(1),
+                b'[' => array_depth += 1,
+                b']' => array_depth = array_depth.saturating_sub(1),
+                _ => {}
+            }
+            index += 1;
+        }
+        None
+    }
+
+    /// Splits a flat array of JSON objects into its object bodies.
+    fn json_objects(array: &str) -> Vec<String> {
+        array
+            .split("},{")
+            .map(|part| part.trim_matches(|character| character == '{' || character == '}'))
+            .filter(|part| !part.is_empty())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The integer value of a flat object field.
+    fn json_number(object: &str, key: &str) -> Option<i64> {
+        let needle = format!("\"{key}\":");
+        let start = object.find(&needle)? + needle.len();
+        let rest = &object[start..];
+        let end = rest
+            .find(|character: char| !(character.is_ascii_digit() || character == '-'))
+            .unwrap_or(rest.len());
+        rest[..end].parse().ok()
+    }
+
+    /// The string value of a flat object field.
+    fn json_string(object: &str, key: &str) -> Option<String> {
+        let needle = format!("\"{key}\":\"");
+        let start = object.find(&needle)? + needle.len();
+        let end = object[start..].find('"')? + start;
+        Some(object[start..end].to_owned())
+    }
+
+    /// The decoded floats of one accessor, in accessor order.
+    fn accessor_floats(glb: &DecodedGlb, accessor: usize) -> Vec<f32> {
+        let accessors = json_objects(json_array(&glb.json, "accessors").unwrap());
+        let views = json_objects(json_array(&glb.json, "bufferViews").unwrap());
+        let object = &accessors[accessor];
+        let view = &views[json_number(object, "bufferView").unwrap() as usize];
+        let count = json_number(object, "count").unwrap() as usize;
+        let components = match json_string(object, "type").unwrap().as_str() {
+            "VEC2" => 2,
+            "VEC3" => 3,
+            _ => 4,
+        };
+        let offset = json_number(view, "byteOffset").unwrap() as usize;
+        (0..count * components)
+            .map(|index| {
+                let start = offset + index * 4;
+                f32::from_le_bytes(glb.bin[start..start + 4].try_into().unwrap())
+            })
+            .collect()
+    }
+
+    /// The decoded indices of one accessor.
+    fn accessor_indices(glb: &DecodedGlb, accessor: usize) -> Vec<u32> {
+        let accessors = json_objects(json_array(&glb.json, "accessors").unwrap());
+        let views = json_objects(json_array(&glb.json, "bufferViews").unwrap());
+        let object = &accessors[accessor];
+        let view = &views[json_number(object, "bufferView").unwrap() as usize];
+        let count = json_number(object, "count").unwrap() as usize;
+        let component_type = json_number(object, "componentType").unwrap();
+        let offset = json_number(view, "byteOffset").unwrap() as usize;
+        (0..count)
+            .map(|index| match component_type {
+                5123 => {
+                    let start = offset + index * 2;
+                    u16::from_le_bytes(glb.bin[start..start + 2].try_into().unwrap()) as u32
+                }
+                _ => {
+                    let start = offset + index * 4;
+                    u32::from_le_bytes(glb.bin[start..start + 4].try_into().unwrap())
+                }
+            })
+            .collect()
+    }
+
+    /// The single primitive body of the single-mesh JSON layout.
+    fn single_primitive(json: &str) -> String {
+        let anchor = json.find("\"primitives\":[").unwrap();
+        let start = anchor + "\"primitives\":[".len();
+        let end = json[start..].find(']').unwrap() + start;
+        json[start..end]
+            .trim()
+            .trim_matches(|character| character == '{' || character == '}')
+            .to_owned()
+    }
+
+    /// The accessor number of a named primitive attribute.
+    fn attribute_accessor(primitive: &str, name: &str) -> Option<usize> {
+        let anchor = primitive.find("\"attributes\":{")? + "\"attributes\":{".len();
+        let end = primitive[anchor..].find('}')? + anchor;
+        json_number(&primitive[anchor..end], name).map(|value| value as usize)
+    }
+
+    /// The reference exception name a `GlbError` stands in for.
+    fn reference_exception(error: &GlbError) -> &'static str {
+        match error {
+            GlbError::TerrainUvScaleDivisionByZero { .. } => "DivideByZeroException",
+            GlbError::TerrainGridNotSquare { .. }
+            | GlbError::TerrainHeightsTooShort { .. }
+            | GlbError::VertexIndexOutOfRange { .. }
+            | GlbError::IndexOutOfRange { .. } => "IndexOutOfRangeException",
+            GlbError::NavMeshIndexNotTriangles { .. } => "Exception",
+            other => panic!("unmapped reference exception for {other}"),
+        }
+    }
+
+    /// One parsed fixture case.
+    #[derive(Debug, Default)]
+    struct BuilderCase {
+        tag: String,
+        nav: bool,
+        version: String,
+        name: String,
+        width: i32,
+        height: i32,
+        resolution: i32,
+        scale: [f32; 3],
+        heights: Vec<i16>,
+        height_count: usize,
+        read_back: (i32, i32, i32),
+        nav_meshes: Vec<(Vec<[f32; 3]>, Vec<i32>)>,
+        positions: Vec<[f32; 3]>,
+        uvs: Vec<[f32; 2]>,
+        indices: Vec<u32>,
+        has_uv: bool,
+        nodes: Vec<String>,
+        empty_nodes: Option<usize>,
+        error: Option<String>,
+    }
+
+    fn parse_f32(text: &str) -> f32 {
+        let value: f32 = text.parse().expect("a probe float");
+        if value == 0.0 && text.starts_with('-') {
+            -0.0
+        } else {
+            value
+        }
+    }
+
+    fn parse_csv_i32(text: &str) -> Vec<i32> {
+        text.split(',')
+            .filter(|part| !part.is_empty())
+            .map(|part| part.parse().expect("a probe integer"))
+            .collect()
+    }
+
+    /// Round-trips `tools/probes/res-glb` through the production builders.
+    ///
+    /// Every row was produced by the shipped `GlbTerrainBuilder`/`GlbNavMeshExporter` over real
+    /// generated objects; the test asserts the container structure, node names, and the decoded
+    /// POSITION/TEXCOORD_0/indices bit-for-bit (including the sign of zero).
+    #[test]
+    fn glb_builders_match_the_reference_runtime() {
+        let fixture = include_str!("glb_builders_fixture.txt");
+        let mut cases: Vec<BuilderCase> = Vec::new();
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let fields: Vec<&str> = line.split('|').collect();
+            match fields[0] {
+                "GIN" => {
+                    let case = BuilderCase {
+                        tag: fields[1].to_owned(),
+                        nav: false,
+                        version: fields[2].to_owned(),
+                        width: fields[3].parse().unwrap(),
+                        height: fields[4].parse().unwrap(),
+                        resolution: fields[5].parse().unwrap(),
+                        scale: [
+                            parse_f32(fields[6]),
+                            parse_f32(fields[7]),
+                            parse_f32(fields[8]),
+                        ],
+                        name: fields[9].to_owned(),
+                        height_count: fields[10].parse().unwrap(),
+                        ..BuilderCase::default()
+                    };
+                    cases.push(case);
+                }
+                "GHTS" => {
+                    let case = cases.last_mut().expect("a GHTS row follows a GIN row");
+                    case.heights = fields[2]
+                        .split(',')
+                        .filter(|part| !part.is_empty())
+                        .map(|part| part.parse().expect("a probe height"))
+                        .collect();
+                    assert_eq!(case.heights.len(), case.height_count, "{line}");
+                }
+                "GREAD" => {
+                    let case = cases.last_mut().expect("a GREAD row follows a GIN row");
+                    case.read_back = (
+                        fields[2].parse().unwrap(),
+                        fields[3].parse().unwrap(),
+                        fields[4].parse().unwrap(),
+                    );
+                }
+                "NIN" => {
+                    cases.push(BuilderCase {
+                        tag: fields[1].to_owned(),
+                        nav: true,
+                        version: fields[2].to_owned(),
+                        name: fields[3].to_owned(),
+                        ..BuilderCase::default()
+                    });
+                }
+                "NVTS" => {
+                    let case = cases.last_mut().expect("an NVTS row follows a NIN row");
+                    let index: usize = fields[2].parse().unwrap();
+                    let vertices: Vec<[f32; 3]> = fields[3]
+                        .split(';')
+                        .filter(|part| !part.is_empty())
+                        .map(|vertex| {
+                            let components: Vec<f32> = vertex.split(',').map(parse_f32).collect();
+                            [components[0], components[1], components[2]]
+                        })
+                        .collect();
+                    while case.nav_meshes.len() <= index {
+                        case.nav_meshes.push((Vec::new(), Vec::new()));
+                    }
+                    case.nav_meshes[index].0 = vertices;
+                }
+                "NIDX" => {
+                    let case = cases.last_mut().expect("an NIDX row follows a NIN row");
+                    let index: usize = fields[2].parse().unwrap();
+                    let indices = parse_csv_i32(fields[3]);
+                    case.nav_meshes[index].1 = indices;
+                }
+                "GMESH" => {
+                    let _ = cases.last();
+                }
+                "GPOS" => {
+                    let case = cases.last_mut().unwrap();
+                    let index: usize = fields[2].parse().unwrap();
+                    assert_eq!(index, case.positions.len(), "{line}");
+                    case.positions.push([
+                        parse_f32(fields[3]),
+                        parse_f32(fields[4]),
+                        parse_f32(fields[5]),
+                    ]);
+                }
+                "GUV" => {
+                    let case = cases.last_mut().unwrap();
+                    let index: usize = fields[2].parse().unwrap();
+                    assert_eq!(index, case.uvs.len(), "{line}");
+                    case.has_uv = true;
+                    case.uvs.push([parse_f32(fields[3]), parse_f32(fields[4])]);
+                }
+                "GIDX" => {
+                    let case = cases.last_mut().unwrap();
+                    case.indices = parse_csv_i32(fields[2])
+                        .into_iter()
+                        .map(|value| value as u32)
+                        .collect();
+                }
+                "GNODE" => {
+                    let case = cases.last_mut().unwrap();
+                    case.nodes.push(fields[2].to_owned());
+                }
+                "GEMPTY" => {
+                    let case = cases.last_mut().unwrap();
+                    case.empty_nodes = Some(
+                        fields[3]
+                            .strip_prefix("nodes=")
+                            .expect("a nodes= count")
+                            .parse()
+                            .unwrap(),
+                    );
+                }
+                "GERR" => {
+                    let case = cases.last_mut().unwrap();
+                    if fields[2] == "inner" {
+                        case.error = Some(fields[3].to_owned());
+                    }
+                }
+                other => panic!("unexpected fixture row {other}"),
+            }
+        }
+        assert_eq!(cases.len(), 9, "every probed case is asserted");
+
+        let mut mesh_cases = 0;
+        for case in &cases {
+            if !case.nav {
+                match case.version.as_str() {
+                    "2019.4.0f1" => assert_eq!(
+                        case.read_back,
+                        (0, 0, case.resolution),
+                        "{} uses the modern Heightmap stubs",
+                        case.tag
+                    ),
+                    "5.0.0f1" => assert_eq!(
+                        case.read_back,
+                        (case.width, case.height, 0),
+                        "{} uses the legacy Heightmap stubs",
+                        case.tag
+                    ),
+                    version => {
+                        panic!("unmapped generated Heightmap behavior for {version}")
+                    }
+                }
+            }
+            let result = if case.nav {
+                let meshes: Vec<NavMeshHeightMesh<'_>> = case
+                    .nav_meshes
+                    .iter()
+                    .map(|(vertices, indices)| NavMeshHeightMesh { indices, vertices })
+                    .collect();
+                build_navmesh_glb(&case.name, &meshes)
+            } else {
+                let input = TerrainMeshInput {
+                    name: &case.name,
+                    width: case.read_back.0,
+                    height: case.read_back.1,
+                    resolution: case.read_back.2,
+                    scale: case.scale,
+                    heights: &case.heights,
+                };
+                build_terrain_glb(&input)
+            };
+            match (&case.error, result) {
+                (Some(exception), Err(error)) => {
+                    assert_eq!(reference_exception(&error), *exception, "{}", case.tag);
+                }
+                (Some(exception), Ok(_)) => {
+                    panic!("{} should fail like the reference {exception}", case.tag)
+                }
+                (None, Err(error)) => panic!("{} failed: {error}", case.tag),
+                (None, Ok(export)) => {
+                    let glb = decode_glb(&export.bytes);
+                    assert_eq!(
+                        json_array(&glb.json, "nodes")
+                            .unwrap()
+                            .matches("\"name\"")
+                            .count(),
+                        case.empty_nodes.unwrap_or(1),
+                        "{}; GLB JSON: {}",
+                        case.tag,
+                        glb.json
+                    );
+                    assert!(glb.json.contains(&format!("\"name\":\"{}\"", case.name)));
+                    if case.empty_nodes.is_some() {
+                        assert_eq!(export.emitted_source_indices.len(), 1);
+                        assert!(export.emitted_source_indices[0].is_empty());
+                        assert!(!glb.json.contains("\"meshes\""));
+                        assert!(glb.bin.is_empty());
+                        continue;
+                    }
+                    assert_eq!(export.emitted_source_indices.len(), 1);
+                    mesh_cases += 1;
+                    let primitive = single_primitive(&glb.json);
+                    let position_accessor =
+                        attribute_accessor(&primitive, "POSITION").expect("a POSITION accessor");
+                    let positions = accessor_floats(&glb, position_accessor);
+                    assert_eq!(positions.len(), case.positions.len() * 3, "{}", case.tag);
+                    for (index, expected) in case.positions.iter().enumerate() {
+                        for axis in 0..3 {
+                            assert_eq!(
+                                positions[index * 3 + axis].to_bits(),
+                                expected[axis].to_bits(),
+                                "{} POSITION vertex {index} axis {axis}",
+                                case.tag
+                            );
+                        }
+                    }
+                    assert_eq!(
+                        attribute_accessor(&primitive, "TEXCOORD_0").is_some(),
+                        case.has_uv,
+                        "{}",
+                        case.tag
+                    );
+                    if case.has_uv {
+                        let uv_accessor = attribute_accessor(&primitive, "TEXCOORD_0").unwrap();
+                        let uvs = accessor_floats(&glb, uv_accessor);
+                        assert_eq!(uvs.len(), case.uvs.len() * 2, "{}", case.tag);
+                        for (index, expected) in case.uvs.iter().enumerate() {
+                            for axis in 0..2 {
+                                assert_eq!(
+                                    uvs[index * 2 + axis].to_bits(),
+                                    expected[axis].to_bits(),
+                                    "{} TEXCOORD_0 vertex {index} axis {axis}",
+                                    case.tag
+                                );
+                            }
+                        }
+                    }
+                    let index_accessor =
+                        json_number(&primitive, "indices").expect("an index accessor") as usize;
+                    assert_eq!(
+                        accessor_indices(&glb, index_accessor),
+                        case.indices,
+                        "{}",
+                        case.tag
+                    );
+                    if case.nav {
+                        assert_eq!(
+                            export.emitted_source_indices[0]
+                                .iter()
+                                .map(|value| *value as usize)
+                                .collect::<Vec<_>>(),
+                            case.positions_source_order(),
+                            "{}",
+                            case.tag
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            mesh_cases, 5,
+            "four terrain and one navmesh case carry geometry"
+        );
+    }
+
+    impl BuilderCase {
+        /// The source vertex index sequence the reference's AddTriangle calls produced.
+        fn positions_source_order(&self) -> Vec<usize> {
+            self.nav_meshes
+                .iter()
+                .flat_map(|(_, indices)| {
+                    indices
+                        .chunks_exact(3)
+                        .flat_map(|triangle| {
+                            [triangle[2], triangle[1], triangle[0]]
+                                .into_iter()
+                                .map(|value| value as usize)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        }
     }
 }

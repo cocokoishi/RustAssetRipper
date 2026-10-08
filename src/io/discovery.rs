@@ -850,4 +850,131 @@ mod tests {
             error.kind
         );
     }
+
+    /// Reference-runtime differential for the directory-import row.
+    ///
+    /// The `DIR|*` rows of `src/io/io_differential_fixture.txt` were produced by
+    /// `tools/probes/io-differential` against the shipped reference: `LocalFileSystem.g.cs`
+    /// `Directory.GetFiles` over a fixed directory, the retained-reader share-lock behavior, and
+    /// the source-backed non-Windows disposition. This test replays the same layout through the
+    /// production discovery, pinning the same top-level file set, the split-family grouping, the
+    /// port's deterministic ordering, and the retained-reader contract on Windows.
+    #[test]
+    fn directory_discovery_matches_the_reference_runtime_fixture() {
+        fn row(prefix: &str) -> Vec<&'static str> {
+            include_str!("io_differential_fixture.txt")
+                .lines()
+                .find(|line| line.starts_with(prefix))
+                .unwrap_or_else(|| panic!("missing reference IO fixture row {prefix:?}"))
+                .split('|')
+                .collect()
+        }
+
+        fn field<'a>(fields: &'a [&'a str], key: &str) -> &'a str {
+            let prefix = format!("{key}=");
+            fields
+                .iter()
+                .find_map(|entry| entry.strip_prefix(&prefix))
+                .unwrap_or_else(|| panic!("missing reference IO fixture field {key:?}"))
+        }
+
+        let enumeration = row("DIR|enumeration|");
+        let reference_top_level: std::collections::BTreeSet<&str> =
+            field(&enumeration, "get_files").split(',').collect();
+        assert_eq!(field(&enumeration, "is_multi_part"), "True");
+        assert_eq!(
+            field(&enumeration, "split_files"),
+            "",
+            "the source GetFiles returns nothing for a split-family base path"
+        );
+
+        let root = TestDiscoveryRoot::new();
+        root.write("zeta.bundle", b"z");
+        root.write("alpha.bundle", b"a");
+        root.write("mid.bundle.split0", b"m0");
+        root.write("mid.bundle.split1", b"m1");
+        root.write("sub/nested.bundle", b"n");
+
+        let (inputs, _report) =
+            discover_directory_inputs(root.path(), 100_000, 8, 100_000).unwrap();
+        let logical: Vec<String> = inputs
+            .iter()
+            .map(|input| {
+                input
+                    .relative_path
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .to_owned()
+            })
+            .collect();
+        let names: std::collections::BTreeSet<String> = inputs
+            .iter()
+            .map(|input| logical_file_name(&input.relative_path))
+            .collect();
+
+        for name in &reference_top_level {
+            if name.contains(".split") {
+                continue;
+            }
+            assert!(names.contains(*name), "{name} missing from {names:?}");
+        }
+        // The two `.splitN` parts fold into one logical input covering both byte counts.
+        assert!(names.contains("mid.bundle"), "{names:?}");
+        let split_input = inputs
+            .iter()
+            .find(|input| logical_file_name(&input.relative_path) == "mid.bundle")
+            .expect("split family input");
+        assert_eq!(split_input.source_bytes, 4);
+        // Recursive discovery reaches the subdirectory, which the reference's one-level
+        // `GetFiles` call does not enumerate by itself.
+        assert!(names.contains("nested.bundle"), "{names:?}");
+
+        // The host order is unspecified; the port sorts for deterministic output.
+        let mut sorted = logical.clone();
+        sorted.sort();
+        assert_eq!(logical, sorted, "discovery order must be deterministic");
+
+        // Retained reader: the reference `File.OpenRead` handle refuses a concurrent write and a
+        // delete on Windows; Rust narrows the share mode there and releases it with the handle.
+        let retained = row("DIR|retained|");
+        assert_eq!(field(&retained, "open_read_type"), "System.IO.FileStream");
+        #[cfg(windows)]
+        {
+            assert_eq!(field(&retained, "write_while_open"), "REJECTED:IOException");
+            assert_eq!(
+                field(&retained, "delete_while_open"),
+                "REJECTED:IOException"
+            );
+            assert_eq!(field(&retained, "read_while_open"), "1:61");
+            let path = root.write("retained.bundle", b"source-bytes");
+            let handle = crate::io::stream::open_logical_file(&path).unwrap();
+            assert!(
+                std::fs::OpenOptions::new().write(true).open(&path).is_err(),
+                "a retained reader must reject a concurrent write on Windows"
+            );
+            assert!(
+                std::fs::remove_file(&path).is_err(),
+                "a retained reader must reject a delete on Windows"
+            );
+            drop(handle);
+            assert!(
+                std::fs::OpenOptions::new().write(true).open(&path).is_ok(),
+                "the share constraint must be released with the reader"
+            );
+        }
+        #[cfg(not(windows))]
+        {
+            // Source-backed disposition instead of a silent skip: `LocalFileSystem.g.cs`
+            // delegates to `System.IO.File.OpenRead` on every host, and on Unix .NET takes no
+            // advisory share lock for `FileShare.Read`, so the Windows rejections above are a
+            // platform property, not AssetRipper behavior. Rust's `open_os_read` matches that by
+            // narrowing the share mode only on Windows.
+            assert_eq!(field(&retained, "open_read_type"), "System.IO.FileStream");
+            let disposition = row("DIR|disposition|");
+            assert!(
+                field(&disposition, "non_windows_arm").contains("FileShare.Read"),
+                "the committed disposition must stay documented"
+            );
+        }
+    }
 }

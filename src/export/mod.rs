@@ -1,5 +1,6 @@
 //! Unity project export primitives.
 
+pub mod anim_wiring;
 pub mod asset_path;
 pub mod audio_export;
 pub mod collection_admission;
@@ -18,6 +19,7 @@ pub mod guid_policy;
 pub mod ids;
 pub mod importer_fields;
 pub mod importer_reads;
+pub mod io_wiring;
 pub mod manager_flows;
 pub mod meta;
 pub mod meta_emission;
@@ -30,19 +32,23 @@ pub mod prefab_collection;
 pub mod prefab_export;
 pub mod primary_content;
 pub mod project_container;
+pub mod project_exporter;
 pub mod project_order;
 pub mod project_output;
 pub mod project_plan;
 pub mod project_workflow;
 pub mod redirect_collection;
 pub mod registration;
+pub mod res_wiring;
 pub mod resource_extensions;
 pub mod scene_collection;
 pub mod scene_helpers;
 pub mod scene_member_order;
+pub mod scene_wiring;
 pub mod script_admission;
 pub mod script_export_flow;
 pub mod script_hashing;
+pub mod ser_wiring;
 pub mod settings;
 pub mod settings_file;
 pub mod shader_export;

@@ -762,7 +762,9 @@ pub fn materialize_planned_generated_transform_payload(
         "m_LocalScale",
         default_values.local_scale,
     )?;
-    set_transform_i32(
+    // The 2019.4 class-4 TPK omits `m_RootOrder`; the baseline setter is a silent no-op there,
+    // so a missing field must not fail the generated Transform.
+    set_optional_transform_i32(
         &mut root,
         *game_object,
         "m_RootOrder",
@@ -927,23 +929,21 @@ fn set_transform_quaternion(
     Ok(())
 }
 
-fn set_transform_i32(
+/// Set an optional Transform integer field; an absent field is the baseline's no-op setter.
+fn set_optional_transform_i32(
     root: &mut SerializedValue,
     game_object: WorkspaceSceneObjectIdentity,
     field_name: &str,
     value: i32,
 ) -> Result<(), WorkspacePrefabProcessingError> {
-    let field = root
+    let Some(field) = root
         .unique_field_in_base_chain_mut(field_name)
         .map_err(|error| {
             generated_transform_materialization_error(game_object, &error.to_string())
         })?
-        .ok_or_else(|| {
-            generated_transform_materialization_error(
-                game_object,
-                &format!("Transform TypeTree has no {field_name} field"),
-            )
-        })?;
+    else {
+        return Ok(());
+    };
     match field {
         SerializedValue::I32(current) => {
             *current = value;
@@ -4354,7 +4354,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_transform_accepts_optional_euler_hint_but_requires_unconditional_fields() {
+    fn generated_transform_accepts_optional_fields_and_requires_transform_vectors() {
         let (plan, asset, _) = generated_transform_plan();
         let without_euler_hint = transform_metadata(false, true);
         let generated = materialize_planned_generated_transform_payload(
@@ -4372,8 +4372,9 @@ mod tests {
             .unwrap()
             .is_none());
 
+        // 2019.4's class-4 TPK omits m_RootOrder; the source setter treats it as optional.
         let without_root_order = transform_metadata(false, false);
-        let error = materialize_planned_generated_transform_payload(
+        let generated = materialize_planned_generated_transform_payload(
             &plan,
             asset,
             &without_root_order,
@@ -4381,8 +4382,35 @@ mod tests {
             ObjectDefaultValueLimits::default(),
             ObjectEncodeLimits::default(),
         )
+        .unwrap();
+        assert!(generated
+            .root
+            .unique_field("m_RootOrder")
+            .unwrap()
+            .is_none());
+
+        // The position, rotation, and scale fields are unconditional factory writes.
+        let mut without_scale = without_root_order;
+        let nodes = &mut without_scale.types[0].type_tree.as_mut().unwrap().nodes;
+        let scale_start = nodes
+            .iter()
+            .position(|node| node.name.as_deref() == Some("m_LocalScale"))
+            .expect("the fixture has m_LocalScale");
+        let mut scale_end = scale_start + 1;
+        while scale_end < nodes.len() && nodes[scale_end].level > nodes[scale_start].level {
+            scale_end += 1;
+        }
+        nodes.drain(scale_start..scale_end);
+        let error = materialize_planned_generated_transform_payload(
+            &plan,
+            asset,
+            &without_scale,
+            0,
+            ObjectDefaultValueLimits::default(),
+            ObjectEncodeLimits::default(),
+        )
         .unwrap_err();
-        assert!(error.to_string().contains("no m_RootOrder field"));
+        assert!(error.to_string().contains("no m_LocalScale field"));
     }
 
     #[test]

@@ -109,6 +109,32 @@ impl PathChecksumCache {
         Ok(checksum)
     }
 
+    /// `PathChecksumCache.AddKeys`: stores a caller-supplied path and its checksum in both
+    /// directions, overwriting any previous entry exactly like the source dictionary
+    /// assignment. This is the population path used by `BuildPathsCache` (hierarchy paths
+    /// and avatar TOS entries), which never rehashes because the source already holds the
+    /// checksum word.
+    pub fn insert_direct(&mut self, path: &str, checksum: u32) -> Result<(), PathChecksumError> {
+        if !self.property_names.contains_key(path) {
+            if self.property_names.len() >= self.limits.max_entries {
+                return Err(PathChecksumError::EntryLimitExceeded {
+                    limit: self.limits.max_entries,
+                });
+            }
+            self.property_names
+                .try_reserve(1)
+                .map_err(|_| PathChecksumError::AllocationFailed)?;
+        }
+        if !self.checksums.contains_key(&checksum) {
+            self.checksums
+                .try_reserve(1)
+                .map_err(|_| PathChecksumError::AllocationFailed)?;
+        }
+        self.property_names.insert(path.to_owned(), checksum);
+        self.checksums.insert(checksum, path.to_owned());
+        Ok(())
+    }
+
     /// `TryGetPath`: the reverse lookup of a checksum, if a stored path produced it.
     pub fn try_get_path(&self, identifier: u32) -> Option<&str> {
         self.checksums.get(&identifier).map(String::as_str)

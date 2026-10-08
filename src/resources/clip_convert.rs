@@ -47,7 +47,7 @@ pub const CLASS_ID_MONO_BEHAVIOUR: i32 = 114;
 pub const DEFAULT_FLOAT_WEIGHT: f32 = 1.0 / 3.0;
 
 /// One generic binding as the converter reads it.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct ConverterBinding {
     /// Binding path hash.
     pub path: u32,
@@ -59,6 +59,8 @@ pub struct ConverterBinding {
     pub custom_type: u8,
     /// Whether the binding addresses PPtr curves.
     pub is_pptr_curve: bool,
+    /// `Script` resolved to the referenced script asset, if any.
+    pub script: Option<super::curve_wrappers::ScriptReference>,
 }
 
 /// An animation-clip conversion failure.
@@ -315,6 +317,7 @@ mod tests {
             class_id,
             custom_type,
             is_pptr_curve,
+            script: None,
         }
     }
 

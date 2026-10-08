@@ -1,0 +1,161 @@
+# Reference-runtime differential for the model-export builders that are ported into
+# src/resources/glb.rs: `GlbTerrainBuilder.Build` and `GlbNavMeshExporter.AddAssetToSceneBuilder`.
+#
+# Probe: tools/probes/res-glb (ResGlbProbe.csproj), .NET SDK 10.0.401, against the shipped
+# AssetRipper assemblies in `%LOCALAPPDATA%\Temp\opencode\ar-ref\Source\0Bins\AssetRipper.GUI.Free\Release`.
+# Every case creates real generated objects through the shipped
+# `TerrainData.Create(AssetInfo, UnityVersion)` / `NavMeshData.Create(...)` factories, sets the
+# serialized fields through the generated property surface, invokes the shipped builder, converts
+# the returned SharpGLTF SceneBuilder with the shipped `ToGltf2()`, and decodes every accessor
+# semantically (so the rows are independent of the SharpGLTF binary encoding).
+#
+# Row grammar:
+#   GIN|<tag>|<version>|<w>|<h>|<resolution>|<sx>|<sy>|<sz>|<name>|<heightCount>
+#     the values written into the generated Heightmap; `w`/`h`/`res` are the requested values.
+#   GHTS|<tag>|<csv i16>            the serialized Heights list
+#   GREAD|<tag>|<w>|<h>|<res>       the values the shipped Heightmap property surface reads back
+#                                   (modern subclasses stub Width/Height to 0; 5.0 keeps them and
+#                                   stubs Resolution to 0)
+#   NIN|<tag>|<version>|<name>|<meshCount>
+#   NVTS|<tag>|<meshIndex>|<x,y,z;...>   a HeightMeshData Vertices list
+#   NIDX|<tag>|<meshIndex>|<csv>          a HeightMeshData Indices list
+#   GMESH|<tag>|<meshIndex>|<meshName>|<primIndex>
+#   GPOS|<tag>|<vertexIndex>|<x>|<y>|<z>  decoded POSITION (round-trip "R" formatting)
+#   GUV|<tag>|<vertexIndex>|<u>|<v>       decoded TEXCOORD_0
+#   GIDX|<tag>|<csv>                      decoded indices
+#   GNODE|<tag>|<name>                    a scene node
+#   GEMPTY|<tag>|no-meshes|nodes=<n>      the model carried no mesh
+#   GERR|<tag>|<exception>|<message>      the shipped call threw; `inner|` rows carry the cause
+#
+# The Rust test `glb_builders_match_the_reference_runtime` replays every row through the
+# production builders and fails on any difference, including sign-of-zero differences.
+GIN|res4|2019.4.0f1|0|0|4|1|1|1|TerrainB|16
+GHTS|res4|0,2000,4000,6000,8000,10000,12000,14000,16000,18000,20000,22000,24000,26000,28000,30000
+GREAD|res4|0|0|4
+GMESH|res4|0||0
+GPOS|res4|0|-0|0|0
+GPOS|res4|1|-0|0.06103702|1
+GPOS|res4|2|1|0.24414808|0
+GPOS|res4|3|1|0.3051851|1
+GPOS|res4|4|-0|0.12207404|2
+GPOS|res4|5|1|0.3662221|2
+GPOS|res4|6|-0|0.18311106|3
+GPOS|res4|7|1|0.42725915|3
+GPOS|res4|8|2|0.48829615|0
+GPOS|res4|9|2|0.54933316|1
+GPOS|res4|10|2|0.6103702|2
+GPOS|res4|11|2|0.6714072|3
+GPOS|res4|12|3|0.7324442|0
+GPOS|res4|13|3|0.79348123|1
+GPOS|res4|14|3|0.8545183|2
+GPOS|res4|15|3|0.9155553|3
+GUV|res4|0|0|0
+GUV|res4|1|0|0
+GUV|res4|2|0|0
+GUV|res4|3|0|0
+GUV|res4|4|0|0
+GUV|res4|5|0|0
+GUV|res4|6|0|0
+GUV|res4|7|0|0
+GUV|res4|8|0|0
+GUV|res4|9|0|0
+GUV|res4|10|0|0
+GUV|res4|11|0|0
+GUV|res4|12|0|0
+GUV|res4|13|0|0
+GUV|res4|14|0|0
+GUV|res4|15|0|0
+GIDX|res4|0,1,2,2,1,3,1,4,3,3,4,5,4,6,5,5,6,7,2,3,8,8,3,9,3,5,9,9,5,10,5,7,10,10,7,11,8,9,12,12,9,13,9,10,13,13,10,14,10,11,14,14,11,15
+GNODE|res4|TerrainB
+GIN|res3scale|2019.4.0f1|0|0|3|2|0.5|3|TerrainE|9
+GHTS|res3scale|0,3000,6000,9000,12000,15000,18000,21000,24000
+GREAD|res3scale|0|0|3
+GMESH|res3scale|0||0
+GPOS|res3scale|0|-0|0|0
+GPOS|res3scale|1|-0|0.045777764|3
+GPOS|res3scale|2|2|0.13733329|0
+GPOS|res3scale|3|2|0.18311106|3
+GPOS|res3scale|4|-0|0.09155553|6
+GPOS|res3scale|5|2|0.22888882|6
+GPOS|res3scale|6|4|0.27466658|0
+GPOS|res3scale|7|4|0.32044435|3
+GPOS|res3scale|8|4|0.3662221|6
+GUV|res3scale|0|0|0
+GUV|res3scale|1|0|0
+GUV|res3scale|2|0|0
+GUV|res3scale|3|0|0
+GUV|res3scale|4|0|0
+GUV|res3scale|5|0|0
+GUV|res3scale|6|0|0
+GUV|res3scale|7|0|0
+GUV|res3scale|8|0|0
+GIDX|res3scale|0,1,2,2,1,3,1,4,3,3,4,5,2,3,6,6,3,7,3,5,7,7,5,8
+GNODE|res3scale|TerrainE
+GIN|empty|2019.4.0f1|0|0|0|1|1|1|TerrainZ|1
+GHTS|empty|0
+GREAD|empty|0|0|0
+GNODE|empty|TerrainZ
+GEMPTY|empty|no-meshes|nodes=1
+GIN|legacy5|5.0.0f1|3|3|0|1|2|1|TerrainA|9
+GHTS|legacy5|0,8192,16384,8192,16384,24576,16384,24576,32767
+GREAD|legacy5|3|3|0
+GMESH|legacy5|0||0
+GPOS|legacy5|0|-0|0|0
+GPOS|legacy5|1|-0|0.50001526|1
+GPOS|legacy5|2|1|0.50001526|0
+GPOS|legacy5|3|1|1.0000305|1
+GPOS|legacy5|4|-0|1.0000305|2
+GPOS|legacy5|5|1|1.5000458|2
+GPOS|legacy5|6|2|1.0000305|0
+GPOS|legacy5|7|2|1.5000458|1
+GPOS|legacy5|8|2|2|2
+GUV|legacy5|0|0|0
+GUV|legacy5|1|0|0
+GUV|legacy5|2|0|0
+GUV|legacy5|3|0|0
+GUV|legacy5|4|0|0
+GUV|legacy5|5|0|0
+GUV|legacy5|6|0|0
+GUV|legacy5|7|0|0
+GUV|legacy5|8|0|0
+GIDX|legacy5|0,1,2,2,1,3,1,4,3,3,4,5,2,3,6,6,3,7,3,5,7,7,5,8
+GNODE|legacy5|TerrainA
+GIN|rect48|5.0.0f1|4|8|0|1|1|1|TerrainR|32
+GHTS|rect48|0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31
+GREAD|rect48|4|8|0
+GERR|rect48|TargetInvocationException|Exception has been thrown by the target of an invocation.
+GERR|rect48|inner|IndexOutOfRangeException|Index was outside the bounds of the array.
+GIN|onebyone|5.0.0f1|1|1|0|1|1|1|TerrainH|1
+GHTS|onebyone|10
+GREAD|onebyone|1|1|0
+GERR|onebyone|TargetInvocationException|Exception has been thrown by the target of an invocation.
+GERR|onebyone|inner|DivideByZeroException|Attempted to divide by zero.
+GIN|legacyres|5.0.0f1|2|2|4|1|1|1|TerrainI|16
+GHTS|legacyres|0,1000,2000,3000,4000,5000,6000,7000,8000,9000,10000,11000,12000,13000,14000,15000
+GREAD|legacyres|2|2|0
+GMESH|legacyres|0||0
+GPOS|legacyres|0|-0|0|0
+GPOS|legacyres|1|-0|0.03051851|1
+GPOS|legacyres|2|1|0.06103702|0
+GPOS|legacyres|3|1|0.09155553|1
+GUV|legacyres|0|0|0
+GUV|legacyres|1|1|0
+GUV|legacyres|2|0|1
+GUV|legacyres|3|1|1
+GIDX|legacyres|0,1,2,2,1,3
+GNODE|legacyres|TerrainI
+NIN|two|2019.4.0f1|NavA|1
+NVTS|two|0|0,0,0;1,0,0;0,1,0;1,1,0
+NIDX|two|0|0,1,2,2,1,3
+GMESH|two|0||0
+GPOS|two|0|-0|1|0
+GPOS|two|1|-1|0|0
+GPOS|two|2|-0|0|0
+GPOS|two|3|-1|1|0
+GIDX|two|0,1,2,3,1,0
+GNODE|two|NavA
+NIN|badcount|2019.4.0f1|NavB|1
+NVTS|badcount|0|0,0,0;1,0,0
+NIDX|badcount|0|0,1
+GERR|badcount|TargetInvocationException|Exception has been thrown by the target of an invocation.
+GERR|badcount|inner|Exception|Height mesh must be triangles.

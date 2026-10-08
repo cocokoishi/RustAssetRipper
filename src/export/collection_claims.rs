@@ -170,6 +170,9 @@ pub enum ClaimOutcome {
     EmptyCollection,
     /// A `FailExportCollection` is created: still a claim, exporting nothing.
     FailCollection,
+    /// A `SkipExportCollection` is created: still a claim, exporting nothing, and the baseline
+    /// replaces references to the asset with missing references.
+    SkipCollection,
     /// A redirect collection pointing at engine or script assets.
     RedirectCollection,
 }

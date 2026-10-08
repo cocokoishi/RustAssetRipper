@@ -566,6 +566,19 @@ pub enum SerializedFileDependencyOutcome {
 }
 
 impl SerializedFileWorkspace {
+    /// Build a resource-only workspace for cross-module reference-fixture tests.
+    #[cfg(test)]
+    pub(crate) fn with_resource_facts_for_test(
+        container_bundles: Vec<WorkspaceSerializedBundle>,
+        resource_files: Vec<WorkspaceResourceFile>,
+    ) -> Self {
+        Self {
+            container_bundles,
+            resource_files,
+            ..Self::default()
+        }
+    }
+
     /// Parse caller-identified SerializedFiles from the VFS and build their per-file reference
     /// graphs. All file sizes are preflighted before any file contents are read.
     pub fn load_from_vfs(
