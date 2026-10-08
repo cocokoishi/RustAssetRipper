@@ -20,6 +20,8 @@
 //       materialized object's class, generated type name, and stored name.
 // Reads only its inputs; writes only the rows file and scratch under target/.
 using System.Reflection;
+using System.Collections;
+using System.Globalization;
 using System.Text;
 using AssetRipper.Assets;
 using AssetRipper.Assets.Bundles;
@@ -37,10 +39,12 @@ using AssetRipper.IO.Files.SerializedFiles.Parser;
 using AssetRipper.IO.Files.SerializedFiles.Parser.TypeTrees;
 using AssetRipper.Primitives;
 using AssetRipper.SourceGenerated;
+using AssetRipper.Tpk;
+using AssetRipper.Tpk.TypeTrees;
 
 if (args.Length == 0)
 {
-	Console.Error.WriteLine("usage: dispatch <version> <classid...> | sweep <version> <max> | tpk <classid> <version...> | author <rows> | materialize <file> <rows>");
+		Console.Error.WriteLine("usage: dispatch <version> <classid...> | sweep <version> <max> | tpk <classid> <version...> | tpk-info <raw-output> <data-output> | tpk-select <output> | author <rows> | materialize <file> <rows>");
 	return 2;
 }
 
@@ -57,6 +61,12 @@ try
 		case "tpk":
 			DumpTpk(int.Parse(args[1]), args[2..]);
 			return 0;
+		case "tpk-info":
+			DumpTpkInfo(args[1], args[2]);
+			return 0;
+		case "tpk-select":
+			DumpTpkSelectionMatrix(args[1]);
+			return 0;
 		case "author":
 			Author(args[1]);
 			return 0;
@@ -68,10 +78,182 @@ try
 			return 2;
 	}
 }
+
 catch (Exception ex)
 {
 	Console.Error.WriteLine($"PROBE_FAIL|{ex.GetType().FullName}|{OneLine(ex.Message)}");
 	return 1;
+}
+
+static void DumpTpkSelectionMatrix(string outputPath)
+{
+	TpkTypeTreeBlob blob = (TpkTypeTreeBlob)TpkFile.FromStream(SourceTpk.GetStream()).GetDataBlob();
+	string fullPath = Path.GetFullPath(outputPath);
+	Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+	using StreamWriter writer = new(fullPath, false, new UTF8Encoding(false)) { NewLine = "\n" };
+	writer.WriteLine("# Source TypeTreeNodeStruct.TryMakeFromTpk version-selection matrix.");
+	writer.WriteLine("# SELECT|class-id|query-version|MISSING, THROW|exception-type, or OK|release-count|release-fnv64|editor-count|editor-fnv64");
+	UnityVersion beforeFirst = UnityVersion.Parse("0.0.0f0");
+	UnityVersion latest = blob.Versions[^1];
+	foreach (TpkClassInformation classInformation in blob.ClassInformation.OrderBy(item => item.ID))
+	{
+		SortedSet<UnityVersion> queries = new() { beforeFirst, latest };
+		foreach (var entry in classInformation.Classes)
+		{
+			queries.Add(entry.Key);
+			int versionIndex = blob.Versions.BinarySearch(entry.Key);
+			if (versionIndex > 0)
+			{
+				queries.Add(blob.Versions[versionIndex - 1]);
+			}
+		}
+		foreach (UnityVersion query in queries)
+		{
+			try
+			{
+				if (!TypeTreeNodeStruct.TryMakeFromTpk((ClassIDType)classInformation.ID, query, out TypeTreeNodeStruct release, out TypeTreeNodeStruct editor))
+				{
+					writer.WriteLine($"SELECT|{classInformation.ID}|{query}|MISSING");
+					continue;
+				}
+				var releaseSignature = Signature(release);
+				var editorSignature = Signature(editor);
+				writer.WriteLine($"SELECT|{classInformation.ID}|{query}|OK|{releaseSignature.Count}|{releaseSignature.Hash:X16}|{editorSignature.Count}|{editorSignature.Hash:X16}");
+			}
+			catch (Exception exception)
+			{
+				writer.WriteLine($"SELECT|{classInformation.ID}|{query}|THROW|{exception.GetType().Name}");
+			}
+		}
+	}
+}
+
+static (int Count, ulong Hash) Signature(TypeTreeNodeStruct root)
+{
+	const ulong offsetBasis = 14695981039346656037;
+	const ulong prime = 1099511628211;
+	ulong hash = offsetBasis;
+	int count = 0;
+	Visit(root, 0);
+	return (count, hash);
+
+	void Visit(TypeTreeNodeStruct node, int depth)
+	{
+		string line = string.Concat(
+			depth.ToString(CultureInfo.InvariantCulture), "|", node.TypeName, "|", node.Name, "|",
+			node.Version.ToString(CultureInfo.InvariantCulture), "|", ((int)node.MetaFlag).ToString(CultureInfo.InvariantCulture), "\n");
+		foreach (byte value in Encoding.UTF8.GetBytes(line))
+		{
+			hash ^= value;
+			hash *= prime;
+		}
+		count++;
+		foreach (TypeTreeNodeStruct child in node.SubNodes)
+		{
+			Visit(child, depth + 1);
+		}
+	}
+}
+
+static void DumpTpkInfo(string rawOutputPath, string dataOutputPath)
+{
+	using Stream source = SourceTpk.GetStream();
+	using MemoryStream buffer = new();
+	source.CopyTo(buffer);
+	byte[] bytes = buffer.ToArray();
+	string fullPath = Path.GetFullPath(rawOutputPath);
+	Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+	File.WriteAllBytes(fullPath, bytes);
+	Console.WriteLine($"TPK_RAW|{bytes.Length}|{Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes))}");
+
+	TpkFile tpk = TpkFile.FromStream(new MemoryStream(bytes));
+	TpkTypeTreeBlob blob = (TpkTypeTreeBlob)tpk.GetDataBlob();
+	DumpMembers("blob", blob);
+	object? classInformation = blob.GetType().GetProperty("ClassInformation")?.GetValue(blob);
+	object? firstClass = First(classInformation);
+	if (firstClass is not null)
+	{
+		DumpMembers("class", firstClass);
+		object? classes = firstClass.GetType().GetProperty("Classes")?.GetValue(firstClass);
+		object? firstVersion = First(classes);
+		if (firstVersion is not null)
+		{
+			DumpMembers("class-version", firstVersion);
+			object? classValue = firstVersion.GetType().GetProperty("Value")?.GetValue(firstVersion);
+			if (classValue is not null)
+			{
+				DumpMembers("unity-class", classValue);
+			}
+		}
+	}
+	object? nodeBuffer = blob.GetType().GetProperty("NodeBuffer")?.GetValue(blob);
+	if (nodeBuffer is not null)
+	{
+		DumpMembers("node-buffer", nodeBuffer);
+		PropertyInfo? indexer = nodeBuffer.GetType().GetProperties().FirstOrDefault(p => p.GetIndexParameters().Length == 1);
+		object? firstNode = indexer?.GetValue(nodeBuffer, [0]);
+		if (firstNode is not null)
+		{
+			DumpMembers("node", firstNode);
+		}
+	}
+	object? stringBuffer = blob.GetType().GetProperty("StringBuffer")?.GetValue(blob);
+	if (stringBuffer is not null)
+	{
+		DumpMembers("string-buffer", stringBuffer);
+	}
+	WriteTpkData(blob, dataOutputPath, bytes.Length, Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)));
+}
+
+static void WriteTpkData(TpkTypeTreeBlob blob, string path, int rawLength, string rawSha256)
+{
+	string fullPath = Path.GetFullPath(path);
+	Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+	using StreamWriter writer = new(fullPath, false, new UTF8Encoding(false)) { NewLine = "\n" };
+	writer.WriteLine($"TPK-DATA|1|{rawLength}|{rawSha256}|{blob.ClassInformation.Count}|{blob.NodeBuffer.Count}|{blob.StringBuffer.Count}");
+	foreach (var version in blob.Versions)
+	{
+		writer.WriteLine($"VERSION|{version}|{version.GetBits():X16}|{version.Major}|{version.Minor}|{version.Build}|{Convert.ToInt32(version.Type)}|{version.TypeNumber}");
+	}
+	foreach (TpkClassInformation classInformation in blob.ClassInformation.OrderBy(item => item.ID))
+	{
+		writer.WriteLine($"CLASSSET|{classInformation.ID}|{classInformation.Classes.Count}");
+		foreach (var entry in classInformation.Classes)
+		{
+			var version = entry.Key;
+			if (entry.Value is null)
+			{
+				writer.WriteLine($"CLASS|{classInformation.ID}|{version}|{version.GetBits():X16}|{version.Major}|{version.Minor}|{version.Build}|{Convert.ToInt32(version.Type)}|{version.TypeNumber}|NULL");
+				continue;
+			}
+			var unityClass = entry.Value;
+			writer.WriteLine($"CLASS|{classInformation.ID}|{version}|{version.GetBits():X16}|{version.Major}|{version.Minor}|{version.Build}|{Convert.ToInt32(version.Type)}|{version.TypeNumber}|{unityClass.Name}|{unityClass.Base}|{(byte)unityClass.Flags}|{unityClass.ReleaseRootNode}|{unityClass.EditorRootNode}");
+		}
+	}
+	for (int index = 0; index < blob.NodeBuffer.Count; index++)
+	{
+		TpkUnityNode node = blob.NodeBuffer[index];
+		string children = string.Join(',', node.SubNodes);
+		writer.WriteLine($"NODE|{index}|{node.TypeName}|{node.Name}|{node.ByteSize}|{node.Version}|{node.TypeFlags}|{node.MetaFlag}|{children}");
+	}
+	for (int index = 0; index < blob.StringBuffer.Count; index++)
+	{
+		string value = blob.StringBuffer[checked((ushort)index)];
+		writer.WriteLine($"STRING|{index}|{Convert.ToBase64String(Encoding.UTF8.GetBytes(value))}");
+	}
+}
+
+static object? First(object? value) => value is IEnumerable enumerable ? enumerable.Cast<object?>().FirstOrDefault() : null;
+
+static void DumpMembers(string label, object value)
+{
+	Console.WriteLine($"SHAPE|{label}|{value.GetType().FullName}");
+	foreach (PropertyInfo property in value.GetType().GetProperties(BindingFlags.Instance | BindingFlags.Public))
+	{
+		object? memberValue = property.GetIndexParameters().Length == 0 ? property.GetValue(value) : null;
+		string count = memberValue is ICollection collection ? collection.Count.ToString() : "-";
+		Console.WriteLine($"MEMBER|{label}|{property.Name}|{property.PropertyType.FullName}|{count}");
+	}
 }
 
 static string OneLine(string value) => value.Replace('\r', ' ').Replace('\n', ' ');

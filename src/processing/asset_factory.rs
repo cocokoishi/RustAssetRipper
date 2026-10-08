@@ -27,6 +27,7 @@
 //! `Temp/opencode/monoutilsprobe` resolving all 21 engine names at 2019.4.0f1, SDK
 //! 10.0.401); the dispatch and fallback rules are source-read over caller facts.
 
+use crate::processing::source_tpk::{SourceTpkDatabase, SourceTpkLookupError, SourceTpkTrees};
 use crate::resources::blend_shape::crc32_ieee;
 
 /// The class ID routed to the MonoBehaviour read path.
@@ -688,6 +689,7 @@ use crate::serialized_file::object::{
 pub enum FactoryVersionType {
     Alpha,
     Beta,
+    China,
     Release,
     Patch,
     Experimental,
@@ -701,6 +703,7 @@ pub struct FactoryUnityVersion {
     pub minor: u32,
     pub build: u16,
     pub version_type: FactoryVersionType,
+    pub type_number: u8,
     pub text: String,
 }
 
@@ -720,19 +723,39 @@ impl FactoryUnityVersion {
             return None;
         }
         let build = build_digits.parse::<u16>().ok()?;
-        let version_type = match rest.as_bytes().get(build_digits.len()).copied() {
-            Some(b'a') => FactoryVersionType::Alpha,
-            Some(b'b') => FactoryVersionType::Beta,
-            Some(b'f') => FactoryVersionType::Release,
-            Some(b'p') => FactoryVersionType::Patch,
-            Some(b'x') => FactoryVersionType::Experimental,
-            _ => FactoryVersionType::Unknown,
+        let suffix = rest.get(build_digits.len()..)?;
+        let (version_type, type_number_text) =
+            if let Some(china_suffix) = suffix.strip_prefix("f1c") {
+                (FactoryVersionType::China, china_suffix)
+            } else {
+                let mut chars = suffix.chars();
+                let version_type = match chars.next()? {
+                    'a' => FactoryVersionType::Alpha,
+                    'b' => FactoryVersionType::Beta,
+                    'c' => FactoryVersionType::China,
+                    'f' => FactoryVersionType::Release,
+                    'p' => FactoryVersionType::Patch,
+                    'x' => FactoryVersionType::Experimental,
+                    _ => FactoryVersionType::Unknown,
+                };
+                let type_number_start = suffix.len() - chars.as_str().len();
+                (version_type, suffix.get(type_number_start..)?)
+            };
+        let type_number_digits: String = type_number_text
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        let type_number = if type_number_digits.is_empty() {
+            0
+        } else {
+            type_number_digits.parse::<u8>().ok()?
         };
         Some(Self {
             major,
             minor,
             build,
             version_type,
+            type_number,
             text: text.to_owned(),
         })
     }
@@ -744,6 +767,7 @@ impl FactoryUnityVersion {
             minor: 0,
             build: 0,
             version_type: FactoryVersionType::Release,
+            type_number: 0,
             text: String::new(),
         }
     }
@@ -764,8 +788,34 @@ impl FactoryUnityVersion {
         let mut bumped = self.clone();
         bumped.build = self.build.wrapping_add(1);
         bumped.version_type = FactoryVersionType::Release;
+        bumped.type_number = 0;
         bumped.text = format!("{}.{}.{}f0", bumped.major, bumped.minor, bumped.build);
         bumped
+    }
+
+    /// The packed ordering used by the frozen source's `UnityVersion` comparison.
+    /// `UnityVersion.GetBits()` stores components from most to least significant as
+    /// major, minor, build, type, and type number.
+    pub fn source_order_bits(&self) -> Option<u64> {
+        let type_code: u64 = match self.version_type {
+            FactoryVersionType::Alpha => 0,
+            FactoryVersionType::Beta => 1,
+            FactoryVersionType::China => 2,
+            FactoryVersionType::Release => 3,
+            FactoryVersionType::Patch => 4,
+            FactoryVersionType::Experimental => 5,
+            FactoryVersionType::Unknown => return None,
+        };
+        if self.major > u16::MAX as u32 || self.minor > u16::MAX as u32 {
+            return None;
+        }
+        Some(
+            (u64::from(self.major) << 48)
+                | (u64::from(self.minor) << 32)
+                | (u64::from(self.build) << 16)
+                | (type_code << 8)
+                | u64::from(self.type_number),
+        )
     }
 }
 
@@ -791,7 +841,7 @@ pub trait ClassLayoutSource {
         &self,
         class_id: i32,
         version: &FactoryUnityVersion,
-    ) -> Option<(Arc<TypeTree>, Arc<TypeTree>)>;
+    ) -> Result<Option<SourceTpkTrees>, SourceTpkLookupError>;
 }
 
 /// Which `CreateAsset` branch produced an asset.
@@ -1062,13 +1112,13 @@ fn create_asset(
     source: &dyn ClassLayoutSource,
     class_id: i32,
     version: &FactoryUnityVersion,
-) -> CreatedAsset {
+) -> Result<CreatedAsset, SourceTpkLookupError> {
     if let Some(name) = source.generated_class_name(class_id, version) {
-        CreatedAsset::Generated(name.to_owned())
-    } else if source.tpk_trees(class_id, version).is_some() {
-        CreatedAsset::TypeTreeObject
+        Ok(CreatedAsset::Generated(name.to_owned()))
+    } else if source.tpk_trees(class_id, version)?.is_some() {
+        Ok(CreatedAsset::TypeTreeObject)
     } else {
-        CreatedAsset::Unknown
+        Ok(CreatedAsset::Unknown)
     }
 }
 
@@ -1081,16 +1131,18 @@ fn class_layout(
     version: &FactoryUnityVersion,
     object_index: usize,
     is_release: bool,
-) -> Option<TypeTree> {
-    if let Some((release, editor)) = source.tpk_trees(class_id, version) {
+) -> Result<Option<TypeTree>, SourceTpkLookupError> {
+    if let Some((release, editor)) = source.tpk_trees(class_id, version)? {
         let selected = if is_release { release } else { editor };
-        return Some(selected.as_ref().clone());
+        return Ok(Some(selected.as_ref().clone()));
     }
-    let tree = serialized_type_tree(file, object_index)?;
-    match classify_type_tree_usability(Some(tree)) {
+    let Some(tree) = serialized_type_tree(file, object_index) else {
+        return Ok(None);
+    };
+    Ok(match classify_type_tree_usability(Some(tree)) {
         TypeTreeUsability::Present => Some(tree.clone()),
         TypeTreeUsability::Empty | TypeTreeUsability::Missing => None,
-    }
+    })
 }
 
 /// A partial or complete normal-read attempt.
@@ -1195,7 +1247,20 @@ fn try_read_normal_object(
     version: &FactoryUnityVersion,
 ) -> Result<NormalAttempt, Box<NormalAttempt>> {
     let class_id = object_read_class_id(&file.metadata.objects[object_index]);
-    let kind = match create_asset(source, class_id, version) {
+    let created_asset = match create_asset(source, class_id, version) {
+        Ok(created_asset) => created_asset,
+        Err(error) => {
+            return Err(Box::new(NormalAttempt {
+                kind: FactoryAssetKind::Unreadable,
+                payload: None,
+                tail: None,
+                chinese: None,
+                log_level: FactoryLogLevel::Error,
+                log_message: Some(error.to_string()),
+            }));
+        }
+    };
+    let kind = match created_asset {
         CreatedAsset::Unknown => {
             // A creation miss wraps the raw bytes silently, without reading.
             return Ok(NormalAttempt {
@@ -1221,19 +1286,29 @@ fn try_read_normal_object(
     let payload_bytes = object_payload_bytes(file, object_index)
         .map_err(|_| Box::new(created.clone_for_failure()))?;
     let read_flags = file.object_read_flags(facts.file_path, facts.collection_name);
-    let Some(layout) = class_layout(
+    let layout = match class_layout(
         file,
         source,
         class_id,
         version,
         object_index,
         read_flags.is_release(),
-    ) else {
-        return Err(Box::new(NormalAttempt {
-            log_level: FactoryLogLevel::Error,
-            log_message: None,
-            ..created
-        }));
+    ) {
+        Ok(Some(layout)) => layout,
+        Ok(None) => {
+            return Err(Box::new(NormalAttempt {
+                log_level: FactoryLogLevel::Error,
+                log_message: None,
+                ..created
+            }));
+        }
+        Err(error) => {
+            return Err(Box::new(NormalAttempt {
+                log_level: FactoryLogLevel::Error,
+                log_message: Some(error.to_string()),
+                ..created
+            }));
+        }
     };
     let arrays_align =
         unity_version_aligns_arrays(file.metadata.prefix.unity_version_text.as_deref());
@@ -1439,22 +1514,34 @@ fn read_monobehaviour(
         object_index,
         read_flags.is_release(),
     )
-    .map(|tree| {
-        decode_with_tree(
-            &tree,
-            &payload_bytes,
-            file.metadata.prefix.body_endian,
-            arrays_align,
-            &file.metadata.reference_types,
+    .map_err(|error| {
+        ObjectDecodeError::source_type_tree_lookup(
             object_index,
-            file.metadata.objects[object_index].path_id,
-            limits,
+            MONO_BEHAVIOUR_CLASS_ID,
+            version.text.clone(),
+            error.to_string(),
         )
     })
-    .transpose();
+    .and_then(|layout| {
+        layout
+            .map(|tree| {
+                decode_with_tree(
+                    &tree,
+                    &payload_bytes,
+                    file.metadata.prefix.body_endian,
+                    arrays_align,
+                    &file.metadata.reference_types,
+                    object_index,
+                    file.metadata.objects[object_index].path_id,
+                    limits,
+                )
+            })
+            .transpose()
+    });
 
     let (header_ok, header_payload) = match header {
-        Ok(payload) => (true, payload),
+        Ok(Some(payload)) => (true, Some(payload)),
+        Ok(None) => (false, None),
         Err(_) => (false, None),
     };
     let consumed = header_payload
@@ -1602,6 +1689,7 @@ pub const PROBE_FIXTURE: &str = include_str!("asset_factory_fixture.txt");
 pub struct ReferenceClassLayouts {
     generated: std::collections::BTreeMap<i32, String>,
     tpk: std::collections::BTreeMap<(i32, String), (Arc<TypeTree>, Arc<TypeTree>)>,
+    source_tpk: Option<&'static SourceTpkDatabase>,
 }
 
 impl ReferenceClassLayouts {
@@ -1694,7 +1782,11 @@ impl ReferenceClassLayouts {
                 );
             }
         }
-        Self { generated, tpk }
+        Self {
+            generated,
+            tpk,
+            source_tpk: None,
+        }
     }
 
     /// The tables of the committed probe fixture.
@@ -1721,18 +1813,28 @@ impl ClassLayoutSource for ReferenceClassLayouts {
         &self,
         class_id: i32,
         version: &FactoryUnityVersion,
-    ) -> Option<(Arc<TypeTree>, Arc<TypeTree>)> {
-        self.tpk.get(&(class_id, version.text.clone())).cloned()
+    ) -> Result<Option<(Arc<TypeTree>, Arc<TypeTree>)>, SourceTpkLookupError> {
+        if let Some(trees) = self.tpk.get(&(class_id, version.text.clone())).cloned() {
+            return Ok(Some(trees));
+        }
+        match self.source_tpk {
+            Some(database) => database.trees(class_id, version),
+            None => Ok(None),
+        }
     }
 }
 
 /// The source-pinned generated-class and TPK layouts available to the Rust product.
 ///
-/// This table currently contains the independently probed 2019.4.40f1 cases only;
-/// callers must preserve ordinary decode failures when a class or version is absent.
+/// Generated class names remain limited to explicit factory probes. TPK layouts use
+/// the complete source `TpkTypeTreeBlob` class/version/node/string tables.
 pub fn reference_class_layouts() -> &'static ReferenceClassLayouts {
     static LAYOUTS: OnceLock<ReferenceClassLayouts> = OnceLock::new();
-    LAYOUTS.get_or_init(|| ReferenceClassLayouts::parse(PROBE_FIXTURE))
+    LAYOUTS.get_or_init(|| {
+        let mut layouts = ReferenceClassLayouts::parse(PROBE_FIXTURE);
+        layouts.source_tpk = Some(SourceTpkDatabase::embedded());
+        layouts
+    })
 }
 
 /// A payload decoded with its source TPK TypeTree because the file contains no usable
@@ -1772,7 +1874,16 @@ pub fn decode_no_usable_type_tree_payload(
     if class_id == MONO_BEHAVIOUR_CLASS_ID {
         return Ok(None);
     }
-    let Some((release_tree, editor_tree)) = source.tpk_trees(class_id, &version) else {
+    let Some((release_tree, editor_tree)) =
+        source.tpk_trees(class_id, &version).map_err(|error| {
+            ObjectDecodeError::source_type_tree_lookup(
+                object_index,
+                class_id,
+                version.text.clone(),
+                error.to_string(),
+            )
+        })?
+    else {
         return Ok(None);
     };
     let flags = file.object_read_flags(file_path, collection_name);

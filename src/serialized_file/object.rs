@@ -2373,6 +2373,23 @@ impl ObjectDecodeError {
         Self::new(offset, ObjectDecodeErrorKind::Header(error))
     }
 
+    pub(crate) fn source_type_tree_lookup(
+        object_index: usize,
+        class_id: i32,
+        version: String,
+        message: String,
+    ) -> Self {
+        Self::new(
+            0,
+            ObjectDecodeErrorKind::SourceTypeTreeLookup {
+                object_index,
+                class_id,
+                version,
+                message,
+            },
+        )
+    }
+
     pub fn offset(&self) -> usize {
         self.offset
     }
@@ -2425,6 +2442,12 @@ pub enum ObjectDecodeErrorKind {
     },
     MissingTypeTree {
         object_index: usize,
+    },
+    SourceTypeTreeLookup {
+        object_index: usize,
+        class_id: i32,
+        version: String,
+        message: String,
     },
     EmptyTypeTree {
         object_index: usize,
@@ -2571,6 +2594,15 @@ impl Display for ObjectDecodeErrorKind {
             Self::MissingTypeTree { object_index } => {
                 write!(f, "object {object_index} has no TypeTree")
             }
+            Self::SourceTypeTreeLookup {
+                object_index,
+                class_id,
+                version,
+                message,
+            } => write!(
+                f,
+                "object {object_index} class {class_id} has no usable source TPK TypeTree at {version}: {message}"
+            ),
             Self::EmptyTypeTree { object_index } => {
                 write!(f, "object {object_index} references an empty TypeTree")
             }

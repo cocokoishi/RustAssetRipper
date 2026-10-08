@@ -46,6 +46,8 @@ All 24 queued rows currently block the Phase 1 gate: each maps to baseline shipp
 
 Source-authored Unity 2019.4.40f1 StandaloneWin64Player TextAsset (class 49) and MonoScript (class 115) fixtures with empty file TypeTrees now decode through their generated TPK layouts in ObjectWorkspace, and the reference graph scans both completely. The TextAsset also exports typed fields through export-project. A fresh isolated source probe agrees with all four SF_HEX/SF_READ rows per fixture. An unknown no-tree class remains unresolved and the CLI refuses to create an output project. This closes only those bounded source behavior subcases; it does not close or remove SER-TT-ABSENT-001 or SER-ASSET-FACTORY-001. The gate queue now has 24 open rows. See DIFF-TT-ABSENT-GENERATED-TEXTASSET-001.
 
+The complete `SourceTpk.GetStream()` class/version projection is now embedded and validated offline. It records all 403 class histories, 1,420 source versions, 5,098 boundaries, 98 null entries, 26,516 TPK nodes, and 7,363 strings; Rust matches all 7,304 source selection queries (7,240 tree pairs and 64 source exceptions). This establishes full source TPK layout availability and selector behavior, but it does not complete generated class materialization, MonoBehaviour assembly/type recovery, or unknown/unreadable paths. `SER-TT-ABSENT-001` and `SER-ASSET-FACTORY-001` remain open and the 24-row gate queue is unchanged. See `DIFF-TT-TPK-COMPLETE-001` and `docs/validation-log.md`.
+
 ## Dependency order
 1. Close the import, container, serialization, generated-object, and reference path together. Do not treat file inventory or decoded TypeTree values as a complete object model.
 2. Close workspace scene and Prefab materialization, then animation processing on those objects.
