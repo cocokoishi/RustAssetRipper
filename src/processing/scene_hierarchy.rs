@@ -867,6 +867,8 @@ pub struct WorkspaceSceneCollectionHierarchy {
     scene_assets: Vec<WorkspaceSceneAssetIdentity>,
     lighting_data_asset_field_object_indices: Vec<usize>,
     component_candidates: Vec<WorkspaceSceneComponentCandidate>,
+    /// Missing Transform plans are retained for non-scene graphs so PrefabProcessor can route
+    /// them into the workspace-wide `Missing Prefab Transforms` collection.
     missing_transform_plans: Vec<WorkspaceMissingTransformPlan>,
     source_graph_complete: bool,
     source_reference_scans_complete: bool,
@@ -4125,11 +4127,6 @@ impl WorkspaceSceneHierarchyBuilder {
                 resource: "non-scene hierarchy collection graphs",
                 requested: non_scene_collection_count,
             })?;
-        for graph in self.collection_graphs.iter_mut().flatten() {
-            // Non-scene generated-transform plans are exposed through the workspace-wide
-            // Missing Prefab Transforms result, not duplicated in this input graph snapshot.
-            graph.missing_transform_plans.clear();
-        }
         for graph in self.collection_graphs.into_iter().flatten() {
             non_scene_collections.push(graph);
         }
