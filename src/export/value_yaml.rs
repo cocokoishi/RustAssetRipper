@@ -1368,20 +1368,32 @@ where
     if source.class_id == 114 {
         move_mapping_field_to_end(&mut body, "m_Structure")?;
     }
-    if source.class_id == 21
-        && field_mode == UnityYamlObjectFieldMode::ProjectAsset
-        && unity_version.major == 2018
-        && unity_version.minor == 2
-        && !stripped
-    {
-        insert_material_2018_editor_fields(&mut body)?;
+    if source.class_id == 21 && field_mode == UnityYamlObjectFieldMode::ProjectAsset && !stripped {
+        let editor_fields: Option<&[&str]> = match (unity_version.major, unity_version.minor) {
+            (2018, 2) => Some(&[
+                "m_ObjectHideFlags",
+                "m_CorrespondingSourceObject",
+                "m_PrefabInternal",
+            ]),
+            (2018, 3) => Some(&[
+                "m_ObjectHideFlags",
+                "m_CorrespondingSourceObject",
+                "m_PrefabInstance",
+                "m_PrefabAsset",
+            ]),
+            _ => None,
+        };
+        if let Some(editor_fields) = editor_fields {
+            insert_material_editor_fields(&mut body, editor_fields)?;
+        }
     }
     UnityYamlDocument::object(source.class_id, file_id, class_name, body, stripped)
         .map_err(UnityYamlObjectConversionError::NodeBuild)
 }
 
-fn insert_material_2018_editor_fields(
+fn insert_material_editor_fields(
     body: &mut UnityYamlNode,
+    editor_fields: &[&str],
 ) -> Result<(), UnityYamlObjectConversionError> {
     let UnityYamlNodeKind::Mapping { style, .. } = &body.kind else {
         return Err(UnityYamlObjectConversionError::NodeBuild(
@@ -1401,14 +1413,12 @@ fn insert_material_2018_editor_fields(
             UnityYamlNodeBuildError::NotAMapping,
         ));
     };
-    let requested =
-        entries
-            .len()
-            .checked_add(3)
-            .ok_or(UnityYamlObjectConversionError::AllocationFailed {
-                resource: "Material Editor YAML fields",
-                requested: usize::MAX,
-            })?;
+    let requested = entries.len().checked_add(editor_fields.len()).ok_or(
+        UnityYamlObjectConversionError::AllocationFailed {
+            resource: "Material Editor YAML fields",
+            requested: usize::MAX,
+        },
+    )?;
     let mut ordered = Vec::new();
     ordered.try_reserve_exact(requested).map_err(|_| {
         UnityYamlObjectConversionError::AllocationFailed {
@@ -1420,11 +1430,7 @@ fn insert_material_2018_editor_fields(
     if let Some(entry) = take_yaml_mapping_field(&mut entries, "serializedVersion") {
         ordered.push(entry);
     }
-    for field in [
-        "m_ObjectHideFlags",
-        "m_CorrespondingSourceObject",
-        "m_PrefabInternal",
-    ] {
+    for &field in editor_fields {
         ordered.push(take_yaml_mapping_field(&mut entries, field).unwrap_or((
             UnityYamlNode::plain_string(field),
             match field {

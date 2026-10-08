@@ -84,10 +84,12 @@ if (args is ["--inspect-material"])
     return 0;
 }
 
-if (args.Length == 2 && args[0] is "--export-material" or "--export-material-rich")
+if (args.Length == 2
+    && args[0] is "--export-material" or "--export-material-rich" or "--export-material-2018-3")
 {
     string materialOutputRoot = args[1];
-    bool includeSavedProperties = args[0] == "--export-material-rich";
+    bool includeSavedProperties = args[0] is "--export-material-rich" or "--export-material-2018-3";
+    bool use2018_3 = args[0] == "--export-material-2018-3";
     string materialOutputRootFull = Path.GetFullPath(materialOutputRoot);
     if (Directory.Exists(materialOutputRootFull) && Directory.EnumerateFileSystemEntries(materialOutputRootFull).Any())
     {
@@ -95,13 +97,27 @@ if (args.Length == 2 && args[0] is "--export-material" or "--export-material-ric
         return 2;
     }
     Logger.Add(new ConsoleLogger());
-    UnityVersion materialVersion = UnityVersion.Parse("2018.2.21f1");
+    UnityVersion materialVersion = UnityVersion.Parse(use2018_3 ? "2018.3.0f1" : "2018.2.21f1");
     GameBundle materialBundle = new();
     var materialCollection = materialBundle.AddNewProcessedCollection("Material", materialVersion);
-    Shader_2018_2 shader = materialCollection.CreateAsset(48, assetInfo => new Shader_2018_2(assetInfo));
-    shader.Name = new Utf8String("ShaderFixture");
-    shader.Script = new Utf8String("Shader \"ShaderFixture\" { }\n");
-    Material_2018_2 material = materialCollection.CreateAsset(21, assetInfo => new Material_2018_2(assetInfo));
+    IShader shader;
+    IMaterial material;
+    if (use2018_3)
+    {
+        Shader_2018_3 shader2018_3 = materialCollection.CreateAsset(48, assetInfo => new Shader_2018_3(assetInfo));
+        shader2018_3.Name = new Utf8String("ShaderFixture");
+        shader2018_3.Script = new Utf8String("Shader \"ShaderFixture\" { }\n");
+        shader = shader2018_3;
+        material = materialCollection.CreateAsset(21, assetInfo => new Material_2018_3(assetInfo));
+    }
+    else
+    {
+        Shader_2018_2 shader2018_2 = materialCollection.CreateAsset(48, assetInfo => new Shader_2018_2(assetInfo));
+        shader2018_2.Name = new Utf8String("ShaderFixture");
+        shader2018_2.Script = new Utf8String("Shader \"ShaderFixture\" { }\n");
+        shader = shader2018_2;
+        material = materialCollection.CreateAsset(21, assetInfo => new Material_2018_2(assetInfo));
+    }
     material.Name_C21 = new Utf8String("MaterialFixture");
     material.Shader_C21P = shader;
     material.CustomRenderQueue_C21 = 2450;
@@ -112,7 +128,7 @@ if (args.Length == 2 && args[0] is "--export-material" or "--export-material-ric
     material.ShaderKeywords_C21_Utf8String = new Utf8String("_FEATURE_A _FEATURE_B");
     material.LockedProperties_C21 = new Utf8String("{\"renderQueue\":true}");
     material.ModifiedSerializedProperties_C21 = 3;
-    var tag = material.StringTagMap_C21.AddNew();
+    var tag = material.StringTagMap_C21!.AddNew();
     tag.Key = new Utf8String("RenderType");
     tag.Value = new Utf8String("TransparentCutout");
     if (includeSavedProperties)
