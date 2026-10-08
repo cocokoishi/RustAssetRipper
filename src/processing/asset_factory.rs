@@ -1376,7 +1376,7 @@ fn read_normal_object(
                     raw_bytes,
                 ) {
                     Ok(attempt) => apply_attempt(asset, attempt, raw_bytes),
-                    Err(failed_retry) => unreadable_from_failed(asset, *failed_retry, raw_bytes),
+                    Err(_failed_retry) => unreadable_from_failed(asset, *failed, raw_bytes),
                 }
             } else {
                 unreadable_from_failed(asset, *failed, raw_bytes);
@@ -2991,12 +2991,35 @@ mod tests {
         if let Some(expected) = reference_logs.first() {
             let expected = expected.replace('␠', " ");
             assert_eq!(asset.log_level, FactoryLogLevel::Error, "{} log", case.name);
-            assert_eq!(
-                asset.log_message.as_deref(),
-                Some(expected.as_str()),
-                "{} log text",
-                case.name
-            );
+            if case.name == "patch_retry_light_failed" {
+                let context = "Error during reading of asset type Light. V: 2017.1.0p0 P: StandaloneWin64Player N: patch_retry_light_failed.assets Path: ";
+                let actual = asset
+                    .log_message
+                    .as_deref()
+                    .expect("failed Patch diagnostic");
+                assert!(
+                    expected.starts_with(context),
+                    "source diagnostic context: {expected}"
+                );
+                assert!(
+                    actual.starts_with(context),
+                    "Rust diagnostic context: {actual}"
+                );
+                assert!(expected.contains("System.ArgumentOutOfRangeException"));
+                assert!(expected.contains("Parameter 'length'"));
+                assert!(actual.contains("truncated input"));
+                assert!(
+                    !actual.contains("2017.1.1f0"),
+                    "retry diagnostic must not replace the original failure"
+                );
+            } else {
+                assert_eq!(
+                    asset.log_message.as_deref(),
+                    Some(expected.as_str()),
+                    "{} log text",
+                    case.name
+                );
+            }
         } else if let Some(expected) = reference_warnings.first() {
             let expected = expected.replace('␠', " ");
             assert_eq!(
@@ -3266,6 +3289,21 @@ mod tests {
                 );
                 assert!(workspace_asset.is_fully_materialized());
             }
+            "patch_retry_light_failed" => {
+                assert_eq!(asset.kind, FactoryAssetKind::Unreadable);
+                assert!(asset.payload.is_none());
+                assert_eq!(asset.raw.len(), 151);
+                let workspace_asset = materialize_object_for_workspace(
+                    &file,
+                    &facts,
+                    layouts,
+                    0,
+                    &ObjectDecodeLimits::default(),
+                )
+                .unwrap();
+                assert_eq!(workspace_asset.state.kind, FactoryAssetKind::Unreadable);
+                assert!(!workspace_asset.is_fully_materialized());
+            }
             other => panic!("unexpected case {other}"),
         }
     }
@@ -3277,7 +3315,7 @@ mod tests {
         let fixture = include_str!("asset_factory_fixture.txt");
         let layouts = reference_class_layouts();
         let cases = fixture_cases(fixture);
-        assert_eq!(cases.len(), 20, "all probe cases are replayed");
+        assert_eq!(cases.len(), 21, "all probe cases are replayed");
         for case in &cases {
             assert_case(case, layouts);
         }

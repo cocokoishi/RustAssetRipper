@@ -511,6 +511,7 @@ static void Author(string rowsPath)
 		"engine_builtin_extra_shader",
 		"engine_builtin_extra_underscore_shader",
 		"patch_retry_light",
+		"patch_retry_light_failed",
 	];
 	string scratch = Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, "target", "ser-factory-probe"));
 	Directory.CreateDirectory(scratch);
@@ -518,6 +519,7 @@ static void Author(string rowsPath)
 	using StreamWriter rows = new(rowsPath, false, new UTF8Encoding(false));
 	rows.WriteLine("# Reference GameAssetFactory differential (probe tools/probes/ser-factory, .NET SDK 10.0.401).");
 	rows.WriteLine("# In expected log text, `␠` encodes a trailing ASCII space so source messages remain whitespace-clean.");
+	rows.WriteLine("# LOG rows omit runtime-specific exception stack frames; exception type/message and input context remain.");
 	rows.WriteLine("# GEN rows: AssetFactory.CreateSerialized(new AssetInfo(collection,42,classId), 2019.4.40f1)");
 	rows.WriteLine("# on an empty real SerializedAssetCollection, plus the TypeTreeNodeStruct.TryMakeFromTpk outcome.");
 	rows.WriteLine("# TPK rows: the real TPK TypeTree nodes used by the CreateAsset fallback.");
@@ -625,6 +627,8 @@ static (string, SerializedFile) BuildCase(string name)
 			return ("unity_builtin_extra", BuildEngineShaderFile("unity_builtin_extra"));
 		case "patch_retry_light":
 			return ("patch_retry_light.assets", BuildPatchRetryFile("patch_retry_light.assets", "2017.1.0p0", "2017.1.1f0", 108));
+		case "patch_retry_light_failed":
+			return ("patch_retry_light_failed.assets", BuildPatchRetryFile("patch_retry_light_failed.assets", "2017.1.0p0", "2017.1.1f0", 108, true));
 		default:
 			throw new ArgumentException($"unknown case {name}");
 	}
@@ -669,7 +673,7 @@ static SerializedFile BuildEngineShaderFile(string collectionName)
 	return BuildFile(collectionName, version.ToString(), 48, null, payload.ToArray());
 }
 
-static SerializedFile BuildPatchRetryFile(string fileName, string serializedVersionText, string payloadVersionText, int classId)
+static SerializedFile BuildPatchRetryFile(string fileName, string serializedVersionText, string payloadVersionText, int classId, bool truncatePayload = false)
 {
 	UnityVersion payloadVersion = UnityVersion.Parse(payloadVersionText);
 	SerializedAssetCollection collection = EmptyCollection(payloadVersion);
@@ -680,7 +684,12 @@ static SerializedFile BuildPatchRetryFile(string fileName, string serializedVers
 	{
 		asset.WriteRelease(writer);
 	}
-	return BuildFile(fileName, serializedVersionText, classId, null, stream.ToArray());
+	byte[] payload = stream.ToArray();
+	if (truncatePayload)
+	{
+		Array.Resize(ref payload, payload.Length - 1);
+	}
+	return BuildFile(fileName, serializedVersionText, classId, null, payload);
 }
 
 static SerializedFile BuildTextAssetFile(string versionText, string name, string script, TypeTree? tree, byte[] tail)
@@ -1053,7 +1062,9 @@ sealed class CaptureLogger : ILogger
 
 	public void Log(LogType type, LogCategory category, string message)
 	{
-		Messages.Add($"{type}|{category}|{message.Replace('\r', ' ').Replace('\n', ' ')}");
+		string normalized = string.Join(' ', message.Replace("\r\n", "\n").Split('\n')
+			.Where(static line => !line.TrimStart().StartsWith("at ", StringComparison.Ordinal)));
+		Messages.Add($"{type}|{category}|{normalized.Replace('\r', ' ').Replace('\n', ' ')}");
 	}
 
 	public void BlankLine(int numLines)
