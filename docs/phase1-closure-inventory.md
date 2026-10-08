@@ -1,20 +1,20 @@
 # Phase 1 closure inventory
 
-Current inventory basis: feature ledger parsed from commit `3dd09f8b1d18320170ca06076c8f042051e521a5` (tree `0e9a7e4716ffbf28e79442dd24d3a47d538dca82`), fetched from `origin/main` after the existing-modern PrefabInstance route increment. Status counts are parsed from the Status cell in each stable-ID row. This inventory update is documentation-only and does not change the ledger counts. Source reference: `C:\Users\koishi\Desktop\RustAssetripper\AssetRipper`, frozen by `docs/baseline-files.sha256` (1,449 entries; manifest SHA-256 `29d1fd27f66b974c43750f30aa99117eb423cb318f3062daf05e1489f10f08f9`).
+Current inventory basis: source baseline files remain frozen from the `AssetRipper` snapshot and manifest. Status counts are parsed from the current `docs/feature-parity.md` working tree after the streamed image-texture closure recorded below. The prior published implementation base was `248be8a267a83f7a9db9486ece852b7fa8b84453` (tree `c6ddbb9c0a7768946ee278882a7e83b6c14f33e6`). Source reference: `C:\Users\koishi\Desktop\RustAssetripper\AssetRipper`, frozen by `docs/baseline-files.sha256` (1,449 entries; manifest SHA-256 `29d1fd27f66b974c43750f30aa99117eb423cb318f3062daf05e1489f10f08f9`).
 
 The status counts below come from the `Status` cell in each stable-ID row of `docs/feature-parity.md`, matched against the required status vocabulary; prose mentions elsewhere do not affect the count.
 
 | Ledger status | Rows |
 |---|---:|
-| `已验证` | 348 |
+| `已验证` | 349 |
 | `已实现但未验证` | 14 |
-| `实现中` | 12 |
+| `实现中` | 11 |
 | `已调查` | 4 |
 | `未调查` | 0 |
 | `受外部条件阻塞` | 0 |
-| **Open rows** | **30** |
+| **Open rows** | **29** |
 
-All 30 queued rows currently block the Phase 1 gate: each maps to baseline shipping behavior, and no exact verified disposition removes it from the product scope. `TYPE-SCRIPT-001` still needs a source-backed runtime-versus-tooling disposition. Unity-only evidence is a real gap where listed; it is not counted as passed. The inventory is the Phase 1 work queue and should be refreshed only after closing a complete behavior or finding a new source-backed disposition.
+All 29 queued rows currently block the Phase 1 gate: each maps to baseline shipping behavior, and no exact verified disposition removes it from the product scope. `TYPE-SCRIPT-001` still needs a source-backed runtime-versus-tooling disposition. Unity-only evidence is a real gap where listed; it is not counted as passed. The inventory is the Phase 1 work queue and should be refreshed only after closing a complete behavior or finding a new source-backed disposition.
 
 ## Closed behavior units
 
@@ -31,8 +31,9 @@ All 30 queued rows currently block the Phase 1 gate: each maps to baseline shipp
 
 | `EXP-PROJECT-PREFAB-ROUTE-001` | `export-project` executes the bounded modern collection route for both generated roots and existing serialized PrefabInstances. The Unity 2019.4.40f1 source processor differential materializes GameObject 10, Transform 11, and PrefabInstance 12, creates one PrefabHierarchyObject, exposes the first two as exportable members, and hides the marker; the Rust product regression writes the matching two-document Prefab with mapped reciprocal PPtrs, no generic duplicates, and `PrefabImporter` metadata. The importer-default probe is separately recorded. AssetBundle Container-derived `RootGameObject.AssetBundleName`, legacy generated Prefabs and `m_PrefabInternal` overlays, full source exporter differential, and Unity Editor import remain open under `EXPORT-UNITY-001`. See `DIFF-PREFAB-INSTANCE-ROUTE-001`, `DIFF-PREFAB-IMPORTER-DEFAULTS-001`, both project-workflow regressions, and `src/processing/prefab_instance_runtime_fixture.txt`. |
 
-## Dependency order
+| `EXP-YAML-STREAMED-ASSET-PREP-001` | The Rust workspace exporter resolves streamed root resources for Mesh and every class in the generated `IImageTexture` interface union (28, 89, 117, 187, 188, 189), stages bytes with version-aware raw field aliases, clears stream metadata in the export-owned YAML view, and preserves source values. Six-class SerializedFile tests, the class-28 `export-project`/`.meta` regression, a missing-resource no-output case, and an isolated source project-export runtime probe close this bounded preparation branch. Texture decoding/format conversion and overall collection dispatch remain open under `RES-TEXTURE-001` and `EXPORT-UNITY-001`; see `DIFF-YAML-STREAMED-IMAGE-CLASS-ROUTE-001`.
 
+## Dependency order
 1. Close the import, container, serialization, generated-object, and reference path together. Do not treat file inventory or decoded TypeTree values as a complete object model.
 2. Close workspace scene and Prefab materialization, then animation processing on those objects.
 3. Finish asset decoders and exporter families, including their resource streams and importer metadata.
@@ -92,7 +93,6 @@ The row-level work units below are the smallest complete closures justified by d
 | `RES-MESH-VIEW-001` | `已实现但未验证` | `MeshExtensions.ReadData`; `VertexDataBlob.Create`; `MeshData.TryMakeFromMesh` | **Implementation/integration:** settle versioned field naming from reference runtime, complete metric/blend-shape/streamed-data reads, and build `MeshData` from real serialized class-43 objects through its export callers. | Yes |
 | `EXP-GLB-001` | `已实现但未验证` | `GlbMeshBuilder`; `GlbSubMeshBuilder`; `GlbMeshType`; coordinate conversion; `GlbWriter` | **Implementation/integration:** finish scene-level and terrain GLB export and blend-shape output, connect processed assets and resolved materials to the writer, and validate full output semantics in an independent viewer/Unity import. | Yes |
 | `RES-BLENDSHAPE-001` | `已实现但未验证` | `MeshBlendShapeExtensions`; `BlendShapeDataExtensions`; `MeshExtensions.FindBlendShapeNameByCRC`; `SetValues` | **Implementation/integration:** connect name/hash resolution to geometry frame/delta/weight decoding and animation binding; cover legacy list and channel layouts with independent versioned inputs. | Yes |
-| `EXP-YAML-STREAMED-ASSET-PREP-001` | `实现中` | `YamlStreamedAssetExportCollection.ExportMesh` and `ExportTexture` | **Integration:** feed resolved streamed resources and version-specific inline fields into actual YAML collection exporters, preserve the input object, and validate complete mesh/texture YAML plus sidecar resources from an external fixture. | Yes |
 
 ### Project export, configuration, and product surface
 
@@ -107,9 +107,9 @@ The row-level work units below are the smallest complete closures justified by d
 
 ## Current verification state
 
-- Latest local validation: `cargo fmt --all -- --check`, `cargo test --workspace --locked --quiet` (1,479 library passed, 1 ignored; 73 CLI passed; 0 doc tests), `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`, and `git diff --check` all exit 0.
+- Latest local validation: `cargo fmt --all -- --check`; `cargo test --workspace --locked --quiet` (1,485 library passed, 1 ignored; 74 CLI passed; 0 doc tests); `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`; `git diff --check`; and `tools/verify-baseline.ps1` all exit 0.
 - `powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/verify-baseline.ps1` exits 0 with `Verified 1449 baseline files; no missing, changed, or unlisted files.` The reference tree contains exactly the 1,449 manifest-listed files.
-- No row status changed in this verification increment: the feature ledger remains at 31 open rows. The new workspace project-export route still has generic-renderer fallbacks and is not complete source parity. The `src/test_support.rs` tests continue to cover the writable test scratch-root selection.
+- Ledger status after the streamed image-texture closure: 378 IDs total, 349 verified, 14 implemented but unverified, 11 in progress, and 4 investigated; 29 rows remain open. `EXP-YAML-STREAMED-ASSET-PREP-001` is closed for its bounded streamed YAML branch; the generic project exporter and resource families remain incomplete.
 - Source-runtime animation conversion now has a repeatable output fixture, but Rust does not replay it and the converter is still disconnected from the product path; `PROC-ANIM-CONVERT-001` remains open. The export class-interface fixture is a union across version-specific generated types; it does not replace version-aware generated-class resolution. Shader/TextAsset precedence has a focused regression and `project_exporter` tests pass 9/9.
 - This evidence validates the local kernel and source-derived vectors. It does not close `PROC-ANIM-CUSTOM-CURVE-001`: the resolver is exercised with caller-supplied scene facts until a production `AnimationClipConverter` caller constructs them for real clip conversion.
 - No user AssetBundle content or UABEA content has been read. Phase 2 remains locked.

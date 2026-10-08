@@ -1649,11 +1649,15 @@ fn workspace_object_to_unity_yaml_document_with_context(
     }
 
     let mut streamed_export_root = None;
-    if let Some(asset_kind) = match class_id {
-        43 => Some(StreamedYamlAssetKind::Mesh),
-        189 => Some(StreamedYamlAssetKind::ImageTexture),
-        _ => None,
-    } {
+    let streamed_asset_kind = if class_id == 43 {
+        Some(StreamedYamlAssetKind::Mesh)
+    } else if crate::export::project_exporter::class_interfaces(class_id).contains(&"IImageTexture")
+    {
+        Some(StreamedYamlAssetKind::ImageTexture)
+    } else {
+        None
+    };
+    if let Some(asset_kind) = streamed_asset_kind {
         let staging_limits = streamed_resources
             .map(|context| context.staging_limits)
             .unwrap_or_default();
@@ -2795,6 +2799,35 @@ pub(crate) mod tests {
                     "m_VertexData",
                     "m_DataSize",
                 ),
+                28 => (
+                    "Texture2D",
+                    "m_StreamData",
+                    "TypelessData",
+                    "image data",
+                    "",
+                ),
+                89 => ("Cubemap", "m_StreamData", "TypelessData", "image data", ""),
+                117 => (
+                    "Texture3D",
+                    "m_StreamData",
+                    "TypelessData",
+                    "image data",
+                    "",
+                ),
+                187 => (
+                    "Texture2DArray",
+                    "m_StreamData",
+                    "TypelessData",
+                    "image data",
+                    "",
+                ),
+                188 => (
+                    "CubemapArray",
+                    "m_StreamData",
+                    "TypelessData",
+                    "image data",
+                    "",
+                ),
                 189 => (
                     "ImageTexture",
                     "m_StreamData_C189",
@@ -3899,6 +3932,88 @@ pub(crate) mod tests {
                 .unwrap(),
             &crate::serialized_file::object::SerializedValue::Bytes(Vec::new())
         );
+    }
+
+    #[test]
+    fn workspace_yaml_export_handles_every_generated_image_texture_interface_class() {
+        for class_id in [28, 89, 117, 187, 188, 189] {
+            let source_bytes = make_streamed_asset_file(class_id, false);
+            let (mut filesystem, workspace) = load_workspace_bytes(&source_bytes);
+            filesystem
+                .write_all_bytes("/game/texture.resS", b"0123456789")
+                .unwrap();
+            let catalog =
+                explicit_root_resource_catalog(&filesystem, "texture.resS", "/game/texture.resS");
+            let objects = ObjectWorkspace::load_from_vfs(
+                &filesystem,
+                &workspace,
+                ObjectWorkspaceLimits::default(),
+            )
+            .unwrap();
+            let reference_graph = workspace
+                .reference_graph(MultiFileReferenceGraphLimits::default())
+                .unwrap();
+            assert!(reference_graph.is_complete(), "class ID {class_id}");
+            assert!(
+                crate::export::project_exporter::class_interfaces(class_id)
+                    .contains(&"IImageTexture"),
+                "class ID {class_id} must come from the frozen generated interface table"
+            );
+            let identity = asset(0, 77, class_id);
+            let pointer_map = pointer_map_for_asset(identity);
+            let provider = PlatformResourceProvider::new(None, None);
+            let context = WorkspaceStreamedYamlResourceContext {
+                filesystem: &filesystem,
+                root_catalog: &catalog,
+                provider: &provider,
+                content_limits: StreamedResourceContentLimits::default(),
+                staging_limits: StreamedYamlAssetLimits::default(),
+            };
+
+            let document = workspace_object_to_unity_yaml_document_with_streamed_resources(
+                &workspace,
+                &reference_graph,
+                &pointer_map,
+                &objects.objects()[0],
+                identity,
+                77,
+                COLLECTION_INDEX,
+                None,
+                UnityYamlObjectConversionLimits::default(),
+                &context,
+            )
+            .unwrap()
+            .unwrap_or_else(|| panic!("class {class_id} unexpectedly skipped"));
+            let yaml =
+                write_unity_yaml_documents(&[document], UnityYamlWriteLimits::default()).unwrap();
+            assert!(yaml.contains("323334"), "class ID {class_id}: {yaml}");
+            assert!(yaml.contains("offset: 0"), "class ID {class_id}: {yaml}");
+            assert!(yaml.contains("size: 0"), "class ID {class_id}: {yaml}");
+            assert!(
+                !yaml.contains("texture.resS"),
+                "class ID {class_id}: {yaml}"
+            );
+
+            let payload = objects.objects()[0].payload.as_ref().unwrap();
+            let stream_field = if class_id == 189 {
+                "m_StreamData_C189"
+            } else {
+                "m_StreamData"
+            };
+            assert_eq!(
+                crate::resource::extract_streamed_resource_info(
+                    payload
+                        .root
+                        .unique_field_in_base_chain(stream_field)
+                        .unwrap()
+                        .unwrap(),
+                )
+                .unwrap()
+                .path,
+                "texture.resS",
+                "source stream remains intact for class ID {class_id}"
+            );
+        }
     }
 
     #[test]

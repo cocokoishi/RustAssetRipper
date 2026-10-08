@@ -5004,11 +5004,43 @@ mod tests {
     }
 
     fn make_streamed_image_texture_file_with_streams(streams: &[(&str, u64, u32)]) -> Vec<u8> {
+        make_streamed_texture_file_for_class(
+            189,
+            "ImageTexture",
+            "m_StreamData_C189",
+            "m_ImageData_C189",
+            "2019.4.0f1",
+            true,
+            streams,
+        )
+    }
+
+    fn make_streamed_texture2d_file(stream_path: &str, offset: u64, size: u32) -> Vec<u8> {
+        make_streamed_texture_file_for_class(
+            28,
+            "Texture2D",
+            "m_StreamData",
+            "image data",
+            "2022.3.22f1",
+            true,
+            &[(stream_path, offset, size)],
+        )
+    }
+
+    fn make_streamed_texture_file_for_class(
+        class_id: i32,
+        root_type_name: &str,
+        stream_field_name: &str,
+        inline_field_name: &str,
+        unity_version: &str,
+        offset_is_u64: bool,
+        streams: &[(&str, u64, u32)],
+    ) -> Vec<u8> {
         let mut string_buffer = Vec::new();
-        let root_type = push_type_tree_string(&mut string_buffer, "ImageTexture");
+        let root_type = push_type_tree_string(&mut string_buffer, root_type_name);
         let empty_name = push_type_tree_string(&mut string_buffer, "");
         let streaming_info_type = push_type_tree_string(&mut string_buffer, "StreamingInfo");
-        let stream_data_name = push_type_tree_string(&mut string_buffer, "m_StreamData_C189");
+        let stream_data_name = push_type_tree_string(&mut string_buffer, stream_field_name);
         let string_type = push_type_tree_string(&mut string_buffer, "string");
         let path_name = push_type_tree_string(&mut string_buffer, "path");
         let array_type = push_type_tree_string(&mut string_buffer, "Array");
@@ -5016,18 +5048,20 @@ mod tests {
         let int_type = push_type_tree_string(&mut string_buffer, "int");
         let data_name = push_type_tree_string(&mut string_buffer, "data");
         let char_type = push_type_tree_string(&mut string_buffer, "char");
-        let offset_type = push_type_tree_string(&mut string_buffer, "UInt64");
+        let offset_type_name = if offset_is_u64 { "UInt64" } else { "UInt32" };
+        let offset_type = push_type_tree_string(&mut string_buffer, offset_type_name);
         let offset_name = push_type_tree_string(&mut string_buffer, "offset");
         let uint32_type = push_type_tree_string(&mut string_buffer, "UInt32");
         let typeless_data_type = push_type_tree_string(&mut string_buffer, "TypelessData");
-        let inline_data_name = push_type_tree_string(&mut string_buffer, "m_ImageData_C189");
+        let inline_data_name = push_type_tree_string(&mut string_buffer, inline_field_name);
         let uint8_type = push_type_tree_string(&mut string_buffer, "UInt8");
 
         let mut metadata = Vec::new();
-        metadata.extend_from_slice(b"2019.4.0f1\0");
+        metadata.extend_from_slice(unity_version.as_bytes());
+        metadata.push(0);
         put_u32_le(&mut metadata, 0);
         put_i32_le(&mut metadata, 1);
-        put_i32_le(&mut metadata, 189);
+        put_i32_le(&mut metadata, class_id);
         put_i32_le(&mut metadata, 11);
         put_i32_le(&mut metadata, i32::try_from(string_buffer.len()).unwrap());
         for (level, type_offset, name_offset, byte_size, index) in [
@@ -5037,7 +5071,13 @@ mod tests {
             (3, array_type, array_type, -1, 3),
             (4, int_type, size_name, 4, 4),
             (4, char_type, data_name, 1, 5),
-            (2, offset_type, offset_name, 8, 6),
+            (
+                2,
+                offset_type,
+                offset_name,
+                if offset_is_u64 { 8 } else { 4 },
+                6,
+            ),
             (2, uint32_type, size_name, 4, 7),
             (1, typeless_data_type, inline_data_name, -1, 8),
             (2, int_type, size_name, 4, 9),
@@ -5070,15 +5110,22 @@ mod tests {
             object_payload.extend_from_slice(stream_path.as_bytes());
             let padding = (4 - object_payload.len() % 4) % 4;
             object_payload.resize(object_payload.len() + padding, 0);
-            object_payload.extend_from_slice(&stream_offset.to_le_bytes());
+            if offset_is_u64 {
+                object_payload.extend_from_slice(&stream_offset.to_le_bytes());
+            } else {
+                put_u32_le(
+                    &mut object_payload,
+                    u32::try_from(*stream_offset).expect("fixture offset fits UInt32"),
+                );
+            }
             put_u32_le(&mut object_payload, *stream_size);
             put_i32_le(&mut object_payload, 0);
 
             put_i32_le(&mut metadata, 77 + i32::try_from(object_index).unwrap());
             put_i32_le(&mut metadata, i32::try_from(byte_start).unwrap());
             put_i32_le(&mut metadata, i32::try_from(object_payload.len()).unwrap());
-            put_i32_le(&mut metadata, 189);
-            put_u16_le(&mut metadata, 189);
+            put_i32_le(&mut metadata, class_id);
+            put_u16_le(&mut metadata, class_id as u16);
             put_u16_le(&mut metadata, 0);
             payload.extend_from_slice(&object_payload);
         }
@@ -7867,6 +7914,82 @@ mod tests {
             source_meta,
             target_asset,
             target_meta,
+            output_root.join("ProjectSettings/ProjectVersion.txt"),
+            output_root.join("Packages/manifest.json"),
+        ]);
+    }
+
+    #[test]
+    fn export_project_materializes_streamed_texture2d_and_fails_closed_when_resource_is_missing() {
+        let directory = TestInputDirectory::new_root();
+        let serialized_path = directory.join("main.assets");
+        let resource_path = directory.join("texture.resS");
+        let output_root = directory.join("project");
+        let missing_output_root = directory.join("project-missing-resource");
+        let serialized_bytes = make_streamed_texture2d_file("texture.resS", 2, 3);
+        fs::write(&serialized_path, &serialized_bytes).unwrap();
+        fs::write(&resource_path, b"0123456789").unwrap();
+        fs::create_dir(&output_root).unwrap();
+        fs::create_dir(&missing_output_root).unwrap();
+        let mut input = TestInputDirectory {
+            directory,
+            files: vec![serialized_path.clone(), resource_path.clone()],
+            subdirectories: vec![
+                output_root.clone(),
+                missing_output_root.clone(),
+                output_root.join("Assets"),
+                output_root.join("Assets/Texture2D"),
+                output_root.join("ProjectSettings"),
+                output_root.join("Packages"),
+            ],
+        };
+
+        super::run(
+            [
+                std::ffi::OsString::from("export-project"),
+                output_root.clone().into_os_string(),
+                serialized_path.clone().into_os_string(),
+                resource_path.clone().into_os_string(),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+
+        let asset_path = output_root.join("Assets/Texture2D/Texture2D.texture2D");
+        let meta_path = output_root.join("Assets/Texture2D/Texture2D.texture2D.meta");
+        let yaml = fs::read_to_string(&asset_path).unwrap();
+        assert!(yaml.contains("--- !u!28 &77"));
+        assert!(yaml.contains("image data: 323334"), "{yaml}");
+        assert!(yaml.contains("offset: 0"), "{yaml}");
+        assert!(yaml.contains("size: 0"), "{yaml}");
+        assert!(!yaml.contains("texture.resS"), "{yaml}");
+        assert!(fs::read_to_string(&meta_path)
+            .unwrap()
+            .contains("NativeFormatImporter:"));
+        assert!(
+            fs::read_to_string(output_root.join("ProjectSettings/ProjectVersion.txt"))
+                .unwrap()
+                .contains("2022.3.22f1")
+        );
+        assert_eq!(fs::read(&serialized_path).unwrap(), serialized_bytes);
+        assert_eq!(fs::read(&resource_path).unwrap(), b"0123456789");
+
+        let error = super::run(
+            [
+                std::ffi::OsString::from("export-project"),
+                missing_output_root.clone().into_os_string(),
+                serialized_path.clone().into_os_string(),
+            ]
+            .into_iter(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("texture.resS"), "{error}");
+        assert_eq!(fs::read_dir(&missing_output_root).unwrap().count(), 0);
+        assert_eq!(fs::read(&serialized_path).unwrap(), serialized_bytes);
+
+        input.files.extend([
+            asset_path,
+            meta_path,
             output_root.join("ProjectSettings/ProjectVersion.txt"),
             output_root.join("Packages/manifest.json"),
         ]);

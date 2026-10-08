@@ -42,15 +42,24 @@ use crate::serialized_file::workspace::SerializedFileWorkspace;
 
 /// The decoded StreamingInfo field name a baseline YAML collection reads for each asset kind.
 ///
-/// `YamlStreamedAssetExportCollection.ExportMesh` reads the root `m_StreamData`;
-/// `ExportTexture` reads class-189 `m_StreamData_C189`. Class-28 `m_StreamData_C28` and the
-/// unsuffixed legacy `m_StreamData` are deliberately not selected for class 189.
+/// `YamlStreamedAssetExportCollection.ExportMesh` reads the generated Mesh `StreamData` field.
+/// Its serialized spelling is `m_StreamData`; the `IImageTexture` interface is implemented by
+/// several generated classes whose generated member names are class-suffixed even though current
+/// TypeTrees serialize the common field as `m_StreamData`.
 pub const fn streamed_asset_stream_field_names(
     kind: StreamedYamlAssetKind,
 ) -> &'static [&'static str] {
     match kind {
         StreamedYamlAssetKind::Mesh => &["m_StreamData"],
-        StreamedYamlAssetKind::ImageTexture => &["m_StreamData_C189"],
+        StreamedYamlAssetKind::ImageTexture => &[
+            "m_StreamData_C189",
+            "m_StreamData_C188",
+            "m_StreamData_C187",
+            "m_StreamData_C117",
+            "m_StreamData_C89",
+            "m_StreamData_C28",
+            "m_StreamData",
+        ],
     }
 }
 
@@ -427,7 +436,15 @@ mod tests {
         );
         assert_eq!(
             streamed_asset_stream_field_names(StreamedYamlAssetKind::ImageTexture),
-            &["m_StreamData_C189"]
+            &[
+                "m_StreamData_C189",
+                "m_StreamData_C188",
+                "m_StreamData_C187",
+                "m_StreamData_C117",
+                "m_StreamData_C89",
+                "m_StreamData_C28",
+                "m_StreamData",
+            ]
         );
     }
 
@@ -450,18 +467,33 @@ mod tests {
                 size: 2,
             }
         );
-        // A class-28 field is invisible to the class-189 selector.
+        // The generated Texture2D property is class-suffixed, while its current
+        // TypeTree serializes the common field without a suffix.
         let texture2d = SerializedValue::Struct(vec![field(
             "m_StreamData_C28",
             stream_value("b.resS", SerializedValue::U64(0), 1),
         )]);
-        assert!(select_streamed_asset_info(
+        let selected = select_streamed_asset_info(
             &texture2d,
             StreamedYamlAssetKind::ImageTexture,
-            Default::default()
+            Default::default(),
         )
         .unwrap()
-        .is_none());
+        .unwrap();
+        assert_eq!(selected.0, "m_StreamData_C28");
+
+        let type_tree_texture = SerializedValue::Struct(vec![field(
+            "m_StreamData",
+            stream_value("c.resS", SerializedValue::U64(2), 3),
+        )]);
+        let selected = select_streamed_asset_info(
+            &type_tree_texture,
+            StreamedYamlAssetKind::ImageTexture,
+            Default::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(selected.0, "m_StreamData");
 
         // Duplicate owner fields are reported, not resolved by pick-one.
         let duplicated = SerializedValue::Struct(vec![
