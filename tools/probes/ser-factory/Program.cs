@@ -512,6 +512,7 @@ static void Author(string rowsPath)
 		"engine_builtin_extra_underscore_shader",
 		"patch_retry_light",
 		"patch_retry_light_failed",
+		"patch_retry_light_editor",
 	];
 	string scratch = Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, "target", "ser-factory-probe"));
 	Directory.CreateDirectory(scratch);
@@ -629,6 +630,8 @@ static (string, SerializedFile) BuildCase(string name)
 			return ("patch_retry_light.assets", BuildPatchRetryFile("patch_retry_light.assets", "2017.1.0p0", "2017.1.1f0", 108));
 		case "patch_retry_light_failed":
 			return ("patch_retry_light_failed.assets", BuildPatchRetryFile("patch_retry_light_failed.assets", "2017.1.0p0", "2017.1.1f0", 108, true));
+		case "patch_retry_light_editor":
+			return ("patch_retry_light_editor.unity", BuildPatchRetryFile("patch_retry_light_editor.unity", "2017.1.0p0", "2017.1.1f0", 108, editorMode: true));
 		default:
 			throw new ArgumentException($"unknown case {name}");
 	}
@@ -673,7 +676,7 @@ static SerializedFile BuildEngineShaderFile(string collectionName)
 	return BuildFile(collectionName, version.ToString(), 48, null, payload.ToArray());
 }
 
-static SerializedFile BuildPatchRetryFile(string fileName, string serializedVersionText, string payloadVersionText, int classId, bool truncatePayload = false)
+static SerializedFile BuildPatchRetryFile(string fileName, string serializedVersionText, string payloadVersionText, int classId, bool truncatePayload = false, bool editorMode = false)
 {
 	UnityVersion payloadVersion = UnityVersion.Parse(payloadVersionText);
 	SerializedAssetCollection collection = EmptyCollection(payloadVersion);
@@ -682,14 +685,21 @@ static SerializedFile BuildPatchRetryFile(string fileName, string serializedVers
 	using MemoryStream stream = new();
 	using (AssetWriter writer = new(stream, asset.Collection))
 	{
-		asset.WriteRelease(writer);
+		if (editorMode)
+		{
+			asset.WriteEditor(writer);
+		}
+		else
+		{
+			asset.WriteRelease(writer);
+		}
 	}
 	byte[] payload = stream.ToArray();
 	if (truncatePayload)
 	{
 		Array.Resize(ref payload, payload.Length - 1);
 	}
-	return BuildFile(fileName, serializedVersionText, classId, null, payload);
+	return BuildFile(fileName, serializedVersionText, classId, null, payload, editorMode ? BuildTarget.NoTarget : (BuildTarget)19);
 }
 
 static SerializedFile BuildTextAssetFile(string versionText, string name, string script, TypeTree? tree, byte[] tail)

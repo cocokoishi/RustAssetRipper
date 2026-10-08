@@ -1488,3 +1488,27 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust behavior | Rust previously used the retry attempt's `2017.1.1f0` diagnostic. `read_normal_object` now passes the first failed `NormalAttempt` to `unreadable_from_failed` when retry also fails. Rust returns the same unreadable name/type and raw bytes and preserves the original version/platform/collection/path context. |
 | Regression evidence | `factory_differential_replays_every_reference_case` asserts the original version context in both logs, source exception type/message, Rust truncated-input diagnostic, unreadable name/type/raw length, and incomplete ObjectWorkspace state. Source stack frames are omitted from the text fixture as runtime-specific; exception type/message and input context remain. The focused regression passes 1/1. |
 | Remaining difference | The .NET reference reports an `ArgumentOutOfRangeException` and Rust reports its structured truncated-input decode error. These exception details differ by implementation; both identify the same initial Patch read and retain the same input context. Other Patch retry failures and broad factory behavior remain open under `SER-ASSET-FACTORY-001`. |
+
+## DIFF-SER-FACTORY-PATCH-RETRY-EDITOR-001 — Patch retry with editor TypeTrees
+
+| Field | Finding |
+|---|---|
+| Status | Source-matched for a NoTarget `.unity` class-108 Light input that fails its Patch-version editor read and succeeds through the editor-layout retry. |
+| Source location | `Source/AssetRipper.Import/AssetCreation/GameAssetFactory.cs`: `ReadNormalObject` performs the Patch build bump; `TryReadNormalObject` calls `asset.Read`, which uses editor serialization when the collection's read flags select it. |
+| Input evidence | `src/processing/asset_factory_fixture.txt` contains a 272-byte SerializedFile tagged `2017.1.0p0`, named `patch_retry_light_editor.unity`, SHA-256 `58516E6E22B33AFC0127CD60CFB64043C9B32A322D788A95B4BEF51AE7626166`. Its NoTarget class-108 payload is written with `WriteEditor` from the generated `2017.1.1f0` layout. |
+| Source behavior | The source factory returns generated type `Light_2017_1_0_p4` with no error log. Direct class dispatch identifies `Light_2017` at `2017.1.0p0` and `Light_2017_1_0_p4` at `2017.1.1f0`, so the returned object demonstrates that the editor-layout retry succeeded. |
+| Rust behavior | `object_read_flags` selects editor mode for the NoTarget `.unity` file. The factory retries using the bumped version, selects the editor TPK tree, returns `Light_2017_1_0_p4` with an exact payload tail, and fully materializes it through ObjectWorkspace. |
+| Regression evidence | `factory_differential_replays_every_reference_case` checks the NoTarget editor flag, input Patch version, retry type, exact tail, and complete workspace state. The fresh source probe output matches all 283 committed fixture lines. |
+| Remaining difference | This is one synthetic editor-mode class/version case. Other editor Patch retry classes and versions, Unity-produced assets, and broad generated-object semantics remain open under `SER-ASSET-FACTORY-001`. |
+
+## DIFF-SER-FACTORY-PATCH-RETRY-EDITOR-001 — Patch retry with editor TypeTrees
+
+| Field | Finding |
+|---|---|
+| Status | Source-matched for a NoTarget `.unity` class-108 Light input that fails its Patch-version editor read and succeeds through the editor-layout retry. |
+| Source location | `Source/AssetRipper.Import/AssetCreation/GameAssetFactory.cs`: `ReadNormalObject` performs the Patch build bump; `TryReadNormalObject` calls `asset.Read`, which uses editor serialization when the collection's read flags select it. |
+| Input evidence | `src/processing/asset_factory_fixture.txt` contains a 272-byte SerializedFile tagged `2017.1.0p0`, named `patch_retry_light_editor.unity`, SHA-256 `58516E6E22B33AFC0127CD60CFB64043C9B32A322D788A95B4BEF51AE7626166`. Its NoTarget class-108 payload is written with `WriteEditor` from the generated `2017.1.1f0` layout. |
+| Source behavior | The source factory returns generated type `Light_2017_1_0_p4` with no error log. Direct class dispatch identifies `Light_2017` at `2017.1.0p0` and `Light_2017_1_0_p4` at `2017.1.1f0`, so the returned object demonstrates that the editor-layout retry succeeded. |
+| Rust behavior | `object_read_flags` selects editor mode for the NoTarget `.unity` file. The factory retries using the bumped version, selects the editor TPK tree, returns `Light_2017_1_0_p4` with an exact payload tail, and fully materializes it through ObjectWorkspace. |
+| Regression evidence | `factory_differential_replays_every_reference_case` checks the NoTarget editor flag, input Patch version, retry type, exact tail, and complete workspace state. The fresh source probe output matches all 283 committed fixture lines. |
+| Remaining difference | This is one synthetic editor-mode class/version case. Other editor Patch retry classes and versions, Unity-produced assets, and broad generated-object semantics remain open under `SER-ASSET-FACTORY-001`. |
