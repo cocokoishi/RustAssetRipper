@@ -85,11 +85,12 @@ if (args is ["--inspect-material"])
 }
 
 if (args.Length == 2
-    && args[0] is "--export-material" or "--export-material-rich" or "--export-material-2018-3")
+    && args[0] is "--export-material" or "--export-material-rich" or "--export-material-2018-3" or "--export-material-2017-4")
 {
     string materialOutputRoot = args[1];
-    bool includeSavedProperties = args[0] is "--export-material-rich" or "--export-material-2018-3";
+    bool includeSavedProperties = args[0] is "--export-material-rich" or "--export-material-2018-3" or "--export-material-2017-4";
     bool use2018_3 = args[0] == "--export-material-2018-3";
+    bool use2017_4 = args[0] == "--export-material-2017-4";
     string materialOutputRootFull = Path.GetFullPath(materialOutputRoot);
     if (Directory.Exists(materialOutputRootFull) && Directory.EnumerateFileSystemEntries(materialOutputRootFull).Any())
     {
@@ -97,7 +98,8 @@ if (args.Length == 2
         return 2;
     }
     Logger.Add(new ConsoleLogger());
-    UnityVersion materialVersion = UnityVersion.Parse(use2018_3 ? "2018.3.0f1" : "2018.2.21f1");
+    string materialVersionText = use2018_3 ? "2018.3.0f1" : use2017_4 ? "2017.4.40f1" : "2018.2.21f1";
+    UnityVersion materialVersion = UnityVersion.Parse(materialVersionText);
     GameBundle materialBundle = new();
     var materialCollection = materialBundle.AddNewProcessedCollection("Material", materialVersion);
     IShader shader;
@@ -109,6 +111,14 @@ if (args.Length == 2
         shader2018_3.Script = new Utf8String("Shader \"ShaderFixture\" { }\n");
         shader = shader2018_3;
         material = materialCollection.CreateAsset(21, assetInfo => new Material_2018_3(assetInfo));
+    }
+    else if (use2017_4)
+    {
+        Shader_2017_3 shader2017_4 = materialCollection.CreateAsset(48, assetInfo => new Shader_2017_3(assetInfo));
+        shader2017_4.Name = new Utf8String("ShaderFixture");
+        shader2017_4.Script = new Utf8String("Shader \"ShaderFixture\" { }\n");
+        shader = shader2017_4;
+        material = materialCollection.CreateAsset(21, assetInfo => new Material_2017_1_0_b9(assetInfo));
     }
     else
     {

@@ -1370,6 +1370,11 @@ where
     }
     if source.class_id == 21 && field_mode == UnityYamlObjectFieldMode::ProjectAsset && !stripped {
         let editor_fields: Option<&[&str]> = match (unity_version.major, unity_version.minor) {
+            (2017, 4) => Some(&[
+                "m_ObjectHideFlags",
+                "m_PrefabParentObject",
+                "m_PrefabInternal",
+            ]),
             (2018, 2) => Some(&[
                 "m_ObjectHideFlags",
                 "m_CorrespondingSourceObject",

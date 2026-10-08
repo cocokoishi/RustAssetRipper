@@ -8256,6 +8256,13 @@ mod tests {
         )
     }
 
+    fn material_2017_4_tpk_release_tree() -> assetripper::serialized_file::metadata::TypeTree {
+        material_tpk_release_tree(
+            include_str!("export/material_tpk_2017_4_fixture.txt"),
+            "TPK|21|2017.4.40f1|release",
+        )
+    }
+
     fn material_tpk_release_tree(
         fixture: &str,
         release_header: &str,
@@ -8351,6 +8358,14 @@ mod tests {
         make_material_file_with_reference_tpk_and_properties(
             b"2018.3.0f1\0",
             material_2018_3_tpk_release_tree(),
+            true,
+        )
+    }
+
+    fn make_material_file_with_reference_2017_4_tpk_and_saved_properties() -> Vec<u8> {
+        make_material_file_with_reference_tpk_and_properties(
+            b"2017.4.40f1\0",
+            material_2017_4_tpk_release_tree(),
             true,
         )
     }
@@ -9556,6 +9571,70 @@ mod tests {
         assert_eq!(
             normalized,
             include_str!("export/material_project_2018_3_fixture.yaml")
+        );
+
+        input.files.extend(
+            project_tree(&output_root)
+                .iter()
+                .map(|path| output_root.join(path)),
+        );
+        drop(input);
+    }
+
+    #[test]
+    fn export_project_material_yaml_matches_the_reference_2017_4_project_probe() {
+        let directory = TestInputDirectory::new_root();
+        let assets_directory = directory.join("assets");
+        fs::create_dir(&assets_directory).unwrap();
+        let output_root = directory.join("project");
+        fs::create_dir(&output_root).unwrap();
+        let material_path = assets_directory.join("material.assets");
+        let shader_path = assets_directory.join("shader.assets");
+        fs::write(
+            &material_path,
+            make_material_file_with_reference_2017_4_tpk_and_saved_properties(),
+        )
+        .unwrap();
+        fs::write(
+            &shader_path,
+            make_shader_file_with_non_modifiable_texture_null(),
+        )
+        .unwrap();
+        let mut input = TestInputDirectory {
+            directory,
+            files: vec![material_path.clone(), shader_path.clone()],
+            subdirectories: vec![
+                assets_directory,
+                output_root.clone(),
+                output_root.join("Assets"),
+                output_root.join("Assets/Material"),
+                output_root.join("Assets/Shader"),
+                output_root.join("ProjectSettings"),
+                output_root.join("Packages"),
+            ],
+        };
+
+        super::export_project_to(
+            &[material_path, shader_path],
+            &output_root,
+            false,
+            &default_export_settings(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+
+        let shader_meta =
+            fs::read_to_string(output_root.join("Assets/Shader/Test_Simple.shader.meta")).unwrap();
+        let shader_guid = shader_meta
+            .lines()
+            .find_map(|line| line.strip_prefix("guid: "))
+            .expect("exported Shader sidecar has a GUID");
+        let material_yaml =
+            fs::read_to_string(output_root.join("Assets/Material/MaterialFixture.mat")).unwrap();
+        let normalized = material_yaml.replace(shader_guid, "<SHADER_GUID>");
+        assert_eq!(
+            normalized,
+            include_str!("export/material_project_2017_4_fixture.yaml")
         );
 
         input.files.extend(
