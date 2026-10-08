@@ -88,6 +88,20 @@ impl Default for SerializedFileWorkspaceLimits {
     }
 }
 
+/// Options for resolving a SerializedFile workspace and its external dependencies.
+pub struct SerializedFileWorkspaceLoadOptions<'a> {
+    /// Ordered Unity `DataPaths` used for external-file lookup.
+    pub data_paths: &'a [String],
+    /// Bounds applied while loading files and walking dependencies.
+    pub limits: SerializedFileWorkspaceLimits,
+    /// Bounds applied while indexing dependency candidates.
+    pub index_limits: DependencyIndexLimits,
+    /// Bounds applied while mounting dependency containers.
+    pub container_limits: ContainerMountLimits,
+    /// Generated-class and TPK layout provider for object materialization.
+    pub layouts: &'a dyn crate::processing::asset_factory::ClassLayoutSource,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SerializedFileWorkspaceReport {
     pub input_files: usize,
@@ -600,6 +614,29 @@ impl SerializedFileWorkspace {
         inputs: &[DependencyFilePath],
         limits: SerializedFileWorkspaceLimits,
     ) -> Result<Self, Box<SerializedFileWorkspaceError>> {
+        Self::load_from_vfs_inner(
+            filesystem,
+            inputs,
+            limits,
+            crate::processing::asset_factory::reference_class_layouts(),
+        )
+    }
+
+    pub fn load_from_vfs_with_layout_source(
+        filesystem: &VirtualFileSystem,
+        inputs: &[DependencyFilePath],
+        limits: SerializedFileWorkspaceLimits,
+        layouts: &dyn crate::processing::asset_factory::ClassLayoutSource,
+    ) -> Result<Self, Box<SerializedFileWorkspaceError>> {
+        Self::load_from_vfs_inner(filesystem, inputs, limits, layouts)
+    }
+
+    fn load_from_vfs_inner(
+        filesystem: &VirtualFileSystem,
+        inputs: &[DependencyFilePath],
+        limits: SerializedFileWorkspaceLimits,
+        layouts: &dyn crate::processing::asset_factory::ClassLayoutSource,
+    ) -> Result<Self, Box<SerializedFileWorkspaceError>> {
         let mut report = SerializedFileWorkspaceReport {
             input_files: inputs.len(),
             ..SerializedFileWorkspaceReport::default()
@@ -782,7 +819,7 @@ impl SerializedFileWorkspace {
                     limits.reference_graph,
                     &input.file_name,
                     &input.virtual_path,
-                    crate::processing::asset_factory::reference_class_layouts(),
+                    layouts,
                 )
                 .map_err(|source| {
                     workspace_error(
@@ -886,7 +923,7 @@ impl SerializedFileWorkspace {
         index_limits: DependencyIndexLimits,
         container_limits: ContainerMountLimits,
     ) -> Result<(Self, SerializedFileDependencyReport), Box<SerializedFileWorkspaceError>> {
-        Self::load_from_vfs_with_preexpanded_containers(
+        Self::load_from_vfs_with_preexpanded_containers_inner(
             filesystem,
             inputs,
             registered_files,
@@ -897,14 +934,53 @@ impl SerializedFileWorkspace {
                 container_limits,
                 preexpanded_containers: &[],
             },
+            crate::processing::asset_factory::reference_class_layouts(),
         )
     }
 
-    pub(crate) fn load_from_vfs_with_preexpanded_containers(
+    pub fn load_from_vfs_with_dependencies_and_layout_source(
+        filesystem: &mut VirtualFileSystem,
+        inputs: &[DependencyFilePath],
+        registered_files: &[DependencyFilePath],
+        options: SerializedFileWorkspaceLoadOptions<'_>,
+    ) -> Result<(Self, SerializedFileDependencyReport), Box<SerializedFileWorkspaceError>> {
+        Self::load_from_vfs_with_preexpanded_containers_inner(
+            filesystem,
+            inputs,
+            registered_files,
+            SerializedFileDependencyLoadOptions {
+                data_paths: options.data_paths,
+                limits: options.limits,
+                index_limits: options.index_limits,
+                container_limits: options.container_limits,
+                preexpanded_containers: &[],
+            },
+            options.layouts,
+        )
+    }
+
+    pub(crate) fn load_from_vfs_with_preexpanded_containers_and_layout_source(
         filesystem: &mut VirtualFileSystem,
         inputs: &[DependencyFilePath],
         registered_files: &[DependencyFilePath],
         options: SerializedFileDependencyLoadOptions<'_>,
+        layouts: &dyn crate::processing::asset_factory::ClassLayoutSource,
+    ) -> Result<(Self, SerializedFileDependencyReport), Box<SerializedFileWorkspaceError>> {
+        Self::load_from_vfs_with_preexpanded_containers_inner(
+            filesystem,
+            inputs,
+            registered_files,
+            options,
+            layouts,
+        )
+    }
+
+    fn load_from_vfs_with_preexpanded_containers_inner(
+        filesystem: &mut VirtualFileSystem,
+        inputs: &[DependencyFilePath],
+        registered_files: &[DependencyFilePath],
+        options: SerializedFileDependencyLoadOptions<'_>,
+        layouts: &dyn crate::processing::asset_factory::ClassLayoutSource,
     ) -> Result<(Self, SerializedFileDependencyReport), Box<SerializedFileWorkspaceError>> {
         let SerializedFileDependencyLoadOptions {
             data_paths,
@@ -913,7 +989,7 @@ impl SerializedFileWorkspace {
             container_limits,
             preexpanded_containers,
         } = options;
-        let mut workspace = Self::load_from_vfs(filesystem, inputs, limits)?;
+        let mut workspace = Self::load_from_vfs_inner(filesystem, inputs, limits, layouts)?;
         let mut dynamic_registered_files = Vec::new();
         dynamic_registered_files
             .try_reserve_exact(registered_files.len())
@@ -1286,6 +1362,7 @@ impl SerializedFileWorkspace {
                                             &mut workspace,
                                             &mut loaded_names,
                                             &mut loaded_paths,
+                                            layouts,
                                         )?;
                                         dependency_report.loaded_serialized_files = dependency_report
                                             .loaded_serialized_files
@@ -1562,6 +1639,7 @@ impl SerializedFileWorkspace {
                                                             &mut workspace,
                                                             &mut loaded_names,
                                                             &mut loaded_paths,
+                                                            layouts,
                                                         )?;
                                                         serialized_files_loaded =
                                                             serialized_files_loaded.checked_add(1).ok_or_else(|| {
@@ -3492,6 +3570,7 @@ fn load_dependency_serialized_file(
     workspace: &mut SerializedFileWorkspace,
     loaded_names: &mut HashMap<String, (usize, usize)>,
     loaded_paths: &mut HashMap<String, usize>,
+    layouts: &dyn crate::processing::asset_factory::ClassLayoutSource,
 ) -> Result<usize, Box<SerializedFileWorkspaceError>> {
     let requested_file_count = workspace.files.len().checked_add(1).ok_or_else(|| {
         workspace_error(
@@ -3521,10 +3600,11 @@ fn load_dependency_serialized_file(
         )
     })?;
 
-    let additional = SerializedFileWorkspace::load_from_vfs(
+    let additional = SerializedFileWorkspace::load_from_vfs_inner(
         filesystem,
         std::slice::from_ref(input),
         remaining_workspace_limits(limits, workspace.report, workspace.files.len()),
+        layouts,
     )
     .map_err(|mut error| {
         error.report = workspace.report;
@@ -4078,7 +4158,8 @@ mod tests {
         append_mounted_container_bundles, collection_lookup_candidates,
         engine_resource_collection_alias, fix_file_identifier, SerializedFileDependencyOutcome,
         SerializedFileWorkspace, SerializedFileWorkspaceErrorKind, SerializedFileWorkspaceLimits,
-        SerializedFileWorkspaceReport, WorkspaceSerializedBundle,
+        SerializedFileWorkspaceLoadOptions, SerializedFileWorkspaceReport,
+        WorkspaceSerializedBundle,
     };
     use crate::io::dependency::{DependencyFilePath, DependencyIndexLimits};
     use crate::io::filesystem::VirtualFileSystem;
@@ -4086,6 +4167,7 @@ mod tests {
         PlatformWorkspaceLoadErrorKind, PlatformWorkspaceLoadOptions,
     };
     use crate::io::platform_structure::{PlatformKind, PlatformStructure};
+    use crate::processing::asset_factory::FileTypeTreeTestLayouts;
     use crate::scheme::{
         ContainerMountErrorKind, ContainerMountLimits, FileKind, MountedContainerBundle,
         MountedResourceFile,
@@ -4849,7 +4931,7 @@ mod tests {
     }
 
     #[test]
-    fn decoded_object_workspace_retains_identity_values_and_raw_fallback_ranges() {
+    fn object_workspace_retains_factory_failure_and_raw_fallback_ranges() {
         let bytes = make_generation_10_file();
         let filesystem = virtual_file_system("/game/main.assets", &bytes);
         let workspace = SerializedFileWorkspace::load_from_vfs(
@@ -4865,8 +4947,10 @@ mod tests {
         )
         .unwrap();
 
-        assert!(decoded.report().is_complete());
+        assert!(!decoded.report().is_complete());
         assert_eq!(decoded.report().object_count, 1);
+        assert_eq!(decoded.report().decoded_objects, 0);
+        assert_eq!(decoded.report().undecoded_objects, 1);
         let object = &decoded.objects()[0];
         let source_object = &workspace.files()[0].metadata.objects[0];
         assert_eq!(object.file_index, 0);
@@ -4885,9 +4969,17 @@ mod tests {
         assert_eq!(object.script_type_index, source_object.script_type_index);
         assert_eq!(object.is_destroyed, source_object.is_destroyed);
         assert_eq!(object.is_stripped, source_object.is_stripped);
-        let Ok(payload) = &object.payload else {
-            panic!("fixture object should decode: {:?}", object.payload);
-        };
+        assert_eq!(
+            object.factory.kind,
+            crate::processing::asset_factory::FactoryAssetKind::Unreadable
+        );
+        assert!(object.payload.is_err());
+
+        // This deliberately malformed class-1 fixture still exercises the generic reader
+        // directly; the product ObjectWorkspace must honor GameAssetFactory's generated
+        // GameObject layout instead of trusting the incompatible custom TypeTree.
+        let parsed = SerializedFile::parse(&bytes).unwrap();
+        let payload = parsed.decode_object_payload(0).unwrap();
         assert_eq!(payload.path_id, 42);
         assert_eq!(
             payload.root,
@@ -4906,9 +4998,26 @@ mod tests {
             ])
         );
 
+        let fixture = crate::processing::asset_factory::PROBE_FIXTURE;
+        let raw_hex = fixture
+            .lines()
+            .find_map(|line| line.strip_prefix("SF_HEX|textasset_notree|"))
+            .expect("the source-factory fixture includes a valid no-TypeTree TextAsset");
+        let raw_bytes = raw_hex
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect::<Vec<_>>();
+        let raw_filesystem = virtual_file_system("/game/textasset.assets", &raw_bytes);
+        let raw_workspace = SerializedFileWorkspace::load_from_vfs(
+            &raw_filesystem,
+            &[input("/game/textasset.assets")],
+            SerializedFileWorkspaceLimits::default(),
+        )
+        .unwrap();
         let raw_limited = ObjectWorkspace::load_from_vfs(
-            &filesystem,
-            &workspace,
+            &raw_filesystem,
+            &raw_workspace,
             ObjectWorkspaceLimits {
                 max_total_decoded_allocation_bytes: 0,
                 ..ObjectWorkspaceLimits::default()
@@ -4918,26 +5027,35 @@ mod tests {
         assert!(!raw_limited.report().is_complete());
         assert_eq!(raw_limited.report().decoded_objects, 0);
         assert_eq!(raw_limited.report().undecoded_objects, 1);
-        assert_eq!(raw_limited.report().total_undecoded_raw_bytes, 12);
+        let raw_length = raw_limited.objects()[0].raw_payload_range.end
+            - raw_limited.objects()[0].raw_payload_range.start;
+        assert_eq!(
+            raw_limited.report().total_undecoded_raw_bytes,
+            usize::try_from(raw_length).unwrap()
+        );
         assert!(matches!(
-            &raw_limited.objects()[0].payload,
-            Err(error)
-                if matches!(error.kind(),
-                    crate::serialized_file::file::SerializedFileErrorKind::Object(
-                        object_error
-                    )
-                    if matches!(
-                        object_error.kind(),
-                        crate::serialized_file::object::ObjectDecodeErrorKind::DecodeLimitExceeded {
-                            limit: 0,
-                            ..
-                        }
-                    )
-                )
+            raw_limited.objects()[0].factory.kind,
+            crate::processing::asset_factory::FactoryAssetKind::Unreadable
         ));
+        assert!(
+            raw_limited.objects()[0]
+                .factory
+                .log_message
+                .as_deref()
+                .is_some_and(|message| message.contains("configured limit 0")),
+            "factory diagnostic: {:?}",
+            raw_limited.objects()[0].factory.log_message
+        );
         let start = usize::try_from(raw_limited.objects()[0].raw_payload_range.start).unwrap();
         let end = usize::try_from(raw_limited.objects()[0].raw_payload_range.end).unwrap();
-        assert_eq!(&bytes[start..end], &bytes[bytes.len() - 12..]);
+        let parsed_raw = SerializedFile::parse(&raw_bytes).unwrap();
+        let source_range = parsed_raw.metadata.objects[0]
+            .data_range(&parsed_raw.header)
+            .unwrap();
+        assert_eq!(raw_limited.objects()[0].raw_payload_range, source_range);
+        let source_start = usize::try_from(source_range.start).unwrap();
+        let source_end = usize::try_from(source_range.end).unwrap();
+        assert_eq!(&raw_bytes[start..end], &raw_bytes[source_start..source_end]);
     }
 
     #[test]
@@ -5270,8 +5388,10 @@ mod tests {
             crate::serialized_file::file::SerializedFileErrorKind::Object(object_error)
                 if matches!(
                     object_error.kind(),
-                    crate::serialized_file::object::ObjectDecodeErrorKind::MissingTypeTree { .. }
-                        | crate::serialized_file::object::ObjectDecodeErrorKind::EmptyTypeTree { .. }
+                    crate::serialized_file::object::ObjectDecodeErrorKind::FactoryObjectOutcome {
+                        class_id: 7,
+                        ..
+                    }
                 )
         ));
     }
@@ -5392,10 +5512,11 @@ mod tests {
         let bytes = make_generation_10_file();
         let filesystem = virtual_file_system("/game/main.assets", &bytes);
         let inputs = [input("/game/main.assets")];
-        let workspace = SerializedFileWorkspace::load_from_vfs(
+        let workspace = SerializedFileWorkspace::load_from_vfs_with_layout_source(
             &filesystem,
             &inputs,
             SerializedFileWorkspaceLimits::default(),
+            &FileTypeTreeTestLayouts,
         )
         .unwrap();
 
@@ -6464,14 +6585,17 @@ mod tests {
         let data_paths = ["/game/Data".to_owned()];
 
         let (workspace, dependency_report) =
-            SerializedFileWorkspace::load_from_vfs_with_dependencies(
+            SerializedFileWorkspace::load_from_vfs_with_dependencies_and_layout_source(
                 &mut filesystem,
                 &inputs,
                 &[],
-                &data_paths,
-                SerializedFileWorkspaceLimits::default(),
-                DependencyIndexLimits::default(),
-                ContainerMountLimits::default(),
+                SerializedFileWorkspaceLoadOptions {
+                    data_paths: &data_paths,
+                    limits: SerializedFileWorkspaceLimits::default(),
+                    index_limits: DependencyIndexLimits::default(),
+                    container_limits: ContainerMountLimits::default(),
+                    layouts: &FileTypeTreeTestLayouts,
+                },
             )
             .unwrap();
 
@@ -6665,14 +6789,17 @@ mod tests {
         let data_paths = ["/game".to_owned()];
 
         let (workspace, dependency_report) =
-            SerializedFileWorkspace::load_from_vfs_with_dependencies(
+            SerializedFileWorkspace::load_from_vfs_with_dependencies_and_layout_source(
                 &mut filesystem,
                 &inputs,
                 &[],
-                &data_paths,
-                SerializedFileWorkspaceLimits::default(),
-                DependencyIndexLimits::default(),
-                ContainerMountLimits::default(),
+                SerializedFileWorkspaceLoadOptions {
+                    data_paths: &data_paths,
+                    limits: SerializedFileWorkspaceLimits::default(),
+                    index_limits: DependencyIndexLimits::default(),
+                    container_limits: ContainerMountLimits::default(),
+                    layouts: &FileTypeTreeTestLayouts,
+                },
             )
             .unwrap();
 

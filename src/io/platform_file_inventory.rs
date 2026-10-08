@@ -228,6 +228,41 @@ impl PlatformStructure {
         additional_registered_files: &[DependencyFilePath],
         additional_data_paths: &[String],
     ) -> Result<PlatformWorkspaceLoadResult, PlatformWorkspaceLoadError> {
+        self.load_primary_serialized_workspace_with_additional_inputs_and_layout_source(
+            filesystem,
+            options,
+            additional_inputs,
+            additional_registered_files,
+            additional_data_paths,
+            crate::processing::asset_factory::reference_class_layouts(),
+        )
+    }
+
+    pub fn load_primary_serialized_workspace_with_layout_source(
+        &self,
+        filesystem: &mut VirtualFileSystem,
+        options: PlatformWorkspaceLoadOptions,
+        layouts: &dyn crate::processing::asset_factory::ClassLayoutSource,
+    ) -> Result<PlatformWorkspaceLoadResult, PlatformWorkspaceLoadError> {
+        self.load_primary_serialized_workspace_with_additional_inputs_and_layout_source(
+            filesystem,
+            options,
+            &[],
+            &[],
+            &[],
+            layouts,
+        )
+    }
+
+    pub fn load_primary_serialized_workspace_with_additional_inputs_and_layout_source(
+        &self,
+        filesystem: &mut VirtualFileSystem,
+        options: PlatformWorkspaceLoadOptions,
+        additional_inputs: &[DependencyFilePath],
+        additional_registered_files: &[DependencyFilePath],
+        additional_data_paths: &[String],
+        layouts: &dyn crate::processing::asset_factory::ClassLayoutSource,
+    ) -> Result<PlatformWorkspaceLoadResult, PlatformWorkspaceLoadError> {
         let file_inventory = self
             .collect_game_files(
                 filesystem,
@@ -286,7 +321,7 @@ impl PlatformStructure {
             }
         }
         let (workspace, dependencies) =
-            SerializedFileWorkspace::load_from_vfs_with_preexpanded_containers(
+            SerializedFileWorkspace::load_from_vfs_with_preexpanded_containers_and_layout_source(
                 filesystem,
                 &inputs,
                 &registered_files,
@@ -297,6 +332,7 @@ impl PlatformStructure {
                     container_limits: options.container_mount_limits,
                     preexpanded_containers: &imported.preexpanded_containers,
                 },
+                layouts,
             )
             .map_err(|error| {
                 PlatformWorkspaceLoadError::new(PlatformWorkspaceLoadErrorKind::Workspace(error))

@@ -225,6 +225,32 @@ pub fn export_workspace_yaml_project_with_settings(
             limits.max_objects
         )));
     }
+    if !objects.report().is_complete() {
+        let incomplete_objects = objects
+            .objects()
+            .iter()
+            .filter(|object| !object.is_fully_materialized())
+            .take(4)
+            .map(|object| {
+                let detail = object
+                    .payload
+                    .as_ref()
+                    .err()
+                    .map(ToString::to_string)
+                    .or_else(|| object.factory.log_message.clone())
+                    .unwrap_or_else(|| "the source factory retained unread structure data".into());
+                format!(
+                    "file {} object {} PathID {} ({:?}): {detail}",
+                    object.file_index, object.object_index, object.path_id, object.factory.kind
+                )
+            })
+            .collect::<Vec<_>>();
+        return Err(invalid_project(format!(
+            "project export requires every input object to be fully materialized; {} object(s) are incomplete: [{}]",
+            objects.report().undecoded_objects,
+            incomplete_objects.join("; ")
+        )));
+    }
     if !reference_graph.is_complete() {
         let incomplete_scans = (0..reference_graph.file_count())
             .filter_map(|file_index| {
@@ -2092,14 +2118,16 @@ mod tests {
     use crate::export::settings::ExportDefaults;
     use crate::export::settings_file::ExportSettingsFile;
     use crate::export::workspace_yaml::tests::{
-        load_workspace_bytes, make_existing_prefab_instance_file,
-        make_game_object_without_transform_file,
+        load_workspace_bytes, load_workspace_bytes_with_source_factory,
+        make_existing_prefab_instance_file, make_game_object_without_transform_file,
     };
     use crate::io::platform_structure::PlatformResourceProvider;
     use crate::processing::scene_naming::SceneUnityVersion;
     use crate::resource::RootResourceFileCatalog;
     use crate::serialized_file::object_workspace::{ObjectWorkspace, ObjectWorkspaceLimits};
-    use crate::serialized_file::reference_graph::MultiFileReferenceGraphLimits;
+    use crate::serialized_file::reference_graph::{
+        MultiFilePPtrResolution, MultiFileReferenceGraphLimits,
+    };
 
     #[test]
     fn project_collection_guids_are_nonzero_and_unique_per_collection() {
@@ -2142,20 +2170,17 @@ mod tests {
     fn project_export_writes_a_processed_prefab_collection_with_generated_transform() {
         let bytes = make_game_object_without_transform_file();
         let (filesystem, workspace) = load_workspace_bytes(&bytes);
-        let objects = ObjectWorkspace::load_from_vfs(
+        let objects = ObjectWorkspace::load_from_vfs_with_layout_source(
             &filesystem,
             &workspace,
             ObjectWorkspaceLimits::default(),
+            &crate::processing::asset_factory::FileTypeTreeTestLayouts,
         )
         .unwrap();
         assert!(objects.report().is_complete(), "{:?}", objects.report());
         let reference_graph = workspace
             .reference_graph(MultiFileReferenceGraphLimits::default())
             .unwrap();
-        assert!(
-            reference_graph.is_complete(),
-            "reference graph is incomplete"
-        );
         let root_catalog = RootResourceFileCatalog::default();
         let provider = PlatformResourceProvider::new(None, None);
         let settings = ExportSettingsFile::from(ExportDefaults::default());
@@ -2215,7 +2240,7 @@ mod tests {
         if let Ok(path) = std::env::var("ASSET_RIPPER_REFERENCE_PREFAB_FIXTURE") {
             std::fs::write(path, &bytes).unwrap();
         }
-        let (filesystem, workspace) = load_workspace_bytes(&bytes);
+        let (filesystem, workspace) = load_workspace_bytes_with_source_factory(&bytes);
         let objects = ObjectWorkspace::load_from_vfs(
             &filesystem,
             &workspace,
@@ -2235,12 +2260,58 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert!(objects.report().is_complete(), "{:?}", objects.report());
+        assert_eq!(objects.objects().len(), 3);
+        assert_eq!(
+            objects.get(0, 0).unwrap().factory.kind,
+            crate::processing::asset_factory::FactoryAssetKind::Generated(
+                "GameObject_2018_3".to_owned()
+            )
+        );
+        assert_eq!(objects.get(0, 0).unwrap().factory.name, "Root");
+        assert_eq!(
+            objects.get(0, 1).unwrap().factory.kind,
+            crate::processing::asset_factory::FactoryAssetKind::Generated(
+                "Transform_2018_3".to_owned()
+            )
+        );
+        assert_eq!(
+            objects.get(0, 2).unwrap().factory.kind,
+            crate::processing::asset_factory::FactoryAssetKind::Generated(
+                "PrefabInstance_2018_3".to_owned()
+            )
+        );
         let reference_graph = workspace
             .reference_graph(MultiFileReferenceGraphLimits::default())
             .unwrap();
         assert!(
             reference_graph.is_complete(),
             "reference graph is incomplete"
+        );
+        let resolves_to = |source_path_id, target_path_id| {
+            reference_graph.references().iter().any(|reference| {
+                reference.source_path_id == source_path_id
+                    && reference.path_id == target_path_id
+                    && reference.file_id == 0
+                    && matches!(
+                        reference.resolution,
+                        MultiFilePPtrResolution::Object {
+                            target_file_index: 0,
+                            ..
+                        }
+                    )
+            })
+        };
+        assert!(
+            resolves_to(10, 11),
+            "GameObject component PPtr was not retained"
+        );
+        assert!(
+            resolves_to(11, 10),
+            "Transform-to-GameObject PPtr was not retained"
+        );
+        assert!(
+            resolves_to(12, 10),
+            "PrefabInstance root PPtr was not retained"
         );
         let root_catalog = RootResourceFileCatalog::default();
         let provider = PlatformResourceProvider::new(None, None);

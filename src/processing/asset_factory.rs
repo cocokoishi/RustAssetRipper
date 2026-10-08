@@ -26,8 +26,10 @@
 //! `Temp/opencode/monoutilsprobe` resolving all 21 engine names at 2019.4.0f1, SDK
 //! 10.0.401); the dispatch and fallback rules are source-read over caller facts.
 
-use crate::processing::source_factory_dispatch::{SourceFactoryDispatch, SourceFactoryLookupError};
-use crate::processing::source_tpk::{SourceTpkDatabase, SourceTpkLookupError, SourceTpkTrees};
+use crate::processing::source_factory_dispatch::SourceFactoryDispatch;
+pub use crate::processing::source_factory_dispatch::SourceFactoryLookupError;
+use crate::processing::source_tpk::SourceTpkDatabase;
+pub use crate::processing::source_tpk::{SourceTpkLookupError, SourceTpkTrees};
 use crate::resources::blend_shape::crc32_ieee;
 
 /// The class ID routed to the MonoBehaviour read path.
@@ -848,6 +850,32 @@ pub trait ClassLayoutSource {
     ) -> Result<Option<SourceTpkTrees>, SourceTpkLookupError>;
 }
 
+/// A schema source for synthetic module fixtures that intentionally exercise arbitrary file
+/// TypeTrees. Production entry points use `reference_class_layouts`; this test source makes no
+/// claim about AssetRipper compatibility and must not be used as parity evidence.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct FileTypeTreeTestLayouts;
+
+#[cfg(test)]
+impl ClassLayoutSource for FileTypeTreeTestLayouts {
+    fn generated_class_name(
+        &self,
+        _class_id: i32,
+        _version: &FactoryUnityVersion,
+    ) -> Result<Option<&str>, SourceFactoryLookupError> {
+        Ok(Some("SyntheticTypeTreeTestObject"))
+    }
+
+    fn tpk_trees(
+        &self,
+        _class_id: i32,
+        _version: &FactoryUnityVersion,
+    ) -> Result<Option<SourceTpkTrees>, SourceTpkLookupError> {
+        Ok(None)
+    }
+}
+
 /// Which `CreateAsset` branch produced an asset.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FactoryAssetKind {
@@ -920,6 +948,108 @@ pub struct FactoryAsset {
     pub log_message: Option<String>,
 }
 
+/// The source-factory result retained by `ObjectWorkspace`. Raw object bytes stay in the VFS and
+/// are addressed by the workspace object's byte range, so this view does not duplicate them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FactoryObjectState {
+    pub object_index: usize,
+    pub path_id: i64,
+    pub class_id: i32,
+    pub kind: FactoryAssetKind,
+    pub class_name: Cow<'static, str>,
+    pub name: String,
+    pub tail: Option<ObjectTailOutcome>,
+    pub chinese_texture_fields: Option<ChineseTextureFields>,
+    pub structure: Option<FactoryStructure>,
+    pub log_level: FactoryLogLevel,
+    pub log_message: Option<String>,
+}
+
+impl FactoryObjectState {
+    /// Whether this source-factory result and its decoded value represent the full serialized
+    /// object rather than a raw or partially read fallback.
+    pub fn is_fully_materialized(&self, payload: Option<&ParsedObjectPayload>) -> bool {
+        let Some(payload) = payload else {
+            return false;
+        };
+        if !self.kind.is_recoverable()
+            || self.log_level == FactoryLogLevel::Error
+            || self.tail == Some(ObjectTailOutcome::IncorrectByteCount)
+        {
+            return false;
+        }
+        let tail_is_complete = match self.tail {
+            Some(ObjectTailOutcome::Exact) => payload.trailing_bytes.is_empty(),
+            Some(ObjectTailOutcome::ZeroPadding | ObjectTailOutcome::ChineseTextureFields) => true,
+            Some(ObjectTailOutcome::IncorrectByteCount) => false,
+            None => payload.trailing_bytes.is_empty(),
+        };
+        if !tail_is_complete {
+            return false;
+        }
+        match self.structure.as_ref().map(|structure| structure.outcome) {
+            Some(MonoBehaviourStructureOutcome::UseParsedStructure) | None => true,
+            Some(
+                MonoBehaviourStructureOutcome::ClearStructure
+                | MonoBehaviourStructureOutcome::UseUnloadedRemainder
+                | MonoBehaviourStructureOutcome::KeepExisting,
+            ) => false,
+        }
+    }
+}
+
+/// Typed source-factory values for one workspace object, without a second raw-byte copy.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FactoryObjectMaterialization {
+    pub state: FactoryObjectState,
+    pub payload: Option<ParsedObjectPayload>,
+}
+
+impl FactoryObjectMaterialization {
+    /// Whether the factory recovered all serialized values needed to represent this object.
+    /// An unloaded MonoBehaviour remainder and a failed normal-object tail remain incomplete even
+    /// when the source factory retained a partially decoded header.
+    pub fn is_fully_materialized(&self) -> bool {
+        self.state.is_fully_materialized(self.payload.as_ref())
+    }
+}
+
+impl FactoryAsset {
+    fn into_workspace_materialization(self) -> FactoryObjectMaterialization {
+        let Self {
+            object_index,
+            path_id,
+            class_id,
+            kind,
+            class_name,
+            name,
+            raw: _,
+            payload,
+            tail,
+            chinese_texture_fields,
+            structure,
+            log_level,
+            log_message,
+        } = self;
+        FactoryObjectMaterialization {
+            state: FactoryObjectState {
+                object_index,
+                path_id,
+                class_id,
+                kind,
+                class_name,
+                name,
+                tail,
+                chinese_texture_fields,
+                structure,
+                log_level,
+                log_message,
+            },
+            payload,
+        }
+    }
+}
+
 /// Structural engine failures (not classification outcomes).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FactoryEngineError {
@@ -973,13 +1103,42 @@ pub fn materialize_object(
     object_index: usize,
     limits: &ObjectDecodeLimits,
 ) -> Result<FactoryAsset, FactoryEngineError> {
+    materialize_object_inner(file, facts, source, object_index, limits, true)
+}
+
+/// Materialize one object for `ObjectWorkspace` without retaining a duplicate of its raw bytes.
+/// The source VFS remains the owner of those bytes and the workspace stores their validated range.
+pub fn materialize_object_for_workspace(
+    file: &SerializedFile<'_>,
+    facts: &FactoryFileFacts<'_>,
+    source: &dyn ClassLayoutSource,
+    object_index: usize,
+    limits: &ObjectDecodeLimits,
+) -> Result<FactoryObjectMaterialization, FactoryEngineError> {
+    materialize_object_inner(file, facts, source, object_index, limits, false)
+        .map(FactoryAsset::into_workspace_materialization)
+}
+
+fn materialize_object_inner(
+    file: &SerializedFile<'_>,
+    facts: &FactoryFileFacts<'_>,
+    source: &dyn ClassLayoutSource,
+    object_index: usize,
+    limits: &ObjectDecodeLimits,
+    retain_raw_bytes: bool,
+) -> Result<FactoryAsset, FactoryEngineError> {
     let object = file.metadata.objects.get(object_index).ok_or(
         FactoryEngineError::ObjectIndexOutOfBounds {
             object_index,
             object_count: file.metadata.objects.len(),
         },
     )?;
-    let raw = object_payload_bytes(file, object_index)?;
+    let raw_bytes = object_payload_slice(file, object_index)?;
+    let raw = if retain_raw_bytes {
+        raw_bytes.to_vec()
+    } else {
+        Vec::new()
+    };
     let version = file
         .metadata
         .prefix
@@ -1012,7 +1171,7 @@ pub fn materialize_object(
         asset.name = unreadable_asset_name(
             asset.class_name.as_ref(),
             named_field(&None),
-            raw_data_hash(&asset.raw),
+            raw_data_hash(raw_bytes),
         );
         return Ok(asset);
     }
@@ -1025,27 +1184,31 @@ pub fn materialize_object(
             object_index,
             limits,
             &version,
+            raw_bytes,
             &mut asset,
         );
         return Ok(asset);
     }
 
     read_normal_object(
-        file,
-        facts,
-        source,
+        NormalObjectReadContext {
+            file,
+            facts,
+            source,
+            limits,
+            version: &version,
+        },
         object_index,
-        limits,
-        &version,
+        raw_bytes,
         &mut asset,
     );
     Ok(asset)
 }
 
-fn object_payload_bytes(
-    file: &SerializedFile<'_>,
+fn object_payload_slice<'a>(
+    file: &'a SerializedFile<'_>,
     object_index: usize,
-) -> Result<Vec<u8>, FactoryEngineError> {
+) -> Result<&'a [u8], FactoryEngineError> {
     let object = &file.metadata.objects[object_index];
     let range = object
         .data_range(&file.header)
@@ -1056,7 +1219,6 @@ fn object_payload_bytes(
         .map_err(|_| FactoryEngineError::InvalidObjectPayloadRange { object_index })?;
     file.input()
         .get(start..end)
-        .map(<[u8]>::to_vec)
         .ok_or(FactoryEngineError::InvalidObjectPayloadRange { object_index })
 }
 
@@ -1166,43 +1328,58 @@ struct NormalAttempt {
     log_message: Option<String>,
 }
 
+#[derive(Clone, Copy)]
+struct NormalObjectReadContext<'a, 'file, 'facts> {
+    file: &'a SerializedFile<'file>,
+    facts: &'a FactoryFileFacts<'facts>,
+    source: &'a dyn ClassLayoutSource,
+    limits: &'a ObjectDecodeLimits,
+    version: &'a FactoryUnityVersion,
+}
+
 fn read_normal_object(
-    file: &SerializedFile<'_>,
-    facts: &FactoryFileFacts<'_>,
-    source: &dyn ClassLayoutSource,
+    context: NormalObjectReadContext<'_, '_, '_>,
     object_index: usize,
-    limits: &ObjectDecodeLimits,
-    version: &FactoryUnityVersion,
+    raw_bytes: &[u8],
     asset: &mut FactoryAsset,
 ) {
-    match try_read_normal_object(file, facts, source, object_index, limits, version) {
-        Ok(attempt) => apply_attempt(asset, attempt),
+    match try_read_normal_object(
+        context.file,
+        context.facts,
+        context.source,
+        object_index,
+        context.limits,
+        context.version,
+        raw_bytes,
+    ) {
+        Ok(attempt) => apply_attempt(asset, attempt, raw_bytes),
         Err(failed) => {
-            if is_engine_collection_name(Some(facts.collection_name)) {
+            if is_engine_collection_name(Some(context.facts.collection_name)) {
                 // Engine collections tolerate failed reads: shaders log info, others warn.
                 let (log_level, log_message) = if asset.class_id == SHADER_CLASS_ID {
                     (FactoryLogLevel::Info, None)
                 } else {
                     (FactoryLogLevel::Warning, failed.log_message.clone())
                 };
-                apply_attempt(asset, *failed);
+                apply_attempt(asset, *failed, raw_bytes);
                 asset.log_level = log_level;
                 asset.log_message = log_message;
-            } else if version.is_patch() {
-                let retry_version = version.with_bumped_build();
+            } else if context.version.is_patch() {
+                let retry_version = context.version.with_bumped_build();
                 match try_read_normal_object(
-                    file,
-                    facts,
-                    source,
+                    context.file,
+                    context.facts,
+                    context.source,
                     object_index,
-                    limits,
+                    context.limits,
                     &retry_version,
+                    raw_bytes,
                 ) {
-                    Ok(attempt) => apply_attempt(asset, attempt),
-                    Err(failed_retry) => unreadable_from_failed(asset, *failed_retry),
+                    Ok(attempt) => apply_attempt(asset, attempt, raw_bytes),
+                    Err(failed_retry) => unreadable_from_failed(asset, *failed_retry, raw_bytes),
                 }
             } else {
-                unreadable_from_failed(asset, *failed);
+                unreadable_from_failed(asset, *failed, raw_bytes);
             }
         }
     }
@@ -1211,21 +1388,21 @@ fn read_normal_object(
 /// The class id of `Shader`, whose engine-collection failure logs at info level.
 const SHADER_CLASS_ID: i32 = 48;
 
-fn unreadable_from_failed(asset: &mut FactoryAsset, failed: NormalAttempt) {
+fn unreadable_from_failed(asset: &mut FactoryAsset, failed: NormalAttempt, raw_bytes: &[u8]) {
     let stored_name = named_field_owned(&failed.payload);
     let message = failed.log_message.clone();
-    apply_attempt(asset, failed);
+    apply_attempt(asset, failed, raw_bytes);
     asset.kind = FactoryAssetKind::Unreadable;
     asset.name = unreadable_asset_name(
         asset.class_name.as_ref(),
         stored_name.as_deref(),
-        raw_data_hash(&asset.raw),
+        raw_data_hash(raw_bytes),
     );
     asset.log_level = FactoryLogLevel::Error;
     asset.log_message = message;
 }
 
-fn apply_attempt(asset: &mut FactoryAsset, attempt: NormalAttempt) {
+fn apply_attempt(asset: &mut FactoryAsset, attempt: NormalAttempt, raw_bytes: &[u8]) {
     asset.kind = attempt.kind;
     asset.payload = attempt.payload;
     asset.tail = attempt.tail;
@@ -1234,7 +1411,7 @@ fn apply_attempt(asset: &mut FactoryAsset, attempt: NormalAttempt) {
     asset.log_message = attempt.log_message;
     match &asset.kind {
         FactoryAssetKind::Unknown => {
-            asset.name = unknown_asset_name(asset.class_name.as_ref(), raw_data_hash(&asset.raw));
+            asset.name = unknown_asset_name(asset.class_name.as_ref(), raw_data_hash(raw_bytes));
         }
         FactoryAssetKind::Generated(_) | FactoryAssetKind::TypeTreeObject => {
             // Only named classes (`INamed`) expose a name; TPK TypeTreeObjects do not.
@@ -1256,6 +1433,7 @@ fn try_read_normal_object(
     object_index: usize,
     limits: &ObjectDecodeLimits,
     version: &FactoryUnityVersion,
+    payload_bytes: &[u8],
 ) -> Result<NormalAttempt, Box<NormalAttempt>> {
     let class_id = object_read_class_id(&file.metadata.objects[object_index]);
     let created_asset = match create_asset(source, class_id, version) {
@@ -1294,8 +1472,6 @@ fn try_read_normal_object(
         log_level: FactoryLogLevel::Silent,
         log_message: None,
     };
-    let payload_bytes = object_payload_bytes(file, object_index)
-        .map_err(|_| Box::new(created.clone_for_failure()))?;
     let read_flags = file.object_read_flags(facts.file_path, facts.collection_name);
     let layout = match class_layout(
         file,
@@ -1325,7 +1501,7 @@ fn try_read_normal_object(
         unity_version_aligns_arrays(file.metadata.prefix.unity_version_text.as_deref());
     let decoded = decode_with_tree(
         &layout,
-        &payload_bytes,
+        payload_bytes,
         file.metadata.prefix.body_endian,
         arrays_align,
         &file.metadata.reference_types,
@@ -1344,7 +1520,7 @@ fn try_read_normal_object(
                     ..created
                 }),
                 ObjectTailOutcome::ChineseTextureFields => {
-                    let name = named_field_of_payload(&created.payload).unwrap_or_default();
+                    let name = named_field_of(&payload.root).unwrap_or_default().to_owned();
                     let chinese = parse_chinese_texture_fields(&payload.trailing_bytes);
                     Ok(NormalAttempt {
                         payload: Some(payload),
@@ -1390,25 +1566,8 @@ fn try_read_normal_object(
     }
 }
 
-impl NormalAttempt {
-    fn clone_for_failure(&self) -> Self {
-        Self {
-            kind: self.kind.clone(),
-            payload: None,
-            tail: None,
-            chinese: None,
-            log_level: FactoryLogLevel::Error,
-            log_message: None,
-        }
-    }
-}
-
 /// The class id of `Texture2D`, which may carry the 24-byte Chinese tail.
 const TEXTURE2D_CLASS_ID: i32 = 28;
-
-fn named_field_of_payload(payload: &Option<ParsedObjectPayload>) -> Option<String> {
-    named_field_owned(payload)
-}
 
 fn parse_chinese_texture_fields(trailing: &[u8]) -> Option<ChineseTextureFields> {
     if trailing.len() != CHINESE_TEXTURE_EXTRA_BYTES {
@@ -1490,24 +1649,9 @@ fn read_monobehaviour(
     object_index: usize,
     limits: &ObjectDecodeLimits,
     version: &FactoryUnityVersion,
+    payload_bytes: &[u8],
     asset: &mut FactoryAsset,
 ) {
-    let payload_bytes = match object_payload_bytes(file, object_index) {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            asset.kind = FactoryAssetKind::Unreadable;
-            asset.log_level = FactoryLogLevel::Error;
-            asset.log_message = Some(read_exception_message(
-                asset.class_name.as_ref(),
-                version.text_or_default(),
-                facts.platform,
-                facts.collection_name,
-                facts.file_path,
-                "InvalidObjectPayloadRange",
-            ));
-            return;
-        }
-    };
     let generated_name = match source.generated_class_name(MONO_BEHAVIOUR_CLASS_ID, version) {
         Ok(name) => name.unwrap_or("MonoBehaviour").to_owned(),
         Err(error) => {
@@ -1542,7 +1686,7 @@ fn read_monobehaviour(
             .map(|tree| {
                 decode_with_tree(
                     &tree,
-                    &payload_bytes,
+                    payload_bytes,
                     file.metadata.prefix.body_endian,
                     arrays_align,
                     &file.metadata.reference_types,

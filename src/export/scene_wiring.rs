@@ -1520,6 +1520,7 @@ fn push_diagnostic(
 mod tests {
     use super::*;
     use crate::io::dependency::DependencyFilePath;
+    use crate::processing::asset_factory::FileTypeTreeTestLayouts;
     use crate::processing::scene_collections::{
         SceneDefinitionGuidPlan, SceneDefinitionPathSource, SceneGuidGenerationReason,
     };
@@ -2121,16 +2122,18 @@ mod tests {
                 virtual_path,
             });
         }
-        let workspace = SerializedFileWorkspace::load_from_vfs(
+        let workspace = SerializedFileWorkspace::load_from_vfs_with_layout_source(
             &filesystem,
             &input,
             SerializedFileWorkspaceLimits::default(),
+            &FileTypeTreeTestLayouts,
         )
         .unwrap();
-        let objects = ObjectWorkspace::load_from_vfs(
+        let objects = ObjectWorkspace::load_from_vfs_with_layout_source(
             &filesystem,
             &workspace,
             ObjectWorkspaceLimits::default(),
+            &FileTypeTreeTestLayouts,
         )
         .unwrap();
         let references = workspace

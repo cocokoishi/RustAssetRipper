@@ -2390,6 +2390,23 @@ impl ObjectDecodeError {
         )
     }
 
+    pub(crate) fn factory_object_outcome(
+        object_index: usize,
+        class_id: i32,
+        outcome: String,
+        diagnostic: Option<String>,
+    ) -> Self {
+        Self::new(
+            0,
+            ObjectDecodeErrorKind::FactoryObjectOutcome {
+                object_index,
+                class_id,
+                outcome,
+                diagnostic,
+            },
+        )
+    }
+
     pub fn offset(&self) -> usize {
         self.offset
     }
@@ -2429,6 +2446,13 @@ pub enum ObjectDecodeErrorKind {
     },
     ObjectTypeUnresolved {
         object_index: usize,
+    },
+    /// The source factory retained this object as unknown or unreadable raw data.
+    FactoryObjectOutcome {
+        object_index: usize,
+        class_id: i32,
+        outcome: String,
+        diagnostic: Option<String>,
     },
     /// The file declares a Unity version before 3.5, whose assets the source
     /// does not read.
@@ -2578,6 +2602,18 @@ impl Display for ObjectDecodeErrorKind {
             ),
             Self::ObjectTypeUnresolved { object_index } => {
                 write!(f, "object {object_index} has no resolved serialized type")
+            }
+            Self::FactoryObjectOutcome {
+                object_index,
+                class_id,
+                outcome,
+                diagnostic,
+            } => {
+                write!(f, "object {object_index} class {class_id} produced {outcome}")?;
+                if let Some(diagnostic) = diagnostic {
+                    write!(f, ": {diagnostic}")?;
+                }
+                Ok(())
             }
             Self::UnreadableUnsupportedVersion { object_index } => write!(
                 f,

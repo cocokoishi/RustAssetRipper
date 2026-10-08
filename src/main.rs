@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::ffi::OsString;
@@ -45,6 +47,11 @@ use assetripper::io::platform_structure::{
 };
 use assetripper::io::stream::logical_file_path;
 use assetripper::processing::asset_bundle::get_asset_bundle_name;
+use assetripper::processing::asset_factory::ClassLayoutSource;
+#[cfg(test)]
+use assetripper::processing::asset_factory::{
+    FactoryUnityVersion, SourceFactoryLookupError, SourceTpkLookupError, SourceTpkTrees,
+};
 use assetripper::processing::prefab_processing::{
     animator_controller_source_dependency_inventory, plan_workspace_prefab_processing,
     plan_workspace_processed_prefab_assets, plan_workspace_scene_hierarchy_bundle_names,
@@ -114,7 +121,7 @@ use assetripper::serialized_file::reference_graph::{
 };
 use assetripper::serialized_file::workspace::{
     SerializedFileDependencyReport, SerializedFileWorkspace, SerializedFileWorkspaceLimits,
-    WorkspaceSerializedBundle,
+    SerializedFileWorkspaceLoadOptions, WorkspaceSerializedBundle,
 };
 
 const MAX_INPUT_PATHS: usize = 100_000;
@@ -123,6 +130,126 @@ const MAX_TOTAL_STREAMED_SCENE_BUNDLE_ENTRIES: usize = 1_000_000;
 const MAX_TOTAL_STREAMED_SCENE_BUNDLE_STRING_BYTES: usize = 256 * 1024 * 1024;
 const MAX_TOTAL_STREAMED_SCENE_PATH_MAPPINGS: usize = 1_000_000;
 const MAX_OBJECT_DECODE_DIAGNOSTICS: usize = 128;
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+struct MainFileTypeTreeTestLayouts;
+
+#[cfg(test)]
+impl ClassLayoutSource for MainFileTypeTreeTestLayouts {
+    fn generated_class_name(
+        &self,
+        _class_id: i32,
+        _version: &FactoryUnityVersion,
+    ) -> Result<Option<&str>, SourceFactoryLookupError> {
+        Ok(Some("SyntheticTypeTreeTestObject"))
+    }
+
+    fn tpk_trees(
+        &self,
+        _class_id: i32,
+        _version: &FactoryUnityVersion,
+    ) -> Result<Option<SourceTpkTrees>, SourceTpkLookupError> {
+        Ok(None)
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    // Main's broad command tests use small hand-authored TypeTrees to exercise command wiring.
+    // Dedicated source-factory tests switch this off so production layouts remain authoritative.
+    static USE_FILE_TYPE_TREE_TEST_LAYOUTS: Cell<bool> = const { Cell::new(true) };
+}
+
+#[cfg(test)]
+struct SourceFactoryLayoutGuard {
+    previous: bool,
+}
+
+#[cfg(test)]
+impl SourceFactoryLayoutGuard {
+    fn use_source_factory() -> Self {
+        let previous = USE_FILE_TYPE_TREE_TEST_LAYOUTS.with(|flag| flag.replace(false));
+        Self { previous }
+    }
+}
+
+#[cfg(test)]
+impl Drop for SourceFactoryLayoutGuard {
+    fn drop(&mut self) {
+        USE_FILE_TYPE_TREE_TEST_LAYOUTS.with(|flag| flag.set(self.previous));
+    }
+}
+
+fn active_class_layout_source() -> &'static dyn ClassLayoutSource {
+    #[cfg(test)]
+    {
+        static TEST_LAYOUTS: MainFileTypeTreeTestLayouts = MainFileTypeTreeTestLayouts;
+        if USE_FILE_TYPE_TREE_TEST_LAYOUTS.with(Cell::get) {
+            return &TEST_LAYOUTS;
+        }
+    }
+    assetripper::processing::asset_factory::reference_class_layouts()
+}
+
+fn load_workspace_with_dependencies(
+    filesystem: &mut VirtualFileSystem,
+    inputs: &[assetripper::io::dependency::DependencyFilePath],
+    registered_files: &[assetripper::io::dependency::DependencyFilePath],
+    data_paths: &[String],
+    limits: SerializedFileWorkspaceLimits,
+    index_limits: DependencyIndexLimits,
+    container_limits: ContainerMountLimits,
+) -> Result<
+    (SerializedFileWorkspace, SerializedFileDependencyReport),
+    Box<assetripper::serialized_file::workspace::SerializedFileWorkspaceError>,
+> {
+    SerializedFileWorkspace::load_from_vfs_with_dependencies_and_layout_source(
+        filesystem,
+        inputs,
+        registered_files,
+        SerializedFileWorkspaceLoadOptions {
+            data_paths,
+            limits,
+            index_limits,
+            container_limits,
+            layouts: active_class_layout_source(),
+        },
+    )
+}
+
+#[cfg(test)]
+fn load_workspace_from_vfs(
+    filesystem: &VirtualFileSystem,
+    inputs: &[assetripper::io::dependency::DependencyFilePath],
+    limits: SerializedFileWorkspaceLimits,
+) -> Result<
+    SerializedFileWorkspace,
+    Box<assetripper::serialized_file::workspace::SerializedFileWorkspaceError>,
+> {
+    SerializedFileWorkspace::load_from_vfs_with_layout_source(
+        filesystem,
+        inputs,
+        limits,
+        active_class_layout_source(),
+    )
+}
+
+fn load_object_workspace(
+    filesystem: &VirtualFileSystem,
+    workspace: &SerializedFileWorkspace,
+    limits: ObjectWorkspaceLimits,
+) -> Result<
+    ObjectWorkspace,
+    Box<assetripper::serialized_file::object_workspace::ObjectWorkspaceError>,
+> {
+    ObjectWorkspace::load_from_vfs_with_layout_source(
+        filesystem,
+        workspace,
+        limits,
+        active_class_layout_source(),
+    )
+}
 const MAX_REFERENCE_GRAPH_DIAGNOSTICS: usize = 128;
 const MAX_GENERATED_TRANSFORM_DIAGNOSTICS: usize = 128;
 const MAX_STREAMED_RESOURCE_DIAGNOSTICS: usize = 128;
@@ -422,7 +549,7 @@ fn export_texture_to<W: io::Write>(
             "the selected files contain no recognized SerializedFile input",
         ));
     }
-    let (workspace, _) = SerializedFileWorkspace::load_from_vfs_with_dependencies(
+    let (workspace, _) = load_workspace_with_dependencies(
         &mut filesystem,
         &mixed.serialized_file_inputs,
         &mixed.registered_files,
@@ -460,8 +587,7 @@ fn export_texture_to<W: io::Write>(
         .into());
     }
 
-    let objects =
-        ObjectWorkspace::load_from_vfs(&filesystem, &workspace, ObjectWorkspaceLimits::default())?;
+    let objects = load_object_workspace(&filesystem, &workspace, ObjectWorkspaceLimits::default())?;
     let object = objects
         .get(serialized_file_index, object_index)
         .ok_or_else(|| invalid_data("selected workspace object is missing"))?;
@@ -696,7 +822,7 @@ fn export_mesh_to<W: io::Write>(
             "the selected files contain no recognized SerializedFile input",
         ));
     }
-    let (workspace, _) = SerializedFileWorkspace::load_from_vfs_with_dependencies(
+    let (workspace, _) = load_workspace_with_dependencies(
         &mut filesystem,
         &mixed.serialized_file_inputs,
         &mixed.registered_files,
@@ -708,8 +834,7 @@ fn export_mesh_to<W: io::Write>(
     ensure_no_workspace_container_failures(&workspace)?;
     let (object_index, _) = select_unique_object(&workspace, serialized_file_index, path_id)?;
 
-    let objects =
-        ObjectWorkspace::load_from_vfs(&filesystem, &workspace, ObjectWorkspaceLimits::default())?;
+    let objects = load_object_workspace(&filesystem, &workspace, ObjectWorkspaceLimits::default())?;
     let object = objects
         .get(serialized_file_index, object_index)
         .ok_or_else(|| invalid_data("selected workspace object is missing"))?;
@@ -1121,7 +1246,7 @@ fn export_shader_to<W: io::Write>(
             "the selected files contain no recognized SerializedFile input",
         ));
     }
-    let (workspace, _) = SerializedFileWorkspace::load_from_vfs_with_dependencies(
+    let (workspace, _) = load_workspace_with_dependencies(
         &mut filesystem,
         &mixed.serialized_file_inputs,
         &mixed.registered_files,
@@ -1133,8 +1258,7 @@ fn export_shader_to<W: io::Write>(
     ensure_no_workspace_container_failures(&workspace)?;
     let (object_index, _) = select_unique_object(&workspace, serialized_file_index, path_id)?;
 
-    let objects =
-        ObjectWorkspace::load_from_vfs(&filesystem, &workspace, ObjectWorkspaceLimits::default())?;
+    let objects = load_object_workspace(&filesystem, &workspace, ObjectWorkspaceLimits::default())?;
     let object = objects
         .get(serialized_file_index, object_index)
         .ok_or_else(|| invalid_data("selected workspace object is missing"))?;
@@ -1314,7 +1438,7 @@ fn export_project_to<W: io::Write>(
         &mount_report.explicit_root_resource_files,
         RootResourceCatalogLimits::default(),
     )?;
-    let (workspace, _) = SerializedFileWorkspace::load_from_vfs_with_dependencies(
+    let (workspace, _) = load_workspace_with_dependencies(
         &mut filesystem,
         &mixed.serialized_file_inputs,
         &mixed.registered_files,
@@ -1324,8 +1448,7 @@ fn export_project_to<W: io::Write>(
         ContainerMountLimits::default(),
     )?;
     ensure_no_workspace_container_failures(&workspace)?;
-    let objects =
-        ObjectWorkspace::load_from_vfs(&filesystem, &workspace, ObjectWorkspaceLimits::default())?;
+    let objects = load_object_workspace(&filesystem, &workspace, ObjectWorkspaceLimits::default())?;
     let reference_graph = workspace.reference_graph(MultiFileReferenceGraphLimits::default())?;
     let platform = detect_platform_structure(
         &filesystem,
@@ -1421,7 +1544,7 @@ fn export_audio_to<W: io::Write>(
             "the selected files contain no recognized SerializedFile input",
         ));
     }
-    let (workspace, _) = SerializedFileWorkspace::load_from_vfs_with_dependencies(
+    let (workspace, _) = load_workspace_with_dependencies(
         &mut filesystem,
         &mixed.serialized_file_inputs,
         &mixed.registered_files,
@@ -1443,8 +1566,7 @@ fn export_audio_to<W: io::Write>(
     let container_bundle_index = file.container_bundle_index;
     let (object_index, _) = select_unique_object(&workspace, serialized_file_index, path_id)?;
 
-    let objects =
-        ObjectWorkspace::load_from_vfs(&filesystem, &workspace, ObjectWorkspaceLimits::default())?;
+    let objects = load_object_workspace(&filesystem, &workspace, ObjectWorkspaceLimits::default())?;
     let object = objects
         .get(serialized_file_index, object_index)
         .ok_or_else(|| invalid_data("selected workspace object is missing"))?;
@@ -1692,7 +1814,7 @@ fn export_object_yaml_to<W: io::Write>(
             "the selected files contain no recognized SerializedFile input",
         ));
     }
-    let (workspace, _) = SerializedFileWorkspace::load_from_vfs_with_dependencies(
+    let (workspace, _) = load_workspace_with_dependencies(
         &mut filesystem,
         &mixed.serialized_file_inputs,
         &mixed.registered_files,
@@ -1729,8 +1851,7 @@ fn export_object_yaml_to<W: io::Write>(
         .into());
     }
 
-    let objects =
-        ObjectWorkspace::load_from_vfs(&filesystem, &workspace, ObjectWorkspaceLimits::default())?;
+    let objects = load_object_workspace(&filesystem, &workspace, ObjectWorkspaceLimits::default())?;
     let object = objects
         .get(serialized_file_index, object_index)
         .ok_or_else(|| invalid_data("selected workspace object is missing"))?;
@@ -1826,7 +1947,7 @@ fn export_file_yaml_to<W: io::Write>(
             "the selected files contain no recognized SerializedFile input",
         ));
     }
-    let (workspace, _) = SerializedFileWorkspace::load_from_vfs_with_dependencies(
+    let (workspace, _) = load_workspace_with_dependencies(
         &mut filesystem,
         &mixed.serialized_file_inputs,
         &mixed.registered_files,
@@ -1855,8 +1976,7 @@ fn export_file_yaml_to<W: io::Write>(
         .into());
     }
 
-    let objects =
-        ObjectWorkspace::load_from_vfs(&filesystem, &workspace, ObjectWorkspaceLimits::default())?;
+    let objects = load_object_workspace(&filesystem, &workspace, ObjectWorkspaceLimits::default())?;
     let reference_graph = workspace.reference_graph(MultiFileReferenceGraphLimits::default())?;
     let mut assignments = Vec::new();
     assignments.try_reserve_exact(object_count).map_err(|_| {
@@ -2101,7 +2221,7 @@ fn inspect_explicit_files_to<W: io::Write>(
         ExplicitInspectPlan::LoadWorkspace => {}
     }
 
-    let (workspace, dependencies) = SerializedFileWorkspace::load_from_vfs_with_dependencies(
+    let (workspace, dependencies) = load_workspace_with_dependencies(
         &mut filesystem,
         &mixed.serialized_file_inputs,
         &mixed.registered_files,
@@ -2471,7 +2591,7 @@ fn inspect_directories_to<W: io::Write>(
         )?;
         return Ok(());
     }
-    let (workspace, dependencies) = SerializedFileWorkspace::load_from_vfs_with_dependencies(
+    let (workspace, dependencies) = load_workspace_with_dependencies(
         &mut filesystem,
         &mixed.serialized_file_inputs,
         &mixed.registered_files,
@@ -3081,7 +3201,7 @@ fn print_workspace_summary_with_optional_resources_to<W: io::Write>(
 
     writeln!(output, "SerializedFiles: {}", workspace.files().len())?;
     let decoded_objects =
-        ObjectWorkspace::load_from_vfs(filesystem, workspace, ObjectWorkspaceLimits::default())?;
+        load_object_workspace(filesystem, workspace, ObjectWorkspaceLimits::default())?;
     if let Some(context) = resource_context {
         print_streamed_resource_summary_to(
             output,
@@ -4401,8 +4521,8 @@ mod tests {
     use std::io;
 
     use super::{
-        merge_mount_report, remaining_budget_u64, remaining_budget_usize,
-        source_bundle_for_collection, WorkspaceSerializedBundle,
+        load_object_workspace, load_workspace_from_vfs, merge_mount_report, remaining_budget_u64,
+        remaining_budget_usize, source_bundle_for_collection, WorkspaceSerializedBundle,
     };
     use assetripper::export::settings::{ExportDefaults, ShaderExportMode};
     use assetripper::export::settings_file::ExportSettingsFile;
@@ -4417,9 +4537,9 @@ mod tests {
     use assetripper::serialized_file::collection_workspace::{
         WorkspaceAssetCollections, WorkspaceCollectionLimits,
     };
-    use assetripper::serialized_file::object_workspace::{ObjectWorkspace, ObjectWorkspaceLimits};
+    use assetripper::serialized_file::object_workspace::ObjectWorkspaceLimits;
     use assetripper::serialized_file::workspace::{
-        SerializedFileDependencyOutcome, SerializedFileWorkspace, SerializedFileWorkspaceLimits,
+        SerializedFileDependencyOutcome, SerializedFileWorkspaceLimits,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -5002,6 +5122,48 @@ mod tests {
 
     fn make_generation_10_file() -> Vec<u8> {
         make_generation_10_file_with_externals(&[])
+    }
+
+    fn make_mono_behaviour_with_game_object_pointer(path_id: i64) -> Vec<u8> {
+        fn decode_hex(hex: &str) -> Vec<u8> {
+            assert!(hex.len().is_multiple_of(2));
+            hex.as_bytes()
+                .chunks_exact(2)
+                .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+                .collect()
+        }
+
+        let hex = assetripper::processing::asset_factory::PROBE_FIXTURE
+            .lines()
+            .find_map(|line| line.strip_prefix("SF_HEX|mono_with_structure|"))
+            .expect("the source-factory fixture includes a typed MonoBehaviour");
+        let bytes = decode_hex(hex);
+        let parsed = assetripper::serialized_file::file::SerializedFile::parse(&bytes).unwrap();
+        let mut payload = parsed.decode_object_payload(0).unwrap();
+        let game_object = payload
+            .root
+            .unique_field_in_base_chain_mut("m_GameObject")
+            .unwrap()
+            .expect("the MonoBehaviour TypeTree contains m_GameObject");
+        *game_object = assetripper::serialized_file::object::SerializedValue::PPtr {
+            file_id: 0,
+            path_id,
+        };
+        let script = payload
+            .root
+            .unique_field_in_base_chain_mut("m_Script")
+            .unwrap()
+            .expect("the MonoBehaviour TypeTree contains m_Script");
+        *script = assetripper::serialized_file::object::SerializedValue::PPtr {
+            file_id: 0,
+            path_id: 0,
+        };
+        parsed
+            .rewrite_object_payloads(
+                &[(0, payload)],
+                assetripper::serialized_file::file::SerializedFileRewriteLimits::default(),
+            )
+            .unwrap()
     }
 
     fn make_generation_10_file_with_externals(external_names: &[&str]) -> Vec<u8> {
@@ -8932,6 +9094,7 @@ mod tests {
 
     #[test]
     fn export_project_recovers_generated_textasset_without_usable_file_typetree() {
+        let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
         fn decode_hex(hex: &str) -> Vec<u8> {
             assert!(hex.len().is_multiple_of(2), "fixture hex has even length");
             hex.as_bytes()
@@ -9008,6 +9171,7 @@ mod tests {
 
     #[test]
     fn export_project_refuses_unknown_object_without_a_usable_type_tree() {
+        let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
         fn decode_hex(hex: &str) -> Vec<u8> {
             assert!(hex.len().is_multiple_of(2), "fixture hex has even length");
             hex.as_bytes()
@@ -9042,7 +9206,8 @@ mod tests {
         )
         .expect_err("an unknown class without a tree must not report a complete export");
         assert!(
-            error.to_string().contains("complete workspace PPtr scan"),
+            error.to_string().contains("fully materialized")
+                && error.to_string().contains("UnknownObject raw fallback"),
             "{error}"
         );
         assert!(
@@ -10567,17 +10732,16 @@ mod tests {
             super::MixedGameStructureLimits::default(),
         )
         .unwrap();
-        let (workspace, dependencies) =
-            super::SerializedFileWorkspace::load_from_vfs_with_dependencies(
-                &mut filesystem,
-                &mixed.serialized_file_inputs,
-                &mixed.registered_files,
-                &mixed.data_paths,
-                super::SerializedFileWorkspaceLimits::default(),
-                super::DependencyIndexLimits::default(),
-                super::ContainerMountLimits::default(),
-            )
-            .unwrap();
+        let (workspace, dependencies) = super::load_workspace_with_dependencies(
+            &mut filesystem,
+            &mixed.serialized_file_inputs,
+            &mixed.registered_files,
+            &mixed.data_paths,
+            super::SerializedFileWorkspaceLimits::default(),
+            super::DependencyIndexLimits::default(),
+            super::ContainerMountLimits::default(),
+        )
+        .unwrap();
         let mut output = Vec::new();
         super::print_workspace_summary_to(&mut output, &filesystem, &workspace, &dependencies)
             .unwrap();
@@ -10597,7 +10761,8 @@ mod tests {
     }
 
     #[test]
-    fn workspace_summary_reports_game_object_hierarchy_with_cross_file_roots() {
+    fn workspace_summary_refuses_handbuilt_game_object_data_that_conflicts_with_source_factory() {
+        let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
         let directory = TestInputDirectory::new_root();
         fs::write(
             directory.join("level0"),
@@ -10632,83 +10797,55 @@ mod tests {
             super::MixedGameStructureLimits::default(),
         )
         .unwrap();
-        let (workspace, dependencies) =
-            super::SerializedFileWorkspace::load_from_vfs_with_dependencies(
-                &mut filesystem,
-                &mixed.serialized_file_inputs,
-                &mixed.registered_files,
-                &mixed.data_paths,
-                super::SerializedFileWorkspaceLimits::default(),
-                super::DependencyIndexLimits::default(),
-                super::ContainerMountLimits::default(),
-            )
-            .unwrap();
+        let (workspace, dependencies) = super::load_workspace_with_dependencies(
+            &mut filesystem,
+            &mixed.serialized_file_inputs,
+            &mixed.registered_files,
+            &mixed.data_paths,
+            super::SerializedFileWorkspaceLimits::default(),
+            super::DependencyIndexLimits::default(),
+            super::ContainerMountLimits::default(),
+        )
+        .unwrap();
         let mut output = Vec::new();
-        super::print_workspace_summary_to(&mut output, &filesystem, &workspace, &dependencies)
-            .unwrap();
+        let error =
+            super::print_workspace_summary_to(&mut output, &filesystem, &workspace, &dependencies)
+                .expect_err(
+                    "the source-generated GameObject schema rejects this handbuilt payload",
+                );
         let summary = String::from_utf8(output).unwrap();
-        // All five objects decode; the six PPtrs split into 1 null (hero
-        // father), 4 cross-file resolutions, and 1 explicit local miss.
+        assert!(error
+            .to_string()
+            .contains("no matching decoded reference at 'm_Component[0]'"));
         assert!(summary
-            .contains("Object payload decode: 5/5 decoded, 0 undecoded, 0 raw fallback bytes"));
-        assert!(summary.contains(
-            "TypeTree reference graph: 6 recognized PPtrs, 1 null, 4 uniquely resolved, 1 unresolved"
-        ));
-        assert!(summary.contains(
-            "Unresolved PPtr: file 4 \"/inputs/0/side-transform\" (name \"side-transform\"), object 0, PathID 21, field \"m_GameObject\": MissingLocalObject { path_id: 9999 }"
-        ));
-        // The hero pair joins across files: the GameObject graph reports its
-        // component edge, and root discovery follows the external Transform
-        // with a null father and its stored root order.
-        assert!(summary.contains("Scene graph: 1 GameObjects, 0 Transforms, 1 relationships"));
-        assert!(summary.contains(
-            "root candidate file 0 PathID 10 (Transform file 1 object 0 PathID Some(20); NullFather)"
-        ));
-        // The orphan side Transform (dangling m_GameObject, external father)
-        // stays explicit: incomplete graph plus a hierarchy issue, never a
-        // silent null root.
-        assert!(summary.contains("Scene graph: 0 GameObjects, 1 Transforms, 2 relationships"));
-        assert!(summary.contains("workspace hierarchy issues: 1, audit complete=false"));
-        assert!(summary.contains("Non-scene hierarchy collection graphs: 4"));
-        assert!(summary.contains(
-            "GameObject 3:0 PathID 11 GetRoot is indeterminate: Some(IncompleteCollectionGraph { file_index: 4 })"
-        ));
-        // The manager file still owns the only SceneDefinition; standalone files
-        // have no SerializedBundle candidate and the generated property stays null.
-        assert!(summary.contains("SceneDefinitions: 1"));
-        assert!(summary.contains("hierarchy AssetBundleName: null"));
-        assert!(
-            summary.contains("hierarchy AssetBundleName candidate: unset (no SerializedBundle)")
-        );
-        assert!(
-            summary.contains("external requests: 4; newly loaded dependencies: 0; resolved: true")
-        );
+            .contains("Object payload decode: 0/5 decoded, 5 undecoded, 230 raw fallback bytes"));
+        assert!(summary.contains("UnreadableObject raw fallback"));
+        assert!(!summary.contains("Scene graph:"));
     }
 
     #[test]
     fn reference_graph_summary_distinguishes_null_resolved_and_unresolved_pointers() {
+        let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
         for (pointer_path_id, expected_counts, complete) in [
-            (0, "1 null, 0 uniquely resolved, 0 unresolved", true),
-            (42, "0 null, 1 uniquely resolved, 0 unresolved", true),
-            (99, "0 null, 0 uniquely resolved, 1 unresolved", false),
+            (0, "2 null, 0 uniquely resolved, 0 unresolved", true),
+            (42, "1 null, 1 uniquely resolved, 0 unresolved", true),
+            (99, "1 null, 0 uniquely resolved, 1 unresolved", false),
         ] {
             let mut filesystem = VirtualFileSystem::new();
             insert_vfs_file(
                 &mut filesystem,
                 "/game/main.assets",
-                &make_generation_10_file_with_pointer_path_id(&[], pointer_path_id),
+                &make_mono_behaviour_with_game_object_pointer(i64::from(pointer_path_id)),
             );
-            let workspace =
-                assetripper::serialized_file::workspace::SerializedFileWorkspace::load_from_vfs(
-                    &filesystem,
-                    &[assetripper::io::dependency::DependencyFilePath {
-                        file_name: "main.assets".to_owned(),
-                        virtual_path: "/game/main.assets".to_owned(),
-                    }],
-                    assetripper::serialized_file::workspace::SerializedFileWorkspaceLimits::default(
-                    ),
-                )
-                .unwrap();
+            let workspace = super::load_workspace_from_vfs(
+                &filesystem,
+                &[assetripper::io::dependency::DependencyFilePath {
+                    file_name: "main.assets".to_owned(),
+                    virtual_path: "/game/main.assets".to_owned(),
+                }],
+                assetripper::serialized_file::workspace::SerializedFileWorkspaceLimits::default(),
+            )
+            .unwrap();
             let graph = workspace
                 .reference_graph(
                     assetripper::serialized_file::reference_graph::MultiFileReferenceGraphLimits::default(),
@@ -10748,17 +10885,16 @@ mod tests {
             super::MixedGameStructureLimits::default(),
         )
         .unwrap();
-        let (workspace, dependencies) =
-            super::SerializedFileWorkspace::load_from_vfs_with_dependencies(
-                &mut filesystem,
-                &mixed.serialized_file_inputs,
-                &mixed.registered_files,
-                &mixed.data_paths,
-                super::SerializedFileWorkspaceLimits::default(),
-                super::DependencyIndexLimits::default(),
-                super::ContainerMountLimits::default(),
-            )
-            .unwrap();
+        let (workspace, dependencies) = super::load_workspace_with_dependencies(
+            &mut filesystem,
+            &mixed.serialized_file_inputs,
+            &mixed.registered_files,
+            &mixed.data_paths,
+            super::SerializedFileWorkspaceLimits::default(),
+            super::DependencyIndexLimits::default(),
+            super::ContainerMountLimits::default(),
+        )
+        .unwrap();
 
         let mut output = Vec::new();
         super::print_workspace_summary_to(&mut output, &filesystem, &workspace, &dependencies)
@@ -10799,13 +10935,14 @@ mod tests {
             data_paths: vec!["/game/Game_Data".to_owned()],
         };
         let loaded = structure
-            .load_primary_serialized_workspace(
+            .load_primary_serialized_workspace_with_layout_source(
                 &mut filesystem,
                 PlatformWorkspaceLoadOptions::default(),
+                super::active_class_layout_source(),
             )
             .unwrap();
 
-        let object_workspace = ObjectWorkspace::load_from_vfs(
+        let object_workspace = load_object_workspace(
             &filesystem,
             &loaded.workspace,
             ObjectWorkspaceLimits::default(),
@@ -10918,7 +11055,7 @@ mod tests {
                 PlatformWorkspaceLoadOptions::default(),
             )
             .unwrap();
-        let object_workspace = ObjectWorkspace::load_from_vfs(
+        let object_workspace = load_object_workspace(
             &filesystem,
             &loaded.workspace,
             ObjectWorkspaceLimits::default(),
@@ -11148,7 +11285,7 @@ mod tests {
             input_path,
             &make_resource_manager_file_with_local_reference(),
         );
-        let workspace = SerializedFileWorkspace::load_from_vfs(
+        let workspace = load_workspace_from_vfs(
             &filesystem,
             &[DependencyFilePath {
                 file_name: "resource.assets".to_owned(),
@@ -11157,12 +11294,9 @@ mod tests {
             SerializedFileWorkspaceLimits::default(),
         )
         .unwrap();
-        let objects = ObjectWorkspace::load_from_vfs(
-            &filesystem,
-            &workspace,
-            ObjectWorkspaceLimits::default(),
-        )
-        .unwrap();
+        let objects =
+            load_object_workspace(&filesystem, &workspace, ObjectWorkspaceLimits::default())
+                .unwrap();
         let collections = WorkspaceAssetCollections::build(
             &workspace,
             &objects,

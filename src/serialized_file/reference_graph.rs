@@ -4,11 +4,9 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
-use super::file::{SerializedFile, SerializedFileError, SerializedFileErrorKind};
+use super::file::{SerializedFile, SerializedFileError};
 use super::metadata::{FileIdentifier, SerializedFileMetadata, TypeTree};
-use super::object::{
-    ObjectDecodeErrorKind, ObjectDecodeLimits, ParsedObjectPayload, SerializedValue,
-};
+use super::object::{ObjectDecodeError, ObjectDecodeLimits, ParsedObjectPayload, SerializedValue};
 use super::references::PPtrResolution;
 
 type ExternalDependencyResolver<'a> = dyn FnMut(usize, &FileIdentifier) -> Option<usize> + 'a;
@@ -255,7 +253,7 @@ impl ObjectReferenceGraph {
 
         for (object_index, object) in file.metadata.objects.iter().enumerate() {
             graph.attempted_objects += 1;
-            let payload = match decode_object_payload_with_generated_fallback(
+            let decoded = match decode_object_payload_with_generated_fallback(
                 file,
                 object_index,
                 &limits.object_decode,
@@ -274,12 +272,22 @@ impl ObjectReferenceGraph {
                     continue;
                 }
             };
-            if !payload.trailing_bytes.is_empty() {
+            if decoded.unparsed_tail_bytes != 0 {
                 graph.push_issue(
                     ReferenceGraphIssue::UnparsedTrailingPayload {
                         object_index,
                         path_id: object.path_id,
-                        byte_count: payload.trailing_bytes.len(),
+                        byte_count: decoded.unparsed_tail_bytes,
+                    },
+                    limits.max_issues,
+                )?;
+            }
+            if let Some(error) = decoded.incomplete_outcome {
+                graph.push_issue(
+                    ReferenceGraphIssue::ObjectDecodeFailed {
+                        object_index,
+                        path_id: object.path_id,
+                        error,
                     },
                     limits.max_issues,
                 )?;
@@ -287,7 +295,7 @@ impl ObjectReferenceGraph {
 
             let mut field_path = String::new();
             match collect_references(
-                &payload.root,
+                &decoded.payload.root,
                 &mut field_path,
                 object_index,
                 object.path_id,
@@ -384,7 +392,7 @@ impl ObjectReferenceGraph {
                 .saturating_sub(graph.managed_references.len());
             let mut managed_field_path = String::new();
             match collect_managed_reference_graph(
-                &payload.root,
+                &decoded.payload.root,
                 &mut managed_field_path,
                 object_index,
                 object.path_id,
@@ -698,40 +706,131 @@ impl ObjectReferenceGraph {
     }
 }
 
+struct DecodedReferenceObject {
+    payload: ParsedObjectPayload,
+    unparsed_tail_bytes: usize,
+    incomplete_outcome: Option<SerializedFileError>,
+}
+
 fn decode_object_payload_with_generated_fallback(
     file: &SerializedFile<'_>,
     object_index: usize,
     limits: &ObjectDecodeLimits,
     fallback: Option<SourceTypeTreeFallback<'_>>,
-) -> Result<ParsedObjectPayload, SerializedFileError> {
-    match file.decode_object_payload_with_limits(object_index, limits) {
-        Ok(payload) => Ok(payload),
-        Err(original_error) => {
-            let has_no_usable_tree = matches!(
-                original_error.kind(),
-                SerializedFileErrorKind::Object(object_error)
-                    if matches!(
-                        object_error.kind(),
-                        ObjectDecodeErrorKind::MissingTypeTree { .. }
-                            | ObjectDecodeErrorKind::EmptyTypeTree { .. }
-                    )
-            );
-            let Some(fallback) = fallback.filter(|_| has_no_usable_tree) else {
-                return Err(original_error);
-            };
-            match crate::processing::asset_factory::decode_no_usable_type_tree_payload(
-                file,
-                object_index,
-                fallback.collection_name,
-                fallback.file_path,
-                fallback.layouts,
-                limits,
-            ) {
-                Ok(Some(recovery)) => Ok(recovery.payload),
-                Ok(None) => Err(original_error),
-                Err(fallback_error) => Err(SerializedFileError::from_object(fallback_error)),
-            }
+) -> Result<DecodedReferenceObject, SerializedFileError> {
+    let Some(fallback) = fallback else {
+        let payload = file.decode_object_payload_with_limits(object_index, limits)?;
+        let unparsed_tail_bytes = payload.trailing_bytes.len();
+        return Ok(DecodedReferenceObject {
+            payload,
+            unparsed_tail_bytes,
+            incomplete_outcome: None,
+        });
+    };
+
+    let platform = reference_graph_platform_label(file.metadata.prefix.target_platform);
+    let materialization = crate::processing::asset_factory::materialize_object_for_workspace(
+        file,
+        &crate::processing::asset_factory::FactoryFileFacts {
+            collection_name: fallback.collection_name,
+            file_path: fallback.file_path,
+            platform: &platform,
+        },
+        fallback.layouts,
+        object_index,
+        limits,
+    )
+    .map_err(|error| {
+        let class_id = file
+            .metadata
+            .objects
+            .get(object_index)
+            .map(crate::processing::asset_factory::object_read_class_id)
+            .unwrap_or_default();
+        SerializedFileError::from_object(ObjectDecodeError::factory_object_outcome(
+            object_index,
+            class_id,
+            "factory materialization failure".to_owned(),
+            Some(error.to_string()),
+        ))
+    })?;
+    let crate::processing::asset_factory::FactoryObjectMaterialization {
+        state,
+        payload: factory_payload,
+    } = materialization;
+
+    let has_file_type_tree = file
+        .metadata
+        .objects
+        .get(object_index)
+        .and_then(|object| object.resolved_type_index)
+        .and_then(|type_index| file.metadata.types.get(type_index))
+        .and_then(|serialized_type| serialized_type.type_tree.as_ref())
+        .is_some_and(|tree| !tree.nodes.is_empty());
+    let payload = if state.class_id == crate::processing::asset_factory::MONO_BEHAVIOUR_CLASS_ID
+        && has_file_type_tree
+    {
+        file.decode_object_payload_with_limits(object_index, limits)?
+    } else if state.kind.is_recoverable() {
+        factory_payload.ok_or_else(|| factory_object_outcome_error(&state))?
+    } else {
+        return Err(factory_object_outcome_error(&state));
+    };
+
+    let unparsed_tail_bytes = match state.tail {
+        Some(
+            crate::processing::asset_factory::ObjectTailOutcome::Exact
+            | crate::processing::asset_factory::ObjectTailOutcome::ZeroPadding
+            | crate::processing::asset_factory::ObjectTailOutcome::ChineseTextureFields,
+        ) => 0,
+        Some(crate::processing::asset_factory::ObjectTailOutcome::IncorrectByteCount) | None => {
+            payload.trailing_bytes.len()
         }
+    };
+    let is_fully_materialized = state.is_fully_materialized(Some(&payload));
+    let incomplete_outcome = if !is_fully_materialized && unparsed_tail_bytes == 0 {
+        Some(factory_object_outcome_error(&state))
+    } else {
+        None
+    };
+    Ok(DecodedReferenceObject {
+        payload,
+        unparsed_tail_bytes,
+        incomplete_outcome,
+    })
+}
+
+fn factory_object_outcome_error(
+    state: &crate::processing::asset_factory::FactoryObjectState,
+) -> SerializedFileError {
+    let outcome = match &state.kind {
+        crate::processing::asset_factory::FactoryAssetKind::Generated(name) => {
+            format!("generated class {name} without a complete serialized structure")
+        }
+        crate::processing::asset_factory::FactoryAssetKind::TypeTreeObject => {
+            "TypeTreeObject without a complete serialized structure".to_owned()
+        }
+        crate::processing::asset_factory::FactoryAssetKind::Unknown => {
+            "UnknownObject raw fallback".to_owned()
+        }
+        crate::processing::asset_factory::FactoryAssetKind::Unreadable => {
+            "UnreadableObject raw fallback".to_owned()
+        }
+    };
+    SerializedFileError::from_object(ObjectDecodeError::factory_object_outcome(
+        state.object_index,
+        state.class_id,
+        outcome,
+        state.log_message.clone(),
+    ))
+}
+
+fn reference_graph_platform_label(platform: Option<u32>) -> String {
+    match platform {
+        Some(crate::serialized_file::object::BUILD_TARGET_NO_TARGET) => "NoTarget".to_owned(),
+        Some(19) => "StandaloneWin64Player".to_owned(),
+        Some(value) => format!("BuildTarget({value})"),
+        None => "Unknown".to_owned(),
     }
 }
 

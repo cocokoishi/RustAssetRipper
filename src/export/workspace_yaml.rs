@@ -2627,6 +2627,7 @@ pub(crate) mod tests {
     use crate::export::scene_collection::ExportAssetIdentity;
     use crate::io::dependency::DependencyFilePath;
     use crate::io::filesystem::VirtualFileSystem;
+    use crate::processing::asset_factory::FileTypeTreeTestLayouts;
     use crate::resource::{ExplicitRootResourceInput, RootResourceCatalogLimits};
     use crate::scheme::{SchemeReader, SchemeReaderLimits};
     use crate::serialized_file::file::SerializedFile;
@@ -2708,6 +2709,27 @@ pub(crate) mod tests {
         load_workspace_files(&[("main.assets", bytes)])
     }
 
+    pub(crate) fn load_workspace_bytes_with_source_factory(
+        bytes: &[u8],
+    ) -> (VirtualFileSystem, SerializedFileWorkspace) {
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem.create_directory(Some("/game")).unwrap();
+        filesystem
+            .write_all_bytes("/game/main.assets", bytes)
+            .unwrap();
+        let input = [DependencyFilePath {
+            file_name: "main.assets".to_owned(),
+            virtual_path: "/game/main.assets".to_owned(),
+        }];
+        let workspace = SerializedFileWorkspace::load_from_vfs(
+            &filesystem,
+            &input,
+            SerializedFileWorkspaceLimits::default(),
+        )
+        .unwrap();
+        (filesystem, workspace)
+    }
+
     fn load_workspace_files(
         files: &[(&str, &[u8])],
     ) -> (VirtualFileSystem, SerializedFileWorkspace) {
@@ -2722,13 +2744,28 @@ pub(crate) mod tests {
                 virtual_path,
             });
         }
-        let workspace = SerializedFileWorkspace::load_from_vfs(
+        let workspace = SerializedFileWorkspace::load_from_vfs_with_layout_source(
             &filesystem,
             &input,
             SerializedFileWorkspaceLimits::default(),
+            &FileTypeTreeTestLayouts,
         )
         .unwrap();
         (filesystem, workspace)
+    }
+
+    fn load_objects_with_test_layouts(
+        filesystem: &VirtualFileSystem,
+        workspace: &SerializedFileWorkspace,
+        limits: ObjectWorkspaceLimits,
+    ) -> Result<ObjectWorkspace, Box<crate::serialized_file::object_workspace::ObjectWorkspaceError>>
+    {
+        ObjectWorkspace::load_from_vfs_with_layout_source(
+            filesystem,
+            workspace,
+            limits,
+            &FileTypeTreeTestLayouts,
+        )
     }
 
     fn explicit_root_resource_catalog(
@@ -3850,7 +3887,7 @@ pub(crate) mod tests {
             .unwrap();
         let catalog =
             explicit_root_resource_catalog(&filesystem, "texture.resS", "/game/texture.resS");
-        let objects = ObjectWorkspace::load_from_vfs(
+        let objects = load_objects_with_test_layouts(
             &filesystem,
             &workspace,
             ObjectWorkspaceLimits::default(),
@@ -3957,7 +3994,7 @@ pub(crate) mod tests {
                 .unwrap();
             let catalog =
                 explicit_root_resource_catalog(&filesystem, "texture.resS", "/game/texture.resS");
-            let objects = ObjectWorkspace::load_from_vfs(
+            let objects = load_objects_with_test_layouts(
                 &filesystem,
                 &workspace,
                 ObjectWorkspaceLimits::default(),
@@ -4042,7 +4079,7 @@ pub(crate) mod tests {
                 RootResourceCatalogLimits::default(),
             )
             .unwrap();
-            let objects = ObjectWorkspace::load_from_vfs(
+            let objects = load_objects_with_test_layouts(
                 &filesystem,
                 &workspace,
                 ObjectWorkspaceLimits::default(),
@@ -4114,7 +4151,7 @@ pub(crate) mod tests {
             .unwrap();
         let catalog =
             explicit_root_resource_catalog(&filesystem, "second.resS", "/game/second.resS");
-        let objects = ObjectWorkspace::load_from_vfs(
+        let objects = load_objects_with_test_layouts(
             &filesystem,
             &workspace,
             ObjectWorkspaceLimits::default(),
@@ -4245,7 +4282,7 @@ pub(crate) mod tests {
             .unwrap();
         let catalog =
             explicit_root_resource_catalog(&filesystem, "texture.resS", "/game/texture.resS");
-        let objects = ObjectWorkspace::load_from_vfs(
+        let objects = load_objects_with_test_layouts(
             &filesystem,
             &workspace,
             ObjectWorkspaceLimits::default(),
@@ -4324,7 +4361,7 @@ pub(crate) mod tests {
             RootResourceCatalogLimits::default(),
         )
         .unwrap();
-        let objects = ObjectWorkspace::load_from_vfs(
+        let objects = load_objects_with_test_layouts(
             &filesystem,
             &workspace,
             ObjectWorkspaceLimits::default(),
@@ -4435,7 +4472,7 @@ pub(crate) mod tests {
     #[test]
     fn exports_workspace_gameobject_component_and_transform_back_reference() {
         let (filesystem, workspace) = load_workspaces(TRANSFORM_PATH_ID);
-        let objects = ObjectWorkspace::load_from_vfs(
+        let objects = load_objects_with_test_layouts(
             &filesystem,
             &workspace,
             ObjectWorkspaceLimits::default(),
@@ -4496,7 +4533,7 @@ pub(crate) mod tests {
     #[test]
     fn collection_executor_writes_documents_in_supplied_yaml_order() {
         let (filesystem, workspace) = load_workspaces(TRANSFORM_PATH_ID);
-        let objects = ObjectWorkspace::load_from_vfs(
+        let objects = load_objects_with_test_layouts(
             &filesystem,
             &workspace,
             ObjectWorkspaceLimits::default(),
@@ -4539,7 +4576,7 @@ pub(crate) mod tests {
     #[test]
     fn scene_executor_applies_scene_ordering_before_writing() {
         let (filesystem, workspace) = load_workspaces(TRANSFORM_PATH_ID);
-        let objects = ObjectWorkspace::load_from_vfs(
+        let objects = load_objects_with_test_layouts(
             &filesystem,
             &workspace,
             ObjectWorkspaceLimits::default(),
@@ -4579,7 +4616,7 @@ pub(crate) mod tests {
 
         let bytes = make_mesh_renderer_component_file();
         let (filesystem, workspace) = load_workspace_bytes(&bytes);
-        let objects = ObjectWorkspace::load_from_vfs(
+        let objects = load_objects_with_test_layouts(
             &filesystem,
             &workspace,
             ObjectWorkspaceLimits::default(),
@@ -4622,7 +4659,7 @@ pub(crate) mod tests {
     fn scene_gameobject_component_nonnull_pptrs_follow_ids_into_yaml() {
         let bytes = make_game_object_mesh_renderer_file();
         let (filesystem, workspace) = load_workspace_bytes(&bytes);
-        let objects = ObjectWorkspace::load_from_vfs(
+        let objects = load_objects_with_test_layouts(
             &filesystem,
             &workspace,
             ObjectWorkspaceLimits::default(),
@@ -4686,7 +4723,7 @@ pub(crate) mod tests {
 
         let bytes = make_game_object_mesh_renderer_file();
         let (filesystem, workspace) = load_workspace_bytes(&bytes);
-        let objects = ObjectWorkspace::load_from_vfs(
+        let objects = load_objects_with_test_layouts(
             &filesystem,
             &workspace,
             ObjectWorkspaceLimits::default(),
@@ -4835,7 +4872,7 @@ pub(crate) mod tests {
 
         let bytes = make_game_object_without_transform_file();
         let (filesystem, workspace) = load_workspace_bytes(&bytes);
-        let objects = ObjectWorkspace::load_from_vfs(
+        let objects = load_objects_with_test_layouts(
             &filesystem,
             &workspace,
             ObjectWorkspaceLimits::default(),
@@ -5093,7 +5130,7 @@ pub(crate) mod tests {
     fn scene_component_pointers_to_other_collections_emit_guid_and_type() {
         let bytes = make_game_object_mesh_renderer_file();
         let (filesystem, workspace) = load_workspace_bytes(&bytes);
-        let objects = ObjectWorkspace::load_from_vfs(
+        let objects = load_objects_with_test_layouts(
             &filesystem,
             &workspace,
             ObjectWorkspaceLimits::default(),
@@ -5160,7 +5197,7 @@ pub(crate) mod tests {
             ("shared.assets", mesh_renderer_bytes.as_slice()),
         ];
         let (filesystem, workspace) = load_workspace_files(&source_files);
-        let objects = ObjectWorkspace::load_from_vfs(
+        let objects = load_objects_with_test_layouts(
             &filesystem,
             &workspace,
             ObjectWorkspaceLimits::default(),
@@ -5256,7 +5293,7 @@ pub(crate) mod tests {
             ("target.assets", target_bytes.as_slice()),
         ];
         let (filesystem, workspace) = load_workspace_files(&source_files);
-        let objects = ObjectWorkspace::load_from_vfs(
+        let objects = load_objects_with_test_layouts(
             &filesystem,
             &workspace,
             ObjectWorkspaceLimits::default(),
@@ -5329,7 +5366,7 @@ pub(crate) mod tests {
     #[test]
     fn collection_executor_reports_processed_assets_without_a_generated_walker() {
         let (filesystem, workspace) = load_workspaces(TRANSFORM_PATH_ID);
-        let objects = ObjectWorkspace::load_from_vfs(
+        let objects = load_objects_with_test_layouts(
             &filesystem,
             &workspace,
             ObjectWorkspaceLimits::default(),
@@ -5373,7 +5410,7 @@ pub(crate) mod tests {
     fn scene_executor_writes_a_planned_generated_transform_document() {
         let bytes = make_game_object_without_transform_file();
         let (filesystem, workspace) = load_workspace_bytes(&bytes);
-        let objects = ObjectWorkspace::load_from_vfs(
+        let objects = load_objects_with_test_layouts(
             &filesystem,
             &workspace,
             ObjectWorkspaceLimits::default(),
@@ -5484,7 +5521,7 @@ pub(crate) mod tests {
     #[test]
     fn refuses_workspace_payload_bytes_or_reference_edges_that_do_not_match() {
         let (filesystem, workspace) = load_workspaces(TRANSFORM_PATH_ID);
-        let objects = ObjectWorkspace::load_from_vfs(
+        let objects = load_objects_with_test_layouts(
             &filesystem,
             &workspace,
             ObjectWorkspaceLimits::default(),
@@ -5556,7 +5593,7 @@ pub(crate) mod tests {
     #[test]
     fn missing_local_component_reference_remains_an_export_error() {
         let (filesystem, workspace) = load_workspaces(999);
-        let objects = ObjectWorkspace::load_from_vfs(
+        let objects = load_objects_with_test_layouts(
             &filesystem,
             &workspace,
             ObjectWorkspaceLimits::default(),

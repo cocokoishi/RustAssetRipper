@@ -7,10 +7,14 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use crate::io::filesystem::VirtualFileSystem;
+use crate::processing::asset_factory::{
+    reference_class_layouts, ClassLayoutSource, FactoryAssetKind, FactoryEngineError,
+    FactoryFileFacts, FactoryObjectMaterialization, FactoryObjectState, FactoryUnityVersion,
+};
 
-use super::file::{SerializedFile, SerializedFileError, SerializedFileErrorKind};
+use super::file::{SerializedFile, SerializedFileError};
 use super::metadata::TypeTree;
-use super::object::{ObjectDecodeErrorKind, ObjectDecodeLimits, ParsedObjectPayload};
+use super::object::{ObjectDecodeError, ObjectDecodeLimits, ParsedObjectPayload};
 use super::workspace::SerializedFileWorkspace;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -64,9 +68,19 @@ pub struct WorkspaceObject {
     pub is_destroyed: Option<u16>,
     pub is_stripped: Option<bool>,
     pub raw_payload_range: Range<u64>,
+    /// `GameAssetFactory` classification and class-specific read outcome. Raw bytes stay in the
+    /// VFS and are available through `raw_payload_range`.
+    pub factory: FactoryObjectState,
     /// Source TPK tree used for this object when its file has no usable tree.
     pub recovered_type_tree: Option<Arc<TypeTree>>,
     pub payload: Result<ParsedObjectPayload, SerializedFileError>,
+}
+
+impl WorkspaceObject {
+    pub fn is_fully_materialized(&self) -> bool {
+        self.factory
+            .is_fully_materialized(self.payload.as_ref().ok())
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -82,6 +96,24 @@ impl ObjectWorkspace {
         filesystem: &VirtualFileSystem,
         workspace: &SerializedFileWorkspace,
         limits: ObjectWorkspaceLimits,
+    ) -> Result<Self, Box<ObjectWorkspaceError>> {
+        Self::load_from_vfs_inner(filesystem, workspace, limits, reference_class_layouts())
+    }
+
+    pub fn load_from_vfs_with_layout_source(
+        filesystem: &VirtualFileSystem,
+        workspace: &SerializedFileWorkspace,
+        limits: ObjectWorkspaceLimits,
+        layouts: &dyn ClassLayoutSource,
+    ) -> Result<Self, Box<ObjectWorkspaceError>> {
+        Self::load_from_vfs_inner(filesystem, workspace, limits, layouts)
+    }
+
+    fn load_from_vfs_inner(
+        filesystem: &VirtualFileSystem,
+        workspace: &SerializedFileWorkspace,
+        limits: ObjectWorkspaceLimits,
+        layouts: &dyn ClassLayoutSource,
     ) -> Result<Self, Box<ObjectWorkspaceError>> {
         let mut report = ObjectWorkspaceReport::default();
         for (file_index, file) in workspace.files().iter().enumerate() {
@@ -206,32 +238,74 @@ impl ObjectWorkspace {
                             .max_total_decoded_allocation_bytes
                             .saturating_sub(report.total_decoded_allocation_bytes),
                     );
-                let mut recovered_type_tree = None;
-                let payload = match parsed_file
-                    .decode_object_payload_with_limits(object_index, &decode_limits)
-                {
-                    Ok(payload) => Ok(payload),
-                    Err(original_error) if missing_type_tree_error(&original_error) => {
-                        match crate::processing::asset_factory::decode_no_usable_type_tree_payload(
-                            &parsed_file,
-                            object_index,
-                            &file.file_name,
+                let platform = target_platform_label(parsed_file.metadata.prefix.target_platform);
+                let materialization =
+                    crate::processing::asset_factory::materialize_object_for_workspace(
+                        &parsed_file,
+                        &FactoryFileFacts {
+                            collection_name: &file.file_name,
+                            file_path: &file.virtual_path,
+                            platform: &platform,
+                        },
+                        layouts,
+                        object_index,
+                        &decode_limits,
+                    )
+                    .map_err(|source| {
+                        object_workspace_error(
+                            file_index,
                             &file.virtual_path,
-                            crate::processing::asset_factory::reference_class_layouts(),
-                            &decode_limits,
-                        ) {
-                            Ok(Some(recovery)) => {
-                                recovered_type_tree = Some(recovery.type_tree);
-                                Ok(recovery.payload)
-                            }
-                            Ok(None) => Err(original_error),
-                            Err(fallback_error) => {
-                                Err(SerializedFileError::from_object(fallback_error))
-                            }
-                        }
-                    }
-                    Err(error) => Err(error),
+                            Some(object_index),
+                            ObjectWorkspaceErrorKind::FactoryMaterialization(source),
+                        )
+                    })?;
+                let FactoryObjectMaterialization {
+                    state,
+                    payload: factory_payload,
+                } = materialization;
+                let object_class_id = state.class_id;
+                let is_mono_behaviour =
+                    object_class_id == crate::processing::asset_factory::MONO_BEHAVIOUR_CLASS_ID;
+                let has_file_type_tree = parsed_file
+                    .metadata
+                    .objects
+                    .get(object_index)
+                    .and_then(|object| object.resolved_type_index)
+                    .and_then(|type_index| parsed_file.metadata.types.get(type_index))
+                    .and_then(|serialized_type| serialized_type.type_tree.as_ref())
+                    .is_some_and(|tree| !tree.nodes.is_empty());
+                let mut recovered_type_tree = None;
+                let payload = if is_mono_behaviour && has_file_type_tree {
+                    parsed_file.decode_object_payload_with_limits(object_index, &decode_limits)
+                } else if state.kind.is_recoverable() {
+                    factory_payload.ok_or_else(|| factory_outcome_error(&state))
+                } else {
+                    Err(factory_outcome_error(&state))
                 };
+                if state.kind.is_recoverable() && !has_file_type_tree {
+                    let version = parsed_file
+                        .metadata
+                        .prefix
+                        .unity_version_text
+                        .as_deref()
+                        .and_then(FactoryUnityVersion::parse)
+                        .unwrap_or_else(FactoryUnityVersion::stripped);
+                    recovered_type_tree = layouts
+                        .tpk_trees(object_class_id, &version)
+                        .ok()
+                        .flatten()
+                        .map(|(release, editor)| {
+                            if parsed_file
+                                .object_read_flags(&file.virtual_path, &file.file_name)
+                                .is_release()
+                            {
+                                release
+                            } else {
+                                editor
+                            }
+                        });
+                }
+                let fully_materialized = state.is_fully_materialized(payload.as_ref().ok());
                 match &payload {
                     Ok(decoded) => {
                         report.total_decoded_allocation_bytes = report
@@ -258,15 +332,48 @@ impl ObjectWorkspace {
                                 },
                             ));
                         }
-                        report.decoded_objects =
-                            report.decoded_objects.checked_add(1).ok_or_else(|| {
-                                object_workspace_error(
-                                    file_index,
-                                    &file.virtual_path,
-                                    Some(object_index),
-                                    ObjectWorkspaceErrorKind::ObjectCountOverflow,
-                                )
-                            })?;
+                        if fully_materialized {
+                            report.decoded_objects =
+                                report.decoded_objects.checked_add(1).ok_or_else(|| {
+                                    object_workspace_error(
+                                        file_index,
+                                        &file.virtual_path,
+                                        Some(object_index),
+                                        ObjectWorkspaceErrorKind::ObjectCountOverflow,
+                                    )
+                                })?;
+                        } else {
+                            let raw_length =
+                                usize::try_from(raw_payload_range.end - raw_payload_range.start)
+                                    .map_err(|_| {
+                                        object_workspace_error(
+                                            file_index,
+                                            &file.virtual_path,
+                                            Some(object_index),
+                                            ObjectWorkspaceErrorKind::UndecodedRawByteCountOverflow,
+                                        )
+                                    })?;
+                            report.total_undecoded_raw_bytes = report
+                                .total_undecoded_raw_bytes
+                                .checked_add(raw_length)
+                                .ok_or_else(|| {
+                                    object_workspace_error(
+                                        file_index,
+                                        &file.virtual_path,
+                                        Some(object_index),
+                                        ObjectWorkspaceErrorKind::UndecodedRawByteCountOverflow,
+                                    )
+                                })?;
+                            report.undecoded_objects =
+                                report.undecoded_objects.checked_add(1).ok_or_else(|| {
+                                    object_workspace_error(
+                                        file_index,
+                                        &file.virtual_path,
+                                        Some(object_index),
+                                        ObjectWorkspaceErrorKind::ObjectCountOverflow,
+                                    )
+                                })?;
+                        }
                     }
                     Err(_) => {
                         let raw_length =
@@ -313,6 +420,7 @@ impl ObjectWorkspace {
                     is_destroyed: object_info.is_destroyed,
                     is_stripped: object_info.is_stripped,
                     raw_payload_range,
+                    factory: state,
                     recovered_type_tree,
                     payload,
                 });
@@ -370,6 +478,7 @@ pub enum ObjectWorkspaceErrorKind {
     },
     FileChangedSinceWorkspaceLoad,
     InvalidObjectPayloadRange,
+    FactoryMaterialization(FactoryEngineError),
     DecodedAllocationByteCountOverflow,
     TotalDecodedAllocationLimitExceeded {
         byte_count: usize,
@@ -417,6 +526,9 @@ impl Display for ObjectWorkspaceErrorKind {
             Self::InvalidObjectPayloadRange => {
                 f.write_str("object payload range overflows or is outside the input file")
             }
+            Self::FactoryMaterialization(error) => {
+                write!(f, "source asset-factory materialization failed: {error}")
+            }
             Self::DecodedAllocationByteCountOverflow => {
                 f.write_str("aggregate decoded allocation byte count overflows")
             }
@@ -437,6 +549,7 @@ impl Error for ObjectWorkspaceError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match &self.kind {
             ObjectWorkspaceErrorKind::FileSystem(error) => Some(error),
+            ObjectWorkspaceErrorKind::FactoryMaterialization(error) => Some(error),
             ObjectWorkspaceErrorKind::SerializedFile(error) => Some(error),
             _ => None,
         }
@@ -457,14 +570,28 @@ fn object_workspace_error(
     })
 }
 
-fn missing_type_tree_error(error: &SerializedFileError) -> bool {
-    matches!(
-        error.kind(),
-        SerializedFileErrorKind::Object(object_error)
-            if matches!(
-                object_error.kind(),
-                ObjectDecodeErrorKind::MissingTypeTree { .. }
-                    | ObjectDecodeErrorKind::EmptyTypeTree { .. }
-            )
-    )
+fn factory_outcome_error(state: &FactoryObjectState) -> SerializedFileError {
+    let outcome = match &state.kind {
+        FactoryAssetKind::Generated(name) => {
+            format!("generated class {name} without decoded values")
+        }
+        FactoryAssetKind::TypeTreeObject => "TypeTreeObject without decoded values".to_owned(),
+        FactoryAssetKind::Unknown => "UnknownObject raw fallback".to_owned(),
+        FactoryAssetKind::Unreadable => "UnreadableObject raw fallback".to_owned(),
+    };
+    SerializedFileError::from_object(ObjectDecodeError::factory_object_outcome(
+        state.object_index,
+        state.class_id,
+        outcome,
+        state.log_message.clone(),
+    ))
+}
+
+fn target_platform_label(platform: Option<u32>) -> String {
+    match platform {
+        Some(crate::serialized_file::object::BUILD_TARGET_NO_TARGET) => "NoTarget".to_owned(),
+        Some(19) => "StandaloneWin64Player".to_owned(),
+        Some(value) => format!("BuildTarget({value})"),
+        None => "Unknown".to_owned(),
+    }
 }

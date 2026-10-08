@@ -31,24 +31,41 @@ impl Default for BuildSettingsSceneLimits {
 
 /// Extract ordered scene paths from a decoded BuildSettings object.
 ///
-/// Current TypeTrees use `m_Scenes`; older layouts used `m_Levels`, which the source generator
-/// normalizes to `m_Scenes`. Entries may be serialized strings or structs with a `path` field.
+/// Current TypeTrees use `m_Scenes`; older layouts used `m_Levels`. Generated BuildSettings
+/// classes expose the corresponding normalized `scenes`/`levels` property names. Entries may be
+/// serialized strings or structs with a `path` field.
 pub fn extract_build_settings_scene_paths(
     root: &SerializedValue,
     limits: BuildSettingsSceneLimits,
 ) -> Result<Vec<String>, BuildSettingsSceneError> {
-    let scenes_field = root
-        .unique_field_in_base_chain("m_Scenes")
-        .map_err(|source| BuildSettingsSceneError::FieldLookup {
-            field_name: "m_Scenes",
-            source,
+    let mut scenes_field = None;
+    for name in ["m_Scenes", "scenes"] {
+        let value = root.unique_field_in_base_chain(name).map_err(|source| {
+            BuildSettingsSceneError::FieldLookup {
+                field_name: "m_Scenes",
+                source,
+            }
         })?;
-    let levels_field = root
-        .unique_field_in_base_chain("m_Levels")
-        .map_err(|source| BuildSettingsSceneError::FieldLookup {
-            field_name: "m_Levels",
-            source,
+        if let Some(value) = value {
+            if scenes_field.replace(value).is_some() {
+                return Err(BuildSettingsSceneError::BothSceneArrayFieldsPresent);
+            }
+        }
+    }
+    let mut levels_field = None;
+    for name in ["m_Levels", "levels"] {
+        let value = root.unique_field_in_base_chain(name).map_err(|source| {
+            BuildSettingsSceneError::FieldLookup {
+                field_name: "m_Levels",
+                source,
+            }
         })?;
+        if let Some(value) = value {
+            if levels_field.replace(value).is_some() {
+                return Err(BuildSettingsSceneError::BothSceneArrayFieldsPresent);
+            }
+        }
+    }
     let entries = match (scenes_field, levels_field) {
         (Some(_), Some(_)) => return Err(BuildSettingsSceneError::BothSceneArrayFieldsPresent),
         (Some(value), None) | (None, Some(value)) => value,
@@ -984,6 +1001,37 @@ pub(crate) mod tests {
                 "Assets/Scenes/Old.unity",
                 "Library/PackageCache/pkg/Old2.unity"
             ]
+        );
+
+        let generated_current = SerializedValue::Struct(vec![field(
+            "Base",
+            SerializedValue::Struct(vec![field(
+                "scenes",
+                SerializedValue::Array(vec![scene_path(b"Assets/Scenes/Generated.unity")]),
+            )]),
+        )]);
+        assert_eq!(
+            extract_build_settings_scene_paths(
+                &generated_current,
+                BuildSettingsSceneLimits::default()
+            )
+            .unwrap(),
+            ["Assets/Scenes/Generated.unity"]
+        );
+
+        let generated_legacy = SerializedValue::Struct(vec![field(
+            "levels",
+            SerializedValue::Array(vec![SerializedValue::StringBytes(
+                b"Assets/Scenes/GeneratedOld.unity".to_vec(),
+            )]),
+        )]);
+        assert_eq!(
+            extract_build_settings_scene_paths(
+                &generated_legacy,
+                BuildSettingsSceneLimits::default()
+            )
+            .unwrap(),
+            ["Assets/Scenes/GeneratedOld.unity"]
         );
     }
 
