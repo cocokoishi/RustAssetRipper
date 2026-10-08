@@ -777,7 +777,7 @@ impl SerializedFileWorkspace {
                         },
                     ));
                 };
-                let graph = ObjectReferenceGraph::build_with_generated_type_tree_fallback(
+                let graph = ObjectReferenceGraph::build_with_source_type_tree_fallback(
                     &parsed,
                     limits.reference_graph,
                     &input.file_name,
@@ -5028,6 +5028,109 @@ mod tests {
         assert_eq!(
             filesystem
                 .read_all_bytes("/game/textasset_notree.assets", usize::MAX)
+                .unwrap(),
+            bytes,
+            "recovery must leave source bytes unchanged"
+        );
+    }
+
+    #[test]
+    fn object_workspace_recovers_editor_tpk_tree_object_without_file_typetree() {
+        let fixture = crate::processing::asset_factory::PROBE_FIXTURE;
+        let hex = fixture
+            .lines()
+            .find_map(|line| line.strip_prefix("SF_HEX|tpk_navmesh_editor|"))
+            .expect("the source factory fixture includes the editor TPK object");
+        assert!(hex.len().is_multiple_of(2), "fixture hex has even length");
+        let bytes = hex
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let digits = std::str::from_utf8(pair).expect("fixture hex is ASCII");
+                u8::from_str_radix(digits, 16).expect("fixture hex is valid")
+            })
+            .collect::<Vec<_>>();
+        let parsed = SerializedFile::parse(&bytes).expect("source fixture parses");
+        assert_eq!(
+            parsed.metadata.prefix.unity_version_text.as_deref(),
+            Some("2019.4.40f1")
+        );
+        assert_eq!(parsed.metadata.prefix.target_platform, Some(0xFFFF_FFFEu32));
+        assert!(
+            !parsed
+                .object_read_flags("/game/navmesh.unity", "navmesh.unity")
+                .is_release(),
+            "NoTarget .unity files use editor serialization flags"
+        );
+        let serialized_type_index = parsed.metadata.objects[0]
+            .resolved_type_index
+            .expect("the TPK class resolves its serialized type");
+        assert!(
+            parsed.metadata.types[serialized_type_index]
+                .type_tree
+                .as_ref()
+                .is_none_or(|tree| tree.nodes.is_empty()),
+            "the object's serialized type must have no usable TypeTree"
+        );
+
+        let filesystem = virtual_file_system("/game/navmesh.unity", &bytes);
+        let workspace = SerializedFileWorkspace::load_from_vfs(
+            &filesystem,
+            &[input("/game/navmesh.unity")],
+            SerializedFileWorkspaceLimits::default(),
+        )
+        .expect("workspace loads the reference fixture");
+        assert!(workspace.files()[0].reference_graph.is_complete());
+        assert!(workspace.files()[0]
+            .reference_graph
+            .object_scan_is_complete(0));
+
+        let objects = ObjectWorkspace::load_from_vfs(
+            &filesystem,
+            &workspace,
+            ObjectWorkspaceLimits::default(),
+        )
+        .expect("the source TPK fallback materializes the TypeTreeObject");
+        assert!(objects.report().is_complete(), "{:?}", objects.report());
+        assert_eq!(objects.report().decoded_objects, 1);
+        let object = &objects.objects()[0];
+        let tree = object
+            .recovered_type_tree
+            .as_ref()
+            .expect("the source TPK editor tree is retained");
+        assert!(tree
+            .nodes
+            .iter()
+            .any(|node| { node.name.as_deref() == Some("m_ObjectHideFlags") }));
+        let payload = object.payload.as_ref().expect("decoded payload");
+        assert_eq!(payload.path_id, 42);
+        assert_eq!(payload.type_name, "NavMeshObsolete");
+        assert_eq!(
+            payload.root.unique_field("m_ObjectHideFlags").unwrap(),
+            Some(&SerializedValue::U32(3))
+        );
+        assert_eq!(
+            payload.root.unique_field("m_PrefabParentObject").unwrap(),
+            Some(&SerializedValue::PPtr {
+                file_id: 0,
+                path_id: 0,
+            })
+        );
+        assert_eq!(
+            payload.root.unique_field("m_PrefabInternal").unwrap(),
+            Some(&SerializedValue::PPtr {
+                file_id: 0,
+                path_id: 0,
+            })
+        );
+        assert_eq!(
+            payload.root.unique_field("m_Name").unwrap(),
+            Some(&SerializedValue::StringBytes(b"SceneNavMesh".to_vec()))
+        );
+        assert_eq!(payload.trailing_bytes, []);
+        assert_eq!(
+            filesystem
+                .read_all_bytes("/game/navmesh.unity", usize::MAX)
                 .unwrap(),
             bytes,
             "recovery must leave source bytes unchanged"

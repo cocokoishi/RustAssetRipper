@@ -64,7 +64,7 @@ pub struct WorkspaceObject {
     pub is_destroyed: Option<u16>,
     pub is_stripped: Option<bool>,
     pub raw_payload_range: Range<u64>,
-    /// Source-generated TPK tree used for this object when its file has no usable tree.
+    /// Source TPK tree used for this object when its file has no usable tree.
     pub recovered_type_tree: Option<Arc<TypeTree>>,
     pub payload: Result<ParsedObjectPayload, SerializedFileError>,
 }
@@ -212,7 +212,7 @@ impl ObjectWorkspace {
                 {
                     Ok(payload) => Ok(payload),
                     Err(original_error) if missing_type_tree_error(&original_error) => {
-                        match crate::processing::asset_factory::decode_no_usable_type_tree_generated_payload(
+                        match crate::processing::asset_factory::decode_no_usable_type_tree_payload(
                             &parsed_file,
                             object_index,
                             &file.file_name,

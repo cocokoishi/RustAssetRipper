@@ -24,6 +24,7 @@ using System.Text;
 using AssetRipper.Assets;
 using AssetRipper.Assets.Bundles;
 using AssetRipper.Assets.Collections;
+using AssetRipper.Assets.IO.Writing;
 using AssetRipper.Assets.Metadata;
 using AssetRipper.Import.AssetCreation;
 using AssetRipper.Import.Logging;
@@ -190,17 +191,19 @@ static void Author(string rowsPath)
 		"mono_unloaded",
 		"mono_with_structure",
 		"monoscript_notree",
+		"tpk_navmesh_editor",
 	];
 	string scratch = Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, "target", "ser-factory-probe"));
 	Directory.CreateDirectory(scratch);
 	Logger.Add(new CaptureLogger());
 	using StreamWriter rows = new(rowsPath, false, new UTF8Encoding(false));
 	rows.WriteLine("# Reference GameAssetFactory differential (probe tools/probes/ser-factory, .NET SDK 10.0.401).");
+	rows.WriteLine("# In expected log text, `␠` encodes a trailing ASCII space so source messages remain whitespace-clean.");
 	rows.WriteLine("# GEN rows: AssetFactory.CreateSerialized(new AssetInfo(collection,42,classId), 2019.4.40f1)");
 	rows.WriteLine("# on an empty real SerializedAssetCollection, plus the TypeTreeNodeStruct.TryMakeFromTpk outcome.");
 	rows.WriteLine("# TPK rows: the real TPK TypeTree nodes used by the CreateAsset fallback.");
 	rows.WriteLine("# SF_HEX rows: the authored SerializedFiles; SF_READ rows: the shipped factory materialization");
-	rows.WriteLine("# of those exact bytes reloaded through SchemeReader (StandaloneWin64Player platform facts).");
+	rows.WriteLine("# of those exact bytes reloaded through SchemeReader using each case's platform/path facts.");
 	UnityVersion version = UnityVersion.Parse("2019.4.40f1");
 	SerializedAssetCollection collection = EmptyCollection(version);
 	foreach (int classId in new[] { 7, 49, 114, 115, 129, 141, 194 })
@@ -262,6 +265,8 @@ static (string, SerializedFile) BuildCase(string name)
 			return ("unknown_class.assets", BuildFile("unknown_class.assets", "2019.4.40f1", 7, null, [1, 2, 3, 4, 5, 6, 7, 8]));
 		case "tpk_navmesh":
 			return ("tpk_navmesh.assets", BuildFile("tpk_navmesh.assets", "2019.4.40f1", 194, null, StringPayload("NavMeshData")));
+		case "tpk_navmesh_editor":
+			return ("navmesh.unity", BuildNavMeshEditorFile());
 		case "unreadable_version":
 			return ("unreadable_version.assets", BuildTextAssetFile("3.4.0f1", "Hero", "print(1)", null, []));
 		case "engine_default_resources":
@@ -286,7 +291,19 @@ static SerializedFile BuildTextAssetFile(string versionText, string name, string
 	return BuildFile("x.assets", versionText, 49, tree, payload.ToArray());
 }
 
-static SerializedFile BuildFile(string fileName, string versionText, int classId, TypeTree? tree, byte[] payload)
+static SerializedFile BuildNavMeshEditorFile()
+{
+	List<byte> payload = [];
+	WriteI32(payload, 3); // m_ObjectHideFlags
+	WriteI32(payload, 0); // m_PrefabParentObject.m_FileID
+	WriteI64(payload, 0); // m_PrefabParentObject.m_PathID
+	WriteI32(payload, 0); // m_PrefabInternal.m_FileID
+	WriteI64(payload, 0); // m_PrefabInternal.m_PathID
+	WriteString(payload, "SceneNavMesh");
+	return BuildFile("navmesh.unity", "2019.4.40f1", 194, null, payload.ToArray(), BuildTarget.NoTarget);
+}
+
+static SerializedFile BuildFile(string fileName, string versionText, int classId, TypeTree? tree, byte[] payload, BuildTarget platform = (BuildTarget)19)
 {
 	SerializedType type = new()
 	{
@@ -301,7 +318,7 @@ static SerializedFile BuildFile(string fileName, string versionText, int classId
 	{
 		Generation = FormatVersion.Unknown_10,
 		Version = UnityVersion.Parse(versionText),
-		Platform = (BuildTarget)19,
+		Platform = platform,
 		EndianType = EndianType.LittleEndian,
 		HasTypeTree = false,
 		Types = { type },
@@ -489,7 +506,7 @@ static void DumpMaterialization(StreamWriter rows, string name, FileBase file)
 		rows.WriteLine($"SF_READ|{name}|ASSET|{asset.PathID}|class={asset.ClassID}|type={asset.GetType().Name}|classname={GetProperty(asset, "ClassName")}|name={NameOf(asset)}");
 		foreach (string message in CaptureLogger.Messages)
 		{
-			rows.WriteLine($"SF_READ|{name}|LOG|{message}");
+			rows.WriteLine($"SF_READ|{name}|LOG|{PreserveTrailingSpaces(message)}");
 		}
 		CaptureLogger.Messages.Clear();
 		switch (asset.ClassID)
@@ -508,11 +525,36 @@ static void DumpMaterialization(StreamWriter rows, string name, FileBase file)
 				rows.WriteLine($"SF_READ|{name}|SCRIPTNAME|{GetProperty(asset, "AssemblyName")}|{GetProperty(asset, "Namespace")}|{GetProperty(asset, "ExecutionOrder")}");
 				break;
 		}
+		if (asset is TypeTreeObject)
+		{
+			using MemoryStream editorStream = new();
+			using (AssetWriter writer = new(editorStream, asset.Collection))
+			{
+				asset.WriteEditor(writer);
+			}
+			rows.WriteLine($"SF_READ|{name}|EDITOR_HEX|{Convert.ToHexString(editorStream.ToArray())}");
+			using MemoryStream releaseStream = new();
+			using (AssetWriter writer = new(releaseStream, asset.Collection))
+			{
+				asset.WriteRelease(writer);
+			}
+			rows.WriteLine($"SF_READ|{name}|RELEASE_HEX|{Convert.ToHexString(releaseStream.ToArray())}");
+		}
 	}
 	foreach (string message in CaptureLogger.Messages)
 	{
-		rows.WriteLine($"SF_READ|{name}|LOG|{message}");
+		rows.WriteLine($"SF_READ|{name}|LOG|{PreserveTrailingSpaces(message)}");
 	}
+}
+
+static string PreserveTrailingSpaces(string value)
+{
+	int end = value.Length;
+	while (end > 0 && value[end - 1] == ' ')
+	{
+		end--;
+	}
+	return end == value.Length ? value : value[..end] + new string('␠', value.Length - end);
 }
 
 static void Materialize(string path, string rowsPath)

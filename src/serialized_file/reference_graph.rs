@@ -21,7 +21,7 @@ struct ReferenceSource<'a> {
 }
 
 #[derive(Clone, Copy)]
-struct GeneratedTypeTreeFallback<'a> {
+struct SourceTypeTreeFallback<'a> {
     collection_name: &'a str,
     file_path: &'a str,
     layouts: &'a dyn crate::processing::asset_factory::ClassLayoutSource,
@@ -197,10 +197,10 @@ impl ObjectReferenceGraph {
         Self::build_internal(file, limits, None)
     }
 
-    /// Build a reference graph with the generated-class TPK recovery used by the
-    /// product workspace when a file has no usable TypeTree. Unsupported class or
-    /// version cases retain the original decode issue and keep the scan incomplete.
-    pub fn build_with_generated_type_tree_fallback(
+    /// Build a reference graph with source TPK recovery for generated classes and
+    /// fallback TypeTreeObjects when a file has no usable TypeTree. Unsupported class
+    /// or version cases retain the original decode issue and keep the scan incomplete.
+    pub fn build_with_source_type_tree_fallback(
         file: &SerializedFile<'_>,
         limits: ReferenceGraphLimits,
         collection_name: &str,
@@ -210,7 +210,7 @@ impl ObjectReferenceGraph {
         Self::build_internal(
             file,
             limits,
-            Some(GeneratedTypeTreeFallback {
+            Some(SourceTypeTreeFallback {
                 collection_name,
                 file_path,
                 layouts,
@@ -221,7 +221,7 @@ impl ObjectReferenceGraph {
     fn build_internal(
         file: &SerializedFile<'_>,
         limits: ReferenceGraphLimits,
-        fallback: Option<GeneratedTypeTreeFallback<'_>>,
+        fallback: Option<SourceTypeTreeFallback<'_>>,
     ) -> Result<Self, ReferenceGraphBuildError> {
         let object_count = file.metadata.objects.len();
         if object_count > limits.max_objects {
@@ -702,7 +702,7 @@ fn decode_object_payload_with_generated_fallback(
     file: &SerializedFile<'_>,
     object_index: usize,
     limits: &ObjectDecodeLimits,
-    fallback: Option<GeneratedTypeTreeFallback<'_>>,
+    fallback: Option<SourceTypeTreeFallback<'_>>,
 ) -> Result<ParsedObjectPayload, SerializedFileError> {
     match file.decode_object_payload_with_limits(object_index, limits) {
         Ok(payload) => Ok(payload),
@@ -719,7 +719,7 @@ fn decode_object_payload_with_generated_fallback(
             let Some(fallback) = fallback.filter(|_| has_no_usable_tree) else {
                 return Err(original_error);
             };
-            match crate::processing::asset_factory::decode_no_usable_type_tree_generated_payload(
+            match crate::processing::asset_factory::decode_no_usable_type_tree_payload(
                 file,
                 object_index,
                 fallback.collection_name,

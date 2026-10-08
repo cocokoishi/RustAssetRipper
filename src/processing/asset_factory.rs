@@ -1080,9 +1080,11 @@ fn class_layout(
     class_id: i32,
     version: &FactoryUnityVersion,
     object_index: usize,
+    is_release: bool,
 ) -> Option<TypeTree> {
-    if let Some((release, _)) = source.tpk_trees(class_id, version) {
-        return Some((*release).clone());
+    if let Some((release, editor)) = source.tpk_trees(class_id, version) {
+        let selected = if is_release { release } else { editor };
+        return Some(selected.as_ref().clone());
     }
     let tree = serialized_type_tree(file, object_index)?;
     match classify_type_tree_usability(Some(tree)) {
@@ -1218,7 +1220,15 @@ fn try_read_normal_object(
     };
     let payload_bytes = object_payload_bytes(file, object_index)
         .map_err(|_| Box::new(created.clone_for_failure()))?;
-    let Some(layout) = class_layout(file, source, class_id, version, object_index) else {
+    let read_flags = file.object_read_flags(facts.file_path, facts.collection_name);
+    let Some(layout) = class_layout(
+        file,
+        source,
+        class_id,
+        version,
+        object_index,
+        read_flags.is_release(),
+    ) else {
         return Err(Box::new(NormalAttempt {
             log_level: FactoryLogLevel::Error,
             log_message: None,
@@ -1420,20 +1430,28 @@ fn read_monobehaviour(
     );
     let arrays_align =
         unity_version_aligns_arrays(file.metadata.prefix.unity_version_text.as_deref());
-    let header = class_layout(file, source, MONO_BEHAVIOUR_CLASS_ID, version, object_index)
-        .map(|tree| {
-            decode_with_tree(
-                &tree,
-                &payload_bytes,
-                file.metadata.prefix.body_endian,
-                arrays_align,
-                &file.metadata.reference_types,
-                object_index,
-                file.metadata.objects[object_index].path_id,
-                limits,
-            )
-        })
-        .transpose();
+    let read_flags = file.object_read_flags(facts.file_path, facts.collection_name);
+    let header = class_layout(
+        file,
+        source,
+        MONO_BEHAVIOUR_CLASS_ID,
+        version,
+        object_index,
+        read_flags.is_release(),
+    )
+    .map(|tree| {
+        decode_with_tree(
+            &tree,
+            &payload_bytes,
+            file.metadata.prefix.body_endian,
+            arrays_align,
+            &file.metadata.reference_types,
+            object_index,
+            file.metadata.objects[object_index].path_id,
+            limits,
+        )
+    })
+    .transpose();
 
     let (header_ok, header_payload) = match header {
         Ok(payload) => (true, payload),
@@ -1717,28 +1735,26 @@ pub fn reference_class_layouts() -> &'static ReferenceClassLayouts {
     LAYOUTS.get_or_init(|| ReferenceClassLayouts::parse(PROBE_FIXTURE))
 }
 
-/// A generated-class payload decoded with its source TPK TypeTree because the file
-/// contains no usable TypeTree for that object.
+/// A payload decoded with its source TPK TypeTree because the file contains no usable
+/// TypeTree for that object.
 #[derive(Clone, Debug, PartialEq)]
-pub struct GeneratedTypeTreeRecovery {
+pub struct TypeTreePayloadRecovery {
     pub payload: ParsedObjectPayload,
     pub type_tree: Arc<TypeTree>,
 }
 
-/// Recover one missing file-TypeTree payload through a source-generated class layout.
+/// Recover one missing file-TypeTree payload through its source TPK class layout.
 ///
-/// This deliberately handles only the generated-class branch, where the shipped
-/// generated type and its TPK-derived layout agree. `TypeTreeObject` conversion,
-/// MonoBehaviour assembly resolution, and unprobed class/version pairs remain on the
-/// original error path.
-pub fn decode_no_usable_type_tree_generated_payload(
+/// Generated classes and fallback `TypeTreeObject`s share the TPK layout data. MonoBehaviour
+/// remains separate because its serialized tail depends on assembly/script resolution.
+pub fn decode_no_usable_type_tree_payload(
     file: &SerializedFile<'_>,
     object_index: usize,
     collection_name: &str,
     file_path: &str,
     source: &dyn ClassLayoutSource,
     limits: &ObjectDecodeLimits,
-) -> Result<Option<GeneratedTypeTreeRecovery>, ObjectDecodeError> {
+) -> Result<Option<TypeTreePayloadRecovery>, ObjectDecodeError> {
     let Some(object) = file.metadata.objects.get(object_index) else {
         return Ok(None);
     };
@@ -1753,9 +1769,7 @@ pub fn decode_no_usable_type_tree_generated_payload(
         return Ok(None);
     }
     let class_id = object_read_class_id(object);
-    if class_id == MONO_BEHAVIOUR_CLASS_ID
-        || source.generated_class_name(class_id, &version).is_none()
-    {
+    if class_id == MONO_BEHAVIOUR_CLASS_ID {
         return Ok(None);
     }
     let Some((release_tree, editor_tree)) = source.tpk_trees(class_id, &version) else {
@@ -1780,7 +1794,7 @@ pub fn decode_no_usable_type_tree_generated_payload(
         classify_object_tail(&decoded.trailing_bytes, class_id == TEXTURE2D_CLASS_ID),
         ObjectTailOutcome::Exact | ObjectTailOutcome::ZeroPadding
     ) {
-        Ok(Some(GeneratedTypeTreeRecovery {
+        Ok(Some(TypeTreePayloadRecovery {
             payload: decoded,
             type_tree,
         }))
@@ -2459,7 +2473,11 @@ mod tests {
             .unwrap_or_else(|error| panic!("{} parse: {error}", case.name));
         let facts = FactoryFileFacts {
             collection_name: &case.collection_name,
-            file_path: "",
+            file_path: if case.collection_name.ends_with(".unity") {
+                &case.collection_name
+            } else {
+                ""
+            },
             platform: "StandaloneWin64Player",
         };
         let asset = materialize_object(&file, &facts, layouts, 0, &ObjectDecodeLimits::default())
@@ -2604,6 +2622,50 @@ mod tests {
                     &SerializedValue::StringBytes(b"NavMeshData".to_vec())
                 );
             }
+            "tpk_navmesh_editor" => {
+                assert!(
+                    !file
+                        .object_read_flags(&case.collection_name, &case.collection_name)
+                        .is_release(),
+                    "the source fixture is a NoTarget .unity file"
+                );
+                assert_eq!(asset.kind, FactoryAssetKind::TypeTreeObject);
+                assert_eq!(asset.tail, Some(ObjectTailOutcome::Exact));
+                assert_eq!(
+                    asset.raw,
+                    hex_bytes(
+                        row_value(case, "EDITOR_HEX|")
+                            .expect("the source factory records editor serialization")
+                    )
+                );
+                assert_eq!(
+                    row_value(case, "RELEASE_HEX|"),
+                    Some("0C0000005363656E654E61764D657368")
+                );
+                let root = &asset.payload.as_ref().unwrap().root;
+                assert_eq!(
+                    root.unique_field("m_ObjectHideFlags").unwrap().unwrap(),
+                    &SerializedValue::U32(3)
+                );
+                assert_eq!(
+                    root.unique_field("m_PrefabParentObject").unwrap().unwrap(),
+                    &SerializedValue::PPtr {
+                        file_id: 0,
+                        path_id: 0,
+                    }
+                );
+                assert_eq!(
+                    root.unique_field("m_PrefabInternal").unwrap().unwrap(),
+                    &SerializedValue::PPtr {
+                        file_id: 0,
+                        path_id: 0,
+                    }
+                );
+                assert_eq!(
+                    root.unique_field("m_Name").unwrap().unwrap(),
+                    &SerializedValue::StringBytes(b"SceneNavMesh".to_vec())
+                );
+            }
             "unreadable_version" => {
                 assert!(asset.payload.is_none());
                 assert_eq!(asset.raw.len(), 20);
@@ -2661,7 +2723,7 @@ mod tests {
         let fixture = include_str!("asset_factory_fixture.txt");
         let layouts = ReferenceClassLayouts::parse(fixture);
         let cases = fixture_cases(fixture);
-        assert_eq!(cases.len(), 11, "all probe cases are replayed");
+        assert_eq!(cases.len(), 12, "all probe cases are replayed");
         for case in &cases {
             assert_case(case, &layouts);
         }
