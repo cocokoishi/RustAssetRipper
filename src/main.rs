@@ -6018,6 +6018,77 @@ mod tests {
         drop(input);
     }
 
+    #[test]
+    fn resource_only_directory_matches_the_source_no_asset_process_gate() {
+        let directory = TestInputDirectory::new_root();
+        let resource_path = directory.join("notes.bytes");
+        fs::write(&resource_path, b"plain resource bytes").unwrap();
+        let input = TestInputDirectory {
+            directory: directory.clone(),
+            files: vec![resource_path],
+            subdirectories: Vec::new(),
+        };
+
+        let reference = include_str!("io/cli_inspect_fixture.txt")
+            .lines()
+            .find(|line| line.starts_with("LOAD|resource_only_directory|"))
+            .expect("source runtime fixture contains the resource-only outcome");
+        assert_eq!(
+            reference,
+            "LOAD|resource_only_directory|collections=0|names=|processors_requested=0"
+        );
+        let mut output = Vec::new();
+        super::inspect_directories_to(std::slice::from_ref(&directory), &mut output).unwrap();
+        let summary = String::from_utf8(output).unwrap();
+        assert!(
+            summary.contains(
+                "No valid assets were found in the selected directories; processing was skipped."
+            ),
+            "{summary}"
+        );
+        drop(input);
+    }
+
+    #[test]
+    fn inspect_cli_rejects_empty_and_missing_directory_inputs() {
+        use std::ffi::OsString;
+
+        let source_empty = include_str!("io/cli_inspect_fixture.txt")
+            .lines()
+            .find(|line| line.starts_with("LOAD|no_paths|"))
+            .expect("source runtime fixture contains the no-path error");
+        assert_eq!(
+            source_empty,
+            "LOAD|no_paths|exception=ArgumentException|message=Game files not found (Parameter 'paths')"
+        );
+        let error = super::run([OsString::from("inspect")].into_iter()).unwrap_err();
+        assert_eq!(error.to_string(), "inspect requires at least one input");
+
+        let parent = TestInputDirectory::new_root();
+        let missing = parent.join("missing");
+        assert!(!missing.exists());
+        let source_missing = include_str!("io/cli_inspect_fixture.txt")
+            .lines()
+            .find(|line| line.starts_with("LOAD|missing_directory|"))
+            .expect("source runtime fixture contains the missing-directory error");
+        assert_eq!(
+            source_missing,
+            "LOAD|missing_directory|exception=Exception|message=Neither file nor directory at '$ROOT\\missing' exists"
+        );
+        let mut output = Vec::new();
+        let error =
+            super::inspect_directories_to(std::slice::from_ref(&missing), &mut output).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("input '{}' is not a directory", missing.display())
+        );
+        drop(TestInputDirectory {
+            directory: parent,
+            files: Vec::new(),
+            subdirectories: Vec::new(),
+        });
+    }
+
     /// End-to-end discovery differential against the reference `GameStructure`
     /// dump committed in `bundle_discovery_fixture.txt` (probe
     /// `Temp/opencode/bundleprobe2`): the same two C#-constructed UnityFS

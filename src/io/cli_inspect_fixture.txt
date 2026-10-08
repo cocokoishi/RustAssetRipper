@@ -4,3 +4,8 @@ EMPTY_DIRECTORY|collections=0|processors_requested=0
 # AssetRipper ExportHandler.LoadAndProcess over a Windows platform root plus a selected mixed directory.
 # Both source collection names survive and the processor sequence is requested once.
 PLATFORM_MIXED|input_names=globalgamemanagers,main.assets|processors_requested=1
+# AssetRipper ExportHandler.LoadAndProcess error and no-asset outcomes.
+LOAD|no_paths|exception=ArgumentException|message=Game files not found (Parameter 'paths')
+LOAD|missing_directory|exception=Exception|message=Neither file nor directory at '$ROOT\missing' exists
+LOAD|empty_directory|collections=0|names=|processors_requested=0
+LOAD|resource_only_directory|collections=0|names=|processors_requested=0
