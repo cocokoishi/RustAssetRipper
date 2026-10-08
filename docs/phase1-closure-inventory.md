@@ -1,6 +1,6 @@
 # Phase 1 closure inventory
 
-Current inventory basis: source baseline files remain frozen from the AssetRipper snapshot and manifest. Counts are read from the current feature-parity Status cells after the streamed-resource project-export integration, based on published commit 79930f12ed6f37dc63f65d1439256aae9f9a3056 (tree b8fa1e753eafd511a757f907c1fb31c6109ba9f9). Source reference: C:\Users\koishi\Desktop\RustAssetripper\AssetRipper, frozen by docs/baseline-files.sha256 (1,449 entries; manifest SHA-256 29d1fd27f66b974c43750f30aa99117eb423cb318f3062daf05e1489f10f08f9).
+Current inventory basis: source baseline files remain frozen from the AssetRipper snapshot and manifest. Counts are read from the current feature-parity Status cells after the LocalFileSystem adapter increment, based on published commit 4eb556c9ce82efc6849a7c53caeca103f7dae4f6 (tree 8804785fadff9b5d0d7ac00f53853ed596913d76). No feature row was closed in that increment. Source reference: C:\Users\koishi\Desktop\RustAssetripper\AssetRipper, frozen by docs/baseline-files.sha256 (1,449 entries; manifest SHA-256 29d1fd27f66b974c43750f30aa99117eb423cb318f3062daf05e1489f10f08f9).
 
 The status counts below come from the `Status` cell in each stable-ID row of `docs/feature-parity.md`, matched against the required status vocabulary; prose mentions elsewhere do not affect the count.
 
