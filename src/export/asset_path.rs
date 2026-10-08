@@ -49,7 +49,7 @@ impl HostPathPlatform {
     /// expression always adds `,`, `[`, `]`, and `U+0000..=U+001F`.
     fn invalid_file_name_characters(self) -> &'static [char] {
         match self {
-            Self::Windows => &['"', '<', '>', '|', ':', ',', '[', ']'],
+            Self::Windows => &['"', '<', '>', '|', ':', '/', '\\', ',', '[', ']'],
             Self::Unix => &['/', ':', ',', '[', ']'],
         }
     }
@@ -741,6 +741,14 @@ mod tests {
         assert_eq!(
             fix_invalid_file_name_characters("a<b>c:d[e]", HostPathPlatform::Unix),
             Ok("a<b>c_d_e_".to_owned())
+        );
+        assert_eq!(
+            fix_invalid_file_name_characters("Test/Simple\\Name", HostPathPlatform::Windows),
+            Ok("Test_Simple_Name".to_owned())
+        );
+        assert_eq!(
+            fix_invalid_file_name_characters("Test/Simple\\Name", HostPathPlatform::Unix),
+            Ok("Test_Simple\\Name".to_owned())
         );
         assert_eq!(
             fix_invalid_path_characters("Assets\\Meshes/a<b>[c]", HostPathPlatform::Windows),

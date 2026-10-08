@@ -30,6 +30,7 @@ use crate::processing::scene_collections::{
 };
 use crate::processing::scene_naming::SceneUnityVersion;
 use crate::resource::{RootResourceFileCatalog, StreamedResourceContentLimits};
+use crate::resources::shader::{script_has_decompiled_text, ShaderView, SHADER_CLASS_ID};
 use crate::serialized_file::object::ParsedObjectPayload;
 use crate::serialized_file::object_workspace::{ObjectWorkspace, WorkspaceObject};
 use crate::serialized_file::reference_graph::{MultiFilePPtrResolution, MultiFileReferenceGraph};
@@ -46,10 +47,11 @@ use super::prefab_collection::{
     PrefabExportIdPlan, PrefabExportPlanLimits, PrefabHierarchyAssetGroups, VersionedPrefabAsset,
 };
 use super::project_exporter::{
-    execute_project_export, export_extension_for, native_format_importer, object_class_name,
-    package_manifest_json, project_version_file, select_collection, ObjectClassFacts,
-    PlannedProjectFile, PlannedProjectMeta, ProjectExportError, ProjectExportNotice,
-    ProjectExportPlan, ProjectExportSettings, ProjectPathPlanner,
+    execute_project_export, export_extension_for, native_format_importer_for_version,
+    object_class_name, package_manifest_json, project_version_file,
+    select_collection_with_shader_text, shader_importer_for_version, ObjectClassFacts,
+    PlannedProjectFile, PlannedProjectMeta, PlannedProjectSupportFile, ProjectExportError,
+    ProjectExportNotice, ProjectExportPlan, ProjectExportSettings, ProjectPathPlanner,
 };
 use super::project_plan::plan_scene_export_paths;
 use super::scene_collection::{
@@ -61,6 +63,10 @@ use super::scene_wiring::{
     process_workspace_scenes_and_prefabs, WorkspaceSceneProcessing, WorkspaceSceneProcessingLimits,
 };
 use super::settings_file::ExportSettingsFile;
+use super::shader_export::{
+    export_shader_text, unity_patches, yaml_shader_patch_texts, yaml_shader_patches,
+    YAML_SHADER_EXTENSION,
+};
 use super::streamed_assets::StreamedYamlAssetLimits;
 use super::unity_yaml::{
     write_unity_yaml_documents, UnityYamlMappingStyle, UnityYamlNode, UnityYamlWriteLimits,
@@ -109,6 +115,7 @@ pub struct WorkspaceProjectExportReport {
     pub serialized_file_count: usize,
     pub exported_object_count: usize,
     pub asset_file_count: usize,
+    pub support_file_count: usize,
     /// Asset files that received an importer sidecar.
     pub meta_file_count: usize,
     pub total_yaml_bytes: usize,
@@ -128,6 +135,10 @@ pub struct WorkspaceProjectExportReport {
 enum ObjectRoute {
     /// `AssetExportCollection` and its subclasses: unique asset path plus `.meta`.
     Asset,
+    /// `ShaderExportCollection` using `DummyShaderTextExporter` or `SimpleShaderExporter`.
+    ShaderText,
+    /// `YamlShaderExportCollection` plus its version-gated Unity editor patches.
+    ShaderYaml,
     /// `ManagerExportCollection`/`EditorBuildSettingsExportCollection`: fixed path, no `.meta`.
     Manager,
     /// `UnknownExportCollection`: raw payload bytes, no `.meta`.
@@ -145,6 +156,7 @@ struct RoutedObject<'a> {
     class_name: String,
     named_name: Option<String>,
     facts: ObjectClassFacts,
+    shader_view: Option<ShaderView>,
     selection: super::project_exporter::CollectionSelection,
     route: ObjectRoute,
     collection_index: usize,
@@ -211,9 +223,38 @@ pub fn export_workspace_yaml_project_with_settings(
         )));
     }
     if !reference_graph.is_complete() {
-        return Err(invalid_project(
-            "project export requires a complete workspace PPtr scan",
-        ));
+        let incomplete_scans = (0..reference_graph.file_count())
+            .filter_map(|file_index| {
+                let graph = reference_graph.managed_graph_for_file(file_index)?;
+                (!graph.is_complete()).then(|| {
+                    let issues = graph.issues();
+                    format!(
+                        "{}: {} scan issue(s), first issue {:?}",
+                        reference_graph.normalized_file_names()[file_index],
+                        issues.len(),
+                        issues.first()
+                    )
+                })
+            })
+            .take(4)
+            .collect::<Vec<_>>();
+        let unresolved_references = reference_graph
+            .references()
+            .iter()
+            .filter(|reference| {
+                !matches!(
+                    reference.resolution,
+                    MultiFilePPtrResolution::Null | MultiFilePPtrResolution::Object { .. }
+                )
+            })
+            .take(4)
+            .map(|reference| format!("{reference:?}"))
+            .collect::<Vec<_>>();
+        return Err(invalid_project(format!(
+            "project export requires a complete workspace PPtr scan; incomplete scans: [{}]; unresolved references: [{}]",
+            incomplete_scans.join("; "),
+            unresolved_references.join("; ")
+        )));
     }
     let settings_facts = ProjectExportSettings::from_export_settings(settings, project_version);
     let PreparedSceneCollections {
@@ -269,12 +310,35 @@ pub fn export_workspace_yaml_project_with_settings(
                 validate_decoded_object(object, object_info.path_id, reference_graph)?;
             }
             let facts = ObjectClassFacts::new(class_id, payload.is_none());
-            let selection = select_collection(facts, settings_facts)?;
+            let shader_view = if class_id == SHADER_CLASS_ID {
+                payload
+                    .map(|payload| ShaderView::from_value(&payload.root))
+                    .transpose()?
+            } else {
+                None
+            };
+            let shader_text = match shader_view.as_ref().and_then(|view| view.script.as_deref()) {
+                None => crate::export::collection_claims::ShaderTextState::NoScript,
+                Some(script) if script_has_decompiled_text(script) => {
+                    crate::export::collection_claims::ShaderTextState::DecompiledSource
+                }
+                Some(_) => crate::export::collection_claims::ShaderTextState::CompiledOrEmpty,
+            };
+            let selection = select_collection_with_shader_text(facts, settings_facts, shader_text)?;
             let kind = selection.kind();
             let (route, skip_reason, fallback_reason) = match kind {
                 ExportCollectionKind::Manager => (ObjectRoute::Manager, "", None),
                 ExportCollectionKind::Unknown => (ObjectRoute::Unknown, "", None),
                 ExportCollectionKind::Unreadable => (ObjectRoute::Unreadable, "", None),
+                ExportCollectionKind::Asset if selection.exporter == "YamlShaderExporter" => {
+                    (ObjectRoute::ShaderYaml, "", None)
+                }
+                ExportCollectionKind::Asset
+                    if selection.exporter == "DummyShaderTextExporter"
+                        || selection.exporter == "SimpleShaderExporter" =>
+                {
+                    (ObjectRoute::ShaderText, "", None)
+                }
                 ExportCollectionKind::Asset => {
                     (ObjectRoute::Asset, "", asset_family_fallback(selection.collection_name))
                 }
@@ -344,17 +408,28 @@ pub fn export_workspace_yaml_project_with_settings(
             let class_name =
                 object_class_name(class_id, payload.map(|payload| payload.type_name.as_str()));
             let named_name = payload.and_then(object_asset_name);
+            let file_id = match route {
+                ObjectRoute::Asset | ObjectRoute::ShaderText | ObjectRoute::ShaderYaml => {
+                    crate::export::ids::get_main_export_id(class_id, 0).map_err(|error| {
+                        invalid_project(format!(
+                            "class {class_id} export file ID could not be planned: {error}"
+                        ))
+                    })?
+                }
+                _ => object_info.path_id,
+            };
             routed.push(RoutedObject {
                 object,
                 class_id,
                 class_name: class_name.clone(),
                 named_name,
                 facts,
+                shader_view,
                 selection,
                 route,
                 collection_index,
                 guid: mint_unique_collection_guid(&mut next_guid_sequence, &mut used_guids)?,
-                file_id: object_info.path_id,
+                file_id,
             });
         }
     }
@@ -481,12 +556,35 @@ pub fn export_workspace_yaml_project_with_settings(
     files
         .try_reserve_exact(collection_count)
         .map_err(|_| invalid_project("could not allocate staged project asset files"))?;
+    let mut support_files = Vec::new();
+    let mut support_file_indexes = HashMap::new();
     let mut total_bytes = 0usize;
     let mut exported_object_count = 0usize;
     let mut raw_file_cache: HashMap<usize, Vec<u8>> = HashMap::new();
     for entry in &routed {
         if entry.route == ObjectRoute::Skipped {
             continue;
+        }
+        if entry.route == ObjectRoute::ShaderYaml {
+            let patch_version = (
+                project_version.major,
+                project_version.minor,
+                project_version.patch,
+            );
+            for (name, text) in yaml_shader_patch_texts(yaml_shader_patches(patch_version)) {
+                let relative_path = format!(
+                    "{}{}",
+                    unity_patches::PATCHES_RELATIVE_DIRECTORY,
+                    unity_patches::patch_file_name(name)
+                );
+                add_shader_support_file(
+                    &mut support_files,
+                    &mut support_file_indexes,
+                    relative_path,
+                    text.as_bytes(),
+                    files.len(),
+                )?;
+            }
         }
         let bytes = match entry.route {
             ObjectRoute::Unknown | ObjectRoute::Unreadable => raw_payload_bytes(
@@ -496,7 +594,21 @@ pub fn export_workspace_yaml_project_with_settings(
                 &mut raw_file_cache,
                 limits,
             )?,
-            _ => {
+            ObjectRoute::ShaderText => {
+                let shader = entry.shader_view.as_ref().ok_or_else(|| {
+                    invalid_project(format!(
+                        "{} selected a text Shader exporter without a decoded Shader view",
+                        entry.selection.exporter
+                    ))
+                })?;
+                export_shader_text(shader, settings.shader_export_mode).map_err(|error| {
+                    invalid_project(format!(
+                        "file {} object {} PathID {} Shader text export failed: {error}",
+                        entry.object.file_index, entry.object.object_index, entry.object.path_id
+                    ))
+                })?
+            }
+            ObjectRoute::Asset | ObjectRoute::ShaderYaml | ObjectRoute::Manager => {
                 let source = identity_of(entry);
                 let document = workspace_object_to_unity_yaml_document_with_streamed_resources(
                     workspace,
@@ -520,6 +632,7 @@ pub fn export_workspace_yaml_project_with_settings(
                 };
                 write_unity_yaml_documents(&[document], limits.yaml_write)?.into_bytes()
             }
+            ObjectRoute::Skipped => unreachable!("skipped routes are filtered above"),
         };
         exported_object_count = exported_object_count
             .checked_add(1)
@@ -551,6 +664,8 @@ pub fn export_workspace_yaml_project_with_settings(
                 };
                 planner.plan_asset_path(&identity, extension)?
             }
+            ObjectRoute::ShaderText => planner.plan_asset_path(&identity, "shader")?,
+            ObjectRoute::ShaderYaml => planner.plan_asset_path(&identity, YAML_SHADER_EXTENSION)?,
             ObjectRoute::Manager => planner.plan_manager_path(&entry.class_name)?,
             ObjectRoute::Unknown => planner.plan_unknown_path(
                 &entry.class_name,
@@ -563,11 +678,43 @@ pub fn export_workspace_yaml_project_with_settings(
             ObjectRoute::Skipped => unreachable!("skipped routes are filtered above"),
         };
         let meta = match entry.route {
-            ObjectRoute::Asset => Some(PlannedProjectMeta {
+            ObjectRoute::Asset | ObjectRoute::ShaderYaml => Some(PlannedProjectMeta {
                 importer_class: "NativeFormatImporter".to_owned(),
-                importer: native_format_importer(entry.file_id)?,
+                importer: native_format_importer_for_version(
+                    entry.file_id,
+                    project_version,
+                    entry
+                        .object
+                        .payload
+                        .as_ref()
+                        .ok()
+                        .and_then(object_asset_bundle_name)
+                        .as_deref(),
+                )?,
             }),
-            _ => None,
+            ObjectRoute::ShaderText => {
+                validate_shader_nonmodifiable_textures(
+                    entry.object.payload.as_ref().map_err(|_| {
+                        invalid_project("ShaderImporter requires a decoded Shader payload")
+                    })?,
+                    project_version,
+                )?;
+                Some(PlannedProjectMeta {
+                    importer_class: "ShaderImporter".to_owned(),
+                    importer: shader_importer_for_version(
+                        project_version,
+                        entry
+                            .object
+                            .payload
+                            .as_ref()
+                            .ok()
+                            .and_then(object_asset_bundle_name)
+                            .as_deref(),
+                    )?,
+                })
+            }
+            ObjectRoute::Manager | ObjectRoute::Unknown | ObjectRoute::Unreadable => None,
+            ObjectRoute::Skipped => unreachable!("skipped routes are filtered above"),
         };
         files.push(PlannedProjectFile {
             collection_name: entry.selection.collection_name,
@@ -626,7 +773,11 @@ pub fn export_workspace_yaml_project_with_settings(
                 .ok_or_else(|| invalid_project("Prefab export plan has no main asset ID"))?;
             Some(PlannedProjectMeta {
                 importer_class: "NativeFormatImporter".to_owned(),
-                importer: native_format_importer(main_file_id)?,
+                importer: native_format_importer_for_version(
+                    main_file_id,
+                    project_version,
+                    prefab.asset_bundle_name.as_deref(),
+                )?,
             })
         } else {
             Some(PlannedProjectMeta {
@@ -758,6 +909,7 @@ pub fn export_workspace_yaml_project_with_settings(
         project_version_file: project_version_file(editor_version_text, project_version),
         package_manifest: manifest,
         files,
+        support_files,
         skipped: notices,
         fallbacks: fallback_notices,
     };
@@ -772,6 +924,7 @@ pub fn export_workspace_yaml_project_with_settings(
         serialized_file_count: workspace.files().len(),
         exported_object_count,
         asset_file_count: report.asset_file_count,
+        support_file_count: report.support_file_count,
         meta_file_count: report.meta_file_count,
         total_yaml_bytes: total_bytes,
         project_version,
@@ -1673,13 +1826,87 @@ fn object_asset_bundle_name(payload: &ParsedObjectPayload) -> Option<String> {
     None
 }
 
+fn validate_shader_nonmodifiable_textures(
+    payload: &ParsedObjectPayload,
+    project_version: SceneUnityVersion,
+) -> Result<(), Box<dyn Error>> {
+    let version_has_field = project_version.major > 2018
+        || (project_version.major == 2018 && project_version.minor >= 1);
+    if !version_has_field {
+        return Ok(());
+    }
+    match payload
+        .root
+        .unique_field_in_base_chain("m_NonModifiableTextures")
+        .map_err(|error| {
+            invalid_project(format!(
+                "ShaderImporter could not inspect NonModifiableTextures: {error}"
+            ))
+        })? {
+        None => Ok(()),
+        Some(crate::serialized_file::object::SerializedValue::Array(items)) if items.is_empty() => {
+            Ok(())
+        }
+        Some(crate::serialized_file::object::SerializedValue::Array(_)) => Err(invalid_project(
+            "ShaderImporter has non-modifiable texture references that are not yet mapped into importer metadata",
+        )),
+        Some(_) => Err(invalid_project(
+            "ShaderImporter NonModifiableTextures has an unsupported serialized shape",
+        )),
+    }
+}
+
+fn add_shader_support_file(
+    files: &mut Vec<PlannedProjectSupportFile>,
+    indexes: &mut HashMap<String, usize>,
+    relative_path: String,
+    bytes: &[u8],
+    before_file_index: usize,
+) -> Result<(), Box<dyn Error>> {
+    if let Some(index) = indexes.get(&relative_path).copied() {
+        let existing = files
+            .get(index)
+            .ok_or_else(|| invalid_project("Shader support-file index is inconsistent"))?;
+        if existing.bytes != bytes {
+            return Err(invalid_project(format!(
+                "Shader exporters generated conflicting support file {relative_path:?}"
+            )));
+        }
+        if before_file_index < existing.before_file_index {
+            files[index].before_file_index = before_file_index;
+        }
+        return Ok(());
+    }
+
+    let mut owned_bytes = Vec::new();
+    owned_bytes
+        .try_reserve_exact(bytes.len())
+        .map_err(|_| invalid_project("could not allocate Shader support file bytes"))?;
+    owned_bytes.extend_from_slice(bytes);
+    files
+        .try_reserve(1)
+        .map_err(|_| invalid_project("could not allocate Shader support-file list"))?;
+    indexes
+        .try_reserve(1)
+        .map_err(|_| invalid_project("could not allocate Shader support-file index"))?;
+    let index = files.len();
+    indexes.insert(relative_path.clone(), index);
+    files.push(PlannedProjectSupportFile {
+        relative_path,
+        bytes: owned_bytes,
+        before_file_index,
+    });
+    Ok(())
+}
+
 /// The collection names whose generic YAML document is the baseline content.
 fn asset_family_fallback(collection_name: &str) -> Option<&'static str> {
     match collection_name {
         "AssetExportCollection"
         | "ScriptableObjectExportCollection"
         | "ScriptableObjectGroupExportCollection"
-        | "YamlStreamedAssetExportCollection" => None,
+        | "YamlStreamedAssetExportCollection"
+        | "ShaderExportCollection" => None,
         "AnimatorControllerExportCollection" => Some(
             "the animator-controller renderer is not ported; the object was written through the \
              generic asset family",
@@ -1691,10 +1918,6 @@ fn asset_family_fallback(collection_name: &str) -> Option<&'static str> {
         "TerrainYamlExportCollection" => Some(
             "the terrain renderer is not ported; the object was written through the generic asset \
              family",
-        ),
-        "ShaderExportCollection" => Some(
-            "the shader exporter (dummy text, YAML mode, or decompiled source) is not wired into \
-             the project path; the object was written through the generic asset family",
         ),
         _ => Some(
             "the specialized exporter for this collection is not wired into the project path; the \
@@ -1822,17 +2045,17 @@ mod tests {
     }
 
     #[test]
-    fn generic_yaml_families_do_not_report_a_fallback() {
+    fn baseline_yaml_and_shader_collections_do_not_report_a_generic_fallback() {
         for name in [
             "AssetExportCollection",
             "ScriptableObjectExportCollection",
             "ScriptableObjectGroupExportCollection",
             "YamlStreamedAssetExportCollection",
+            "ShaderExportCollection",
         ] {
             assert!(asset_family_fallback(name).is_none(), "{name}");
         }
         for name in [
-            "ShaderExportCollection",
             "TextAssetExportCollection",
             "AudioClipExportCollection",
             "TerrainYamlExportCollection",

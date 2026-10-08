@@ -1348,12 +1348,13 @@ fn export_project_to<W: io::Write>(
     )?;
     writeln!(
         status_output,
-        "Wrote a Unity project to {:?}: {} SerializedFiles, {} objects in {} asset files ({} with importer metadata), {} bytes (project version {}).",
+        "Wrote a Unity project to {:?}: {} SerializedFiles, {} objects in {} asset files ({} with importer metadata; support-file count {}), {} bytes (project version {}).",
         output_root,
         report.serialized_file_count,
         report.exported_object_count,
         report.asset_file_count,
         report.meta_file_count,
+        report.support_file_count,
         report.total_yaml_bytes,
         report.project_version.major
     )?;
@@ -4391,7 +4392,7 @@ fn invalid_data_owned(message: String) -> io::Error {
 
 fn print_usage() {
     println!(
-        "Usage:\n  assetripper-rs inspect <input-directory> [input-directory ...]\n  assetripper-rs inspect-files <input-file> [input-file ...]\n  assetripper-rs export-project [--delete-existing] [--settings <path>] <output-directory> <input-file-or-directory> [input-file-or-directory ...]\n  assetripper-rs export-object-yaml <serialized-file-index> <path-id> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-file-yaml <serialized-file-index> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-texture [--settings <path>] <serialized-file-index> <path-id> <new-output-image> <input-file> [input-file ...]\n  assetripper-rs export-mesh <serialized-file-index> <path-id> <new-output-glb> <input-file> [input-file ...]\n  assetripper-rs export-shader [--shader-export-mode <dummy|yaml|decompile>] [--settings <path>] <serialized-file-index> <path-id> <new-output-shader> <input-file> [input-file ...]\n  assetripper-rs export-audio [--settings <path>] <serialized-file-index> <path-id> <new-output-audio> <input-file> [input-file ...]\n  assetripper-rs save-default-settings [--settings <path>]\n  assetripper-rs delete-default-settings\n  assetripper-rs --help\n  assetripper-rs --version\n\n`inspect` mounts directories into isolated VFS roots. `inspect-files` dispatches explicitly selected file paths, registers top-level ResourceFiles as GameBundle root inputs, and reports the parsed SerializedFiles. `export-project` loads mixed file and directory inputs, resolves cross-file references and streamed resources, and writes processed Scene collections as `.unity` YAML with `DefaultImporter` `.meta`, generic YAML `.asset` files for other routed objects, `ProjectSettings/ProjectVersion.txt`, and the default package manifest. It stages all YAML before writing and refuses undecoded objects, unresolved pointers, or objects omitted by YAML conversion. The generated Scene hierarchy's effective `AssetBundleName` remains null because its `GeneratedObjectBase` setter is a no-op; its `.meta` bundle-name field is blank. Duplicate BuildSettings paths keep the first Scene output. The output directory must not be empty or named `Desktop`, `Documents`, or `Downloads`; an existing non-empty directory aborts the export unless `--delete-existing` is given, which deletes and recreates it exactly like the reference exporter does after deletion consent. This is still an initial workspace workflow: Prefab export, generated Prefab collections, class-specific exporter/importer families, settings application, and remaining post-exporters are open parity work. `export-object-yaml` writes one decoded object as YAML. `export-file-yaml` writes YAML-exportable objects from one SerializedFile in object-table order, resolves streamed Mesh and image-texture bytes, preserves intra-file references through source PathIDs, and refuses unresolved or cross-file references. It reports ImageTexture objects omitted by the baseline when they have no usable image data. `export-texture` decodes one class-28 Texture2D, resolves its inline or streamed image data, and writes a PNG/BMP/TGA image; the output extension selects the format (otherwise the configured settings format, default PNG). `export-mesh` decodes one class-43 Mesh, resolves its vertex data and compressed mesh, and writes a glTF 2.0 binary file with one node per sub-mesh, converting Unity's left-handed coordinates to glTF's right-handed space and rewriting the sub-mesh topology. `export-shader` decodes one class-48 Shader and writes `.shader` text: decompiled script text is written verbatim under every mode, otherwise `dummy` (the default) and `decompile` render the fallback dummy body and `yaml` reports that YAML mode writes a YAML asset instead. `export-audio` decodes one class-83 AudioClip, resolves its inline or streamed audio data, and writes the decoded bytes; tracker audio passes through, `FSB5` reports the external-decoder requirement, and unknown bytes fail with the reference diagnostic. None of the commands replaces an existing output file."
+        "Usage:\n  assetripper-rs inspect <input-directory> [input-directory ...]\n  assetripper-rs inspect-files <input-file> [input-file ...]\n  assetripper-rs export-project [--delete-existing] [--settings <path>] <output-directory> <input-file-or-directory> [input-file-or-directory ...]\n  assetripper-rs export-object-yaml <serialized-file-index> <path-id> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-file-yaml <serialized-file-index> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-texture [--settings <path>] <serialized-file-index> <path-id> <new-output-image> <input-file> [input-file ...]\n  assetripper-rs export-mesh <serialized-file-index> <path-id> <new-output-glb> <input-file> [input-file ...]\n  assetripper-rs export-shader [--shader-export-mode <dummy|yaml|decompile>] [--settings <path>] <serialized-file-index> <path-id> <new-output-shader> <input-file> [input-file ...]\n  assetripper-rs export-audio [--settings <path>] <serialized-file-index> <path-id> <new-output-audio> <input-file> [input-file ...]\n  assetripper-rs save-default-settings [--settings <path>]\n  assetripper-rs delete-default-settings\n  assetripper-rs --help\n  assetripper-rs --version\n\n`inspect` mounts directories into isolated VFS roots. `inspect-files` dispatches explicitly selected file paths, registers top-level ResourceFiles as GameBundle root inputs, and reports the parsed SerializedFiles. `export-project` loads mixed file and directory inputs, resolves cross-file references and streamed resources, and writes processed Scene collections as `.unity` YAML with `DefaultImporter` `.meta`, Material `.mat` YAML with cross-file Shader pointer mapping; Shader collections write `.shader` plus `ShaderImporter` in Dummy/Decompile modes (raw source text wins when present) or `.asset` plus `NativeFormatImporter` and version-gated patches in YAML mode; other routed objects use generic YAML `.asset` files, `ProjectSettings/ProjectVersion.txt`, and the default package manifest. It stages all project outputs before writing and refuses undecoded objects, unresolved pointers, or objects omitted by YAML conversion. The generated Scene hierarchy's effective `AssetBundleName` remains null because its `GeneratedObjectBase` setter is a no-op; its `.meta` bundle-name field is blank. Duplicate BuildSettings paths keep the first Scene output. The output directory must not be empty or named `Desktop`, `Documents`, or `Downloads`; an existing non-empty directory aborts the export unless `--delete-existing` is given, which deletes and recreates it exactly like the reference exporter does after deletion consent. This is still an initial workspace workflow: legacy generated Prefabs and overlays, remaining class-specific exporter/importer families (including complete Material/Shader field coverage), settings application, and remaining post-exporters are open parity work. `export-object-yaml` writes one decoded object as YAML. `export-file-yaml` writes YAML-exportable objects from one SerializedFile in object-table order, resolves streamed Mesh and image-texture bytes, preserves intra-file references through source PathIDs, and refuses unresolved or cross-file references. It reports ImageTexture objects omitted by the baseline when they have no usable image data. `export-texture` decodes one class-28 Texture2D, resolves its inline or streamed image data, and writes a PNG/BMP/TGA image; the output extension selects the format (otherwise the configured settings format, default PNG). `export-mesh` decodes one class-43 Mesh, resolves its vertex data and compressed mesh, and writes a glTF 2.0 binary file with one node per sub-mesh, converting Unity's left-handed coordinates to glTF's right-handed space and rewriting the sub-mesh topology. `export-shader` decodes one class-48 Shader and writes `.shader` text: decompiled script text is written verbatim under every mode, otherwise `dummy` (the default) and `decompile` render the fallback dummy body and `yaml` reports that YAML mode writes a YAML asset instead. `export-audio` decodes one class-83 AudioClip, resolves its inline or streamed audio data, and writes the decoded bytes; tracker audio passes through, `FSB5` reports the external-decoder requirement, and unknown bytes fail with the reference diagnostic. None of the commands replaces an existing output file."
     );
 }
 
@@ -4403,7 +4404,7 @@ mod tests {
         merge_mount_report, remaining_budget_u64, remaining_budget_usize,
         source_bundle_for_collection, WorkspaceSerializedBundle,
     };
-    use assetripper::export::settings::ExportDefaults;
+    use assetripper::export::settings::{ExportDefaults, ShaderExportMode};
     use assetripper::export::settings_file::ExportSettingsFile;
     use assetripper::io::dependency::DependencyFilePath;
     use assetripper::io::filesystem::VirtualFileSystem;
@@ -7830,6 +7831,26 @@ mod tests {
         payload: &[u8],
         path_id: i32,
     ) -> Vec<u8> {
+        finish_single_object_file_with_externals(
+            version,
+            class_id,
+            nodes,
+            strings,
+            payload,
+            path_id,
+            &[],
+        )
+    }
+
+    fn finish_single_object_file_with_externals(
+        version: &[u8],
+        class_id: i32,
+        nodes: &[(u8, u32, u32, i32)],
+        strings: &[u8],
+        payload: &[u8],
+        path_id: i32,
+        external_names: &[&str],
+    ) -> Vec<u8> {
         let mut metadata = Vec::new();
         metadata.extend_from_slice(version);
         put_u32_le(&mut metadata, 0);
@@ -7856,7 +7877,14 @@ mod tests {
         put_i32_le(&mut metadata, class_id);
         put_u16_le(&mut metadata, u16::try_from(class_id).unwrap());
         put_u16_le(&mut metadata, 0);
-        put_i32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, i32::try_from(external_names.len()).unwrap());
+        for external_name in external_names {
+            metadata.push(0);
+            metadata.extend_from_slice(&[0; 16]);
+            put_i32_le(&mut metadata, 0);
+            metadata.extend_from_slice(external_name.as_bytes());
+            metadata.push(0);
+        }
         metadata.push(0);
 
         let data_offset = 20 + metadata.len();
@@ -7896,6 +7924,10 @@ mod tests {
     }
 
     fn make_shader_file(script: &str) -> Vec<u8> {
+        make_shader_file_with_path_id(script, 42)
+    }
+
+    fn make_shader_file_with_path_id(script: &str, path_id: i32) -> Vec<u8> {
         let mut strings = Vec::new();
         let shader_type = push_type_tree_string(&mut strings, "Shader");
         let empty_name = push_type_tree_string(&mut strings, "");
@@ -7925,7 +7957,7 @@ mod tests {
         put_typetree_string_value(&mut payload, "Test/Simple");
         put_typetree_string_value(&mut payload, script);
         assert!(payload.len().is_multiple_of(4), "payload is 4-byte aligned");
-        finish_single_object_file(b"5.0.0f1\0", 48, &nodes, &strings, &payload, 42)
+        finish_single_object_file(b"5.0.0f1\0", 48, &nodes, &strings, &payload, path_id)
     }
 
     fn make_material_file() -> Vec<u8> {
@@ -7959,6 +7991,54 @@ mod tests {
         put_i32_le(&mut payload, -1);
         assert!(payload.len().is_multiple_of(4), "payload is 4-byte aligned");
         finish_single_object_file(b"2019.4.0f1\0", 21, &nodes, &strings, &payload, 42)
+    }
+
+    fn make_material_file_with_shader(shader_path_id: i32, external_name: &str) -> Vec<u8> {
+        let mut strings = Vec::new();
+        let material_type = push_type_tree_string(&mut strings, "Material");
+        let empty_name = push_type_tree_string(&mut strings, "");
+        let string_type = push_type_tree_string(&mut strings, "string");
+        let name_field = push_type_tree_string(&mut strings, "m_Name");
+        let pptr_shader_type = push_type_tree_string(&mut strings, "PPtr<Shader>");
+        let shader_field = push_type_tree_string(&mut strings, "m_Shader");
+        let int_type = push_type_tree_string(&mut strings, "int");
+        let file_id_field = push_type_tree_string(&mut strings, "m_FileID");
+        let path_id_type = push_type_tree_string(&mut strings, "SInt32");
+        let path_id_field = push_type_tree_string(&mut strings, "m_PathID");
+        let queue_field = push_type_tree_string(&mut strings, "m_CustomRenderQueue");
+
+        let mut nodes = vec![(0, material_type, empty_name, -1)];
+        let string_table = StringTreeTable {
+            string_type,
+            array_type: push_type_tree_string(&mut strings, "Array"),
+            int_type,
+            size_field: push_type_tree_string(&mut strings, "size"),
+            char_type: push_type_tree_string(&mut strings, "char"),
+            data_field: push_type_tree_string(&mut strings, "data"),
+        };
+        string_tree_nodes(&mut nodes, 1, &string_table, name_field);
+        nodes.extend([
+            (1, pptr_shader_type, shader_field, -1),
+            (2, int_type, file_id_field, 4),
+            (2, path_id_type, path_id_field, 4),
+            (1, int_type, queue_field, 4),
+        ]);
+
+        let mut payload = Vec::new();
+        put_typetree_string_value(&mut payload, "TestMat");
+        put_i32_le(&mut payload, 1);
+        put_i32_le(&mut payload, shader_path_id);
+        put_i32_le(&mut payload, -1);
+        assert!(payload.len().is_multiple_of(4), "payload is 4-byte aligned");
+        finish_single_object_file_with_externals(
+            b"2019.4.0f1\0",
+            21,
+            &nodes,
+            &strings,
+            &payload,
+            42,
+            &[external_name],
+        )
     }
 
     fn make_audio_clip_file(data: &[u8], sound_type: Option<i32>) -> Vec<u8> {
@@ -8195,12 +8275,12 @@ mod tests {
             .expect("target asset sidecar has a GUID")
             .to_owned();
 
-        assert!(source_yaml.contains("--- !u!1 &42"));
-        assert!(source_yaml.contains("m_Target: {fileID: 42,"));
+        assert!(source_yaml.contains("--- !u!1 &100000"));
+        assert!(source_yaml.contains("m_Target: {fileID: 100000,"));
         assert!(source_yaml.contains(&format!("guid: {target_guid}")));
         assert!(fs::read_to_string(&target_asset)
             .unwrap()
-            .contains("--- !u!1 &42"));
+            .contains("--- !u!1 &100000"));
         assert!(fs::read_to_string(&source_meta)
             .unwrap()
             .contains("NativeFormatImporter:"));
@@ -8296,7 +8376,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(assets.len(), 1, "exported files: {exported_files:?}");
         let yaml = fs::read_to_string(assets[0]).unwrap();
-        assert!(yaml.contains("--- !u!49 &42"), "{yaml}");
+        assert!(yaml.contains("--- !u!49 &4900000"), "{yaml}");
         assert!(yaml.contains("m_Name: Hero"), "{yaml}");
         assert!(yaml.contains("m_Script: print(1)"), "{yaml}");
         assert_eq!(fs::read(&source_path).unwrap(), source_bytes);
@@ -8391,7 +8471,7 @@ mod tests {
         let asset_path = output_root.join("Assets/Texture2D/Texture2D.texture2D");
         let meta_path = output_root.join("Assets/Texture2D/Texture2D.texture2D.meta");
         let yaml = fs::read_to_string(&asset_path).unwrap();
-        assert!(yaml.contains("--- !u!28 &77"));
+        assert!(yaml.contains("--- !u!28 &2800000"));
         assert!(yaml.contains("image data: 323334"), "{yaml}");
         assert!(yaml.contains("offset: 0"), "{yaml}");
         assert!(yaml.contains("size: 0"), "{yaml}");
@@ -8487,7 +8567,7 @@ mod tests {
             line == "SOURCE_STREAMED_YAML|class=28|data=323334|offset=0|size=0|path_empty=true"
         }));
         let yaml = fs::read_to_string(&asset_path).unwrap();
-        assert!(yaml.contains("--- !u!28 &77"), "{yaml}");
+        assert!(yaml.contains("--- !u!28 &2800000"), "{yaml}");
         assert!(yaml.contains("image data: 323334"), "{yaml}");
         assert!(yaml.contains("offset: 0"), "{yaml}");
         assert!(yaml.contains("size: 0"), "{yaml}");
@@ -8523,7 +8603,11 @@ mod tests {
         let texture_path = assets_directory.join("texture.assets");
         fs::write(&texture_path, make_texture2d_file()).unwrap();
         let material_path = assets_directory.join("material.assets");
-        fs::write(&material_path, make_material_file()).unwrap();
+        fs::write(
+            &material_path,
+            make_material_file_with_shader(42, "shader.assets"),
+        )
+        .unwrap();
         let mesh_path = assets_directory.join("mesh.assets");
         fs::write(&mesh_path, make_mesh_file()).unwrap();
         let player_path = assets_directory.join("player.assets");
@@ -8537,7 +8621,11 @@ mod tests {
         let bundle_path = assets_directory.join("bundle.assets");
         fs::write(&bundle_path, make_asset_bundle_file()).unwrap();
         let shader_path = assets_directory.join("shader.assets");
-        fs::write(&shader_path, make_shader_file("Shader \"x\" { }")).unwrap();
+        fs::write(
+            &shader_path,
+            make_shader_file_with_path_id("Shader \"x\" { }\n", 42),
+        )
+        .unwrap();
 
         let mut input = TestInputDirectory {
             directory: directory.clone(),
@@ -8590,8 +8678,8 @@ mod tests {
                 "Assets/Material/TestMat.mat.meta".to_owned(),
                 "Assets/Mesh/Tri.asset".to_owned(),
                 "Assets/Mesh/Tri.asset.meta".to_owned(),
-                "Assets/Shader/Test/Simple.shader".to_owned(),
-                "Assets/Shader/Test/Simple.shader.meta".to_owned(),
+                "Assets/Shader/Test_Simple.shader".to_owned(),
+                "Assets/Shader/Test_Simple.shader.meta".to_owned(),
                 "Assets/Texture2D/Texture2D.texture2D".to_owned(),
                 "Assets/Texture2D/Texture2D.texture2D.meta".to_owned(),
                 "Packages/manifest.json".to_owned(),
@@ -8605,28 +8693,56 @@ mod tests {
         let target_guid = meta_guid(&output_root.join("Assets/GameObject/GameObject_0.asset.meta"));
         let main_yaml = fs::read_to_string(output_root.join("Assets/GameObject/GameObject.asset"))
             .expect("cross-file asset is readable");
-        assert!(main_yaml.contains("--- !u!1 &42"), "{main_yaml}");
+        assert!(main_yaml.contains("--- !u!1 &100000"), "{main_yaml}");
         assert!(
             main_yaml.contains(&format!("guid: {target_guid}")),
             "{main_yaml}"
         );
 
-        // Every asset-family sidecar is a NativeFormatImporter naming its own object.
-        for relative in [
-            "Assets/GameObject/GameObject.asset.meta",
-            "Assets/GameObject/GameObject_0.asset.meta",
-            "Assets/Material/TestMat.mat.meta",
-            "Assets/Mesh/Tri.asset.meta",
-            "Assets/Shader/Test/Simple.shader.meta",
-            "Assets/Texture2D/Texture2D.texture2D.meta",
+        // Native asset sidecars use AssetRipper's class-prefixed main export IDs.
+        for (relative, main_id) in [
+            ("Assets/GameObject/GameObject.asset.meta", 100_000),
+            ("Assets/GameObject/GameObject_0.asset.meta", 100_000),
+            ("Assets/Material/TestMat.mat.meta", 2_100_000),
+            ("Assets/Mesh/Tri.asset.meta", 4_300_000),
+            ("Assets/Texture2D/Texture2D.texture2D.meta", 2_800_000),
         ] {
             let meta = fs::read_to_string(output_root.join(relative)).unwrap();
             assert!(
                 meta.contains("NativeFormatImporter:"),
                 "{relative}:\n{meta}"
             );
-            assert!(meta.contains("mainObjectFileID: 42"), "{relative}:\n{meta}");
+            assert!(
+                meta.contains(&format!("mainObjectFileID: {main_id}")),
+                "{relative}:\n{meta}"
+            );
         }
+
+        // The source selects ShaderImporter for decompiled text and Material PPtrs use the
+        // shader collection's own exported file ID and GUID.
+        let shader_meta_path = "Assets/Shader/Test_Simple.shader.meta";
+        let shader_meta = fs::read_to_string(output_root.join(shader_meta_path)).unwrap();
+        assert!(shader_meta.contains("ShaderImporter:"), "{shader_meta}");
+        assert!(shader_meta.contains("externalObjects: {}"), "{shader_meta}");
+        assert!(shader_meta.contains("defaultTextures: []"), "{shader_meta}");
+        assert!(
+            shader_meta.contains("nonModifiableTextures: []"),
+            "{shader_meta}"
+        );
+        assert!(!shader_meta.contains("mainObjectFileID:"), "{shader_meta}");
+        let shader_guid = meta_guid(&output_root.join(shader_meta_path));
+        assert_eq!(
+            fs::read(output_root.join("Assets/Shader/Test_Simple.shader")).unwrap(),
+            b"Shader \"x\" { }\n"
+        );
+        let material_yaml = fs::read_to_string(output_root.join("Assets/Material/TestMat.mat"))
+            .expect("material YAML is readable");
+        assert!(
+            material_yaml.contains(&format!(
+                "m_Shader: {{fileID: 4800000, guid: {shader_guid}, type: 2}}"
+            )),
+            "material did not preserve its cross-file Shader reference:\n{material_yaml}"
+        );
 
         // The settings-file family writes one file per object with unique GUIDs.
         let mut guids: Vec<String> = [
@@ -8634,7 +8750,7 @@ mod tests {
             "Assets/GameObject/GameObject_0.asset.meta",
             "Assets/Material/TestMat.mat.meta",
             "Assets/Mesh/Tri.asset.meta",
-            "Assets/Shader/Test/Simple.shader.meta",
+            shader_meta_path,
             "Assets/Texture2D/Texture2D.texture2D.meta",
         ]
         .iter()
@@ -8657,8 +8773,14 @@ mod tests {
             "{status}"
         );
         assert!(status.contains("EmptyExportCollection"), "{status}");
-        assert!(status.contains("generic asset-family renderer"), "{status}");
-        assert!(status.contains("ShaderExportCollection"), "{status}");
+        assert!(
+            !status.contains("generic asset-family renderer"),
+            "this fixture's generic baseline routes should not be reported as specialized-renderer fallbacks:\n{status}"
+        );
+        assert!(
+            !status.contains("ShaderExportCollection"),
+            "shader used an unexpected generic fallback:\n{status}"
+        );
 
         // Post-exporters: ProjectVersion and the default package manifest.
         assert!(
@@ -8681,8 +8803,8 @@ mod tests {
             output_root.join("Assets/Material/TestMat.mat.meta"),
             output_root.join("Assets/Mesh/Tri.asset"),
             output_root.join("Assets/Mesh/Tri.asset.meta"),
-            output_root.join("Assets/Shader/Test/Simple.shader"),
-            output_root.join("Assets/Shader/Test/Simple.shader.meta"),
+            output_root.join("Assets/Shader/Test_Simple.shader"),
+            output_root.join("Assets/Shader/Test_Simple.shader.meta"),
             output_root.join("Assets/Texture2D/Texture2D.texture2D"),
             output_root.join("Assets/Texture2D/Texture2D.texture2D.meta"),
             output_root.join("ProjectSettings/ProjectSettings.asset"),
@@ -8692,6 +8814,71 @@ mod tests {
         input
             .subdirectories
             .push(output_root.join("Assets/Shader/Test"));
+        drop(input);
+    }
+
+    #[test]
+    fn export_project_yaml_shader_writes_source_versioned_patch_and_importer() {
+        let directory = TestInputDirectory::new_root();
+        let assets_directory = directory.join("assets");
+        fs::create_dir(&assets_directory).unwrap();
+        let output_root = directory.join("project");
+        fs::create_dir(&output_root).unwrap();
+        let shader_path = assets_directory.join("shader.assets");
+        let script = "Shader \"x\" {\nSubShader {\nProgram \"vp\" {}\n}\n}\n";
+        fs::write(&shader_path, make_shader_file_with_path_id(script, 42)).unwrap();
+        let mut input = TestInputDirectory {
+            directory,
+            files: vec![shader_path.clone()],
+            subdirectories: vec![
+                assets_directory,
+                output_root.clone(),
+                output_root.join("Assets"),
+                output_root.join("Assets/Shader"),
+                output_root.join("Assets/Editor"),
+                output_root.join("Assets/Editor/AssetRipperPatches"),
+                output_root.join("ProjectSettings"),
+                output_root.join("Packages"),
+            ],
+        };
+        let mut settings = default_export_settings();
+        settings.shader_export_mode = ShaderExportMode::Yaml;
+        let mut status = Vec::new();
+        super::export_project_to(&[shader_path], &output_root, false, &settings, &mut status)
+            .unwrap();
+        let status = String::from_utf8(status).unwrap();
+
+        let asset_path = output_root.join("Assets/Shader/Test_Simple.asset");
+        let meta_path = output_root.join("Assets/Shader/Test_Simple.asset.meta");
+        assert!(asset_path.is_file());
+        assert!(!output_root
+            .join("Assets/Shader/Test_Simple.shader")
+            .exists());
+        assert!(
+            fs::read_to_string(&asset_path)
+                .unwrap()
+                .contains("--- !u!48 &4800000"),
+            "YAML Shader asset uses the Shader collection export ID"
+        );
+        let meta = fs::read_to_string(meta_path).unwrap();
+        assert!(meta.contains("NativeFormatImporter:"), "{meta}");
+        assert!(meta.contains("  name:\n"), "{meta}");
+        assert!(!meta.contains("externalObjects:"), "{meta}");
+        assert!(!meta.contains("mainObjectFileID:"), "{meta}");
+
+        let patch_path =
+            output_root.join("Assets/Editor/AssetRipperPatches/AvoidSavingYamlShaders.cs");
+        assert!(patch_path.is_file());
+        assert!(!output_root
+            .join("Assets/Editor/AssetRipperPatches/YamlShaderPostprocessor.cs")
+            .exists());
+        assert!(status.contains("support-file count 1"), "{status}");
+
+        input.files.extend(
+            project_tree(&output_root)
+                .iter()
+                .map(|path| output_root.join(path)),
+        );
         drop(input);
     }
 
@@ -8802,7 +8989,9 @@ mod tests {
             !stale_file.exists(),
             "the stale export root content survives"
         );
-        assert!(fs::read_to_string(&asset).unwrap().contains("--- !u!1 &42"));
+        assert!(fs::read_to_string(&asset)
+            .unwrap()
+            .contains("--- !u!1 &100000"));
         assert!(fs::read_to_string(output_root.join("ProjectSettings/ProjectVersion.txt")).is_ok());
         input.files.extend([
             asset,

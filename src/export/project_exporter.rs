@@ -45,7 +45,8 @@ use super::settings::{
 };
 use super::settings_file::ExportSettingsFile;
 use super::unity_yaml::{
-    UnityYamlMappingStyle, UnityYamlNode, UnityYamlScalar, UnityYamlWriteLimits,
+    UnityYamlMappingStyle, UnityYamlNode, UnityYamlScalar, UnityYamlSequenceStyle,
+    UnityYamlWriteLimits,
 };
 use crate::processing::scene_naming::SceneUnityVersion;
 
@@ -273,13 +274,21 @@ pub fn claim_asset_kind(facts: ObjectClassFacts) -> ClaimAssetKind {
     }
 }
 
-/// The claim facts of one unprocessed workspace object.
+/// The claim facts of one unprocessed workspace object with no payload-derived facts.
 ///
-/// `MainAsset` is unset until the Scene/Prefab processors run, so `main` is `Absent`;
-/// payload-derived validity flags and decoded shader/audio state are not wired into this
-/// plan step yet, which makes the specialized exporters decline exactly like their source
-/// counterparts do for objects with no usable data.
+/// `MainAsset` is unset until the Scene/Prefab processors run, so `main` is `Absent`. The
+/// project workflow supplies the decoded Shader script state through
+/// [`claim_facts_for_shader_text`]; other specialized payload facts remain explicit defaults.
 pub fn claim_facts_for(facts: ObjectClassFacts, settings: ProjectExportSettings) -> ClaimFacts {
+    claim_facts_for_shader_text(facts, settings, ShaderTextState::NoScript)
+}
+
+/// The claim facts of one unprocessed object when its Shader script admission is known.
+pub fn claim_facts_for_shader_text(
+    facts: ObjectClassFacts,
+    settings: ProjectExportSettings,
+    shader_text: ShaderTextState,
+) -> ClaimFacts {
     ClaimFacts {
         asset: claim_asset_kind(facts),
         main: ClaimMainKind::Absent,
@@ -288,7 +297,7 @@ pub fn claim_facts_for(facts: ObjectClassFacts, settings: ProjectExportSettings)
         export_sprites: !settings.sprite_export_mode_yaml,
         audio_decode: AudioClaimDecode::Undecodable,
         prefer_wav: false,
-        shader_text: ShaderTextState::NoScript,
+        shader_text,
         script_claimed_before: false,
         assembly_manager_is_set: false,
         engine_file: false,
@@ -319,7 +328,16 @@ pub fn select_collection(
     facts: ObjectClassFacts,
     settings: ProjectExportSettings,
 ) -> Result<CollectionSelection, ProjectExportError> {
-    let claim_facts = claim_facts_for(facts, settings);
+    select_collection_with_shader_text(facts, settings, ShaderTextState::NoScript)
+}
+
+/// Run `ProjectExporter.CreateCollection` with the payload-derived Shader script state.
+pub fn select_collection_with_shader_text(
+    facts: ObjectClassFacts,
+    settings: ProjectExportSettings,
+    shader_text: ShaderTextState,
+) -> Result<CollectionSelection, ProjectExportError> {
+    let claim_facts = claim_facts_for_shader_text(facts, settings, shader_text);
     // `ObjectHandlerStack` pushes every matching handler in registration order and iterates the
     // resulting stack, so the last registration is tried first.
     for (registration_index, registration) in EXPORTER_REGISTRATIONS.iter().enumerate().rev() {
@@ -419,6 +437,8 @@ pub enum ProjectExportError {
         relative_path: String,
         reason: &'static str,
     },
+    /// The staged asset and support-file counts overflow the host address space.
+    ProjectFileCountOverflow,
     /// A bounded allocation for the plan could not be reserved.
     AllocationFailed { resource: &'static str },
     /// The plan describes an object with no usable payload bytes.
@@ -449,6 +469,9 @@ impl Display for ProjectExportError {
                 formatter,
                 "project path {relative_path:?} is invalid: {reason}"
             ),
+            Self::ProjectFileCountOverflow => {
+                formatter.write_str("project output file count overflowed")
+            }
             Self::AllocationFailed { resource } => {
                 write!(formatter, "could not allocate {resource}")
             }
@@ -496,6 +519,15 @@ pub struct PlannedProjectFile {
     pub label: String,
 }
 
+/// A project support file emitted by a collection exporter without an asset `.meta` sidecar.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlannedProjectSupportFile {
+    pub relative_path: String,
+    pub bytes: Vec<u8>,
+    /// Write immediately before this zero-based staged asset-file index.
+    pub before_file_index: usize,
+}
+
 /// The complete staged project: nothing is written until `execute_project_export` runs.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProjectExportPlan {
@@ -503,6 +535,8 @@ pub struct ProjectExportPlan {
     pub project_version_file: String,
     pub package_manifest: String,
     pub files: Vec<PlannedProjectFile>,
+    /// Collection-generated project files such as editor patches, with no importer sidecar.
+    pub support_files: Vec<PlannedProjectSupportFile>,
     /// Objects whose collection writes nothing, with the baseline reason.
     pub skipped: Vec<ProjectExportNotice>,
     /// Files that used the generic asset-family renderer instead of their own.
@@ -513,6 +547,10 @@ impl ProjectExportPlan {
     /// Fail-closed path validation: every destination is a portable, non-escaping,
     /// collision-free `assets`-side path, and no planned file shadows a post-export file.
     pub fn validate(&self) -> Result<(), ProjectExportError> {
+        self.files
+            .len()
+            .checked_add(self.support_files.len())
+            .ok_or(ProjectExportError::ProjectFileCountOverflow)?;
         let mut seen: BTreeSet<String> = BTreeSet::new();
         let mut seen_insensitive: HashMap<String, String> = HashMap::new();
         for reserved in [PROJECT_VERSION_FILE, PACKAGE_MANIFEST_FILE] {
@@ -536,6 +574,40 @@ impl ProjectExportPlan {
                     second: file.relative_path.clone(),
                 });
             }
+        }
+        for file in &self.support_files {
+            validate_portable_relative_path(&file.relative_path)?;
+            if file.before_file_index > self.files.len() {
+                return Err(ProjectExportError::InvalidProjectPath {
+                    relative_path: file.relative_path.clone(),
+                    reason: "support-file insertion index exceeds the staged asset-file count",
+                });
+            }
+            if !seen.insert(file.relative_path.clone()) {
+                return Err(ProjectExportError::DuplicateProjectPath {
+                    relative_path: file.relative_path.clone(),
+                    first: file.relative_path.clone(),
+                    second: file.relative_path.clone(),
+                });
+            }
+            let folded = file.relative_path.to_lowercase();
+            if let Some(first) = seen_insensitive.insert(folded, file.relative_path.clone()) {
+                return Err(ProjectExportError::DuplicateProjectPath {
+                    relative_path: file.relative_path.clone(),
+                    first,
+                    second: file.relative_path.clone(),
+                });
+            }
+        }
+        if self
+            .support_files
+            .windows(2)
+            .any(|pair| pair[0].before_file_index > pair[1].before_file_index)
+        {
+            return Err(ProjectExportError::InvalidProjectPath {
+                relative_path: "<support-files>".to_owned(),
+                reason: "support files are not ordered by their staged insertion index",
+            });
         }
         Ok(())
     }
@@ -577,6 +649,7 @@ fn validate_portable_relative_path(value: &str) -> Result<(), ProjectExportError
 pub struct ProjectExportReport {
     pub file_count: usize,
     pub asset_file_count: usize,
+    pub support_file_count: usize,
     pub meta_file_count: usize,
     pub total_asset_bytes: usize,
     pub events: Vec<ProjectExportEvent>,
@@ -604,8 +677,18 @@ pub fn execute_project_export(
     let mut asset_file_count = 0usize;
     let mut meta_file_count = 0usize;
     let mut total_asset_bytes = 0usize;
+    let mut support_file_count = 0usize;
+    let mut next_support_file = 0usize;
 
     for (index, file) in plan.files.iter().enumerate() {
+        while let Some(support) = plan.support_files.get(next_support_file) {
+            if support.before_file_index != index {
+                break;
+            }
+            write_new_project_file(output_root, &support.relative_path, &support.bytes, limits)?;
+            support_file_count += 1;
+            next_support_file += 1;
+        }
         let bytes = file.bytes.as_slice();
         match &file.meta {
             Some(meta) => {
@@ -644,6 +727,19 @@ pub fn execute_project_export(
         });
     }
 
+    while let Some(support) = plan.support_files.get(next_support_file) {
+        if support.before_file_index != plan.files.len() {
+            return Err(ProjectExportError::InvalidProjectPath {
+                relative_path: support.relative_path.clone(),
+                reason: "support files must be ordered by their staged insertion index",
+            }
+            .into());
+        }
+        write_new_project_file(output_root, &support.relative_path, &support.bytes, limits)?;
+        support_file_count += 1;
+        next_support_file += 1;
+    }
+
     write_new_project_file(
         output_root,
         PROJECT_VERSION_FILE,
@@ -674,8 +770,9 @@ pub fn execute_project_export(
     fallbacks.extend(plan.fallbacks.iter().cloned());
 
     Ok(ProjectExportReport {
-        file_count: plan.files.len(),
+        file_count: plan.files.len() + plan.support_files.len(),
         asset_file_count,
+        support_file_count,
         meta_file_count,
         total_asset_bytes,
         events,
@@ -694,19 +791,94 @@ fn write_staged_asset_bytes(path: &Path, bytes: &[u8]) -> io::Result<usize> {
 
 /// `AssetExportCollection.CreateImporter` for the `NativeFormatImporter` family.
 pub fn native_format_importer(main_file_id: i64) -> Result<UnityYamlNode, Box<dyn Error>> {
+    native_format_importer_for_version(
+        main_file_id,
+        SceneUnityVersion {
+            major: 2019,
+            minor: 4,
+            patch: 0,
+        },
+        None,
+    )
+}
+
+/// Version-aware base importer fields from `NativeFormatImporter.Create`.
+pub fn native_format_importer_for_version(
+    main_file_id: i64,
+    version: SceneUnityVersion,
+    asset_bundle_name: Option<&str>,
+) -> Result<UnityYamlNode, Box<dyn Error>> {
     let mut importer = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
-    importer.insert_field(
-        "externalObjects",
-        UnityYamlNode::mapping(UnityYamlMappingStyle::Flow),
-    )?;
-    importer.insert_field(
-        "mainObjectFileID",
-        UnityYamlNode::scalar(UnityYamlScalar::Signed(main_file_id)),
-    )?;
+    if !unity_major_minor_at_least(version, 2018, 3) {
+        importer.insert_field("name", UnityYamlNode::string(""))?;
+    }
+    if unity_major_minor_at_least(version, 2017, 2) {
+        importer.insert_field(
+            "externalObjects",
+            UnityYamlNode::mapping(UnityYamlMappingStyle::Flow),
+        )?;
+    }
+    if unity_major_minor_at_least(version, 2017, 1) {
+        importer.insert_field(
+            "mainObjectFileID",
+            UnityYamlNode::scalar(UnityYamlScalar::Signed(main_file_id)),
+        )?;
+    }
     importer.insert_field("userData", UnityYamlNode::string(""))?;
-    importer.insert_field("assetBundleName", UnityYamlNode::string(""))?;
+    importer.insert_field(
+        "assetBundleName",
+        optional_importer_string(asset_bundle_name),
+    )?;
     importer.insert_field("assetBundleVariant", UnityYamlNode::string(""))?;
     Ok(importer)
+}
+
+/// `ShaderExportCollection.CreateImporter`'s versioned `ShaderImporter` defaults.
+pub fn shader_importer_for_version(
+    version: SceneUnityVersion,
+    asset_bundle_name: Option<&str>,
+) -> Result<UnityYamlNode, Box<dyn Error>> {
+    let mut importer = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    let has_shader_importer_name = !unity_major_minor_at_least(version, 2018, 3);
+    let has_external_objects = unity_major_minor_at_least(version, 2017, 2);
+    let has_non_modifiable_textures = unity_major_minor_at_least(version, 2018, 1);
+    if has_shader_importer_name {
+        importer.insert_field("name", UnityYamlNode::string(""))?;
+    }
+    if has_external_objects {
+        importer.insert_field(
+            "externalObjects",
+            UnityYamlNode::mapping(UnityYamlMappingStyle::Flow),
+        )?;
+    }
+    importer.insert_field(
+        "defaultTextures",
+        UnityYamlNode::sequence(UnityYamlSequenceStyle::Flow),
+    )?;
+    if has_non_modifiable_textures {
+        importer.insert_field(
+            "nonModifiableTextures",
+            UnityYamlNode::sequence(UnityYamlSequenceStyle::Flow),
+        )?;
+    }
+    importer.insert_field("userData", UnityYamlNode::string(""))?;
+    importer.insert_field(
+        "assetBundleName",
+        optional_importer_string(asset_bundle_name),
+    )?;
+    importer.insert_field("assetBundleVariant", UnityYamlNode::string(""))?;
+    Ok(importer)
+}
+
+fn optional_importer_string(value: Option<&str>) -> UnityYamlNode {
+    match value {
+        Some(value) => UnityYamlNode::string(value),
+        None => UnityYamlNode::string(""),
+    }
+}
+
+const fn unity_major_minor_at_least(version: SceneUnityVersion, major: u32, minor: u32) -> bool {
+    version.major > major || (version.major == major && version.minor >= minor)
 }
 
 /// The baseline default `Packages/manifest.json` body for one Unity version.
@@ -929,6 +1101,7 @@ impl ExportFileSystem for PlannedFileSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::export::meta::{UnityMetaFile, UnityMetaFileOptions};
 
     fn defaults() -> ProjectExportSettings {
         ProjectExportSettings::from_export_settings(
@@ -1086,6 +1259,76 @@ mod tests {
     }
 
     #[test]
+    fn shader_and_yaml_shader_importers_match_reference_project_probe() {
+        let fixture = include_str!("shader_project_fixture.txt");
+        let mut case = None;
+        let mut compared_cases = 0;
+
+        for row in fixture.lines() {
+            if let Some(header) = row.strip_prefix("CASE|") {
+                let (mode, version) = header
+                    .split_once('|')
+                    .expect("fixture case row has mode and Unity version");
+                case = Some((mode, version, SceneUnityVersion::parse(version).unwrap()));
+                continue;
+            }
+
+            let Some(meta_row) = row.strip_prefix("META|") else {
+                continue;
+            };
+            let (path, expected_escaped) = meta_row
+                .split_once('|')
+                .expect("fixture meta row has a path and normalized sidecar");
+            assert!(
+                path.ends_with("Test_Simple.shader.meta")
+                    || path.ends_with("Test_Simple.asset.meta")
+            );
+            let (mode, version_text, version) =
+                case.expect("fixture meta row follows a case header");
+            let (importer_class, importer) = match mode {
+                "dummy" => (
+                    "ShaderImporter",
+                    shader_importer_for_version(version, None).unwrap(),
+                ),
+                "yaml" => (
+                    "NativeFormatImporter",
+                    native_format_importer_for_version(4_800_000, version, None).unwrap(),
+                ),
+                _ => panic!("unexpected fixture mode {mode:?}"),
+            };
+            let meta = UnityMetaFile::new(
+                [0x7f; 16],
+                importer_class,
+                importer,
+                UnityMetaFileOptions {
+                    time_created_unix_seconds: Some(0),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .to_yaml(UnityYamlWriteLimits::default())
+            .unwrap();
+            let normalized = meta
+                .lines()
+                .filter(|line| !line.starts_with("guid: ") && !line.starts_with("timeCreated: "))
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n";
+            assert_eq!(
+                normalized,
+                expected_escaped.replace("\\n", "\n"),
+                "source project importer mismatch for {mode} {version_text}"
+            );
+            compared_cases += 1;
+        }
+
+        assert_eq!(
+            compared_cases, 18,
+            "all source probe importer rows are checked"
+        );
+    }
+
+    #[test]
     fn export_extensions_follow_the_marker_order() {
         assert_eq!(export_extension_for(facts(48)), "shader");
         assert_eq!(export_extension_for(facts(21)), "mat");
@@ -1142,6 +1385,7 @@ mod tests {
                 planned_file("Assets/A/x.asset"),
                 planned_file("Assets/a/x.asset"),
             ],
+            support_files: Vec::new(),
             skipped: Vec::new(),
             fallbacks: Vec::new(),
         };
