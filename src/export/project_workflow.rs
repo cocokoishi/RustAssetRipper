@@ -40,7 +40,8 @@ use super::collection_kind::ExportCollectionKind;
 use super::export_extension::DEFAULT_EXPORT_EXTENSION;
 use super::pointer_map::{
     ExportCollectionPointerMetadata, ExportPointerMapLimits, ExportedAssetPointerEntry,
-    ProjectExportPointerMap, UnityProjectAssetType,
+    ProjectExportPointerMap, ProjectPointerRequest, ProjectPointerResolution,
+    UnityProjectAssetType,
 };
 use super::prefab_collection::{
     generate_prefab_source_pointer, plan_prefab_export_ids, PrefabAssetRepresentation,
@@ -49,9 +50,10 @@ use super::prefab_collection::{
 use super::project_exporter::{
     execute_project_export, export_extension_for, native_format_importer_for_version,
     object_class_name, package_manifest_json, project_version_file,
-    select_collection_with_shader_text, shader_importer_for_version, ObjectClassFacts,
-    PlannedProjectFile, PlannedProjectMeta, PlannedProjectSupportFile, ProjectExportError,
-    ProjectExportNotice, ProjectExportPlan, ProjectExportSettings, ProjectPathPlanner,
+    select_collection_with_shader_text, shader_importer_for_version_with_non_modifiable_textures,
+    ObjectClassFacts, PlannedProjectFile, PlannedProjectMeta, PlannedProjectSupportFile,
+    ProjectExportError, ProjectExportNotice, ProjectExportPlan, ProjectExportSettings,
+    ProjectPathPlanner,
 };
 use super::project_plan::plan_scene_export_paths;
 use super::scene_collection::{
@@ -69,7 +71,8 @@ use super::shader_export::{
 };
 use super::streamed_assets::StreamedYamlAssetLimits;
 use super::unity_yaml::{
-    write_unity_yaml_documents, UnityYamlMappingStyle, UnityYamlNode, UnityYamlWriteLimits,
+    project_pointer_to_unity_yaml, write_unity_yaml_documents, UnityYamlMappingStyle,
+    UnityYamlNode, UnityYamlSequenceStyle, UnityYamlWriteLimits,
 };
 use super::workspace_yaml::{
     workspace_object_to_unity_yaml_document_with_streamed_resources,
@@ -693,15 +696,20 @@ pub fn export_workspace_yaml_project_with_settings(
                 )?,
             }),
             ObjectRoute::ShaderText => {
-                validate_shader_nonmodifiable_textures(
-                    entry.object.payload.as_ref().map_err(|_| {
-                        invalid_project("ShaderImporter requires a decoded Shader payload")
-                    })?,
+                let shader = entry.shader_view.as_ref().ok_or_else(|| {
+                    invalid_project("ShaderImporter requires a decoded Shader view")
+                })?;
+                let non_modifiable_textures = shader_non_modifiable_textures_yaml(
+                    shader,
+                    entry,
+                    objects,
+                    reference_graph,
+                    &pointer_map,
                     project_version,
                 )?;
                 Some(PlannedProjectMeta {
                     importer_class: "ShaderImporter".to_owned(),
-                    importer: shader_importer_for_version(
+                    importer: shader_importer_for_version_with_non_modifiable_textures(
                         project_version,
                         entry
                             .object
@@ -710,6 +718,7 @@ pub fn export_workspace_yaml_project_with_settings(
                             .ok()
                             .and_then(object_asset_bundle_name)
                             .as_deref(),
+                        non_modifiable_textures,
                     )?,
                 })
             }
@@ -1826,34 +1835,99 @@ fn object_asset_bundle_name(payload: &ParsedObjectPayload) -> Option<String> {
     None
 }
 
-fn validate_shader_nonmodifiable_textures(
-    payload: &ParsedObjectPayload,
+fn shader_non_modifiable_textures_yaml(
+    shader: &ShaderView,
+    entry: &RoutedObject<'_>,
+    objects: &ObjectWorkspace,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+    pointer_map: &ProjectExportPointerMap,
     project_version: SceneUnityVersion,
-) -> Result<(), Box<dyn Error>> {
-    let version_has_field = project_version.major > 2018
-        || (project_version.major == 2018 && project_version.minor >= 1);
-    if !version_has_field {
-        return Ok(());
+) -> Result<UnityYamlNode, Box<dyn Error>> {
+    let Some(textures) = shader.non_modifiable_textures.as_deref() else {
+        return Ok(UnityYamlNode::sequence(UnityYamlSequenceStyle::Flow));
+    };
+    if textures.is_empty() {
+        return Ok(UnityYamlNode::sequence(UnityYamlSequenceStyle::Flow));
     }
-    match payload
-        .root
-        .unique_field_in_base_chain("m_NonModifiableTextures")
+    let mut output = UnityYamlNode::sequence(UnityYamlSequenceStyle::Block);
+    for (index, texture) in textures.iter().enumerate() {
+        let expected_path = format!("m_NonModifiableTextures[{index}].second");
+        let mut matching = reference_graph
+            .references_from_object(entry.object.file_index, entry.object.object_index)
+            .filter(|reference| {
+                reference.field_path == expected_path
+                    && reference.file_id == texture.file_id
+                    && reference.path_id == texture.path_id
+            });
+        let reference = matching.next().ok_or_else(|| {
+            invalid_project(format!(
+                "ShaderImporter texture key {:?} at index {index} has no matching PPtr scan edge at {expected_path:?}",
+                texture.name
+            ))
+        })?;
+        if matching.next().is_some() {
+            return Err(invalid_project(format!(
+                "ShaderImporter texture key {:?} at index {index} has duplicate PPtr scan edges",
+                texture.name
+            )));
+        }
+
+        let resolution = match &reference.resolution {
+            MultiFilePPtrResolution::Null => ProjectPointerResolution::Null,
+            MultiFilePPtrResolution::Object {
+                target_file_index,
+                target_object_index,
+            } => {
+                let target = objects
+                    .get(*target_file_index, *target_object_index)
+                    .ok_or_else(|| {
+                        invalid_project(format!(
+                            "ShaderImporter texture key {:?} resolves to absent workspace object {target_file_index}:{target_object_index}",
+                            texture.name
+                        ))
+                    })?;
+                let class_id = target.class_id.ok_or_else(|| {
+                    invalid_project(format!(
+                        "ShaderImporter texture key {:?} resolves to an object without a class ID",
+                        texture.name
+                    ))
+                })?;
+                let identity = ExportAssetIdentity {
+                    collection: ExportAssetCollectionIdentity::SerializedFile {
+                        file_index: target.file_index,
+                    },
+                    object_index: target.object_index,
+                    path_id: target.path_id,
+                    class_id: i32::from(class_id),
+                };
+                pointer_map.resolve(
+                    ProjectPointerRequest::ResolvedAsset(identity),
+                    entry.collection_index,
+                )?
+            }
+            unresolved => {
+                return Err(invalid_project(format!(
+                    "ShaderImporter texture key {:?} at {expected_path:?} has unresolved input PPtr {:?}",
+                    texture.name, unresolved
+                )));
+            }
+        };
+        let pointer = project_pointer_to_unity_yaml(
+            &resolution,
+            project_version,
+            Some(crate::export::script_hashing::UnityGuid::MISSING_REFERENCE.to_byte_array()),
+        )
         .map_err(|error| {
             invalid_project(format!(
-                "ShaderImporter could not inspect NonModifiableTextures: {error}"
+                "ShaderImporter texture key {:?} PPtr could not be converted to project YAML: {error}",
+                texture.name
             ))
-        })? {
-        None => Ok(()),
-        Some(crate::serialized_file::object::SerializedValue::Array(items)) if items.is_empty() => {
-            Ok(())
-        }
-        Some(crate::serialized_file::object::SerializedValue::Array(_)) => Err(invalid_project(
-            "ShaderImporter has non-modifiable texture references that are not yet mapped into importer metadata",
-        )),
-        Some(_) => Err(invalid_project(
-            "ShaderImporter NonModifiableTextures has an unsupported serialized shape",
-        )),
+        })?;
+        let mut pair = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+        pair.insert_field(texture.name.clone(), pointer)?;
+        output.push(pair)?;
     }
+    Ok(output)
 }
 
 fn add_shader_support_file(

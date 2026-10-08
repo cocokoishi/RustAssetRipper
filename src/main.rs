@@ -7960,6 +7960,109 @@ mod tests {
         finish_single_object_file(b"5.0.0f1\0", 48, &nodes, &strings, &payload, path_id)
     }
 
+    fn make_shader_file_with_non_modifiable_texture_null() -> Vec<u8> {
+        make_shader_file_with_non_modifiable_texture_pointer(0, 0, &[])
+    }
+
+    fn make_shader_file_with_non_modifiable_texture_pointer(
+        file_id: i32,
+        path_id: i64,
+        external_names: &[&str],
+    ) -> Vec<u8> {
+        let mut strings = Vec::new();
+        let shader_type = push_type_tree_string(&mut strings, "Shader");
+        let empty_name = push_type_tree_string(&mut strings, "");
+        let string_type = push_type_tree_string(&mut strings, "string");
+        let array_type = push_type_tree_string(&mut strings, "Array");
+        let int_type = push_type_tree_string(&mut strings, "int");
+        let size_field = push_type_tree_string(&mut strings, "size");
+        let data_field = push_type_tree_string(&mut strings, "data");
+        let char_type = push_type_tree_string(&mut strings, "char");
+        let name_field = push_type_tree_string(&mut strings, "m_Name");
+        let script_field = push_type_tree_string(&mut strings, "m_Script");
+        let non_modifiable_field = push_type_tree_string(&mut strings, "m_NonModifiableTextures");
+        let map_type = push_type_tree_string(&mut strings, "map");
+        let pair_type = push_type_tree_string(&mut strings, "pair");
+        let first_field = push_type_tree_string(&mut strings, "first");
+        let second_field = push_type_tree_string(&mut strings, "second");
+        let pptr_texture_type = push_type_tree_string(&mut strings, "PPtr<Texture>");
+        let file_id_field = push_type_tree_string(&mut strings, "m_FileID");
+        let path_id_type = push_type_tree_string(&mut strings, "SInt64");
+        let path_id_field = push_type_tree_string(&mut strings, "m_PathID");
+
+        let mut nodes = vec![(0, shader_type, empty_name, -1)];
+        let string_table = StringTreeTable {
+            string_type,
+            array_type,
+            int_type,
+            size_field,
+            char_type,
+            data_field,
+        };
+        string_tree_nodes(&mut nodes, 1, &string_table, name_field);
+        string_tree_nodes(&mut nodes, 1, &string_table, script_field);
+        nodes.extend([
+            (1, map_type, non_modifiable_field, -1),
+            (2, array_type, array_type, -1),
+            (3, int_type, size_field, 4),
+            (3, pair_type, data_field, -1),
+        ]);
+        string_tree_nodes(&mut nodes, 4, &string_table, first_field);
+        nodes.extend([
+            (4, pptr_texture_type, second_field, -1),
+            (5, int_type, file_id_field, 4),
+            (5, path_id_type, path_id_field, 8),
+        ]);
+
+        let mut payload = Vec::new();
+        put_typetree_string_value(&mut payload, "Test/Simple");
+        put_typetree_string_value(&mut payload, "Shader \"Test/Simple\" { }\n");
+        put_i32_le(&mut payload, 1);
+        put_typetree_string_value(&mut payload, "_MainTex");
+        put_i32_le(&mut payload, file_id);
+        put_i64_le(&mut payload, path_id);
+        assert!(payload.len().is_multiple_of(4), "payload is 4-byte aligned");
+        finish_single_object_file_with_externals(
+            b"2018.2.21f1\0",
+            48,
+            &nodes,
+            &strings,
+            &payload,
+            42,
+            external_names,
+        )
+    }
+
+    fn make_minimal_texture_file(name: &str, path_id: i32) -> Vec<u8> {
+        let mut strings = Vec::new();
+        let texture_type = push_type_tree_string(&mut strings, "Texture2D");
+        let empty_name = push_type_tree_string(&mut strings, "");
+        let string_type = push_type_tree_string(&mut strings, "string");
+        let name_field = push_type_tree_string(&mut strings, "m_Name");
+        let array_type = push_type_tree_string(&mut strings, "Array");
+        let int_type = push_type_tree_string(&mut strings, "int");
+        let size_field = push_type_tree_string(&mut strings, "size");
+        let char_type = push_type_tree_string(&mut strings, "char");
+        let data_field = push_type_tree_string(&mut strings, "data");
+        let mut nodes = vec![(0, texture_type, empty_name, -1)];
+        string_tree_nodes(
+            &mut nodes,
+            1,
+            &StringTreeTable {
+                string_type,
+                array_type,
+                int_type,
+                size_field,
+                char_type,
+                data_field,
+            },
+            name_field,
+        );
+        let mut payload = Vec::new();
+        put_typetree_string_value(&mut payload, name);
+        finish_single_object_file(b"2018.2.21f1\0", 28, &nodes, &strings, &payload, path_id)
+    }
+
     fn make_material_file() -> Vec<u8> {
         let mut strings = Vec::new();
         let material_type = push_type_tree_string(&mut strings, "Material");
@@ -8873,6 +8976,131 @@ mod tests {
             .join("Assets/Editor/AssetRipperPatches/YamlShaderPostprocessor.cs")
             .exists());
         assert!(status.contains("support-file count 1"), "{status}");
+
+        input.files.extend(
+            project_tree(&output_root)
+                .iter()
+                .map(|path| output_root.join(path)),
+        );
+        drop(input);
+    }
+
+    #[test]
+    fn export_project_shader_importer_matches_the_reference_nonmodifiable_texture_map() {
+        let directory = TestInputDirectory::new_root();
+        let assets_directory = directory.join("assets");
+        fs::create_dir(&assets_directory).unwrap();
+        let output_root = directory.join("project");
+        fs::create_dir(&output_root).unwrap();
+        let shader_path = assets_directory.join("shader.assets");
+        fs::write(
+            &shader_path,
+            make_shader_file_with_non_modifiable_texture_null(),
+        )
+        .unwrap();
+        let mut input = TestInputDirectory {
+            directory,
+            files: vec![shader_path.clone()],
+            subdirectories: vec![
+                assets_directory,
+                output_root.clone(),
+                output_root.join("Assets"),
+                output_root.join("Assets/Shader"),
+                output_root.join("ProjectSettings"),
+                output_root.join("Packages"),
+            ],
+        };
+
+        super::export_project_to(
+            &[shader_path],
+            &output_root,
+            false,
+            &default_export_settings(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+
+        let expected = include_str!("export/shader_nonmodifiable_fixture.txt");
+        let expected = expected
+            .lines()
+            .find_map(|line| line.strip_prefix("META|"))
+            .expect("source fixture has a normalized importer row")
+            .replace("\\n", "\n");
+        let meta_path = output_root.join("Assets/Shader/Test_Simple.shader.meta");
+        let meta = fs::read_to_string(meta_path).unwrap();
+        let normalized = meta
+            .lines()
+            .filter(|line| !line.starts_with("guid: ") && !line.starts_with("timeCreated: "))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        assert_eq!(normalized, expected);
+
+        input.files.extend(
+            project_tree(&output_root)
+                .iter()
+                .map(|path| output_root.join(path)),
+        );
+        drop(input);
+    }
+
+    #[test]
+    fn export_project_shader_importer_maps_nonmodifiable_texture_pointers() {
+        let directory = TestInputDirectory::new_root();
+        let assets_directory = directory.join("assets");
+        fs::create_dir(&assets_directory).unwrap();
+        let output_root = directory.join("project");
+        fs::create_dir(&output_root).unwrap();
+        let shader_path = assets_directory.join("shader.assets");
+        let texture_path = assets_directory.join("texture.assets");
+        fs::write(
+            &shader_path,
+            make_shader_file_with_non_modifiable_texture_pointer(1, 88, &["texture.assets"]),
+        )
+        .unwrap();
+        fs::write(
+            &texture_path,
+            make_minimal_texture_file("ExternalTexture", 88),
+        )
+        .unwrap();
+        let mut input = TestInputDirectory {
+            directory,
+            files: vec![shader_path.clone(), texture_path.clone()],
+            subdirectories: vec![
+                assets_directory,
+                output_root.clone(),
+                output_root.join("Assets"),
+                output_root.join("Assets/Shader"),
+                output_root.join("Assets/Texture2D"),
+                output_root.join("ProjectSettings"),
+                output_root.join("Packages"),
+            ],
+        };
+
+        super::export_project_to(
+            &[shader_path, texture_path],
+            &output_root,
+            false,
+            &default_export_settings(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+
+        let texture_meta =
+            fs::read_to_string(output_root.join("Assets/Texture2D/ExternalTexture.texture2D.meta"))
+                .unwrap();
+        let texture_guid = texture_meta
+            .lines()
+            .find_map(|line| line.strip_prefix("guid: "))
+            .expect("exported Texture2D sidecar has a GUID");
+        let shader_meta =
+            fs::read_to_string(output_root.join("Assets/Shader/Test_Simple.shader.meta")).unwrap();
+        assert!(
+            shader_meta.contains(&format!(
+                "  - _MainTex: {{fileID: 2800000, guid: {texture_guid}, type: 2}}"
+            )),
+            "ShaderImporter texture entry points to the exported Texture2D sidecar: {shader_meta}"
+        );
 
         input.files.extend(
             project_tree(&output_root)

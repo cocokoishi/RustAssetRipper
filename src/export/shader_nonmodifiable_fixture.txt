@@ -1,0 +1,2 @@
+CASE|2018.2.21f1
+META|fileFormatVersion: 2\nlicenseType: Free\nShaderImporter:\n  name:\n  externalObjects: {}\n  defaultTextures: []\n  nonModifiableTextures:\n  - _MainTex: {fileID: 0}\n  userData:\n  assetBundleName:\n  assetBundleVariant:\n

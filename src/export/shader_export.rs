@@ -1,9 +1,9 @@
 //! Shader export text paths ported from the frozen baseline.
 //!
-//! The importer classes and parsed shader forms come from the external
-//! `AssetRipper.SourceGenerated` package, so generated member lists, `Has_*`
-//! thresholds, and parsed-form reads stay open. Everything assembled from snapshot text
-//! is pinned here:
+//! Importer behavior is pinned by isolated project-export runtime fixtures; parsed
+//! property rendering is pinned by a generated-API runtime fixture. Serialized class-48
+//! TypeTree coverage is still partial, so unprobed version gates remain open. Everything
+//! assembled from snapshot text is pinned here:
 //!
 //! - Collection admission: the base admits every shader; `SimpleShaderExporter` further
 //!   requires a script whose text is nonempty and contains neither `Program` nor
@@ -988,6 +988,7 @@ mod tests {
                 script: Some(script.as_bytes().to_vec()),
                 has_parsed_form: false,
                 parsed: None,
+                non_modifiable_textures: None,
             };
             let admits = simple_admits == "simple-admits=1";
             assert_eq!(
@@ -1090,6 +1091,7 @@ mod tests {
                 script: None,
                 has_parsed_form: true,
                 parsed: Some(form.clone()),
+                non_modifiable_textures: None,
             };
             let expected_bytes = probed.into_bytes();
             assert_eq!(
@@ -1264,6 +1266,7 @@ mod tests {
             script: Some(b"Shader \"x\" {\nProgram \"vp\" {}\n}".to_vec()),
             has_parsed_form: false,
             parsed: None,
+            non_modifiable_textures: None,
         };
         assert!(matches!(
             export_shader_text(&compiled, ShaderExportMode::Yaml),
@@ -1280,6 +1283,7 @@ mod tests {
                 fallback_name: String::new(),
                 custom_editor_name: String::new(),
             }),
+            non_modifiable_textures: None,
         };
         assert_eq!(
             export_shader_text(&parsed, ShaderExportMode::Dummy)
@@ -1296,6 +1300,7 @@ mod tests {
             script: None,
             has_parsed_form: false,
             parsed: None,
+            non_modifiable_textures: None,
         };
         assert_eq!(
             export_shader_text(&empty, ShaderExportMode::Dummy),
@@ -1307,6 +1312,7 @@ mod tests {
             script: Some(Vec::new()),
             has_parsed_form: false,
             parsed: None,
+            non_modifiable_textures: None,
         };
         assert_eq!(
             export_shader_text(&blank, ShaderExportMode::Dummy),

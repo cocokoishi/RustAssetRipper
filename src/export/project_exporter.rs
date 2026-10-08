@@ -838,6 +838,19 @@ pub fn shader_importer_for_version(
     version: SceneUnityVersion,
     asset_bundle_name: Option<&str>,
 ) -> Result<UnityYamlNode, Box<dyn Error>> {
+    shader_importer_for_version_with_non_modifiable_textures(
+        version,
+        asset_bundle_name,
+        UnityYamlNode::sequence(UnityYamlSequenceStyle::Flow),
+    )
+}
+
+/// Versioned `ShaderImporter` defaults with the source Shader's exported texture map.
+pub fn shader_importer_for_version_with_non_modifiable_textures(
+    version: SceneUnityVersion,
+    asset_bundle_name: Option<&str>,
+    non_modifiable_textures: UnityYamlNode,
+) -> Result<UnityYamlNode, Box<dyn Error>> {
     let mut importer = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
     let has_shader_importer_name = !unity_major_minor_at_least(version, 2018, 3);
     let has_external_objects = unity_major_minor_at_least(version, 2017, 2);
@@ -856,10 +869,7 @@ pub fn shader_importer_for_version(
         UnityYamlNode::sequence(UnityYamlSequenceStyle::Flow),
     )?;
     if has_non_modifiable_textures {
-        importer.insert_field(
-            "nonModifiableTextures",
-            UnityYamlNode::sequence(UnityYamlSequenceStyle::Flow),
-        )?;
+        importer.insert_field("nonModifiableTextures", non_modifiable_textures)?;
     }
     importer.insert_field("userData", UnityYamlNode::string(""))?;
     importer.insert_field(

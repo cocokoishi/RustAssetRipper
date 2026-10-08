@@ -73,6 +73,21 @@ pub enum ShaderViewError {
         /// The lookup failure.
         source: SerializedValueLookupError,
     },
+    /// A field required by a present Shader map entry is absent.
+    MissingField {
+        /// The missing serialized field.
+        field: &'static str,
+    },
+    /// A serialized string used as an importer key is not valid UTF-8.
+    InvalidUtf8 {
+        /// The string field that could not be decoded.
+        field: &'static str,
+    },
+    /// A bounded collection allocation failed.
+    AllocationFailed {
+        /// The collection being allocated.
+        field: &'static str,
+    },
     /// A present field has an unexpected value kind.
     WrongType {
         /// The field being read.
@@ -87,6 +102,15 @@ impl Display for ShaderViewError {
         match self {
             Self::FieldLookup { field, source } => {
                 write!(formatter, "could not read Shader field '{field}': {source}")
+            }
+            Self::MissingField { field } => {
+                write!(formatter, "Shader map entry is missing field '{field}'")
+            }
+            Self::InvalidUtf8 { field } => {
+                write!(formatter, "Shader field '{field}' is not valid UTF-8")
+            }
+            Self::AllocationFailed { field } => {
+                write!(formatter, "could not allocate Shader field '{field}'")
             }
             Self::WrongType { field, actual } => {
                 write!(
@@ -127,11 +151,12 @@ pub struct ParsedShaderProperty {
 
 /// A parsed shader form: `ISerializedShader` as the dummy exporter reads it.
 ///
-/// The `m_`-prefixed serialized names follow the public class-48 TypeTree layout
+/// This shape follows the generated API names exercised by the 2019.4 runtime fixture;
+/// serialized class-48 TypeTree coverage is still partial. The projected fields are:
 /// (`m_ParsedForm` with `m_Name`, `m_PropInfo`/`m_Props`, `m_FallbackName`,
 /// `m_CustomEditorName`; each property with `m_Attributes`, `m_Flags`, `m_Name`,
 /// `m_Description`, `m_Type`, `m_DefValue_0..3`, and `m_DefTexture` with
-/// `m_TexDim`/`m_DefaultName`). No local class-48 TypeTree dump has confirmed them.
+/// `m_TexDim`/`m_DefaultName`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ParsedShaderForm {
     /// `Name`.
@@ -142,6 +167,17 @@ pub struct ParsedShaderForm {
     pub fallback_name: String,
     /// `CustomEditorName`.
     pub custom_editor_name: String,
+}
+
+/// One `Shader.NonModifiableTextures` entry copied into `ShaderImporter` metadata.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NonModifiableTextureReference {
+    /// The serialized dictionary key (`first` in the TypeTree pair).
+    pub name: String,
+    /// The serialized file ID from the texture PPtr.
+    pub file_id: i32,
+    /// The serialized PathID from the texture PPtr.
+    pub path_id: i64,
 }
 
 /// The fields `SimpleShaderExporter` and `DummyShaderTextExporter` read from a shader.
@@ -155,6 +191,8 @@ pub struct ShaderView {
     pub has_parsed_form: bool,
     /// The decoded parsed form, when `m_ParsedForm` is present.
     pub parsed: Option<ParsedShaderForm>,
+    /// The ordered `m_NonModifiableTextures` dictionary, when present in the TypeTree.
+    pub non_modifiable_textures: Option<Vec<NonModifiableTextureReference>>,
 }
 
 impl ShaderView {
@@ -172,8 +210,62 @@ impl ShaderView {
             script: optional_string(root, SHADER_SCRIPT_FIELD)?,
             has_parsed_form: parsed.is_some(),
             parsed,
+            non_modifiable_textures: read_non_modifiable_textures(root)?,
         })
     }
+}
+
+fn read_non_modifiable_textures(
+    root: &SerializedValue,
+) -> Result<Option<Vec<NonModifiableTextureReference>>, ShaderViewError> {
+    let Some(value) = lookup(root, "m_NonModifiableTextures")? else {
+        return Ok(None);
+    };
+    let items = as_array(value, "m_NonModifiableTextures")?;
+    let mut textures = Vec::new();
+    textures
+        .try_reserve_exact(items.len())
+        .map_err(|_| ShaderViewError::AllocationFailed {
+            field: "m_NonModifiableTextures",
+        })?;
+    for item in items {
+        let pair = as_struct(item, "m_NonModifiableTextures")?;
+        let name = match required_field(pair, "first")? {
+            SerializedValue::StringBytes(bytes) => {
+                String::from_utf8(bytes.clone()).map_err(|_| ShaderViewError::InvalidUtf8 {
+                    field: "m_NonModifiableTextures.first",
+                })?
+            }
+            other => {
+                return Err(ShaderViewError::WrongType {
+                    field: "m_NonModifiableTextures.first",
+                    actual: serialized_kind(other),
+                });
+            }
+        };
+        let (file_id, path_id) = match required_field(pair, "second")? {
+            SerializedValue::PPtr { file_id, path_id } => (*file_id, *path_id),
+            other => {
+                return Err(ShaderViewError::WrongType {
+                    field: "m_NonModifiableTextures.second",
+                    actual: serialized_kind(other),
+                });
+            }
+        };
+        textures.push(NonModifiableTextureReference {
+            name,
+            file_id,
+            path_id,
+        });
+    }
+    Ok(Some(textures))
+}
+
+fn required_field<'a>(
+    fields: &'a [SerializedFieldValue],
+    name: &'static str,
+) -> Result<&'a SerializedValue, ShaderViewError> {
+    find_field(fields, name)?.ok_or(ShaderViewError::MissingField { field: name })
 }
 
 fn read_parsed_form(value: &SerializedValue) -> Result<ParsedShaderForm, ShaderViewError> {
@@ -711,6 +803,89 @@ mod tests {
             Err(ShaderViewError::WrongType {
                 field: "m_Script",
                 actual: "int"
+            })
+        );
+    }
+
+    #[test]
+    fn view_reads_non_modifiable_texture_map_keys_and_pptrs_in_order() {
+        let root = SerializedValue::Struct(vec![field(
+            "m_NonModifiableTextures",
+            SerializedValue::Array(vec![
+                SerializedValue::Struct(vec![
+                    field("first", string_value("_MainTex")),
+                    field(
+                        "second",
+                        SerializedValue::PPtr {
+                            file_id: 0,
+                            path_id: 42,
+                        },
+                    ),
+                ]),
+                SerializedValue::Struct(vec![
+                    field("first", string_value("_DetailTex")),
+                    field(
+                        "second",
+                        SerializedValue::PPtr {
+                            file_id: 2,
+                            path_id: 88,
+                        },
+                    ),
+                ]),
+            ]),
+        )]);
+        let view = ShaderView::from_value(&root).unwrap();
+        assert_eq!(
+            view.non_modifiable_textures,
+            Some(vec![
+                NonModifiableTextureReference {
+                    name: "_MainTex".to_owned(),
+                    file_id: 0,
+                    path_id: 42,
+                },
+                NonModifiableTextureReference {
+                    name: "_DetailTex".to_owned(),
+                    file_id: 2,
+                    path_id: 88,
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn view_rejects_malformed_non_modifiable_texture_entries() {
+        let missing_key = SerializedValue::Struct(vec![field(
+            "m_NonModifiableTextures",
+            SerializedValue::Array(vec![SerializedValue::Struct(vec![field(
+                "second",
+                SerializedValue::PPtr {
+                    file_id: 0,
+                    path_id: 0,
+                },
+            )])]),
+        )]);
+        assert_eq!(
+            ShaderView::from_value(&missing_key),
+            Err(ShaderViewError::MissingField { field: "first" })
+        );
+
+        let invalid_key = SerializedValue::Struct(vec![field(
+            "m_NonModifiableTextures",
+            SerializedValue::Array(vec![SerializedValue::Struct(vec![
+                field("first", SerializedValue::StringBytes(vec![0xff])),
+                field(
+                    "second",
+                    SerializedValue::PPtr {
+                        file_id: 0,
+                        path_id: 0,
+                    },
+                ),
+            ])]),
+        )]);
+        assert_eq!(
+            ShaderView::from_value(&invalid_key),
+            Err(ShaderViewError::InvalidUtf8 {
+                field: "m_NonModifiableTextures.first"
             })
         );
     }

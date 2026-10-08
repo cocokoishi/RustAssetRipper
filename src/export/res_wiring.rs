@@ -1043,6 +1043,7 @@ mod tests {
             script: Some(b"Shader \"T\" {\nSubShader {\nProgram \"vp\" {\n}\n}\n}".to_vec()),
             has_parsed_form: false,
             parsed: None,
+            non_modifiable_textures: None,
         };
         let plan = plan_shader_export("T", &view, ShaderExportMode::Dummy).unwrap();
         assert_eq!(plan.file_name, "T.shader");
