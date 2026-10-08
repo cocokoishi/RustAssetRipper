@@ -8,12 +8,12 @@
 //! are reported as explicit notices; families whose specialized renderer is not ported fall back
 //! to the generic Unity YAML asset family instead of being dropped.
 //!
-//! Scene/Prefab collection reconstruction (which would attach `SceneHierarchyObject`/
-//! `PrefabHierarchyObject` main assets and group objects into scene collections) is a separate
-//! required integration owned by the scene workstream; until it is connected, scene and prefab
-//! objects take the plain asset-family route, exactly like the baseline's unprocessed case.
+//! Scene definitions are processed into workspace hierarchies and emitted as `.unity` files
+//! through the scene collection route, with scene IDs, pointers, and `DefaultImporter` metadata.
+//! Prefab collection reconstruction/export and the remaining class-specific project exporters
+//! are still separate required integrations.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::hash::BuildHasher;
 use std::io;
@@ -23,6 +23,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::io::filesystem::VirtualFileSystem;
 use crate::io::platform_structure::PlatformResourceProvider;
+use crate::processing::scene_collections::{
+    SceneDefinitionGuidPlan, SceneDefinitionPathSource, SceneGuidWords,
+};
 use crate::processing::scene_naming::SceneUnityVersion;
 use crate::resource::{RootResourceFileCatalog, StreamedResourceContentLimits};
 use crate::serialized_file::object::ParsedObjectPayload;
@@ -42,13 +45,26 @@ use super::project_exporter::{
     PlannedProjectFile, PlannedProjectMeta, ProjectExportError, ProjectExportNotice,
     ProjectExportPlan, ProjectExportSettings, ProjectPathPlanner,
 };
-use super::scene_collection::{ExportAssetCollectionIdentity, ExportAssetIdentity};
+use super::project_plan::plan_scene_export_paths;
+use super::scene_collection::{
+    plan_workspace_scene_export_ids_with_processed_assets, ExportAssetCollectionIdentity,
+    ExportAssetIdentity, ExportAssetObjectKey, SceneExportIdAssignment, SceneExportIdPlanLimits,
+    SceneHierarchyAssetOrderLimits,
+};
+use super::scene_wiring::{
+    process_workspace_scenes_and_prefabs, WorkspaceSceneProcessing, WorkspaceSceneProcessingLimits,
+};
 use super::settings_file::ExportSettingsFile;
 use super::streamed_assets::StreamedYamlAssetLimits;
-use super::unity_yaml::{write_unity_yaml_documents, UnityYamlWriteLimits};
+use super::unity_yaml::{
+    write_unity_yaml_documents, UnityYamlMappingStyle, UnityYamlNode, UnityYamlWriteLimits,
+};
 use super::workspace_yaml::{
     workspace_object_to_unity_yaml_document_with_streamed_resources,
-    UnityYamlWorkspaceCollectionLimits, WorkspaceStreamedYamlResourceContext,
+    workspace_scene_assignments_to_unity_yaml_with_streamed_resources,
+    workspace_scene_assignments_to_unity_yaml_with_streamed_resources_and_generated_transforms,
+    UnityYamlWorkspaceCollectionLimits, WorkspaceGeneratedTransformYamlContext,
+    WorkspaceStreamedYamlResourceContext,
 };
 
 const MAX_PROJECT_OBJECTS: usize = 20_000_000;
@@ -127,6 +143,27 @@ struct RoutedObject<'a> {
     file_id: i64,
 }
 
+/// One processed Scene collection staged for the Unity project exporter.
+struct RoutedSceneCollection {
+    scene_index: usize,
+    name: String,
+    path: String,
+    path_source: SceneDefinitionPathSource,
+    guid_plan: SceneDefinitionGuidPlan,
+    asset_bundle_name: Option<String>,
+    assignments: Vec<SceneExportIdAssignment>,
+    exportable_assignments: Vec<SceneExportIdAssignment>,
+    collection_index: usize,
+    guid: [u8; 16],
+}
+
+struct PreparedSceneCollections {
+    processing: WorkspaceSceneProcessing,
+    routed: Vec<RoutedSceneCollection>,
+    member_keys: HashSet<ExportAssetObjectKey>,
+    used_guids: HashSet<[u8; 16]>,
+}
+
 /// Execute a workspace-backed Unity project export with explicit export settings.
 #[allow(clippy::too_many_arguments)]
 pub fn export_workspace_yaml_project_with_settings(
@@ -155,6 +192,19 @@ pub fn export_workspace_yaml_project_with_settings(
         ));
     }
     let settings_facts = ProjectExportSettings::from_export_settings(settings, project_version);
+    let PreparedSceneCollections {
+        processing: scene_processing,
+        routed: mut scene_collections,
+        member_keys: scene_member_keys,
+        mut used_guids,
+    } = prepare_scene_collections(
+        filesystem,
+        workspace,
+        objects,
+        reference_graph,
+        project_version,
+    )?;
+    let mut next_guid_sequence = 0u64;
 
     // Pass 1: route every object through the registration stack. No file is planned yet, so a
     // mis-routed or unhandled object aborts with nothing written.
@@ -167,6 +217,9 @@ pub fn export_workspace_yaml_project_with_settings(
     let mut next_collection_index = 0usize;
     for (file_index, file) in workspace.files().iter().enumerate() {
         for (object_index, object_info) in file.metadata.objects.iter().enumerate() {
+            if scene_member_keys.contains(&source_object_key(file_index, object_index)) {
+                continue;
+            }
             let object = objects.get(file_index, object_index).ok_or_else(|| {
                 invalid_project(format!(
                     "workspace object is missing at file {file_index}, object {object_index}"
@@ -272,17 +325,43 @@ pub fn export_workspace_yaml_project_with_settings(
                 selection,
                 route,
                 collection_index,
-                guid: new_collection_guid(collection_index as u64),
+                guid: mint_unique_collection_guid(&mut next_guid_sequence, &mut used_guids)?,
                 file_id: object_info.path_id,
             });
         }
     }
 
+    for scene in &mut scene_collections {
+        scene.collection_index = next_collection_index;
+        next_collection_index = next_collection_index
+            .checked_add(1)
+            .ok_or_else(|| invalid_project("project collection count overflows"))?;
+        scene.guid = match scene.guid_plan {
+            SceneDefinitionGuidPlan::Preserve(words) if !words.is_zero() => {
+                scene_guid_words_to_bytes(words)
+            }
+            SceneDefinitionGuidPlan::Preserve(_) | SceneDefinitionGuidPlan::GenerateAtExport(_) => {
+                mint_unique_collection_guid(&mut next_guid_sequence, &mut used_guids)?
+            }
+        };
+        used_guids.insert(scene.guid);
+    }
+
     // Pass 2: build the project pointer map from exactly the objects that will be written, so a
     // reference to a skipped asset resolves to the baseline missing-reference pointer.
+    let scene_assignment_count = scene_collections
+        .iter()
+        .try_fold(0usize, |count, scene| {
+            count.checked_add(scene.assignments.len())
+        })
+        .ok_or_else(|| invalid_project("project pointer count overflows"))?;
+    let pointer_capacity = routed
+        .len()
+        .checked_add(scene_assignment_count)
+        .ok_or_else(|| invalid_project("project pointer count overflows"))?;
     let mut pointer_entries = Vec::new();
     pointer_entries
-        .try_reserve_exact(routed.len())
+        .try_reserve_exact(pointer_capacity)
         .map_err(|_| invalid_project("could not allocate project export pointer entries"))?;
     let mut collection_metadata = Vec::new();
     collection_metadata
@@ -305,6 +384,23 @@ pub fn export_workspace_yaml_project_with_settings(
             collection_index: entry.collection_index,
         });
     }
+    for scene in &scene_collections {
+        collection_count = collection_count
+            .checked_add(1)
+            .ok_or_else(|| invalid_project("project collection count overflows"))?;
+        collection_metadata.push(ExportCollectionPointerMetadata {
+            collection_index: scene.collection_index,
+            guid: scene.guid,
+            asset_type: UnityProjectAssetType::Serialized,
+        });
+        pointer_entries.extend(scene.assignments.iter().map(|assignment| {
+            ExportedAssetPointerEntry {
+                asset: assignment.asset,
+                file_id: assignment.file_id,
+                collection_index: scene.collection_index,
+            }
+        }));
+    }
     let pointer_map =
         ProjectExportPointerMap::new(&pointer_entries, &collection_metadata, limits.pointer_map)?;
     let streamed_resources = WorkspaceStreamedYamlResourceContext {
@@ -322,6 +418,7 @@ pub fn export_workspace_yaml_project_with_settings(
         .try_reserve_exact(collection_count)
         .map_err(|_| invalid_project("could not allocate staged project asset files"))?;
     let mut total_bytes = 0usize;
+    let mut exported_object_count = 0usize;
     let mut raw_file_cache: HashMap<usize, Vec<u8>> = HashMap::new();
     for entry in &routed {
         if entry.route == ObjectRoute::Skipped {
@@ -360,6 +457,9 @@ pub fn export_workspace_yaml_project_with_settings(
                 write_unity_yaml_documents(&[document], limits.yaml_write)?.into_bytes()
             }
         };
+        exported_object_count = exported_object_count
+            .checked_add(1)
+            .ok_or_else(|| invalid_project("exported object count overflows"))?;
         total_bytes = total_bytes
             .checked_add(bytes.len())
             .ok_or_else(|| invalid_project("project output byte count overflows"))?;
@@ -416,6 +516,136 @@ pub fn export_workspace_yaml_project_with_settings(
         });
     }
 
+    let mut scene_paths_seen: HashSet<String> = HashSet::new();
+    for scene in &mut scene_collections {
+        let path_plan =
+            plan_scene_export_paths(&scene.path, ProjectPathPlanner::host_platform(), "")?;
+        if scene_paths_seen.contains(&path_plan.relative_path) {
+            if scene_build_settings_entry_is_duplicate(&scene_processing, scene.path_source) {
+                notices.push(ProjectExportNotice {
+                    subject: format!("{} ({})", scene.name, path_plan.relative_path),
+                    reason: "a previous duplicate BuildSettings scene already wrote this path",
+                });
+                continue;
+            }
+            return Err(invalid_project(format!(
+                "scene {:?} resolves to duplicate output path {:?} without a duplicate BuildSettings entry",
+                scene.name, path_plan.relative_path
+            )));
+        }
+        scene_paths_seen.insert(path_plan.relative_path.clone());
+
+        let generated_assignment_count = scene
+            .assignments
+            .iter()
+            .filter(|assignment| {
+                matches!(
+                    assignment.asset.collection,
+                    ExportAssetCollectionIdentity::ProcessedCollection { .. }
+                )
+            })
+            .count();
+        let generated_transforms: Vec<_> = scene_processing
+            .generated_transforms
+            .iter()
+            .filter(|transform| {
+                scene.assignments.iter().any(|assignment| {
+                    matches!(
+                        assignment.asset.collection,
+                        ExportAssetCollectionIdentity::ProcessedCollection {
+                            collection_index
+                        } if collection_index == transform.asset.collection_index
+                    ) && assignment.asset.path_id == transform.asset.path_id
+                })
+            })
+            .collect();
+        if generated_assignment_count != generated_transforms.len() {
+            return Err(invalid_project(format!(
+                "scene {:?} has {generated_assignment_count} generated assignments but {} materialized generated Transforms",
+                scene.name,
+                generated_transforms.len(),
+            )));
+        }
+        let scene_yaml = if let Some(first_transform) = generated_transforms.first() {
+            let type_file_index = first_transform.type_file_index;
+            let transform_type_index = first_transform.payload.type_index;
+            for transform in &generated_transforms[1..] {
+                if transform.type_file_index != type_file_index
+                    || transform.payload.type_index != transform_type_index
+                {
+                    return Err(invalid_project(format!(
+                        "scene {:?} generated Transforms use multiple TypeTree sources; per-asset generated TypeTree routing is not connected",
+                        scene.name
+                    )));
+                }
+            }
+            let metadata = &workspace
+                .files()
+                .get(type_file_index)
+                .ok_or_else(|| {
+                    invalid_project(format!(
+                        "scene {:?} generated Transform type file {type_file_index} is missing",
+                        scene.name
+                    ))
+                })?
+                .metadata;
+            workspace_scene_assignments_to_unity_yaml_with_streamed_resources_and_generated_transforms(
+                workspace,
+                objects,
+                reference_graph,
+                &pointer_map,
+                &scene.exportable_assignments,
+                scene.collection_index,
+                None,
+                limits.yaml_collection,
+                &streamed_resources,
+                &WorkspaceGeneratedTransformYamlContext::new(
+                    &scene_processing.processed_assets,
+                    scene.scene_index,
+                    metadata,
+                    transform_type_index,
+                ),
+            )?
+        } else {
+            workspace_scene_assignments_to_unity_yaml_with_streamed_resources(
+                workspace,
+                objects,
+                reference_graph,
+                &pointer_map,
+                &scene.exportable_assignments,
+                scene.collection_index,
+                None,
+                limits.yaml_collection,
+                &streamed_resources,
+            )?
+        };
+        exported_object_count = exported_object_count
+            .checked_add(count_unity_yaml_documents(&scene_yaml))
+            .ok_or_else(|| invalid_project("exported object count overflows"))?;
+        let bytes = scene_yaml.into_bytes();
+        total_bytes = total_bytes
+            .checked_add(bytes.len())
+            .ok_or_else(|| invalid_project("project output byte count overflows"))?;
+        if total_bytes > limits.max_total_yaml_bytes {
+            return Err(invalid_project(format!(
+                "project output uses {total_bytes} bytes, exceeding the limit {}",
+                limits.max_total_yaml_bytes
+            )));
+        }
+        files.push(PlannedProjectFile {
+            collection_name: "SceneExportCollection",
+            kind: ExportCollectionKind::Scene,
+            relative_path: path_plan.relative_path,
+            guid: scene.guid,
+            bytes,
+            meta: Some(PlannedProjectMeta {
+                importer_class: "DefaultImporter".to_owned(),
+                importer: default_importer(scene.asset_bundle_name.as_deref())?,
+            }),
+            label: scene.name.clone(),
+        });
+    }
+
     let manifest = package_manifest_json(project_version);
     let plan = ProjectExportPlan {
         project_version_text: editor_version_text.to_owned(),
@@ -434,7 +664,7 @@ pub fn export_workspace_yaml_project_with_settings(
     )?;
     Ok(WorkspaceProjectExportReport {
         serialized_file_count: workspace.files().len(),
-        exported_object_count: report.file_count,
+        exported_object_count,
         asset_file_count: report.asset_file_count,
         meta_file_count: report.meta_file_count,
         total_yaml_bytes: total_bytes,
@@ -488,6 +718,236 @@ fn identity_of(entry: &RoutedObject<'_>) -> ExportAssetIdentity {
         path_id: entry.object.path_id,
         class_id: entry.class_id,
     }
+}
+
+fn prepare_scene_collections(
+    filesystem: &VirtualFileSystem,
+    workspace: &SerializedFileWorkspace,
+    objects: &ObjectWorkspace,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+    project_version: SceneUnityVersion,
+) -> Result<PreparedSceneCollections, Box<dyn Error>> {
+    let processing = process_workspace_scenes_and_prefabs(
+        filesystem,
+        workspace,
+        objects,
+        reference_graph,
+        WorkspaceSceneProcessingLimits::default(),
+    )
+    .map_err(|error| invalid_project(format!("Scene/Prefab processing failed: {error}")))?;
+    let scenes = processing.hierarchies.scenes();
+    let mut scene_collections = Vec::new();
+    scene_collections
+        .try_reserve_exact(scenes.len())
+        .map_err(|_| invalid_project("could not allocate processed Scene collections"))?;
+    let mut scene_member_keys = HashSet::new();
+    let mut used_guids = HashSet::new();
+    if scenes.is_empty() {
+        return Ok(PreparedSceneCollections {
+            processing,
+            routed: scene_collections,
+            member_keys: scene_member_keys,
+            used_guids,
+        });
+    }
+    if !processing.processed_assets.is_complete() {
+        return Err(invalid_project(format!(
+            "Scene export requires a complete PrefabProcessor asset plan: {}",
+            processing
+                .processed_assets
+                .incomplete_reason()
+                .unwrap_or("no reason was recorded")
+        )));
+    }
+    if processing.scene_hierarchies.len() != scenes.len() {
+        return Err(invalid_project(format!(
+            "Scene processor produced {} hierarchy assets for {} scene definitions",
+            processing.scene_hierarchies.len(),
+            scenes.len()
+        )));
+    }
+
+    for (scene_index, scene) in scenes.iter().enumerate() {
+        let mut hierarchy_matches = processing
+            .scene_hierarchies
+            .iter()
+            .filter(|hierarchy| hierarchy.scene_index == scene_index);
+        let hierarchy = hierarchy_matches.next().ok_or_else(|| {
+            invalid_project(format!(
+                "SceneDefinition {scene_index} has no materialized SceneHierarchyObject"
+            ))
+        })?;
+        if hierarchy_matches.next().is_some() {
+            return Err(invalid_project(format!(
+                "SceneDefinition {scene_index} has multiple materialized SceneHierarchyObjects"
+            )));
+        }
+        if hierarchy.incomplete {
+            return Err(invalid_project(format!(
+                "SceneDefinition {:?} has incomplete hierarchy membership or roots",
+                scene.plan.name
+            )));
+        }
+
+        let assignments = plan_workspace_scene_export_ids_with_processed_assets(
+            scene,
+            scene_index,
+            &processing.processed_assets,
+            project_version,
+            Default::default(),
+            SceneHierarchyAssetOrderLimits::default(),
+            SceneExportIdPlanLimits::default(),
+        )
+        .map_err(|error| {
+            invalid_project(format!(
+                "SceneDefinition {:?} export-ID planning failed: {error}",
+                scene.plan.name
+            ))
+        })?;
+
+        let mut non_exportable_scene_assets = HashSet::new();
+        non_exportable_scene_assets
+            .try_reserve(
+                hierarchy
+                    .managers
+                    .len()
+                    .saturating_add(usize::from(hierarchy.scene_roots.is_some())),
+            )
+            .map_err(|_| invalid_project("could not allocate Scene manager identity index"))?;
+        for manager in &hierarchy.managers {
+            non_exportable_scene_assets
+                .insert(source_object_key(manager.file_index, manager.object_index));
+        }
+        if let Some(scene_roots) = hierarchy.scene_roots {
+            non_exportable_scene_assets.insert(source_object_key(
+                scene_roots.file_index,
+                scene_roots.object_index,
+            ));
+        }
+
+        let mut exportable_assignments = Vec::new();
+        exportable_assignments
+            .try_reserve_exact(assignments.len())
+            .map_err(|_| invalid_project("could not allocate Scene YAML assignments"))?;
+        for assignment in &assignments {
+            if let ExportAssetCollectionIdentity::SerializedFile { file_index } =
+                assignment.asset.collection
+            {
+                let key = source_object_key(file_index, assignment.asset.object_index);
+                if !scene_member_keys.insert(key) {
+                    return Err(invalid_project(format!(
+                        "workspace object {file_index}:{} belongs to multiple exported Scene collections",
+                        assignment.asset.object_index
+                    )));
+                }
+                if !non_exportable_scene_assets.contains(&key) {
+                    exportable_assignments.push(*assignment);
+                }
+            } else {
+                exportable_assignments.push(*assignment);
+            }
+        }
+
+        if let SceneDefinitionGuidPlan::Preserve(words) = scene.plan.guid {
+            if !words.is_zero() {
+                used_guids.insert(scene_guid_words_to_bytes(words));
+            }
+        }
+        scene_collections.push(RoutedSceneCollection {
+            scene_index,
+            name: scene.plan.name.clone(),
+            path: scene.plan.path.clone(),
+            path_source: scene.plan.path_source,
+            guid_plan: scene.plan.guid,
+            asset_bundle_name: hierarchy.asset_bundle_name.clone(),
+            assignments,
+            exportable_assignments,
+            collection_index: usize::MAX,
+            guid: [0; 16],
+        });
+    }
+
+    Ok(PreparedSceneCollections {
+        processing,
+        routed: scene_collections,
+        member_keys: scene_member_keys,
+        used_guids,
+    })
+}
+
+fn source_object_key(file_index: usize, object_index: usize) -> ExportAssetObjectKey {
+    ExportAssetObjectKey {
+        collection: ExportAssetCollectionIdentity::SerializedFile { file_index },
+        object_index,
+    }
+}
+
+fn scene_guid_words_to_bytes(words: SceneGuidWords) -> [u8; 16] {
+    let mut bytes = [0; 16];
+    for (index, word) in words.data.iter().enumerate() {
+        bytes[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    bytes
+}
+
+fn mint_unique_collection_guid(
+    next_sequence: &mut u64,
+    used_guids: &mut HashSet<[u8; 16]>,
+) -> Result<[u8; 16], Box<dyn Error>> {
+    loop {
+        let sequence = *next_sequence;
+        *next_sequence = sequence
+            .checked_add(1)
+            .ok_or_else(|| invalid_project("project collection GUID sequence overflows"))?;
+        let guid = new_collection_guid(sequence);
+        if guid != [0; 16] && used_guids.insert(guid) {
+            return Ok(guid);
+        }
+    }
+}
+
+fn scene_build_settings_entry_is_duplicate(
+    processing: &WorkspaceSceneProcessing,
+    path_source: SceneDefinitionPathSource,
+) -> bool {
+    let SceneDefinitionPathSource::BuildSettings { scene_index } = path_source else {
+        return false;
+    };
+    let Some(scenes) = processing
+        .editor_build_settings
+        .as_ref()
+        .map(|settings| settings.scenes())
+    else {
+        return false;
+    };
+    let Some(selected) = scenes.get(scene_index) else {
+        return false;
+    };
+    scenes
+        .iter()
+        .enumerate()
+        .any(|(index, scene)| index != scene_index && scene.path == selected.path)
+}
+
+fn default_importer(asset_bundle_name: Option<&str>) -> Result<UnityYamlNode, Box<dyn Error>> {
+    let mut importer = UnityYamlNode::mapping(super::unity_yaml::UnityYamlMappingStyle::Block);
+    importer.insert_field(
+        "externalObjects",
+        UnityYamlNode::mapping(UnityYamlMappingStyle::Flow),
+    )?;
+    importer.insert_field("userData", UnityYamlNode::string(""))?;
+    importer.insert_field(
+        "assetBundleName",
+        UnityYamlNode::string(asset_bundle_name.unwrap_or("")),
+    )?;
+    importer.insert_field("assetBundleVariant", UnityYamlNode::string(""))?;
+    Ok(importer)
+}
+
+fn count_unity_yaml_documents(yaml: &str) -> usize {
+    yaml.lines()
+        .filter(|line| line.starts_with("--- !u!"))
+        .count()
 }
 
 fn workspace_project_version(

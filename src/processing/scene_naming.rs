@@ -199,6 +199,45 @@ mod tests {
     }
 
     #[test]
+    fn scene_collection_names_match_reference_runtime_fixture() {
+        for line in include_str!("scene_naming_fixture.txt").lines() {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let fields: Vec<_> = line.split('|').collect();
+            match fields.as_slice() {
+                ["INDEX", version_text, name, "True", index_text] => {
+                    let version = version(version_text);
+                    assert_eq!(
+                        file_name_to_scene_index(name, version),
+                        Some(index_text.parse().unwrap()),
+                        "source row {line:?}"
+                    );
+                }
+                ["INDEX", version_text, name, "False", "-1"] => {
+                    assert_eq!(
+                        file_name_to_scene_index(name, version(version_text)),
+                        None,
+                        "source row {line:?}"
+                    );
+                }
+                ["FILENAME", version_text, index_text, name] => {
+                    assert_eq!(
+                        scene_index_to_file_name(
+                            index_text.parse().unwrap(),
+                            version(version_text)
+                        )
+                        .as_deref(),
+                        Some(*name),
+                        "source row {line:?}"
+                    );
+                }
+                _ => panic!("invalid SceneHelpers fixture row {line:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn parses_release_versions_without_accepting_malformed_numeric_fields() {
         assert_eq!(
             SceneUnityVersion::parse("2022.3.1f1"),

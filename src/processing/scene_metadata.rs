@@ -358,7 +358,7 @@ impl Display for BuildSettingsSceneError {
 impl Error for BuildSettingsSceneError {}
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::{
         decode_build_settings_scene_paths, extract_build_settings_scene_paths,
         scene_path_from_build_settings_value, BuildSettingsSceneError, BuildSettingsSceneLimits,
@@ -879,10 +879,19 @@ mod tests {
     }
 
     fn make_modern_full_build_settings_file() -> Vec<u8> {
+        make_reference_build_settings_file(&[
+            "Assets/Scenes/Main.unity",
+            "Assets/Scenes/Extra.unity",
+        ])
+    }
+
+    /// Build a 2019.4 class-141 file that the frozen generated factory materializes as
+    /// `BuildSettings`, including every real TPK field and alignment lane.
+    pub(crate) fn make_reference_build_settings_file(scene_paths: &[&str]) -> Vec<u8> {
         make_full_layout_build_settings_file(
             b"2019.4.40f1\0",
             "m_Scenes",
-            &["Assets/Scenes/Main.unity", "Assets/Scenes/Extra.unity"],
+            scene_paths,
             &["m_PreloadedPlugins", "m_EnabledVRDevices", "m_BuildTags"],
             &[
                 "hasPROVersion",

@@ -1372,7 +1372,7 @@ fn export_project_to<W: io::Write>(
     }
     writeln!(
         status_output,
-        "Mounted {} logical inputs ({} bytes). Scene/Prefab processing and the remaining class-specific exporters are still separate integrations.",
+        "Mounted {} logical inputs ({} bytes). Basic Scene collection export is wired; Prefab export and the remaining class-specific exporters are still separate integrations.",
         mount_report.discovered_inputs,
         mount_report.discovered_source_bytes
     )?;
@@ -4006,16 +4006,27 @@ fn print_workspace_summary_with_optional_resources_to<W: io::Write>(
         let bundle_assignment = scene_bundle_assignments
             .get(scene_index)
             .ok_or_else(|| invalid_data("scene hierarchy bundle assignment is unavailable"))?;
+        writeln!(
+            output,
+            "        hierarchy AssetBundleName: {}",
+            bundle_assignment
+                .effective_asset_bundle_name
+                .as_deref()
+                .unwrap_or("null")
+        )?;
         match &bundle_assignment.name {
             assetripper::processing::prefab_processing::WorkspaceSceneHierarchyBundleName::Unset => {
-                writeln!(output, "        hierarchy AssetBundleName: unset (no SerializedBundle)")?;
+                writeln!(
+                    output,
+                    "        hierarchy AssetBundleName candidate: unset (no SerializedBundle)"
+                )?;
             }
             assetripper::processing::prefab_processing::WorkspaceSceneHierarchyBundleName::BundleName(
                 name,
             ) => {
                 writeln!(
                     output,
-                    "        hierarchy AssetBundleName: bundle {name:?} (no IAssetBundle asset)"
+                    "        hierarchy AssetBundleName candidate: bundle {name:?} (no IAssetBundle asset)"
                 )?;
             }
             assetripper::processing::prefab_processing::WorkspaceSceneHierarchyBundleName::AssetName(
@@ -4023,10 +4034,14 @@ fn print_workspace_summary_with_optional_resources_to<W: io::Write>(
             ) => {
                 writeln!(
                     output,
-                    "        hierarchy AssetBundleName: asset {name:?} (first IAssetBundle in FetchAssets order)"
+                    "        hierarchy AssetBundleName candidate: asset {name:?} (first IAssetBundle in FetchAssets order)"
                 )?;
             }
         }
+        writeln!(
+            output,
+            "        GeneratedObjectBase.AssetBundleName setter is a no-op"
+        )?;
         if let Some(warning) = &bundle_assignment.streamed_scene_assert_warning {
             writeln!(output, "        hierarchy AssetBundle warning: {warning}")?;
         }
@@ -4213,7 +4228,7 @@ fn invalid_data_owned(message: String) -> io::Error {
 
 fn print_usage() {
     println!(
-        "Usage:\n  assetripper-rs inspect <input-directory> [input-directory ...]\n  assetripper-rs inspect-files <input-file> [input-file ...]\n  assetripper-rs export-project [--delete-existing] [--settings <path>] <output-directory> <input-file-or-directory> [input-file-or-directory ...]\n  assetripper-rs export-object-yaml <serialized-file-index> <path-id> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-file-yaml <serialized-file-index> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-texture [--settings <path>] <serialized-file-index> <path-id> <new-output-image> <input-file> [input-file ...]\n  assetripper-rs export-mesh <serialized-file-index> <path-id> <new-output-glb> <input-file> [input-file ...]\n  assetripper-rs export-shader [--shader-export-mode <dummy|yaml|decompile>] [--settings <path>] <serialized-file-index> <path-id> <new-output-shader> <input-file> [input-file ...]\n  assetripper-rs export-audio [--settings <path>] <serialized-file-index> <path-id> <new-output-audio> <input-file> [input-file ...]\n  assetripper-rs save-default-settings [--settings <path>]\n  assetripper-rs delete-default-settings\n  assetripper-rs --help\n  assetripper-rs --version\n\n`inspect` mounts directories into isolated VFS roots. `inspect-files` dispatches explicitly selected file paths, registers top-level ResourceFiles as GameBundle root inputs, and reports the parsed SerializedFiles. `export-project` loads mixed file and directory inputs, resolves cross-file references and streamed resources, and writes one YAML `.asset` per SerializedFile plus `NativeFormatImporter` metadata, `ProjectVersion.txt`, and the default package manifest. It stages all YAML before writing and refuses undecoded objects, unresolved pointers, or objects omitted by YAML conversion. The output directory must not be empty or named `Desktop`, `Documents`, or `Downloads`; an existing non-empty directory aborts the export unless `--delete-existing` is given, which deletes and recreates it exactly like the reference exporter does after deletion consent. This is the initial workspace YAML workflow; Scene/Prefab reconstruction, class-specific binary collections, importer variants, settings application, and the remaining post-exporters are still open parity work. `export-object-yaml` writes one decoded object as YAML. `export-file-yaml` writes YAML-exportable objects from one SerializedFile in object-table order, resolves streamed Mesh and image-texture bytes, preserves intra-file references through source PathIDs, and refuses unresolved or cross-file references. It reports ImageTexture objects omitted by the baseline when they have no usable image data. `export-texture` decodes one class-28 Texture2D, resolves its inline or streamed image data, and writes a PNG/BMP/TGA image; the output extension selects the format (otherwise the configured settings format, default PNG). `export-mesh` decodes one class-43 Mesh, resolves its vertex data and compressed mesh, and writes a glTF 2.0 binary file with one node per sub-mesh, converting Unity's left-handed coordinates to glTF's right-handed space and rewriting the sub-mesh topology. `export-shader` decodes one class-48 Shader and writes `.shader` text: decompiled script text is written verbatim under every mode, otherwise `dummy` (the default) and `decompile` render the fallback dummy body and `yaml` reports that YAML mode writes a YAML asset instead. `export-audio` decodes one class-83 AudioClip, resolves its inline or streamed audio data, and writes the decoded bytes; tracker audio passes through, `FSB5` reports the external-decoder requirement, and unknown bytes fail with the reference diagnostic. None of the commands replaces an existing output file."
+        "Usage:\n  assetripper-rs inspect <input-directory> [input-directory ...]\n  assetripper-rs inspect-files <input-file> [input-file ...]\n  assetripper-rs export-project [--delete-existing] [--settings <path>] <output-directory> <input-file-or-directory> [input-file-or-directory ...]\n  assetripper-rs export-object-yaml <serialized-file-index> <path-id> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-file-yaml <serialized-file-index> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-texture [--settings <path>] <serialized-file-index> <path-id> <new-output-image> <input-file> [input-file ...]\n  assetripper-rs export-mesh <serialized-file-index> <path-id> <new-output-glb> <input-file> [input-file ...]\n  assetripper-rs export-shader [--shader-export-mode <dummy|yaml|decompile>] [--settings <path>] <serialized-file-index> <path-id> <new-output-shader> <input-file> [input-file ...]\n  assetripper-rs export-audio [--settings <path>] <serialized-file-index> <path-id> <new-output-audio> <input-file> [input-file ...]\n  assetripper-rs save-default-settings [--settings <path>]\n  assetripper-rs delete-default-settings\n  assetripper-rs --help\n  assetripper-rs --version\n\n`inspect` mounts directories into isolated VFS roots. `inspect-files` dispatches explicitly selected file paths, registers top-level ResourceFiles as GameBundle root inputs, and reports the parsed SerializedFiles. `export-project` loads mixed file and directory inputs, resolves cross-file references and streamed resources, and writes processed Scene collections as `.unity` YAML with `DefaultImporter` `.meta`, generic YAML `.asset` files for other routed objects, `ProjectSettings/ProjectVersion.txt`, and the default package manifest. It stages all YAML before writing and refuses undecoded objects, unresolved pointers, or objects omitted by YAML conversion. The generated Scene hierarchy's effective `AssetBundleName` remains null because its `GeneratedObjectBase` setter is a no-op; its `.meta` bundle-name field is blank. Duplicate BuildSettings paths keep the first Scene output. The output directory must not be empty or named `Desktop`, `Documents`, or `Downloads`; an existing non-empty directory aborts the export unless `--delete-existing` is given, which deletes and recreates it exactly like the reference exporter does after deletion consent. This is still an initial workspace workflow: Prefab export, generated Prefab collections, class-specific exporter/importer families, settings application, and remaining post-exporters are open parity work. `export-object-yaml` writes one decoded object as YAML. `export-file-yaml` writes YAML-exportable objects from one SerializedFile in object-table order, resolves streamed Mesh and image-texture bytes, preserves intra-file references through source PathIDs, and refuses unresolved or cross-file references. It reports ImageTexture objects omitted by the baseline when they have no usable image data. `export-texture` decodes one class-28 Texture2D, resolves its inline or streamed image data, and writes a PNG/BMP/TGA image; the output extension selects the format (otherwise the configured settings format, default PNG). `export-mesh` decodes one class-43 Mesh, resolves its vertex data and compressed mesh, and writes a glTF 2.0 binary file with one node per sub-mesh, converting Unity's left-handed coordinates to glTF's right-handed space and rewriting the sub-mesh topology. `export-shader` decodes one class-48 Shader and writes `.shader` text: decompiled script text is written verbatim under every mode, otherwise `dummy` (the default) and `decompile` render the fallback dummy body and `yaml` reports that YAML mode writes a YAML asset instead. `export-audio` decodes one class-83 AudioClip, resolves its inline or streamed audio data, and writes the decoded bytes; tracker audio passes through, `FSB5` reports the external-decoder requirement, and unknown bytes fail with the reference diagnostic. None of the commands replaces an existing output file."
     );
 }
 
@@ -8511,10 +8526,13 @@ mod tests {
         assert!(summary.contains(
             "GameObject 3:0 PathID 11 GetRoot is indeterminate: Some(IncompleteCollectionGraph { file_index: 4 })"
         ));
-        // The manager file still owns the only SceneDefinition; standalone
-        // files have no SerializedBundle so the hierarchy bundle name is unset.
+        // The manager file still owns the only SceneDefinition; standalone files
+        // have no SerializedBundle candidate and the generated property stays null.
         assert!(summary.contains("SceneDefinitions: 1"));
-        assert!(summary.contains("hierarchy AssetBundleName: unset (no SerializedBundle)"));
+        assert!(summary.contains("hierarchy AssetBundleName: null"));
+        assert!(
+            summary.contains("hierarchy AssetBundleName candidate: unset (no SerializedBundle)")
+        );
         assert!(
             summary.contains("external requests: 4; newly loaded dependencies: 0; resolved: true")
         );
@@ -8699,11 +8717,16 @@ mod tests {
         assert!(summary
             .contains("scene GUID: preserve [0x00000001, 0x00000002, 0x00000003, 0x00000004]"));
         assert!(
+            summary.contains("hierarchy AssetBundleName: null"),
+            "{summary}"
+        );
+        assert!(
             summary.contains(
-                "hierarchy AssetBundleName: asset \"data.unity3d\" (first IAssetBundle in FetchAssets order)"
+                "hierarchy AssetBundleName candidate: asset \"data.unity3d\" (first IAssetBundle in FetchAssets order)"
             ),
             "{summary}"
         );
+        assert!(summary.contains("GeneratedObjectBase.AssetBundleName setter is a no-op"));
         assert!(
             summary.contains("Generated Prefab Transforms planned for non-scene GameObjects: 0")
         );

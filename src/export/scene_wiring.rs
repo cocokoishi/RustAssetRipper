@@ -391,8 +391,13 @@ pub struct MaterializedSceneHierarchyAsset {
     pub scene_roots: Option<WorkspaceSceneObjectIdentity>,
     /// `SceneHierarchyObject.GetRoots()` in `GameObjects` order.
     pub roots: Vec<WorkspaceSceneObjectIdentity>,
-    /// Selected `AssetBundleName`; `None` when no serialized bundle supplies one.
+    /// Read-back value of `SceneHierarchyObject.AssetBundleName` after processing.
+    ///
+    /// AssetRipper's `SceneHierarchyObject` inherits the no-op setter from
+    /// `GeneratedObjectBase`, so this remains `None` even when the processor computes a name.
     pub asset_bundle_name: Option<String>,
+    /// Name `PrefabProcessor` attempts to assign before the generated-object no-op setter drops it.
+    pub requested_asset_bundle_name: Option<String>,
     /// True when the hierarchy's asset membership or root discovery reported issues.
     pub incomplete: bool,
 }
@@ -404,6 +409,8 @@ pub struct MaterializedGeneratedTransform {
     pub game_object: WorkspaceSceneObjectIdentity,
     /// `ProcessedAssetCollection.Name` that owns the generated asset.
     pub collection_name: String,
+    /// Workspace file supplying the class-ID-4 TypeTree used to materialize this payload.
+    pub type_file_index: usize,
     pub payload: WorkspaceGeneratedTransformPayload,
 }
 
@@ -1319,6 +1326,7 @@ fn materialize_generated_transforms(
                     asset: payload.asset,
                     game_object,
                     collection_name,
+                    type_file_index,
                     payload,
                 });
             }
@@ -1422,8 +1430,8 @@ fn materialize_scene_hierarchies(
             .copied()
             .filter(|game_object| root_ids.contains(game_object))
             .collect();
-        let asset_bundle_name =
-            resolve_scene_bundle_name(workspace, objects, &collection_file_indices);
+        let requested_asset_bundle_name =
+            requested_scene_bundle_name(workspace, objects, &collection_file_indices);
         let incomplete = !membership.is_complete()
             || scene
                 .collections()
@@ -1452,17 +1460,18 @@ fn materialize_scene_hierarchies(
             prefab_instances: membership.prefab_instances().to_vec(),
             scene_roots: membership.scene_roots(),
             roots,
-            asset_bundle_name,
+            asset_bundle_name: None,
+            requested_asset_bundle_name,
             incomplete,
         });
     }
     Ok(result)
 }
 
-/// `PrefabProcessor.Process` lines 34-47: the first scene collection's serialized bundle
-/// supplies the hierarchy's `AssetBundleName`; its first `IAssetBundle` asset's
-/// `GetAssetBundleName()` wins, otherwise the bundle name does.
-fn resolve_scene_bundle_name(
+/// `PrefabProcessor.Process` lines 34-47: computes the candidate name that it passes to
+/// `SceneHierarchyObject.AssetBundleName`. The generated hierarchy inherits a no-op setter from
+/// `GeneratedObjectBase`, so this candidate is not the effective property value.
+fn requested_scene_bundle_name(
     workspace: &SerializedFileWorkspace,
     objects: &ObjectWorkspace,
     collection_file_indices: &[usize],
@@ -1652,6 +1661,70 @@ mod tests {
         (6, 1, "char", "data", 1, 0),
     ];
 
+    /// Release TypeTree nodes copied from AssetRipper's TPK for class 142 at Unity 2019.4.40f1.
+    /// Unlike `ASSET_BUNDLE_TREE`, this includes the complete serialized object layout and its
+    /// alignment flags so the frozen source factory can materialize the streamed-scene fixture.
+    const ASSET_BUNDLE_FULL_TREE: Tree = &[
+        (0, 1, "AssetBundle", "Base", -1, 32768),
+        (1, 1, "string", "m_Name", -1, 557057),
+        (2, 1, "Array", "Array", -1, 540673),
+        (3, 1, "int", "size", 4, 524289),
+        (3, 1, "char", "data", 1, 524289),
+        (1, 1, "vector", "m_PreloadTable", -1, 32768),
+        (2, 1, "Array", "Array", -1, 16384),
+        (3, 1, "int", "size", 4, 0),
+        (3, 1, "PPtr<Object>", "data", -1, 0),
+        (4, 1, "int", "m_FileID", 4, 8388609),
+        (4, 1, "SInt64", "m_PathID", 8, 8388609),
+        (1, 1, "map", "m_Container", -1, 32768),
+        (2, 1, "Array", "Array", -1, 32768),
+        (3, 1, "int", "size", 4, 0),
+        (3, 1, "pair", "data", -1, 32768),
+        (4, 1, "string", "first", -1, 32768),
+        (5, 1, "Array", "Array", -1, 16385),
+        (6, 1, "int", "size", 4, 1),
+        (6, 1, "char", "data", 1, 1),
+        (4, 1, "AssetInfo", "second", -1, 0),
+        (5, 1, "int", "preloadIndex", 4, 0),
+        (5, 1, "int", "preloadSize", 4, 0),
+        (5, 1, "PPtr<Object>", "asset", -1, 0),
+        (6, 1, "int", "m_FileID", 4, 8388609),
+        (6, 1, "SInt64", "m_PathID", 8, 8388609),
+        (1, 1, "AssetInfo", "m_MainAsset", -1, 0),
+        (2, 1, "int", "preloadIndex", 4, 0),
+        (2, 1, "int", "preloadSize", 4, 0),
+        (2, 1, "PPtr<Object>", "asset", -1, 0),
+        (3, 1, "int", "m_FileID", 4, 8388609),
+        (3, 1, "SInt64", "m_PathID", 8, 8388609),
+        (1, 1, "unsigned int", "m_RuntimeCompatibility", 4, 0),
+        (1, 1, "string", "m_AssetBundleName", -1, 32768),
+        (2, 1, "Array", "Array", -1, 16385),
+        (3, 1, "int", "size", 4, 1),
+        (3, 1, "char", "data", 1, 1),
+        (1, 1, "vector", "m_Dependencies", -1, 32768),
+        (2, 1, "Array", "Array", -1, 49152),
+        (3, 1, "int", "size", 4, 0),
+        (3, 1, "string", "data", -1, 32768),
+        (4, 1, "Array", "Array", -1, 16385),
+        (5, 1, "int", "size", 4, 1),
+        (5, 1, "char", "data", 1, 1),
+        (1, 1, "bool", "m_IsStreamedSceneAssetBundle", 1, 16384),
+        (1, 1, "int", "m_ExplicitDataLayout", 4, 0),
+        (1, 1, "int", "m_PathFlags", 4, 0),
+        (1, 1, "map", "m_SceneHashes", -1, 32768),
+        (2, 1, "Array", "Array", -1, 32768),
+        (3, 1, "int", "size", 4, 0),
+        (3, 1, "pair", "data", -1, 32768),
+        (4, 1, "string", "first", -1, 32768),
+        (5, 1, "Array", "Array", -1, 16385),
+        (6, 1, "int", "size", 4, 1),
+        (6, 1, "char", "data", 1, 1),
+        (4, 1, "string", "second", -1, 32768),
+        (5, 1, "Array", "Array", -1, 16385),
+        (6, 1, "int", "size", 4, 1),
+        (6, 1, "char", "data", 1, 1),
+    ];
+
     struct FixtureType {
         class_id: i32,
         tree: Tree,
@@ -1765,6 +1838,46 @@ mod tests {
             push_string(&mut payload, name);
         }
         payload
+    }
+
+    fn full_asset_bundle_payload(bundle_name: &str, scene_hashes: &[(&str, &str)]) -> Vec<u8> {
+        let mut payload = Vec::new();
+        push_string(&mut payload, "CAB-scene"); // m_Name
+        payload.extend_from_slice(&0i32.to_le_bytes()); // m_PreloadTable size
+        payload.extend_from_slice(&0i32.to_le_bytes()); // m_Container size
+        payload.extend_from_slice(&0i32.to_le_bytes()); // m_MainAsset.preloadIndex
+        payload.extend_from_slice(&0i32.to_le_bytes()); // m_MainAsset.preloadSize
+        push_pptr(&mut payload, 0, 0); // m_MainAsset.asset
+        payload.extend_from_slice(&0u32.to_le_bytes()); // m_RuntimeCompatibility
+        push_string(&mut payload, bundle_name); // m_AssetBundleName
+        payload.extend_from_slice(&0i32.to_le_bytes()); // m_Dependencies size
+        payload.push(1); // m_IsStreamedSceneAssetBundle
+        while !payload.len().is_multiple_of(4) {
+            payload.push(0); // TypeTree AlignBytes flag after streamed-scene bool
+        }
+        payload.extend_from_slice(&0i32.to_le_bytes()); // m_ExplicitDataLayout
+        payload.extend_from_slice(&0i32.to_le_bytes()); // m_PathFlags
+        payload.extend_from_slice(&i32::try_from(scene_hashes.len()).unwrap().to_le_bytes());
+        for (scene_path, collection_name) in scene_hashes {
+            push_string(&mut payload, scene_path);
+            push_string(&mut payload, collection_name);
+        }
+        payload
+    }
+
+    fn full_asset_bundle_file(scene_hashes: &[(&str, &str)]) -> Vec<u8> {
+        build_serialized_file(
+            "2019.4.40f1",
+            &[FixtureType {
+                class_id: ASSET_BUNDLE_CLASS_ID,
+                tree: ASSET_BUNDLE_FULL_TREE,
+            }],
+            &[FixtureObject {
+                path_id: ASSET_BUNDLE_PATH_ID,
+                type_index: 0,
+                payload: full_asset_bundle_payload("streamed-scene-bundle", scene_hashes),
+            }],
+        )
     }
 
     fn write_type_tree(output: &mut Vec<u8>, class_id: i32, nodes: Tree) {
@@ -2280,6 +2393,289 @@ mod tests {
         assert!(processing.prefab_processing.is_complete());
     }
 
+    #[test]
+    fn export_project_writes_processed_scene_collections_and_skips_duplicate_build_paths() {
+        // Use complete 2019.4 TPK layouts so the frozen generated factory materializes both
+        // BuildSettings and the streamed-scene AssetBundle instead of classifying the shortened
+        // unit-test shapes as unreadable. `level1` and `level2` map to duplicate paths; the
+        // first export wins. The streamed bundle maps `level3` through SceneHashes.
+        let files = vec![
+            ("level0", level0_file()),
+            ("level1", level1_file()),
+            ("level2", level1_file()),
+            ("level3", level1_file()),
+            (
+                "globalgamemanagers",
+                crate::processing::scene_metadata::tests::make_reference_build_settings_file(&[
+                    "Assets/Scenes/FromBuild.unity",
+                    "Assets/Scenes/Dupe.unity",
+                    "Assets/Scenes/Dupe.unity",
+                ]),
+            ),
+            (
+                "CAB-scene",
+                full_asset_bundle_file(&[("Assets/Scenes/Streamed.unity", "level3")]),
+            ),
+        ];
+
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem.create_directory(Some("/game")).unwrap();
+        let mut inputs = Vec::new();
+        for (file_name, bytes) in &files {
+            let virtual_path = format!("/game/{file_name}");
+            filesystem.write_all_bytes(&virtual_path, bytes).unwrap();
+            inputs.push(DependencyFilePath {
+                file_name: (*file_name).to_owned(),
+                virtual_path,
+            });
+        }
+        let workspace = SerializedFileWorkspace::load_from_vfs(
+            &filesystem,
+            &inputs,
+            SerializedFileWorkspaceLimits::default(),
+        )
+        .unwrap();
+        let objects = ObjectWorkspace::load_from_vfs(
+            &filesystem,
+            &workspace,
+            ObjectWorkspaceLimits::default(),
+        )
+        .unwrap();
+        let references = workspace
+            .reference_graph(MultiFileReferenceGraphLimits::default())
+            .unwrap();
+        let scene_processing = process_workspace_scenes_and_prefabs(
+            &filesystem,
+            &workspace,
+            &objects,
+            &references,
+            WorkspaceSceneProcessingLimits::default(),
+        )
+        .unwrap();
+        assert!(
+            scene_processing.report.is_complete(),
+            "{:?}",
+            scene_processing.diagnostics
+        );
+        assert!(scene_processing
+            .scene_hierarchies
+            .iter()
+            .all(|hierarchy| hierarchy.asset_bundle_name.is_none()));
+        let reference_rows: Vec<_> = include_str!("scene_processor_fixture.txt")
+            .lines()
+            .filter(|line| {
+                matches!(
+                    line.split_once('|').map(|(record, _)| record),
+                    Some(
+                        "HIER"
+                            | "HIER-GUID"
+                            | "HIER-GO"
+                            | "HIER-COMPONENTS"
+                            | "HIER-MANAGERS"
+                            | "HIER-PREFABS"
+                            | "HIER-SCENEROOTS"
+                            | "HIER-ROOTS"
+                    )
+                )
+            })
+            .collect();
+        assert_eq!(
+            reference_rows.len(),
+            scene_processing.scene_hierarchies.len() * 8
+        );
+
+        fn reference_field<'a>(row: &'a str, name: &str) -> &'a str {
+            row.strip_prefix(name)
+                .or_else(|| row.split('|').find_map(|part| part.strip_prefix(name)))
+                .unwrap_or_else(|| panic!("reference row {row:?} has no {name:?} field"))
+        }
+
+        let mut reference_scenes: Vec<_> = reference_rows.chunks_exact(8).collect();
+        reference_scenes.sort_by_key(|rows| reference_field(rows[0], "path="));
+        let mut rust_scenes: Vec<_> = scene_processing
+            .hierarchies
+            .scenes()
+            .iter()
+            .zip(&scene_processing.scene_hierarchies)
+            .collect();
+        rust_scenes.sort_by_key(|(scene, _)| scene.plan.path.as_str());
+        for (rows, (scene, hierarchy)) in reference_scenes.into_iter().zip(rust_scenes) {
+            assert_eq!(reference_field(rows[0], "scene="), scene.plan.name);
+            assert_eq!(reference_field(rows[0], "path="), scene.plan.path);
+            assert_eq!(reference_field(rows[0], "name="), scene.plan.name);
+            assert_eq!(
+                reference_field(rows[0], "bundle="),
+                hierarchy.asset_bundle_name.as_deref().unwrap_or("null")
+            );
+            match scene.plan.guid {
+                SceneDefinitionGuidPlan::Preserve(words) => {
+                    let mut guid_bytes = [0; 16];
+                    for (index, word) in words.data.iter().enumerate() {
+                        guid_bytes[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
+                    }
+                    assert_eq!(
+                        reference_field(rows[1], "HIER-GUID|"),
+                        crate::export::unity_yaml::format_unity_guid_words(guid_bytes)
+                    );
+                }
+                SceneDefinitionGuidPlan::GenerateAtExport(_) => {
+                    // AssetRipper generates these GUIDs randomly in its in-memory scene
+                    // definitions, so compare the rest of the scene semantics and validate the
+                    // Rust-emitted GUID in the project export below instead of freezing a random
+                    // source-runtime value in this fixture.
+                }
+            }
+
+            let source_ids = |row: &str| {
+                row.split_once('|')
+                    .unwrap()
+                    .1
+                    .split(',')
+                    .filter_map(|asset| {
+                        asset
+                            .split_once('#')
+                            .and_then(|(_, tail)| tail.split_once(':'))
+                            .map(|(path_id, _)| path_id.parse::<i64>().unwrap())
+                    })
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                hierarchy
+                    .game_objects
+                    .iter()
+                    .map(|identity| identity.path_id)
+                    .collect::<Vec<_>>(),
+                source_ids(rows[2])
+            );
+            assert_eq!(
+                hierarchy.components.len() + hierarchy.generated_components.len(),
+                reference_field(rows[3], "HIER-COMPONENTS|")
+                    .parse::<usize>()
+                    .unwrap()
+            );
+            assert_eq!(
+                hierarchy
+                    .managers
+                    .iter()
+                    .map(|identity| identity.path_id)
+                    .collect::<Vec<_>>(),
+                source_ids(rows[4])
+            );
+            assert_eq!(
+                hierarchy.prefab_instances.len(),
+                reference_field(rows[5], "HIER-PREFABS|")
+                    .parse::<usize>()
+                    .unwrap()
+            );
+            assert_eq!(
+                hierarchy.scene_roots.is_some(),
+                reference_field(rows[6], "HIER-SCENEROOTS|") != "null"
+            );
+            assert_eq!(
+                hierarchy
+                    .roots
+                    .iter()
+                    .map(|identity| identity.path_id)
+                    .collect::<Vec<_>>(),
+                source_ids(rows[7])
+            );
+        }
+        let output_root = crate::test_support::unique_test_directory("scene-project-export");
+        let root_catalog = crate::resource::RootResourceFileCatalog::default();
+        let provider = crate::io::platform_structure::PlatformResourceProvider::new(None, None);
+
+        let report = crate::export::project_workflow::export_workspace_yaml_project(
+            &output_root,
+            false,
+            &filesystem,
+            &root_catalog,
+            &provider,
+            &workspace,
+            &objects,
+            &references,
+            crate::export::project_workflow::WorkspaceProjectExportLimits::default(),
+        )
+        .unwrap();
+
+        let first_scene =
+            std::fs::read_to_string(output_root.join("Assets/Scenes/FromBuild.unity")).unwrap();
+        assert!(first_scene.contains("--- !u!1 &100"));
+        assert!(first_scene.contains("--- !u!4 &"));
+        assert!(first_scene.contains("m_Components:"));
+        assert!(first_scene.contains("m_GameObject:"));
+
+        let first_meta =
+            std::fs::read_to_string(output_root.join("Assets/Scenes/FromBuild.unity.meta"))
+                .unwrap();
+        let importer_reference = include_str!("default_importer_probe_fixture.txt");
+        assert!(importer_reference.contains("VALUE|ExternalObjects|Count = 0"));
+        for property in ["AssetBundleName_R", "AssetBundleVariant", "UserData"] {
+            assert!(importer_reference
+                .lines()
+                .any(|line| line == format!("VALUE|{property}|")));
+        }
+        assert!(first_meta.contains("DefaultImporter:"));
+        assert!(first_meta.contains("externalObjects: {}"));
+        assert!(first_meta.contains("assetBundleName:"));
+        assert!(first_meta
+            .lines()
+            .any(|line| line.trim() == "assetBundleName:"));
+        assert!(first_meta
+            .lines()
+            .any(|line| line.trim() == "assetBundleVariant:"));
+        assert!(!first_meta.contains("mainObjectFileID:"));
+        let first_guid = first_meta
+            .lines()
+            .find_map(|line| line.strip_prefix("guid: "))
+            .unwrap();
+        let from_build_rows = reference_rows
+            .chunks_exact(8)
+            .find(|rows| reference_field(rows[0], "path=") == "Assets/Scenes/FromBuild")
+            .unwrap();
+        assert_eq!(
+            first_guid,
+            reference_field(from_build_rows[1], "HIER-GUID|")
+        );
+
+        let duplicate_scene = output_root.join("Assets/Scenes/Dupe.unity");
+        assert!(duplicate_scene.is_file());
+        let duplicate_meta =
+            std::fs::read_to_string(duplicate_scene.with_extension("unity.meta")).unwrap();
+        let duplicate_guid = duplicate_meta
+            .lines()
+            .find_map(|line| line.strip_prefix("guid: "))
+            .unwrap();
+        assert_eq!(duplicate_guid.len(), 32);
+        assert!(duplicate_guid
+            .chars()
+            .all(|character| character.is_ascii_hexdigit()));
+        assert_ne!(duplicate_guid, "00000000000000000000000000000000");
+        assert_ne!(duplicate_guid, first_guid);
+        let streamed_scene = output_root.join("Assets/Scenes/Streamed.unity");
+        assert!(streamed_scene.is_file());
+        let streamed_meta =
+            std::fs::read_to_string(streamed_scene.with_extension("unity.meta")).unwrap();
+        assert!(streamed_meta.contains("assetBundleName:"));
+        let streamed_guid = streamed_meta
+            .lines()
+            .find_map(|line| line.strip_prefix("guid: "))
+            .unwrap();
+        assert_eq!(streamed_guid.len(), 32);
+        assert!(streamed_guid
+            .chars()
+            .all(|character| character.is_ascii_hexdigit()));
+        assert_ne!(streamed_guid, "00000000000000000000000000000000");
+        assert_ne!(streamed_guid, first_guid);
+        assert_ne!(streamed_guid, duplicate_guid);
+        assert!(report.skipped_objects.iter().any(|notice| {
+            notice.reason == "a previous duplicate BuildSettings scene already wrote this path"
+        }));
+        assert!(!output_root.join("Assets/GameObject/RootA.asset").exists());
+        assert!(report.exported_object_count >= 5);
+
+        std::fs::remove_dir_all(output_root).unwrap();
+    }
+
     fn vector3_of(value: &crate::serialized_file::object::SerializedValue) -> [f32; 3] {
         let fields = value.struct_fields().expect("Vector3f struct");
         let mut result = [0.0; 3];
@@ -2326,7 +2722,25 @@ mod tests {
             .join("target")
             .join("scene-scratch");
         std::fs::create_dir_all(&directory).unwrap();
-        for (name, bytes) in fixture_files() {
+        let files = [
+            ("level0", level0_file()),
+            ("level1", level1_file()),
+            ("level2", level1_file()),
+            ("level3", level1_file()),
+            (
+                "globalgamemanagers",
+                crate::processing::scene_metadata::tests::make_reference_build_settings_file(&[
+                    "Assets/Scenes/FromBuild.unity",
+                    "Assets/Scenes/Dupe.unity",
+                    "Assets/Scenes/Dupe.unity",
+                ]),
+            ),
+            (
+                "CAB-scene",
+                full_asset_bundle_file(&[("Assets/Scenes/Streamed.unity", "level3")]),
+            ),
+        ];
+        for (name, bytes) in files {
             std::fs::write(directory.join(name), bytes).unwrap();
         }
     }

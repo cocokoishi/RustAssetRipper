@@ -21,10 +21,12 @@ using AssetRipper.Processing;
 using AssetRipper.Processing.Prefabs;
 using AssetRipper.Processing.Scenes;
 using AssetRipper.SourceGenerated;
+using AssetRipper.SourceGenerated.Classes.ClassID_142;
+using AssetRipper.SourceGenerated.Extensions;
 
 if (args.Length == 0)
 {
-	Console.Error.WriteLine("usage: tpk <version> <classId...> | process <rows> <file...>");
+	Console.Error.WriteLine("usage: tpk <version> <classId...> | naming <version> <name...> | process <rows> <file...>");
 	return 2;
 }
 
@@ -35,12 +37,17 @@ try
 		DumpTpk(args[1], args[2..]);
 		return 0;
 	}
+	if (args[0] == "naming" && args.Length >= 3)
+	{
+		DumpSceneNaming(args[1], args[2..]);
+		return 0;
+	}
 	if (args[0] == "process" && args.Length >= 3)
 	{
 		Process(args[1], args[2..]);
 		return 0;
 	}
-	Console.Error.WriteLine("usage: tpk <version> <classId...> | process <rows> <file...>");
+	Console.Error.WriteLine("usage: tpk <version> <classId...> | naming <version> <name...> | process <rows> <file...>");
 	return 2;
 }
 catch (Exception ex)
@@ -72,6 +79,27 @@ static void DumpTpk(string versionText, string[] classIds)
 	}
 }
 
+static void DumpSceneNaming(string versionText, string[] names)
+{
+	UnityVersion version = UnityVersion.Parse(versionText);
+	foreach (string name in names)
+	{
+		try
+		{
+			bool success = SceneHelpers.TryGetFileNameToSceneIndex(name, version, out int index);
+			Console.WriteLine($"INDEX|{versionText}|{name}|{success}|{index}");
+		}
+		catch (Exception exception)
+		{
+			Console.WriteLine($"INDEX|{versionText}|{name}|ERROR|{exception.GetType().Name}");
+		}
+	}
+	for (int index = 0; index <= 2; index++)
+	{
+		Console.WriteLine($"FILENAME|{versionText}|{index}|{SceneHelpers.SceneIndexToFileName(index, version)}");
+	}
+}
+
 static void DumpNodes(TypeTreeNodeStruct node, int level)
 {
 	Console.WriteLine($"NODE|{level}|{node.TypeName}|{node.Name}|v{node.Version}|meta{(int)node.MetaFlag}");
@@ -85,6 +113,8 @@ static void Process(string rowsPath, string[] paths)
 {
 	GameAssetFactory factory = new GameAssetFactory(new BaseManager(s => { }));
 	GameBundle bundle = new();
+	SerializedBundle serializedBundle = new();
+	bundle.AddBundle(serializedBundle);
 	UnityVersion version = default;
 	foreach (string path in paths)
 	{
@@ -96,7 +126,7 @@ static void Process(string rowsPath, string[] paths)
 			continue;
 		}
 		version = serializedFile.Version;
-		bundle.AddCollectionFromSerializedFile(serializedFile, factory);
+		serializedBundle.AddCollectionFromSerializedFile(serializedFile, factory);
 	}
 	GameData gameData = new(bundle, version, new BaseManager(s => { }), null);
 
@@ -117,8 +147,32 @@ static void Process(string rowsPath, string[] paths)
 	}
 	foreach (IUnityObjectBase asset in bundle.FetchAssets())
 	{
+		if (asset is IAssetBundle assetBundle)
+		{
+			rows.WriteLine($"BUNDLE-COMPUTED|{assetBundle.GetAssetBundleName()}");
+			foreach (PropertyInfo property in asset.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance)
+				.Where(property => property.Name.Contains("Scene", StringComparison.Ordinal)
+					|| property.Name.Contains("AssetBundle", StringComparison.Ordinal)
+					|| property.Name == "Name")
+				.OrderBy(property => property.Name, StringComparer.Ordinal))
+			{
+				try
+				{
+					rows.WriteLine($"BUNDLE-PROPERTY|{property.Name}|{SafeString(property.GetValue(asset))}");
+				}
+				catch (Exception exception)
+				{
+					rows.WriteLine($"BUNDLE-PROPERTY|{property.Name}|ERROR:{exception.GetType().Name}");
+				}
+			}
+		}
 		if (asset is SceneHierarchyObject hierarchy)
 		{
+			Bundle? hierarchyBundle = hierarchy.Scene.Collections.Select(collection => collection.Bundle)
+				.FirstOrDefault(candidate => candidate is SerializedBundle);
+			IAssetBundle? hierarchyAssetBundle = hierarchyBundle?.FetchAssets().OfType<IAssetBundle>().FirstOrDefault();
+			rows.WriteLine($"HIER-CHECK|{hierarchyBundle?.Name ?? "<null>"}|{hierarchyAssetBundle?.GetAssetBundleName() ?? "<null>"}");
+			rows.WriteLine($"HIER-SET|{hierarchy.AssetBundleName ?? "<null>"}|collections={string.Join(",", hierarchy.Scene.Collections.Select(collection => $"{collection.Name}:{collection.Bundle.GetType().Name}"))}");
 			DumpHierarchy(rows, hierarchy);
 		}
 	}
@@ -134,6 +188,7 @@ static void DumpHierarchy(StreamWriter rows, SceneHierarchyObject hierarchy)
 	string sceneName = SafeString(GetProperty(scene, "Name"));
 	string scenePath = SafeString(GetProperty(scene, "Path"));
 	rows.WriteLine($"HIER|scene={sceneName}|path={scenePath}|name={name}|bundle={bundleName}");
+	rows.WriteLine($"HIER-GUID|{SafeString(GetProperty(scene, "GUID"))}");
 	IEnumerable? gameObjects = GetProperty(hierarchy, "GameObjects") as IEnumerable;
 	rows.WriteLine($"HIER-GO|{FormatAssets(gameObjects)}");
 	IEnumerable? components = GetProperty(hierarchy, "Components") as IEnumerable;

@@ -67,7 +67,7 @@ The row-level work units below are the smallest complete closures justified by d
 | Stable ID | Status | Baseline source symbols/files | Missing work type and shortest complete closure unit | Gate |
 |---|---|---|---|---|
 | `PROC-SCENE-001` | `实现中` | `Processing/Scenes`; `Prefabs`; `SceneHierarchyObject.GetRoots`; `TraversalHelperMethods`; `TransformExtensions`; `EditorFormatConverterAsync` | **Integration:** create typed GameObject/component/Transform graphs from the workspace, preserve cross-file relationships and ordered components, then run Scene and Prefab processors including generated/missing objects and diagnostics. | Yes |
-| `PROC-SCENE-NAMING-001` | `实现中` | `SceneHelpers`; `SceneDefinitionProcessor` | **Integration:** materialize the source scene collections and definitions, resolve BuildSettings indexes, paths, GUIDs, duplicate entries, and streamed-scene hashes/container mappings from serialized input. | Yes |
+| `PROC-SCENE-NAMING-001` | `已验证` | `SceneHelpers`; `SceneDefinitionProcessor`; `SceneDefinition.FromName/FromPath` | The naming and export integration is verified against 5.2/5.3 naming boundaries and the 2019.4 source processor: BuildSettings paths, duplicate paths, serialized GUIDs, streamed SceneHashes, scene hierarchy membership, generated GUID output, `.unity`, and `.meta`. Keep concrete generated AssetCollection parity, Container fallback differential, full Prefab processing, and Unity import open under their separate IDs. | Yes |
 
 ### Animation processing and export
 

@@ -2548,17 +2548,18 @@ fn ensure_scene_processed_collection(
     Ok(collection_index)
 }
 
-/// How a scene hierarchy records its asset-bundle name.
+/// Candidate asset-bundle name that the source processor tries to assign to a scene hierarchy.
 ///
 /// Mirrors the `PrefabProcessor.Process` scene pass
 /// (`AssetRipper/Source/AssetRipper.Processing/Prefabs/PrefabProcessor.cs`,
 /// lines 28-48): the first `SerializedBundle` among the scene collections
-/// supplies the name; its first `IAssetBundle` asset's `GetAssetBundleName`
-/// wins when present, otherwise the bundle name is used; with no
-/// `SerializedBundle` the hierarchy keeps its default (empty) name.
+/// supplies the candidate; its first `IAssetBundle` asset's `GetAssetBundleName`
+/// wins when present, otherwise the bundle name is used. With no `SerializedBundle`
+/// the source does not attempt an assignment. `GeneratedObjectBase.AssetBundleName`
+/// has a no-op setter, so the effective generated hierarchy property remains null.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WorkspaceSceneHierarchyBundleName {
-    /// No `SerializedBundle` among the scene collections: `AssetBundleName` untouched.
+    /// No `SerializedBundle` among the scene collections: no assignment candidate.
     Unset,
     /// A `SerializedBundle` without an `IAssetBundle` asset: `bundle.Name`.
     BundleName(String),
@@ -2566,16 +2567,18 @@ pub enum WorkspaceSceneHierarchyBundleName {
     AssetName(String),
 }
 
-/// Selects a scene hierarchy's asset-bundle name over caller facts.
+/// Selects the candidate that `PrefabProcessor` attempts to assign to the hierarchy.
 ///
 /// `has_serialized_bundle` records the `FirstOrDefault(b => b is SerializedBundle)`
-/// lookup and gates everything, matching the nested `if (bundle is not null)`;
+/// lookup and gates everything, matching the nested `if (bundle is not null)`.
 /// `bundle_name` is that bundle's `Name`; `asset_bundle_name` carries the first
 /// `IAssetBundle` asset's resolved `GetAssetBundleName()` (`Some` when such an
 /// asset exists, `None` otherwise). Collection traversal order, the
 /// `FetchAssets` order, and the `GetAssetBundleName` resolution itself (see
 /// `asset_bundle.rs`) stay caller-side, as does the debug-only streamed-scene
-/// assertion, which is intentionally not modeled.
+/// assertion, which is intentionally not modeled. The generated `SceneHierarchyObject` inherits
+/// a no-op `AssetBundleName` setter from `GeneratedObjectBase`, so the candidate is discarded and
+/// the effective property remains unset.
 pub fn scene_hierarchy_asset_bundle_name(
     has_serialized_bundle: bool,
     bundle_name: &str,
@@ -2628,7 +2631,11 @@ pub struct WorkspaceBundleAssetNameFact {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceSceneHierarchyBundleAssignment {
     pub scene_index: usize,
+    /// Candidate value that `PrefabProcessor` passes to the generated hierarchy setter.
     pub name: WorkspaceSceneHierarchyBundleName,
+    /// Effective `SceneHierarchyObject.AssetBundleName` read-back value. The generated hierarchy
+    /// inherits a no-op setter from `GeneratedObjectBase`, so the source leaves this unset.
+    pub effective_asset_bundle_name: Option<String>,
     /// Present when the selected asset carries the streamed-scene field with a
     /// false value, which trips the source `Debug.Assert` in debug builds while
     /// release builds continue with the resolved name. Rust always continues with
@@ -2667,10 +2674,11 @@ impl Default for WorkspaceSceneHierarchyBundlePlanLimits {
 /// For each scene the first collection whose bundle is a serialized bundle wins
 /// (`FirstOrDefault`), then that bundle's first `IAssetBundle` asset wins
 /// (`FetchAssets().OfType<IAssetBundle>().FirstOrDefault()`): its resolved
-/// `GetAssetBundleName()` becomes `AssetName`, while a bundle without such an
-/// asset falls back to `bundle.Name`. A scene without any serialized bundle
-/// stays `Unset`. The streamed-scene `Debug.Assert` becomes an explicit warning;
-/// it never changes the selected name and never fails the plan.
+/// `GetAssetBundleName()` becomes the candidate `AssetName`, while a bundle without such an
+/// asset falls back to the candidate `bundle.Name`. A scene without any serialized bundle
+/// stays `Unset`. All candidates are discarded by `GeneratedObjectBase.AssetBundleName`'s
+/// no-op setter, leaving the effective property unset. The streamed-scene `Debug.Assert` becomes
+/// an explicit warning; it never changes the candidate and never fails the plan.
 pub fn plan_workspace_scene_hierarchy_bundle_names(
     scene_collection_file_indices: &[Vec<usize>],
     file_bundles: &[Option<WorkspaceSceneBundleSource>],
@@ -2728,6 +2736,7 @@ pub fn plan_workspace_scene_hierarchy_bundle_names(
             assignments.push(WorkspaceSceneHierarchyBundleAssignment {
                 scene_index,
                 name: WorkspaceSceneHierarchyBundleName::Unset,
+                effective_asset_bundle_name: None,
                 streamed_scene_assert_warning: None,
             });
             continue;
@@ -2737,6 +2746,7 @@ pub fn plan_workspace_scene_hierarchy_bundle_names(
             assignments.push(WorkspaceSceneHierarchyBundleAssignment {
                 scene_index,
                 name: WorkspaceSceneHierarchyBundleName::BundleName(bundle.bundle_name.clone()),
+                effective_asset_bundle_name: None,
                 streamed_scene_assert_warning: None,
             });
             continue;
@@ -2752,6 +2762,7 @@ pub fn plan_workspace_scene_hierarchy_bundle_names(
             assignments.push(WorkspaceSceneHierarchyBundleAssignment {
                 scene_index,
                 name: WorkspaceSceneHierarchyBundleName::BundleName(bundle.bundle_name.clone()),
+                effective_asset_bundle_name: None,
                 streamed_scene_assert_warning: None,
             });
             continue;
@@ -2774,6 +2785,7 @@ pub fn plan_workspace_scene_hierarchy_bundle_names(
         assignments.push(WorkspaceSceneHierarchyBundleAssignment {
             scene_index,
             name: WorkspaceSceneHierarchyBundleName::AssetName(first.resolved_name.clone()),
+            effective_asset_bundle_name: None,
             streamed_scene_assert_warning: warning,
         });
     }
@@ -4557,6 +4569,7 @@ mod tests {
         .unwrap();
         assert_eq!(assignments.len(), 3);
         assert_eq!(assignments[0].scene_index, 0);
+        assert_eq!(assignments[0].effective_asset_bundle_name, None);
         assert_eq!(
             assignments[0].name,
             WorkspaceSceneHierarchyBundleName::AssetName("scenes".to_owned())
@@ -4566,10 +4579,12 @@ mod tests {
             assignments[1].name,
             WorkspaceSceneHierarchyBundleName::Unset
         );
+        assert_eq!(assignments[1].effective_asset_bundle_name, None);
         assert_eq!(
             assignments[2].name,
             WorkspaceSceneHierarchyBundleName::BundleName("empty".to_owned())
         );
+        assert_eq!(assignments[2].effective_asset_bundle_name, None);
     }
 
     #[test]

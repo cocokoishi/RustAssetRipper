@@ -1,0 +1,49 @@
+# AssetRipper scene-processor output from the isolated reference runtime.
+# Probe: tools/probes/scene-processor, process mode, Unity 2019.4.40f1.
+# Inputs: hand-built level0-level3 fixtures, full class-141 BuildSettings, and full class-142
+# streamed-scene AssetBundle with SceneHashes mapping Streamed.unity to level3.
+# The source processor requires scene collections to belong to a SerializedBundle; the probe
+# attaches the fixture files to one. Generated SceneDefinition GUIDs are random per run.
+HIER|scene=FromBuild|path=Assets/Scenes/FromBuild|name=FromBuild|bundle=null
+HIER-GUID|4433221188776655ccbbaa9900ffeedd
+HIER-GO|GameObject_2018_3#100:Root,GameObject_2018_3#101:Orphan
+HIER-COMPONENTS|2
+HIER-MANAGERS|OcclusionCullingSettings_2017#300:null
+HIER-PREFABS|0
+HIER-SCENEROOTS|null
+HIER-ROOTS|GameObject_2018_3#100:Root,GameObject_2018_3#101:Orphan
+HIER|scene=Dupe|path=Assets/Scenes/Dupe|name=Dupe|bundle=null
+HIER-GUID|ddac28089aa008f4f8de20efb58846ca
+HIER-GO|GameObject_2018_3#110:Second
+HIER-COMPONENTS|1
+HIER-MANAGERS|OcclusionCullingSettings_2017#301:null
+HIER-PREFABS|0
+HIER-SCENEROOTS|null
+HIER-ROOTS|GameObject_2018_3#110:Second
+# Focused bundle-name diagnostics from the same runtime invocation. The generated AssetBundle
+# exposes a nonempty computed name, but SceneHierarchyObject's effective inherited property stays
+# null after PrefabProcessor attempts to assign it.
+BUNDLE-COMPUTED|streamed-scene-bundle
+BUNDLE-PROPERTY|AssetBundleName|null
+BUNDLE-PROPERTY|AssetBundleName_R|streamed-scene-bundle
+BUNDLE-PROPERTY|IsStreamedSceneAssetBundle|True
+BUNDLE-PROPERTY|Name|CAB-scene
+BUNDLE-PROPERTY|SceneHashes|Count = 1
+HIER-CHECK||streamed-scene-bundle
+HIER-SET|<null>|collections=level3:SerializedBundle,Streamed (Generated Assets):ProcessedBundle
+HIER|scene=Dupe|path=Assets/Scenes/Dupe|name=Dupe|bundle=null
+HIER-GUID|3973dd9c3fc51504ab01c9545ef7c832
+HIER-GO|GameObject_2018_3#110:Second
+HIER-COMPONENTS|1
+HIER-MANAGERS|OcclusionCullingSettings_2017#301:null
+HIER-PREFABS|0
+HIER-SCENEROOTS|null
+HIER-ROOTS|GameObject_2018_3#110:Second
+HIER|scene=Streamed|path=Assets/Scenes/Streamed|name=Streamed|bundle=null
+HIER-GUID|150a33c1e67bb1c4c8afba1a66ec0af8
+HIER-GO|GameObject_2018_3#110:Second
+HIER-COMPONENTS|1
+HIER-MANAGERS|OcclusionCullingSettings_2017#301:null
+HIER-PREFABS|0
+HIER-SCENEROOTS|null
+HIER-ROOTS|GameObject_2018_3#110:Second
