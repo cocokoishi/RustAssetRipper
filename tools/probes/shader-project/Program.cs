@@ -56,6 +56,16 @@ if (args is ["--inspect-shader"])
     return 0;
 }
 
+if (args is ["--inspect-shader-2019"])
+{
+    Type shaderType = typeof(Shader_2019_3_0_b0);
+    foreach (var property in shaderType.GetProperties().OrderBy(property => property.Name, StringComparer.Ordinal))
+    {
+        Console.WriteLine($"PROPERTY|{property.Name}|{property.PropertyType.FullName}|set={property.SetMethod is not null}");
+    }
+    return 0;
+}
+
 if (args is ["--inspect-material"])
 {
     Assembly generatedAssembly = typeof(Shader_2022_3_20).Assembly;
@@ -85,12 +95,13 @@ if (args is ["--inspect-material"])
 }
 
 if (args.Length == 2
-    && args[0] is "--export-material" or "--export-material-rich" or "--export-material-multi" or "--export-material-duplicate" or "--export-material-2018-3" or "--export-material-2017-4")
+    && args[0] is "--export-material" or "--export-material-rich" or "--export-material-multi" or "--export-material-duplicate" or "--export-material-2019-4" or "--export-material-2018-3" or "--export-material-2017-4")
 {
     string materialOutputRoot = args[1];
-    bool includeSavedProperties = args[0] is "--export-material-rich" or "--export-material-multi" or "--export-material-duplicate" or "--export-material-2018-3" or "--export-material-2017-4";
+    bool includeSavedProperties = args[0] is "--export-material-rich" or "--export-material-multi" or "--export-material-duplicate" or "--export-material-2019-4" or "--export-material-2018-3" or "--export-material-2017-4";
     bool includeMultipleSavedProperties = args[0] == "--export-material-multi";
     bool includeDuplicateSavedProperties = args[0] == "--export-material-duplicate";
+    bool use2019_4 = args[0] == "--export-material-2019-4";
     bool use2018_3 = args[0] == "--export-material-2018-3";
     bool use2017_4 = args[0] == "--export-material-2017-4";
     string materialOutputRootFull = Path.GetFullPath(materialOutputRoot);
@@ -100,13 +111,20 @@ if (args.Length == 2
         return 2;
     }
     Logger.Add(new ConsoleLogger());
-    string materialVersionText = use2018_3 ? "2018.3.0f1" : use2017_4 ? "2017.4.40f1" : "2018.2.21f1";
+    string materialVersionText = use2019_4 ? "2019.4.40f1" : use2018_3 ? "2018.3.0f1" : use2017_4 ? "2017.4.40f1" : "2018.2.21f1";
     UnityVersion materialVersion = UnityVersion.Parse(materialVersionText);
     GameBundle materialBundle = new();
     var materialCollection = materialBundle.AddNewProcessedCollection("Material", materialVersion);
     IShader shader;
     IMaterial material;
-    if (use2018_3)
+    if (use2019_4)
+    {
+        Shader_2019_3_0_b0 shader2019_4 = materialCollection.CreateAsset(48, assetInfo => new Shader_2019_3_0_b0(assetInfo));
+        shader2019_4.Name = new Utf8String("ShaderFixture");
+        shader = shader2019_4;
+        material = materialCollection.CreateAsset(21, assetInfo => new Material_2018_3(assetInfo));
+    }
+    else if (use2018_3)
     {
         Shader_2018_3 shader2018_3 = materialCollection.CreateAsset(48, assetInfo => new Shader_2018_3(assetInfo));
         shader2018_3.Name = new Utf8String("ShaderFixture");

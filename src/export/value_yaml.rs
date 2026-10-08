@@ -1380,7 +1380,7 @@ where
                 "m_CorrespondingSourceObject",
                 "m_PrefabInternal",
             ]),
-            (2018, 3) => Some(&[
+            (2018, 3) | (2019, 4) => Some(&[
                 "m_ObjectHideFlags",
                 "m_CorrespondingSourceObject",
                 "m_PrefabInstance",
