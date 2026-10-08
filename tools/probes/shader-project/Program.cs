@@ -85,10 +85,12 @@ if (args is ["--inspect-material"])
 }
 
 if (args.Length == 2
-    && args[0] is "--export-material" or "--export-material-rich" or "--export-material-2018-3" or "--export-material-2017-4")
+    && args[0] is "--export-material" or "--export-material-rich" or "--export-material-multi" or "--export-material-duplicate" or "--export-material-2018-3" or "--export-material-2017-4")
 {
     string materialOutputRoot = args[1];
-    bool includeSavedProperties = args[0] is "--export-material-rich" or "--export-material-2018-3" or "--export-material-2017-4";
+    bool includeSavedProperties = args[0] is "--export-material-rich" or "--export-material-multi" or "--export-material-duplicate" or "--export-material-2018-3" or "--export-material-2017-4";
+    bool includeMultipleSavedProperties = args[0] == "--export-material-multi";
+    bool includeDuplicateSavedProperties = args[0] == "--export-material-duplicate";
     bool use2018_3 = args[0] == "--export-material-2018-3";
     bool use2017_4 = args[0] == "--export-material-2017-4";
     string materialOutputRootFull = Path.GetFullPath(materialOutputRoot);
@@ -150,16 +152,40 @@ if (args.Length == 2
         texture.Value.Scale.Y = -2.5f;
         texture.Value.Offset.X = 0.125f;
         texture.Value.Offset.Y = 0.75f;
+        if (includeMultipleSavedProperties || includeDuplicateSavedProperties)
+        {
+            AssetPair<Utf8String, UnityTexEnv_5> secondTexture =
+                material.SavedProperties_C21.TexEnvs_AssetDictionary_Utf8String_UnityTexEnv_5!.AddNew();
+            secondTexture.Key = includeDuplicateSavedProperties ? "_MainTex" : "_ATexture";
+            secondTexture.Value.Scale.X = 2f;
+            secondTexture.Value.Scale.Y = 0.5f;
+            secondTexture.Value.Offset.X = -0.25f;
+            secondTexture.Value.Offset.Y = 0.125f;
+        }
 
         AssetPair<Utf8String, float> roughness =
             material.SavedProperties_C21.Floats_AssetDictionary_Utf8String_Single!.AddNew();
-        roughness.Key = "_Glossiness";
+        roughness.Key = includeMultipleSavedProperties ? "_ZFloat" : "_Glossiness";
         roughness.Value = 0.375f;
+        if (includeMultipleSavedProperties || includeDuplicateSavedProperties)
+        {
+            AssetPair<Utf8String, float> secondFloat =
+                material.SavedProperties_C21.Floats_AssetDictionary_Utf8String_Single!.AddNew();
+            secondFloat.Key = includeDuplicateSavedProperties ? "_Glossiness" : "_AFloat";
+            secondFloat.Value = -0.125f;
+        }
 
         AssetPair<Utf8String, ColorRGBAf> tint =
             material.SavedProperties_C21.Colors_AssetDictionary_Utf8String_ColorRGBAf!.AddNew();
-        tint.Key = "_Color";
+        tint.Key = includeMultipleSavedProperties ? "_ZColor" : "_Color";
         tint.Value.SetValues(0.125f, 0.25f, 0.5f, 0.75f);
+        if (includeMultipleSavedProperties || includeDuplicateSavedProperties)
+        {
+            AssetPair<Utf8String, ColorRGBAf> secondColor =
+                material.SavedProperties_C21.Colors_AssetDictionary_Utf8String_ColorRGBAf!.AddNew();
+            secondColor.Key = includeDuplicateSavedProperties ? "_Color" : "_AColor";
+            secondColor.Value.SetValues(1f, 0.5f, 0.25f, 1f);
+        }
     }
     GameData materialData = new(materialBundle, materialVersion, new BaseManager(_ => { }), null);
     FullConfiguration materialSettings = new();
