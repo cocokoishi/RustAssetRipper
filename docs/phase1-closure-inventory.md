@@ -1,6 +1,6 @@
 # Phase 1 closure inventory
 
-Current inventory basis: the frozen AssetRipper source snapshot and checksum manifest remain authoritative. The latest Shader/Material project-export implementation is commit a272aad74fccd8f7950391334b5047b4042550f7 (tree 34250ddd497a6c2f529aa7af3eee827391ee8647); no feature row was closed by this increment. Counts below are read from the exact Status cells in `docs/feature-parity.md`. Source reference: C:\Users\koishi\Desktop\RustAssetripper\AssetRipper, frozen by docs/baseline-files.sha256 (1,449 entries; manifest SHA-256 29d1fd27f66b974c43750f30aa99117eb423cb318f3062daf05e1489f10f08f9).
+Current inventory basis: the frozen AssetRipper source snapshot and checksum manifest remain authoritative. The latest Shader/Material project-export implementation is commit c5cc69899cb4396319e04c6fc91e1b81ef8609ec (tree ef497105ee179e10a671e9791ac6c8ab2073e255); no feature row was closed by this increment. Counts below are read from the exact Status cells in `docs/feature-parity.md`. Source reference: C:\Users\koishi\Desktop\RustAssetripper\AssetRipper, frozen by docs/baseline-files.sha256 (1,449 entries; manifest SHA-256 29d1fd27f66b974c43750f30aa99117eb423cb318f3062daf05e1489f10f08f9).
 
 The status counts below come from the `Status` cell in each stable-ID row of `docs/feature-parity.md`, matched against the required status vocabulary; prose mentions elsewhere do not affect the count.
 
