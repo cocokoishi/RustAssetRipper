@@ -45,7 +45,8 @@ public static class Program
 			return DecodeCodec(args[1], args[2], args[3]);
 		}
 
-		string output = args.Length > 0 ? args[0] : "io_differential_fixture.txt";
+		bool alignmentSlackOnly = args.Length == 2 && args[0] == "--unityfs-alignment-slack";
+		string output = alignmentSlackOnly ? args[1] : args.Length > 0 ? args[0] : "io_differential_fixture.txt";
 		WorkDirectory = Path.Combine(
 			Directory.GetCurrentDirectory(), "target", "io-scratch", "probe-" + Guid.NewGuid().ToString("N"));
 		Directory.CreateDirectory(WorkDirectory);
@@ -65,10 +66,17 @@ public static class Program
 
 		try
 		{
-			EmitSchemeSection();
-			EmitStreamSection();
-			EmitDirectorySection();
-			EmitResourceSection();
+			if (alignmentSlackOnly)
+			{
+				EmitUnityFsAlignmentSlackSection();
+			}
+			else
+			{
+				EmitSchemeSection();
+				EmitStreamSection();
+				EmitDirectorySection();
+				EmitResourceSection();
+			}
 		}
 		finally
 		{
@@ -336,6 +344,53 @@ public static class Program
 		{
 			file[offset + i] = value[i];
 		}
+	}
+
+	/// <summary>
+	/// The source accepts a four-byte-aligned metadata size when the structures consume
+	/// fewer bytes, but its uncompressed reader leaves the stream before that padding.
+	/// This input pins that behavior against the Rust parser's declared metadata range.
+	/// </summary>
+	private static byte[] BuildUnityFsWithUncompressedMetadataAlignmentSlack()
+	{
+		List<byte> file = BuildUnityFs(
+			7,
+			0,
+			0,
+			false,
+			new[] { new Entry("data/file.bin1", Ascii("slack entry payload")) }).ToList();
+		int headerLength = 8 + 4 + Encoding.UTF8.GetByteCount("2022.3.1f1") + 1
+			+ Encoding.UTF8.GetByteCount("2022.3.1f1") + 1 + 8 + 4 + 4 + 4;
+		int metadataOffset = (headerLength + 15) & ~15;
+		int metadataSize = ReadInt32BigEndian(file, 46);
+		int padding = (4 - (metadataSize & 3)) & 3;
+		if (padding == 0)
+		{
+			throw new InvalidOperationException("Alignment-slack fixture metadata unexpectedly has no padding");
+		}
+		file.InsertRange(metadataOffset + metadataSize, new byte[padding]);
+		WriteInt32BigEndian(file, 42, ReadInt32BigEndian(file, 42) + padding);
+		WriteInt32BigEndian(file, 46, metadataSize + padding);
+		PatchSize(file, file.Count);
+		return file.ToArray();
+	}
+
+	private static int ReadInt32BigEndian(IReadOnlyList<byte> bytes, int offset)
+	{
+		return unchecked((int)(
+			((uint)bytes[offset] << 24)
+			| ((uint)bytes[offset + 1] << 16)
+			| ((uint)bytes[offset + 2] << 8)
+			| bytes[offset + 3]));
+	}
+
+	private static void WriteInt32BigEndian(List<byte> bytes, int offset, int value)
+	{
+		uint bits = unchecked((uint)value);
+		bytes[offset] = (byte)(bits >> 24);
+		bytes[offset + 1] = (byte)(bits >> 16);
+		bytes[offset + 2] = (byte)(bits >> 8);
+		bytes[offset + 3] = (byte)bits;
 	}
 
 	private static byte[] CompressMetadata(byte[] metadata, byte metaCompression)
@@ -664,6 +719,26 @@ public static class Program
 			{
 				Lines.Add($"SCHEME|{name}|in={Hex(data)}|THROW:{ex.GetType().Name}:{Sanitize(ex.Message)}");
 			}
+		}
+	}
+
+	private static void EmitUnityFsAlignmentSlackSection()
+	{
+		const string name = "ufs_v7_uncompressed_metadata_alignment_slack";
+		byte[] data = BuildUnityFsWithUncompressedMetadataAlignmentSlack();
+		string path = Path.Combine(WorkDirectory, name + ".bundle");
+		File.WriteAllBytes(path, data);
+		try
+		{
+			FileBase file = SchemeReader.LoadFile(path, LocalFileSystem.Instance);
+			file.ReadContentsRecursively();
+			List<string> parts = new();
+			Dump(file, parts, 0);
+			Lines.Add($"UNITYFS_ALIGNMENT_SLACK|in={Hex(data)}|tree={string.Join(",", parts)}");
+		}
+		catch (Exception ex)
+		{
+			Lines.Add($"UNITYFS_ALIGNMENT_SLACK|in={Hex(data)}|THROW:{ex.GetType().Name}:{Sanitize(ex.Message)}");
 		}
 	}
 

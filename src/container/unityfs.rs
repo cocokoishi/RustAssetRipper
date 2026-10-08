@@ -1729,6 +1729,53 @@ mod tests {
         assert_eq!(bundle.read_entry(0).unwrap().as_ref(), entry);
     }
 
+    /// The source accepts the four-byte metadata slack but resumes at the number of
+    /// bytes consumed by its metadata structs, before the padding. This replay uses a
+    /// separately built source-probe input and verifies the production dispatcher
+    /// honors the declared metadata region and returns the intact resource bytes.
+    #[test]
+    fn production_dispatch_skips_reference_metadata_slack_before_entry_data() {
+        let fixture = include_str!("unityfs_alignment_slack_fixture.txt");
+        let field = |prefix: &str| {
+            fixture
+                .lines()
+                .find_map(|line| line.strip_prefix(prefix))
+                .unwrap_or_else(|| panic!("missing fixture field {prefix}"))
+        };
+        let decode_hex = |hex: &str| {
+            assert_eq!(hex.len() % 2, 0);
+            hex.as_bytes()
+                .chunks_exact(2)
+                .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+                .collect::<Vec<_>>()
+        };
+
+        let input = decode_hex(field("INPUT_HEX|"));
+        let source_tree = field("SOURCE_TREE|");
+        let source_bytes = decode_hex(field("SOURCE_ENTRY_HEX|"));
+        let expected_bytes = decode_hex(field("RUST_EXPECTED_ENTRY_HEX|"));
+        assert!(source_tree.ends_with(&format!(
+            "RES:data/file.bin1:{}",
+            field("SOURCE_ENTRY_HEX|")
+        )));
+        assert_eq!(source_bytes, b"\0\0\0slack entry payl");
+        assert_eq!(expected_bytes, b"slack entry payload");
+
+        let parsed = UnityFsBundle::parse(&input).unwrap();
+        assert_eq!(parsed.header.version, 7);
+        assert_eq!(parsed.metadata_offset, 64);
+        assert_eq!(parsed.header.uncompressed_blocks_info_size, 72);
+        assert_eq!(parsed.data_offset, 136);
+        assert_eq!(parsed.read_entry(0).unwrap().as_ref(), expected_bytes);
+
+        let dispatched = SchemeReader::read(&input).unwrap();
+        assert_eq!(dispatched.kind(), FileKind::UnityFs);
+        let entry = dispatched.dispatch_entry(0).unwrap();
+        assert_eq!(entry.kind(), FileKind::Resource);
+        assert_eq!(entry.bytes(), expected_bytes);
+        assert_ne!(entry.bytes(), source_bytes);
+    }
+
     #[test]
     fn mounts_unityfs_entries_using_the_parsed_node_paths() {
         let payload = b"UnityFS direct mount payload";
