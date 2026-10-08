@@ -398,18 +398,23 @@ pub fn reset_transition(state: LoaderState) -> (LoaderState, bool) {
 /// System directory names `IsValidExportDirectory` rejects as the final path segment.
 ///
 /// The comparison is ordinal and case sensitive: `desktop` exports while `Desktop` does not.
-pub const PROTECTED_EXPORT_DIRECTORY_NAMES: [&str; 3] = ["Desktop", "Documents", "Downloads"];
+/// The list lives with the shared export-root guard so both ports of the check stay identical.
+pub use crate::export::export_root::PROTECTED_EXPORT_DIRECTORY_NAMES;
 
 /// Mirror `GameFileLoader.IsValidExportDirectory`.
 ///
-/// An empty path fails, as does a path whose file name is a protected system directory name.
-/// The file name is the text after the last `/` or `\` separator.
+/// An empty path fails, as does a path whose `Path.GetFileName` is a protected system
+/// directory name. `Path.GetFileName` is host dependent, so this reuses the export-root
+/// guard's host-accurate port of it rather than splitting on both separators: on Windows
+/// `C:\Users\me\Desktop` exposes `Desktop` and is rejected, while on Unix that string is a
+/// single file name and the path is accepted, exactly as the baseline behaves.
 pub fn is_valid_export_directory(path: &str) -> bool {
     if path.is_empty() {
         return false;
     }
-    let file_name = path.rsplit(['/', '\\']).next().unwrap_or(path);
-    !PROTECTED_EXPORT_DIRECTORY_NAMES.contains(&file_name)
+    !crate::export::export_root::is_system_directory_name(
+        &crate::export::export_root::source_file_name(std::path::Path::new(path)),
+    )
 }
 
 /// Mirror `GameFileLoader.UserConsentsToDeletion`.
@@ -571,7 +576,12 @@ mod tests {
     #[test]
     fn export_directories_reject_empty_and_protected_names_ordinally() {
         assert!(!is_valid_export_directory(""));
+        // `Path.GetFileName` splits on `\` only on Windows, so the host decides whether a
+        // Windows-shaped path exposes its final segment (see `source_file_name`).
+        #[cfg(windows)]
         assert!(!is_valid_export_directory("C:\\Users\\me\\Desktop"));
+        #[cfg(unix)]
+        assert!(is_valid_export_directory("C:\\Users\\me\\Desktop"));
         assert!(!is_valid_export_directory("/home/me/Documents"));
         assert!(!is_valid_export_directory("Downloads"));
         // Ordinal comparison: other casings export.
@@ -582,6 +592,33 @@ mod tests {
             PROTECTED_EXPORT_DIRECTORY_NAMES,
             ["Desktop", "Documents", "Downloads"]
         );
+    }
+
+    #[test]
+    fn export_directory_gate_agrees_with_the_shared_export_root_guard() {
+        for path in [
+            "",
+            "Desktop",
+            "Documents",
+            "Downloads",
+            "Downloads\\nested",
+            "C:\\project\\Documents\\Desktop",
+            "desktop",
+            "Desktop.txt",
+            "DesktopX",
+            "Desktop ",
+            "Desktop\\.",
+            "Desktop\\",
+            "/out/ExportedProject",
+            "/out/ExportedProject/",
+        ] {
+            assert_eq!(
+                is_valid_export_directory(path),
+                crate::export::export_root::validate_export_directory(std::path::Path::new(path))
+                    .is_ok(),
+                "{path}"
+            );
+        }
     }
 
     #[test]

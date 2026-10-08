@@ -1233,20 +1233,28 @@ fn export_project_from_arguments<I>(arguments: I) -> Result<(), Box<dyn Error>>
 where
     I: Iterator<Item = OsString>,
 {
-    let mut arguments = arguments;
-    let output_root = arguments
-        .next()
-        .map(PathBuf::from)
-        .ok_or_else(|| invalid_input("export-project requires a new output directory"))?;
+    let mut output_root: Option<PathBuf> = None;
+    let mut delete_existing = false;
     let mut inputs = Vec::new();
     for argument in arguments {
-        if inputs.len() >= MAX_INPUT_PATHS {
-            return Err(invalid_input(format!(
-                "input path count exceeds {MAX_INPUT_PATHS}"
-            )));
+        if argument == "--delete-existing" {
+            delete_existing = true;
+            continue;
         }
-        inputs.push(PathBuf::from(argument));
+        match &output_root {
+            None => output_root = Some(PathBuf::from(argument)),
+            Some(_) => {
+                if inputs.len() >= MAX_INPUT_PATHS {
+                    return Err(invalid_input(format!(
+                        "input path count exceeds {MAX_INPUT_PATHS}"
+                    )));
+                }
+                inputs.push(PathBuf::from(argument));
+            }
+        }
     }
+    let output_root = output_root
+        .ok_or_else(|| invalid_input("export-project requires a new output directory"))?;
     if inputs.is_empty() {
         return Err(invalid_input(
             "export-project requires at least one input file or directory",
@@ -1254,12 +1262,13 @@ where
     }
     let stdout = io::stdout();
     let mut status_output = stdout.lock();
-    export_project_to(&inputs, &output_root, &mut status_output)
+    export_project_to(&inputs, &output_root, delete_existing, &mut status_output)
 }
 
 fn export_project_to<W: io::Write>(
     input_paths: &[PathBuf],
     output_root: &Path,
+    delete_existing: bool,
     status_output: &mut W,
 ) -> Result<(), Box<dyn Error>> {
     let (mut filesystem, selected_paths, mount_report) = mount_project_inputs(input_paths)?;
@@ -1299,6 +1308,7 @@ fn export_project_to<W: io::Write>(
         PlatformResourceProvider::with_mixed_data_paths(platform.as_ref(), Some(&mixed.data_paths));
     let report = export_workspace_yaml_project(
         output_root,
+        delete_existing,
         &filesystem,
         &root_catalog,
         &provider,
@@ -4160,7 +4170,7 @@ fn invalid_data_owned(message: String) -> io::Error {
 
 fn print_usage() {
     println!(
-        "Usage:\n  assetripper-rs inspect <input-directory> [input-directory ...]\n  assetripper-rs inspect-files <input-file> [input-file ...]\n  assetripper-rs export-project <new-empty-output-directory> <input-file-or-directory> [input-file-or-directory ...]\n  assetripper-rs export-object-yaml <serialized-file-index> <path-id> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-file-yaml <serialized-file-index> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-texture [--settings <path>] <serialized-file-index> <path-id> <new-output-image> <input-file> [input-file ...]\n  assetripper-rs export-mesh <serialized-file-index> <path-id> <new-output-glb> <input-file> [input-file ...]\n  assetripper-rs export-shader [--shader-export-mode <dummy|yaml|decompile>] [--settings <path>] <serialized-file-index> <path-id> <new-output-shader> <input-file> [input-file ...]\n  assetripper-rs export-audio [--settings <path>] <serialized-file-index> <path-id> <new-output-audio> <input-file> [input-file ...]\n  assetripper-rs save-default-settings [--settings <path>]\n  assetripper-rs delete-default-settings\n  assetripper-rs --help\n  assetripper-rs --version\n\n`inspect` mounts directories into isolated VFS roots. `inspect-files` dispatches explicitly selected file paths, registers top-level ResourceFiles as GameBundle root inputs, and reports the parsed SerializedFiles. `export-project` loads mixed file and directory inputs, resolves cross-file references and streamed resources, and writes one YAML `.asset` per SerializedFile plus `NativeFormatImporter` metadata, `ProjectVersion.txt`, and the default package manifest. It stages all YAML before writing and refuses undecoded objects, unresolved pointers, or objects omitted by YAML conversion. This is the initial workspace YAML workflow; Scene/Prefab reconstruction, class-specific binary collections, importer variants, settings application, and the remaining post-exporters are still open parity work. `export-object-yaml` writes one decoded object as YAML. `export-file-yaml` writes YAML-exportable objects from one SerializedFile in object-table order, resolves streamed Mesh and image-texture bytes, preserves intra-file references through source PathIDs, and refuses unresolved or cross-file references. It reports ImageTexture objects omitted by the baseline when they have no usable image data. `export-texture` decodes one class-28 Texture2D, resolves its inline or streamed image data, and writes a PNG/BMP/TGA image; the output extension selects the format (otherwise the configured settings format, default PNG). `export-mesh` decodes one class-43 Mesh, resolves its vertex data and compressed mesh, and writes a glTF 2.0 binary file with one node per sub-mesh, converting Unity's left-handed coordinates to glTF's right-handed space and rewriting the sub-mesh topology. `export-shader` decodes one class-48 Shader and writes `.shader` text: decompiled script text is written verbatim under every mode, otherwise `dummy` (the default) and `decompile` render the fallback dummy body and `yaml` reports that YAML mode writes a YAML asset instead. `export-audio` decodes one class-83 AudioClip, resolves its inline or streamed audio data, and writes the decoded bytes; tracker audio passes through, `FSB5` reports the external-decoder requirement, and unknown bytes fail with the reference diagnostic. None of the commands replaces an existing output file."
+        "Usage:\n  assetripper-rs inspect <input-directory> [input-directory ...]\n  assetripper-rs inspect-files <input-file> [input-file ...]\n  assetripper-rs export-project [--delete-existing] <output-directory> <input-file-or-directory> [input-file-or-directory ...]\n  assetripper-rs export-object-yaml <serialized-file-index> <path-id> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-file-yaml <serialized-file-index> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-texture [--settings <path>] <serialized-file-index> <path-id> <new-output-image> <input-file> [input-file ...]\n  assetripper-rs export-mesh <serialized-file-index> <path-id> <new-output-glb> <input-file> [input-file ...]\n  assetripper-rs export-shader [--shader-export-mode <dummy|yaml|decompile>] [--settings <path>] <serialized-file-index> <path-id> <new-output-shader> <input-file> [input-file ...]\n  assetripper-rs export-audio [--settings <path>] <serialized-file-index> <path-id> <new-output-audio> <input-file> [input-file ...]\n  assetripper-rs save-default-settings [--settings <path>]\n  assetripper-rs delete-default-settings\n  assetripper-rs --help\n  assetripper-rs --version\n\n`inspect` mounts directories into isolated VFS roots. `inspect-files` dispatches explicitly selected file paths, registers top-level ResourceFiles as GameBundle root inputs, and reports the parsed SerializedFiles. `export-project` loads mixed file and directory inputs, resolves cross-file references and streamed resources, and writes one YAML `.asset` per SerializedFile plus `NativeFormatImporter` metadata, `ProjectVersion.txt`, and the default package manifest. It stages all YAML before writing and refuses undecoded objects, unresolved pointers, or objects omitted by YAML conversion. The output directory must not be empty or named `Desktop`, `Documents`, or `Downloads`; an existing non-empty directory aborts the export unless `--delete-existing` is given, which deletes and recreates it exactly like the reference exporter does after deletion consent. This is the initial workspace YAML workflow; Scene/Prefab reconstruction, class-specific binary collections, importer variants, settings application, and the remaining post-exporters are still open parity work. `export-object-yaml` writes one decoded object as YAML. `export-file-yaml` writes YAML-exportable objects from one SerializedFile in object-table order, resolves streamed Mesh and image-texture bytes, preserves intra-file references through source PathIDs, and refuses unresolved or cross-file references. It reports ImageTexture objects omitted by the baseline when they have no usable image data. `export-texture` decodes one class-28 Texture2D, resolves its inline or streamed image data, and writes a PNG/BMP/TGA image; the output extension selects the format (otherwise the configured settings format, default PNG). `export-mesh` decodes one class-43 Mesh, resolves its vertex data and compressed mesh, and writes a glTF 2.0 binary file with one node per sub-mesh, converting Unity's left-handed coordinates to glTF's right-handed space and rewriting the sub-mesh topology. `export-shader` decodes one class-48 Shader and writes `.shader` text: decompiled script text is written verbatim under every mode, otherwise `dummy` (the default) and `decompile` render the fallback dummy body and `yaml` reports that YAML mode writes a YAML asset instead. `export-audio` decodes one class-83 AudioClip, resolves its inline or streamed audio data, and writes the decoded bytes; tracker audio passes through, `FSB5` reports the external-decoder requirement, and unknown bytes fail with the reference diagnostic. None of the commands replaces an existing output file."
     );
 }
 
@@ -7744,8 +7754,8 @@ mod tests {
             subdirectories: vec![output_root.clone()],
         };
 
-        let error =
-            super::export_project_to(&[source_path], &output_root, &mut Vec::new()).unwrap_err();
+        let error = super::export_project_to(&[source_path], &output_root, false, &mut Vec::new())
+            .unwrap_err();
 
         assert!(
             error.to_string().contains("unresolved")
@@ -7771,13 +7781,116 @@ mod tests {
             subdirectories: vec![output_root.clone()],
         };
 
-        let error =
-            super::export_project_to(&[source_path], &output_root, &mut Vec::new()).unwrap_err();
+        let error = super::export_project_to(&[source_path], &output_root, false, &mut Vec::new())
+            .unwrap_err();
 
-        assert!(error.to_string().contains("must be empty"));
+        assert!(error
+            .to_string()
+            .contains("User declined to delete existing export directory. Aborting export."));
+        assert!(error.to_string().contains("--delete-existing"));
         assert_eq!(fs::read(&existing_file).unwrap(), b"existing project file");
         assert_eq!(fs::read_dir(&output_root).unwrap().count(), 1);
         drop(input);
+    }
+
+    #[test]
+    fn export_project_replaces_a_nonempty_output_directory_when_delete_existing_leads() {
+        let directory = TestInputDirectory::new_root();
+        let source_path = directory.join("main.assets");
+        let output_root = directory.join("project");
+        let stale_file = output_root.join("keep.txt");
+        fs::write(&source_path, make_generation_10_file()).unwrap();
+        fs::create_dir(&output_root).unwrap();
+        fs::write(&stale_file, b"stale project content").unwrap();
+        let mut input = TestInputDirectory {
+            directory: directory.clone(),
+            files: vec![source_path.clone()],
+            // Drop removes directories in reverse order, so keep parents before children.
+            subdirectories: vec![
+                output_root.clone(),
+                output_root.join("Assets"),
+                output_root.join("Assets/AssetRipper"),
+                output_root.join("Assets/AssetRipper/SerializedFiles"),
+                output_root.join("ProjectSettings"),
+                output_root.join("Packages"),
+            ],
+        };
+
+        super::run(
+            [
+                std::ffi::OsString::from("export-project"),
+                std::ffi::OsString::from("--delete-existing"),
+                output_root.clone().into_os_string(),
+                source_path.clone().into_os_string(),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+
+        let asset = output_root.join("Assets/AssetRipper/SerializedFiles/file_000000.asset");
+        let meta = output_root.join("Assets/AssetRipper/SerializedFiles/file_000000.asset.meta");
+        assert!(
+            !stale_file.exists(),
+            "the stale export root content survives"
+        );
+        assert!(fs::read_to_string(&asset).unwrap().contains("--- !u!1 &42"));
+        assert!(fs::read_to_string(output_root.join("ProjectSettings/ProjectVersion.txt")).is_ok());
+        input.files.extend([
+            asset,
+            meta,
+            output_root.join("ProjectSettings/ProjectVersion.txt"),
+            output_root.join("Packages/manifest.json"),
+        ]);
+        drop(input);
+    }
+
+    #[test]
+    fn export_project_accepts_delete_existing_after_the_inputs() {
+        let mut input = TestInputDirectory::new();
+        let source_path = input.files[0].clone();
+        let output_root = input.directory.join("project");
+
+        // Dispatch hands the command parser the arguments after the command name.
+        super::export_project_from_arguments(
+            [
+                output_root.clone().into_os_string(),
+                source_path.into_os_string(),
+                std::ffi::OsString::from("--delete-existing"),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+
+        let asset = output_root.join("Assets/AssetRipper/SerializedFiles/file_000000.asset");
+        assert!(asset.is_file());
+        input.files.extend([
+            asset,
+            output_root.join("Assets/AssetRipper/SerializedFiles/file_000000.asset.meta"),
+            output_root.join("ProjectSettings/ProjectVersion.txt"),
+            output_root.join("Packages/manifest.json"),
+        ]);
+        input.subdirectories.extend([
+            output_root.clone(),
+            output_root.join("Assets"),
+            output_root.join("Assets/AssetRipper"),
+            output_root.join("Assets/AssetRipper/SerializedFiles"),
+            output_root.join("ProjectSettings"),
+            output_root.join("Packages"),
+        ]);
+        drop(input);
+    }
+
+    #[test]
+    fn export_project_treats_delete_existing_as_a_flag_not_as_the_output_directory() {
+        // Dispatch hands the command parser the arguments after the command name.
+        let error = super::export_project_from_arguments(
+            [std::ffi::OsString::from("--delete-existing")].into_iter(),
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("export-project requires a new output directory"));
     }
 
     #[test]

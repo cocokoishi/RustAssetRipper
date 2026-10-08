@@ -16,6 +16,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::export::export_root::prepare_export_root;
 use crate::export::meta::UnityMetaFileOptions;
 use crate::export::pointer_map::{
     ExportCollectionPointerMetadata, ExportPointerMapLimits, ExportedAssetPointerEntry,
@@ -97,9 +98,16 @@ struct PlannedSerializedFileAsset {
 /// the first filesystem write, so unsupported or malformed objects do not leave a project
 /// that looks successful. Output paths are deterministic; collection GUIDs follow the
 /// source's random-per-collection policy.
+///
+/// The export root is validated and prepared exactly like the reference GUI export
+/// guard: the path must not be empty or a system directory, and an existing non-empty
+/// directory is only deleted when `delete_existing` selects the reference's consented
+/// arm. Because the root is guaranteed empty afterwards, no project file can be written
+/// over pre-existing content on this path.
 #[allow(clippy::too_many_arguments)]
 pub fn export_workspace_yaml_project(
     output_root: &Path,
+    delete_existing: bool,
     filesystem: &VirtualFileSystem,
     root_catalog: &RootResourceFileCatalog,
     resource_provider: &PlatformResourceProvider<'_>,
@@ -108,7 +116,7 @@ pub fn export_workspace_yaml_project(
     reference_graph: &MultiFileReferenceGraph<'_>,
     limits: WorkspaceProjectExportLimits,
 ) -> Result<WorkspaceProjectExportReport, Box<dyn Error>> {
-    ensure_fresh_output_root(output_root)?;
+    prepare_export_root(output_root, delete_existing)?;
     if workspace.files().is_empty() {
         return Err(invalid_project("project export has no SerializedFiles"));
     }
@@ -409,28 +417,6 @@ fn new_collection_guid(sequence: u64) -> [u8; 16] {
         guid[0] = 1;
     }
     guid
-}
-
-fn ensure_fresh_output_root(path: &Path) -> io::Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-            Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("project output root {path:?} must be a real directory"),
-            ))
-        }
-        Ok(_) => {
-            if fs::read_dir(path)?.next().is_some() {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    format!("project output root {path:?} must be empty"),
-                ));
-            }
-            Ok(())
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
-    }
 }
 
 fn invalid_project(message: impl Into<String>) -> Box<dyn Error> {

@@ -10,6 +10,7 @@ pub mod deleted_collection;
 pub mod diagnostic_pointers;
 pub mod empty_script;
 pub mod export_extension;
+pub mod export_root;
 pub mod export_type;
 pub mod exporter_bases;
 pub mod exporter_match;
