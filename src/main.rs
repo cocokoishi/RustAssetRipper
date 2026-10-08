@@ -8429,6 +8429,82 @@ mod tests {
     }
 
     #[test]
+    fn export_project_resolves_streamed_texture2d_from_platform_data_path() {
+        let scratch = TestInputDirectory::new_root();
+        let platform_root = scratch.join("game");
+        let data_directory = platform_root.join("game_Data");
+        let executable = platform_root.join("game.exe");
+        let serialized_path = data_directory.join("globalgamemanagers");
+        let resource_path = data_directory.join("texture.resS");
+        let output_root = scratch.join("project");
+        fs::create_dir(&platform_root).unwrap();
+        fs::create_dir(&data_directory).unwrap();
+        fs::write(&executable, b"synthetic executable marker").unwrap();
+        let serialized_bytes = make_streamed_texture2d_file("texture.resS", 2, 3);
+        fs::write(&serialized_path, &serialized_bytes).unwrap();
+        fs::write(&resource_path, b"0123456789").unwrap();
+        fs::create_dir(&output_root).unwrap();
+
+        let asset_path = output_root.join("Assets/Texture2D/Texture2D.texture2D");
+        let meta_path = output_root.join("Assets/Texture2D/Texture2D.texture2D.meta");
+        let input = TestInputDirectory {
+            directory: scratch,
+            files: vec![
+                executable,
+                serialized_path.clone(),
+                resource_path.clone(),
+                asset_path.clone(),
+                meta_path.clone(),
+                output_root.join("ProjectSettings/ProjectVersion.txt"),
+                output_root.join("Packages/manifest.json"),
+            ],
+            subdirectories: vec![
+                platform_root,
+                data_directory,
+                output_root.clone(),
+                output_root.join("Assets"),
+                output_root.join("Assets/Texture2D"),
+                output_root.join("ProjectSettings"),
+                output_root.join("Packages"),
+            ],
+        };
+
+        super::run(
+            [
+                std::ffi::OsString::from("export-project"),
+                output_root.clone().into_os_string(),
+                input.directory.join("game").into_os_string(),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+
+        let source_rows = include_str!("export/streamed_image_resource_fixture.txt");
+        assert!(source_rows
+            .lines()
+            .any(|line| { line == "SOURCE_PROVIDER|calls=1|name=texture.resS" }));
+        assert!(source_rows.lines().any(|line| {
+            line == "SOURCE_STREAMED_YAML|class=28|data=323334|offset=0|size=0|path_empty=true"
+        }));
+        let yaml = fs::read_to_string(&asset_path).unwrap();
+        assert!(yaml.contains("--- !u!28 &77"), "{yaml}");
+        assert!(yaml.contains("image data: 323334"), "{yaml}");
+        assert!(yaml.contains("offset: 0"), "{yaml}");
+        assert!(yaml.contains("size: 0"), "{yaml}");
+        assert!(!yaml.contains("texture.resS"), "{yaml}");
+        assert!(fs::read_to_string(&meta_path)
+            .unwrap()
+            .contains("NativeFormatImporter:"));
+        assert!(
+            fs::read_to_string(output_root.join("ProjectSettings/ProjectVersion.txt"))
+                .unwrap()
+                .contains("2022.3.22f1")
+        );
+        assert_eq!(fs::read(&serialized_path).unwrap(), serialized_bytes);
+        assert_eq!(fs::read(&resource_path).unwrap(), b"0123456789");
+    }
+
+    #[test]
     fn export_project_dispatches_collections_and_writes_a_complete_unity_project() {
         let directory = TestInputDirectory::new_root();
         let assets_directory = directory.join("assets");

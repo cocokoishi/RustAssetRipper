@@ -1,0 +1,3 @@
+# Frozen rows from the isolated AssetRipper 2022.3.22f1 project-export probe using GameBundle.ResourceProvider.
+SOURCE_PROVIDER|calls=1|name=texture.resS
+SOURCE_STREAMED_YAML|class=28|data=323334|offset=0|size=0|path_empty=true

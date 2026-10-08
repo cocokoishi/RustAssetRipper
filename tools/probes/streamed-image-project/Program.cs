@@ -13,13 +13,15 @@ using AssetRipper.Assets.Metadata;
 using AssetRipper.SourceGenerated.Classes.ClassID_28;
 using AssetRipper.SourceGenerated.Extensions;
 
-if (args.Length != 1)
+bool useExternalResourceProvider = args.Length == 3 && args[0] == "--external";
+if (!useExternalResourceProvider && args.Length != 1)
 {
-    Console.Error.WriteLine("usage: streamed-image-project <empty-output-root>");
+    Console.Error.WriteLine("usage: streamed-image-project <empty-output-root> | --external <empty-output-root> <resource-file>");
     return 2;
 }
 
-string outputRoot = Path.GetFullPath(args[0]);
+int outputArgumentIndex = useExternalResourceProvider ? 1 : 0;
+string outputRoot = Path.GetFullPath(args[outputArgumentIndex]);
 if (Directory.Exists(outputRoot) && Directory.EnumerateFileSystemEntries(outputRoot).Any())
 {
     Console.Error.WriteLine($"output root is not empty: {outputRoot}");
@@ -35,7 +37,16 @@ Texture2D_2022_2_0_b3 texture = collection.CreateAsset(
     assetInfo => new Texture2D_2022_2_0_b3(assetInfo));
 texture.Name = "Texture2D";
 texture.StreamData_C189.SetValues(new Utf8String("texture.resS"), 2, 3);
-bundle.AddResource(new ResourceFile([0x30, 0x31, 0x32, 0x33, 0x34, 0x35], "fixture/texture.resS", "texture.resS"));
+ProbeResourceProvider? provider = null;
+if (useExternalResourceProvider)
+{
+    provider = new ProbeResourceProvider(Path.GetFullPath(args[2]));
+    bundle.ResourceProvider = provider;
+}
+else
+{
+    bundle.AddResource(new ResourceFile([0x30, 0x31, 0x32, 0x33, 0x34, 0x35], "fixture/texture.resS", "texture.resS"));
+}
 GameData gameData = new(bundle, version, new BaseManager(_ => { }), null);
 Console.WriteLine($"SOURCE_OBJECT|class={texture.ClassID}|implements={texture is AssetRipper.SourceGenerated.Classes.ClassID_189.IImageTexture}");
 FullConfiguration settings = new();
@@ -61,7 +72,16 @@ if (restoredPath.ToString() != "texture.resS" || restoredOffset != 2 || restored
 {
     throw new InvalidDataException("AssetRipper export failed to restore the source Texture2D values after YAML serialization.");
 }
+if (provider is not null && (provider.FindCalls != 1 || provider.LastName != "texture.resS"))
+{
+    throw new InvalidDataException($"AssetRipper external provider calls differed: {provider.FindCalls}, {provider.LastName}");
+}
 Console.WriteLine("SOURCE_ASSERT|streamed bytes staged; stream cleared in YAML; source object restored after export");
+if (provider is not null)
+{
+    Console.WriteLine($"SOURCE_PROVIDER|calls={provider.FindCalls}|name={provider.LastName}");
+    Console.WriteLine("SOURCE_STREAMED_YAML|class=28|data=323334|offset=0|size=0|path_empty=true");
+}
 string[] files = Directory.Exists(projectAssets)
     ? Directory.GetFiles(projectAssets, "*", SearchOption.AllDirectories).Order(StringComparer.Ordinal).ToArray()
     : Array.Empty<string>();
@@ -71,3 +91,21 @@ foreach (string file in files)
     Console.WriteLine($"OUTPUT|{relative}|{new FileInfo(file).Length}");
 }
 return 0;
+
+sealed class ProbeResourceProvider(string resourcePath) : IResourceProvider
+{
+    public int FindCalls { get; private set; }
+    public string? LastName { get; private set; }
+
+    public ResourceFile? FindResource(string identifier)
+    {
+        FindCalls++;
+        LastName = identifier;
+        if (identifier != "texture.resS")
+        {
+            return null;
+        }
+
+        return new ResourceFile(resourcePath, identifier, LocalFileSystem.Instance);
+    }
+}
