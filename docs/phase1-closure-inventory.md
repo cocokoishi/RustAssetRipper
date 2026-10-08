@@ -7,11 +7,11 @@ The status counts below come from the `Status` cell in each stable-ID row of `do
 | Ledger status | Rows |
 |---|---:|
 | `已验证` | 354 |
-| `已实现但未验证` | 13 |
+| `已实现但未验证` | 12 |
 | `实现中` | 7 |
 | `已调查` | 4 |
 | `未调查` | 0 |
-| `受外部条件阻塞` | 0 |
+| `受外部条件阻塞` | 1 |
 | **Open rows** | **24** |
 
 All 24 queued rows currently block the Phase 1 gate: each maps to baseline shipping behavior, and no exact verified disposition removes it from the product scope. `TYPE-SCRIPT-001` still needs a source-backed runtime-versus-tooling disposition. Unity-only evidence is a real gap where listed; it is not counted as passed. The inventory is the Phase 1 work queue and should be refreshed only after closing a complete behavior or finding a new source-backed disposition.
@@ -62,7 +62,7 @@ The row-level work units below are the smallest complete closures justified by d
 | Stable ID | Status | Baseline source symbols/files | Missing work type and shortest complete closure unit | Gate |
 |---|---|---|---|---|
 | `IO-FS-IMPORT-PRESERVE-DIRECTORY-001` | `受外部条件阻塞` | `LocalFileSystem.File.OpenRead`; generated `LocalFileSystem.FileImplementation`; `MultiFileStream.OpenRead`; `SchemeReader.LoadFile`; platform `CollectFiles` | **External validation block:** Windows `FileShare.Read` and directory discovery are source-runtime pinned; .NET 10 source confirms Unix shared `flock`, best-effort errors, compatible shared writes, and unlink behavior. Rustix implementation type-checks for Linux, but no Linux runtime is available here, so non-Windows runtime behavior and the Unix integrated directory-import replay are not executed. `Directory.GetFiles` order is unspecified; Rust sorts deterministically. Re-run the Unix lock and integrated import checks on a supported non-Windows host. | Yes |
-| `IO-STREAM-001` | `实现中` | `RandomAccessStream`; `PartialStream`; `MultiFileStream`; `SmartStream` | **Local filesystem integration:** port and validate the remaining `LocalFileSystem` adapter behavior used by streams, including temporary-directory selection and file/directory/path wrapper operations. Then verify its temp-stream lifecycle and local path imports through the existing bounded resource/container readers. Stream wrapper runtime differences were reconciled on 2026-10-08; see `DIFF-STREAM-001`. | Yes |
+| `IO-STREAM-001` | `实现中` | `RandomAccessStream`; `PartialStream`; `MultiFileStream`; `SmartStream`; `LocalFileSystem` | **Local filesystem integration:** the source-probed file/directory operations, lazy pattern enumeration, UTF-8/16/32 text BOM routes, path helpers, and local-first/system-fallback temp policy now feed the adapter and SmartStream. Remaining adapter work is arbitrary .NET Encoding/fallback support plus source timing and platform checks. Then complete bounded resource/container-reader integration. Source wrapper differences were reconciled on 2026-10-08. See `DIFF-STREAM-001` and `DIFF-LOCAL-FS-ADAPTER-001`. | Yes |
 
 ### Serialization, generated objects, and reference graph
 

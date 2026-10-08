@@ -4,9 +4,11 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <ReferenceRoot Condition="'$(ReferenceRoot)' == ''">$(LOCALAPPDATA)\Temp\opencode\ar-ref</ReferenceRoot>
+    <ReferenceRoot Condition="'$(ReferenceRoot)' == ''">$(LOCALAPPDATA)\Temp\opencode\ar-ref\Source\0Bins\AssetRipper.GUI.Free\Release</ReferenceRoot>
   </PropertyGroup>
   <ItemGroup>
-    <ProjectReference Include="$(ReferenceRoot)\Source\AssetRipper.IO.Files\AssetRipper.IO.Files.csproj" />
+    <Reference Include="AssetRipper.IO.Files">
+      <HintPath>$(ReferenceRoot)\AssetRipper.IO.Files.dll</HintPath>
+    </Reference>
   </ItemGroup>
 </Project>

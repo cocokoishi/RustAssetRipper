@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use super::local_filesystem::LocalFileSystem;
+
 /// A stream that supports both sequential reads and repositioning.
 pub trait ReadSeek: Read + Seek {}
 
@@ -507,15 +509,25 @@ impl SmartStream {
     }
 
     pub fn create_temp() -> io::Result<Self> {
-        Self::create_temp_in(&std::env::temp_dir())
+        let filesystem = LocalFileSystem::global();
+        let path = filesystem.create_temporary_file()?;
+        let file = filesystem.open_temporary_stream_file(&path)?;
+        Ok(Self::new(
+            SmartStreamBackend::Temporary(TemporaryFile {
+                file: Some(file),
+                path,
+            }),
+            SmartStreamType::File,
+            true,
+            true,
+        ))
     }
 
     /// Create a temporary smart stream in `directory`.
     ///
-    /// The reference implementation only offers `CreateTemp()` against
-    /// `Path.GetTempPath()`; the directory-parameterized form exists so callers (and tests)
-    /// that already own a writable scratch directory do not depend on the process-wide
-    /// temporary directory being writable.
+    /// The directory-parameterized form exists for callers (and tests) that already own a
+    /// writable scratch directory. Product `CreateTemp()` uses LocalFileSystem's application-
+    /// local/system-fallback temporary-directory policy.
     pub fn create_temp_in(directory: &Path) -> io::Result<Self> {
         static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
         for _ in 0..128 {
@@ -923,59 +935,9 @@ pub fn open_logical_file(path: impl AsRef<Path>) -> io::Result<Box<dyn ReadSeek 
     }
 }
 
-/// Open a filesystem input using the reference `File.OpenRead` share contract.
-///
-/// On Windows, AssetRipper shares read access only while the stream is open. On Unix,
-/// .NET uses an advisory shared `flock` for `FileShare.Read`; mirror that lock while
-/// accepting that Unix writers using a compatible shared lock and unlink operations
-/// are not blocked. Unix targets without Rustix `flock` support use their native
-/// read-only open semantics, as do other non-Windows platforms.
+/// Open a local input through the source-compatible LocalFileSystem adapter.
 fn open_os_read(path: &Path) -> io::Result<File> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-
-        const FILE_SHARE_READ: u32 = 0x0000_0001;
-        OpenOptions::new()
-            .read(true)
-            .share_mode(FILE_SHARE_READ)
-            .open(path)
-    }
-    #[cfg(unix)]
-    {
-        let file = File::open(path)?;
-        #[cfg(not(any(
-            target_os = "solaris",
-            target_os = "espidf",
-            target_os = "horizon",
-            target_os = "vita"
-        )))]
-        {
-            return match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockShared)
-            {
-                Ok(()) => Ok(file),
-                Err(error) if error == rustix::io::Errno::WOULDBLOCK => Err(error.into()),
-                Err(_) => {
-                    // .NET treats unsupported advisory locking as best-effort and still opens
-                    // the file; only a conflicting lock rejects the read handle.
-                    Ok(file)
-                }
-            };
-        }
-        #[cfg(any(
-            target_os = "solaris",
-            target_os = "espidf",
-            target_os = "horizon",
-            target_os = "vita"
-        ))]
-        {
-            Ok(file)
-        }
-    }
-    #[cfg(not(any(windows, unix)))]
-    {
-        File::open(path)
-    }
+    LocalFileSystem::global().open_read(path)
 }
 
 /// Return the logical base path for a `.splitN` part path, if the suffix is recognized.
@@ -1366,8 +1328,8 @@ mod tests {
     use super::open_os_read;
     use super::{
         logical_file_name, logical_file_path, open_logical_file, split_base_path, split_part_index,
-        FileRangeStream, MultiFileStream, PartialStream, SmartStream, SmartStreamBackend,
-        SmartStreamType,
+        FileRangeStream, LocalFileSystem, MultiFileStream, PartialStream, SmartStream,
+        SmartStreamBackend, SmartStreamType,
     };
     use crate::compression::wrappers::compress_gzip;
     use crate::scheme::{FileKind, SchemeReader, SchemeReaderLimits};
@@ -2288,6 +2250,48 @@ mod tests {
         assert_eq!(&bytes, b"temporary");
         drop(reference);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn default_temporary_smart_stream_uses_local_filesystem_policy_and_lifetime() {
+        struct RestoreTemporaryDirectory(std::path::PathBuf);
+        impl Drop for RestoreTemporaryDirectory {
+            fn drop(&mut self) {
+                let _ = LocalFileSystem::global().set_temporary_directory(&self.0);
+            }
+        }
+
+        let directory = create_test_directory("smart-local-filesystem-temp");
+        let filesystem = LocalFileSystem::global();
+        let previous = filesystem.temporary_directory().unwrap();
+        let _restore = RestoreTemporaryDirectory(previous);
+        filesystem.set_temporary_directory(&directory).unwrap();
+
+        let mut owner = SmartStream::create_temp().unwrap();
+        let backing_path = match &*owner.lock_backend().unwrap() {
+            SmartStreamBackend::Temporary(temporary) => temporary.path.clone(),
+            _ => panic!("CreateTemp must use a delete-on-drop local file"),
+        };
+        assert!(backing_path.starts_with(&directory));
+        assert!(backing_path.exists());
+        owner.write_all(b"temp-data").unwrap();
+        owner.seek(SeekFrom::Start(0)).unwrap();
+        let mut contents = [0; 9];
+        assert_eq!(owner.read(&mut contents).unwrap(), 9);
+        assert_eq!(&contents, b"temp-data");
+
+        let reference = owner.create_reference();
+        drop(owner);
+        assert!(
+            backing_path.exists(),
+            "the retained reference owns the file"
+        );
+        drop(reference);
+        assert!(
+            !backing_path.exists(),
+            "the last reference deletes the file"
+        );
+        remove_test_files(&directory, &[]);
     }
 
     #[test]

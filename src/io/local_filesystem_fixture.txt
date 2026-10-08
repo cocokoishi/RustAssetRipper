@@ -1,9 +1,46 @@
-# AssetRipper LocalFileSystem read-share differential
-# Probe: tools/probes/local-filesystem, .NET SDK 10.0.401, isolated reference root %LOCALAPPDATA%\Temp\opencode\ar-ref.
-# All files are generated under the Rust repository's ignored target directory.
+# LocalFileSystem runtime differential from the isolated frozen AssetRipper.IO.Files.dll.
+# Probe: tools/probes/local-filesystem; 37 new normalized rows, scratch files stay beneath target/.
+# Random GUID names and absolute paths are normalized to structural properties.
 WRITE_WHILE_OPEN|REJECTED|IOException
 READ_AFTER_WRITE_ATTEMPT|736F757263652D6279746573
 DELETE_WHILE_OPEN|REJECTED|IOException
 WRITE_SPLIT_WHILE_OPEN|REJECTED|IOException
 DELETE_SPLIT_WHILE_OPEN|REJECTED|IOException
 SPLIT_READ_AFTER_MUTATION_ATTEMPTS|73706C69742D6C6566743A73706C69742D7269676874
+DEFAULT_TEMP|app-local=True|exists=False
+SET_TEMP|full=True|normalized=True
+BLANK_SETTER|unchanged=True
+TEMP_FILE|inside=True|exists=True|length=0|guid=True
+TEMP_DIRECTORY|inside=True|guid8=True|exists=True
+OPEN_WRITE|initial-position=0
+OPEN_WRITE|bytes=585963646566
+WRITE_WHILE_READ_OPEN|REJECTED
+DELETE_TEMP|removed=True|repeat=True
+DELETE_MISSING_FILE|no-op=True
+PATH|rooted-dot=False|rooted-root=True|full-relative=True
+ENUM_FILES|all=.hidden,BETA.TXT,alpha.txt,no-extension
+ENUM_FILES|txt=BETA.TXT,alpha.txt
+ENUM_FILES|star-dot-star=.hidden,BETA.TXT,alpha.txt,no-extension
+ENUM_FILES|recursive=BETA.TXT,alpha.txt,nested/deep/deep.txt,nested/inner.txt
+ENUMERATE_FILES|all=.hidden,BETA.TXT,alpha.txt,no-extension
+ENUMERATE_FILES|txt=BETA.TXT,alpha.txt
+ENUMERATE_FILES|recursive=BETA.TXT,alpha.txt,nested/deep/deep.txt,nested/inner.txt
+ENUM_DIRS|top=nested,other
+ENUM_DIRS|recursive=nested,nested/deep,other
+ENUMERATE_DIRS|top=nested,other
+ENUMERATE_DIRS|pattern=nested,other
+ENUMERATE_DIRS|recursive=nested,nested/deep,other
+TEXT|default-write=636166C3A9
+TEXT|utf8-bom-read=636166C3A9
+TEXT|utf16-bom-read=63C3A9
+TEXT|utf16-write=FFFE630061006600E900
+PATH_HELPERS|join=alpha\beta\gamma
+PATH_HELPERS|join-rooted=alpha\beta
+PATH_HELPERS|directory=alpha
+PATH_HELPERS|extension=.ext
+PATH_HELPERS|filename=beta.ext
+PATH_HELPERS|filename-no-extension=beta
+PATH_HELPERS|dotfile-extension=.hidden
+PATH_HELPERS|trailing-filename=
+PATH_HELPERS|rooted-drive-relative=True
+PATH_HELPERS|relative=a\b.txt

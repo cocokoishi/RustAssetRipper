@@ -6,6 +6,7 @@ pub mod discovery;
 pub mod file_names;
 pub mod filesystem;
 pub mod game_structure;
+pub mod local_filesystem;
 pub mod platform_file_inventory;
 pub mod platform_structure;
 pub mod resource_wiring;
