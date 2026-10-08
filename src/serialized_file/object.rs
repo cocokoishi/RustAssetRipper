@@ -8,7 +8,7 @@ use super::format_version::FormatVersion;
 use super::header::{HeaderError, SerializedFileHeader};
 use super::managed_types::managed_reference as managed_names;
 use super::metadata::{
-    unity_version_aligns_arrays, SerializedFileMetadata, TypeTree, TypeTreeNode,
+    unity_version_aligns_arrays, ObjectInfo, SerializedFileMetadata, TypeTree, TypeTreeNode,
 };
 use super::transfer_flags::TransferInstructionFlags;
 
@@ -51,6 +51,13 @@ struct DecodeBudget<'a> {
     managed_type_references: &'a [super::metadata::SerializedTypeReference],
     stream_offset: usize,
     managed_registry_depth: usize,
+}
+
+#[derive(Clone, Copy)]
+struct ObjectDecodeTarget<'a> {
+    index: usize,
+    object: &'a ObjectInfo,
+    fallback_type_id: i32,
 }
 
 pub(crate) struct ManagedPayloadDecodeContext {
@@ -963,28 +970,9 @@ impl SerializedFileMetadata {
         object_index: usize,
         limits: &ObjectDecodeLimits,
     ) -> Result<ParsedObjectPayload, ObjectDecodeError> {
-        let mut budget = DecodeBudget {
-            limits,
-            allocated_bytes: 0,
-            managed_type_references: &self.reference_types,
-            stream_offset: 0,
-            managed_registry_depth: 0,
-        };
         // The source refuses pre-3.5 assets before reading anything; refused payloads
         // flow into the existing raw-retention path downstream like any decode failure.
-        if let Some((major, minor)) = self
-            .prefix
-            .unity_version_text
-            .as_deref()
-            .and_then(version_major_minor)
-        {
-            if version_is_unsupported(major, minor) {
-                return Err(ObjectDecodeError::new(
-                    0,
-                    ObjectDecodeErrorKind::UnreadableUnsupportedVersion { object_index },
-                ));
-            }
-        }
+        self.ensure_object_version_supported(object_index)?;
         header
             .validate_for_file_size(file_bytes.len())
             .map_err(ObjectDecodeError::from_header)?;
@@ -1030,6 +1018,103 @@ impl SerializedFileMetadata {
                 ObjectDecodeError::new(0, ObjectDecodeErrorKind::MissingTypeTree { object_index })
             })?,
         };
+        let mut budget = DecodeBudget {
+            limits,
+            allocated_bytes: 0,
+            managed_type_references: &self.reference_types,
+            stream_offset: 0,
+            managed_registry_depth: 0,
+        };
+        self.decode_object_payload_from_tree(
+            file_bytes,
+            header,
+            ObjectDecodeTarget {
+                index: object_index,
+                object,
+                fallback_type_id: serialized_type.raw_type_id,
+            },
+            type_tree,
+            &mut budget,
+        )
+    }
+
+    /// Decode one object with a source-supplied TypeTree. The asset factory uses this
+    /// when a generated class has a usable versioned TPK layout but the file has no
+    /// usable TypeTree.
+    pub(crate) fn decode_object_payload_using_type_tree_with_limits(
+        &self,
+        file_bytes: &[u8],
+        header: &SerializedFileHeader,
+        object_index: usize,
+        type_tree: &TypeTree,
+        limits: &ObjectDecodeLimits,
+    ) -> Result<ParsedObjectPayload, ObjectDecodeError> {
+        self.ensure_object_version_supported(object_index)?;
+        header
+            .validate_for_file_size(file_bytes.len())
+            .map_err(ObjectDecodeError::from_header)?;
+        let object = self.objects.get(object_index).ok_or_else(|| {
+            ObjectDecodeError::new(
+                0,
+                ObjectDecodeErrorKind::InvalidObjectIndex {
+                    object_index,
+                    object_count: self.objects.len(),
+                },
+            )
+        })?;
+        let mut budget = DecodeBudget {
+            limits,
+            allocated_bytes: 0,
+            managed_type_references: &self.reference_types,
+            stream_offset: 0,
+            managed_registry_depth: 0,
+        };
+        self.decode_object_payload_from_tree(
+            file_bytes,
+            header,
+            ObjectDecodeTarget {
+                index: object_index,
+                object,
+                fallback_type_id: object.raw_type_id,
+            },
+            type_tree,
+            &mut budget,
+        )
+    }
+
+    fn ensure_object_version_supported(
+        &self,
+        object_index: usize,
+    ) -> Result<(), ObjectDecodeError> {
+        if let Some((major, minor)) = self
+            .prefix
+            .unity_version_text
+            .as_deref()
+            .and_then(version_major_minor)
+        {
+            if version_is_unsupported(major, minor) {
+                return Err(ObjectDecodeError::new(
+                    0,
+                    ObjectDecodeErrorKind::UnreadableUnsupportedVersion { object_index },
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn decode_object_payload_from_tree(
+        &self,
+        file_bytes: &[u8],
+        header: &SerializedFileHeader,
+        target: ObjectDecodeTarget<'_>,
+        type_tree: &TypeTree,
+        budget: &mut DecodeBudget<'_>,
+    ) -> Result<ParsedObjectPayload, ObjectDecodeError> {
+        let ObjectDecodeTarget {
+            index: object_index,
+            object,
+            fallback_type_id,
+        } = target;
         let type_root = type_tree.nodes.first().ok_or_else(|| {
             ObjectDecodeError::new(0, ObjectDecodeErrorKind::EmptyTypeTree { object_index })
         })?;
@@ -1073,7 +1158,7 @@ impl SerializedFileMetadata {
             arrays_align,
             object_index,
             type_root.type_name.as_deref().unwrap_or(""),
-            &mut budget,
+            budget,
         )?;
         let consumed_bytes = reader.position();
         let trailing_length = reader.remaining();
@@ -1089,7 +1174,7 @@ impl SerializedFileMetadata {
             type_name: type_root
                 .type_name
                 .clone()
-                .unwrap_or_else(|| format!("type {}", serialized_type.raw_type_id)),
+                .unwrap_or_else(|| format!("type {fallback_type_id}")),
             root,
             consumed_bytes,
             trailing_bytes,

@@ -7920,6 +7920,129 @@ mod tests {
     }
 
     #[test]
+    fn export_project_recovers_generated_textasset_without_usable_file_typetree() {
+        fn decode_hex(hex: &str) -> Vec<u8> {
+            assert!(hex.len().is_multiple_of(2), "fixture hex has even length");
+            hex.as_bytes()
+                .chunks_exact(2)
+                .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+                .collect()
+        }
+
+        fn collect_output_tree(
+            path: &std::path::Path,
+            files: &mut Vec<PathBuf>,
+            directories: &mut Vec<PathBuf>,
+        ) {
+            for entry in fs::read_dir(path).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if entry.file_type().unwrap().is_dir() {
+                    directories.push(path.clone());
+                    collect_output_tree(&path, files, directories);
+                } else {
+                    files.push(path);
+                }
+            }
+        }
+
+        let fixture = assetripper::processing::asset_factory::PROBE_FIXTURE;
+        let hex = fixture
+            .lines()
+            .find_map(|line| line.strip_prefix("SF_HEX|textasset_notree|"))
+            .expect(
+                "source-factory fixture includes a generated TextAsset without a file TypeTree",
+            );
+        let source_bytes = decode_hex(hex);
+        let directory = TestInputDirectory::new_root();
+        let source_path = directory.join("textasset_notree.assets");
+        let output_root = directory.join("project-no-typetree");
+        fs::write(&source_path, &source_bytes).unwrap();
+        let mut input = TestInputDirectory {
+            directory,
+            files: vec![source_path.clone()],
+            subdirectories: Vec::new(),
+        };
+
+        super::run(
+            [
+                std::ffi::OsString::from("export-project"),
+                output_root.clone().into_os_string(),
+                source_path.clone().into_os_string(),
+            ]
+            .into_iter(),
+        )
+        .expect("export-project uses the source-generated TPK fallback");
+
+        let mut exported_files = Vec::new();
+        let mut exported_directories = Vec::new();
+        collect_output_tree(&output_root, &mut exported_files, &mut exported_directories);
+        let assets = exported_files
+            .iter()
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "asset")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(assets.len(), 1, "exported files: {exported_files:?}");
+        let yaml = fs::read_to_string(assets[0]).unwrap();
+        assert!(yaml.contains("--- !u!49 &42"), "{yaml}");
+        assert!(yaml.contains("m_Name: Hero"), "{yaml}");
+        assert!(yaml.contains("m_Script: print(1)"), "{yaml}");
+        assert_eq!(fs::read(&source_path).unwrap(), source_bytes);
+
+        input.files.extend(exported_files);
+        input.subdirectories.extend(exported_directories);
+    }
+
+    #[test]
+    fn export_project_refuses_unknown_object_without_a_usable_type_tree() {
+        fn decode_hex(hex: &str) -> Vec<u8> {
+            assert!(hex.len().is_multiple_of(2), "fixture hex has even length");
+            hex.as_bytes()
+                .chunks_exact(2)
+                .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+                .collect()
+        }
+
+        let fixture = assetripper::processing::asset_factory::PROBE_FIXTURE;
+        let hex = fixture
+            .lines()
+            .find_map(|line| line.strip_prefix("SF_HEX|unknown_class|"))
+            .expect("source-factory fixture includes an unknown class");
+        let bytes = decode_hex(hex);
+        let directory = TestInputDirectory::new_root();
+        let source_path = directory.join("unknown_class.assets");
+        let output_root = directory.join("project-unknown-class");
+        fs::write(&source_path, &bytes).unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![source_path.clone()],
+            subdirectories: Vec::new(),
+        };
+
+        let error = super::run(
+            [
+                std::ffi::OsString::from("export-project"),
+                output_root.clone().into_os_string(),
+                source_path.clone().into_os_string(),
+            ]
+            .into_iter(),
+        )
+        .expect_err("an unknown class without a tree must not report a complete export");
+        assert!(
+            error.to_string().contains("complete workspace PPtr scan"),
+            "{error}"
+        );
+        assert!(
+            !output_root.exists(),
+            "failed export must not create a project root"
+        );
+        assert_eq!(fs::read(&source_path).unwrap(), bytes);
+        drop(input);
+    }
+
+    #[test]
     fn export_project_materializes_streamed_texture2d_and_fails_closed_when_resource_is_missing() {
         let directory = TestInputDirectory::new_root();
         let serialized_path = directory.join("main.assets");

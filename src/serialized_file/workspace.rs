@@ -763,15 +763,20 @@ impl SerializedFileWorkspace {
                         },
                     ));
                 };
-                let graph =
-                    ObjectReferenceGraph::build_with_limits(&parsed, limits.reference_graph)
-                        .map_err(|source| {
-                            workspace_error(
-                                report,
-                                Some(&input.virtual_path),
-                                SerializedFileWorkspaceErrorKind::ReferenceGraph(source),
-                            )
-                        })?;
+                let graph = ObjectReferenceGraph::build_with_generated_type_tree_fallback(
+                    &parsed,
+                    limits.reference_graph,
+                    &input.file_name,
+                    &input.virtual_path,
+                    crate::processing::asset_factory::reference_class_layouts(),
+                )
+                .map_err(|source| {
+                    workspace_error(
+                        report,
+                        Some(&input.virtual_path),
+                        SerializedFileWorkspaceErrorKind::ReferenceGraph(source),
+                    )
+                })?;
                 (parsed.header, parsed.metadata, graph)
             };
 
@@ -4717,6 +4722,239 @@ mod tests {
         let start = usize::try_from(raw_limited.objects()[0].raw_payload_range.start).unwrap();
         let end = usize::try_from(raw_limited.objects()[0].raw_payload_range.end).unwrap();
         assert_eq!(&bytes[start..end], &bytes[bytes.len() - 12..]);
+    }
+
+    #[test]
+    fn object_workspace_recovers_source_generated_textasset_without_usable_file_typetree() {
+        let fixture = crate::processing::asset_factory::PROBE_FIXTURE;
+        let hex = fixture
+            .lines()
+            .find_map(|line| line.strip_prefix("SF_HEX|textasset_notree|"))
+            .expect("the source-factory fixture includes the no-TypeTree TextAsset");
+        assert!(hex.len().is_multiple_of(2), "fixture hex has even length");
+        let bytes = hex
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let digits = std::str::from_utf8(pair).expect("fixture hex is ASCII");
+                u8::from_str_radix(digits, 16).expect("fixture hex is valid")
+            })
+            .collect::<Vec<_>>();
+        let parsed = SerializedFile::parse(&bytes).expect("source fixture parses");
+        assert_eq!(
+            parsed.metadata.prefix.unity_version_text.as_deref(),
+            Some("2019.4.40f1")
+        );
+        assert_eq!(parsed.metadata.prefix.target_platform, Some(19));
+        let serialized_type_index = parsed.metadata.objects[0]
+            .resolved_type_index
+            .expect("TextAsset resolves its serialized type");
+        assert!(
+            parsed.metadata.types[serialized_type_index]
+                .type_tree
+                .as_ref()
+                .is_none_or(|tree| tree.nodes.is_empty()),
+            "the object's serialized type must have no usable TypeTree"
+        );
+        assert!(matches!(
+            parsed.decode_object_payload(0).unwrap_err().kind(),
+            crate::serialized_file::file::SerializedFileErrorKind::Object(object_error)
+                if matches!(
+                    object_error.kind(),
+                    crate::serialized_file::object::ObjectDecodeErrorKind::MissingTypeTree { .. }
+                        | crate::serialized_file::object::ObjectDecodeErrorKind::EmptyTypeTree { .. }
+                )
+        ));
+
+        let filesystem = virtual_file_system("/game/textasset_notree.assets", &bytes);
+        let workspace = SerializedFileWorkspace::load_from_vfs(
+            &filesystem,
+            &[input("/game/textasset_notree.assets")],
+            SerializedFileWorkspaceLimits::default(),
+        )
+        .expect("workspace loads the reference fixture");
+        assert!(workspace.files()[0].reference_graph.is_complete());
+        assert!(workspace.files()[0]
+            .reference_graph
+            .object_scan_is_complete(0));
+        assert!(workspace.files()[0].reference_graph.references().is_empty());
+        let objects = ObjectWorkspace::load_from_vfs(
+            &filesystem,
+            &workspace,
+            ObjectWorkspaceLimits::default(),
+        )
+        .expect("the factory fallback materializes the generated class");
+
+        assert!(objects.report().is_complete(), "{:?}", objects.report());
+        assert_eq!(objects.report().decoded_objects, 1);
+        let payload = &objects.objects()[0]
+            .payload
+            .as_ref()
+            .expect("decoded payload");
+        assert_eq!(payload.path_id, 42);
+        assert_eq!(payload.type_name, "TextAsset");
+        assert_eq!(
+            payload
+                .root
+                .unique_field_in_base_chain("m_Name")
+                .expect("unique name field")
+                .expect("name field exists"),
+            &SerializedValue::StringBytes(b"Hero".to_vec())
+        );
+        assert_eq!(
+            payload
+                .root
+                .unique_field_in_base_chain("m_Script")
+                .expect("unique script field")
+                .expect("script field exists"),
+            &SerializedValue::StringBytes(b"print(1)".to_vec())
+        );
+        assert_eq!(
+            filesystem
+                .read_all_bytes("/game/textasset_notree.assets", usize::MAX)
+                .unwrap(),
+            bytes,
+            "recovery must leave source bytes unchanged"
+        );
+    }
+
+    #[test]
+    fn object_workspace_recovers_source_generated_monoscript_without_usable_file_typetree() {
+        let fixture = crate::processing::asset_factory::PROBE_FIXTURE;
+        let hex = fixture
+            .lines()
+            .find_map(|line| line.strip_prefix("SF_HEX|monoscript_notree|"))
+            .expect("the source-factory fixture includes the no-usable-TypeTree MonoScript");
+        assert!(hex.len().is_multiple_of(2), "fixture hex has even length");
+        let bytes = hex
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let digits = std::str::from_utf8(pair).expect("fixture hex is ASCII");
+                u8::from_str_radix(digits, 16).expect("fixture hex is valid")
+            })
+            .collect::<Vec<_>>();
+        let parsed = SerializedFile::parse(&bytes).expect("source fixture parses");
+        assert_eq!(
+            parsed.metadata.prefix.unity_version_text.as_deref(),
+            Some("2019.4.40f1")
+        );
+        assert_eq!(parsed.metadata.prefix.target_platform, Some(19));
+        let serialized_type_index = parsed.metadata.objects[0]
+            .resolved_type_index
+            .expect("MonoScript resolves its serialized type");
+        assert!(
+            parsed.metadata.types[serialized_type_index]
+                .type_tree
+                .as_ref()
+                .is_none_or(|tree| tree.nodes.is_empty()),
+            "the object's serialized type must have no usable TypeTree"
+        );
+
+        let filesystem = virtual_file_system("/game/monoscript_notree.assets", &bytes);
+        let workspace = SerializedFileWorkspace::load_from_vfs(
+            &filesystem,
+            &[input("/game/monoscript_notree.assets")],
+            SerializedFileWorkspaceLimits::default(),
+        )
+        .expect("workspace loads the reference fixture");
+        assert!(workspace.files()[0].reference_graph.is_complete());
+        assert!(workspace.files()[0]
+            .reference_graph
+            .object_scan_is_complete(0));
+        let objects = ObjectWorkspace::load_from_vfs(
+            &filesystem,
+            &workspace,
+            ObjectWorkspaceLimits::default(),
+        )
+        .expect("the factory fallback materializes the generated class");
+
+        assert!(objects.report().is_complete(), "{:?}", objects.report());
+        assert_eq!(objects.report().decoded_objects, 1);
+        let payload = &objects.objects()[0]
+            .payload
+            .as_ref()
+            .expect("decoded payload");
+        assert_eq!(payload.path_id, 42);
+        assert_eq!(payload.type_name, "MonoScript");
+        for (field_name, expected) in [
+            ("m_Name", &b"HeroController"[..]),
+            ("m_ClassName", &b"HeroController"[..]),
+            ("m_Namespace", &b"VRC.SDK"[..]),
+            ("m_AssemblyName", &b"Assembly-CSharp"[..]),
+        ] {
+            assert_eq!(
+                payload
+                    .root
+                    .unique_field_in_base_chain(field_name)
+                    .expect("unique field")
+                    .expect("field exists"),
+                &SerializedValue::StringBytes(expected.to_vec()),
+                "{field_name}"
+            );
+        }
+        assert_eq!(
+            payload
+                .root
+                .unique_field_in_base_chain("m_ExecutionOrder")
+                .expect("unique execution order")
+                .expect("execution order exists"),
+            &SerializedValue::I32(200)
+        );
+        assert_eq!(
+            filesystem
+                .read_all_bytes("/game/monoscript_notree.assets", usize::MAX)
+                .unwrap(),
+            bytes,
+            "recovery must leave source bytes unchanged"
+        );
+    }
+
+    #[test]
+    fn object_workspace_keeps_unknown_no_tree_objects_unresolved() {
+        let fixture = crate::processing::asset_factory::PROBE_FIXTURE;
+        let hex = fixture
+            .lines()
+            .find_map(|line| line.strip_prefix("SF_HEX|unknown_class|"))
+            .expect("the source-factory fixture includes an unknown class");
+        let bytes = hex
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let digits = std::str::from_utf8(pair).expect("fixture hex is ASCII");
+                u8::from_str_radix(digits, 16).expect("fixture hex is valid")
+            })
+            .collect::<Vec<_>>();
+        let filesystem = virtual_file_system("/game/unknown_class.assets", &bytes);
+        let workspace = SerializedFileWorkspace::load_from_vfs(
+            &filesystem,
+            &[input("/game/unknown_class.assets")],
+            SerializedFileWorkspaceLimits::default(),
+        )
+        .expect("workspace retains an unknown serialized class");
+
+        assert!(!workspace.files()[0].reference_graph.is_complete());
+        assert!(!workspace.files()[0]
+            .reference_graph
+            .object_scan_is_complete(0));
+        let objects = ObjectWorkspace::load_from_vfs(
+            &filesystem,
+            &workspace,
+            ObjectWorkspaceLimits::default(),
+        )
+        .expect("unknown objects remain raw-retained rather than aborting the workspace");
+        assert!(!objects.report().is_complete());
+        assert_eq!(objects.report().decoded_objects, 0);
+        assert_eq!(objects.report().undecoded_objects, 1);
+        assert!(matches!(
+            objects.objects()[0].payload.as_ref().unwrap_err().kind(),
+            crate::serialized_file::file::SerializedFileErrorKind::Object(object_error)
+                if matches!(
+                    object_error.kind(),
+                    crate::serialized_file::object::ObjectDecodeErrorKind::MissingTypeTree { .. }
+                        | crate::serialized_file::object::ObjectDecodeErrorKind::EmptyTypeTree { .. }
+                )
+        ));
     }
 
     #[test]

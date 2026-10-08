@@ -670,6 +670,7 @@ pub fn chinese_texture_warning_message(texture_name: &str) -> String {
 
 use std::borrow::Cow;
 use std::fmt::{self, Display, Formatter};
+use std::sync::{Arc, OnceLock};
 
 use crate::io::binary::Endian;
 use crate::serialized_file::file::SerializedFile;
@@ -790,7 +791,7 @@ pub trait ClassLayoutSource {
         &self,
         class_id: i32,
         version: &FactoryUnityVersion,
-    ) -> Option<(TypeTree, TypeTree)>;
+    ) -> Option<(Arc<TypeTree>, Arc<TypeTree>)>;
 }
 
 /// Which `CreateAsset` branch produced an asset.
@@ -1081,7 +1082,7 @@ fn class_layout(
     object_index: usize,
 ) -> Option<TypeTree> {
     if let Some((release, _)) = source.tpk_trees(class_id, version) {
-        return Some(release);
+        return Some((*release).clone());
     }
     let tree = serialized_type_tree(file, object_index)?;
     match classify_type_tree_usability(Some(tree)) {
@@ -1582,7 +1583,7 @@ pub const PROBE_FIXTURE: &str = include_str!("asset_factory_fixture.txt");
 #[derive(Clone, Debug, Default)]
 pub struct ReferenceClassLayouts {
     generated: std::collections::BTreeMap<i32, String>,
-    tpk: std::collections::BTreeMap<(i32, String), (TypeTree, TypeTree)>,
+    tpk: std::collections::BTreeMap<(i32, String), (Arc<TypeTree>, Arc<TypeTree>)>,
 }
 
 impl ReferenceClassLayouts {
@@ -1663,14 +1664,14 @@ impl ReferenceClassLayouts {
                 tpk.insert(
                     (*class_id, version.clone()),
                     (
-                        TypeTree {
+                        Arc::new(TypeTree {
                             nodes: release.clone(),
                             string_buffer: Vec::new(),
-                        },
-                        TypeTree {
+                        }),
+                        Arc::new(TypeTree {
                             nodes: editor.clone(),
                             string_buffer: Vec::new(),
-                        },
+                        }),
                     ),
                 );
             }
@@ -1702,8 +1703,89 @@ impl ClassLayoutSource for ReferenceClassLayouts {
         &self,
         class_id: i32,
         version: &FactoryUnityVersion,
-    ) -> Option<(TypeTree, TypeTree)> {
+    ) -> Option<(Arc<TypeTree>, Arc<TypeTree>)> {
         self.tpk.get(&(class_id, version.text.clone())).cloned()
+    }
+}
+
+/// The source-pinned generated-class and TPK layouts available to the Rust product.
+///
+/// This table currently contains the independently probed 2019.4.40f1 cases only;
+/// callers must preserve ordinary decode failures when a class or version is absent.
+pub fn reference_class_layouts() -> &'static ReferenceClassLayouts {
+    static LAYOUTS: OnceLock<ReferenceClassLayouts> = OnceLock::new();
+    LAYOUTS.get_or_init(|| ReferenceClassLayouts::parse(PROBE_FIXTURE))
+}
+
+/// A generated-class payload decoded with its source TPK TypeTree because the file
+/// contains no usable TypeTree for that object.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GeneratedTypeTreeRecovery {
+    pub payload: ParsedObjectPayload,
+    pub type_tree: Arc<TypeTree>,
+}
+
+/// Recover one missing file-TypeTree payload through a source-generated class layout.
+///
+/// This deliberately handles only the generated-class branch, where the shipped
+/// generated type and its TPK-derived layout agree. `TypeTreeObject` conversion,
+/// MonoBehaviour assembly resolution, and unprobed class/version pairs remain on the
+/// original error path.
+pub fn decode_no_usable_type_tree_generated_payload(
+    file: &SerializedFile<'_>,
+    object_index: usize,
+    collection_name: &str,
+    file_path: &str,
+    source: &dyn ClassLayoutSource,
+    limits: &ObjectDecodeLimits,
+) -> Result<Option<GeneratedTypeTreeRecovery>, ObjectDecodeError> {
+    let Some(object) = file.metadata.objects.get(object_index) else {
+        return Ok(None);
+    };
+    let version = file
+        .metadata
+        .prefix
+        .unity_version_text
+        .as_deref()
+        .and_then(FactoryUnityVersion::parse)
+        .unwrap_or_else(FactoryUnityVersion::stripped);
+    if version.is_unsupported() {
+        return Ok(None);
+    }
+    let class_id = object_read_class_id(object);
+    if class_id == MONO_BEHAVIOUR_CLASS_ID
+        || source.generated_class_name(class_id, &version).is_none()
+    {
+        return Ok(None);
+    }
+    let Some((release_tree, editor_tree)) = source.tpk_trees(class_id, &version) else {
+        return Ok(None);
+    };
+    let flags = file.object_read_flags(file_path, collection_name);
+    let type_tree = if flags.is_release() {
+        release_tree
+    } else {
+        editor_tree
+    };
+    let decoded = file
+        .metadata
+        .decode_object_payload_using_type_tree_with_limits(
+            file.input(),
+            &file.header,
+            object_index,
+            &type_tree,
+            limits,
+        )?;
+    if matches!(
+        classify_object_tail(&decoded.trailing_bytes, class_id == TEXTURE2D_CLASS_ID),
+        ObjectTailOutcome::Exact | ObjectTailOutcome::ZeroPadding
+    ) {
+        Ok(Some(GeneratedTypeTreeRecovery {
+            payload: decoded,
+            type_tree,
+        }))
+    } else {
+        Ok(None)
     }
 }
 

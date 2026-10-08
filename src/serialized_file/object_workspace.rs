@@ -4,11 +4,13 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::io;
 use std::ops::Range;
+use std::sync::Arc;
 
 use crate::io::filesystem::VirtualFileSystem;
 
-use super::file::{SerializedFile, SerializedFileError};
-use super::object::{ObjectDecodeLimits, ParsedObjectPayload};
+use super::file::{SerializedFile, SerializedFileError, SerializedFileErrorKind};
+use super::metadata::TypeTree;
+use super::object::{ObjectDecodeErrorKind, ObjectDecodeLimits, ParsedObjectPayload};
 use super::workspace::SerializedFileWorkspace;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -62,6 +64,8 @@ pub struct WorkspaceObject {
     pub is_destroyed: Option<u16>,
     pub is_stripped: Option<bool>,
     pub raw_payload_range: Range<u64>,
+    /// Source-generated TPK tree used for this object when its file has no usable tree.
+    pub recovered_type_tree: Option<Arc<TypeTree>>,
     pub payload: Result<ParsedObjectPayload, SerializedFileError>,
 }
 
@@ -202,8 +206,32 @@ impl ObjectWorkspace {
                             .max_total_decoded_allocation_bytes
                             .saturating_sub(report.total_decoded_allocation_bytes),
                     );
-                let payload =
-                    parsed_file.decode_object_payload_with_limits(object_index, &decode_limits);
+                let mut recovered_type_tree = None;
+                let payload = match parsed_file
+                    .decode_object_payload_with_limits(object_index, &decode_limits)
+                {
+                    Ok(payload) => Ok(payload),
+                    Err(original_error) if missing_type_tree_error(&original_error) => {
+                        match crate::processing::asset_factory::decode_no_usable_type_tree_generated_payload(
+                            &parsed_file,
+                            object_index,
+                            &file.file_name,
+                            &file.virtual_path,
+                            crate::processing::asset_factory::reference_class_layouts(),
+                            &decode_limits,
+                        ) {
+                            Ok(Some(recovery)) => {
+                                recovered_type_tree = Some(recovery.type_tree);
+                                Ok(recovery.payload)
+                            }
+                            Ok(None) => Err(original_error),
+                            Err(fallback_error) => {
+                                Err(SerializedFileError::from_object(fallback_error))
+                            }
+                        }
+                    }
+                    Err(error) => Err(error),
+                };
                 match &payload {
                     Ok(decoded) => {
                         report.total_decoded_allocation_bytes = report
@@ -285,6 +313,7 @@ impl ObjectWorkspace {
                     is_destroyed: object_info.is_destroyed,
                     is_stripped: object_info.is_stripped,
                     raw_payload_range,
+                    recovered_type_tree,
                     payload,
                 });
             }
@@ -426,4 +455,16 @@ fn object_workspace_error(
         object_index,
         kind,
     })
+}
+
+fn missing_type_tree_error(error: &SerializedFileError) -> bool {
+    matches!(
+        error.kind(),
+        SerializedFileErrorKind::Object(object_error)
+            if matches!(
+                object_error.kind(),
+                ObjectDecodeErrorKind::MissingTypeTree { .. }
+                    | ObjectDecodeErrorKind::EmptyTypeTree { .. }
+            )
+    )
 }

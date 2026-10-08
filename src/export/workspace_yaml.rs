@@ -1235,13 +1235,15 @@ fn workspace_generated_component_yaml_overlay(
             serialized_type.raw_type_id
         )));
     }
-    let type_tree = serialized_type.type_tree.as_ref().ok_or(
-        UnityYamlWorkspaceExportError::MissingTypeTree {
+    let type_tree = object
+        .recovered_type_tree
+        .as_deref()
+        .or(serialized_type.type_tree.as_ref())
+        .ok_or(UnityYamlWorkspaceExportError::MissingTypeTree {
             file_index: object.file_index,
             object_index: object.object_index,
             type_index,
-        },
-    )?;
+        })?;
     let element_node_index =
         game_object_component_element_node_index(type_tree).map_err(invariant_error)?;
     let empty_element_template = file
@@ -1587,13 +1589,15 @@ fn workspace_object_to_unity_yaml_document_with_context(
             type_count: file.metadata.types.len(),
         },
     )?;
-    let type_tree = serialized_type.type_tree.as_ref().ok_or(
-        UnityYamlWorkspaceExportError::MissingTypeTree {
+    let type_tree = object
+        .recovered_type_tree
+        .as_deref()
+        .or(serialized_type.type_tree.as_ref())
+        .ok_or(UnityYamlWorkspaceExportError::MissingTypeTree {
             file_index,
             object_index: object.object_index,
             type_index,
-        },
-    )?;
+        })?;
     let type_root =
         type_tree
             .nodes

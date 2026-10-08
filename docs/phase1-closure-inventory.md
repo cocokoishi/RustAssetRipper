@@ -1,6 +1,6 @@
 # Phase 1 closure inventory
 
-Current inventory basis: source baseline files remain frozen from the `AssetRipper` snapshot and manifest. Status counts are parsed from the current `docs/feature-parity.md` working tree after the streamed image-texture closure recorded below. The prior published implementation base was `248be8a267a83f7a9db9486ece852b7fa8b84453` (tree `c6ddbb9c0a7768946ee278882a7e83b6c14f33e6`). Source reference: `C:\Users\koishi\Desktop\RustAssetripper\AssetRipper`, frozen by `docs/baseline-files.sha256` (1,449 entries; manifest SHA-256 `29d1fd27f66b974c43750f30aa99117eb423cb318f3062daf05e1489f10f08f9`).
+Current inventory basis: source baseline files remain frozen from the `AssetRipper` snapshot and manifest. Status counts are parsed from the current `docs/feature-parity.md` working tree after the streamed image-texture and generated TextAsset subcase evidence recorded below. The prior published implementation base was `cbfe186fd6f064c5a29c1138fec764b676320bb0` (tree `f91c8611920b1b4a4c0d11deaf01afdcc91bb0fe`). Source reference: `C:\Users\koishi\Desktop\RustAssetripper\AssetRipper`, frozen by `docs/baseline-files.sha256` (1,449 entries; manifest SHA-256 `29d1fd27f66b974c43750f30aa99117eb423cb318f3062daf05e1489f10f08f9`).
 
 The status counts below come from the `Status` cell in each stable-ID row of `docs/feature-parity.md`, matched against the required status vocabulary; prose mentions elsewhere do not affect the count.
 
@@ -33,6 +33,10 @@ All 29 queued rows currently block the Phase 1 gate: each maps to baseline shipp
 
 | `EXP-YAML-STREAMED-ASSET-PREP-001` | The Rust workspace exporter resolves streamed root resources for Mesh and every class in the generated `IImageTexture` interface union (28, 89, 117, 187, 188, 189), stages bytes with version-aware raw field aliases, clears stream metadata in the export-owned YAML view, and preserves source values. Six-class SerializedFile tests, the class-28 `export-project`/`.meta` regression, a missing-resource no-output case, and an isolated source project-export runtime probe close this bounded preparation branch. Texture decoding/format conversion and overall collection dispatch remain open under `RES-TEXTURE-001` and `EXPORT-UNITY-001`; see `DIFF-YAML-STREAMED-IMAGE-CLASS-ROUTE-001`.
 
+## Bounded source behavior integrated under open rows
+
+Source-authored Unity 2019.4.40f1 StandaloneWin64Player TextAsset (class 49) and MonoScript (class 115) fixtures with empty file TypeTrees now decode through their generated TPK layouts in ObjectWorkspace, and the reference graph scans both completely. The TextAsset also exports typed fields through export-project. A fresh isolated source probe agrees with all four SF_HEX/SF_READ rows per fixture. An unknown no-tree class remains unresolved and the CLI refuses to create an output project. This closes only those bounded source behavior subcases; it does not close or remove SER-TT-ABSENT-001 or SER-ASSET-FACTORY-001, and the 29-row gate queue is unchanged. See DIFF-TT-ABSENT-GENERATED-TEXTASSET-001.
+
 ## Dependency order
 1. Close the import, container, serialization, generated-object, and reference path together. Do not treat file inventory or decoded TypeTree values as a complete object model.
 2. Close workspace scene and Prefab materialization, then animation processing on those objects.
@@ -60,10 +64,10 @@ The row-level work units below are the smallest complete closures justified by d
 
 | Stable ID | Status | Baseline source symbols/files | Missing work type and shortest complete closure unit | Gate |
 |---|---|---|---|---|
-| `SER-TT-ABSENT-001` | `实现中` | `GameAssetFactory`; `TypeTreeObject`; `UnknownObject`; `UnreadableObject`; `RawDataObject` | **Implementation:** build the source fallback objects and recover objects when TypeTrees or generated types are absent; include TPK and unknown-class paths, raw preservation, and reference-runtime fixtures. | Yes |
+| `SER-TT-ABSENT-001` | `实现中` | `GameAssetFactory`; `TypeTreeObject`; `UnknownObject`; `UnreadableObject`; `RawDataObject` | **Implementation (still open):** expand the integrated generated TextAsset TPK fallback, proven on Unity 2019.4.40f1, to all source-generated classes and versions; materialize TPK TypeTreeObject and MonoBehaviour/assembly paths, preserve unreadable/unknown/raw fallback behavior, and compare the remaining factory branches. The bounded TextAsset case is recorded in DIFF-TT-ABSENT-GENERATED-TEXTASSET-001. | Yes |
 | `TYPE-SCRIPT-001` | `已调查` | `AssetRipper.Import/Structure/Assembly/`; `MonoManager`; `IL2CppManager`; `TypeTreeResolver`; `SerializableType`; `ScriptIdentifier`; MonoScript/MonoBehaviour extensions | **Disposition/implementation:** establish which assembly and IL2CPP paths are shipping runtime behavior versus developer tooling; port all required metadata/type recovery into Rust without a .NET runtime parser dependency and verify managed/stripped cases. | Yes |
 | `OBJ-REF-001` | `实现中` | Asset collections, traversal, bundles, and `ObjectInfo` | **Integration:** join file, bundle, local, external, and built-in identities into a complete graph with stable export mappings; classify null, missing, ambiguous, invalid, and unresolved references and preserve cycles. | Yes |
-| `SER-ASSET-FACTORY-001` | `已实现但未验证` | `GameAssetFactory.ReadAsset`; `ReadNormalObject`; `TryReadNormalObject`; `CreateAsset`; `CreateEngineAsset` | **Implementation/integration:** materialize source-generated classes and all source factory fallback/retry branches from real SerializedFile objects, including engine assets and assembly-backed objects; compare object type and fields with the reference. | Yes |
+| `SER-ASSET-FACTORY-001` | `已实现但未验证` | `GameAssetFactory.ReadAsset`; `ReadNormalObject`; `TryReadNormalObject`; `CreateAsset`; `CreateEngineAsset` | **Implementation/integration (still open):** the product path now integrates the generated TextAsset no-usable-TypeTree case for Unity 2019.4.40f1. Complete all other generated classes, engine assets, TypeTreeObject and assembly-backed objects, error/tail/retry and engine-collection branches, then compare materialized types and fields with the reference. | Yes |
 
 ### Scene, Prefab, and workspace processing
 

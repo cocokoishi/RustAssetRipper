@@ -195,7 +195,7 @@ impl SerializedFileError {
         }
     }
 
-    fn from_object(error: ObjectDecodeError) -> Self {
+    pub(crate) fn from_object(error: ObjectDecodeError) -> Self {
         let offset = error.offset();
         Self {
             offset,

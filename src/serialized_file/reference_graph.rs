@@ -4,9 +4,11 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
-use super::file::{SerializedFile, SerializedFileError};
+use super::file::{SerializedFile, SerializedFileError, SerializedFileErrorKind};
 use super::metadata::{FileIdentifier, SerializedFileMetadata, TypeTree};
-use super::object::{ObjectDecodeLimits, SerializedValue};
+use super::object::{
+    ObjectDecodeErrorKind, ObjectDecodeLimits, ParsedObjectPayload, SerializedValue,
+};
 use super::references::PPtrResolution;
 
 type ExternalDependencyResolver<'a> = dyn FnMut(usize, &FileIdentifier) -> Option<usize> + 'a;
@@ -16,6 +18,13 @@ struct ReferenceSource<'a> {
     file_index: usize,
     metadata: &'a SerializedFileMetadata,
     graph: &'a ObjectReferenceGraph,
+}
+
+#[derive(Clone, Copy)]
+struct GeneratedTypeTreeFallback<'a> {
+    collection_name: &'a str,
+    file_path: &'a str,
+    layouts: &'a dyn crate::processing::asset_factory::ClassLayoutSource,
 }
 
 /// Bounds for constructing a per-file reference scan.
@@ -185,6 +194,35 @@ impl ObjectReferenceGraph {
         file: &SerializedFile<'_>,
         limits: ReferenceGraphLimits,
     ) -> Result<Self, ReferenceGraphBuildError> {
+        Self::build_internal(file, limits, None)
+    }
+
+    /// Build a reference graph with the generated-class TPK recovery used by the
+    /// product workspace when a file has no usable TypeTree. Unsupported class or
+    /// version cases retain the original decode issue and keep the scan incomplete.
+    pub fn build_with_generated_type_tree_fallback(
+        file: &SerializedFile<'_>,
+        limits: ReferenceGraphLimits,
+        collection_name: &str,
+        file_path: &str,
+        layouts: &dyn crate::processing::asset_factory::ClassLayoutSource,
+    ) -> Result<Self, ReferenceGraphBuildError> {
+        Self::build_internal(
+            file,
+            limits,
+            Some(GeneratedTypeTreeFallback {
+                collection_name,
+                file_path,
+                layouts,
+            }),
+        )
+    }
+
+    fn build_internal(
+        file: &SerializedFile<'_>,
+        limits: ReferenceGraphLimits,
+        fallback: Option<GeneratedTypeTreeFallback<'_>>,
+    ) -> Result<Self, ReferenceGraphBuildError> {
         let object_count = file.metadata.objects.len();
         if object_count > limits.max_objects {
             return Err(ReferenceGraphBuildError::ObjectCountLimitExceeded {
@@ -217,21 +255,25 @@ impl ObjectReferenceGraph {
 
         for (object_index, object) in file.metadata.objects.iter().enumerate() {
             graph.attempted_objects += 1;
-            let payload =
-                match file.decode_object_payload_with_limits(object_index, &limits.object_decode) {
-                    Ok(payload) => payload,
-                    Err(error) => {
-                        graph.push_issue(
-                            ReferenceGraphIssue::ObjectDecodeFailed {
-                                object_index,
-                                path_id: object.path_id,
-                                error,
-                            },
-                            limits.max_issues,
-                        )?;
-                        continue;
-                    }
-                };
+            let payload = match decode_object_payload_with_generated_fallback(
+                file,
+                object_index,
+                &limits.object_decode,
+                fallback,
+            ) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    graph.push_issue(
+                        ReferenceGraphIssue::ObjectDecodeFailed {
+                            object_index,
+                            path_id: object.path_id,
+                            error,
+                        },
+                        limits.max_issues,
+                    )?;
+                    continue;
+                }
+            };
             if !payload.trailing_bytes.is_empty() {
                 graph.push_issue(
                     ReferenceGraphIssue::UnparsedTrailingPayload {
@@ -653,6 +695,43 @@ impl ObjectReferenceGraph {
             .map_err(|_| ReferenceGraphBuildError::allocation("reference scan issues", 1))?;
         self.issues.push(issue);
         Ok(())
+    }
+}
+
+fn decode_object_payload_with_generated_fallback(
+    file: &SerializedFile<'_>,
+    object_index: usize,
+    limits: &ObjectDecodeLimits,
+    fallback: Option<GeneratedTypeTreeFallback<'_>>,
+) -> Result<ParsedObjectPayload, SerializedFileError> {
+    match file.decode_object_payload_with_limits(object_index, limits) {
+        Ok(payload) => Ok(payload),
+        Err(original_error) => {
+            let has_no_usable_tree = matches!(
+                original_error.kind(),
+                SerializedFileErrorKind::Object(object_error)
+                    if matches!(
+                        object_error.kind(),
+                        ObjectDecodeErrorKind::MissingTypeTree { .. }
+                            | ObjectDecodeErrorKind::EmptyTypeTree { .. }
+                    )
+            );
+            let Some(fallback) = fallback.filter(|_| has_no_usable_tree) else {
+                return Err(original_error);
+            };
+            match crate::processing::asset_factory::decode_no_usable_type_tree_generated_payload(
+                file,
+                object_index,
+                fallback.collection_name,
+                fallback.file_path,
+                fallback.layouts,
+                limits,
+            ) {
+                Ok(Some(recovery)) => Ok(recovery.payload),
+                Ok(None) => Err(original_error),
+                Err(fallback_error) => Err(SerializedFileError::from_object(fallback_error)),
+            }
+        }
     }
 }
 

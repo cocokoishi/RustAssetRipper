@@ -1,9 +1,9 @@
 //! Lane integration surface for the serialization, asset-factory, and reference-graph workstream.
 //!
-//! This module exists so that workstream can wire its ported kernels into the product path
-//! without editing `src/main.rs`, `src/export/project_workflow.rs`, or another lane's files.
-//!
-//! The entry point below is the product call the export spine adds:
+//! The full per-file factory entry point below remains an integration surface used by
+//! factory-specific validation. The product `ObjectWorkspace` currently consumes the
+//! narrower generated-class TypeTree recovery function directly; full factory-driven
+//! object materialization remains open under `SER-ASSET-FACTORY-001`.
 //!
 //! ```ignore
 //! let layouts = assetripper_rs::export::ser_wiring::reference_class_layouts();
@@ -20,22 +20,18 @@
 //! file's real object bytes: generated-class identity, TPK-backed `TypeTreeObject`,
 //! `UnknownObject`, and `UnreadableObject` fallbacks, plus the version gate, the
 //! engine-collection tolerance, and the Patch retry. `reference_class_layouts()` is the
-//! reference-pinned class table (committed probe output) the dispatch consults, the
-//! Rust equivalent of `AssetFactory.CreateSerialized` + `TypeTreeNodeStruct.TryMakeFromTpk`.
-
-use std::sync::OnceLock;
+//! reference-pinned class table (committed probe output) the dispatch consults.
 
 use crate::processing::asset_factory::{
-    materialize_file_objects, FactoryAsset, FactoryEngineError, ReferenceClassLayouts,
-    PROBE_FIXTURE,
+    materialize_file_objects, reference_class_layouts as pinned_reference_class_layouts,
+    FactoryAsset, FactoryEngineError, ReferenceClassLayouts,
 };
 use crate::serialized_file::file::SerializedFile;
 use crate::serialized_file::object::ObjectDecodeLimits;
 
 /// The reference-pinned class identity and TPK layout tables.
 pub fn reference_class_layouts() -> &'static ReferenceClassLayouts {
-    static LAYOUTS: OnceLock<ReferenceClassLayouts> = OnceLock::new();
-    LAYOUTS.get_or_init(|| ReferenceClassLayouts::parse(PROBE_FIXTURE))
+    pinned_reference_class_layouts()
 }
 
 /// Materialize every object of one parsed SerializedFile through the ported factory.
@@ -59,7 +55,7 @@ pub fn materialize_workspace_file(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::processing::asset_factory::FactoryAssetKind;
+    use crate::processing::asset_factory::{FactoryAssetKind, PROBE_FIXTURE};
 
     /// The wired entry point reproduces the reference factory for the probe fixture's
     /// unknown-class case (`UnknownObject` with the synthetic name) and class-id 7
