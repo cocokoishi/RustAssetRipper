@@ -8398,6 +8398,17 @@ mod tests {
         )
     }
 
+    fn make_material_file_with_reference_2019_4_tpk_and_texture_reference() -> Vec<u8> {
+        make_material_file_with_reference_tpk_and_properties_and_texture_pointer(
+            b"2019.4.40f1\0",
+            material_2019_4_tpk_release_tree(),
+            1,
+            false,
+            Some((2, 88)),
+            &["shader.assets", "texture.assets"],
+        )
+    }
+
     fn make_material_file_with_reference_2017_4_tpk_and_saved_properties() -> Vec<u8> {
         make_material_file_with_reference_tpk_and_properties(
             b"2017.4.40f1\0",
@@ -8412,6 +8423,24 @@ mod tests {
         type_tree: assetripper::serialized_file::metadata::TypeTree,
         saved_property_count: usize,
         duplicate_keys: bool,
+    ) -> Vec<u8> {
+        make_material_file_with_reference_tpk_and_properties_and_texture_pointer(
+            version,
+            type_tree,
+            saved_property_count,
+            duplicate_keys,
+            None,
+            &["shader.assets"],
+        )
+    }
+
+    fn make_material_file_with_reference_tpk_and_properties_and_texture_pointer(
+        version: &[u8],
+        type_tree: assetripper::serialized_file::metadata::TypeTree,
+        saved_property_count: usize,
+        duplicate_keys: bool,
+        texture_pointer: Option<(i32, i64)>,
+        external_names: &[&str],
     ) -> Vec<u8> {
         let mut payload = Vec::new();
         put_typetree_string_value(&mut payload, "MaterialFixture");
@@ -8433,8 +8462,9 @@ mod tests {
             let map_length = i32::try_from(saved_property_count).unwrap();
             put_i32_le(&mut payload, map_length);
             put_typetree_string_value(&mut payload, "_MainTex");
-            put_i32_le(&mut payload, 0);
-            put_i64_le(&mut payload, 0);
+            let (texture_file_id, texture_path_id) = texture_pointer.unwrap_or_default();
+            put_i32_le(&mut payload, texture_file_id);
+            put_i64_le(&mut payload, texture_path_id);
             put_f32_le(&mut payload, 1.25);
             put_f32_le(&mut payload, -2.5);
             put_f32_le(&mut payload, 0.125);
@@ -8513,7 +8543,7 @@ mod tests {
             &type_tree,
             &payload,
             42,
-            &["shader.assets"],
+            external_names,
         )
     }
 
@@ -9854,6 +9884,93 @@ mod tests {
             normalized,
             include_str!("export/material_project_2019_4_fixture.yaml")
         );
+
+        input.files.extend(
+            project_tree(&output_root)
+                .iter()
+                .map(|path| output_root.join(path)),
+        );
+        drop(input);
+    }
+
+    #[test]
+    fn export_project_material_resolves_saved_texture_pointer_to_exported_texture_guid() {
+        let directory = TestInputDirectory::new_root();
+        let assets_directory = directory.join("assets");
+        fs::create_dir(&assets_directory).unwrap();
+        let output_root = directory.join("project");
+        fs::create_dir(&output_root).unwrap();
+        let material_path = assets_directory.join("material.assets");
+        let shader_path = assets_directory.join("shader.assets");
+        let texture_path = assets_directory.join("texture.assets");
+        fs::write(
+            &material_path,
+            make_material_file_with_reference_2019_4_tpk_and_texture_reference(),
+        )
+        .unwrap();
+        fs::write(
+            &shader_path,
+            make_shader_file_with_non_modifiable_texture_null(),
+        )
+        .unwrap();
+        fs::write(
+            &texture_path,
+            make_minimal_texture_file("TextureFixture", 88),
+        )
+        .unwrap();
+        let mut input = TestInputDirectory {
+            directory,
+            files: vec![
+                material_path.clone(),
+                shader_path.clone(),
+                texture_path.clone(),
+            ],
+            subdirectories: vec![
+                assets_directory,
+                output_root.clone(),
+                output_root.join("Assets"),
+                output_root.join("Assets/Material"),
+                output_root.join("Assets/Shader"),
+                output_root.join("Assets/Texture2D"),
+                output_root.join("ProjectSettings"),
+                output_root.join("Packages"),
+            ],
+        };
+
+        super::export_project_to(
+            &[material_path, shader_path, texture_path],
+            &output_root,
+            false,
+            &default_export_settings(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+
+        let shader_meta =
+            fs::read_to_string(output_root.join("Assets/Shader/Test_Simple.shader.meta")).unwrap();
+        let shader_guid = shader_meta
+            .lines()
+            .find_map(|line| line.strip_prefix("guid: "))
+            .expect("exported Shader sidecar has a GUID");
+        let texture_meta =
+            fs::read_to_string(output_root.join("Assets/Texture2D/TextureFixture.texture2D.meta"))
+                .unwrap();
+        let texture_guid = texture_meta
+            .lines()
+            .find_map(|line| line.strip_prefix("guid: "))
+            .expect("exported Texture2D sidecar has a GUID");
+        let material_yaml =
+            fs::read_to_string(output_root.join("Assets/Material/MaterialFixture.mat")).unwrap();
+        let normalized = material_yaml
+            .replace(shader_guid, "<SHADER_GUID>")
+            .replace(texture_guid, "<TEXTURE_GUID>");
+        assert_eq!(
+            normalized,
+            include_str!("export/material_project_2019_4_texture_ref_fixture.yaml")
+        );
+        assert!(output_root
+            .join("Assets/Texture2D/TextureFixture.texture2D")
+            .is_file());
 
         input.files.extend(
             project_tree(&output_root)

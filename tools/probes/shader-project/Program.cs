@@ -9,6 +9,7 @@ using AssetRipper.IO.Files;
 using AssetRipper.Primitives;
 using AssetRipper.Processing;
 using AssetRipper.SourceGenerated.Classes.ClassID_21;
+using AssetRipper.SourceGenerated.Classes.ClassID_28;
 using AssetRipper.SourceGenerated.Classes.ClassID_48;
 using AssetRipper.SourceGenerated.Extensions;
 using AssetRipper.SourceGenerated.Subclasses.ColorRGBAf;
@@ -66,6 +67,16 @@ if (args is ["--inspect-shader-2019"])
     return 0;
 }
 
+if (args is ["--inspect-texture-2019"])
+{
+    Type textureType = typeof(Texture2D_2019_4_9);
+    foreach (var property in textureType.GetProperties().OrderBy(property => property.Name, StringComparer.Ordinal))
+    {
+        Console.WriteLine($"PROPERTY|{property.Name}|{property.PropertyType.FullName}|set={property.SetMethod is not null}");
+    }
+    return 0;
+}
+
 if (args is ["--inspect-material"])
 {
     Assembly generatedAssembly = typeof(Shader_2022_3_20).Assembly;
@@ -95,13 +106,14 @@ if (args is ["--inspect-material"])
 }
 
 if (args.Length == 2
-    && args[0] is "--export-material" or "--export-material-rich" or "--export-material-multi" or "--export-material-duplicate" or "--export-material-2019-4" or "--export-material-2018-3" or "--export-material-2017-4")
+    && args[0] is "--export-material" or "--export-material-rich" or "--export-material-multi" or "--export-material-duplicate" or "--export-material-2019-4" or "--export-material-texture-ref" or "--export-material-2018-3" or "--export-material-2017-4")
 {
     string materialOutputRoot = args[1];
-    bool includeSavedProperties = args[0] is "--export-material-rich" or "--export-material-multi" or "--export-material-duplicate" or "--export-material-2019-4" or "--export-material-2018-3" or "--export-material-2017-4";
+    bool includeSavedProperties = args[0] is "--export-material-rich" or "--export-material-multi" or "--export-material-duplicate" or "--export-material-2019-4" or "--export-material-texture-ref" or "--export-material-2018-3" or "--export-material-2017-4";
     bool includeMultipleSavedProperties = args[0] == "--export-material-multi";
     bool includeDuplicateSavedProperties = args[0] == "--export-material-duplicate";
-    bool use2019_4 = args[0] == "--export-material-2019-4";
+    bool includeTextureReference = args[0] == "--export-material-texture-ref";
+    bool use2019_4 = args[0] is "--export-material-2019-4" or "--export-material-texture-ref";
     bool use2018_3 = args[0] == "--export-material-2018-3";
     bool use2017_4 = args[0] == "--export-material-2017-4";
     string materialOutputRootFull = Path.GetFullPath(materialOutputRoot);
@@ -170,6 +182,21 @@ if (args.Length == 2
         texture.Value.Scale.Y = -2.5f;
         texture.Value.Offset.X = 0.125f;
         texture.Value.Offset.Y = 0.75f;
+        if (includeTextureReference)
+        {
+            var textureCollection = materialBundle.AddNewProcessedCollection("Texture2D", materialVersion);
+            Texture2D_2019_4_9 textureAsset = textureCollection.CreateAsset(
+                28,
+                assetInfo => new Texture2D_2019_4_9(assetInfo));
+            textureAsset.Name = new Utf8String("TextureFixture");
+            textureAsset.Width_C28 = 1;
+            textureAsset.Height_C28 = 1;
+            textureAsset.Format_C28 = 4;
+            textureAsset.CompleteImageSize_C28_Int32 = 4;
+            textureAsset.ImageCount_C28 = 1;
+            textureAsset.ImageData_C28 = [255, 0, 0, 255];
+            texture.Value.Texture.SetAsset(materialCollection, textureAsset);
+        }
         if (includeMultipleSavedProperties || includeDuplicateSavedProperties)
         {
             AssetPair<Utf8String, UnityTexEnv_5> secondTexture =
@@ -223,6 +250,17 @@ if (args.Length == 2
     string shaderGuid = File.ReadLines(shaderMetaFile)
         .Single(line => line.StartsWith("guid: ", StringComparison.Ordinal))[6..];
     normalized = normalized.Replace(shaderGuid, "<SHADER_GUID>", StringComparison.Ordinal);
+    if (includeTextureReference)
+    {
+        string textureMetaFile = Directory.GetFiles(
+                Path.Combine(materialOutputRootFull, "ExportedProject", "Assets"),
+                "*.meta",
+                SearchOption.AllDirectories)
+            .Single(path => Path.GetFileName(path).StartsWith("TextureFixture.", StringComparison.Ordinal));
+        string textureGuid = File.ReadLines(textureMetaFile)
+            .Single(line => line.StartsWith("guid: ", StringComparison.Ordinal))[6..];
+        normalized = normalized.Replace(textureGuid, "<TEXTURE_GUID>", StringComparison.Ordinal);
+    }
     Console.WriteLine($"MATERIAL|{Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(normalized))}");
     return 0;
 }

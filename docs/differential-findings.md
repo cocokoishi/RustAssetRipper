@@ -1344,3 +1344,14 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust behavior | The first exact comparison failed because `value_yaml` selected editor fields only for the exact 2018.3 tuple. The source TPK confirmed the same field group at 2019.4; Rust now selects it for `(2019, 4)` and the exact `.mat` comparison passes after normalizing only the generated Shader GUID. |
 | Regression evidence | `export_project_material_yaml_matches_the_reference_2019_4_project_probe` constructs a class-21 payload from the committed source TPK and checks the full project YAML and mapped cross-file Shader PPtr. Fresh source dispatch, TPK, and project-runtime replay matched their fixtures. Full gates and counts are in `docs/validation-log.md`. |
 | Remaining difference | This verifies the 2019.4 layout only. 2020+ Material TypeTrees/field branches, larger maps, non-null saved-property texture PPtrs, Unity-produced SerializedFiles, and Unity Editor import/runtime remain open. `RES-MATERIAL-EXPORT-001` remains `已实现但未验证`. |
+## DIFF-MATERIAL-PROJECT-2019-TEXTURE-001 - Non-null Material saved texture PPtr across files
+
+| Field | Finding |
+|---|---|
+| Status | Matched for the 2019.4.40f1 `_MainTex.m_Texture` pointer to a separate generated Texture2D collection and its Unity project export identity. |
+| Source location | `UnityTexEnv_5.Texture`/`IPPtr.SetAsset`; `GameBundle` processed collections; Material YAML and Texture2D project collections/export IDs. |
+| Input evidence | Source factory dispatch selects `Texture2D_2019_4_9`. The isolated source probe places Material/Shader and a 1x1 RGBA32 Texture2D in separate processed collections, then assigns the Texture2D through the saved-property PPtr. |
+| Source behavior | The source `.mat` emits `m_Texture: {fileID: 2800000, guid: <TEXTURE_GUID>, type: 2}` and exports the referenced Texture2D sidecar. `src/export/material_project_2019_4_texture_ref_fixture.yaml` normalizes only the generated Shader and Texture2D GUIDs. |
+| Rust behavior | A 2019.4 Material SerializedFile built from the source release TPK references Shader PathID 42 through external fileID 1 and Texture2D PathID 88 through external fileID 2. Rust resolves both targets and emits the saved texture PPtr with the same generated fileID/type and the GUID from `TextureFixture.texture2D.meta`. |
+| Regression evidence | `export_project_material_resolves_saved_texture_pointer_to_exported_texture_guid` checks the full source `.mat` after GUID normalization and verifies the Texture2D asset/sidecar exist. The fresh source replay matched the committed fixture. Full gates and counts are in `docs/validation-log.md`. |
+| Remaining difference | One generated 2019.4 Texture2D target and one string-keyed map entry are covered. Other Unity versions/key layouts, multiple non-null texture PPtrs, Unity-produced SerializedFiles, and Unity Editor import/runtime remain open. `RES-MATERIAL-EXPORT-001` remains `已实现但未验证`. |
