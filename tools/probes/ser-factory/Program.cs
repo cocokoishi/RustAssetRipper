@@ -44,7 +44,7 @@ using AssetRipper.Tpk.TypeTrees;
 
 if (args.Length == 0)
 {
-		Console.Error.WriteLine("usage: dispatch <version> <classid...> | sweep <version> <max> | tpk <classid> <version...> | tpk-info <raw-output> <data-output> | tpk-select <output> | author <rows> | materialize <file> <rows>");
+		Console.Error.WriteLine("usage: dispatch <version> <classid...> | dispatch-matrix <output> | sweep <version> <max> | tpk <classid> <version...> | tpk-info <raw-output> <data-output> | tpk-select <output> | author <rows> | materialize <file> <rows>");
 	return 2;
 }
 
@@ -54,6 +54,9 @@ try
 	{
 		case "dispatch":
 			DumpDispatch(args[1], args[2..]);
+			return 0;
+		case "dispatch-matrix":
+			DumpFactoryDispatchMatrix(args[1]);
 			return 0;
 		case "sweep":
 			Sweep(args[1], int.Parse(args[2]));
@@ -285,6 +288,49 @@ static void DumpDispatch(string versionText, string[] classIds)
 		Console.WriteLine($"GEN|{classId}|{GeneratedName(collection, classId, version)}");
 		Console.WriteLine($"TPK|{classId}|{TpkOutcome(classId, version)}");
 	}
+}
+
+static void DumpFactoryDispatchMatrix(string outputPath)
+{
+	TpkTypeTreeBlob blob = (TpkTypeTreeBlob)TpkFile.FromStream(SourceTpk.GetStream()).GetDataBlob();
+	SortedSet<UnityVersion> queryVersions = new() { UnityVersion.Parse("0.0.0f0") };
+	queryVersions.UnionWith(blob.Versions);
+	int[] classIds = Enum.GetValues<ClassIDType>()
+		.Select(static value => (int)value)
+		.Concat(blob.ClassInformation.Select(static item => item.ID))
+		.Distinct()
+		.OrderBy(static value => value)
+		.ToArray();
+	string fullPath = Path.GetFullPath(outputPath);
+	Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+	using StreamWriter writer = new(fullPath, false, new UTF8Encoding(false)) { NewLine = "\n" };
+	writer.WriteLine($"FACTORY-DISPATCH|1|{classIds.Length}|{queryVersions.Count}|{(long)classIds.Length * queryVersions.Count}");
+	foreach (int classId in classIds)
+	{
+		writer.WriteLine($"ID|{classId}");
+	}
+	foreach (UnityVersion version in queryVersions)
+	{
+		writer.WriteLine($"VERSION|{version}|{version.GetBits():X16}");
+	}
+	Dictionary<int, string> previous = new();
+	int transitionCount = 0;
+	foreach (UnityVersion version in queryVersions)
+	{
+		SerializedAssetCollection collection = EmptyCollection(version);
+		foreach (int classId in classIds)
+		{
+			string name = GeneratedName(collection, classId, version).Replace('|', ' ');
+			if (previous.TryGetValue(classId, out string? oldName) && oldName == name)
+			{
+				continue;
+			}
+			writer.WriteLine($"GEN|{classId}|{version}|{version.GetBits():X16}|{name}");
+			previous[classId] = name;
+			transitionCount++;
+		}
+	}
+	writer.WriteLine($"TRANSITIONS|{transitionCount}");
 }
 
 static void Sweep(string versionText, int maximum)

@@ -14,19 +14,19 @@
 //! generated objects and live assemblies. Version facts arrive precomputed because the
 //! Rust tree has no parsed Unity-version model yet.
 //!
-//! Deliberately open: the generated `AssetFactory.CreateSerialized` class switch (emitted
-//! by `AssetRipper.AssemblyDumper` `Pass940_MakeAssetFactory`, not snapshot logic), the
-//! `TypeTreeNodeStruct`/`SerializableStructure` node building behind the MonoBehaviour
-//! structure facts, the live-assembly `UnloadedStructure` materialization, the actual
-//! `EndianSpanReader` byte consumption behind the tail-layout offsets, and the
-//! `FromSerializedFile` stripped-version default (a zero version takes the configured
-//! default, which needs a unified parsed Unity-version model; versions still travel
-//! as caller facts and texts).
+//! The frozen `AssetFactory.CreateSerialized` class/version selection is now captured
+//! as offline data for 404 class IDs across 1,421 source query versions. Deliberately
+//! open: per-class generated serializers and generated-object materialization through
+//! the product `ObjectWorkspace`/export pipeline; `SerializableStructure` and live-
+//! assembly `UnloadedStructure` recovery for MonoBehaviours; and full fidelity for
+//! reader tails, stripped-version defaults, and all engine-collection/error paths.
+//! The selection table does not stand in for those object and product behaviors.
 //!
 //! Differential evidence: the `ENGINE` rows of `mono_utils_fixture.txt` (probe
 //! `Temp/opencode/monoutilsprobe` resolving all 21 engine names at 2019.4.0f1, SDK
 //! 10.0.401); the dispatch and fallback rules are source-read over caller facts.
 
+use crate::processing::source_factory_dispatch::{SourceFactoryDispatch, SourceFactoryLookupError};
 use crate::processing::source_tpk::{SourceTpkDatabase, SourceTpkLookupError, SourceTpkTrees};
 use crate::resources::blend_shape::crc32_ieee;
 
@@ -834,7 +834,11 @@ pub struct FactoryFileFacts<'a> {
 pub trait ClassLayoutSource {
     /// `AssetFactory.CreateSerialized(info, version)`: the generated class name, or
     /// `None` when the class id has no generated class at this version.
-    fn generated_class_name(&self, class_id: i32, version: &FactoryUnityVersion) -> Option<&str>;
+    fn generated_class_name(
+        &self,
+        class_id: i32,
+        version: &FactoryUnityVersion,
+    ) -> Result<Option<&str>, SourceFactoryLookupError>;
 
     /// `TypeTreeNodeStruct.TryMakeFromTpk`: the class's release and editor trees.
     fn tpk_trees(
@@ -1112,10 +1116,17 @@ fn create_asset(
     source: &dyn ClassLayoutSource,
     class_id: i32,
     version: &FactoryUnityVersion,
-) -> Result<CreatedAsset, SourceTpkLookupError> {
-    if let Some(name) = source.generated_class_name(class_id, version) {
+) -> Result<CreatedAsset, String> {
+    let generated_name = source
+        .generated_class_name(class_id, version)
+        .map_err(|error| error.to_string())?;
+    if let Some(name) = generated_name {
         Ok(CreatedAsset::Generated(name.to_owned()))
-    } else if source.tpk_trees(class_id, version)?.is_some() {
+    } else if source
+        .tpk_trees(class_id, version)
+        .map_err(|error| error.to_string())?
+        .is_some()
+    {
         Ok(CreatedAsset::TypeTreeObject)
     } else {
         Ok(CreatedAsset::Unknown)
@@ -1256,7 +1267,7 @@ fn try_read_normal_object(
                 tail: None,
                 chinese: None,
                 log_level: FactoryLogLevel::Error,
-                log_message: Some(error.to_string()),
+                log_message: Some(error),
             }));
         }
     };
@@ -1497,12 +1508,16 @@ fn read_monobehaviour(
             return;
         }
     };
-    asset.kind = FactoryAssetKind::Generated(
-        source
-            .generated_class_name(MONO_BEHAVIOUR_CLASS_ID, version)
-            .unwrap_or("MonoBehaviour")
-            .to_owned(),
-    );
+    let generated_name = match source.generated_class_name(MONO_BEHAVIOUR_CLASS_ID, version) {
+        Ok(name) => name.unwrap_or("MonoBehaviour").to_owned(),
+        Err(error) => {
+            asset.kind = FactoryAssetKind::Unreadable;
+            asset.log_level = FactoryLogLevel::Error;
+            asset.log_message = Some(error.to_string());
+            return;
+        }
+    };
+    asset.kind = FactoryAssetKind::Generated(generated_name);
     let arrays_align =
         unity_version_aligns_arrays(file.metadata.prefix.unity_version_text.as_deref());
     let read_flags = file.object_read_flags(facts.file_path, facts.collection_name);
@@ -1678,18 +1693,16 @@ impl VersionText for FactoryUnityVersion {
 /// `TPK`/`NODE` real TypeTrees, and the authored case files.
 pub const PROBE_FIXTURE: &str = include_str!("asset_factory_fixture.txt");
 
-/// Class identity and class layouts pinned by the committed reference probe output
-/// (`tools/probes/ser-factory`, SDK 10.0.401). The `GEN` rows reproduce
-/// `AssetFactory.CreateSerialized` and the `TPK` rows reproduce
-/// `TypeTreeNodeStruct.TryMakeFromTpk`, so this is the data layer of `CreateAsset`.
-///
-/// The tables cover the classes the probe exercised; classes outside them fall through
-/// to `Unknown`, exactly like a generated table that does not know the class.
+/// Class identity and class layouts pinned by isolated reference probes. The explicit
+/// fixture parsed by `parse` is bounded to its authored cases; the production accessor
+/// overlays the complete source `AssetFactory.CreateSerialized` dispatch matrix and
+/// complete TPK class/version database.
 #[derive(Clone, Debug, Default)]
 pub struct ReferenceClassLayouts {
     generated: std::collections::BTreeMap<i32, String>,
     tpk: std::collections::BTreeMap<(i32, String), (Arc<TypeTree>, Arc<TypeTree>)>,
     source_tpk: Option<&'static SourceTpkDatabase>,
+    source_factory_dispatch: Option<&'static SourceFactoryDispatch>,
 }
 
 impl ReferenceClassLayouts {
@@ -1786,6 +1799,7 @@ impl ReferenceClassLayouts {
             generated,
             tpk,
             source_tpk: None,
+            source_factory_dispatch: None,
         }
     }
 
@@ -1801,12 +1815,18 @@ impl ReferenceClassLayouts {
 }
 
 impl ClassLayoutSource for ReferenceClassLayouts {
-    fn generated_class_name(&self, class_id: i32, version: &FactoryUnityVersion) -> Option<&str> {
-        // Every GEN row was probed at one version; other versions are unprobed.
-        if self.probed_version() != Some(version.text.as_str()) {
-            return None;
+    fn generated_class_name(
+        &self,
+        class_id: i32,
+        version: &FactoryUnityVersion,
+    ) -> Result<Option<&str>, SourceFactoryLookupError> {
+        if let Some(dispatch) = self.source_factory_dispatch {
+            return dispatch.generated_class_name(class_id, version);
         }
-        self.generated.get(&class_id).map(String::as_str)
+        if self.probed_version() != Some(version.text.as_str()) {
+            return Ok(None);
+        }
+        Ok(self.generated.get(&class_id).map(String::as_str))
     }
 
     fn tpk_trees(
@@ -1826,13 +1846,15 @@ impl ClassLayoutSource for ReferenceClassLayouts {
 
 /// The source-pinned generated-class and TPK layouts available to the Rust product.
 ///
-/// Generated class names remain limited to explicit factory probes. TPK layouts use
-/// the complete source `TpkTypeTreeBlob` class/version/node/string tables.
+/// Generated class names use the source-probed `AssetFactory.CreateSerialized`
+/// class/version matrix. TPK layouts use the complete source class/version/node/string
+/// tables.
 pub fn reference_class_layouts() -> &'static ReferenceClassLayouts {
     static LAYOUTS: OnceLock<ReferenceClassLayouts> = OnceLock::new();
     LAYOUTS.get_or_init(|| {
         let mut layouts = ReferenceClassLayouts::parse(PROBE_FIXTURE);
         layouts.source_tpk = Some(SourceTpkDatabase::embedded());
+        layouts.source_factory_dispatch = Some(SourceFactoryDispatch::embedded());
         layouts
     })
 }
@@ -2832,11 +2854,11 @@ mod tests {
     #[test]
     fn factory_differential_replays_every_reference_case() {
         let fixture = include_str!("asset_factory_fixture.txt");
-        let layouts = ReferenceClassLayouts::parse(fixture);
+        let layouts = reference_class_layouts();
         let cases = fixture_cases(fixture);
         assert_eq!(cases.len(), 12, "all probe cases are replayed");
         for case in &cases {
-            assert_case(case, &layouts);
+            assert_case(case, layouts);
         }
     }
 }

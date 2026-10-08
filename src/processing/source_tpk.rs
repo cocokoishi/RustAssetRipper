@@ -397,7 +397,7 @@ impl SourceTpkDatabase {
     }
 
     #[cfg(test)]
-    fn source_versions(&self) -> &[(FactoryUnityVersion, u64)] {
+    pub(crate) fn source_versions(&self) -> &[(FactoryUnityVersion, u64)] {
         &self.source_versions
     }
 
