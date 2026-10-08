@@ -8313,6 +8313,16 @@ mod tests {
     }
 
     fn make_material_file_with_reference_2018_tpk() -> Vec<u8> {
+        make_material_file_with_reference_2018_tpk_and_properties(false)
+    }
+
+    fn make_material_file_with_reference_2018_tpk_and_saved_properties() -> Vec<u8> {
+        make_material_file_with_reference_2018_tpk_and_properties(true)
+    }
+
+    fn make_material_file_with_reference_2018_tpk_and_properties(
+        include_saved_properties: bool,
+    ) -> Vec<u8> {
         let type_tree = material_2018_tpk_release_tree();
         let mut payload = Vec::new();
         put_typetree_string_value(&mut payload, "MaterialFixture");
@@ -8329,10 +8339,32 @@ mod tests {
         put_i32_le(&mut payload, 1);
         put_typetree_string_value(&mut payload, "RenderType");
         put_typetree_string_value(&mut payload, "TransparentCutout");
-        put_i32_le(&mut payload, 0);
-        put_i32_le(&mut payload, 0);
-        put_i32_le(&mut payload, 0);
-        put_i32_le(&mut payload, 0);
+        put_i32_le(&mut payload, 0); // disabledShaderPasses
+        if include_saved_properties {
+            put_i32_le(&mut payload, 1);
+            put_typetree_string_value(&mut payload, "_MainTex");
+            put_i32_le(&mut payload, 0);
+            put_i64_le(&mut payload, 0);
+            put_f32_le(&mut payload, 1.25);
+            put_f32_le(&mut payload, -2.5);
+            put_f32_le(&mut payload, 0.125);
+            put_f32_le(&mut payload, 0.75);
+
+            put_i32_le(&mut payload, 1);
+            put_typetree_string_value(&mut payload, "_Glossiness");
+            put_f32_le(&mut payload, 0.375);
+
+            put_i32_le(&mut payload, 1);
+            put_typetree_string_value(&mut payload, "_Color");
+            put_f32_le(&mut payload, 0.125);
+            put_f32_le(&mut payload, 0.25);
+            put_f32_le(&mut payload, 0.5);
+            put_f32_le(&mut payload, 0.75);
+        } else {
+            put_i32_le(&mut payload, 0);
+            put_i32_le(&mut payload, 0);
+            put_i32_le(&mut payload, 0);
+        }
         assert!(payload.len().is_multiple_of(4), "payload is 4-byte aligned");
         finish_single_object_file_with_tpk_tree(
             b"2018.2.21f1\0",
@@ -9360,6 +9392,70 @@ mod tests {
         assert_eq!(
             normalized,
             include_str!("export/material_project_fixture.yaml")
+        );
+
+        input.files.extend(
+            project_tree(&output_root)
+                .iter()
+                .map(|path| output_root.join(path)),
+        );
+        drop(input);
+    }
+
+    #[test]
+    fn export_project_material_saved_property_maps_match_the_reference_2018_2_project_probe() {
+        let directory = TestInputDirectory::new_root();
+        let assets_directory = directory.join("assets");
+        fs::create_dir(&assets_directory).unwrap();
+        let output_root = directory.join("project");
+        fs::create_dir(&output_root).unwrap();
+        let material_path = assets_directory.join("material.assets");
+        let shader_path = assets_directory.join("shader.assets");
+        fs::write(
+            &material_path,
+            make_material_file_with_reference_2018_tpk_and_saved_properties(),
+        )
+        .unwrap();
+        fs::write(
+            &shader_path,
+            make_shader_file_with_non_modifiable_texture_null(),
+        )
+        .unwrap();
+        let mut input = TestInputDirectory {
+            directory,
+            files: vec![material_path.clone(), shader_path.clone()],
+            subdirectories: vec![
+                assets_directory,
+                output_root.clone(),
+                output_root.join("Assets"),
+                output_root.join("Assets/Material"),
+                output_root.join("Assets/Shader"),
+                output_root.join("ProjectSettings"),
+                output_root.join("Packages"),
+            ],
+        };
+
+        super::export_project_to(
+            &[material_path, shader_path],
+            &output_root,
+            false,
+            &default_export_settings(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+
+        let shader_meta =
+            fs::read_to_string(output_root.join("Assets/Shader/Test_Simple.shader.meta")).unwrap();
+        let shader_guid = shader_meta
+            .lines()
+            .find_map(|line| line.strip_prefix("guid: "))
+            .expect("exported Shader sidecar has a GUID");
+        let material_yaml =
+            fs::read_to_string(output_root.join("Assets/Material/MaterialFixture.mat")).unwrap();
+        let normalized = material_yaml.replace(shader_guid, "<SHADER_GUID>");
+        assert_eq!(
+            normalized,
+            include_str!("export/material_project_properties_fixture.yaml")
         );
 
         input.files.extend(

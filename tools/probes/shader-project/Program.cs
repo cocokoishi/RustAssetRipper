@@ -1,5 +1,6 @@
 using AssetRipper.Assets;
 using AssetRipper.Assets.Bundles;
+using AssetRipper.Assets.Generics;
 using AssetRipper.Export.Configuration;
 using AssetRipper.Export.UnityProjects;
 using AssetRipper.Import.Logging;
@@ -9,6 +10,9 @@ using AssetRipper.Primitives;
 using AssetRipper.Processing;
 using AssetRipper.SourceGenerated.Classes.ClassID_21;
 using AssetRipper.SourceGenerated.Classes.ClassID_48;
+using AssetRipper.SourceGenerated.Extensions;
+using AssetRipper.SourceGenerated.Subclasses.ColorRGBAf;
+using AssetRipper.SourceGenerated.Subclasses.UnityTexEnv;
 using System.Security.Cryptography;
 using System.Reflection;
 
@@ -80,8 +84,10 @@ if (args is ["--inspect-material"])
     return 0;
 }
 
-if (args is ["--export-material", string materialOutputRoot])
+if (args.Length == 2 && args[0] is "--export-material" or "--export-material-rich")
 {
+    string materialOutputRoot = args[1];
+    bool includeSavedProperties = args[0] == "--export-material-rich";
     string materialOutputRootFull = Path.GetFullPath(materialOutputRoot);
     if (Directory.Exists(materialOutputRootFull) && Directory.EnumerateFileSystemEntries(materialOutputRootFull).Any())
     {
@@ -109,6 +115,26 @@ if (args is ["--export-material", string materialOutputRoot])
     var tag = material.StringTagMap_C21.AddNew();
     tag.Key = new Utf8String("RenderType");
     tag.Value = new Utf8String("TransparentCutout");
+    if (includeSavedProperties)
+    {
+        AssetPair<Utf8String, UnityTexEnv_5> texture =
+            material.SavedProperties_C21.TexEnvs_AssetDictionary_Utf8String_UnityTexEnv_5!.AddNew();
+        texture.Key = "_MainTex";
+        texture.Value.Scale.X = 1.25f;
+        texture.Value.Scale.Y = -2.5f;
+        texture.Value.Offset.X = 0.125f;
+        texture.Value.Offset.Y = 0.75f;
+
+        AssetPair<Utf8String, float> roughness =
+            material.SavedProperties_C21.Floats_AssetDictionary_Utf8String_Single!.AddNew();
+        roughness.Key = "_Glossiness";
+        roughness.Value = 0.375f;
+
+        AssetPair<Utf8String, ColorRGBAf> tint =
+            material.SavedProperties_C21.Colors_AssetDictionary_Utf8String_ColorRGBAf!.AddNew();
+        tint.Key = "_Color";
+        tint.Value.SetValues(0.125f, 0.25f, 0.5f, 0.75f);
+    }
     GameData materialData = new(materialBundle, materialVersion, new BaseManager(_ => { }), null);
     FullConfiguration materialSettings = new();
     ExportHandler materialHandler = new(materialSettings);
