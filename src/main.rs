@@ -8131,6 +8131,61 @@ mod tests {
         )
     }
 
+    fn assert_material_project_yaml_matches_fixture(material_file: Vec<u8>, fixture: &str) {
+        let directory = TestInputDirectory::new_root();
+        let assets_directory = directory.join("assets");
+        fs::create_dir(&assets_directory).unwrap();
+        let output_root = directory.join("project");
+        fs::create_dir(&output_root).unwrap();
+        let material_path = assets_directory.join("material.assets");
+        let shader_path = assets_directory.join("shader.assets");
+        fs::write(&material_path, material_file).unwrap();
+        fs::write(
+            &shader_path,
+            make_shader_file_with_non_modifiable_texture_null(),
+        )
+        .unwrap();
+        let mut input = TestInputDirectory {
+            directory,
+            files: vec![material_path.clone(), shader_path.clone()],
+            subdirectories: vec![
+                assets_directory,
+                output_root.clone(),
+                output_root.join("Assets"),
+                output_root.join("Assets/Material"),
+                output_root.join("Assets/Shader"),
+                output_root.join("ProjectSettings"),
+                output_root.join("Packages"),
+            ],
+        };
+
+        super::export_project_to(
+            &[material_path, shader_path],
+            &output_root,
+            false,
+            &default_export_settings(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+
+        let shader_meta =
+            fs::read_to_string(output_root.join("Assets/Shader/Test_Simple.shader.meta")).unwrap();
+        let shader_guid = shader_meta
+            .lines()
+            .find_map(|line| line.strip_prefix("guid: "))
+            .expect("exported Shader sidecar has a GUID");
+        let material_yaml =
+            fs::read_to_string(output_root.join("Assets/Material/MaterialFixture.mat")).unwrap();
+        assert_eq!(material_yaml.replace(shader_guid, "<SHADER_GUID>"), fixture);
+
+        input.files.extend(
+            project_tree(&output_root)
+                .iter()
+                .map(|path| output_root.join(path)),
+        );
+        drop(input);
+    }
+
     fn make_minimal_texture_file(name: &str, path_id: i32) -> Vec<u8> {
         let mut strings = Vec::new();
         let texture_type = push_type_tree_string(&mut strings, "Texture2D");
@@ -8260,6 +8315,20 @@ mod tests {
         material_tpk_release_tree(
             include_str!("export/material_tpk_2019_4_fixture.txt"),
             "TPK|21|2019.4.40f1|release",
+        )
+    }
+
+    fn material_2022_3_tpk_release_tree() -> assetripper::serialized_file::metadata::TypeTree {
+        material_tpk_release_tree(
+            include_str!("export/material_tpk_2022_3_fixture.txt"),
+            "TPK|21|2022.3.22f1|release",
+        )
+    }
+
+    fn material_6000_4_tpk_release_tree() -> assetripper::serialized_file::metadata::TypeTree {
+        material_tpk_release_tree(
+            include_str!("export/material_tpk_6000_4_fixture.txt"),
+            "TPK|21|6000.4.0f1|release",
         )
     }
 
@@ -8398,6 +8467,24 @@ mod tests {
         )
     }
 
+    fn make_material_file_with_reference_2022_3_tpk_and_saved_properties() -> Vec<u8> {
+        make_material_file_with_reference_tpk_and_properties(
+            b"2022.3.22f1\0",
+            material_2022_3_tpk_release_tree(),
+            1,
+            false,
+        )
+    }
+
+    fn make_material_file_with_reference_6000_4_tpk_and_saved_properties() -> Vec<u8> {
+        make_material_file_with_reference_tpk_and_properties(
+            b"6000.4.0f1\0",
+            material_6000_4_tpk_release_tree(),
+            1,
+            false,
+        )
+    }
+
     fn make_material_file_with_reference_2019_4_tpk_and_texture_reference() -> Vec<u8> {
         make_material_file_with_reference_tpk_and_properties_and_texture_pointer(
             b"2019.4.40f1\0",
@@ -8442,11 +8529,30 @@ mod tests {
         texture_pointer: Option<(i32, i64)>,
         external_names: &[&str],
     ) -> Vec<u8> {
+        let has_split_keywords = type_tree
+            .nodes
+            .iter()
+            .any(|node| node.name.as_deref() == Some("m_ValidKeywords"));
+        let has_int_map = type_tree
+            .nodes
+            .iter()
+            .any(|node| node.name.as_deref() == Some("m_Ints"));
+        let has_build_texture_stacks = type_tree
+            .nodes
+            .iter()
+            .any(|node| node.name.as_deref() == Some("m_BuildTextureStacks"));
         let mut payload = Vec::new();
         put_typetree_string_value(&mut payload, "MaterialFixture");
         put_i32_le(&mut payload, 1);
         put_i64_le(&mut payload, 42);
-        put_typetree_string_value(&mut payload, "_FEATURE_A _FEATURE_B");
+        if has_split_keywords {
+            put_i32_le(&mut payload, 1);
+            put_typetree_string_value(&mut payload, "_FEATURE_A");
+            put_i32_le(&mut payload, 1);
+            put_typetree_string_value(&mut payload, "_FEATURE_B");
+        } else {
+            put_typetree_string_value(&mut payload, "_FEATURE_A _FEATURE_B");
+        }
         put_u32_le(&mut payload, 4);
         payload.push(1);
         payload.push(1);
@@ -8469,6 +8575,9 @@ mod tests {
             put_f32_le(&mut payload, -2.5);
             put_f32_le(&mut payload, 0.125);
             put_f32_le(&mut payload, 0.75);
+            if has_int_map {
+                put_i32_le(&mut payload, 0);
+            }
             if saved_property_count > 1 {
                 put_typetree_string_value(
                     &mut payload,
@@ -8533,7 +8642,13 @@ mod tests {
             }
         } else {
             put_i32_le(&mut payload, 0);
+            if has_int_map {
+                put_i32_le(&mut payload, 0);
+            }
             put_i32_le(&mut payload, 0);
+            put_i32_le(&mut payload, 0);
+        }
+        if has_build_texture_stacks {
             put_i32_le(&mut payload, 0);
         }
         assert!(payload.len().is_multiple_of(4), "payload is 4-byte aligned");
@@ -9891,6 +10006,45 @@ mod tests {
                 .map(|path| output_root.join(path)),
         );
         drop(input);
+    }
+
+    #[test]
+    fn export_project_material_yaml_matches_the_reference_2022_3_project_probe() {
+        let fixture = include_str!("export/material_tpk_2022_3_fixture.txt");
+        assert!(fixture.contains("GEN|21|Material_2022_1_0_b14"));
+        assert!(fixture.contains("GEN|48|Shader_2022_3_20"));
+        assert!(fixture.contains("TPK|48|2022.3.22f1|release"));
+        assert!(fixture.contains("NODE|1|vector|m_ValidKeywords|"));
+        assert!(fixture.contains("NODE|1|PPtr<Material>|m_Parent|"));
+        assert!(fixture.contains("NODE|1|unsigned int|m_ModifiedSerializedProperties|"));
+        assert!(fixture.contains("NODE|1|string|m_LockedProperties|"));
+        assert!(fixture.contains("NODE|1|vector|m_BuildTextureStacks|"));
+        assert!(fixture.contains("m_ParsedForm"));
+
+        assert_material_project_yaml_matches_fixture(
+            make_material_file_with_reference_2022_3_tpk_and_saved_properties(),
+            include_str!("export/material_project_2022_3_fixture.yaml"),
+        );
+    }
+
+    #[test]
+    fn export_project_material_yaml_matches_the_reference_unity6_project_probe() {
+        let fixture = include_str!("export/material_tpk_6000_4_fixture.txt");
+        assert!(fixture.contains("GEN|21|Material_2023_2_8"));
+        assert!(fixture.contains("GEN|48|Shader_6000_3_0_b6"));
+        assert!(fixture.contains("TPK|48|6000.4.0f1|release"));
+        assert!(fixture.contains("NODE|1|vector|m_ValidKeywords|"));
+        assert!(fixture.contains("NODE|1|PPtr<Material>|m_Parent|"));
+        assert!(fixture.contains("NODE|1|unsigned int|m_ModifiedSerializedProperties|"));
+        assert!(fixture.contains("NODE|1|string|m_LockedProperties|"));
+        assert!(fixture.contains("NODE|1|vector|m_BuildTextureStacks|"));
+        assert!(fixture.contains("NODE|1|bool|m_AllowLocking|"));
+        assert!(fixture.contains("m_ParsedForm"));
+
+        assert_material_project_yaml_matches_fixture(
+            make_material_file_with_reference_6000_4_tpk_and_saved_properties(),
+            include_str!("export/material_project_6000_4_fixture.yaml"),
+        );
     }
 
     #[test]

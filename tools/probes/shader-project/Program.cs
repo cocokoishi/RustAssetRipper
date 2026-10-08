@@ -106,16 +106,19 @@ if (args is ["--inspect-material"])
 }
 
 if (args.Length == 2
-    && args[0] is "--export-material" or "--export-material-rich" or "--export-material-multi" or "--export-material-duplicate" or "--export-material-2019-4" or "--export-material-texture-ref" or "--export-material-2018-3" or "--export-material-2017-4")
+    && args[0] is "--export-material" or "--export-material-rich" or "--export-material-multi" or "--export-material-duplicate" or "--export-material-2019-4" or "--export-material-texture-ref" or "--export-material-2018-3" or "--export-material-2017-4" or "--export-material-2022-3" or "--export-material-unity6")
 {
     string materialOutputRoot = args[1];
-    bool includeSavedProperties = args[0] is "--export-material-rich" or "--export-material-multi" or "--export-material-duplicate" or "--export-material-2019-4" or "--export-material-texture-ref" or "--export-material-2018-3" or "--export-material-2017-4";
+    bool includeSavedProperties = args[0] is "--export-material-rich" or "--export-material-multi" or "--export-material-duplicate" or "--export-material-2019-4" or "--export-material-texture-ref" or "--export-material-2018-3" or "--export-material-2017-4" or "--export-material-2022-3" or "--export-material-unity6";
     bool includeMultipleSavedProperties = args[0] == "--export-material-multi";
     bool includeDuplicateSavedProperties = args[0] == "--export-material-duplicate";
     bool includeTextureReference = args[0] == "--export-material-texture-ref";
     bool use2019_4 = args[0] is "--export-material-2019-4" or "--export-material-texture-ref";
     bool use2018_3 = args[0] == "--export-material-2018-3";
     bool use2017_4 = args[0] == "--export-material-2017-4";
+    bool use2022_3 = args[0] == "--export-material-2022-3";
+    bool useUnity6 = args[0] == "--export-material-unity6";
+    bool useModernMaterial = use2022_3 || useUnity6;
     string materialOutputRootFull = Path.GetFullPath(materialOutputRoot);
     if (Directory.Exists(materialOutputRootFull) && Directory.EnumerateFileSystemEntries(materialOutputRootFull).Any())
     {
@@ -123,13 +126,27 @@ if (args.Length == 2
         return 2;
     }
     Logger.Add(new ConsoleLogger());
-    string materialVersionText = use2019_4 ? "2019.4.40f1" : use2018_3 ? "2018.3.0f1" : use2017_4 ? "2017.4.40f1" : "2018.2.21f1";
+    string materialVersionText = useUnity6 ? "6000.4.0f1" : use2022_3 ? "2022.3.22f1" : use2019_4 ? "2019.4.40f1" : use2018_3 ? "2018.3.0f1" : use2017_4 ? "2017.4.40f1" : "2018.2.21f1";
     UnityVersion materialVersion = UnityVersion.Parse(materialVersionText);
     GameBundle materialBundle = new();
     var materialCollection = materialBundle.AddNewProcessedCollection("Material", materialVersion);
     IShader shader;
     IMaterial material;
-    if (use2019_4)
+    if (useUnity6)
+    {
+        Shader_6000_3_0_b6 shader6000 = materialCollection.CreateAsset(48, assetInfo => new Shader_6000_3_0_b6(assetInfo));
+        shader6000.Name = new Utf8String("ShaderFixture");
+        shader = shader6000;
+        material = materialCollection.CreateAsset(21, assetInfo => new Material_2023_2_8(assetInfo));
+    }
+    else if (use2022_3)
+    {
+        Shader_2022_3_20 shader2022 = materialCollection.CreateAsset(48, assetInfo => new Shader_2022_3_20(assetInfo));
+        shader2022.Name = new Utf8String("ShaderFixture");
+        shader = shader2022;
+        material = materialCollection.CreateAsset(21, assetInfo => new Material_2022_1_0_b14(assetInfo));
+    }
+    else if (use2019_4)
     {
         Shader_2019_3_0_b0 shader2019_4 = materialCollection.CreateAsset(48, assetInfo => new Shader_2019_3_0_b0(assetInfo));
         shader2019_4.Name = new Utf8String("ShaderFixture");
@@ -166,10 +183,21 @@ if (args.Length == 2
     material.LightmapFlags_C21 = 4;
     material.EnableInstancingVariants_C21 = true;
     material.DoubleSidedGI_C21 = true;
-    material.AllowLocking_C21 = true;
-    material.ShaderKeywords_C21_Utf8String = new Utf8String("_FEATURE_A _FEATURE_B");
-    material.LockedProperties_C21 = new Utf8String("{\"renderQueue\":true}");
-    material.ModifiedSerializedProperties_C21 = 3;
+    if (useModernMaterial)
+    {
+        material.ValidKeywords_C21!.Add(new Utf8String("_FEATURE_A"));
+        material.InvalidKeywords_C21!.Add(new Utf8String("_FEATURE_B"));
+        material.LockedProperties_C21 = new Utf8String(string.Empty);
+        material.ModifiedSerializedProperties_C21 = 0;
+        material.AllowLocking_C21 = false;
+    }
+    else
+    {
+        material.AllowLocking_C21 = true;
+        material.ShaderKeywords_C21_Utf8String = new Utf8String("_FEATURE_A _FEATURE_B");
+        material.LockedProperties_C21 = new Utf8String("{\"renderQueue\":true}");
+        material.ModifiedSerializedProperties_C21 = 3;
+    }
     var tag = material.StringTagMap_C21!.AddNew();
     tag.Key = new Utf8String("RenderType");
     tag.Value = new Utf8String("TransparentCutout");

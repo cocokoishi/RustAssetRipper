@@ -1369,27 +1369,35 @@ where
         move_mapping_field_to_end(&mut body, "m_Structure")?;
     }
     if source.class_id == 21 && field_mode == UnityYamlObjectFieldMode::ProjectAsset && !stripped {
-        let editor_fields: Option<&[&str]> = match (unity_version.major, unity_version.minor) {
-            (2017, 4) => Some(&[
-                "m_ObjectHideFlags",
-                "m_PrefabParentObject",
-                "m_PrefabInternal",
-            ]),
-            (2018, 2) => Some(&[
-                "m_ObjectHideFlags",
-                "m_CorrespondingSourceObject",
-                "m_PrefabInternal",
-            ]),
-            (2018, 3) | (2019, 4) => Some(&[
-                "m_ObjectHideFlags",
-                "m_CorrespondingSourceObject",
-                "m_PrefabInstance",
-                "m_PrefabAsset",
-            ]),
-            _ => None,
-        };
-        if let Some(editor_fields) = editor_fields {
-            insert_material_editor_fields(&mut body, editor_fields)?;
+        match (unity_version.major, unity_version.minor) {
+            (2017, 4) => insert_material_editor_fields(
+                &mut body,
+                &[
+                    "m_ObjectHideFlags",
+                    "m_PrefabParentObject",
+                    "m_PrefabInternal",
+                ],
+            )?,
+            (2018, 2) => insert_material_editor_fields(
+                &mut body,
+                &[
+                    "m_ObjectHideFlags",
+                    "m_CorrespondingSourceObject",
+                    "m_PrefabInternal",
+                ],
+            )?,
+            (2018, 3) | (2019, 4) => insert_material_editor_fields(
+                &mut body,
+                &[
+                    "m_ObjectHideFlags",
+                    "m_CorrespondingSourceObject",
+                    "m_PrefabInstance",
+                    "m_PrefabAsset",
+                ],
+            )?,
+            (2022, 3) => insert_late_material_editor_fields(&mut body, false)?,
+            (6000, 4) => insert_late_material_editor_fields(&mut body, true)?,
+            _ => {}
         }
     }
     UnityYamlDocument::object(source.class_id, file_id, class_name, body, stripped)
@@ -1455,6 +1463,87 @@ fn insert_material_editor_fields(
         style,
         entries: ordered,
     };
+    Ok(())
+}
+
+fn insert_late_material_editor_fields(
+    body: &mut UnityYamlNode,
+    include_allow_locking: bool,
+) -> Result<(), UnityYamlObjectConversionError> {
+    insert_material_editor_fields(
+        body,
+        &[
+            "m_ObjectHideFlags",
+            "m_CorrespondingSourceObject",
+            "m_PrefabInstance",
+            "m_PrefabAsset",
+        ],
+    )?;
+    insert_material_field_after(body, "m_Parent", "m_Shader", material_null_pointer()?)?;
+    insert_material_field_after(
+        body,
+        "m_ModifiedSerializedProperties",
+        "m_Parent",
+        UnityYamlNode::scalar(UnityYamlScalar::Unsigned(0)),
+    )?;
+    insert_material_field_after(
+        body,
+        "m_LockedProperties",
+        "disabledShaderPasses",
+        UnityYamlNode::plain_string(""),
+    )?;
+    if include_allow_locking {
+        insert_material_field_after(
+            body,
+            "m_AllowLocking",
+            "m_BuildTextureStacks",
+            UnityYamlNode::scalar(UnityYamlScalar::Boolean(false)),
+        )?;
+    }
+    Ok(())
+}
+
+fn material_null_pointer() -> Result<UnityYamlNode, UnityYamlObjectConversionError> {
+    let mut pointer = UnityYamlNode::mapping(UnityYamlMappingStyle::Flow);
+    pointer
+        .insert_field("fileID", UnityYamlNode::scalar(UnityYamlScalar::Signed(0)))
+        .map_err(UnityYamlObjectConversionError::NodeBuild)?;
+    Ok(pointer)
+}
+
+fn insert_material_field_after(
+    body: &mut UnityYamlNode,
+    field_name: &str,
+    anchor_name: &str,
+    default_value: UnityYamlNode,
+) -> Result<(), UnityYamlObjectConversionError> {
+    let UnityYamlNodeKind::Mapping { entries, .. } = &mut body.kind else {
+        return Err(UnityYamlObjectConversionError::NodeBuild(
+            UnityYamlNodeBuildError::NotAMapping,
+        ));
+    };
+    let field = take_yaml_mapping_field(entries, field_name)
+        .unwrap_or((UnityYamlNode::plain_string(field_name), default_value));
+    let Some(anchor_index) = entries.iter().position(|(key, _)| {
+        matches!(
+            &key.kind,
+            UnityYamlNodeKind::Scalar(
+                UnityYamlScalar::PlainString(value) | UnityYamlScalar::String(value)
+            ) if value == anchor_name
+        )
+    }) else {
+        return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+            node_index: 0,
+            reason: "missing Material editor-field insertion anchor",
+        });
+    };
+    entries
+        .try_reserve(1)
+        .map_err(|_| UnityYamlObjectConversionError::AllocationFailed {
+            resource: "Material Editor YAML fields",
+            requested: entries.len().saturating_add(1),
+        })?;
+    entries.insert(anchor_index + 1, field);
     Ok(())
 }
 
