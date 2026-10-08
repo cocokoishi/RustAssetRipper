@@ -1,6 +1,6 @@
 # Phase 1 closure inventory
 
-Current inventory basis: the frozen AssetRipper source snapshot and checksum manifest remain authoritative. The latest implementation/evidence increment is commit d16ba669eedc33b44a226357c2c17ea934132656 (tree da6138aad165a6f4959557b9ed6995419c8d30d8); it source-matches a no-TypeTree class-194 editor TPK `TypeTreeObject` path without closing a feature row. Counts below are read from the exact Status cells in `docs/feature-parity.md`. Source reference: C:\Users\koishi\Desktop\RustAssetripper\AssetRipper, frozen by docs/baseline-files.sha256 (1,449 entries; manifest SHA-256 29d1fd27f66b974c43750f30aa99117eb423cb318f3062daf05e1489f10f08f9).
+Current inventory basis: the frozen AssetRipper source snapshot and checksum manifest remain authoritative. The latest implementation/evidence increment is commit 61fcd6fca2a3716ab7645380f32c9dff5beb0b05 (tree 3e97bbcc3b1641319d1205c92f3adff66e7642d1); it embeds the complete source TPK class/version projection and matches all 7,304 captured source selection queries without closing a feature row. Counts below are read from the exact Status cells in `docs/feature-parity.md`. Source reference: C:\Users\koishi\Desktop\RustAssetripper\AssetRipper, frozen by docs/baseline-files.sha256 (1,449 entries; manifest SHA-256 29d1fd27f66b974c43750f30aa99117eb423cb318f3062daf05e1489f10f08f9).
 
 The status counts below come from the `Status` cell in each stable-ID row of `docs/feature-parity.md`, matched against the required status vocabulary; prose mentions elsewhere do not affect the count.
 
