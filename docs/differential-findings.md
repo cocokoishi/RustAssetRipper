@@ -20,12 +20,12 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 
 | Field | Finding |
 |---|---|
-| Status | Rust follows standard End-relative seek semantics; the opposite source behavior is confirmed by an isolated C# runtime probe and retained as documented hardening |
+| Status | Resolved: Rust now reproduces the isolated C# source behavior and has a direct regression |
 | Source location | AssetRipper/Source/AssetRipper.IO.Files/Streams/MultiFileStream.cs, MultiFileStream.Seek |
-| Input evidence | `tools/probes/multifile/MultiFileProbe.cs` runs against the isolated frozen `AssetRipper.IO.Files.dll` and records `SEEK_END|10|10|12|8` in `src/io/multifile_path_fixture.txt`. Rust test `multi_file_stream_seeks_from_end_with_standard_offsets` asserts those source results and its own End seeks. |
+| Input evidence | `tools/probes/multifile/MultiFileProbe.cs` runs against the isolated frozen `AssetRipper.IO.Files.dll` and records `SEEK_END|10|10|12|8` in `src/io/multifile_path_fixture.txt`. A fresh 16-row probe run on 2026-10-08 matched the committed fixture exactly. Rust test `multi_file_stream_seeks_from_end_with_source_offsets` checks the same offsets. |
 | Source-runtime behavior | For length 10, the source returns 10 for End(0), 12 for End(-2), and 8 for End(+2), confirming `Position = Length - offset`. |
-| Rust behavior | MultiFileStream implements Rust Seek semantics: the End-relative offset is added to the logical stream length, so End(-2) is 8 and End(+2) is 12. |
-| Resolution | The Rust behavior is retained as standard seek semantics. The source difference is explicit and runtime-confirmed; this probe does not establish compatibility with any caller that relies on the source's inverted sign. |
+| Rust behavior | `MultiFileStream` now computes `Length - offset`, giving 10, 12, and 8 for End(0), End(-2), and End(+2). It also rejects negative and out-of-range positions rather than wrapping them into `u64`. |
+| Resolution | The earlier deliberate hardening divergence was removed to restore source parity. `source_seek_target` applies this rule to both `MultiFileStream` and the file-backed `RandomAccessStream` view; `PartialStream` retains the source's separate standard-sign rule. |
 
 ## DIFF-MULTIFILE-PATH-001 — canonical split names and path-backed mounting
 
@@ -37,7 +37,7 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Source-runtime behavior | `SchemeReader.LoadFile` exposes the same logical base name for a regular path, split base, or supplied split part. Parts are numerically ordered; gaps and `.split00` plus `.split1` are rejected because the source requires exact `.split0` through `.splitN` names. |
 | Rust change | `open_split_file` now checks the exact canonical names across the enumerated `.split*` candidate count before sorting/opening. This rejects `.split00` as a substitute for `.split0`; `SchemeReader::mount_path` carries the logical name into the VFS. |
 | Regression evidence | `multi_file_paths_match_reference_runtime_fixture` compares path classification, bytes, names, numeric order, boundary reads, gap rejection, and padded-name rejection. `mount_path_assembles_split_inputs_and_uses_the_logical_base_name` and `mount_path_rejects_zero_padded_parts_the_reference_cannot_open` exercise the integrated mount path. |
-| Remaining difference | Rust reports `NotFound` with the expected canonical path; the C# fixture records a rejected `Exception`. Both reject the malformed family. End-relative seek sign remains the separate documented difference in `DIFF-MULTIFILE-SEEK-END-001`. |
+| Remaining difference | Rust reports `NotFound` with the expected canonical path; the C# fixture records a rejected `Exception`. Both reject the malformed family. End-relative seek behavior now matches and is closed in `DIFF-MULTIFILE-SEEK-END-001`. |
 
 ## DIFF-LOCAL-FS-SHARING-001 — Rust's default Windows file sharing allowed input mutation
 
@@ -720,14 +720,14 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 
 | Field | Finding |
 |---|---|
-| Status | Reference-runtime op differential recorded; four rows ported and pinned |
+| Status | Source-runtime wrapper differences reconciled; wrapper regressions pass |
 | Source location | AssetRipper.IO.Files/Streams/Smart/SmartStream.cs (null fails loud); MultiFileStream.cs (splitN OpenRead); PartialStream.cs (no construction positioning, Seek adds base offset); RandomAccessStream.cs (internal, bounded file range) |
-| Input evidence | Probe Temp/opencode/streamprobe (shipped IO.Files DLL, SDK 10.0.401) executing identical op sequences (lengths, reads, seeks, positions, EOF, ReadByte) over memory, temp, null, split parts, ranges, and file ranges. Committed as src/io/stream_fixture.txt (10 lines). |
-| Source-derived behavior | Lengths, cross-boundary and cross-seek reads, positions, EOF short reads, and null loudness all reproduce; split part naming and ordering reproduce; bounded ranges clamp identically. |
-| Root cause | One deliberate hardening, not a deviation: reads-before-first-seek hit the unpositioned base in the source while Rust positions on every access; post-Seek bytes are identical and callers Seek first. Otherwise no deviation found. |
-| Rust change | src/io/stream.rs test stream_operations_match_reference_runtime; fixture src/io/stream_fixture.txt. |
-| Regression evidence | All six op sequences reproduce field-for-field; full suite 1363 plus 60 pass with warnings-denied Clippy. |
-| Remaining comparison | OS positional I/O and direct VFS mount APIs stay with their tracked rows; wrapper observable behavior is now fully reference-differentially covered. |
+| Input evidence | Frozen reference probes `tools/probes/io-differential` and `tools/probes/multifile` execute lengths, reads, seeks, positions, EOF, and `ReadByte` over memory, temp, null, split parts, ranges, and file ranges. Fresh 2026-10-08 runs produced six `STREAM` rows and 16 MultiFile path rows matching their committed fixtures exactly. |
+| Source-derived behavior | `PartialStream` begins at the wrapped cursor, clamps `Read` by `Length - Position`, delegates `ReadByte` without clamping, and maps seek offsets through its base. `RandomAccessStream` and `MultiFileStream` use `Length - offset` for End seeks. Shared range reads leave the parent cursor unchanged; split reads advance part-by-part; null SmartStream operations fail loudly. |
+| Root cause | Rust had normalized three source quirks to conventional behavior: first `PartialStream.Read` was repositioned, `ReadByte` was range-bounded, and RandomAccess/MultiFile End offsets were standard-signed. Compatibility required preserving the source operations. |
+| Rust change | `src/io/stream.rs` now retains the source parent cursor for PartialStream reads, exposes the source's delegated `read_byte`, and uses source-sign End seeks for `FileRangeStream` and `MultiFileStream`. Unix file ranges use `read_at`; Windows uses `seek_read` and restores the cursor while the shared handle remains locked. |
+| Regression evidence | `stream_observables_match_the_reference_runtime_fixture`, `partial_stream_matches_source_cursor_and_bounded_read_behavior`, `partial_stream_read_byte_matches_source_unbounded_delegation_and_borrowed_lifetime`, `partial_and_random_access_views_keep_their_distinct_end_seek_rules`, and `multi_file_stream_seeks_from_end_with_source_offsets`; all 29 `io::stream::tests` passed. |
+| Remaining comparison | No difference remains in the tested wrapper operations. The full LocalFileSystem adapter surface and the bounded contiguous-buffer requirement of downstream container parsers remain open in aggregate `IO-STREAM-001`; Unix retained-reader runtime validation remains under the externally blocked directory-import row. |
 
 ## DIFF-SER-TYPE-001 - SerializedFile type and managed-reference records
 

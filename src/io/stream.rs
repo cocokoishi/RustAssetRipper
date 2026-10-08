@@ -17,7 +17,10 @@ pub struct PartialStream<S> {
     source: S,
     base_offset: u64,
     length: u64,
-    position: u64,
+    /// Logical position observed from the wrapped stream. This can start below zero when the
+    /// source stream's cursor is before `base_offset`, which is how the reference PartialStream
+    /// behaves before its first seek.
+    position: i128,
 }
 
 impl<S: Read + Seek> PartialStream<S> {
@@ -44,7 +47,7 @@ impl<S: Read + Seek> PartialStream<S> {
             source,
             base_offset,
             length,
-            position: 0,
+            position: i128::from(original_position) - i128::from(base_offset),
         })
     }
 
@@ -52,8 +55,23 @@ impl<S: Read + Seek> PartialStream<S> {
         self.length
     }
 
-    pub fn position(&self) -> u64 {
+    pub fn position(&self) -> i128 {
         self.position
+    }
+
+    /// `PartialStream.ReadByte` delegates directly to its parent without applying the range
+    /// bound. The reference implementation exposes this quirk, so callers that specifically
+    /// request a byte read get the same behavior as the source.
+    pub fn read_byte(&mut self) -> io::Result<Option<u8>> {
+        let mut byte = [0];
+        let read = self.source.read(&mut byte)?;
+        self.position += i128::try_from(read).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "partial stream position overflows",
+            )
+        })?;
+        Ok((read == 1).then_some(byte[0]))
     }
 
     pub fn into_inner(self) -> S {
@@ -63,19 +81,17 @@ impl<S: Read + Seek> PartialStream<S> {
 
 impl<S: Read + Seek> Read for PartialStream<S> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        let available = self.length.saturating_sub(self.position);
+        // The source caps Read using Length - Position, then reads at the wrapped stream's
+        // current cursor. It does not position the parent at `base_offset` on construction.
+        let available = (i128::from(self.length) - self.position).max(0);
         let requested = buffer
             .len()
             .min(usize::try_from(available).unwrap_or(usize::MAX));
         if requested == 0 {
             return Ok(0);
         }
-        let absolute_position = self.base_offset.checked_add(self.position).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "stream position overflows")
-        })?;
-        self.source.seek(SeekFrom::Start(absolute_position))?;
         let read = self.source.read(&mut buffer[..requested])?;
-        self.position = self.position.checked_add(read as u64).ok_or_else(|| {
+        self.position += i128::try_from(read).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 "partial stream position overflows",
@@ -87,9 +103,28 @@ impl<S: Read + Seek> Read for PartialStream<S> {
 
 impl<S: Read + Seek> Seek for PartialStream<S> {
     fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
-        let next = seek_target(self.position, self.length, from)?;
-        self.position = next;
-        Ok(next)
+        let base = i128::from(self.base_offset);
+        let absolute_position = match from {
+            SeekFrom::Start(position) => base + i128::from(position),
+            SeekFrom::Current(offset) => {
+                i128::from(self.base_offset) + self.position + i128::from(offset)
+            }
+            SeekFrom::End(offset) => base + i128::from(self.length) + i128::from(offset),
+        };
+        let absolute_position = u64::try_from(absolute_position).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "seek position is negative or exceeds the address space",
+            )
+        })?;
+        let next_absolute = self.source.seek(SeekFrom::Start(absolute_position))?;
+        self.position = i128::from(next_absolute) - base;
+        u64::try_from(self.position).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "logical partial stream position is negative or exceeds the address space",
+            )
+        })
     }
 }
 
@@ -99,27 +134,21 @@ impl<S: Read + Seek> Seek for PartialStream<S> {
 /// `NotSupportedException`.
 impl<S: Read + Seek + Write> Write for PartialStream<S> {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        let end = self
-            .position
-            .checked_add(buffer.len() as u64)
-            .ok_or_else(|| {
+        let end = self.position
+            + i128::try_from(buffer.len()).map_err(|_| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "partial stream's position is out of range",
                 )
             })?;
-        if end > self.length {
+        if end > i128::from(self.length) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "partial stream's position is out of range",
             ));
         }
-        let absolute_position = self.base_offset.checked_add(self.position).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "stream position overflows")
-        })?;
-        self.source.seek(SeekFrom::Start(absolute_position))?;
         let written = self.source.write(buffer)?;
-        self.position = self.position.checked_add(written as u64).ok_or_else(|| {
+        self.position += i128::try_from(written).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 "partial stream position overflows",
@@ -254,7 +283,7 @@ fn read_file_at(file: &File, buffer: &mut [u8], offset: u64) -> io::Result<usize
 
 impl Seek for FileRangeStream {
     fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
-        let next = seek_target(self.position, self.length, from)?;
+        let next = source_seek_target(self.position, self.length, from)?;
         self.position = next;
         Ok(next)
     }
@@ -1286,11 +1315,10 @@ impl Read for MultiFileStream {
 
 impl Seek for MultiFileStream {
     /// `MultiFileStream.Position` setter plus `UpdateCurrentStream`.
-    ///
-    /// The end-relative offset itself keeps the documented BCL-correct decision in
-    /// [`seek_target`]; the part bookkeeping that follows is the source's.
+    /// The source computes an end-relative target as `Length - offset`, so positive offsets
+    /// seek backward and negative offsets can move past the logical end.
     fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
-        let next = seek_target(self.position, self.length, from)?;
+        let next = source_seek_target(self.position, self.length, from)?;
         self.position = next;
         if next < self.current_begin || next >= self.current_end {
             self.update_current_stream()?;
@@ -1301,27 +1329,25 @@ impl Seek for MultiFileStream {
     }
 }
 
-/// Shared end-relative seek decision for the partial, file-range, and multi-file views:
-/// `End` offsets add to the length (BCL semantics), so `End(0)` is the end, negative
-/// offsets count back, and positive offsets may run past the end (reads then clamp).
-/// This deliberately follows neither `RandomAccessStream.Seek` nor `MultiFileStream.Seek`,
-/// which both subtract their offset (`Length - offset`); the port stays BCL-correct on
-/// every view instead.
-fn seek_target(position: u64, length: u64, from: SeekFrom) -> io::Result<u64> {
-    let base = match from {
-        SeekFrom::Start(value) => return Ok(value),
-        SeekFrom::Current(_) => position,
-        SeekFrom::End(_) => length,
+/// End-relative seek behavior shared by the baseline `RandomAccessStream` and
+/// `MultiFileStream`: their `Seek(End, offset)` implementations use `Length - offset`.
+/// `PartialStream` and ordinary `Stream` implementations keep standard signed offsets.
+fn source_seek_target(position: u64, length: u64, from: SeekFrom) -> io::Result<u64> {
+    let target = match from {
+        SeekFrom::Start(value) => i128::from(value),
+        SeekFrom::Current(offset) => i128::from(position) + i128::from(offset),
+        SeekFrom::End(offset) => i128::from(length) - i128::from(offset),
     };
-    let offset = match from {
-        SeekFrom::Start(_) => unreachable!(),
-        SeekFrom::Current(offset) | SeekFrom::End(offset) => i128::from(offset),
-    };
-    let target = i128::from(base) + offset;
+    let target = i64::try_from(target).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "seek position is negative or exceeds the reference stream range",
+        )
+    })?;
     u64::try_from(target).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
-            "seek position is negative or exceeds the address space",
+            "seek position is negative or exceeds the reference stream range",
         )
     })
 }
@@ -1433,12 +1459,14 @@ mod tests {
     }
 
     #[test]
-    fn partial_stream_reads_and_seeks_only_inside_its_range() {
+    fn partial_stream_matches_source_cursor_and_bounded_read_behavior() {
         let source = Cursor::new(b"0123456789".to_vec());
         let mut partial = PartialStream::new(source, 2, 5).unwrap();
         let mut first = [0; 2];
         assert_eq!(partial.read(&mut first).unwrap(), 2);
-        assert_eq!(&first, b"23");
+        // The reference does not position the parent at the partial offset on construction.
+        assert_eq!(&first, b"01");
+        assert_eq!(partial.position(), 0);
         assert_eq!(partial.seek(SeekFrom::End(-1)).unwrap(), 4);
         let mut last = [0; 2];
         assert_eq!(partial.read(&mut last).unwrap(), 1);
@@ -1454,12 +1482,10 @@ mod tests {
         assert!(PartialStream::new(source, u64::MAX, 1).is_err());
     }
 
-    /// End-relative seeks follow BCL semantics on both partial views: `End(0)` is the
-    /// end, negative offsets count back, and positive offsets may run past the end
-    /// (reads then clamp to zero). This locks the port against the source
-    /// `RandomAccessStream.Seek` inversion (`Length - offset`).
+    /// `PartialStream` uses the standard signed End offset. `RandomAccessStream` instead
+    /// uses `Length - offset`, which FileRangeStream preserves below.
     #[test]
-    fn partial_views_seek_from_end_with_standard_offsets() {
+    fn partial_and_random_access_views_keep_their_distinct_end_seek_rules() {
         let source = Cursor::new(b"0123456789".to_vec());
         let mut partial = PartialStream::new(source, 2, 5).unwrap();
         assert_eq!(partial.seek(SeekFrom::End(0)).unwrap(), 5);
@@ -1475,11 +1501,40 @@ mod tests {
         let file = std::fs::File::open(&path).unwrap();
         let mut range = FileRangeStream::from_file(file, 2, 5).unwrap();
         assert_eq!(range.seek(SeekFrom::End(0)).unwrap(), 5);
-        assert_eq!(range.seek(SeekFrom::End(-2)).unwrap(), 3);
-        assert_eq!(range.seek(SeekFrom::End(2)).unwrap(), 7);
+        assert_eq!(range.seek(SeekFrom::End(-2)).unwrap(), 7);
+        assert_eq!(range.seek(SeekFrom::End(2)).unwrap(), 3);
+        range.seek(SeekFrom::End(2)).unwrap();
+        let mut selected = [0];
+        assert_eq!(range.read(&mut selected).unwrap(), 1);
+        assert_eq!(selected, [b'5']);
+        assert_eq!(range.read(&mut tail).unwrap(), 1);
+        assert_eq!(tail[0], b'6');
         assert_eq!(range.read(&mut tail).unwrap(), 0);
         assert!(range.seek(SeekFrom::End(i64::MIN)).is_err());
         remove_test_files(&directory, &["ranges.bin"]);
+    }
+
+    #[test]
+    fn partial_stream_read_byte_matches_source_unbounded_delegation_and_borrowed_lifetime() {
+        let mut source = Cursor::new(b"0123456789".to_vec());
+        {
+            let mut partial = PartialStream::new(&mut source, 2, 5).unwrap();
+            let mut prefix = [0; 2];
+            assert_eq!(partial.read(&mut prefix).unwrap(), 2);
+            assert_eq!(&prefix, b"01");
+            assert_eq!(partial.position(), 0);
+
+            partial.seek(SeekFrom::Start(5)).unwrap();
+            assert_eq!(partial.read_byte().unwrap(), Some(b'7'));
+            assert_eq!(partial.position(), 6);
+            let mut bounded = [0; 1];
+            assert_eq!(partial.read(&mut bounded).unwrap(), 0);
+        }
+        assert_eq!(
+            source.position(),
+            8,
+            "dropping a borrowed view keeps its parent usable"
+        );
     }
 
     /// Bounded write-through (`PartialStream.Write`): bytes land at the logical
@@ -1496,7 +1551,7 @@ mod tests {
         assert_eq!(partial.write(b"d").unwrap(), 1);
         assert_eq!(partial.position(), 5);
         // Past-the-end writes fail and leave the source untouched.
-        assert_eq!(partial.position(), partial.length());
+        assert_eq!(partial.position(), i128::from(partial.length()));
         assert!(partial.write(b"e").is_err());
         assert_eq!(partial.position(), 5);
         let source = partial.into_inner().into_inner();
@@ -1535,18 +1590,15 @@ mod tests {
             .into_iter()
             .map(|part| Cursor::new(part.to_vec()));
         let mut stream = MultiFileStream::new(parts).unwrap();
-        assert_eq!(stream.seek(SeekFrom::End(-2)).unwrap(), 5);
+        assert_eq!(stream.seek(SeekFrom::End(2)).unwrap(), 5);
         let mut suffix = [0; 3];
         assert_eq!(stream.read(&mut suffix).unwrap(), 2);
         assert_eq!(&suffix[..2], b"fg");
     }
 
-    /// End-relative seeks follow BCL semantics on the multi-file view, like on the
-    /// partial views: `End(0)` is the end, negative offsets count back, and positive
-    /// offsets may run past the end (reads then clamp to zero). This locks the port
-    /// against the source `MultiFileStream.Seek` inversion (`Length - offset`).
+    /// `MultiFileStream` follows the source's `Length - offset` end-seek implementation.
     #[test]
-    fn multi_file_stream_seeks_from_end_with_standard_offsets() {
+    fn multi_file_stream_seeks_from_end_with_source_offsets() {
         let reference = source_multifile_fixture_fields("SEEK_END|");
         assert_eq!(reference, ["SEEK_END", "10", "10", "12", "8"]);
 
@@ -1556,9 +1608,12 @@ mod tests {
         let mut stream = MultiFileStream::new(parts).unwrap();
         assert_eq!(stream.length(), 7);
         assert_eq!(stream.seek(SeekFrom::End(0)).unwrap(), 7);
-        assert_eq!(stream.seek(SeekFrom::End(-2)).unwrap(), 5);
-        assert_eq!(stream.seek(SeekFrom::End(2)).unwrap(), 9);
+        assert_eq!(stream.seek(SeekFrom::End(-2)).unwrap(), 9);
+        assert_eq!(stream.seek(SeekFrom::End(2)).unwrap(), 5);
         let mut tail = [0; 4];
+        assert_eq!(stream.read(&mut tail).unwrap(), 2);
+        assert_eq!(&tail[..2], b"fg");
+        assert_eq!(stream.seek(SeekFrom::End(-2)).unwrap(), 9);
         assert_eq!(stream.read(&mut tail).unwrap(), 0);
         assert!(stream.seek(SeekFrom::End(i64::MIN)).is_err());
     }
@@ -1991,7 +2046,7 @@ mod tests {
             let mut middle = [0; 2];
             assert_eq!(nested.read(&mut middle).unwrap(), 2);
             assert_eq!(&middle, b"cd");
-            assert_eq!(view.seek(SeekFrom::End(-1)).unwrap(), 3);
+            assert_eq!(view.seek(SeekFrom::End(1)).unwrap(), 3);
             let mut last = [0; 1];
             assert_eq!(view.read(&mut last).unwrap(), 1);
             assert_eq!(&last, b"e");
@@ -2363,20 +2418,17 @@ mod tests {
             remove_test_files(&dir, &["part.split0", "part.split1"]);
         }
 
-        // P1: post-Seek range ops match. The reference reads-before-first-seek
-        // go to the base stream's current position (PartialStream never
-        // positions on construction; only Seek/Begin/End add the base offset),
-        // so callers must Seek first. Rust positions on every access, which is
-        // strictly more correct and identical after any Seek; the difference is
-        // documented here, not hidden.
+        // P1: initial reads use the parent cursor, then Seek maps logical positions to
+        // the requested range as the reference PartialStream does.
         {
             let dump = reads.get("P1").expect("P1 dump");
             assert!(dump.contains("LEN=20"), "P1 {dump}");
             let mut s = PartialStream::new(Cursor::new(seq(64)), 10, 20).unwrap();
             assert_eq!(s.length(), 20);
-            assert_eq!(read_n(&mut s, 20), (10..30).collect::<Vec<u8>>());
+            assert_eq!(read_n(&mut s, 20), (0..20).collect::<Vec<u8>>());
+            assert_eq!(s.position(), 10);
             s.seek(SeekFrom::Start(5)).unwrap();
-            assert_eq!(read_byte(&mut s), Some(15));
+            assert_eq!(s.read_byte().unwrap(), Some(15));
             s.seek(SeekFrom::End(-2)).unwrap();
             assert_eq!(s.position(), 18);
             assert_eq!(read_n(&mut s, 2), vec![28, 29]);
@@ -2515,6 +2567,19 @@ mod tests {
             assert_eq!(io_fixture_value(&fields, "seek_end0"), "20");
             assert_eq!(io_fixture_value(&fields, "seek_end_minus2"), "22");
             assert_eq!(io_fixture_value(&fields, "seek_end_plus2"), "18");
+
+            let dir = create_test_directory("stream-r3-end-seek");
+            let path = dir.join("range.bin");
+            std::fs::write(&path, (0..64u8).collect::<Vec<_>>()).unwrap();
+            let file = std::fs::File::open(&path).unwrap();
+            let mut range = FileRangeStream::from_file(file, 0, 20).unwrap();
+            assert_eq!(range.seek(SeekFrom::End(0)).unwrap(), 20);
+            assert_eq!(range.seek(SeekFrom::End(-2)).unwrap(), 22);
+            assert_eq!(range.seek(SeekFrom::End(2)).unwrap(), 18);
+            let mut suffix = [0; 2];
+            assert_eq!(range.read(&mut suffix).unwrap(), 2);
+            assert_eq!(suffix, [18, 19]);
+            remove_test_files(&dir, &["range.bin"]);
         }
 
         // M2: one part per `Read`, but `ReadExactly` crosses.
@@ -2553,7 +2618,8 @@ mod tests {
             remove_test_files(&dir, &["parts.bundle.split0", "parts.bundle.split1"]);
         }
 
-        // P2: partial range reads, byte reads, and end-relative seeks.
+        // P2: PartialStream's initial parent cursor, bounded Read, delegated ReadByte,
+        // and end-relative seeks.
         {
             let fields = io_stream_fixture_fields("P2");
             assert_eq!(io_fixture_value(&fields, "len"), "20");
@@ -2566,7 +2632,7 @@ mod tests {
             assert_eq!(&buffer[..20], &(10..30u8).collect::<Vec<u8>>()[..]);
             assert_eq!(partial.position(), 20);
             partial.seek(SeekFrom::Start(5)).unwrap();
-            assert_eq!(read_one_byte(&mut partial), Some(15));
+            assert_eq!(partial.read_byte().unwrap(), Some(15));
             let mut tail = [0u8; 8];
             assert_eq!(partial.read(&mut tail).unwrap(), 8);
             assert_eq!(tail, [16, 17, 18, 19, 20, 21, 22, 23]);
