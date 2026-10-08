@@ -266,14 +266,14 @@ static string OneLine(string value) => value.Replace('\r', ' ').Replace('\n', ' 
 
 // An empty serialized file at the requested version gives a real collection whose
 // Version/Platform/EndianType facts the factory consults, without needing any payload.
-static SerializedAssetCollection EmptyCollection(UnityVersion version)
+static SerializedAssetCollection EmptyCollection(UnityVersion version, EndianType endianType = EndianType.LittleEndian)
 {
 	SerializedFile file = new SerializedFileBuilder
 	{
 		Generation = FormatVersion.Unknown_10,
 		Version = version,
 		Platform = (BuildTarget)19,
-		EndianType = EndianType.LittleEndian,
+		EndianType = endianType,
 		HasTypeTree = false,
 	}.Build();
 	GameAssetFactory factory = new(new BaseManager(s => { }));
@@ -504,6 +504,8 @@ static void Author(string rowsPath)
 		"monoscript_notree",
 		"tpk_navmesh_editor",
 		"gameobject_4_alpha_notree",
+		"texture_chinese_tail_le",
+		"texture_chinese_tail_be",
 	];
 	string scratch = Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, "target", "ser-factory-probe"));
 	Directory.CreateDirectory(scratch);
@@ -602,9 +604,37 @@ static (string, SerializedFile) BuildCase(string name)
 			}
 			return ("gameobject_4_alpha_notree.assets", BuildFile("gameobject_4_alpha_notree.assets", version.ToString(), 1, null, stream.ToArray()));
 		}
+		case "texture_chinese_tail_le":
+			return ("texture_chinese_tail_le.assets", BuildChineseTextureFile("texture_chinese_tail_le.assets", EndianType.LittleEndian));
+		case "texture_chinese_tail_be":
+			return ("texture_chinese_tail_be.assets", BuildChineseTextureFile("texture_chinese_tail_be.assets", EndianType.BigEndian));
 		default:
 			throw new ArgumentException($"unknown case {name}");
 	}
+}
+
+static SerializedFile BuildChineseTextureFile(string fileName, EndianType endianType)
+{
+	UnityVersion version = UnityVersion.Parse("2019.4.40f1");
+	SerializedAssetCollection collection = EmptyCollection(version, endianType);
+	IUnityObjectBase texture = AssetFactory.CreateSerialized(new AssetInfo(collection, 42, 28), version)
+		?? throw new InvalidOperationException("Texture2D factory returned null");
+	PropertyInfo nameProperty = texture.GetType().GetProperty("Name", BindingFlags.Public | BindingFlags.Instance)
+		?? throw new InvalidOperationException("generated Texture2D has no Name property");
+	nameProperty.SetValue(texture, new Utf8String("Logo"));
+	using MemoryStream stream = new();
+	using (AssetWriter writer = new(stream, texture.Collection))
+	{
+		texture.WriteRelease(writer);
+	}
+	List<byte> payload = [.. stream.ToArray()];
+	WriteI32(payload, 2048, endianType);
+	WriteI32(payload, 1024, endianType);
+	WriteI32(payload, unchecked((int)0x11223344), endianType);
+	WriteI32(payload, unchecked((int)0x55667788), endianType);
+	WriteI32(payload, unchecked((int)0x90ABCDEF), endianType);
+	WriteI32(payload, 0x01234567, endianType);
+	return BuildFile(fileName, version.ToString(), 28, null, payload.ToArray(), endianType: endianType);
 }
 
 static SerializedFile BuildTextAssetFile(string versionText, string name, string script, TypeTree? tree, byte[] tail)
@@ -628,7 +658,7 @@ static SerializedFile BuildNavMeshEditorFile()
 	return BuildFile("navmesh.unity", "2019.4.40f1", 194, null, payload.ToArray(), BuildTarget.NoTarget);
 }
 
-static SerializedFile BuildFile(string fileName, string versionText, int classId, TypeTree? tree, byte[] payload, BuildTarget platform = (BuildTarget)19)
+static SerializedFile BuildFile(string fileName, string versionText, int classId, TypeTree? tree, byte[] payload, BuildTarget platform = (BuildTarget)19, EndianType endianType = EndianType.LittleEndian)
 {
 	SerializedType type = new()
 	{
@@ -644,7 +674,7 @@ static SerializedFile BuildFile(string fileName, string versionText, int classId
 		Generation = FormatVersion.Unknown_10,
 		Version = UnityVersion.Parse(versionText),
 		Platform = platform,
-		EndianType = EndianType.LittleEndian,
+		EndianType = endianType,
 		HasTypeTree = false,
 		Types = { type },
 		Objects =
@@ -807,8 +837,25 @@ static void WriteString(List<byte> payload, string value)
 	}
 }
 
-static void WriteI32(List<byte> payload, int value) => payload.AddRange(BitConverter.GetBytes(value));
-static void WriteI64(List<byte> payload, long value) => payload.AddRange(BitConverter.GetBytes(value));
+static void WriteI32(List<byte> payload, int value, EndianType endianType = EndianType.LittleEndian)
+{
+	byte[] bytes = BitConverter.GetBytes(value);
+	if (BitConverter.IsLittleEndian != (endianType == EndianType.LittleEndian))
+	{
+		Array.Reverse(bytes);
+	}
+	payload.AddRange(bytes);
+}
+
+static void WriteI64(List<byte> payload, long value, EndianType endianType = EndianType.LittleEndian)
+{
+	byte[] bytes = BitConverter.GetBytes(value);
+	if (BitConverter.IsLittleEndian != (endianType == EndianType.LittleEndian))
+	{
+		Array.Reverse(bytes);
+	}
+	payload.AddRange(bytes);
+}
 
 // ---------------------------------------------------------------------------
 // Materialization dump
@@ -848,6 +895,9 @@ static void DumpMaterialization(StreamWriter rows, string name, FileBase file)
 				break;
 			case (int)ClassIDType.MonoScript:
 				rows.WriteLine($"SF_READ|{name}|SCRIPTNAME|{GetProperty(asset, "AssemblyName")}|{GetProperty(asset, "Namespace")}|{GetProperty(asset, "ExecutionOrder")}");
+				break;
+			case (int)ClassIDType.Texture2D:
+				DumpChineseTextureFields(rows, name, asset);
 				break;
 		}
 		if (asset is TypeTreeObject)
@@ -928,6 +978,12 @@ static void DumpMonoBehaviour(StreamWriter rows, string name, object asset)
 	{
 		rows.WriteLine($"SF_READ|{name}|SCRIPT|{GetProperty(script, "FileID")}:{GetProperty(script, "PathID")}");
 	}
+}
+
+static void DumpChineseTextureFields(StreamWriter rows, string name, object asset)
+{
+	object? guid = GetProperty(asset, "OriginalAssetGuid_C28");
+	rows.WriteLine($"SF_READ|{name}|CHINESE_TEXTURE|{GetProperty(asset, "OriginalWidth_C28")}|{GetProperty(asset, "OriginalHeight_C28")}|{GetProperty(guid, "Data_0_")},{GetProperty(guid, "Data_1_")},{GetProperty(guid, "Data_2_")},{GetProperty(guid, "Data_3_")}");
 }
 
 static string Describe(object? value)

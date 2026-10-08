@@ -15,7 +15,7 @@
 //! Rust tree has no parsed Unity-version model yet.
 //!
 //! The frozen `AssetFactory.CreateSerialized` class/version selection is now captured
-//! as offline data for 404 class IDs across 1,421 source query versions. Deliberately
+//! as offline data for 404 class IDs across 1,838 source query versions. Deliberately
 //! open: per-class generated serializers and generated-object materialization through
 //! the product `ObjectWorkspace`/export pipeline; `SerializableStructure` and live-
 //! assembly `UnloadedStructure` recovery for MonoBehaviours; and full fidelity for
@@ -636,12 +636,12 @@ pub fn monobehaviour_layout_mismatch_message(
     )
 }
 
-/// Byte offset of `m_OriginalWidth` (little-endian Int32) in the non-standard Chinese
+/// Byte offset of `m_OriginalWidth` (body-endian Int32) in the non-standard Chinese
 /// texture tail (`GameAssetFactory.ReadExtraTextureFields`).
 pub const CHINESE_TEXTURE_ORIGINAL_WIDTH_OFFSET: usize = 0;
-/// Byte offset of `m_OriginalHeight` (little-endian Int32) in the tail.
+/// Byte offset of `m_OriginalHeight` (body-endian Int32) in the tail.
 pub const CHINESE_TEXTURE_ORIGINAL_HEIGHT_OFFSET: usize = 4;
-/// Byte offset of `m_OriginalAssetGuid` (GUID release read, 16 bytes) in the tail.
+/// Byte offset of `m_OriginalAssetGuid` (body-endian GUID release read, 16 bytes) in the tail.
 pub const CHINESE_TEXTURE_ORIGINAL_GUID_OFFSET: usize = 8;
 /// Byte size of the GUID release read: 8 + 16 fills the 24-byte tail exactly, so the
 /// trailing `data[0..3]` lines in the source comments describe reserved slots the
@@ -1521,7 +1521,10 @@ fn try_read_normal_object(
                 }),
                 ObjectTailOutcome::ChineseTextureFields => {
                     let name = named_field_of(&payload.root).unwrap_or_default().to_owned();
-                    let chinese = parse_chinese_texture_fields(&payload.trailing_bytes);
+                    let chinese = parse_chinese_texture_fields(
+                        &payload.trailing_bytes,
+                        file.metadata.prefix.body_endian,
+                    );
                     Ok(NormalAttempt {
                         payload: Some(payload),
                         tail: Some(tail),
@@ -1569,31 +1572,28 @@ fn try_read_normal_object(
 /// The class id of `Texture2D`, which may carry the 24-byte Chinese tail.
 const TEXTURE2D_CLASS_ID: i32 = 28;
 
-fn parse_chinese_texture_fields(trailing: &[u8]) -> Option<ChineseTextureFields> {
+fn parse_chinese_texture_fields(trailing: &[u8], endian: Endian) -> Option<ChineseTextureFields> {
     if trailing.len() != CHINESE_TEXTURE_EXTRA_BYTES {
         return None;
     }
-    let word = |offset: usize| -> i32 {
-        i32::from_le_bytes([
-            trailing[offset],
-            trailing[offset + 1],
-            trailing[offset + 2],
-            trailing[offset + 3],
-        ])
+    let read_u32 = |offset: usize| -> Option<u32> {
+        let end = offset.checked_add(4)?;
+        let bytes: [u8; 4] = trailing.get(offset..end)?.try_into().ok()?;
+        Some(match endian {
+            Endian::Little => u32::from_le_bytes(bytes),
+            Endian::Big => u32::from_be_bytes(bytes),
+        })
     };
+    let original_width = read_u32(CHINESE_TEXTURE_ORIGINAL_WIDTH_OFFSET)? as i32;
+    let original_height = read_u32(CHINESE_TEXTURE_ORIGINAL_HEIGHT_OFFSET)? as i32;
     let mut guid = [0u32; 4];
     for (index, slot) in guid.iter_mut().enumerate() {
         let offset = CHINESE_TEXTURE_ORIGINAL_GUID_OFFSET + index * 4;
-        *slot = u32::from_le_bytes([
-            trailing[offset],
-            trailing[offset + 1],
-            trailing[offset + 2],
-            trailing[offset + 3],
-        ]);
+        *slot = read_u32(offset)?;
     }
     Some(ChineseTextureFields {
-        original_width: word(CHINESE_TEXTURE_ORIGINAL_WIDTH_OFFSET),
-        original_height: word(CHINESE_TEXTURE_ORIGINAL_HEIGHT_OFFSET),
+        original_width,
+        original_height,
         original_asset_guid: guid,
     })
 }
@@ -3169,6 +3169,37 @@ mod tests {
                 assert_eq!(payload.consumed_bytes, 15);
                 assert!(payload.trailing_bytes.is_empty());
             }
+            "texture_chinese_tail_le" | "texture_chinese_tail_be" => {
+                let expected = ChineseTextureFields {
+                    original_width: 2048,
+                    original_height: 1024,
+                    original_asset_guid: [0x1122_3344, 0x5566_7788, 0x90AB_CDEF, 0x0123_4567],
+                };
+                assert_eq!(asset.class_id, TEXTURE2D_CLASS_ID);
+                assert_eq!(asset.name, "Logo");
+                assert_eq!(asset.tail, Some(ObjectTailOutcome::ChineseTextureFields));
+                assert_eq!(asset.chinese_texture_fields, Some(expected));
+                assert_eq!(asset.log_level, FactoryLogLevel::Warning);
+                assert_eq!(
+                    row_value(case, "CHINESE_TEXTURE|"),
+                    Some("2048|1024|287454020,1432778632,2427178479,19088743")
+                );
+                assert_eq!(
+                    asset.payload.as_ref().unwrap().trailing_bytes.len(),
+                    CHINESE_TEXTURE_EXTRA_BYTES
+                );
+
+                let workspace_asset = materialize_object_for_workspace(
+                    &file,
+                    &facts,
+                    layouts,
+                    0,
+                    &ObjectDecodeLimits::default(),
+                )
+                .unwrap();
+                assert_eq!(workspace_asset.state.chinese_texture_fields, Some(expected));
+                assert!(workspace_asset.is_fully_materialized());
+            }
             other => panic!("unexpected case {other}"),
         }
     }
@@ -3180,7 +3211,7 @@ mod tests {
         let fixture = include_str!("asset_factory_fixture.txt");
         let layouts = reference_class_layouts();
         let cases = fixture_cases(fixture);
-        assert_eq!(cases.len(), 13, "all probe cases are replayed");
+        assert_eq!(cases.len(), 15, "all probe cases are replayed");
         for case in &cases {
             assert_case(case, layouts);
         }
