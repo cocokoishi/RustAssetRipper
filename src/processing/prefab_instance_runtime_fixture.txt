@@ -1,0 +1,17 @@
+# Isolated AssetRipper SceneDefinitionProcessor + PrefabProcessor output.
+# Input: Rust synthetic generation-10 SerializedFile, Unity 2019.4.40f1, BuildTarget.NoTarget,
+# passed under a .unity logical path so AssetRipper selects the Editor TypeTree layout.
+# Input SHA-256: AFF86571CB3C94DDB2130F2B718BB5DC9F286A0971531D247535E504928E984D
+# Probe: tools/probes/scene-processor/Program.cs `process` mode; isolated ar-ref build.
+FILE|1|version=2019.4.40f1
+COLL|0|Generated Settings|1|scene=False
+ASSET|0|1|159|EditorSettings_2019_4_40
+COLL|1|prefab-instance-2019.4.unity|3|scene=False
+ASSET|1|10|1|GameObject_2018_3
+ASSET|1|11|4|Transform_2018_3
+ASSET|1|12|1001|PrefabInstance_2018_3
+COLL|2|Prefab Hierarchies|1|scene=False
+ASSET|2|1|1001|PrefabHierarchyObject
+COLL|3|Generated Prefabs|0|scene=False
+COLL|4|Missing Prefab Transforms|0|scene=False
+PREFAB-HIER|root=10:Root|prefab=12|gameObjects=GameObject_2018_3#10:Root|components=Transform_2018_3#11:null|prefabInstances=|exportable=GameObject_2018_3#10:Root,Transform_2018_3#11:null|hidden=PrefabInstance_2018_3#12:null

@@ -12,6 +12,7 @@ using AssetRipper.Assets;
 using AssetRipper.Assets.Bundles;
 using AssetRipper.Assets.Collections;
 using AssetRipper.Import.AssetCreation;
+using AssetRipper.Import.Logging;
 using AssetRipper.Import.Structure.Assembly.Managers;
 using AssetRipper.Import.Structure.Assembly.TypeTrees;
 using AssetRipper.IO.Files;
@@ -111,6 +112,7 @@ static void DumpNodes(TypeTreeNodeStruct node, int level)
 
 static void Process(string rowsPath, string[] paths)
 {
+	Logger.Add(new ConsoleLogger());
 	GameAssetFactory factory = new GameAssetFactory(new BaseManager(s => { }));
 	GameBundle bundle = new();
 	SerializedBundle serializedBundle = new();
@@ -147,6 +149,10 @@ static void Process(string rowsPath, string[] paths)
 	}
 	foreach (IUnityObjectBase asset in bundle.FetchAssets())
 	{
+		if (asset is PrefabHierarchyObject prefabHierarchy)
+		{
+			rows.WriteLine($"PREFAB-HIER|root={prefabHierarchy.Root.PathID}:{prefabHierarchy.Root.Name}|prefab={prefabHierarchy.Prefab.PathID}|gameObjects={FormatAssets(prefabHierarchy.GameObjects)}|components={FormatAssets(prefabHierarchy.Components)}|prefabInstances={FormatAssets(prefabHierarchy.PrefabInstances)}|exportable={FormatAssets(prefabHierarchy.ExportableAssets)}|hidden={FormatAssets(prefabHierarchy.HiddenAssets)}");
+		}
 		if (asset is IAssetBundle assetBundle)
 		{
 			rows.WriteLine($"BUNDLE-COMPUTED|{assetBundle.GetAssetBundleName()}");

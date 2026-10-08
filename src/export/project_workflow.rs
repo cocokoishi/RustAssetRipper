@@ -1795,7 +1795,8 @@ mod tests {
     use crate::export::settings::ExportDefaults;
     use crate::export::settings_file::ExportSettingsFile;
     use crate::export::workspace_yaml::tests::{
-        load_workspace_bytes, make_game_object_without_transform_file,
+        load_workspace_bytes, make_existing_prefab_instance_file,
+        make_game_object_without_transform_file,
     };
     use crate::io::platform_structure::PlatformResourceProvider;
     use crate::processing::scene_naming::SceneUnityVersion;
@@ -1850,11 +1851,14 @@ mod tests {
             ObjectWorkspaceLimits::default(),
         )
         .unwrap();
-        assert!(objects.report().is_complete());
+        assert!(objects.report().is_complete(), "{:?}", objects.report());
         let reference_graph = workspace
             .reference_graph(MultiFileReferenceGraphLimits::default())
             .unwrap();
-        assert!(reference_graph.is_complete());
+        assert!(
+            reference_graph.is_complete(),
+            "reference graph is incomplete"
+        );
         let root_catalog = RootResourceFileCatalog::default();
         let provider = PlatformResourceProvider::new(None, None);
         let settings = ExportSettingsFile::from(ExportDefaults::default());
@@ -1904,6 +1908,89 @@ mod tests {
         assert_eq!(report.meta_file_count, 1);
         assert_eq!(report.collection_count, 1);
         assert_eq!(report.exported_object_count, 2);
+
+        std::fs::remove_dir_all(output_root).unwrap();
+    }
+
+    #[test]
+    fn project_export_routes_an_existing_modern_prefab_instance_collection() {
+        let bytes = make_existing_prefab_instance_file();
+        if let Ok(path) = std::env::var("ASSET_RIPPER_REFERENCE_PREFAB_FIXTURE") {
+            std::fs::write(path, &bytes).unwrap();
+        }
+        let (filesystem, workspace) = load_workspace_bytes(&bytes);
+        let objects = ObjectWorkspace::load_from_vfs(
+            &filesystem,
+            &workspace,
+            ObjectWorkspaceLimits::default(),
+        )
+        .unwrap();
+        assert!(
+            objects
+                .objects()
+                .iter()
+                .all(|object| object.payload.is_ok()),
+            "undecoded Prefab fixture objects: {:?}",
+            objects
+                .objects()
+                .iter()
+                .filter_map(|object| object.payload.as_ref().err())
+                .collect::<Vec<_>>()
+        );
+        assert!(objects.report().is_complete(), "{:?}", objects.report());
+        let reference_graph = workspace
+            .reference_graph(MultiFileReferenceGraphLimits::default())
+            .unwrap();
+        assert!(
+            reference_graph.is_complete(),
+            "reference graph is incomplete"
+        );
+        let root_catalog = RootResourceFileCatalog::default();
+        let provider = PlatformResourceProvider::new(None, None);
+        let settings = ExportSettingsFile::from(ExportDefaults::default());
+        let output_root = crate::test_support::unique_test_directory("project-existing-prefab-e2e");
+
+        let report = export_workspace_yaml_project_with_settings(
+            &output_root,
+            false,
+            &filesystem,
+            &root_catalog,
+            &provider,
+            &workspace,
+            &objects,
+            &reference_graph,
+            &settings,
+            WorkspaceProjectExportLimits::default(),
+        )
+        .unwrap();
+
+        let prefab_path = output_root.join("Assets/PrefabInstance/Root.prefab");
+        let prefab_meta_path = output_root.join("Assets/PrefabInstance/Root.prefab.meta");
+        let prefab_yaml = std::fs::read_to_string(&prefab_path).unwrap();
+        let prefab_meta = std::fs::read_to_string(&prefab_meta_path).unwrap();
+        let game_object_id = yaml_document_file_id(&prefab_yaml, 1);
+        let transform_id = yaml_document_file_id(&prefab_yaml, 4);
+        assert!(prefab_yaml.contains("m_Name: Root"), "{prefab_yaml}");
+        assert!(
+            prefab_yaml.contains(&format!("component: {{fileID: {transform_id}}}")),
+            "{prefab_yaml}"
+        );
+        assert!(
+            prefab_yaml.contains(&format!("m_GameObject: {{fileID: {game_object_id}}}")),
+            "{prefab_yaml}"
+        );
+        assert!(!prefab_yaml.contains("!u!1001"), "{prefab_yaml}");
+        assert!(prefab_meta.contains("PrefabImporter:"), "{prefab_meta}");
+        assert_eq!(report.asset_file_count, 1);
+        assert_eq!(report.meta_file_count, 1);
+        assert_eq!(report.collection_count, 1);
+        assert_eq!(report.exported_object_count, 2);
+        assert!(report.processing_warnings.is_empty());
+
+        let source_rows = include_str!("../processing/prefab_instance_runtime_fixture.txt");
+        assert!(source_rows.lines().any(|line| {
+            line == "PREFAB-HIER|root=10:Root|prefab=12|gameObjects=GameObject_2018_3#10:Root|components=Transform_2018_3#11:null|prefabInstances=|exportable=GameObject_2018_3#10:Root,Transform_2018_3#11:null|hidden=PrefabInstance_2018_3#12:null"
+        }));
 
         std::fs::remove_dir_all(output_root).unwrap();
     }
