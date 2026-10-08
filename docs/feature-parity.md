@@ -497,8 +497,9 @@ The integrated regressions are object_workspace_recovers_source_generated_textas
 - Header-indexed parity report: 380 total rows; 334 recognized statuses (310 verified, 12 implemented but unverified, 7 in progress, 4 investigated, 1 externally blocked); 24 recognized non-verified rows. The report exits 1 because 46 rows still have malformed 10-cell shapes, so the full ledger gate remains untrustworthy and open.
 - Phase 1 remains incomplete and Phase 2 remains locked. No user AssetBundle or UABEA content was accessed. Unity Editor import/runtime remains unrun.
 
-## Texture2D tail endian differential checkpoint (2026-10-08)
+## Source-factory branch differential checkpoint (2026-10-08)
 
 - `SER-ASSET-FACTORY-TEXTURE-TAIL-ENDIAN-001` is verified for the synthetic Unity 2019.4.40f1 24-byte Texture2D extra-tail branch. Source runtime and Rust agree on warning text, dimensions, and GUID words for both little- and big-endian SerializedFile bodies. The Rust decoder now uses the file body endian; evidence is recorded under `DIFF-SER-FACTORY-TEXTURE-TAIL-ENDIAN-001`.
+- `SER-ASSET-FACTORY-ENGINE-SHADER-001` is verified for the synthetic Unity 2019.4.40f1 failed-Shader-read path in all four exact default-resource/builtin-extra collection aliases. Source runtime and Rust agree on generated class/type, Info message, malformed tail classification, and incomplete workspace state. Evidence is recorded under `DIFF-SER-FACTORY-ENGINE-SHADER-001`.
 - Header-indexed parity report: 382 total rows; 336 recognized statuses (312 verified, 12 implemented but unverified, 7 in progress, 4 investigated, 1 externally blocked); 24 recognized non-verified rows. There are no duplicate IDs and 46 malformed 10-cell rows remain, so the report exits 1 and the Phase 1 gate stays open.
 - Broad `SER-ASSET-FACTORY-001`, `SER-TT-ABSENT-001`, and `RES-TEXTURE-001` remain open. Phase 2 remains locked; no user AssetBundle or UABEA contents were accessed, and Unity Editor import/runtime remains unrun.
