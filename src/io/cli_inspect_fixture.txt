@@ -1,3 +1,6 @@
 # AssetRipper ExportHandler.LoadAndProcess over an empty directory (probe tools/probes/cli-inspect).
 # The empty GameBundle is returned and the processor sequence is not requested.
 EMPTY_DIRECTORY|collections=0|processors_requested=0
+# AssetRipper ExportHandler.LoadAndProcess over a Windows platform root plus a selected mixed directory.
+# Both source collection names survive and the processor sequence is requested once.
+PLATFORM_MIXED|input_names=globalgamemanagers,main.assets|processors_requested=1

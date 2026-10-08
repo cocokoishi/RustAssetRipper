@@ -2403,20 +2403,30 @@ fn inspect_directories_to<W: io::Write>(
         PlatformStructureLimits::default(),
     )?;
     if let Some(structure) = structure {
+        let mixed = MixedGameStructure::from_vfs_paths_with_consumed_paths(
+            &filesystem,
+            &selected_paths,
+            &structure.consumed_paths,
+            MixedGameStructureLimits::default(),
+        )?;
         let inventory = structure.collect_game_files(
             &filesystem,
             PlatformFileInventoryOptions::default(),
             PlatformFileInventoryLimits::default(),
         )?;
-        let loaded = structure.load_primary_serialized_workspace(
+        let loaded = structure.load_primary_serialized_workspace_with_additional_inputs(
             &mut filesystem,
             PlatformWorkspaceLoadOptions::default(),
+            &mixed.serialized_file_inputs,
+            &mixed.registered_files,
+            &mixed.data_paths,
         )?;
         writeln!(
             output,
-            "platform: {:?}; source registrations: {}; scripting backend: {:?}; assemblies: {}; initial containers: {}",
+            "platform: {:?}; source registrations: {}; mixed registrations: {}; scripting backend: {:?}; assemblies: {}; initial containers: {}",
             structure.platform,
             inventory.registered_files.len(),
+            mixed.registered_files.len(),
             inventory.scripting_backend,
             inventory.assemblies.len(),
             loaded.initial_container_expansions.len()
@@ -2429,7 +2439,10 @@ fn inspect_directories_to<W: io::Write>(
         let root_catalog = RootResourceFileCatalog::default();
         let resource_context = StreamedResourceSummaryContext {
             root_catalog: &root_catalog,
-            provider: PlatformResourceProvider::new(Some(&structure), None),
+            provider: PlatformResourceProvider::with_mixed_data_paths(
+                Some(&structure),
+                Some(&mixed.data_paths),
+            ),
         };
         print_workspace_summary_with_streamed_resources_to(
             output,
@@ -9635,6 +9648,90 @@ mod tests {
             }
         );
         super::inspect_directories(std::slice::from_ref(&input.directory)).unwrap();
+    }
+
+    #[test]
+    fn platform_directory_inspection_unions_mixed_inputs_and_resolves_their_references() {
+        let platform_input = TestInputDirectory::new_windows_platform();
+        let mixed_input = TestInputDirectory::new();
+        let primary_path = platform_input
+            .files
+            .iter()
+            .find(|path| {
+                path.file_name()
+                    .is_some_and(|name| name == "globalgamemanagers")
+            })
+            .expect("synthetic platform input has globalgamemanagers");
+        fs::write(
+            primary_path,
+            make_generation_10_file_with_externals(&["main.assets"]),
+        )
+        .unwrap();
+
+        let selected_directories = [
+            platform_input.directory.clone(),
+            mixed_input.directory.clone(),
+        ];
+        let (mut filesystem, selected_paths, _) =
+            super::mount_input_directories(&selected_directories, true).unwrap();
+        let platform = detect_platform_structure(
+            &filesystem,
+            &selected_paths,
+            PlatformStructureLimits::default(),
+        )
+        .unwrap()
+        .expect("the first selected directory is a Windows platform root");
+        let mixed = super::MixedGameStructure::from_vfs_paths_with_consumed_paths(
+            &filesystem,
+            &selected_paths,
+            &platform.consumed_paths,
+            super::MixedGameStructureLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(mixed.serialized_file_inputs.len(), 1);
+
+        let loaded = platform
+            .load_primary_serialized_workspace_with_additional_inputs(
+                &mut filesystem,
+                PlatformWorkspaceLoadOptions::default(),
+                &mixed.serialized_file_inputs,
+                &mixed.registered_files,
+                &mixed.data_paths,
+            )
+            .unwrap();
+        assert_eq!(loaded.workspace.files().len(), 3);
+        let main_assets_request = loaded
+            .dependencies
+            .requests
+            .iter()
+            .find(|request| request.dependency_name == "main.assets")
+            .expect("platform external table requests the mixed SerializedFile");
+        let main_assets_index = match main_assets_request.outcome {
+            SerializedFileDependencyOutcome::AlreadyLoaded { file_index } => file_index,
+            ref outcome => {
+                panic!("mixed SerializedFile was not resolved in the common workspace: {outcome:?}")
+            }
+        };
+        assert_eq!(
+            loaded.workspace.files()[main_assets_index].file_name,
+            "main.assets"
+        );
+
+        let mut output = Vec::new();
+        super::inspect_directories_to(&selected_directories, &mut output).unwrap();
+        let summary = String::from_utf8(output).unwrap();
+        assert!(summary.contains("mixed registrations: 1"), "{summary}");
+        assert!(summary.contains("SerializedFiles: 3"), "{summary}");
+        assert!(summary.contains("external requests: 1"), "{summary}");
+        assert!(summary.contains("resolved: true"), "{summary}");
+        let source_row = include_str!("io/cli_inspect_fixture.txt")
+            .lines()
+            .find(|line| line.starts_with("PLATFORM_MIXED|"))
+            .expect("source runtime fixture contains the platform/mixed result");
+        assert_eq!(
+            source_row,
+            "PLATFORM_MIXED|input_names=globalgamemanagers,main.assets|processors_requested=1"
+        );
     }
 
     fn os_args(words: &[&str]) -> Vec<std::ffi::OsString> {

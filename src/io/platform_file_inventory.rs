@@ -207,6 +207,27 @@ impl PlatformStructure {
         filesystem: &mut VirtualFileSystem,
         options: PlatformWorkspaceLoadOptions,
     ) -> Result<PlatformWorkspaceLoadResult, PlatformWorkspaceLoadError> {
+        self.load_primary_serialized_workspace_with_additional_inputs(
+            filesystem,
+            options,
+            &[],
+            &[],
+            &[],
+        )
+    }
+
+    /// Load the platform files and additional mixed-input files into one workspace.
+    ///
+    /// Keeping both source structures in the same workspace is necessary for cross-file
+    /// external references to resolve with the original file identity and scope.
+    pub fn load_primary_serialized_workspace_with_additional_inputs(
+        &self,
+        filesystem: &mut VirtualFileSystem,
+        options: PlatformWorkspaceLoadOptions,
+        additional_inputs: &[DependencyFilePath],
+        additional_registered_files: &[DependencyFilePath],
+        additional_data_paths: &[String],
+    ) -> Result<PlatformWorkspaceLoadResult, PlatformWorkspaceLoadError> {
         let file_inventory = self
             .collect_game_files(
                 filesystem,
@@ -219,18 +240,58 @@ impl PlatformStructure {
                 ))
             })?;
         let imported = import_initial_platform_files(filesystem, &file_inventory, options)?;
-        if imported.inputs.is_empty() {
+        let mut inputs = imported
+            .inputs
+            .into_iter()
+            .map(|entry| (entry.file_name, entry.virtual_path))
+            .collect::<BTreeSet<_>>();
+        inputs.extend(
+            additional_inputs
+                .iter()
+                .map(|entry| (entry.file_name.clone(), entry.virtual_path.clone())),
+        );
+        let inputs = inputs
+            .into_iter()
+            .map(|(file_name, virtual_path)| DependencyFilePath {
+                file_name,
+                virtual_path,
+            })
+            .collect::<Vec<_>>();
+        if inputs.is_empty() {
             return Err(PlatformWorkspaceLoadError::new(
                 PlatformWorkspaceLoadErrorKind::NoSerializedFileInputs,
             ));
         }
+        let mut registered_files = imported
+            .registered_files
+            .iter()
+            .map(|entry| (entry.file_name.clone(), entry.virtual_path.clone()))
+            .collect::<BTreeSet<_>>();
+        registered_files.extend(
+            additional_registered_files
+                .iter()
+                .map(|entry| (entry.file_name.clone(), entry.virtual_path.clone())),
+        );
+        let registered_files = registered_files
+            .into_iter()
+            .map(|(file_name, virtual_path)| DependencyFilePath {
+                file_name,
+                virtual_path,
+            })
+            .collect::<Vec<_>>();
+        let mut data_paths = self.data_paths.clone();
+        for data_path in additional_data_paths {
+            if !data_paths.contains(data_path) {
+                data_paths.push(data_path.clone());
+            }
+        }
         let (workspace, dependencies) =
             SerializedFileWorkspace::load_from_vfs_with_preexpanded_containers(
                 filesystem,
-                &imported.inputs,
-                &imported.registered_files,
+                &inputs,
+                &registered_files,
                 SerializedFileDependencyLoadOptions {
-                    data_paths: &self.data_paths,
+                    data_paths: &data_paths,
                     limits: imported.workspace_limits,
                     index_limits: options.dependency_index_limits,
                     container_limits: options.container_mount_limits,
