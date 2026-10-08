@@ -590,7 +590,6 @@ fn is_windows_device_name(component: &str) -> bool {
 mod tests {
     use std::fs;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::{meta_sidecar_file_name, write_unity_meta_sidecar};
     use super::{
@@ -605,13 +604,7 @@ mod tests {
 
     impl TestOutputRoot {
         fn new() -> Self {
-            static NEXT_ID: AtomicU64 = AtomicU64::new(0);
-            let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!(
-                "assetripper-meta-output-{}-{id}",
-                std::process::id()
-            ));
-            fs::create_dir(&path).unwrap();
+            let path = crate::test_support::unique_test_directory("meta-output");
             Self(path)
         }
 

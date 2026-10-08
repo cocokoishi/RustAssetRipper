@@ -1,2 +1,7 @@
 /target/
 *.rs.bk
+
+# .NET build outputs of the isolated reference probes (never committed; the
+# reference AssetRipper tree itself is read-only and frozen by docs/baseline-files.sha256)
+tools/probes/**/bin/
+tools/probes/**/obj/

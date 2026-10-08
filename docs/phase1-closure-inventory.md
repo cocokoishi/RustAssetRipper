@@ -1,20 +1,20 @@
 # Phase 1 closure inventory
 
-Current inventory basis: local `main` and fetched `origin/main` are both `a63437d501c721c24948eff66b3b982dd7a052e4` (tree `e4358b42aa1344751059e267d0f0f67d37916851`), pushed and verified. This commit contains the nested-registry implementation, initial workspace YAML export, multi-file path differential, and Windows local-file sharing fix recorded below. The working tree may retain untracked probe `bin`/`obj` build outputs; they were not committed. Reference source: `C:\Users\koishi\Desktop\RustAssetripper\AssetRipper`, frozen by `docs/baseline-files.sha256` (1,449 entries; manifest SHA-256 `29d1fd27f66b974c43750f30aa99117eb423cb318f3062daf05e1489f10f08f9`).
+Current inventory basis: the code commit preceding this docs checkpoint is `6accb9aae57825a4845ab18b52707d2f1dc12624` (tree `aff76701039c4d052b1355a55b06816ac2a29318`), whose parent `5dc5701f2b3ff94b4fc9a15d7e8ef9b45c9002a0` (tree `2557a9d32026ec4a1a323ac02fd002ec04e0ffcf`) is pushed to `origin/main`; this checkpoint adds the sandbox-safe test temporary root and the corrected verification state below. The working tree may retain untracked probe `bin`/`obj` build outputs under `tools/probes`; they were not committed. Reference source: `C:\Users\koishi\Desktop\RustAssetripper\AssetRipper`, frozen by `docs/baseline-files.sha256` (1,449 entries; manifest SHA-256 `29d1fd27f66b974c43750f30aa99117eb423cb318f3062daf05e1489f10f08f9`).
 
 The status counts below come from the `Status` cell in each stable-ID row of `docs/feature-parity.md`, matched against the required status vocabulary; prose mentions elsewhere do not affect the count.
 
 | Ledger status | Rows |
 |---|---:|
-| `已验证` | 345 |
-| `已实现但未验证` | 15 |
+| `已验证` | 346 |
+| `已实现但未验证` | 14 |
 | `实现中` | 13 |
 | `已调查` | 4 |
 | `未调查` | 0 |
 | `受外部条件阻塞` | 0 |
-| **Open rows** | **32** |
+| **Open rows** | **31** |
 
-All 32 queued rows currently block the Phase 1 gate: each maps to baseline shipping behavior, and no exact verified disposition removes it from the product scope. `TYPE-SCRIPT-001` still needs a source-backed runtime-versus-tooling disposition. Unity-only evidence is a real gap where listed; it is not counted as passed. The inventory is the Phase 1 work queue and should be refreshed only after closing a complete behavior or finding a new source-backed disposition.
+All 31 queued rows currently block the Phase 1 gate: each maps to baseline shipping behavior, and no exact verified disposition removes it from the product scope. `TYPE-SCRIPT-001` still needs a source-backed runtime-versus-tooling disposition. Unity-only evidence is a real gap where listed; it is not counted as passed. The inventory is the Phase 1 work queue and should be refreshed only after closing a complete behavior or finding a new source-backed disposition.
 
 ## Closed behavior units
 
@@ -27,6 +27,7 @@ All 32 queued rows currently block the Phase 1 gate: each maps to baseline shipp
 | `PROC-SCENE-INSPECT-001` | A GameObject-rich CLI end-to-end fixture inspects a manager plus cross-file GameObject/Transform pairs (external father, dangling local reference) and pins graph counts, PPtr resolution outcomes, root candidates, hierarchy diagnostics, indeterminate `GetRoot` reasons, SceneDefinition attachment, and the dependency report. Root ordering stays covered by the ported `calculate_root_order` plus fixture. See the regression test named in `docs/feature-parity.md`. |
 | `RES-SHADER-PARSED-001` | The exporter stack (decompiled text wins under every mode, `Decompile` falls to dummy), the four-template catalog with its requirement sets, the `PropertyType` numbers, and the subset-match/earliest-winner selection are source-audited and mirrored; the vendored template bodies are hash-identical to the source resources. The `export-shader` CLI covers all four modes end to end. Importer creation stays with the project-export rows; a Unity-produced export stays Phase 2 work. See `DIFF-SHADER-PARSED-001` and the tests named in `docs/feature-parity.md`. |
 | `PROC-SCENE-BUILDSETTINGS-001` | Real class-141 TPK layouts (4.7.2f1 through 6000.0.23f1: string vectors, `m_Levels` before 5.2, `m_Scenes` after, `AlignBytes` on the last pre-string `bool`) back the decoder; full-layout 2019.4 and 5.0 fixtures are reference-materialized as real generated objects with agreeing paths, versions, GUID words, and flags, and every probe row is replayed through production decoding. Collection/editor-settings object materialization stays with the factory rows; a Unity-produced file stays Phase 2 work. See `DIFF-BUILDSETTINGS-REAL-LAYOUT-001` and the tests named in `docs/feature-parity.md`. |
+| `EXP-META-PIPELINE-001` | The asset-plus-`{file}.meta` pipeline is verified: 14/14 module tests pin the failed-export skip, success contents, add-only refusals, the zero-GUID source-order edge, the subdirectory-before-failure order, and the throwing-exporter partial-asset path; the `decide_asset_collection_export` kernel and `meta_sidecar_file_name` atom are wired into production. The `export-project` CLI path now calls `export_asset_with_meta` per object with a fresh caller-minted nonzero GUID and writes `{file}.asset` before `{file}.asset.meta`, asserted end to end by `export_project_writes_a_cross_file_yaml_workspace`. The export-root guard (`prepare_export_root`) guarantees an empty destination, so the add-only refusal cannot collide with the source overwrite; folder sidecars are dead in the source (no `isFolder:true` caller). Per-class collection layout remains `EXPORT-UNITY-001`. See `DIFF-EXPORT-ROOT-GUARD-001` and the tests named in `docs/feature-parity.md`. |
 
 ## Dependency order
 
@@ -105,8 +106,7 @@ The row-level work units below are the smallest complete closures justified by d
 ## Current verification state
 
 - `cargo fmt --all -- --check` passes.
-- The focused resolver suite passes 12/12. Its fixture assertions cover 39 actual `ToAttributeName` cases, 14 manufactured-name results, and 2 marker-hash results; the generated component tables contain 2,551 entries.
-- Full workspace tests pass: 1,409 library tests and 68 CLI tests; there are 0 doc tests. Warnings-denied all-target/all-feature Clippy passes.
-- `tools/verify-baseline.ps1` exits 1 because of 188 unlisted build-output files created by the earlier source probe; the previous read-only checksum pass found all 1,449 manifest-listed reference files unchanged. Cleanup remains blocked by automatic review, so the verifier is not passed. `git diff --check` passes after the current documentation edits.
-- This evidence validates the local kernel and source-derived vectors. It does not close the row because no production `AnimationClipConverter` caller constructs the scene facts or routes real clip bindings through the resolver.
+- Full workspace tests pass: 1,432 library tests, 72 CLI tests, and 0 doc tests (`cargo test --workspace --locked`, exit 0). Warnings-denied all-target Clippy passes. The two extra library tests are the new `src/test_support.rs` guard tests described in `docs/validation-log.md`.
+- `tools/verify-baseline.ps1` exits 0 with `Verified 1449 baseline files; no missing, changed, or unlisted files.` The 188 unlisted probe build outputs recorded by earlier rounds are gone; the reference tree now contains exactly the 1,449 manifest-listed files. `git diff --check` passes.
+- This evidence validates the local kernel and source-derived vectors. It does not close `PROC-ANIM-CUSTOM-CURVE-001`: the resolver is exercised with caller-supplied scene facts until a production `AnimationClipConverter` caller constructs them for real clip conversion.
 - No user AssetBundle content or UABEA content has been read. Phase 2 remains locked.

@@ -579,18 +579,12 @@ mod tests {
         split_group_representative, split_logical_path, DirectoryDiscoveryErrorKind,
     };
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     struct TestDiscoveryRoot(PathBuf);
 
     impl TestDiscoveryRoot {
         fn new() -> Self {
-            static NEXT_ID: AtomicU64 = AtomicU64::new(0);
-            let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir()
-                .join(format!("assetripper-discovery-{}-{id}", std::process::id()));
-            std::fs::create_dir(&path).unwrap();
-            Self(path)
+            Self(crate::test_support::unique_test_directory("discovery"))
         }
 
         fn path(&self) -> &Path {

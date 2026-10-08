@@ -436,8 +436,17 @@ impl SmartStream {
     }
 
     pub fn create_temp() -> io::Result<Self> {
+        Self::create_temp_in(&std::env::temp_dir())
+    }
+
+    /// Create a temporary smart stream in `directory`.
+    ///
+    /// The reference implementation only offers `CreateTemp()` against
+    /// `Path.GetTempPath()`; the directory-parameterized form exists so callers (and tests)
+    /// that already own a writable scratch directory do not depend on the process-wide
+    /// temporary directory being writable.
+    pub fn create_temp_in(directory: &Path) -> io::Result<Self> {
         static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
-        let directory = std::env::temp_dir();
         for _ in 0..128 {
             let id = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
             let path = directory.join(format!("assetripper-{}-{id}.tmp", std::process::id()));
@@ -1909,7 +1918,7 @@ mod tests {
         memory.set_len(0).unwrap();
         assert_eq!(memory.position().unwrap(), 0);
 
-        let mut file = SmartStream::create_temp().unwrap();
+        let mut file = SmartStream::create_temp_in(crate::test_support::test_temp_root()).unwrap();
         file.write_all(b"abcdef").unwrap();
         file.seek(SeekFrom::Start(5)).unwrap();
         file.set_len(3).unwrap();
@@ -1964,7 +1973,7 @@ mod tests {
 
     #[test]
     fn temporary_smart_stream_is_removed_after_its_last_reference() {
-        let mut owner = SmartStream::create_temp().unwrap();
+        let mut owner = SmartStream::create_temp_in(crate::test_support::test_temp_root()).unwrap();
         let path = {
             let inner = owner.inner.as_ref().unwrap();
             let backend = inner.backend.lock().unwrap();
@@ -2062,7 +2071,7 @@ mod tests {
         {
             let dump = reads.get("S2").expect("S2 dump");
             assert!(dump.contains("LEN=32"), "S2 {dump}");
-            let mut s = SmartStream::create_temp().unwrap();
+            let mut s = SmartStream::create_temp_in(crate::test_support::test_temp_root()).unwrap();
             s.write_all(&seq(32)).unwrap();
             s.seek(SeekFrom::Start(0)).unwrap();
             assert_eq!(s.length().unwrap(), 32);

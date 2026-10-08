@@ -3151,15 +3151,9 @@ mod tests {
     use crate::io::filesystem::VirtualFileSystem;
     use std::io::{Cursor, Seek, SeekFrom};
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     fn unique_temp_file_path(extension: &str) -> PathBuf {
-        static NEXT_FILE_ID: AtomicU64 = AtomicU64::new(0);
-        let id = NEXT_FILE_ID.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
-            "assetripper-rust-mount-{}-{id}.{extension}",
-            std::process::id()
-        ))
+        crate::test_support::unique_test_path("mount", extension)
     }
 
     fn source_multifile_path_fields(prefix: &str) -> Vec<&'static str> {

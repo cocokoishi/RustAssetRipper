@@ -591,7 +591,6 @@ mod tests {
         };
         use std::cell::RefCell;
         use std::fs;
-        use std::sync::atomic::{AtomicU64, Ordering};
 
         struct FakeCollection {
             name: &'static str,
@@ -605,14 +604,7 @@ mod tests {
         struct TestRoot(std::path::PathBuf);
         impl TestRoot {
             fn new() -> Self {
-                static NEXT_ID: AtomicU64 = AtomicU64::new(0);
-                let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-                let path = std::env::temp_dir().join(format!(
-                    "assetripper-project-loop-{}-{id}",
-                    std::process::id()
-                ));
-                fs::create_dir(&path).unwrap();
-                Self(path)
+                Self(crate::test_support::unique_test_directory("project-loop"))
             }
         }
         impl Drop for TestRoot {
