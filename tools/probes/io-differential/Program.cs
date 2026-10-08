@@ -13,11 +13,13 @@
 // Usage: io-differential <output-path>
 
 using System.Reflection;
+using System.IO.Compression;
 using System.Text;
 using AssetRipper.IO.Files;
 using AssetRipper.IO.Files.BundleFiles;
 using AssetRipper.IO.Files.BundleFiles.FileStream;
 using AssetRipper.IO.Files.CompressedFiles;
+using AssetRipper.IO.Files.CompressedFiles.Brotli;
 using AssetRipper.IO.Files.CompressedFiles.GZip;
 using AssetRipper.IO.Files.ResourceFiles;
 using AssetRipper.IO.Files.SerializedFiles;
@@ -34,6 +36,15 @@ public static class Program
 
 	public static int Main(string[] args)
 	{
+		if (args.Length == 4 && args[0] == "--decode-lzma")
+		{
+			return DecodeLzma(args[1], args[2], args[3]);
+		}
+		if (args.Length == 4 && args[0] == "--decode-codec")
+		{
+			return DecodeCodec(args[1], args[2], args[3]);
+		}
+
 		string output = args.Length > 0 ? args[0] : "io_differential_fixture.txt";
 		WorkDirectory = Path.Combine(
 			Directory.GetCurrentDirectory(), "target", "io-scratch", "probe-" + Guid.NewGuid().ToString("N"));
@@ -67,6 +78,74 @@ public static class Program
 		File.WriteAllLines(output, Lines);
 		Console.WriteLine($"wrote {Lines.Count} lines to {output}");
 		return 0;
+	}
+
+	private static int DecodeLzma(string mode, string path, string expectedSizeText)
+	{
+		try
+		{
+			byte[] inputBytes = File.ReadAllBytes(path);
+			using MemoryStream input = new(inputBytes, writable: false);
+			using MemoryStream output = new();
+			if (mode == "raw")
+			{
+				long expectedSize = long.Parse(expectedSizeText);
+				LzmaCompression.DecompressLzmaStream(input, input.Length, output, expectedSize);
+			}
+			else if (mode == "sized")
+			{
+				LzmaCompression.DecompressLzmaSizeStream(input, input.Length, output);
+			}
+			else
+			{
+				throw new ArgumentException($"unknown LZMA mode: {mode}");
+			}
+			Console.WriteLine($"LZMA_DECODE|{mode}|out={Convert.ToHexString(output.ToArray())}");
+			return 0;
+		}
+		catch (Exception error)
+		{
+			Console.Error.WriteLine($"LZMA_DECODE_ERROR|{mode}|{error.GetType().Name}|{error.Message}");
+			return 2;
+		}
+	}
+
+	private static int DecodeCodec(string mode, string path, string expectedSizeText)
+	{
+		try
+		{
+			byte[] input = File.ReadAllBytes(path);
+			byte[] output;
+			if (mode == "gzip")
+			{
+				using MemoryStream source = new(input, writable: false);
+				using GZipStream decoder = new(source, CompressionMode.Decompress);
+				using MemoryStream decoded = new();
+				decoder.CopyTo(decoded);
+				output = decoded.ToArray();
+			}
+			else if (mode == "lz4")
+			{
+				int expectedSize = int.Parse(expectedSizeText);
+				output = new byte[expectedSize];
+				int written = LZ4Codec.Decode(input, output);
+				if (written != expectedSize)
+				{
+					throw new InvalidDataException($"LZ4 decoded {written} bytes, expected {expectedSize}");
+				}
+			}
+			else
+			{
+				throw new ArgumentException($"unknown codec: {mode}");
+			}
+			Console.WriteLine($"CODEC_DECODE|{mode}|out={Convert.ToHexString(output)}");
+			return 0;
+		}
+		catch (Exception error)
+		{
+			Console.Error.WriteLine($"CODEC_DECODE_ERROR|{mode}|{error.GetType().Name}|{error.Message}");
+			return 2;
+		}
 	}
 
 	// ---------------------------------------------------------------- byte writers
@@ -109,7 +188,7 @@ public static class Program
 
 	/// <summary>
 	/// Builds a full UnityFS bundle. `metaCompression` and `blockCompression` are raw
-	/// CompressionType discriminants: 0 None, 1 Lzma, 2 Lz4, 3 Lz4HC, 4 Lzham, 5 unknown.
+	/// CompressionType discriminants: 0 None, 1 Lzma, 2 Lz4, 3 Lz4HC, 4 Lzham; 5/6 exercise the unknown-code Zstd and unsupported lanes.
 	/// </summary>
 	private static byte[] BuildUnityFs(
 		int version,
@@ -452,6 +531,7 @@ public static class Program
 	{
 		byte[] ufsNone = BuildUnityFs(6, 0, 0, false, new[] { new Entry("data/file.bin", Ascii("0123456789")) });
 		byte[] webData = BuildWebData(new[] { new Entry("inner.bin", Ascii("web!")), new Entry("sub/deep.bin", Ascii("deep")) });
+		byte[] gzipWebData = BuildWebData(new[] { new Entry("nested.gz", BuildGZip(Ascii("webdata gzip payload"))) });
 		var blobs = new (string Name, byte[] Data)[]
 		{
 			("ufs_v1_none", BuildUnityFs(1, 0, 0, false, new[] { new Entry("data/file.bin", Ascii("0123456789")) })),
@@ -479,6 +559,7 @@ public static class Program
 				},
 				new[] { 4, 8 })),
 			("ufs_v6_zstd_block", BuildUnityFs(6, 0, 5, false, new[] { new Entry("data/file.bin", Ascii("0123456789")) })),
+			("ufs_v6_unknown_non_zstd_block", BuildUnityFs(6, 0, 6, false, new[] { new Entry("data/file.bin", Ascii("0123456789")) })),
 			("ufs_v6_multiblock_cross_entry", BuildUnityFs(
 				6,
 				0,
@@ -538,9 +619,11 @@ public static class Program
 			("web_v8", BuildRawWeb(true, 8, new[] { new Entry("w.bin", Ascii("ABCDEFGHIJ")) })),
 			("web_nested_webdata", BuildRawWeb(true, 6, new[] { new Entry("nested.webdata", webData) })),
 			("webdata", webData),
+			("webdata_gzip_entry", gzipWebData),
 			("archive", BuildArchive()),
 			("plain", Ascii("plain resource bytes")),
 			("gzip_ufs", BuildGZip(ufsNone)),
+			("brotli_ufs", BuildBrotli(ufsNone)),
 		};
 
 		foreach ((string name, byte[] data) in blobs)
@@ -555,6 +638,20 @@ public static class Program
 				Dump(file, parts, 0);
 				Lines.Add($"SCHEME|{name}|in={Hex(data)}|type={file.GetType().Name}|fixed={file.NameFixed}"
 					+ $"|tree={string.Join(",", parts)}");
+				if (name == "brotli_ufs")
+				{
+					BrotliFile decoder = new() { Name = name + ".bin", FilePath = path };
+					using SmartStream input = SmartStream.CreateMemory(data);
+					decoder.Read(input);
+					if (decoder.UncompressedFile is ResourceFile decoded)
+					{
+						Lines.Add($"BROTLI|{name}|type=ResourceFile|decoded={Hex(decoded.ToByteArray())}");
+					}
+					else
+					{
+						Lines.Add($"BROTLI|{name}|type={decoder.UncompressedFile?.GetType().Name ?? "null"}");
+					}
+				}
 			}
 			catch (Exception ex)
 			{
@@ -572,6 +669,87 @@ public static class Program
 			UncompressedFile = new ResourceFile(inner, "wrapped.bin", "wrapped.bin"),
 		};
 		return file.ToByteArray();
+	}
+
+	private static byte[] BuildBrotli(byte[] inner)
+	{
+		using MemoryStream compressed = new();
+		using (BrotliStream encoder = new(compressed, CompressionLevel.Optimal, leaveOpen: true))
+		{
+			encoder.Write(inner);
+		}
+
+		byte[] encoded = compressed.ToArray();
+		int headerBitCount = BrotliWindowHeaderBitCount(encoded);
+		List<byte> wrapped = new();
+		int bitPosition = 0;
+		for (int bit = 0; bit < headerBitCount; bit++)
+		{
+			WriteBits(wrapped, ref bitPosition, ReadBits(encoded, bit, 1), 1);
+		}
+
+		byte[] signature = Encoding.ASCII.GetBytes("UnityWeb Compressed Content (brotli)");
+		WriteBits(wrapped, ref bitPosition, 0, 1); // ISLAST = false
+		WriteBits(wrapped, ref bitPosition, 3, 2); // MNIBBLES = zero
+		WriteBits(wrapped, ref bitPosition, 0, 1); // ISMETADATA = true
+		WriteBits(wrapped, ref bitPosition, 1, 2); // one MSKIPLEN byte
+		WriteBits(wrapped, ref bitPosition, (uint)(signature.Length - 1), 8);
+		while ((bitPosition & 7) != 0)
+		{
+			WriteBits(wrapped, ref bitPosition, 0, 1);
+		}
+		wrapped.AddRange(signature);
+		bitPosition += signature.Length * 8;
+
+		for (int bit = headerBitCount; bit < encoded.Length * 8; bit++)
+		{
+			WriteBits(wrapped, ref bitPosition, ReadBits(encoded, bit, 1), 1);
+		}
+		return wrapped.ToArray();
+	}
+
+	private static int BrotliWindowHeaderBitCount(byte[] encoded)
+	{
+		int position = 0;
+		if (ReadBits(encoded, position++, 1) == 0)
+		{
+			return position;
+		}
+		uint code4 = 1 | (ReadBits(encoded, position, 3) << 1);
+		position += 3;
+		if (code4 == 1)
+		{
+			position += 3;
+		}
+		return position;
+	}
+
+	private static uint ReadBits(byte[] bytes, int bitPosition, int count)
+	{
+		uint value = 0;
+		for (int bit = 0; bit < count; bit++)
+		{
+			int position = bitPosition + bit;
+			value |= (uint)((bytes[position / 8] >> (position & 7)) & 1) << bit;
+		}
+		return value;
+	}
+
+	private static void WriteBits(List<byte> bytes, ref int bitPosition, uint value, int count)
+	{
+		for (int bit = 0; bit < count; bit++)
+		{
+			int byteIndex = bitPosition / 8;
+			if (bytes.Count <= byteIndex)
+			{
+				bytes.Add(0);
+			}
+			if (((value >> bit) & 1) != 0)
+			{
+				bytes[byteIndex] |= (byte)(1 << (bitPosition & 7));
+			}
+			bitPosition++;
+		}
 	}
 
 	private static string Sanitize(string value) =>

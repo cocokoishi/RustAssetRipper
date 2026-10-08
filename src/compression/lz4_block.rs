@@ -572,6 +572,27 @@ mod tests {
     }
 
     #[test]
+    fn rust_lz4_encoder_output_decodes_in_k4os_reference_runtime() {
+        let line = include_str!("rust_encoder_reference_fixture.txt")
+            .lines()
+            .find(|line| line.starts_with("RUST_ENC|lz4|"))
+            .expect("reference-decoded Rust LZ4 row");
+        let fields: Vec<&str> = line.split('|').collect();
+        assert_eq!(fields.len(), 5);
+        let plain = parse_hex(fields[2].strip_prefix("plain=").unwrap());
+        let encoded = parse_hex(fields[3].strip_prefix("encoded=").unwrap());
+        let source = parse_hex(fields[4].strip_prefix("source=").unwrap());
+
+        assert_eq!(source, plain, "K4os LZ4Codec.Decode output");
+        let worst_case = plain.len() + plain.len() / 255 + 16;
+        assert_eq!(compress_block(&plain, worst_case).unwrap(), encoded);
+        assert_eq!(
+            decompress_block(&encoded, plain.len(), plain.len()).unwrap(),
+            plain
+        );
+    }
+
+    #[test]
     fn k4os_encoded_lz4_blocks_decode_to_the_same_bytes() {
         fn hex_to_bytes(hex: &str) -> Vec<u8> {
             assert!(hex.len().is_multiple_of(2), "odd hex length for {hex}");

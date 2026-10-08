@@ -75,6 +75,189 @@ pub fn decompress_size_block(
     )
 }
 
+/// Encode a Unity LZMA block: five LZMA properties bytes followed by a raw stream.
+///
+/// The source `CompressLzmaStream` API does not write an uncompressed-size field. The
+/// output limit bounds the complete encoded block, including its five-byte properties.
+pub fn compress_block(
+    input: &[u8],
+    maximum_compressed_size: usize,
+) -> Result<Vec<u8>, LzmaEncodeError> {
+    encode_raw_block(input, maximum_compressed_size)
+}
+
+/// Encode a UnityWeb LZMA stream: five properties bytes, an eight-byte little-endian
+/// decoded-size prefix, and the raw LZMA payload.
+pub fn compress_size_block(
+    input: &[u8],
+    maximum_compressed_size: usize,
+) -> Result<Vec<u8>, LzmaEncodeError> {
+    const PROPERTIES_LENGTH: usize = 5;
+    const SIZE_LENGTH: usize = 8;
+    let size = u64::try_from(input.len()).map_err(|_| {
+        LzmaEncodeError::new(LzmaEncodeErrorKind::InputSizeUnrepresentable { size: input.len() })
+    })?;
+    let payload_limit = maximum_compressed_size
+        .checked_sub(SIZE_LENGTH)
+        .ok_or_else(|| {
+            LzmaEncodeError::new(LzmaEncodeErrorKind::OutputLimitExceeded {
+                limit: maximum_compressed_size,
+            })
+        })?;
+    let encoded = encode_raw_block(input, payload_limit)?;
+    let total_size = encoded.len().checked_add(SIZE_LENGTH).ok_or_else(|| {
+        LzmaEncodeError::new(LzmaEncodeErrorKind::AllocationFailed {
+            requested: usize::MAX,
+        })
+    })?;
+    let mut output = Vec::new();
+    output.try_reserve_exact(total_size).map_err(|_| {
+        LzmaEncodeError::new(LzmaEncodeErrorKind::AllocationFailed {
+            requested: total_size,
+        })
+    })?;
+    output.extend_from_slice(&encoded[..PROPERTIES_LENGTH]);
+    output.extend_from_slice(&size.to_le_bytes());
+    output.extend_from_slice(&encoded[PROPERTIES_LENGTH..]);
+    Ok(output)
+}
+
+fn encode_raw_block(
+    input: &[u8],
+    maximum_compressed_size: usize,
+) -> Result<Vec<u8>, LzmaEncodeError> {
+    let mut output = BoundedEncodeOutput {
+        bytes: Vec::new(),
+        maximum: maximum_compressed_size,
+        exceeded: false,
+        allocation_failed: None,
+    };
+    let options = lzma_rs::compress::Options {
+        unpacked_size: lzma_rs::compress::UnpackedSize::SkipWritingToHeader,
+    };
+    let mut input = Cursor::new(input);
+    let result = lzma_rs::lzma_compress_with_options(&mut input, &mut output, &options);
+
+    if output.exceeded {
+        return Err(LzmaEncodeError::new(
+            LzmaEncodeErrorKind::OutputLimitExceeded {
+                limit: maximum_compressed_size,
+            },
+        ));
+    }
+    if let Some(requested) = output.allocation_failed {
+        return Err(LzmaEncodeError::new(
+            LzmaEncodeErrorKind::AllocationFailed { requested },
+        ));
+    }
+    result
+        .map_err(|error| LzmaEncodeError::new(LzmaEncodeErrorKind::Encoder(error.to_string())))?;
+    if output.bytes.len() < 5 {
+        return Err(LzmaEncodeError::new(LzmaEncodeErrorKind::Encoder(
+            "encoder emitted fewer than five properties bytes".to_string(),
+        )));
+    }
+    Ok(output.bytes)
+}
+
+struct BoundedEncodeOutput {
+    bytes: Vec<u8>,
+    maximum: usize,
+    exceeded: bool,
+    allocation_failed: Option<usize>,
+}
+
+impl Write for BoundedEncodeOutput {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.is_empty() {
+            return Ok(0);
+        }
+        let remaining = self.maximum.saturating_sub(self.bytes.len());
+        let written = bytes.len().min(remaining);
+        if written == 0 {
+            self.exceeded = true;
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "LZMA encoded output exceeds configured limit",
+            ));
+        }
+        let requested = self.bytes.len().checked_add(written).ok_or_else(|| {
+            self.exceeded = true;
+            io::Error::new(io::ErrorKind::InvalidData, "LZMA output length overflow")
+        })?;
+        if self.bytes.try_reserve(written).is_err() {
+            self.allocation_failed = Some(requested);
+            return Err(io::Error::new(
+                io::ErrorKind::OutOfMemory,
+                "could not reserve bounded LZMA output",
+            ));
+        }
+        self.bytes.extend_from_slice(&bytes[..written]);
+        if written < bytes.len() {
+            self.exceeded = true;
+        }
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LzmaEncodeError {
+    kind: LzmaEncodeErrorKind,
+}
+
+impl LzmaEncodeError {
+    fn new(kind: LzmaEncodeErrorKind) -> Self {
+        Self { kind }
+    }
+
+    pub fn kind(&self) -> &LzmaEncodeErrorKind {
+        &self.kind
+    }
+}
+
+impl Display for LzmaEncodeError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        Display::fmt(&self.kind, formatter)
+    }
+}
+
+impl Error for LzmaEncodeError {}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LzmaEncodeErrorKind {
+    OutputLimitExceeded { limit: usize },
+    AllocationFailed { requested: usize },
+    InputSizeUnrepresentable { size: usize },
+    Encoder(String),
+}
+
+impl Display for LzmaEncodeErrorKind {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::OutputLimitExceeded { limit } => {
+                write!(formatter, "encoded LZMA output exceeds {limit} bytes")
+            }
+            Self::AllocationFailed { requested } => {
+                write!(
+                    formatter,
+                    "could not allocate {requested} bytes for LZMA output"
+                )
+            }
+            Self::InputSizeUnrepresentable { size } => {
+                write!(
+                    formatter,
+                    "input size {size} cannot be stored in the LZMA size header"
+                )
+            }
+            Self::Encoder(detail) => write!(formatter, "LZMA encoder: {detail}"),
+        }
+    }
+}
+
 fn decompress_raw_block(
     properties: &[u8],
     compressed_payload: &[u8],
@@ -298,7 +481,111 @@ impl Display for LzmaBlockErrorKind {
 mod tests {
     use std::io::Cursor;
 
-    use super::{decompress_block, decompress_size_block, LzmaBlockErrorKind};
+    use super::{
+        compress_block, compress_size_block, decompress_block, decompress_size_block,
+        LzmaBlockErrorKind, LzmaEncodeErrorKind,
+    };
+
+    #[test]
+    fn writes_raw_and_size_prefixed_unity_lzma_blocks() {
+        let inputs: [&[u8]; 3] = [
+            b"source-compatible LZMA block writer",
+            &(0_u8..=255).collect::<Vec<_>>(),
+            b"",
+        ];
+        for input in inputs {
+            let raw = compress_block(input, 4096).unwrap();
+            assert!(
+                raw.len() >= 5,
+                "raw blocks include five LZMA properties bytes"
+            );
+            assert_eq!(
+                decompress_block(&raw, input.len(), 4096).unwrap(),
+                input,
+                "raw Unity block round-trip"
+            );
+
+            let sized = compress_size_block(input, 4104).unwrap();
+            assert_eq!(&sized[..5], &raw[..5], "properties header");
+            assert_eq!(
+                u64::from_le_bytes(sized[5..13].try_into().unwrap()),
+                input.len() as u64,
+                "little-endian size field"
+            );
+            assert_eq!(
+                decompress_size_block(&sized, input.len(), 4096).unwrap(),
+                input,
+                "UnityWeb size-prefixed block round-trip"
+            );
+        }
+    }
+
+    #[test]
+    fn lzma_writers_enforce_the_compressed_output_limit() {
+        assert_eq!(
+            compress_block(b"this output cannot fit", 1)
+                .unwrap_err()
+                .kind(),
+            &LzmaEncodeErrorKind::OutputLimitExceeded { limit: 1 }
+        );
+        assert_eq!(
+            compress_size_block(b"x", 7).unwrap_err().kind(),
+            &LzmaEncodeErrorKind::OutputLimitExceeded { limit: 7 }
+        );
+    }
+
+    #[test]
+    fn rust_lzma_encoder_outputs_match_reference_runtime_decoding() {
+        fn hex_to_bytes(hex: &str) -> Vec<u8> {
+            assert!(hex.len().is_multiple_of(2), "odd length for {hex}");
+            hex.as_bytes()
+                .chunks_exact(2)
+                .map(|pair| {
+                    let digit = |value: u8| match value {
+                        b'0'..=b'9' => value - b'0',
+                        b'a'..=b'f' => value - b'a' + 10,
+                        b'A'..=b'F' => value - b'A' + 10,
+                        _ => panic!("invalid hex byte {value}"),
+                    };
+                    (digit(pair[0]) << 4) | digit(pair[1])
+                })
+                .collect()
+        }
+
+        let fixture = include_str!("rust_encoder_reference_fixture.txt");
+        let mut rows = 0;
+        for line in fixture
+            .lines()
+            .filter(|line| line.starts_with("RUST_ENC|lzma-"))
+        {
+            let fields: Vec<&str> = line.split('|').collect();
+            assert_eq!(fields.len(), 5, "invalid fixture row {line}");
+            let plain = hex_to_bytes(fields[2].strip_prefix("plain=").unwrap());
+            let encoded = hex_to_bytes(fields[3].strip_prefix("encoded=").unwrap());
+            let reference = hex_to_bytes(fields[4].strip_prefix("source=").unwrap());
+            assert_eq!(reference, plain, "source decoder output for {}", fields[1]);
+
+            match fields[1] {
+                "lzma-raw" => {
+                    assert_eq!(compress_block(&plain, encoded.len()).unwrap(), encoded);
+                    assert_eq!(
+                        decompress_block(&encoded, plain.len(), plain.len()).unwrap(),
+                        plain
+                    );
+                }
+                "lzma-sized" => {
+                    assert_eq!(compress_size_block(&plain, encoded.len()).unwrap(), encoded);
+                    assert_eq!(
+                        decompress_size_block(&encoded, plain.len(), plain.len()).unwrap(),
+                        plain
+                    );
+                }
+                mode => panic!("unknown source LZMA output mode {mode}"),
+            }
+            rows += 1;
+        }
+        assert_eq!(rows, 2, "the source exposes both LZMA write layouts");
+    }
 
     #[test]
     fn decodes_a_raw_stream_with_unity_properties() {
@@ -537,8 +824,9 @@ mod tests {
         // Probe Temp/opencode/lzmaprobe (LzmaCompression over SharpCompress,
         // SDK 10.0.401): existing SharpCompress vectors decoded through the
         // reference entry points, plus reference-generated GEN vectors, plus
-        // the LZMA-metadata write refusal and the -1 size silent-empty proof.
-        // Nothing here was produced by lzma-rs.
+        // the FileStreamBundleFile LZMA-metadata write refusal and the -1 size
+        // silent-empty proof. Rust's codec writers are independently decoded
+        // by the source in lzma_rust_encoder_fixture.txt.
         let fixture = include_str!("lzma_reference_fixture.txt");
         let mut refs: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
         let mut gen_unity: Option<(Vec<u8>, Vec<u8>)> = None;
@@ -578,7 +866,8 @@ mod tests {
             }
         }
 
-        // Baseline cannot write LZMA metadata; no Rust write unit is owed.
+        // The source FileStreamBundleFile writer cannot write LZMA metadata;
+        // that container limitation is distinct from the raw codec writers.
         let write_outcome = write_outcome.expect("LZMA_WRITE row");
         assert!(
             write_outcome.contains("NotImplementedException"),

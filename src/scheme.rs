@@ -5788,6 +5788,203 @@ mod tests {
         assert_eq!(checked, 41, "reference fixture row count");
     }
 
+    #[test]
+    fn wrapper_scheme_runtime_fixture_covers_brotli_detection_and_webdata_gzip() {
+        fn hex(bytes: &[u8]) -> String {
+            use std::fmt::Write as _;
+            let mut text = String::with_capacity(bytes.len() * 2);
+            for byte in bytes {
+                write!(text, "{byte:02X}").unwrap();
+            }
+            text
+        }
+
+        let mut source_brotli_input = None;
+        let mut source_brotli_type = None;
+        let mut source_brotli_tree = None;
+        let mut direct_brotli_output = None;
+        let mut source_webdata_input = None;
+        let mut source_webdata_tree = None;
+
+        for line in include_str!("compression/wrapper_scheme_runtime_fixture.txt").lines() {
+            let fields: Vec<&str> = line.split('|').collect();
+            match fields.first().copied() {
+                Some("SCHEME") if fields.get(1) == Some(&"brotli_ufs") => {
+                    source_brotli_input = fields
+                        .iter()
+                        .find_map(|field| field.strip_prefix("in="))
+                        .map(decode_hex_fixture);
+                    source_brotli_type =
+                        fields.iter().find_map(|field| field.strip_prefix("type="));
+                    source_brotli_tree =
+                        fields.iter().find_map(|field| field.strip_prefix("tree="));
+                }
+                Some("BROTLI") if fields.get(1) == Some(&"brotli_ufs") => {
+                    assert!(fields.contains(&"type=ResourceFile"));
+                    direct_brotli_output = fields
+                        .iter()
+                        .find_map(|field| field.strip_prefix("decoded="))
+                        .map(decode_hex_fixture);
+                }
+                Some("SCHEME") if fields.get(1) == Some(&"webdata_gzip_entry") => {
+                    source_webdata_input = fields
+                        .iter()
+                        .find_map(|field| field.strip_prefix("in="))
+                        .map(decode_hex_fixture);
+                    source_webdata_tree =
+                        fields.iter().find_map(|field| field.strip_prefix("tree="));
+                }
+                _ => {}
+            }
+        }
+
+        let source_brotli_input = source_brotli_input.expect("source SchemeReader Brotli row");
+        assert_eq!(source_brotli_type, Some("ResourceFile"));
+        assert_eq!(
+            source_brotli_tree,
+            Some(format!("RES:brotli_ufs.bin:{}", hex(&source_brotli_input)).as_str()),
+            "reference SchemeReader currently fails to recognize this valid marked stream"
+        );
+        let source_direct_output =
+            direct_brotli_output.expect("direct reference BrotliFile.Read result");
+        assert!(source_direct_output.starts_with(b"UnityFS\0"));
+        assert_eq!(
+            crate::compression::wrappers::decompress_brotli(&source_brotli_input, 1024 * 1024)
+                .unwrap(),
+            source_direct_output,
+            "the reference BrotliFile decoder accepts the same bytes that its scheme detector misses"
+        );
+
+        let dispatched =
+            SchemeReader::read_with_limits(&source_brotli_input, SchemeReaderLimits::default())
+                .expect("RFC-valid marked Brotli stream dispatches in Rust");
+        assert_eq!(dispatched.kind(), FileKind::UnityFs);
+        assert_eq!(
+            dispatched.wrappers().first().map(|layer| layer.kind),
+            Some(WrapperKind::Brotli)
+        );
+        let super::ParsedFile::UnityFs(bundle) = dispatched.parse().unwrap() else {
+            panic!("Brotli wrapper must dispatch its decoded UnityFS payload");
+        };
+        assert_eq!(bundle.nodes.len(), 1);
+        assert_eq!(bundle.read_entry(0).unwrap().as_ref(), b"0123456789");
+
+        let path = crate::test_support::unique_test_path("brotli-scheme-runtime", "bin");
+        std::fs::write(&path, &source_brotli_input).expect("write reference wrapper bytes");
+        let streamed = SchemeReader::read_path_streaming(&path, SchemeReaderLimits::default())
+            .expect("file-backed Brotli wrapper dispatch");
+        std::fs::remove_file(&path).expect("remove reference wrapper bytes");
+        assert_eq!(streamed.kind(), FileKind::UnityFs);
+        assert_eq!(streamed.wrappers(), dispatched.wrappers());
+        let mut filesystem = crate::io::filesystem::VirtualFileSystem::new();
+        let mounted = streamed
+            .mount_container_tree(
+                &mut filesystem,
+                Some("/brotli-wrapper"),
+                super::ContainerMountLimits::default(),
+            )
+            .unwrap();
+        assert_eq!(mounted.mounted_entries, 1);
+        assert_eq!(
+            filesystem
+                .read_all_bytes("/brotli-wrapper/data/file.bin", 32)
+                .unwrap(),
+            b"0123456789"
+        );
+
+        let source_webdata_input = source_webdata_input.expect("source WebData GZip entry row");
+        assert_eq!(
+            source_webdata_tree,
+            Some("CONTAINER:WebFile:webdata_gzip_entry.bin:res=1:failed=0,RES:nested.gz:7765626461746120677A6970207061796C6F6164")
+        );
+        let webdata = SchemeReader::read(&source_webdata_input).unwrap();
+        assert_eq!(webdata.kind(), FileKind::UnityWebData);
+        let entry = webdata.dispatch_entry(0).unwrap();
+        assert_eq!(
+            entry.wrappers().first().map(|layer| layer.kind),
+            Some(WrapperKind::Gzip)
+        );
+        assert_eq!(entry.bytes(), b"webdata gzip payload");
+        let mut filesystem = crate::io::filesystem::VirtualFileSystem::new();
+        let mounted = webdata
+            .mount_container_tree(
+                &mut filesystem,
+                Some("/webdata-gzip"),
+                super::ContainerMountLimits::default(),
+            )
+            .unwrap();
+        assert_eq!(mounted.mounted_entries, 1);
+        assert_eq!(mounted.resource_files[0].name, "nested.gz");
+        assert_eq!(
+            filesystem
+                .read_all_bytes(&mounted.resource_files[0].virtual_path, 128)
+                .unwrap(),
+            b"webdata gzip payload"
+        );
+    }
+
+    #[test]
+    fn source_unknown_non_zstd_unityfs_block_is_retained_as_a_failed_entry() {
+        let row = include_str!("compression/wrapper_scheme_runtime_fixture.txt")
+            .lines()
+            .find(|line| line.starts_with("SCHEME|ufs_v6_unknown_non_zstd_block|"))
+            .expect("source SchemeReader unknown-code fallback row");
+        let fields: Vec<&str> = row.split('|').collect();
+        assert_eq!(fields.first(), Some(&"SCHEME"));
+        assert!(fields.get(2).is_some_and(|field| field.starts_with("in=")));
+        let input = fields
+            .iter()
+            .find_map(|field| field.strip_prefix("in="))
+            .map(decode_hex_fixture)
+            .expect("source input bytes");
+        assert_eq!(
+            fields.iter().find_map(|field| field.strip_prefix("type=")),
+            Some("FileStreamBundleFile")
+        );
+        assert_eq!(
+            fields.iter().find_map(|field| field.strip_prefix("tree=")),
+            Some("CONTAINER:FileStreamBundleFile:ufs_v6_unknown_non_zstd_block.bin:res=0:failed=1,FAIL:data/file.bin")
+        );
+
+        let dispatched = SchemeReader::read(&input).expect("UnityFS input dispatch");
+        assert_eq!(dispatched.kind(), FileKind::UnityFs);
+        let super::ParsedFile::UnityFs(bundle) = dispatched.parse().unwrap() else {
+            panic!("unknown-code fixture must parse as UnityFS");
+        };
+        let read_error = bundle.read_entry(0).expect_err("unknown non-Zstd codec");
+        assert!(matches!(
+            read_error.kind(),
+            crate::container::unityfs::UnityFsErrorKind::UnsupportedCompression {
+                compression: 6,
+                context: "storage block"
+            }
+        ));
+
+        let mut filesystem = crate::io::filesystem::VirtualFileSystem::new();
+        let mounted = dispatched
+            .mount_container_tree_with_source_name(
+                &mut filesystem,
+                Some("/unknown-codec"),
+                Some("ufs_v6_unknown_non_zstd_block.bin"),
+                super::ContainerMountLimits::default(),
+            )
+            .expect("unsupported entry is retained as a diagnostic");
+        assert_eq!(mounted.mounted_entries, 0);
+        assert_eq!(mounted.failed_entries.len(), 1);
+        assert_eq!(mounted.failed_entries[0].source_name, "data/file.bin");
+        assert_eq!(mounted.failed_entries[0].container_bundle_index, Some(0));
+        assert!(matches!(
+            mounted.failed_entries[0].error.kind(),
+            crate::container::unityfs::UnityFsErrorKind::UnsupportedCompression {
+                compression: 6,
+                context: "storage block"
+            }
+        ));
+        assert!(filesystem
+            .read_all_bytes("/unknown-codec/data/file.bin", 32)
+            .is_err());
+    }
+
     /// The streaming path enforces the same wrapper bounds before materializing a layer.
     #[test]
     fn streaming_dispatch_enforces_wrapper_and_input_limits() {

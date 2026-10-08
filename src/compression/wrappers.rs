@@ -434,6 +434,30 @@ mod tests {
     }
 
     #[test]
+    fn rust_gzip_encoder_output_decodes_in_the_reference_runtime() {
+        fn parse_hex(text: &str) -> Vec<u8> {
+            text.as_bytes()
+                .chunks_exact(2)
+                .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+                .collect()
+        }
+
+        let line = include_str!("rust_encoder_reference_fixture.txt")
+            .lines()
+            .find(|line| line.starts_with("RUST_ENC|gzip|"))
+            .expect("reference-decoded Rust GZip row");
+        let fields: Vec<&str> = line.split('|').collect();
+        assert_eq!(fields.len(), 5);
+        let plain = parse_hex(fields[2].strip_prefix("plain=").unwrap());
+        let encoded = parse_hex(fields[3].strip_prefix("encoded=").unwrap());
+        let source = parse_hex(fields[4].strip_prefix("source=").unwrap());
+
+        assert_eq!(source, plain, "reference GZipStream decoded output");
+        assert_eq!(compress_gzip(&plain, encoded.len()).unwrap(), encoded);
+        assert_eq!(decompress_gzip(&encoded, plain.len()).unwrap(), plain);
+    }
+
+    #[test]
     fn validates_gzip_checksum_and_output_limit() {
         let mut malformed = stored_gzip_member(b"crc");
         let checksum_index = malformed.len() - 8;

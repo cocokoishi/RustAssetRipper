@@ -6,14 +6,14 @@ This log records behavior differences found between the Rust port and the frozen
 
 | Field | Finding |
 |---|---|
-| Status | Rust detector corrected and regression-covered; C# execution and Unity-produced-file comparison remain unrun |
+| Status | Frozen-source runtime confirms the scheme detector false-negative; Rust follows RFC 7932 and the direct source decoder confirms the payload |
 | Source location | `AssetRipper/Source/AssetRipper.IO.Files/CompressedFiles/Brotli/BrotliFile.cs`, `BrotliFile.IsBrotliFile` |
-| Input evidence | `scheme::tests::dispatches_a_spec_encoded_unity_brotli_metadata_wrapper` constructs a Brotli stream with Unity's 36-byte marker in an empty metadata meta-block, followed by an uncompressed meta-block containing `webdata payload` and a final empty block. The fixture is assembled from RFC 7932 bit fields; the pinned decoder returns the exact payload for every WBITS value from 10 through 24. |
-| Source-derived behavior | The source reads the encoded `MSKIPLEN - 1` value and compares it directly with `BrotliSignature.Length`. For the valid 36-byte marker, the encoded value is 35, so the signature comparison fails. This is derived from the inspected implementation; a C# runtime differential for this case has not been run. .NET SDK 10.0.401 is available. |
+| Input evidence | `tools/probes/io-differential/Program.cs` creates an actual temporary file containing a valid RFC 7932 Brotli stream with Unity's 36-byte metadata marker and a .NET BrotliStream-compressed UnityFS payload. The source `SchemeReader.LoadFile` result and direct `BrotliFile.Read` result are frozen in `src/compression/wrapper_scheme_runtime_fixture.txt`; a direct Rust regression checks both plus file-backed wrapper import and mounted UnityFS entry bytes. |
+| Source-runtime behavior | The source `SchemeReader.LoadFile` selects `ResourceFile` and leaves the marked bytes untouched. Calling the source `BrotliFile.Read` directly on the same bytes produces the original UnityFS bytes. The detector reads the encoded `MSKIPLEN - 1` value and compares it directly with `BrotliSignature.Length`; for the valid 36-byte marker, the encoded value is 35, so the signature comparison fails. |
 | Root cause | RFC 7932 §9.2 stores metadata length minus one. The detector omitted the `+1` needed to obtain the number of metadata bytes before comparing the marker length. |
 | Rust change | `has_brotli_file_signature` now parses the Brotli window header, validates the empty metadata block fields and zero alignment bits, adds one to the encoded length, bounds the marker read, and compares the metadata bytes. The recursive scheme reader then decodes the same input under the configured output limit. |
-| Regression evidence | The constructed marker streams are recognized and decoded for WBITS 10–24. `docs/validation-log.md` records the full test run. |
-| Remaining comparison | No C# execution, separate Brotli encoder run, AssetRipper-produced wrapper, or real-file differential has been performed. |
+| Regression evidence | The bit-level marker tests recognize and decode WBITS 10–24. The frozen-source runtime probe confirms the scheme-level false-negative, while the direct source decoder and Rust's file-backed path both recover the UnityFS payload. `docs/validation-log.md` records exact commands and test results. |
+| Remaining comparison | No Unity-produced Brotli wrapper was available in Phase 1. The runtime fixture is a generated standards-valid file and does not establish the prevalence of this source detector bug in shipped inputs. |
 
 The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.html#section-9.2). Its metadata length field stores `MSKIPLEN - 1`, and the metadata bytes are excluded from decompressed output.
 ## DIFF-MULTIFILE-SEEK-END-001 — source uses the opposite End offset sign
@@ -754,6 +754,18 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | Three per-codec tests in wrappers.rs, lz4_block.rs, zstd.rs; shared fixture src/compression/reference_encoded_fixture.txt. |
 | Regression evidence | All seven vectors decode byte-exact on both sides; full suite 1367 plus 60 pass with warnings-denied Clippy. |
 | Remaining comparison | Broad fuzz stays future work; Unity Zstd uses standard framing covered here. |
+
+## DIFF-COMP-WRITE-INTEROP-001 — Rust LZMA, LZ4, and GZip outputs decoded by the source runtime
+
+| Field | Finding |
+|---|---|
+| Status | Both codec directions are source-runtime verified for the baseline's supported write helpers |
+| Source location | `BundleFiles/LzmaCompression.cs`; `CompressedFiles/GZip/GZipFile.cs`; `FileStream/FileStreamBundleFile.cs` and its K4os LZ4 call |
+| Input evidence | Rust-authored raw LZMA, size-prefixed LZMA, GZip, and raw LZ4 blocks are frozen in `src/compression/rust_encoder_reference_fixture.txt`. `tools/probes/io-differential/Program.cs` reads those files through the source `LzmaCompression` methods, .NET `GZipStream`, and K4os `LZ4Codec.Decode`. Each source output is byte-identical to the input payload. |
+| Source-derived behavior | The baseline offers raw and size-prefixed LZMA compression helpers, GZip file write, and LZ4 block encoding used by the UnityFS metadata writer. Brotli has no writer, Zstandard exposes a decoder only, UnityFS metadata writing rejects LZMA, and non-empty UnityFS entry data writing throws `NotImplementedException`. |
+| Rust change | `src/compression/lzma.rs` now exposes bounded raw and size-prefixed LZMA writers. Existing bounded LZ4 and GZip writers are checked against the source decoders. No full UnityFS bundle writer is added: the only product callsite found for `FileStreamBundleFile.Write` creates an empty uncompressed lighting bundle; non-empty entry data is not implemented in the frozen source. |
+| Regression evidence | `rust_lzma_encoder_outputs_match_reference_runtime_decoding`, `rust_lz4_encoder_output_decodes_in_k4os_reference_runtime`, and `rust_gzip_encoder_output_decodes_in_the_reference_runtime` compare the product outputs to the frozen fixture and also decode them with the Rust readers. Existing independent source-encoded vectors cover the opposite direction. |
+| Remaining comparison | Unity-produced compression outputs and broad fuzz coverage remain unrun. This finding covers codec formats and the source-supported codec write helpers; it does not claim an AssetBundle creation workflow. |
 
 ## DIFF-SER-ENV-001 - SerializedFile envelopes and file entry
 
