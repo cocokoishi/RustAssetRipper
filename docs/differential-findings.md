@@ -1452,3 +1452,15 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust behavior | `parse_chinese_texture_fields` now decodes each 32-bit word using `SerializedFile.metadata.prefix.body_endian`; workspace factory state retains the fields and considers the recognized suffix complete. |
 | Regression evidence | `factory_differential_replays_every_reference_case` compares both source-authored fixture rows, warning text, fields, trailing-byte classification, and workspace materialization. The generated source probe output matches all 256 committed fixture lines. Focused Rust test passed 1/1. |
 | Remaining difference | The two source-authored endianness fixtures validate this fixed 24-byte branch, not real-world Chinese Unity bundles or all Texture2D class/version layouts. `SER-ASSET-FACTORY-001` and full Texture2D exporter coverage remain open. |
+
+## DIFF-SER-FACTORY-ENGINE-SHADER-001 — Engine-collection Shader failure handling
+
+| Field | Finding |
+|---|---|
+| Status | Source-matched for the four frozen default-resource and builtin-extra collection names using a synthetic 2019.4.40f1 Shader with a non-zero invalid tail. The generated Shader is retained and the source emits an Info-level engine-type-tree message. |
+| Source location | `Source/AssetRipper.Import/AssetCreation/GameAssetFactory.cs`: `ReadNormalObject`; `Source/AssetRipper.IO.Files/SpecialFileNames.cs`: `IsDefaultResourceOrBuiltinExtra`. |
+| Input evidence | `src/processing/asset_factory_fixture.txt` includes four 168-byte SerializedFiles, one for each of `unity default resources`, `unity_default_resources`, `unity builtin extra`, and `unity_builtin_extra`. All share SHA-256 `BE57A1047909BB58A9AD066B29176A1E36BDDE8EECA6670C3FBAEC735FB49BCC`; the differing collection names are supplied by the synthetic file paths. Each carries a generated class-48 release Shader payload followed by non-zero bytes. |
+| Source behavior | For all four aliases, AssetRipper returns generated type `Shader_2019_3_0_b0` and logs `Shader with PathID 42 in <collection> uses engine type trees.` at Info level instead of converting the object to `UnreadableObject`. |
+| Rust behavior | `is_engine_collection_name` recognizes the four exact aliases. `read_normal_object` retains the generated Shader, classifies the invalid tail, and records `FactoryLogLevel::Info` without an error message. `ObjectWorkspace` preserves the object as incomplete because the malformed tail is still present. |
+| Regression evidence | `factory_differential_replays_every_reference_case` compares all four source Info messages, generated type/class/name, tail classification, and incomplete workspace state. The source probe output matches all 272 committed fixture lines. |
+| Remaining difference | This validates the synthetic failed-read branch only. Valid engine-resource Shader field loading and actual built-in TypeTree hydration/export remain open under `SER-ASSET-FACTORY-001` and `RES-SHADER-PARSED-001`. |

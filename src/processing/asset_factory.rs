@@ -2983,6 +2983,11 @@ mod tests {
             .iter()
             .filter_map(|row| row.strip_prefix("LOG|Warning|Import|"))
             .collect();
+        let reference_infos: Vec<&str> = case
+            .rows
+            .iter()
+            .filter_map(|row| row.strip_prefix("LOG|Info|Import|"))
+            .collect();
         if let Some(expected) = reference_logs.first() {
             let expected = expected.replace('␠', " ");
             assert_eq!(asset.log_level, FactoryLogLevel::Error, "{} log", case.name);
@@ -3005,6 +3010,17 @@ mod tests {
                 Some(expected.as_str()),
                 "{} log text",
                 case.name
+            );
+        } else if let Some(expected) = reference_infos.first() {
+            let expected = (*expected).to_owned();
+            assert_eq!(asset.log_level, FactoryLogLevel::Info, "{} log", case.name);
+            assert_eq!(asset.log_message, None, "{} stored log text", case.name);
+            assert_eq!(
+                expected,
+                format!(
+                    "Shader with PathID 42 in {} uses engine type trees.",
+                    case.collection_name
+                )
             );
         } else {
             assert_eq!(
@@ -3200,6 +3216,25 @@ mod tests {
                 assert_eq!(workspace_asset.state.chinese_texture_fields, Some(expected));
                 assert!(workspace_asset.is_fully_materialized());
             }
+            "engine_default_resources_shader"
+            | "engine_default_resources_underscore_shader"
+            | "engine_builtin_extra_shader"
+            | "engine_builtin_extra_underscore_shader" => {
+                assert_eq!(asset.class_id, SHADER_CLASS_ID);
+                assert!(asset.kind.is_recoverable());
+                assert_eq!(asset.tail, Some(ObjectTailOutcome::IncorrectByteCount));
+                assert_eq!(asset.log_level, FactoryLogLevel::Info);
+                assert_eq!(asset.log_message, None);
+                let workspace_asset = materialize_object_for_workspace(
+                    &file,
+                    &facts,
+                    layouts,
+                    0,
+                    &ObjectDecodeLimits::default(),
+                )
+                .unwrap();
+                assert!(!workspace_asset.is_fully_materialized());
+            }
             other => panic!("unexpected case {other}"),
         }
     }
@@ -3211,7 +3246,7 @@ mod tests {
         let fixture = include_str!("asset_factory_fixture.txt");
         let layouts = reference_class_layouts();
         let cases = fixture_cases(fixture);
-        assert_eq!(cases.len(), 15, "all probe cases are replayed");
+        assert_eq!(cases.len(), 19, "all probe cases are replayed");
         for case in &cases {
             assert_case(case, layouts);
         }

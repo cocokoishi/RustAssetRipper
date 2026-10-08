@@ -506,6 +506,10 @@ static void Author(string rowsPath)
 		"gameobject_4_alpha_notree",
 		"texture_chinese_tail_le",
 		"texture_chinese_tail_be",
+		"engine_default_resources_shader",
+		"engine_default_resources_underscore_shader",
+		"engine_builtin_extra_shader",
+		"engine_builtin_extra_underscore_shader",
 	];
 	string scratch = Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, "target", "ser-factory-probe"));
 	Directory.CreateDirectory(scratch);
@@ -534,7 +538,9 @@ static void Author(string rowsPath)
 		(string fileName, SerializedFile file) = BuildCase(name);
 		byte[] bytes = file.ToByteArray();
 		rows.WriteLine($"SF_HEX|{name}|{Convert.ToHexString(bytes)}");
-		string path = Path.Combine(scratch, fileName);
+		string caseDirectory = Path.Combine(scratch, name);
+		Directory.CreateDirectory(caseDirectory);
+		string path = Path.Combine(caseDirectory, fileName);
 		File.WriteAllBytes(path, bytes);
 		using FileBase loaded = SchemeReader.LoadFile(path, LocalFileSystem.Instance);
 		DumpMaterialization(rows, name, loaded);
@@ -608,6 +614,14 @@ static (string, SerializedFile) BuildCase(string name)
 			return ("texture_chinese_tail_le.assets", BuildChineseTextureFile("texture_chinese_tail_le.assets", EndianType.LittleEndian));
 		case "texture_chinese_tail_be":
 			return ("texture_chinese_tail_be.assets", BuildChineseTextureFile("texture_chinese_tail_be.assets", EndianType.BigEndian));
+		case "engine_default_resources_shader":
+			return ("unity default resources", BuildEngineShaderFile("unity default resources"));
+		case "engine_default_resources_underscore_shader":
+			return ("unity_default_resources", BuildEngineShaderFile("unity_default_resources"));
+		case "engine_builtin_extra_shader":
+			return ("unity builtin extra", BuildEngineShaderFile("unity builtin extra"));
+		case "engine_builtin_extra_underscore_shader":
+			return ("unity_builtin_extra", BuildEngineShaderFile("unity_builtin_extra"));
 		default:
 			throw new ArgumentException($"unknown case {name}");
 	}
@@ -635,6 +649,21 @@ static SerializedFile BuildChineseTextureFile(string fileName, EndianType endian
 	WriteI32(payload, unchecked((int)0x90ABCDEF), endianType);
 	WriteI32(payload, 0x01234567, endianType);
 	return BuildFile(fileName, version.ToString(), 28, null, payload.ToArray(), endianType: endianType);
+}
+
+static SerializedFile BuildEngineShaderFile(string collectionName)
+{
+	UnityVersion version = UnityVersion.Parse("2019.4.40f1");
+	SerializedAssetCollection collection = EmptyCollection(version);
+	IUnityObjectBase shader = AssetFactory.CreateSerialized(new AssetInfo(collection, 42, 48), version)
+		?? throw new InvalidOperationException("Shader factory returned null");
+	using MemoryStream stream = new();
+	using (AssetWriter writer = new(stream, shader.Collection))
+	{
+		shader.WriteRelease(writer);
+	}
+	List<byte> payload = [.. stream.ToArray(), 0xAA, 0xBB, 0xCC, 0xDD];
+	return BuildFile(collectionName, version.ToString(), 48, null, payload.ToArray());
 }
 
 static SerializedFile BuildTextAssetFile(string versionText, string name, string script, TypeTree? tree, byte[] tail)
