@@ -532,6 +532,12 @@ public static class Program
 		byte[] ufsNone = BuildUnityFs(6, 0, 0, false, new[] { new Entry("data/file.bin", Ascii("0123456789")) });
 		byte[] webData = BuildWebData(new[] { new Entry("inner.bin", Ascii("web!")), new Entry("sub/deep.bin", Ascii("deep")) });
 		byte[] gzipWebData = BuildWebData(new[] { new Entry("nested.gz", BuildGZip(Ascii("webdata gzip payload"))) });
+		string serializedFixturePath = Path.Combine(Directory.GetCurrentDirectory(), "src", "io", "platform_probe_fixture.txt");
+		string serializedFixtureHex = File.ReadLines(serializedFixturePath)
+			.Select(line => line.Trim())
+			.First(line => line.StartsWith("SFHEX|", StringComparison.Ordinal))
+			.Split('|')[1];
+		byte[] serializedFile = Convert.FromHexString(serializedFixtureHex);
 		var blobs = new (string Name, byte[] Data)[]
 		{
 			("ufs_v1_none", BuildUnityFs(1, 0, 0, false, new[] { new Entry("data/file.bin", Ascii("0123456789")) })),
@@ -622,6 +628,7 @@ public static class Program
 			("webdata_gzip_entry", gzipWebData),
 			("archive", BuildArchive()),
 			("plain", Ascii("plain resource bytes")),
+			("serialized_file_direct", serializedFile),
 			("gzip_ufs", BuildGZip(ufsNone)),
 			("brotli_ufs", BuildBrotli(ufsNone)),
 		};

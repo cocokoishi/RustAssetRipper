@@ -6020,6 +6020,59 @@ mod tests {
             .is_err());
     }
 
+    #[test]
+    fn source_standalone_serialized_file_dispatches_through_the_bounded_path_reader() {
+        let row = include_str!("io/serialized_file_scheme_fixture.txt")
+            .lines()
+            .find(|line| line.starts_with("SCHEME|serialized_file_direct|"))
+            .expect("source standalone SerializedFile SchemeReader row");
+        let fields: Vec<&str> = row.split('|').collect();
+        let input = fields
+            .iter()
+            .find_map(|field| field.strip_prefix("in="))
+            .map(decode_hex_fixture)
+            .expect("source SerializedFile input bytes");
+        assert!(fields.contains(&"type=SerializedFile"));
+        assert!(fields.contains(&"fixed=serialized_file_direct.bin"));
+        assert!(fields.contains(&"tree=OTHER:SerializedFile:serialized_file_direct.bin"));
+
+        let directory = crate::test_support::unique_test_path("serialized-file-scheme", "dir");
+        std::fs::create_dir(&directory).expect("create serialized-file scratch directory");
+        let path = directory.join("serialized_file_direct.bin");
+        std::fs::write(&path, &input).expect("write source SerializedFile bytes");
+        let streamed = SchemeReader::read_path_streaming(&path, SchemeReaderLimits::default())
+            .expect("file-backed SerializedFile dispatch");
+        assert_eq!(streamed.kind(), FileKind::SerializedFile);
+        assert!(streamed.wrappers().is_empty());
+        assert!(matches!(
+            streamed.parse(),
+            Ok(super::ParsedFile::SerializedFile(_))
+        ));
+
+        let mut filesystem = crate::io::filesystem::VirtualFileSystem::new();
+        filesystem
+            .create_directory(Some("/serialized"))
+            .expect("create destination root");
+        let mounted = SchemeReader::mount_path(
+            &path,
+            &mut filesystem,
+            Some("/serialized"),
+            SchemeReaderLimits::default(),
+            super::ContainerMountLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(mounted.mounted_entries, 1);
+        assert_eq!(mounted.mounted_bytes, input.len() as u64);
+        assert_eq!(
+            filesystem
+                .read_all_bytes("/serialized/serialized_file_direct.bin", input.len())
+                .unwrap(),
+            input
+        );
+        std::fs::remove_file(&path).expect("remove source SerializedFile bytes");
+        std::fs::remove_dir(&directory).expect("remove serialized-file scratch directory");
+    }
+
     /// The streaming path enforces the same wrapper bounds before materializing a layer.
     #[test]
     fn streaming_dispatch_enforces_wrapper_and_input_limits() {
