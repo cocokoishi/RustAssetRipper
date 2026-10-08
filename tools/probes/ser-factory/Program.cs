@@ -44,7 +44,7 @@ using AssetRipper.Tpk.TypeTrees;
 
 if (args.Length == 0)
 {
-		Console.Error.WriteLine("usage: dispatch <version> <classid...> | dispatch-matrix <output> | sweep <version> <max> | tpk <classid> <version...> | tpk-info <raw-output> <data-output> | tpk-select <output> | author <rows> | materialize <file> <rows>");
+		Console.Error.WriteLine("usage: dispatch <version> <classid...> | dispatch-matrix <output> | payload-matrix <output> | sweep <version> <max> | tpk <classid> <version...> | tpk-info <raw-output> <data-output> | tpk-select <output> | author <rows> | materialize <file> <rows>");
 	return 2;
 }
 
@@ -57,6 +57,9 @@ try
 			return 0;
 		case "dispatch-matrix":
 			DumpFactoryDispatchMatrix(args[1]);
+			return 0;
+		case "payload-matrix":
+			DumpGeneratedPayloadMatrix(args[1]);
 			return 0;
 		case "sweep":
 			Sweep(args[1], int.Parse(args[2]));
@@ -295,6 +298,9 @@ static void DumpFactoryDispatchMatrix(string outputPath)
 	TpkTypeTreeBlob blob = (TpkTypeTreeBlob)TpkFile.FromStream(SourceTpk.GetStream()).GetDataBlob();
 	SortedSet<UnityVersion> queryVersions = new() { UnityVersion.Parse("0.0.0f0") };
 	queryVersions.UnionWith(blob.Versions);
+	// The package-wide version list omits some per-class boundary versions. The factory can
+	// switch generated classes at those boundaries, so include them in the dispatch matrix too.
+	queryVersions.UnionWith(blob.ClassInformation.SelectMany(static item => item.Classes.Select(static entry => entry.Key)));
 	int[] classIds = Enum.GetValues<ClassIDType>()
 		.Select(static value => (int)value)
 		.Concat(blob.ClassInformation.Select(static item => item.ID))
@@ -331,6 +337,83 @@ static void DumpFactoryDispatchMatrix(string outputPath)
 		}
 	}
 	writer.WriteLine($"TRANSITIONS|{transitionCount}");
+}
+
+static void DumpGeneratedPayloadMatrix(string outputPath)
+{
+	TpkTypeTreeBlob blob = (TpkTypeTreeBlob)TpkFile.FromStream(SourceTpk.GetStream()).GetDataBlob();
+	string fullPath = Path.GetFullPath(outputPath);
+	Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+	using StreamWriter writer = new(fullPath, false, new UTF8Encoding(false)) { NewLine = "\n" };
+	writer.WriteLine("# Release bytes written by the frozen generated AssetRipper classes at each non-null TPK class-version boundary.");
+	writer.WriteLine("# PAYLOAD|class-id|version|factory-type|mode|byte-length|bytes-hex");
+	Dictionary<string, SerializedAssetCollection> collections = new(StringComparer.Ordinal);
+	int generated = 0;
+	int skipped = 0;
+	int failed = 0;
+	long totalBytes = 0;
+	foreach (TpkClassInformation classInformation in blob.ClassInformation.OrderBy(item => item.ID))
+	{
+		foreach (var entry in classInformation.Classes)
+		{
+			if (entry.Value is null)
+			{
+				continue;
+			}
+			UnityVersion version = entry.Key;
+			string versionText = version.ToString();
+			if (!collections.TryGetValue(versionText, out SerializedAssetCollection? collection))
+			{
+				collection = EmptyCollection(version);
+				collections.Add(versionText, collection);
+			}
+			IUnityObjectBase? asset;
+			try
+			{
+				asset = AssetFactory.CreateSerialized(new AssetInfo(collection, 42, classInformation.ID), version);
+			}
+			catch (Exception exception)
+			{
+				writer.WriteLine($"SKIP|{classInformation.ID}|{versionText}|THROW:{exception.GetType().Name}");
+				skipped++;
+				continue;
+			}
+			if (asset is null)
+			{
+				writer.WriteLine($"SKIP|{classInformation.ID}|{versionText}|MISSING");
+				skipped++;
+				continue;
+			}
+			foreach (string mode in new[] { "release", "editor" })
+			{
+				try
+				{
+					using MemoryStream stream = new();
+					using (AssetWriter assetWriter = new(stream, asset.Collection))
+					{
+						if (mode == "release")
+						{
+							asset.WriteRelease(assetWriter);
+						}
+						else
+						{
+							asset.WriteEditor(assetWriter);
+						}
+					}
+					byte[] bytes = stream.ToArray();
+					writer.WriteLine($"PAYLOAD|{classInformation.ID}|{versionText}|{asset.GetType().Name}|{mode}|{bytes.Length}|{Convert.ToHexString(bytes)}");
+					generated++;
+					totalBytes += bytes.Length;
+				}
+				catch (Exception exception)
+				{
+					writer.WriteLine($"FAIL|{classInformation.ID}|{versionText}|{asset.GetType().Name}|{mode}|{exception.GetType().FullName}|{OneLine(exception.Message)}");
+					failed++;
+				}
+			}
+		}
+	}
+	Console.WriteLine($"PAYLOAD_MATRIX|generated={generated}|skipped={skipped}|failed={failed}|bytes={totalBytes}|versions={collections.Count}");
 }
 
 static void Sweep(string versionText, int maximum)
@@ -420,6 +503,7 @@ static void Author(string rowsPath)
 		"mono_with_structure",
 		"monoscript_notree",
 		"tpk_navmesh_editor",
+		"gameobject_4_alpha_notree",
 	];
 	string scratch = Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, "target", "ser-factory-probe"));
 	Directory.CreateDirectory(scratch);
@@ -505,6 +589,19 @@ static (string, SerializedFile) BuildCase(string name)
 			return ("mono_with_structure.assets", BuildMonoBehaviourWithStructureFile());
 		case "monoscript_notree":
 			return ("monoscript_notree.assets", BuildMonoScriptFile());
+		case "gameobject_4_alpha_notree":
+		{
+			UnityVersion version = UnityVersion.Parse("4.0.0a0");
+			SerializedAssetCollection collection = EmptyCollection(version);
+			IUnityObjectBase asset = AssetFactory.CreateSerialized(new AssetInfo(collection, 42, 1), version)
+				?? throw new InvalidOperationException("GameObject factory returned null");
+			using MemoryStream stream = new();
+			using (AssetWriter writer = new(stream, asset.Collection))
+			{
+				asset.WriteRelease(writer);
+			}
+			return ("gameobject_4_alpha_notree.assets", BuildFile("gameobject_4_alpha_notree.assets", version.ToString(), 1, null, stream.ToArray()));
+		}
 		default:
 			throw new ArgumentException($"unknown case {name}");
 	}

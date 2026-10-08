@@ -371,8 +371,8 @@ mod tests {
     fn source_generated_factory_matrix_is_complete_and_retains_non_success_outcomes() {
         let dispatch = SourceFactoryDispatch::embedded();
         assert_eq!(dispatch.ids.len(), 404);
-        assert_eq!(dispatch.versions.len(), 1421);
-        assert_eq!(dispatch.query_count, 574_084);
+        assert_eq!(dispatch.versions.len(), 1838);
+        assert_eq!(dispatch.query_count, 742_552);
         assert_eq!(dispatch.transition_count, 3508);
         assert_eq!(dispatch.throw_count, 37);
         assert_eq!(dispatch.missing_count, 2);
@@ -383,21 +383,16 @@ mod tests {
     fn every_source_generated_factory_query_matches_the_rle_source_matrix() {
         let dispatch = SourceFactoryDispatch::embedded();
         let tpk = SourceTpkDatabase::embedded();
-        let source_versions = std::iter::once(FactoryUnityVersion::parse("0.0.0f0").unwrap())
-            .chain(
-                tpk.source_versions()
-                    .iter()
-                    .map(|(version, _)| version.clone()),
-            )
-            .collect::<Vec<_>>();
+        let source_versions = tpk.factory_dispatch_versions();
         assert_eq!(source_versions.len(), dispatch.versions.len());
-        for (matrix_version, expected_version) in dispatch.versions.iter().zip(&source_versions) {
+        for (matrix_version, (expected_version, expected_bits)) in
+            dispatch.versions.iter().zip(&source_versions)
+        {
             assert_eq!(&matrix_version.0.text, &expected_version.text);
             let matrix_bits = matrix_version.1;
-            let expected_bits = expected_version.source_order_bits().unwrap();
-            assert_eq!(matrix_bits, expected_bits);
+            assert_eq!(matrix_bits, *expected_bits);
             for class_id in &dispatch.ids {
-                let expected = dispatch.source_outcome(*class_id, expected_bits);
+                let expected = dispatch.source_outcome(*class_id, *expected_bits);
                 let actual = dispatch.generated_class_name(*class_id, expected_version);
                 match expected {
                     Some(DispatchOutcome::Generated(name)) => {

@@ -5153,6 +5153,68 @@ mod tests {
     }
 
     #[test]
+    fn object_workspace_uses_generated_class_at_the_alpha_tpk_boundary() {
+        let fixture = crate::processing::asset_factory::PROBE_FIXTURE;
+        let hex = fixture
+            .lines()
+            .find_map(|line| line.strip_prefix("SF_HEX|gameobject_4_alpha_notree|"))
+            .expect("the source fixture includes the 4.0.0a0 GameObject");
+        assert!(hex.len().is_multiple_of(2), "fixture hex has even length");
+        let bytes = hex
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let digits = std::str::from_utf8(pair).expect("fixture hex is ASCII");
+                u8::from_str_radix(digits, 16).expect("fixture hex is valid")
+            })
+            .collect::<Vec<_>>();
+
+        let parsed = SerializedFile::parse(&bytes).expect("source fixture parses");
+        assert_eq!(
+            parsed.metadata.prefix.unity_version_text.as_deref(),
+            Some("4.0.0a0")
+        );
+        assert!(parsed.metadata.types[0]
+            .type_tree
+            .as_ref()
+            .is_none_or(|tree| tree.nodes.is_empty()));
+
+        let filesystem = virtual_file_system("/game/gameobject_4_alpha_notree.assets", &bytes);
+        let workspace = SerializedFileWorkspace::load_from_vfs(
+            &filesystem,
+            &[input("/game/gameobject_4_alpha_notree.assets")],
+            SerializedFileWorkspaceLimits::default(),
+        )
+        .expect("workspace resolves the source-generated object");
+        assert!(workspace.files()[0].reference_graph.is_complete());
+        assert!(workspace.files()[0]
+            .reference_graph
+            .object_scan_is_complete(0));
+
+        let objects = ObjectWorkspace::load_from_vfs(
+            &filesystem,
+            &workspace,
+            ObjectWorkspaceLimits::default(),
+        )
+        .expect("ObjectWorkspace uses the per-class factory boundary");
+        assert!(objects.report().is_complete(), "{:?}", objects.report());
+        assert_eq!(objects.report().decoded_objects, 1);
+        assert_eq!(
+            objects.objects()[0].factory.kind,
+            crate::processing::asset_factory::FactoryAssetKind::Generated(
+                "GameObject_4".to_owned()
+            )
+        );
+        let payload = objects.objects()[0]
+            .payload
+            .as_ref()
+            .expect("generated GameObject is decoded");
+        assert_eq!(payload.type_name, "GameObject");
+        assert_eq!(payload.consumed_bytes, 15);
+        assert!(payload.trailing_bytes.is_empty());
+    }
+
+    #[test]
     fn object_workspace_recovers_editor_tpk_tree_object_without_file_typetree() {
         let fixture = crate::processing::asset_factory::PROBE_FIXTURE;
         let hex = fixture

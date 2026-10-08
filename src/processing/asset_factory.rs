@@ -2120,6 +2120,172 @@ pub fn materialize_file_objects(
 mod tests {
     use super::*;
 
+    fn decode_fixture_hex(value: &str) -> Vec<u8> {
+        assert_eq!(
+            value.len() % 2,
+            0,
+            "fixture hex has an odd number of digits"
+        );
+        value
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let digits = std::str::from_utf8(pair).expect("hex fixture is ASCII");
+                u8::from_str_radix(digits, 16).expect("fixture contains valid hex")
+            })
+            .collect()
+    }
+
+    /// Replays release/editor payloads written by AssetRipper's generated classes at every
+    /// non-null source TPK class-version boundary through the production Rust decoder.
+    #[test]
+    fn source_generated_payloads_decode_against_all_selected_tpk_boundaries() {
+        let fixture = include_str!("source_factory_payload_fixture.txt");
+        let layouts = reference_class_layouts();
+        let mut payload_count = 0usize;
+        let mut skipped_count = 0usize;
+        let mut payload_bytes = 0usize;
+        let mut cases = std::collections::HashSet::new();
+
+        for (line_index, line) in fixture.lines().enumerate() {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let fields: Vec<&str> = line.split('|').collect();
+            match fields.first().copied() {
+                Some("SKIP") => {
+                    assert_eq!(fields.len(), 4, "fixture line {}", line_index + 1);
+                    let class_id: i32 = fields[1].parse().expect("fixture class ID");
+                    let version =
+                        FactoryUnityVersion::parse(fields[2]).expect("fixture Unity version");
+                    match fields[3] {
+                        "MISSING" => assert_eq!(
+                            layouts.generated_class_name(class_id, &version).unwrap(),
+                            None,
+                            "source-missing class {class_id} at {}",
+                            version.text
+                        ),
+                        exception if exception.starts_with("THROW:") => {
+                            let error = layouts
+                                .generated_class_name(class_id, &version)
+                                .expect_err("source dispatch exception must remain an error");
+                            assert!(
+                                error.to_string().contains(&exception["THROW:".len()..]),
+                                "class {class_id} at {}: {error} vs {exception}",
+                                version.text
+                            );
+                        }
+                        outcome => panic!(
+                            "unexpected source skip outcome `{outcome}` on line {}",
+                            line_index + 1
+                        ),
+                    }
+                    skipped_count += 1;
+                }
+                Some("PAYLOAD") => {
+                    assert_eq!(fields.len(), 7, "fixture line {}", line_index + 1);
+                    let class_id: i32 = fields[1].parse().expect("fixture class ID");
+                    let version =
+                        FactoryUnityVersion::parse(fields[2]).expect("fixture Unity version");
+                    let source_name = layouts
+                        .generated_class_name(class_id, &version)
+                        .unwrap_or_else(|error| {
+                            panic!("class {class_id} at {}: {error}", version.text)
+                        })
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "source class missing for payload class {class_id} at {}",
+                                version.text
+                            )
+                        });
+                    assert_eq!(
+                        source_name,
+                        fields[3],
+                        "factory type at line {}",
+                        line_index + 1
+                    );
+                    let trees = layouts
+                        .tpk_trees(class_id, &version)
+                        .unwrap_or_else(|error| {
+                            panic!(
+                                "TPK lookup for class {class_id} at {}: {error}",
+                                version.text
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "TPK layout missing for class {class_id} at {}",
+                                version.text
+                            )
+                        });
+                    let mode = fields[4];
+                    let tree = match mode {
+                        "release" => trees.0,
+                        "editor" => trees.1,
+                        mode => {
+                            panic!("unexpected writer mode `{mode}` on line {}", line_index + 1)
+                        }
+                    };
+                    let expected_length: usize = fields[5].parse().expect("fixture byte length");
+                    let bytes = decode_fixture_hex(fields[6]);
+                    assert_eq!(
+                        bytes.len(),
+                        expected_length,
+                        "payload size at line {}",
+                        line_index + 1
+                    );
+                    assert!(
+                        cases.insert((class_id, version.text.clone(), fields[4].to_owned())),
+                        "duplicate generated payload case on line {}",
+                        line_index + 1
+                    );
+
+                    let decoded = decode_with_tree(
+                        &tree,
+                        &bytes,
+                        Endian::Little,
+                        unity_version_aligns_arrays(Some(&version.text)),
+                        &[],
+                        payload_count,
+                        42,
+                        &ObjectDecodeLimits::default(),
+                    )
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "Rust failed to decode source {mode} payload for class {class_id} at {}: {error}",
+                            version.text
+                        )
+                    });
+                    assert_eq!(
+                        decoded.consumed_bytes,
+                        bytes.len(),
+                        "source {mode} payload tail for class {class_id} at {}",
+                        version.text
+                    );
+                    assert!(
+                        decoded.trailing_bytes.is_empty(),
+                        "source {mode} payload has trailing bytes for class {class_id} at {}",
+                        version.text
+                    );
+                    payload_bytes = payload_bytes
+                        .checked_add(bytes.len())
+                        .expect("fixture payload byte count fits usize");
+                    payload_count += 1;
+                }
+                Some("FAIL") => panic!("source generated writer failed: {line}"),
+                outcome => panic!(
+                    "unexpected source payload fixture record `{outcome:?}` on line {}",
+                    line_index + 1
+                ),
+            }
+        }
+
+        assert_eq!(payload_count, 8_922);
+        assert_eq!(skipped_count, 539);
+        assert_eq!(payload_bytes, 1_482_552);
+        assert_eq!(cases.len(), payload_count);
+    }
+
     #[test]
     fn fallback_names_follow_the_raw_data_hash_rule() {
         // The hash is the reflected CRC-32 of the raw bytes.
@@ -2989,6 +3155,20 @@ mod tests {
                     &SerializedValue::I32(200)
                 );
             }
+            "gameobject_4_alpha_notree" => {
+                assert_eq!(
+                    asset.kind,
+                    FactoryAssetKind::Generated("GameObject_4".to_owned())
+                );
+                assert_eq!(asset.tail, Some(ObjectTailOutcome::Exact));
+                let payload = asset
+                    .payload
+                    .as_ref()
+                    .expect("generated GameObject payload");
+                assert_eq!(payload.type_name, "GameObject");
+                assert_eq!(payload.consumed_bytes, 15);
+                assert!(payload.trailing_bytes.is_empty());
+            }
             other => panic!("unexpected case {other}"),
         }
     }
@@ -3000,7 +3180,7 @@ mod tests {
         let fixture = include_str!("asset_factory_fixture.txt");
         let layouts = reference_class_layouts();
         let cases = fixture_cases(fixture);
-        assert_eq!(cases.len(), 12, "all probe cases are replayed");
+        assert_eq!(cases.len(), 13, "all probe cases are replayed");
         for case in &cases {
             assert_case(case, layouts);
         }

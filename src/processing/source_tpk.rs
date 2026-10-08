@@ -401,6 +401,35 @@ impl SourceTpkDatabase {
         &self.source_versions
     }
 
+    #[cfg(test)]
+    pub(crate) fn factory_dispatch_versions(&self) -> Vec<(FactoryUnityVersion, u64)> {
+        let mut versions = BTreeMap::<u64, FactoryUnityVersion>::new();
+        let before_first = FactoryUnityVersion::parse("0.0.0f0")
+            .expect("the factory matrix's initial version is valid");
+        versions.insert(
+            before_first
+                .source_order_bits()
+                .expect("the initial version is source-orderable"),
+            before_first,
+        );
+        for (version, bits) in &self.source_versions {
+            versions.entry(*bits).or_insert_with(|| version.clone());
+        }
+        for history in self.class_histories.values() {
+            for entry in history {
+                if let Some(bits) = entry.version.source_order_bits() {
+                    versions
+                        .entry(bits)
+                        .or_insert_with(|| entry.version.clone());
+                }
+            }
+        }
+        versions
+            .into_iter()
+            .map(|(bits, version)| (version, bits))
+            .collect()
+    }
+
     pub(crate) fn trees(
         &self,
         class_id: i32,
