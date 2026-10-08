@@ -2451,9 +2451,11 @@ fn inspect_directories_to<W: io::Write>(
         MixedGameStructureLimits::default(),
     )?;
     if plan_load_process(mixed.serialized_file_inputs.len()) == LoadProcessPlan::ReturnUnprocessed {
-        return Err(invalid_input(
-            "the selected directories contain no recognized SerializedFile inputs",
-        ));
+        writeln!(
+            output,
+            "No valid assets were found in the selected directories; processing was skipped."
+        )?;
+        return Ok(());
     }
     let (workspace, dependencies) = SerializedFileWorkspace::load_from_vfs_with_dependencies(
         &mut filesystem,
@@ -2514,6 +2516,7 @@ fn mount_input_directories(
         }
 
         let destination_root = format!("/inputs/{index}");
+        filesystem.create_directory(Some(&destination_root))?;
         let remaining_limits = BatchMountLimits {
             max_inputs: remaining_budget_usize(
                 batch_limits.max_inputs,
@@ -5971,6 +5974,35 @@ mod tests {
     fn directory_inspection_loads_a_synthetic_serialized_file() {
         let input = TestInputDirectory::new();
         super::inspect_directories(std::slice::from_ref(&input.directory)).unwrap();
+    }
+
+    #[test]
+    fn empty_directory_inspection_reports_unprocessed_empty_bundle() {
+        let directory = TestInputDirectory::new_root();
+        let input = TestInputDirectory {
+            directory: directory.clone(),
+            files: Vec::new(),
+            subdirectories: Vec::new(),
+        };
+        let mut output = Vec::new();
+        super::inspect_directories_to(std::slice::from_ref(&directory), &mut output).unwrap();
+        let summary = String::from_utf8(output).unwrap();
+
+        let reference = include_str!("io/cli_inspect_fixture.txt")
+            .lines()
+            .find(|line| line.starts_with("EMPTY_DIRECTORY|"))
+            .expect("source runtime fixture contains the empty directory outcome");
+        assert_eq!(
+            reference,
+            "EMPTY_DIRECTORY|collections=0|processors_requested=0"
+        );
+        assert!(
+            summary.contains(
+                "No valid assets were found in the selected directories; processing was skipped."
+            ),
+            "{summary}"
+        );
+        drop(input);
     }
 
     /// End-to-end discovery differential against the reference `GameStructure`

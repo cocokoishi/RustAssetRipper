@@ -1,0 +1,3 @@
+# AssetRipper ExportHandler.LoadAndProcess over an empty directory (probe tools/probes/cli-inspect).
+# The empty GameBundle is returned and the processor sequence is not requested.
+EMPTY_DIRECTORY|collections=0|processors_requested=0
