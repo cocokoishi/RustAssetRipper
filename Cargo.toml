@@ -15,3 +15,6 @@ lzma-rs = { version = "0.3.0", default-features = false, features = ["raw_decode
 ruzstd = { version = "=0.9.0", default-features = false, features = ["std", "hash"] }
 brotli-decompressor = "=5.0.3"
 flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend"] }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "=1.1.5", features = ["fs"] }

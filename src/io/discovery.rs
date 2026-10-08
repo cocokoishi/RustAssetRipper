@@ -964,17 +964,18 @@ mod tests {
         }
         #[cfg(not(windows))]
         {
-            // Source-backed disposition instead of a silent skip: `LocalFileSystem.g.cs`
-            // delegates to `System.IO.File.OpenRead` on every host, and on Unix .NET takes no
-            // advisory share lock for `FileShare.Read`, so the Windows rejections above are a
-            // platform property, not AssetRipper behavior. Rust's `open_os_read` matches that by
-            // narrowing the share mode only on Windows.
+            // The frozen source delegates to System.IO.File.OpenRead on every host. The
+            // source-code disposition records .NET 10's Unix advisory shared lock and the
+            // compatible File.WriteAllBytes lock, but this host-specific runtime row is not
+            // available in the current Windows environment.
             assert_eq!(field(&retained, "open_read_type"), "System.IO.FileStream");
             let disposition = row("DIR|disposition|");
             assert!(
-                field(&disposition, "non_windows_arm").contains("FileShare.Read"),
+                field(&disposition, "non_windows_source").contains("FileShare.Read"),
                 "the committed disposition must stay documented"
             );
+            assert!(field(&disposition, "non_windows_source").contains("LOCK_SH"));
+            assert!(field(&disposition, "non_windows_source").contains("Unix Unlink"));
         }
     }
 }

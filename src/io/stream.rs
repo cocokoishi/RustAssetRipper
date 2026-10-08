@@ -896,10 +896,11 @@ pub fn open_logical_file(path: impl AsRef<Path>) -> io::Result<Box<dyn ReadSeek 
 
 /// Open a filesystem input using the reference `File.OpenRead` share contract.
 ///
-/// On Windows, AssetRipper shares read access only while the stream is open, so other
-/// processes cannot replace or delete an input being retained by the workspace.
-/// Rust's default `File::open` also shares write and delete access; narrow those flags
-/// to match the source. Other platforms use their native read-only open semantics.
+/// On Windows, AssetRipper shares read access only while the stream is open. On Unix,
+/// .NET uses an advisory shared `flock` for `FileShare.Read`; mirror that lock while
+/// accepting that Unix writers using a compatible shared lock and unlink operations
+/// are not blocked. Unix targets without Rustix `flock` support use their native
+/// read-only open semantics, as do other non-Windows platforms.
 fn open_os_read(path: &Path) -> io::Result<File> {
     #[cfg(windows)]
     {
@@ -911,7 +912,38 @@ fn open_os_read(path: &Path) -> io::Result<File> {
             .share_mode(FILE_SHARE_READ)
             .open(path)
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
+    {
+        let file = File::open(path)?;
+        #[cfg(not(any(
+            target_os = "solaris",
+            target_os = "espidf",
+            target_os = "horizon",
+            target_os = "vita"
+        )))]
+        {
+            return match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockShared)
+            {
+                Ok(()) => Ok(file),
+                Err(error) if error == rustix::io::Errno::WOULDBLOCK => Err(error.into()),
+                Err(_) => {
+                    // .NET treats unsupported advisory locking as best-effort and still opens
+                    // the file; only a conflicting lock rejects the read handle.
+                    Ok(file)
+                }
+            };
+        }
+        #[cfg(any(
+            target_os = "solaris",
+            target_os = "espidf",
+            target_os = "horizon",
+            target_os = "vita"
+        ))]
+        {
+            Ok(file)
+        }
+    }
+    #[cfg(not(any(windows, unix)))]
     {
         File::open(path)
     }
@@ -1296,6 +1328,16 @@ fn seek_target(position: u64, length: u64, from: SeekFrom) -> io::Result<u64> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(
+        unix,
+        not(any(
+            target_os = "solaris",
+            target_os = "espidf",
+            target_os = "horizon",
+            target_os = "vita"
+        ))
+    ))]
+    use super::open_os_read;
     use super::{
         logical_file_name, logical_file_path, open_logical_file, split_base_path, split_part_index,
         FileRangeStream, MultiFileStream, PartialStream, SmartStream, SmartStreamBackend,
@@ -1303,6 +1345,26 @@ mod tests {
     };
     use crate::compression::wrappers::compress_gzip;
     use crate::scheme::{FileKind, SchemeReader, SchemeReaderLimits};
+    #[cfg(all(
+        unix,
+        not(any(
+            target_os = "solaris",
+            target_os = "espidf",
+            target_os = "horizon",
+            target_os = "vita"
+        ))
+    ))]
+    use std::fs::OpenOptions;
+    #[cfg(all(
+        unix,
+        not(any(
+            target_os = "solaris",
+            target_os = "espidf",
+            target_os = "horizon",
+            target_os = "vita"
+        ))
+    ))]
+    use std::io;
     use std::io::{Cursor, Read, Seek, SeekFrom, Write};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1692,6 +1754,65 @@ mod tests {
         assert_eq!(hex_encode(&split_bytes), split_read_record[1]);
         drop(split_stream);
         remove_test_files(&directory, &["split.bundle.split0", "split.bundle.split1"]);
+    }
+
+    #[cfg(all(
+        unix,
+        not(any(
+            target_os = "solaris",
+            target_os = "espidf",
+            target_os = "horizon",
+            target_os = "vita"
+        ))
+    ))]
+    #[test]
+    fn physical_file_read_sharing_matches_dotnet_unix_advisory_lock_contract() {
+        use rustix::fs::{flock, FlockOperation};
+        use rustix::io::Errno;
+
+        let directory = create_test_directory("source-file-sharing-unix");
+        let path = directory.join("retained.bundle");
+        std::fs::write(&path, b"source-bytes").unwrap();
+
+        let blocker = OpenOptions::new().read(true).open(&path).unwrap();
+        assert_eq!(
+            flock(&blocker, FlockOperation::NonBlockingLockExclusive),
+            Ok(())
+        );
+        let blocked_read = open_os_read(&path).unwrap_err();
+        assert_eq!(blocked_read.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(flock(&blocker, FlockOperation::Unlock), Ok(()));
+        drop(blocker);
+
+        let mut reader = open_os_read(&path).unwrap();
+        let mut compatible_writer = OpenOptions::new().write(true).open(&path).unwrap();
+        // File.WriteAllBytes uses FileShare.Read on .NET 10, so its shared lock is
+        // compatible with the retained reader's shared lock.
+        assert_eq!(
+            flock(&compatible_writer, FlockOperation::NonBlockingLockShared),
+            Ok(())
+        );
+        compatible_writer.set_len(0).unwrap();
+        compatible_writer.write_all(b"replacement").unwrap();
+
+        let exclusive_writer = OpenOptions::new().read(true).open(&path).unwrap();
+        assert_eq!(
+            flock(&exclusive_writer, FlockOperation::NonBlockingLockExclusive),
+            Err(Errno::WOULDBLOCK)
+        );
+
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"replacement");
+
+        std::fs::remove_file(&path).unwrap();
+        reader.seek(SeekFrom::Start(0)).unwrap();
+        bytes.clear();
+        reader.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"replacement");
+
+        drop((reader, compatible_writer, exclusive_writer));
+        std::fs::remove_dir(&directory).unwrap();
     }
 
     #[cfg(windows)]

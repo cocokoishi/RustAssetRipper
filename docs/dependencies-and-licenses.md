@@ -8,13 +8,17 @@
 
 `brotli-decompressor` provides a pure-Rust Brotli streaming reader. `flate2` provides GZip decoding and encoding with only its `rust_backend` feature enabled, using the pure-Rust `miniz_oxide` backend. Wrapper decoders cap decoded output; `flate2::read::MultiGzDecoder` reads concatenated GZip members. GZip encoding caps the compressed bytes written to memory. Unity's Brotli metadata marker is parsed with a bounded RFC 7932 bit reader, then `SchemeReader` recursively applies the decoder. The Rust parser accounts for the metadata length field's `MSKIPLEN - 1` representation; the source discrepancy is tracked in `docs/differential-findings.md`.
 
+`rustix` provides safe Unix system-call bindings for the shared advisory file lock used by `File.OpenRead` parity. The `fs` feature is enabled; Linux uses `linux-raw-sys`, while other supported Unix targets use the crate's platform bindings.
+
 | Crate | Locked version | Use | Declared license | Rust version metadata |
 |---|---:|---|---|---|
 | [lzma-rs](https://github.com/gendx/lzma-rs) | 0.3.0 | Pure Rust raw LZMA decoder | MIT | Not declared in the published crate manifest |
 | [ruzstd](https://github.com/KillingSpark/zstd-rs) | 0.9.0 | Pure Rust Zstandard frame decoder | MIT | 1.87 |
 | [brotli-decompressor](https://github.com/dropbox/rust-brotli-decompressor) | 5.0.3 | Pure Rust Brotli streaming decoder | BSD-3-Clause / MIT | Not declared in the published crate manifest |
 | [flate2](https://github.com/rust-lang/flate2-rs) | 1.1.10 | GZip stream decoder and encoder using `rust_backend` | MIT OR Apache-2.0 | 1.67 |
+| [rustix](https://github.com/bytecodealliance/rustix) | 1.1.5 | Safe Unix `flock` bindings for retained input handles | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | 1.65 |
 | [byteorder](https://github.com/BurntSushi/byteorder) | 1.5.0 | Little-endian parsing used by `lzma-rs` | Unlicense OR MIT | 1.60 |
+| [bitflags](https://github.com/bitflags/bitflags) | 2.13.2 | Flag types used by `rustix` | MIT OR Apache-2.0 | 1.56 |
 | [crc](https://github.com/mrhooray/crc-rs) | 3.4.0 | CRC support compiled as an `lzma-rs` dependency | MIT OR Apache-2.0 | 1.83 |
 | [crc-catalog](https://github.com/akhilles/crc-catalog) | 2.5.0 | CRC algorithm definitions used by `crc` | MIT OR Apache-2.0 | Not declared in the published crate manifest |
 | [twox-hash](https://github.com/shepmaster/twox-hash) | 2.1.4 | XXH64 checksums used by `ruzstd` | MIT | 1.81 |
@@ -25,6 +29,9 @@
 | simd-adler32 | 0.3.10 | Adler checksum implementation used by `miniz_oxide` | MIT | Not declared in the published crate manifest |
 | [crc32fast](https://github.com/srijs/rust-crc32fast) | 1.5.2 | GZip CRC validation used by `flate2` | MIT OR Apache-2.0 | 1.63 |
 | [cfg-if](https://github.com/rust-lang/cfg-if) | 1.0.5 | Target configuration used by `crc32fast` | MIT OR Apache-2.0 | 1.32 |
+| [errno](https://github.com/lambda-fairy/rust-errno) | 0.3.14 | Unix error codes used by `rustix` on non-Linux Unix targets | MIT OR Apache-2.0 | 1.56 |
+| [libc](https://github.com/rust-lang/libc) | 0.2.190 | Platform bindings used by `rustix` on non-Linux Unix targets | MIT OR Apache-2.0 | 1.65 |
+| [linux-raw-sys](https://github.com/sunfishcode/linux-raw-sys) | 0.12.1 | Linux syscall bindings used by `rustix` | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | 1.63 |
 
 `Cargo.lock` records the exact selected dependency graph. The package minimum is Rust 1.87 to satisfy `ruzstd` 0.9.0. Rust 1.87 is not installed in the current environment, so only Rust 1.98.1 has been used to build and test this repository. The selected crates are pure Rust and do not require a native C codec toolchain.
 

@@ -1028,13 +1028,12 @@ public static class Program
 			+ $"|write_while_open={writeOutcome}|delete_while_open={deleteOutcome}"
 			+ $"|read_while_open={retainedRead}:{Hex(retained)}");
 
-		Lines.Add("DIR|disposition|non_windows_arm=LocalFileSystem.g.cs delegates File.OpenRead and "
-			+ "Directory.GetFiles to System.IO on every host, so the observed share-lock rejection is the "
-			+ "Windows file-sharing rule, not AssetRipper logic; on Unix .NET does not take an advisory share "
-			+ "lock for FileShare.Read, so a concurrent write or delete is not guaranteed to be blocked, and "
-			+ "Directory.GetFiles order is OS-dependent; Rust narrows the share mode only on Windows "
-			+ "(io/stream.rs open_os_read) and uses a plain File::open elsewhere, while sorting discovered "
-			+ "directory entries for deterministic output.");
+		Lines.Add("DIR|disposition|non_windows_source=AssetRipper delegates File.OpenRead and Directory.GetFiles "
+			+ "to System.IO; .NET 10 Unix File.OpenRead requests FileShare.Read and best-effort LOCK_SH, "
+			+ "while File.WriteAllBytes also requests FileShare.Read so the shared locks are compatible; "
+			+ "File.Delete calls Unix Unlink and is not protected by that advisory lock; Directory.GetFiles "
+			+ "order is not guaranteed; Rust mirrors LOCK_SH on supported Unix targets and sorts discovery deterministically. "
+			+ "This row is source-code analysis, not a non-Windows runtime observation.");
 	}
 
 	private static string JoinNames(IEnumerable<string> paths) =>
