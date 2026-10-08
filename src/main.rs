@@ -406,7 +406,7 @@ fn export_texture_to<W: io::Write>(
     output_path: &Path,
     status_output: &mut W,
 ) -> Result<(), Box<dyn Error>> {
-    let (mut filesystem, selected_paths, mount_report) = mount_input_files(input_files)?;
+    let (mut filesystem, selected_paths, mount_report) = mount_input_files_for_export(input_files)?;
     let mixed = MixedGameStructure::from_vfs_paths(
         &filesystem,
         &selected_paths,
@@ -431,6 +431,7 @@ fn export_texture_to<W: io::Write>(
         DependencyIndexLimits::default(),
         ContainerMountLimits::default(),
     )?;
+    ensure_no_workspace_container_failures(&workspace)?;
     let file = workspace
         .files()
         .get(serialized_file_index)
@@ -683,7 +684,8 @@ fn export_mesh_to<W: io::Write>(
     output_path: &Path,
     status_output: &mut W,
 ) -> Result<(), Box<dyn Error>> {
-    let (mut filesystem, selected_paths, _mount_report) = mount_input_files(input_files)?;
+    let (mut filesystem, selected_paths, _mount_report) =
+        mount_input_files_for_export(input_files)?;
     let mixed = MixedGameStructure::from_vfs_paths(
         &filesystem,
         &selected_paths,
@@ -703,6 +705,7 @@ fn export_mesh_to<W: io::Write>(
         DependencyIndexLimits::default(),
         ContainerMountLimits::default(),
     )?;
+    ensure_no_workspace_container_failures(&workspace)?;
     let (object_index, _) = select_unique_object(&workspace, serialized_file_index, path_id)?;
 
     let objects =
@@ -1106,7 +1109,8 @@ fn export_shader_to<W: io::Write>(
     output_path: &Path,
     status_output: &mut W,
 ) -> Result<(), Box<dyn Error>> {
-    let (mut filesystem, selected_paths, _mount_report) = mount_input_files(input_files)?;
+    let (mut filesystem, selected_paths, _mount_report) =
+        mount_input_files_for_export(input_files)?;
     let mixed = MixedGameStructure::from_vfs_paths(
         &filesystem,
         &selected_paths,
@@ -1126,6 +1130,7 @@ fn export_shader_to<W: io::Write>(
         DependencyIndexLimits::default(),
         ContainerMountLimits::default(),
     )?;
+    ensure_no_workspace_container_failures(&workspace)?;
     let (object_index, _) = select_unique_object(&workspace, serialized_file_index, path_id)?;
 
     let objects =
@@ -1293,6 +1298,7 @@ fn export_project_to<W: io::Write>(
     status_output: &mut W,
 ) -> Result<(), Box<dyn Error>> {
     let (mut filesystem, selected_paths, mount_report) = mount_project_inputs(input_paths)?;
+    ensure_no_batch_container_failures(&mount_report)?;
     let mixed = MixedGameStructure::from_vfs_paths(
         &filesystem,
         &selected_paths,
@@ -1317,6 +1323,7 @@ fn export_project_to<W: io::Write>(
         DependencyIndexLimits::default(),
         ContainerMountLimits::default(),
     )?;
+    ensure_no_workspace_container_failures(&workspace)?;
     let objects =
         ObjectWorkspace::load_from_vfs(&filesystem, &workspace, ObjectWorkspaceLimits::default())?;
     let reference_graph = workspace.reference_graph(MultiFileReferenceGraphLimits::default())?;
@@ -1397,7 +1404,7 @@ fn export_audio_to<W: io::Write>(
     output_path: &Path,
     status_output: &mut W,
 ) -> Result<(), Box<dyn Error>> {
-    let (mut filesystem, selected_paths, mount_report) = mount_input_files(input_files)?;
+    let (mut filesystem, selected_paths, mount_report) = mount_input_files_for_export(input_files)?;
     let mixed = MixedGameStructure::from_vfs_paths(
         &filesystem,
         &selected_paths,
@@ -1422,6 +1429,7 @@ fn export_audio_to<W: io::Write>(
         DependencyIndexLimits::default(),
         ContainerMountLimits::default(),
     )?;
+    ensure_no_workspace_container_failures(&workspace)?;
     let file = workspace
         .files()
         .get(serialized_file_index)
@@ -1667,7 +1675,7 @@ fn export_object_yaml_to<W: io::Write>(
     output_path: &Path,
     status_output: &mut W,
 ) -> Result<(), Box<dyn Error>> {
-    let (mut filesystem, selected_paths, mount_report) = mount_input_files(input_files)?;
+    let (mut filesystem, selected_paths, mount_report) = mount_input_files_for_export(input_files)?;
     let mixed = MixedGameStructure::from_vfs_paths(
         &filesystem,
         &selected_paths,
@@ -1692,6 +1700,7 @@ fn export_object_yaml_to<W: io::Write>(
         DependencyIndexLimits::default(),
         ContainerMountLimits::default(),
     )?;
+    ensure_no_workspace_container_failures(&workspace)?;
     let file = workspace
         .files()
         .get(serialized_file_index)
@@ -1800,7 +1809,7 @@ fn export_file_yaml_to<W: io::Write>(
     output_path: &Path,
     status_output: &mut W,
 ) -> Result<(), Box<dyn Error>> {
-    let (mut filesystem, selected_paths, mount_report) = mount_input_files(input_files)?;
+    let (mut filesystem, selected_paths, mount_report) = mount_input_files_for_export(input_files)?;
     let mixed = MixedGameStructure::from_vfs_paths(
         &filesystem,
         &selected_paths,
@@ -1825,6 +1834,7 @@ fn export_file_yaml_to<W: io::Write>(
         DependencyIndexLimits::default(),
         ContainerMountLimits::default(),
     )?;
+    ensure_no_workspace_container_failures(&workspace)?;
     let file = workspace
         .files()
         .get(serialized_file_index)
@@ -2061,6 +2071,7 @@ fn inspect_explicit_files_to<W: io::Write>(
     output: &mut W,
 ) -> Result<(), Box<dyn Error>> {
     let (mut filesystem, selected_paths, mount_report) = mount_input_files(input_files)?;
+    print_batch_container_failures_to(output, &mount_report)?;
     let mixed = MixedGameStructure::from_vfs_paths(
         &filesystem,
         &selected_paths,
@@ -2185,6 +2196,98 @@ fn mount_input_files(
     Ok((filesystem, selected_paths, mount_report))
 }
 
+fn mount_input_files_for_export(
+    input_files: &[PathBuf],
+) -> Result<(VirtualFileSystem, Vec<String>, BatchMountReport), Box<dyn Error>> {
+    let mounted = mount_input_files(input_files)?;
+    ensure_no_batch_container_failures(&mounted.2)?;
+    Ok(mounted)
+}
+
+fn ensure_no_batch_container_failures(report: &BatchMountReport) -> Result<(), Box<dyn Error>> {
+    let Some(failure) = report.failed_entries.first() else {
+        return Ok(());
+    };
+    Err(invalid_input(format!(
+        "refusing to export an incomplete container mount: {} UnityFS entries failed; first failure is input {:?}, entry {} {:?}: {}",
+        report.failed_entries.len(),
+        failure.input_path,
+        failure.entry.entry_index,
+        failure.entry.source_name,
+        failure.entry.error
+    )))
+}
+
+fn ensure_no_workspace_container_failures(
+    workspace: &SerializedFileWorkspace,
+) -> Result<(), Box<dyn Error>> {
+    let Some(failure) = workspace.failed_container_entries().first() else {
+        return Ok(());
+    };
+    Err(invalid_input(format!(
+        "refusing to export an incomplete dependency-container mount: {} UnityFS entries failed; first failure is container {:?}, entry {} {:?}: {}",
+        workspace.failed_container_entries().len(),
+        failure.source_container_path,
+        failure.entry.entry_index,
+        failure.entry.source_name,
+        failure.entry.error
+    )))
+}
+
+fn print_batch_container_failures_to<W: io::Write>(
+    output: &mut W,
+    report: &BatchMountReport,
+) -> io::Result<()> {
+    let failures = &report.failed_entries;
+    if failures.is_empty() {
+        return Ok(());
+    }
+    writeln!(
+        output,
+        "UnityFS entries recorded as failed: {}",
+        failures.len()
+    )?;
+    for failed in failures {
+        writeln!(
+            output,
+            "  input {:?}; entry {} {:?}; VFS path {:?}: {}",
+            failed.input_path,
+            failed.entry.entry_index,
+            failed.entry.source_name,
+            failed.entry.virtual_path,
+            failed.entry.error
+        )?;
+    }
+    Ok(())
+}
+
+fn print_workspace_container_failures_to<W: io::Write>(
+    output: &mut W,
+    workspace: &SerializedFileWorkspace,
+) -> io::Result<()> {
+    let failures = workspace.failed_container_entries();
+    if failures.is_empty() {
+        return Ok(());
+    }
+    writeln!(
+        output,
+        "UnityFS entries recorded as failed during workspace expansion: {}",
+        failures.len()
+    )?;
+    for failed in failures {
+        writeln!(
+            output,
+            "  container {:?}; entry {} {:?}; VFS path {:?}: {}",
+            failed.source_container_path,
+            failed.entry.entry_index,
+            failed.entry.source_name,
+            failed.entry.virtual_path,
+            failed.entry.error
+        )?;
+    }
+    Ok(())
+}
+
 fn mount_project_inputs(
     input_paths: &[PathBuf],
 ) -> Result<(VirtualFileSystem, Vec<String>, BatchMountReport), Box<dyn Error>> {
@@ -2238,6 +2341,16 @@ fn mount_project_inputs(
                 total.mounted_bytes,
                 "mounted output byte count",
             )?,
+            max_failed_entries: remaining_budget_usize(
+                limits.max_failed_entries,
+                total.failed_entries.len(),
+                "failed container entry count",
+            )?,
+            max_total_failed_entry_metadata_bytes: remaining_budget_u64(
+                limits.max_total_failed_entry_metadata_bytes,
+                total.failed_entry_metadata_bytes,
+                "failed container entry metadata byte count",
+            )?,
         };
         let next = if metadata.is_dir() {
             SchemeReader::mount_directory(
@@ -2283,6 +2396,7 @@ fn inspect_directories_to<W: io::Write>(
 ) -> Result<(), Box<dyn Error>> {
     let (mut filesystem, selected_paths, total_mount_report) =
         mount_input_directories(input_directories, true)?;
+    print_batch_container_failures_to(output, &total_mount_report)?;
     let structure = detect_platform_structure(
         &filesystem,
         &selected_paths,
@@ -2330,6 +2444,7 @@ fn inspect_directories_to<W: io::Write>(
     drop(filesystem);
     let (mut filesystem, selected_paths, total_mount_report) =
         mount_input_directories(input_directories, false)?;
+    print_batch_container_failures_to(output, &total_mount_report)?;
     let mixed = MixedGameStructure::from_vfs_paths(
         &filesystem,
         &selected_paths,
@@ -2425,6 +2540,16 @@ fn mount_input_directories(
                     "mounted output byte count",
                 )?
             },
+            max_failed_entries: remaining_budget_usize(
+                batch_limits.max_failed_entries,
+                total_mount_report.failed_entries.len(),
+                "failed container entry count",
+            )?,
+            max_total_failed_entry_metadata_bytes: remaining_budget_u64(
+                batch_limits.max_total_failed_entry_metadata_bytes,
+                total_mount_report.failed_entry_metadata_bytes,
+                "failed container entry metadata byte count",
+            )?,
         };
         let report = if preserve_containers {
             SchemeReader::mount_directory_preserving_containers(
@@ -2887,6 +3012,7 @@ fn print_workspace_summary_with_optional_resources_to<W: io::Write>(
     dependencies: &SerializedFileDependencyReport,
     resource_context: Option<&StreamedResourceSummaryContext<'_>>,
 ) -> Result<(), Box<dyn Error>> {
+    print_workspace_container_failures_to(output, workspace)?;
     let source_collection_file_indices = workspace.source_collection_file_indices()?;
     let mut source_collection_order_by_file = Vec::new();
     source_collection_order_by_file
@@ -4218,6 +4344,17 @@ fn merge_mount_report(
         .mounted_bytes
         .checked_add(next.mounted_bytes)
         .ok_or_else(|| invalid_data("mounted output byte count overflows"))?;
+    total.failed_entry_metadata_bytes = total
+        .failed_entry_metadata_bytes
+        .checked_add(next.failed_entry_metadata_bytes)
+        .ok_or_else(|| invalid_data("failed-entry metadata byte count overflows"))?;
+    total
+        .failed_entries
+        .try_reserve(next.failed_entries.len())
+        .map_err(|_| invalid_data("failed container entry metadata allocation failed"))?;
+    total
+        .failed_entries
+        .extend(next.failed_entries.iter().cloned());
     total
         .explicit_root_resource_files
         .extend_from_slice(&next.explicit_root_resource_files);
@@ -5973,6 +6110,63 @@ mod tests {
         assert!(first_resource_index < second_resource_index);
         assert!(!summary.contains("unselected.resS"));
         assert!(summary.contains("explicit file import: 3 logical inputs"));
+        drop(input);
+    }
+
+    #[test]
+    fn inspection_reports_failed_bundle_entries_and_project_export_refuses_partial_mounts() {
+        fn decode_hex(hex: &str) -> Vec<u8> {
+            hex.as_bytes()
+                .chunks_exact(2)
+                .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+                .collect()
+        }
+
+        let row = include_str!("io/io_differential_fixture.txt")
+            .lines()
+            .find(|line| line.starts_with("SCHEME|ufs_v6_lzham_block|"))
+            .expect("reference fixture contains the failed-entry continuation case");
+        let input_hex = row
+            .split('|')
+            .find_map(|field| field.strip_prefix("in="))
+            .expect("fixture row contains input bytes");
+        let directory = TestInputDirectory::new_root();
+        let bundle_path = directory.join("partial.bundle");
+        fs::write(&bundle_path, decode_hex(input_hex)).unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![bundle_path.clone()],
+            subdirectories: Vec::new(),
+        };
+
+        let mut inspection = Vec::new();
+        let inspect_error =
+            super::inspect_explicit_files_to(std::slice::from_ref(&bundle_path), &mut inspection)
+                .expect_err("the fixture has no SerializedFile or explicit root resource input");
+        let inspection = String::from_utf8(inspection).unwrap();
+        assert!(
+            inspection.contains("UnityFS entries recorded as failed: 1"),
+            "{inspection}\n{inspect_error}"
+        );
+        assert!(inspection.contains("unsupported.bin"), "{inspection}");
+
+        let output_root = input.directory.join("partial-project");
+        let mut status = Vec::new();
+        let export_error = super::export_project_to(
+            std::slice::from_ref(&bundle_path),
+            &output_root,
+            false,
+            &default_export_settings(),
+            &mut status,
+        )
+        .expect_err("project export must refuse a failed UnityFS entry");
+        assert!(
+            export_error
+                .to_string()
+                .contains("refusing to export an incomplete container mount"),
+            "{export_error}"
+        );
+        assert!(!output_root.exists(), "partial project output was created");
         drop(input);
     }
 

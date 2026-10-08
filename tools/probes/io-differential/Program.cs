@@ -467,7 +467,7 @@ public static class Program
 			("ufs_v6_lzham_block", BuildUnityFs(
 				6,
 				0,
-				new byte[] { 0, 4 },
+				new byte[] { 0, 4, 0 },
 				blocksInfoAtEnd: false,
 				needsPaddingAtStart: false,
 				directoryCombined: true,
@@ -475,8 +475,9 @@ public static class Program
 				{
 					new Entry("valid.bin", Ascii("GOOD")),
 					new Entry("unsupported.bin", Ascii("BAD!")),
+					new Entry("after.bin", Ascii("LATER")),
 				},
-				new[] { 4 })),
+				new[] { 4, 8 })),
 			("ufs_v6_zstd_block", BuildUnityFs(6, 0, 5, false, new[] { new Entry("data/file.bin", Ascii("0123456789")) })),
 			("ufs_v6_multiblock_cross_entry", BuildUnityFs(
 				6,

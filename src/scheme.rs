@@ -111,6 +111,10 @@ pub struct ContainerMountLimits {
     pub max_total_resource_file_path_bytes: u64,
     /// Maximum aggregate original ResourceFile name bytes retained for bundle-resource lookup.
     pub max_total_resource_file_name_bytes: u64,
+    /// Maximum number of source-style failed-entry records retained by one container tree.
+    pub max_failed_entries: usize,
+    /// Maximum aggregate input-path, source-name, and virtual-path bytes retained for failures.
+    pub max_total_failed_entry_metadata_bytes: u64,
 }
 
 impl Default for ContainerMountLimits {
@@ -125,6 +129,8 @@ impl Default for ContainerMountLimits {
             max_total_serialized_file_path_bytes: 64 * 1024 * 1024,
             max_total_resource_file_path_bytes: 64 * 1024 * 1024,
             max_total_resource_file_name_bytes: 64 * 1024 * 1024,
+            max_failed_entries: 1_000_000,
+            max_total_failed_entry_metadata_bytes: 64 * 1024 * 1024,
         }
     }
 }
@@ -143,6 +149,10 @@ pub struct BatchMountLimits {
     /// Maximum aggregate bytes in recursively mounted leaves; raw-preserving imports use the
     /// aggregate source-byte limit above because their inserted streams retain physical files.
     pub max_total_output_bytes: u64,
+    /// Maximum source-style failed-entry records retained across the complete batch.
+    pub max_failed_entries: usize,
+    /// Maximum aggregate source-name and virtual-path bytes retained for failed entries.
+    pub max_total_failed_entry_metadata_bytes: u64,
 }
 
 impl Default for BatchMountLimits {
@@ -153,6 +163,8 @@ impl Default for BatchMountLimits {
             max_directory_depth: 256,
             max_total_input_bytes: 16 * 1024 * 1024 * 1024,
             max_total_output_bytes: 2 * 1024 * 1024 * 1024,
+            max_failed_entries: 1_000_000,
+            max_total_failed_entry_metadata_bytes: 64 * 1024 * 1024,
         }
     }
 }
@@ -186,6 +198,22 @@ pub struct ContainerMountReport {
     pub resource_file_path_bytes: u64,
     /// Aggregate bytes in original source names for `resource_files`.
     pub resource_file_name_bytes: u64,
+    /// UnityFS entry reads that failed but did not stop sibling traversal, matching source
+    /// `FileContainer.FailedFiles`. Limits that prevent retaining the complete list are fatal.
+    pub failed_entries: Vec<FailedContainerEntry>,
+    /// Aggregate input-path, source-name, and virtual-path bytes in `failed_entries`.
+    pub failed_entry_metadata_bytes: u64,
+}
+
+/// One UnityFS directory entry that the reference records as a `FailedFile`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FailedContainerEntry {
+    pub virtual_path: String,
+    pub source_name: String,
+    /// Local index of the owning container node in this mount report, when recursively mounted.
+    pub container_bundle_index: Option<usize>,
+    pub entry_index: usize,
+    pub error: UnityFsError,
 }
 
 /// One source FileContainer in the recursively mounted SerializedBundle tree.
@@ -231,8 +259,18 @@ pub struct BatchMountReport {
     pub completed_inputs: usize,
     pub mounted_entries: usize,
     pub mounted_bytes: u64,
+    /// Source input and entry details for failed UnityFS entries in successfully traversed trees.
+    pub failed_entries: Vec<BatchFailedContainerEntry>,
+    /// Aggregate source-name and virtual-path bytes in `failed_entries`.
+    pub failed_entry_metadata_bytes: u64,
     /// Explicit path-list inputs dispatched as root ResourceFiles, in caller input order.
     pub explicit_root_resource_files: Box<Vec<MountedExplicitResourceFile>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchFailedContainerEntry {
+    pub input_path: std::path::PathBuf,
+    pub entry: FailedContainerEntry,
 }
 
 /// A top-level path-list input classified as a ResourceFile by `SchemeReader` and mounted in VFS.
@@ -263,7 +301,7 @@ struct BatchInputRequest {
 
 #[derive(Debug)]
 pub struct BatchMountError {
-    pub partial_report: BatchMountReport,
+    pub partial_report: Box<BatchMountReport>,
     pub input_path: Option<std::path::PathBuf>,
     pub kind: BatchMountErrorKind,
 }
@@ -301,6 +339,17 @@ pub enum BatchMountErrorKind {
     TotalOutputLimitExceeded {
         requested_total: u64,
         limit: u64,
+    },
+    FailedEntryCountLimitExceeded {
+        count: usize,
+        limit: usize,
+    },
+    FailedEntryMetadataLimitExceeded {
+        requested: u64,
+        limit: u64,
+    },
+    FailedEntryAllocationFailed {
+        requested: usize,
     },
     InvalidInputPathEncoding,
     ReportOverflow,
@@ -413,6 +462,17 @@ pub enum ContainerMountErrorKind {
         requested: usize,
     },
     ContainerResourceIndexOverflow,
+    FailedEntryCountLimitExceeded {
+        count: usize,
+        limit: usize,
+    },
+    FailedEntryMetadataLimitExceeded {
+        requested: u64,
+        limit: u64,
+    },
+    FailedEntryAllocationFailed {
+        requested: usize,
+    },
     TotalOutputLimitExceeded {
         entry_index: usize,
         requested_total: u64,
@@ -558,8 +618,10 @@ impl<'a> DispatchedFile<'a> {
 
     /// Mount each direct bundle/WebData entry under `destination_root` in its parsed path form.
     ///
-    /// Entry bytes are placed in owned SmartStreams. A failure reports the number and byte count
-    /// already mounted; earlier entries are not silently rolled back or reported as a full mount.
+    /// Entry bytes are placed in owned SmartStreams. UnityFS block-read failures are retained in
+    /// `failed_entries` and later siblings continue, matching the source FileContainer behavior.
+    /// Bounds and failures that prevent safe traversal return an error with the mounted partial
+    /// report; failed-entry count and metadata have explicit limits.
     pub fn mount_container_entries(
         &self,
         filesystem: &mut VirtualFileSystem,
@@ -576,18 +638,31 @@ impl<'a> DispatchedFile<'a> {
                 preflight_entry_count(bundle.nodes.len(), limits, &report)?;
                 preflight_output_sizes(bundle.nodes.iter().map(|node| node.size), limits, &report)?;
                 for (index, node) in bundle.nodes.iter().enumerate() {
-                    let bytes = bundle.read_entry(index).map_err(|error| {
-                        ContainerMountError::new(
-                            report.clone(),
-                            ContainerMountErrorKind::Scheme(SchemeError::new(
-                                SchemeErrorKind::UnityFs(error),
-                            )),
-                        )
-                    })?;
-                    mount_container_entry(
+                    let path = checked_container_entry_path(
                         filesystem,
                         destination_root,
                         node.path.as_str(),
+                        index,
+                        &report,
+                    )?;
+                    let bytes = match bundle.read_entry(index) {
+                        Ok(bytes) => bytes,
+                        Err(error) => {
+                            record_failed_container_entry(
+                                &mut report,
+                                node.path.as_str(),
+                                path,
+                                None,
+                                index,
+                                error,
+                                limits,
+                            )?;
+                            continue;
+                        }
+                    };
+                    mount_container_entry_at_path(
+                        filesystem,
+                        &path,
                         index,
                         bytes,
                         limits,
@@ -668,7 +743,8 @@ impl<'a> DispatchedFile<'a> {
     /// Recognized nested containers become virtual directories named after their parent entry;
     /// their contained leaves are mounted below that path. Container and wrapper payloads are
     /// parsed in memory and are not inserted as leaf files. Entry count, nesting depth, and total
-    /// mounted bytes are bounded across the complete traversal.
+    /// mounted bytes are bounded across the complete traversal. UnityFS block-read failures are
+    /// retained as source-style failed-entry records while later siblings continue.
     pub fn mount_container_tree(
         &self,
         filesystem: &mut VirtualFileSystem,
@@ -744,14 +820,21 @@ impl<'a> DispatchedFile<'a> {
                         index,
                         &state.report,
                     )?;
-                    let bytes = bundle.read_entry(index).map_err(|error| {
-                        ContainerMountError::new(
-                            state.report.clone(),
-                            ContainerMountErrorKind::Scheme(SchemeError::new(
-                                SchemeErrorKind::UnityFs(error),
-                            )),
-                        )
-                    })?;
+                    let bytes = match bundle.read_entry(index) {
+                        Ok(bytes) => bytes,
+                        Err(error) => {
+                            record_failed_container_entry(
+                                &mut state.report,
+                                node.path.as_str(),
+                                path,
+                                Some(container_bundle_index),
+                                index,
+                                error,
+                                state.limits,
+                            )?;
+                            continue;
+                        }
+                    };
                     let child = SchemeReader::read_cow_with_limits(bytes, self.limits).map_err(
                         |error| {
                             ContainerMountError::new(
@@ -885,7 +968,7 @@ impl BatchMountError {
         kind: BatchMountErrorKind,
     ) -> Self {
         Self {
-            partial_report,
+            partial_report: Box::new(partial_report),
             input_path,
             kind,
         }
@@ -895,15 +978,62 @@ impl BatchMountError {
 fn merge_batch_mount_report(
     batch: &mut BatchMountReport,
     input: &ContainerMountReport,
-) -> Result<(), ()> {
-    batch.mounted_entries = batch
+    input_path: &Path,
+    limits: BatchMountLimits,
+) -> Result<(), BatchMountErrorKind> {
+    let mounted_entries = batch
         .mounted_entries
         .checked_add(input.mounted_entries)
-        .ok_or(())?;
-    batch.mounted_bytes = batch
+        .ok_or(BatchMountErrorKind::ReportOverflow)?;
+    let mounted_bytes = batch
         .mounted_bytes
         .checked_add(input.mounted_bytes)
-        .ok_or(())?;
+        .ok_or(BatchMountErrorKind::ReportOverflow)?;
+    let failed_entry_count = batch
+        .failed_entries
+        .len()
+        .checked_add(input.failed_entries.len())
+        .ok_or(BatchMountErrorKind::ReportOverflow)?;
+    if failed_entry_count > limits.max_failed_entries {
+        return Err(BatchMountErrorKind::FailedEntryCountLimitExceeded {
+            count: failed_entry_count,
+            limit: limits.max_failed_entries,
+        });
+    }
+    let input_path_record_bytes = u64::try_from(input_path.as_os_str().len())
+        .ok()
+        .and_then(|path_bytes| {
+            u64::try_from(input.failed_entries.len())
+                .ok()
+                .and_then(|count| path_bytes.checked_mul(count))
+        })
+        .ok_or(BatchMountErrorKind::ReportOverflow)?;
+    let failed_entry_metadata_bytes = batch
+        .failed_entry_metadata_bytes
+        .checked_add(input.failed_entry_metadata_bytes)
+        .and_then(|bytes| bytes.checked_add(input_path_record_bytes))
+        .ok_or(BatchMountErrorKind::ReportOverflow)?;
+    if failed_entry_metadata_bytes > limits.max_total_failed_entry_metadata_bytes {
+        return Err(BatchMountErrorKind::FailedEntryMetadataLimitExceeded {
+            requested: failed_entry_metadata_bytes,
+            limit: limits.max_total_failed_entry_metadata_bytes,
+        });
+    }
+    batch
+        .failed_entries
+        .try_reserve(input.failed_entries.len())
+        .map_err(|_| BatchMountErrorKind::FailedEntryAllocationFailed {
+            requested: failed_entry_count,
+        })?;
+    batch.mounted_entries = mounted_entries;
+    batch.mounted_bytes = mounted_bytes;
+    batch.failed_entry_metadata_bytes = failed_entry_metadata_bytes;
+    for entry in &input.failed_entries {
+        batch.failed_entries.push(BatchFailedContainerEntry {
+            input_path: input_path.to_path_buf(),
+            entry: entry.clone(),
+        });
+    }
     Ok(())
 }
 
@@ -973,6 +1103,18 @@ impl Display for BatchMountErrorKind {
             } => write!(
                 formatter,
                 "mounted output would total {requested_total} bytes, exceeding batch limit {limit}"
+            ),
+            Self::FailedEntryCountLimitExceeded { count, limit } => write!(
+                formatter,
+                "batch has {count} failed container entries, exceeding diagnostic limit {limit}"
+            ),
+            Self::FailedEntryMetadataLimitExceeded { requested, limit } => write!(
+                formatter,
+                "failed-entry names and paths use {requested} bytes, exceeding batch diagnostic metadata limit {limit}"
+            ),
+            Self::FailedEntryAllocationFailed { requested } => write!(
+                formatter,
+                "could not reserve space for {requested} batch failed-entry records"
             ),
             Self::InvalidInputPathEncoding => {
                 formatter.write_str("input path cannot be represented as a virtual UTF-8 path")
@@ -1139,6 +1281,18 @@ impl Display for ContainerMountErrorKind {
             Self::ContainerResourceIndexOverflow => {
                 formatter.write_str("container resource order overflows usize")
             }
+            Self::FailedEntryCountLimitExceeded { count, limit } => write!(
+                formatter,
+                "container has {count} failed entries, exceeding diagnostic limit {limit}"
+            ),
+            Self::FailedEntryMetadataLimitExceeded { requested, limit } => write!(
+                formatter,
+                "failed-entry names and paths use {requested} bytes, exceeding diagnostic metadata limit {limit}"
+            ),
+            Self::FailedEntryAllocationFailed { requested } => write!(
+                formatter,
+                "could not reserve space for {requested} failed-entry records"
+            ),
             Self::TotalOutputLimitExceeded {
                 entry_index,
                 requested_total,
@@ -1253,6 +1407,96 @@ fn preflight_output_sizes(
             ));
         }
     }
+    Ok(())
+}
+
+fn record_failed_container_entry(
+    report: &mut ContainerMountReport,
+    source_name: &str,
+    virtual_path: String,
+    container_bundle_index: Option<usize>,
+    entry_index: usize,
+    error: UnityFsError,
+    limits: ContainerMountLimits,
+) -> Result<(), ContainerMountError> {
+    let requested_count = report.failed_entries.len().checked_add(1).ok_or_else(|| {
+        ContainerMountError::new(report.clone(), ContainerMountErrorKind::EntryCountOverflow)
+    })?;
+    if requested_count > limits.max_failed_entries {
+        return Err(ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::FailedEntryCountLimitExceeded {
+                count: requested_count,
+                limit: limits.max_failed_entries,
+            },
+        ));
+    }
+    let record_bytes = u64::try_from(source_name.len())
+        .ok()
+        .and_then(|source_bytes| {
+            u64::try_from(virtual_path.len())
+                .ok()
+                .and_then(|path_bytes| source_bytes.checked_add(path_bytes))
+        })
+        .ok_or_else(|| {
+            ContainerMountError::new(
+                report.clone(),
+                ContainerMountErrorKind::FailedEntryMetadataLimitExceeded {
+                    requested: u64::MAX,
+                    limit: limits.max_total_failed_entry_metadata_bytes,
+                },
+            )
+        })?;
+    let requested_metadata_bytes = report
+        .failed_entry_metadata_bytes
+        .checked_add(record_bytes)
+        .ok_or_else(|| {
+            ContainerMountError::new(
+                report.clone(),
+                ContainerMountErrorKind::FailedEntryMetadataLimitExceeded {
+                    requested: u64::MAX,
+                    limit: limits.max_total_failed_entry_metadata_bytes,
+                },
+            )
+        })?;
+    if requested_metadata_bytes > limits.max_total_failed_entry_metadata_bytes {
+        return Err(ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::FailedEntryMetadataLimitExceeded {
+                requested: requested_metadata_bytes,
+                limit: limits.max_total_failed_entry_metadata_bytes,
+            },
+        ));
+    }
+
+    let mut owned_source_name = String::new();
+    owned_source_name
+        .try_reserve_exact(source_name.len())
+        .map_err(|_| {
+            ContainerMountError::new(
+                report.clone(),
+                ContainerMountErrorKind::FailedEntryAllocationFailed {
+                    requested: source_name.len(),
+                },
+            )
+        })?;
+    owned_source_name.push_str(source_name);
+    report.failed_entries.try_reserve(1).map_err(|_| {
+        ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::FailedEntryAllocationFailed {
+                requested: requested_count,
+            },
+        )
+    })?;
+    report.failed_entries.push(FailedContainerEntry {
+        virtual_path,
+        source_name: owned_source_name,
+        container_bundle_index,
+        entry_index,
+        error,
+    });
+    report.failed_entry_metadata_bytes = requested_metadata_bytes;
     Ok(())
 }
 
@@ -2813,10 +3057,36 @@ impl SchemeReader {
                         BatchMountErrorKind::ReportOverflow,
                     )
                 })?;
+            let remaining_failed_entries = batch_limits
+                .max_failed_entries
+                .checked_sub(report.failed_entries.len())
+                .ok_or_else(|| {
+                    BatchMountError::new(
+                        report.clone(),
+                        Some(input.path.clone()),
+                        BatchMountErrorKind::ReportOverflow,
+                    )
+                })?;
+            let remaining_failed_metadata = batch_limits
+                .max_total_failed_entry_metadata_bytes
+                .checked_sub(report.failed_entry_metadata_bytes)
+                .ok_or_else(|| {
+                    BatchMountError::new(
+                        report.clone(),
+                        Some(input.path.clone()),
+                        BatchMountErrorKind::ReportOverflow,
+                    )
+                })?;
             let mut per_input_mount_limits = mount_limits;
             per_input_mount_limits.max_total_output_bytes = per_input_mount_limits
                 .max_total_output_bytes
                 .min(remaining_output);
+            per_input_mount_limits.max_failed_entries = per_input_mount_limits
+                .max_failed_entries
+                .min(remaining_failed_entries);
+            per_input_mount_limits.max_total_failed_entry_metadata_bytes = per_input_mount_limits
+                .max_total_failed_entry_metadata_bytes
+                .min(remaining_failed_metadata);
             let output_before_input = report.mounted_bytes;
 
             let mounted = Self::mount_dispatched_path(
@@ -2828,13 +3098,10 @@ impl SchemeReader {
             );
             match mounted {
                 Ok(input_report) => {
-                    merge_batch_mount_report(&mut report, &input_report).map_err(|_| {
-                        BatchMountError::new(
-                            report.clone(),
-                            Some(input.path.clone()),
-                            BatchMountErrorKind::ReportOverflow,
-                        )
-                    })?;
+                    merge_batch_mount_report(&mut report, &input_report, &input.path, batch_limits)
+                        .map_err(|kind| {
+                            BatchMountError::new(report.clone(), Some(input.path.clone()), kind)
+                        })?;
                     if let Some(resource_file) = explicit_root_resource_file {
                         report.explicit_root_resource_files.push(resource_file);
                     }
@@ -2848,15 +3115,15 @@ impl SchemeReader {
                         })?;
                 }
                 Err(input_error) => {
-                    merge_batch_mount_report(&mut report, &input_error.partial_report).map_err(
-                        |_| {
-                            BatchMountError::new(
-                                report.clone(),
-                                Some(input.path.clone()),
-                                BatchMountErrorKind::ReportOverflow,
-                            )
-                        },
-                    )?;
+                    merge_batch_mount_report(
+                        &mut report,
+                        &input_error.partial_report,
+                        &input.path,
+                        batch_limits,
+                    )
+                    .map_err(|kind| {
+                        BatchMountError::new(report.clone(), Some(input.path.clone()), kind)
+                    })?;
                     let batch_output_limit = match &input_error.kind {
                         ContainerMountErrorKind::TotalOutputLimitExceeded {
                             requested_total,
@@ -5206,19 +5473,17 @@ mod tests {
                     let header_index = out.len();
                     out.push(String::new());
                     let mut resources = 0usize;
-                    let mut failures = 0usize;
+                    let mut failed_names = Vec::new();
                     for (index, node) in bundle.nodes.iter().enumerate() {
                         let Ok(entry) = bundle.read_entry(index) else {
-                            failures += 1;
-                            out.push(format!("FAIL:{}", node.path));
+                            failed_names.push(node.path.as_str());
                             continue;
                         };
                         let Ok(child) = SchemeReader::read_with_limits(
                             entry.as_ref(),
                             SchemeReaderLimits::default(),
                         ) else {
-                            failures += 1;
-                            out.push(format!("FAIL:{}", node.path));
+                            failed_names.push(node.path.as_str());
                             continue;
                         };
                         if child.kind() == FileKind::Resource && child.wrappers().is_empty() {
@@ -5226,9 +5491,13 @@ mod tests {
                         }
                         walk(&child, &node.path, out);
                     }
+                    for failed_name in &failed_names {
+                        out.push(format!("FAIL:{failed_name}"));
+                    }
                     out[header_index] = format!(
-                        "CONTAINER:{}:{name}:res={resources}:failed={failures}",
-                        kind_name(FileKind::UnityFs)
+                        "CONTAINER:{}:{name}:res={resources}:failed={}",
+                        kind_name(FileKind::UnityFs),
+                        failed_names.len()
                     );
                 }
                 FileKind::UnityRaw | FileKind::UnityWebBundle => {
@@ -5370,11 +5639,14 @@ mod tests {
                     | FileKind::UnityRaw
                     | FileKind::UnityWebBundle
                     | FileKind::UnityWebData
-            ) && !expected_tree.contains("FAIL:")
-            {
+            ) {
                 let expected_resources: Vec<(&str, &str)> = expected_tree
                     .split(',')
                     .filter_map(|part| part.strip_prefix("RES:")?.split_once(':'))
+                    .collect();
+                let expected_failures: Vec<&str> = expected_tree
+                    .split(',')
+                    .filter_map(|part| part.strip_prefix("FAIL:"))
                     .collect();
                 let mut filesystem = crate::io::filesystem::VirtualFileSystem::new();
                 let mounted = dispatched
@@ -5385,6 +5657,36 @@ mod tests {
                         super::ContainerMountLimits::default(),
                     )
                     .unwrap_or_else(|error| panic!("{case}: recursive mount failed: {error}"));
+                assert_eq!(
+                    mounted.failed_entries.len(),
+                    expected_failures.len(),
+                    "{case}: source FailedFile count"
+                );
+                for (failure, expected_name) in mounted
+                    .failed_entries
+                    .iter()
+                    .zip(expected_failures.iter().copied())
+                {
+                    assert_eq!(
+                        failure.source_name, expected_name,
+                        "{case}: failed entry name"
+                    );
+                    assert_eq!(
+                        failure.container_bundle_index,
+                        Some(0),
+                        "{case}: failure owner"
+                    );
+                    assert!(
+                        matches!(
+                            failure.error.kind(),
+                            crate::container::unityfs::UnityFsErrorKind::UnsupportedCompression {
+                                compression: 4,
+                                ..
+                            }
+                        ),
+                        "{case}: {failure:?}"
+                    );
+                }
                 assert_eq!(
                     mounted.resource_files.len(),
                     expected_resources.len(),
@@ -5412,33 +5714,53 @@ mod tests {
                         resource.virtual_path
                     );
                 }
-            } else if expected_tree.contains("FAIL:")
-                && matches!(dispatched.kind(), FileKind::UnityFs)
-            {
-                // The reference FileStreamBundleFile retains an entry-level FailedFile and
-                // continues. The current product mount is fail-closed: it reports an error
-                // with the successfully mounted prefix, rather than returning a report that
-                // represents the source's FailedFiles collection.
-                let mut filesystem = crate::io::filesystem::VirtualFileSystem::new();
-                let error = dispatched
-                    .mount_container_tree_with_source_name(
-                        &mut filesystem,
-                        Some("/io-differential"),
-                        Some(&format!("{case}.bin")),
-                        super::ContainerMountLimits::default(),
-                    )
-                    .expect_err("source-failed UnityFS entry must not be reported as a full mount");
-                assert_eq!(
-                    error.partial_report.mounted_entries, 1,
-                    "{case}: preserve the successful prefix in the partial report"
-                );
-                assert_eq!(
-                    filesystem
-                        .read_all_bytes("/io-differential/valid.bin", 16)
-                        .expect("successful sibling remains mounted"),
-                    b"GOOD",
-                    "{case}: failed entry must not discard a prior valid sibling"
-                );
+                if !expected_failures.is_empty() {
+                    assert_eq!(expected_failures, ["unsupported.bin"]);
+                    assert_eq!(
+                        filesystem
+                            .read_all_bytes("/io-differential/after.bin", 16)
+                            .expect("valid sibling after the failed entry remains mounted"),
+                        b"LATER",
+                        "{case}: traversal continues after the failed entry"
+                    );
+
+                    let mut direct_filesystem = crate::io::filesystem::VirtualFileSystem::new();
+                    let direct = dispatched
+                        .mount_container_entries(
+                            &mut direct_filesystem,
+                            Some("/direct"),
+                            super::ContainerMountLimits::default(),
+                        )
+                        .unwrap_or_else(|error| panic!("{case}: direct mount failed: {error}"));
+                    assert_eq!(direct.failed_entries.len(), 1, "{case}: direct FailedFile");
+                    assert_eq!(direct.failed_entries[0].container_bundle_index, None);
+                    assert_eq!(
+                        direct_filesystem
+                            .read_all_bytes("/direct/after.bin", 16)
+                            .expect("direct mount continues after the failed entry"),
+                        b"LATER"
+                    );
+
+                    let mut limited_filesystem = crate::io::filesystem::VirtualFileSystem::new();
+                    let limited = dispatched
+                        .mount_container_tree(
+                            &mut limited_filesystem,
+                            Some("/limited"),
+                            super::ContainerMountLimits {
+                                max_failed_entries: 0,
+                                ..super::ContainerMountLimits::default()
+                            },
+                        )
+                        .expect_err("a disabled failure-record budget must not silently succeed");
+                    assert!(matches!(
+                        limited.kind,
+                        super::ContainerMountErrorKind::FailedEntryCountLimitExceeded {
+                            count: 1,
+                            limit: 0
+                        }
+                    ));
+                    assert_eq!(limited.partial_report.mounted_entries, 1);
+                }
             }
 
             // The same independently produced bytes must dispatch identically through the
