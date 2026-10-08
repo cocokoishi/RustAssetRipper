@@ -510,6 +510,7 @@ static void Author(string rowsPath)
 		"engine_default_resources_underscore_shader",
 		"engine_builtin_extra_shader",
 		"engine_builtin_extra_underscore_shader",
+		"patch_retry_light",
 	];
 	string scratch = Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, "target", "ser-factory-probe"));
 	Directory.CreateDirectory(scratch);
@@ -622,6 +623,8 @@ static (string, SerializedFile) BuildCase(string name)
 			return ("unity builtin extra", BuildEngineShaderFile("unity builtin extra"));
 		case "engine_builtin_extra_underscore_shader":
 			return ("unity_builtin_extra", BuildEngineShaderFile("unity_builtin_extra"));
+		case "patch_retry_light":
+			return ("patch_retry_light.assets", BuildPatchRetryFile("patch_retry_light.assets", "2017.1.0p0", "2017.1.1f0", 108));
 		default:
 			throw new ArgumentException($"unknown case {name}");
 	}
@@ -664,6 +667,20 @@ static SerializedFile BuildEngineShaderFile(string collectionName)
 	}
 	List<byte> payload = [.. stream.ToArray(), 0xAA, 0xBB, 0xCC, 0xDD];
 	return BuildFile(collectionName, version.ToString(), 48, null, payload.ToArray());
+}
+
+static SerializedFile BuildPatchRetryFile(string fileName, string serializedVersionText, string payloadVersionText, int classId)
+{
+	UnityVersion payloadVersion = UnityVersion.Parse(payloadVersionText);
+	SerializedAssetCollection collection = EmptyCollection(payloadVersion);
+	IUnityObjectBase asset = AssetFactory.CreateSerialized(new AssetInfo(collection, 42, classId), payloadVersion)
+		?? throw new InvalidOperationException($"factory returned null for class {classId} at {payloadVersion}");
+	using MemoryStream stream = new();
+	using (AssetWriter writer = new(stream, asset.Collection))
+	{
+		asset.WriteRelease(writer);
+	}
+	return BuildFile(fileName, serializedVersionText, classId, null, stream.ToArray());
 }
 
 static SerializedFile BuildTextAssetFile(string versionText, string name, string script, TypeTree? tree, byte[] tail)

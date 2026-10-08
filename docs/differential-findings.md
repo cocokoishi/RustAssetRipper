@@ -1464,3 +1464,15 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust behavior | `is_engine_collection_name` recognizes the four exact aliases. `read_normal_object` retains the generated Shader, classifies the invalid tail, and records `FactoryLogLevel::Info` without an error message. `ObjectWorkspace` preserves the object as incomplete because the malformed tail is still present. |
 | Regression evidence | `factory_differential_replays_every_reference_case` compares all four source Info messages, generated type/class/name, tail classification, and incomplete workspace state. The source probe output matches all 272 committed fixture lines. |
 | Remaining difference | This validates the synthetic failed-read branch only. Valid engine-resource Shader field loading and actual built-in TypeTree hydration/export remain open under `SER-ASSET-FACTORY-001` and `RES-SHADER-PARSED-001`. |
+
+## DIFF-SER-FACTORY-PATCH-RETRY-001 — Patch-version generated-object retry
+
+| Field | Finding |
+|---|---|
+| Status | Source-matched for a synthetic class-108 Light payload whose old Patch-version layout fails but whose single incremented-build release retry succeeds. |
+| Source location | `Source/AssetRipper.Import/AssetCreation/GameAssetFactory.cs`: `ReadNormalObject` retries only after the initial read error when the collection version type is Patch; `TryReadNormalObject` creates and reads the selected class layout. |
+| Input evidence | `src/processing/asset_factory_fixture.txt` contains a 248-byte SerializedFile tagged `2017.1.0p0`, SHA-256 `F3F8E6CDDA84B1300B98C7CB7480A67C91376B0236686F1756AD973C7B6B4480`. Its class-108 Light object was written from the generated `2017.1.1f0` layout. |
+| Source behavior | Direct source dispatch selects `Light_2017` for `2017.1.0p0` and `Light_2017_1_0_p4` for the bumped `2017.1.1f0`. The old release TypeTree expects the 13-float `m_FalloffTable`; the bumped release layout omits that field. The factory returns `Light_2017_1_0_p4` with no error log, showing the first read failed and the retry succeeded. |
+| Rust behavior | The factory first attempts the input version, retries with `FactoryUnityVersion::with_bumped_build`, selects the bumped TPK layout, returns generated type `Light_2017_1_0_p4`, and materializes the object fully through `ObjectWorkspace` with an exact tail. |
+| Regression evidence | `factory_differential_replays_every_reference_case` compares the source-authored bytes and resulting type; the case-specific regression checks the original Patch signature, retry type, absent `m_FalloffTable`, exact payload tail, and complete ObjectWorkspace state. The fresh source probe output matches all 275 fixture lines. |
+| Remaining difference | This is one synthetic StandaloneWin64Player release-mode class/version boundary. Other Patch retry boundaries, editor-mode behavior, Unity-produced assets, and broad generated-object semantics remain open under `SER-ASSET-FACTORY-001`. |

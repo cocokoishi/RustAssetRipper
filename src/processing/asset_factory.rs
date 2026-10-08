@@ -3235,6 +3235,37 @@ mod tests {
                 .unwrap();
                 assert!(!workspace_asset.is_fully_materialized());
             }
+            "patch_retry_light" => {
+                assert_eq!(
+                    file.metadata.prefix.unity_version_text.as_deref(),
+                    Some("2017.1.0p0")
+                );
+                assert_eq!(
+                    asset.kind,
+                    FactoryAssetKind::Generated("Light_2017_1_0_p4".to_owned())
+                );
+                assert_eq!(asset.tail, Some(ObjectTailOutcome::Exact));
+                let payload = asset.payload.as_ref().expect("retried Light payload");
+                assert!(payload.trailing_bytes.is_empty());
+                assert!(payload
+                    .root
+                    .unique_field("m_FalloffTable")
+                    .unwrap()
+                    .is_none());
+                let workspace_asset = materialize_object_for_workspace(
+                    &file,
+                    &facts,
+                    layouts,
+                    0,
+                    &ObjectDecodeLimits::default(),
+                )
+                .unwrap();
+                assert_eq!(
+                    workspace_asset.state.kind,
+                    FactoryAssetKind::Generated("Light_2017_1_0_p4".to_owned())
+                );
+                assert!(workspace_asset.is_fully_materialized());
+            }
             other => panic!("unexpected case {other}"),
         }
     }
@@ -3246,7 +3277,7 @@ mod tests {
         let fixture = include_str!("asset_factory_fixture.txt");
         let layouts = reference_class_layouts();
         let cases = fixture_cases(fixture);
-        assert_eq!(cases.len(), 19, "all probe cases are replayed");
+        assert_eq!(cases.len(), 20, "all probe cases are replayed");
         for case in &cases {
             assert_case(case, layouts);
         }
