@@ -10,8 +10,10 @@
 //!
 //! Scene definitions are processed into workspace hierarchies and emitted as `.unity` files
 //! through the scene collection route, with scene IDs, pointers, and `DefaultImporter` metadata.
-//! Prefab collection reconstruction/export and the remaining class-specific project exporters
-//! are still separate required integrations.
+//! Modern PrefabProcessor hierarchies are emitted as `.prefab` collections with planned IDs,
+//! generated Transforms, pointer mapping, and `PrefabImporter` metadata. Legacy generated Prefabs,
+//! full AssetBundle-derived importer metadata, and the remaining class-specific exporters remain
+//! required integrations.
 
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -39,6 +41,10 @@ use super::pointer_map::{
     ExportCollectionPointerMetadata, ExportPointerMapLimits, ExportedAssetPointerEntry,
     ProjectExportPointerMap, UnityProjectAssetType,
 };
+use super::prefab_collection::{
+    generate_prefab_source_pointer, plan_prefab_export_ids, PrefabAssetRepresentation,
+    PrefabExportIdPlan, PrefabExportPlanLimits, PrefabHierarchyAssetGroups, VersionedPrefabAsset,
+};
 use super::project_exporter::{
     execute_project_export, export_extension_for, native_format_importer, object_class_name,
     package_manifest_json, project_version_file, select_collection, ObjectClassFacts,
@@ -61,6 +67,7 @@ use super::unity_yaml::{
 };
 use super::workspace_yaml::{
     workspace_object_to_unity_yaml_document_with_streamed_resources,
+    workspace_prefab_hierarchy_to_unity_yaml_with_generated_transforms,
     workspace_scene_assignments_to_unity_yaml_with_streamed_resources,
     workspace_scene_assignments_to_unity_yaml_with_streamed_resources_and_generated_transforms,
     UnityYamlWorkspaceCollectionLimits, WorkspaceGeneratedTransformYamlContext,
@@ -106,12 +113,14 @@ pub struct WorkspaceProjectExportReport {
     pub meta_file_count: usize,
     pub total_yaml_bytes: usize,
     pub project_version: SceneUnityVersion,
-    /// Objects that claimed an exportable collection (one collection per object today).
+    /// Exportable source-object collections, processed Scenes, and processed Prefabs written.
     pub collection_count: usize,
     /// Objects whose baseline collection writes nothing, with the reason.
     pub skipped_objects: Vec<ProjectExportNotice>,
     /// Files written through the generic asset-family renderer instead of their own.
     pub fallbacks: Vec<ProjectExportNotice>,
+    /// Scene/Prefab processing diagnostics that did not prevent generic source-object export.
+    pub processing_warnings: Vec<String>,
 }
 
 /// One object's export route.
@@ -161,7 +170,22 @@ struct PreparedSceneCollections {
     processing: WorkspaceSceneProcessing,
     routed: Vec<RoutedSceneCollection>,
     member_keys: HashSet<ExportAssetObjectKey>,
+    prefabs: Vec<RoutedPrefabCollection>,
+    prefab_member_keys: HashSet<ExportAssetObjectKey>,
+    processing_warnings: Vec<String>,
     used_guids: HashSet<[u8; 16]>,
+}
+
+/// One PrefabExportCollection reconstructed from a PrefabProcessor hierarchy.
+struct RoutedPrefabCollection {
+    name: String,
+    class_name: String,
+    named_name: Option<String>,
+    asset_bundle_name: Option<String>,
+    representation: PrefabAssetRepresentation,
+    export_ids: PrefabExportIdPlan,
+    collection_index: usize,
+    guid: [u8; 16],
 }
 
 /// Execute a workspace-backed Unity project export with explicit export settings.
@@ -196,6 +220,9 @@ pub fn export_workspace_yaml_project_with_settings(
         processing: scene_processing,
         routed: mut scene_collections,
         member_keys: scene_member_keys,
+        prefabs: mut prefab_collections,
+        prefab_member_keys,
+        processing_warnings,
         mut used_guids,
     } = prepare_scene_collections(
         filesystem,
@@ -217,7 +244,8 @@ pub fn export_workspace_yaml_project_with_settings(
     let mut next_collection_index = 0usize;
     for (file_index, file) in workspace.files().iter().enumerate() {
         for (object_index, object_info) in file.metadata.objects.iter().enumerate() {
-            if scene_member_keys.contains(&source_object_key(file_index, object_index)) {
+            let source_key = source_object_key(file_index, object_index);
+            if scene_member_keys.contains(&source_key) || prefab_member_keys.contains(&source_key) {
                 continue;
             }
             let object = objects.get(file_index, object_index).ok_or_else(|| {
@@ -331,6 +359,14 @@ pub fn export_workspace_yaml_project_with_settings(
         }
     }
 
+    for prefab in &mut prefab_collections {
+        prefab.collection_index = next_collection_index;
+        next_collection_index = next_collection_index
+            .checked_add(1)
+            .ok_or_else(|| invalid_project("project collection count overflows"))?;
+        prefab.guid = mint_unique_collection_guid(&mut next_guid_sequence, &mut used_guids)?;
+    }
+
     for scene in &mut scene_collections {
         scene.collection_index = next_collection_index;
         next_collection_index = next_collection_index
@@ -358,6 +394,11 @@ pub fn export_workspace_yaml_project_with_settings(
     let pointer_capacity = routed
         .len()
         .checked_add(scene_assignment_count)
+        .and_then(|count| {
+            prefab_collections.iter().try_fold(count, |total, prefab| {
+                total.checked_add(prefab.export_ids.registered_assets.len())
+            })
+        })
         .ok_or_else(|| invalid_project("project pointer count overflows"))?;
     let mut pointer_entries = Vec::new();
     pointer_entries
@@ -400,6 +441,29 @@ pub fn export_workspace_yaml_project_with_settings(
                 collection_index: scene.collection_index,
             }
         }));
+    }
+    for prefab in &prefab_collections {
+        let source_pointer = generate_prefab_source_pointer(prefab.guid, prefab.representation)
+            .map_err(|error| invalid_project(format!("Prefab pointer planning failed: {error}")))?;
+        collection_count = collection_count
+            .checked_add(1)
+            .ok_or_else(|| invalid_project("project collection count overflows"))?;
+        collection_metadata.push(ExportCollectionPointerMetadata {
+            collection_index: prefab.collection_index,
+            guid: prefab.guid,
+            asset_type: source_pointer.asset_type,
+        });
+        pointer_entries.extend(
+            prefab
+                .export_ids
+                .registered_assets
+                .iter()
+                .map(|assignment| ExportedAssetPointerEntry {
+                    asset: assignment.asset,
+                    file_id: assignment.file_id,
+                    collection_index: prefab.collection_index,
+                }),
+        );
     }
     let pointer_map =
         ProjectExportPointerMap::new(&pointer_entries, &collection_metadata, limits.pointer_map)?;
@@ -516,6 +580,71 @@ pub fn export_workspace_yaml_project_with_settings(
         });
     }
 
+    for prefab in &prefab_collections {
+        let yaml = workspace_prefab_hierarchy_to_unity_yaml_with_generated_transforms(
+            workspace,
+            objects,
+            reference_graph,
+            &pointer_map,
+            &prefab.export_ids,
+            prefab.collection_index,
+            None,
+            limits.yaml_collection,
+            &WorkspaceGeneratedTransformYamlContext::with_materialized_prefab_transforms(
+                &scene_processing.processed_assets,
+                &scene_processing.generated_transforms,
+            ),
+        )?;
+        exported_object_count = exported_object_count
+            .checked_add(count_unity_yaml_documents(&yaml))
+            .ok_or_else(|| invalid_project("exported object count overflows"))?;
+        total_bytes = total_bytes
+            .checked_add(yaml.len())
+            .ok_or_else(|| invalid_project("project output byte count overflows"))?;
+        if total_bytes > limits.max_total_yaml_bytes {
+            return Err(invalid_project(format!(
+                "project output uses {total_bytes} bytes, exceeding the limit {}",
+                limits.max_total_yaml_bytes
+            )));
+        }
+
+        let relative_path = planner.plan_asset_path(
+            &super::asset_path::ExportAssetPathIdentity {
+                class_name: prefab.class_name.clone(),
+                named_name: prefab.named_name.clone(),
+                ..Default::default()
+            },
+            "prefab",
+        )?;
+        let meta = if prefab.representation == PrefabAssetRepresentation::LegacyPrefabMarker {
+            let main_file_id = prefab
+                .export_ids
+                .registered_assets
+                .iter()
+                .find(|assignment| assignment.is_main_asset)
+                .map(|assignment| assignment.file_id)
+                .ok_or_else(|| invalid_project("Prefab export plan has no main asset ID"))?;
+            Some(PlannedProjectMeta {
+                importer_class: "NativeFormatImporter".to_owned(),
+                importer: native_format_importer(main_file_id)?,
+            })
+        } else {
+            Some(PlannedProjectMeta {
+                importer_class: "PrefabImporter".to_owned(),
+                importer: prefab_importer(prefab.asset_bundle_name.as_deref())?,
+            })
+        };
+        files.push(PlannedProjectFile {
+            collection_name: "PrefabExportCollection",
+            kind: ExportCollectionKind::Prefab,
+            relative_path,
+            guid: prefab.guid,
+            bytes: yaml.into_bytes(),
+            meta,
+            label: prefab.name.clone(),
+        });
+    }
+
     let mut scene_paths_seen: HashSet<String> = HashSet::new();
     for scene in &mut scene_collections {
         let path_plan =
@@ -566,29 +695,7 @@ pub fn export_workspace_yaml_project_with_settings(
                 generated_transforms.len(),
             )));
         }
-        let scene_yaml = if let Some(first_transform) = generated_transforms.first() {
-            let type_file_index = first_transform.type_file_index;
-            let transform_type_index = first_transform.payload.type_index;
-            for transform in &generated_transforms[1..] {
-                if transform.type_file_index != type_file_index
-                    || transform.payload.type_index != transform_type_index
-                {
-                    return Err(invalid_project(format!(
-                        "scene {:?} generated Transforms use multiple TypeTree sources; per-asset generated TypeTree routing is not connected",
-                        scene.name
-                    )));
-                }
-            }
-            let metadata = &workspace
-                .files()
-                .get(type_file_index)
-                .ok_or_else(|| {
-                    invalid_project(format!(
-                        "scene {:?} generated Transform type file {type_file_index} is missing",
-                        scene.name
-                    ))
-                })?
-                .metadata;
+        let scene_yaml = if !generated_transforms.is_empty() {
             workspace_scene_assignments_to_unity_yaml_with_streamed_resources_and_generated_transforms(
                 workspace,
                 objects,
@@ -599,11 +706,10 @@ pub fn export_workspace_yaml_project_with_settings(
                 None,
                 limits.yaml_collection,
                 &streamed_resources,
-                &WorkspaceGeneratedTransformYamlContext::new(
+                &WorkspaceGeneratedTransformYamlContext::with_materialized_scene_transforms(
                     &scene_processing.processed_assets,
                     scene.scene_index,
-                    metadata,
-                    transform_type_index,
+                    &scene_processing.generated_transforms,
                 ),
             )?
         } else {
@@ -672,6 +778,7 @@ pub fn export_workspace_yaml_project_with_settings(
         collection_count,
         skipped_objects: report.skipped,
         fallbacks: report.fallbacks,
+        processing_warnings,
     })
 }
 
@@ -742,15 +849,7 @@ fn prepare_scene_collections(
         .map_err(|_| invalid_project("could not allocate processed Scene collections"))?;
     let mut scene_member_keys = HashSet::new();
     let mut used_guids = HashSet::new();
-    if scenes.is_empty() {
-        return Ok(PreparedSceneCollections {
-            processing,
-            routed: scene_collections,
-            member_keys: scene_member_keys,
-            used_guids,
-        });
-    }
-    if !processing.processed_assets.is_complete() {
+    if !scenes.is_empty() && !processing.processed_assets.is_complete() {
         return Err(invalid_project(format!(
             "Scene export requires a complete PrefabProcessor asset plan: {}",
             processing
@@ -867,12 +966,577 @@ fn prepare_scene_collections(
         });
     }
 
+    let (prefabs, prefab_member_keys) = prepare_prefab_collections(
+        workspace,
+        objects,
+        &processing,
+        project_version,
+        &scene_member_keys,
+    )?;
+
+    let mut processing_warnings = Vec::new();
+    if scenes.is_empty() && !processing.prefab_processing.is_complete() {
+        let report = processing.prefab_processing.report();
+        processing_warnings.push(format!(
+            "PrefabProcessor hierarchy planning is incomplete ({} root-resolution issues, {} incomplete hierarchy walks); no processed Prefab collection was emitted, and source objects used their regular export collections",
+            report.root_resolution_issues,
+            report.existing_hierarchy_failures + report.generated_hierarchy_failures,
+        ));
+    }
+
     Ok(PreparedSceneCollections {
         processing,
         routed: scene_collections,
         member_keys: scene_member_keys,
+        prefabs,
+        prefab_member_keys,
+        processing_warnings,
         used_guids,
     })
+}
+
+fn prepare_prefab_collections(
+    workspace: &SerializedFileWorkspace,
+    objects: &ObjectWorkspace,
+    processing: &WorkspaceSceneProcessing,
+    project_version: SceneUnityVersion,
+    scene_member_keys: &HashSet<ExportAssetObjectKey>,
+) -> Result<(Vec<RoutedPrefabCollection>, HashSet<ExportAssetObjectKey>), Box<dyn Error>> {
+    let has_prefab_hierarchy_assets =
+        processing
+            .processed_assets
+            .collections()
+            .iter()
+            .any(|collection| {
+                collection.kind
+                == crate::processing::prefab_processing::WorkspaceProcessedCollectionKind::
+                    PrefabHierarchies
+                && !collection.assets.is_empty()
+            });
+    if !processing.prefab_processing.is_complete()
+        && !has_prefab_hierarchy_assets
+        && !has_unrouteable_prefab_candidate(workspace, processing)
+    {
+        return Ok((Vec::new(), HashSet::new()));
+    }
+    if !processing.prefab_processing.is_complete() {
+        return Err(invalid_project(
+            "Prefab export requires a complete PrefabProcessor hierarchy pass",
+        ));
+    }
+    if !processing.processed_assets.is_complete() {
+        return Err(invalid_project(format!(
+            "Prefab export requires a complete processed-asset plan: {}",
+            processing
+                .processed_assets
+                .incomplete_reason()
+                .unwrap_or("no reason was recorded")
+        )));
+    }
+    let Some(hierarchies) = processing
+        .processed_assets
+        .collections()
+        .iter()
+        .find(|collection| {
+            collection.kind
+            == crate::processing::prefab_processing::WorkspaceProcessedCollectionKind::
+                PrefabHierarchies
+        })
+    else {
+        return Ok((Vec::new(), HashSet::new()));
+    };
+    let mut prefabs = Vec::new();
+    prefabs
+        .try_reserve_exact(hierarchies.assets.len())
+        .map_err(|_| invalid_project("could not allocate processed Prefab collections"))?;
+    let mut member_keys = HashSet::new();
+    member_keys
+        .try_reserve(hierarchies.assets.len())
+        .map_err(|_| invalid_project("could not allocate Prefab membership index"))?;
+
+    for (hierarchy_object_index, hierarchy_asset) in hierarchies.assets.iter().enumerate() {
+        let crate::processing::prefab_processing::WorkspaceProcessedPrefabAssetKind::
+            PrefabHierarchy {
+                root_game_object,
+                prefab: prefab_reference,
+            } = hierarchy_asset.kind
+        else {
+            return Err(invalid_project(format!(
+                "Prefab Hierarchies collection contains unexpected asset kind {:?}",
+                hierarchy_asset.kind
+            )));
+        };
+        let hierarchy = find_prefab_hierarchy_plan(
+            &processing.prefab_processing,
+            root_game_object,
+            prefab_reference,
+        )?;
+        if !hierarchy.is_complete() {
+            return Err(invalid_project(format!(
+                "Prefab root {}:{} has incomplete hierarchy membership",
+                root_game_object.file_index, root_game_object.path_id
+            )));
+        }
+
+        let root_identity = source_asset_identity(root_game_object)?;
+        if root_identity.class_id != 1 {
+            return Err(invalid_project(format!(
+                "Prefab hierarchy root {}:{} has class ID {}, expected GameObject class ID 1",
+                root_game_object.file_index, root_game_object.path_id, root_identity.class_id
+            )));
+        }
+        let root_object = objects
+            .get(root_game_object.file_index, root_game_object.object_index)
+            .ok_or_else(|| {
+                invalid_project(format!(
+                    "Prefab root object {}:{} is absent from the workspace",
+                    root_game_object.file_index, root_game_object.object_index
+                ))
+            })?;
+        let root_payload = root_object.payload.as_ref().map_err(|error| {
+            invalid_project(format!(
+                "Prefab root {}:{} is undecodable: {error}",
+                root_game_object.file_index, root_game_object.path_id
+            ))
+        })?;
+        let root_name = object_asset_name(root_payload);
+
+        let hierarchy_identity = ExportAssetIdentity {
+            collection: ExportAssetCollectionIdentity::ProcessedCollection {
+                collection_index: hierarchies.collection_index,
+            },
+            object_index: hierarchy_object_index,
+            path_id: hierarchy_asset.identity.path_id,
+            class_id: hierarchy_asset.identity.class_id,
+        };
+        let hierarchy_versioned = VersionedPrefabAsset {
+            identity: hierarchy_identity,
+            unity_version: project_version,
+        };
+
+        let (prefab_identity, representation, class_name) = match prefab_reference {
+            crate::processing::prefab_processing::WorkspaceProcessedPrefabReference::Existing(
+                source_prefab,
+            ) => {
+                let source_identity = source_asset_identity(source_prefab)?;
+                if source_identity.class_id != 1001 {
+                    return Err(invalid_project(format!(
+                        "Prefab main object {}:{} has class ID {}, expected 1001",
+                        source_prefab.file_index, source_prefab.path_id, source_identity.class_id
+                    )));
+                }
+                let version = source_unity_version(workspace, source_prefab.file_index)?;
+                let object = objects
+                    .get(source_prefab.file_index, source_prefab.object_index)
+                    .ok_or_else(|| {
+                        invalid_project(format!(
+                            "Prefab main object {}:{} is absent from the workspace",
+                            source_prefab.file_index, source_prefab.object_index
+                        ))
+                    })?;
+                let payload = object.payload.as_ref().map_err(|error| {
+                    invalid_project(format!(
+                        "Prefab main object {}:{} is undecodable: {error}",
+                        source_prefab.file_index, source_prefab.path_id
+                    ))
+                })?;
+                let representation = match payload.type_name.as_str() {
+                    "Prefab" => PrefabAssetRepresentation::LegacyPrefabMarker,
+                    "PrefabInstance" => PrefabAssetRepresentation::PrefabInstanceMarker,
+                    _ => PrefabAssetRepresentation::Other,
+                };
+                (
+                    VersionedPrefabAsset {
+                        identity: source_identity,
+                        unity_version: version,
+                    },
+                    representation,
+                    payload.type_name.clone(),
+                )
+            }
+            crate::processing::prefab_processing::WorkspaceProcessedPrefabReference::Generated(
+                generated_prefab,
+            ) => {
+                if generated_prefab.class_id != 1001 {
+                    return Err(invalid_project(format!(
+                        "generated Prefab main asset has class ID {}, expected 1001",
+                        generated_prefab.class_id
+                    )));
+                }
+                if !unity_version_has_prefab_importer(project_version) {
+                    return Err(invalid_project(format!(
+                            "Unity {}.{} generated legacy Prefab payload serialization is not implemented",
+                            project_version.major, project_version.minor
+                        )));
+                }
+                let generated_collection = processing
+                    .processed_assets
+                    .collections()
+                    .get(generated_prefab.collection_index)
+                    .ok_or_else(|| {
+                        invalid_project(format!(
+                            "generated Prefab collection {} is absent from the plan",
+                            generated_prefab.collection_index
+                        ))
+                    })?;
+                let generated_asset = generated_collection
+                    .assets
+                    .iter()
+                    .find(|asset| asset.identity == generated_prefab)
+                    .ok_or_else(|| {
+                        invalid_project(format!(
+                            "generated Prefab asset {:?} is absent from its collection",
+                            generated_prefab
+                        ))
+                    })?;
+                if !matches!(
+                    generated_asset.kind,
+                    crate::processing::prefab_processing::
+                        WorkspaceProcessedPrefabAssetKind::GeneratedPrefabInstance {
+                            root_game_object: generated_root
+                        } if generated_root == root_game_object
+                ) {
+                    return Err(invalid_project(
+                        "generated Prefab main asset disagrees with its hierarchy root",
+                    ));
+                }
+                (
+                    VersionedPrefabAsset {
+                        identity: ExportAssetIdentity {
+                            collection: ExportAssetCollectionIdentity::ProcessedCollection {
+                                collection_index: generated_prefab.collection_index,
+                            },
+                            object_index: generated_collection
+                                .assets
+                                .iter()
+                                .position(|asset| asset.identity == generated_prefab)
+                                .ok_or_else(|| {
+                                    invalid_project(
+                                        "generated Prefab main asset index is unavailable",
+                                    )
+                                })?,
+                            path_id: generated_prefab.path_id,
+                            class_id: generated_prefab.class_id,
+                        },
+                        unity_version: project_version,
+                    },
+                    PrefabAssetRepresentation::PrefabInstanceMarker,
+                    "PrefabInstance".to_owned(),
+                )
+            }
+        };
+
+        if let crate::processing::prefab_processing::WorkspaceProcessedPrefabReference::Generated(
+            generated_prefab,
+        ) = prefab_reference
+        {
+            let found = processing
+                .processed_assets
+                .collections()
+                .iter()
+                .flat_map(|collection| collection.assets.iter())
+                .any(|asset| {
+                    asset.identity == generated_prefab
+                        && matches!(
+                            asset.kind,
+                            crate::processing::prefab_processing::
+                                WorkspaceProcessedPrefabAssetKind::GeneratedPrefabInstance {
+                                    root_game_object: generated_root
+                                } if generated_root == root_game_object
+                        )
+                });
+            if !found {
+                return Err(invalid_project(
+                    "Prefab hierarchy references an unregistered generated Prefab asset",
+                ));
+            }
+        }
+
+        let mut game_objects = Vec::new();
+        let mut components = Vec::new();
+        game_objects
+            .try_reserve_exact(hierarchy.entries().len())
+            .map_err(|_| invalid_project("could not allocate Prefab GameObject members"))?;
+        components
+            .try_reserve_exact(hierarchy.entries().len())
+            .map_err(|_| invalid_project("could not allocate Prefab component members"))?;
+        for entry in hierarchy.entries() {
+            match entry {
+                crate::processing::prefab_processing::WorkspacePrefabHierarchyPlanEntry::Source(
+                    entry,
+                ) => {
+                    let member_identity = source_asset_identity(entry.identity)?;
+                    let version = source_unity_version(workspace, entry.identity.file_index)?;
+                    let member = VersionedPrefabAsset {
+                        identity: member_identity,
+                        unity_version: version,
+                    };
+                    match entry.kind {
+                        crate::processing::scene_hierarchy::
+                            WorkspaceGameObjectHierarchyEntryKind::GameObject => {
+                            game_objects.push(member);
+                        }
+                        crate::processing::scene_hierarchy::
+                            WorkspaceGameObjectHierarchyEntryKind::Component => {
+                            components.push(member);
+                        }
+                    }
+                }
+                crate::processing::prefab_processing::WorkspacePrefabHierarchyPlanEntry::
+                    GeneratedTransform { game_object, .. } => {
+                    let transform = find_generated_transform(
+                        &processing.processed_assets,
+                        *game_object,
+                    )?;
+                    components.push(VersionedPrefabAsset {
+                        identity: transform,
+                        unity_version: project_version,
+                    });
+                }
+            }
+        }
+        let hidden_assets = if representation == PrefabAssetRepresentation::PrefabInstanceMarker {
+            vec![prefab_identity.identity.object_key()]
+        } else {
+            Vec::new()
+        };
+        let export_ids = plan_prefab_export_ids(
+            PrefabHierarchyAssetGroups {
+                game_objects: &game_objects,
+                components: &components,
+                prefab_instances: &[],
+                prefab_asset: prefab_identity,
+                hierarchy_asset: hierarchy_versioned,
+                representation,
+            },
+            &hidden_assets,
+            PrefabExportPlanLimits::default(),
+        )
+        .map_err(|error| {
+            invalid_project(format!(
+                "Prefab root {}:{} export-ID planning failed: {error}",
+                root_game_object.file_index, root_game_object.path_id
+            ))
+        })?;
+
+        if export_ids.emit_prefab_asset
+            && matches!(
+                prefab_reference,
+                crate::processing::prefab_processing::WorkspaceProcessedPrefabReference::Generated(
+                    _
+                )
+            )
+        {
+            return Err(invalid_project(
+                "generated legacy Prefab serialization requires a versioned generated-object walker",
+            ));
+        }
+        for assignment in &export_ids.registered_assets {
+            let ExportAssetCollectionIdentity::SerializedFile { file_index } =
+                assignment.asset.collection
+            else {
+                continue;
+            };
+            let key = source_object_key(file_index, assignment.asset.object_index);
+            if scene_member_keys.contains(&key) || !member_keys.insert(key) {
+                return Err(invalid_project(format!(
+                    "workspace object {file_index}:{} belongs to more than one Scene or Prefab export collection",
+                    assignment.asset.object_index
+                )));
+            }
+        }
+        prefabs.push(RoutedPrefabCollection {
+            name: root_name
+                .clone()
+                .unwrap_or_else(|| "PrefabInstance".to_owned()),
+            class_name,
+            named_name: root_name,
+            asset_bundle_name: object_asset_bundle_name(root_payload),
+            representation,
+            export_ids,
+            collection_index: usize::MAX,
+            guid: [0; 16],
+        });
+    }
+    Ok((prefabs, member_keys))
+}
+
+fn has_unrouteable_prefab_candidate(
+    workspace: &SerializedFileWorkspace,
+    processing: &WorkspaceSceneProcessing,
+) -> bool {
+    if workspace.files().iter().any(|file| {
+        file.metadata
+            .objects
+            .iter()
+            .any(|object| object.class_id == Some(1001))
+    }) {
+        return true;
+    }
+    processing.prefab_processing.events().iter().any(|event| {
+        matches!(
+            event,
+            crate::processing::prefab_processing::WorkspacePrefabProcessingEvent::
+                ExistingPrefabHierarchyCreated { .. }
+                | crate::processing::prefab_processing::WorkspacePrefabProcessingEvent::
+                    ExistingPrefabHierarchyIncomplete { .. }
+                | crate::processing::prefab_processing::WorkspacePrefabProcessingEvent::
+                    GeneratedPrefabHierarchyCreated { .. }
+                | crate::processing::prefab_processing::WorkspacePrefabProcessingEvent::
+                    GeneratedPrefabHierarchyIncomplete { .. }
+        )
+    })
+}
+
+fn find_prefab_hierarchy_plan(
+    processing: &crate::processing::prefab_processing::WorkspacePrefabProcessingPlan,
+    root: crate::processing::scene_hierarchy::WorkspaceSceneObjectIdentity,
+    prefab: crate::processing::prefab_processing::WorkspaceProcessedPrefabReference,
+) -> Result<&crate::processing::prefab_processing::WorkspacePrefabHierarchyPlan, Box<dyn Error>> {
+    use crate::processing::prefab_processing::{
+        WorkspacePrefabProcessingEvent, WorkspaceProcessedPrefabReference,
+    };
+    let mut matching = processing
+        .events()
+        .iter()
+        .filter_map(|event| match (prefab, event) {
+            (
+                WorkspaceProcessedPrefabReference::Existing(expected),
+                WorkspacePrefabProcessingEvent::ExistingPrefabHierarchyCreated {
+                    prefab_instance,
+                    root_game_object,
+                    hierarchy,
+                    ..
+                },
+            ) if expected == *prefab_instance && root == *root_game_object => Some(hierarchy),
+            (
+                WorkspaceProcessedPrefabReference::Generated(_),
+                WorkspacePrefabProcessingEvent::GeneratedPrefabHierarchyCreated {
+                    root_game_object,
+                    hierarchy,
+                    ..
+                },
+            ) if root == *root_game_object => Some(hierarchy),
+            _ => None,
+        });
+    let hierarchy = matching.next().ok_or_else(|| {
+        invalid_project(format!(
+            "Prefab hierarchy for root {}:{} has no matching PrefabProcessor event",
+            root.file_index, root.path_id
+        ))
+    })?;
+    if matching.next().is_some() {
+        return Err(invalid_project(format!(
+            "Prefab hierarchy for root {}:{} has multiple matching PrefabProcessor events",
+            root.file_index, root.path_id
+        )));
+    }
+    Ok(hierarchy)
+}
+
+fn find_generated_transform(
+    processed_assets: &crate::processing::prefab_processing::WorkspaceProcessedPrefabAssetPlan,
+    game_object: crate::processing::scene_hierarchy::WorkspaceSceneObjectIdentity,
+) -> Result<ExportAssetIdentity, Box<dyn Error>> {
+    use crate::processing::prefab_processing::{
+        WorkspaceProcessedCollectionKind, WorkspaceProcessedPrefabAssetKind,
+    };
+    let mut matches = processed_assets
+        .collections()
+        .iter()
+        .filter(|collection| {
+            collection.kind == WorkspaceProcessedCollectionKind::MissingPrefabTransforms
+        })
+        .flat_map(|collection| {
+            collection
+                .assets
+                .iter()
+                .enumerate()
+                .filter_map(move |(object_index, asset)| {
+                    matches!(
+                        asset.kind,
+                        WorkspaceProcessedPrefabAssetKind::GeneratedTransform {
+                            game_object: target,
+                            ..
+                        } if target == game_object
+                    )
+                    .then_some(ExportAssetIdentity {
+                        collection: ExportAssetCollectionIdentity::ProcessedCollection {
+                            collection_index: collection.collection_index,
+                        },
+                        object_index,
+                        path_id: asset.identity.path_id,
+                        class_id: asset.identity.class_id,
+                    })
+                })
+        });
+    let identity = matches.next().ok_or_else(|| {
+        invalid_project(format!(
+            "Prefab GameObject {}:{} has no planned generated Transform asset",
+            game_object.file_index, game_object.path_id
+        ))
+    })?;
+    if matches.next().is_some() {
+        return Err(invalid_project(format!(
+            "Prefab GameObject {}:{} has multiple generated Transform assets",
+            game_object.file_index, game_object.path_id
+        )));
+    }
+    Ok(identity)
+}
+
+fn source_asset_identity(
+    identity: crate::processing::scene_hierarchy::WorkspaceSceneObjectIdentity,
+) -> Result<ExportAssetIdentity, Box<dyn Error>> {
+    let class_id = identity.class_id.ok_or_else(|| {
+        invalid_project(format!(
+            "workspace object {}:{} has no class ID",
+            identity.file_index, identity.path_id
+        ))
+    })?;
+    if identity.path_id == 0 {
+        return Err(invalid_project(format!(
+            "workspace object {}:{} has PathID 0",
+            identity.file_index, identity.path_id
+        )));
+    }
+    Ok(ExportAssetIdentity {
+        collection: ExportAssetCollectionIdentity::SerializedFile {
+            file_index: identity.file_index,
+        },
+        object_index: identity.object_index,
+        path_id: identity.path_id,
+        class_id,
+    })
+}
+
+fn source_unity_version(
+    workspace: &SerializedFileWorkspace,
+    file_index: usize,
+) -> Result<SceneUnityVersion, Box<dyn Error>> {
+    let file = workspace
+        .files()
+        .get(file_index)
+        .ok_or_else(|| invalid_project(format!("workspace file {file_index} is unavailable")))?;
+    let text = file
+        .metadata
+        .prefix
+        .unity_version_text
+        .as_deref()
+        .ok_or_else(|| {
+            invalid_project(format!(
+                "workspace file {file_index} has no Unity version for Prefab export IDs"
+            ))
+        })?;
+    SceneUnityVersion::parse(text).ok_or_else(|| {
+        invalid_project(format!(
+            "workspace file {file_index} has invalid Unity version {text:?}"
+        ))
+    })
+}
+
+fn unity_version_has_prefab_importer(version: SceneUnityVersion) -> bool {
+    version.major > 2018 || (version.major == 2018 && version.minor >= 3)
 }
 
 fn source_object_key(file_index: usize, object_index: usize) -> ExportAssetObjectKey {
@@ -944,6 +1608,21 @@ fn default_importer(asset_bundle_name: Option<&str>) -> Result<UnityYamlNode, Bo
     Ok(importer)
 }
 
+fn prefab_importer(asset_bundle_name: Option<&str>) -> Result<UnityYamlNode, Box<dyn Error>> {
+    let mut importer = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    importer.insert_field(
+        "externalObjects",
+        UnityYamlNode::mapping(UnityYamlMappingStyle::Flow),
+    )?;
+    importer.insert_field("userData", UnityYamlNode::string(""))?;
+    importer.insert_field(
+        "assetBundleName",
+        UnityYamlNode::string(asset_bundle_name.unwrap_or("")),
+    )?;
+    importer.insert_field("assetBundleVariant", UnityYamlNode::string(""))?;
+    Ok(importer)
+}
+
 fn count_unity_yaml_documents(yaml: &str) -> usize {
     yaml.lines()
         .filter(|line| line.starts_with("--- !u!"))
@@ -978,6 +1657,17 @@ fn object_asset_name(payload: &ParsedObjectPayload) -> Option<String> {
             if !bytes.is_empty() {
                 return Some(String::from_utf8_lossy(bytes).into_owned());
             }
+        }
+    }
+    None
+}
+
+fn object_asset_bundle_name(payload: &ParsedObjectPayload) -> Option<String> {
+    for field in ["AssetBundleName_R", "AssetBundleName", "m_AssetBundleName"] {
+        if let Ok(Some(crate::serialized_file::object::SerializedValue::StringBytes(bytes))) =
+            payload.root.unique_field_in_base_chain(field)
+        {
+            return Some(String::from_utf8_lossy(bytes).into_owned());
         }
     }
     None
@@ -1098,8 +1788,20 @@ fn invalid_project(message: impl Into<String>) -> Box<dyn Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{asset_family_fallback, new_collection_guid, package_manifest_json};
+    use super::{
+        asset_family_fallback, export_workspace_yaml_project_with_settings, new_collection_guid,
+        package_manifest_json, WorkspaceProjectExportLimits,
+    };
+    use crate::export::settings::ExportDefaults;
+    use crate::export::settings_file::ExportSettingsFile;
+    use crate::export::workspace_yaml::tests::{
+        load_workspace_bytes, make_game_object_without_transform_file,
+    };
+    use crate::io::platform_structure::PlatformResourceProvider;
     use crate::processing::scene_naming::SceneUnityVersion;
+    use crate::resource::RootResourceFileCatalog;
+    use crate::serialized_file::object_workspace::{ObjectWorkspace, ObjectWorkspaceLimits};
+    use crate::serialized_file::reference_graph::MultiFileReferenceGraphLimits;
 
     #[test]
     fn project_collection_guids_are_nonzero_and_unique_per_collection() {
@@ -1136,5 +1838,82 @@ mod tests {
         ] {
             assert!(asset_family_fallback(name).is_some(), "{name}");
         }
+    }
+
+    #[test]
+    fn project_export_writes_a_processed_prefab_collection_with_generated_transform() {
+        let bytes = make_game_object_without_transform_file();
+        let (filesystem, workspace) = load_workspace_bytes(&bytes);
+        let objects = ObjectWorkspace::load_from_vfs(
+            &filesystem,
+            &workspace,
+            ObjectWorkspaceLimits::default(),
+        )
+        .unwrap();
+        assert!(objects.report().is_complete());
+        let reference_graph = workspace
+            .reference_graph(MultiFileReferenceGraphLimits::default())
+            .unwrap();
+        assert!(reference_graph.is_complete());
+        let root_catalog = RootResourceFileCatalog::default();
+        let provider = PlatformResourceProvider::new(None, None);
+        let settings = ExportSettingsFile::from(ExportDefaults::default());
+        let output_root = crate::test_support::unique_test_directory("project-prefab-e2e");
+
+        let report = export_workspace_yaml_project_with_settings(
+            &output_root,
+            false,
+            &filesystem,
+            &root_catalog,
+            &provider,
+            &workspace,
+            &objects,
+            &reference_graph,
+            &settings,
+            WorkspaceProjectExportLimits::default(),
+        )
+        .unwrap();
+
+        let prefab_path = output_root.join("Assets/PrefabInstance/Root.prefab");
+        let prefab_meta_path = output_root.join("Assets/PrefabInstance/Root.prefab.meta");
+        let prefab_yaml = std::fs::read_to_string(&prefab_path).unwrap();
+        let prefab_meta = std::fs::read_to_string(&prefab_meta_path).unwrap();
+        let game_object_id = yaml_document_file_id(&prefab_yaml, 1);
+        let transform_id = yaml_document_file_id(&prefab_yaml, 4);
+        assert!(prefab_yaml.contains("m_Name: Root"), "{prefab_yaml}");
+        assert!(prefab_yaml.contains("m_LocalPosition:"), "{prefab_yaml}");
+        assert!(
+            prefab_yaml.contains(&format!("component: {{fileID: {transform_id}}}")),
+            "{prefab_yaml}"
+        );
+        assert!(
+            prefab_yaml.contains(&format!("m_GameObject: {{fileID: {game_object_id}}}")),
+            "{prefab_yaml}"
+        );
+        assert!(!prefab_yaml.contains("!u!1001"), "{prefab_yaml}");
+        assert!(prefab_meta.contains("PrefabImporter:"), "{prefab_meta}");
+        assert!(prefab_meta.contains("externalObjects: {}"), "{prefab_meta}");
+        assert!(prefab_meta.contains("userData:\n"), "{prefab_meta}");
+        assert!(prefab_meta.contains("assetBundleName:\n"), "{prefab_meta}");
+        assert!(
+            prefab_meta.contains("assetBundleVariant:\n"),
+            "{prefab_meta}"
+        );
+        assert!(!output_root.join("Assets/GameObject").exists());
+        assert_eq!(report.asset_file_count, 1);
+        assert_eq!(report.meta_file_count, 1);
+        assert_eq!(report.collection_count, 1);
+        assert_eq!(report.exported_object_count, 2);
+
+        std::fs::remove_dir_all(output_root).unwrap();
+    }
+
+    fn yaml_document_file_id(yaml: &str, class_id: i32) -> String {
+        let prefix = format!("--- !u!{class_id} &");
+        yaml.lines()
+            .find_map(|line| line.strip_prefix(&prefix))
+            .and_then(|tail| tail.split_whitespace().next())
+            .expect("the expected Unity YAML document exists")
+            .to_owned()
     }
 }

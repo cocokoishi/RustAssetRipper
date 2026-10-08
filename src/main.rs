@@ -1360,6 +1360,16 @@ fn export_project_to<W: io::Write>(
             writeln!(status_output, "  - {}: {}", notice.subject, notice.reason)?;
         }
     }
+    if !report.processing_warnings.is_empty() {
+        writeln!(
+            status_output,
+            "{} Scene/Prefab processing warnings:",
+            report.processing_warnings.len()
+        )?;
+        for warning in report.processing_warnings.iter().take(10) {
+            writeln!(status_output, "  - {warning}")?;
+        }
+    }
     if !report.fallbacks.is_empty() {
         writeln!(
             status_output,
@@ -1372,7 +1382,7 @@ fn export_project_to<W: io::Write>(
     }
     writeln!(
         status_output,
-        "Mounted {} logical inputs ({} bytes). Basic Scene collection export is wired; Prefab export and the remaining class-specific exporters are still separate integrations.",
+        "Mounted {} logical inputs ({} bytes). Processed Scene and modern Prefab collection routes are wired; legacy generated Prefabs and the remaining class-specific exporters are still incomplete.",
         mount_report.discovered_inputs,
         mount_report.discovered_source_bytes
     )?;

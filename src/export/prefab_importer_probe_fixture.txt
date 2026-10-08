@@ -1,0 +1,12 @@
+# Frozen AssetRipper.SourceGenerated PrefabImporter.Create defaults from the isolated AssetRipper runtime.
+# Probe: tools/probes/scene-importer, Unity 2022.3.22f1, PrefabImporter.Create(null, version).
+# A null collection inspects defaults only; this is not a full source export or Unity Editor import.
+TYPE|AssetRipper.SourceGenerated.dll|AssetRipper.SourceGenerated.Classes.ClassID_468431735.PrefabImporter|base=System.Object
+FACTORY|AssetRipper.SourceGenerated.Classes.ClassID_468431735.IPrefabImporter Create(AssetRipper.Assets.Collections.AssetCollection, AssetRipper.Primitives.UnityVersion)
+CREATE|AssetCollection|ok
+VALUE|AssetBundleName|<null>
+VALUE|AssetBundleName_R|
+VALUE|AssetBundleVariant|
+VALUE|ExternalObjects|Count = 0
+VALUE|Name|
+VALUE|UserData|

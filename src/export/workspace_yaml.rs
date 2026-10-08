@@ -5,6 +5,7 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::str;
 
+use crate::export::scene_wiring::MaterializedGeneratedTransform;
 use crate::io::filesystem::VirtualFileSystem;
 use crate::io::platform_structure::PlatformResourceProvider;
 use crate::processing::prefab_processing::{
@@ -137,8 +138,9 @@ impl GeneratedTransformCollectionScope {
 pub struct WorkspaceGeneratedTransformYamlContext<'a> {
     pub processed_assets: &'a WorkspaceProcessedPrefabAssetPlan,
     collection_scope: GeneratedTransformCollectionScope,
-    pub metadata: &'a SerializedFileMetadata,
-    pub transform_type_index: usize,
+    materialized_transforms: Option<&'a [MaterializedGeneratedTransform]>,
+    metadata: Option<&'a SerializedFileMetadata>,
+    transform_type_index: Option<usize>,
     pub default_value_limits: ObjectDefaultValueLimits,
     pub encode_limits: ObjectEncodeLimits,
 }
@@ -153,8 +155,9 @@ impl<'a> WorkspaceGeneratedTransformYamlContext<'a> {
         Self {
             processed_assets,
             collection_scope: GeneratedTransformCollectionScope::Scene { scene_index },
-            metadata,
-            transform_type_index,
+            materialized_transforms: None,
+            metadata: Some(metadata),
+            transform_type_index: Some(transform_type_index),
             default_value_limits: ObjectDefaultValueLimits::default(),
             encode_limits: ObjectEncodeLimits::default(),
         }
@@ -168,8 +171,44 @@ impl<'a> WorkspaceGeneratedTransformYamlContext<'a> {
         Self {
             processed_assets,
             collection_scope: GeneratedTransformCollectionScope::Prefab,
-            metadata,
-            transform_type_index,
+            materialized_transforms: None,
+            metadata: Some(metadata),
+            transform_type_index: Some(transform_type_index),
+            default_value_limits: ObjectDefaultValueLimits::default(),
+            encode_limits: ObjectEncodeLimits::default(),
+        }
+    }
+
+    /// Use the payloads already materialized by the workspace processing pass. Each generated
+    /// Transform retains the source file and TypeTree that supplied its serialized layout, so a
+    /// collection may safely contain generated objects from different input files or versions.
+    pub fn with_materialized_scene_transforms(
+        processed_assets: &'a WorkspaceProcessedPrefabAssetPlan,
+        scene_index: usize,
+        generated_transforms: &'a [MaterializedGeneratedTransform],
+    ) -> Self {
+        Self {
+            processed_assets,
+            collection_scope: GeneratedTransformCollectionScope::Scene { scene_index },
+            materialized_transforms: Some(generated_transforms),
+            metadata: None,
+            transform_type_index: None,
+            default_value_limits: ObjectDefaultValueLimits::default(),
+            encode_limits: ObjectEncodeLimits::default(),
+        }
+    }
+
+    /// Prefab counterpart to [`Self::with_materialized_scene_transforms`].
+    pub fn with_materialized_prefab_transforms(
+        processed_assets: &'a WorkspaceProcessedPrefabAssetPlan,
+        generated_transforms: &'a [MaterializedGeneratedTransform],
+    ) -> Self {
+        Self {
+            processed_assets,
+            collection_scope: GeneratedTransformCollectionScope::Prefab,
+            materialized_transforms: Some(generated_transforms),
+            metadata: None,
+            transform_type_index: None,
             default_value_limits: ObjectDefaultValueLimits::default(),
             encode_limits: ObjectEncodeLimits::default(),
         }
@@ -643,26 +682,77 @@ fn workspace_generated_transform_assignment_to_unity_yaml_document(
         ));
     }
 
-    let payload = materialize_planned_generated_transform_payload(
-        context.processed_assets,
-        asset.identity,
-        context.metadata,
-        context.transform_type_index,
-        context.default_value_limits,
-        context.encode_limits,
-    )
-    .map_err(|error| invariant_error(error.to_string()))?;
-    generated_transform_payload_to_unity_yaml_document(
-        &payload,
-        context.metadata,
-        source,
-        file_id,
-        constructor_pointer,
-        pointer_map,
-        current_collection_index,
-        missing_reference_guid,
-        limits,
-    )
+    if let Some(materialized_transforms) = context.materialized_transforms {
+        let mut matches = materialized_transforms
+            .iter()
+            .filter(|transform| transform.asset == asset.identity);
+        let transform = matches.next().ok_or_else(|| {
+            invariant_error(format!(
+                "generated Transform {:?} was not materialized by workspace processing",
+                asset.identity
+            ))
+        })?;
+        if matches.next().is_some() {
+            return Err(invariant_error(format!(
+                "generated Transform {:?} has multiple materialized payloads",
+                asset.identity
+            )));
+        }
+        if transform.game_object != *game_object || transform.payload.asset != asset.identity {
+            return Err(invariant_error(
+                "materialized Transform identity disagrees with its processed asset plan"
+                    .to_owned(),
+            ));
+        }
+        let metadata = &workspace
+            .files()
+            .get(transform.type_file_index)
+            .ok_or_else(|| {
+                invariant_error(format!(
+                    "generated Transform type file {} is absent from the workspace",
+                    transform.type_file_index
+                ))
+            })?
+            .metadata;
+        generated_transform_payload_to_unity_yaml_document(
+            &transform.payload,
+            metadata,
+            source,
+            file_id,
+            constructor_pointer,
+            pointer_map,
+            current_collection_index,
+            missing_reference_guid,
+            limits,
+        )
+    } else {
+        let metadata = context.metadata.ok_or_else(|| {
+            invariant_error("generated Transform YAML has no TypeTree metadata context".to_owned())
+        })?;
+        let type_index = context.transform_type_index.ok_or_else(|| {
+            invariant_error("generated Transform YAML has no TypeTree index".to_owned())
+        })?;
+        let payload = materialize_planned_generated_transform_payload(
+            context.processed_assets,
+            asset.identity,
+            metadata,
+            type_index,
+            context.default_value_limits,
+            context.encode_limits,
+        )
+        .map_err(|error| invariant_error(error.to_string()))?;
+        generated_transform_payload_to_unity_yaml_document(
+            &payload,
+            metadata,
+            source,
+            file_id,
+            constructor_pointer,
+            pointer_map,
+            current_collection_index,
+            missing_reference_guid,
+            limits,
+        )
+    }
 }
 
 /// Order hierarchy-listed Scene assignments using the baseline manager-first stable comparator,
@@ -2510,7 +2600,7 @@ pub fn generated_transform_payload_to_unity_yaml_document(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     use crate::export::pointer_map::{
@@ -2595,7 +2685,9 @@ mod tests {
         load_workspace_bytes(&bytes)
     }
 
-    fn load_workspace_bytes(bytes: &[u8]) -> (VirtualFileSystem, SerializedFileWorkspace) {
+    pub(crate) fn load_workspace_bytes(
+        bytes: &[u8],
+    ) -> (VirtualFileSystem, SerializedFileWorkspace) {
         load_workspace_files(&[("main.assets", bytes)])
     }
 
@@ -2994,7 +3086,7 @@ mod tests {
         file
     }
 
-    fn make_game_object_without_transform_file() -> Vec<u8> {
+    pub(crate) fn make_game_object_without_transform_file() -> Vec<u8> {
         let game_object_tree = [
             (0, 6, "GameObject", "", -1),
             (1, 1, "string", "m_Name", -1),
@@ -3010,10 +3102,45 @@ mod tests {
             (5, 1, "SInt32", "m_FileID", 4),
             (5, 1, "SInt64", "m_PathID", 8),
         ];
+        let transform_tree = [
+            (0, 1, "Transform", "", -1),
+            (1, 1, "Component", "Base", -1),
+            (2, 1, "PPtr<GameObject>", "m_GameObject", 12),
+            (3, 1, "SInt32", "m_FileID", 4),
+            (3, 1, "SInt64", "m_PathID", 8),
+            (1, 1, "PPtr<Transform>", "m_Father", 12),
+            (2, 1, "SInt32", "m_FileID", 4),
+            (2, 1, "SInt64", "m_PathID", 8),
+            (1, 1, "vector", "m_Children", -1),
+            (2, 1, "Array", "Array", -1),
+            (3, 1, "int", "size", 4),
+            (3, 1, "PPtr<Transform>", "data", 12),
+            (4, 1, "SInt32", "m_FileID", 4),
+            (4, 1, "SInt64", "m_PathID", 8),
+            (1, 1, "int", "m_RootOrder", 4),
+            (1, 1, "Vector3f", "m_LocalEulerAnglesHint", -1),
+            (2, 1, "float", "x", 4),
+            (2, 1, "float", "y", 4),
+            (2, 1, "float", "z", 4),
+            (1, 1, "Vector3f", "m_LocalPosition", -1),
+            (2, 1, "float", "x", 4),
+            (2, 1, "float", "y", 4),
+            (2, 1, "float", "z", 4),
+            (1, 1, "Quaternionf", "m_LocalRotation", -1),
+            (2, 1, "float", "x", 4),
+            (2, 1, "float", "y", 4),
+            (2, 1, "float", "z", 4),
+            (2, 1, "float", "w", 4),
+            (1, 1, "Vector3f", "m_LocalScale", -1),
+            (2, 1, "float", "x", 4),
+            (2, 1, "float", "y", 4),
+            (2, 1, "float", "z", 4),
+        ];
         let mut metadata = b"2019.4.0f1\0".to_vec();
         metadata.extend_from_slice(&0u32.to_le_bytes());
-        metadata.extend_from_slice(&1i32.to_le_bytes());
+        metadata.extend_from_slice(&2i32.to_le_bytes());
         write_type_tree(&mut metadata, 1, &game_object_tree);
+        write_type_tree(&mut metadata, 4, &transform_tree);
         metadata.extend_from_slice(&0u32.to_le_bytes()); // generation-10 long FileID flag
         metadata.extend_from_slice(&1i32.to_le_bytes());
         let mut payload = Vec::new();

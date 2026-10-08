@@ -43,9 +43,9 @@ foreach (string argument in args)
 		}
 	}
 
-	foreach (Type type in types.Where(IsDefaultImporterRelated).OrderBy(type => type.FullName, StringComparer.Ordinal))
+	foreach (Type type in types.Where(IsProjectImporterRelated).OrderBy(type => type.FullName, StringComparer.Ordinal))
 	{
-		if (type.IsInterface || type.Name != "DefaultImporter")
+		if (type.IsInterface || type.Name is not ("DefaultImporter" or "PrefabImporter"))
 		{
 			continue;
 		}
@@ -115,9 +115,11 @@ foreach (string argument in args)
 
 return 0;
 
-static bool IsDefaultImporterRelated(Type type) =>
-	type.Name.Contains("DefaultImporter", StringComparison.Ordinal)
-	|| type.GetInterfaces().Any(contract => contract.Name.Contains("DefaultImporter", StringComparison.Ordinal));
+static bool IsProjectImporterRelated(Type type) =>
+	type.Name is "DefaultImporter" or "PrefabImporter"
+	|| type.GetInterfaces().Any(contract =>
+		contract.Name.Contains("DefaultImporter", StringComparison.Ordinal)
+		|| contract.Name.Contains("PrefabImporter", StringComparison.Ordinal));
 
 static string OneLine(string value) => value.Replace('\r', ' ').Replace('\n', ' ');
 
