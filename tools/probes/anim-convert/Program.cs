@@ -1,5 +1,12 @@
 using System.Reflection;
 using System.Text;
+using AssetRipper.Assets;
+using AssetRipper.Assets.Collections;
+using AssetRipper.Assets.IO.Writing;
+using AssetRipper.IO.Endian;
+using AssetRipper.IO.Files;
+using AssetRipper.IO.Files.SerializedFiles;
+using AssetRipper.IO.Files.SerializedFiles.Parser;
 
 // Reference-runtime probe for the animation processing workstream.
 //
@@ -9,6 +16,9 @@ using System.Text;
 //   types <fragment>    list shipped type names containing a fragment
 //   convert <out>       build a real AnimationClip graph, run the shipped
 //                       AnimationClipConverter, and dump the complete result
+//   workspace <out> <serialized-file>
+//                       write the same generated non-default graph as a no-TypeTree
+//                       SerializedFile before conversion
 public static class Program
 {
     private static Assembly Sg = null!;
@@ -33,6 +43,16 @@ public static class Program
                 try
                 {
                     return RunConvert(args[1]);
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine(ex.ToString());
+                    return 3;
+                }
+            case "workspace":
+                try
+                {
+                    return RunConvert(args[1], args[2]);
                 }
                 catch (Exception ex)
                 {
@@ -351,7 +371,7 @@ public static class Program
     // Conversion differential
     // ---------------------------------------------------------------------------------
 
-    private static int RunConvert(string output)
+    private static int RunConvert(string output, string? serializedWorkspace = null)
     {
         var bundle = new AssetRipper.Assets.Bundles.GameBundle();
         var collection = new AssetRipper.Assets.Collections.ProcessedAssetCollection(bundle);
@@ -566,6 +586,15 @@ public static class Program
         Set(animationEvent, "IntParameter", 7);
         Set(animationEvent, "Time", 0.75f);
 
+        if (serializedWorkspace is not null)
+        {
+            WriteSerializedWorkspace(
+                serializedWorkspace,
+                collection,
+                version,
+                [rootGo, armGo, legGo, rootTr, armTr, legTr, skin, mesh, renderer, material, controller, animator, clip]);
+        }
+
         var checksumType = Type.GetType("AssetRipper.Processing.AnimationClips.PathChecksumCache, AssetRipper.Processing")!;
         var gameDataType = Type.GetType("AssetRipper.Processing.GameData, AssetRipper.Processing")!;
         object gameData = Activator.CreateInstance(gameDataType, bundle, version, null!, null!)!;
@@ -576,6 +605,55 @@ public static class Program
 
         DumpClip(clip, output);
         return 0;
+    }
+
+    private static void WriteSerializedWorkspace(
+        string output,
+        object collection,
+        object version,
+        IReadOnlyList<object> assets)
+    {
+        var builder = new SerializedFileBuilder
+        {
+            Generation = FormatVersion.Unknown_10,
+            Version = (AssetRipper.Primitives.UnityVersion)version,
+            Platform = (BuildTarget)19,
+            EndianType = EndianType.LittleEndian,
+            HasTypeTree = false,
+        };
+
+        Dictionary<int, SerializedType> typesByClassId = new();
+        foreach (object asset in assets.OrderBy(asset => Convert.ToInt64(Get(asset, "PathID"))))
+        {
+            int classId = Convert.ToInt32(Get(asset, "ClassID"));
+            long pathId = Convert.ToInt64(Get(asset, "PathID"));
+            if (!typesByClassId.TryGetValue(classId, out SerializedType? type))
+            {
+                type = new SerializedType { RawTypeID = classId };
+                typesByClassId.Add(classId, type);
+                builder.Types.Add(type);
+            }
+
+            using MemoryStream payload = new();
+            using (AssetWriter writer = new(payload, (AssetCollection)collection))
+            {
+                ((IUnityObjectBase)asset).WriteRelease(writer);
+            }
+
+            builder.Objects.Add(new ObjectInfo(type)
+            {
+                FileID = pathId,
+                TypeID = classId,
+                ObjectData = payload.ToArray(),
+            });
+        }
+
+        AssetRipper.IO.Files.SerializedFiles.SerializedFile file = builder.Build();
+        file.FilePath = "animation_workspace.assets";
+        string fullPath = Path.GetFullPath(output);
+        Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+        File.WriteAllBytes(fullPath, file.ToByteArray());
+        Console.WriteLine($"wrote source-generated workspace {fullPath} objects={assets.Count} bytes={new FileInfo(fullPath).Length}");
     }
 
     private static void AddComponent(object gameObject, object component, int classId)

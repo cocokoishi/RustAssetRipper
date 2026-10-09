@@ -36,6 +36,9 @@
     <Reference Include="AssetRipper.Numerics">
       <HintPath>$(ReferenceRoot)\Source\0Bins\AssetRipper.GUI.Free\Release\AssetRipper.Numerics.dll</HintPath>
     </Reference>
+    <Reference Include="AssetRipper.IO.Files">
+      <HintPath>$(ReferenceRoot)\Source\0Bins\AssetRipper.GUI.Free\Release\AssetRipper.IO.Files.dll</HintPath>
+    </Reference>
   </ItemGroup>
   <ItemGroup>
     <None Include="$(ReferenceRoot)\Source\0Bins\AssetRipper.GUI.Free\Release\*.dll" CopyToOutputDirectory="PreserveNewest" LinkBase="ref" />

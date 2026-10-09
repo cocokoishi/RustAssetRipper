@@ -603,21 +603,43 @@ impl<'a> UnityYamlTypeTreeLayout<'a> {
             "m_ScaleValues" => ("m_ScaleValues3", "m_ScaleValues4"),
             _ => return Ok(None),
         };
-        let array_node = self
-            .unique_child_index_by_name(field_node_index, "m_Array")?
-            .ok_or(UnityYamlObjectConversionError::InvalidTypeTree {
-                node_index: field_node_index,
-                reason: "ValueArray vector field has no m_Array child",
-            })?;
-        let data_node = self
-            .unique_child_index_by_name(array_node, "m_Data")?
-            .ok_or(UnityYamlObjectConversionError::InvalidTypeTree {
-                node_index: array_node,
-                reason: "ValueArray m_Array node has no m_Data child",
-            })?;
+        let named_array_node = self.unique_child_index_by_name(field_node_index, "m_Array")?;
+        let source_array_node = self.unique_child_index_by_name(field_node_index, "Array")?;
+        let array_node = match (named_array_node, source_array_node) {
+            (Some(_), Some(_)) => {
+                return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                    node_index: field_node_index,
+                    reason: "ValueArray vector field has multiple array nodes",
+                });
+            }
+            (Some(index), None) | (None, Some(index)) => index,
+            (None, None) => {
+                return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                    node_index: field_node_index,
+                    reason: "ValueArray vector field has no array child",
+                });
+            }
+        };
+        let named_data_node = self.unique_child_index_by_name(array_node, "m_Data")?;
+        let source_data_node = self.unique_child_index_by_name(array_node, "data")?;
+        let data_node = match (named_data_node, source_data_node) {
+            (Some(_), Some(_)) => {
+                return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                    node_index: array_node,
+                    reason: "ValueArray array node has multiple data fields",
+                });
+            }
+            (Some(index), None) | (None, Some(index)) => index,
+            (None, None) => {
+                return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                    node_index: array_node,
+                    reason: "ValueArray array node has no data field",
+                });
+            }
+        };
         match self.type_name(data_node)? {
-            "Vector3Float" => Ok(Some(aliases.0)),
-            "Vector4Float" => Ok(Some(aliases.1)),
+            "Vector3Float" | "float3" => Ok(Some(aliases.0)),
+            "Vector4Float" | "float4" => Ok(Some(aliases.1)),
             _ => Err(UnityYamlObjectConversionError::InvalidTypeTree {
                 node_index: data_node,
                 reason: "unsupported ValueArray element TypeTree type",
@@ -2804,18 +2826,18 @@ fn baseline_type_scoped_field_alias(
 ) -> Option<&'static str> {
     match (parent_type, field_name) {
         ("ClipMuscleConstant", "m_AverageSpeed") => match field_type {
-            "Vector4Float" => Some("m_AverageSpeed4"),
-            "Vector3Float" => Some("m_AverageSpeed3"),
+            "Vector4Float" | "float4" => Some("m_AverageSpeed4"),
+            "Vector3Float" | "float3" => Some("m_AverageSpeed3"),
             _ => None,
         },
         ("Xform", "m_T") => match field_type {
-            "Vector4Float" => Some("m_T4"),
-            "Vector3Float" => Some("m_T3"),
+            "Vector4Float" | "float4" => Some("m_T4"),
+            "Vector3Float" | "float3" => Some("m_T3"),
             _ => None,
         },
         ("Xform", "m_S") => match field_type {
-            "Vector4Float" => Some("m_S4"),
-            "Vector3Float" => Some("m_S3"),
+            "Vector4Float" | "float4" => Some("m_S4"),
+            "Vector3Float" | "float3" => Some("m_S3"),
             _ => None,
         },
         ("ParticleSystem", "m_StartDelay") => Some(if field_type == "float" {
@@ -2840,9 +2862,17 @@ fn unsupported_contextual_field_alias_reason(
 ) -> Option<&'static str> {
     let recognized_type = match (parent_type, field_name) {
         ("ClipMuscleConstant", "m_AverageSpeed") => {
-            matches!(field_type, "Vector4Float" | "Vector3Float")
+            matches!(
+                field_type,
+                "Vector4Float" | "Vector3Float" | "float4" | "float3"
+            )
         }
-        ("Xform", "m_T" | "m_S") => matches!(field_type, "Vector4Float" | "Vector3Float"),
+        ("Xform", "m_T" | "m_S") => {
+            matches!(
+                field_type,
+                "Vector4Float" | "Vector3Float" | "float4" | "float3"
+            )
+        }
         _ => true,
     };
     (!recognized_type).then_some("unsupported child TypeTree type for baseline field alias")
@@ -4738,36 +4768,54 @@ mod tests {
 
     #[test]
     fn clip_muscle_and_xform_aliases_follow_vector_child_type() {
+        let mut nodes = vec![
+            type_tree_node(0, "GameObject", "Base", 0),
+            type_tree_node(1, "SInt32", "m_T", 0),
+            type_tree_node(1, "ClipMuscleConstant", "m_Clip", 0),
+            type_tree_node(2, "Vector3Float", "m_AverageSpeed", 0),
+            type_tree_node(3, "float", "x", 0),
+            type_tree_node(3, "float", "y", 0),
+            type_tree_node(3, "float", "z", 0),
+            type_tree_node(1, "Xform", "m_Xform4_3", 0),
+            type_tree_node(2, "Vector4Float", "m_T", 0),
+            type_tree_node(3, "float", "x", 0),
+            type_tree_node(3, "float", "y", 0),
+            type_tree_node(3, "float", "z", 0),
+            type_tree_node(3, "float", "w", 0),
+            type_tree_node(2, "Vector3Float", "m_S", 0),
+            type_tree_node(3, "float", "x", 0),
+            type_tree_node(3, "float", "y", 0),
+            type_tree_node(3, "float", "z", 0),
+            type_tree_node(1, "Xform", "m_Xform3_4", 0),
+            type_tree_node(2, "Vector3Float", "m_T", 0),
+            type_tree_node(3, "float", "x", 0),
+            type_tree_node(3, "float", "y", 0),
+            type_tree_node(3, "float", "z", 0),
+            type_tree_node(2, "Vector4Float", "m_S", 0),
+            type_tree_node(3, "float", "x", 0),
+            type_tree_node(3, "float", "y", 0),
+            type_tree_node(3, "float", "z", 0),
+            type_tree_node(3, "float", "w", 0),
+        ];
+        nodes.extend([
+            type_tree_node(1, "ClipMuscleConstant", "m_ClipPrimitive", 0),
+            type_tree_node(2, "float3", "m_AverageSpeed", 0),
+            type_tree_node(3, "float", "x", 0),
+            type_tree_node(3, "float", "y", 0),
+            type_tree_node(3, "float", "z", 0),
+            type_tree_node(1, "Xform", "m_XformPrimitive", 0),
+            type_tree_node(2, "float4", "m_T", 0),
+            type_tree_node(3, "float", "x", 0),
+            type_tree_node(3, "float", "y", 0),
+            type_tree_node(3, "float", "z", 0),
+            type_tree_node(3, "float", "w", 0),
+            type_tree_node(2, "float3", "m_S", 0),
+            type_tree_node(3, "float", "x", 0),
+            type_tree_node(3, "float", "y", 0),
+            type_tree_node(3, "float", "z", 0),
+        ]);
         let type_tree = TypeTree {
-            nodes: vec![
-                type_tree_node(0, "GameObject", "Base", 0),
-                type_tree_node(1, "SInt32", "m_T", 0),
-                type_tree_node(1, "ClipMuscleConstant", "m_Clip", 0),
-                type_tree_node(2, "Vector3Float", "m_AverageSpeed", 0),
-                type_tree_node(3, "float", "x", 0),
-                type_tree_node(3, "float", "y", 0),
-                type_tree_node(3, "float", "z", 0),
-                type_tree_node(1, "Xform", "m_Xform4_3", 0),
-                type_tree_node(2, "Vector4Float", "m_T", 0),
-                type_tree_node(3, "float", "x", 0),
-                type_tree_node(3, "float", "y", 0),
-                type_tree_node(3, "float", "z", 0),
-                type_tree_node(3, "float", "w", 0),
-                type_tree_node(2, "Vector3Float", "m_S", 0),
-                type_tree_node(3, "float", "x", 0),
-                type_tree_node(3, "float", "y", 0),
-                type_tree_node(3, "float", "z", 0),
-                type_tree_node(1, "Xform", "m_Xform3_4", 0),
-                type_tree_node(2, "Vector3Float", "m_T", 0),
-                type_tree_node(3, "float", "x", 0),
-                type_tree_node(3, "float", "y", 0),
-                type_tree_node(3, "float", "z", 0),
-                type_tree_node(2, "Vector4Float", "m_S", 0),
-                type_tree_node(3, "float", "x", 0),
-                type_tree_node(3, "float", "y", 0),
-                type_tree_node(3, "float", "z", 0),
-                type_tree_node(3, "float", "w", 0),
-            ],
+            nodes,
             string_buffer: Vec::new(),
         };
         let hints = UnityYamlObjectConversionHints::from_type_tree(
@@ -4782,6 +4830,9 @@ mod tests {
             ("m_Xform4_3.m_S", "m_S3"),
             ("m_Xform3_4.m_T", "m_T3"),
             ("m_Xform3_4.m_S", "m_S4"),
+            ("m_ClipPrimitive.m_AverageSpeed", "m_AverageSpeed3"),
+            ("m_XformPrimitive.m_T", "m_T4"),
+            ("m_XformPrimitive.m_S", "m_S3"),
         ] {
             assert_eq!(
                 hints.field_name_aliases.get(path).map(String::as_str),
@@ -4872,11 +4923,13 @@ mod tests {
             nodes: &mut Vec<TypeTreeNode>,
             field_name: &str,
             element_type: &str,
+            array_name: &str,
+            data_name: &str,
         ) {
             nodes.push(type_tree_node(2, "vector", field_name, 0));
-            nodes.push(type_tree_node(3, "Array", "m_Array", 0));
+            nodes.push(type_tree_node(3, "Array", array_name, 0));
             nodes.push(type_tree_node(4, "SInt32", "size", 0));
-            nodes.push(type_tree_node(4, element_type, "m_Data", 0));
+            nodes.push(type_tree_node(4, element_type, data_name, 0));
             for component in ["x", "y", "z"] {
                 nodes.push(type_tree_node(5, "float", component, 0));
             }
@@ -4890,11 +4943,41 @@ mod tests {
             type_tree_node(1, "SInt32", "m_PositionValues", 0),
             type_tree_node(1, "ValueArray", "m_ThreeFour", 0),
         ];
-        append_vector_array_field(&mut nodes, "m_PositionValues", "Vector3Float");
-        append_vector_array_field(&mut nodes, "m_ScaleValues", "Vector4Float");
+        append_vector_array_field(
+            &mut nodes,
+            "m_PositionValues",
+            "Vector3Float",
+            "m_Array",
+            "m_Data",
+        );
+        append_vector_array_field(
+            &mut nodes,
+            "m_ScaleValues",
+            "Vector4Float",
+            "m_Array",
+            "m_Data",
+        );
         nodes.push(type_tree_node(1, "ValueArray", "m_FourThree", 0));
-        append_vector_array_field(&mut nodes, "m_PositionValues", "Vector4Float");
-        append_vector_array_field(&mut nodes, "m_ScaleValues", "Vector3Float");
+        append_vector_array_field(
+            &mut nodes,
+            "m_PositionValues",
+            "Vector4Float",
+            "m_Array",
+            "m_Data",
+        );
+        append_vector_array_field(
+            &mut nodes,
+            "m_ScaleValues",
+            "Vector3Float",
+            "m_Array",
+            "m_Data",
+        );
+        nodes.push(type_tree_node(1, "ValueArray", "m_SourceTypes", 0));
+        append_vector_array_field(&mut nodes, "m_PositionValues", "float3", "Array", "data");
+        append_vector_array_field(&mut nodes, "m_ScaleValues", "float4", "Array", "data");
+        nodes.push(type_tree_node(1, "ValueArray", "m_SourceNames", 0));
+        append_vector_array_field(&mut nodes, "m_PositionValues", "float4", "Array", "data");
+        append_vector_array_field(&mut nodes, "m_ScaleValues", "float3", "Array", "data");
         let type_tree = TypeTree {
             nodes,
             string_buffer: Vec::new(),
@@ -4910,6 +4993,10 @@ mod tests {
             ("m_ThreeFour.m_ScaleValues", "m_ScaleValues4"),
             ("m_FourThree.m_PositionValues", "m_PositionValues4"),
             ("m_FourThree.m_ScaleValues", "m_ScaleValues3"),
+            ("m_SourceTypes.m_PositionValues", "m_PositionValues3"),
+            ("m_SourceTypes.m_ScaleValues", "m_ScaleValues4"),
+            ("m_SourceNames.m_PositionValues", "m_PositionValues4"),
+            ("m_SourceNames.m_ScaleValues", "m_ScaleValues3"),
         ] {
             assert_eq!(
                 hints.field_name_aliases.get(path).map(String::as_str),
@@ -4975,9 +5062,9 @@ mod tests {
             nodes: vec![
                 type_tree_node(0, "ValueArray", "Base", 0),
                 type_tree_node(1, "vector", "m_PositionValues", 0),
-                type_tree_node(2, "Array", "m_Array", 0),
+                type_tree_node(2, "Array", "Array", 0),
                 type_tree_node(3, "SInt32", "size", 0),
-                type_tree_node(3, "SInt32", "m_Data", 0),
+                type_tree_node(3, "SInt32", "data", 0),
             ],
             string_buffer: Vec::new(),
         };

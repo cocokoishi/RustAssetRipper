@@ -8,6 +8,8 @@
 
 use std::fmt::Write as _;
 
+use crate::io::dependency::DependencyFilePath;
+use crate::io::filesystem::VirtualFileSystem;
 use crate::numerics::{Quat, Vec3};
 use crate::resources::animation::clip_object::{
     AnimationClipObject, BindingObject, ClipEventObject, ConstantClipObject, DenseClipObject,
@@ -20,6 +22,9 @@ use crate::resources::animation::scene_facts::{
 use crate::resources::muscle_clip_info::{MuscleClipConstantView, MuscleClipInfoView};
 use crate::resources::path_checksum::{PathChecksumCache, PathChecksumLimits, ProcessedScriptSet};
 use crate::resources::vertex_data_blob::{EndianType, UnityVersion};
+use crate::serialized_file::object::SerializedValue;
+use crate::serialized_file::object_workspace::{ObjectWorkspace, ObjectWorkspaceLimits};
+use crate::serialized_file::workspace::{SerializedFileWorkspace, SerializedFileWorkspaceLimits};
 
 #[test]
 fn complete_clip_process_matches_the_source_generated_asset() {
@@ -43,6 +48,127 @@ fn complete_clip_process_matches_the_source_generated_asset() {
         .collect::<Vec<_>>()
         .join("\n");
     assert_eq!(format_clip(&clip), expected);
+}
+
+#[test]
+fn source_generated_nondefault_animation_clip_materializes_through_object_workspace() {
+    let path = "/animation/animation_workspace.assets";
+    let bytes = include_bytes!("animation_workspace_fixture.assets");
+    let mut filesystem = VirtualFileSystem::new();
+    filesystem
+        .create_directory(Some("/animation"))
+        .expect("create fixture directory");
+    filesystem
+        .write_all_bytes(path, bytes)
+        .expect("write fixture to the test VFS");
+    let workspace = SerializedFileWorkspace::load_from_vfs(
+        &filesystem,
+        &[DependencyFilePath {
+            file_name: "animation_workspace.assets".to_owned(),
+            virtual_path: path.to_owned(),
+        }],
+        SerializedFileWorkspaceLimits::default(),
+    )
+    .expect("source-generated SerializedFile parses and scans");
+
+    assert_eq!(workspace.files().len(), 1);
+    assert_eq!(workspace.files()[0].metadata.objects.len(), 13);
+    assert!(workspace.files()[0]
+        .metadata
+        .types
+        .iter()
+        .all(|serialized_type| serialized_type
+            .type_tree
+            .as_ref()
+            .is_none_or(|tree| tree.nodes.is_empty())));
+    assert!(workspace.files()[0].reference_graph.is_complete());
+    assert_eq!(workspace.files()[0].reference_graph.references().len(), 58);
+
+    let objects =
+        ObjectWorkspace::load_from_vfs(&filesystem, &workspace, ObjectWorkspaceLimits::default())
+            .expect("ObjectWorkspace uses the source-generated TPK layouts");
+    assert_eq!(objects.report().object_count, 13);
+    assert!(objects.report().is_complete());
+    let clip = objects
+        .objects()
+        .iter()
+        .find(|object| object.factory.class_id == 74)
+        .expect("generated AnimationClip object");
+    let payload = clip
+        .payload
+        .as_ref()
+        .expect("AnimationClip payload materializes");
+
+    let sample_rate = unique_field(&payload.root, "m_SampleRate");
+    assert!(matches!(sample_rate, SerializedValue::F32(value) if *value == 30.0));
+
+    let binding_constant = unique_field(&payload.root, "m_ClipBindingConstant");
+    assert_eq!(array_field(binding_constant, "genericBindings").len(), 23);
+    let pptr_mapping = array_field(binding_constant, "pptrCurveMapping");
+    assert_eq!(pptr_mapping.len(), 2);
+    assert!(matches!(
+        pptr_mapping[0],
+        SerializedValue::PPtr {
+            file_id: 0,
+            path_id: 1010
+        }
+    ));
+    assert!(matches!(
+        pptr_mapping[1],
+        SerializedValue::PPtr {
+            file_id: 0,
+            path_id: 0
+        }
+    ));
+
+    let events = array_field(&payload.root, "m_Events");
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        string_field(events.first().unwrap(), "functionName"),
+        "OnThing"
+    );
+    assert_eq!(string_field(events.first().unwrap(), "data"), "payload");
+
+    let muscle_clip = unique_field(&payload.root, "m_MuscleClip");
+    let clip_data = unique_field(unique_field(muscle_clip, "m_Clip"), "data");
+    let streamed_data = array_field(unique_field(clip_data, "m_StreamedClip"), "data");
+    assert!(!streamed_data.is_empty());
+    let dense_clip = unique_field(clip_data, "m_DenseClip");
+    assert!(matches!(
+        unique_field(dense_clip, "m_FrameCount"),
+        SerializedValue::I32(2)
+    ));
+    let dense_samples = array_field(dense_clip, "m_SampleArray");
+    assert_eq!(dense_samples.len(), 6);
+    assert!(matches!(dense_samples.first(), Some(SerializedValue::F32(value)) if *value == 100.0));
+    let constant_samples = array_field(unique_field(clip_data, "m_ConstantClip"), "data");
+    assert_eq!(constant_samples.len(), 2);
+    assert!(
+        matches!(constant_samples.first(), Some(SerializedValue::F32(value)) if *value == 777.0)
+    );
+}
+
+fn unique_field<'a>(value: &'a SerializedValue, name: &str) -> &'a SerializedValue {
+    value
+        .unique_field_in_base_chain(name)
+        .expect("field lookup is unambiguous")
+        .unwrap_or_else(|| panic!("missing serialized field {name}"))
+}
+
+fn array_field<'a>(value: &'a SerializedValue, name: &str) -> &'a [SerializedValue] {
+    match unique_field(value, name) {
+        SerializedValue::Array(items) => items,
+        other => panic!("serialized field {name} is not an array: {other:?}"),
+    }
+}
+
+fn string_field<'a>(value: &'a SerializedValue, name: &str) -> &'a str {
+    match unique_field(value, name) {
+        SerializedValue::StringBytes(bytes) => {
+            std::str::from_utf8(bytes).expect("source-generated string is UTF-8")
+        }
+        other => panic!("serialized field {name} is not a string: {other:?}"),
+    }
 }
 
 fn source_probe_input() -> (AnimationClipObject, SceneFactsTable, Vec<PathCacheAsset>) {

@@ -9047,6 +9047,43 @@ mod tests {
     }
 
     #[test]
+    fn export_file_yaml_handles_source_generated_animation_workspace_without_typetrees() {
+        let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
+        let directory = TestInputDirectory::new_root();
+        let serialized_path = directory.join("animation_workspace.assets");
+        let output_path = directory.join("animation_workspace.yaml");
+        let bytes = include_bytes!("resources/animation/animation_workspace_fixture.assets");
+        fs::write(&serialized_path, bytes).unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![serialized_path.clone(), output_path.clone()],
+            subdirectories: Vec::new(),
+        };
+
+        super::run(
+            [
+                std::ffi::OsString::from("export-file-yaml"),
+                std::ffi::OsString::from("0"),
+                output_path.clone().into_os_string(),
+                serialized_path.clone().into_os_string(),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+
+        let yaml = fs::read_to_string(&output_path).unwrap();
+        assert_eq!(yaml.matches("--- !u!").count(), 13);
+        assert!(yaml.contains("m_SampleRate: 30"));
+        assert!(yaml.contains("m_ConstantClip:"));
+        assert!(yaml.contains("- 777\n          - 888"));
+        assert!(yaml.contains("pptrCurveMapping:\n    - {fileID: 1010}\n    - {fileID: 0}"));
+        assert!(yaml.contains("functionName: OnThing"));
+        assert!(yaml.contains("m_PositionValues3: []"));
+        assert_eq!(fs::read(&serialized_path).unwrap(), bytes);
+        drop(input);
+    }
+
+    #[test]
     fn export_project_writes_a_cross_file_yaml_workspace() {
         let directory = TestInputDirectory::new_root();
         let source_path = directory.join("main.assets");
