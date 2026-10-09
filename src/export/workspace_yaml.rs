@@ -1614,6 +1614,8 @@ fn workspace_object_to_unity_yaml_document_with_context(
     if metadata_object.path_id != source.path_id
         || metadata_object.resolved_type_index != object.resolved_type_index
         || metadata_object.class_id.map(i32::from) != object.class_id.map(i32::from)
+        || crate::processing::asset_factory::resolve_read_class_id(metadata_object.raw_type_id)
+            != object.factory.class_id
         || metadata_object.is_stripped != object.is_stripped
     {
         return Err(UnityYamlWorkspaceExportError::MetadataIdentityMismatch {
@@ -1621,14 +1623,7 @@ fn workspace_object_to_unity_yaml_document_with_context(
             object_index: object.object_index,
         });
     }
-    let class_id =
-        object
-            .class_id
-            .map(i32::from)
-            .ok_or(UnityYamlWorkspaceExportError::MissingClassId {
-                file_index,
-                object_index: object.object_index,
-            })?;
+    let class_id = object.factory.class_id;
     if source.class_id != class_id {
         return Err(UnityYamlWorkspaceExportError::ClassIdMismatch {
             source_class_id: source.class_id,

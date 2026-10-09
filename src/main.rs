@@ -591,7 +591,7 @@ fn export_texture_to<W: io::Write>(
     let object = objects
         .get(serialized_file_index, object_index)
         .ok_or_else(|| invalid_data("selected workspace object is missing"))?;
-    let class_id = object.class_id.map(i32::from);
+    let class_id = Some(object.factory.class_id);
     let payload = object.payload.as_ref().map_err(|error| {
         invalid_data_owned(format!(
             "SerializedFile {serialized_file_index} PathID {path_id} could not be decoded: {error}"
@@ -838,7 +838,7 @@ fn export_mesh_to<W: io::Write>(
     let object = objects
         .get(serialized_file_index, object_index)
         .ok_or_else(|| invalid_data("selected workspace object is missing"))?;
-    if object.class_id != Some(43) {
+    if object.factory.class_id != 43 {
         return Err(invalid_data_owned(format!(
             "SerializedFile {serialized_file_index} PathID {path_id} has class {:?}, not a class-43 Mesh",
             object.class_id
@@ -1262,7 +1262,7 @@ fn export_shader_to<W: io::Write>(
     let object = objects
         .get(serialized_file_index, object_index)
         .ok_or_else(|| invalid_data("selected workspace object is missing"))?;
-    if object.class_id != Some(SHADER_CLASS_ID as i16) {
+    if object.factory.class_id != SHADER_CLASS_ID {
         return Err(invalid_data_owned(format!(
             "SerializedFile {serialized_file_index} PathID {path_id} has class {:?}, not a class-48 Shader",
             object.class_id
@@ -1580,7 +1580,7 @@ fn export_audio_to<W: io::Write>(
     let object = objects
         .get(serialized_file_index, object_index)
         .ok_or_else(|| invalid_data("selected workspace object is missing"))?;
-    if object.class_id != Some(AUDIO_CLIP_CLASS_ID as i16) {
+    if object.factory.class_id != AUDIO_CLIP_CLASS_ID {
         return Err(invalid_data_owned(format!(
             "SerializedFile {serialized_file_index} PathID {path_id} has class {:?}, not a class-83 AudioClip",
             object.class_id

@@ -517,3 +517,15 @@ The integrated regressions are object_workspace_recovers_source_generated_textas
 - `PROC-ANIM-CONVERT-001` and `PROC-ANIM-STREAMED-001`: the source-generated serialized input and the existing full `process_clip` source replay now cover adjacent decode and conversion stages, but no production `ObjectWorkspace` caller connects them. The converter output still matches the 5,137-byte source fixture; no row status changed.
 - `EXPORT-UNITY-001`: `export-file-yaml` now handles the 13-object no-TypeTree animation workspace. The same input exposed a `ValueArray` source TPK shape (`Array/data`, `float3`/`float4`) that the YAML hint builder did not accept; that branch now emits the corresponding 3D/4D field aliases and has a focused fixture regression. This does not add the processed `.anim` or AnimatorController project-export routes.
 - The parity reporter remains at 386 rows and 24 non-verified IDs; Phase 1 remains open and Phase 2 remains locked. No user AssetBundle or UABEA content was accessed, and Unity Editor import/runtime was not run.
+
+## Managed-reference project integration evidence (2026-10-08)
+
+The following bounded evidence supplements the existing stable-ID rows. It does not change any status or close a broader feature area.
+
+| Feature ID | Verification evidence | Status and remaining scope |
+|---|---|---|
+| `SER-MANAGED-REFS-001` | `DIFF-MANAGED-REF-PROJECT-001` adds a frozen-source `ExportHandler` run and Rust product export for a counted registry containing typed `NodeA`/`NodeB` values, a cycle, and a PPtr into a second SerializedFile. Existing verified status remains based on the row's bounded decode/write/scope contract. | Status remains `已验证`; this does not assert all Unity registry variants or dynamic Unity behavior. |
+| `OBJ-REF-001` | The focused project integration regression loads two generation-21 SerializedFiles, resolves the managed cycle's three RID edges and the serialized `fileID=1, PathID=900` target, and emits the cross-file asset mapping. | Status remains `实现中`; this covers one TypeTree-backed two-file graph, not all object references, dependency discovery, bundle identity, external resources, or export identity paths. |
+| `EXPORT-UNITY-001` | Source and Rust managed-reference YAML subtrees match after normalizing only the randomly generated target GUID. The modern format-21 project route now gets class identity from the resolved factory TypeID when the legacy object-table class ID is absent. | Status remains `实现中`; the whole root MonoBehaviour YAML still differs because Rust omits six source-emitted default fields. Other exporter families, full project settings/post-export, and GUI workflows remain open. |
+
+The fixture contains serialized TypeTrees and reference-type metadata, so it adds no missing-TypeTree evidence for `SER-TT-ABSENT-001` and no assembly-backed recovery evidence for `TYPE-SCRIPT-001`. See the input hashes, exact probe command, and full-file YAML difference in `docs/differential-findings.md` (`DIFF-MANAGED-REF-PROJECT-001`).
