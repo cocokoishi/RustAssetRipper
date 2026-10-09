@@ -3,7 +3,10 @@
 // then imports and exports those files through the frozen AssetRipper product path.
 using System.Security.Cryptography;
 using System.Collections;
+using System.Collections.Immutable;
 using System.Reflection;
+using System.Reflection.Metadata;
+using System.Reflection.PortableExecutable;
 using System.Text;
 using AssetRipper.Export.Configuration;
 using AssetRipper.Export.UnityProjects;
@@ -19,6 +22,16 @@ using AssetRipper.IO.Files.SerializedFiles.Parser;
 using AssetRipper.IO.Files.SerializedFiles.Parser.TypeTrees;
 using AssetRipper.Primitives;
 using AssetRipper.SerializationLogic;
+
+if (args.Length > 0 && args[0] == "compare-managed-assembly-pe")
+{
+    if (args.Length != 3)
+    {
+        Console.Error.WriteLine("usage: managed-project compare-managed-assembly-pe <source-saved-dll> <rust-saved-dll>");
+        return 2;
+    }
+    return CompareManagedAssemblyPe(args[1], args[2]);
+}
 
 if (args.Length > 0 && args[0] == "export-mono-structure")
 {
@@ -2149,3 +2162,212 @@ static void WriteString(List<byte> payload, string value)
 static void WriteI32(List<byte> payload, int value) => payload.AddRange(BitConverter.GetBytes(value));
 
 static void WriteI64(List<byte> payload, long value) => payload.AddRange(BitConverter.GetBytes(value));
+
+static int CompareManagedAssemblyPe(string sourcePath, string rustPath)
+{
+    string[] sourceRows = ReadManagedAssemblyPeRows(sourcePath);
+    string[] rustRows = ReadManagedAssemblyPeRows(rustPath);
+    Console.WriteLine($"SOURCE_ROWS|{sourceRows.Length}");
+    Console.WriteLine($"RUST_ROWS|{rustRows.Length}");
+    int commonCount = Math.Min(sourceRows.Length, rustRows.Length);
+    bool matches = true;
+    for (int index = 0; index < commonCount; index++)
+    {
+        if (!string.Equals(sourceRows[index], rustRows[index], StringComparison.Ordinal))
+        {
+            Console.Error.WriteLine($"MISMATCH|{index}|SOURCE|{sourceRows[index]}|RUST|{rustRows[index]}");
+            matches = false;
+        }
+    }
+    if (sourceRows.Length != rustRows.Length)
+    {
+        Console.Error.WriteLine($"ROW_COUNT_MISMATCH|SOURCE|{sourceRows.Length}|RUST|{rustRows.Length}");
+        matches = false;
+    }
+    if (!matches) return 1;
+    Console.WriteLine("MANAGED_ASSEMBLY_PE_MODEL_MATCH");
+    return 0;
+}
+
+static string[] ReadManagedAssemblyPeRows(string path)
+{
+    using var stream = File.OpenRead(path);
+    using var peReader = new PEReader(stream);
+    if (!peReader.HasMetadata)
+    {
+        throw new BadImageFormatException($"PE file has no CLR metadata: {path}");
+    }
+    MetadataReader reader = peReader.GetMetadataReader();
+    var signatureProvider = new ManagedAssemblySignatureProvider();
+    var rows = new List<string>();
+    if (reader.IsAssembly)
+    {
+        System.Reflection.Metadata.AssemblyDefinition assembly = reader.GetAssemblyDefinition();
+        rows.Add($"ASSEMBLY|{reader.GetString(assembly.Name)}|{assembly.Version}|{assembly.Flags}");
+    }
+    foreach (AssemblyReferenceHandle handle in reader.AssemblyReferences)
+    {
+        AssemblyReference reference = reader.GetAssemblyReference(handle);
+        rows.Add($"REFERENCE|{reader.GetString(reference.Name)}|{reference.Version}|{reference.Flags}");
+    }
+    rows = rows.OrderBy(row => row, StringComparer.Ordinal).ToList();
+    foreach (TypeDefinitionHandle typeHandle in reader.TypeDefinitions)
+    {
+        TypeDefinition type = reader.GetTypeDefinition(typeHandle);
+        string typeName = GetTypeDefinitionName(reader, typeHandle);
+        string baseType = type.BaseType.IsNil ? "" : GetTypeHandleName(reader, type.BaseType);
+        rows.Add($"TYPE|{typeName}|{baseType}|{type.Attributes}");
+        foreach (FieldDefinitionHandle fieldHandle in type.GetFields()
+            .OrderBy(handle => reader.GetString(reader.GetFieldDefinition(handle).Name), StringComparer.Ordinal))
+        {
+            FieldDefinition field = reader.GetFieldDefinition(fieldHandle);
+            string fieldType = field.DecodeSignature(signatureProvider, null);
+            rows.Add($"FIELD|{typeName}|{reader.GetString(field.Name)}|{fieldType}|{field.Attributes}");
+        }
+        foreach (MethodDefinitionHandle methodHandle in type.GetMethods()
+            .OrderBy(handle => reader.GetString(reader.GetMethodDefinition(handle).Name), StringComparer.Ordinal))
+        {
+            MethodDefinition method = reader.GetMethodDefinition(methodHandle);
+            var signature = method.DecodeSignature(signatureProvider, null);
+            string parameters = string.Join(',', signature.ParameterTypes);
+            string body = "no-body";
+            if (method.RelativeVirtualAddress != 0)
+            {
+                MethodBodyBlock methodBody = peReader.GetMethodBody(method.RelativeVirtualAddress);
+                int ilLength = methodBody.GetILBytes()?.Length ?? 0;
+                string locals = methodBody.LocalSignature.IsNil
+                    ? ""
+                    : string.Join(',', reader.GetStandaloneSignature(methodBody.LocalSignature)
+                        .DecodeLocalSignature(signatureProvider, null));
+                string exceptions = string.Join(';', methodBody.ExceptionRegions.Select(region =>
+                    $"{region.Kind}:{region.TryOffset}+{region.TryLength}:{region.HandlerOffset}+{region.HandlerLength}:{region.FilterOffset}:{(region.CatchType.IsNil ? "" : GetTypeHandleName(reader, region.CatchType))}"));
+                body = $"il={ilLength};maxStack={methodBody.MaxStack};initLocals={methodBody.LocalVariablesInitialized};locals={locals};exceptions={exceptions}";
+            }
+            string methodName = reader.GetString(method.Name);
+            rows.Add($"METHOD|{typeName}|{methodName}|{signature.ReturnType}({parameters})|{method.Attributes}|0x{((int)method.ImplAttributes):X4}|{body}");
+        }
+        foreach (PropertyDefinitionHandle propertyHandle in type.GetProperties()
+            .OrderBy(handle => reader.GetString(reader.GetPropertyDefinition(handle).Name), StringComparer.Ordinal))
+        {
+            PropertyDefinition property = reader.GetPropertyDefinition(propertyHandle);
+            var signature = property.DecodeSignature(signatureProvider, null);
+            PropertyAccessors accessors = property.GetAccessors();
+            string getter = accessors.Getter.IsNil ? "" : reader.GetString(reader.GetMethodDefinition(accessors.Getter).Name);
+            string setter = accessors.Setter.IsNil ? "" : reader.GetString(reader.GetMethodDefinition(accessors.Setter).Name);
+            string others = string.Join(',', accessors.Others.Select(handle => reader.GetString(reader.GetMethodDefinition(handle).Name)));
+            rows.Add($"PROPERTY|{typeName}|{reader.GetString(property.Name)}|{signature.ReturnType}({string.Join(',', signature.ParameterTypes)})|{property.Attributes}|{getter}|{setter}|{others}");
+        }
+        foreach (EventDefinitionHandle eventHandle in type.GetEvents()
+            .OrderBy(handle => reader.GetString(reader.GetEventDefinition(handle).Name), StringComparer.Ordinal))
+        {
+            EventDefinition eventDefinition = reader.GetEventDefinition(eventHandle);
+            EventAccessors accessors = eventDefinition.GetAccessors();
+            string add = accessors.Adder.IsNil ? "" : reader.GetString(reader.GetMethodDefinition(accessors.Adder).Name);
+            string remove = accessors.Remover.IsNil ? "" : reader.GetString(reader.GetMethodDefinition(accessors.Remover).Name);
+            string raise = accessors.Raiser.IsNil ? "" : reader.GetString(reader.GetMethodDefinition(accessors.Raiser).Name);
+            string others = string.Join(',', accessors.Others.Select(handle => reader.GetString(reader.GetMethodDefinition(handle).Name)));
+            rows.Add($"EVENT|{typeName}|{reader.GetString(eventDefinition.Name)}|{GetTypeHandleName(reader, eventDefinition.Type)}|{eventDefinition.Attributes}|{add}|{remove}|{raise}|{others}");
+        }
+    }
+    return rows.OrderBy(row => row, StringComparer.Ordinal).ToArray();
+}
+
+static string GetTypeHandleName(MetadataReader reader, EntityHandle handle) => handle.Kind switch
+{
+    HandleKind.TypeDefinition => GetTypeDefinitionName(reader, (TypeDefinitionHandle)handle),
+    HandleKind.TypeReference => GetTypeReferenceName(reader, (TypeReferenceHandle)handle),
+    HandleKind.TypeSpecification => reader.GetTypeSpecification((TypeSpecificationHandle)handle)
+        .DecodeSignature(new ManagedAssemblySignatureProvider(), null),
+    _ => handle.Kind.ToString(),
+};
+
+static string GetTypeDefinitionName(MetadataReader reader, TypeDefinitionHandle handle)
+{
+    TypeDefinition type = reader.GetTypeDefinition(handle);
+    string name = reader.GetString(type.Name);
+    TypeDefinitionHandle declaringType = type.GetDeclaringType();
+    if (!declaringType.IsNil)
+    {
+        return $"{GetTypeDefinitionName(reader, declaringType)}+{name}";
+    }
+    string ns = reader.GetString(type.Namespace);
+    return ns.Length == 0 ? name : $"{ns}.{name}";
+}
+
+static string GetTypeReferenceName(MetadataReader reader, TypeReferenceHandle handle)
+{
+    TypeReference type = reader.GetTypeReference(handle);
+    string name = reader.GetString(type.Name);
+    if (type.ResolutionScope.Kind == HandleKind.TypeReference)
+    {
+        return $"{GetTypeReferenceName(reader, (TypeReferenceHandle)type.ResolutionScope)}+{name}";
+    }
+    string ns = reader.GetString(type.Namespace);
+    return ns.Length == 0 ? name : $"{ns}.{name}";
+}
+
+sealed class ManagedAssemblySignatureProvider : ISignatureTypeProvider<string, object?>
+{
+    public string GetArrayType(string elementType, ArrayShape shape) =>
+        $"{elementType}[{new string(',', Math.Max(0, shape.Rank - 1))}]";
+
+    public string GetByReferenceType(string elementType) => $"{elementType}&";
+
+    public string GetFunctionPointerType(MethodSignature<string> signature) =>
+        $"methodptr {signature.ReturnType}({string.Join(',', signature.ParameterTypes)})";
+
+    public string GetGenericInstantiation(string genericType, ImmutableArray<string> typeArguments) =>
+        $"{genericType}<{string.Join(',', typeArguments)}>";
+
+    public string GetGenericMethodParameter(object? genericContext, int index) => $"!!{index}";
+
+    public string GetGenericTypeParameter(object? genericContext, int index) => $"!{index}";
+
+    public string GetModifiedType(string modifier, string unmodifiedType, bool isRequired) =>
+        $"{(isRequired ? "modreq" : "modopt")}({modifier}) {unmodifiedType}";
+
+    public string GetPinnedType(string elementType) => $"{elementType} pinned";
+
+    public string GetPointerType(string elementType) => $"{elementType}*";
+
+    public string GetPrimitiveType(PrimitiveTypeCode typeCode) => typeCode.ToString();
+
+    public string GetSZArrayType(string elementType) => $"{elementType}[]";
+
+    public string GetTypeFromDefinition(MetadataReader reader, TypeDefinitionHandle handle, byte rawTypeKind) =>
+        TypeDefinitionName(reader, handle);
+
+    public string GetTypeFromReference(MetadataReader reader, TypeReferenceHandle handle, byte rawTypeKind) =>
+        TypeReferenceName(reader, handle);
+
+    public string GetTypeFromSpecification(
+        MetadataReader reader,
+        object? genericContext,
+        TypeSpecificationHandle handle,
+        byte rawTypeKind) => reader.GetTypeSpecification(handle).DecodeSignature(this, genericContext);
+
+    private static string TypeDefinitionName(MetadataReader reader, TypeDefinitionHandle handle)
+    {
+        TypeDefinition type = reader.GetTypeDefinition(handle);
+        string name = reader.GetString(type.Name);
+        TypeDefinitionHandle declaringType = type.GetDeclaringType();
+        if (!declaringType.IsNil)
+        {
+            return $"{TypeDefinitionName(reader, declaringType)}+{name}";
+        }
+        string ns = reader.GetString(type.Namespace);
+        return ns.Length == 0 ? name : $"{ns}.{name}";
+    }
+
+    private static string TypeReferenceName(MetadataReader reader, TypeReferenceHandle handle)
+    {
+        TypeReference type = reader.GetTypeReference(handle);
+        string name = reader.GetString(type.Name);
+        if (type.ResolutionScope.Kind == HandleKind.TypeReference)
+        {
+            return $"{TypeReferenceName(reader, (TypeReferenceHandle)type.ResolutionScope)}+{name}";
+        }
+        string ns = reader.GetString(type.Namespace);
+        return ns.Length == 0 ? name : $"{ns}.{name}";
+    }
+}

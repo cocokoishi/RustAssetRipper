@@ -53,6 +53,8 @@ use assetripper::processing::asset_factory::ClassLayoutSource;
 use assetripper::processing::asset_factory::{
     FactoryUnityVersion, SourceFactoryLookupError, SourceTpkLookupError, SourceTpkTrees,
 };
+#[cfg(test)]
+use assetripper::processing::managed_assembly::{ManagedAssembly, ManagedAssemblyLimits};
 use assetripper::processing::managed_assembly::{
     ManagedAssemblyCatalog, ManagedAssemblyCatalogLimits, ManagedScriptResolutionOutcome,
     ManagedScriptResolutionReport,
@@ -4800,7 +4802,8 @@ mod tests {
 
     use super::{
         load_object_workspace, load_workspace_from_vfs, merge_mount_report, remaining_budget_u64,
-        remaining_budget_usize, source_bundle_for_collection, WorkspaceSerializedBundle,
+        remaining_budget_usize, source_bundle_for_collection, ManagedAssembly,
+        ManagedAssemblyLimits, WorkspaceSerializedBundle,
     };
     use assetripper::export::settings::{ExportDefaults, ScriptExportMode, ShaderExportMode};
     use assetripper::export::settings_file::ExportSettingsFile;
@@ -9861,6 +9864,25 @@ mod tests {
             source_plugin_meta,
             "PluginImporter metadata matches after removing only generated GUID and time"
         );
+        let exported_assembly =
+            fs::read(output_root.join("Assets/Plugins/ComplexFixtureScripts.dll"))
+                .expect("source-saved manager-backed assembly");
+        let exported_assembly_model = ManagedAssembly::parse(
+            "ComplexFixtureScripts.dll",
+            &exported_assembly,
+            ManagedAssemblyLimits::default(),
+        )
+        .expect("exported complex assembly parses");
+        let source_assembly_model = ManagedAssembly::parse(
+            "ComplexFixtureScripts.dll",
+            include_bytes!("processing/managed_assembly_schema_complex_source_saved_fixture.dll"),
+            ManagedAssemblyLimits::default(),
+        )
+        .expect("source-saved complex assembly parses");
+        assert_eq!(
+            exported_assembly_model.types, source_assembly_model.types,
+            "project export preserves the source-saved managed type model"
+        );
         assert_eq!(fs::read(&source_path).unwrap(), input_bytes);
         assert_eq!(fs::read(&assembly_path).unwrap(), assembly_bytes);
 
@@ -9991,8 +10013,24 @@ mod tests {
             normalize_meta(&plugin_meta_path).as_bytes(),
             source_plugin_meta
         );
-        // The source reserializes this DLL; the current Rust product retains its input bytes.
-        assert_eq!(fs::read(&plugin_path).unwrap(), assembly_bytes);
+        let exported_assembly = fs::read(&plugin_path).unwrap();
+        let exported_assembly_model = ManagedAssembly::parse(
+            "ManagedReferenceFixtureScripts.dll",
+            &exported_assembly,
+            ManagedAssemblyLimits::default(),
+        )
+        .expect("exported managed-reference assembly parses");
+        let source_assembly_model = ManagedAssembly::parse(
+            "ManagedReferenceFixtureScripts.dll",
+            include_bytes!("processing/managed_reference_schema_source_saved_fixture.dll"),
+            ManagedAssemblyLimits::default(),
+        )
+        .expect("source-saved managed-reference assembly parses");
+        assert_eq!(
+            exported_assembly_model.types, source_assembly_model.types,
+            "project export preserves the source-saved managed type model"
+        );
+        assert_ne!(exported_assembly, assembly_bytes);
         assert_eq!(
             fs::read(&root_path).unwrap(),
             input_bytes("managed_reference_schema.assets")
@@ -10813,10 +10851,27 @@ mod tests {
         let assembly_output = output_root.join("Assets/Plugins/FixtureScripts.dll");
         let assembly_meta = output_root.join("Assets/Plugins/FixtureScripts.dll.meta");
         let behaviour_output = output_root.join("Assets/MonoBehaviour/SavedScriptRoot.asset");
+        let exported_assembly = fs::read(&assembly_output).expect("saved assembly bytes");
+        let exported_assembly_model = ManagedAssembly::parse(
+            "FixtureScripts.dll",
+            &exported_assembly,
+            ManagedAssemblyLimits::default(),
+        )
+        .expect("exported saved-script assembly parses");
+        let source_assembly_model = ManagedAssembly::parse(
+            "FixtureScripts.dll",
+            include_bytes!("processing/managed_assembly_saved_source_saved_fixture.dll"),
+            ManagedAssemblyLimits::default(),
+        )
+        .expect("source-saved script assembly parses");
         assert_eq!(
-            fs::read(&assembly_output).expect("saved assembly bytes"),
+            exported_assembly_model.types, source_assembly_model.types,
+            "manager-backed Save preserves the source-saved managed type model"
+        );
+        assert_ne!(
+            exported_assembly,
             include_bytes!("processing/managed_assembly_fixture.dll"),
-            "the Rust save path retains the original imported assembly stream"
+            "manager-backed Save must not copy the imported DLL bytes"
         );
         let normalized_meta = fs::read_to_string(&assembly_meta)
             .expect("PluginImporter sidecar")

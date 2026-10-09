@@ -550,3 +550,12 @@ Fresh frozen-source probes and Rust `export-project` tests now cover both versio
 | `EXPORT-UNITY-001` | Production `export-project` tests compare full 2019.4 and 2021.2 MonoBehaviour YAML after replacing only target/script GUIDs. Target bytes and normalized TextScriptImporter/PluginImporter metadata match in both cases; the CLI also writes ProjectVersion and the package manifest. | Status remains `实现中`; the source-rewritten assembly, `System.Runtime.CompilerServices.Unsafe.dll`, `EditorSettings.asset`, other exporter families/settings, Unity import, and complete project output remain open. |
 
 This closes the tested legacy and counted source behaviors but changes no feature status. The ledger remains 386 rows with 24 non-verified items and `phase1_gate: OPEN`; Phase 2 remains locked.
+
+## Manager-backed assembly save semantics (2026-10-09)
+
+| Feature ID | Verification evidence | Status and remaining scope |
+|---|---|---|
+| `TYPE-SCRIPT-001` | `DIFF-MANAGED-DLL-SAVE-001` now compares three source-generated Unity 2019.4.40f1 manager-saved DLLs. The independent .NET PEReader rows match 34/34, 19/19, and 24/24; Rust also compares decoded bodies after normalizing method/field metadata indices. The project writer uses `ManagedAssembly::serialize_for_export`; local `dotnetdll` fixes preserve the CLR `ManagedMask` value and method ownership for property/event accessors. | Status remains `实现中`; PE layout/bytes differ, helper assembly and EditorSettings outputs remain absent, and other script modes, identities, architectures, resources, IL2CPP/Cpp2IL paths, and version branches remain open. |
+| `EXPORT-UNITY-001` | `export-project` manager-backed Save output is now reserialized in Rust. Complex-schema, saved-script, and managed-reference project regressions compare exported DLL type/field models with frozen source-saved fixtures while preserving the original input DLLs. | Status remains `实现中`; this does not implement the complete project collection/export pipeline. The source-added `System.Runtime.CompilerServices.Unsafe.dll`, `ProjectSettings/EditorSettings.asset`, other class exporters/importers, full settings, and Unity validation remain open. |
+
+This settles the source cache-clear/re-serialization behavior for the three listed fixtures only. Source and Rust PE files are not byte-identical, and those fixtures do not prove preservation of all native PE resources, strong-name/signing data, or machine types. No feature status changed: 386 rows remain, 24 are non-verified, and `phase1_gate: OPEN`.

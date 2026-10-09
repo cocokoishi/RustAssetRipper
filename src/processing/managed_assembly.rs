@@ -11,7 +11,7 @@ use std::io;
 
 use dotnetdll::prelude::{
     BaseType, MemberType, MethodReferenceParent, MethodType, ReadOptions, Resolution,
-    ResolutionScope, ResolvedDebug, TypeSource, UserMethod, UserType, ValueKind,
+    ResolutionScope, ResolvedDebug, TypeSource, UserMethod, UserType, ValueKind, WriteOptions,
 };
 
 use crate::io::dependency::DependencyFilePath;
@@ -391,6 +391,45 @@ fn managed_type_reference_identity(
     })
 }
 
+fn managed_pe_is_32_bit(file_name: &str, bytes: &[u8]) -> Result<bool, Box<ManagedAssemblyError>> {
+    let malformed = |reason: &str| {
+        managed_assembly_error(
+            file_name,
+            ManagedAssemblyErrorKind::MalformedPeHeader {
+                reason: reason.to_owned(),
+            },
+        )
+    };
+    if bytes.get(0..2) != Some(b"MZ") {
+        return Err(malformed("missing DOS MZ signature"));
+    }
+    let offset_bytes: [u8; 4] = bytes
+        .get(0x3c..0x40)
+        .ok_or_else(|| malformed("truncated DOS header"))?
+        .try_into()
+        .map_err(|_| malformed("invalid PE header offset"))?;
+    let pe_offset = usize::try_from(u32::from_le_bytes(offset_bytes))
+        .map_err(|_| malformed("PE header offset does not fit this platform"))?;
+    let machine_offset = pe_offset
+        .checked_add(4)
+        .ok_or_else(|| malformed("PE header offset overflows"))?;
+    let machine_end = machine_offset
+        .checked_add(2)
+        .ok_or_else(|| malformed("COFF machine offset overflows"))?;
+    if bytes.get(pe_offset..machine_offset) != Some(b"PE\0\0") || machine_end > bytes.len() {
+        return Err(malformed("truncated or invalid PE/COFF header"));
+    }
+    let machine = u16::from_le_bytes([bytes[machine_offset], bytes[machine_offset + 1]]);
+    match machine {
+        0x014c => Ok(true),  // IMAGE_FILE_MACHINE_I386
+        0x8664 => Ok(false), // IMAGE_FILE_MACHINE_AMD64
+        _ => Err(managed_assembly_error(
+            file_name,
+            ManagedAssemblyErrorKind::UnsupportedPeMachine { machine },
+        )),
+    }
+}
+
 impl ManagedAssembly {
     pub fn parse(
         file_name: &str,
@@ -526,6 +565,84 @@ impl ManagedAssembly {
             source_virtual_path: None,
             types,
         })
+    }
+
+    /// Reserializes a managed PE for the source manager-backed `Save` export path.
+    ///
+    /// The source clears its cached input streams during assembly processing, after which
+    /// `BaseManager.GetStreamForAssembly` serializes the loaded assembly. This performs that
+    /// bounded PE round-trip without invoking a .NET process. Unsupported machine types fail
+    /// explicitly instead of being rewritten with the wrong architecture.
+    pub fn serialize_for_export(
+        file_name: &str,
+        bytes: &[u8],
+        limits: ManagedAssemblyLimits,
+    ) -> Result<Vec<u8>, Box<ManagedAssemblyError>> {
+        if bytes.len() > limits.max_file_bytes {
+            return Err(managed_assembly_error(
+                file_name,
+                ManagedAssemblyErrorKind::FileSizeLimitExceeded {
+                    file_bytes: bytes.len(),
+                    limit: limits.max_file_bytes,
+                },
+            ));
+        }
+        let is_32_bit = managed_pe_is_32_bit(file_name, bytes)?;
+        let resolution = Resolution::parse(bytes, ReadOptions::default()).map_err(|error| {
+            managed_assembly_error(
+                file_name,
+                ManagedAssemblyErrorKind::MetadataParse(error.to_string()),
+            )
+        })?;
+        if resolution.type_definitions.len() > limits.max_types {
+            return Err(managed_assembly_error(
+                file_name,
+                ManagedAssemblyErrorKind::TypeCountLimitExceeded {
+                    count: resolution.type_definitions.len(),
+                    limit: limits.max_types,
+                },
+            ));
+        }
+        let field_count = resolution
+            .type_definitions
+            .iter()
+            .try_fold(0usize, |count, definition| {
+                count.checked_add(definition.fields.len())
+            })
+            .ok_or_else(|| {
+                managed_assembly_error(file_name, ManagedAssemblyErrorKind::FieldCountOverflow)
+            })?;
+        if field_count > limits.max_fields {
+            return Err(managed_assembly_error(
+                file_name,
+                ManagedAssemblyErrorKind::FieldCountLimitExceeded {
+                    count: field_count,
+                    limit: limits.max_fields,
+                },
+            ));
+        }
+
+        let output = resolution
+            .write(WriteOptions {
+                is_32_bit,
+                ..WriteOptions::default()
+            })
+            .map_err(|error| {
+                managed_assembly_error(
+                    file_name,
+                    ManagedAssemblyErrorKind::Serialization(error.to_string()),
+                )
+            })?;
+        if output.len() > limits.max_file_bytes {
+            return Err(managed_assembly_error(
+                file_name,
+                ManagedAssemblyErrorKind::FileSizeLimitExceeded {
+                    file_bytes: output.len(),
+                    limit: limits.max_file_bytes,
+                },
+            ));
+        }
+        Ok(output)
     }
 
     pub fn find_type(&self, namespace: &str, name: &str) -> Option<&ManagedTypeDefinition> {
@@ -1101,6 +1218,13 @@ pub enum ManagedAssemblyErrorKind {
         count: usize,
         limit: usize,
     },
+    MalformedPeHeader {
+        reason: String,
+    },
+    UnsupportedPeMachine {
+        machine: u16,
+    },
+    Serialization(String),
     DuplicatePathAlias {
         alias: String,
         previous_file: String,
@@ -1141,6 +1265,19 @@ impl Display for ManagedAssemblyError {
                     "field count {count} exceeds the {limit}-field limit"
                 )
             }
+            ManagedAssemblyErrorKind::MalformedPeHeader { reason } => {
+                write!(
+                    formatter,
+                    "PE header could not be used for serialization: {reason}"
+                )
+            }
+            ManagedAssemblyErrorKind::UnsupportedPeMachine { machine } => write!(
+                formatter,
+                "PE machine type 0x{machine:04X} cannot be preserved by the managed assembly writer"
+            ),
+            ManagedAssemblyErrorKind::Serialization(reason) => {
+                write!(formatter, "CLR metadata could not be serialized: {reason}")
+            }
             ManagedAssemblyErrorKind::DuplicatePathAlias {
                 alias,
                 previous_file,
@@ -1168,6 +1305,10 @@ fn managed_assembly_error(
 mod tests {
     use std::borrow::Cow;
 
+    use dotnetdll::prelude::{
+        FieldReferenceParent, MethodReferenceParent, ReadOptions, Resolution, ResolvedDebug,
+    };
+
     use super::{
         has_cli_directory, resolve_mono_script_object, ManagedAssembly, ManagedAssemblyCatalog,
         ManagedAssemblyCatalogLimits, ManagedAssemblyErrorKind, ManagedAssemblyLimits,
@@ -1185,6 +1326,323 @@ mod tests {
     use crate::serialized_file::object_workspace::WorkspaceObject;
 
     const ASSEMBLY_BYTES: &[u8] = include_bytes!("managed_assembly_fixture.dll");
+
+    #[test]
+    fn managed_reference_assembly_writer_preserves_the_source_module_model() {
+        assert_writer_matches_source_saved_model(
+            "ManagedReferenceFixtureScripts.dll",
+            include_bytes!("managed_reference_schema_fixture.dll"),
+            include_bytes!("managed_reference_schema_source_saved_fixture.dll"),
+            "target/managed-reference-dotnetdll-save.dll",
+        );
+    }
+
+    #[test]
+    fn managed_assembly_writer_preserves_complex_schema_module_model() {
+        assert_writer_matches_source_saved_model(
+            "ComplexFixtureScripts.dll",
+            include_bytes!("managed_assembly_schema_complex_fixture.dll"),
+            include_bytes!("managed_assembly_schema_complex_source_saved_fixture.dll"),
+            "target/complex-dotnetdll-save.dll",
+        );
+    }
+
+    #[test]
+    fn managed_assembly_writer_preserves_saved_script_module_model() {
+        assert_writer_matches_source_saved_model(
+            "FixtureScripts.dll",
+            include_bytes!("managed_assembly_fixture.dll"),
+            include_bytes!("managed_assembly_saved_source_saved_fixture.dll"),
+            "target/saved-script-dotnetdll-save.dll",
+        );
+    }
+
+    fn assert_writer_matches_source_saved_model(
+        file_name: &str,
+        input: &[u8],
+        source_saved: &[u8],
+        rust_output_path: &str,
+    ) {
+        let source_resolution = Resolution::parse(source_saved, ReadOptions::default())
+            .expect("source-reserialized assembly parses with method bodies");
+        let output = ManagedAssembly::serialize_for_export(
+            file_name,
+            input,
+            ManagedAssemblyLimits::default(),
+        )
+        .expect("managed assembly serializes as a PE image");
+        assert_eq!(
+            super::managed_pe_is_32_bit(file_name, &output).unwrap(),
+            super::managed_pe_is_32_bit(file_name, source_saved).unwrap(),
+            "Rust writer preserves the source PE bitness"
+        );
+        let reparsed = Resolution::parse(&output, ReadOptions::default())
+            .expect("serialized PE can be parsed again");
+        std::fs::write(rust_output_path, &output)
+            .expect("write the isolated serialization experiment under target");
+        let source_model =
+            ManagedAssembly::parse(file_name, source_saved, ManagedAssemblyLimits::default())
+                .expect("source-saved assembly metadata parses");
+        let rust_model =
+            ManagedAssembly::parse(file_name, &output, ManagedAssemblyLimits::default())
+                .expect("Rust-saved assembly metadata parses");
+        assert_eq!(
+            rust_model.types, source_model.types,
+            "Rust writer preserves every script type and field represented by the source save"
+        );
+        assert_eq!(
+            source_resolution
+                .type_definitions
+                .iter()
+                .flat_map(|ty| ty.methods.iter())
+                .filter(|method| method.body.is_some())
+                .count(),
+            reparsed
+                .type_definitions
+                .iter()
+                .flat_map(|ty| ty.methods.iter())
+                .filter(|method| method.body.is_some())
+                .count(),
+            "writer preserves the number of IL method bodies"
+        );
+        assert_eq!(
+            method_body_rows(&reparsed),
+            method_body_rows(&source_resolution),
+            "Rust writer preserves source-saved method signatures and IL bodies"
+        );
+    }
+
+    #[test]
+    fn managed_assembly_writer_rejects_malformed_and_unsupported_pe_headers() {
+        let malformed = ManagedAssembly::serialize_for_export(
+            "malformed.dll",
+            b"not a PE image",
+            ManagedAssemblyLimits::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            malformed.kind,
+            ManagedAssemblyErrorKind::MalformedPeHeader { .. }
+        ));
+
+        let mut unsupported_machine =
+            include_bytes!("managed_reference_schema_fixture.dll").to_vec();
+        let pe_offset = u32::from_le_bytes(
+            unsupported_machine[0x3c..0x40]
+                .try_into()
+                .expect("DOS header has a PE offset"),
+        ) as usize;
+        unsupported_machine[pe_offset + 4..pe_offset + 6].copy_from_slice(&0x01c0u16.to_le_bytes());
+        let unsupported = ManagedAssembly::serialize_for_export(
+            "unsupported-machine.dll",
+            &unsupported_machine,
+            ManagedAssemblyLimits::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            unsupported.kind,
+            ManagedAssemblyErrorKind::UnsupportedPeMachine { machine: 0x01c0 }
+        ));
+    }
+
+    fn method_body_rows(resolution: &Resolution<'_>) -> Vec<String> {
+        let method_references = resolution
+            .method_references
+            .iter()
+            .enumerate()
+            .map(|(index, reference)| {
+                let parent = match &reference.parent {
+                    MethodReferenceParent::Type(method_type) => method_type.show(resolution),
+                    MethodReferenceParent::Module(module_index) => {
+                        resolution[*module_index].name.to_string()
+                    }
+                    MethodReferenceParent::VarargMethod(method_index) => {
+                        resolution[method_index.parent_type()].nested_type_name(resolution)
+                    }
+                };
+                (
+                    format!("MethodRefIndex({index})"),
+                    format!(
+                        "{parent}::{}{}",
+                        reference.name,
+                        reference.signature.show(resolution)
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        let field_references = resolution
+            .field_references
+            .iter()
+            .enumerate()
+            .map(|(index, reference)| {
+                let parent = match &reference.parent {
+                    FieldReferenceParent::Type(field_type) => field_type.show(resolution),
+                    FieldReferenceParent::Module(module_index) => {
+                        resolution[*module_index].name.to_string()
+                    }
+                };
+                (
+                    format!("FieldRefIndex({index})"),
+                    format!(
+                        "{parent}::{} {}",
+                        reference.name,
+                        reference.field_type.show(resolution)
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut definition_indices = Vec::new();
+        let mut type_indices = Vec::new();
+        for (type_index, ty) in resolution.type_definitions.iter().enumerate() {
+            let owner = ty.nested_type_name(resolution);
+            type_indices.push((format!("TypeIndex({type_index})"), format!("Type<{owner}>")));
+            for (field_index, field) in ty.fields.iter().enumerate() {
+                definition_indices.push((
+                    format!(
+                        "FieldIndex {{ parent_type: TypeIndex({type_index}), field: {field_index} }}"
+                    ),
+                    format!("Field<{owner}::{}>", field.name),
+                ));
+            }
+            for (method_index, method) in ty.methods.iter().enumerate() {
+                definition_indices.push((
+                    format!(
+                        "MethodIndex {{ parent_type: TypeIndex({type_index}), member: Method({method_index}) }}"
+                    ),
+                    format!(
+                        "Method<{owner}::{}{}>",
+                        method.name,
+                        method.signature.show(resolution)
+                    ),
+                ));
+            }
+            for (property_index, property) in ty.properties.iter().enumerate() {
+                if let Some(method) = &property.getter {
+                    definition_indices.push((
+                        format!(
+                            "MethodIndex {{ parent_type: TypeIndex({type_index}), member: PropertyGetter({property_index}) }}"
+                        ),
+                        format!(
+                            "Method<{owner}::{}{}>",
+                            method.name,
+                            method.signature.show(resolution)
+                        ),
+                    ));
+                }
+                if let Some(method) = &property.setter {
+                    definition_indices.push((
+                        format!(
+                            "MethodIndex {{ parent_type: TypeIndex({type_index}), member: PropertySetter({property_index}) }}"
+                        ),
+                        format!(
+                            "Method<{owner}::{}{}>",
+                            method.name,
+                            method.signature.show(resolution)
+                        ),
+                    ));
+                }
+                for (other_index, method) in property.other.iter().enumerate() {
+                    definition_indices.push((
+                        format!(
+                            "MethodIndex {{ parent_type: TypeIndex({type_index}), member: PropertyOther {{ property: {property_index}, other: {other_index} }} }}"
+                        ),
+                        format!(
+                            "Method<{owner}::{}{}>",
+                            method.name,
+                            method.signature.show(resolution)
+                        ),
+                    ));
+                }
+            }
+            for (event_index, event) in ty.events.iter().enumerate() {
+                for (member, method) in [
+                    ("EventAdd", Some(&event.add_listener)),
+                    ("EventRemove", Some(&event.remove_listener)),
+                    ("EventRaise", event.raise_event.as_ref()),
+                ] {
+                    if let Some(method) = method {
+                        definition_indices.push((
+                            format!(
+                                "MethodIndex {{ parent_type: TypeIndex({type_index}), member: {member}({event_index}) }}"
+                            ),
+                            format!(
+                                "Method<{owner}::{}{}>",
+                                method.name,
+                                method.signature.show(resolution)
+                            ),
+                        ));
+                    }
+                }
+                for (other_index, method) in event.other.iter().enumerate() {
+                    definition_indices.push((
+                        format!(
+                            "MethodIndex {{ parent_type: TypeIndex({type_index}), member: EventOther {{ event: {event_index}, other: {other_index} }} }}"
+                        ),
+                        format!(
+                            "Method<{owner}::{}{}>",
+                            method.name,
+                            method.signature.show(resolution)
+                        ),
+                    ));
+                }
+            }
+        }
+        let mut rows = Vec::new();
+        for ty in &resolution.type_definitions {
+            let owner = ty.nested_type_name(resolution);
+            macro_rules! append_method {
+                ($method:expr) => {{
+                    let method = $method;
+                    let mut body = format!("{:?}", method.body);
+                    for (index, identity) in &definition_indices {
+                        body = body.replace(index, identity);
+                    }
+                    for (index, identity) in &method_references {
+                        body = body.replace(index, &format!("MethodRef<{identity}>"));
+                    }
+                    for (index, identity) in &field_references {
+                        body = body.replace(index, &format!("FieldRef<{identity}>"));
+                    }
+                    for (index, identity) in &type_indices {
+                        body = body.replace(index, identity);
+                    }
+                    rows.push(format!(
+                        "{owner}::{}{}|{:?}|{:?}|{body}",
+                        method.name,
+                        method.signature.show(resolution),
+                        method.body_format,
+                        method.body_management
+                    ));
+                }};
+            }
+            for method in &ty.methods {
+                append_method!(method);
+            }
+            for property in &ty.properties {
+                if let Some(method) = &property.getter {
+                    append_method!(method);
+                }
+                if let Some(method) = &property.setter {
+                    append_method!(method);
+                }
+                for method in &property.other {
+                    append_method!(method);
+                }
+            }
+            for event in &ty.events {
+                append_method!(&event.add_listener);
+                append_method!(&event.remove_listener);
+                if let Some(method) = &event.raise_event {
+                    append_method!(method);
+                }
+                for method in &event.other {
+                    append_method!(method);
+                }
+            }
+        }
+        rows.sort();
+        rows
+    }
 
     fn script_id(assembly: &str, namespace: &str, name: &str) -> ScriptIdentifier {
         ScriptIdentifier::try_new(assembly, namespace, name)

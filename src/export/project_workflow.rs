@@ -31,7 +31,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::io::filesystem::VirtualFileSystem;
 use crate::io::platform_structure::PlatformResourceProvider;
 use crate::processing::asset_factory::{FactoryAssetKind, FactoryUnityVersion};
-use crate::processing::managed_assembly::{mono_script_export_identity, ManagedAssemblyCatalog};
+use crate::processing::managed_assembly::{
+    mono_script_export_identity, ManagedAssembly, ManagedAssemblyCatalog, ManagedAssemblyLimits,
+};
 use crate::processing::scene_collections::{
     SceneDefinitionGuidPlan, SceneDefinitionPathSource, SceneGuidWords,
 };
@@ -915,7 +917,7 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
     for entry in &routed {
         if entry.class_id == 115 && !saved_assemblies_emitted {
             for assembly in &saved_assemblies {
-                let bytes = filesystem
+                let input_bytes = filesystem
                     .read_all_bytes(
                         &assembly.source_virtual_path,
                         limits.max_total_asset_payload_bytes,
@@ -926,6 +928,22 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
                             assembly.assembly_name, assembly.source_virtual_path
                         ))
                     })?;
+                let file_name = assembly
+                    .relative_path
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&assembly.relative_path);
+                let bytes = ManagedAssembly::serialize_for_export(
+                    file_name,
+                    &input_bytes,
+                    ManagedAssemblyLimits::default(),
+                )
+                .map_err(|error| {
+                    invalid_project(format!(
+                        "saved assembly {:?} could not be reserialized from {}: {error}",
+                        assembly.assembly_name, assembly.source_virtual_path
+                    ))
+                })?;
                 total_bytes = total_bytes
                     .checked_add(bytes.len())
                     .ok_or_else(|| invalid_project("project output byte count overflows"))?;
@@ -3047,7 +3065,8 @@ mod tests {
     use crate::io::platform_structure::PlatformResourceProvider;
     use crate::processing::asset_factory::FactoryUnityVersion;
     use crate::processing::managed_assembly::{
-        ManagedAssemblyCatalog, ManagedAssemblyCatalogLimits, ManagedAssemblyLimits,
+        ManagedAssembly, ManagedAssemblyCatalog, ManagedAssemblyCatalogLimits,
+        ManagedAssemblyLimits,
     };
     use crate::processing::managed_assembly_schema::ManagedSchemaLimits;
     use crate::processing::scene_naming::SceneUnityVersion;
@@ -3907,10 +3926,29 @@ mod tests {
             normalized_meta_text(&source_target_meta)
         );
 
-        // The saved assembly must be copied byte-for-byte and carry the source PluginImporter body.
+        // The source reserializes manager-backed assemblies after clearing its stream cache.
         let exported_assembly =
             std::fs::read(output_root.join("Assets/Plugins/ComplexFixtureScripts.dll")).unwrap();
-        assert_eq!(exported_assembly, assembly_bytes);
+        let source_saved_assembly = include_bytes!(
+            "../processing/managed_assembly_schema_complex_source_saved_fixture.dll"
+        );
+        let exported_assembly_model = ManagedAssembly::parse(
+            "ComplexFixtureScripts.dll",
+            &exported_assembly,
+            ManagedAssemblyLimits::default(),
+        )
+        .expect("exported complex assembly parses");
+        let source_assembly_model = ManagedAssembly::parse(
+            "ComplexFixtureScripts.dll",
+            source_saved_assembly,
+            ManagedAssemblyLimits::default(),
+        )
+        .expect("source-saved complex assembly parses");
+        assert_eq!(
+            exported_assembly_model.types, source_assembly_model.types,
+            "project export preserves the source-saved managed type model"
+        );
+        assert_ne!(exported_assembly, assembly_bytes);
         let rust_plugin_meta = std::fs::read_to_string(
             output_root.join("Assets/Plugins/ComplexFixtureScripts.dll.meta"),
         )
@@ -4219,13 +4257,28 @@ mod tests {
             normalized_meta_text(&std::fs::read_to_string(&plugin_meta_path).unwrap()) + "\n",
             String::from_utf8(source_plugin_meta).unwrap()
         );
-        // Known unresolved difference tracked by DIFF-MANAGED-DLL-SAVE-001: the reference
-        // post-process rewrites this synthetic assembly, while Rust currently preserves its input.
-        assert_eq!(
+        let exported_assembly =
             std::fs::read(output_root.join("Assets/Plugins/ManagedReferenceFixtureScripts.dll"))
-                .unwrap(),
-            assembly_bytes
+                .unwrap();
+        let exported_assembly_model = ManagedAssembly::parse(
+            "ManagedReferenceFixtureScripts.dll",
+            &exported_assembly,
+            ManagedAssemblyLimits::default(),
+        )
+        .expect("exported managed-reference assembly parses");
+        let source_saved_assembly =
+            include_bytes!("../processing/managed_reference_schema_source_saved_fixture.dll");
+        let source_assembly_model = ManagedAssembly::parse(
+            "ManagedReferenceFixtureScripts.dll",
+            source_saved_assembly,
+            ManagedAssemblyLimits::default(),
+        )
+        .expect("source-saved managed-reference assembly parses");
+        assert_eq!(
+            exported_assembly_model.types, source_assembly_model.types,
+            "project export preserves the source-saved managed type model"
         );
+        assert_ne!(exported_assembly, assembly_bytes);
         std::fs::remove_dir_all(output_root).unwrap();
     }
 
