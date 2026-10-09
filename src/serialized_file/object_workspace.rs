@@ -16,7 +16,7 @@ use crate::processing::managed_assembly::{
     resolve_mono_script_object, ManagedAssemblyCatalog, ManagedScriptResolutionOutcome,
 };
 use crate::processing::managed_assembly_schema::{
-    build_mono_behaviour_schema, ManagedSchemaLimits,
+    build_managed_reference_type_tree, build_mono_behaviour_schema, ManagedSchemaLimits,
 };
 use crate::processing::script_identity::ScriptIdentifier;
 
@@ -766,6 +766,19 @@ impl ObjectWorkspace {
                 let arrays_align = super::metadata::unity_version_aligns_arrays(
                     parsed_file.metadata.prefix.unity_version_text.as_deref(),
                 );
+                let managed_reference_type_resolver = |managed_script: &ScriptIdentifier| {
+                    if catalog.find_type(managed_script).is_none() {
+                        return Ok(None);
+                    }
+                    build_managed_reference_type_tree(
+                        catalog,
+                        managed_script,
+                        &script_version,
+                        schema_limits,
+                    )
+                    .map(Some)
+                    .map_err(|error| error.to_string())
+                };
                 let decoded = decode_typetree_payload(
                     &schema.type_tree,
                     raw_remainder,
@@ -776,6 +789,7 @@ impl ObjectWorkspace {
                         entry_index: candidate.object_index,
                         stream_offset,
                         managed_registry_depth: 0,
+                        managed_reference_type_resolver: Some(&managed_reference_type_resolver),
                     },
                     &decode_limits,
                 );

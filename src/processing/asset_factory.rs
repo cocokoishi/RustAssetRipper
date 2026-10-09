@@ -1614,6 +1614,7 @@ fn decode_with_tree(
         entry_index: object_index,
         stream_offset: 0,
         managed_registry_depth: 0,
+        managed_reference_type_resolver: None,
     };
     let (root, consumed_bytes, allocated_bytes) = decode_typetree_payload(
         tree,

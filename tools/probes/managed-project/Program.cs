@@ -9,13 +9,16 @@ using AssetRipper.Export.Configuration;
 using AssetRipper.Export.UnityProjects;
 using AssetRipper.Export.UnityProjects.Scripts;
 using AssetRipper.Import.Logging;
+using AssetRipper.Import.Structure.Assembly;
 using AssetRipper.Import.Structure.Assembly.Managers;
+using AssetRipper.Import.Structure.Assembly.TypeTrees;
 using AssetRipper.IO.Endian;
 using AssetRipper.IO.Files;
 using AssetRipper.IO.Files.SerializedFiles;
 using AssetRipper.IO.Files.SerializedFiles.Parser;
 using AssetRipper.IO.Files.SerializedFiles.Parser.TypeTrees;
 using AssetRipper.Primitives;
+using AssetRipper.SerializationLogic;
 
 if (args.Length > 0 && args[0] == "export-mono-structure")
 {
@@ -35,6 +38,16 @@ if (args.Length > 0 && args[0] == "export-managed-schema")
         return 2;
     }
     return ExportManagedSchema(args[1], args[2], args[3], args[4]);
+}
+
+if (args.Length > 0 && args[0] == "export-managed-reference-schema")
+{
+    if (args.Length != 5)
+    {
+        Console.Error.WriteLine("usage: managed-project export-managed-reference-schema <input-root> <output-root> <rows-file> <assembly-file>");
+        return 2;
+    }
+    return ExportManagedReferenceSchema(args[1], args[2], args[3], args[4]);
 }
 
 if (args.Length > 0 && args[0] == "export-nested-reference-bundle")
@@ -710,6 +723,202 @@ static int ExportManagedSchema(
     return 0;
 }
 
+static int ExportManagedReferenceSchema(
+    string inputRootArgument,
+    string outputRootArgument,
+    string rowsArgument,
+    string assemblyArgument)
+{
+    string inputRoot = Path.GetFullPath(inputRootArgument);
+    string outputRoot = Path.GetFullPath(outputRootArgument);
+    string rowsPath = Path.GetFullPath(rowsArgument);
+    string assemblyPath = Path.GetFullPath(assemblyArgument);
+    EnsureEmptyOrMissingDirectory(inputRoot, "input");
+    EnsureEmptyOrMissingDirectory(outputRoot, "output");
+    if (!File.Exists(assemblyPath))
+    {
+        throw new FileNotFoundException("managed reference schema fixture assembly is missing", assemblyPath);
+    }
+    if (File.Exists(rowsPath) || Directory.Exists(rowsPath))
+    {
+        throw new IOException($"refusing to overwrite probe rows {rowsPath}");
+    }
+
+    Directory.CreateDirectory(inputRoot);
+    Directory.CreateDirectory(outputRoot);
+    Directory.CreateDirectory(Path.GetDirectoryName(rowsPath)!);
+    string serializedPath = Path.Combine(inputRoot, "managed_reference_schema.assets");
+    string targetSerializedPath = Path.Combine(inputRoot, "target.assets");
+    string inputAssemblyPath = Path.Combine(inputRoot, "ManagedReferenceFixtureScripts.dll");
+    const string unityVersionText = "2021.2.0f1";
+    byte[] serializedBytes = BuildManagedReferenceSchemaFile(unityVersionText);
+    byte[] targetSerializedBytes = BuildManagedReferenceTargetFile(unityVersionText);
+    byte[] assemblyBytes = File.ReadAllBytes(assemblyPath);
+    File.WriteAllBytes(serializedPath, serializedBytes);
+    File.WriteAllBytes(targetSerializedPath, targetSerializedBytes);
+    File.WriteAllBytes(inputAssemblyPath, assemblyBytes);
+
+    Logger.Add(new ConsoleLogger());
+    ExportHandler handler = new(new FullConfiguration());
+    var gameData = handler.LoadAndProcess([inputRoot], LocalFileSystem.Instance);
+    var matches = gameData.GameBundle.FetchAssets()
+        .Where(asset => (asset.ClassID == 114 && asset.PathID == 42)
+            || (asset.ClassID == 115 && asset.PathID == 7)
+            || (asset.ClassID == 49 && asset.PathID == 9))
+        .Select(asset => $"{asset.ClassName}|{asset.PathID}|{asset}")
+        .ToArray();
+    if (matches.Length != 3)
+    {
+        throw new InvalidDataException($"expected MonoBehaviour, MonoScript, and TextAsset objects; found {matches.Length}: {string.Join(";", matches)}");
+    }
+    handler.Export(gameData, outputRoot, LocalFileSystem.Instance);
+
+    string assetsRoot = Path.Combine(outputRoot, "ExportedProject", "Assets");
+    string? behaviourPath = Directory.GetFiles(assetsRoot, "*.asset", SearchOption.AllDirectories)
+        .FirstOrDefault(path => File.ReadAllText(path).Contains("m_Name: ManagedRoot", StringComparison.Ordinal));
+    if (behaviourPath is null)
+    {
+        throw new InvalidDataException("source project export did not write the ManagedRoot MonoBehaviour");
+    }
+    string? targetMetaPath = Directory.GetFiles(assetsRoot, "*.meta", SearchOption.AllDirectories)
+        .FirstOrDefault(path => File.ReadAllText(path).Contains("TextScriptImporter:", StringComparison.Ordinal));
+    if (targetMetaPath is null)
+    {
+        throw new InvalidDataException("source project export did not write a TextScriptImporter sidecar");
+    }
+    string targetPath = targetMetaPath[..^5];
+    string behaviourText = File.ReadAllText(behaviourPath);
+    string pluginAssemblyPath = Path.Combine(assetsRoot, "Plugins", "ManagedReferenceFixtureScripts.dll");
+    string pluginMetaPath = pluginAssemblyPath + ".meta";
+    if (!File.Exists(pluginAssemblyPath) || !File.Exists(pluginMetaPath))
+    {
+        throw new InvalidDataException("source project export did not write the managed assembly and PluginImporter sidecar");
+    }
+    string targetGuid = GuidFromMeta(targetMetaPath);
+    string scriptLine = behaviourText.Split('\n')
+        .Select(line => line.TrimEnd('\r'))
+        .FirstOrDefault(line => line.TrimStart().StartsWith("m_Script:", StringComparison.Ordinal))
+        ?? throw new InvalidDataException("MonoBehaviour YAML has no m_Script pointer");
+    string scriptGuid = GuidFromYamlLine(scriptLine);
+    string normalizedBehaviour = behaviourText
+        .Replace($"guid: {targetGuid}", "guid: __TEXTASSET_GUID__", StringComparison.Ordinal)
+        .Replace($"guid: {scriptGuid}", "guid: __SCRIPT_GUID__", StringComparison.Ordinal);
+    string[] requiredBehaviourFragments =
+    [
+        "  root:\n    rid: 101",
+        "  marker: 77",
+        "  references:\n    version: 2",
+        "    RefIds:\n    - rid: 101",
+        "        value: 13",
+        "        next:\n          rid: 202",
+        "        target: {fileID: 4900000, guid: __TEXTASSET_GUID__, type: 3}",
+        "        weight: 0.5",
+        "    - rid: 202",
+        "        value: 27",
+        "        next:\n          rid: 101",
+        "        label: back",
+    ];
+    foreach (string fragment in requiredBehaviourFragments)
+    {
+        if (!normalizedBehaviour.Contains(fragment, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException($"source MonoBehaviour YAML is missing required SerializeReference evidence: {fragment}");
+        }
+    }
+    if (normalizedBehaviour.Split("\n    - rid:", StringSplitOptions.None).Length - 1 != 2)
+    {
+        throw new InvalidDataException("source MonoBehaviour YAML must contain exactly two managed registry entries");
+    }
+    byte[] normalizedBehaviourBytes = Encoding.UTF8.GetBytes(normalizedBehaviour);
+    byte[] normalizedTargetMetaBytes = Encoding.UTF8.GetBytes(string.Join("\n",
+        File.ReadAllLines(targetMetaPath)
+            .Where(line => !line.StartsWith("guid: ", StringComparison.Ordinal)
+                && !line.StartsWith("timeCreated: ", StringComparison.Ordinal))) + "\n");
+    byte[] pluginAssemblyBytes = File.ReadAllBytes(pluginAssemblyPath);
+    byte[] normalizedPluginMetaBytes = Encoding.UTF8.GetBytes(string.Join("\n",
+        File.ReadAllLines(pluginMetaPath)
+            .Where(line => !line.StartsWith("guid: ", StringComparison.Ordinal)
+                && !line.StartsWith("timeCreated: ", StringComparison.Ordinal))) + "\n");
+    byte[] targetBytes = File.ReadAllBytes(targetPath);
+    if (!StringComparer.Ordinal.Equals(Encoding.UTF8.GetString(targetBytes), "managed-reference-target"))
+    {
+        throw new InvalidDataException("source TextAsset output does not retain the external PPtr target content");
+    }
+
+    using StreamWriter rows = new(rowsPath, false, new UTF8Encoding(false)) { NewLine = "\n" };
+    rows.WriteLine("# Frozen AssetRipper export for an assembly-resolved no-TypeTree SerializeReference registry.");
+    rows.WriteLine("NORMALIZE|TextAsset target GUID becomes __TEXTASSET_GUID__; MonoScript GUID becomes __SCRIPT_GUID__.");
+    rows.WriteLine("NORMALIZE|Importer guid and timeCreated fields omitted.");
+    rows.WriteLine($"INPUT_HEX|managed_reference_schema.assets|{Convert.ToHexString(serializedBytes)}");
+    rows.WriteLine($"INPUT_HEX|target.assets|{Convert.ToHexString(targetSerializedBytes)}");
+    rows.WriteLine($"ASSEMBLY|ManagedReferenceFixtureScripts.dll|{assemblyBytes.Length}|{Convert.ToHexString(SHA256.HashData(assemblyBytes))}");
+    rows.WriteLine($"ASSEMBLY_OUTPUT|ManagedReferenceFixtureScripts.dll|{pluginAssemblyBytes.Length}|{Convert.ToHexString(SHA256.HashData(pluginAssemblyBytes))}");
+    foreach (string className in new[] { "GraphHost", "NodeA", "NodeB" })
+    {
+        ScriptIdentifier scriptId = new("ManagedReferenceFixtureScripts", "Game", className);
+        if (!gameData.AssemblyManager.TryGetSerializableType(scriptId, UnityVersion.Parse(unityVersionText), out SerializableType? schema, out string? reason))
+        {
+            throw new InvalidDataException($"source FieldSerializer could not build {className}: {reason}");
+        }
+        DumpSourceSchema(schema!, className, rows);
+    }
+    foreach (string item in matches)
+    {
+        rows.WriteLine($"OBJECT|{item}");
+    }
+    string behaviourRelative = Path.GetRelativePath(outputRoot, behaviourPath).Replace('\\', '/');
+    rows.WriteLine($"YAML_HEX|{behaviourRelative}|{normalizedBehaviourBytes.Length}|{Convert.ToHexString(SHA256.HashData(normalizedBehaviourBytes))}|{Convert.ToHexString(normalizedBehaviourBytes)}");
+    string targetRelative = Path.GetRelativePath(outputRoot, targetPath).Replace('\\', '/');
+    rows.WriteLine($"TARGET_HEX|{targetRelative}|{targetBytes.Length}|{Convert.ToHexString(SHA256.HashData(targetBytes))}|{Convert.ToHexString(targetBytes)}");
+    string targetMetaRelative = Path.GetRelativePath(outputRoot, targetMetaPath).Replace('\\', '/');
+    rows.WriteLine($"TARGET_META_HEX|{targetMetaRelative}|{normalizedTargetMetaBytes.Length}|{Convert.ToHexString(SHA256.HashData(normalizedTargetMetaBytes))}|{Convert.ToHexString(normalizedTargetMetaBytes)}");
+    string pluginMetaRelative = Path.GetRelativePath(outputRoot, pluginMetaPath).Replace('\\', '/');
+    rows.WriteLine($"PLUGIN_META_HEX|{pluginMetaRelative}|{normalizedPluginMetaBytes.Length}|{Convert.ToHexString(SHA256.HashData(normalizedPluginMetaBytes))}|{Convert.ToHexString(normalizedPluginMetaBytes)}");
+    Console.WriteLine($"mono_behaviour={behaviourRelative}");
+    Console.WriteLine($"target={targetRelative}");
+    return 0;
+}
+
+static void DumpSourceSchema(SerializableType serializableType, string identity, StreamWriter rows)
+{
+    TypeTreeNodeStruct root = TypeTreeNodeStruct.FromSerializableType(serializableType);
+    Dump(root, 0);
+
+    void Dump(TypeTreeNodeStruct node, int level)
+    {
+        rows.WriteLine($"SCHEMA_NODE|{identity}|{level}|{node.TypeName}|{node.Name}|{node.Version}|{(uint)node.MetaFlag}");
+        foreach (TypeTreeNodeStruct child in node.SubNodes)
+        {
+            Dump(child, level + 1);
+        }
+    }
+}
+
+static string GuidFromMeta(string path)
+{
+    string line = File.ReadAllLines(path)
+        .FirstOrDefault(line => line.StartsWith("guid: ", StringComparison.Ordinal))
+        ?? throw new InvalidDataException($"metadata file has no GUID: {path}");
+    return line[6..];
+}
+
+static string GuidFromYamlLine(string line)
+{
+    const string marker = "guid: ";
+    int start = line.IndexOf(marker, StringComparison.Ordinal);
+    if (start < 0)
+    {
+        throw new InvalidDataException($"YAML pointer has no GUID: {line}");
+    }
+    start += marker.Length;
+    string value = new(line[start..].TakeWhile(Uri.IsHexDigit).ToArray());
+    if (value.Length != 32)
+    {
+        throw new InvalidDataException($"YAML pointer GUID has {value.Length} hex digits: {line}");
+    }
+    return value;
+}
+
 static byte[] BuildManagedSchemaFile()
 {
     List<byte> behaviour = [];
@@ -789,6 +998,123 @@ static byte[] BuildManagedSchemaFile()
     }.Build();
     file.FilePath = "managed_schema.assets";
     return file.ToByteArray();
+}
+
+static byte[] BuildManagedReferenceSchemaFile(string unityVersionText)
+{
+    List<byte> behaviour = [];
+    WriteI32(behaviour, 0); // m_GameObject.m_FileID
+    WriteI64(behaviour, 0); // m_GameObject.m_PathID
+    behaviour.Add(1); // m_Enabled
+    AlignFour(behaviour);
+    WriteI32(behaviour, 0); // m_Script.m_FileID
+    WriteI64(behaviour, 7); // m_Script.m_PathID
+    WriteString(behaviour, "ManagedRoot"); // m_Name
+    WriteI64(behaviour, 101); // root.rid -> NodeA
+    WriteI32(behaviour, 77); // marker
+
+    WriteI32(behaviour, 2); // ManagedReferenceRegistry counted format
+    WriteI32(behaviour, 2); // references.Count
+    WriteI64(behaviour, 101); // NodeA rid
+    WriteManagedTypeTriple(behaviour, "NodeA", "Game", "ManagedReferenceFixtureScripts");
+    WriteI32(behaviour, 13); // NodeA.value
+    WriteI64(behaviour, 202); // NodeA.next.rid -> NodeB
+    WriteI32(behaviour, 1); // NodeA.target.m_FileID -> target.assets
+    WriteI64(behaviour, 9); // NodeA.target.m_PathID -> TextAsset
+    WriteI32(behaviour, BitConverter.SingleToInt32Bits(0.5f)); // NodeA.weight
+
+    WriteI64(behaviour, 202); // NodeB rid
+    WriteManagedTypeTriple(behaviour, "NodeB", "Game", "ManagedReferenceFixtureScripts");
+    WriteI32(behaviour, 27); // NodeB.value
+    WriteI64(behaviour, 101); // NodeB.next.rid -> NodeA, forming a cycle
+    WriteI32(behaviour, 0); // NodeB.target.m_FileID
+    WriteI64(behaviour, 0); // NodeB.target.m_PathID
+    WriteString(behaviour, "back"); // NodeB.label
+    AlignFour(behaviour); // registry array alignment
+
+    List<byte> script = [];
+    WriteString(script, "GraphHost"); // m_Name
+    WriteI32(script, 0); // m_ExecutionOrder
+    script.AddRange(new byte[16]); // m_PropertiesHash
+    WriteString(script, "GraphHost"); // m_ClassName
+    WriteString(script, "Game"); // m_Namespace
+    WriteString(script, "ManagedReferenceFixtureScripts"); // m_AssemblyName
+
+    SerializedType behaviourType = new() { RawTypeID = 114 };
+    SerializedType scriptType = new() { RawTypeID = 115 };
+    SerializedFile file = new SerializedFileBuilder
+    {
+        Generation = FormatVersion.StoresTypeDependencies,
+        Version = UnityVersion.Parse(unityVersionText),
+        Platform = (BuildTarget)19,
+        EndianType = EndianType.LittleEndian,
+        HasTypeTree = false,
+        Types = { behaviourType, scriptType },
+        Objects =
+        {
+            new ObjectInfo(behaviourType)
+            {
+                FileID = 42,
+                TypeID = 114,
+                SerializedTypeIndex = 0,
+                ObjectData = behaviour.ToArray(),
+            },
+            new ObjectInfo(scriptType)
+            {
+                FileID = 7,
+                TypeID = 115,
+                SerializedTypeIndex = 1,
+                ObjectData = script.ToArray(),
+            },
+        },
+        Dependencies =
+        {
+            new FileIdentifier
+            {
+                AssetPath = "target.assets",
+                PathNameOrigin = "target.assets",
+                PathName = "target.assets",
+                Type = AssetType.Serialized,
+            },
+        },
+    }.Build();
+    file.FilePath = "managed_reference_schema.assets";
+    return file.ToByteArray();
+}
+
+static byte[] BuildManagedReferenceTargetFile(string unityVersionText)
+{
+    List<byte> textAsset = [];
+    WriteString(textAsset, "Target");
+    WriteString(textAsset, "managed-reference-target");
+    SerializedType textAssetType = new() { RawTypeID = 49 };
+    SerializedFile file = new SerializedFileBuilder
+    {
+        Generation = FormatVersion.StoresTypeDependencies,
+        Version = UnityVersion.Parse(unityVersionText),
+        Platform = (BuildTarget)19,
+        EndianType = EndianType.LittleEndian,
+        HasTypeTree = false,
+        Types = { textAssetType },
+        Objects =
+        {
+            new ObjectInfo(textAssetType)
+            {
+                FileID = 9,
+                TypeID = 49,
+                ObjectData = textAsset.ToArray(),
+            },
+        },
+    }.Build();
+    file.FilePath = "target.assets";
+    return file.ToByteArray();
+}
+
+static void WriteManagedTypeTriple(List<byte> payload, string className, string namespaceName, string assemblyName)
+{
+    WriteString(payload, className);
+    WriteString(payload, namespaceName);
+    WriteString(payload, assemblyName);
 }
 
 static void AlignFour(List<byte> bytes)

@@ -248,6 +248,74 @@ pub fn build_mono_behaviour_schema(
     })
 }
 
+/// Build the source `SerializableTreeType.FromReferencedObjectNode` field shape for one dynamic
+/// `[SerializeReference]` registry entry. The entry is resolved by assembly/type identity and its
+/// registry payload is decoded with these fields; any root `ManagedReferencesRegistry` marker is
+/// omitted because the owning MonoBehaviour stores the shared registry.
+pub fn build_managed_reference_type_tree(
+    catalog: &ManagedAssemblyCatalog,
+    script: &ScriptIdentifier,
+    unity_version: &str,
+    limits: ManagedSchemaLimits,
+) -> Result<TypeTree, ManagedSchemaError> {
+    let Some(name) = script.name.as_deref() else {
+        return Err(schema_error(
+            script.unique_name(),
+            ManagedSchemaErrorKind::MissingScriptIdentity,
+        ));
+    };
+    let identity = ManagedTypeIdentity {
+        assembly: script.assembly.clone(),
+        namespace: script.namespace.clone(),
+        name: name.to_owned(),
+    };
+    let identity_text = format_type_identity(&identity);
+    let Some(definition) = catalog.find_type_by_identity(&identity) else {
+        return Err(schema_error(
+            identity_text.clone(),
+            ManagedSchemaErrorKind::AssemblyOrTypeNotFound {
+                identity: identity_text,
+            },
+        ));
+    };
+    if definition.is_abstract || definition.is_interface {
+        return Err(schema_error(
+            identity_text.clone(),
+            ManagedSchemaErrorKind::InvalidRootType {
+                identity: identity_text,
+                reason: if definition.is_interface {
+                    "type is an interface".to_owned()
+                } else {
+                    "type is abstract".to_owned()
+                },
+            },
+        ));
+    }
+    if definition.generic_parameter_count != 0 {
+        return Err(schema_error(
+            identity_text.clone(),
+            ManagedSchemaErrorKind::InvalidRootType {
+                identity: identity_text,
+                reason: "generic managed-reference types are not serializable".to_owned(),
+            },
+        ));
+    }
+
+    let mut builder = SchemaBuilder {
+        catalog,
+        unity_version,
+        limits,
+        stack: Vec::new(),
+        field_count: 0,
+        skipped_fields: Vec::new(),
+        root_identity: format_type_identity(&identity),
+    };
+    let root = builder
+        .build_definition(&identity, &[], 0)
+        .map_err(|kind| schema_error(builder.root_identity.clone(), kind))?;
+    build_tree_from_fields(&root, &root.fields, limits, &builder.root_identity)
+}
+
 impl SchemaBuilder<'_> {
     fn build_definition(
         &mut self,

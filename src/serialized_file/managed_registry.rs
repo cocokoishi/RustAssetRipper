@@ -902,6 +902,30 @@ pub struct ManagedRegistryReadOptions {
     pub max_total_decoded_allocation_bytes: usize,
 }
 
+/// Resolves the serialized fields of a managed-reference object from an available assembly
+/// catalog. This is the source `BaseManager` path used when a MonoBehaviour has no file
+/// TypeTree; ordinary serialized `referenceTypes` remain the fallback for the file-tree path.
+pub(crate) trait ManagedReferenceTypeTreeResolver {
+    fn resolve_type_tree(
+        &self,
+        script: &crate::processing::script_identity::ScriptIdentifier,
+    ) -> Result<Option<super::metadata::TypeTree>, String>;
+}
+
+impl<F> ManagedReferenceTypeTreeResolver for F
+where
+    F: Fn(
+        &crate::processing::script_identity::ScriptIdentifier,
+    ) -> Result<Option<super::metadata::TypeTree>, String>,
+{
+    fn resolve_type_tree(
+        &self,
+        script: &crate::processing::script_identity::ScriptIdentifier,
+    ) -> Result<Option<super::metadata::TypeTree>, String> {
+        self(script)
+    }
+}
+
 /// One decoded registry entry (`ReadReferencedObject`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ManagedRegistryEntry {
@@ -949,6 +973,17 @@ pub fn read_managed_registry(
     bytes: &[u8],
     options: ManagedRegistryReadOptions,
     references: &[super::metadata::SerializedTypeReference],
+) -> Result<ManagedRegistryRead, ManagedRegistryReadError> {
+    read_managed_registry_with_resolver(bytes, options, references, None)
+}
+
+/// Decode one managed-reference registry, allowing source-style assembly resolution before
+/// falling back to serialized reference TypeTrees.
+pub(crate) fn read_managed_registry_with_resolver(
+    bytes: &[u8],
+    options: ManagedRegistryReadOptions,
+    references: &[super::metadata::SerializedTypeReference],
+    resolver: Option<&dyn ManagedReferenceTypeTreeResolver>,
 ) -> Result<ManagedRegistryRead, ManagedRegistryReadError> {
     if options.registry_depth > options.object_decode_limits.max_managed_registry_depth {
         return Err(ManagedRegistryReadError::RegistryDepthLimitExceeded {
@@ -1014,6 +1049,7 @@ pub fn read_managed_registry(
                     &mut cursor,
                     entry_options,
                     references,
+                    resolver,
                     entry_index,
                     reference_id,
                     triple,
@@ -1074,6 +1110,7 @@ pub fn read_managed_registry(
                 &mut cursor,
                 entry_options,
                 references,
+                resolver,
                 entry_index,
                 entry_index as i64,
                 triple,
@@ -1145,6 +1182,7 @@ fn read_entry(
     cursor: &mut Cursor<'_>,
     options: ManagedRegistryReadOptions,
     references: &[super::metadata::SerializedTypeReference],
+    resolver: Option<&dyn ManagedReferenceTypeTreeResolver>,
     entry_index: usize,
     reference_id: i64,
     triple: ManagedTypeTriple,
@@ -1168,32 +1206,42 @@ fn read_entry(
             namespace: triple.namespace_name.clone(),
             name: Some(triple.class_name.clone()),
         };
-        let matched =
-            crate::processing::script_identity::find_type_reference_index(references, &script)
-                .ok_or_else(|| ManagedRegistryReadError::UnresolvableType {
-                    entry_index,
-                    unique_name: script.unique_name(),
-                    reason: TYPE_REFERENCE_NOT_FOUND.to_owned(),
-                })?;
-        let tree = references[matched].type_tree.as_ref().ok_or_else(|| {
-            ManagedRegistryReadError::UnresolvableType {
+        let resolved_tree = resolver
+            .map(|resolver| resolver.resolve_type_tree(&script))
+            .transpose()
+            .map_err(|reason| ManagedRegistryReadError::UnresolvableType {
                 entry_index,
                 unique_name: script.unique_name(),
-                reason: TYPE_TREE_NODE_BUILD_FAILED.to_owned(),
-            }
-        })?;
-        let built =
-            crate::processing::script_identity::build_type_nodes(&tree.nodes).ok_or_else(|| {
+                reason,
+            })?
+            .flatten();
+        let payload_tree = if let Some(tree) = resolved_tree {
+            tree
+        } else {
+            let matched =
+                crate::processing::script_identity::find_type_reference_index(references, &script)
+                    .ok_or_else(|| ManagedRegistryReadError::UnresolvableType {
+                        entry_index,
+                        unique_name: script.unique_name(),
+                        reason: TYPE_REFERENCE_NOT_FOUND.to_owned(),
+                    })?;
+            let tree = references[matched].type_tree.as_ref().ok_or_else(|| {
                 ManagedRegistryReadError::UnresolvableType {
                     entry_index,
                     unique_name: script.unique_name(),
                     reason: TYPE_TREE_NODE_BUILD_FAILED.to_owned(),
                 }
             })?;
-        let flat = flatten_built_tree(&built);
-        let payload_tree = super::metadata::TypeTree {
-            nodes: flat,
-            string_buffer: Vec::new(),
+            let built = crate::processing::script_identity::build_type_nodes(&tree.nodes)
+                .ok_or_else(|| ManagedRegistryReadError::UnresolvableType {
+                    entry_index,
+                    unique_name: script.unique_name(),
+                    reason: TYPE_TREE_NODE_BUILD_FAILED.to_owned(),
+                })?;
+            super::metadata::TypeTree {
+                nodes: flatten_built_tree(&built),
+                string_buffer: Vec::new(),
+            }
         };
         let payload = cursor.remaining_bytes();
         let payload_stream_offset = options.stream_offset.checked_add(cursor.position()).ok_or(
@@ -1206,7 +1254,7 @@ fn read_entry(
         decode_limits.max_decoded_allocation_bytes = decode_limits
             .max_decoded_allocation_bytes
             .min(options.max_total_decoded_allocation_bytes);
-        let (value, consumed, allocated) = super::object::decode_typetree_payload(
+        let (value, consumed, allocated) = super::object::decode_typetree_payload_with_resolver(
             &payload_tree,
             payload,
             options.endian,
@@ -1216,6 +1264,7 @@ fn read_entry(
                 entry_index,
                 stream_offset: payload_stream_offset,
                 managed_registry_depth: options.registry_depth,
+                managed_reference_type_resolver: resolver,
             },
             &decode_limits,
         )

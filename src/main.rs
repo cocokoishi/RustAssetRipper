@@ -9876,6 +9876,141 @@ mod tests {
     }
 
     #[test]
+    fn export_project_recovers_assembly_resolved_managed_references_without_file_typetrees() {
+        let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
+        let fixture = include_str!("processing/managed_reference_schema_project_fixture.txt");
+        let decode_hex = |hex: &str| {
+            assert!(hex.len().is_multiple_of(2), "fixture hex has even length");
+            hex.as_bytes()
+                .chunks_exact(2)
+                .map(|pair| {
+                    u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16)
+                        .expect("source fixture contains valid hexadecimal")
+                })
+                .collect::<Vec<_>>()
+        };
+        let input_bytes = |file_name: &str| {
+            let prefix = format!("INPUT_HEX|{file_name}|");
+            decode_hex(
+                fixture
+                    .lines()
+                    .find_map(|line| line.strip_prefix(&prefix))
+                    .unwrap_or_else(|| panic!("source fixture has input {file_name}")),
+            )
+        };
+        let source_artifact = |key: &str, expected_path: &str| {
+            let prefix = format!("{key}|");
+            let row = fixture
+                .lines()
+                .find_map(|line| line.strip_prefix(&prefix))
+                .unwrap_or_else(|| panic!("source fixture has artifact {key}"));
+            let mut fields = row.splitn(4, '|');
+            assert_eq!(fields.next(), Some(expected_path));
+            let expected_length = fields
+                .next()
+                .expect("source artifact length")
+                .parse::<usize>()
+                .expect("source artifact length is numeric");
+            assert_eq!(fields.next().expect("source artifact SHA-256").len(), 64);
+            let bytes = decode_hex(fields.next().expect("source artifact bytes"));
+            assert_eq!(bytes.len(), expected_length);
+            bytes
+        };
+
+        let assembly_bytes = include_bytes!("processing/managed_reference_schema_fixture.dll");
+        let assembly_row = fixture
+            .lines()
+            .find(|line| line.starts_with("ASSEMBLY|ManagedReferenceFixtureScripts.dll|"))
+            .expect("source fixture records the managed assembly");
+        assert!(assembly_row
+            .contains("|5120|1B20CEFF8CE7DE3E996D6497F3F7892B6472D53261DCED73F12D623FFDE902BB"));
+
+        let directory = TestInputDirectory::new_root();
+        let root_path = directory.join("managed_reference_schema.assets");
+        let target_input_path = directory.join("target.assets");
+        let assembly_path = directory.join("ManagedReferenceFixtureScripts.dll");
+        fs::write(&root_path, input_bytes("managed_reference_schema.assets")).unwrap();
+        fs::write(&target_input_path, input_bytes("target.assets")).unwrap();
+        fs::write(&assembly_path, assembly_bytes).unwrap();
+        let output_root = directory.join("project-managed-reference-schema");
+
+        super::run(
+            [
+                std::ffi::OsString::from("export-project"),
+                output_root.clone().into_os_string(),
+                directory.clone().into_os_string(),
+            ]
+            .into_iter(),
+        )
+        .expect("the product CLI recovers assembly-resolved managed references");
+
+        let behaviour_path = output_root.join("Assets/MonoBehaviour/ManagedRoot.asset");
+        let target_path = output_root.join("Assets/TextAsset/Target.txt");
+        let target_meta_path = output_root.join("Assets/TextAsset/Target.txt.meta");
+        let plugin_path = output_root.join("Assets/Plugins/ManagedReferenceFixtureScripts.dll");
+        let plugin_meta_path =
+            output_root.join("Assets/Plugins/ManagedReferenceFixtureScripts.dll.meta");
+        let source_yaml = String::from_utf8(source_artifact(
+            "YAML_HEX",
+            "ExportedProject/Assets/MonoBehaviour/ManagedRoot.asset",
+        ))
+        .expect("source MonoBehaviour YAML is UTF-8");
+        let source_target =
+            source_artifact("TARGET_HEX", "ExportedProject/Assets/TextAsset/Target.txt");
+        let source_target_meta = source_artifact(
+            "TARGET_META_HEX",
+            "ExportedProject/Assets/TextAsset/Target.txt.meta",
+        );
+        let source_plugin_meta = source_artifact(
+            "PLUGIN_META_HEX",
+            "ExportedProject/Assets/Plugins/ManagedReferenceFixtureScripts.dll.meta",
+        );
+        let expected_yaml = source_yaml
+            .replace("__TEXTASSET_GUID__", &meta_guid(&target_meta_path))
+            .replace("__SCRIPT_GUID__", &meta_guid(&plugin_meta_path));
+        let actual_yaml = fs::read_to_string(&behaviour_path).expect("project MonoBehaviour YAML");
+        assert_eq!(
+            actual_yaml.replace("\r\n", "\n"),
+            expected_yaml.replace("\r\n", "\n"),
+            "the CLI project output preserves the managed registry, cycle, and cross-file PPtr"
+        );
+        assert_eq!(fs::read(&target_path).unwrap(), source_target);
+
+        let normalize_meta = |path: &std::path::Path| {
+            fs::read_to_string(path)
+                .expect("importer sidecar is readable")
+                .lines()
+                .filter(|line| !line.starts_with("guid: ") && !line.starts_with("timeCreated: "))
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n"
+        };
+        assert_eq!(
+            normalize_meta(&target_meta_path).as_bytes(),
+            source_target_meta
+        );
+        assert_eq!(
+            normalize_meta(&plugin_meta_path).as_bytes(),
+            source_plugin_meta
+        );
+        // The source reserializes this DLL; the current Rust product retains its input bytes.
+        assert_eq!(fs::read(&plugin_path).unwrap(), assembly_bytes);
+        assert_eq!(
+            fs::read(&root_path).unwrap(),
+            input_bytes("managed_reference_schema.assets")
+        );
+        assert_eq!(
+            fs::read(&target_input_path).unwrap(),
+            input_bytes("target.assets")
+        );
+        assert_eq!(fs::read(&assembly_path).unwrap(), assembly_bytes);
+        assert!(output_root
+            .join("ProjectSettings/ProjectVersion.txt")
+            .is_file());
+        assert!(output_root.join("Packages/manifest.json").is_file());
+    }
+
+    #[test]
     fn export_project_matches_source_generic_empty_script_without_a_manager() {
         let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
         let fixture = include_str!("processing/generic_script_project_fixture.txt");

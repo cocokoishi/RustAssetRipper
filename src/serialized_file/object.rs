@@ -49,6 +49,8 @@ struct DecodeBudget<'a> {
     limits: &'a ObjectDecodeLimits,
     allocated_bytes: usize,
     managed_type_references: &'a [super::metadata::SerializedTypeReference],
+    managed_reference_type_resolver:
+        Option<&'a dyn super::managed_registry::ManagedReferenceTypeTreeResolver>,
     stream_offset: usize,
     managed_registry_depth: usize,
 }
@@ -60,10 +62,12 @@ struct ObjectDecodeTarget<'a> {
     fallback_type_id: i32,
 }
 
-pub(crate) struct ManagedPayloadDecodeContext {
+pub(crate) struct ManagedPayloadDecodeContext<'a> {
     pub entry_index: usize,
     pub stream_offset: usize,
     pub managed_registry_depth: usize,
+    pub managed_reference_type_resolver:
+        Option<&'a dyn super::managed_registry::ManagedReferenceTypeTreeResolver>,
 }
 
 impl DecodeBudget<'_> {
@@ -1022,6 +1026,7 @@ impl SerializedFileMetadata {
             limits,
             allocated_bytes: 0,
             managed_type_references: &self.reference_types,
+            managed_reference_type_resolver: None,
             stream_offset: 0,
             managed_registry_depth: 0,
         };
@@ -1066,6 +1071,7 @@ impl SerializedFileMetadata {
             limits,
             allocated_bytes: 0,
             managed_type_references: &self.reference_types,
+            managed_reference_type_resolver: None,
             stream_offset: 0,
             managed_registry_depth: 0,
         };
@@ -1195,13 +1201,34 @@ pub(crate) fn decode_typetree_payload(
     endian: Endian,
     arrays_align: bool,
     managed_type_references: &[super::metadata::SerializedTypeReference],
-    context: ManagedPayloadDecodeContext,
+    context: ManagedPayloadDecodeContext<'_>,
+    limits: &ObjectDecodeLimits,
+) -> Result<(SerializedValue, usize, usize), ObjectDecodeError> {
+    decode_typetree_payload_with_resolver(
+        type_tree,
+        payload,
+        endian,
+        arrays_align,
+        managed_type_references,
+        context,
+        limits,
+    )
+}
+
+pub(crate) fn decode_typetree_payload_with_resolver(
+    type_tree: &TypeTree,
+    payload: &[u8],
+    endian: Endian,
+    arrays_align: bool,
+    managed_type_references: &[super::metadata::SerializedTypeReference],
+    context: ManagedPayloadDecodeContext<'_>,
     limits: &ObjectDecodeLimits,
 ) -> Result<(SerializedValue, usize, usize), ObjectDecodeError> {
     let mut budget = DecodeBudget {
         limits,
         allocated_bytes: 0,
         managed_type_references,
+        managed_reference_type_resolver: context.managed_reference_type_resolver,
         stream_offset: context.stream_offset,
         managed_registry_depth: context.managed_registry_depth,
     };
@@ -1452,10 +1479,11 @@ fn decode_node_value(
             max_entries: budget.limits.max_array_elements,
             max_total_decoded_allocation_bytes: budget.remaining_allocation_bytes(),
         };
-        let registry = super::managed_registry::read_managed_registry(
+        let registry = super::managed_registry::read_managed_registry_with_resolver(
             reader.remaining_slice(),
             options,
             budget.managed_type_references,
+            budget.managed_reference_type_resolver,
         )
         .map_err(|error| {
             ObjectDecodeError::new(
@@ -4656,6 +4684,7 @@ mod tests {
                 limits: &limits,
                 allocated_bytes: 0,
                 managed_type_references: &[],
+                managed_reference_type_resolver: None,
                 stream_offset: 0,
                 managed_registry_depth: 0,
             };
@@ -4693,6 +4722,7 @@ mod tests {
                 limits: &limits,
                 allocated_bytes: 0,
                 managed_type_references: &[],
+                managed_reference_type_resolver: None,
                 stream_offset: 0,
                 managed_registry_depth: 0,
             };
@@ -4728,6 +4758,7 @@ mod tests {
                 limits: &limits,
                 allocated_bytes: 0,
                 managed_type_references: &[],
+                managed_reference_type_resolver: None,
                 stream_offset: 0,
                 managed_registry_depth: 0,
             };
