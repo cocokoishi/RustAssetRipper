@@ -37,6 +37,16 @@ if (args.Length > 0 && args[0] == "export-nested-reference-bundle")
     return ExportNestedReferenceBundle(args[1], args[2], args[3]);
 }
 
+if (args.Length > 0 && args[0] == "export-sibling-bundle-reference-order")
+{
+    if (args.Length != 4)
+    {
+        Console.Error.WriteLine("usage: managed-project export-sibling-bundle-reference-order <input-root> <output-root> <rows-file>");
+        return 2;
+    }
+    return ExportSiblingBundleReferenceOrder(args[1], args[2], args[3]);
+}
+
 if (args.Length > 0 && args[0] == "export-empty-script")
 {
     if (args.Length != 4)
@@ -267,6 +277,130 @@ static int ExportNestedReferenceBundle(string inputRootArgument, string outputRo
         }
     }
     Console.WriteLine($"source_objects={string.Join(';', sourceObjects)}");
+    Console.WriteLine($"bundle_bytes={outerBundle.Length}");
+    Console.WriteLine($"project_asset_files={assetFiles.Length}");
+    return 0;
+}
+
+static int ExportSiblingBundleReferenceOrder(string inputRootArgument, string outputRootArgument, string rowsArgument)
+{
+    string inputRoot = Path.GetFullPath(inputRootArgument);
+    string outputRoot = Path.GetFullPath(outputRootArgument);
+    string rowsPath = Path.GetFullPath(rowsArgument);
+    EnsureEmptyOrMissingDirectory(inputRoot, "input");
+    EnsureEmptyOrMissingDirectory(outputRoot, "output");
+    if (File.Exists(rowsPath) || Directory.Exists(rowsPath))
+    {
+        throw new IOException($"refusing to overwrite probe rows {rowsPath}");
+    }
+
+    Directory.CreateDirectory(inputRoot);
+    Directory.CreateDirectory(outputRoot);
+    Directory.CreateDirectory(Path.GetDirectoryName(rowsPath)!);
+
+    byte[] managedFile = BuildManagedRootFile();
+    byte[] firstTargetFile = BuildTargetBehaviourFile("FirstTarget", 789);
+    byte[] secondTargetFile = BuildTargetBehaviourFile("SecondTarget", 456);
+    byte[] firstBundle = BuildUnityFs(("target.assets", firstTargetFile));
+    byte[] secondBundle = BuildUnityFs(("target.assets", secondTargetFile));
+    byte[] outerBundle = BuildUnityFs(
+        ("managed.assets", managedFile),
+        ("first.bundle", firstBundle),
+        ("second.bundle", secondBundle));
+    string bundlePath = Path.Combine(inputRoot, "workspace.bundle");
+    File.WriteAllBytes(bundlePath, outerBundle);
+
+    Logger.Add(new ConsoleLogger());
+    ExportHandler handler = new(new FullConfiguration());
+    var gameData = handler.LoadAndProcess([inputRoot], LocalFileSystem.Instance);
+    string[] sourceObjects = gameData.GameBundle.FetchAssets()
+        .Where(asset => asset.ClassID == 114 && asset.PathID is 42 or 900)
+        .Select(asset => $"{asset.ClassName}|{asset.PathID}|{asset}")
+        .Order(StringComparer.Ordinal)
+        .ToArray();
+    if (sourceObjects.Length != 3
+        || !sourceObjects.Any(line => line.Contains("ManagedRoot", StringComparison.Ordinal))
+        || !sourceObjects.Any(line => line.Contains("FirstTarget", StringComparison.Ordinal))
+        || !sourceObjects.Any(line => line.Contains("SecondTarget", StringComparison.Ordinal)))
+    {
+        throw new InvalidDataException($"AssetRipper did not load all duplicate-name sibling collections: {string.Join(";", sourceObjects)}");
+    }
+
+    handler.Export(gameData, outputRoot, LocalFileSystem.Instance);
+    string projectAssets = Path.Combine(outputRoot, "ExportedProject", "Assets");
+    string[] assetFiles = Directory.Exists(projectAssets)
+        ? Directory.GetFiles(projectAssets, "*", SearchOption.AllDirectories)
+            .Where(path => new[] { ".asset", ".meta" }.Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase))
+            .OrderBy(path => Path.GetRelativePath(outputRoot, path), StringComparer.Ordinal)
+            .ToArray()
+        : [];
+    string? rootYamlPath = assetFiles.FirstOrDefault(path =>
+        string.Equals(Path.GetExtension(path), ".asset", StringComparison.OrdinalIgnoreCase)
+        && File.ReadAllText(path).Contains("m_Name: ManagedRoot", StringComparison.Ordinal));
+    string? firstTargetYamlPath = assetFiles.FirstOrDefault(path =>
+        string.Equals(Path.GetExtension(path), ".asset", StringComparison.OrdinalIgnoreCase)
+        && File.ReadAllText(path).Contains("m_Name: FirstTarget", StringComparison.Ordinal));
+    string? secondTargetYamlPath = assetFiles.FirstOrDefault(path =>
+        string.Equals(Path.GetExtension(path), ".asset", StringComparison.OrdinalIgnoreCase)
+        && File.ReadAllText(path).Contains("m_Name: SecondTarget", StringComparison.Ordinal));
+    if (rootYamlPath is null || firstTargetYamlPath is null || secondTargetYamlPath is null)
+    {
+        throw new InvalidDataException($"sibling-bundle export omitted an object: {string.Join(",", assetFiles.Select(path => Path.GetRelativePath(outputRoot, path)))}");
+    }
+    string rootYaml = File.ReadAllText(rootYamlPath);
+    string firstTargetMetaPath = firstTargetYamlPath + ".meta";
+    string secondTargetMetaPath = secondTargetYamlPath + ".meta";
+    string firstTargetGuid = File.ReadLines(firstTargetMetaPath)
+        .FirstOrDefault(line => line.StartsWith("guid: ", StringComparison.Ordinal))?[6..]
+        ?? throw new InvalidDataException("first sibling target metadata has no GUID");
+    string secondTargetGuid = File.ReadLines(secondTargetMetaPath)
+        .FirstOrDefault(line => line.StartsWith("guid: ", StringComparison.Ordinal))?[6..]
+        ?? throw new InvalidDataException("second sibling target metadata has no GUID");
+    if (!rootYaml.Contains(firstTargetGuid, StringComparison.Ordinal)
+        || rootYaml.Contains(secondTargetGuid, StringComparison.Ordinal))
+    {
+        throw new InvalidDataException("the cross-file PPtr did not select the first same-named collection in source bundle-entry order");
+    }
+
+    using StreamWriter rows = new(rowsPath, false, new UTF8Encoding(false)) { NewLine = "\n" };
+    rows.WriteLine("# Frozen source AssetRipper export of duplicate collection names in sibling UnityFS bundles.");
+    rows.WriteLine("VERSION|2019.4.40f1|format=21|platform=StandaloneWin64Player");
+    rows.WriteLine($"OBJECT|{string.Join(";", sourceObjects)}");
+    rows.WriteLine($"SELECTED|target.assets|FirstTarget|{firstTargetGuid}");
+    WriteInputRow(rows, bundlePath, outerBundle);
+    rows.WriteLine($"ENTRY|workspace.bundle|managed.assets|{managedFile.Length}|{Convert.ToHexString(SHA256.HashData(managedFile))}");
+    rows.WriteLine($"ENTRY|workspace.bundle|first.bundle|{firstBundle.Length}|{Convert.ToHexString(SHA256.HashData(firstBundle))}");
+    rows.WriteLine($"ENTRY|workspace.bundle|second.bundle|{secondBundle.Length}|{Convert.ToHexString(SHA256.HashData(secondBundle))}");
+    rows.WriteLine($"ENTRY|first.bundle|target.assets|{firstTargetFile.Length}|{Convert.ToHexString(SHA256.HashData(firstTargetFile))}");
+    rows.WriteLine($"ENTRY|second.bundle|target.assets|{secondTargetFile.Length}|{Convert.ToHexString(SHA256.HashData(secondTargetFile))}");
+    foreach (string file in assetFiles)
+    {
+        string relative = Path.GetRelativePath(outputRoot, file).Replace('\\', '/');
+        byte[] bytes = File.ReadAllBytes(file);
+        byte[] stableBytes = bytes;
+        if (string.Equals(Path.GetExtension(file), ".asset", StringComparison.OrdinalIgnoreCase))
+        {
+            stableBytes = Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(bytes).Replace(firstTargetGuid, "<TARGET_GUID>", StringComparison.Ordinal));
+        }
+        else if (string.Equals(Path.GetExtension(file), ".meta", StringComparison.OrdinalIgnoreCase))
+        {
+            string normalized = string.Join(
+                "\n",
+                Encoding.UTF8.GetString(bytes)
+                    .Split('\n')
+                    .Where(line => !line.StartsWith("guid: ", StringComparison.Ordinal)
+                        && !line.StartsWith("timeCreated: ", StringComparison.Ordinal)))
+                .TrimEnd('\r', '\n') + "\n";
+            stableBytes = Encoding.UTF8.GetBytes(normalized);
+        }
+        rows.WriteLine($"FILE|{relative}|{stableBytes.Length}|{Convert.ToHexString(SHA256.HashData(stableBytes))}");
+        if (new[] { ".asset", ".meta" }.Contains(Path.GetExtension(file), StringComparer.OrdinalIgnoreCase))
+        {
+            rows.WriteLine($"CONTENT|{relative}|{Convert.ToBase64String(stableBytes)}");
+        }
+    }
+    Console.WriteLine($"source_objects={string.Join(';', sourceObjects)}");
+    Console.WriteLine($"selected_target=FirstTarget|{firstTargetGuid}");
     Console.WriteLine($"bundle_bytes={outerBundle.Length}");
     Console.WriteLine($"project_asset_files={assetFiles.Length}");
     return 0;
@@ -1096,7 +1230,7 @@ static byte[] BuildManagedRootFile()
     return file.ToByteArray();
 }
 
-static byte[] BuildTargetBehaviourFile()
+static byte[] BuildTargetBehaviourFile(string name = "ReferencedRoot", int health = 789)
 {
     List<byte> payload = [];
     WriteI32(payload, 0); // m_GameObject.m_FileID
@@ -1108,8 +1242,8 @@ static byte[] BuildTargetBehaviourFile()
     }
     WriteI32(payload, 0); // m_Script.m_FileID
     WriteI64(payload, 0); // m_Script.m_PathID
-    WriteString(payload, "ReferencedRoot");
-    WriteI32(payload, 789); // m_Health
+    WriteString(payload, name);
+    WriteI32(payload, health); // m_Health
     SerializedType monoBehaviourType = new() { RawTypeID = 114 };
     AssignTree(monoBehaviourType, MonoBehaviourTargetTree());
     SerializedFile file = new SerializedFileBuilder

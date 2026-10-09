@@ -6,6 +6,7 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::compression::wrappers::{
     decompress_brotli, decompress_brotli_stream, decompress_gzip, decompress_gzip_stream,
@@ -263,8 +264,21 @@ pub struct BatchMountReport {
     pub failed_entries: Vec<BatchFailedContainerEntry>,
     /// Aggregate source-name and virtual-path bytes in `failed_entries`.
     pub failed_entry_metadata_bytes: u64,
+    /// Source container topology for the recursively expanded top-level inputs.
+    pub container_trees: Vec<Arc<BatchContainerTree>>,
     /// Explicit path-list inputs dispatched as root ResourceFiles, in caller input order.
     pub explicit_root_resource_files: Box<Vec<MountedExplicitResourceFile>>,
+}
+
+/// One recursively expanded top-level container, retaining entry order for workspace joins.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchContainerTree {
+    pub virtual_path: String,
+    pub container_scopes: Vec<String>,
+    pub container_bundles: Vec<MountedContainerBundle>,
+    pub serialized_files: Vec<MountedSerializedFile>,
+    pub resource_files: Vec<MountedResourceFile>,
+    pub failed_entries: Vec<FailedContainerEntry>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -334,6 +348,9 @@ pub enum BatchMountErrorKind {
         opened_bytes: u64,
     },
     InputListAllocationFailed {
+        requested: usize,
+    },
+    ContainerTreeAllocationFailed {
         requested: usize,
     },
     TotalOutputLimitExceeded {
@@ -1096,6 +1113,10 @@ impl Display for BatchMountErrorKind {
             Self::InputListAllocationFailed { requested } => write!(
                 formatter,
                 "could not allocate storage for {requested} path-list inputs"
+            ),
+            Self::ContainerTreeAllocationFailed { requested } => write!(
+                formatter,
+                "could not allocate storage for {requested} expanded container trees"
             ),
             Self::TotalOutputLimitExceeded {
                 requested_total,
@@ -3102,6 +3123,41 @@ impl SchemeReader {
                         .map_err(|kind| {
                             BatchMountError::new(report.clone(), Some(input.path.clone()), kind)
                         })?;
+                    if !input_report.container_bundles.is_empty() {
+                        let requested_trees =
+                            report.container_trees.len().checked_add(1).ok_or_else(|| {
+                                BatchMountError::new(
+                                    report.clone(),
+                                    Some(input.path.clone()),
+                                    BatchMountErrorKind::ReportOverflow,
+                                )
+                            })?;
+                        report.container_trees.try_reserve(1).map_err(|_| {
+                            BatchMountError::new(
+                                report.clone(),
+                                Some(input.path.clone()),
+                                BatchMountErrorKind::ContainerTreeAllocationFailed {
+                                    requested: requested_trees,
+                                },
+                            )
+                        })?;
+                        let virtual_path = input_report
+                            .container_scopes
+                            .first()
+                            .cloned()
+                            .or_else(|| input.container_destination.clone())
+                            .unwrap_or_else(|| {
+                                format!("<batch input {}>", report.completed_inputs)
+                            });
+                        report.container_trees.push(Arc::new(BatchContainerTree {
+                            virtual_path,
+                            container_scopes: input_report.container_scopes,
+                            container_bundles: input_report.container_bundles,
+                            serialized_files: input_report.serialized_files,
+                            resource_files: input_report.resource_files,
+                            failed_entries: input_report.failed_entries,
+                        }));
+                    }
                     if let Some(resource_file) = explicit_root_resource_file {
                         report.explicit_root_resource_files.push(resource_file);
                     }

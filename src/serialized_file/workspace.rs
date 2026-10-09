@@ -98,6 +98,8 @@ pub struct SerializedFileWorkspaceLoadOptions<'a> {
     pub index_limits: DependencyIndexLimits,
     /// Bounds applied while mounting dependency containers.
     pub container_limits: ContainerMountLimits,
+    /// Initial containers already expanded into the VFS, with their source entry order.
+    pub preexpanded_containers: &'a [PreExpandedContainer],
     /// Generated-class and TPK layout provider for object materialization.
     pub layouts: &'a dyn crate::processing::asset_factory::ClassLayoutSource,
 }
@@ -511,7 +513,7 @@ pub struct SerializedFileDependencyReport {
 
 /// A container mounted before the external dependency walk began.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct PreExpandedContainer {
+pub struct PreExpandedContainer {
     pub virtual_path: String,
     pub serialized_files_loaded: usize,
     pub container_scopes: Vec<String>,
@@ -953,7 +955,7 @@ impl SerializedFileWorkspace {
                 limits: options.limits,
                 index_limits: options.index_limits,
                 container_limits: options.container_limits,
-                preexpanded_containers: &[],
+                preexpanded_containers: options.preexpanded_containers,
             },
             options.layouts,
         )
@@ -7497,6 +7499,7 @@ mod tests {
                     limits: SerializedFileWorkspaceLimits::default(),
                     index_limits: DependencyIndexLimits::default(),
                     container_limits: ContainerMountLimits::default(),
+                    preexpanded_containers: &[],
                     layouts: &FileTypeTreeTestLayouts,
                 },
             )
@@ -7701,6 +7704,7 @@ mod tests {
                     limits: SerializedFileWorkspaceLimits::default(),
                     index_limits: DependencyIndexLimits::default(),
                     container_limits: ContainerMountLimits::default(),
+                    preexpanded_containers: &[],
                     layouts: &FileTypeTreeTestLayouts,
                 },
             )

@@ -126,8 +126,9 @@ use assetripper::serialized_file::reference_graph::{
     MultiFileReferenceGraphLimits,
 };
 use assetripper::serialized_file::workspace::{
-    LoadedSerializedFile, SerializedFileDependencyReport, SerializedFileWorkspace,
-    SerializedFileWorkspaceLimits, SerializedFileWorkspaceLoadOptions, WorkspaceSerializedBundle,
+    LoadedSerializedFile, PreExpandedContainer, SerializedFileDependencyReport,
+    SerializedFileWorkspace, SerializedFileWorkspaceLimits, SerializedFileWorkspaceLoadOptions,
+    WorkspaceSerializedBundle,
 };
 
 const MAX_INPUT_PATHS: usize = 100_000;
@@ -198,14 +199,61 @@ fn active_class_layout_source() -> &'static dyn ClassLayoutSource {
     assetripper::processing::asset_factory::reference_class_layouts()
 }
 
+#[cfg(test)]
 fn load_workspace_with_dependencies(
     filesystem: &mut VirtualFileSystem,
     inputs: &[assetripper::io::dependency::DependencyFilePath],
     registered_files: &[assetripper::io::dependency::DependencyFilePath],
     data_paths: &[String],
-    limits: SerializedFileWorkspaceLimits,
-    index_limits: DependencyIndexLimits,
-    container_limits: ContainerMountLimits,
+    limits: WorkspaceLoadLimits,
+) -> Result<
+    (SerializedFileWorkspace, SerializedFileDependencyReport),
+    Box<assetripper::serialized_file::workspace::SerializedFileWorkspaceError>,
+> {
+    load_workspace_with_preexpanded_containers(
+        filesystem,
+        inputs,
+        registered_files,
+        data_paths,
+        limits,
+        &[],
+    )
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct WorkspaceLoadLimits {
+    serialized_files: SerializedFileWorkspaceLimits,
+    dependency_index: DependencyIndexLimits,
+    containers: ContainerMountLimits,
+}
+
+fn load_workspace_with_mount_report(
+    filesystem: &mut VirtualFileSystem,
+    inputs: &[assetripper::io::dependency::DependencyFilePath],
+    registered_files: &[assetripper::io::dependency::DependencyFilePath],
+    data_paths: &[String],
+    limits: WorkspaceLoadLimits,
+    mount_report: &mut BatchMountReport,
+) -> Result<(SerializedFileWorkspace, SerializedFileDependencyReport), Box<dyn Error>> {
+    let preexpanded_containers = take_preexpanded_containers(mount_report)?;
+    load_workspace_with_preexpanded_containers(
+        filesystem,
+        inputs,
+        registered_files,
+        data_paths,
+        limits,
+        &preexpanded_containers,
+    )
+    .map_err(Into::into)
+}
+
+fn load_workspace_with_preexpanded_containers(
+    filesystem: &mut VirtualFileSystem,
+    inputs: &[assetripper::io::dependency::DependencyFilePath],
+    registered_files: &[assetripper::io::dependency::DependencyFilePath],
+    data_paths: &[String],
+    limits: WorkspaceLoadLimits,
+    preexpanded_containers: &[PreExpandedContainer],
 ) -> Result<
     (SerializedFileWorkspace, SerializedFileDependencyReport),
     Box<assetripper::serialized_file::workspace::SerializedFileWorkspaceError>,
@@ -216,12 +264,37 @@ fn load_workspace_with_dependencies(
         registered_files,
         SerializedFileWorkspaceLoadOptions {
             data_paths,
-            limits,
-            index_limits,
-            container_limits,
+            limits: limits.serialized_files,
+            index_limits: limits.dependency_index,
+            container_limits: limits.containers,
+            preexpanded_containers,
             layouts: active_class_layout_source(),
         },
     )
+}
+
+fn take_preexpanded_containers(
+    mount_report: &mut BatchMountReport,
+) -> Result<Vec<PreExpandedContainer>, io::Error> {
+    let trees = std::mem::take(&mut mount_report.container_trees);
+    let mut preexpanded = Vec::new();
+    preexpanded
+        .try_reserve_exact(trees.len())
+        .map_err(|_| invalid_data("pre-expanded container list allocation failed"))?;
+    for tree in trees {
+        let tree = std::sync::Arc::try_unwrap(tree).unwrap_or_else(|shared| (*shared).clone());
+        let serialized_files_loaded = tree.serialized_files.len();
+        preexpanded.push(PreExpandedContainer {
+            virtual_path: tree.virtual_path,
+            serialized_files_loaded,
+            container_scopes: tree.container_scopes,
+            container_bundles: tree.container_bundles,
+            serialized_files: tree.serialized_files,
+            resource_files: tree.resource_files,
+            failed_entries: tree.failed_entries,
+        });
+    }
+    Ok(preexpanded)
 }
 
 #[cfg(test)]
@@ -578,7 +651,8 @@ fn export_texture_to<W: io::Write>(
     output_path: &Path,
     status_output: &mut W,
 ) -> Result<(), Box<dyn Error>> {
-    let (mut filesystem, selected_paths, mount_report) = mount_input_files_for_export(input_files)?;
+    let (mut filesystem, selected_paths, mut mount_report) =
+        mount_input_files_for_export(input_files)?;
     let mixed = MixedGameStructure::from_vfs_paths(
         &filesystem,
         &selected_paths,
@@ -594,14 +668,13 @@ fn export_texture_to<W: io::Write>(
             "the selected files contain no recognized SerializedFile input",
         ));
     }
-    let (workspace, _) = load_workspace_with_dependencies(
+    let (workspace, _) = load_workspace_with_mount_report(
         &mut filesystem,
         &mixed.serialized_file_inputs,
         &mixed.registered_files,
         &mixed.data_paths,
-        SerializedFileWorkspaceLimits::default(),
-        DependencyIndexLimits::default(),
-        ContainerMountLimits::default(),
+        WorkspaceLoadLimits::default(),
+        &mut mount_report,
     )?;
     ensure_no_workspace_container_failures(&workspace)?;
     let file = workspace
@@ -855,7 +928,7 @@ fn export_mesh_to<W: io::Write>(
     output_path: &Path,
     status_output: &mut W,
 ) -> Result<(), Box<dyn Error>> {
-    let (mut filesystem, selected_paths, _mount_report) =
+    let (mut filesystem, selected_paths, mut mount_report) =
         mount_input_files_for_export(input_files)?;
     let mixed = MixedGameStructure::from_vfs_paths(
         &filesystem,
@@ -867,14 +940,13 @@ fn export_mesh_to<W: io::Write>(
             "the selected files contain no recognized SerializedFile input",
         ));
     }
-    let (workspace, _) = load_workspace_with_dependencies(
+    let (workspace, _) = load_workspace_with_mount_report(
         &mut filesystem,
         &mixed.serialized_file_inputs,
         &mixed.registered_files,
         &mixed.data_paths,
-        SerializedFileWorkspaceLimits::default(),
-        DependencyIndexLimits::default(),
-        ContainerMountLimits::default(),
+        WorkspaceLoadLimits::default(),
+        &mut mount_report,
     )?;
     ensure_no_workspace_container_failures(&workspace)?;
     let (object_index, _) = select_unique_object(&workspace, serialized_file_index, path_id)?;
@@ -1279,7 +1351,7 @@ fn export_shader_to<W: io::Write>(
     output_path: &Path,
     status_output: &mut W,
 ) -> Result<(), Box<dyn Error>> {
-    let (mut filesystem, selected_paths, _mount_report) =
+    let (mut filesystem, selected_paths, mut mount_report) =
         mount_input_files_for_export(input_files)?;
     let mixed = MixedGameStructure::from_vfs_paths(
         &filesystem,
@@ -1291,14 +1363,13 @@ fn export_shader_to<W: io::Write>(
             "the selected files contain no recognized SerializedFile input",
         ));
     }
-    let (workspace, _) = load_workspace_with_dependencies(
+    let (workspace, _) = load_workspace_with_mount_report(
         &mut filesystem,
         &mixed.serialized_file_inputs,
         &mixed.registered_files,
         &mixed.data_paths,
-        SerializedFileWorkspaceLimits::default(),
-        DependencyIndexLimits::default(),
-        ContainerMountLimits::default(),
+        WorkspaceLoadLimits::default(),
+        &mut mount_report,
     )?;
     ensure_no_workspace_container_failures(&workspace)?;
     let (object_index, _) = select_unique_object(&workspace, serialized_file_index, path_id)?;
@@ -1466,7 +1537,7 @@ fn export_project_to<W: io::Write>(
     settings: &ExportSettingsFile,
     status_output: &mut W,
 ) -> Result<(), Box<dyn Error>> {
-    let (mut filesystem, selected_paths, mount_report) = mount_project_inputs(input_paths)?;
+    let (mut filesystem, selected_paths, mut mount_report) = mount_project_inputs(input_paths)?;
     ensure_no_batch_container_failures(&mount_report)?;
     let mixed = MixedGameStructure::from_vfs_paths(
         &filesystem,
@@ -1541,14 +1612,13 @@ fn export_project_to<W: io::Write>(
         &mount_report.explicit_root_resource_files,
         RootResourceCatalogLimits::default(),
     )?;
-    let (mut workspace, _) = load_workspace_with_dependencies(
+    let (mut workspace, _) = load_workspace_with_mount_report(
         &mut filesystem,
         &mixed.serialized_file_inputs,
         &mixed.registered_files,
         &mixed.data_paths,
-        SerializedFileWorkspaceLimits::default(),
-        DependencyIndexLimits::default(),
-        ContainerMountLimits::default(),
+        WorkspaceLoadLimits::default(),
+        &mut mount_report,
     )?;
     ensure_no_workspace_container_failures(&workspace)?;
     let mut objects =
@@ -1737,7 +1807,8 @@ fn export_audio_to<W: io::Write>(
     output_path: &Path,
     status_output: &mut W,
 ) -> Result<(), Box<dyn Error>> {
-    let (mut filesystem, selected_paths, mount_report) = mount_input_files_for_export(input_files)?;
+    let (mut filesystem, selected_paths, mut mount_report) =
+        mount_input_files_for_export(input_files)?;
     let mixed = MixedGameStructure::from_vfs_paths(
         &filesystem,
         &selected_paths,
@@ -1753,14 +1824,13 @@ fn export_audio_to<W: io::Write>(
             "the selected files contain no recognized SerializedFile input",
         ));
     }
-    let (workspace, _) = load_workspace_with_dependencies(
+    let (workspace, _) = load_workspace_with_mount_report(
         &mut filesystem,
         &mixed.serialized_file_inputs,
         &mixed.registered_files,
         &mixed.data_paths,
-        SerializedFileWorkspaceLimits::default(),
-        DependencyIndexLimits::default(),
-        ContainerMountLimits::default(),
+        WorkspaceLoadLimits::default(),
+        &mut mount_report,
     )?;
     ensure_no_workspace_container_failures(&workspace)?;
     let file = workspace
@@ -2007,7 +2077,8 @@ fn export_object_yaml_to<W: io::Write>(
     output_path: &Path,
     status_output: &mut W,
 ) -> Result<(), Box<dyn Error>> {
-    let (mut filesystem, selected_paths, mount_report) = mount_input_files_for_export(input_files)?;
+    let (mut filesystem, selected_paths, mut mount_report) =
+        mount_input_files_for_export(input_files)?;
     let mixed = MixedGameStructure::from_vfs_paths(
         &filesystem,
         &selected_paths,
@@ -2023,14 +2094,13 @@ fn export_object_yaml_to<W: io::Write>(
             "the selected files contain no recognized SerializedFile input",
         ));
     }
-    let (workspace, _) = load_workspace_with_dependencies(
+    let (workspace, _) = load_workspace_with_mount_report(
         &mut filesystem,
         &mixed.serialized_file_inputs,
         &mixed.registered_files,
         &mixed.data_paths,
-        SerializedFileWorkspaceLimits::default(),
-        DependencyIndexLimits::default(),
-        ContainerMountLimits::default(),
+        WorkspaceLoadLimits::default(),
+        &mut mount_report,
     )?;
     ensure_no_workspace_container_failures(&workspace)?;
     let file = workspace
@@ -2140,7 +2210,8 @@ fn export_file_yaml_to<W: io::Write>(
     output_path: &Path,
     status_output: &mut W,
 ) -> Result<(), Box<dyn Error>> {
-    let (mut filesystem, selected_paths, mount_report) = mount_input_files_for_export(input_files)?;
+    let (mut filesystem, selected_paths, mut mount_report) =
+        mount_input_files_for_export(input_files)?;
     let mixed = MixedGameStructure::from_vfs_paths(
         &filesystem,
         &selected_paths,
@@ -2156,14 +2227,13 @@ fn export_file_yaml_to<W: io::Write>(
             "the selected files contain no recognized SerializedFile input",
         ));
     }
-    let (workspace, _) = load_workspace_with_dependencies(
+    let (workspace, _) = load_workspace_with_mount_report(
         &mut filesystem,
         &mixed.serialized_file_inputs,
         &mixed.registered_files,
         &mixed.data_paths,
-        SerializedFileWorkspaceLimits::default(),
-        DependencyIndexLimits::default(),
-        ContainerMountLimits::default(),
+        WorkspaceLoadLimits::default(),
+        &mut mount_report,
     )?;
     ensure_no_workspace_container_failures(&workspace)?;
     let file = workspace
@@ -2400,7 +2470,7 @@ fn inspect_explicit_files_to<W: io::Write>(
     input_files: &[PathBuf],
     output: &mut W,
 ) -> Result<(), Box<dyn Error>> {
-    let (mut filesystem, selected_paths, mount_report) = mount_input_files(input_files)?;
+    let (mut filesystem, selected_paths, mut mount_report) = mount_input_files(input_files)?;
     print_batch_container_failures_to(output, &mount_report)?;
     let mixed = MixedGameStructure::from_vfs_paths(
         &filesystem,
@@ -2430,14 +2500,13 @@ fn inspect_explicit_files_to<W: io::Write>(
         ExplicitInspectPlan::LoadWorkspace => {}
     }
 
-    let (workspace, dependencies) = load_workspace_with_dependencies(
+    let (workspace, dependencies) = load_workspace_with_mount_report(
         &mut filesystem,
         &mixed.serialized_file_inputs,
         &mixed.registered_files,
         &mixed.data_paths,
-        SerializedFileWorkspaceLimits::default(),
-        DependencyIndexLimits::default(),
-        ContainerMountLimits::default(),
+        WorkspaceLoadLimits::default(),
+        &mut mount_report,
     )?;
     writeln!(
         output,
@@ -2682,7 +2751,7 @@ fn mount_project_inputs(
                 "failed container entry metadata byte count",
             )?,
         };
-        let next = if metadata.is_dir() {
+        let mut next = if metadata.is_dir() {
             SchemeReader::mount_directory(
                 input_path,
                 &mut filesystem,
@@ -2708,7 +2777,7 @@ fn mount_project_inputs(
                 input_path
             )));
         };
-        merge_mount_report(&mut total, &next)?;
+        merge_mount_report(&mut total, &mut next)?;
         selected_paths.push(destination_root);
     }
     Ok((filesystem, selected_paths, total))
@@ -2785,7 +2854,7 @@ fn inspect_directories_to<W: io::Write>(
     }
 
     drop(filesystem);
-    let (mut filesystem, selected_paths, total_mount_report) =
+    let (mut filesystem, selected_paths, mut total_mount_report) =
         mount_input_directories(input_directories, false)?;
     print_batch_container_failures_to(output, &total_mount_report)?;
     let mixed = MixedGameStructure::from_vfs_paths(
@@ -2800,14 +2869,13 @@ fn inspect_directories_to<W: io::Write>(
         )?;
         return Ok(());
     }
-    let (workspace, dependencies) = load_workspace_with_dependencies(
+    let (workspace, dependencies) = load_workspace_with_mount_report(
         &mut filesystem,
         &mixed.serialized_file_inputs,
         &mixed.registered_files,
         &mixed.data_paths,
-        SerializedFileWorkspaceLimits::default(),
-        DependencyIndexLimits::default(),
-        ContainerMountLimits::default(),
+        WorkspaceLoadLimits::default(),
+        &mut total_mount_report,
     )?;
     writeln!(
         output,
@@ -2897,7 +2965,7 @@ fn mount_input_directories(
                 "failed container entry metadata byte count",
             )?,
         };
-        let report = if preserve_containers {
+        let mut report = if preserve_containers {
             SchemeReader::mount_directory_preserving_containers(
                 input_directory,
                 &mut filesystem,
@@ -2916,7 +2984,7 @@ fn mount_input_directories(
                 remaining_limits,
             )?
         };
-        merge_mount_report(&mut total_mount_report, &report)?;
+        merge_mount_report(&mut total_mount_report, &mut report)?;
         println!(
             "mounted {}: {} logical inputs, {} VFS files, {} bytes",
             input_directory.display(),
@@ -4646,7 +4714,7 @@ fn remaining_budget_usize(
 
 fn merge_mount_report(
     total: &mut BatchMountReport,
-    next: &BatchMountReport,
+    next: &mut BatchMountReport,
 ) -> Result<(), io::Error> {
     total
         .explicit_root_resource_files
@@ -4685,8 +4753,13 @@ fn merge_mount_report(
         .try_reserve(next.failed_entries.len())
         .map_err(|_| invalid_data("failed container entry metadata allocation failed"))?;
     total
+        .container_trees
+        .try_reserve(next.container_trees.len())
+        .map_err(|_| invalid_data("expanded container tree metadata allocation failed"))?;
+    total
         .failed_entries
         .extend(next.failed_entries.iter().cloned());
+    total.container_trees.append(&mut next.container_trees);
     total
         .explicit_root_resource_files
         .extend_from_slice(&next.explicit_root_resource_files);
@@ -4721,14 +4794,14 @@ mod tests {
     };
     use assetripper::export::settings::{ExportDefaults, ScriptExportMode, ShaderExportMode};
     use assetripper::export::settings_file::ExportSettingsFile;
-    use assetripper::io::dependency::{DependencyFilePath, DependencyIndexLimits};
+    use assetripper::io::dependency::DependencyFilePath;
     use assetripper::io::filesystem::VirtualFileSystem;
     use assetripper::io::platform_file_inventory::PlatformWorkspaceLoadOptions;
     use assetripper::io::platform_structure::{
         detect_platform_structure, PlatformKind, PlatformStructure, PlatformStructureLimits,
     };
+    use assetripper::scheme::BatchMountReport;
     use assetripper::scheme::FileKind;
-    use assetripper::scheme::{BatchMountReport, ContainerMountLimits};
     use assetripper::serialized_file::collection_workspace::{
         WorkspaceAssetCollections, WorkspaceCollectionLimits,
     };
@@ -6367,7 +6440,7 @@ mod tests {
             mounted_bytes: 12,
             ..BatchMountReport::default()
         };
-        let next = BatchMountReport {
+        let mut next = BatchMountReport {
             directory_entries_scanned: 4,
             discovered_inputs: 4,
             discovered_source_bytes: 20,
@@ -6376,7 +6449,7 @@ mod tests {
             mounted_bytes: 30,
             ..BatchMountReport::default()
         };
-        merge_mount_report(&mut total, &next).unwrap();
+        merge_mount_report(&mut total, &mut next).unwrap();
         assert_eq!(total.directory_entries_scanned, 5);
         assert_eq!(total.discovered_inputs, 6);
         assert_eq!(total.discovered_source_bytes, 30);
@@ -9918,6 +9991,176 @@ mod tests {
     }
 
     #[test]
+    fn export_project_uses_source_entry_order_for_duplicate_nested_bundle_dependencies() {
+        let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
+        let source_fixture = include_str!("export/managed_reference_sibling_bundle_fixture.txt");
+        assert!(source_fixture.contains("SELECTED|target.assets|FirstTarget|"));
+        let source_bundle_hex = source_fixture
+            .lines()
+            .find_map(|line| line.strip_prefix("INPUT_HEX|workspace.bundle|"))
+            .expect("source-runtime fixture includes the sibling UnityFS input");
+        let source_bundle_bytes = source_bundle_hex
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16)
+                    .expect("source bundle fixture contains valid hex")
+            })
+            .collect::<Vec<_>>();
+        let bundled_fixture = include_bytes!(
+            "export/managed_reference_project_fixture/nested_sibling_reference.bundle"
+        );
+        assert_eq!(bundled_fixture, source_bundle_bytes.as_slice());
+
+        let directory = TestInputDirectory::new_root();
+        let bundle_path = directory.join("workspace.bundle");
+        fs::write(&bundle_path, bundled_fixture).expect("source-runtime sibling UnityFS fixture");
+        let input = TestInputDirectory {
+            directory: directory.clone(),
+            files: vec![bundle_path.clone()],
+            subdirectories: Vec::new(),
+        };
+        let (mut graph_filesystem, selected_paths, mut graph_mount_report) =
+            super::mount_project_inputs(std::slice::from_ref(&bundle_path)).unwrap();
+        let mixed = super::MixedGameStructure::from_vfs_paths(
+            &graph_filesystem,
+            &selected_paths,
+            super::MixedGameStructureLimits::default(),
+        )
+        .unwrap();
+        let (graph_workspace, _) = super::load_workspace_with_mount_report(
+            &mut graph_filesystem,
+            &mixed.serialized_file_inputs,
+            &mixed.registered_files,
+            &mixed.data_paths,
+            super::WorkspaceLoadLimits::default(),
+            &mut graph_mount_report,
+        )
+        .unwrap();
+        let graph = graph_workspace
+            .reference_graph(
+                assetripper::serialized_file::reference_graph::MultiFileReferenceGraphLimits::default(),
+            )
+            .unwrap();
+        let root_file_index = graph_workspace
+            .files()
+            .iter()
+            .position(|file| file.file_name == "managed.assets")
+            .unwrap();
+        let root_pointer = graph
+            .references()
+            .iter()
+            .find(|reference| {
+                reference.source_file_index == root_file_index
+                    && reference.field_path == "references.RefIds[0].data.m_Asset"
+            })
+            .unwrap();
+        let assetripper::serialized_file::reference_graph::MultiFilePPtrResolution::Object {
+            target_file_index,
+            target_object_index: 0,
+        } = root_pointer.resolution
+        else {
+            panic!("the source-backed nested PPtr must resolve to an object");
+        };
+        assert!(graph_workspace.files()[target_file_index]
+            .virtual_path
+            .ends_with("first.bundle/target.assets"));
+        let output_root = directory.join("project-sibling-bundle");
+        let mut status = Vec::new();
+        super::export_project_to(
+            std::slice::from_ref(&bundle_path),
+            &output_root,
+            false,
+            &default_export_settings(),
+            &mut status,
+        )
+        .expect("duplicate sibling collection references resolve in source entry order");
+
+        let status = String::from_utf8(status).expect("export status is UTF-8");
+        assert!(status.contains("3 SerializedFiles"), "{status}");
+        assert!(status.contains("3 objects in 3 asset files"), "{status}");
+
+        let root_path = output_root.join("Assets/MonoBehaviour/ManagedRoot.asset");
+        let root_meta_path = output_root.join("Assets/MonoBehaviour/ManagedRoot.asset.meta");
+        let first_target_path = output_root.join("Assets/MonoBehaviour/FirstTarget.asset");
+        let first_target_meta_path =
+            output_root.join("Assets/MonoBehaviour/FirstTarget.asset.meta");
+        let second_target_path = output_root.join("Assets/MonoBehaviour/SecondTarget.asset");
+        let second_target_meta_path =
+            output_root.join("Assets/MonoBehaviour/SecondTarget.asset.meta");
+        let root_yaml = fs::read_to_string(&root_path).expect("root YAML is exported");
+        let first_target_yaml =
+            fs::read_to_string(&first_target_path).expect("first sibling target YAML is exported");
+        let second_target_yaml = fs::read_to_string(&second_target_path)
+            .expect("second sibling target YAML is exported");
+        let first_target_guid = meta_guid(&first_target_meta_path);
+        let second_target_guid = meta_guid(&second_target_meta_path);
+        let source_target_meta = include_str!(
+            "export/managed_reference_project_fixture/source_ReferencedRoot.asset.meta"
+        );
+        let source_guid = source_target_meta
+            .lines()
+            .find_map(|line| line.strip_prefix("guid: "))
+            .expect("frozen source target metadata has a GUID");
+        let source_root_yaml =
+            include_str!("export/managed_reference_project_fixture/source_ManagedRoot.asset");
+        assert_eq!(
+            source_root_yaml
+                .replace(source_guid, "<TARGET_GUID>")
+                .trim_end(),
+            root_yaml
+                .replace(&first_target_guid, "<TARGET_GUID>")
+                .trim_end(),
+            "the root PPtr maps to the first same-named collection in bundle-entry order"
+        );
+        assert!(root_yaml.contains(&format!(
+            "m_Asset: {{fileID: 11400000, guid: {first_target_guid}, type: 2}}"
+        )));
+        assert!(
+            !root_yaml.contains(&second_target_guid),
+            "the root PPtr must not map to the later duplicate collection"
+        );
+        assert_eq!(
+            include_str!(
+                "export/managed_reference_project_fixture/source_sibling_FirstTarget.asset"
+            )
+            .trim_end(),
+            first_target_yaml.trim_end()
+        );
+        assert_eq!(
+            include_str!(
+                "export/managed_reference_project_fixture/source_sibling_SecondTarget.asset"
+            )
+            .trim_end(),
+            second_target_yaml.trim_end()
+        );
+        assert!(first_target_yaml.contains("m_Health: 789"));
+        assert!(second_target_yaml.contains("m_Health: 456"));
+        assert!(root_yaml.contains("        m_Link:\n          rid: 200\n"));
+        assert!(root_yaml.contains("        m_Link:\n          rid: 100\n"));
+
+        let normalize_meta = |path: &std::path::Path| {
+            let normalized = fs::read_to_string(path)
+                .expect("asset metadata is readable")
+                .lines()
+                .filter(|line| !line.starts_with("guid: ") && !line.starts_with("timeCreated: "))
+                .collect::<Vec<_>>()
+                .join("\n");
+            normalized.trim_end_matches(['\r', '\n']).to_owned() + "\n"
+        };
+        let expected_meta = include_str!(
+            "export/managed_reference_project_fixture/source_nested_ReferencedRoot.asset.meta.normalized"
+        );
+        assert_eq!(expected_meta, normalize_meta(&root_meta_path));
+        assert_eq!(expected_meta, normalize_meta(&first_target_meta_path));
+        assert_eq!(expected_meta, normalize_meta(&second_target_meta_path));
+        assert_eq!(fs::read(&bundle_path).unwrap(), bundled_fixture);
+
+        fs::remove_dir_all(&output_root).expect("remove sibling-bundle project output");
+        drop(input);
+    }
+
+    #[test]
     fn export_project_saves_managed_assembly_and_maps_script_pointer() {
         let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
         let fixture = include_str!("processing/managed_assembly_saved_project_fixture.txt");
@@ -11741,9 +11984,7 @@ mod tests {
             &mixed.serialized_file_inputs,
             &mixed.registered_files,
             &mixed.data_paths,
-            super::SerializedFileWorkspaceLimits::default(),
-            super::DependencyIndexLimits::default(),
-            super::ContainerMountLimits::default(),
+            super::WorkspaceLoadLimits::default(),
         )
         .unwrap();
         let mut output = Vec::new();
@@ -11806,9 +12047,7 @@ mod tests {
             &mixed.serialized_file_inputs,
             &mixed.registered_files,
             &mixed.data_paths,
-            super::SerializedFileWorkspaceLimits::default(),
-            super::DependencyIndexLimits::default(),
-            super::ContainerMountLimits::default(),
+            super::WorkspaceLoadLimits::default(),
         )
         .unwrap();
         let mut output = Vec::new();
@@ -11901,9 +12140,7 @@ mod tests {
             std::slice::from_ref(&input),
             std::slice::from_ref(&input),
             &[],
-            SerializedFileWorkspaceLimits::default(),
-            DependencyIndexLimits::default(),
-            ContainerMountLimits::default(),
+            super::WorkspaceLoadLimits::default(),
         )
         .unwrap();
 
@@ -11951,9 +12188,7 @@ mod tests {
             &mixed.serialized_file_inputs,
             &mixed.registered_files,
             &mixed.data_paths,
-            super::SerializedFileWorkspaceLimits::default(),
-            super::DependencyIndexLimits::default(),
-            super::ContainerMountLimits::default(),
+            super::WorkspaceLoadLimits::default(),
         )
         .unwrap();
 
