@@ -65,6 +65,8 @@ The UnityFS v7 `#1470` metadata-slack case is now source-runtime pinned through 
 
 The 2019.4.40f1 no-TypeTree GameObject/Transform path is now integrated through generated TPK recovery, `ObjectWorkspace`, reciprocal reference resolution, and `export-project`. A fresh frozen-source export matches the Rust Prefab YAML byte-for-byte and matches `.meta` after removing only randomized GUID/timeCreated values. This validates one non-default two-object hierarchy and its generated Prefab route; it closes no feature row and does not establish general generated-field, scene, project-support-file, or Unity Editor parity. The 24-row Phase 1 queue is unchanged. See `DIFF-TT-ABSENT-GENERATED-PREFAB-PROJECT-001` and `docs/validation-log.md`.
 
+The full Rust `process_clip` converter now replays the isolated source probe's real generated Unity 2022.3.0f1 AnimationClip and scene graph. All 5,137 output bytes, including streamed/dense/constant curve emission, hierarchy/custom-curve names, PPtr mapping, events, and MuscleClipInfo fields, match the source fixture at SHA-256 `A4C1BA2733ABAB473E46C924CEF3D343E4E1EB69293E04195BC9009EB714CAD5`. This settles the converter output for that bounded source scenario but does not wire `ObjectWorkspace` to the converter, cover other version branches, or provide Unity dynamic sampling. It closes no status row; the 24-row queue is unchanged. See `DIFF-ANIMATION-CLIP-PROCESS-001` and `docs/validation-log.md`.
+
 ## Dependency order
 1. Close the import, container, serialization, generated-object, and reference path together. Do not treat file inventory or decoded TypeTree values as a complete object model.
 2. Close workspace scene and Prefab materialization, then animation processing on those objects.

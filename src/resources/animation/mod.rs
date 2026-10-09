@@ -19,3 +19,6 @@ pub mod clip_object;
 pub mod converter;
 pub mod field_hashes;
 pub mod scene_facts;
+
+#[cfg(test)]
+mod converter_fixture;

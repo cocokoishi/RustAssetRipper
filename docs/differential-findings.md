@@ -403,6 +403,18 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Regression evidence | `next_frame_search_matches_the_reference_runtime` asserts all six search rows; `bankers_round_matches_the_reference_runtime` asserts all nine rounding words including the negative-zero case; branch tests cover every `CalculateLastConstantTime` path with synthetic frames. |
 | Remaining comparison | The rounding probe covers nine inputs; the stop-time branches are synthetic-only. Curve emission stays open. |
 
+## DIFF-ANIMATION-CLIP-PROCESS-001 - full generated AnimationClip conversion
+
+| Field | Finding |
+|---|---|
+| Status | Full converter output matches one source-generated Unity 2022.3.0f1 clip and scene graph. Other version branches and product wiring remain open. |
+| Source location | `AssetRipper.Processing/AnimationClips/AnimationClipConverter.cs` (`Process`, streamed/dense/constant processing, curve emission); `PathChecksumCache.cs`; `CustomCurveResolver.cs`; `AssetRipper.SourceGenerated.Extensions/AnimationClipExtensions.cs` (`FindRoots`) |
+| Input evidence | The isolated `tools/probes/anim-convert` `convert` mode creates real generated GameObject, Transform, Renderer, Mesh, Material, AnimatorController, Animator, and AnimationClip objects at Unity 2022.3.0f1, populates 23 GenericBindings, streamed/dense/constant data, and one AnimationEvent, then invokes the shipped converter. A fresh run exited 0 and wrote 5,137 bytes with SHA-256 `A4C1BA2733ABAB473E46C924CEF3D343E4E1EB69293E04195BC9009EB714CAD5`. |
+| Source-derived behavior | The converter's complete mutations cover streamed frame generation and slope calculation, transform and Euler expansion, default engine/GameObject curves, custom-curve fallback naming with hierarchy facts, dense and constant samples, a PPtr curve, event preservation, and MuscleClipInfo initialization. The generated null `Script` PPtr remains a zero-valued pointer (`PathID=0`). |
+| Rust change | `resources::animation::converter_fixture::source_probe_input` reconstructs the deterministic source input in the Rust `AnimationClipObject`/`SceneFactsTable` model; `process_clip` runs the full conversion and the formatter compares all emitted curve and event fields against the source output fixture. |
+| Regression evidence | `complete_clip_process_matches_the_source_generated_asset` matches every output row and float bit pattern in `src/resources/animation/clip_convert_fixture.txt`; the source probe's fresh output and committed fixture hashes match exactly. Full workspace validation passed with 1,532 library tests (1 ignored), 98 CLI tests, and 1 ignored doc test; warnings-denied Clippy, formatting, diff check, and all 1,449 frozen baseline files passed. |
+| Remaining comparison | The fixture proves one source-generated 2022.3 conversion, not all version/platform branches. The converter still has no `ObjectWorkspace` or `export-project` caller that extracts clips and scene facts from parsed SerializedValues. Unity Editor animation import and dynamic sampling remain unrun. Keep `PROC-ANIM-001`, `PROC-ANIM-STREAMED-001`, `PROC-ANIM-CONVERT-001`, `PROC-ANIM-CUSTOM-CURVE-001`, and `RES-ANIM-001` open. |
+
 ## DIFF-AUDIO-DECODE-001 - decoder dispatch, diagnostic fill, and clip version gates
 
 | Field | Finding |
@@ -1101,7 +1113,7 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Root cause | The initial Rust port hashed only the prefix before reversing the CRC, omitting the source's seven-H marker. The first fixture expectations also had incorrect CRC words and did not reproduce the resolver's real scene predicate. The live probe exposed these mismatches; Rust now streams the marker into the same CRC state and the fixture records the correct predicates and values. |
 | Rust change | `src/resources/blend_shape.rs` now exposes a crate-private incremental IEEE CRC update; `src/resources/custom_curve.rs` ports the `ReverseAscii` transform, resolver dispatch, table hits, and source-compatible errors for unsupported binding enum values. |
 | Regression evidence | `cargo test --workspace --locked custom_curve::tests` passes 12/12. The fixture includes 14 `ReverseAscii` outputs and 2 direct `HashAscii` marker hashes. The full Rust workspace passes 1,397 library tests and 65 CLI tests; formatting, warnings-denied Clippy, and the 1,449-file baseline verifier pass. |
-| Remaining comparison | `AnimationClipConverter` does not call the Rust `to_attribute_name`; production code still lacks root/child traversal and asset-backed blend-shape/material CRC lookup to populate `CustomCurveSceneFacts`. Full clip conversion, independent Unity-file evidence, and dynamic Unity animation sampling remain unrun. Keep `PROC-ANIM-CUSTOM-CURVE-001` open. |
+| Remaining comparison | Rust `converter::process_clip` now calls `to_attribute_name`; `DIFF-ANIMATION-CLIP-PROCESS-001` source-replays one complete 2022.3 clip and scene graph, including hierarchy path recovery and blend-shape/material fallback names. The actual ObjectWorkspace/export-project caller and construction of `CustomCurveSceneFacts` from serialized renderer, mesh, material, and script assets remain absent; matching blend-shape/material asset lookups, other version branches, and dynamic Unity animation sampling remain open. Keep `PROC-ANIM-CUSTOM-CURVE-001` open. |
 
 ## DIFF-MANAGED-REFS-002 - nested managed-reference registries
 
