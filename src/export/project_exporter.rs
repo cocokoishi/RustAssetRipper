@@ -387,7 +387,7 @@ pub fn select_collection_with_text_asset_validity(
     select_collection_with_claim_facts(facts, settings, claim_facts)
 }
 
-fn select_collection_with_claim_facts(
+pub(crate) fn select_collection_with_claim_facts(
     facts: ObjectClassFacts,
     settings: ProjectExportSettings,
     claim_facts: ClaimFacts,

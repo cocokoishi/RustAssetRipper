@@ -9602,6 +9602,254 @@ mod tests {
     }
 
     #[test]
+    fn export_project_matches_source_for_standalone_generated_texture_versions() {
+        let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
+
+        fn decode_hex(hex: &str) -> Vec<u8> {
+            assert!(hex.len().is_multiple_of(2), "fixture hex has even length");
+            hex.as_bytes()
+                .chunks_exact(2)
+                .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+                .collect()
+        }
+
+        fn source_row_bytes(fixture: &str, relative_path: &str) -> Vec<u8> {
+            let prefix = format!("SOURCE_OUTPUT|ExportedProject/{relative_path}|");
+            let hex = fixture
+                .lines()
+                .find_map(|line| line.strip_prefix(&prefix))
+                .unwrap_or_else(|| panic!("source texture fixture has {relative_path}"));
+            decode_hex(hex)
+        }
+
+        fn normalize_meta(text: &str) -> String {
+            let normalized = text
+                .lines()
+                .map(|line| {
+                    if line.starts_with("guid: ") {
+                        "guid: <GUID>"
+                    } else if line.starts_with("timeCreated: ") {
+                        "timeCreated: <TIME>"
+                    } else {
+                        line
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("{normalized}\n")
+        }
+
+        fn collect_output_tree(
+            path: &std::path::Path,
+            files: &mut Vec<PathBuf>,
+            directories: &mut Vec<PathBuf>,
+        ) {
+            for entry in fs::read_dir(path).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if entry.file_type().unwrap().is_dir() {
+                    directories.push(path.clone());
+                    collect_output_tree(&path, files, directories);
+                } else {
+                    files.push(path);
+                }
+            }
+        }
+
+        let settings = include_str!("export/settings_file_defaults.json")
+            .replace("\"ImageExportFormat\": 4", "\"ImageExportFormat\": 0")
+            .replace(
+                "\"PreferOriginalTextureExtension\": true",
+                "\"PreferOriginalTextureExtension\": false",
+            );
+        assert!(settings.contains("\"ImageExportFormat\": 0"));
+        assert!(settings.contains("\"PreferOriginalTextureExtension\": false"));
+        for (unity_version, storage, fixture) in [
+            (
+                "2019.4.40f1",
+                "inline",
+                include_str!("export/texture_project_source_2019_4_fixture.txt"),
+            ),
+            (
+                "2022.3.22f1",
+                "inline",
+                include_str!("export/texture_project_source_2022_3_fixture.txt"),
+            ),
+            (
+                "2019.4.40f1",
+                "streamed",
+                include_str!("export/texture_project_source_2019_4_streamed_fixture.txt"),
+            ),
+            (
+                "2022.3.22f1",
+                "streamed",
+                include_str!("export/texture_project_source_2022_3_streamed_fixture.txt"),
+            ),
+        ] {
+            let directory = TestInputDirectory::new_root();
+            let mut has_serialized_file = false;
+            let mut source_inputs = Vec::new();
+            for input_row in fixture
+                .lines()
+                .filter_map(|line| line.strip_prefix("INPUT_HEX|"))
+            {
+                let (file_name, hex) = input_row
+                    .split_once('|')
+                    .expect("source input row contains a path and hex bytes");
+                let bytes = decode_hex(hex);
+                let path = directory.join(file_name);
+                fs::write(&path, &bytes).unwrap();
+                if file_name == "TextureFixture.assets" {
+                    has_serialized_file = true;
+                }
+                source_inputs.push((path, bytes));
+            }
+            assert!(
+                has_serialized_file,
+                "source fixture contains its SerializedFile"
+            );
+            let input_paths = source_inputs
+                .iter()
+                .map(|(path, _)| path.clone())
+                .collect::<Vec<_>>();
+            let settings_path = directory.join("texture-settings.json");
+            let output_root = directory.join("project-texture");
+            fs::write(&settings_path, settings.as_bytes()).unwrap();
+            let mut input = TestInputDirectory {
+                directory: directory.clone(),
+                files: input_paths.clone(),
+                subdirectories: Vec::new(),
+            };
+            input.files.push(settings_path.clone());
+
+            let mut arguments = vec![
+                std::ffi::OsString::from("export-project"),
+                std::ffi::OsString::from("--settings"),
+                settings_path.clone().into_os_string(),
+                output_root.clone().into_os_string(),
+            ];
+            arguments.extend(
+                input_paths
+                    .iter()
+                    .map(|path| path.as_os_str().to_os_string()),
+            );
+            super::run(arguments.into_iter()).unwrap_or_else(|error| {
+                panic!("export-project failed for Unity {unity_version} {storage}: {error}")
+            });
+
+            let texture_path = output_root.join("Assets/Texture2D/TextureFixture.bmp");
+            let texture_meta_path = output_root.join("Assets/Texture2D/TextureFixture.bmp.meta");
+            let texture_bytes = fs::read(&texture_path).unwrap();
+            assert_eq!(
+                texture_bytes,
+                source_row_bytes(fixture, "Assets/Texture2D/TextureFixture.bmp"),
+                "converted image differs for Unity {unity_version} {storage}"
+            );
+            let texture_meta = normalize_meta(&fs::read_to_string(&texture_meta_path).unwrap());
+            assert_eq!(
+                texture_meta.as_bytes(),
+                source_row_bytes(fixture, "Assets/Texture2D/TextureFixture.bmp.meta"),
+                "TextureImporter sidecar differs for Unity {unity_version} {storage}"
+            );
+            assert_eq!(
+                fs::read(output_root.join("ProjectSettings/ProjectVersion.txt")).unwrap(),
+                source_row_bytes(fixture, "ProjectSettings/ProjectVersion.txt"),
+                "project version output differs for Unity {unity_version} {storage}"
+            );
+            let source_manifest =
+                String::from_utf8(source_row_bytes(fixture, "Packages/manifest.json"))
+                    .expect("source package manifest is UTF-8");
+            let rust_manifest =
+                fs::read_to_string(output_root.join("Packages/manifest.json")).unwrap();
+            let normalize_manifest = |text: &str| {
+                let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+                normalized.trim_end_matches('\n').to_owned() + "\n"
+            };
+            assert_eq!(
+                normalize_manifest(&rust_manifest),
+                normalize_manifest(&source_manifest),
+                "package manifest differs beyond line endings for Unity {unity_version} {storage}"
+            );
+            assert!(!output_root
+                .join("Assets/Texture2D/TextureFixture.texture2D")
+                .exists());
+            for (source_input_path, source_input_bytes) in &source_inputs {
+                assert_eq!(
+                    fs::read(source_input_path).unwrap(),
+                    *source_input_bytes,
+                    "export modified input {} for Unity {unity_version} {storage}",
+                    source_input_path.display()
+                );
+            }
+
+            let mut exported_files = Vec::new();
+            let mut exported_directories = Vec::new();
+            collect_output_tree(&output_root, &mut exported_files, &mut exported_directories);
+            input.files.extend(exported_files);
+            input.subdirectories.extend(exported_directories);
+        }
+
+        let streamed_fixture =
+            include_str!("export/texture_project_source_2019_4_streamed_fixture.txt");
+        let stream_input = |file_name: &str| {
+            let prefix = format!("INPUT_HEX|{file_name}|");
+            let hex = streamed_fixture
+                .lines()
+                .find_map(|line| line.strip_prefix(&prefix))
+                .unwrap_or_else(|| panic!("stream fixture contains {file_name}"));
+            decode_hex(hex)
+        };
+        let serialized_bytes = stream_input("TextureFixture.assets");
+        let resource_bytes = stream_input("TextureFixture.resS");
+        for (supply_resource, resource_length) in [(false, 0), (true, resource_bytes.len() - 1)] {
+            let directory = TestInputDirectory::new_root();
+            let source_path = directory.join("TextureFixture.assets");
+            let resource_path = directory.join("TextureFixture.resS");
+            let settings_path = directory.join("texture-settings.json");
+            let output_root = directory.join("project-texture-missing-stream");
+            fs::write(&source_path, &serialized_bytes).unwrap();
+            fs::write(&settings_path, settings.as_bytes()).unwrap();
+            fs::create_dir(&output_root).unwrap();
+            let mut input = TestInputDirectory {
+                directory,
+                files: vec![source_path.clone(), settings_path.clone()],
+                subdirectories: vec![output_root.clone()],
+            };
+            let mut arguments = vec![
+                std::ffi::OsString::from("export-project"),
+                std::ffi::OsString::from("--settings"),
+                settings_path.into_os_string(),
+                output_root.clone().into_os_string(),
+                source_path.clone().into_os_string(),
+            ];
+            if supply_resource {
+                let invalid_resource = &resource_bytes[..resource_length];
+                fs::write(&resource_path, invalid_resource).unwrap();
+                input.files.push(resource_path.clone());
+                arguments.push(resource_path.clone().into_os_string());
+            }
+
+            let error = super::run(arguments.into_iter()).unwrap_err();
+            assert!(
+                error.to_string().contains("TextureFixture.resS"),
+                "stream resolution error lacks its resource path: {error}"
+            );
+            assert_eq!(
+                fs::read_dir(&output_root).unwrap().count(),
+                0,
+                "failed streamed Texture2D export wrote partial project files"
+            );
+            assert_eq!(fs::read(&source_path).unwrap(), serialized_bytes);
+            if supply_resource {
+                assert_eq!(
+                    fs::read(&resource_path).unwrap(),
+                    &resource_bytes[..resource_length]
+                );
+            }
+        }
+    }
+
+    #[test]
     fn export_project_recovers_assembly_backed_monobehaviour_structure() {
         let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
         let directory = TestInputDirectory::new_root();

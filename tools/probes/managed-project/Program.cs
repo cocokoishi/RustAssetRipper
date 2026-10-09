@@ -8,6 +8,11 @@ using System.Reflection;
 using System.Reflection.Metadata;
 using System.Reflection.PortableExecutable;
 using System.Text;
+using System.Text.RegularExpressions;
+using AssetRipper.Assets.Bundles;
+using AssetRipper.Assets.Collections;
+using AssetRipper.Assets.IO.Writing;
+using AssetRipper.Assets.Metadata;
 using AssetRipper.Export.Configuration;
 using AssetRipper.Export.UnityProjects;
 using AssetRipper.Export.UnityProjects.Scripts;
@@ -31,6 +36,27 @@ if (args.Length > 0 && args[0] == "compare-managed-assembly-pe")
         return 2;
     }
     return CompareManagedAssemblyPe(args[1], args[2]);
+}
+
+if (args.Length > 0 && args[0] == "export-texture-project")
+{
+    if (args.Length is < 5 or > 7)
+    {
+        Console.Error.WriteLine("usage: managed-project export-texture-project <input-root> <output-root> <rows-file> <image-export-format> [unity-version] [inline|streamed]");
+        return 2;
+    }
+    return ExportTextureProject(
+        args[1],
+        args[2],
+        args[3],
+        args[4],
+        args.Length >= 6 ? args[5] : "2019.4.40f1",
+        args.Length == 7 ? args[6] : "inline");
+}
+
+if (args.Length == 1 && args[0] == "dump-texture-enums")
+{
+    return DumpTextureEnums();
 }
 
 if (args.Length > 0 && args[0] == "export-mono-structure")
@@ -1915,6 +1941,279 @@ static void WriteInputRow(StreamWriter rows, string path, byte[] bytes)
 {
     rows.WriteLine($"INPUT|{Path.GetFileName(path)}|{bytes.Length}|{Convert.ToHexString(SHA256.HashData(bytes))}");
     rows.WriteLine($"INPUT_HEX|{Path.GetFileName(path)}|{Convert.ToHexString(bytes)}");
+}
+
+static int ExportTextureProject(
+    string inputRootValue,
+    string outputRootValue,
+    string rowsValue,
+    string imageFormatName,
+    string unityVersionText,
+    string storageMode)
+{
+    string inputRoot = Path.GetFullPath(inputRootValue);
+    string outputRoot = Path.GetFullPath(outputRootValue);
+    string rowsPath = Path.GetFullPath(rowsValue);
+    EnsureEmptyOrMissingDirectory(inputRoot, "input");
+    EnsureEmptyOrMissingDirectory(outputRoot, "output");
+    if (File.Exists(rowsPath) || Directory.Exists(rowsPath))
+    {
+        throw new IOException($"rows file must be new: {rowsPath}");
+    }
+    Directory.CreateDirectory(inputRoot);
+    Directory.CreateDirectory(outputRoot);
+    Directory.CreateDirectory(Path.GetDirectoryName(rowsPath)!);
+    if (storageMode is not ("inline" or "streamed"))
+    {
+        throw new ArgumentException($"unknown texture storage mode: {storageMode}");
+    }
+
+    UnityVersion version = UnityVersion.Parse(unityVersionText);
+    GameBundle bundle = new();
+    ProcessedAssetCollection collection = new(bundle);
+    collection.GetType().GetProperty("Version")!.SetValue(collection, version);
+    object texture = MakeGenerated(
+        "AssetRipper.SourceGenerated.Classes.ClassID_28.Texture2D",
+        28,
+        44,
+        collection,
+        version);
+    SetGeneratedProperty(texture, "Name", "TextureFixture");
+    SetGeneratedProperty(texture, "Width_C28", 2);
+    SetGeneratedProperty(texture, "Height_C28", 2);
+    SetGeneratedProperty(texture, "ImageCount_C28", 1);
+    SetGeneratedProperty(texture, "MipMap_C28", false);
+    SetGeneratedProperty(texture, "CompleteImageSize_C28_Int32", 16);
+    byte[] imageBytes = new byte[]
+    {
+        10, 20, 30, 255,
+        40, 50, 60, 255,
+        70, 80, 90, 255,
+        100, 110, 120, 255,
+    };
+    string? streamPath = null;
+    if (storageMode == "streamed")
+    {
+        PropertyInfo streamProperty = FindGeneratedProperty(texture, "StreamData_C28");
+        object streamInfo = streamProperty.GetValue(texture)
+            ?? throw new InvalidOperationException("generated Texture2D has no StreamingInfo instance");
+        Console.WriteLine($"STREAM_INFO_TYPE|{streamInfo.GetType().FullName}");
+        SetGeneratedProperty(streamInfo, "Path", "TextureFixture.resS");
+        SetGeneratedProperty(streamInfo, "Size", imageBytes.Length);
+        PropertyInfo? offsetProperty = null;
+        for (Type? current = streamInfo.GetType(); current is not null && offsetProperty is null; current = current.BaseType)
+        {
+            offsetProperty = current.GetProperty(
+                "Offset_UInt64",
+                BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly);
+            offsetProperty ??= current.GetProperty(
+                "Offset_UInt32",
+                BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly);
+        }
+        if (offsetProperty is null)
+        {
+            throw new InvalidOperationException("generated StreamingInfo has no writable offset property");
+        }
+        SetGeneratedProperty(streamInfo, offsetProperty.Name, 0);
+        SetGeneratedProperty(texture, "ImageData_C28", Array.Empty<byte>());
+        streamPath = Path.Combine(inputRoot, "TextureFixture.resS");
+        File.WriteAllBytes(streamPath, imageBytes);
+    }
+    else
+    {
+        SetGeneratedProperty(texture, "ImageData_C28", imageBytes);
+    }
+    PropertyInfo formatProperty = texture.GetType().GetProperty("Format_C28E")
+        ?? throw new InvalidOperationException("generated Texture2D has no Format_C28E property");
+    formatProperty.SetValue(texture, Enum.ToObject(formatProperty.PropertyType, 4)); // RGBA32
+    collection.GetType().GetMethod("AddAsset", BindingFlags.NonPublic | BindingFlags.Instance)!
+        .Invoke(collection, new[] { texture });
+
+    byte[] textureBody;
+    using (MemoryStream bodyStream = new())
+    using (AssetWriter writer = new(bodyStream, collection))
+    {
+        ((IAssetWritable)texture).WriteRelease(writer);
+        textureBody = bodyStream.ToArray();
+    }
+
+    SerializedType textureType = new() { RawTypeID = 28 };
+    SerializedFile serializedFile = new SerializedFileBuilder
+    {
+        Generation = FormatVersion.StoresTypeDependencies,
+        Version = version,
+        Platform = (BuildTarget)19,
+        EndianType = EndianType.LittleEndian,
+        HasTypeTree = false,
+        Types = { textureType },
+        Objects =
+        {
+            new ObjectInfo(textureType)
+            {
+                FileID = 44,
+                TypeID = 28,
+                SerializedTypeIndex = 0,
+                ObjectData = textureBody,
+            },
+        },
+    }.Build();
+    serializedFile.FilePath = "TextureFixture.assets";
+    byte[] inputBytes = serializedFile.ToByteArray();
+    string inputPath = Path.Combine(inputRoot, "TextureFixture.assets");
+    File.WriteAllBytes(inputPath, inputBytes);
+
+    FullConfiguration configuration = new();
+    configuration.ExportSettings.ImageExportFormat = Enum.Parse<ImageExportFormat>(imageFormatName, false);
+    configuration.ExportSettings.PreferOriginalTextureExtension = false;
+    ExportHandler handler = new(configuration);
+    var gameData = handler.LoadAndProcess([inputRoot], LocalFileSystem.Instance);
+    handler.Export(gameData, outputRoot, LocalFileSystem.Instance);
+
+    using StreamWriter rows = new(rowsPath, false, new UTF8Encoding(false));
+    rows.WriteLine("# Source-generated class-28 Texture2D through SpriteProcessor and ExportHandler.Export.");
+    WriteInputRow(rows, inputPath, inputBytes);
+    if (streamPath is not null)
+    {
+        WriteInputRow(rows, streamPath, imageBytes);
+    }
+    foreach (string outputPath in Directory.EnumerateFiles(outputRoot, "*", SearchOption.AllDirectories)
+        .OrderBy(path => Path.GetRelativePath(outputRoot, path), StringComparer.Ordinal))
+    {
+        string relativePath = Path.GetRelativePath(outputRoot, outputPath).Replace('\\', '/');
+        byte[] outputBytes = File.ReadAllBytes(outputPath);
+        if (relativePath.EndsWith(".meta", StringComparison.Ordinal))
+        {
+            string normalized = NormalizeTextureProjectMeta(new UTF8Encoding(false, true).GetString(outputBytes));
+            outputBytes = Encoding.UTF8.GetBytes(normalized);
+        }
+        rows.WriteLine($"SOURCE_OUTPUT|{relativePath}|{Convert.ToHexString(outputBytes)}");
+    }
+    Console.WriteLine($"TEXTURE_PROJECT|input={inputBytes.Length}|storage={storageMode}|files={Directory.GetFiles(outputRoot, "*", SearchOption.AllDirectories).Length}|format={imageFormatName}");
+    return 0;
+}
+
+static int DumpTextureEnums()
+{
+    Assembly generatedAssembly = Assembly.Load("AssetRipper.SourceGenerated");
+    foreach (string typeName in new[]
+    {
+        "AssetRipper.SourceGenerated.Enums.TextureUsageMode",
+        "AssetRipper.SourceGenerated.Enums.ColorSpace",
+        "AssetRipper.SourceGenerated.Enums.TextureImporterGenerateCubemap",
+        "AssetRipper.SourceGenerated.Enums.TextureImporterShape",
+        "AssetRipper.SourceGenerated.Enums.TextureImporterType",
+    })
+    {
+        Type? type = generatedAssembly.GetType(typeName);
+        if (type is null || !type.IsEnum)
+        {
+            Console.WriteLine($"ENUM_MISSING|{typeName}");
+            continue;
+        }
+        foreach (string name in Enum.GetNames(type))
+        {
+            object value = Enum.Parse(type, name);
+            Console.WriteLine($"ENUM|{typeName}|{name}|{Convert.ToInt64(value)}");
+        }
+    }
+    UnityVersion version = UnityVersion.Parse("2019.4.40f1");
+    GameBundle bundle = new();
+    ProcessedAssetCollection collection = new(bundle);
+    collection.GetType().GetProperty("Version")!.SetValue(collection, version);
+    object texture = MakeGenerated(
+        "AssetRipper.SourceGenerated.Classes.ClassID_28.Texture2D",
+        28,
+        44,
+        collection,
+        version);
+    PropertyInfo streamProperty = FindGeneratedProperty(texture, "StreamData_C28");
+    Console.WriteLine($"PROPERTY|StreamData_C28|{streamProperty.PropertyType.FullName}");
+    object? streamValue = streamProperty.GetValue(texture);
+    if (streamValue is not null)
+    {
+        Console.WriteLine($"STREAM_VALUE_TYPE|{streamValue.GetType().FullName}|valueType={streamValue.GetType().IsValueType}");
+    }
+    foreach (PropertyInfo property in streamProperty.PropertyType.GetProperties(BindingFlags.Public | BindingFlags.Instance))
+    {
+        Console.WriteLine($"STREAM_PROPERTY|{property.Name}|{property.PropertyType.FullName}|{property.CanWrite}");
+    }
+    return 0;
+}
+
+static object MakeGenerated(string factory, int classId, long pathId, AssetCollection collection, UnityVersion version)
+{
+    Assembly generatedAssembly = Assembly.Load("AssetRipper.SourceGenerated");
+    Type factoryType = generatedAssembly.GetType(factory)
+        ?? throw new InvalidOperationException($"generated factory type was not found: {factory}");
+    MethodInfo? create = factoryType.GetMethod("Create", new[] { typeof(AssetInfo), typeof(UnityVersion) })
+        ?? factoryType.GetMethod("Create", new[] { typeof(AssetInfo) });
+    if (create is null)
+    {
+        throw new InvalidOperationException($"generated factory has no Create method: {factory}");
+    }
+    object assetInfo = new AssetInfo(collection, pathId, classId);
+    object[] arguments = create.GetParameters().Length == 2
+        ? new[] { assetInfo, (object)version }
+        : new[] { assetInfo };
+    return create.Invoke(null, arguments)
+        ?? throw new InvalidOperationException($"generated factory returned null: {factory}");
+}
+
+static void SetGeneratedProperty(object asset, string propertyName, object value)
+{
+    PropertyInfo property = FindGeneratedProperty(asset, propertyName);
+    if (!property.CanWrite)
+    {
+        throw new InvalidOperationException($"generated asset property is not writable: {propertyName}");
+    }
+    if (value is int integer)
+    {
+        if (property.PropertyType.IsEnum)
+        {
+            value = Enum.ToObject(property.PropertyType, integer);
+        }
+        else if (property.PropertyType == typeof(uint))
+        {
+            value = (uint)integer;
+        }
+        else if (property.PropertyType == typeof(long))
+        {
+            value = (long)integer;
+        }
+        else if (property.PropertyType == typeof(ulong))
+        {
+            value = (ulong)integer;
+        }
+    }
+    else if (value is string stringValue && property.PropertyType.Name == "Utf8String")
+    {
+        value = Activator.CreateInstance(property.PropertyType, stringValue)
+            ?? throw new InvalidOperationException($"could not create Utf8String for {propertyName}");
+    }
+    property.SetValue(asset, value);
+}
+
+static PropertyInfo FindGeneratedProperty(object asset, string propertyName)
+{
+    Type type = asset.GetType();
+    for (Type? current = type; current is not null; current = current.BaseType)
+    {
+        PropertyInfo? property = current.GetProperty(
+            propertyName,
+            BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly);
+        if (property is not null)
+        {
+            return property;
+        }
+    }
+    throw new InvalidOperationException($"generated asset has no {propertyName} property");
+}
+
+static string NormalizeTextureProjectMeta(string text)
+{
+    text = text.Replace("\r\n", "\n", StringComparison.Ordinal);
+    text = Regex.Replace(text, "(?m)^guid: [0-9a-fA-F]{32}$", "guid: <GUID>");
+    return Regex.Replace(text, "(?m)^timeCreated: [0-9]+$", "timeCreated: <TIME>");
 }
 
 static byte[] BuildManagedRootFile()

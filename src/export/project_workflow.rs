@@ -39,13 +39,17 @@ use crate::processing::scene_collections::{
 };
 use crate::processing::scene_naming::SceneUnityVersion;
 use crate::processing::script_identity::ScriptIdentifier;
-use crate::resource::{RootResourceFileCatalog, StreamedResourceContentLimits};
+use crate::resource::{
+    resolve_and_read_streamed_resource_info, RootResourceFileCatalog,
+    StreamedResourceContentLimits, StreamedResourceContentResolution,
+};
 use crate::resources::shader::{script_has_decompiled_text, ShaderView, SHADER_CLASS_ID};
 use crate::serialized_file::object::ParsedObjectPayload;
 use crate::serialized_file::object_workspace::{ObjectWorkspace, WorkspaceObject};
 use crate::serialized_file::reference_graph::{MultiFilePPtrResolution, MultiFileReferenceGraph};
 use crate::serialized_file::workspace::SerializedFileWorkspace;
 
+use super::collection_claims::ClaimMainKind;
 use super::collection_kind::ExportCollectionKind;
 use super::collection_paths::{
     plan_script_export_paths, remove_assembly_file_extension, scripts_folder_name,
@@ -62,9 +66,9 @@ use super::prefab_collection::{
     PrefabExportIdPlan, PrefabExportPlanLimits, PrefabHierarchyAssetGroups, VersionedPrefabAsset,
 };
 use super::project_exporter::{
-    execute_project_export, export_extension_for, native_format_importer_for_version,
-    object_class_name, package_manifest_json, project_version_file,
-    select_collection_with_text_asset_validity,
+    claim_facts_for_shader_text, execute_project_export, export_extension_for,
+    native_format_importer_for_version, object_class_name, package_manifest_json,
+    project_version_file, select_collection_with_claim_facts,
     shader_importer_for_version_with_non_modifiable_textures, ObjectClassFacts, PlannedProjectFile,
     PlannedProjectMeta, PlannedProjectSupportFile, ProjectExportError, ProjectExportNotice,
     ProjectExportPlan, ProjectExportSettings, ProjectPathPlanner,
@@ -94,6 +98,9 @@ use super::shader_export::{
     YAML_SHADER_EXTENSION,
 };
 use super::streamed_assets::StreamedYamlAssetLimits;
+use super::texture_project::{
+    plan_texture_project_export, TextureImporterLayout, TextureProjectPlan,
+};
 use super::unity_yaml::{
     project_pointer_to_unity_yaml, write_unity_yaml_documents, UnityYamlMappingStyle,
     UnityYamlNode, UnityYamlSequenceStyle, UnityYamlWriteLimits,
@@ -169,6 +176,8 @@ enum ObjectRoute {
     Asset,
     /// `TextAssetExportCollection`: raw `m_Script` bytes, mode-based extension, and TextScriptImporter.
     TextAsset,
+    /// `TextureExportCollection`: a converted image plus the generated TextureImporter sidecar.
+    TextureImage,
     /// `ShaderExportCollection` using `DummyShaderTextExporter` or `SimpleShaderExporter`.
     ShaderText,
     /// `YamlShaderExportCollection` plus its version-gated Unity editor patches.
@@ -197,6 +206,7 @@ struct RoutedObject<'a> {
     facts: ObjectClassFacts,
     shader_view: Option<ShaderView>,
     text_asset_export: Option<TextAssetExportDetails>,
+    texture_export: Option<TextureProjectPlan>,
     script_export: Option<ScriptExportDetails>,
     selection: super::project_exporter::CollectionSelection,
     route: ObjectRoute,
@@ -507,14 +517,22 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
             } else {
                 None
             };
-            let selection = select_collection_with_text_asset_validity(
-                facts,
-                settings_facts,
-                shader_text,
-                text_asset_script
-                    .as_ref()
-                    .is_some_and(|script| !script.is_empty()),
-            )?;
+            let standalone_texture = class_id == 28
+                && matches!(&object.factory.kind, FactoryAssetKind::Generated(_))
+                && object.recovered_type_tree.is_some()
+                && !has_sprite_reference_to_object(reference_graph, file_index, object_index);
+            let texture_route_supported = standalone_texture
+                && TextureImporterLayout::for_project_version(project_version).is_some();
+            let mut claim_facts = claim_facts_for_shader_text(facts, settings_facts, shader_text);
+            claim_facts.data_valid = text_asset_script
+                .as_ref()
+                .is_some_and(|script| !script.is_empty());
+            if texture_route_supported {
+                // SpriteProcessor creates this generated main asset for a standalone ITexture2D.
+                // Keep selection in the ordinary registration walk with the processed fact.
+                claim_facts.main = ClaimMainKind::SpriteInformation;
+            }
+            let selection = select_collection_with_claim_facts(facts, settings_facts, claim_facts)?;
             let text_asset_export = if selection.exporter == "TextAssetExporter" {
                 let script = text_asset_script.ok_or_else(|| {
                     invalid_project("TextAssetExporter was selected without decoded m_Script bytes")
@@ -522,6 +540,33 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
                 let text = String::from_utf8_lossy(&script);
                 let extension = text_export_extension(None, settings.text_export_mode, &text);
                 Some(TextAssetExportDetails { script, extension })
+            } else {
+                None
+            };
+            let texture_export = if texture_route_supported {
+                if selection.exporter != "TextureAssetExporter" {
+                    return Err(invalid_project(format!(
+                        "standalone generated Texture2D selected {}, expected the registered TextureAssetExporter",
+                        selection.exporter
+                    )));
+                }
+                let payload = payload.ok_or_else(|| {
+                    invalid_project(
+                        "TextureAssetExporter was selected without decoded Texture2D fields",
+                    )
+                })?;
+                let asset_bundle_name = object_asset_bundle_name(payload);
+                Some(plan_texture_project_export(
+                    &payload.root,
+                    project_version,
+                    settings,
+                    asset_bundle_name.as_deref(),
+                ).map_err(|error| {
+                    invalid_project(format!(
+                        "file {file_index} object {object_index} PathID {} Texture2D project planning failed: {error}",
+                        object.path_id
+                    ))
+                })?)
             } else {
                 None
             };
@@ -602,6 +647,9 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
                 {
                     (ObjectRoute::ShaderText, "", None)
                 }
+                ExportCollectionKind::Asset if texture_export.is_some() => {
+                    (ObjectRoute::TextureImage, "", None)
+                }
                 ExportCollectionKind::Asset => {
                     (ObjectRoute::Asset, "", asset_family_fallback(selection.collection_name))
                 }
@@ -666,6 +714,11 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
                     None,
                 ),
             };
+            let fallback_reason = if standalone_texture && !texture_route_supported {
+                Some("the source TextureExportCollection image/importer route is not yet ported for this Unity importer version or Sprite group")
+            } else {
+                fallback_reason
+            };
             let label = if route == ObjectRoute::Skipped {
                 format!("{} (class {class_id})", selection.collection_name)
             } else {
@@ -711,6 +764,7 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
             };
             let file_id = match route {
                 ObjectRoute::Asset
+                | ObjectRoute::TextureImage
                 | ObjectRoute::TextAsset
                 | ObjectRoute::ShaderText
                 | ObjectRoute::ShaderYaml => crate::export::ids::get_main_export_id(class_id, 0)
@@ -743,6 +797,7 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
                 facts,
                 shader_view,
                 text_asset_export,
+                texture_export,
                 script_export,
                 selection,
                 route,
@@ -1067,6 +1122,96 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
                 output.extend_from_slice(script);
                 output
             }
+            ObjectRoute::TextureImage => {
+                let texture = entry.texture_export.as_ref().ok_or_else(|| {
+                    invalid_project("TextureExportCollection route has no decoded texture plan")
+                })?;
+                let loaded_file =
+                    workspace
+                        .files()
+                        .get(entry.object.file_index)
+                        .ok_or_else(|| {
+                            invalid_project(format!(
+                                "Texture2D references absent SerializedFile {}",
+                                entry.object.file_index
+                            ))
+                        })?;
+                let stream_content = if texture.view.image_data.is_empty() {
+                    if let Some(stream_info) = texture
+                        .view
+                        .stream_data
+                        .as_ref()
+                        .filter(|info| info.is_set())
+                    {
+                        match resolve_and_read_streamed_resource_info(
+                            filesystem,
+                            workspace,
+                            loaded_file.container_bundle_index,
+                            stream_info,
+                            root_catalog,
+                            resource_provider,
+                            limits.streamed_content,
+                        )
+                        .map_err(|error| {
+                            invalid_project(format!(
+                                "file {} object {} PathID {} Texture2D stream {:?} could not be read: {error}",
+                                entry.object.file_index,
+                                entry.object.object_index,
+                                entry.object.path_id,
+                                stream_info.path
+                            ))
+                        })? {
+                            StreamedResourceContentResolution::Resolved { bytes, .. } => {
+                                Some(bytes)
+                            }
+                            StreamedResourceContentResolution::Missing {
+                                unavailable_data_paths,
+                            } => {
+                                return Err(invalid_project(format!(
+                                    "file {} object {} PathID {} Texture2D stream {:?} is missing; unavailable data paths: [{}]",
+                                    entry.object.file_index,
+                                    entry.object.object_index,
+                                    entry.object.path_id,
+                                    stream_info.path,
+                                    unavailable_data_paths.join(", ")
+                                )))
+                            }
+                            StreamedResourceContentResolution::Unset => {
+                                return Err(invalid_project(format!(
+                                    "file {} object {} PathID {} Texture2D stream {:?} became unset during resolution",
+                                    entry.object.file_index,
+                                    entry.object.object_index,
+                                    entry.object.path_id,
+                                    stream_info.path
+                                )))
+                            }
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                texture
+                    .export_image(
+                        stream_content.as_deref(),
+                        loaded_file
+                            .metadata
+                            .prefix
+                            .target_platform
+                            .unwrap_or_default() as i32,
+                        loaded_file.metadata.prefix.body_endian
+                            == crate::io::binary::Endian::Little,
+                    )
+                    .map_err(|error| {
+                        invalid_project(format!(
+                            "file {} object {} PathID {} Texture2D image conversion failed: {error}",
+                            entry.object.file_index,
+                            entry.object.object_index,
+                            entry.object.path_id
+                        ))
+                    })?
+            }
             ObjectRoute::Asset | ObjectRoute::ShaderYaml | ObjectRoute::Manager => {
                 let source = identity_of(entry);
                 let document = workspace_object_to_unity_yaml_document_with_streamed_resources(
@@ -1123,6 +1268,12 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
                 };
                 planner.plan_asset_path(&identity, extension)?
             }
+            ObjectRoute::TextureImage => {
+                let texture = entry.texture_export.as_ref().ok_or_else(|| {
+                    invalid_project("TextureExportCollection route has no planned image extension")
+                })?;
+                planner.plan_asset_path(&identity, &texture.extension)?
+            }
             ObjectRoute::TextAsset => {
                 let text_asset = entry
                     .text_asset_export
@@ -1173,6 +1324,17 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
                         .and_then(object_asset_bundle_name)
                         .as_deref(),
                 )?,
+            }),
+            ObjectRoute::TextureImage => Some(PlannedProjectMeta {
+                importer_class: "TextureImporter".to_owned(),
+                importer: entry
+                    .texture_export
+                    .as_ref()
+                    .ok_or_else(|| {
+                        invalid_project("TextureExportCollection route has no importer data")
+                    })?
+                    .importer
+                    .clone(),
             }),
             ObjectRoute::TextAsset => {
                 let asset_bundle_name = entry
@@ -2550,6 +2712,21 @@ fn source_object_key(file_index: usize, object_index: usize) -> ExportAssetObjec
         collection: ExportAssetCollectionIdentity::SerializedFile { file_index },
         object_index,
     }
+}
+
+fn has_sprite_reference_to_object(
+    reference_graph: &MultiFileReferenceGraph<'_>,
+    file_index: usize,
+    object_index: usize,
+) -> bool {
+    const SPRITE_CLASS_ID: i32 = 213;
+    reference_graph
+        .references_to_object(file_index, object_index)
+        .any(|reference| {
+            reference_graph
+                .object_class_id(reference.source_file_index, reference.source_object_index)
+                == Some(SPRITE_CLASS_ID)
+        })
 }
 
 fn opaque_factory_object_keys(

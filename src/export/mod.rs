@@ -54,6 +54,7 @@ pub mod settings;
 pub mod settings_file;
 pub mod shader_export;
 pub mod streamed_assets;
+pub mod texture_project;
 pub mod unity_yaml;
 pub mod value_yaml;
 pub mod workspace_yaml;
