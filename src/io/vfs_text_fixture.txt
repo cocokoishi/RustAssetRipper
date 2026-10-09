@@ -1,0 +1,10 @@
+# Frozen AssetRipper.IO.Files VirtualFileSystem on .NET SDK 10.0.401.
+# Rows are UTF-8 hex of File.ReadAllText output for each malformed input byte sequence.
+VFS_TEXT|isolated-invalid=EFBFBD
+VFS_TEXT|stray-continuations=EFBFBDEFBFBD
+VFS_TEXT|bad-continuation=EFBFBD28
+VFS_TEXT|invalid-lead-followed-by-ascii=EFBFBD41
+VFS_TEXT|truncated-three-byte=EFBFBD
+VFS_TEXT|overlong=EFBFBDEFBFBD
+VFS_TEXT|surrogate-scalar=EFBFBDEFBFBDEFBFBD
+VFS_TEXT|above-unicode-range=EFBFBDEFBFBDEFBFBDEFBFBD

@@ -1,13 +1,13 @@
 //! In-memory virtual filesystem used by containers and recovered Unity files.
 //!
 //! Covers the `VirtualFileSystem` CRUD, enumeration, `Count`, `Clear`, `ReadAllBytes`/
-//! `WriteAllBytes`, UTF-8 `ReadAllText`/`WriteAllText`, `TemporaryDirectory` rules,
+//! `WriteAllBytes`, encoded `ReadAllText`/`WriteAllText`, `TemporaryDirectory` rules,
 //! and logical split-group open/existence (including the `GetFilePath` base
 //! resolution that explicit path-list batches use so one path represents each
 //! split group).
 //!
-//! Deliberately open: the `Encoding` text overloads (only UTF-8 ports), GUID-named
-//! temporary file/directory creation, `DeleteTemporaryDirectory` (which needs the
+//! Deliberately open: GUID-named temporary file/directory creation,
+//! `DeleteTemporaryDirectory` (which needs the
 //! still-unported recursive directory delete), real-filesystem mounting, and the
 //! `GetUniqueName` uniqueness-counter loop with its reserved-name gate (both need
 //! live directory state; only the length stage ports, as
@@ -16,6 +16,9 @@
 use std::collections::BTreeMap;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
+use super::local_filesystem::{
+    decode_text_with_fallbacks, encode_text_with_fallbacks, TextEncoding, TextEncodingFallbacks,
+};
 use crate::io::stream::{MultiFileStream, SmartStream};
 
 /// Resource limits for paths and entries held by [`VirtualFileSystem`].
@@ -522,17 +525,39 @@ impl VirtualFileSystem {
     }
 
     /// `File.ReadAllText(path)`: UTF-8 text decoded from the whole file, bounded like
-    /// [`VirtualFileSystem::read_all_bytes`]. Non-UTF-8 content is an explicit
-    /// `InvalidData` error rather than a lossy replacement. The `Encoding` overloads
-    /// stay open: only UTF-8 has a portable counterpart here.
+    /// [`VirtualFileSystem::read_all_bytes`]. Invalid byte sequences use the source's default
+    /// UTF-8 decoder replacement fallback (`U+FFFD`). A leading BOM is decoded as U+FEFF.
     pub fn read_all_text(&self, path: &str, maximum_bytes: usize) -> io::Result<String> {
+        self.read_all_text_with_encoding(path, maximum_bytes, TextEncoding::Utf8)
+    }
+
+    /// Reads bounded text with an explicit encoding and its default fallback behavior. Unlike
+    /// local `File.ReadAllText`, the virtual filesystem does not detect or strip a BOM.
+    pub fn read_all_text_with_encoding(
+        &self,
+        path: &str,
+        maximum_bytes: usize,
+        encoding: TextEncoding,
+    ) -> io::Result<String> {
+        self.read_all_text_with_encoding_and_fallbacks(
+            path,
+            maximum_bytes,
+            encoding,
+            &TextEncodingFallbacks::for_encoding(encoding),
+        )
+    }
+
+    /// Reads bounded text with explicit encoder/decoder fallback policies. Encoding matches
+    /// `Encoding.GetString`: no BOM detection is performed.
+    pub fn read_all_text_with_encoding_and_fallbacks(
+        &self,
+        path: &str,
+        maximum_bytes: usize,
+        encoding: TextEncoding,
+        fallbacks: &TextEncodingFallbacks,
+    ) -> io::Result<String> {
         let bytes = self.read_all_bytes(path, maximum_bytes)?;
-        String::from_utf8(bytes).map_err(|error| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("file '{path}' is not valid UTF-8: {error}"),
-            )
-        })
+        decode_text_with_fallbacks(&bytes, encoding, fallbacks, false)
     }
 
     /// `File.WriteAllText(path, contents)`: UTF-8 bytes written through
@@ -540,6 +565,34 @@ impl VirtualFileSystem {
     /// an existing file is truncated first.
     pub fn write_all_text(&mut self, path: &str, contents: &str) -> io::Result<()> {
         self.write_all_bytes(path, contents.as_bytes())
+    }
+
+    /// Encodes text with the selected encoding's default fallback behavior and writes its
+    /// bytes without an encoding preamble, matching `Encoding.GetBytes` in the virtual FS.
+    pub fn write_all_text_with_encoding(
+        &mut self,
+        path: &str,
+        contents: &str,
+        encoding: TextEncoding,
+    ) -> io::Result<()> {
+        self.write_all_text_with_encoding_and_fallbacks(
+            path,
+            contents,
+            encoding,
+            &TextEncodingFallbacks::for_encoding(encoding),
+        )
+    }
+
+    /// Encodes text with explicit fallback policies and writes bytes without a preamble.
+    pub fn write_all_text_with_encoding_and_fallbacks(
+        &mut self,
+        path: &str,
+        contents: &str,
+        encoding: TextEncoding,
+        fallbacks: &TextEncodingFallbacks,
+    ) -> io::Result<()> {
+        let bytes = encode_text_with_fallbacks(contents, encoding, fallbacks, false)?;
+        self.write_all_bytes(path, &bytes)
     }
 
     pub fn enumerate_directories(
@@ -1416,13 +1469,15 @@ mod tests {
                 .kind(),
             std::io::ErrorKind::InvalidData
         );
-        // Non-UTF-8 bytes are an explicit error, never lossy text.
+        // The frozen source delegates to Encoding.UTF8.GetString, whose default decoder
+        // replacement fallback emits U+FFFD for malformed byte sequences.
         filesystem
             .write_all_bytes("/docs/raw.bin", &[0xff, 0xfe])
             .unwrap();
-        let error = filesystem.read_all_text("/docs/raw.bin", 64).unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
-        assert!(error.to_string().contains("/docs/raw.bin"));
+        assert_eq!(
+            filesystem.read_all_text("/docs/raw.bin", 64).unwrap(),
+            "\u{FFFD}\u{FFFD}"
+        );
         // Writing text still requires an existing parent directory.
         assert_eq!(
             filesystem
@@ -1431,6 +1486,43 @@ mod tests {
                 .kind(),
             std::io::ErrorKind::NotFound
         );
+    }
+
+    #[test]
+    fn virtual_file_utf8_replacement_matches_source_runtime_corpus() {
+        let input_cases: [(&str, &[u8]); 8] = [
+            ("isolated-invalid", &[0xff]),
+            ("stray-continuations", &[0x80, 0x81]),
+            ("bad-continuation", &[0xc3, 0x28]),
+            ("invalid-lead-followed-by-ascii", &[0xf5, 0x41]),
+            ("truncated-three-byte", &[0xe2, 0x82]),
+            ("overlong", &[0xc0, 0xaf]),
+            ("surrogate-scalar", &[0xed, 0xa0, 0x80]),
+            ("above-unicode-range", &[0xf4, 0x90, 0x80, 0x80]),
+        ];
+        let source = include_str!("vfs_text_fixture.txt");
+        let expected = source
+            .lines()
+            .filter_map(|line| line.strip_prefix("VFS_TEXT|"))
+            .filter_map(|line| line.split_once('='))
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(expected.len(), input_cases.len());
+
+        for (name, bytes) in input_cases {
+            let mut filesystem = VirtualFileSystem::new();
+            filesystem.write_all_bytes("/input.bin", bytes).unwrap();
+            let actual = filesystem.read_all_text("/input.bin", 64).unwrap();
+            let actual_hex = actual
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02X}"))
+                .collect::<String>();
+            assert_eq!(
+                expected.get(name).copied(),
+                Some(actual_hex.as_str()),
+                "source mismatch for malformed UTF-8 case {name}"
+            );
+        }
     }
 
     /// The `IsPathRooted` rule behind temporary-directory storage: only a leading
