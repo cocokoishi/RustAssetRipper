@@ -14,12 +14,20 @@
 | Command | Exit code | Result |
 |---|---:|---|
 | `& 'C:\Users\koishi\.cargo\bin\cargo.exe' fmt --all -- --check` | 0 | All Rust files are formatted |
-| `TEMP/TMP=target/test-tmp; cargo test --workspace --locked --quiet` | 0 | 1,483 library tests passed (1 ignored), 73 CLI tests passed; 0 doc tests |
-| `cargo test --workspace --locked custom_curve::tests` | 0 | Focused custom-curve module suite: 12 passed |
-| `& 'C:\Users\koishi\.cargo\bin\cargo.exe' clippy --workspace --all-targets --locked -- -D warnings` | 0 | Passed with warnings denied |
+| `& "$env:USERPROFILE\.cargo\bin\cargo.exe" test --workspace --locked --quiet` | 0 | 1,537 library tests passed (1 ignored), 99 CLI tests passed, 1 doc test ignored |
+| `& "$env:USERPROFILE\.cargo\bin\cargo.exe" clippy --workspace --all-targets --all-features --locked -- -D warnings` | 0 | Passed with warnings denied |
 | `& 'C:\Users\koishi\.cargo\bin\cargo.exe' tree --locked` | 0 | Locked graph includes `brotli-decompressor` 5.0.3, `flate2` 1.1.10 with pure-Rust `miniz_oxide` 0.9.1, `lzma-rs` 0.3.0, and `ruzstd` 0.9.0; full graph is recorded in `docs/dependencies-and-licenses.md` |
 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File '.\tools\verify-baseline.ps1'` | 0 | Verified 1,449 baseline files; no missing, changed, or unlisted files |
 | `dotnet --version` | 0 | .NET SDK 10.0.401 available; isolated reference build and tests are recorded below |
+| `& $dotnetPath run --project tools/probes/local-filesystem/LocalFileSystemProbe.csproj --configuration Release -p:ReferenceRoot=$referenceRoot -- target/enumeration-timing-source-probe` | 0 | Isolated frozen-source probe pins call-time missing-path/pattern errors, file-root and root-deletion iteration behavior, and entries added before iteration |
+| `cargo test --workspace --locked directory_enumeration_error_timing_matches_reference_runtime_fixture` | 0 | Source timing fixture matches Rust call and first-iteration outcomes |
+
+## 2026-10-08 filesystem enumeration timing differential
+
+- Source command, with `$dotnetPath='C:\Users\koishi\AppData\Local\Microsoft\dotnet\dotnet.exe'` and `$referenceRoot=Join-Path $env:LOCALAPPDATA 'Temp\opencode\ar-ref\Source\0Bins\AssetRipper.GUI.Free\Release'`: `& $dotnetPath run --project tools/probes/local-filesystem/LocalFileSystemProbe.csproj --configuration Release -p:ReferenceRoot=$referenceRoot -- target/enumeration-timing-source-probe`. Exit 0; the referenced DLL is from the isolated build, not the frozen source directory.
+- `src/io/enumeration_timing_fixture.txt` records 12 normalized observations. `EnumerateFiles` and `EnumerateDirectories` throw on a missing root at call time; malformed patterns win over missing-root errors; an existing file path is accepted at call time and fails when iterated; an empty path fails at call time; removal after a successful query yields no entries; additions before iteration are visible.
+- `directory_enumeration_error_timing_matches_reference_runtime_fixture` passes on Windows. Rust now checks path existence after pattern validation while preserving lazy directory reads; it suppresses a root `NotFound` that occurs after query creation. Full locked workspace tests pass (1,537 library passed, 1 ignored; 99 CLI passed; 1 doc test ignored). Warnings-denied all-target/all-feature Clippy, format check, and the 1,449-file baseline verifier pass.
+- This settles the enumeration timing branch only. `IO-STREAM-001` stays open for end-to-end stream/container integration and remaining platform behavior. The parity ledger remains at 386 rows and 24 non-verified; Phase 1 is OPEN. No user AssetBundle or UABEA content was used.
 
 ## 2026-10-07 custom-curve resolver increment
 

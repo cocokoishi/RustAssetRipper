@@ -629,6 +629,16 @@ impl DirectoryEnumeration {
         directories: bool,
     ) -> io::Result<Self> {
         validate_search_pattern(search_pattern)?;
+        if root.as_os_str().is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "directory enumeration path must not be empty",
+            ));
+        }
+        // System.IO.Directory.EnumerateFiles/EnumerateDirectories validates that the path
+        // exists when the enumerable is requested, while it defers opening the iterator until
+        // MoveNext. Keep the metadata check separate from read_dir so files still fail lazily.
+        fs::metadata(root)?;
         Ok(Self {
             root: Some(root.to_path_buf()),
             frames: Vec::new(),
@@ -689,6 +699,11 @@ impl Iterator for DirectoryEnumeration {
                 };
                 if let Err(error) = self.push_directory(root) {
                     self.finished = true;
+                    // A directory can disappear after the source-compatible call-time
+                    // existence check. The .NET iterator yields no items in that case.
+                    if error.kind() == io::ErrorKind::NotFound {
+                        return None;
+                    }
                     return Some(Err(error));
                 }
             }
@@ -2193,11 +2208,132 @@ mod tests {
             .enumerate_files(&root, "nested/*.txt", SearchOption::AllDirectories)
             .is_err());
         let missing = root.join("removed-after-enumerator-creation");
-        let mut lazy = filesystem
-            .enumerate_files(&missing, "*", SearchOption::TopDirectoryOnly)
+        assert!(matches!(
+            filesystem.enumerate_files(&missing, "*", SearchOption::TopDirectoryOnly),
+            Err(error) if error.kind() == io::ErrorKind::NotFound
+        ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn directory_enumeration_error_timing_matches_reference_runtime_fixture() {
+        let root = crate::test_support::test_temp_root().join("local-fs-enumeration-timing");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let filesystem = LocalFileSystem::with_roots(&root, root.join("system"));
+        let missing = root.join("missing");
+        let mut actual = Vec::new();
+
+        fn error_name(error: &io::Error) -> &'static str {
+            match error.kind() {
+                io::ErrorKind::NotFound => "DirectoryNotFoundException",
+                io::ErrorKind::InvalidInput => "ArgumentException",
+                io::ErrorKind::NotADirectory => "IOException",
+                _ => "other",
+            }
+        }
+
+        fn call_result<T>(result: io::Result<T>) -> &'static str {
+            match result {
+                Ok(_) => "ok",
+                Err(error) => error_name(&error),
+            }
+        }
+
+        fn first_move(enumeration: &mut super::DirectoryEnumeration) -> &'static str {
+            match enumeration.next() {
+                Some(Ok(_)) => "true",
+                Some(Err(error)) => error_name(&error),
+                None => "false",
+            }
+        }
+
+        actual.push(format!(
+            "ENUM_TIMING|missing-files|call={}",
+            call_result(filesystem.enumerate_files_in(&missing))
+        ));
+        actual.push(format!(
+            "ENUM_TIMING|missing-get-files|call={}",
+            call_result(filesystem.get_files(&missing))
+        ));
+        actual.push(format!(
+            "ENUM_TIMING|missing-dirs|call={}",
+            call_result(filesystem.enumerate_directories_in(&missing))
+        ));
+        actual.push(format!(
+            "ENUM_TIMING|missing-and-invalid|call={}",
+            call_result(filesystem.enumerate_files_matching(&missing, "bad\0pattern"))
+        ));
+
+        let file_root = root.join("file-root");
+        std::fs::write(&file_root, b"file").unwrap();
+        let mut file_root_enumeration = filesystem.enumerate_files_in(&file_root).unwrap();
+        actual.push("ENUM_TIMING|file-as-root|call=ok".to_owned());
+        actual.push(format!(
+            "ENUM_TIMING|file-as-root|first-move={}",
+            first_move(&mut file_root_enumeration)
+        ));
+
+        actual.push(format!(
+            "ENUM_TIMING|empty-path|call={}",
+            call_result(filesystem.enumerate_files_in(Path::new("")))
+        ));
+        actual.push(format!(
+            "ENUM_TIMING|invalid-pattern|call={}",
+            call_result(filesystem.enumerate_files_matching(&root, "bad\0pattern"))
+        ));
+
+        let removed_root = root.join("removed-root");
+        std::fs::create_dir(&removed_root).unwrap();
+        let mut removed_enumeration = filesystem.enumerate_files_in(&removed_root).unwrap();
+        std::fs::remove_dir(&removed_root).unwrap();
+        actual.push(format!(
+            "ENUM_TIMING|removed-root|first-move={}",
+            first_move(&mut removed_enumeration)
+        ));
+
+        let removed_directory_root = root.join("removed-directory-root");
+        std::fs::create_dir(&removed_directory_root).unwrap();
+        let mut removed_directory_enumeration = filesystem
+            .enumerate_directories_in(&removed_directory_root)
             .unwrap();
-        assert!(lazy.next().unwrap().is_err());
-        assert!(lazy.next().is_none());
+        std::fs::remove_dir(&removed_directory_root).unwrap();
+        actual.push(format!(
+            "ENUM_TIMING|removed-directory-root|first-move={}",
+            first_move(&mut removed_directory_enumeration)
+        ));
+
+        let late_file_root = root.join("late-file-root");
+        std::fs::create_dir(&late_file_root).unwrap();
+        let mut late_file_enumeration = filesystem
+            .enumerate_files_matching(&late_file_root, "late.txt")
+            .unwrap();
+        std::fs::write(late_file_root.join("late.txt"), b"late").unwrap();
+        actual.push(format!(
+            "ENUM_TIMING|late-file|move-result={}",
+            first_move(&mut late_file_enumeration)
+        ));
+
+        let late_directory_root = root.join("late-directory-root");
+        std::fs::create_dir(&late_directory_root).unwrap();
+        let mut late_directory_enumeration = filesystem
+            .enumerate_directories_matching(&late_directory_root, "late")
+            .unwrap();
+        std::fs::create_dir(late_directory_root.join("late")).unwrap();
+        actual.push(format!(
+            "ENUM_TIMING|late-directory|move-result={}",
+            first_move(&mut late_directory_enumeration)
+        ));
+
+        let expected: Vec<&str> = include_str!("enumeration_timing_fixture.txt")
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .collect();
+        assert_eq!(
+            actual.iter().map(String::as_str).collect::<Vec<_>>(),
+            expected
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

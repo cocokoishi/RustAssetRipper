@@ -2,6 +2,18 @@
 
 This log records behavior differences found between the Rust port and the frozen local source. A source-code analysis is identified as such; it is not described as an executed C# differential.
 
+## DIFF-LOCAL-FS-ENUMERATION-TIMING-001 — directory enumeration validates paths at source-compatible stages
+
+| Field | Finding |
+|---|---|
+| Status | Source-runtime matched and fixed for missing roots, invalid patterns, file paths, roots removed after query creation, and entries added before iteration |
+| Source location | `LocalFileSystem.g.cs` delegates `EnumerateFiles`/`EnumerateDirectories` to `System.IO.Directory`; `GetFiles`/`GetDirectories` delegate to their eager counterparts |
+| Input evidence | `tools/probes/local-filesystem/Program.cs` runs against the isolated frozen `AssetRipper.IO.Files.dll` under .NET SDK 10.0.401. Its normalized outcomes are committed in `src/io/enumeration_timing_fixture.txt`; the probe uses only scratch paths under `target/`. |
+| Source behavior | Missing roots fail with `DirectoryNotFoundException` when the enumeration method is called; malformed patterns fail with `ArgumentException` before root lookup; an existing file path is accepted by the call and fails with `IOException` on first iteration. If a valid root is deleted after query creation, first iteration returns no entries. Files/directories created after query creation are visible when iteration begins. |
+| Rust behavior and repair | `DirectoryEnumeration::new` now checks patterns first, rejects empty paths, and performs a metadata existence check at call time without requiring a directory. It still opens/reads the directory lazily. A root that disappears after the successful call ends with an empty iterator; a non-directory path still errors on iteration. |
+| Regression evidence | `directory_enumeration_error_timing_matches_reference_runtime_fixture` compares the source fixture with Rust call and first-iteration outcomes for files and directories. The existing `local_directory_enumeration_matches_search_options_and_patterns` retains the search and recursion checks. |
+| Scope | This settles the deferred-enumeration timing branch only. Entry ordering, which the baseline does not promise and Rust sorts for deterministic output, is unchanged. Other stream/container integration and platform checks remain open under `IO-STREAM-001`. |
+
 ## DIFF-BROTLI-METADATA-001 — metadata length off by one in source detection
 
 | Field | Finding |

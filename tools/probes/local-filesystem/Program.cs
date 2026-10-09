@@ -90,6 +90,44 @@ Console.WriteLine($"ENUMERATE_DIRS|top={RelativeList(fileSystem.Directory.Enumer
 Console.WriteLine($"ENUMERATE_DIRS|pattern={RelativeList(fileSystem.Directory.EnumerateDirectories(enumerationRoot, "*"))}");
 Console.WriteLine($"ENUMERATE_DIRS|recursive={RelativeList(fileSystem.Directory.EnumerateDirectories(enumerationRoot, "*", SearchOption.AllDirectories))}");
 
+string missingEnumerationRoot = Path.Combine(scratch, "missing-enumeration-root");
+Console.WriteLine($"ENUM_TIMING|missing-files|call={Capture(() => _ = fileSystem.Directory.EnumerateFiles(missingEnumerationRoot))}");
+Console.WriteLine($"ENUM_TIMING|missing-get-files|call={Capture(() => _ = fileSystem.Directory.GetFiles(missingEnumerationRoot))}");
+Console.WriteLine($"ENUM_TIMING|missing-dirs|call={Capture(() => _ = fileSystem.Directory.EnumerateDirectories(missingEnumerationRoot))}");
+Console.WriteLine($"ENUM_TIMING|missing-and-invalid|call={Capture(() => _ = fileSystem.Directory.EnumerateFiles(missingEnumerationRoot, "bad\0pattern"))}");
+
+string fileEnumerationRoot = Path.Combine(scratch, "enumeration-root-file");
+File.WriteAllText(fileEnumerationRoot, "file");
+IEnumerable<string>? fileRootEnumeration = null;
+Console.WriteLine($"ENUM_TIMING|file-as-root|call={Capture(() => fileRootEnumeration = fileSystem.Directory.EnumerateFiles(fileEnumerationRoot))}");
+Console.WriteLine($"ENUM_TIMING|file-as-root|first-move={(fileRootEnumeration is null ? "not-created" : FirstMove(fileRootEnumeration))}");
+Console.WriteLine($"ENUM_TIMING|empty-path|call={Capture(() => _ = fileSystem.Directory.EnumerateFiles(""))}");
+
+Console.WriteLine($"ENUM_TIMING|invalid-pattern|call={Capture(() => _ = fileSystem.Directory.EnumerateFiles(enumerationRoot, "bad\0pattern"))}");
+
+string removedEnumerationRoot = Path.Combine(scratch, "removed-enumeration-root-" + Guid.NewGuid().ToString("N"));
+Directory.CreateDirectory(removedEnumerationRoot);
+IEnumerable<string> removedRootEnumeration = fileSystem.Directory.EnumerateFiles(removedEnumerationRoot);
+Directory.Delete(removedEnumerationRoot);
+Console.WriteLine($"ENUM_TIMING|removed-root|first-move={FirstMove(removedRootEnumeration)}");
+
+string removedDirectoryEnumerationRoot = Path.Combine(scratch, "removed-directory-enumeration-root-" + Guid.NewGuid().ToString("N"));
+Directory.CreateDirectory(removedDirectoryEnumerationRoot);
+IEnumerable<string> removedDirectoryEnumeration = fileSystem.Directory.EnumerateDirectories(removedDirectoryEnumerationRoot);
+Directory.Delete(removedDirectoryEnumerationRoot);
+Console.WriteLine($"ENUM_TIMING|removed-directory-root|first-move={FirstMove(removedDirectoryEnumeration)}");
+
+string lateFileRoot = Path.Combine(scratch, "late-file-root");
+Directory.CreateDirectory(lateFileRoot);
+IEnumerable<string> lateFileEnumeration = fileSystem.Directory.EnumerateFiles(lateFileRoot, "late.txt");
+File.WriteAllText(Path.Combine(lateFileRoot, "late.txt"), "late");
+Console.WriteLine($"ENUM_TIMING|late-file|move-result={FirstMove(lateFileEnumeration)}");
+string lateDirectoryRoot = Path.Combine(scratch, "late-directory-root");
+Directory.CreateDirectory(lateDirectoryRoot);
+IEnumerable<string> lateDirectoryEnumeration = fileSystem.Directory.EnumerateDirectories(lateDirectoryRoot, "late");
+Directory.CreateDirectory(Path.Combine(lateDirectoryRoot, "late"));
+Console.WriteLine($"ENUM_TIMING|late-directory|move-result={FirstMove(lateDirectoryEnumeration)}");
+
 string utf8Path = Path.Combine(scratch, "utf8.txt");
 fileSystem.File.WriteAllText(utf8Path, "café");
 Console.WriteLine($"TEXT|default-write={Convert.ToHexString(File.ReadAllBytes(utf8Path))}");
@@ -364,4 +402,30 @@ static bool DeleteMissing(LocalFileSystem fileSystem, string path)
 {
 	fileSystem.File.Delete(path);
 	return !File.Exists(path);
+}
+
+static string Capture(Action action)
+{
+	try
+	{
+		action();
+		return "ok";
+	}
+	catch (Exception exception)
+	{
+		return exception.GetType().Name;
+	}
+}
+
+static string FirstMove(IEnumerable<string> paths)
+{
+	try
+	{
+		using IEnumerator<string> enumerator = paths.GetEnumerator();
+		return enumerator.MoveNext() ? "true" : "false";
+	}
+	catch (Exception exception)
+	{
+		return exception.GetType().Name;
+	}
 }

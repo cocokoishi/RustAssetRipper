@@ -1,0 +1,14 @@
+# Deferred LocalFileSystem enumeration timing from AssetRipper.IO.Files.dll, .NET 10.0.401.
+# Source probe: tools/probes/local-filesystem; Rust categories normalize source exceptions.
+ENUM_TIMING|missing-files|call=DirectoryNotFoundException
+ENUM_TIMING|missing-get-files|call=DirectoryNotFoundException
+ENUM_TIMING|missing-dirs|call=DirectoryNotFoundException
+ENUM_TIMING|missing-and-invalid|call=ArgumentException
+ENUM_TIMING|file-as-root|call=ok
+ENUM_TIMING|file-as-root|first-move=IOException
+ENUM_TIMING|empty-path|call=ArgumentException
+ENUM_TIMING|invalid-pattern|call=ArgumentException
+ENUM_TIMING|removed-root|first-move=false
+ENUM_TIMING|removed-directory-root|first-move=false
+ENUM_TIMING|late-file|move-result=true
+ENUM_TIMING|late-directory|move-result=true
