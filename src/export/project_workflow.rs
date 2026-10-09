@@ -2748,6 +2748,13 @@ mod tests {
         };
         let source_target_guid = guid_from_meta(source_target_meta);
         let rust_target_guid = guid_from_meta(&rust_target_meta);
+        let normalized_source_yaml = source_root_yaml.replace(&source_target_guid, "<TARGET_GUID>");
+        let normalized_rust_yaml = rust_root_yaml.replace(&rust_target_guid, "<TARGET_GUID>");
+        assert_eq!(
+            normalized_source_yaml.trim_end(),
+            normalized_rust_yaml.trim_end(),
+            "managed-reference MonoBehaviour YAML should match the source after GUID normalization"
+        );
         let source_registry = source_root_yaml
             .split_once("  m_Root:\n")
             .expect("source YAML includes the managed-reference body")
@@ -2765,6 +2772,13 @@ mod tests {
         assert!(rust_root_yaml.contains("        m_Link:\n          rid: 200\n"));
         assert!(rust_root_yaml.contains("        m_Link:\n          rid: 100\n"));
         let target_yaml = std::fs::read_to_string(target_path).unwrap();
+        let source_target_yaml =
+            include_str!("managed_reference_project_fixture/source_ReferencedRoot.asset");
+        assert_eq!(
+            source_target_yaml.trim_end(),
+            target_yaml.trim_end(),
+            "referenced MonoBehaviour YAML should match the source"
+        );
         assert!(target_yaml.contains("m_Name: ReferencedRoot"));
         assert!(target_yaml.contains("m_Health: 789"));
         assert_eq!(report.asset_file_count, 2);
