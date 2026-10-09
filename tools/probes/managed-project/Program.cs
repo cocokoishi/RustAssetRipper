@@ -67,6 +67,16 @@ if (args.Length > 0 && args[0] == "export-reference-script")
     return ExportReferenceScript(args[1], args[2], args[3]);
 }
 
+if (args.Length > 0 && args[0] == "export-manager-reference-script")
+{
+    if (args.Length != 5)
+    {
+        Console.Error.WriteLine("usage: managed-project export-manager-reference-script <input-root> <output-root> <rows-file> <mscorlib-v2-file>");
+        return 2;
+    }
+    return ExportManagerReferenceScript(args[1], args[2], args[3], args[4]);
+}
+
 if (args.Length > 0 && args[0] == "export-textasset")
 {
     if (args.Length != 5)
@@ -757,6 +767,86 @@ static int ExportReferenceScript(string inputRootArgument, string outputRootArgu
     return 0;
 }
 
+static int ExportManagerReferenceScript(
+    string inputRootArgument,
+    string outputRootArgument,
+    string rowsArgument,
+    string mscorlibV2Argument)
+{
+    string inputRoot = Path.GetFullPath(inputRootArgument);
+    string outputRoot = Path.GetFullPath(outputRootArgument);
+    string rowsPath = Path.GetFullPath(rowsArgument);
+    string mscorlibV2Path = Path.GetFullPath(mscorlibV2Argument);
+    EnsureEmptyOrMissingDirectory(inputRoot, "input");
+    EnsureEmptyOrMissingDirectory(outputRoot, "output");
+    if (!File.Exists(mscorlibV2Path))
+    {
+        throw new FileNotFoundException("mscorlib v2 fixture is missing", mscorlibV2Path);
+    }
+    if (File.Exists(rowsPath) || Directory.Exists(rowsPath))
+    {
+        throw new IOException($"refusing to overwrite probe rows {rowsPath}");
+    }
+
+    Directory.CreateDirectory(inputRoot);
+    Directory.CreateDirectory(outputRoot);
+    Directory.CreateDirectory(Path.GetDirectoryName(rowsPath)!);
+    string scriptInputPath = Path.Combine(inputRoot, "reference_script.assets");
+    string behaviourInputPath = Path.Combine(inputRoot, "reference_behaviour.assets");
+    string mscorlibInputPath = Path.Combine(inputRoot, "mscorlib.dll");
+    const string unityVersion = "2019.1.0f1";
+    byte[] scriptInputBytes = BuildReferenceScriptFile("Mono.Cecil", unityVersion);
+    byte[] behaviourInputBytes = BuildReferenceBehaviourFile(unityVersion);
+    byte[] mscorlibInputBytes = File.ReadAllBytes(mscorlibV2Path);
+    File.WriteAllBytes(scriptInputPath, scriptInputBytes);
+    File.WriteAllBytes(behaviourInputPath, behaviourInputBytes);
+    File.WriteAllBytes(mscorlibInputPath, mscorlibInputBytes);
+
+    Logger.Add(new ConsoleLogger());
+    ExportHandler handler = new(new FullConfiguration());
+    var gameData = handler.LoadAndProcess([inputRoot], LocalFileSystem.Instance);
+    if (!gameData.AssemblyManager.IsSet || !gameData.AssemblyManager.HasMscorlib2)
+    {
+        throw new InvalidDataException(
+            $"expected initialized mscorlib2 manager, got backend={gameData.AssemblyManager.ScriptingBackend}, " +
+            $"isSet={gameData.AssemblyManager.IsSet}, hasMscorlib2={gameData.AssemblyManager.HasMscorlib2}");
+    }
+    var scripts = gameData.GameBundle.FetchAssets()
+        .Where(asset => asset.ClassID == 115 && asset.PathID == 7)
+        .Select(asset => $"{asset.ClassName}|{asset.PathID}|{asset}")
+        .ToArray();
+    if (scripts.Length != 1 || !scripts[0].StartsWith("MonoScript|7|", StringComparison.Ordinal))
+    {
+        throw new InvalidDataException($"expected one source Mono.Cecil MonoScript at PathID 7: {string.Join(';', scripts)}");
+    }
+    handler.Export(gameData, outputRoot, LocalFileSystem.Instance);
+
+    string assetsRoot = Path.Combine(outputRoot, "ExportedProject", "Assets");
+    string? behaviourPath = Directory.Exists(assetsRoot)
+        ? Directory.GetFiles(assetsRoot, "*.asset", SearchOption.AllDirectories)
+            .FirstOrDefault(path => File.ReadAllText(path).Contains("m_Name: ReferenceRoot", StringComparison.Ordinal))
+        : null;
+    if (behaviourPath is null)
+    {
+        throw new InvalidDataException("source manager-backed export did not write the referencing MonoBehaviour asset");
+    }
+
+    using StreamWriter rows = new(rowsPath, false, new UTF8Encoding(false)) { NewLine = "\n" };
+    rows.WriteLine($"MANAGER|{gameData.AssemblyManager.ScriptingBackend}|{gameData.AssemblyManager.IsSet}|{gameData.AssemblyManager.HasMscorlib2}");
+    rows.WriteLine($"OBJECT|{scripts[0]}");
+    WriteInputRow(rows, scriptInputPath, scriptInputBytes);
+    WriteInputRow(rows, behaviourInputPath, behaviourInputBytes);
+    WriteInputRow(rows, mscorlibInputPath, mscorlibInputBytes);
+    string behaviourRelative = $"Assets/{Path.GetRelativePath(assetsRoot, behaviourPath).Replace('\\', '/') }";
+    byte[] behaviourBytes = File.ReadAllBytes(behaviourPath);
+    rows.WriteLine($"FILE|{behaviourRelative}|{behaviourBytes.Length}|{Convert.ToHexString(SHA256.HashData(behaviourBytes))}");
+    rows.WriteLine($"CONTENT_HEX|{behaviourRelative}|{Convert.ToHexString(behaviourBytes)}");
+    Console.WriteLine($"manager={gameData.AssemblyManager.ScriptingBackend}|{gameData.AssemblyManager.IsSet}|{gameData.AssemblyManager.HasMscorlib2}");
+    Console.WriteLine($"source_object={scripts[0]}");
+    Console.WriteLine($"behaviour={behaviourRelative}");
+    return 0;
+}
+
 static int ExportTextAsset(string inputRootArgument, string outputRootArgument, string rowsArgument, string modeArgument)
 {
     string inputRoot = Path.GetFullPath(inputRootArgument);
@@ -1009,7 +1099,7 @@ static byte[] BuildSavedBehaviourFile()
     return file.ToByteArray();
 }
 
-static byte[] BuildReferenceScriptFile()
+static byte[] BuildReferenceScriptFile(string assemblyName = "UnityEngine", string versionText = "2019.4.40f1")
 {
     List<byte> scriptPayload = [];
     WriteString(scriptPayload, "Object"); // m_Name
@@ -1017,13 +1107,13 @@ static byte[] BuildReferenceScriptFile()
     scriptPayload.AddRange(new byte[16]); // Hash128 m_PropertiesHash
     WriteString(scriptPayload, "Object"); // m_ClassName
     WriteString(scriptPayload, "UnityEngine"); // m_Namespace
-    WriteString(scriptPayload, "UnityEngine"); // m_AssemblyName
+    WriteString(scriptPayload, assemblyName); // m_AssemblyName
 
     SerializedType monoScriptType = new() { RawTypeID = 115 };
     SerializedFile file = new SerializedFileBuilder
     {
         Generation = FormatVersion.StoresTypeDependencies,
-        Version = UnityVersion.Parse("2019.4.40f1"),
+        Version = UnityVersion.Parse(versionText),
         Platform = (BuildTarget)19,
         EndianType = EndianType.LittleEndian,
         HasTypeTree = false,
@@ -1042,7 +1132,7 @@ static byte[] BuildReferenceScriptFile()
     return file.ToByteArray();
 }
 
-static byte[] BuildReferenceBehaviourFile()
+static byte[] BuildReferenceBehaviourFile(string versionText = "2019.4.40f1")
 {
     List<byte> behaviourPayload = [];
     WriteI32(behaviourPayload, 0); // m_GameObject.m_FileID
@@ -1062,7 +1152,7 @@ static byte[] BuildReferenceBehaviourFile()
     SerializedFile file = new SerializedFileBuilder
     {
         Generation = FormatVersion.StoresTypeDependencies,
-        Version = UnityVersion.Parse("2019.4.40f1"),
+        Version = UnityVersion.Parse(versionText),
         Platform = (BuildTarget)19,
         EndianType = EndianType.LittleEndian,
         HasTypeTree = true,

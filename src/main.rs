@@ -9891,6 +9891,95 @@ mod tests {
     }
 
     #[test]
+    fn export_project_matches_source_manager_backed_mscorlib2_reference_pointer() {
+        let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
+        let fixture = include_str!("processing/reference_script_mscorlib2_project_fixture.txt");
+        let decode_hex = |hex: &str| {
+            assert!(hex.len().is_multiple_of(2), "fixture hex has even length");
+            hex.as_bytes()
+                .chunks_exact(2)
+                .map(|pair| {
+                    u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16)
+                        .expect("fixture hex is valid")
+                })
+                .collect::<Vec<_>>()
+        };
+        let input_bytes = |name: &str| {
+            let prefix = format!("INPUT_HEX|{name}|");
+            fixture
+                .lines()
+                .find_map(|line| line.strip_prefix(&prefix))
+                .map(decode_hex)
+                .unwrap_or_else(|| panic!("manager-backed reference fixture includes {prefix}"))
+        };
+        let expected_behaviour = fixture
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("CONTENT_HEX|Assets/MonoBehaviour/ReferenceRoot.asset|")
+            })
+            .map(decode_hex)
+            .expect("manager-backed fixture includes the source MonoBehaviour YAML");
+
+        let directory = TestInputDirectory::new_root();
+        let input_root = directory.join("manager-reference-input");
+        fs::create_dir(&input_root).unwrap();
+        let script_path = input_root.join("reference_script.assets");
+        let behaviour_path = input_root.join("reference_behaviour.assets");
+        let mscorlib_path = input_root.join("mscorlib.dll");
+        let script_bytes = input_bytes("reference_script.assets");
+        let behaviour_bytes = input_bytes("reference_behaviour.assets");
+        let mscorlib_bytes = input_bytes("mscorlib.dll");
+        fs::write(&script_path, &script_bytes).unwrap();
+        fs::write(&behaviour_path, &behaviour_bytes).unwrap();
+        fs::write(&mscorlib_path, &mscorlib_bytes).unwrap();
+        let mut input = TestInputDirectory {
+            directory: directory.clone(),
+            files: vec![
+                script_path.clone(),
+                behaviour_path.clone(),
+                mscorlib_path.clone(),
+            ],
+            subdirectories: vec![input_root.clone()],
+        };
+        let output_root = directory.join("manager-reference-project");
+        let mut status = Vec::new();
+        super::export_project_to(
+            &[input_root],
+            &output_root,
+            false,
+            &default_export_settings(),
+            &mut status,
+        )
+        .expect("manager-backed Mono.Cecil reference pointer export");
+
+        let status = String::from_utf8(status).unwrap();
+        assert!(status.contains(
+            "Mono assembly metadata: 1 loaded from 1 candidates (0 native/non-CLI skipped)"
+        ));
+        assert!(status.contains("0 resolved, 0 valid, 0 abstract, 1 unresolved"));
+        let behaviour_output = output_root.join("Assets/MonoBehaviour/ReferenceRoot.asset");
+        assert_eq!(fs::read(&behaviour_output).unwrap(), expected_behaviour);
+        assert!(
+            !project_tree(&output_root)
+                .iter()
+                .any(|path| path.to_ascii_lowercase().ends_with(".cs")),
+            "a reference-map MonoScript uses the reference pointer without a local script file"
+        );
+        assert_eq!(fs::read(&script_path).unwrap(), script_bytes);
+        assert_eq!(fs::read(&behaviour_path).unwrap(), behaviour_bytes);
+        assert_eq!(fs::read(&mscorlib_path).unwrap(), mscorlib_bytes);
+
+        input.files.extend(
+            project_tree(&output_root)
+                .iter()
+                .map(|path| output_root.join(path)),
+        );
+        input
+            .subdirectories
+            .extend(project_directories(&output_root));
+    }
+
+    #[test]
     fn export_project_resolves_cross_file_reference_through_nested_unityfs() {
         let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
         let source_fixture = include_str!("export/managed_reference_nested_bundle_fixture.txt");
