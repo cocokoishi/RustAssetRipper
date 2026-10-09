@@ -6005,6 +6005,39 @@ mod tests {
         assert_eq!(mono_script.path_id, 7);
         assert_eq!(mono_script.factory.class_id, 115);
         assert_eq!(mono_script.factory.name, "HeroController");
+        let mono_script_payload = &mono_script
+            .payload
+            .as_ref()
+            .expect("the generated MonoScript fields remain available")
+            .root;
+        assert_eq!(
+            mono_script_payload
+                .unique_field("m_ClassName")
+                .expect("unique class-name field")
+                .expect("class-name field exists"),
+            &SerializedValue::StringBytes(b"HeroController".to_vec())
+        );
+        assert_eq!(
+            mono_script_payload
+                .unique_field("m_Namespace")
+                .expect("unique namespace field")
+                .expect("namespace field exists"),
+            &SerializedValue::StringBytes(b"VRC.SDK".to_vec())
+        );
+        assert_eq!(
+            mono_script_payload
+                .unique_field("m_AssemblyName")
+                .expect("unique assembly-name field")
+                .expect("assembly-name field exists"),
+            &SerializedValue::StringBytes(b"Assembly-CSharp".to_vec())
+        );
+        assert_eq!(
+            mono_script_payload
+                .unique_field("m_ExecutionOrder")
+                .expect("unique execution-order field")
+                .expect("execution-order field exists"),
+            &SerializedValue::I32(200)
+        );
         assert!(matches!(
             &mono_script.factory.kind,
             crate::processing::asset_factory::FactoryAssetKind::Generated(_)
