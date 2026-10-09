@@ -47,6 +47,16 @@ if (args.Length > 0 && args[0] == "export-reference-script")
     return ExportReferenceScript(args[1], args[2], args[3]);
 }
 
+if (args.Length > 0 && args[0] == "export-textasset")
+{
+    if (args.Length != 5)
+    {
+        Console.Error.WriteLine("usage: managed-project export-textasset <input-root> <output-root> <rows-file> <Bytes|Txt|Parse>");
+        return 2;
+    }
+    return ExportTextAsset(args[1], args[2], args[3], args[4]);
+}
+
 if (args.Length > 0 && args[0] == "reference-assembly-map")
 {
     if (args.Length != 2)
@@ -394,6 +404,68 @@ static int ExportReferenceScript(string inputRootArgument, string outputRootArgu
     Console.WriteLine($"sidecar=Assets/{sidecarRelative}");
     Console.WriteLine($"assembly_definition=Assets/{definitionRelative}");
     Console.WriteLine($"behaviour=Assets/{Path.GetRelativePath(assetsRoot, behaviourPath).Replace('\\', '/')}");
+    return 0;
+}
+
+static int ExportTextAsset(string inputRootArgument, string outputRootArgument, string rowsArgument, string modeArgument)
+{
+    string inputRoot = Path.GetFullPath(inputRootArgument);
+    string outputRoot = Path.GetFullPath(outputRootArgument);
+    string rowsPath = Path.GetFullPath(rowsArgument);
+    EnsureEmptyOrMissingDirectory(outputRoot, "output");
+    if (File.Exists(rowsPath) || Directory.Exists(rowsPath))
+    {
+        throw new IOException($"refusing to overwrite probe rows {rowsPath}");
+    }
+    if (!Directory.Exists(inputRoot))
+    {
+        throw new DirectoryNotFoundException($"input root does not exist: {inputRoot}");
+    }
+
+    TextExportMode mode = Enum.Parse<TextExportMode>(modeArgument, ignoreCase: false);
+    Directory.CreateDirectory(outputRoot);
+    Directory.CreateDirectory(Path.GetDirectoryName(rowsPath)!);
+    FullConfiguration configuration = new();
+    configuration.ExportSettings.TextExportMode = mode;
+    ExportHandler handler = new(configuration);
+    var gameData = handler.LoadAndProcess([inputRoot], LocalFileSystem.Instance);
+    var textAssets = gameData.GameBundle.FetchAssets()
+        .Where(asset => asset.ClassID == 49)
+        .Select(asset => $"{asset.ClassName}|{asset.PathID}|{asset}")
+        .Order(StringComparer.Ordinal)
+        .ToArray();
+    if (textAssets.Length != 1)
+    {
+        throw new InvalidDataException($"expected one TextAsset, found {textAssets.Length}: {string.Join(';', textAssets)}");
+    }
+    handler.Export(gameData, outputRoot, LocalFileSystem.Instance);
+
+    string projectAssets = Path.Combine(outputRoot, "ExportedProject", "Assets");
+    string[] files = Directory.GetFiles(projectAssets, "*", SearchOption.AllDirectories)
+        .OrderBy(path => Path.GetRelativePath(outputRoot, path), StringComparer.Ordinal)
+        .ToArray();
+    using StreamWriter rows = new(rowsPath, false, new UTF8Encoding(false)) { NewLine = "\n" };
+    rows.WriteLine($"MODE|{mode}");
+    rows.WriteLine($"OBJECT|{textAssets[0]}");
+    foreach (string path in files)
+    {
+        string relative = Path.GetRelativePath(outputRoot, path).Replace('\\', '/');
+        byte[] bytes = File.ReadAllBytes(path);
+        if (relative.EndsWith(".meta", StringComparison.Ordinal))
+        {
+            string normalized = string.Join('\n', File.ReadAllLines(path)
+                .Where(line => !line.StartsWith("guid:", StringComparison.Ordinal)
+                    && !line.StartsWith("timeCreated:", StringComparison.Ordinal))) + "\n";
+            rows.WriteLine($"META|{relative}|{normalized.Replace("\n", "\\n", StringComparison.Ordinal)}");
+        }
+        else
+        {
+            rows.WriteLine($"ASSET|{relative}|{Convert.ToBase64String(bytes)}");
+        }
+    }
+    Console.WriteLine($"mode={mode}");
+    Console.WriteLine($"text_asset={textAssets[0]}");
+    Console.WriteLine($"project_assets={files.Length}");
     return 0;
 }
 

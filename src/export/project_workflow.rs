@@ -6,7 +6,8 @@
 //! every route is materialized into a staged [`ProjectExportPlan`], and only then does
 //! `execute_project_export` touch the disk. Objects whose baseline collection is not exportable
 //! are reported as explicit notices; families whose specialized renderer is not ported fall back
-//! to the generic Unity YAML asset family instead of being dropped.
+//! to the generic Unity YAML asset family instead of being dropped. TextAssets with non-empty
+//! `m_Script` bytes use their binary exporter, settings-based extension, and TextScriptImporter.
 //!
 //! Scene definitions are processed into workspace hierarchies and emitted as `.unity` files
 //! through the scene collection route, with scene IDs, pointers, and `DefaultImporter` metadata.
@@ -57,13 +58,14 @@ use super::prefab_collection::{
 use super::project_exporter::{
     execute_project_export, export_extension_for, native_format_importer_for_version,
     object_class_name, package_manifest_json, project_version_file,
-    select_collection_with_shader_text, shader_importer_for_version_with_non_modifiable_textures,
-    ObjectClassFacts, PlannedProjectFile, PlannedProjectMeta, PlannedProjectSupportFile,
-    ProjectExportError, ProjectExportNotice, ProjectExportPlan, ProjectExportSettings,
-    ProjectPathPlanner,
+    select_collection_with_text_asset_validity,
+    shader_importer_for_version_with_non_modifiable_textures, ObjectClassFacts, PlannedProjectFile,
+    PlannedProjectMeta, PlannedProjectSupportFile, ProjectExportError, ProjectExportNotice,
+    ProjectExportPlan, ProjectExportSettings, ProjectPathPlanner,
 };
 use super::project_plan::plan_scene_export_paths;
 use super::reference_assemblies::ReferenceAssemblyMaps;
+use super::resource_extensions::text_export_extension;
 use super::scene_collection::{
     plan_workspace_scene_export_ids_with_processed_assets, ExportAssetCollectionIdentity,
     ExportAssetIdentity, ExportAssetObjectKey, SceneExportIdAssignment, SceneExportIdPlanLimits,
@@ -156,6 +158,8 @@ pub struct WorkspaceProjectExportReport {
 enum ObjectRoute {
     /// `AssetExportCollection` and its subclasses: unique asset path plus `.meta`.
     Asset,
+    /// `TextAssetExportCollection`: raw `m_Script` bytes, mode-based extension, and TextScriptImporter.
+    TextAsset,
     /// `ShaderExportCollection` using `DummyShaderTextExporter` or `SimpleShaderExporter`.
     ShaderText,
     /// `YamlShaderExportCollection` plus its version-gated Unity editor patches.
@@ -180,6 +184,7 @@ struct RoutedObject<'a> {
     named_name: Option<String>,
     facts: ObjectClassFacts,
     shader_view: Option<ShaderView>,
+    text_asset_export: Option<TextAssetExportDetails>,
     script_export: Option<ScriptExportDetails>,
     selection: super::project_exporter::CollectionSelection,
     route: ObjectRoute,
@@ -199,6 +204,12 @@ struct ScriptExportDetails {
     guid: [u8; 16],
     pointer_guid: [u8; 16],
     pointer_file_id: i64,
+}
+
+#[derive(Clone, Debug)]
+struct TextAssetExportDetails {
+    script: Vec<u8>,
+    extension: String,
 }
 
 /// One processed Scene collection staged for the Unity project exporter.
@@ -443,7 +454,29 @@ pub fn export_workspace_yaml_project_with_script_manager(
                 }
                 Some(_) => crate::export::collection_claims::ShaderTextState::CompiledOrEmpty,
             };
-            let selection = select_collection_with_shader_text(facts, settings_facts, shader_text)?;
+            let text_asset_script = if class_id == 49 {
+                payload.map(text_asset_script_bytes).transpose()?.flatten()
+            } else {
+                None
+            };
+            let selection = select_collection_with_text_asset_validity(
+                facts,
+                settings_facts,
+                shader_text,
+                text_asset_script
+                    .as_ref()
+                    .is_some_and(|script| !script.is_empty()),
+            )?;
+            let text_asset_export = if selection.exporter == "TextAssetExporter" {
+                let script = text_asset_script.ok_or_else(|| {
+                    invalid_project("TextAssetExporter was selected without decoded m_Script bytes")
+                })?;
+                let text = String::from_utf8_lossy(&script);
+                let extension = text_export_extension(None, settings.text_export_mode, &text);
+                Some(TextAssetExportDetails { script, extension })
+            } else {
+                None
+            };
             let kind = selection.kind();
             let script_export = if class_id == 115 {
                 plan_script_export_details(
@@ -480,6 +513,9 @@ pub fn export_workspace_yaml_project_with_script_manager(
                 ExportCollectionKind::Manager => (ObjectRoute::Manager, "", None),
                 ExportCollectionKind::Unknown => (ObjectRoute::Unknown, "", None),
                 ExportCollectionKind::Unreadable => (ObjectRoute::Unreadable, "", None),
+                ExportCollectionKind::Asset if selection.exporter == "TextAssetExporter" => {
+                    (ObjectRoute::TextAsset, "", None)
+                }
                 ExportCollectionKind::Asset if selection.exporter == "YamlShaderExporter" => {
                     (ObjectRoute::ShaderYaml, "", None)
                 }
@@ -583,13 +619,15 @@ pub fn export_workspace_yaml_project_with_script_manager(
                 )
             };
             let file_id = match route {
-                ObjectRoute::Asset | ObjectRoute::ShaderText | ObjectRoute::ShaderYaml => {
-                    crate::export::ids::get_main_export_id(class_id, 0).map_err(|error| {
+                ObjectRoute::Asset
+                | ObjectRoute::TextAsset
+                | ObjectRoute::ShaderText
+                | ObjectRoute::ShaderYaml => crate::export::ids::get_main_export_id(class_id, 0)
+                    .map_err(|error| {
                         invalid_project(format!(
                             "class {class_id} export file ID could not be planned: {error}"
                         ))
-                    })?
-                }
+                    })?,
                 ObjectRoute::Script => {
                     script_export
                         .as_ref()
@@ -613,6 +651,7 @@ pub fn export_workspace_yaml_project_with_script_manager(
                 named_name,
                 facts,
                 shader_view,
+                text_asset_export,
                 script_export,
                 selection,
                 route,
@@ -821,6 +860,19 @@ pub fn export_workspace_yaml_project_with_script_manager(
                     })?
                     .into_bytes()
             }
+            ObjectRoute::TextAsset => {
+                let script = &entry
+                    .text_asset_export
+                    .as_ref()
+                    .ok_or_else(|| invalid_project("TextAsset route has no script bytes"))?
+                    .script;
+                let mut output = Vec::new();
+                output
+                    .try_reserve_exact(script.len())
+                    .map_err(|_| invalid_project("could not allocate TextAsset export bytes"))?;
+                output.extend_from_slice(script);
+                output
+            }
             ObjectRoute::Asset | ObjectRoute::ShaderYaml | ObjectRoute::Manager => {
                 let source = identity_of(entry);
                 let document = workspace_object_to_unity_yaml_document_with_streamed_resources(
@@ -877,6 +929,13 @@ pub fn export_workspace_yaml_project_with_script_manager(
                 };
                 planner.plan_asset_path(&identity, extension)?
             }
+            ObjectRoute::TextAsset => {
+                let text_asset = entry
+                    .text_asset_export
+                    .as_ref()
+                    .ok_or_else(|| invalid_project("TextAsset route has no planned extension"))?;
+                planner.plan_asset_path(&identity, &text_asset.extension)?
+            }
             ObjectRoute::ShaderText => planner.plan_asset_path(&identity, "shader")?,
             ObjectRoute::ShaderYaml => planner.plan_asset_path(&identity, YAML_SHADER_EXTENSION)?,
             ObjectRoute::Script => {
@@ -918,6 +977,18 @@ pub fn export_workspace_yaml_project_with_script_manager(
                         .as_deref(),
                 )?,
             }),
+            ObjectRoute::TextAsset => {
+                let asset_bundle_name = entry
+                    .object
+                    .payload
+                    .as_ref()
+                    .ok()
+                    .and_then(object_asset_bundle_name);
+                Some(PlannedProjectMeta {
+                    importer_class: "TextScriptImporter".to_owned(),
+                    importer: default_importer(asset_bundle_name.as_deref())?,
+                })
+            }
             ObjectRoute::Script => {
                 let script = entry.script_export.as_ref().ok_or_else(|| {
                     invalid_project("MonoScript route has no validated script identity")
@@ -2286,6 +2357,29 @@ fn object_asset_name(payload: &ParsedObjectPayload) -> Option<String> {
         }
     }
     None
+}
+
+fn text_asset_script_bytes(
+    payload: &ParsedObjectPayload,
+) -> Result<Option<Vec<u8>>, Box<dyn Error>> {
+    let script = payload
+        .root
+        .unique_field_in_base_chain("m_Script")
+        .map_err(|error| invalid_project(format!("TextAsset m_Script lookup failed: {error}")))?;
+    let Some(crate::serialized_file::object::SerializedValue::StringBytes(bytes)) = script else {
+        if script.is_none() {
+            return Ok(None);
+        }
+        return Err(invalid_project(
+            "TextAsset m_Script field is not a serialized string",
+        ));
+    };
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(bytes.len())
+        .map_err(|_| invalid_project("could not allocate TextAsset script bytes"))?;
+    output.extend_from_slice(bytes);
+    Ok(Some(output))
 }
 
 fn object_asset_bundle_name(payload: &ParsedObjectPayload) -> Option<String> {

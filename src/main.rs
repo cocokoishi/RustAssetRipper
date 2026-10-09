@@ -4706,7 +4706,7 @@ fn invalid_data_owned(message: String) -> io::Error {
 
 fn print_usage() {
     println!(
-        "Usage:\n  assetripper-rs inspect <input-directory> [input-directory ...]\n  assetripper-rs inspect-files <input-file> [input-file ...]\n  assetripper-rs export-project [--delete-existing] [--settings <path>] <output-directory> <input-file-or-directory> [input-file-or-directory ...]\n  assetripper-rs export-object-yaml <serialized-file-index> <path-id> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-file-yaml <serialized-file-index> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-texture [--settings <path>] <serialized-file-index> <path-id> <new-output-image> <input-file> [input-file ...]\n  assetripper-rs export-mesh <serialized-file-index> <path-id> <new-output-glb> <input-file> [input-file ...]\n  assetripper-rs export-shader [--shader-export-mode <dummy|yaml|decompile>] [--settings <path>] <serialized-file-index> <path-id> <new-output-shader> <input-file> [input-file ...]\n  assetripper-rs export-audio [--settings <path>] <serialized-file-index> <path-id> <new-output-audio> <input-file> [input-file ...]\n  assetripper-rs save-default-settings [--settings <path>]\n  assetripper-rs delete-default-settings\n  assetripper-rs --help\n  assetripper-rs --version\n\n`inspect` mounts directories into isolated VFS roots. `inspect-files` dispatches explicitly selected file paths, registers top-level ResourceFiles as GameBundle root inputs, and reports the parsed SerializedFiles. `export-project` loads mixed file and directory inputs, resolves cross-file references and streamed resources, and writes processed Scene collections as `.unity` YAML with `DefaultImporter` `.meta`, Material `.mat` YAML with cross-file Shader pointer mapping; Shader collections write `.shader` plus `ShaderImporter` in Dummy/Decompile modes (raw source text wins when present) or `.asset` plus `NativeFormatImporter` and version-gated patches in YAML mode; other routed objects use generic YAML `.asset` files, `ProjectSettings/ProjectVersion.txt`, and the default package manifest. It stages all project outputs before writing and refuses undecoded objects, unresolved pointers, or objects omitted by YAML conversion. The generated Scene hierarchy's effective `AssetBundleName` remains null because its `GeneratedObjectBase` setter is a no-op; its `.meta` bundle-name field is blank. Duplicate BuildSettings paths keep the first Scene output. The output directory must not be empty or named `Desktop`, `Documents`, or `Downloads`; an existing non-empty directory aborts the export unless `--delete-existing` is given, which deletes and recreates it exactly like the reference exporter does after deletion consent. Processed Scene and modern/legacy Prefab collections are supported on the routed workspace path; remaining class-specific exporter/importer families (including complete Material/Shader field coverage), settings application, and post-exporters remain open parity work. `export-object-yaml` writes one decoded object as YAML. `export-file-yaml` writes YAML-exportable objects from one SerializedFile in object-table order, resolves streamed Mesh and image-texture bytes, preserves intra-file references through source PathIDs, and refuses unresolved or cross-file references. It reports ImageTexture objects omitted by the baseline when they have no usable image data. `export-texture` decodes one class-28 Texture2D, resolves its inline or streamed image data, and writes a PNG/BMP/TGA image; the output extension selects the format (otherwise the configured settings format, default PNG). `export-mesh` decodes one class-43 Mesh, resolves its vertex data and compressed mesh, and writes a glTF 2.0 binary file with one node per sub-mesh, converting Unity's left-handed coordinates to glTF's right-handed space and rewriting the sub-mesh topology. `export-shader` decodes one class-48 Shader and writes `.shader` text: decompiled script text is written verbatim under every mode, otherwise `dummy` (the default) and `decompile` render the fallback dummy body and `yaml` reports that YAML mode writes a YAML asset instead. `export-audio` decodes one class-83 AudioClip, resolves its inline or streamed audio data, and writes the decoded bytes; tracker audio passes through, `FSB5` reports the external-decoder requirement, and unknown bytes fail with the reference diagnostic. None of the commands replaces an existing output file."
+        "Usage:\n  assetripper-rs inspect <input-directory> [input-directory ...]\n  assetripper-rs inspect-files <input-file> [input-file ...]\n  assetripper-rs export-project [--delete-existing] [--settings <path>] <output-directory> <input-file-or-directory> [input-file-or-directory ...]\n  assetripper-rs export-object-yaml <serialized-file-index> <path-id> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-file-yaml <serialized-file-index> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-texture [--settings <path>] <serialized-file-index> <path-id> <new-output-image> <input-file> [input-file ...]\n  assetripper-rs export-mesh <serialized-file-index> <path-id> <new-output-glb> <input-file> [input-file ...]\n  assetripper-rs export-shader [--shader-export-mode <dummy|yaml|decompile>] [--settings <path>] <serialized-file-index> <path-id> <new-output-shader> <input-file> [input-file ...]\n  assetripper-rs export-audio [--settings <path>] <serialized-file-index> <path-id> <new-output-audio> <input-file> [input-file ...]\n  assetripper-rs save-default-settings [--settings <path>]\n  assetripper-rs delete-default-settings\n  assetripper-rs --help\n  assetripper-rs --version\n\n`inspect` mounts directories into isolated VFS roots. `inspect-files` dispatches explicitly selected file paths, registers top-level ResourceFiles as GameBundle root inputs, and reports the parsed SerializedFiles. `export-project` loads mixed file and directory inputs, resolves cross-file references and streamed resources, and writes processed Scene collections as `.unity` YAML with `DefaultImporter` `.meta`, Material `.mat` YAML with cross-file Shader pointer mapping; Shader collections write `.shader` plus `ShaderImporter` in Dummy/Decompile modes (raw source text wins when present) or `.asset` plus `NativeFormatImporter` and version-gated patches in YAML mode; TextAssets write raw `m_Script` bytes with `TextScriptImporter` metadata and a `TextExportMode`-selected extension; other routed objects use generic YAML `.asset` files, `ProjectSettings/ProjectVersion.txt`, and the default package manifest. It stages all project outputs before writing and refuses undecoded objects, unresolved pointers, or objects omitted by YAML conversion. The generated Scene hierarchy's effective `AssetBundleName` remains null because its `GeneratedObjectBase` setter is a no-op; its `.meta` bundle-name field is blank. Duplicate BuildSettings paths keep the first Scene output. The output directory must not be empty or named `Desktop`, `Documents`, or `Downloads`; an existing non-empty directory aborts the export unless `--delete-existing` is given, which deletes and recreates it exactly like the reference exporter does after deletion consent. Processed Scene and modern/legacy Prefab collections are supported on the routed workspace path; remaining class-specific exporter/importer families (including complete Material/Shader field coverage), settings application, and post-exporters remain open parity work. `export-object-yaml` writes one decoded object as YAML. `export-file-yaml` writes YAML-exportable objects from one SerializedFile in object-table order, resolves streamed Mesh and image-texture bytes, preserves intra-file references through source PathIDs, and refuses unresolved or cross-file references. It reports ImageTexture objects omitted by the baseline when they have no usable image data. `export-texture` decodes one class-28 Texture2D, resolves its inline or streamed image data, and writes a PNG/BMP/TGA image; the output extension selects the format (otherwise the configured settings format, default PNG). `export-mesh` decodes one class-43 Mesh, resolves its vertex data and compressed mesh, and writes a glTF 2.0 binary file with one node per sub-mesh, converting Unity's left-handed coordinates to glTF's right-handed space and rewriting the sub-mesh topology. `export-shader` decodes one class-48 Shader and writes `.shader` text: decompiled script text is written verbatim under every mode, otherwise `dummy` (the default) and `decompile` render the fallback dummy body and `yaml` reports that YAML mode writes a YAML asset instead. `export-audio` decodes one class-83 AudioClip, resolves its inline or streamed audio data, and writes the decoded bytes; tracker audio passes through, `FSB5` reports the external-decoder requirement, and unknown bytes fail with the reference diagnostic. None of the commands replaces an existing output file."
     );
 }
 
@@ -9355,7 +9355,7 @@ mod tests {
     }
 
     #[test]
-    fn export_project_recovers_generated_textasset_without_usable_file_typetree() {
+    fn export_project_routes_textasset_bytes_mode_and_importer() {
         let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
         fn decode_hex(hex: &str) -> Vec<u8> {
             assert!(hex.len().is_multiple_of(2), "fixture hex has even length");
@@ -9382,6 +9382,24 @@ mod tests {
             }
         }
 
+        fn source_textasset_meta(asset_name: &str) -> String {
+            let prefix = format!("META|ExportedProject/Assets/TextAsset/{asset_name}.meta|");
+            include_str!("export/textasset_project_fixture.txt")
+                .lines()
+                .find_map(|line| line.strip_prefix(&prefix))
+                .unwrap_or_else(|| panic!("source TextAsset metadata row missing for {asset_name}"))
+                .replace("\\n", "\n")
+        }
+
+        fn source_textasset_asset_row(asset_name: &str) -> String {
+            let prefix = format!("ASSET|ExportedProject/Assets/TextAsset/{asset_name}|");
+            include_str!("export/textasset_project_fixture.txt")
+                .lines()
+                .find(|line| line.starts_with(&prefix))
+                .unwrap_or_else(|| panic!("source TextAsset asset row missing for {asset_name}"))
+                .to_owned()
+        }
+
         let fixture = assetripper::processing::asset_factory::PROBE_FIXTURE;
         let hex = fixture
             .lines()
@@ -9392,7 +9410,7 @@ mod tests {
         let source_bytes = decode_hex(hex);
         let directory = TestInputDirectory::new_root();
         let source_path = directory.join("textasset_notree.assets");
-        let output_root = directory.join("project-no-typetree");
+        let output_root = directory.join("project-textasset-parse");
         fs::write(&source_path, &source_bytes).unwrap();
         let mut input = TestInputDirectory {
             directory,
@@ -9410,21 +9428,86 @@ mod tests {
         )
         .expect("export-project uses the source-generated TPK fallback");
 
+        let text_asset_path = output_root.join("Assets/TextAsset/Hero.txt");
+        let text_asset_meta_path = output_root.join("Assets/TextAsset/Hero.txt.meta");
+        assert_eq!(
+            source_textasset_asset_row("Hero.txt"),
+            "ASSET|ExportedProject/Assets/TextAsset/Hero.txt|cHJpbnQoMSk="
+        );
+        assert_eq!(fs::read(&text_asset_path).unwrap(), b"print(1)");
+        let normalized_text_asset_meta = fs::read_to_string(&text_asset_meta_path)
+            .unwrap()
+            .lines()
+            .filter(|line| !line.starts_with("guid:") && !line.starts_with("timeCreated:"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        assert_eq!(
+            normalized_text_asset_meta,
+            source_textasset_meta("Hero.txt")
+        );
+        assert!(
+            normalized_text_asset_meta.contains("TextScriptImporter:"),
+            "{normalized_text_asset_meta}"
+        );
+        assert!(!normalized_text_asset_meta.contains("NativeFormatImporter:"));
+        for field in [
+            "externalObjects: {}",
+            "userData:",
+            "assetBundleName:",
+            "assetBundleVariant:",
+        ] {
+            assert!(
+                normalized_text_asset_meta.contains(field),
+                "{normalized_text_asset_meta}"
+            );
+        }
+
+        let settings_path = input.directory.join("textasset-bytes-settings.json");
+        let default_settings = include_str!("export/settings_file_defaults.json");
+        let bytes_settings =
+            default_settings.replace("\"TextExportMode\": 2", "\"TextExportMode\": 0");
+        assert_ne!(bytes_settings, default_settings);
+        fs::write(&settings_path, bytes_settings).unwrap();
+        let bytes_output_root = input.directory.join("project-textasset-bytes");
+        super::run(
+            [
+                std::ffi::OsString::from("export-project"),
+                std::ffi::OsString::from("--settings"),
+                settings_path.clone().into_os_string(),
+                bytes_output_root.clone().into_os_string(),
+                source_path.clone().into_os_string(),
+            ]
+            .into_iter(),
+        )
+        .expect("export-project applies TextExportMode::Bytes to TextAssets");
+        let bytes_asset_path = bytes_output_root.join("Assets/TextAsset/Hero.bytes");
+        let bytes_asset_meta_path = bytes_output_root.join("Assets/TextAsset/Hero.bytes.meta");
+        assert_eq!(
+            source_textasset_asset_row("Hero.bytes"),
+            "ASSET|ExportedProject/Assets/TextAsset/Hero.bytes|cHJpbnQoMSk="
+        );
+        assert_eq!(fs::read(&bytes_asset_path).unwrap(), b"print(1)");
+        let normalized_bytes_meta = fs::read_to_string(&bytes_asset_meta_path)
+            .unwrap()
+            .lines()
+            .filter(|line| !line.starts_with("guid:") && !line.starts_with("timeCreated:"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        assert_eq!(normalized_bytes_meta, source_textasset_meta("Hero.bytes"));
+
         let mut exported_files = Vec::new();
         let mut exported_directories = Vec::new();
         collect_output_tree(&output_root, &mut exported_files, &mut exported_directories);
-        let assets = exported_files
-            .iter()
-            .filter(|path| {
-                path.extension()
-                    .is_some_and(|extension| extension == "asset")
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(assets.len(), 1, "exported files: {exported_files:?}");
-        let yaml = fs::read_to_string(assets[0]).unwrap();
-        assert!(yaml.contains("--- !u!49 &4900000"), "{yaml}");
-        assert!(yaml.contains("m_Name: Hero"), "{yaml}");
-        assert!(yaml.contains("m_Script: print(1)"), "{yaml}");
+        collect_output_tree(
+            &bytes_output_root,
+            &mut exported_files,
+            &mut exported_directories,
+        );
+        assert!(!exported_files.iter().any(|path| path
+            .extension()
+            .is_some_and(|extension| extension == "asset")));
         assert_eq!(fs::read(&source_path).unwrap(), source_bytes);
 
         input.files.extend(exported_files);

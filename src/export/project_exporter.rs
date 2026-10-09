@@ -368,6 +368,30 @@ pub fn select_collection_with_shader_text(
     shader_text: ShaderTextState,
 ) -> Result<CollectionSelection, ProjectExportError> {
     let claim_facts = claim_facts_for_shader_text(facts, settings, shader_text);
+    select_collection_with_claim_facts(facts, settings, claim_facts)
+}
+
+/// Run the source registration stack with TextAsset payload validity supplied by decoding.
+///
+/// The baseline `TextAssetExporter` claims only assets whose serialized `m_Script` bytes are
+/// non-empty. Other exporters continue to use their own payload facts and existing selection
+/// entry points.
+pub fn select_collection_with_text_asset_validity(
+    facts: ObjectClassFacts,
+    settings: ProjectExportSettings,
+    shader_text: ShaderTextState,
+    text_asset_data_valid: bool,
+) -> Result<CollectionSelection, ProjectExportError> {
+    let mut claim_facts = claim_facts_for_shader_text(facts, settings, shader_text);
+    claim_facts.data_valid = text_asset_data_valid;
+    select_collection_with_claim_facts(facts, settings, claim_facts)
+}
+
+fn select_collection_with_claim_facts(
+    facts: ObjectClassFacts,
+    settings: ProjectExportSettings,
+    claim_facts: ClaimFacts,
+) -> Result<CollectionSelection, ProjectExportError> {
     // `ObjectHandlerStack` pushes every matching handler in registration order and iterates the
     // resulting stack, so the last registration is tried first.
     for (registration_index, registration) in EXPORTER_REGISTRATIONS.iter().enumerate().rev() {
@@ -1179,6 +1203,30 @@ mod tests {
         assert!(class_interfaces(48).contains(&"IShader"));
         assert!(class_interfaces(48).contains(&"ITextAsset"));
         assert_eq!(claim_asset_kind(facts(48)), ClaimAssetKind::Shader);
+    }
+
+    #[test]
+    fn text_asset_exporter_requires_nonempty_script_data() {
+        let settings = defaults();
+        let text_asset = facts(49);
+        let empty = select_collection_with_text_asset_validity(
+            text_asset,
+            settings,
+            ShaderTextState::NoScript,
+            false,
+        )
+        .unwrap();
+        assert_eq!(empty.exporter, "DefaultYamlExporter");
+
+        let populated = select_collection_with_text_asset_validity(
+            text_asset,
+            settings,
+            ShaderTextState::NoScript,
+            true,
+        )
+        .unwrap();
+        assert_eq!(populated.exporter, "TextAssetExporter");
+        assert_eq!(populated.collection_name, "TextAssetExportCollection");
     }
 
     #[test]

@@ -1,0 +1,11 @@
+# Frozen AssetRipper 1.4.0.0 TextAsset project-export output from the source-authored
+# Unity 2019.4.40f1 textasset_notree SerializedFile (PathID 42, name Hero, m_Script print(1)).
+# GUID and timeCreated are omitted from metadata because the source generates both per export.
+MODE|Parse
+OBJECT|TextAsset|42|Hero
+ASSET|ExportedProject/Assets/TextAsset/Hero.txt|cHJpbnQoMSk=
+META|ExportedProject/Assets/TextAsset/Hero.txt.meta|fileFormatVersion: 2\nlicenseType: Free\nTextScriptImporter:\n  externalObjects: {}\n  userData:\n  assetBundleName:\n  assetBundleVariant:\n
+MODE|Bytes
+OBJECT|TextAsset|42|Hero
+ASSET|ExportedProject/Assets/TextAsset/Hero.bytes|cHJpbnQoMSk=
+META|ExportedProject/Assets/TextAsset/Hero.bytes.meta|fileFormatVersion: 2\nlicenseType: Free\nTextScriptImporter:\n  externalObjects: {}\n  userData:\n  assetBundleName:\n  assetBundleVariant:\n

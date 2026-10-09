@@ -2,6 +2,18 @@
 
 This log records behavior differences found between the Rust port and the frozen local source. A source-code analysis is identified as such; it is not described as an executed C# differential.
 
+## DIFF-TEXTASSET-PROJECT-001 — TextAsset collection output and TextExportMode
+
+| Field | Finding |
+|---|---|
+| Status | Source-runtime matched and fixed for a source-authored Unity 2019.4.40f1 no-TypeTree TextAsset under `Parse` and `Bytes`. |
+| Source location | `TextAssetExporter.TryCreateCollection` and `Export`; `TextAssetExportCollection.GetExportExtension` and `CreateImporter`; `ProjectExporter.Overrides.cs`. Rust: `src/export/project_exporter.rs`, `src/export/project_workflow.rs`, `src/export/resource_extensions.rs`. |
+| Input evidence | `src/processing/asset_factory_fixture.txt` contains the frozen-source `textasset_notree` SerializedFile: 120 bytes, SHA-256 `BF7601B1D6A9E99330B62AD36035389A038B5A0C0171A08BE738012799A6CCEC`. It is Unity 2019.4.40f1, class 49, PathID 42, name `Hero`, with `m_Script` equal to UTF-8 `print(1)` and no embedded file TypeTree. |
+| Source-runtime evidence | `tools/probes/managed-project/Program.cs` runs the frozen `ExportHandler.LoadAndProcess` and `ExportHandler.Export` path. `export-textasset ... Parse` and `export-textasset ... Bytes` both exited 0. Committed outputs in `src/export/textasset_project_fixture.txt` record `Assets/TextAsset/Hero.txt` and `Assets/TextAsset/Hero.bytes`, each containing the exact eight input script bytes, plus the normalized `TextScriptImporter` sidecar. |
+| Source behavior | `TextAssetExporter` claims only a non-empty `Script_C49`; its writer emits the original script bytes. With no best extension, `Parse` classifies `print(1)` as `txt`, while `Bytes` selects `bytes`. `TextAssetExportCollection` creates a `TextScriptImporter` whose 2019.4 sidecar contains `externalObjects`, `userData`, `assetBundleName`, and `assetBundleVariant`. |
+| Rust behavior and regression | Project dispatch now supplies TextAsset script validity to collection selection, retains the serialized string bytes, applies `TextExportMode` to the output extension, writes those bytes directly, and emits `TextScriptImporter` metadata. `text_asset_exporter_requires_nonempty_script_data` checks the claim boundary. `export_project_routes_textasset_bytes_mode_and_importer` runs the product CLI for default `Parse` and settings-file `Bytes`, compares both normalized sidecars with the frozen-source fixture, checks the output paths and bytes, and verifies the input remains unchanged. |
+| Scope | This closes the one source behavior for the tested 2019.4.40f1 input and two modes, not `EXP-SETTINGS-APPLY-001` or `EXPORT-UNITY-001`. `Txt`, best-extension overrides, AssetBundle-derived importer values, other Unity versions, empty-script SerializedFile dispatch, and Unity Editor import remain unverified. |
+
 ## DIFF-LOCAL-FS-ENUMERATION-TIMING-001 — directory enumeration validates paths at source-compatible stages
 
 | Field | Finding |
