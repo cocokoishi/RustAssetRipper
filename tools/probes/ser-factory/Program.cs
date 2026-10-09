@@ -21,6 +21,7 @@
 // Reads only its inputs; writes only the rows file and scratch under target/.
 using System.Reflection;
 using System.Collections;
+using System.IO.Compression;
 using System.Globalization;
 using System.Text;
 using AssetRipper.Assets;
@@ -44,7 +45,7 @@ using AssetRipper.Tpk.TypeTrees;
 
 if (args.Length == 0)
 {
-		Console.Error.WriteLine("usage: dispatch <version> <classid...> | dispatch-matrix <output> | payload-matrix <output> | sweep <version> <max> | tpk <classid> <version...> | tpk-info <raw-output> <data-output> | tpk-select <output> | author <rows> | materialize <file> <rows>");
+		Console.Error.WriteLine("usage: dispatch <version> <classid...> | dispatch-matrix <output> | payload-matrix <output> | workspace-matrix <output.gz> [max-boundaries] | sweep <version> <max> | tpk <classid> <version...> | tpk-info <raw-output> <data-output> | tpk-select <output> | author <rows> | materialize <file> <rows>");
 	return 2;
 }
 
@@ -60,6 +61,9 @@ try
 			return 0;
 		case "payload-matrix":
 			DumpGeneratedPayloadMatrix(args[1]);
+			return 0;
+		case "workspace-matrix":
+			DumpGeneratedWorkspaceMatrix(args[1], args.Length > 2 ? int.Parse(args[2], CultureInfo.InvariantCulture) : null);
 			return 0;
 		case "sweep":
 			Sweep(args[1], int.Parse(args[2]));
@@ -266,13 +270,16 @@ static string OneLine(string value) => value.Replace('\r', ' ').Replace('\n', ' 
 
 // An empty serialized file at the requested version gives a real collection whose
 // Version/Platform/EndianType facts the factory consults, without needing any payload.
-static SerializedAssetCollection EmptyCollection(UnityVersion version, EndianType endianType = EndianType.LittleEndian)
+static SerializedAssetCollection EmptyCollection(
+	UnityVersion version,
+	EndianType endianType = EndianType.LittleEndian,
+	BuildTarget platform = (BuildTarget)19)
 {
 	SerializedFile file = new SerializedFileBuilder
 	{
 		Generation = FormatVersion.Unknown_10,
 		Version = version,
-		Platform = (BuildTarget)19,
+		Platform = platform,
 		EndianType = endianType,
 		HasTypeTree = false,
 	}.Build();
@@ -414,6 +421,185 @@ static void DumpGeneratedPayloadMatrix(string outputPath)
 		}
 	}
 	Console.WriteLine($"PAYLOAD_MATRIX|generated={generated}|skipped={skipped}|failed={failed}|bytes={totalBytes}|versions={collections.Count}");
+}
+
+static void DumpGeneratedWorkspaceMatrix(string outputPath, int? maximumBoundaries)
+{
+	TpkTypeTreeBlob blob = (TpkTypeTreeBlob)TpkFile.FromStream(SourceTpk.GetStream()).GetDataBlob();
+	string scratch = Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, "target", "ser-factory-workspace-probe"));
+	Directory.CreateDirectory(scratch);
+	Dictionary<(string Version, bool Editor), List<(int ClassId, string WrittenType, byte[] Payload)>> groups = new();
+	Dictionary<string, SerializedAssetCollection> collections = new(StringComparer.Ordinal);
+	int boundaries = 0;
+	int skipped = 0;
+	int failed = 0;
+	long payloadBytes = 0;
+	List<string> skipRecords = [];
+
+	foreach (TpkClassInformation classInformation in blob.ClassInformation.OrderBy(item => item.ID))
+	{
+		foreach (var entry in classInformation.Classes)
+		{
+			if (entry.Value is null)
+			{
+				continue;
+			}
+			if (maximumBoundaries.HasValue && boundaries >= maximumBoundaries.Value)
+			{
+				goto WriteGroups;
+			}
+			boundaries++;
+			UnityVersion version = entry.Key;
+			string versionText = version.ToString();
+			foreach (bool editor in new[] { false, true })
+			{
+				BuildTarget platform = editor ? BuildTarget.NoTarget : (BuildTarget)19;
+				SerializedAssetCollection collection = EmptyCollection(version, platform: platform);
+				IUnityObjectBase? asset;
+				try
+				{
+					asset = AssetFactory.CreateSerialized(new AssetInfo(collection, 42, classInformation.ID), version);
+				}
+				catch (Exception exception)
+				{
+					skipped++;
+					skipRecords.Add($"SKIP|{classInformation.ID}|{versionText}|{(editor ? "editor" : "release")}|THROW:{exception.GetType().Name}|{OneLine(exception.Message)}");
+					continue;
+				}
+				if (asset is null)
+				{
+					skipped++;
+					skipRecords.Add($"SKIP|{classInformation.ID}|{versionText}|{(editor ? "editor" : "release")}|MISSING");
+					continue;
+				}
+
+				try
+				{
+					using MemoryStream stream = new();
+					using (AssetWriter writer = new(stream, asset.Collection))
+					{
+						if (editor)
+						{
+							asset.WriteEditor(writer);
+						}
+						else
+						{
+							asset.WriteRelease(writer);
+						}
+					}
+					var key = (versionText, editor);
+					if (!groups.TryGetValue(key, out List<(int ClassId, string WrittenType, byte[] Payload)>? objects))
+					{
+						objects = [];
+						groups.Add(key, objects);
+					}
+					objects.Add((classInformation.ID, asset.GetType().Name, stream.ToArray()));
+					payloadBytes += stream.Length;
+			}
+				catch (Exception exception)
+				{
+					failed++;
+					throw new InvalidOperationException(
+						$"Source writer failed for class {classInformation.ID} at {versionText} in {(editor ? "editor" : "release")} mode",
+						exception);
+				}
+			}
+		}
+	}
+
+WriteGroups:
+	var orderedGroups = groups
+		.OrderBy(pair => UnityVersion.Parse(pair.Key.Version))
+		.ThenBy(pair => pair.Key.Editor)
+		.ToArray();
+	string fullPath = Path.GetFullPath(outputPath);
+	Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+	long serializedFileBytes = 0;
+	int materializedObjects = 0;
+	using (FileStream fileStream = File.Create(fullPath))
+	using (GZipStream gzip = new(fileStream, CompressionLevel.SmallestSize))
+	using (BinaryWriter fixture = new(gzip, Encoding.UTF8, leaveOpen: false))
+	{
+		fixture.Write(Encoding.ASCII.GetBytes("ARWFAC01"));
+		fixture.Write(orderedGroups.Length);
+		for (int groupIndex = 0; groupIndex < orderedGroups.Length; groupIndex++)
+		{
+			var group = orderedGroups[groupIndex];
+			string fileName = $"factory_{groupIndex:D4}_{(group.Key.Editor ? "editor" : "release")}{(group.Key.Editor ? ".unity" : ".assets")}";
+			BuildTarget platform = group.Key.Editor ? BuildTarget.NoTarget : (BuildTarget)19;
+			SerializedFileBuilder builder = new()
+			{
+				Generation = FormatVersion.Unknown_10,
+				Version = UnityVersion.Parse(group.Key.Version),
+				Platform = platform,
+				EndianType = EndianType.LittleEndian,
+				HasTypeTree = false,
+			};
+			for (int objectIndex = 0; objectIndex < group.Value.Count; objectIndex++)
+			{
+				var sourceObject = group.Value[objectIndex];
+				SerializedType type = new() { RawTypeID = sourceObject.ClassId };
+				builder.Types.Add(type);
+				builder.Objects.Add(new ObjectInfo(type)
+				{
+					FileID = objectIndex + 1,
+					TypeID = sourceObject.ClassId,
+					ObjectData = sourceObject.Payload,
+				});
+			}
+			SerializedFile generatedFile = builder.Build();
+			generatedFile.FilePath = fileName;
+			byte[] serializedFile = generatedFile.ToByteArray();
+			serializedFileBytes += serializedFile.Length;
+			string scratchPath = Path.Combine(scratch, fileName);
+			File.WriteAllBytes(scratchPath, serializedFile);
+			using FileBase loaded = SchemeReader.LoadFile(scratchPath, LocalFileSystem.Instance);
+			if (loaded is not SerializedFile loadedSerializedFile)
+			{
+				throw new InvalidOperationException($"{fileName} reloaded as {loaded.GetType().Name}");
+			}
+			GameAssetFactory factory = new(new BaseManager(_ => { }));
+			SerializedAssetCollection collection = new GameBundle().AddCollectionFromSerializedFile(loadedSerializedFile, factory);
+			if (collection.Count != group.Value.Count)
+			{
+				throw new InvalidOperationException($"{fileName} source factory returned {collection.Count} assets for {group.Value.Count} objects");
+			}
+			Dictionary<long, IUnityObjectBase> assetsByPathId = collection.ToDictionary(asset => asset.PathID);
+
+			WriteFixtureString(fixture, fileName);
+			WriteFixtureString(fixture, group.Key.Version);
+			fixture.Write((byte)(group.Key.Editor ? 1 : 0));
+			fixture.Write(serializedFile.Length);
+			fixture.Write(serializedFile);
+			fixture.Write(group.Value.Count);
+			for (int objectIndex = 0; objectIndex < group.Value.Count; objectIndex++)
+			{
+				var sourceObject = group.Value[objectIndex];
+				long pathId = objectIndex + 1;
+				if (!assetsByPathId.TryGetValue(pathId, out IUnityObjectBase? asset))
+				{
+					throw new InvalidOperationException($"{fileName} source factory omitted PathID {pathId}");
+				}
+				fixture.Write(sourceObject.ClassId);
+				fixture.Write(pathId);
+				WriteFixtureString(fixture, asset.GetType().Name);
+				WriteFixtureString(fixture, NameOf(asset));
+				object? structure = GetProperty(asset, "Structure");
+				WriteFixtureString(fixture, structure?.GetType().Name ?? string.Empty);
+		fixture.Write(sourceObject.Payload.Length);
+				materializedObjects++;
+			}
+		}
+	}
+	File.WriteAllLines(fullPath + ".skips.txt", skipRecords, new UTF8Encoding(false));
+	Console.WriteLine($"WORKSPACE_MATRIX|boundaries={boundaries}|payloads={materializedObjects}|groups={orderedGroups.Length}|serialized_bytes={serializedFileBytes}|payload_bytes={payloadBytes}|skipped={skipped}|failed={failed}");
+}
+
+static void WriteFixtureString(BinaryWriter writer, string value)
+{
+	byte[] bytes = Encoding.UTF8.GetBytes(value);
+	writer.Write(bytes.Length);
+	writer.Write(bytes);
 }
 
 static void Sweep(string versionText, int maximum)

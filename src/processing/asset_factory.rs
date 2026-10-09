@@ -1088,11 +1088,11 @@ impl Display for FactoryEngineError {
 
 impl std::error::Error for FactoryEngineError {}
 
-/// The read class id the source collection uses: the file's resolved class id with
-/// the stripped (negative) fallback to MonoBehaviour.
+/// The read class id the source collection uses: `ObjectInfo.TypeID` is retained as
+/// `raw_type_id`, with the stripped (negative) fallback to MonoBehaviour. The legacy
+/// object-table `class_id` field is not the value passed to `AssetInfo` by the source.
 pub fn object_read_class_id(object: &ObjectInfo) -> i32 {
-    let class_id = object.class_id.map(i32::from).unwrap_or(object.raw_type_id);
-    resolve_read_class_id(class_id)
+    resolve_read_class_id(object.raw_type_id)
 }
 
 /// `GameAssetFactory.ReadAsset`: dispatch one file object through the factory.
@@ -2567,6 +2567,32 @@ mod tests {
         assert_eq!(
             super::classify_read_data_path(true, -1),
             AssetReadPath::UnreadableUnsupportedVersion
+        );
+    }
+
+    #[test]
+    fn read_class_id_uses_type_id_instead_of_legacy_class_id_field() {
+        let object = crate::serialized_file::metadata::ObjectInfo {
+            path_id: 1,
+            byte_start: 0,
+            byte_size: 0,
+            serialized_type_index: None,
+            raw_type_id: 1_480_428_607,
+            class_id: Some(0),
+            script_type_index: None,
+            is_destroyed: None,
+            is_stripped: None,
+            resolved_type_index: Some(0),
+        };
+        assert_eq!(super::object_read_class_id(&object), 1_480_428_607);
+
+        let stripped = crate::serialized_file::metadata::ObjectInfo {
+            raw_type_id: -1,
+            ..object
+        };
+        assert_eq!(
+            super::object_read_class_id(&stripped),
+            super::MONO_BEHAVIOUR_CLASS_ID
         );
     }
 

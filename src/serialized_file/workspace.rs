@@ -4154,6 +4154,8 @@ fn workspace_error(
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
+
     use super::{
         append_mounted_container_bundles, collection_lookup_candidates,
         engine_resource_collection_alias, fix_file_identifier, SerializedFileDependencyOutcome,
@@ -4864,6 +4866,131 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct SourceFactoryWorkspaceExpectedObject {
+        class_id: i32,
+        path_id: i64,
+        source_type: String,
+        source_name: String,
+        source_structure: String,
+        payload_bytes: usize,
+    }
+
+    #[derive(Debug)]
+    struct SourceFactoryWorkspaceExpectedFile {
+        file_name: String,
+        unity_version: String,
+        editor_mode: bool,
+        bytes: Vec<u8>,
+        objects: Vec<SourceFactoryWorkspaceExpectedObject>,
+    }
+
+    fn read_factory_fixture_u32(cursor: &mut std::io::Cursor<&[u8]>) -> u32 {
+        let mut bytes = [0; 4];
+        cursor
+            .read_exact(&mut bytes)
+            .expect("source-factory fixture contains a u32");
+        u32::from_le_bytes(bytes)
+    }
+
+    fn read_factory_fixture_i32(cursor: &mut std::io::Cursor<&[u8]>) -> i32 {
+        let mut bytes = [0; 4];
+        cursor
+            .read_exact(&mut bytes)
+            .expect("source-factory fixture contains an i32");
+        i32::from_le_bytes(bytes)
+    }
+
+    fn read_factory_fixture_i64(cursor: &mut std::io::Cursor<&[u8]>) -> i64 {
+        let mut bytes = [0; 8];
+        cursor
+            .read_exact(&mut bytes)
+            .expect("source-factory fixture contains an i64");
+        i64::from_le_bytes(bytes)
+    }
+
+    fn read_factory_fixture_string(cursor: &mut std::io::Cursor<&[u8]>) -> String {
+        let length = usize::try_from(read_factory_fixture_u32(cursor))
+            .expect("fixture string length fits usize");
+        assert!(length <= 1024 * 1024, "fixture string is bounded");
+        let mut bytes = vec![0; length];
+        cursor
+            .read_exact(&mut bytes)
+            .expect("source-factory fixture contains a complete string");
+        String::from_utf8(bytes).expect("source-factory fixture strings are UTF-8")
+    }
+
+    fn parse_source_factory_workspace_fixture(
+        bytes: &[u8],
+    ) -> Vec<SourceFactoryWorkspaceExpectedFile> {
+        let decoder = flate2::read::GzDecoder::new(bytes);
+        let mut decoded = Vec::new();
+        decoder
+            .take(64 * 1024 * 1024)
+            .read_to_end(&mut decoded)
+            .expect("source-factory workspace fixture decompresses within its bound");
+        let mut cursor = std::io::Cursor::new(decoded.as_slice());
+        let mut magic = [0; 8];
+        cursor
+            .read_exact(&mut magic)
+            .expect("source-factory workspace fixture has a header");
+        assert_eq!(&magic, b"ARWFAC01");
+        let group_count = usize::try_from(read_factory_fixture_u32(&mut cursor))
+            .expect("fixture group count fits usize");
+        assert!(group_count <= 100_000, "fixture group count is bounded");
+        let mut files = Vec::with_capacity(group_count);
+        for _ in 0..group_count {
+            let file_name = read_factory_fixture_string(&mut cursor);
+            let unity_version = read_factory_fixture_string(&mut cursor);
+            let mut editor = [0];
+            cursor
+                .read_exact(&mut editor)
+                .expect("source-factory fixture contains its serialization mode");
+            assert!(editor[0] <= 1, "fixture mode is release or editor");
+            let file_length = usize::try_from(read_factory_fixture_u32(&mut cursor))
+                .expect("serialized file length fits usize");
+            assert!(file_length <= 16 * 1024 * 1024, "fixture file is bounded");
+            let mut file_bytes = vec![0; file_length];
+            cursor
+                .read_exact(&mut file_bytes)
+                .expect("source-factory fixture contains a complete SerializedFile");
+            let object_count = usize::try_from(read_factory_fixture_u32(&mut cursor))
+                .expect("fixture object count fits usize");
+            assert!(object_count <= 100_000, "fixture object count is bounded");
+            let mut objects = Vec::with_capacity(object_count);
+            for _ in 0..object_count {
+                let class_id = read_factory_fixture_i32(&mut cursor);
+                let path_id = read_factory_fixture_i64(&mut cursor);
+                let source_type = read_factory_fixture_string(&mut cursor);
+                let source_name = read_factory_fixture_string(&mut cursor);
+                let source_structure = read_factory_fixture_string(&mut cursor);
+                let payload_bytes = usize::try_from(read_factory_fixture_u32(&mut cursor))
+                    .expect("fixture payload length fits usize");
+                objects.push(SourceFactoryWorkspaceExpectedObject {
+                    class_id,
+                    path_id,
+                    source_type,
+                    source_name,
+                    source_structure,
+                    payload_bytes,
+                });
+            }
+            files.push(SourceFactoryWorkspaceExpectedFile {
+                file_name,
+                unity_version,
+                editor_mode: editor[0] == 1,
+                bytes: file_bytes,
+                objects,
+            });
+        }
+        assert_eq!(
+            cursor.position(),
+            u64::try_from(decoded.len()).unwrap(),
+            "source-factory fixture has no unaccounted trailing bytes"
+        );
+        files
+    }
+
     #[test]
     fn source_collection_file_order_matches_root_and_nested_bundle_walk() {
         let mut filesystem = VirtualFileSystem::new();
@@ -5056,6 +5183,401 @@ mod tests {
         let source_start = usize::try_from(source_range.start).unwrap();
         let source_end = usize::try_from(source_range.end).unwrap();
         assert_eq!(&raw_bytes[start..end], &raw_bytes[source_start..source_end]);
+    }
+
+    #[test]
+    fn object_workspace_replays_source_factory_defaults_at_every_tpk_boundary() {
+        let expected_files = parse_source_factory_workspace_fixture(include_bytes!(
+            "../processing/source_factory_workspace_fixture.bin.gz"
+        ));
+        assert_eq!(expected_files.len(), 1168, "reference group count changed");
+        let expected_object_count = expected_files
+            .iter()
+            .map(|file| file.objects.len())
+            .sum::<usize>();
+        assert_eq!(expected_object_count, 8_922);
+
+        let mut source_payloads = std::collections::HashMap::new();
+        let mut source_skip_count = 0usize;
+        for (line_index, line) in include_str!("../processing/source_factory_payload_fixture.txt")
+            .lines()
+            .enumerate()
+        {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let fields: Vec<_> = line.split('|').collect();
+            match fields.first().copied() {
+                Some("SKIP") => {
+                    assert_eq!(
+                        fields.len(),
+                        4,
+                        "source payload fixture line {}",
+                        line_index + 1
+                    );
+                    source_skip_count += 1;
+                }
+                Some("PAYLOAD") => {
+                    assert_eq!(
+                        fields.len(),
+                        7,
+                        "source payload fixture line {}",
+                        line_index + 1
+                    );
+                    let class_id = fields[1].parse::<i32>().expect("source class ID");
+                    let mode = match fields[4] {
+                        "release" => false,
+                        "editor" => true,
+                        other => panic!("unexpected source payload mode `{other}`"),
+                    };
+                    let byte_count = fields[5]
+                        .parse::<usize>()
+                        .expect("source payload byte count");
+                    let hex = fields[6].as_bytes();
+                    assert_eq!(hex.len(), byte_count * 2, "source payload hex length");
+                    let bytes = hex
+                        .chunks_exact(2)
+                        .map(|pair| {
+                            let digits =
+                                std::str::from_utf8(pair).expect("source payload hex is ASCII");
+                            u8::from_str_radix(digits, 16).expect("source payload hex digit")
+                        })
+                        .collect::<Vec<_>>();
+                    assert!(
+                        source_payloads
+                            .insert(
+                                (class_id, fields[2].to_owned(), mode),
+                                (fields[3].to_owned(), bytes)
+                            )
+                            .is_none(),
+                        "source payload fixture has a unique class/version/mode key"
+                    );
+                }
+                other => panic!("unexpected source payload fixture row {other:?}"),
+            }
+        }
+        assert_eq!(source_payloads.len(), 8_922);
+        assert_eq!(source_skip_count, 539);
+
+        let mut filesystem = VirtualFileSystem::new();
+        let mut inputs = Vec::with_capacity(expected_files.len());
+        for file in &expected_files {
+            let path = format!("/factory-matrix/{}", file.file_name);
+            insert_file(&mut filesystem, &path, &file.bytes);
+            inputs.push(input(&path));
+        }
+
+        let workspace = SerializedFileWorkspace::load_from_vfs(
+            &filesystem,
+            &inputs,
+            SerializedFileWorkspaceLimits::default(),
+        )
+        .expect("every source-authored matrix file parses and scans");
+        assert_eq!(workspace.files().len(), expected_files.len());
+        assert_eq!(workspace.report().total_objects, expected_object_count);
+        for (file_index, (file, expected)) in
+            workspace.files().iter().zip(&expected_files).enumerate()
+        {
+            assert_eq!(file.file_name, expected.file_name, "file {file_index}");
+            assert_eq!(
+                file.metadata.prefix.unity_version_text.as_deref(),
+                Some(expected.unity_version.as_str()),
+                "file {} version",
+                expected.file_name
+            );
+            assert_eq!(
+                file.metadata.prefix.target_platform,
+                Some(if expected.editor_mode {
+                    crate::serialized_file::object::BUILD_TARGET_NO_TARGET
+                } else {
+                    19
+                }),
+                "file {} platform/mode",
+                expected.file_name
+            );
+            assert_eq!(file.metadata.objects.len(), expected.objects.len());
+            assert!(file.metadata.types.iter().all(|serialized_type| {
+                serialized_type
+                    .type_tree
+                    .as_ref()
+                    .is_none_or(|tree| tree.nodes.is_empty())
+            }));
+            assert_eq!(
+                filesystem
+                    .read_all_bytes(&file.virtual_path, usize::MAX)
+                    .expect("fixture file remains in the source VFS"),
+                expected.bytes,
+                "{} source bytes are retained",
+                expected.file_name
+            );
+        }
+
+        let objects = ObjectWorkspace::load_from_vfs(
+            &filesystem,
+            &workspace,
+            ObjectWorkspaceLimits::default(),
+        )
+        .expect("ObjectWorkspace materializes every source-factory matrix object");
+        assert_eq!(objects.report().object_count, expected_object_count);
+        assert_eq!(objects.objects().len(), expected_object_count);
+        assert_eq!(
+            objects.report().decoded_objects + objects.report().undecoded_objects,
+            expected_object_count,
+            "every object has an explicit materialization outcome"
+        );
+
+        let mut expected_full_count = 0usize;
+        let mut expected_object_index = 0usize;
+        for (file_index, file) in expected_files.iter().enumerate() {
+            for (object_index, expected) in file.objects.iter().enumerate() {
+                let actual = &objects.objects()[expected_object_index];
+                expected_object_index += 1;
+                assert_eq!(
+                    actual.file_index, file_index,
+                    "{} file index",
+                    file.file_name
+                );
+                assert_eq!(
+                    actual.object_index, object_index,
+                    "{} object index",
+                    file.file_name
+                );
+                assert_eq!(
+                    actual.path_id, expected.path_id,
+                    "{} PathID",
+                    file.file_name
+                );
+                assert_eq!(
+                    actual.factory.class_id, expected.class_id,
+                    "{} class",
+                    file.file_name
+                );
+                let actual_payload_bytes =
+                    usize::try_from(actual.raw_payload_range.end - actual.raw_payload_range.start)
+                        .expect("object payload range fits usize");
+                assert_eq!(
+                    actual_payload_bytes, expected.payload_bytes,
+                    "{} payload size",
+                    file.file_name
+                );
+                let (source_type, source_payload) = source_payloads
+                    .remove(&(
+                        expected.class_id,
+                        file.unity_version.clone(),
+                        file.editor_mode,
+                    ))
+                    .expect("every workspace object has a matching source payload fixture row");
+                assert_eq!(
+                    source_type, expected.source_type,
+                    "{} source type",
+                    file.file_name
+                );
+                let payload_start = usize::try_from(actual.raw_payload_range.start)
+                    .expect("object payload start fits usize");
+                let payload_end = usize::try_from(actual.raw_payload_range.end)
+                    .expect("object payload end fits usize");
+                assert_eq!(
+                    file.bytes.get(payload_start..payload_end),
+                    Some(source_payload.as_slice()),
+                    "{} PathID {} preserves the byte-exact source release/editor payload",
+                    file.file_name,
+                    expected.path_id
+                );
+
+                match expected.source_type.as_str() {
+                    "UnknownObject" | "RawDataObject" => assert!(
+                        matches!(
+                            actual.factory.kind,
+                            crate::processing::asset_factory::FactoryAssetKind::Unknown
+                        ),
+                        "{} PathID {}: source type {} vs Rust {:?}",
+                        file.file_name,
+                        expected.path_id,
+                        expected.source_type,
+                        actual.factory.kind
+                    ),
+                    name if name.starts_with("Unreadable") => assert!(
+                        matches!(
+                            actual.factory.kind,
+                            crate::processing::asset_factory::FactoryAssetKind::Unreadable
+                        ),
+                        "{} PathID {}: source type {} vs Rust {:?}",
+                        file.file_name,
+                        expected.path_id,
+                        expected.source_type,
+                        actual.factory.kind
+                    ),
+                    name if name.contains("TypeTreeObject") => assert!(
+                        matches!(
+                            actual.factory.kind,
+                            crate::processing::asset_factory::FactoryAssetKind::TypeTreeObject
+                        ),
+                        "{} PathID {}: source type {} vs Rust {:?}",
+                        file.file_name,
+                        expected.path_id,
+                        expected.source_type,
+                        actual.factory.kind
+                    ),
+                    source_type => assert_eq!(
+                        actual.factory.kind,
+                        crate::processing::asset_factory::FactoryAssetKind::Generated(
+                            source_type.to_owned()
+                        ),
+                        "{} PathID {} source generated type",
+                        file.file_name,
+                        expected.path_id
+                    ),
+                }
+
+                if expected.source_name != "NULL" {
+                    assert_eq!(
+                        actual.factory.name, expected.source_name,
+                        "{} PathID {} source name",
+                        file.file_name, expected.path_id
+                    );
+                }
+
+                if !expected.source_structure.is_empty() {
+                    let actual_structure = actual.factory.structure.as_ref().map(|structure| {
+                        match structure.outcome {
+                            crate::processing::asset_factory::MonoBehaviourStructureOutcome::UseParsedStructure => {
+                                "SerializableStructure"
+                            }
+                            crate::processing::asset_factory::MonoBehaviourStructureOutcome::ClearStructure => {
+                                "NULL"
+                            }
+                            crate::processing::asset_factory::MonoBehaviourStructureOutcome::UseUnloadedRemainder => {
+                                "UnloadedStructure"
+                            }
+                            crate::processing::asset_factory::MonoBehaviourStructureOutcome::KeepExisting => {
+                                "KeepExisting"
+                            }
+                        }
+                    });
+                    assert_eq!(
+                        actual_structure,
+                        Some(expected.source_structure.as_str()),
+                        "{} PathID {} source MonoBehaviour structure",
+                        file.file_name,
+                        expected.path_id
+                    );
+                }
+
+                let source_is_incomplete = expected.source_type == "UnknownObject"
+                    || expected.source_type == "RawDataObject"
+                    || expected.source_type.starts_with("Unreadable")
+                    || expected.source_structure == "UnloadedStructure";
+                if !source_is_incomplete {
+                    expected_full_count += 1;
+                    assert!(
+                        actual.is_fully_materialized(),
+                        "{} PathID {} is complete in the source but incomplete in Rust: {:?}",
+                        file.file_name,
+                        expected.path_id,
+                        actual.factory
+                    );
+                } else if expected.source_structure == "UnloadedStructure" {
+                    assert!(
+                        !actual.is_fully_materialized(),
+                        "{} PathID {} source UnloadedStructure must remain explicit",
+                        file.file_name,
+                        expected.path_id
+                    );
+                }
+
+                match actual.payload.as_ref() {
+                    Ok(payload) => {
+                        assert_eq!(payload.path_id, expected.path_id);
+                        assert_eq!(
+                            payload.consumed_bytes + payload.trailing_bytes.len(),
+                            expected.payload_bytes,
+                            "{} PathID {} decoded range",
+                            file.file_name,
+                            expected.path_id
+                        );
+                        if !matches!(
+                            actual.factory.kind,
+                            crate::processing::asset_factory::FactoryAssetKind::Unreadable
+                                | crate::processing::asset_factory::FactoryAssetKind::Unknown
+                        ) {
+                            let tree = actual
+                                .recovered_type_tree
+                                .as_ref()
+                                .expect("no-TypeTree generated objects retain their selected TPK tree");
+                            assert_eq!(
+                                tree.nodes.first().and_then(|node| node.type_name.as_deref()),
+                                Some(payload.type_name.as_str()),
+                                "{} PathID {} selected tree root",
+                                file.file_name,
+                                expected.path_id
+                            );
+                        }
+                    }
+                    Err(error) => assert!(
+                        source_is_incomplete,
+                        "{} PathID {} has a Rust decode error without a matching source fallback: {error}",
+                        file.file_name,
+                        expected.path_id
+                    ),
+                }
+            }
+
+            for issue in workspace.files()[file_index].reference_graph.issues() {
+                let source_object_index = match issue {
+                    crate::serialized_file::reference_graph::ReferenceGraphIssue::ObjectDecodeFailed {
+                        object_index,
+                        ..
+                    }
+                    | crate::serialized_file::reference_graph::ReferenceGraphIssue::UnparsedTrailingPayload {
+                        object_index,
+                        ..
+                    }
+                    | crate::serialized_file::reference_graph::ReferenceGraphIssue::UnparsedRawValue {
+                        object_index,
+                        ..
+                    }
+                    | crate::serialized_file::reference_graph::ReferenceGraphIssue::FieldPathLimitExceeded {
+                        object_index,
+                        ..
+                    }
+                    | crate::serialized_file::reference_graph::ReferenceGraphIssue::EdgeLimitExceeded {
+                        object_index,
+                        ..
+                    }
+                    | crate::serialized_file::reference_graph::ReferenceGraphIssue::ManagedObjectLimitExceeded {
+                        object_index,
+                        ..
+                    }
+                    | crate::serialized_file::reference_graph::ReferenceGraphIssue::ManagedReferenceLimitExceeded {
+                        object_index,
+                        ..
+                    }
+                    | crate::serialized_file::reference_graph::ReferenceGraphIssue::ManagedRegistryScopeLimitExceeded {
+                        object_index,
+                        ..
+                    } => *object_index,
+                };
+                let source_object = &file.objects[source_object_index];
+                assert!(
+                    source_object.source_type == "UnknownObject"
+                        || source_object.source_type == "RawDataObject"
+                        || source_object.source_type.starts_with("Unreadable")
+                        || source_object.source_structure == "UnloadedStructure",
+                    "{} PathID {} has a Rust reference-scan issue without a matching source partial/raw outcome: {issue:?}",
+                    file.file_name,
+                    source_object.path_id
+                );
+            }
+        }
+        assert_eq!(
+            objects.report().decoded_objects,
+            expected_full_count,
+            "ObjectWorkspace completion count matches the source factory outcomes"
+        );
+        assert!(
+            source_payloads.is_empty(),
+            "all source payload rows were consumed"
+        );
     }
 
     #[test]

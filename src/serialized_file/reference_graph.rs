@@ -2213,6 +2213,7 @@ fn collect_references(
                 path_id: *path_id,
             });
         }
+        SerializedValue::Raw { bytes, .. } if bytes.is_empty() => {}
         SerializedValue::Raw { bytes, .. } => {
             if issues.len() >= limits.max_issues {
                 return Err(WalkIssue::IssueLimitExceeded {
@@ -3598,6 +3599,31 @@ mod tests {
                 byte_count: 4,
             }]
         );
+    }
+
+    #[test]
+    fn empty_raw_type_tree_leaves_do_not_report_unscanned_reference_bytes() {
+        let value = SerializedValue::Struct(vec![SerializedFieldValue {
+            name: "m_Unknown".to_owned(),
+            value: SerializedValue::Raw {
+                type_name: "UnknownPointerShape".to_owned(),
+                bytes: Vec::new(),
+            },
+        }]);
+        let mut references = Vec::new();
+        let mut issues = Vec::new();
+        collect_references(
+            &value,
+            &mut String::new(),
+            2,
+            77,
+            &mut references,
+            &mut issues,
+            ReferenceGraphLimits::default(),
+        )
+        .unwrap();
+        assert!(references.is_empty());
+        assert!(issues.is_empty());
     }
 
     /// File-level PPtr/external differential against the reference dump
