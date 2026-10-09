@@ -13,7 +13,7 @@ use crate::compression::wrappers::{
     has_brotli_file_signature, has_gzip_magic, WrapperCodecError,
 };
 use crate::container::raw_web::{RawWebBundle, RawWebError, RawWebKind, RawWebLimits};
-use crate::container::unityfs::{UnityFsBundle, UnityFsError, UnityFsLimits};
+use crate::container::unityfs::{UnityFsBundle, UnityFsError, UnityFsLimits, UnityFsStreamBundle};
 use crate::container::web_file::{WebFile, WebFileError, WebFileLimits};
 use crate::io::discovery::{discover_directory_inputs, DirectoryDiscoveryError};
 use crate::io::filesystem::VirtualFileSystem;
@@ -1893,6 +1893,334 @@ fn record_container_bundle(
     Ok(bundle_index)
 }
 
+fn mount_unityfs_stream_tree(
+    source: &SmartStream,
+    source_name: Option<&str>,
+    filesystem: &mut VirtualFileSystem,
+    destination_root: Option<&str>,
+    scheme_limits: SchemeReaderLimits,
+    limits: ContainerMountLimits,
+) -> Result<ContainerMountReport, ContainerMountError> {
+    let mut state = ContainerTreeMountState {
+        filesystem,
+        limits,
+        visited_entries: 0,
+        active_nested_bytes: 0,
+        container_scope_path_bytes: 0,
+        container_bundle_name_bytes: 0,
+        bundle_serialized_file_counts: Vec::new(),
+        bundle_resource_file_counts: Vec::new(),
+        resource_file_path_bytes: 0,
+        resource_file_name_bytes: 0,
+        report: ContainerMountReport::default(),
+    };
+    mount_unityfs_stream_tree_at(
+        source,
+        UnityFsStreamContext {
+            destination_root,
+            depth: 0,
+            parent_bundle_index: None,
+            parent_entry_index: None,
+            source_name,
+        },
+        scheme_limits,
+        &mut state,
+    )?;
+    Ok(state.report)
+}
+
+fn mount_unityfs_stream_tree_at(
+    source: &SmartStream,
+    context: UnityFsStreamContext<'_>,
+    scheme_limits: SchemeReaderLimits,
+    state: &mut ContainerTreeMountState<'_>,
+) -> Result<(), ContainerMountError> {
+    let UnityFsStreamContext {
+        destination_root,
+        depth,
+        parent_bundle_index,
+        parent_entry_index,
+        source_name,
+    } = context;
+    let container_scope_index = record_container_scope(destination_root, state)?;
+    let container_bundle_index = record_container_bundle(
+        container_scope_index,
+        parent_bundle_index,
+        parent_entry_index,
+        source_name,
+        state,
+    )?;
+    if depth > state.limits.max_depth {
+        return Err(ContainerMountError::new(
+            state.report.clone(),
+            ContainerMountErrorKind::NestingDepthLimitExceeded {
+                depth,
+                limit: state.limits.max_depth,
+            },
+        ));
+    }
+    let bundle = UnityFsStreamBundle::parse(
+        source,
+        scheme_limits.unity_fs,
+        scheme_limits.max_input_bytes,
+    )
+    .map_err(|error| {
+        ContainerMountError::new(
+            state.report.clone(),
+            ContainerMountErrorKind::Scheme(SchemeError::new(SchemeErrorKind::UnityFs(error))),
+        )
+    })?;
+    preflight_tree_entry_count(bundle.nodes.len(), state)?;
+    for (index, node) in bundle.nodes.iter().enumerate() {
+        let path = checked_container_entry_path(
+            state.filesystem,
+            destination_root,
+            node.path.as_str(),
+            index,
+            &state.report,
+        )?;
+        let (mut entry_stream, source_backed) = match bundle.read_entry_with_source_backing(index) {
+            Ok(stream) => stream,
+            Err(error) => {
+                record_failed_container_entry(
+                    &mut state.report,
+                    node.path.as_str(),
+                    path,
+                    Some(container_bundle_index),
+                    index,
+                    error,
+                    state.limits,
+                )?;
+                continue;
+            }
+        };
+        let child_kind =
+            probe_direct_stream_kind(&mut entry_stream, scheme_limits).map_err(|error| {
+                ContainerMountError::new(
+                    state.report.clone(),
+                    ContainerMountErrorKind::Scheme(error),
+                )
+            })?;
+        if child_kind == Some(FileKind::UnityFs) {
+            let child_depth = depth.checked_add(1).ok_or_else(|| {
+                ContainerMountError::new(
+                    state.report.clone(),
+                    ContainerMountErrorKind::NestingDepthLimitExceeded {
+                        depth: usize::MAX,
+                        limit: state.limits.max_depth,
+                    },
+                )
+            })?;
+            let child_size = entry_stream.length().map_err(|source| {
+                ContainerMountError::new(
+                    state.report.clone(),
+                    ContainerMountErrorKind::FileSystem {
+                        entry_index: index,
+                        path: path.clone(),
+                        source,
+                    },
+                )
+            })?;
+            let child_owned_bytes = if source_backed { 0 } else { child_size };
+            let requested_active_bytes = state
+                .active_nested_bytes
+                .checked_add(child_owned_bytes)
+                .ok_or_else(|| {
+                ContainerMountError::new(
+                    state.report.clone(),
+                    ContainerMountErrorKind::ActiveNestedContainerLimitExceeded {
+                        entry_index: index,
+                        requested_total: u64::MAX,
+                        limit: state.limits.max_active_nested_bytes,
+                    },
+                )
+            })?;
+            if requested_active_bytes > state.limits.max_active_nested_bytes {
+                return Err(ContainerMountError::new(
+                    state.report.clone(),
+                    ContainerMountErrorKind::ActiveNestedContainerLimitExceeded {
+                        entry_index: index,
+                        requested_total: requested_active_bytes,
+                        limit: state.limits.max_active_nested_bytes,
+                    },
+                ));
+            }
+            state.active_nested_bytes = requested_active_bytes;
+            let result = mount_unityfs_stream_tree_at(
+                &entry_stream,
+                UnityFsStreamContext {
+                    destination_root: Some(&path),
+                    depth: child_depth,
+                    parent_bundle_index: Some(container_bundle_index),
+                    parent_entry_index: Some(index),
+                    source_name: Some(node.path.as_str()),
+                },
+                scheme_limits,
+                state,
+            );
+            state.active_nested_bytes -= child_owned_bytes;
+            result?;
+            continue;
+        }
+
+        if matches!(
+            child_kind,
+            Some(FileKind::SerializedFile | FileKind::Resource)
+        ) {
+            let serialized_file = if child_kind == Some(FileKind::SerializedFile) {
+                Some(prepare_mounted_serialized_file(
+                    &path,
+                    index,
+                    container_scope_index,
+                    container_bundle_index,
+                    state,
+                )?)
+            } else {
+                None
+            };
+            let resource_file = if child_kind == Some(FileKind::Resource) {
+                Some(prepare_mounted_resource_file(
+                    &path,
+                    node.path.as_str(),
+                    index,
+                    container_scope_index,
+                    container_bundle_index,
+                    state,
+                )?)
+            } else {
+                None
+            };
+            mount_container_stream_at_path(
+                state.filesystem,
+                &path,
+                index,
+                entry_stream,
+                state.limits,
+                &mut state.report,
+            )?;
+            if let Some(serialized_file) = serialized_file {
+                state.report.serialized_file_path_bytes = serialized_file.total_path_bytes;
+                state.report.serialized_files.push(serialized_file.record);
+                state.bundle_serialized_file_counts[container_bundle_index] =
+                    serialized_file.next_bundle_collection_count;
+            }
+            if let Some(resource_file) = resource_file {
+                state.resource_file_path_bytes = resource_file.total_path_bytes;
+                state.report.resource_file_path_bytes = resource_file.total_path_bytes;
+                state.resource_file_name_bytes = resource_file.total_name_bytes;
+                state.report.resource_file_name_bytes = resource_file.total_name_bytes;
+                state.report.resource_files.push(resource_file.record);
+                state.bundle_resource_file_counts[container_bundle_index] =
+                    resource_file.next_bundle_resource_count;
+            }
+            continue;
+        }
+
+        let entry_bytes = entry_stream
+            .to_vec(scheme_limits.max_input_bytes)
+            .map_err(|error| {
+                ContainerMountError::new(
+                    state.report.clone(),
+                    ContainerMountErrorKind::Scheme(SchemeError::new(
+                        SchemeErrorKind::StreamInput(error),
+                    )),
+                )
+            })?;
+        let child = SchemeReader::read_cow_with_limits(Cow::Owned(entry_bytes), scheme_limits)
+            .map_err(|error| {
+                ContainerMountError::new(
+                    state.report.clone(),
+                    ContainerMountErrorKind::Scheme(error),
+                )
+            })?;
+        mount_tree_child(
+            child,
+            ContainerTreeEntry {
+                virtual_path: path,
+                source_name: node.path.as_str(),
+                entry_index: index,
+            },
+            container_scope_index,
+            container_bundle_index,
+            depth,
+            state,
+        )?;
+    }
+    Ok(())
+}
+
+struct UnityFsStreamContext<'a> {
+    destination_root: Option<&'a str>,
+    depth: usize,
+    parent_bundle_index: Option<usize>,
+    parent_entry_index: Option<usize>,
+    source_name: Option<&'a str>,
+}
+
+fn mount_container_stream_at_path(
+    filesystem: &mut VirtualFileSystem,
+    path: &str,
+    entry_index: usize,
+    mut stream: SmartStream,
+    limits: ContainerMountLimits,
+    report: &mut ContainerMountReport,
+) -> Result<(), ContainerMountError> {
+    let entry_size = stream.length().map_err(|source| {
+        ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::FileSystem {
+                entry_index,
+                path: path.to_owned(),
+                source,
+            },
+        )
+    })?;
+    let new_total = report
+        .mounted_bytes
+        .checked_add(entry_size)
+        .ok_or_else(|| {
+            ContainerMountError::new(
+                report.clone(),
+                ContainerMountErrorKind::TotalOutputSizeOverflow { entry_index },
+            )
+        })?;
+    if new_total > limits.max_total_output_bytes {
+        return Err(ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::TotalOutputLimitExceeded {
+                entry_index,
+                requested_total: new_total,
+                limit: limits.max_total_output_bytes,
+            },
+        ));
+    }
+    stream.seek(SeekFrom::Start(0)).map_err(|source| {
+        ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::FileSystem {
+                entry_index,
+                path: path.to_owned(),
+                source,
+            },
+        )
+    })?;
+    filesystem
+        .insert_file_stream_with_parents(path, stream)
+        .map_err(|source| {
+            ContainerMountError::new(
+                report.clone(),
+                ContainerMountErrorKind::FileSystem {
+                    entry_index,
+                    path: path.to_owned(),
+                    source,
+                },
+            )
+        })?;
+    report.mounted_entries += 1;
+    report.mounted_bytes = new_total;
+    Ok(())
+}
+
 struct ContainerTreeEntry<'a> {
     virtual_path: String,
     source_name: &'a str,
@@ -2496,6 +2824,14 @@ impl SchemeReader {
         Self::read_cow_with_state(Cow::Owned(output), limits, vec![layer], output_size)
     }
 
+    /// Check whether a seekable input is a direct UnityFS container without reading its body.
+    fn is_direct_unityfs_stream<R: Read + Seek>(
+        stream: &mut R,
+        limits: SchemeReaderLimits,
+    ) -> Result<bool, SchemeError> {
+        Ok(probe_direct_stream_kind(stream, limits)? == Some(FileKind::UnityFs))
+    }
+
     /// Materialize the remaining seekable layer into bounded storage.
     fn materialize_stream<R: Read + Seek>(
         stream: &mut R,
@@ -2531,7 +2867,38 @@ impl SchemeReader {
         mount_limits: ContainerMountLimits,
     ) -> Result<ContainerMountReport, ContainerMountError> {
         let input_path = path.as_ref();
-        let dispatched = Self::read_path(input_path, scheme_limits).map_err(|error| {
+        let mut stream = SmartStream::open_read_multi(input_path).map_err(|error| {
+            ContainerMountError::new(
+                ContainerMountReport::default(),
+                ContainerMountErrorKind::Scheme(SchemeError::new(SchemeErrorKind::StreamInput(
+                    error,
+                ))),
+            )
+        })?;
+        let direct_unityfs =
+            Self::is_direct_unityfs_stream(&mut stream, scheme_limits).map_err(|error| {
+                ContainerMountError::new(
+                    ContainerMountReport::default(),
+                    ContainerMountErrorKind::Scheme(error),
+                )
+            })?;
+        if direct_unityfs {
+            let source_name = logical_file_name(input_path).ok_or_else(|| {
+                ContainerMountError::new(
+                    ContainerMountReport::default(),
+                    ContainerMountErrorKind::InputPathHasNoFileName,
+                )
+            })?;
+            return mount_unityfs_stream_tree(
+                &stream,
+                Some(&source_name),
+                filesystem,
+                destination_root,
+                scheme_limits,
+                mount_limits,
+            );
+        }
+        let dispatched = Self::read_stream(&mut stream, scheme_limits).map_err(|error| {
             ContainerMountError::new(
                 ContainerMountReport::default(),
                 ContainerMountErrorKind::Scheme(error),
@@ -3030,24 +3397,70 @@ impl SchemeReader {
         }
 
         for input in requests {
-            let dispatched = Self::read_path(&input.path, scheme_limits).map_err(|error| {
+            let mut stream = SmartStream::open_read_multi(&input.path).map_err(|error| {
                 BatchMountError::new(
                     report.clone(),
                     Some(input.path.clone()),
                     BatchMountErrorKind::InputMount(Box::new(ContainerMountError::new(
                         ContainerMountReport::default(),
-                        ContainerMountErrorKind::Scheme(error),
+                        ContainerMountErrorKind::Scheme(SchemeError::new(
+                            SchemeErrorKind::StreamInput(error),
+                        )),
                     ))),
                 )
             })?;
-            let is_container = is_container_kind(dispatched.kind);
+            let opened_bytes = stream
+                .length()
+                .map_err(|source| batch_input_io_error(report.clone(), &input.path, source))?;
+            if opened_bytes != input.source_bytes {
+                return Err(BatchMountError::new(
+                    report,
+                    Some(input.path),
+                    BatchMountErrorKind::InputSizeChanged {
+                        discovered_bytes: input.source_bytes,
+                        opened_bytes,
+                    },
+                ));
+            }
+            let direct_unityfs = Self::is_direct_unityfs_stream(&mut stream, scheme_limits)
+                .map_err(|error| {
+                    BatchMountError::new(
+                        report.clone(),
+                        Some(input.path.clone()),
+                        BatchMountErrorKind::InputMount(Box::new(ContainerMountError::new(
+                            ContainerMountReport::default(),
+                            ContainerMountErrorKind::Scheme(error),
+                        ))),
+                    )
+                })?;
+            let dispatched = if direct_unityfs {
+                None
+            } else {
+                Some(
+                    Self::read_stream(&mut stream, scheme_limits).map_err(|error| {
+                        BatchMountError::new(
+                            report.clone(),
+                            Some(input.path.clone()),
+                            BatchMountErrorKind::InputMount(Box::new(ContainerMountError::new(
+                                ContainerMountReport::default(),
+                                ContainerMountErrorKind::Scheme(error),
+                            ))),
+                        )
+                    })?,
+                )
+            };
+            let root_kind = dispatched
+                .as_ref()
+                .map(DispatchedFile::kind)
+                .unwrap_or(FileKind::UnityFs);
+            let is_container = direct_unityfs || is_container_kind(root_kind);
             let destination = if is_container {
                 input.container_destination.as_deref()
             } else {
                 input.standalone_destination.as_deref()
             };
             let explicit_root_resource_file =
-                if input.explicit_path && dispatched.kind() == FileKind::Resource {
+                if input.explicit_path && root_kind == FileKind::Resource {
                     let file_name = logical_file_name(&input.path).ok_or_else(|| {
                         BatchMountError::new(
                             report.clone(),
@@ -3075,7 +3488,7 @@ impl SchemeReader {
                     Some(MountedExplicitResourceFile {
                         file_name,
                         virtual_path,
-                        kind: dispatched.kind(),
+                        kind: root_kind,
                     })
                 } else {
                     None
@@ -3122,13 +3535,40 @@ impl SchemeReader {
                 .min(remaining_failed_metadata);
             let output_before_input = report.mounted_bytes;
 
-            let mounted = Self::mount_dispatched_path(
-                &input.path,
-                dispatched,
-                filesystem,
-                destination,
-                per_input_mount_limits,
-            );
+            let mounted = if direct_unityfs {
+                let source_name = logical_file_name(&input.path).ok_or_else(|| {
+                    BatchMountError::new(
+                        report.clone(),
+                        Some(input.path.clone()),
+                        BatchMountErrorKind::InputMount(Box::new(ContainerMountError::new(
+                            ContainerMountReport::default(),
+                            ContainerMountErrorKind::InputPathHasNoFileName,
+                        ))),
+                    )
+                })?;
+                mount_unityfs_stream_tree(
+                    &stream,
+                    Some(&source_name),
+                    filesystem,
+                    destination,
+                    scheme_limits,
+                    per_input_mount_limits,
+                )
+            } else {
+                match dispatched {
+                    Some(dispatched) => Self::mount_dispatched_path(
+                        &input.path,
+                        dispatched,
+                        filesystem,
+                        destination,
+                        per_input_mount_limits,
+                    ),
+                    None => Err(ContainerMountError::new(
+                        ContainerMountReport::default(),
+                        ContainerMountErrorKind::NotContainer,
+                    )),
+                }
+            };
             match mounted {
                 Ok(input_report) => {
                     merge_batch_mount_report(&mut report, &input_report, &input.path, batch_limits)
@@ -3336,6 +3776,34 @@ fn read_stream_prefix<R: Read + Seek>(stream: &mut R, length: u64) -> Result<Vec
         .read_exact(&mut prefix)
         .map_err(|error| SchemeError::new(SchemeErrorKind::StreamInput(error)))?;
     Ok(prefix)
+}
+
+/// Determine the primary file kind from a seekable stream without reading its body.
+/// A wrapper returns `None` so callers that need its decoded leaf can use the full dispatcher.
+fn probe_direct_stream_kind<R: Read + Seek>(
+    stream: &mut R,
+    limits: SchemeReaderLimits,
+) -> Result<Option<FileKind>, SchemeError> {
+    let stream_length = stream
+        .seek(SeekFrom::End(0))
+        .map_err(|error| SchemeError::new(SchemeErrorKind::StreamInput(error)))?;
+    if stream_length > u64::try_from(limits.max_input_bytes).unwrap_or(u64::MAX) {
+        return Err(SchemeError::new(SchemeErrorKind::InputSizeLimitExceeded {
+            requested: stream_length,
+            limit: limits.max_input_bytes,
+        }));
+    }
+    let prefix = read_stream_prefix(stream, stream_length)?;
+    if let Some(kind) = detect_primary_file_kind_with_length(&prefix, stream_length) {
+        return Ok(Some(kind));
+    }
+    if is_serialized_file_with_length(&prefix, stream_length) {
+        return Ok(Some(FileKind::SerializedFile));
+    }
+    if has_gzip_magic(&prefix) || has_brotli_file_signature(&prefix) {
+        return Ok(None);
+    }
+    Ok(Some(FileKind::Resource))
 }
 
 fn decode_wrapper(

@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 
 use crate::compression::lz4_block::{decompress_block, Lz4BlockError};
 use crate::compression::lzma::{decompress_block as decompress_lzma_block, LzmaBlockError};
@@ -8,6 +9,7 @@ use crate::compression::zstd::{
     decompress_block as decompress_zstd_block, has_frame_magic, ZstdBlockError,
 };
 use crate::io::binary::{BinaryError, BinaryReader, Endian};
+use crate::io::stream::{SmartStream, SmartStreamType};
 
 const UNITY_FS_MAGIC: &str = "UnityFS";
 const BLOCK_INFO_AT_END: u32 = 0x80;
@@ -159,272 +161,33 @@ impl<'a> UnityFsBundle<'a> {
     }
 
     pub fn parse_with_limits(input: &'a [u8], limits: UnityFsLimits) -> Result<Self, UnityFsError> {
-        let mut reader = BinaryReader::new(input, Endian::Big);
-        let signature = read_string(
-            &mut reader,
-            limits.max_header_string_bytes,
-            "UnityFS signature",
-        )?;
-        if signature != UNITY_FS_MAGIC {
-            return Err(UnityFsError::new(
-                0,
-                UnityFsErrorKind::InvalidSignature { signature },
-            ));
-        }
-
-        let version_offset = reader.offset();
-        let version = read_i32(&mut reader, "UnityFS bundle version")?;
-        if version < 0 {
-            return Err(UnityFsError::new(
-                version_offset,
-                UnityFsErrorKind::NegativeValue {
-                    field: "bundle version",
-                    value: i64::from(version),
-                },
-            ));
-        }
-        let unity_version = read_string(
-            &mut reader,
-            limits.max_header_string_bytes,
-            "UnityFS engine version",
-        )?;
-        let unity_revision = read_string(
-            &mut reader,
-            limits.max_header_string_bytes,
-            "UnityFS engine revision",
-        )?;
-
-        let declared_size_offset = reader.offset();
-        let declared_size_signed = read_i64(&mut reader, "UnityFS declared size")?;
-        let declared_size =
-            nonnegative_u64(declared_size_signed, declared_size_offset, "declared size")?;
-        let compressed_blocks_info_size = nonnegative_u32(
-            read_i32(&mut reader, "compressed blocks-info size")?,
-            reader.offset().saturating_sub(4),
-            "compressed blocks-info size",
-        )?;
-        let uncompressed_blocks_info_size = nonnegative_u32(
-            read_i32(&mut reader, "uncompressed blocks-info size")?,
-            reader.offset().saturating_sub(4),
-            "uncompressed blocks-info size",
-        )?;
-        let flags = read_u32(&mut reader, "UnityFS flags")?;
-        let header_size = reader.position();
-
-        let blocks_at_end = flags & BLOCK_INFO_AT_END != 0;
-        if version >= BUNDLE_VERSION_LARGE_FILES_SUPPORT {
-            reader.align(16).map_err(|error| {
-                UnityFsError::from_binary(error, "UnityFS v7+ header alignment")
-            })?;
-        }
-
-        let metadata_offset = if blocks_at_end {
-            let offset = declared_size
-                .checked_sub(u64::from(compressed_blocks_info_size))
-                .ok_or_else(|| {
-                    UnityFsError::new(
-                        declared_size_offset,
-                        UnityFsErrorKind::InvalidMetadataRange {
-                            metadata_offset: 0,
-                            metadata_size: compressed_blocks_info_size,
-                            input_size: input.len(),
-                        },
-                    )
-                })?;
-            usize::try_from(offset).map_err(|_| {
-                UnityFsError::new(
-                    declared_size_offset,
-                    UnityFsErrorKind::AddressSpaceOverflow("metadata offset"),
-                )
-            })?
-        } else {
-            reader.position()
-        };
-        let metadata_end = metadata_offset
-            .checked_add(compressed_blocks_info_size as usize)
+        let header_layout = parse_header_slice(input, input.len(), &limits)?;
+        let compressed_metadata = input
+            .get(header_layout.metadata_offset..header_layout.metadata_end)
             .ok_or_else(|| {
                 UnityFsError::new(
-                    metadata_offset,
-                    UnityFsErrorKind::AddressSpaceOverflow("metadata range"),
-                )
-            })?;
-        let compressed_metadata = input.get(metadata_offset..metadata_end).ok_or_else(|| {
-            UnityFsError::new(
-                metadata_offset,
-                UnityFsErrorKind::InvalidMetadataRange {
-                    metadata_offset,
-                    metadata_size: compressed_blocks_info_size,
-                    input_size: input.len(),
-                },
-            )
-        })?;
-        if metadata_offset < header_size || (!blocks_at_end && metadata_offset < reader.position())
-        {
-            return Err(UnityFsError::new(
-                metadata_offset,
-                UnityFsErrorKind::InvalidMetadataRange {
-                    metadata_offset,
-                    metadata_size: compressed_blocks_info_size,
-                    input_size: input.len(),
-                },
-            ));
-        }
-
-        let metadata_limit = limits.max_metadata_uncompressed_bytes;
-        let uncompressed_metadata_size =
-            usize::try_from(uncompressed_blocks_info_size).map_err(|_| {
-                UnityFsError::new(
-                    metadata_offset,
-                    UnityFsErrorKind::AddressSpaceOverflow("uncompressed metadata size"),
-                )
-            })?;
-        if uncompressed_metadata_size > metadata_limit {
-            return Err(UnityFsError::new(
-                metadata_offset,
-                UnityFsErrorKind::LimitExceeded {
-                    resource: "uncompressed blocks metadata",
-                    requested: uncompressed_metadata_size as u64,
-                    limit: metadata_limit,
-                },
-            ));
-        }
-        let metadata_compression = (flags & COMPRESSION_MASK) as u8;
-        let decoded_metadata = decode_payload(
-            compressed_metadata,
-            uncompressed_metadata_size,
-            metadata_limit,
-            metadata_compression,
-            metadata_offset,
-            "blocks metadata",
-            None,
-        )?;
-        let metadata_base_offset = if metadata_compression == 0 {
-            metadata_offset
-        } else {
-            0
-        };
-        let metadata = parse_metadata(
-            decoded_metadata.as_ref(),
-            metadata_base_offset,
-            metadata_offset,
-            uncompressed_metadata_size,
-            flags & BLOCKS_AND_DIRECTORY_COMBINED != 0,
-            &limits,
-        )?;
-
-        let mut data_offset = if blocks_at_end {
-            header_size
-        } else {
-            // Block data starts after the declared metadata size even when the
-            // alignment slack above was tolerated: the slack pad bytes are not
-            // entry data, so continuing after the consumed bytes would shift every
-            // entry by the slack (the source falls through without repositioning
-            // and reads the pad as data). The source writer upholds the same
-            // invariant from the other side by rejecting inexact metadata writes.
-            metadata_end
-        };
-        if blocks_at_end && version >= BUNDLE_VERSION_LARGE_FILES_SUPPORT {
-            data_offset = align_offset(data_offset, 16).ok_or_else(|| {
-                UnityFsError::new(
-                    data_offset,
-                    UnityFsErrorKind::AddressSpaceOverflow("data alignment"),
-                )
-            })?;
-        }
-        if flags & BLOCK_INFO_NEEDS_PADDING != 0 {
-            data_offset = align_offset(data_offset, 16).ok_or_else(|| {
-                UnityFsError::new(
-                    data_offset,
-                    UnityFsErrorKind::AddressSpaceOverflow("data padding"),
-                )
-            })?;
-        }
-
-        let data_end = if blocks_at_end {
-            metadata_offset
-        } else {
-            input.len()
-        };
-        if data_offset > data_end {
-            return Err(UnityFsError::new(
-                data_offset,
-                UnityFsErrorKind::InvalidDataRange {
-                    data_offset,
-                    data_end,
-                    input_size: input.len(),
-                },
-            ));
-        }
-
-        let mut compressed_data_size = 0u64;
-        let mut uncompressed_data_size = 0u64;
-        for (index, block) in metadata.storage_blocks.iter().enumerate() {
-            if block.compression_type() == 0 && block.compressed_size != block.uncompressed_size {
-                return Err(UnityFsError::new(
-                    data_offset,
-                    UnityFsErrorKind::UncompressedBlockSizeMismatch {
-                        block_index: index,
-                        compressed_size: block.compressed_size,
-                        uncompressed_size: block.uncompressed_size,
+                    header_layout.metadata_offset,
+                    UnityFsErrorKind::InvalidMetadataRange {
+                        metadata_offset: header_layout.metadata_offset,
+                        metadata_size: header_layout.header.compressed_blocks_info_size,
+                        input_size: input.len(),
                     },
-                ));
-            }
-            compressed_data_size = compressed_data_size
-                .checked_add(u64::from(block.compressed_size))
-                .ok_or_else(|| {
-                    UnityFsError::new(
-                        data_offset,
-                        UnityFsErrorKind::AddressSpaceOverflow("compressed block ranges"),
-                    )
-                })?;
-            uncompressed_data_size = uncompressed_data_size
-                .checked_add(u64::from(block.uncompressed_size))
-                .ok_or_else(|| {
-                    UnityFsError::new(
-                        data_offset,
-                        UnityFsErrorKind::AddressSpaceOverflow("uncompressed block ranges"),
-                    )
-                })?;
-        }
-        let data_capacity = u64::try_from(data_end - data_offset).map_err(|_| {
-            UnityFsError::new(
-                data_offset,
-                UnityFsErrorKind::AddressSpaceOverflow("available compressed data size"),
-            )
-        })?;
-        if compressed_data_size > data_capacity {
-            return Err(UnityFsError::new(
-                data_offset,
-                UnityFsErrorKind::CompressedBlocksExceedData {
-                    compressed_size: compressed_data_size,
-                    available: data_capacity,
-                },
-            ));
-        }
-        validate_nodes(&metadata.nodes, uncompressed_data_size, metadata_offset)?;
+                )
+            })?;
+        let parsed = parse_layout(input.len(), header_layout, compressed_metadata, &limits)?;
 
         Ok(Self {
             input,
             limits,
-            header: UnityFsHeader {
-                version,
-                unity_version,
-                unity_revision,
-                declared_size,
-                compressed_blocks_info_size,
-                uncompressed_blocks_info_size,
-                flags,
-                header_size,
-            },
-            uncompressed_data_hash: metadata.uncompressed_data_hash,
-            storage_blocks: metadata.storage_blocks,
-            nodes: metadata.nodes,
-            metadata_offset,
-            data_offset,
-            uncompressed_data_size,
+            header: parsed.header,
+            uncompressed_data_hash: parsed.uncompressed_data_hash,
+            storage_blocks: parsed.storage_blocks,
+            nodes: parsed.nodes,
+            metadata_offset: parsed.metadata_offset,
+            data_offset: parsed.data_offset,
+            uncompressed_data_size: parsed.uncompressed_data_size,
         })
     }
-
     /// Read one directory entry. A single uncompressed storage block can be borrowed directly;
     /// entries crossing or using compressed blocks are returned in an owned buffer.
     pub fn read_entry(&self, entry_index: usize) -> Result<Cow<'a, [u8]>, UnityFsError> {
@@ -637,6 +400,790 @@ impl<'a> UnityFsBundle<'a> {
         }
         Ok(Cow::Owned(output))
     }
+}
+
+/// UnityFS metadata parsed from a seekable source stream.
+///
+/// Directory entries remain backed by the original source for the common single-block
+/// uncompressed case. Compressed and multi-block entries are materialized one entry at a time.
+pub struct UnityFsStreamBundle {
+    source: SmartStream,
+    limits: UnityFsLimits,
+    max_input_bytes: usize,
+    pub header: UnityFsHeader,
+    pub uncompressed_data_hash: [u8; 16],
+    pub storage_blocks: Vec<UnityFsStorageBlock>,
+    pub nodes: Vec<UnityFsNode>,
+    pub metadata_offset: usize,
+    pub data_offset: usize,
+    pub uncompressed_data_size: u64,
+}
+
+impl UnityFsStreamBundle {
+    /// Parse only the bounded UnityFS header and metadata from a seekable source.
+    pub fn parse(
+        source: &SmartStream,
+        limits: UnityFsLimits,
+        max_input_bytes: usize,
+    ) -> Result<Self, UnityFsError> {
+        let source_length = source
+            .length()
+            .map_err(|error| stream_input_error(0, "UnityFS input length", error))?;
+        if source_length > u64::try_from(max_input_bytes).unwrap_or(u64::MAX) {
+            return Err(UnityFsError::new(
+                0,
+                UnityFsErrorKind::LimitExceeded {
+                    resource: "UnityFS input",
+                    requested: source_length,
+                    limit: max_input_bytes,
+                },
+            ));
+        }
+        let input_size = usize::try_from(source_length).map_err(|_| {
+            UnityFsError::new(
+                0,
+                UnityFsErrorKind::AddressSpaceOverflow("UnityFS input size"),
+            )
+        })?;
+
+        let mut reader = source.create_reference();
+        let header_prefix = read_header_prefix(&mut reader, input_size, &limits)?;
+        let header_layout = parse_header_slice(&header_prefix, input_size, &limits)?;
+        let metadata_size = usize::try_from(header_layout.header.compressed_blocks_info_size)
+            .map_err(|_| {
+                UnityFsError::new(
+                    header_layout.metadata_offset,
+                    UnityFsErrorKind::AddressSpaceOverflow("compressed metadata size"),
+                )
+            })?;
+        let mut compressed_metadata = Vec::new();
+        compressed_metadata
+            .try_reserve_exact(metadata_size)
+            .map_err(|_| {
+                UnityFsError::new(
+                    header_layout.metadata_offset,
+                    UnityFsErrorKind::AllocationFailed {
+                        resource: "compressed blocks metadata",
+                        requested: metadata_size,
+                    },
+                )
+            })?;
+        compressed_metadata.resize(metadata_size, 0);
+        reader
+            .seek(SeekFrom::Start(header_layout.metadata_offset as u64))
+            .map_err(|error| {
+                stream_input_error(
+                    header_layout.metadata_offset,
+                    "UnityFS metadata seek",
+                    error,
+                )
+            })?;
+        reader
+            .read_exact(&mut compressed_metadata)
+            .map_err(|error| {
+                stream_input_error(
+                    header_layout.metadata_offset,
+                    "UnityFS metadata read",
+                    error,
+                )
+            })?;
+
+        let parsed = parse_layout(input_size, header_layout, &compressed_metadata, &limits)?;
+        Ok(Self {
+            source: source.create_reference(),
+            limits,
+            max_input_bytes,
+            header: parsed.header,
+            uncompressed_data_hash: parsed.uncompressed_data_hash,
+            storage_blocks: parsed.storage_blocks,
+            nodes: parsed.nodes,
+            metadata_offset: parsed.metadata_offset,
+            data_offset: parsed.data_offset,
+            uncompressed_data_size: parsed.uncompressed_data_size,
+        })
+    }
+
+    /// Return one entry as a source-backed range when possible, otherwise as a bounded stream.
+    pub fn read_entry(&self, entry_index: usize) -> Result<SmartStream, UnityFsError> {
+        self.read_entry_with_source_backing(entry_index)
+            .map(|(stream, _)| stream)
+    }
+
+    /// Return an entry stream and whether it is a range over the input rather than materialized.
+    pub fn read_entry_with_source_backing(
+        &self,
+        entry_index: usize,
+    ) -> Result<(SmartStream, bool), UnityFsError> {
+        let entry = self.nodes.get(entry_index).ok_or_else(|| {
+            UnityFsError::new(
+                self.metadata_offset,
+                UnityFsErrorKind::InvalidEntryIndex {
+                    entry_index,
+                    entry_count: self.nodes.len(),
+                },
+            )
+        })?;
+        let entry_size = usize::try_from(entry.size).map_err(|_| {
+            UnityFsError::new(
+                self.data_offset,
+                UnityFsErrorKind::AddressSpaceOverflow("entry size"),
+            )
+        })?;
+        if entry_size > self.limits.max_entry_bytes {
+            return Err(UnityFsError::new(
+                self.data_offset,
+                UnityFsErrorKind::LimitExceeded {
+                    resource: "bundle entry",
+                    requested: entry.size,
+                    limit: self.limits.max_entry_bytes,
+                },
+            ));
+        }
+        let entry_end = entry.offset.checked_add(entry.size).ok_or_else(|| {
+            UnityFsError::new(
+                self.data_offset,
+                UnityFsErrorKind::AddressSpaceOverflow("entry range"),
+            )
+        })?;
+
+        if self.storage_blocks.len() == 1 && self.storage_blocks[0].compression_type() == 0 {
+            let absolute_offset = u64::try_from(self.data_offset)
+                .ok()
+                .and_then(|offset| offset.checked_add(entry.offset))
+                .ok_or_else(|| {
+                    UnityFsError::new(
+                        self.data_offset,
+                        UnityFsErrorKind::AddressSpaceOverflow("source-backed entry offset"),
+                    )
+                })?;
+            let stream = self
+                .source
+                .create_partial(absolute_offset, entry.size)
+                .map_err(|error| {
+                    stream_input_error(
+                        usize::try_from(absolute_offset).unwrap_or(usize::MAX),
+                        "UnityFS source-backed entry range",
+                        error,
+                    )
+                })?;
+            let source_backed = stream.stream_type() == SmartStreamType::File;
+            return Ok((stream, source_backed));
+        }
+
+        if entry_size == 0 {
+            return Ok((SmartStream::from_memory(Vec::new()), false));
+        }
+
+        const TEMPORARY_OUTPUT_THRESHOLD: usize = 50 * 1024 * 1024;
+        let mut output = if entry_size > TEMPORARY_OUTPUT_THRESHOLD {
+            SmartStream::create_temp()
+        } else {
+            Ok(SmartStream::create_memory())
+        }
+        .map_err(|error| stream_input_error(self.data_offset, "UnityFS entry output", error))?;
+        let mut compressed_offset = 0u64;
+        let mut block_uncompressed_offset = 0u64;
+        let mut output_size = 0u64;
+        for (block_index, block) in self.storage_blocks.iter().enumerate() {
+            let block_end = block_uncompressed_offset
+                .checked_add(u64::from(block.uncompressed_size))
+                .ok_or_else(|| {
+                    UnityFsError::new(
+                        self.data_offset,
+                        UnityFsErrorKind::AddressSpaceOverflow("block output range"),
+                    )
+                })?;
+            if let Some((overlap_start, overlap_end)) = entry_block_window(
+                entry.offset,
+                entry_end,
+                block_uncompressed_offset,
+                block_end,
+            ) {
+                let overlap_length = overlap_end - overlap_start;
+                let block_absolute_offset = u64::try_from(self.data_offset)
+                    .ok()
+                    .and_then(|offset| offset.checked_add(compressed_offset))
+                    .ok_or_else(|| {
+                        UnityFsError::new(
+                            self.data_offset,
+                            UnityFsErrorKind::AddressSpaceOverflow("compressed block offset"),
+                        )
+                    })?;
+                let local_start = overlap_start - block_uncompressed_offset;
+                if block.compression_type() == 0 {
+                    let part_offset =
+                        block_absolute_offset
+                            .checked_add(local_start)
+                            .ok_or_else(|| {
+                                UnityFsError::new(
+                                    self.data_offset,
+                                    UnityFsErrorKind::AddressSpaceOverflow(
+                                        "uncompressed entry range",
+                                    ),
+                                )
+                            })?;
+                    let mut part = self
+                        .source
+                        .create_partial(part_offset, overlap_length)
+                        .map_err(|error| {
+                            stream_input_error(
+                                usize::try_from(part_offset).unwrap_or(usize::MAX),
+                                "UnityFS uncompressed block range",
+                                error,
+                            )
+                        })?;
+                    io::copy(&mut part, &mut output).map_err(|error| {
+                        stream_input_error(
+                            usize::try_from(part_offset).unwrap_or(usize::MAX),
+                            "UnityFS uncompressed block copy",
+                            error,
+                        )
+                    })?;
+                } else {
+                    let compressed_size = u64::from(block.compressed_size);
+                    let compressed = self
+                        .source
+                        .create_partial(block_absolute_offset, compressed_size)
+                        .map_err(|error| {
+                            stream_input_error(
+                                usize::try_from(block_absolute_offset).unwrap_or(usize::MAX),
+                                "UnityFS compressed block range",
+                                error,
+                            )
+                        })?;
+                    let compressed_bytes =
+                        compressed.to_vec(self.max_input_bytes).map_err(|error| {
+                            stream_input_error(
+                                usize::try_from(block_absolute_offset).unwrap_or(usize::MAX),
+                                "UnityFS compressed block read",
+                                error,
+                            )
+                        })?;
+                    let decoded = decode_payload(
+                        &compressed_bytes,
+                        block.uncompressed_size as usize,
+                        self.limits.max_block_uncompressed_bytes,
+                        block.compression_type(),
+                        usize::try_from(block_absolute_offset).unwrap_or(usize::MAX),
+                        "storage block",
+                        Some(self.limits.max_zstd_window_bytes),
+                    )?;
+                    let local_start = usize::try_from(local_start).map_err(|_| {
+                        UnityFsError::new(
+                            self.data_offset,
+                            UnityFsErrorKind::AddressSpaceOverflow("entry block offset"),
+                        )
+                    })?;
+                    let local_end = local_start
+                        .checked_add(usize::try_from(overlap_length).map_err(|_| {
+                            UnityFsError::new(
+                                self.data_offset,
+                                UnityFsErrorKind::AddressSpaceOverflow("entry block range"),
+                            )
+                        })?)
+                        .ok_or_else(|| {
+                            UnityFsError::new(
+                                self.data_offset,
+                                UnityFsErrorKind::AddressSpaceOverflow("entry block range"),
+                            )
+                        })?;
+                    let part = decoded.get(local_start..local_end).ok_or_else(|| {
+                        UnityFsError::new(
+                            usize::try_from(block_absolute_offset).unwrap_or(usize::MAX),
+                            UnityFsErrorKind::InvalidBlockSlice {
+                                block_index,
+                                start: local_start,
+                                end: local_end,
+                                block_size: decoded.len(),
+                            },
+                        )
+                    })?;
+                    output.write_all(part).map_err(|error| {
+                        stream_input_error(
+                            usize::try_from(block_absolute_offset).unwrap_or(usize::MAX),
+                            "UnityFS decoded block write",
+                            error,
+                        )
+                    })?;
+                }
+                output_size = output_size.checked_add(overlap_length).ok_or_else(|| {
+                    UnityFsError::new(
+                        self.data_offset,
+                        UnityFsErrorKind::AddressSpaceOverflow("entry output size"),
+                    )
+                })?;
+            }
+            compressed_offset = compressed_offset
+                .checked_add(u64::from(block.compressed_size))
+                .ok_or_else(|| {
+                    UnityFsError::new(
+                        self.data_offset,
+                        UnityFsErrorKind::AddressSpaceOverflow("compressed block offset"),
+                    )
+                })?;
+            block_uncompressed_offset = block_end;
+        }
+        if output_size != entry.size {
+            return Err(UnityFsError::new(
+                self.data_offset,
+                UnityFsErrorKind::EntryOutputSizeMismatch {
+                    entry_index,
+                    expected: entry_size,
+                    actual: usize::try_from(output_size).unwrap_or(usize::MAX),
+                },
+            ));
+        }
+        output
+            .seek(SeekFrom::Start(0))
+            .map_err(|error| stream_input_error(self.data_offset, "UnityFS entry rewind", error))?;
+        Ok((output, false))
+    }
+}
+
+#[derive(Debug)]
+struct UnityFsHeaderLayout {
+    header: UnityFsHeader,
+    metadata_offset: usize,
+    metadata_end: usize,
+}
+
+#[derive(Debug)]
+struct UnityFsParsedLayout {
+    header: UnityFsHeader,
+    uncompressed_data_hash: [u8; 16],
+    storage_blocks: Vec<UnityFsStorageBlock>,
+    nodes: Vec<UnityFsNode>,
+    metadata_offset: usize,
+    data_offset: usize,
+    uncompressed_data_size: u64,
+}
+
+fn parse_header_slice(
+    input: &[u8],
+    input_size: usize,
+    limits: &UnityFsLimits,
+) -> Result<UnityFsHeaderLayout, UnityFsError> {
+    let mut reader = BinaryReader::new(input, Endian::Big);
+    let signature = read_string(
+        &mut reader,
+        limits.max_header_string_bytes,
+        "UnityFS signature",
+    )?;
+    if signature != UNITY_FS_MAGIC {
+        return Err(UnityFsError::new(
+            0,
+            UnityFsErrorKind::InvalidSignature { signature },
+        ));
+    }
+    let version_offset = reader.offset();
+    let version = read_i32(&mut reader, "UnityFS bundle version")?;
+    if version < 0 {
+        return Err(UnityFsError::new(
+            version_offset,
+            UnityFsErrorKind::NegativeValue {
+                field: "bundle version",
+                value: i64::from(version),
+            },
+        ));
+    }
+    let unity_version = read_string(
+        &mut reader,
+        limits.max_header_string_bytes,
+        "UnityFS engine version",
+    )?;
+    let unity_revision = read_string(
+        &mut reader,
+        limits.max_header_string_bytes,
+        "UnityFS engine revision",
+    )?;
+    let declared_size_offset = reader.offset();
+    let declared_size_signed = read_i64(&mut reader, "UnityFS declared size")?;
+    let declared_size =
+        nonnegative_u64(declared_size_signed, declared_size_offset, "declared size")?;
+    let compressed_blocks_info_size = nonnegative_u32(
+        read_i32(&mut reader, "compressed blocks-info size")?,
+        reader.offset().saturating_sub(4),
+        "compressed blocks-info size",
+    )?;
+    let uncompressed_blocks_info_size = nonnegative_u32(
+        read_i32(&mut reader, "uncompressed blocks-info size")?,
+        reader.offset().saturating_sub(4),
+        "uncompressed blocks-info size",
+    )?;
+    let flags = read_u32(&mut reader, "UnityFS flags")?;
+    let header_size = reader.position();
+    if version >= BUNDLE_VERSION_LARGE_FILES_SUPPORT {
+        reader
+            .align(16)
+            .map_err(|error| UnityFsError::from_binary(error, "UnityFS v7+ header alignment"))?;
+    }
+    let header_data_start = reader.position();
+    let blocks_at_end = flags & BLOCK_INFO_AT_END != 0;
+    let metadata_offset = if blocks_at_end {
+        let offset = declared_size
+            .checked_sub(u64::from(compressed_blocks_info_size))
+            .ok_or_else(|| {
+                UnityFsError::new(
+                    declared_size_offset,
+                    UnityFsErrorKind::InvalidMetadataRange {
+                        metadata_offset: 0,
+                        metadata_size: compressed_blocks_info_size,
+                        input_size,
+                    },
+                )
+            })?;
+        usize::try_from(offset).map_err(|_| {
+            UnityFsError::new(
+                declared_size_offset,
+                UnityFsErrorKind::AddressSpaceOverflow("metadata offset"),
+            )
+        })?
+    } else {
+        header_data_start
+    };
+    let metadata_end = metadata_offset
+        .checked_add(compressed_blocks_info_size as usize)
+        .ok_or_else(|| {
+            UnityFsError::new(
+                metadata_offset,
+                UnityFsErrorKind::AddressSpaceOverflow("metadata range"),
+            )
+        })?;
+    if metadata_end > input_size {
+        return Err(UnityFsError::new(
+            metadata_offset,
+            UnityFsErrorKind::InvalidMetadataRange {
+                metadata_offset,
+                metadata_size: compressed_blocks_info_size,
+                input_size,
+            },
+        ));
+    }
+    if metadata_offset < header_size || (!blocks_at_end && metadata_offset < header_data_start) {
+        return Err(UnityFsError::new(
+            metadata_offset,
+            UnityFsErrorKind::InvalidMetadataRange {
+                metadata_offset,
+                metadata_size: compressed_blocks_info_size,
+                input_size,
+            },
+        ));
+    }
+    Ok(UnityFsHeaderLayout {
+        header: UnityFsHeader {
+            version,
+            unity_version,
+            unity_revision,
+            declared_size,
+            compressed_blocks_info_size,
+            uncompressed_blocks_info_size,
+            flags,
+            header_size,
+        },
+        metadata_offset,
+        metadata_end,
+    })
+}
+
+fn parse_layout(
+    input_size: usize,
+    header_layout: UnityFsHeaderLayout,
+    compressed_metadata: &[u8],
+    limits: &UnityFsLimits,
+) -> Result<UnityFsParsedLayout, UnityFsError> {
+    let UnityFsHeaderLayout {
+        header,
+        metadata_offset,
+        metadata_end,
+    } = header_layout;
+    if compressed_metadata.len() != header.compressed_blocks_info_size as usize {
+        return Err(UnityFsError::new(
+            metadata_offset,
+            UnityFsErrorKind::InvalidMetadataRange {
+                metadata_offset,
+                metadata_size: header.compressed_blocks_info_size,
+                input_size,
+            },
+        ));
+    }
+    let uncompressed_metadata_size = usize::try_from(header.uncompressed_blocks_info_size)
+        .map_err(|_| {
+            UnityFsError::new(
+                metadata_offset,
+                UnityFsErrorKind::AddressSpaceOverflow("uncompressed metadata size"),
+            )
+        })?;
+    if uncompressed_metadata_size > limits.max_metadata_uncompressed_bytes {
+        return Err(UnityFsError::new(
+            metadata_offset,
+            UnityFsErrorKind::LimitExceeded {
+                resource: "uncompressed blocks metadata",
+                requested: uncompressed_metadata_size as u64,
+                limit: limits.max_metadata_uncompressed_bytes,
+            },
+        ));
+    }
+    let metadata_compression = header.metadata_compression();
+    let decoded_metadata = decode_payload(
+        compressed_metadata,
+        uncompressed_metadata_size,
+        limits.max_metadata_uncompressed_bytes,
+        metadata_compression,
+        metadata_offset,
+        "blocks metadata",
+        None,
+    )?;
+    let metadata_base_offset = if metadata_compression == 0 {
+        metadata_offset
+    } else {
+        0
+    };
+    let metadata = parse_metadata(
+        decoded_metadata.as_ref(),
+        metadata_base_offset,
+        metadata_offset,
+        uncompressed_metadata_size,
+        header.directory_is_combined(),
+        limits,
+    )?;
+
+    let blocks_at_end = header.blocks_info_at_end();
+    let mut data_offset = if blocks_at_end {
+        header.header_size
+    } else {
+        metadata_end
+    };
+    if blocks_at_end && header.version >= BUNDLE_VERSION_LARGE_FILES_SUPPORT {
+        data_offset = align_offset(data_offset, 16).ok_or_else(|| {
+            UnityFsError::new(
+                data_offset,
+                UnityFsErrorKind::AddressSpaceOverflow("data alignment"),
+            )
+        })?;
+    }
+    if header.blocks_need_padding_at_start() {
+        data_offset = align_offset(data_offset, 16).ok_or_else(|| {
+            UnityFsError::new(
+                data_offset,
+                UnityFsErrorKind::AddressSpaceOverflow("data padding"),
+            )
+        })?;
+    }
+    let data_end = if blocks_at_end {
+        metadata_offset
+    } else {
+        input_size
+    };
+    if data_offset > data_end {
+        return Err(UnityFsError::new(
+            data_offset,
+            UnityFsErrorKind::InvalidDataRange {
+                data_offset,
+                data_end,
+                input_size,
+            },
+        ));
+    }
+
+    let mut compressed_data_size = 0u64;
+    let mut uncompressed_data_size = 0u64;
+    for (index, block) in metadata.storage_blocks.iter().enumerate() {
+        if block.compression_type() == 0 && block.compressed_size != block.uncompressed_size {
+            return Err(UnityFsError::new(
+                data_offset,
+                UnityFsErrorKind::UncompressedBlockSizeMismatch {
+                    block_index: index,
+                    compressed_size: block.compressed_size,
+                    uncompressed_size: block.uncompressed_size,
+                },
+            ));
+        }
+        compressed_data_size = compressed_data_size
+            .checked_add(u64::from(block.compressed_size))
+            .ok_or_else(|| {
+                UnityFsError::new(
+                    data_offset,
+                    UnityFsErrorKind::AddressSpaceOverflow("compressed block ranges"),
+                )
+            })?;
+        uncompressed_data_size = uncompressed_data_size
+            .checked_add(u64::from(block.uncompressed_size))
+            .ok_or_else(|| {
+                UnityFsError::new(
+                    data_offset,
+                    UnityFsErrorKind::AddressSpaceOverflow("uncompressed block ranges"),
+                )
+            })?;
+    }
+    let data_capacity = u64::try_from(data_end - data_offset).map_err(|_| {
+        UnityFsError::new(
+            data_offset,
+            UnityFsErrorKind::AddressSpaceOverflow("available compressed data size"),
+        )
+    })?;
+    if compressed_data_size > data_capacity {
+        return Err(UnityFsError::new(
+            data_offset,
+            UnityFsErrorKind::CompressedBlocksExceedData {
+                compressed_size: compressed_data_size,
+                available: data_capacity,
+            },
+        ));
+    }
+    validate_nodes(&metadata.nodes, uncompressed_data_size, metadata_offset)?;
+    Ok(UnityFsParsedLayout {
+        header,
+        uncompressed_data_hash: metadata.uncompressed_data_hash,
+        storage_blocks: metadata.storage_blocks,
+        nodes: metadata.nodes,
+        metadata_offset,
+        data_offset,
+        uncompressed_data_size,
+    })
+}
+
+fn read_header_prefix(
+    stream: &mut SmartStream,
+    input_size: usize,
+    limits: &UnityFsLimits,
+) -> Result<Vec<u8>, UnityFsError> {
+    stream
+        .seek(SeekFrom::Start(0))
+        .map_err(|error| stream_input_error(0, "UnityFS header seek", error))?;
+    let mut prefix = Vec::new();
+    read_stream_cstring(
+        stream,
+        &mut prefix,
+        input_size,
+        limits.max_header_string_bytes,
+    )?;
+    let version_offset = prefix.len();
+    read_stream_append(stream, &mut prefix, input_size, 4, "UnityFS bundle version")?;
+    let version_bytes: [u8; 4] = prefix[version_offset..version_offset + 4]
+        .try_into()
+        .map_err(|_| {
+            UnityFsError::new(
+                version_offset,
+                UnityFsErrorKind::AddressSpaceOverflow("header version"),
+            )
+        })?;
+    let version = i32::from_be_bytes(version_bytes);
+    read_stream_cstring(
+        stream,
+        &mut prefix,
+        input_size,
+        limits.max_header_string_bytes,
+    )?;
+    read_stream_cstring(
+        stream,
+        &mut prefix,
+        input_size,
+        limits.max_header_string_bytes,
+    )?;
+    read_stream_append(stream, &mut prefix, input_size, 20, "UnityFS fixed header")?;
+    if version >= BUNDLE_VERSION_LARGE_FILES_SUPPORT {
+        if let Some(aligned_end) = align_offset(prefix.len(), 16) {
+            let remaining = aligned_end.saturating_sub(prefix.len());
+            read_stream_append(
+                stream,
+                &mut prefix,
+                input_size,
+                remaining,
+                "UnityFS header alignment",
+            )?;
+        }
+    }
+    Ok(prefix)
+}
+
+fn read_stream_cstring(
+    stream: &mut SmartStream,
+    output: &mut Vec<u8>,
+    input_size: usize,
+    maximum_length: usize,
+) -> Result<(), UnityFsError> {
+    let start = output.len();
+    loop {
+        let offset = output.len();
+        if offset >= input_size {
+            return Err(stream_input_error(
+                offset,
+                "UnityFS header string",
+                io::Error::new(io::ErrorKind::UnexpectedEof, "unterminated string"),
+            ));
+        }
+        let mut byte = [0u8; 1];
+        stream
+            .read_exact(&mut byte)
+            .map_err(|error| stream_input_error(offset, "UnityFS header string", error))?;
+        if byte[0] != 0 && output.len() - start >= maximum_length {
+            return Err(UnityFsError::new(
+                offset,
+                UnityFsErrorKind::LimitExceeded {
+                    resource: "UnityFS header string",
+                    requested: (output.len() - start + 1) as u64,
+                    limit: maximum_length,
+                },
+            ));
+        }
+        output.try_reserve(1).map_err(|_| {
+            UnityFsError::new(
+                offset,
+                UnityFsErrorKind::AllocationFailed {
+                    resource: "UnityFS header",
+                    requested: output.len().saturating_add(1),
+                },
+            )
+        })?;
+        output.push(byte[0]);
+        if byte[0] == 0 {
+            return Ok(());
+        }
+    }
+}
+
+fn read_stream_append(
+    stream: &mut SmartStream,
+    output: &mut Vec<u8>,
+    input_size: usize,
+    count: usize,
+    context: &'static str,
+) -> Result<(), UnityFsError> {
+    let start = output.len();
+    let available = input_size.saturating_sub(start);
+    let requested = count.min(available);
+    output.try_reserve(requested).map_err(|_| {
+        UnityFsError::new(
+            start,
+            UnityFsErrorKind::AllocationFailed {
+                resource: "UnityFS header",
+                requested: start.saturating_add(requested),
+            },
+        )
+    })?;
+    let original_len = output.len();
+    output.resize(original_len + requested, 0);
+    stream
+        .read_exact(&mut output[original_len..])
+        .map_err(|error| stream_input_error(start, context, error))?;
+    if requested < count {
+        return Err(stream_input_error(
+            start + requested,
+            context,
+            io::Error::new(io::ErrorKind::UnexpectedEof, "truncated header"),
+        ));
+    }
+    Ok(())
+}
+
+fn stream_input_error(offset: usize, context: &'static str, error: io::Error) -> UnityFsError {
+    UnityFsError::new(
+        offset,
+        UnityFsErrorKind::StreamInput {
+            context,
+            detail: error.to_string(),
+        },
+    )
 }
 
 /// Half-open overlap of one storage block with the entry byte range, if any.
@@ -1195,6 +1742,10 @@ impl Error for UnityFsError {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UnityFsErrorKind {
+    StreamInput {
+        context: &'static str,
+        detail: String,
+    },
     Binary {
         context: &'static str,
         detail: String,
@@ -1306,6 +1857,7 @@ pub enum UnityFsErrorKind {
 impl Display for UnityFsErrorKind {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
+            Self::StreamInput { context, detail } => write!(f, "{context}: {detail}"),
             Self::Binary { context, detail } => write!(f, "{context}: {detail}"),
             Self::FieldRead { field, detail } => write!(f, "{field}: {detail}"),
             Self::InvalidSignature { signature } => {
@@ -1433,11 +1985,15 @@ impl Display for UnityFsErrorKind {
 mod tests {
     use super::{
         compression_type_name, UnityFsBundle, UnityFsErrorKind, UnityFsLimits, UnityFsNode,
-        BUNDLE_VERSION_LARGE_FILES_SUPPORT, NODE_SERIALIZED_FILE_FLAG,
+        UnityFsStreamBundle, BUNDLE_VERSION_LARGE_FILES_SUPPORT, NODE_SERIALIZED_FILE_FLAG,
     };
     use crate::compression::wrappers::compress_gzip;
     use crate::io::filesystem::VirtualFileSystem;
-    use crate::scheme::{ContainerMountLimits, FileKind, ParsedFile, SchemeReader, WrapperKind};
+    use crate::io::stream::{SmartStream, SmartStreamType};
+    use crate::scheme::{
+        BatchMountLimits, ContainerMountErrorKind, ContainerMountLimits, FileKind, ParsedFile,
+        SchemeReader, SchemeReaderLimits, WrapperKind,
+    };
 
     fn push_i32(output: &mut Vec<u8>, value: i32) {
         output.extend_from_slice(&value.to_be_bytes());
@@ -1696,6 +2252,343 @@ mod tests {
             bundle.read_entry(0).unwrap(),
             std::borrow::Cow::Borrowed(_)
         ));
+    }
+
+    #[test]
+    fn streamed_unityfs_reader_keeps_single_uncompressed_entry_file_backed() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static NEXT_FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
+        let input = make_bundle(b"source-backed entry bytes", 0, false, 0);
+        let path = crate::test_support::test_temp_root().join(format!(
+            "unityfs-stream-entry-{}-{}.bundle",
+            std::process::id(),
+            NEXT_FIXTURE_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&path, &input).unwrap();
+
+        let source = SmartStream::open_read(&path).unwrap();
+        let bundle =
+            UnityFsStreamBundle::parse(&source, UnityFsLimits::default(), 1024 * 1024).unwrap();
+        assert_eq!(bundle.nodes[0].path, "data/file.bin");
+        let entry = bundle.read_entry(0).unwrap();
+        assert_eq!(entry.stream_type(), SmartStreamType::File);
+        assert_eq!(entry.to_vec(1024).unwrap(), b"source-backed entry bytes");
+
+        drop(entry);
+        drop(bundle);
+        drop(source);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn production_mount_paths_retain_file_backing_for_uncompressed_unityfs_leaves() {
+        let row = include_str!("unityfs_stream_entry_source_fixture.txt")
+            .lines()
+            .find(|line| line.starts_with("UNITYFS_ENTRY_STREAM|case=uncompressed|"))
+            .expect("source UnityFS stream row");
+        let field = |name: &str| {
+            row.split('|')
+                .find_map(|part| part.strip_prefix(name))
+                .unwrap_or_else(|| panic!("missing source row field {name}"))
+        };
+        let decode_hex = |hex: &str| {
+            assert_eq!(hex.len() % 2, 0, "odd source hex length");
+            hex.as_bytes()
+                .chunks_exact(2)
+                .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+                .collect::<Vec<_>>()
+        };
+        let input = decode_hex(field("input="));
+        let payload = decode_hex(field("entry="));
+        assert_eq!(input.len().to_string(), field("input_length="));
+        assert_eq!(payload.len().to_string(), field("entry_length="));
+        assert_eq!(field("resource_name="), "data/file.bin");
+        assert_eq!(field("backing_stream="), "RandomAccessStream");
+        assert_eq!(field("stream_type="), "THROW:InvalidOperationException");
+        assert_eq!(field("resources="), "1");
+        assert_eq!(field("failed="), "0");
+
+        let directory = crate::test_support::unique_test_directory("unityfs-stream-mount");
+        let path = directory.join("input.bundle");
+        std::fs::write(&path, &input).unwrap();
+
+        let mut path_filesystem = VirtualFileSystem::new();
+        let path_report = SchemeReader::mount_path(
+            &path,
+            &mut path_filesystem,
+            Some("/path-mount"),
+            SchemeReaderLimits::default(),
+            ContainerMountLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(path_report.mounted_entries, 1);
+        assert_eq!(path_report.mounted_bytes, payload.len() as u64);
+        assert_eq!(path_report.resource_files.len(), 1);
+        let path_leaf = "/path-mount/data/file.bin";
+        let path_stream = path_filesystem.open_file(path_leaf).unwrap();
+        assert_eq!(path_stream.stream_type(), SmartStreamType::File);
+        assert_eq!(path_stream.to_vec(1024).unwrap(), payload.as_slice());
+
+        let mut directory_filesystem = VirtualFileSystem::new();
+        let directory_report = SchemeReader::mount_directory(
+            &directory,
+            &mut directory_filesystem,
+            Some("/directory-mount"),
+            SchemeReaderLimits::default(),
+            ContainerMountLimits::default(),
+            BatchMountLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(directory_report.discovered_inputs, 1);
+        assert_eq!(directory_report.completed_inputs, 1);
+        assert_eq!(directory_report.mounted_entries, 1);
+        assert_eq!(directory_report.mounted_bytes, payload.len() as u64);
+        assert_eq!(directory_report.container_trees.len(), 1);
+        assert_eq!(directory_report.container_trees[0].resource_files.len(), 1);
+        let directory_leaf = "/directory-mount/input.bundle/data/file.bin";
+        let directory_stream = directory_filesystem.open_file(directory_leaf).unwrap();
+        assert_eq!(directory_stream.stream_type(), SmartStreamType::File);
+        assert_eq!(directory_stream.to_vec(1024).unwrap(), payload.as_slice());
+
+        let empty_row = include_str!("unityfs_stream_entry_source_fixture.txt")
+            .lines()
+            .find(|line| line.starts_with("UNITYFS_ENTRY_STREAM|case=empty|"))
+            .expect("source UnityFS empty-entry row");
+        let empty_field = |name: &str| {
+            empty_row
+                .split('|')
+                .find_map(|part| part.strip_prefix(name))
+                .unwrap_or_else(|| panic!("missing empty-entry source row field {name}"))
+        };
+        let empty_input = decode_hex(empty_field("input="));
+        assert_eq!(empty_field("entry_length="), "0");
+        assert_eq!(empty_field("backing_stream="), "RandomAccessStream");
+        assert_eq!(
+            empty_field("stream_type="),
+            "THROW:InvalidOperationException"
+        );
+        let empty_path = directory.join("empty.bundle");
+        std::fs::write(&empty_path, empty_input).unwrap();
+        let mut empty_filesystem = VirtualFileSystem::new();
+        let empty_report = SchemeReader::mount_path(
+            &empty_path,
+            &mut empty_filesystem,
+            Some("/empty-mount"),
+            SchemeReaderLimits::default(),
+            ContainerMountLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(empty_report.mounted_entries, 1);
+        assert_eq!(empty_report.mounted_bytes, 0);
+        let empty_stream = empty_filesystem
+            .open_file("/empty-mount/data/file.bin")
+            .unwrap();
+        assert_eq!(empty_stream.stream_type(), SmartStreamType::File);
+        assert!(empty_stream.to_vec(0).unwrap().is_empty());
+
+        drop(path_stream);
+        drop(path_filesystem);
+        drop(directory_stream);
+        drop(directory_filesystem);
+        drop(empty_stream);
+        drop(empty_filesystem);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(empty_path).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn production_stream_mount_decodes_source_lz4_and_multiblock_entries() {
+        let fixture = include_str!("unityfs_stream_entry_source_fixture.txt");
+        let decode_hex = |hex: &str| {
+            assert_eq!(hex.len() % 2, 0, "odd source hex length");
+            hex.as_bytes()
+                .chunks_exact(2)
+                .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+                .collect::<Vec<_>>()
+        };
+
+        for case_name in ["lz4", "multiblock"] {
+            let row = fixture
+                .lines()
+                .find(|line| line.starts_with(&format!("UNITYFS_ENTRY_STREAM|case={case_name}|")))
+                .unwrap_or_else(|| panic!("missing source UnityFS {case_name} row"));
+            let field = |name: &str| {
+                row.split('|')
+                    .find_map(|part| part.strip_prefix(name))
+                    .unwrap_or_else(|| panic!("missing {case_name} source row field {name}"))
+            };
+            let input = decode_hex(field("input="));
+            let expected = decode_hex(field("entry="));
+            assert_eq!(input.len().to_string(), field("input_length="));
+            assert_eq!(expected.len().to_string(), field("entry_length="));
+            assert_eq!(field("resource_name="), "data/file.bin");
+            assert_eq!(field("backing_stream="), "MemoryStream");
+            assert_eq!(field("stream_type="), "Memory");
+            assert_eq!(field("resources="), "1");
+            assert_eq!(field("failed="), "0");
+
+            let path = crate::test_support::unique_test_path(
+                &format!("unityfs-stream-{case_name}"),
+                "bundle",
+            );
+            std::fs::write(&path, &input).unwrap();
+            let mut filesystem = VirtualFileSystem::new();
+            let destination = format!("/source-{case_name}");
+            let report = SchemeReader::mount_path(
+                &path,
+                &mut filesystem,
+                Some(&destination),
+                SchemeReaderLimits::default(),
+                ContainerMountLimits::default(),
+            )
+            .unwrap();
+            assert_eq!(report.mounted_entries, 1, "{case_name} mounted entries");
+            assert_eq!(
+                report.mounted_bytes,
+                expected.len() as u64,
+                "{case_name} mounted bytes"
+            );
+            let leaf_path = format!("{destination}/data/file.bin");
+            let leaf = filesystem.open_file(&leaf_path).unwrap();
+            assert_eq!(
+                leaf.stream_type(),
+                SmartStreamType::Memory,
+                "{case_name} stream"
+            );
+            assert_eq!(leaf.to_vec(1024).unwrap(), expected, "{case_name} payload");
+
+            drop(leaf);
+            drop(filesystem);
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn streamed_mount_applies_nested_owned_byte_limit_to_materialized_children() {
+        let payload = b"nested payload";
+        let inner = make_bundle(payload, 0, false, 0);
+        let direct_outer = make_bundle(&inner, 0, false, 0);
+        let compressed_outer = make_bundle_with_block_compression(&inner, 0, 2, false, 6, 0, false);
+        let directory = crate::test_support::unique_test_directory("unityfs-stream-nested-limit");
+        let direct_path = directory.join("direct.bundle");
+        let compressed_path = directory.join("compressed.bundle");
+        std::fs::write(&direct_path, &direct_outer).unwrap();
+        std::fs::write(&compressed_path, &compressed_outer).unwrap();
+        let limits = ContainerMountLimits {
+            max_active_nested_bytes: 0,
+            ..ContainerMountLimits::default()
+        };
+
+        let mut direct_filesystem = VirtualFileSystem::new();
+        let direct_report = SchemeReader::mount_path(
+            &direct_path,
+            &mut direct_filesystem,
+            Some("/direct"),
+            SchemeReaderLimits::default(),
+            limits,
+        )
+        .unwrap();
+        assert_eq!(direct_report.mounted_entries, 1);
+        let direct_leaf = direct_filesystem
+            .read_all_bytes("/direct/data/file.bin/data/file.bin", 1024)
+            .unwrap();
+        assert_eq!(direct_leaf, payload);
+        drop(direct_filesystem);
+
+        let mut compressed_filesystem = VirtualFileSystem::new();
+        let error = SchemeReader::mount_path(
+            &compressed_path,
+            &mut compressed_filesystem,
+            Some("/compressed"),
+            SchemeReaderLimits::default(),
+            limits,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            &error.kind,
+            ContainerMountErrorKind::ActiveNestedContainerLimitExceeded {
+                requested_total,
+                limit: 0,
+                ..
+            } if *requested_total == inner.len() as u64
+        ));
+        drop(compressed_filesystem);
+
+        std::fs::remove_file(direct_path).unwrap();
+        std::fs::remove_file(compressed_path).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn streamed_mount_preserves_source_nested_container_topology() {
+        let input =
+            include_bytes!("../export/managed_reference_project_fixture/nested_reference.bundle");
+        let directory = crate::test_support::unique_test_directory("unityfs-stream-topology");
+        let path = directory.join("workspace.bundle");
+        std::fs::write(&path, input).unwrap();
+
+        let dispatched = SchemeReader::read(input).unwrap();
+        let mut slice_filesystem = VirtualFileSystem::new();
+        let slice_report = dispatched
+            .mount_container_tree_with_source_name(
+                &mut slice_filesystem,
+                Some("/source"),
+                Some("workspace.bundle"),
+                ContainerMountLimits::default(),
+            )
+            .unwrap();
+
+        let mut stream_filesystem = VirtualFileSystem::new();
+        let stream_report = SchemeReader::mount_path(
+            &path,
+            &mut stream_filesystem,
+            Some("/source"),
+            SchemeReaderLimits::default(),
+            ContainerMountLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            stream_report.container_scopes,
+            slice_report.container_scopes
+        );
+        assert_eq!(
+            stream_report.container_bundles,
+            slice_report.container_bundles
+        );
+        assert_eq!(
+            stream_report.serialized_files,
+            slice_report.serialized_files
+        );
+        assert_eq!(stream_report.resource_files, slice_report.resource_files);
+        assert_eq!(stream_report.failed_entries, slice_report.failed_entries);
+        assert_eq!(stream_report.mounted_entries, slice_report.mounted_entries);
+        assert_eq!(stream_report.mounted_bytes, slice_report.mounted_bytes);
+
+        drop(stream_filesystem);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn streamed_unityfs_reader_decodes_compressed_blocks_across_boundaries() {
+        for compression in [1, 2, 5] {
+            let input = make_bundle_with_block_compression(
+                b"abcdefghijklmnop",
+                2,
+                compression,
+                true,
+                6,
+                0,
+                false,
+            );
+            let source = SmartStream::from_memory(input);
+            let bundle =
+                UnityFsStreamBundle::parse(&source, UnityFsLimits::default(), 1024 * 1024).unwrap();
+            let entry = bundle.read_entry(0).unwrap();
+            assert_eq!(entry.to_vec(1024).unwrap(), b"abcdefghijklmnop");
+        }
     }
 
     /// Uncompressed metadata with tolerated 4-byte-alignment slack (the source

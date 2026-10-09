@@ -46,7 +46,10 @@ public static class Program
 		}
 
 		bool alignmentSlackOnly = args.Length == 2 && args[0] == "--unityfs-alignment-slack";
-		string output = alignmentSlackOnly ? args[1] : args.Length > 0 ? args[0] : "io_differential_fixture.txt";
+		bool unityFsEntryStreamsOnly = args.Length == 2 && args[0] == "--unityfs-entry-streams";
+		string output = alignmentSlackOnly || unityFsEntryStreamsOnly
+			? args[1]
+			: args.Length > 0 ? args[0] : "io_differential_fixture.txt";
 		WorkDirectory = Path.Combine(
 			Directory.GetCurrentDirectory(), "target", "io-scratch", "probe-" + Guid.NewGuid().ToString("N"));
 		Directory.CreateDirectory(WorkDirectory);
@@ -70,6 +73,10 @@ public static class Program
 			if (alignmentSlackOnly)
 			{
 				EmitUnityFsAlignmentSlackSection();
+			}
+			else if (unityFsEntryStreamsOnly)
+			{
+				EmitUnityFsEntryStreamCases();
 			}
 			else
 			{
@@ -777,6 +784,70 @@ public static class Program
 		{
 			Lines.Add($"UNITYFS_ALIGNMENT_SLACK|in={Hex(data)}|THROW:{ex.GetType().Name}:{Sanitize(ex.Message)}");
 		}
+	}
+
+	private static void EmitUnityFsEntryStreamCases()
+	{
+		byte[] payload = Ascii("source-backed entry bytes");
+		EmitUnityFsEntryStreamCase("uncompressed", 0, payload, null);
+		EmitUnityFsEntryStreamCase("empty", 0, Array.Empty<byte>(), null);
+		EmitUnityFsEntryStreamCase("lz4", 2, payload, null);
+		EmitUnityFsEntryStreamCase("multiblock", 2, payload, new[] { 7 });
+	}
+
+	private static void EmitUnityFsEntryStreamCase(
+		string caseName,
+		byte blockCompression,
+		byte[] payload,
+		IReadOnlyList<int>? blockSplitOffsets)
+	{
+		byte[] input = blockSplitOffsets is null
+			? BuildUnityFs(6, 0, blockCompression, false, new[] { new Entry("data/file.bin", payload) })
+			: BuildUnityFs(
+				6,
+				0,
+				new[] { blockCompression, blockCompression },
+				false,
+				needsPaddingAtStart: false,
+				directoryCombined: true,
+				new[] { new Entry("data/file.bin", payload) },
+				blockSplitOffsets);
+		string path = Path.Combine(WorkDirectory, $"{caseName}-entry.bundle");
+		File.WriteAllBytes(path, input);
+
+		FileBase file = SchemeReader.LoadFile(path, LocalFileSystem.Instance);
+		file.ReadContentsRecursively();
+		if (file is not FileStreamBundleFile bundle)
+		{
+			throw new InvalidOperationException($"Expected FileStreamBundleFile, got {file.GetType().Name}");
+		}
+		if (bundle.ResourceFiles.Count != 1 || bundle.FailedFiles.Count != 0)
+		{
+			throw new InvalidOperationException(
+				$"Expected one successful resource entry, got resources={bundle.ResourceFiles.Count}, failed={bundle.FailedFiles.Count}");
+		}
+
+		ResourceFile resource = bundle.ResourceFiles[0];
+		PropertyInfo backingStreamProperty = typeof(SmartStream).GetProperty(
+			"Stream", BindingFlags.NonPublic | BindingFlags.Instance)
+			?? throw new InvalidOperationException("SmartStream backing stream property not found");
+		Stream backingStream = (Stream?)backingStreamProperty.GetValue(resource.Stream)
+			?? throw new InvalidOperationException("Resource entry has no backing stream");
+		string streamType;
+		try
+		{
+			streamType = resource.Stream.StreamType.ToString();
+		}
+		catch (Exception exception)
+		{
+			streamType = $"THROW:{exception.GetType().Name}";
+		}
+
+		Lines.Add($"UNITYFS_ENTRY_STREAM|case={caseName}|input={Hex(input)}|input_length={input.Length}"
+			+ $"|entry={Hex(resource.ToByteArray())}|entry_length={resource.Stream.Length}"
+			+ $"|resource_name={resource.NameFixed}|backing_stream={backingStream.GetType().Name}"
+			+ $"|stream_type={streamType}|resources={bundle.ResourceFiles.Count}"
+			+ $"|failed={bundle.FailedFiles.Count}");
 	}
 
 	private static byte[] BuildGZip(byte[] inner)

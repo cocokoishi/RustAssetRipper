@@ -493,6 +493,32 @@ impl SmartStream {
         ))
     }
 
+    /// Opens a regular file or its contiguous numbered `.splitN` parts as one logical stream.
+    ///
+    /// Regular files retain the positional file backend so nested ranges stay file-backed;
+    /// split families use the seekable multi-file reader and copy only requested partial ranges.
+    pub fn open_read_multi(path: impl AsRef<Path>) -> io::Result<Self> {
+        let path = path.as_ref();
+        if let Some(base_path) = split_base_path(path) {
+            let stream = open_split_file(&base_path, DEFAULT_MAX_PARTS)?;
+            return Self::from_reader(Box::new(stream));
+        }
+
+        match open_os_read(path) {
+            Ok(file) => Ok(Self::new(
+                SmartStreamBackend::File(Arc::new(Mutex::new(file))),
+                SmartStreamType::File,
+                true,
+                false,
+            )),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let stream = open_split_file(path, DEFAULT_MAX_PARTS)?;
+                Self::from_reader(Box::new(stream))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Wraps an owned seekable reader as a shared, read-only file stream.
     ///
     /// The reader is positioned at byte zero before it is retained.
