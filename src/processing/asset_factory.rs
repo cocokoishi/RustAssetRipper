@@ -3095,6 +3095,12 @@ mod tests {
                 assert_eq!(asset.raw, [1, 2, 3, 4, 5, 6, 7, 8]);
                 assert!(asset.payload.is_none());
             }
+            "unknown_no_tree" => {
+                assert_eq!(asset.kind, FactoryAssetKind::Unknown);
+                assert_eq!(asset.class_id, 9999);
+                assert_eq!(asset.raw, [1, 2, 3, 4, 5, 6, 7, 8]);
+                assert!(asset.payload.is_none());
+            }
             "tpk_navmesh" => {
                 assert_eq!(asset.tail, Some(ObjectTailOutcome::Exact));
                 assert_eq!(
@@ -3156,6 +3162,12 @@ mod tests {
             "unreadable_version" => {
                 assert!(asset.payload.is_none());
                 assert_eq!(asset.raw.len(), 20);
+            }
+            "unreadable_no_tree" => {
+                assert_eq!(asset.kind, FactoryAssetKind::Unreadable);
+                assert_eq!(asset.class_id, 9999);
+                assert_eq!(asset.raw, [1, 2, 3, 4, 5, 6, 7, 8]);
+                assert!(asset.payload.is_none());
             }
             "engine_default_resources" => {
                 assert!(asset.kind.is_recoverable());
@@ -3356,7 +3368,7 @@ mod tests {
         let fixture = include_str!("asset_factory_fixture.txt");
         let layouts = reference_class_layouts();
         let cases = fixture_cases(fixture);
-        assert_eq!(cases.len(), 22, "all probe cases are replayed");
+        assert_eq!(cases.len(), 24, "all probe cases are replayed");
         for case in &cases {
             assert_case(case, layouts);
         }

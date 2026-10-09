@@ -1468,6 +1468,9 @@ pub fn plan_workspace_processed_prefab_assets(
     }
 
     let collection_file_indices = processing.source_collection_file_indices();
+    let no_prefab_hierarchy_work = workspace.scenes().is_empty()
+        && processing.processed_game_objects().is_empty()
+        && processing.events().is_empty();
     let mut seen_collection_files = HashSet::new();
     seen_collection_files
         .try_reserve(collection_file_indices.len())
@@ -1483,15 +1486,38 @@ pub fn plan_workspace_processed_prefab_assets(
             )));
         }
         let Some(graph) = graphs_by_file.get(&file_index).copied() else {
+            if no_prefab_hierarchy_work {
+                // Collections containing only non-hierarchy assets do not participate in
+                // AddMissingTransforms, SceneHierarchyObject, or generated Prefab allocation.
+                // Their absence from the typed hierarchy graph therefore creates no generated
+                // PathID order to replay. Any scene, GameObject, PrefabInstance, or other
+                // processor event keeps the original fail-closed behavior below.
+                continue;
+            }
             return Ok(incomplete_processed_asset_plan(&format!(
                 "source collection file {file_index} has no recovered hierarchy graph; generated PathID order is indeterminate"
             )));
         };
-        if !graph.is_complete() {
+        let has_hierarchy_inputs = graph.game_object_count() != 0
+            || graph.transform_count() != 0
+            || !graph.scene_assets().is_empty()
+            || !graph.component_candidates().is_empty()
+            || !graph.missing_transform_plans().is_empty();
+        if !graph.is_complete() && has_hierarchy_inputs {
             return Ok(incomplete_processed_asset_plan(&format!(
-                "collection file {file_index} has an incomplete scene hierarchy graph"
+                "collection file {file_index} has an incomplete scene hierarchy graph ({} GameObjects, {} Transforms, {} scene assets, {} component candidates, {} missing-Transform plans)",
+                graph.game_object_count(),
+                graph.transform_count(),
+                graph.scene_assets().len(),
+                graph.component_candidates().len(),
+                graph.missing_transform_plans().len()
             )));
         }
+        // The baseline's AddMissingTransforms pass creates no objects for a collection with no
+        // GameObject, Transform, scene-asset, or component candidates. An opaque raw object in
+        // such a collection cannot affect generated Prefab PathID order; keep the source scan
+        // incomplete, but allow the empty processed-asset collections to be planned. If any
+        // recognized hierarchy input exists, the fail-closed branch above still applies.
         let requested = missing_transforms
             .len()
             .checked_add(graph.missing_transform_plans().len())

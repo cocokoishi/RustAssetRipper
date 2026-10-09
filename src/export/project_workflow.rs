@@ -26,6 +26,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::io::filesystem::VirtualFileSystem;
 use crate::io::platform_structure::PlatformResourceProvider;
+use crate::processing::asset_factory::FactoryAssetKind;
 use crate::processing::scene_collections::{
     SceneDefinitionGuidPlan, SceneDefinitionPathSource, SceneGuidWords,
 };
@@ -85,13 +86,13 @@ use super::workspace_yaml::{
 };
 
 const MAX_PROJECT_OBJECTS: usize = 20_000_000;
-const MAX_PROJECT_YAML_BYTES: usize = 2 * 1024 * 1024 * 1024;
+const MAX_PROJECT_ASSET_PAYLOAD_BYTES: usize = 2 * 1024 * 1024 * 1024;
 
 /// Resource and allocation bounds for one workspace project export.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WorkspaceProjectExportLimits {
     pub max_objects: usize,
-    pub max_total_yaml_bytes: usize,
+    pub max_total_asset_payload_bytes: usize,
     pub pointer_map: ExportPointerMapLimits,
     pub yaml_collection: UnityYamlWorkspaceCollectionLimits,
     pub project_output: super::project_output::UnityProjectOutputLimits,
@@ -103,7 +104,7 @@ impl Default for WorkspaceProjectExportLimits {
     fn default() -> Self {
         Self {
             max_objects: MAX_PROJECT_OBJECTS,
-            max_total_yaml_bytes: MAX_PROJECT_YAML_BYTES,
+            max_total_asset_payload_bytes: MAX_PROJECT_ASSET_PAYLOAD_BYTES,
             pointer_map: ExportPointerMapLimits::default(),
             yaml_collection: UnityYamlWorkspaceCollectionLimits::default(),
             project_output: super::project_output::UnityProjectOutputLimits::default(),
@@ -122,7 +123,7 @@ pub struct WorkspaceProjectExportReport {
     pub support_file_count: usize,
     /// Asset files that received an importer sidecar.
     pub meta_file_count: usize,
-    pub total_yaml_bytes: usize,
+    pub total_asset_payload_bytes: usize,
     pub project_version: SceneUnityVersion,
     /// Exportable source-object collections, processed Scenes, and processed Prefabs written.
     pub collection_count: usize,
@@ -130,6 +131,9 @@ pub struct WorkspaceProjectExportReport {
     pub skipped_objects: Vec<ProjectExportNotice>,
     /// Files written through the generic asset-family renderer instead of their own.
     pub fallbacks: Vec<ProjectExportNotice>,
+    /// Unknown or unreadable objects preserved through the source raw-data exporter. Their
+    /// payload bytes are retained, but their internal fields and references could not be read.
+    pub opaque_fallbacks: Vec<ProjectExportNotice>,
     /// Scene/Prefab processing diagnostics that did not prevent generic source-object export.
     pub processing_warnings: Vec<String>,
 }
@@ -219,6 +223,7 @@ pub fn export_workspace_yaml_project_with_settings(
     limits: WorkspaceProjectExportLimits,
 ) -> Result<WorkspaceProjectExportReport, Box<dyn Error>> {
     let (editor_version_text, project_version) = workspace_project_version(workspace)?;
+    let settings_facts = ProjectExportSettings::from_export_settings(settings, project_version);
     if objects.report().object_count > limits.max_objects {
         return Err(invalid_project(format!(
             "project export has {} objects, exceeding the limit {}",
@@ -226,33 +231,39 @@ pub fn export_workspace_yaml_project_with_settings(
             limits.max_objects
         )));
     }
-    if !objects.report().is_complete() {
-        let incomplete_objects = objects
-            .objects()
-            .iter()
-            .filter(|object| !object.is_fully_materialized())
-            .take(4)
-            .map(|object| {
-                let detail = object
-                    .payload
-                    .as_ref()
-                    .err()
-                    .map(ToString::to_string)
-                    .or_else(|| object.factory.log_message.clone())
-                    .unwrap_or_else(|| "the source factory retained unread structure data".into());
-                format!(
-                    "file {} object {} PathID {} ({:?}): {detail}",
-                    object.file_index, object.object_index, object.path_id, object.factory.kind
-                )
-            })
-            .collect::<Vec<_>>();
+    let opaque_objects = opaque_factory_object_keys(objects)?;
+    let incomplete_objects = objects
+        .objects()
+        .iter()
+        .filter(|object| {
+            !object.is_fully_materialized()
+                && !opaque_objects.contains(&(object.file_index, object.object_index))
+        })
+        .take(4)
+        .map(|object| {
+            let detail = object
+                .payload
+                .as_ref()
+                .err()
+                .map(ToString::to_string)
+                .or_else(|| object.factory.log_message.clone())
+                .unwrap_or_else(|| "the source factory retained unread structure data".into());
+            format!(
+                "file {} object {} PathID {} ({:?}): {detail}",
+                object.file_index, object.object_index, object.path_id, object.factory.kind
+            )
+        })
+        .collect::<Vec<_>>();
+    if !incomplete_objects.is_empty() {
         return Err(invalid_project(format!(
-            "project export requires every input object to be fully materialized; {} object(s) are incomplete: [{}]",
-            objects.report().undecoded_objects,
+            "project export requires every decoded object to be fully materialized; other than source-supported unknown/unreadable raw fallbacks, {} object(s) are incomplete: [{}]",
+            objects.report().undecoded_objects.saturating_sub(opaque_objects.len()),
             incomplete_objects.join("; ")
         )));
     }
-    if !reference_graph.is_complete() {
+    if !reference_graph.is_complete_except_opaque_object_payloads(|file_index, object_index| {
+        opaque_objects.contains(&(file_index, object_index))
+    }) {
         let incomplete_scans = (0..reference_graph.file_count())
             .filter_map(|file_index| {
                 let graph = reference_graph.managed_graph_for_file(file_index)?;
@@ -286,7 +297,6 @@ pub fn export_workspace_yaml_project_with_settings(
             unresolved_references.join("; ")
         )));
     }
-    let settings_facts = ProjectExportSettings::from_export_settings(settings, project_version);
     let PreparedSceneCollections {
         processing: scene_processing,
         routed: mut scene_collections,
@@ -312,6 +322,7 @@ pub fn export_workspace_yaml_project_with_settings(
         .map_err(|_| invalid_project("could not allocate routed project objects"))?;
     let mut notices: Vec<ProjectExportNotice> = Vec::new();
     let mut fallback_notices: Vec<ProjectExportNotice> = Vec::new();
+    let mut opaque_fallback_notices: Vec<ProjectExportNotice> = Vec::new();
     let mut next_collection_index = 0usize;
     for (file_index, file) in workspace.files().iter().enumerate() {
         for (object_index, object_info) in file.metadata.objects.iter().enumerate() {
@@ -336,10 +347,17 @@ pub fn export_workspace_yaml_project_with_settings(
                 ))
             })?;
             let payload = object.payload.as_ref().ok();
-            if payload.is_some() {
+            if payload.is_some() && !opaque_objects.contains(&(file_index, object_index)) {
                 validate_decoded_object(object, object_info.path_id, reference_graph)?;
             }
-            let facts = ObjectClassFacts::new(class_id, payload.is_none());
+            let facts = match &object.factory.kind {
+                FactoryAssetKind::TypeTreeObject => ObjectClassFacts::type_tree_object(class_id),
+                FactoryAssetKind::Unknown => ObjectClassFacts::with_known(class_id, false, false),
+                FactoryAssetKind::Unreadable => ObjectClassFacts::new(class_id, true),
+                FactoryAssetKind::Generated(_) => {
+                    ObjectClassFacts::new(class_id, payload.is_none())
+                }
+            };
             let shader_view = if class_id == SHADER_CLASS_ID {
                 payload
                     .map(|payload| ShaderView::from_value(&payload.root))
@@ -356,6 +374,26 @@ pub fn export_workspace_yaml_project_with_settings(
             };
             let selection = select_collection_with_shader_text(facts, settings_facts, shader_text)?;
             let kind = selection.kind();
+            let is_opaque_fallback = opaque_objects.contains(&(file_index, object_index));
+            let raw_fallback_kind_matches = match kind {
+                ExportCollectionKind::Unknown => {
+                    matches!(&object.factory.kind, FactoryAssetKind::Unknown)
+                }
+                ExportCollectionKind::Unreadable => {
+                    matches!(&object.factory.kind, FactoryAssetKind::Unreadable)
+                }
+                _ => true,
+            };
+            if matches!(
+                kind,
+                ExportCollectionKind::Unknown | ExportCollectionKind::Unreadable
+            ) && (!is_opaque_fallback || !raw_fallback_kind_matches)
+            {
+                return Err(invalid_project(format!(
+                    "{} selected a raw fallback exporter, but the source factory did not retain an opaque UnknownObject or UnreadableObject payload",
+                    selection.collection_name
+                )));
+            }
             let (route, skip_reason, fallback_reason) = match kind {
                 ExportCollectionKind::Manager => (ObjectRoute::Manager, "", None),
                 ExportCollectionKind::Unknown => (ObjectRoute::Unknown, "", None),
@@ -422,8 +460,14 @@ pub fn export_workspace_yaml_project_with_settings(
             }
             if let Some(reason) = fallback_reason {
                 fallback_notices.push(ProjectExportNotice {
-                    subject: label,
+                    subject: label.clone(),
                     reason,
+                });
+            }
+            if matches!(route, ObjectRoute::Unknown | ObjectRoute::Unreadable) {
+                opaque_fallback_notices.push(ProjectExportNotice {
+                    subject: label,
+                    reason: "raw bytes are preserved, but this object has no decoded fields or reference scan",
                 });
             }
             let collection_index = if route == ObjectRoute::Skipped {
@@ -435,9 +479,17 @@ pub fn export_workspace_yaml_project_with_settings(
                     .ok_or_else(|| invalid_project("project collection count overflows"))?;
                 index
             };
-            let class_name =
-                object_class_name(class_id, payload.map(|payload| payload.type_name.as_str()));
-            let named_name = payload.and_then(object_asset_name);
+            let (class_name, named_name) = if opaque_objects.contains(&(file_index, object_index)) {
+                (
+                    object.factory.class_name.to_string(),
+                    Some(object.factory.name.clone()),
+                )
+            } else {
+                (
+                    object_class_name(class_id, payload.map(|payload| payload.type_name.as_str())),
+                    payload.and_then(object_asset_name),
+                )
+            };
             let file_id = match route {
                 ObjectRoute::Asset | ObjectRoute::ShaderText | ObjectRoute::ShaderYaml => {
                     crate::export::ids::get_main_export_id(class_id, 0).map_err(|error| {
@@ -519,6 +571,13 @@ pub fn export_workspace_yaml_project_with_settings(
             continue;
         }
         collection_count += 1;
+        // UnknownExportCollection and UnreadableExportCollection write raw files without
+        // `.meta` files or export GUIDs. Do not register their synthetic in-memory GUIDs as
+        // Unity project pointers; references to them resolve through the explicit missing-map
+        // path instead of targeting a GUID that no output metadata defines.
+        if matches!(entry.route, ObjectRoute::Unknown | ObjectRoute::Unreadable) {
+            continue;
+        }
         collection_metadata.push(ExportCollectionPointerMetadata {
             collection_index: entry.collection_index,
             guid: entry.guid,
@@ -670,10 +729,10 @@ pub fn export_workspace_yaml_project_with_settings(
         total_bytes = total_bytes
             .checked_add(bytes.len())
             .ok_or_else(|| invalid_project("project output byte count overflows"))?;
-        if total_bytes > limits.max_total_yaml_bytes {
+        if total_bytes > limits.max_total_asset_payload_bytes {
             return Err(invalid_project(format!(
                 "project output uses {total_bytes} bytes, exceeding the limit {}",
-                limits.max_total_yaml_bytes
+                limits.max_total_asset_payload_bytes
             )));
         }
         let mut identity = super::asset_path::ExportAssetPathIdentity {
@@ -803,10 +862,10 @@ pub fn export_workspace_yaml_project_with_settings(
         total_bytes = total_bytes
             .checked_add(yaml.len())
             .ok_or_else(|| invalid_project("project output byte count overflows"))?;
-        if total_bytes > limits.max_total_yaml_bytes {
+        if total_bytes > limits.max_total_asset_payload_bytes {
             return Err(invalid_project(format!(
                 "project output uses {total_bytes} bytes, exceeding the limit {}",
-                limits.max_total_yaml_bytes
+                limits.max_total_asset_payload_bytes
             )));
         }
 
@@ -938,10 +997,10 @@ pub fn export_workspace_yaml_project_with_settings(
         total_bytes = total_bytes
             .checked_add(bytes.len())
             .ok_or_else(|| invalid_project("project output byte count overflows"))?;
-        if total_bytes > limits.max_total_yaml_bytes {
+        if total_bytes > limits.max_total_asset_payload_bytes {
             return Err(invalid_project(format!(
                 "project output uses {total_bytes} bytes, exceeding the limit {}",
-                limits.max_total_yaml_bytes
+                limits.max_total_asset_payload_bytes
             )));
         }
         files.push(PlannedProjectFile {
@@ -981,11 +1040,12 @@ pub fn export_workspace_yaml_project_with_settings(
         asset_file_count: report.asset_file_count,
         support_file_count: report.support_file_count,
         meta_file_count: report.meta_file_count,
-        total_yaml_bytes: total_bytes,
+        total_asset_payload_bytes: total_bytes,
         project_version,
         collection_count,
         skipped_objects: report.skipped,
         fallbacks: report.fallbacks,
+        opaque_fallbacks: opaque_fallback_notices,
         processing_warnings,
     })
 }
@@ -1744,6 +1804,25 @@ fn source_object_key(file_index: usize, object_index: usize) -> ExportAssetObjec
     }
 }
 
+fn opaque_factory_object_keys(
+    objects: &ObjectWorkspace,
+) -> Result<HashSet<(usize, usize)>, Box<dyn Error>> {
+    let mut keys = HashSet::new();
+    keys.try_reserve(objects.report().undecoded_objects)
+        .map_err(|_| invalid_project("could not allocate opaque raw-object identities"))?;
+    for object in objects.objects() {
+        if !object.is_fully_materialized()
+            && matches!(
+                &object.factory.kind,
+                FactoryAssetKind::Unknown | FactoryAssetKind::Unreadable
+            )
+        {
+            keys.insert((object.file_index, object.object_index));
+        }
+    }
+    Ok(keys)
+}
+
 fn scene_guid_words_to_bytes(words: SceneGuidWords) -> [u8; 16] {
     let mut bytes = [0; 16];
     for (index, word) in words.data.iter().enumerate() {
@@ -2050,7 +2129,8 @@ fn raw_payload_bytes(
         ))
     })?;
     if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(object.file_index) {
-        let bytes = filesystem.read_all_bytes(&file.virtual_path, limits.max_total_yaml_bytes)?;
+        let bytes =
+            filesystem.read_all_bytes(&file.virtual_path, limits.max_total_asset_payload_bytes)?;
         entry.insert(bytes);
     }
     let bytes = cache

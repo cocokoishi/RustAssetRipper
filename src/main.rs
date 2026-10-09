@@ -1478,7 +1478,7 @@ fn export_project_to<W: io::Write>(
         report.asset_file_count,
         report.meta_file_count,
         report.support_file_count,
-        report.total_yaml_bytes,
+        report.total_asset_payload_bytes,
         report.project_version.major
     )?;
     if !report.skipped_objects.is_empty() {
@@ -1508,6 +1508,16 @@ fn export_project_to<W: io::Write>(
             report.fallbacks.len()
         )?;
         for notice in report.fallbacks.iter().take(10) {
+            writeln!(status_output, "  - {}: {}", notice.subject, notice.reason)?;
+        }
+    }
+    if !report.opaque_fallbacks.is_empty() {
+        writeln!(
+            status_output,
+            "{} Unknown/Unreadable objects were preserved as raw bytes without Unity metadata; their fields and embedded references remain opaque:",
+            report.opaque_fallbacks.len()
+        )?;
+        for notice in report.opaque_fallbacks.iter().take(10) {
             writeln!(status_output, "  - {}: {}", notice.subject, notice.reason)?;
         }
     }
@@ -4552,6 +4562,20 @@ mod tests {
         ExportSettingsFile::from(ExportDefaults::default())
     }
 
+    /// Decode one source-authored SerializedFile fixture for factory/project integration tests.
+    fn source_factory_fixture_bytes(case_name: &str) -> Vec<u8> {
+        let prefix = format!("SF_HEX|{case_name}|");
+        let hex = assetripper::processing::asset_factory::PROBE_FIXTURE
+            .lines()
+            .find_map(|line| line.strip_prefix(&prefix))
+            .unwrap_or_else(|| panic!("source-factory fixture includes {case_name}"));
+        assert!(hex.len().is_multiple_of(2), "fixture hex has even length");
+        hex.as_bytes()
+            .chunks_exact(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect()
+    }
+
     /// The `guid:` line of one importer sidecar.
     fn meta_guid(path: &std::path::Path) -> String {
         fs::read_to_string(path)
@@ -4581,6 +4605,23 @@ mod tests {
         let mut output = Vec::new();
         walk(root, root, &mut output);
         output.sort();
+        output
+    }
+
+    /// Every output directory below one root, parent before child for safe reverse cleanup.
+    fn project_directories(root: &std::path::Path) -> Vec<PathBuf> {
+        fn walk(current: &std::path::Path, output: &mut Vec<PathBuf>) {
+            for entry in fs::read_dir(current).expect("output directory is readable") {
+                let entry = entry.expect("directory entry is readable");
+                let path = entry.path();
+                if path.is_dir() {
+                    output.push(path.clone());
+                    walk(&path, output);
+                }
+            }
+        }
+        let mut output = vec![root.to_path_buf()];
+        walk(root, &mut output);
         output
     }
 
@@ -9170,51 +9211,195 @@ mod tests {
     }
 
     #[test]
-    fn export_project_refuses_unknown_object_without_a_usable_type_tree() {
+    fn export_project_skips_unknown_object_when_raw_fallback_setting_is_disabled() {
         let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
-        fn decode_hex(hex: &str) -> Vec<u8> {
-            assert!(hex.len().is_multiple_of(2), "fixture hex has even length");
-            hex.as_bytes()
-                .chunks_exact(2)
-                .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
-                .collect()
-        }
-
-        let fixture = assetripper::processing::asset_factory::PROBE_FIXTURE;
-        let hex = fixture
-            .lines()
-            .find_map(|line| line.strip_prefix("SF_HEX|unknown_class|"))
-            .expect("source-factory fixture includes an unknown class");
-        let bytes = decode_hex(hex);
+        let bytes = source_factory_fixture_bytes("unknown_no_tree");
         let directory = TestInputDirectory::new_root();
-        let source_path = directory.join("unknown_class.assets");
-        let output_root = directory.join("project-unknown-class");
+        let source_path = directory.join("unknown_no_tree.assets");
+        let output_root = directory.join("project-unknown-class-default");
         fs::write(&source_path, &bytes).unwrap();
-        let input = TestInputDirectory {
+        let mut input = TestInputDirectory {
             directory,
             files: vec![source_path.clone()],
             subdirectories: Vec::new(),
         };
-
-        let error = super::run(
-            [
-                std::ffi::OsString::from("export-project"),
-                output_root.clone().into_os_string(),
-                source_path.clone().into_os_string(),
-            ]
-            .into_iter(),
+        let mut status = Vec::new();
+        super::export_project_to(
+            std::slice::from_ref(&source_path),
+            &output_root,
+            false,
+            &default_export_settings(),
+            &mut status,
         )
-        .expect_err("an unknown class without a tree must not report a complete export");
+        .unwrap();
+        let status = String::from_utf8(status).unwrap();
         assert!(
-            error.to_string().contains("fully materialized")
-                && error.to_string().contains("UnknownObject raw fallback"),
-            "{error}"
+            status.contains("SkipExportCollection (class 9999)"),
+            "{status}"
         );
-        assert!(
-            !output_root.exists(),
-            "failed export must not create a project root"
-        );
+        assert!(!output_root.join("AssetRipper/UnknownAssets").exists());
+        assert!(output_root
+            .join("ProjectSettings/ProjectVersion.txt")
+            .is_file());
         assert_eq!(fs::read(&source_path).unwrap(), bytes);
+        input.files.extend(
+            project_tree(&output_root)
+                .iter()
+                .map(|path| output_root.join(path)),
+        );
+        input
+            .subdirectories
+            .extend(project_directories(&output_root));
+        drop(input);
+    }
+
+    #[test]
+    fn export_project_skips_unreadable_object_when_raw_fallback_setting_is_disabled() {
+        let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
+        let bytes = source_factory_fixture_bytes("unreadable_no_tree");
+        let directory = TestInputDirectory::new_root();
+        let source_path = directory.join("unreadable_no_tree.assets");
+        let output_root = directory.join("project-unreadable-class-default");
+        fs::write(&source_path, &bytes).unwrap();
+        let mut input = TestInputDirectory {
+            directory,
+            files: vec![source_path.clone()],
+            subdirectories: Vec::new(),
+        };
+        let mut status = Vec::new();
+        super::export_project_to(
+            std::slice::from_ref(&source_path),
+            &output_root,
+            false,
+            &default_export_settings(),
+            &mut status,
+        )
+        .unwrap();
+        let status = String::from_utf8(status).unwrap();
+        assert!(
+            status.contains("SkipExportCollection (class 9999)"),
+            "{status}"
+        );
+        assert!(!output_root.join("AssetRipper/UnreadableAssets").exists());
+        assert!(output_root
+            .join("ProjectSettings/ProjectVersion.txt")
+            .is_file());
+        assert_eq!(fs::read(&source_path).unwrap(), bytes);
+        input.files.extend(
+            project_tree(&output_root)
+                .iter()
+                .map(|path| output_root.join(path)),
+        );
+        input
+            .subdirectories
+            .extend(project_directories(&output_root));
+        drop(input);
+    }
+
+    #[test]
+    fn export_project_preserves_unknown_raw_bytes_without_meta_when_enabled() {
+        let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
+        let raw_payload = [1, 2, 3, 4, 5, 6, 7, 8];
+        let source_bytes = source_factory_fixture_bytes("unknown_no_tree");
+        let directory = TestInputDirectory::new_root();
+        let source_path = directory.join("unknown_no_tree.assets");
+        let output_root = directory.join("project-unknown-class-enabled");
+        fs::write(&source_path, &source_bytes).unwrap();
+        let mut input = TestInputDirectory {
+            directory,
+            files: vec![source_path.clone()],
+            subdirectories: Vec::new(),
+        };
+        let mut settings = default_export_settings();
+        settings.export_unreadable_assets = true;
+        let mut status = Vec::new();
+        super::export_project_to(
+            std::slice::from_ref(&source_path),
+            &output_root,
+            false,
+            &settings,
+            &mut status,
+        )
+        .unwrap();
+        let status = String::from_utf8(status).unwrap();
+        assert!(
+            status.contains("fields and embedded references remain opaque"),
+            "{status}"
+        );
+
+        let raw_path =
+            output_root.join("AssetRipper/UnknownAssets/9999/Unknown9999_3FCA88C5.unknown");
+        assert_eq!(fs::read(&raw_path).unwrap(), raw_payload);
+        assert!(!raw_path
+            .with_file_name("Unknown9999_3FCA88C5.unknown.meta")
+            .exists());
+        assert_eq!(fs::read(&source_path).unwrap(), source_bytes);
+        input.files.extend(
+            project_tree(&output_root)
+                .iter()
+                .map(|path| output_root.join(path)),
+        );
+        input
+            .subdirectories
+            .extend(project_directories(&output_root));
+        drop(input);
+    }
+
+    #[test]
+    fn export_project_preserves_unreadable_raw_bytes_without_meta_when_enabled() {
+        let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
+        let raw_payload = [1, 2, 3, 4, 5, 6, 7, 8];
+        let source_bytes = source_factory_fixture_bytes("unreadable_no_tree");
+        let directory = TestInputDirectory::new_root();
+        let source_path = directory.join("unreadable_no_tree.assets");
+        let output_root = directory.join("project-unreadable-version");
+        fs::write(&source_path, &source_bytes).unwrap();
+        let mut input = TestInputDirectory {
+            directory,
+            files: vec![source_path.clone()],
+            subdirectories: Vec::new(),
+        };
+        let mut settings = default_export_settings();
+        settings.export_unreadable_assets = true;
+        let mut status = Vec::new();
+        super::export_project_to(
+            std::slice::from_ref(&source_path),
+            &output_root,
+            false,
+            &settings,
+            &mut status,
+        )
+        .unwrap();
+        let status = String::from_utf8(status).unwrap();
+        assert!(
+            status.contains("fields and embedded references remain opaque"),
+            "{status}"
+        );
+
+        let raw_path = output_root
+            .join("AssetRipper/UnreadableAssets/9999/Unreadable9999_3FCA88C5.unreadable");
+        let raw_files = project_tree(&output_root)
+            .into_iter()
+            .filter(|path| path.ends_with(".unreadable"))
+            .collect::<Vec<_>>();
+        assert_eq!(raw_files.len(), 1, "{raw_files:?}");
+        assert_eq!(
+            raw_files[0],
+            "AssetRipper/UnreadableAssets/9999/Unreadable9999_3FCA88C5.unreadable"
+        );
+        let raw_bytes = fs::read(&raw_path).unwrap();
+        assert_eq!(raw_bytes, raw_payload);
+        let meta_name = format!("{}.meta", raw_path.file_name().unwrap().to_string_lossy());
+        assert!(!raw_path.with_file_name(meta_name).exists());
+        assert_eq!(fs::read(&source_path).unwrap(), source_bytes);
+        input.files.extend(
+            project_tree(&output_root)
+                .iter()
+                .map(|path| output_root.join(path)),
+        );
+        input
+            .subdirectories
+            .extend(project_directories(&output_root));
         drop(input);
     }
 

@@ -496,8 +496,10 @@ static void Author(string rowsPath)
 		"textasset_padding",
 		"textasset_bad_tail",
 		"unknown_class",
+		"unknown_no_tree",
 		"tpk_navmesh",
 		"unreadable_version",
+		"unreadable_no_tree",
 		"engine_default_resources",
 		"mono_unloaded",
 		"mono_with_structure",
@@ -587,12 +589,16 @@ static (string, SerializedFile) BuildCase(string name)
 			return ("textasset_bad_tail.assets", BuildTextAssetFile("2019.4.40f1", "Hero", "print(1)", null, [0xAA, 0xBB, 0xCC, 0xDD, 0xEE]));
 		case "unknown_class":
 			return ("unknown_class.assets", BuildFile("unknown_class.assets", "2019.4.40f1", 7, null, [1, 2, 3, 4, 5, 6, 7, 8]));
+		case "unknown_no_tree":
+			return ("unknown_no_tree.assets", BuildFile("unknown_no_tree.assets", "2019.4.40f1", 9999, null, [1, 2, 3, 4, 5, 6, 7, 8]));
 		case "tpk_navmesh":
 			return ("tpk_navmesh.assets", BuildFile("tpk_navmesh.assets", "2019.4.40f1", 194, null, StringPayload("NavMeshData")));
 		case "tpk_navmesh_editor":
 			return ("navmesh.unity", BuildNavMeshEditorFile());
 		case "unreadable_version":
 			return ("unreadable_version.assets", BuildTextAssetFile("3.4.0f1", "Hero", "print(1)", null, []));
+		case "unreadable_no_tree":
+			return ("unreadable_no_tree.assets", BuildFile("unreadable_no_tree.assets", "3.4.0f1", 9999, null, [1, 2, 3, 4, 5, 6, 7, 8]));
 		case "engine_default_resources":
 			return ("unity default resources", BuildTextAssetFile("2019.4.40f1", "Hero", "print(1)", null, [0xAA, 0xBB, 0xCC, 0xDD, 0xEE]));
 		case "mono_unloaded":

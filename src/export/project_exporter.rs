@@ -180,6 +180,9 @@ pub struct ObjectClassFacts {
     pub known: bool,
     /// The object payload failed TypeTree decoding (`UnreadableObject`).
     pub unreadable: bool,
+    /// The factory made a dynamic `TypeTreeObject` because no generated class matched this
+    /// version. It exposes fields from TPK and does not implement generated class interfaces.
+    pub type_tree_object: bool,
 }
 
 impl ObjectClassFacts {
@@ -189,6 +192,18 @@ impl ObjectClassFacts {
             class_id,
             known: is_generated_class(class_id),
             unreadable,
+            type_tree_object: false,
+        }
+    }
+
+    /// Facts for the versioned TPK fallback. Class IDs can have generated types in other Unity
+    /// versions, so interface dispatch must use the runtime object's actual dynamic type here.
+    pub const fn type_tree_object(class_id: i32) -> Self {
+        Self {
+            class_id,
+            known: false,
+            unreadable: false,
+            type_tree_object: true,
         }
     }
 
@@ -198,12 +213,20 @@ impl ObjectClassFacts {
             class_id,
             known,
             unreadable,
+            type_tree_object: false,
         }
     }
 }
 
 /// `ObjectHandlerStack.CalculateAssetHandlerStack` type matching for one registration target.
 pub fn class_satisfies_target(facts: ObjectClassFacts, target: &str) -> bool {
+    if facts.type_tree_object {
+        return match target {
+            "IUnityObjectBase" => true,
+            "TypeTreeObject" => facts.class_id == PLAYER_SETTINGS_CLASS_ID,
+            _ => false,
+        };
+    }
     match target {
         "IUnityObjectBase" => true,
         // `TypeTreeObject { IsPlayerSettings: true }`: only PlayerSettings reaches the manager
@@ -220,6 +243,13 @@ pub fn class_satisfies_target(facts: ObjectClassFacts, target: &str) -> bool {
 
 /// The `ClaimAssetKind` of one object, in the source's interface-precedence order.
 pub fn claim_asset_kind(facts: ObjectClassFacts) -> ClaimAssetKind {
+    if facts.type_tree_object {
+        return if facts.class_id == PLAYER_SETTINGS_CLASS_ID {
+            ClaimAssetKind::PlayerSettingsObject
+        } else {
+            ClaimAssetKind::Other
+        };
+    }
     if facts.unreadable {
         return ClaimAssetKind::UnreadableObject;
     }
@@ -1251,6 +1281,32 @@ mod tests {
         assert_eq!(selection.kind(), ExportCollectionKind::Unreadable);
         let selection = select_collection(unreadable, off).unwrap();
         assert_eq!(selection.exporter, "DummyAssetExporter");
+    }
+
+    #[test]
+    fn dynamic_tpk_objects_use_their_runtime_type_in_collection_dispatch() {
+        let settings = defaults();
+        let dynamic = ObjectClassFacts::type_tree_object(194);
+        assert!(class_satisfies_target(dynamic, "IUnityObjectBase"));
+        assert!(!class_satisfies_target(dynamic, "UnknownObject"));
+        assert!(!class_satisfies_target(dynamic, "INavMesh"));
+        assert_eq!(claim_asset_kind(dynamic), ClaimAssetKind::Other);
+        let selected = select_collection(dynamic, settings).unwrap();
+        assert_eq!(selected.exporter, "DefaultYamlExporter");
+        assert_eq!(selected.collection_name, "AssetExportCollection");
+
+        let player_settings = ObjectClassFacts::type_tree_object(PLAYER_SETTINGS_CLASS_ID);
+        assert!(class_satisfies_target(player_settings, "TypeTreeObject"));
+        assert_eq!(
+            claim_asset_kind(player_settings),
+            ClaimAssetKind::PlayerSettingsObject
+        );
+        assert_eq!(
+            select_collection(player_settings, settings)
+                .unwrap()
+                .collection_name,
+            "ManagerExportCollection"
+        );
     }
 
     #[test]

@@ -599,6 +599,30 @@ impl ObjectReferenceGraph {
             && self.issues.is_empty()
     }
 
+    /// Whether the scan is complete except for payloads explicitly treated as opaque by the
+    /// caller. Only decode/trailing/raw-value issues on those object indices may be excluded;
+    /// safety-limit failures and reference-walk failures remain fatal. A `true` result does not
+    /// claim that references inside an opaque payload were inspected.
+    pub fn is_complete_except_opaque_object_payloads(
+        &self,
+        mut is_opaque: impl FnMut(usize) -> bool,
+    ) -> bool {
+        self.path_id_index.len() == self.object_count
+            && self.attempted_objects == self.object_count
+            && self.issues.iter().all(|issue| match issue {
+                ReferenceGraphIssue::ObjectDecodeFailed { object_index, .. }
+                | ReferenceGraphIssue::UnparsedTrailingPayload { object_index, .. }
+                | ReferenceGraphIssue::UnparsedRawValue { object_index, .. } => {
+                    is_opaque(*object_index)
+                }
+                ReferenceGraphIssue::FieldPathLimitExceeded { .. }
+                | ReferenceGraphIssue::EdgeLimitExceeded { .. }
+                | ReferenceGraphIssue::ManagedObjectLimitExceeded { .. }
+                | ReferenceGraphIssue::ManagedReferenceLimitExceeded { .. }
+                | ReferenceGraphIssue::ManagedRegistryScopeLimitExceeded { .. } => false,
+            })
+    }
+
     /// Classifies an edge using this graph's PathID index and the source one-based external table.
     pub fn resolve_pointer<'a>(
         &self,
@@ -1305,6 +1329,30 @@ impl<'a> MultiFileReferenceGraph<'a> {
     /// True only when all input scans are complete and every non-null PPtr resolves uniquely.
     pub fn is_complete(&self) -> bool {
         self.input_graphs_complete
+            && self.references.iter().all(|reference| {
+                matches!(
+                    reference.resolution,
+                    MultiFilePPtrResolution::Null | MultiFilePPtrResolution::Object { .. }
+                )
+            })
+    }
+
+    /// Whether all known references resolve and every graph issue belongs to an explicitly
+    /// opaque object payload. Opaque object identities remain in the PathID index, so references
+    /// to those objects are still classified; their own unparsed payloads are not claimed to be
+    /// reference-free.
+    pub fn is_complete_except_opaque_object_payloads(
+        &self,
+        mut is_opaque: impl FnMut(usize, usize) -> bool,
+    ) -> bool {
+        self.file_graphs
+            .iter()
+            .enumerate()
+            .all(|(file_index, graph)| {
+                graph.is_complete_except_opaque_object_payloads(|object_index| {
+                    is_opaque(file_index, object_index)
+                })
+            })
             && self.references.iter().all(|reference| {
                 matches!(
                     reference.resolution,

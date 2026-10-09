@@ -36,7 +36,7 @@ using System.Security.Cryptography;
 
 if (args.Length == 0)
 {
-	Console.Error.WriteLine("usage: tpk <version> <classId...> | naming <version> <name...> | process <rows> <file...> | legacy-export <input> <rows> <output>");
+	Console.Error.WriteLine("usage: tpk <version> <classId...> | naming <version> <name...> | process <rows> <file...> | legacy-export <input> <rows> <output> | raw-fallback-export <input> <rows> <output>");
 	return 2;
 }
 
@@ -62,7 +62,12 @@ try
 		ExportLegacyPrefab(args[1], args[2], args[3]);
 		return 0;
 	}
-	Console.Error.WriteLine("usage: tpk <version> <classId...> | naming <version> <name...> | process <rows> <file...> | legacy-export <input> <rows> <output>");
+	if (args[0] == "raw-fallback-export" && args.Length == 4)
+	{
+		ExportRawFallback(args[1], args[2], args[3]);
+		return 0;
+	}
+	Console.Error.WriteLine("usage: tpk <version> <classId...> | naming <version> <name...> | process <rows> <file...> | legacy-export <input> <rows> <output> | raw-fallback-export <input> <rows> <output>");
 	return 2;
 }
 catch (Exception ex)
@@ -254,6 +259,74 @@ static void ExportLegacyPrefab(string inputPath, string rowsPath, string outputR
 		{
 			rows.WriteLine($"CONTENT|{relativePath}|{Convert.ToBase64String(content)}");
 		}
+	}
+}
+
+static void ExportRawFallback(string inputPath, string rowsPath, string outputRoot)
+{
+	string inputFullPath = Path.GetFullPath(inputPath);
+	string rowsFullPath = Path.GetFullPath(rowsPath);
+	string outputFullPath = Path.GetFullPath(outputRoot);
+	if (!File.Exists(inputFullPath))
+	{
+		throw new FileNotFoundException("raw-fallback probe input was not found", inputFullPath);
+	}
+	if (File.Exists(rowsFullPath) || Directory.Exists(rowsFullPath))
+	{
+		throw new IOException($"refusing to overwrite probe rows {rowsFullPath}");
+	}
+	if (Directory.Exists(outputFullPath) && Directory.EnumerateFileSystemEntries(outputFullPath).Any())
+	{
+		throw new IOException($"refusing to export into non-empty output {outputFullPath}");
+	}
+
+	Directory.CreateDirectory(Path.GetDirectoryName(rowsFullPath)!);
+	Directory.CreateDirectory(outputFullPath);
+	Logger.Add(new ConsoleLogger());
+	FullConfiguration settings = new();
+	settings.ExportSettings.ExportUnreadableAssets = true;
+	ExportHandler handler = new(settings);
+	GameData gameData = handler.LoadAndProcess([inputFullPath], LocalFileSystem.Instance);
+	handler.Export(gameData, outputFullPath, LocalFileSystem.Instance);
+
+	string[] exportedFiles = Directory.GetFiles(outputFullPath, "*", SearchOption.AllDirectories)
+		.OrderBy(path => Path.GetRelativePath(outputFullPath, path), StringComparer.Ordinal)
+		.ToArray();
+	string[] rawFiles = exportedFiles
+		.Where(path => string.Equals(Path.GetExtension(path), ".unknown", StringComparison.OrdinalIgnoreCase)
+			|| string.Equals(Path.GetExtension(path), ".unreadable", StringComparison.OrdinalIgnoreCase))
+		.ToArray();
+	if (rawFiles.Length != 1)
+	{
+		throw new InvalidDataException($"expected one raw fallback output, found {rawFiles.Length}");
+	}
+	string rawPath = rawFiles[0];
+	if (File.Exists(rawPath + ".meta"))
+	{
+		throw new InvalidDataException($"raw fallback unexpectedly has a Unity metadata sidecar: {rawPath}.meta");
+	}
+	byte[] inputBytes = File.ReadAllBytes(inputFullPath);
+	byte[] rawBytes = File.ReadAllBytes(rawPath);
+	using StreamWriter rows = new(rowsFullPath, false, new System.Text.UTF8Encoding(false)) { NewLine = "\n" };
+	rows.WriteLine("# Frozen AssetRipper raw fallback project-export probe.");
+	rows.WriteLine($"INPUT|{Path.GetFileName(inputFullPath)}|{inputBytes.Length}|{Convert.ToHexString(SHA256.HashData(inputBytes))}");
+	foreach (IUnityObjectBase asset in gameData.GameBundle.FetchAssets())
+	{
+		if (asset is not RawDataObject rawAsset)
+		{
+			continue;
+		}
+		string name = asset is INamed named ? named.Name.ToString() : "<unnamed>";
+		rows.WriteLine($"OBJECT|{asset.GetType().Name}|{asset.ClassID}|{asset.ClassName}|{name}|{rawAsset.RawData.Length}|{rawAsset.RawDataHash:X8}");
+	}
+	string relativePath = Path.GetRelativePath(outputFullPath, rawPath).Replace('\\', '/');
+	rows.WriteLine($"RAW_FILE|{relativePath}|{rawBytes.Length}|{Convert.ToHexString(SHA256.HashData(rawBytes))}");
+	rows.WriteLine($"RAW_HEX|{Convert.ToHexString(rawBytes)}");
+	foreach (string file in exportedFiles)
+	{
+		string fileRelativePath = Path.GetRelativePath(outputFullPath, file).Replace('\\', '/');
+		byte[] content = File.ReadAllBytes(file);
+		rows.WriteLine($"FILE|{fileRelativePath}|{content.Length}|{Convert.ToHexString(SHA256.HashData(content))}");
 	}
 }
 

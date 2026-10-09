@@ -4563,7 +4563,10 @@ fn classify_type_tree_component_base(
         return TypeTreeComponentBaseClassification::Unavailable;
     };
     let Some(root) = type_tree.nodes.first() else {
-        return TypeTreeComponentBaseClassification::Ambiguous;
+        // SerializedTypes can retain an empty node list when the file has no TypeTree. That
+        // absence cannot support a Component-vs-asset classification and must not become a
+        // fabricated component candidate (especially for explicit raw-fallback objects).
+        return TypeTreeComponentBaseClassification::Unavailable;
     };
     if root.level != 0 {
         return TypeTreeComponentBaseClassification::Ambiguous;
@@ -5524,6 +5527,10 @@ mod tests {
             (1, "Base", Some("Object")),
         ]);
         let missing_base_type = tree(&[(0, "", Some("MalformedAsset")), (1, "Base", None)]);
+        let empty_tree = TypeTree {
+            nodes: Vec::new(),
+            string_buffer: Vec::new(),
+        };
 
         assert_eq!(
             classify_type_tree_component_base(Some(&mesh_renderer)),
@@ -5540,6 +5547,10 @@ mod tests {
         assert_eq!(
             classify_type_tree_component_base(Some(&missing_base_type)),
             TypeTreeComponentBaseClassification::Ambiguous
+        );
+        assert_eq!(
+            classify_type_tree_component_base(Some(&empty_tree)),
+            TypeTreeComponentBaseClassification::Unavailable
         );
         assert_eq!(
             classify_type_tree_component_base(None),
