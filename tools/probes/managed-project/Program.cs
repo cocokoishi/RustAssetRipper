@@ -68,6 +68,16 @@ if (args.Length > 0 && args[0] == "export-path-id-map-project")
         args.Length == 5 ? args[4] : "2019.4.40f1");
 }
 
+if (args.Length > 0 && args[0] == "export-audio-yaml-project")
+{
+    if (args.Length != 4)
+    {
+        Console.Error.WriteLine("usage: managed-project export-audio-yaml-project <input-root> <output-root> <rows-file>");
+        return 2;
+    }
+    return ExportAudioYamlProject(args[1], args[2], args[3]);
+}
+
 if (args.Length == 1 && args[0] == "dump-texture-enums")
 {
     return DumpTextureEnums();
@@ -2272,6 +2282,105 @@ static int DumpTextureEnums()
     {
         Console.WriteLine($"STREAM_PROPERTY|{property.Name}|{property.PropertyType.FullName}|{property.CanWrite}");
     }
+    return 0;
+}
+
+static int ExportAudioYamlProject(string inputRootValue, string outputRootValue, string rowsValue)
+{
+    const string unityVersionText = "2019.4.40f1";
+    const string audioName = "AudioFixture";
+    const string streamName = "AudioFixture.resS";
+    const ulong streamOffset = 6;
+    const ulong streamSize = 3;
+    byte[] resourceBytes = "prefixABCsuffix"u8.ToArray();
+
+    string inputRoot = Path.GetFullPath(inputRootValue);
+    string outputRoot = Path.GetFullPath(outputRootValue);
+    string rowsPath = Path.GetFullPath(rowsValue);
+    EnsureEmptyOrMissingDirectory(inputRoot, "input");
+    EnsureEmptyOrMissingDirectory(outputRoot, "output");
+    if (File.Exists(rowsPath) || Directory.Exists(rowsPath))
+    {
+        throw new IOException($"rows file must be new: {rowsPath}");
+    }
+    Directory.CreateDirectory(inputRoot);
+    Directory.CreateDirectory(outputRoot);
+    Directory.CreateDirectory(Path.GetDirectoryName(rowsPath)!);
+
+    UnityVersion version = UnityVersion.Parse(unityVersionText);
+    GameBundle bundle = new();
+    ProcessedAssetCollection collection = new(bundle);
+    collection.GetType().GetProperty("Version")!.SetValue(collection, version);
+    object audio = MakeGenerated(
+        "AssetRipper.SourceGenerated.Classes.ClassID_83.AudioClip",
+        83,
+        303,
+        collection,
+        version);
+    SetGeneratedProperty(audio, "Name", audioName);
+    object resource = FindGeneratedProperty(audio, "Resource").GetValue(audio)
+        ?? throw new InvalidOperationException("generated AudioClip has no Resource instance");
+    SetGeneratedProperty(resource, "Source", streamName);
+    SetGeneratedProperty(resource, "Offset", checked((int)streamOffset));
+    SetGeneratedProperty(resource, "Size", checked((int)streamSize));
+
+    byte[] audioBody;
+    using (MemoryStream bodyStream = new())
+    using (AssetWriter writer = new(bodyStream, collection))
+    {
+        ((IAssetWritable)audio).WriteRelease(writer);
+        audioBody = bodyStream.ToArray();
+    }
+    SerializedType serializedType = new() { RawTypeID = 83 };
+    SerializedFile serializedFile = new SerializedFileBuilder
+    {
+        Generation = FormatVersion.StoresTypeDependencies,
+        Version = version,
+        Platform = (BuildTarget)19,
+        EndianType = EndianType.LittleEndian,
+        HasTypeTree = false,
+        Types = { serializedType },
+        Objects =
+        {
+            new ObjectInfo(serializedType)
+            {
+                FileID = 303,
+                TypeID = 83,
+                SerializedTypeIndex = 0,
+                ObjectData = audioBody,
+            },
+        },
+    }.Build();
+    serializedFile.FilePath = "AudioFixture.assets";
+    byte[] inputBytes = serializedFile.ToByteArray();
+    string inputPath = Path.Combine(inputRoot, "AudioFixture.assets");
+    string resourcePath = Path.Combine(inputRoot, streamName);
+    File.WriteAllBytes(inputPath, inputBytes);
+    File.WriteAllBytes(resourcePath, resourceBytes);
+
+    FullConfiguration configuration = new();
+    configuration.ExportSettings.AudioExportFormat = AudioExportFormat.Yaml;
+    ExportHandler handler = new(configuration);
+    var gameData = handler.LoadAndProcess([inputRoot], LocalFileSystem.Instance);
+    handler.Export(gameData, outputRoot, LocalFileSystem.Instance);
+
+    using StreamWriter rows = new(rowsPath, false, new UTF8Encoding(false)) { NewLine = "\n" };
+    rows.WriteLine($"UNITY_VERSION|{unityVersionText}");
+    WriteInputRow(rows, inputPath, inputBytes);
+    WriteInputRow(rows, resourcePath, resourceBytes);
+    foreach (string outputPath in Directory.EnumerateFiles(outputRoot, "*", SearchOption.AllDirectories)
+        .OrderBy(path => Path.GetRelativePath(outputRoot, path), StringComparer.Ordinal))
+    {
+        string relativePath = Path.GetRelativePath(outputRoot, outputPath).Replace('\\', '/');
+        byte[] outputBytes = File.ReadAllBytes(outputPath);
+        if (relativePath.EndsWith(".meta", StringComparison.Ordinal))
+        {
+            string normalized = NormalizeTextureProjectMeta(new UTF8Encoding(false, true).GetString(outputBytes));
+            outputBytes = Encoding.UTF8.GetBytes(normalized);
+        }
+        rows.WriteLine($"SOURCE_OUTPUT|{relativePath}|{Convert.ToHexString(outputBytes)}");
+    }
+    Console.WriteLine($"AUDIO_YAML_PROJECT|input={inputBytes.Length}|resource={resourceBytes.Length}|files={Directory.GetFiles(outputRoot, "*", SearchOption.AllDirectories).Length}");
     return 0;
 }
 

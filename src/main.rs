@@ -9810,6 +9810,229 @@ mod tests {
     }
 
     #[test]
+    fn export_project_writes_streamed_audio_yaml_sidecar_and_rebases_its_range() {
+        let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
+        let fixture = include_str!("export/audio_project_stream_source_2019_4_fixture.txt");
+
+        fn decode_hex(hex: &str) -> Vec<u8> {
+            assert!(hex.len().is_multiple_of(2), "fixture hex has even length");
+            hex.as_bytes()
+                .chunks_exact(2)
+                .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+                .collect()
+        }
+
+        fn fixture_hex(fixture: &str, prefix: &str) -> Vec<u8> {
+            let hex = fixture
+                .lines()
+                .find_map(|line| line.strip_prefix(prefix))
+                .unwrap_or_else(|| panic!("streamed AudioClip fixture is missing {prefix}"));
+            decode_hex(hex)
+        }
+
+        fn source_output(fixture: &str, relative_path: &str) -> Vec<u8> {
+            let prefix = format!("SOURCE_OUTPUT|ExportedProject/{relative_path}|");
+            let hex = fixture
+                .lines()
+                .find_map(|line| line.strip_prefix(&prefix))
+                .unwrap_or_else(|| {
+                    panic!("source streamed AudioClip output is missing {relative_path}")
+                });
+            decode_hex(hex)
+        }
+
+        fn normalized_lines(text: &str) -> String {
+            let normalized = text
+                .replace("\r\n", "\n")
+                .lines()
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("{normalized}\n")
+        }
+
+        fn normalized_meta(text: &str) -> String {
+            let normalized = text
+                .lines()
+                .map(|line| {
+                    if line.starts_with("guid: ") {
+                        "guid: <GUID>"
+                    } else if line.starts_with("timeCreated: ") {
+                        "timeCreated: <TIME>"
+                    } else {
+                        line
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("{normalized}\n")
+        }
+
+        let input_assets = fixture_hex(fixture, "INPUT_HEX|AudioFixture.assets|");
+        let input_resource = fixture_hex(fixture, "INPUT_HEX|AudioFixture.resS|");
+        let source_yaml = source_output(fixture, "Assets/AudioClip/AudioFixture.audioclip");
+        let source_sidecar = source_output(fixture, "Assets/AudioClip/AudioFixture.audioclip.resS");
+        let expected_meta = source_output(fixture, "Assets/AudioClip/AudioFixture.audioclip.meta");
+        assert_eq!(source_sidecar, b"ABC");
+        let source_yaml_text = std::str::from_utf8(&source_yaml).unwrap();
+        assert!(source_yaml_text.contains("m_Offset: 6\n    m_Size: 3\n"));
+        assert_eq!(source_sidecar.len(), 3);
+        let expected_yaml = source_yaml_text.replacen(
+            "m_Offset: 6\n    m_Size: 3\n",
+            "m_Offset: 0\n    m_Size: 3\n",
+            1,
+        );
+
+        let directory = TestInputDirectory::new_root();
+        let input_root = directory.join("streamed-audio-input");
+        fs::create_dir(&input_root).unwrap();
+        let source_path = input_root.join("AudioFixture.assets");
+        let resource_path = input_root.join("AudioFixture.resS");
+        let settings_path = directory.join("audio-yaml-settings.json");
+        let output_root = directory.join("streamed-audio-project");
+        let settings = include_str!("export/settings_file_defaults.json")
+            .replace("\"AudioExportFormat\": 2", "\"AudioExportFormat\": 0");
+        assert!(settings.contains("\"AudioExportFormat\": 0"));
+        fs::write(&source_path, &input_assets).unwrap();
+        fs::write(&resource_path, &input_resource).unwrap();
+        fs::write(&settings_path, settings).unwrap();
+        let _input_guard = TestInputDirectory {
+            directory: directory.clone(),
+            files: vec![
+                source_path.clone(),
+                resource_path.clone(),
+                settings_path.clone(),
+            ],
+            subdirectories: vec![input_root.clone()],
+        };
+
+        super::run(
+            [
+                std::ffi::OsString::from("export-project"),
+                std::ffi::OsString::from("--settings"),
+                settings_path.into_os_string(),
+                output_root.clone().into_os_string(),
+                input_root.into_os_string(),
+            ]
+            .into_iter(),
+        )
+        .expect("production export-project resolves and stages streamed AudioClip bytes");
+
+        let audio_path = output_root.join("Assets/AudioClip/AudioFixture.audioclip");
+        let audio_sidecar_path = output_root.join("Assets/AudioClip/AudioFixture.audioclip.resS");
+        let audio_meta_path = output_root.join("Assets/AudioClip/AudioFixture.audioclip.meta");
+        let actual_yaml = fs::read_to_string(&audio_path).unwrap();
+        assert_eq!(
+            normalized_lines(&actual_yaml),
+            normalized_lines(&expected_yaml),
+            "the only source difference is rebasing the sliced sidecar offset to zero"
+        );
+        assert!(actual_yaml.contains("m_Source: Assets\\AudioClip\\AudioFixture.audioclip.resS"));
+        assert!(actual_yaml.contains("m_Offset: 0\n    m_Size: 3"));
+        assert_eq!(fs::read(&audio_sidecar_path).unwrap(), source_sidecar);
+        assert_eq!(
+            normalized_meta(&fs::read_to_string(&audio_meta_path).unwrap()).as_bytes(),
+            expected_meta.as_slice(),
+            "NativeFormatImporter metadata matches the source output"
+        );
+        assert_eq!(fs::read(&source_path).unwrap(), input_assets);
+        assert_eq!(fs::read(&resource_path).unwrap(), input_resource);
+        assert!(!output_root
+            .join("Assets/AudioClip/AudioFixture.asset")
+            .exists());
+        fs::remove_dir_all(&output_root).unwrap();
+    }
+
+    #[test]
+    fn export_project_rejects_missing_or_truncated_streamed_audio_without_partial_assets() {
+        let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
+        let fixture = include_str!("export/audio_project_stream_source_2019_4_fixture.txt");
+
+        fn decode_hex(hex: &str) -> Vec<u8> {
+            assert!(hex.len().is_multiple_of(2), "fixture hex has even length");
+            hex.as_bytes()
+                .chunks_exact(2)
+                .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+                .collect()
+        }
+
+        let input_assets_hex = fixture
+            .lines()
+            .find_map(|line| line.strip_prefix("INPUT_HEX|AudioFixture.assets|"))
+            .expect("fixture has the AudioClip SerializedFile bytes");
+        let input_assets = decode_hex(input_assets_hex);
+        let settings = include_str!("export/settings_file_defaults.json")
+            .replace("\"AudioExportFormat\": 2", "\"AudioExportFormat\": 0");
+        let cases: [(&str, Option<&[u8]>, &str); 2] = [
+            ("missing", None, "is missing"),
+            ("truncated", Some(b"prefixAB"), "range"),
+        ];
+
+        for (case_name, resource_bytes, expected_reason) in cases {
+            let directory = TestInputDirectory::new_root();
+            let input_root = directory.join(format!("{case_name}-audio-input"));
+            fs::create_dir(&input_root).unwrap();
+            let source_path = input_root.join("AudioFixture.assets");
+            let resource_path = input_root.join("AudioFixture.resS");
+            let settings_path = directory.join(format!("{case_name}-audio-settings.json"));
+            let output_root = directory.join(format!("{case_name}-audio-project"));
+            fs::write(&source_path, &input_assets).unwrap();
+            if let Some(resource_bytes) = resource_bytes {
+                fs::write(&resource_path, resource_bytes).unwrap();
+            }
+            fs::write(&settings_path, &settings).unwrap();
+            let mut files = vec![source_path.clone(), settings_path.clone()];
+            if resource_path.is_file() {
+                files.push(resource_path.clone());
+            }
+            let _input_guard = TestInputDirectory {
+                directory: directory.clone(),
+                files,
+                subdirectories: vec![input_root.clone()],
+            };
+
+            let error = super::run(
+                [
+                    std::ffi::OsString::from("export-project"),
+                    std::ffi::OsString::from("--settings"),
+                    settings_path.into_os_string(),
+                    output_root.clone().into_os_string(),
+                    input_root.into_os_string(),
+                ]
+                .into_iter(),
+            )
+            .expect_err("declared streamed AudioClip bytes cannot be silently omitted")
+            .to_string();
+            assert!(error.contains("AudioClip stream"), "{error}");
+            assert!(error.contains(expected_reason), "{error}");
+
+            let audio_path = output_root.join("Assets/AudioClip/AudioFixture.audioclip");
+            let sidecar_path = output_root.join("Assets/AudioClip/AudioFixture.audioclip.resS");
+            let meta_path = output_root.join("Assets/AudioClip/AudioFixture.audioclip.meta");
+            assert!(
+                !audio_path.exists(),
+                "failed export left an AudioClip asset"
+            );
+            assert!(
+                !sidecar_path.exists(),
+                "failed export left a resource sidecar"
+            );
+            assert!(!meta_path.exists(), "failed export left AudioClip metadata");
+            if output_root.is_dir() {
+                assert_eq!(
+                    fs::read_dir(&output_root).unwrap().count(),
+                    0,
+                    "failed export may not leave partial project files"
+                );
+                fs::remove_dir(&output_root).unwrap();
+            }
+            assert_eq!(fs::read(&source_path).unwrap(), input_assets);
+            if let Some(expected_resource_bytes) = resource_bytes {
+                assert_eq!(fs::read(&resource_path).unwrap(), expected_resource_bytes);
+            }
+        }
+    }
+
+    #[test]
     fn export_project_matches_source_for_standalone_generated_texture_versions() {
         let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
 

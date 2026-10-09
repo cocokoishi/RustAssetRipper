@@ -41,8 +41,9 @@ use crate::processing::scene_collections::{
 use crate::processing::scene_naming::SceneUnityVersion;
 use crate::processing::script_identity::ScriptIdentifier;
 use crate::resource::{
-    resolve_and_read_streamed_resource_info, RootResourceFileCatalog,
-    StreamedResourceContentLimits, StreamedResourceContentResolution,
+    resolve_and_read_streamed_resource_info, resolve_and_read_streamed_resource_range,
+    RootResourceFileCatalog, StreamedResourceContentLimits, StreamedResourceContentResolution,
+    StreamedResourceRange,
 };
 use crate::resources::shader::{script_has_decompiled_text, ShaderView, SHADER_CLASS_ID};
 use crate::serialized_file::object::ParsedObjectPayload;
@@ -215,6 +216,7 @@ struct RoutedObject<'a> {
     named_name: Option<String>,
     facts: ObjectClassFacts,
     shader_view: Option<ShaderView>,
+    audio_yaml_resource: Option<crate::resources::audio::AudioClipResourceInfo>,
     text_asset_export: Option<TextAssetExportDetails>,
     texture_export: Option<TextureProjectPlan>,
     script_export: Option<ScriptExportDetails>,
@@ -567,7 +569,7 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
                     .as_ref()
                     .is_some_and(|resource| resource.is_set());
                 let can_preserve_audio = match settings.audio_export_format {
-                    crate::export::settings::AudioExportFormat::Yaml => !has_stream_data,
+                    crate::export::settings::AudioExportFormat::Yaml => true,
                     crate::export::settings::AudioExportFormat::Default
                     | crate::export::settings::AudioExportFormat::PreferWav => {
                         !has_inline_data && !has_stream_data
@@ -595,6 +597,25 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
                     object.path_id, selection.exporter
                 )));
             }
+            let audio_yaml_resource = if audio_yaml_route {
+                let view = audio_view.as_ref().ok_or_else(|| {
+                    invalid_project(
+                        "YamlAudioExporter was selected without decoded AudioClip fields",
+                    )
+                })?;
+                match view.resource.as_ref() {
+                    None => None,
+                    Some(resource) if resource.size > 0 && resource.path.is_empty() => {
+                        return Err(invalid_project(format!(
+                            "file {file_index} object {object_index} PathID {} AudioClip declares {} streamed bytes with an empty resource path",
+                            object.path_id, resource.size
+                        )));
+                    }
+                    Some(resource) => Some(resource.clone()),
+                }
+            } else {
+                None
+            };
             let text_asset_export = if selection.exporter == "TextAssetExporter" {
                 let script = text_asset_script.ok_or_else(|| {
                     invalid_project("TextAssetExporter was selected without decoded m_Script bytes")
@@ -862,6 +883,7 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
                 named_name,
                 facts,
                 shader_view,
+                audio_yaml_resource,
                 text_asset_export,
                 texture_export,
                 script_export,
@@ -1138,6 +1160,109 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
                 )?;
             }
         }
+        let mut identity = super::asset_path::ExportAssetPathIdentity {
+            class_name: entry.class_name.clone(),
+            named_name: entry.named_name.clone(),
+            ..Default::default()
+        };
+        if identity.class_name.is_empty() {
+            identity.class_name = entry.class_name.clone();
+        }
+        let planned_audio_asset_path = if entry.route == ObjectRoute::AudioYaml {
+            Some(planner.plan_asset_path(&identity, "audioclip")?)
+        } else {
+            None
+        };
+        let planned_audio_sidecar_path = match (
+            entry.audio_yaml_resource.as_ref(),
+            planned_audio_asset_path.as_ref(),
+        ) {
+            (Some(resource), Some(asset_path)) if resource.size > 0 => {
+                Some(format!("{asset_path}.resS"))
+            }
+            (Some(resource), None) if resource.size > 0 => {
+                return Err(invalid_project(
+                    "AudioClip stream has no planned AudioClip asset path",
+                ));
+            }
+            _ => None,
+        };
+        let planned_audio_yaml_sidecar_source = planned_audio_sidecar_path
+            .as_deref()
+            .map(project_relative_path_for_host);
+        let audio_sidecar_bytes = if let Some(resource) = entry
+            .audio_yaml_resource
+            .as_ref()
+            .filter(|resource| resource.size > 0)
+        {
+            if resource.path.is_empty() {
+                return Err(invalid_project(format!(
+                    "file {} object {} PathID {} AudioClip declares {} streamed bytes with an empty resource path",
+                    entry.object.file_index,
+                    entry.object.object_index,
+                    entry.object.path_id,
+                    resource.size
+                )));
+            }
+            let source_bundle_index = workspace
+                .files()
+                .get(entry.object.file_index)
+                .ok_or_else(|| {
+                    invalid_project(format!(
+                        "AudioClip references absent SerializedFile {}",
+                        entry.object.file_index
+                    ))
+                })?
+                .container_bundle_index;
+            let resolution = resolve_and_read_streamed_resource_range(
+                filesystem,
+                workspace,
+                source_bundle_index,
+                StreamedResourceRange {
+                    path: &resource.path,
+                    offset: resource.offset,
+                    size: resource.size,
+                },
+                root_catalog,
+                resource_provider,
+                limits.streamed_content,
+            )
+            .map_err(|error| {
+                invalid_project(format!(
+                    "file {} object {} PathID {} AudioClip stream {:?} could not be read: {error}",
+                    entry.object.file_index,
+                    entry.object.object_index,
+                    entry.object.path_id,
+                    resource.path
+                ))
+            })?;
+            match resolution {
+                StreamedResourceContentResolution::Resolved { bytes, .. } => Some(bytes),
+                StreamedResourceContentResolution::Missing {
+                    unavailable_data_paths,
+                } => {
+                    return Err(invalid_project(format!(
+                        "file {} object {} PathID {} AudioClip stream {:?} is missing; unavailable data paths: [{}]",
+                        entry.object.file_index,
+                        entry.object.object_index,
+                        entry.object.path_id,
+                        resource.path,
+                        unavailable_data_paths.join(", ")
+                    )));
+                }
+                StreamedResourceContentResolution::Unset => {
+                    return Err(invalid_project(format!(
+                        "file {} object {} PathID {} AudioClip stream {:?} became unset during resolution",
+                        entry.object.file_index,
+                        entry.object.object_index,
+                        entry.object.path_id,
+                        resource.path
+                    )));
+                }
+            }
+        } else {
+            None
+        };
         let bytes = match entry.route {
             ObjectRoute::Unknown | ObjectRoute::Unreadable => raw_payload_bytes(
                 filesystem,
@@ -1313,6 +1438,14 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
                             _ => None,
                         },
                     )?;
+                    if let Some(resource) = entry.audio_yaml_resource.as_ref() {
+                        rewrite_audio_yaml_resource(
+                            &mut document,
+                            resource,
+                            planned_audio_yaml_sidecar_source.as_deref(),
+                            audio_sidecar_bytes.as_deref(),
+                        )?;
+                    }
                 }
                 write_unity_yaml_documents(&[document], limits.yaml_write)?.into_bytes()
             }
@@ -1330,13 +1463,26 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
                 limits.max_total_asset_payload_bytes
             )));
         }
-        let mut identity = super::asset_path::ExportAssetPathIdentity {
-            class_name: entry.class_name.clone(),
-            named_name: entry.named_name.clone(),
-            ..Default::default()
-        };
-        if identity.class_name.is_empty() {
-            identity.class_name = entry.class_name.clone();
+        if let Some(sidecar_bytes) = audio_sidecar_bytes.as_deref() {
+            let relative_path = planned_audio_sidecar_path.as_ref().ok_or_else(|| {
+                invalid_project("AudioClip sidecar bytes have no planned support-file path")
+            })?;
+            total_bytes = total_bytes
+                .checked_add(sidecar_bytes.len())
+                .ok_or_else(|| invalid_project("project output byte count overflows"))?;
+            if total_bytes > limits.max_total_asset_payload_bytes {
+                return Err(invalid_project(format!(
+                    "project output uses {total_bytes} bytes, exceeding the limit {}",
+                    limits.max_total_asset_payload_bytes
+                )));
+            }
+            add_project_support_file(
+                &mut support_files,
+                &mut support_file_indexes,
+                relative_path.clone(),
+                sidecar_bytes,
+                files.len(),
+            )?;
         }
         let relative_path = match entry.route {
             ObjectRoute::Asset => {
@@ -1348,7 +1494,8 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
                 };
                 planner.plan_asset_path(&identity, extension)?
             }
-            ObjectRoute::AudioYaml => planner.plan_asset_path(&identity, "audioclip")?,
+            ObjectRoute::AudioYaml => planned_audio_asset_path
+                .ok_or_else(|| invalid_project("AudioYaml route has no planned asset path"))?,
             ObjectRoute::TextureImage => {
                 let texture = entry.texture_export.as_ref().ok_or_else(|| {
                     invalid_project("TextureExportCollection route has no planned image extension")
@@ -3591,6 +3738,154 @@ fn audio_yaml_key_matches(node: &crate::export::unity_yaml::UnityYamlNode, expec
             crate::export::unity_yaml::UnityYamlScalar::PlainString(value)
         ) if value == expected
     )
+}
+
+fn rewrite_audio_yaml_resource(
+    document: &mut crate::export::unity_yaml::UnityYamlDocument,
+    resource: &crate::resources::audio::AudioClipResourceInfo,
+    sidecar_source: Option<&str>,
+    sidecar_bytes: Option<&[u8]>,
+) -> Result<(), Box<dyn Error>> {
+    let audio_body = match &mut document.root.kind {
+        crate::export::unity_yaml::UnityYamlNodeKind::Mapping { entries, .. } => {
+            let mut audio_body_index = None;
+            for (index, (key, _)) in entries.iter().enumerate() {
+                if audio_yaml_key_matches(key, "AudioClip")
+                    && audio_body_index.replace(index).is_some()
+                {
+                    return Err(invalid_project(
+                        "AudioClip YAML document has duplicate AudioClip mappings",
+                    ));
+                }
+            }
+            let index = audio_body_index.ok_or_else(|| {
+                invalid_project("AudioClip YAML document has no AudioClip mapping")
+            })?;
+            &mut entries[index].1
+        }
+        _ => {
+            return Err(invalid_project(
+                "AudioClip YAML document root is not a mapping",
+            ))
+        }
+    };
+    let resource_mapping = match &mut audio_body.kind {
+        crate::export::unity_yaml::UnityYamlNodeKind::Mapping { entries, .. } => {
+            let mut resource_index = None;
+            for (index, (key, _)) in entries.iter().enumerate() {
+                if audio_yaml_key_matches(key, "m_Resource")
+                    && resource_index.replace(index).is_some()
+                {
+                    return Err(invalid_project(
+                        "AudioClip YAML body has duplicate m_Resource mappings",
+                    ));
+                }
+            }
+            let index = resource_index
+                .ok_or_else(|| invalid_project("AudioClip YAML body has no m_Resource mapping"))?;
+            &mut entries[index].1
+        }
+        _ => return Err(invalid_project("AudioClip YAML body is not a mapping")),
+    };
+    let fields = match &mut resource_mapping.kind {
+        crate::export::unity_yaml::UnityYamlNodeKind::Mapping { entries, .. } => entries,
+        _ => {
+            return Err(invalid_project(
+                "AudioClip m_Resource value is not a mapping",
+            ))
+        }
+    };
+    let (source, size) = match (resource.size, sidecar_source, sidecar_bytes) {
+        (0, None, None) => ("", 0),
+        (0, Some(_), _) => {
+            return Err(invalid_project(
+                "AudioClip sidecar source path exists without streamed bytes",
+            ));
+        }
+        (_, None, _) => {
+            return Err(invalid_project(
+                "AudioClip streamed bytes have no planned sidecar source path",
+            ));
+        }
+        (_, Some(_), None) => {
+            return Err(invalid_project(
+                "AudioClip sidecar source path exists without resolved streamed bytes",
+            ));
+        }
+        (source_size, Some(path), Some(bytes)) => {
+            let sidecar_size = u64::try_from(bytes.len()).map_err(|_| {
+                invalid_project("AudioClip sidecar length does not fit its serialized size")
+            })?;
+            if sidecar_size != source_size {
+                return Err(invalid_project(format!(
+                    "AudioClip source range declares {} bytes but the sidecar contains {sidecar_size}",
+                    source_size
+                )));
+            }
+            (path, sidecar_size)
+        }
+    };
+    set_audio_yaml_resource_field(
+        fields,
+        &["m_Source", "path"],
+        "source path",
+        crate::export::unity_yaml::UnityYamlNode::plain_string(source),
+    )?;
+    set_audio_yaml_resource_field(
+        fields,
+        &["m_Offset", "offset"],
+        "offset",
+        crate::export::unity_yaml::UnityYamlNode::scalar(
+            crate::export::unity_yaml::UnityYamlScalar::Unsigned(0),
+        ),
+    )?;
+    set_audio_yaml_resource_field(
+        fields,
+        &["m_Size", "size"],
+        "size",
+        crate::export::unity_yaml::UnityYamlNode::scalar(
+            crate::export::unity_yaml::UnityYamlScalar::Unsigned(size),
+        ),
+    )?;
+    Ok(())
+}
+
+fn set_audio_yaml_resource_field(
+    fields: &mut [(
+        crate::export::unity_yaml::UnityYamlNode,
+        crate::export::unity_yaml::UnityYamlNode,
+    )],
+    aliases: &[&str],
+    field_label: &str,
+    value: crate::export::unity_yaml::UnityYamlNode,
+) -> Result<(), Box<dyn Error>> {
+    let mut matching_index = None;
+    for (index, (key, _)) in fields.iter().enumerate() {
+        if aliases
+            .iter()
+            .any(|alias| audio_yaml_key_matches(key, alias))
+            && matching_index.replace(index).is_some()
+        {
+            return Err(invalid_project(format!(
+                "AudioClip m_Resource has duplicate {field_label} fields"
+            )));
+        }
+    }
+    let index = matching_index.ok_or_else(|| {
+        invalid_project(format!(
+            "AudioClip m_Resource has no serialized {field_label} field"
+        ))
+    })?;
+    fields[index].1 = value;
+    Ok(())
+}
+
+fn project_relative_path_for_host(path: &str) -> String {
+    if cfg!(windows) {
+        path.replace('/', "\\")
+    } else {
+        path.to_owned()
+    }
 }
 
 fn audio_yaml_mapping_has_field(
