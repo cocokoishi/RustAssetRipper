@@ -11397,6 +11397,150 @@ mod tests {
     }
 
     #[test]
+    fn export_project_redirects_engine_resource_references_to_predefined_guid_and_path_id() {
+        let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
+        fn assert_case(fixture: &str, engine_file_name: &str, expected_guid: &str) {
+            let fixture_value = |prefix: &str| {
+                fixture
+                    .lines()
+                    .find_map(|line| line.strip_prefix(prefix))
+                    .unwrap_or_else(|| panic!("source engine-resource fixture is missing {prefix}"))
+            };
+            let decode_hex = |hex: &str| {
+                assert!(hex.len().is_multiple_of(2), "fixture hex has even length");
+                hex.as_bytes()
+                    .chunks_exact(2)
+                    .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+                    .collect::<Vec<_>>()
+            };
+            let decode_base64 = |encoded: &str| {
+                fn digit(byte: u8) -> u8 {
+                    match byte {
+                        b'A'..=b'Z' => byte - b'A',
+                        b'a'..=b'z' => byte - b'a' + 26,
+                        b'0'..=b'9' => byte - b'0' + 52,
+                        b'+' => 62,
+                        b'/' => 63,
+                        _ => panic!("source fixture contains invalid base64"),
+                    }
+                }
+                assert!(encoded.len().is_multiple_of(4), "base64 length is aligned");
+                let mut output = Vec::with_capacity(encoded.len() / 4 * 3);
+                let mut buffer = 0u32;
+                let mut bits = 0u8;
+                for byte in encoded.bytes() {
+                    if byte == b'=' {
+                        break;
+                    }
+                    buffer = (buffer << 6) | u32::from(digit(byte));
+                    bits += 6;
+                    if bits >= 8 {
+                        bits -= 8;
+                        output.push((buffer >> bits) as u8);
+                        buffer &= (1 << bits) - 1;
+                    }
+                }
+                output
+            };
+            let managed_bytes = decode_hex(fixture_value("INPUT_HEX|managed.assets|"));
+            let engine_bytes = decode_hex(fixture_value(&format!("INPUT_HEX|{engine_file_name}|")));
+            let source_root = decode_base64(fixture_value(
+                "CONTENT|ExportedProject/Assets/MonoBehaviour/ManagedRoot.asset|",
+            ));
+            let source_meta = decode_base64(fixture_value(
+                "CONTENT|ExportedProject/Assets/MonoBehaviour/ManagedRoot.asset.meta|",
+            ));
+
+            let directory = TestInputDirectory::new_root();
+            let managed_path = directory.join("managed.assets");
+            let engine_path = directory.join(engine_file_name);
+            fs::write(&managed_path, &managed_bytes).expect("write source-generated root file");
+            fs::write(&engine_path, &engine_bytes).expect("write source-generated engine file");
+            let input = TestInputDirectory {
+                directory: directory.clone(),
+                files: vec![managed_path.clone(), engine_path.clone()],
+                subdirectories: Vec::new(),
+            };
+            let output_root = directory.join("project-engine-resource-reference");
+            let mut status = Vec::new();
+            super::export_project_to(
+                std::slice::from_ref(&directory),
+                &output_root,
+                false,
+                &default_export_settings(),
+                &mut status,
+            )
+            .expect("engine resource references use the source predefined pointer");
+
+            let status = String::from_utf8(status).expect("export status is UTF-8");
+            assert!(status.contains("2 SerializedFiles"), "{status}");
+            assert!(status.contains("1 objects in 1 asset files"), "{status}");
+            let root_path = output_root.join("Assets/MonoBehaviour/ManagedRoot.asset");
+            let root_meta_path = output_root.join("Assets/MonoBehaviour/ManagedRoot.asset.meta");
+            let rust_root_yaml = fs::read(&root_path).expect("root YAML is exported");
+            assert_eq!(
+                source_root, rust_root_yaml,
+                "source and Rust root YAML match exactly for {engine_file_name}"
+            );
+            let normalize_meta = |bytes: &[u8]| {
+                String::from_utf8(bytes.to_vec())
+                    .expect("metadata is UTF-8")
+                    .lines()
+                    .filter(|line| {
+                        !line.starts_with("guid: ") && !line.starts_with("timeCreated: ")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    + "\n"
+            };
+            assert_eq!(
+                normalize_meta(&source_meta),
+                normalize_meta(&fs::read(&root_meta_path).expect("root metadata is exported")),
+                "source and Rust NativeFormatImporter metadata match after generated identity fields"
+            );
+            let root_yaml_text = String::from_utf8(rust_root_yaml).expect("root YAML is UTF-8");
+            assert!(
+                root_yaml_text.contains(&format!(
+                    "m_Asset: {{fileID: 900, guid: {expected_guid}, type: 0}}"
+                )),
+                "the root PPtr keeps the predefined GUID, original PathID, and internal type"
+            );
+            assert!(
+                !output_root
+                    .join("Assets/MonoBehaviour/EngineResourceTarget.asset")
+                    .exists(),
+                "redirected engine objects have no standalone project file"
+            );
+            assert_eq!(fs::read(&managed_path).unwrap(), managed_bytes);
+            assert_eq!(fs::read(&engine_path).unwrap(), engine_bytes);
+
+            fs::remove_dir_all(&output_root).expect("remove engine-reference project output");
+            drop(input);
+        }
+
+        assert_case(
+            include_str!("export/engine_resource_reference_project_fixture.txt"),
+            "unity default resources",
+            "0000000000000000e000000000000000",
+        );
+        assert_case(
+            include_str!("export/engine_builtin_extra_reference_project_fixture.txt"),
+            "unity builtin extra",
+            "0000000000000000f000000000000000",
+        );
+        assert_case(
+            include_str!("export/engine_resource_underscore_reference_project_fixture.txt"),
+            "unity_default_resources",
+            "0000000000000000e000000000000000",
+        );
+        assert_case(
+            include_str!("export/engine_builtin_extra_underscore_reference_project_fixture.txt"),
+            "unity_builtin_extra",
+            "0000000000000000f000000000000000",
+        );
+    }
+
+    #[test]
     fn export_project_uses_source_entry_order_for_duplicate_nested_bundle_dependencies() {
         let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
         let source_fixture = include_str!("export/managed_reference_sibling_bundle_fixture.txt");

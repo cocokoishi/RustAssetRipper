@@ -195,6 +195,9 @@ enum ObjectRoute {
     ShaderYaml,
     /// `ManagerExportCollection`/`EditorBuildSettingsExportCollection`: fixed path, no `.meta`.
     Manager,
+    /// `EngineAssetsExporter` redirects explicit default-resource/builtin-extra collections to
+    /// their predefined EGUID/FGUID and preserves the source PathID without writing an asset.
+    EngineRedirect,
     /// `ScriptExportCollection`/`EmptyScriptExportCollection`: deterministic `.cs` and MonoImporter metadata.
     Script,
     /// A manager-backed MonoScript whose source collection only registers a pointer; saved DLL
@@ -498,6 +501,7 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
             // Newer SerializedFile generations omit the legacy object-table class ID;
             // the source factory resolves it from the serialized type table.
             let class_id = object.factory.class_id;
+            let engine_guid = engine_resource_collection_guid(&file.file_name);
             let payload = object.payload.as_ref().ok();
             if payload.is_some() && !opaque_objects.contains(&(file_index, object_index)) {
                 validate_decoded_object(object, object_info.path_id, reference_graph)?;
@@ -510,14 +514,16 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
                     ObjectClassFacts::new(class_id, payload.is_none())
                 }
             };
-            let shader_view = if class_id == SHADER_CLASS_ID {
+            let shader_view = if engine_guid.is_none() && class_id == SHADER_CLASS_ID {
                 payload
                     .map(|payload| ShaderView::from_value(&payload.root))
                     .transpose()?
             } else {
                 None
             };
-            let audio_view = if class_id == crate::resources::audio::AUDIO_CLIP_CLASS_ID {
+            let audio_view = if engine_guid.is_none()
+                && class_id == crate::resources::audio::AUDIO_CLIP_CLASS_ID
+            {
                 payload
                     .map(|payload| {
                         crate::resources::audio::AudioClipView::from_value(&payload.root)
@@ -533,18 +539,20 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
                 }
                 Some(_) => crate::export::collection_claims::ShaderTextState::CompiledOrEmpty,
             };
-            let text_asset_script = if class_id == 49 {
+            let text_asset_script = if engine_guid.is_none() && class_id == 49 {
                 payload.map(text_asset_script_bytes).transpose()?.flatten()
             } else {
                 None
             };
-            let standalone_texture = class_id == 28
+            let standalone_texture = engine_guid.is_none()
+                && class_id == 28
                 && matches!(&object.factory.kind, FactoryAssetKind::Generated(_))
                 && object.recovered_type_tree.is_some()
                 && !has_sprite_reference_to_object(reference_graph, file_index, object_index);
             let texture_route_supported = standalone_texture
                 && TextureImporterLayout::for_project_version(project_version).is_some();
             let mut claim_facts = claim_facts_for_shader_text(facts, settings_facts, shader_text);
+            claim_facts.engine_file = engine_guid.is_some();
             claim_facts.data_valid = text_asset_script
                 .as_ref()
                 .is_some_and(|script| !script.is_empty());
@@ -654,7 +662,7 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
                 None
             };
             let kind = selection.kind();
-            let script_export = if class_id == 115 {
+            let script_export = if class_id == 115 && engine_guid.is_none() {
                 plan_script_export_details(
                     object,
                     settings,
@@ -714,7 +722,18 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
                     selection.collection_name
                 )));
             }
-            let (route, skip_reason, fallback_reason) = match kind {
+            let (route, skip_reason, fallback_reason) = if engine_guid.is_some() {
+                if selection.exporter != "EngineAssetsExporter"
+                    || kind != ExportCollectionKind::Redirect
+                {
+                    return Err(invalid_project(format!(
+                        "engine resource collection {} selected {}, expected EngineAssetsExporter redirect",
+                        file.file_name, selection.exporter
+                    )));
+                }
+                (ObjectRoute::EngineRedirect, "", None)
+            } else {
+                match kind {
                 ExportCollectionKind::Manager => (ObjectRoute::Manager, "", None),
                 ExportCollectionKind::Unknown => (ObjectRoute::Unknown, "", None),
                 ExportCollectionKind::Unreadable => (ObjectRoute::Unreadable, "", None),
@@ -799,6 +818,7 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
                     "RedirectExportCollection is not exportable",
                     None,
                 ),
+                }
             };
             let fallback_reason = if standalone_texture && !texture_route_supported {
                 Some("the source TextureExportCollection image/importer route is not yet ported for this Unity importer version or Sprite group")
@@ -868,7 +888,10 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
                 }
                 _ => object_info.path_id,
             };
-            let guid = if let Some(script) = script_export.as_ref() {
+            let guid = if let Some(engine_guid) = engine_guid {
+                used_guids.insert(engine_guid);
+                engine_guid
+            } else if let Some(script) = script_export.as_ref() {
                 script.guid
             } else {
                 mint_unique_collection_guid(&mut next_guid_sequence, &mut used_guids)?
@@ -967,7 +990,9 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
         if entry.route == ObjectRoute::Skipped {
             continue;
         }
-        collection_count += 1;
+        if entry.route != ObjectRoute::EngineRedirect {
+            collection_count += 1;
+        }
         // UnknownExportCollection and UnreadableExportCollection write raw files without
         // `.meta` files or export GUIDs. Do not register their synthetic in-memory GUIDs as
         // Unity project pointers; references to them resolve through the explicit missing-map
@@ -983,6 +1008,8 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
                 ObjectRoute::Script | ObjectRoute::ScriptPointerOnly | ObjectRoute::TextAsset
             ) {
                 UnityProjectAssetType::Meta
+            } else if entry.route == ObjectRoute::EngineRedirect {
+                UnityProjectAssetType::Internal
             } else {
                 UnityProjectAssetType::Serialized
             },
@@ -1133,7 +1160,10 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
             }
             saved_assemblies_emitted = true;
         }
-        if entry.route == ObjectRoute::Skipped {
+        if matches!(
+            entry.route,
+            ObjectRoute::Skipped | ObjectRoute::EngineRedirect
+        ) {
             continue;
         }
         if entry.route == ObjectRoute::ScriptPointerOnly {
@@ -1449,7 +1479,9 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
                 }
                 write_unity_yaml_documents(&[document], limits.yaml_write)?.into_bytes()
             }
-            ObjectRoute::Skipped => unreachable!("skipped routes are filtered above"),
+            ObjectRoute::EngineRedirect | ObjectRoute::Skipped => {
+                unreachable!("non-exportable routes are filtered above")
+            }
         };
         exported_object_count = exported_object_count
             .checked_add(1)
@@ -1526,6 +1558,9 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
             }
             ObjectRoute::ScriptPointerOnly => {
                 unreachable!("pointer-only MonoScripts are filtered before path planning")
+            }
+            ObjectRoute::EngineRedirect => {
+                unreachable!("engine redirects are filtered before path planning")
             }
             ObjectRoute::Manager => planner.plan_manager_path(&entry.class_name)?,
             ObjectRoute::Unknown => planner.plan_unknown_path(
@@ -1617,7 +1652,10 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
                     )?,
                 })
             }
-            ObjectRoute::Manager | ObjectRoute::Unknown | ObjectRoute::Unreadable => None,
+            ObjectRoute::Manager
+            | ObjectRoute::EngineRedirect
+            | ObjectRoute::Unknown
+            | ObjectRoute::Unreadable => None,
             ObjectRoute::Skipped => unreachable!("skipped routes are filtered above"),
         };
         files.push(PlannedProjectFile {
@@ -2983,6 +3021,21 @@ fn opaque_factory_object_keys(
         }
     }
     Ok(keys)
+}
+
+fn engine_resource_collection_guid(name: &str) -> Option<[u8; 16]> {
+    let words = if crate::io::special_names::is_default_resource(name) {
+        crate::export::guid_policy::ENGINE_DEFAULT_RESOURCES_GUID_WORDS
+    } else if crate::io::special_names::is_builtin_extra(name) {
+        crate::export::guid_policy::ENGINE_BUILTIN_EXTRA_GUID_WORDS
+    } else {
+        return None;
+    };
+    let mut bytes = [0; 16];
+    for (index, word) in words.iter().enumerate() {
+        bytes[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    Some(bytes)
 }
 
 fn scene_guid_words_to_bytes(words: SceneGuidWords) -> [u8; 16] {

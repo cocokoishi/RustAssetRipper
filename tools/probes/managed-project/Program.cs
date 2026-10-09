@@ -128,6 +128,20 @@ if (args.Length > 0 && args[0] == "export-nested-reference-bundle")
     return ExportNestedReferenceBundle(args[1], args[2], args[3]);
 }
 
+if (args.Length > 0 && args[0] == "export-engine-resource-pointer")
+{
+    if (args.Length is < 4 or > 5)
+    {
+        Console.Error.WriteLine("usage: managed-project export-engine-resource-pointer <input-root> <output-root> <rows-file> [engine-file-name]");
+        return 2;
+    }
+    return ExportEngineResourcePointer(
+        args[1],
+        args[2],
+        args[3],
+        args.Length == 5 ? args[4] : "unity default resources");
+}
+
 if (args.Length > 0 && args[0] == "export-sibling-bundle-reference-order")
 {
     if (args.Length != 4)
@@ -397,6 +411,109 @@ static int ExportNestedReferenceBundle(string inputRootArgument, string outputRo
     Console.WriteLine($"source_objects={string.Join(';', sourceObjects)}");
     Console.WriteLine($"bundle_bytes={outerBundle.Length}");
     Console.WriteLine($"project_asset_files={assetFiles.Length}");
+    return 0;
+}
+
+static int ExportEngineResourcePointer(
+    string inputRootArgument,
+    string outputRootArgument,
+    string rowsArgument,
+    string engineFileName)
+{
+    string inputRoot = Path.GetFullPath(inputRootArgument);
+    string outputRoot = Path.GetFullPath(outputRootArgument);
+    string rowsPath = Path.GetFullPath(rowsArgument);
+    EnsureEmptyOrMissingDirectory(inputRoot, "input");
+    EnsureEmptyOrMissingDirectory(outputRoot, "output");
+    if (File.Exists(rowsPath) || Directory.Exists(rowsPath))
+    {
+        throw new IOException($"refusing to overwrite probe rows {rowsPath}");
+    }
+
+    Directory.CreateDirectory(inputRoot);
+    Directory.CreateDirectory(outputRoot);
+    Directory.CreateDirectory(Path.GetDirectoryName(rowsPath)!);
+
+    byte[] managedFile = BuildManagedRootFile(engineFileName);
+    byte[] engineFile = BuildTargetBehaviourFile("EngineResourceTarget", 789, engineFileName);
+    string managedPath = Path.Combine(inputRoot, "managed.assets");
+    string enginePath = Path.Combine(inputRoot, engineFileName);
+    File.WriteAllBytes(managedPath, managedFile);
+    File.WriteAllBytes(enginePath, engineFile);
+
+    Logger.Add(new ConsoleLogger());
+    ExportHandler handler = new(new FullConfiguration());
+    var gameData = handler.LoadAndProcess([inputRoot], LocalFileSystem.Instance);
+    string[] sourceObjects = gameData.GameBundle.FetchAssets()
+        .Where(asset => asset.ClassID == 114 && asset.PathID is 42 or 900)
+        .Select(asset => $"{asset.ClassName}|{asset.PathID}|{asset}")
+        .Order(StringComparer.Ordinal)
+        .ToArray();
+    if (sourceObjects.Length != 2
+        || !sourceObjects.Any(line => line.StartsWith("MonoBehaviour|42|", StringComparison.Ordinal))
+        || !sourceObjects.Any(line => line.StartsWith("MonoBehaviour|900|", StringComparison.Ordinal)))
+    {
+        throw new InvalidDataException($"AssetRipper did not load both engine-pointer objects: {string.Join(";", sourceObjects)}");
+    }
+
+    handler.Export(gameData, outputRoot, LocalFileSystem.Instance);
+    string projectAssets = Path.Combine(outputRoot, "ExportedProject", "Assets");
+    string[] assetFiles = Directory.Exists(projectAssets)
+        ? Directory.GetFiles(projectAssets, "*", SearchOption.AllDirectories)
+            .Where(path => new[] { ".asset", ".meta" }.Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase))
+            .OrderBy(path => Path.GetRelativePath(outputRoot, path), StringComparer.Ordinal)
+            .ToArray()
+        : [];
+    string? rootYamlPath = assetFiles.FirstOrDefault(path =>
+        string.Equals(Path.GetExtension(path), ".asset", StringComparison.OrdinalIgnoreCase)
+        && File.ReadAllText(path).Contains("m_Name: ManagedRoot", StringComparison.Ordinal));
+    if (rootYamlPath is null
+        || assetFiles.Any(path => string.Equals(Path.GetExtension(path), ".asset", StringComparison.OrdinalIgnoreCase)
+            && File.ReadAllText(path).Contains("m_Name: EngineResourceTarget", StringComparison.Ordinal)))
+    {
+        throw new InvalidDataException($"AssetRipper did not redirect the explicit engine collection: {string.Join(",", assetFiles.Select(path => Path.GetRelativePath(outputRoot, path)))}");
+    }
+    string rootYaml = File.ReadAllText(rootYamlPath);
+    string expectedGuid = engineFileName is "unity default resources" or "unity_default_resources"
+        ? "0000000000000000e000000000000000"
+        : "0000000000000000f000000000000000";
+    if (!rootYaml.Contains($"guid: {expectedGuid}, type: 0", StringComparison.Ordinal)
+        || !rootYaml.Contains("fileID: 900", StringComparison.Ordinal))
+    {
+        throw new InvalidDataException("AssetRipper did not emit the default-resource EGUID and internal PathID pointer");
+    }
+
+    using StreamWriter rows = new(rowsPath, false, new UTF8Encoding(false)) { NewLine = "\n" };
+    rows.WriteLine($"# Frozen source project export for an explicit {engineFileName} PPtr target.");
+    rows.WriteLine("VERSION|2019.4.40f1|format=21|platform=StandaloneWin64Player");
+    rows.WriteLine($"OBJECT|{string.Join(";", sourceObjects)}");
+    WriteInputRow(rows, managedPath, managedFile);
+    WriteInputRow(rows, enginePath, engineFile);
+    foreach (string file in assetFiles)
+    {
+        string relative = Path.GetRelativePath(outputRoot, file).Replace('\\', '/');
+        byte[] bytes = File.ReadAllBytes(file);
+        byte[] stableBytes = bytes;
+        if (string.Equals(Path.GetExtension(file), ".meta", StringComparison.OrdinalIgnoreCase))
+        {
+            string normalized = string.Join(
+                "\n",
+                Encoding.UTF8.GetString(bytes)
+                    .Split('\n')
+                    .Where(line => !line.StartsWith("guid: ", StringComparison.Ordinal)
+                        && !line.StartsWith("timeCreated: ", StringComparison.Ordinal)))
+                .TrimEnd('\r', '\n') + "\n";
+            stableBytes = Encoding.UTF8.GetBytes(normalized);
+        }
+        rows.WriteLine($"FILE|{relative}|{stableBytes.Length}|{Convert.ToHexString(SHA256.HashData(stableBytes))}");
+        if (new[] { ".asset", ".meta" }.Contains(Path.GetExtension(file), StringComparer.OrdinalIgnoreCase))
+        {
+            rows.WriteLine($"CONTENT|{relative}|{Convert.ToBase64String(stableBytes)}");
+        }
+    }
+    Console.WriteLine($"source_objects={string.Join(';', sourceObjects)}");
+    Console.WriteLine($"project_asset_files={assetFiles.Length}");
+    Console.WriteLine($"engine_pointer={expectedGuid}:900:0");
     return 0;
 }
 
@@ -2460,7 +2577,7 @@ static string NormalizeTextureProjectMeta(string text)
     return Regex.Replace(text, "(?m)^timeCreated: [0-9]+$", "timeCreated: <TIME>");
 }
 
-static byte[] BuildManagedRootFile()
+static byte[] BuildManagedRootFile(string targetFileName = "target.assets")
 {
     const string versionText = "2019.4.40f1";
     List<byte> payload = [];
@@ -2508,9 +2625,9 @@ static byte[] BuildManagedRootFile()
         {
             new FileIdentifier
             {
-                AssetPath = "target.assets",
-                PathNameOrigin = "target.assets",
-                PathName = "target.assets",
+                AssetPath = targetFileName,
+                PathNameOrigin = targetFileName,
+                PathName = targetFileName,
                 Type = AssetType.Serialized,
             },
         },
@@ -2528,7 +2645,10 @@ static byte[] BuildManagedRootFile()
     return file.ToByteArray();
 }
 
-static byte[] BuildTargetBehaviourFile(string name = "ReferencedRoot", int health = 789)
+static byte[] BuildTargetBehaviourFile(
+    string name = "ReferencedRoot",
+    int health = 789,
+    string fileName = "target.assets")
 {
     List<byte> payload = [];
     WriteI32(payload, 0); // m_GameObject.m_FileID
@@ -2562,7 +2682,7 @@ static byte[] BuildTargetBehaviourFile(string name = "ReferencedRoot", int healt
             },
         },
     }.Build();
-    file.FilePath = "target.assets";
+    file.FilePath = fileName;
     return file.ToByteArray();
 }
 
