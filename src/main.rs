@@ -9818,6 +9818,106 @@ mod tests {
     }
 
     #[test]
+    fn export_project_resolves_cross_file_reference_through_nested_unityfs() {
+        let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
+        let source_fixture = include_str!("export/managed_reference_nested_bundle_fixture.txt");
+        let source_bundle_hex = source_fixture
+            .lines()
+            .find_map(|line| line.strip_prefix("INPUT_HEX|workspace.bundle|"))
+            .expect("source-runtime fixture includes the complete nested UnityFS input");
+        let source_bundle_bytes = source_bundle_hex
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16)
+                    .expect("source bundle fixture contains valid hex")
+            })
+            .collect::<Vec<_>>();
+        let bundled_fixture =
+            include_bytes!("export/managed_reference_project_fixture/nested_reference.bundle");
+        assert_eq!(bundled_fixture, source_bundle_bytes.as_slice());
+
+        let directory = TestInputDirectory::new_root();
+        let bundle_path = directory.join("workspace.bundle");
+        fs::write(&bundle_path, bundled_fixture).expect("source-runtime nested UnityFS fixture");
+        let input = TestInputDirectory {
+            directory: directory.clone(),
+            files: vec![bundle_path.clone()],
+            subdirectories: Vec::new(),
+        };
+        let output_root = directory.join("project-nested-bundle");
+        let mut status = Vec::new();
+        super::export_project_to(
+            std::slice::from_ref(&bundle_path),
+            &output_root,
+            false,
+            &default_export_settings(),
+            &mut status,
+        )
+        .expect("cross-file PPtrs resolve through nested UnityFS bundles");
+
+        let status = String::from_utf8(status).expect("export status is UTF-8");
+        assert!(status.contains("2 SerializedFiles"), "{status}");
+        assert!(status.contains("2 objects in 2 asset files"), "{status}");
+
+        let root_path = output_root.join("Assets/MonoBehaviour/ManagedRoot.asset");
+        let root_meta_path = output_root.join("Assets/MonoBehaviour/ManagedRoot.asset.meta");
+        let target_path = output_root.join("Assets/MonoBehaviour/ReferencedRoot.asset");
+        let target_meta_path = output_root.join("Assets/MonoBehaviour/ReferencedRoot.asset.meta");
+        let rust_root_yaml = fs::read_to_string(&root_path).expect("root YAML is exported");
+        let rust_target_yaml =
+            fs::read_to_string(&target_path).expect("nested target YAML is exported");
+        let normalize_meta = |path: &std::path::Path| {
+            let normalized = fs::read_to_string(path)
+                .expect("asset metadata is readable")
+                .lines()
+                .filter(|line| !line.starts_with("guid: ") && !line.starts_with("timeCreated: "))
+                .collect::<Vec<_>>()
+                .join("\n");
+            normalized.trim_end_matches(['\r', '\n']).to_owned() + "\n"
+        };
+        assert_eq!(
+            include_str!("export/managed_reference_project_fixture/source_nested_ManagedRoot.asset.meta.normalized"),
+            normalize_meta(&root_meta_path)
+        );
+        assert_eq!(
+            include_str!("export/managed_reference_project_fixture/source_nested_ReferencedRoot.asset.meta.normalized"),
+            normalize_meta(&target_meta_path)
+        );
+        let source_target_meta = include_str!(
+            "export/managed_reference_project_fixture/source_ReferencedRoot.asset.meta"
+        );
+        let source_guid = source_target_meta
+            .lines()
+            .find_map(|line| line.strip_prefix("guid: "))
+            .expect("frozen source target metadata has a GUID");
+        let rust_guid = meta_guid(&target_meta_path);
+        let source_root_yaml =
+            include_str!("export/managed_reference_project_fixture/source_ManagedRoot.asset");
+        let source_target_yaml =
+            include_str!("export/managed_reference_project_fixture/source_ReferencedRoot.asset");
+        assert_eq!(
+            source_root_yaml.replace(source_guid, "<TARGET_GUID>").trim_end(),
+            rust_root_yaml.replace(&rust_guid, "<TARGET_GUID>").trim_end(),
+            "the source-generated root YAML and nested-bundle export agree after GUID normalization"
+        );
+        assert_eq!(
+            source_target_yaml.trim_end(),
+            rust_target_yaml.trim_end(),
+            "the referenced object loaded from the nested bundle keeps its source YAML"
+        );
+        assert!(rust_root_yaml.contains(&format!(
+            "m_Asset: {{fileID: 11400000, guid: {rust_guid}, type: 2}}"
+        )));
+        assert!(rust_root_yaml.contains("        m_Link:\n          rid: 200\n"));
+        assert!(rust_root_yaml.contains("        m_Link:\n          rid: 100\n"));
+        assert!(rust_target_yaml.contains("m_Health: 789"));
+
+        fs::remove_dir_all(&output_root).expect("remove nested-bundle project output");
+        drop(input);
+    }
+
+    #[test]
     fn export_project_saves_managed_assembly_and_maps_script_pointer() {
         let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
         let fixture = include_str!("processing/managed_assembly_saved_project_fixture.txt");
