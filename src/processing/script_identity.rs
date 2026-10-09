@@ -5,10 +5,11 @@
 //! `UniqueName`), the `ScriptingBackend` discriminants, the `MonoManager.IsMonoAssembly`
 //! file-name predicate and mscorlib discovery (`TryGetMscorlibPath`), the pure string kernels
 //! behind `MonoScriptExtensions.GetFullName`, `GetValidAssemblyName`, and `HasAssemblyName`,
-//! the `ModuleExtensions.GetType` match rule with the `BaseManager.IsPresent`/`IsValid`
-//! gates, and the `PropertiesHash` fallback bytes behind `GetPropertiesHash` (the
-//! `IMonoScript`/assembly-manager lookups themselves stay outside: they need live
-//! managed assemblies).
+//! the `ModuleExtensions.GetType` match rule, the `BaseManager.IsPresent`/`IsValid`
+//! gates, and the `PropertiesHash` fallback bytes behind `GetPropertiesHash`.
+//! Bounded CLR metadata parsing and the source-shaped `MonoManager` type catalog live in
+//! `managed_assembly.rs`; `FieldSerializer` schema construction and IL2CPP assembly recovery
+//! remain in the open remainder of `TYPE-SCRIPT-001`.
 //!
 //! Differential evidence: `src/io/script_identity_fixture.txt` (probe
 //! `Temp/opencode/scriptidprobe` against the shipped `AssetRipper.Import.dll` and

@@ -1391,7 +1391,35 @@ where
         retain_stripped_yaml_fields(&mut body, source.class_id)?;
     }
     if source.class_id == 114 {
-        move_mapping_field_to_end(&mut body, "m_Structure")?;
+        if field_mode == UnityYamlObjectFieldMode::ProjectAsset
+            && !stripped
+            && has_mono_behaviour_yaml_header(&body)
+        {
+            flatten_mapping_field(&mut body, "m_Structure")?;
+            insert_material_editor_fields(
+                &mut body,
+                &[
+                    "m_ObjectHideFlags",
+                    "m_CorrespondingSourceObject",
+                    "m_PrefabInstance",
+                    "m_PrefabAsset",
+                ],
+            )?;
+            insert_mapping_field_before(
+                &mut body,
+                "m_EditorHideFlags",
+                "m_Script",
+                UnityYamlNode::scalar(UnityYamlScalar::Signed(0)),
+            )?;
+            insert_material_field_after(
+                &mut body,
+                "m_EditorClassIdentifier",
+                "m_Name",
+                UnityYamlNode::string(String::new()),
+            )?;
+        } else {
+            move_mapping_field_to_end(&mut body, "m_Structure")?;
+        }
     }
     if source.class_id == 21 && field_mode == UnityYamlObjectFieldMode::ProjectAsset && !stripped {
         match (unity_version.major, unity_version.minor) {
@@ -1559,7 +1587,7 @@ fn insert_material_field_after(
     }) else {
         return Err(UnityYamlObjectConversionError::InvalidTypeTree {
             node_index: 0,
-            reason: "missing Material editor-field insertion anchor",
+            reason: "missing Unity YAML editor-field insertion anchor",
         });
     };
     entries
@@ -1569,6 +1597,106 @@ fn insert_material_field_after(
             requested: entries.len().saturating_add(1),
         })?;
     entries.insert(anchor_index + 1, field);
+    Ok(())
+}
+
+fn insert_mapping_field_before(
+    body: &mut UnityYamlNode,
+    field_name: &str,
+    anchor_name: &str,
+    default_value: UnityYamlNode,
+) -> Result<(), UnityYamlObjectConversionError> {
+    let UnityYamlNodeKind::Mapping { entries, .. } = &mut body.kind else {
+        return Err(UnityYamlObjectConversionError::NodeBuild(
+            UnityYamlNodeBuildError::NotAMapping,
+        ));
+    };
+    let field = take_yaml_mapping_field(entries, field_name)
+        .unwrap_or((UnityYamlNode::plain_string(field_name), default_value));
+    let Some(anchor_index) = entries.iter().position(|(key, _)| {
+        matches!(
+            &key.kind,
+            UnityYamlNodeKind::Scalar(
+                UnityYamlScalar::PlainString(value) | UnityYamlScalar::String(value)
+            ) if value == anchor_name
+        )
+    }) else {
+        return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+            node_index: 0,
+            reason: "missing Unity YAML editor-field insertion anchor",
+        });
+    };
+    entries
+        .try_reserve(1)
+        .map_err(|_| UnityYamlObjectConversionError::AllocationFailed {
+            resource: "Unity YAML editor fields",
+            requested: entries.len().saturating_add(1),
+        })?;
+    entries.insert(anchor_index, field);
+    Ok(())
+}
+
+fn has_mono_behaviour_yaml_header(body: &UnityYamlNode) -> bool {
+    let UnityYamlNodeKind::Mapping { entries, .. } = &body.kind else {
+        return false;
+    };
+    ["m_GameObject", "m_Script"].into_iter().all(|field_name| {
+        entries.iter().any(|(key, value)| {
+            matches!(
+                &key.kind,
+                UnityYamlNodeKind::Scalar(
+                    UnityYamlScalar::PlainString(name) | UnityYamlScalar::String(name)
+                ) if name == field_name
+            ) && matches!(&value.kind, UnityYamlNodeKind::Mapping { .. })
+        })
+    })
+}
+
+fn flatten_mapping_field(
+    body: &mut UnityYamlNode,
+    field_name: &str,
+) -> Result<(), UnityYamlObjectConversionError> {
+    let UnityYamlNodeKind::Mapping { entries, .. } = &mut body.kind else {
+        return Err(UnityYamlObjectConversionError::NodeBuild(
+            UnityYamlNodeBuildError::NotAMapping,
+        ));
+    };
+    let mut field_index = None;
+    for (index, (key, _)) in entries.iter().enumerate() {
+        if matches!(
+            &key.kind,
+            UnityYamlNodeKind::Scalar(
+                UnityYamlScalar::PlainString(name) | UnityYamlScalar::String(name)
+            ) if name == field_name
+        ) && field_index.replace(index).is_some()
+        {
+            return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                node_index: 0,
+                reason: "MonoBehaviour contains multiple m_Structure fields",
+            });
+        }
+    }
+    let Some(field_index) = field_index else {
+        return Ok(());
+    };
+    let (_, structure) = entries.remove(field_index);
+    let UnityYamlNodeKind::Mapping {
+        entries: structure_fields,
+        ..
+    } = structure.kind
+    else {
+        return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+            node_index: 0,
+            reason: "MonoBehaviour m_Structure is not a structure",
+        });
+    };
+    entries
+        .try_reserve(structure_fields.len().saturating_sub(1))
+        .map_err(|_| UnityYamlObjectConversionError::AllocationFailed {
+            resource: "flattened MonoBehaviour YAML fields",
+            requested: entries.len().saturating_add(structure_fields.len()),
+        })?;
+    entries.splice(field_index..field_index, structure_fields);
     Ok(())
 }
 
@@ -5341,6 +5469,62 @@ mod tests {
         let non_mono_structure = non_mono_output.find("  m_Structure:").unwrap();
         let non_mono_after = non_mono_output.find("  m_After: 3").unwrap();
         assert!(non_mono_structure < non_mono_after);
+    }
+
+    #[test]
+    fn recovered_monobehaviour_structure_matches_source_yaml_shape() {
+        let root = SerializedValue::Struct(vec![
+            field("m_GameObject", null_pptr()),
+            field("m_Enabled", SerializedValue::Bool(true)),
+            field("m_Script", null_pptr()),
+            field(
+                "m_Name",
+                SerializedValue::StringBytes(b"Behaviour".to_vec()),
+            ),
+            field(
+                "m_Structure",
+                SerializedValue::Struct(vec![
+                    field("inherited", SerializedValue::I64(0x0102_0304_0506_0708)),
+                    field("health", SerializedValue::I32(1234)),
+                    field("speed", SerializedValue::F32(1.5)),
+                ]),
+            ),
+        ]);
+        let document = convert_object_with_options(
+            source_with_class_id(114),
+            &root,
+            &UnityYamlObjectConversionHints::default(),
+            UnityYamlObjectFieldMode::ProjectAsset,
+            false,
+            |_| ProjectPointerResolution::Null,
+        )
+        .unwrap();
+        let output = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[document],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        for line in [
+            "  m_ObjectHideFlags: 0",
+            "  m_CorrespondingSourceObject: {fileID: 0}",
+            "  m_PrefabInstance: {fileID: 0}",
+            "  m_PrefabAsset: {fileID: 0}",
+            "  m_EditorHideFlags: 0",
+            "  m_EditorClassIdentifier:",
+            "  inherited: 72623859790382856",
+            "  health: 1234",
+            "  speed: 1.5",
+        ] {
+            assert!(output.contains(line), "missing {line:?} in:\n{output}");
+        }
+        assert!(!output.contains("m_Structure"), "{output}");
+        let name = output.find("  m_Name: Behaviour").unwrap();
+        let class_identifier = output.find("  m_EditorClassIdentifier:").unwrap();
+        let inherited = output.find("  inherited: 72623859790382856").unwrap();
+        assert!(
+            name < class_identifier && class_identifier < inherited,
+            "{output}"
+        );
     }
 
     #[test]

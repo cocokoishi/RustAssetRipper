@@ -1,0 +1,19 @@
+# Frozen AssetRipper MonoManager.Read/GetScriptID/IsPresent/IsValid/FieldSerializer runtime probe.
+# Input: source-generated FixtureScripts.dll copied as Assembly-CSharp.dll.
+INPUT|Assembly-CSharp.dll|4608|52117F6D87359D5F82D9985A6582ED59E55FA4C8193DD7456D7DC78DE5E946F1
+ASSEMBLY|file=Assembly-CSharp.dll|manifest=FixtureScripts
+QUERY|Assembly-CSharp|Game|HeroController|[Assembly-CSharp]Game.HeroController|True|True
+QUERY|FixtureScripts|Game|HeroController|[FixtureScripts]Game.HeroController|True|True
+QUERY|Assembly-CSharp|Game|AbstractController|[Assembly-CSharp]Game.AbstractController|True|False
+QUERY|Assembly-CSharp|game|HeroController|<default>|False|False
+QUERY|assembly-csharp|Game|HeroController|<default>|False|False
+QUERY|Assembly-CSharp|Game|MissingController|<default>|False|False
+FIELD|health|System.Int32|True|False|False|False|False|
+FIELD|speed|System.Single|False|False|False|False|False|UnityEngine.SerializeField
+FIELD|ignored|System.Int32|True|False|False|True|False|
+FIELD|staticValue|System.Int32|True|True|False|False|False|
+FIELD|locked|System.Int32|True|False|False|False|True|
+SCHEMA_NODE|0|HeroController|Base|1|32768
+SCHEMA_NODE|1|SInt64|inherited|1|16384
+SCHEMA_NODE|1|SInt32|health|1|16384
+SCHEMA_NODE|1|float|speed|1|16384

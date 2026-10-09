@@ -16,10 +16,9 @@
 //! identical, while exotic Unicode connector punctuation and marks may differ from .NET
 //! `\w` and stay an open edge.
 //!
-//! Template bytes join with CRLF because the frozen snapshot is uniformly CRLF on disk and
-//! C# raw strings embed file newlines verbatim; whitespace-only template lines become empty
-//! lines (verified against the .NET raw-string rules with an isolated `dotnet run` probe).
-//! A reference-runtime differential of the rendered bytes stays open.
+//! The source template's line endings and lack of a final newline are preserved. Its
+//! indentation-only lines are also retained where the raw C# string contains them; the
+//! namespaced template's two such lines are pinned by a source-generated project fixture.
 
 use crate::processing::scene_naming::SceneUnityVersion;
 
@@ -209,7 +208,7 @@ const NAMESPACED_TEMPLATE_LINES: &[&str] = &[
         "\t\t\tUnity asset bundles and serialized files do not contain script information to decompile.",
         "\t\t\t\t* For Mono games, that information is contained in .NET dll files.",
         "\t\t\t\t* For Il2Cpp games, that information is contained in compiled C++ assemblies and the global metadata.",
-        "",
+        "\t\t\t\t",
         "\t\t\tAssetRipper usually expects games to conform to a normal file structure for Unity games of that platform.",
         "\t\t\tA unexpected file structure could cause AssetRipper to not find the required files.",
         "",
@@ -229,7 +228,7 @@ const NAMESPACED_TEMPLATE_LINES: &[&str] = &[
         "\t\t\tThis information can be used to recover the serializable fields of a script.",
         "",
         "\t\t\tSee: https://github.com/AssetRipper/AssetRipper/issues/655",
-        "",
+        "\t",
         "\t\t4. This script is unnecessary.",
         "",
         "\t\t\tIf this script has no asset or script references, it can be deleted.",
@@ -266,13 +265,15 @@ const NAMESPACED_TEMPLATE_LINES: &[&str] = &[
 /// Render the template lines with CRLF endings and a trailing newline, like the source.
 fn render_template(lines: &[&str], namespace: &str, display_name: &str) -> String {
     let mut rendered = String::new();
-    for line in lines {
+    for (index, line) in lines.iter().enumerate() {
         rendered.push_str(
             &line
                 .replace("{{@namespace}}", namespace)
                 .replace("{{name}}", display_name),
         );
-        rendered.push_str("\r\n");
+        if index + 1 < lines.len() {
+            rendered.push_str("\r\n");
+        }
     }
     rendered
 }
@@ -361,13 +362,13 @@ mod tests {
         let global = empty_script_content("", "Brick").unwrap();
         assert!(global.starts_with("using UnityEngine;\r\n\r\npublic class Brick"));
         assert!(!global.contains("namespace"));
-        assert!(global.ends_with("}\r\n"));
+        assert!(global.ends_with('}'));
         assert!(!global.replace("\r\n", "").contains('\n'));
 
         let namespaced = empty_script_content("Game.Play", "Brick").unwrap();
         assert!(namespaced.contains("namespace Game.Play\r\n"));
         assert!(namespaced.contains("\tpublic class Brick : MonoBehaviour\r\n"));
-        assert!(namespaced.ends_with("\t}\r\n}\r\n"));
+        assert!(namespaced.ends_with("\t}\r\n}"));
 
         let generic = empty_script_content("Game.Play", "Box`2").unwrap();
         assert!(generic.contains("\tpublic class Box<T1, T2> : MonoBehaviour\r\n"));
@@ -380,7 +381,8 @@ mod tests {
         assert!(global.contains("\t*/\r\n"));
         assert!(global.contains("https://github.com/AssetRipper/AssetRipper/issues/653"));
         assert!(global.contains("https://github.com/AssetRipper/AssetRipper/issues/655"));
-        // The whitespace-only template lines render as empty lines.
+        // The global template's whitespace-only lines render empty; the namespaced template's
+        // retained raw-string whitespace is source-pinned by the project-export regression.
         assert!(
             global.contains("assemblies and the global metadata.\r\n\r\n\t\tAssetRipper usually")
         );

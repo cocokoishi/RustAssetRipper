@@ -192,7 +192,7 @@ impl ObjectReferenceGraph {
         file: &SerializedFile<'_>,
         limits: ReferenceGraphLimits,
     ) -> Result<Self, ReferenceGraphBuildError> {
-        Self::build_internal(file, limits, None)
+        Self::build_internal(file, limits, None, None)
     }
 
     /// Build a reference graph with source TPK recovery for generated classes and
@@ -213,6 +213,31 @@ impl ObjectReferenceGraph {
                 file_path,
                 layouts,
             }),
+            None,
+        )
+    }
+
+    /// Rebuild a source-fallback scan while substituting caller-decoded payloads for selected
+    /// object indexes. Overrides must be sorted by object index and retain the corresponding
+    /// object PathID. This is used after assembly-backed MonoBehaviour recovery so the graph
+    /// scans the recovered script fields rather than preserving the old unloaded-tail issue.
+    pub(crate) fn build_with_source_type_tree_fallback_and_payload_overrides(
+        file: &SerializedFile<'_>,
+        limits: ReferenceGraphLimits,
+        collection_name: &str,
+        file_path: &str,
+        layouts: &dyn crate::processing::asset_factory::ClassLayoutSource,
+        payload_overrides: &[(usize, ParsedObjectPayload)],
+    ) -> Result<Self, ReferenceGraphBuildError> {
+        Self::build_internal(
+            file,
+            limits,
+            Some(SourceTypeTreeFallback {
+                collection_name,
+                file_path,
+                layouts,
+            }),
+            Some(payload_overrides),
         )
     }
 
@@ -220,6 +245,7 @@ impl ObjectReferenceGraph {
         file: &SerializedFile<'_>,
         limits: ReferenceGraphLimits,
         fallback: Option<SourceTypeTreeFallback<'_>>,
+        payload_overrides: Option<&[(usize, ParsedObjectPayload)]>,
     ) -> Result<Self, ReferenceGraphBuildError> {
         let object_count = file.metadata.objects.len();
         if object_count > limits.max_objects {
@@ -253,12 +279,35 @@ impl ObjectReferenceGraph {
 
         for (object_index, object) in file.metadata.objects.iter().enumerate() {
             graph.attempted_objects += 1;
-            let decoded = match decode_object_payload_with_generated_fallback(
-                file,
-                object_index,
-                &limits.object_decode,
-                fallback,
-            ) {
+            let override_payload = payload_overrides.and_then(|overrides| {
+                overrides
+                    .binary_search_by_key(&object_index, |(index, _)| *index)
+                    .ok()
+                    .map(|index| &overrides[index].1)
+            });
+            let decoded_result = if let Some(payload) = override_payload {
+                if payload.object_index != object_index || payload.path_id != object.path_id {
+                    return Err(ReferenceGraphBuildError::PayloadOverrideIdentityMismatch {
+                        object_index,
+                        expected_path_id: object.path_id,
+                        actual_object_index: payload.object_index,
+                        actual_path_id: payload.path_id,
+                    });
+                }
+                Ok(DecodedReferenceObject {
+                    payload: payload.clone(),
+                    unparsed_tail_bytes: payload.trailing_bytes.len(),
+                    incomplete_outcome: None,
+                })
+            } else {
+                decode_object_payload_with_generated_fallback(
+                    file,
+                    object_index,
+                    &limits.object_decode,
+                    fallback,
+                )
+            };
+            let decoded = match decoded_result {
                 Ok(payload) => payload,
                 Err(error) => {
                     graph.push_issue(
@@ -1694,6 +1743,12 @@ pub enum ReferenceGraphBuildError {
         path_id: i64,
         limit: usize,
     },
+    PayloadOverrideIdentityMismatch {
+        object_index: usize,
+        expected_path_id: i64,
+        actual_object_index: usize,
+        actual_path_id: i64,
+    },
 }
 
 impl ReferenceGraphBuildError {
@@ -1723,6 +1778,15 @@ impl Display for ReferenceGraphBuildError {
             } => write!(
                 f,
                 "reference graph issue limit {limit} exceeded at object {object_index} PathID {path_id}"
+            ),
+            Self::PayloadOverrideIdentityMismatch {
+                object_index,
+                expected_path_id,
+                actual_object_index,
+                actual_path_id,
+            } => write!(
+                f,
+                "payload override for object {object_index} PathID {expected_path_id} instead names object {actual_object_index} PathID {actual_path_id}"
             ),
         }
     }

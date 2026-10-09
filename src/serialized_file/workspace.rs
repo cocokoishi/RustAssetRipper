@@ -1816,6 +1816,20 @@ impl SerializedFileWorkspace {
         &self.files
     }
 
+    /// Replace one per-file scan after a caller has recovered additional object fields.
+    /// Returns `false` if the requested file index does not exist.
+    pub(crate) fn replace_reference_graph(
+        &mut self,
+        file_index: usize,
+        graph: ObjectReferenceGraph,
+    ) -> bool {
+        let Some(file) = self.files.get_mut(file_index) else {
+            return false;
+        };
+        file.reference_graph = graph;
+        true
+    }
+
     /// Source container hierarchy with each node's direct collection and ResourceFile indexes.
     pub fn container_bundles(&self) -> &[WorkspaceSerializedBundle] {
         &self.container_bundles
@@ -4170,6 +4184,8 @@ mod tests {
     };
     use crate::io::platform_structure::{PlatformKind, PlatformStructure};
     use crate::processing::asset_factory::FileTypeTreeTestLayouts;
+    use crate::processing::managed_assembly::{ManagedAssemblyCatalog, ManagedAssemblyLimits};
+    use crate::processing::managed_assembly_schema::ManagedSchemaLimits;
     use crate::scheme::{
         ContainerMountErrorKind, ContainerMountLimits, FileKind, MountedContainerBundle,
         MountedResourceFile,
@@ -4180,7 +4196,8 @@ mod tests {
     use crate::serialized_file::file::SerializedFile;
     use crate::serialized_file::object::SerializedValue;
     use crate::serialized_file::object_workspace::{
-        ObjectWorkspace, ObjectWorkspaceErrorKind, ObjectWorkspaceLimits,
+        ManagedBehaviourRecoveryOutcome, ObjectWorkspace, ObjectWorkspaceErrorKind,
+        ObjectWorkspaceLimits,
     };
     use crate::serialized_file::reference_graph::{
         MultiFilePPtrResolution, MultiFileReferenceGraphLimits, ObjectReferenceGraph,
@@ -6096,6 +6113,140 @@ mod tests {
                 .expect("source fixture remains mounted"),
             bytes,
             "factory and graph integration preserve input bytes"
+        );
+    }
+
+    #[test]
+    fn object_workspace_recovers_assembly_backed_unloaded_monobehaviour_structure() {
+        let fixture = crate::processing::asset_factory::PROBE_FIXTURE;
+        let hex = fixture
+            .lines()
+            .find_map(|line| line.strip_prefix("SF_HEX|mono_unloaded_valid|"))
+            .expect("the source fixture includes a valid assembly-backed structure remainder");
+        assert!(hex.len().is_multiple_of(2), "fixture hex has even length");
+        let bytes = hex
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let digits = std::str::from_utf8(pair).expect("fixture hex is ASCII");
+                u8::from_str_radix(digits, 16).expect("fixture hex is valid")
+            })
+            .collect::<Vec<_>>();
+
+        let mut filesystem = virtual_file_system("/game/mono_unloaded_valid.assets", &bytes);
+        insert_file(
+            &mut filesystem,
+            "/game/Assembly-CSharp.dll",
+            include_bytes!("../processing/managed_assembly_fixture.dll"),
+        );
+        let mut workspace = SerializedFileWorkspace::load_from_vfs(
+            &filesystem,
+            &[input("/game/mono_unloaded_valid.assets")],
+            SerializedFileWorkspaceLimits::default(),
+        )
+        .expect("workspace loads the source-authored two-object file");
+        let mut objects = ObjectWorkspace::load_from_vfs(
+            &filesystem,
+            &workspace,
+            ObjectWorkspaceLimits::default(),
+        )
+        .expect("factory materializes the generated MonoBehaviour header and MonoScript");
+        let mut catalog = ManagedAssemblyCatalog::default();
+        catalog
+            .insert(
+                "Assembly-CSharp.dll",
+                include_bytes!("../processing/managed_assembly_fixture.dll"),
+                ManagedAssemblyLimits::default(),
+            )
+            .expect("Rust reads the synthetic managed assembly metadata");
+
+        let recovery = objects
+            .recover_mono_behaviour_structures(
+                &filesystem,
+                &mut workspace,
+                &catalog,
+                ObjectWorkspaceLimits::default(),
+                ManagedSchemaLimits::default(),
+            )
+            .expect("assembly-backed field bytes decode through ObjectWorkspace");
+        assert_eq!(recovery.behaviours.len(), 1);
+        assert!(
+            matches!(
+                &recovery.behaviours[0].outcome,
+                ManagedBehaviourRecoveryOutcome::Recovered {
+                    script_version,
+                    decoded_bytes: 16,
+                    skipped_fields,
+                } if script_version == "2019.4.40f1"
+                    && skipped_fields.iter().any(|field| field.contains("ignored"))
+                    && skipped_fields.iter().any(|field| field.contains("staticValue"))
+                    && skipped_fields.iter().any(|field| field.contains("locked"))
+            ),
+            "unexpected assembly recovery outcome: {:?}",
+            recovery.behaviours
+        );
+        assert_eq!(recovery.behaviours[0].path_id, 42);
+        assert_eq!(
+            recovery.behaviours[0]
+                .script
+                .as_ref()
+                .map(|script| script.unique_name()),
+            Some("[Assembly-CSharp]Game.HeroController".to_owned())
+        );
+
+        let behaviour = objects
+            .get(0, 0)
+            .expect("recovered MonoBehaviour remains in its stable workspace slot");
+        assert!(behaviour.is_fully_materialized());
+        assert_eq!(
+            behaviour
+                .factory
+                .structure
+                .as_ref()
+                .map(|structure| structure.outcome),
+            Some(
+                crate::processing::asset_factory::MonoBehaviourStructureOutcome::UseParsedStructure
+            )
+        );
+        let payload = behaviour
+            .payload
+            .as_ref()
+            .expect("recovered payload remains available");
+        let structure = payload
+            .root
+            .unique_field("m_Structure")
+            .expect("MonoBehaviour root lookup succeeds")
+            .expect("recovered script fields are attached to m_Structure");
+        let SerializedValue::Struct(fields) = structure else {
+            panic!("m_Structure is represented as a structure");
+        };
+        let field_value = |name: &str| {
+            fields
+                .iter()
+                .find(|field| field.name == name)
+                .map(|field| &field.value)
+                .unwrap_or_else(|| panic!("recovered structure field {name:?} exists"))
+        };
+        assert_eq!(
+            field_value("inherited"),
+            &SerializedValue::I64(0x0102_0304_0506_0708)
+        );
+        assert_eq!(field_value("health"), &SerializedValue::I32(1234));
+        assert_eq!(field_value("speed"), &SerializedValue::F32(1.5));
+        assert!(!fields
+            .iter()
+            .any(|field| { matches!(field.name.as_str(), "ignored" | "staticValue" | "locked") }));
+        assert!(objects.report().is_complete());
+        assert!(workspace.files()[0].reference_graph.is_complete());
+        assert!(workspace.files()[0]
+            .reference_graph
+            .object_scan_is_complete(0));
+        assert_eq!(
+            filesystem
+                .read_all_bytes("/game/mono_unloaded_valid.assets", usize::MAX)
+                .expect("source-authored input remains mounted"),
+            bytes,
+            "assembly recovery must leave the original SerializedFile unchanged"
         );
     }
 

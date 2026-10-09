@@ -3207,6 +3207,17 @@ mod tests {
                 );
                 assert_eq!(structure.unloaded_remainder, [0xDE, 0xAD, 0xBE, 0xEF]);
             }
+            "mono_unloaded_valid" => {
+                let structure = asset.structure.as_ref().expect("a structure decision");
+                assert_eq!(
+                    structure.outcome,
+                    MonoBehaviourStructureOutcome::UseUnloadedRemainder
+                );
+                assert_eq!(
+                    structure.unloaded_remainder,
+                    [8, 7, 6, 5, 4, 3, 2, 1, 0xD2, 0x04, 0, 0, 0, 0, 0xC0, 0x3F]
+                );
+            }
             "mono_with_structure" => {
                 let structure = asset.structure.as_ref().expect("a structure decision");
                 assert_eq!(
@@ -3394,7 +3405,7 @@ mod tests {
         let fixture = include_str!("asset_factory_fixture.txt");
         let layouts = reference_class_layouts();
         let cases = fixture_cases(fixture);
-        assert_eq!(cases.len(), 24, "all probe cases are replayed");
+        assert_eq!(cases.len(), 25, "all probe cases are replayed");
         for case in &cases {
             assert_case(case, layouts);
         }

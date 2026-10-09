@@ -13,6 +13,16 @@ using AssetRipper.IO.Files.SerializedFiles.Parser;
 using AssetRipper.IO.Files.SerializedFiles.Parser.TypeTrees;
 using AssetRipper.Primitives;
 
+if (args.Length > 0 && args[0] == "export-mono-structure")
+{
+    if (args.Length != 4)
+    {
+        Console.Error.WriteLine("usage: managed-project export-mono-structure <input-root> <output-root> <rows-file>");
+        return 2;
+    }
+    return ExportMonoStructure(args[1], args[2], args[3]);
+}
+
 if (args.Length != 3)
 {
     Console.Error.WriteLine("usage: managed-project <empty-input-root> <empty-output-root> <new-rows-file>");
@@ -94,6 +104,65 @@ Console.WriteLine($"project_assets={assetFiles.Length}");
 Console.WriteLine($"mono_behaviour={Path.GetRelativePath(outputRoot, monoYamlPath).Replace('\\', '/')}");
 Console.WriteLine($"referenced_behaviour={Path.GetRelativePath(outputRoot, targetYamlPath).Replace('\\', '/')}");
 return 0;
+
+static int ExportMonoStructure(string inputRootArgument, string outputRootArgument, string rowsArgument)
+{
+    string inputRoot = Path.GetFullPath(inputRootArgument);
+    string outputRoot = Path.GetFullPath(outputRootArgument);
+    string rowsPath = Path.GetFullPath(rowsArgument);
+    if (!Directory.Exists(inputRoot))
+    {
+        throw new DirectoryNotFoundException($"input root does not exist: {inputRoot}");
+    }
+    EnsureEmptyOrMissingDirectory(outputRoot, "output");
+    if (File.Exists(rowsPath) || Directory.Exists(rowsPath))
+    {
+        throw new IOException($"refusing to overwrite probe rows {rowsPath}");
+    }
+
+    Directory.CreateDirectory(outputRoot);
+    Directory.CreateDirectory(Path.GetDirectoryName(rowsPath)!);
+    Logger.Add(new ConsoleLogger());
+    ExportHandler handler = new(new FullConfiguration());
+    var gameData = handler.LoadAndProcess([inputRoot], LocalFileSystem.Instance);
+    string[] monoBehaviours = gameData.GameBundle.FetchAssets()
+        .Where(asset => asset.ClassID == 114 && asset.PathID == 42)
+        .Select(asset => $"{asset.ClassName}|{asset.PathID}|{asset}")
+        .ToArray();
+    if (monoBehaviours.Length != 1)
+    {
+        throw new InvalidDataException($"expected one MonoBehaviour at PathID 42, found {monoBehaviours.Length}");
+    }
+    handler.Export(gameData, outputRoot, LocalFileSystem.Instance);
+
+    string projectAssets = Path.Combine(outputRoot, "ExportedProject", "Assets");
+    string? monoYamlPath = Directory.Exists(projectAssets)
+        ? Directory.GetFiles(projectAssets, "*.asset", SearchOption.AllDirectories)
+            .FirstOrDefault(path => File.ReadAllText(path).Contains("m_Name: Behaviour", StringComparison.Ordinal))
+        : null;
+    if (monoYamlPath is null)
+    {
+        throw new InvalidDataException("source export did not write the expected MonoBehaviour asset");
+    }
+
+    using StreamWriter rows = new(rowsPath, false, new UTF8Encoding(false)) { NewLine = "\n" };
+    rows.WriteLine("# Frozen AssetRipper ExportHandler result for an assembly-backed UnloadedStructure.");
+    rows.WriteLine($"OBJECT|{monoBehaviours[0]}");
+    foreach (string path in Directory.GetFiles(outputRoot, "*", SearchOption.AllDirectories)
+        .OrderBy(path => Path.GetRelativePath(outputRoot, path), StringComparer.Ordinal))
+    {
+        string relative = Path.GetRelativePath(outputRoot, path).Replace('\\', '/');
+        byte[] bytes = File.ReadAllBytes(path);
+        rows.WriteLine($"FILE|{relative}|{bytes.Length}|{Convert.ToHexString(SHA256.HashData(bytes))}");
+        if (string.Equals(Path.GetExtension(path), ".asset", StringComparison.OrdinalIgnoreCase))
+        {
+            rows.WriteLine($"CONTENT|{relative}|{Convert.ToBase64String(bytes)}");
+        }
+    }
+    Console.WriteLine($"source_object={monoBehaviours[0]}");
+    Console.WriteLine($"mono_behaviour={Path.GetRelativePath(outputRoot, monoYamlPath).Replace('\\', '/')}");
+    return 0;
+}
 
 static void EnsureEmptyOrMissingDirectory(string path, string label)
 {

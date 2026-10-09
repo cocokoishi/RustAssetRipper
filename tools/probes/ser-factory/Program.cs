@@ -688,6 +688,7 @@ static void Author(string rowsPath)
 		"unreadable_no_tree",
 		"engine_default_resources",
 		"mono_unloaded",
+		"mono_unloaded_valid",
 		"mono_with_structure",
 		"monoscript_notree",
 		"tpk_navmesh_editor",
@@ -789,6 +790,8 @@ static (string, SerializedFile) BuildCase(string name)
 			return ("unity default resources", BuildTextAssetFile("2019.4.40f1", "Hero", "print(1)", null, [0xAA, 0xBB, 0xCC, 0xDD, 0xEE]));
 		case "mono_unloaded":
 			return ("mono_unloaded.assets", BuildMonoBehaviourFile());
+		case "mono_unloaded_valid":
+			return ("mono_unloaded_valid.assets", BuildMonoBehaviourWithValidUnloadedStructureFile());
 		case "mono_with_structure":
 			return ("mono_with_structure.assets", BuildMonoBehaviourWithStructureFile());
 		case "monoscript_notree":
@@ -969,6 +972,25 @@ static TypeTree TextAssetReleaseTree()
 // A MonoBehaviour whose generated header is followed by an unreadable remainder.
 static SerializedFile BuildMonoBehaviourFile()
 {
+	return BuildMonoBehaviourFileWithRemainder("mono_unloaded.assets", [0xDE, 0xAD, 0xBE, 0xEF], "VRC.SDK");
+}
+
+// A source-authored UnloadedStructure whose bytes follow the fixture assembly's
+// inherited long, int, and float fields exactly.
+static SerializedFile BuildMonoBehaviourWithValidUnloadedStructureFile()
+{
+	List<byte> structure = [];
+	WriteI64(structure, 0x0102030405060708);
+	WriteI32(structure, 1234);
+	WriteI32(structure, BitConverter.SingleToInt32Bits(1.5f));
+	return BuildMonoBehaviourFileWithRemainder("mono_unloaded_valid.assets", structure.ToArray(), "Game");
+}
+
+static SerializedFile BuildMonoBehaviourFileWithRemainder(
+	string fileName,
+	byte[] unloadedStructure,
+	string scriptNamespace)
+{
 	List<byte> payload = [];
 	WriteI32(payload, 0);          // m_GameObject.m_FileID
 	WriteI64(payload, 0);          // m_GameObject.m_PathID
@@ -980,10 +1002,10 @@ static SerializedFile BuildMonoBehaviourFile()
 	WriteI32(payload, 0);          // m_Script.m_FileID
 	WriteI64(payload, 7);          // m_Script.m_PathID
 	WriteString(payload, "Behaviour");
-	payload.AddRange([0xDE, 0xAD, 0xBE, 0xEF]);
+	payload.AddRange(unloadedStructure);
 	SerializedType monoBehaviourType = new() { RawTypeID = 114 };
 	SerializedType monoScriptType = new() { RawTypeID = 115 };
-	byte[] monoScriptPayload = BuildMonoScriptFile().Objects[0].ObjectData;
+	byte[] monoScriptPayload = BuildMonoScriptFileWithNamespace(scriptNamespace).Objects[0].ObjectData;
 	SerializedFile file = new SerializedFileBuilder
 	{
 		Generation = FormatVersion.Unknown_10,
@@ -1008,7 +1030,7 @@ static SerializedFile BuildMonoBehaviourFile()
 			},
 		},
 	}.Build();
-	file.FilePath = "mono_unloaded.assets";
+	file.FilePath = fileName;
 	return file;
 }
 
@@ -1056,6 +1078,11 @@ static TypeTree MonoBehaviourStructureTree()
 // MonoScript release layout: m_Name, m_ExecutionOrder, m_PropertiesHash, three strings.
 static SerializedFile BuildMonoScriptFile()
 {
+	return BuildMonoScriptFileWithNamespace("VRC.SDK");
+}
+
+static SerializedFile BuildMonoScriptFileWithNamespace(string scriptNamespace)
+{
 	List<byte> payload = [];
 	WriteString(payload, "HeroController");
 	WriteI32(payload, 200);
@@ -1064,7 +1091,7 @@ static SerializedFile BuildMonoScriptFile()
 		payload.Add((byte)i);
 	}
 	WriteString(payload, "HeroController");
-	WriteString(payload, "VRC.SDK");
+	WriteString(payload, scriptNamespace);
 	WriteString(payload, "Assembly-CSharp");
 	return BuildFile("monoscript_notree.assets", "2019.4.40f1", 115, null, payload.ToArray());
 }

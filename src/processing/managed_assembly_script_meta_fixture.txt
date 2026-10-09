@@ -1,0 +1,12 @@
+fileFormatVersion: 2
+guid: 5beaadbee78c87800aec07c4b4895e3b
+licenseType: Free
+MonoImporter:
+  serializedVersion: 2
+  externalObjects: {}
+  defaultReferences: []
+  executionOrder: 200
+  icon: {fileID: 0}
+  userData:
+  assetBundleName:
+  assetBundleVariant:

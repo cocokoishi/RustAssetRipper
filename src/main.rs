@@ -17,7 +17,7 @@ use assetripper::export::pointer_map::{
     ProjectExportPointerMap, UnityProjectAssetType,
 };
 use assetripper::export::project_workflow::{
-    export_workspace_yaml_project_with_settings, WorkspaceProjectExportLimits,
+    export_workspace_yaml_project_with_script_manager, WorkspaceProjectExportLimits,
 };
 use assetripper::export::scene_collection::{
     ExportAssetCollectionIdentity, ExportAssetIdentity, SceneExportIdAssignment,
@@ -40,7 +40,8 @@ use assetripper::io::dependency::DependencyIndexLimits;
 use assetripper::io::filesystem::VirtualFileSystem;
 use assetripper::io::game_structure::{MixedGameStructure, MixedGameStructureLimits};
 use assetripper::io::platform_file_inventory::{
-    PlatformFileInventoryLimits, PlatformFileInventoryOptions, PlatformWorkspaceLoadOptions,
+    select_scripting_backend, PlatformFileInventoryLimits, PlatformFileInventoryOptions,
+    PlatformWorkspaceLoadOptions, ScriptingBackend as PlatformScriptingBackend,
 };
 use assetripper::io::platform_structure::{
     detect_platform_structure, PlatformResourceProvider, PlatformStructureLimits,
@@ -52,6 +53,11 @@ use assetripper::processing::asset_factory::ClassLayoutSource;
 use assetripper::processing::asset_factory::{
     FactoryUnityVersion, SourceFactoryLookupError, SourceTpkLookupError, SourceTpkTrees,
 };
+use assetripper::processing::managed_assembly::{
+    ManagedAssemblyCatalog, ManagedAssemblyCatalogLimits, ManagedScriptResolutionOutcome,
+    ManagedScriptResolutionReport,
+};
+use assetripper::processing::managed_assembly_schema::ManagedSchemaLimits;
 use assetripper::processing::prefab_processing::{
     animator_controller_source_dependency_inventory, plan_workspace_prefab_processing,
     plan_workspace_processed_prefab_assets, plan_workspace_scene_hierarchy_bundle_names,
@@ -1433,12 +1439,70 @@ fn export_project_to<W: io::Write>(
             "the selected paths contain no recognized SerializedFile inputs",
         ));
     }
+    let platform = detect_platform_structure(
+        &filesystem,
+        &selected_paths,
+        PlatformStructureLimits::default(),
+    )?;
+    let platform_inventory = platform
+        .as_ref()
+        .map(|structure| {
+            structure.collect_game_files(
+                &filesystem,
+                PlatformFileInventoryOptions::default(),
+                PlatformFileInventoryLimits::default(),
+            )
+        })
+        .transpose()?;
+    let platform_backend = platform_inventory
+        .as_ref()
+        .map(|inventory| inventory.scripting_backend);
+    let mixed_backend = if mixed.assemblies.is_empty() {
+        PlatformScriptingBackend::Unknown
+    } else {
+        PlatformScriptingBackend::Mono
+    };
+    let scripting_backend = select_scripting_backend(false, platform_backend, Some(mixed_backend));
+    let manager_assemblies = if scripting_backend == PlatformScriptingBackend::Mono {
+        if platform.is_some() {
+            platform_inventory
+                .as_ref()
+                .map(|inventory| inventory.assemblies.as_slice())
+                .unwrap_or_default()
+        } else {
+            mixed.assemblies.as_slice()
+        }
+    } else {
+        &[]
+    };
+    let mut managed_assemblies = ManagedAssemblyCatalog::default();
+    let mut managed_assembly_load_report = None;
+    let mut mono_manager_initialized = false;
+    if scripting_backend == PlatformScriptingBackend::Mono {
+        match ManagedAssemblyCatalog::load_from_vfs(
+            &filesystem,
+            manager_assemblies,
+            ManagedAssemblyCatalogLimits::default(),
+        ) {
+            Ok((catalog, report)) => {
+                managed_assemblies = catalog;
+                managed_assembly_load_report = Some(report);
+                mono_manager_initialized = true;
+            }
+            Err(error) => {
+                writeln!(
+                    status_output,
+                    "Mono assembly manager initialization failed and script type recovery is disabled for this import, matching the source fallback: {error}"
+                )?;
+            }
+        }
+    }
     let root_catalog = RootResourceFileCatalog::from_mounted_explicit_resource_files(
         &filesystem,
         &mount_report.explicit_root_resource_files,
         RootResourceCatalogLimits::default(),
     )?;
-    let (workspace, _) = load_workspace_with_dependencies(
+    let (mut workspace, _) = load_workspace_with_dependencies(
         &mut filesystem,
         &mixed.serialized_file_inputs,
         &mixed.registered_files,
@@ -1448,16 +1512,110 @@ fn export_project_to<W: io::Write>(
         ContainerMountLimits::default(),
     )?;
     ensure_no_workspace_container_failures(&workspace)?;
-    let objects = load_object_workspace(&filesystem, &workspace, ObjectWorkspaceLimits::default())?;
+    let mut objects =
+        load_object_workspace(&filesystem, &workspace, ObjectWorkspaceLimits::default())?;
+    if mono_manager_initialized {
+        let recovery = objects.recover_mono_behaviour_structures(
+            &filesystem,
+            &mut workspace,
+            &managed_assemblies,
+            ObjectWorkspaceLimits::default(),
+            ManagedSchemaLimits::default(),
+        )?;
+        let recovered_count = recovery
+            .behaviours
+            .iter()
+            .filter(|behaviour| {
+                matches!(
+                    behaviour.outcome,
+                    assetripper::serialized_file::object_workspace::ManagedBehaviourRecoveryOutcome::Recovered { .. }
+                )
+            })
+            .count();
+        let unresolved_count = recovery.behaviours.len().saturating_sub(recovered_count);
+        writeln!(
+            status_output,
+            "MonoBehaviour script structures: {recovered_count} recovered, {unresolved_count} unresolved."
+        )?;
+        for behaviour in recovery.behaviours.iter().filter(|behaviour| {
+            matches!(
+                behaviour.outcome,
+                assetripper::serialized_file::object_workspace::ManagedBehaviourRecoveryOutcome::Unresolved(_)
+            )
+        }).take(10) {
+            let identity = behaviour
+                .script
+                .as_ref()
+                .map(|script| script.unique_name())
+                .unwrap_or_else(|| "<unavailable MonoScript identity>".to_owned());
+            writeln!(
+                status_output,
+                "  - file {} object {} PathID {} {identity}: {:?}",
+                behaviour.file_index,
+                behaviour.object_index,
+                behaviour.path_id,
+                behaviour.outcome
+            )?;
+        }
+        let report =
+            ManagedScriptResolutionReport::from_object_workspace(&objects, &managed_assemblies)?;
+        let abstract_count = report
+            .scripts
+            .iter()
+            .filter(|script| {
+                matches!(
+                    script.outcome,
+                    ManagedScriptResolutionOutcome::Resolved { is_valid: false }
+                )
+            })
+            .count();
+        let unresolved_count = report.scripts.len().saturating_sub(report.resolved_count());
+        let load_report = managed_assembly_load_report
+            .as_ref()
+            .expect("successful Mono manager initialization retains its load report");
+        writeln!(
+            status_output,
+            "Mono assembly metadata: {} loaded from {} candidates ({} native/non-CLI skipped); MonoScript types: {} resolved, {} valid, {} abstract, {} unresolved.",
+            load_report.loaded_count,
+            load_report.candidate_count,
+            load_report.skipped_non_cli.len(),
+            report.resolved_count(),
+            report.valid_count(),
+            abstract_count,
+            unresolved_count
+        )?;
+        for script in report
+            .scripts
+            .iter()
+            .filter(|script| {
+                !matches!(
+                    script.outcome,
+                    ManagedScriptResolutionOutcome::Resolved { .. }
+                )
+            })
+            .take(10)
+        {
+            let identity = script
+                .script
+                .as_ref()
+                .map(|script| script.unique_name())
+                .unwrap_or_else(|| "<unavailable MonoScript metadata>".to_owned());
+            writeln!(
+                status_output,
+                "  - file {} object {} PathID {} {identity}: {:?}",
+                script.file_index, script.object_index, script.path_id, script.outcome
+            )?;
+        }
+    } else if scripting_backend == PlatformScriptingBackend::Il2Cpp {
+        writeln!(
+            status_output,
+            "Scripting backend is IL2CPP; its assembly recovery path is not wired into this project exporter."
+        )?;
+    }
     let reference_graph = workspace.reference_graph(MultiFileReferenceGraphLimits::default())?;
-    let platform = detect_platform_structure(
-        &filesystem,
-        &selected_paths,
-        PlatformStructureLimits::default(),
-    )?;
     let provider =
         PlatformResourceProvider::with_mixed_data_paths(platform.as_ref(), Some(&mixed.data_paths));
-    let report = export_workspace_yaml_project_with_settings(
+    let report = export_workspace_yaml_project_with_script_manager(
         output_root,
         delete_existing,
         &filesystem,
@@ -1467,6 +1625,7 @@ fn export_project_to<W: io::Write>(
         &objects,
         &reference_graph,
         settings,
+        mono_manager_initialized,
         WorkspaceProjectExportLimits::default(),
     )?;
     writeln!(
@@ -9245,6 +9404,129 @@ mod tests {
 
         input.files.extend(exported_files);
         input.subdirectories.extend(exported_directories);
+    }
+
+    #[test]
+    fn export_project_recovers_assembly_backed_monobehaviour_structure() {
+        let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
+        let directory = TestInputDirectory::new_root();
+        let source_path = directory.join("mono_unloaded_valid.assets");
+        let assembly_path = directory.join("Assembly-CSharp.dll");
+        let output_root = directory.join("project-managed-structure");
+        fs::write(
+            &source_path,
+            source_factory_fixture_bytes("mono_unloaded_valid"),
+        )
+        .unwrap();
+        fs::write(
+            &assembly_path,
+            include_bytes!("processing/managed_assembly_fixture.dll"),
+        )
+        .unwrap();
+        let mut input = TestInputDirectory {
+            directory: directory.clone(),
+            files: vec![source_path.clone(), assembly_path.clone()],
+            subdirectories: Vec::new(),
+        };
+        let mut status = Vec::new();
+
+        super::export_project_to(
+            std::slice::from_ref(&directory),
+            &output_root,
+            false,
+            &default_export_settings(),
+            &mut status,
+        )
+        .expect("project export recovers assembly-backed MonoBehaviour fields");
+
+        let status = String::from_utf8(status).expect("status output is UTF-8");
+        assert!(
+            status.contains("MonoBehaviour script structures: 1 recovered, 0 unresolved."),
+            "{status}"
+        );
+        let assets = project_tree(&output_root)
+            .into_iter()
+            .filter(|path| path.ends_with(".asset"))
+            .map(|path| fs::read_to_string(output_root.join(path)).unwrap())
+            .collect::<Vec<_>>();
+        let yaml = assets
+            .iter()
+            .find(|yaml| yaml.contains("inherited: 72623859790382856"))
+            .expect("the Unity project contains the recovered MonoBehaviour fields");
+        assert!(yaml.contains("m_ObjectHideFlags: 0"), "{yaml}");
+        assert!(
+            yaml.contains("m_CorrespondingSourceObject: {fileID: 0}"),
+            "{yaml}"
+        );
+        assert!(yaml.contains("m_PrefabInstance: {fileID: 0}"), "{yaml}");
+        assert!(yaml.contains("m_PrefabAsset: {fileID: 0}"), "{yaml}");
+        assert!(yaml.contains("m_EditorHideFlags: 0"), "{yaml}");
+        assert!(yaml.contains("m_EditorClassIdentifier:"), "{yaml}");
+        assert!(!yaml.contains("m_Structure:"), "{yaml}");
+        assert!(yaml.contains("inherited: 72623859790382856"), "{yaml}");
+        assert!(yaml.contains("health: 1234"), "{yaml}");
+        assert!(yaml.contains("speed: 1.5"), "{yaml}");
+        assert_eq!(
+            yaml.replace("\r\n", "\n"),
+            include_str!("processing/managed_assembly_project_fixture.txt").replace("\r\n", "\n"),
+            "the complete MonoBehaviour YAML, including the source script pointer, matches the frozen source ExportHandler fixture"
+        );
+        let script_path = output_root.join("Assets/Scripts/Assembly-CSharp/Game/HeroController.cs");
+        let script_meta_path =
+            output_root.join("Assets/Scripts/Assembly-CSharp/Game/HeroController.cs.meta");
+        let script_bytes = fs::read(&script_path).expect("exported MonoScript source");
+        let script_fixture_hex =
+            include_str!("processing/managed_assembly_script_fixture.hex").trim();
+        assert_eq!(
+            script_fixture_hex.len() % 2,
+            0,
+            "script fixture has even hex length"
+        );
+        let script_fixture = script_fixture_hex
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16)
+                    .expect("script fixture hex is valid")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            script_bytes, script_fixture,
+            "the exported source fallback matches the frozen AssetRipper script"
+        );
+        let script_meta = fs::read_to_string(&script_meta_path).expect("MonoImporter sidecar");
+        let without_time_created = |value: &str| {
+            value
+                .lines()
+                .filter(|line| !line.starts_with("timeCreated: "))
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n"
+        };
+        assert_eq!(
+            without_time_created(&script_meta),
+            include_str!("processing/managed_assembly_script_meta_fixture.txt")
+                .replace("\r\n", "\n"),
+            "MonoImporter metadata matches the source after excluding only its creation timestamp"
+        );
+        assert!(
+            !output_root.join("Assets/MonoScript/HeroController.asset").exists(),
+            "a MonoScript is exported as its deterministic .cs target, not a generic serialized asset"
+        );
+        assert_eq!(
+            fs::read(&source_path).unwrap(),
+            source_factory_fixture_bytes("mono_unloaded_valid"),
+            "project recovery must preserve the source SerializedFile"
+        );
+
+        input.files.extend(
+            project_tree(&output_root)
+                .iter()
+                .map(|path| output_root.join(path)),
+        );
+        input
+            .subdirectories
+            .extend(project_directories(&output_root));
     }
 
     #[test]

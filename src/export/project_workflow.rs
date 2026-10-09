@@ -27,6 +27,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::io::filesystem::VirtualFileSystem;
 use crate::io::platform_structure::PlatformResourceProvider;
 use crate::processing::asset_factory::FactoryAssetKind;
+use crate::processing::managed_assembly::mono_script_export_identity;
 use crate::processing::scene_collections::{
     SceneDefinitionGuidPlan, SceneDefinitionPathSource, SceneGuidWords,
 };
@@ -39,6 +40,8 @@ use crate::serialized_file::reference_graph::{MultiFilePPtrResolution, MultiFile
 use crate::serialized_file::workspace::SerializedFileWorkspace;
 
 use super::collection_kind::ExportCollectionKind;
+use super::collection_paths::plan_script_export_paths;
+use super::empty_script::{empty_script_content, is_predefined_assembly, MonoScriptIdentity};
 use super::export_extension::DEFAULT_EXPORT_EXTENSION;
 use super::pointer_map::{
     ExportCollectionPointerMetadata, ExportPointerMapLimits, ExportedAssetPointerEntry,
@@ -66,6 +69,8 @@ use super::scene_collection::{
 use super::scene_wiring::{
     process_workspace_scenes_and_prefabs, WorkspaceSceneProcessing, WorkspaceSceneProcessingLimits,
 };
+use super::script_export_flow::{assembly_export_type, AssemblyExportType};
+use super::script_hashing::{calculate_script_guid_str, ScriptHashLimits};
 use super::settings_file::ExportSettingsFile;
 use super::shader_export::{
     export_shader_text, unity_patches, yaml_shader_patch_texts, yaml_shader_patches,
@@ -149,6 +154,8 @@ enum ObjectRoute {
     ShaderYaml,
     /// `ManagerExportCollection`/`EditorBuildSettingsExportCollection`: fixed path, no `.meta`.
     Manager,
+    /// `ScriptExportCollection`/`EmptyScriptExportCollection`: deterministic `.cs` and MonoImporter metadata.
+    Script,
     /// `UnknownExportCollection`: raw payload bytes, no `.meta`.
     Unknown,
     /// `UnreadableExportCollection`: raw payload bytes, no `.meta`.
@@ -165,11 +172,19 @@ struct RoutedObject<'a> {
     named_name: Option<String>,
     facts: ObjectClassFacts,
     shader_view: Option<ShaderView>,
+    script_export: Option<ScriptExportDetails>,
     selection: super::project_exporter::CollectionSelection,
     route: ObjectRoute,
     collection_index: usize,
     guid: [u8; 16],
     file_id: i64,
+}
+
+#[derive(Clone, Debug)]
+struct ScriptExportDetails {
+    identity: MonoScriptIdentity,
+    execution_order: i16,
+    guid: [u8; 16],
 }
 
 /// One processed Scene collection staged for the Unity project exporter.
@@ -220,6 +235,36 @@ pub fn export_workspace_yaml_project_with_settings(
     objects: &ObjectWorkspace,
     reference_graph: &MultiFileReferenceGraph<'_>,
     settings: &ExportSettingsFile,
+    limits: WorkspaceProjectExportLimits,
+) -> Result<WorkspaceProjectExportReport, Box<dyn Error>> {
+    export_workspace_yaml_project_with_script_manager(
+        output_root,
+        delete_existing,
+        filesystem,
+        root_catalog,
+        resource_provider,
+        workspace,
+        objects,
+        reference_graph,
+        settings,
+        false,
+        limits,
+    )
+}
+
+/// Execute project export with the source Mono manager availability fact supplied by import.
+#[allow(clippy::too_many_arguments)]
+pub fn export_workspace_yaml_project_with_script_manager(
+    output_root: &Path,
+    delete_existing: bool,
+    filesystem: &VirtualFileSystem,
+    root_catalog: &RootResourceFileCatalog,
+    resource_provider: &PlatformResourceProvider<'_>,
+    workspace: &SerializedFileWorkspace,
+    objects: &ObjectWorkspace,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+    settings: &ExportSettingsFile,
+    assembly_manager_is_set: bool,
     limits: WorkspaceProjectExportLimits,
 ) -> Result<WorkspaceProjectExportReport, Box<dyn Error>> {
     let (editor_version_text, project_version) = workspace_project_version(workspace)?;
@@ -371,6 +416,11 @@ pub fn export_workspace_yaml_project_with_settings(
             };
             let selection = select_collection_with_shader_text(facts, settings_facts, shader_text)?;
             let kind = selection.kind();
+            let script_export = if class_id == 115 {
+                plan_script_export_details(object, settings, assembly_manager_is_set)?
+            } else {
+                None
+            };
             let is_opaque_fallback = opaque_objects.contains(&(file_index, object_index));
             let raw_fallback_kind_matches = match kind {
                 ExportCollectionKind::Unknown => {
@@ -407,16 +457,26 @@ pub fn export_workspace_yaml_project_with_settings(
                 ExportCollectionKind::Asset => {
                     (ObjectRoute::Asset, "", asset_family_fallback(selection.collection_name))
                 }
-                ExportCollectionKind::Scene
-                | ExportCollectionKind::Prefab
-                | ExportCollectionKind::Script
-                | ExportCollectionKind::EmptyScript => (
+                ExportCollectionKind::Script | ExportCollectionKind::EmptyScript
+                    if script_export.is_some() => (ObjectRoute::Script, "", None),
+                ExportCollectionKind::Script | ExportCollectionKind::EmptyScript
+                    if class_id == 115 => (
+                    ObjectRoute::Skipped,
+                    "injected MonoScripts have no standalone script file in the source exporter",
+                    None,
+                ),
+                ExportCollectionKind::Scene | ExportCollectionKind::Prefab => (
                     ObjectRoute::Asset,
                     "",
                     Some(
                         "the specialized collection renderer is not ported; the object was written \
                          through the generic asset family",
                     ),
+                ),
+                ExportCollectionKind::Script | ExportCollectionKind::EmptyScript => (
+                    ObjectRoute::Skipped,
+                    "a script export collection was selected without a MonoScript object",
+                    None,
                 ),
                 ExportCollectionKind::Fail => (
                     ObjectRoute::Skipped,
@@ -495,7 +555,19 @@ pub fn export_workspace_yaml_project_with_settings(
                         ))
                     })?
                 }
+                ObjectRoute::Script => {
+                    super::script_export_flow::decompiled_file_id().map_err(|error| {
+                        invalid_project(format!(
+                            "MonoScript export ID could not be planned: {error}"
+                        ))
+                    })?
+                }
                 _ => object_info.path_id,
+            };
+            let guid = if let Some(script) = script_export.as_ref() {
+                script.guid
+            } else {
+                mint_unique_collection_guid(&mut next_guid_sequence, &mut used_guids)?
             };
             routed.push(RoutedObject {
                 object,
@@ -504,10 +576,11 @@ pub fn export_workspace_yaml_project_with_settings(
                 named_name,
                 facts,
                 shader_view,
+                script_export,
                 selection,
                 route,
                 collection_index,
-                guid: mint_unique_collection_guid(&mut next_guid_sequence, &mut used_guids)?,
+                guid,
                 file_id,
             });
         }
@@ -578,7 +651,11 @@ pub fn export_workspace_yaml_project_with_settings(
         collection_metadata.push(ExportCollectionPointerMetadata {
             collection_index: entry.collection_index,
             guid: entry.guid,
-            asset_type: UnityProjectAssetType::Serialized,
+            asset_type: if entry.route == ObjectRoute::Script {
+                UnityProjectAssetType::Meta
+            } else {
+                UnityProjectAssetType::Serialized
+            },
         });
         pointer_entries.push(ExportedAssetPointerEntry {
             asset: identity_of(entry),
@@ -694,6 +771,18 @@ pub fn export_workspace_yaml_project_with_settings(
                     ))
                 })?
             }
+            ObjectRoute::Script => {
+                let script = entry.script_export.as_ref().ok_or_else(|| {
+                    invalid_project("MonoScript route has no validated script identity")
+                })?;
+                empty_script_content(&script.identity.namespace, &script.identity.class)
+                    .map_err(|error| {
+                        invalid_project(format!(
+                            "MonoScript dummy source generation failed: {error}"
+                        ))
+                    })?
+                    .into_bytes()
+            }
             ObjectRoute::Asset | ObjectRoute::ShaderYaml | ObjectRoute::Manager => {
                 let source = identity_of(entry);
                 let document = workspace_object_to_unity_yaml_document_with_streamed_resources(
@@ -752,6 +841,19 @@ pub fn export_workspace_yaml_project_with_settings(
             }
             ObjectRoute::ShaderText => planner.plan_asset_path(&identity, "shader")?,
             ObjectRoute::ShaderYaml => planner.plan_asset_path(&identity, YAML_SHADER_EXTENSION)?,
+            ObjectRoute::Script => {
+                let script = entry.script_export.as_ref().ok_or_else(|| {
+                    invalid_project("MonoScript route has no validated script identity")
+                })?;
+                plan_script_export_paths(
+                    &script.identity.assembly,
+                    &script.identity.namespace,
+                    &script.identity.class,
+                    ProjectPathPlanner::host_platform(),
+                    "",
+                )?
+                .relative_asset_path
+            }
             ObjectRoute::Manager => planner.plan_manager_path(&entry.class_name)?,
             ObjectRoute::Unknown => planner.plan_unknown_path(
                 &entry.class_name,
@@ -778,6 +880,15 @@ pub fn export_workspace_yaml_project_with_settings(
                         .as_deref(),
                 )?,
             }),
+            ObjectRoute::Script => {
+                let script = entry.script_export.as_ref().ok_or_else(|| {
+                    invalid_project("MonoScript route has no validated script identity")
+                })?;
+                Some(PlannedProjectMeta {
+                    importer_class: "MonoImporter".to_owned(),
+                    importer: mono_importer_yaml(script.execution_order)?,
+                })
+            }
             ObjectRoute::ShaderText => {
                 let shader = entry.shader_view.as_ref().ok_or_else(|| {
                     invalid_project("ShaderImporter requires a decoded Shader view")
@@ -1090,6 +1201,66 @@ fn identity_of(entry: &RoutedObject<'_>) -> ExportAssetIdentity {
         path_id: entry.object.path_id,
         class_id: entry.class_id,
     }
+}
+
+fn plan_script_export_details(
+    object: &WorkspaceObject,
+    settings: &ExportSettingsFile,
+    assembly_manager_is_set: bool,
+) -> Result<Option<ScriptExportDetails>, Box<dyn Error>> {
+    let metadata = mono_script_export_identity(object).map_err(|error| {
+        invalid_project(format!(
+            "file {} object {} PathID {} MonoScript export fields are invalid: {error}",
+            object.file_index, object.object_index, object.path_id
+        ))
+    })?;
+    let identity = MonoScriptIdentity {
+        class: metadata.class,
+        namespace: metadata.namespace,
+        assembly: metadata.assembly,
+    };
+    if identity.is_injected() {
+        return Ok(None);
+    }
+    if !is_predefined_assembly(&identity.assembly) {
+        return Err(invalid_project(format!(
+            "file {} object {} PathID {} MonoScript assembly {:?} requires reference-assembly lookup or saved-assembly export, which is not wired into the project path",
+            object.file_index, object.object_index, object.path_id, identity.assembly
+        )));
+    }
+    let export_type = assembly_export_type(
+        false,
+        assembly_manager_is_set,
+        settings.script_export_mode,
+        &identity.assembly,
+    );
+    if export_type != AssemblyExportType::Decompile {
+        return Err(invalid_project(format!(
+            "file {} object {} PathID {} MonoScript selects {export_type:?} for ScriptExportMode::{:?}; that script export route is not wired into the project path",
+            object.file_index,
+            object.object_index,
+            object.path_id,
+            settings.script_export_mode
+        )));
+    }
+    let guid = calculate_script_guid_str(
+        &identity.assembly,
+        &identity.namespace,
+        &identity.class,
+        ScriptHashLimits::default(),
+    )
+    .map_err(|error| {
+        invalid_project(format!(
+            "file {} object {} PathID {} MonoScript GUID could not be calculated: {error}",
+            object.file_index, object.object_index, object.path_id
+        ))
+    })?
+    .to_byte_array();
+    Ok(Some(ScriptExportDetails {
+        identity,
+        execution_order: metadata.execution_order,
+        guid,
+    }))
 }
 
 fn prepare_scene_collections(
@@ -1863,6 +2034,38 @@ fn scene_build_settings_entry_is_duplicate(
         .iter()
         .enumerate()
         .any(|(index, scene)| index != scene_index && scene.path == selected.path)
+}
+
+fn mono_importer_yaml(execution_order: i16) -> Result<UnityYamlNode, Box<dyn Error>> {
+    let mut importer = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    importer.insert_field(
+        "serializedVersion",
+        UnityYamlNode::scalar(super::unity_yaml::UnityYamlScalar::Signed(2)),
+    )?;
+    importer.insert_field(
+        "externalObjects",
+        UnityYamlNode::mapping(UnityYamlMappingStyle::Flow),
+    )?;
+    importer.insert_field(
+        "defaultReferences",
+        UnityYamlNode::sequence(UnityYamlSequenceStyle::Flow),
+    )?;
+    importer.insert_field(
+        "executionOrder",
+        UnityYamlNode::scalar(super::unity_yaml::UnityYamlScalar::Signed(i64::from(
+            execution_order,
+        ))),
+    )?;
+    let mut icon = UnityYamlNode::mapping(UnityYamlMappingStyle::Flow);
+    icon.insert_field(
+        "fileID",
+        UnityYamlNode::scalar(super::unity_yaml::UnityYamlScalar::Signed(0)),
+    )?;
+    importer.insert_field("icon", icon)?;
+    importer.insert_field("userData", UnityYamlNode::string(""))?;
+    importer.insert_field("assetBundleName", UnityYamlNode::string(""))?;
+    importer.insert_field("assetBundleVariant", UnityYamlNode::string(""))?;
+    Ok(importer)
 }
 
 fn default_importer(asset_bundle_name: Option<&str>) -> Result<UnityYamlNode, Box<dyn Error>> {

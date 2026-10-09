@@ -2,6 +2,8 @@
 
 pub mod asset_bundle;
 pub mod asset_factory;
+pub mod managed_assembly;
+pub mod managed_assembly_schema;
 pub mod mono_utils;
 pub mod pipeline;
 pub mod prefab_processing;

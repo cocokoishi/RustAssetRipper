@@ -10,6 +10,8 @@
 
 `rustix` provides safe Unix system-call bindings for the shared advisory file lock used by `File.OpenRead` parity. The `fs` feature is enabled; Linux uses `linux-raw-sys`, while other supported Unix targets use the crate's platform bindings.
 
+`dotnetdll` reads PE/CLI and ECMA-335 CLR metadata for the Mono assembly path: manifest names, TypeDefs, fields, signatures, flags, and custom attributes. This is a Rust metadata library and does not invoke a .NET process. It does not parse Unity containers or SerializedFiles; those remain Rust core responsibilities. Its GPL-3.0+ license is compatible with this GPL-3.0-only project when distributed under GPL-3.0; retain the crate attribution and applicable license notice in distribution materials.
+
 | Crate | Locked version | Use | Declared license | Rust version metadata |
 |---|---:|---|---|---|
 | [lzma-rs](https://github.com/gendx/lzma-rs) | 0.3.0 | Pure Rust raw LZMA decoder | MIT | Not declared in the published crate manifest |
@@ -17,6 +19,7 @@
 | [brotli-decompressor](https://github.com/dropbox/rust-brotli-decompressor) | 5.0.3 | Pure Rust Brotli streaming decoder | BSD-3-Clause / MIT | Not declared in the published crate manifest |
 | [flate2](https://github.com/rust-lang/flate2-rs) | 1.1.10 | GZip stream decoder and encoder using `rust_backend` | MIT OR Apache-2.0 | 1.67 |
 | [rustix](https://github.com/bytecodealliance/rustix) | 1.1.5 | Safe Unix `flock` bindings for retained input handles | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | 1.65 |
+| [dotnetdll](https://github.com/nickbclifford/dotnetdll) | 0.3.0 | Rust PE/CLI reader for CLR assembly metadata used by Mono type lookup | GPL-3.0+ | 1.85.1 |
 | [byteorder](https://github.com/BurntSushi/byteorder) | 1.5.0 | Little-endian parsing used by `lzma-rs` | Unlicense OR MIT | 1.60 |
 | [bitflags](https://github.com/bitflags/bitflags) | 2.13.2 | Flag types used by `rustix` | MIT OR Apache-2.0 | 1.56 |
 | [crc](https://github.com/mrhooray/crc-rs) | 3.4.0 | CRC support compiled as an `lzma-rs` dependency | MIT OR Apache-2.0 | 1.83 |
