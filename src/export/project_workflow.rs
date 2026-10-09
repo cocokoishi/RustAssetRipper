@@ -3594,7 +3594,14 @@ mod tests {
     }
 
     fn managed_reference_schema_fixture_row(key: &str) -> Vec<String> {
-        include_str!("../processing/managed_reference_schema_project_fixture.txt")
+        managed_reference_schema_fixture_row_from(
+            include_str!("../processing/managed_reference_schema_project_fixture.txt"),
+            key,
+        )
+    }
+
+    fn managed_reference_schema_fixture_row_from(fixture: &str, key: &str) -> Vec<String> {
+        fixture
             .lines()
             .find_map(|line| line.strip_prefix(&format!("{key}|")))
             .unwrap_or_else(|| panic!("frozen source fixture has no {key} row"))
@@ -3604,8 +3611,15 @@ mod tests {
     }
 
     fn managed_reference_schema_fixture_input(file_name: &str) -> Vec<u8> {
+        managed_reference_schema_fixture_input_from(
+            include_str!("../processing/managed_reference_schema_project_fixture.txt"),
+            file_name,
+        )
+    }
+
+    fn managed_reference_schema_fixture_input_from(fixture: &str, file_name: &str) -> Vec<u8> {
         let prefix = format!("INPUT_HEX|{file_name}|");
-        let hex = include_str!("../processing/managed_reference_schema_project_fixture.txt")
+        let hex = fixture
             .lines()
             .find_map(|line| line.strip_prefix(&prefix))
             .unwrap_or_else(|| panic!("frozen source fixture has no input named {file_name}"));
@@ -4213,6 +4227,152 @@ mod tests {
             assembly_bytes
         );
         std::fs::remove_dir_all(output_root).unwrap();
+    }
+
+    #[test]
+    fn project_export_recovers_legacy_assembly_managed_references_without_file_typetrees() {
+        let fixture =
+            include_str!("../processing/managed_reference_legacy_schema_project_fixture.txt");
+        assert!(fixture
+            .lines()
+            .any(|line| line == "UNITY_VERSION|2019.4.40f1"));
+        assert!(fixture
+            .lines()
+            .any(|line| line == "REGISTRY_FORMAT|1|terminated index IDs"));
+        let root_bytes =
+            managed_reference_schema_fixture_input_from(fixture, "managed_reference_schema.assets");
+        let target_bytes = managed_reference_schema_fixture_input_from(fixture, "target.assets");
+        let assembly_bytes = include_bytes!("../processing/managed_reference_schema_fixture.dll");
+
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem.create_directory(Some("/game")).unwrap();
+        filesystem
+            .write_all_bytes("/game/managed_reference_schema.assets", &root_bytes)
+            .unwrap();
+        filesystem
+            .write_all_bytes("/game/target.assets", &target_bytes)
+            .unwrap();
+        filesystem
+            .write_all_bytes("/game/ManagedReferenceFixtureScripts.dll", assembly_bytes)
+            .unwrap();
+        let inputs = [
+            DependencyFilePath {
+                file_name: "managed_reference_schema.assets".to_owned(),
+                virtual_path: "/game/managed_reference_schema.assets".to_owned(),
+            },
+            DependencyFilePath {
+                file_name: "target.assets".to_owned(),
+                virtual_path: "/game/target.assets".to_owned(),
+            },
+            DependencyFilePath {
+                file_name: "ManagedReferenceFixtureScripts.dll".to_owned(),
+                virtual_path: "/game/ManagedReferenceFixtureScripts.dll".to_owned(),
+            },
+        ];
+        let (catalog, assembly_report) = ManagedAssemblyCatalog::load_from_vfs(
+            &filesystem,
+            &inputs,
+            ManagedAssemblyCatalogLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(assembly_report.loaded_count, 1, "{assembly_report:?}");
+        let mut workspace = SerializedFileWorkspace::load_from_vfs(
+            &filesystem,
+            &inputs[..2],
+            SerializedFileWorkspaceLimits::default(),
+        )
+        .unwrap();
+        assert!(workspace.files().iter().all(|file| file
+            .metadata
+            .types
+            .iter()
+            .all(|serialized_type| serialized_type.type_tree.is_none())));
+        let mut objects = ObjectWorkspace::load_from_vfs(
+            &filesystem,
+            &workspace,
+            ObjectWorkspaceLimits::default(),
+        )
+        .unwrap();
+        let recovery = objects
+            .recover_mono_behaviour_structures(
+                &filesystem,
+                &mut workspace,
+                &catalog,
+                ObjectWorkspaceLimits::default(),
+                ManagedSchemaLimits::default(),
+            )
+            .unwrap();
+        assert_eq!(recovery.behaviours.len(), 1);
+        assert!(matches!(
+            recovery.behaviours[0].outcome,
+            crate::serialized_file::object_workspace::ManagedBehaviourRecoveryOutcome::Recovered { .. }
+        ));
+        assert!(objects.report().is_complete(), "{:?}", objects.report());
+        assert_eq!(objects.report().object_count, 3);
+
+        let root_file_index = workspace
+            .files()
+            .iter()
+            .position(|file| file.file_name == "managed_reference_schema.assets")
+            .unwrap();
+        let target_file_index = workspace
+            .files()
+            .iter()
+            .position(|file| file.file_name == "target.assets")
+            .unwrap();
+        let reference_graph = workspace
+            .reference_graph(MultiFileReferenceGraphLimits::default())
+            .unwrap();
+        assert!(reference_graph.is_complete(), "{reference_graph:?}");
+        let target_reference = reference_graph
+            .references()
+            .iter()
+            .find(|reference| {
+                reference.source_file_index == root_file_index
+                    && reference.source_path_id == 42
+                    && reference.field_path == "m_Structure.references.RefIds[0].data.target"
+            })
+            .expect("legacy registry's assembly-resolved PPtr is scanned");
+        assert_eq!(target_reference.file_id, 1);
+        assert_eq!(target_reference.path_id, 9);
+        assert!(matches!(
+            target_reference.resolution,
+            MultiFilePPtrResolution::Object {
+                target_file_index: target,
+                target_object_index: 0,
+            } if target == target_file_index
+        ));
+        let managed_graph = reference_graph
+            .managed_graph_for_file(root_file_index)
+            .expect("legacy managed-reference graph exists");
+        assert_eq!(managed_graph.managed_objects().len(), 2);
+        assert_eq!(managed_graph.managed_objects()[0].reference_id, 0);
+        assert_eq!(managed_graph.managed_objects()[0].class_name, "NodeA");
+        assert_eq!(managed_graph.managed_objects()[1].reference_id, 1);
+        assert_eq!(managed_graph.managed_objects()[1].class_name, "NodeB");
+        assert_eq!(managed_graph.managed_references().len(), 3);
+        assert!(managed_graph.managed_references().iter().all(|reference| matches!(
+            reference.resolution,
+            crate::serialized_file::reference_graph::SerializedManagedReferenceResolution::Object { .. }
+        )));
+        let root_edge = managed_graph
+            .managed_references()
+            .iter()
+            .find(|reference| reference.field_path == "m_Structure.root")
+            .expect("legacy root index points to the first registry entry");
+        assert_eq!(root_edge.reference_id, 0);
+        let node_a_edge = managed_graph
+            .managed_references()
+            .iter()
+            .find(|reference| reference.field_path == "m_Structure.references.RefIds[0].data.next")
+            .expect("legacy NodeA points to NodeB");
+        assert_eq!(node_a_edge.reference_id, 1);
+        let node_b_edge = managed_graph
+            .managed_references()
+            .iter()
+            .find(|reference| reference.field_path == "m_Structure.references.RefIds[1].data.next")
+            .expect("legacy NodeB points back to NodeA");
+        assert_eq!(node_b_edge.reference_id, 0);
     }
 
     #[test]

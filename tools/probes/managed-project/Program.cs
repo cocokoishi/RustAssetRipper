@@ -42,12 +42,17 @@ if (args.Length > 0 && args[0] == "export-managed-schema")
 
 if (args.Length > 0 && args[0] == "export-managed-reference-schema")
 {
-    if (args.Length != 5)
+    if (args.Length < 5 || args.Length > 6)
     {
-        Console.Error.WriteLine("usage: managed-project export-managed-reference-schema <input-root> <output-root> <rows-file> <assembly-file>");
+        Console.Error.WriteLine("usage: managed-project export-managed-reference-schema <input-root> <output-root> <rows-file> <assembly-file> [unity-version]");
         return 2;
     }
-    return ExportManagedReferenceSchema(args[1], args[2], args[3], args[4]);
+    return ExportManagedReferenceSchema(
+        args[1],
+        args[2],
+        args[3],
+        args[4],
+        args.Length == 6 ? args[5] : "2021.2.0f1");
 }
 
 if (args.Length > 0 && args[0] == "export-nested-reference-bundle")
@@ -727,7 +732,8 @@ static int ExportManagedReferenceSchema(
     string inputRootArgument,
     string outputRootArgument,
     string rowsArgument,
-    string assemblyArgument)
+    string assemblyArgument,
+    string unityVersionText)
 {
     string inputRoot = Path.GetFullPath(inputRootArgument);
     string outputRoot = Path.GetFullPath(outputRootArgument);
@@ -750,7 +756,11 @@ static int ExportManagedReferenceSchema(
     string serializedPath = Path.Combine(inputRoot, "managed_reference_schema.assets");
     string targetSerializedPath = Path.Combine(inputRoot, "target.assets");
     string inputAssemblyPath = Path.Combine(inputRoot, "ManagedReferenceFixtureScripts.dll");
-    const string unityVersionText = "2021.2.0f1";
+    if (unityVersionText is not "2019.4.40f1" and not "2021.2.0f1")
+    {
+        throw new ArgumentException($"the managed-reference fixture supports only its pinned 2019.4.40f1 and 2021.2.0f1 cases, not {unityVersionText}");
+    }
+    bool stableReferenceIds = unityVersionText == "2021.2.0f1";
     byte[] serializedBytes = BuildManagedReferenceSchemaFile(unityVersionText);
     byte[] targetSerializedBytes = BuildManagedReferenceTargetFile(unityVersionText);
     byte[] assemblyBytes = File.ReadAllBytes(assemblyPath);
@@ -803,21 +813,37 @@ static int ExportManagedReferenceSchema(
     string normalizedBehaviour = behaviourText
         .Replace($"guid: {targetGuid}", "guid: __TEXTASSET_GUID__", StringComparison.Ordinal)
         .Replace($"guid: {scriptGuid}", "guid: __SCRIPT_GUID__", StringComparison.Ordinal);
-    string[] requiredBehaviourFragments =
-    [
-        "  root:\n    rid: 101",
-        "  marker: 77",
-        "  references:\n    version: 2",
-        "    RefIds:\n    - rid: 101",
-        "        value: 13",
-        "        next:\n          rid: 202",
-        "        target: {fileID: 4900000, guid: __TEXTASSET_GUID__, type: 3}",
-        "        weight: 0.5",
-        "    - rid: 202",
-        "        value: 27",
-        "        next:\n          rid: 101",
-        "        label: back",
-    ];
+    string[] requiredBehaviourFragments = stableReferenceIds
+        ?
+        [
+            "  root:\n    rid: 101",
+            "  marker: 77",
+            "  references:\n    version: 2",
+            "    RefIds:\n    - rid: 101",
+            "        value: 13",
+            "        next:\n          rid: 202",
+            "        target: {fileID: 4900000, guid: __TEXTASSET_GUID__, type: 3}",
+            "        weight: 0.5",
+            "    - rid: 202",
+            "        value: 27",
+            "        next:\n          rid: 101",
+            "        label: back",
+        ]
+        :
+        [
+            "  root:\n    id: 0",
+            "  marker: 77",
+            "  references:\n    version: 1",
+            "    RefIds:\n    - rid: 0",
+            "        value: 13",
+            "        next:\n          id: 1",
+            "        target: {fileID: 4900000, guid: __TEXTASSET_GUID__, type: 3}",
+            "        weight: 0.5",
+            "    - rid: 1",
+            "        value: 27",
+            "        next:\n          id: 0",
+            "        label: back",
+        ];
     foreach (string fragment in requiredBehaviourFragments)
     {
         if (!normalizedBehaviour.Contains(fragment, StringComparison.Ordinal))
@@ -849,6 +875,8 @@ static int ExportManagedReferenceSchema(
     rows.WriteLine("# Frozen AssetRipper export for an assembly-resolved no-TypeTree SerializeReference registry.");
     rows.WriteLine("NORMALIZE|TextAsset target GUID becomes __TEXTASSET_GUID__; MonoScript GUID becomes __SCRIPT_GUID__.");
     rows.WriteLine("NORMALIZE|Importer guid and timeCreated fields omitted.");
+    rows.WriteLine($"UNITY_VERSION|{unityVersionText}");
+    rows.WriteLine($"REGISTRY_FORMAT|{(stableReferenceIds ? 2 : 1)}|{(stableReferenceIds ? "counted stable IDs" : "terminated index IDs")}");
     rows.WriteLine($"INPUT_HEX|managed_reference_schema.assets|{Convert.ToHexString(serializedBytes)}");
     rows.WriteLine($"INPUT_HEX|target.assets|{Convert.ToHexString(targetSerializedBytes)}");
     rows.WriteLine($"ASSEMBLY|ManagedReferenceFixtureScripts.dll|{assemblyBytes.Length}|{Convert.ToHexString(SHA256.HashData(assemblyBytes))}");
@@ -1002,6 +1030,7 @@ static byte[] BuildManagedSchemaFile()
 
 static byte[] BuildManagedReferenceSchemaFile(string unityVersionText)
 {
+    bool stableReferenceIds = unityVersionText == "2021.2.0f1";
     List<byte> behaviour = [];
     WriteI32(behaviour, 0); // m_GameObject.m_FileID
     WriteI64(behaviour, 0); // m_GameObject.m_PathID
@@ -1010,26 +1039,57 @@ static byte[] BuildManagedReferenceSchemaFile(string unityVersionText)
     WriteI32(behaviour, 0); // m_Script.m_FileID
     WriteI64(behaviour, 7); // m_Script.m_PathID
     WriteString(behaviour, "ManagedRoot"); // m_Name
-    WriteI64(behaviour, 101); // root.rid -> NodeA
+    if (stableReferenceIds)
+    {
+        WriteI64(behaviour, 101); // root.rid -> NodeA
+    }
+    else
+    {
+        WriteI32(behaviour, 0); // root.rid -> first legacy registry entry
+    }
     WriteI32(behaviour, 77); // marker
 
-    WriteI32(behaviour, 2); // ManagedReferenceRegistry counted format
-    WriteI32(behaviour, 2); // references.Count
-    WriteI64(behaviour, 101); // NodeA rid
+    WriteI32(behaviour, stableReferenceIds ? 2 : 1); // counted or terminated registry format
+    if (stableReferenceIds)
+    {
+        WriteI32(behaviour, 2); // references.Count
+        WriteI64(behaviour, 101); // NodeA rid
+    }
     WriteManagedTypeTriple(behaviour, "NodeA", "Game", "ManagedReferenceFixtureScripts");
     WriteI32(behaviour, 13); // NodeA.value
-    WriteI64(behaviour, 202); // NodeA.next.rid -> NodeB
+    if (stableReferenceIds)
+    {
+        WriteI64(behaviour, 202); // NodeA.next.rid -> NodeB
+    }
+    else
+    {
+        WriteI32(behaviour, 1); // NodeA.next.rid -> NodeB
+    }
     WriteI32(behaviour, 1); // NodeA.target.m_FileID -> target.assets
     WriteI64(behaviour, 9); // NodeA.target.m_PathID -> TextAsset
     WriteI32(behaviour, BitConverter.SingleToInt32Bits(0.5f)); // NodeA.weight
 
-    WriteI64(behaviour, 202); // NodeB rid
+    if (stableReferenceIds)
+    {
+        WriteI64(behaviour, 202); // NodeB rid
+    }
     WriteManagedTypeTriple(behaviour, "NodeB", "Game", "ManagedReferenceFixtureScripts");
     WriteI32(behaviour, 27); // NodeB.value
-    WriteI64(behaviour, 101); // NodeB.next.rid -> NodeA, forming a cycle
+    if (stableReferenceIds)
+    {
+        WriteI64(behaviour, 101); // NodeB.next.rid -> NodeA, forming a cycle
+    }
+    else
+    {
+        WriteI32(behaviour, 0); // NodeB.next.rid -> NodeA, forming a cycle
+    }
     WriteI32(behaviour, 0); // NodeB.target.m_FileID
     WriteI64(behaviour, 0); // NodeB.target.m_PathID
     WriteString(behaviour, "back"); // NodeB.label
+    if (!stableReferenceIds)
+    {
+        WriteManagedTypeTriple(behaviour, "Terminus", "UnityEngine.DMAT", "FAKE_ASM");
+    }
     AlignFour(behaviour); // registry array alignment
 
     List<byte> script = [];

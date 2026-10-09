@@ -9875,10 +9875,8 @@ mod tests {
         drop(input);
     }
 
-    #[test]
-    fn export_project_recovers_assembly_resolved_managed_references_without_file_typetrees() {
+    fn assert_assembly_resolved_managed_reference_cli(fixture: &str) {
         let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
-        let fixture = include_str!("processing/managed_reference_schema_project_fixture.txt");
         let decode_hex = |hex: &str| {
             assert!(hex.len().is_multiple_of(2), "fixture hex has even length");
             hex.as_bytes()
@@ -10008,6 +10006,20 @@ mod tests {
             .join("ProjectSettings/ProjectVersion.txt")
             .is_file());
         assert!(output_root.join("Packages/manifest.json").is_file());
+    }
+
+    #[test]
+    fn export_project_recovers_assembly_resolved_managed_references_without_file_typetrees() {
+        assert_assembly_resolved_managed_reference_cli(include_str!(
+            "processing/managed_reference_schema_project_fixture.txt"
+        ));
+    }
+
+    #[test]
+    fn export_project_recovers_legacy_assembly_managed_references_without_file_typetrees() {
+        assert_assembly_resolved_managed_reference_cli(include_str!(
+            "processing/managed_reference_legacy_schema_project_fixture.txt"
+        ));
     }
 
     #[test]
