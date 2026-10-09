@@ -2659,7 +2659,8 @@ mod tests {
             std::fs::read_to_string(output_root.join("Assets/Scenes/FromBuild.unity")).unwrap();
         assert!(first_scene.contains("--- !u!1 &100"));
         assert!(first_scene.contains("--- !u!4 &"));
-        assert!(first_scene.contains("m_Components:"));
+        assert!(first_scene.contains("m_Component:"));
+        assert!(!first_scene.contains("m_Components:"));
         assert!(first_scene.contains("m_GameObject:"));
 
         let first_meta =

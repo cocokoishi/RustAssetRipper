@@ -1487,11 +1487,10 @@ fn prepare_prefab_collections(
                     } else {
                         PrefabAssetRepresentation::LegacyPrefabMarker
                     },
-                    if unity_version_has_prefab_importer(project_version) {
-                        "PrefabInstance".to_owned()
-                    } else {
-                        "GameObject".to_owned()
-                    },
+                    // The generated class-1001 marker is hidden implementation state. The
+                    // baseline names a Prefab collection created from a loose GameObject after
+                    // its root GameObject, even when the collection uses PrefabImporter.
+                    "GameObject".to_owned(),
                 )
             }
         };
@@ -1891,6 +1890,15 @@ fn prefab_importer(asset_bundle_name: Option<&str>) -> Result<UnityYamlNode, Box
         "externalObjects",
         UnityYamlNode::mapping(UnityYamlMappingStyle::Flow),
     )?;
+    importer.insert_field("addedObjectFileIDs", UnityYamlNode::string(""))?;
+    importer.insert_field(
+        "isPrefabVariant",
+        UnityYamlNode::scalar(super::unity_yaml::UnityYamlScalar::Signed(0)),
+    )?;
+    importer.insert_field(
+        "unableToImportOnPreviousDomainReload",
+        UnityYamlNode::scalar(super::unity_yaml::UnityYamlScalar::Signed(0)),
+    )?;
     importer.insert_field("userData", UnityYamlNode::string(""))?;
     importer.insert_field(
         "assetBundleName",
@@ -2209,7 +2217,8 @@ mod tests {
     use crate::export::settings_file::ExportSettingsFile;
     use crate::export::workspace_yaml::tests::{
         load_workspace_bytes, load_workspace_bytes_with_source_factory,
-        make_existing_prefab_instance_file, make_game_object_without_transform_file,
+        load_workspace_named_bytes_with_source_factory, make_existing_prefab_instance_file,
+        make_game_object_without_transform_file,
     };
     use crate::io::platform_structure::PlatformResourceProvider;
     use crate::processing::scene_naming::SceneUnityVersion;
@@ -2290,8 +2299,8 @@ mod tests {
         )
         .unwrap();
 
-        let prefab_path = output_root.join("Assets/PrefabInstance/Root.prefab");
-        let prefab_meta_path = output_root.join("Assets/PrefabInstance/Root.prefab.meta");
+        let prefab_path = output_root.join("Assets/GameObject/Root.prefab");
+        let prefab_meta_path = output_root.join("Assets/GameObject/Root.prefab.meta");
         let prefab_yaml = std::fs::read_to_string(&prefab_path).unwrap();
         let prefab_meta = std::fs::read_to_string(&prefab_meta_path).unwrap();
         let game_object_id = yaml_document_file_id(&prefab_yaml, 1);
@@ -2315,7 +2324,7 @@ mod tests {
             prefab_meta.contains("assetBundleVariant:\n"),
             "{prefab_meta}"
         );
-        assert!(!output_root.join("Assets/GameObject").exists());
+        assert!(!output_root.join("Assets/PrefabInstance").exists());
         assert_eq!(report.asset_file_count, 1);
         assert_eq!(report.meta_file_count, 1);
         assert_eq!(report.collection_count, 1);
@@ -2385,6 +2394,127 @@ mod tests {
         assert_eq!(report.meta_file_count, 1);
         assert_eq!(report.collection_count, 1);
         assert_eq!(report.exported_object_count, 3);
+        assert!(report.processing_warnings.is_empty());
+
+        std::fs::remove_dir_all(output_root).unwrap();
+    }
+
+    #[test]
+    fn project_export_matches_source_for_a_no_tree_generated_prefab_hierarchy() {
+        let fixture = include_str!("no_tree_prefab_source_2019_4_input.hex");
+        let hex = fixture
+            .lines()
+            .find(|line| !line.is_empty() && !line.starts_with('#'))
+            .expect("source-authored input fixture has a hex payload");
+        assert_eq!(hex.len() % 2, 0, "source fixture hex has an odd length");
+        let bytes = hex
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16)
+                    .expect("source fixture contains ASCII hexadecimal bytes")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(bytes.len(), 360);
+
+        let (filesystem, workspace) =
+            load_workspace_named_bytes_with_source_factory("NoTreeRoot.unity", &bytes);
+        let serialized_file = workspace.files().first().expect("one source file");
+        assert_eq!(serialized_file.metadata.objects.len(), 2);
+        assert!(serialized_file
+            .metadata
+            .types
+            .iter()
+            .all(|serialized_type| serialized_type
+                .type_tree
+                .as_ref()
+                .is_none_or(|tree| tree.nodes.is_empty())));
+        let objects = ObjectWorkspace::load_from_vfs(
+            &filesystem,
+            &workspace,
+            ObjectWorkspaceLimits::default(),
+        )
+        .unwrap();
+        assert!(objects.report().is_complete(), "{:?}", objects.report());
+        assert_eq!(objects.objects().len(), 2);
+        assert!(objects.objects().iter().all(|object| {
+            matches!(
+                &object.factory.kind,
+                crate::processing::asset_factory::FactoryAssetKind::Generated(_)
+            ) && object.recovered_type_tree.is_some()
+                && object.payload.is_ok()
+        }));
+        assert_eq!(objects.get(0, 0).unwrap().factory.name, "NoTreeRoot");
+
+        let reference_graph = workspace
+            .reference_graph(MultiFileReferenceGraphLimits::default())
+            .unwrap();
+        assert!(reference_graph.is_complete());
+        assert!(reference_graph.references().iter().any(|reference| {
+            reference.source_path_id == 10
+                && reference.path_id == 11
+                && reference.field_path == "m_Component[0].component"
+                && matches!(
+                    reference.resolution,
+                    MultiFilePPtrResolution::Object {
+                        target_file_index: 0,
+                        target_object_index: 1,
+                    }
+                )
+        }));
+        assert!(reference_graph.references().iter().any(|reference| {
+            reference.source_path_id == 11
+                && reference.path_id == 10
+                && reference.field_path == "m_GameObject"
+                && matches!(
+                    reference.resolution,
+                    MultiFilePPtrResolution::Object {
+                        target_file_index: 0,
+                        target_object_index: 0,
+                    }
+                )
+        }));
+
+        let root_catalog = RootResourceFileCatalog::default();
+        let provider = PlatformResourceProvider::new(None, None);
+        let settings = ExportSettingsFile::from(ExportDefaults::default());
+        let output_root = crate::test_support::unique_test_directory("project-no-tree-prefab-e2e");
+        let report = export_workspace_yaml_project_with_settings(
+            &output_root,
+            false,
+            &filesystem,
+            &root_catalog,
+            &provider,
+            &workspace,
+            &objects,
+            &reference_graph,
+            &settings,
+            WorkspaceProjectExportLimits::default(),
+        )
+        .unwrap();
+
+        let prefab_path = output_root.join("Assets/GameObject/NoTreeRoot.prefab");
+        let prefab_meta_path = output_root.join("Assets/GameObject/NoTreeRoot.prefab.meta");
+        let prefab_yaml = std::fs::read_to_string(&prefab_path).unwrap();
+        let source_yaml = include_str!("no_tree_prefab_source_2019_4.yaml");
+        assert_eq!(
+            prefab_yaml.replace("\r\n", "\n"),
+            source_yaml.replace("\r\n", "\n")
+        );
+        assert!(!output_root.join("Assets/PrefabInstance").exists());
+        let prefab_meta = std::fs::read_to_string(prefab_meta_path).unwrap();
+        let source_meta = include_str!("no_tree_prefab_source_2019_4.meta.yaml");
+        let normalize_meta = |text: &str| {
+            text.lines()
+                .filter(|line| !line.starts_with("guid: ") && !line.starts_with("timeCreated: "))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert_eq!(normalize_meta(&prefab_meta), normalize_meta(source_meta));
+        assert_eq!(report.asset_file_count, 1);
+        assert_eq!(report.meta_file_count, 1);
+        assert_eq!(report.collection_count, 1);
+        assert_eq!(report.exported_object_count, 2);
         assert!(report.processing_warnings.is_empty());
 
         std::fs::remove_dir_all(output_root).unwrap();

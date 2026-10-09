@@ -34,6 +34,10 @@ The reference source was read only. No build, export, or test output was written
 - `dotnet build AssetRipper.slnx -c Release` exits 0 with 32 warnings and 0 errors.
 - `dotnet test` over the 8 test projects reports 339 passed and 20 failed. All 20 failures are the CRLF
   checkout artifact recorded as `DIFF-REFERENCE-TEST-NEWLINE-001`; they are not product defects.
+- Unity Editor 2022.3.22f1 is installed at `C:\Program Files\Unity 2022.3.22f1`. A fresh batch-mode
+  launch against an empty synthetic project exited 1 with `No valid Unity Editor license found`;
+  therefore no Unity project import/runtime evidence is currently available. The probe output is
+  recorded in `validation-log.md`, and its generated project/log remain under the ignored `target/`.
 - `cargo`, `rustc`, and `rustup` are still not on `PATH` and are used from `%USERPROFILE%\.cargo\bin`.
 - The active Rust toolchain is `rustc 1.98.1`, `cargo 1.98.1`, `stable-aarch64-pc-windows-msvc`. The Rust
   package declares 1.87 as its minimum because `ruzstd` 0.9.0 requires it; that minimum is untested.

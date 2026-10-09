@@ -1725,12 +1725,15 @@ fn workspace_object_to_unity_yaml_document_with_context(
     let mut hints =
         UnityYamlObjectConversionHints::from_type_tree(type_tree, unity_version, limits)
             .map_err(UnityYamlWorkspaceExportError::Conversion)?;
-    if generated_prefab_internal.is_some()
-        && matches!(&object.factory.kind, FactoryAssetKind::Generated(_))
+    let generated_game_object_or_transform =
+        matches!(class_id, 1 | 4) && matches!(&object.factory.kind, FactoryAssetKind::Generated(_));
+    if generated_game_object_or_transform
+        || (generated_prefab_internal.is_some()
+            && matches!(&object.factory.kind, FactoryAssetKind::Generated(_)))
     {
         // Generated source classes walk their own original member names. TPK recovery has
-        // already applied the baseline's normalized aliases, so replaying those aliases here
-        // would emit a different legacy Prefab document from the generated-class route.
+        // already selected the source class layout. Replaying YAML aliases for GameObject and
+        // Transform changes source member names such as m_ObjectHideFlags and m_Component.
         hints.field_name_aliases.clear();
         hints.preserve_type_tree_field_names = true;
     }
@@ -3315,14 +3318,20 @@ pub(crate) mod tests {
     pub(crate) fn load_workspace_bytes_with_source_factory(
         bytes: &[u8],
     ) -> (VirtualFileSystem, SerializedFileWorkspace) {
+        load_workspace_named_bytes_with_source_factory("main.assets", bytes)
+    }
+
+    pub(crate) fn load_workspace_named_bytes_with_source_factory(
+        file_name: &str,
+        bytes: &[u8],
+    ) -> (VirtualFileSystem, SerializedFileWorkspace) {
         let mut filesystem = VirtualFileSystem::new();
         filesystem.create_directory(Some("/game")).unwrap();
-        filesystem
-            .write_all_bytes("/game/main.assets", bytes)
-            .unwrap();
+        let virtual_path = format!("/game/{file_name}");
+        filesystem.write_all_bytes(&virtual_path, bytes).unwrap();
         let input = [DependencyFilePath {
-            file_name: "main.assets".to_owned(),
-            virtual_path: "/game/main.assets".to_owned(),
+            file_name: file_name.to_owned(),
+            virtual_path,
         }];
         let workspace = SerializedFileWorkspace::load_from_vfs(
             &filesystem,

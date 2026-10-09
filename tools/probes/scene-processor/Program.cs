@@ -62,12 +62,17 @@ try
 		ExportLegacyPrefab(args[1], args[2], args[3]);
 		return 0;
 	}
+	if (args[0] == "notree-prefab-export" && args.Length == 4)
+	{
+		ExportNoTreePrefab(args[1], args[2], args[3]);
+		return 0;
+	}
 	if (args[0] == "raw-fallback-export" && args.Length == 4)
 	{
 		ExportRawFallback(args[1], args[2], args[3]);
 		return 0;
 	}
-	Console.Error.WriteLine("usage: tpk <version> <classId...> | naming <version> <name...> | process <rows> <file...> | legacy-export <input> <rows> <output> | raw-fallback-export <input> <rows> <output>");
+	Console.Error.WriteLine("usage: tpk <version> <classId...> | naming <version> <name...> | process <rows> <file...> | legacy-export <input> <rows> <output> | notree-prefab-export <input> <rows> <output> | raw-fallback-export <input> <rows> <output>");
 	return 2;
 }
 catch (Exception ex)
@@ -260,6 +265,153 @@ static void ExportLegacyPrefab(string inputPath, string rowsPath, string outputR
 			rows.WriteLine($"CONTENT|{relativePath}|{Convert.ToBase64String(content)}");
 		}
 	}
+}
+
+static void ExportNoTreePrefab(string inputPath, string rowsPath, string outputRoot)
+{
+	string inputFullPath = Path.GetFullPath(inputPath);
+	string rowsFullPath = Path.GetFullPath(rowsPath);
+	string outputFullPath = Path.GetFullPath(outputRoot);
+	if (File.Exists(inputFullPath) || Directory.Exists(inputFullPath))
+	{
+		throw new IOException($"refusing to overwrite probe input {inputFullPath}");
+	}
+	if (File.Exists(rowsFullPath) || Directory.Exists(rowsFullPath))
+	{
+		throw new IOException($"refusing to overwrite probe rows {rowsFullPath}");
+	}
+	if (Directory.Exists(outputFullPath) && Directory.EnumerateFileSystemEntries(outputFullPath).Any())
+	{
+		throw new IOException($"refusing to export into non-empty output {outputFullPath}");
+	}
+
+	Directory.CreateDirectory(Path.GetDirectoryName(inputFullPath)!);
+	Directory.CreateDirectory(Path.GetDirectoryName(rowsFullPath)!);
+	Directory.CreateDirectory(outputFullPath);
+	byte[] inputBytes = BuildNoTreePrefabFile();
+	File.WriteAllBytes(inputFullPath, inputBytes);
+
+	Logger.Add(new ConsoleLogger());
+	FullConfiguration settings = new();
+	ExportHandler handler = new(settings);
+	GameData gameData = handler.LoadAndProcess([inputFullPath], LocalFileSystem.Instance);
+	handler.Export(gameData, outputFullPath, LocalFileSystem.Instance);
+
+	string[] exportedFiles = Directory.GetFiles(outputFullPath, "*", SearchOption.AllDirectories)
+		.OrderBy(path => Path.GetRelativePath(outputFullPath, path), StringComparer.Ordinal)
+		.ToArray();
+	using StreamWriter rows = new(rowsFullPath, false, new System.Text.UTF8Encoding(false)) { NewLine = "\n" };
+	rows.WriteLine("# Frozen AssetRipper source-generated no-TypeTree Unity 2019.4.40f1 project export.");
+	rows.WriteLine($"INPUT|{Path.GetFileName(inputFullPath)}|{inputBytes.Length}|{Convert.ToHexString(SHA256.HashData(inputBytes))}");
+	rows.WriteLine($"INPUT_HEX|{Convert.ToHexString(inputBytes)}");
+	foreach (IUnityObjectBase asset in gameData.GameBundle.FetchAssets())
+	{
+		string assetName = asset is INamed named ? named.Name.ToString() : "<unnamed>";
+		rows.WriteLine($"OBJECT|{asset.GetType().Name}|{asset.ClassID}|{asset.PathID}|{assetName}");
+		if (asset is IGameObject gameObject)
+		{
+			rows.WriteLine($"GAMEOBJECT|{asset.PathID}|{gameObject.Layer}|{gameObject.IsActive_Boolean}|{FormatAssets(gameObject.Components)}");
+		}
+		if (asset is ITransform transform)
+		{
+			rows.WriteLine($"TRANSFORM|{asset.PathID}|{transform.LocalPosition_C4.X}|{transform.LocalPosition_C4.Y}|{transform.LocalPosition_C4.Z}|{transform.LocalRotation_C4.X}|{transform.LocalRotation_C4.Y}|{transform.LocalRotation_C4.Z}|{transform.LocalRotation_C4.W}|{transform.LocalScale_C4.X}|{transform.LocalScale_C4.Y}|{transform.LocalScale_C4.Z}|{transform.RootOrder_C4}");
+		}
+	}
+	foreach (string file in exportedFiles)
+	{
+		string relativePath = Path.GetRelativePath(outputFullPath, file).Replace('\\', '/');
+		byte[] content = File.ReadAllBytes(file);
+		rows.WriteLine($"FILE|{relativePath}|{content.Length}|{Convert.ToHexString(SHA256.HashData(content))}");
+		if (string.Equals(Path.GetExtension(file), ".prefab", StringComparison.OrdinalIgnoreCase)
+			|| string.Equals(Path.GetFileName(file), Path.GetFileNameWithoutExtension(file) + ".meta", StringComparison.OrdinalIgnoreCase)
+			&& file.EndsWith(".prefab.meta", StringComparison.OrdinalIgnoreCase))
+		{
+			rows.WriteLine($"CONTENT|{relativePath}|{Convert.ToBase64String(content)}");
+		}
+	}
+}
+
+static byte[] BuildNoTreePrefabFile()
+{
+	UnityVersion version = UnityVersion.Parse("2019.4.40f1");
+	SerializedFile template = new SerializedFileBuilder
+	{
+		Generation = FormatVersion.Unknown_10,
+		Version = version,
+		Platform = BuildTarget.NoTarget,
+		EndianType = EndianType.LittleEndian,
+		HasTypeTree = false,
+	}.Build();
+	GameAssetFactory factory = new(new BaseManager(s => { }));
+	GameBundle bundle = new();
+	SerializedAssetCollection collection = bundle.AddCollectionFromSerializedFile(template, factory);
+	IUnityObjectBase gameObjectAsset = AssetFactory.CreateSerialized(new AssetInfo(collection, 10, 1), version)
+		?? throw new InvalidDataException("source factory did not create the 2019.4 GameObject");
+	if (gameObjectAsset is not IGameObject gameObject)
+	{
+		throw new InvalidDataException($"source factory returned {gameObjectAsset.GetType().Name}, expected IGameObject");
+	}
+	IUnityObjectBase transformAsset = AssetFactory.CreateSerialized(new AssetInfo(collection, 11, 4), version)
+		?? throw new InvalidDataException("source factory did not create the 2019.4 Transform");
+	if (transformAsset is not ITransform transform)
+	{
+		throw new InvalidDataException($"source factory returned {transformAsset.GetType().Name}, expected ITransform");
+	}
+	transform.InitializeDefault();
+	transform.GameObject_C4P = gameObject;
+	transform.LocalPosition_C4.X = 1.25f;
+	transform.LocalPosition_C4.Y = -2.5f;
+	transform.LocalPosition_C4.Z = 3.75f;
+	transform.LocalRotation_C4.X = 0.0f;
+	transform.LocalRotation_C4.Y = 0.70710677f;
+	transform.LocalRotation_C4.Z = 0.0f;
+	transform.LocalRotation_C4.W = 0.70710677f;
+	transform.LocalScale_C4.X = 2.0f;
+	transform.LocalScale_C4.Y = 0.5f;
+	transform.LocalScale_C4.Z = 1.25f;
+	transform.RootOrder_C4 = 0;
+	gameObject.AddComponent(ClassIDType.Transform, transform);
+	gameObject.Name = new Utf8String("NoTreeRoot");
+	gameObject.Layer = 12;
+	gameObject.IsActive_Boolean = true;
+
+	byte[] gameObjectPayload = WriteAsset(gameObjectAsset, true);
+	byte[] transformPayload = WriteAsset(transformAsset, true);
+	SerializedType gameObjectType = new() { RawTypeID = 1 };
+	SerializedType transformType = new() { RawTypeID = 4 };
+	SerializedFile file = new SerializedFileBuilder
+	{
+		Generation = FormatVersion.Unknown_10,
+		Version = version,
+		Platform = BuildTarget.NoTarget,
+		EndianType = EndianType.LittleEndian,
+		HasTypeTree = false,
+		Types = { gameObjectType, transformType },
+		Objects =
+		{
+			new ObjectInfo(gameObjectType) { FileID = 10, TypeID = 1, ObjectData = gameObjectPayload },
+			new ObjectInfo(transformType) { FileID = 11, TypeID = 4, ObjectData = transformPayload },
+		},
+	}.Build();
+	file.FilePath = "NoTreeRoot.unity";
+	return file.ToByteArray();
+}
+
+static byte[] WriteAsset(IUnityObjectBase asset, bool editor)
+{
+	using MemoryStream stream = new();
+	using (AssetWriter writer = new(stream, asset.Collection))
+	{
+		if (editor)
+		{
+			asset.WriteEditor(writer);
+		}
+		else
+		{
+			asset.WriteRelease(writer);
+		}
+	}
+	return stream.ToArray();
 }
 
 static void ExportRawFallback(string inputPath, string rowsPath, string outputRoot)
