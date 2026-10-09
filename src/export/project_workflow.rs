@@ -227,6 +227,7 @@ struct SavedAssemblyExport {
     source_virtual_path: String,
     relative_path: String,
     guid: [u8; 16],
+    generated_forwarder: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -548,7 +549,7 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
                         "the imported manager has no matching script type; its source pointer is retained and no .cs file is emitted"
                     }
                     (true, _) => {
-                        "the assembly is absent from the imported catalog; its source GUID/fileID pointer is retained and no DLL is emitted"
+                            "the assembly is absent from the imported catalog; its source GUID/fileID pointer is retained and the missing script DLL is not fabricated"
                     }
                     (false, _) => {
                         "the source script content is unavailable; its pointer is retained and no .cs file is emitted"
@@ -924,7 +925,7 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
                     )
                     .map_err(|error| {
                         invalid_project(format!(
-                            "saved assembly {:?} could not be read from {}: {error}",
+                            "managed assembly {:?} could not be read from {}: {error}",
                             assembly.assembly_name, assembly.source_virtual_path
                         ))
                     })?;
@@ -933,14 +934,35 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
                     .rsplit('/')
                     .next()
                     .unwrap_or(&assembly.relative_path);
-                let bytes = ManagedAssembly::serialize_for_export(
-                    file_name,
-                    &input_bytes,
-                    ManagedAssemblyLimits::default(),
-                )
-                .map_err(|error| {
+                let serialized = match assembly.generated_forwarder.as_deref() {
+                    Some("System.Runtime.CompilerServices.Unsafe") => {
+                        ManagedAssembly::create_unsafe_forwarder(
+                            &assembly.source_virtual_path,
+                            &input_bytes,
+                            ManagedAssemblyLimits::default(),
+                        )
+                    }
+                    Some("System.Runtime.InteropServices") => {
+                        ManagedAssembly::create_interop_services_forwarder(
+                            &assembly.source_virtual_path,
+                            &input_bytes,
+                            ManagedAssemblyLimits::default(),
+                        )
+                    }
+                    Some(helper_name) => {
+                        return Err(invalid_project(format!(
+                            "unknown synthesized forwarding assembly {helper_name:?}"
+                        )))
+                    }
+                    None => ManagedAssembly::serialize_for_export(
+                        file_name,
+                        &input_bytes,
+                        ManagedAssemblyLimits::default(),
+                    ),
+                };
+                let bytes = serialized.map_err(|error| {
                     invalid_project(format!(
-                        "saved assembly {:?} could not be reserialized from {}: {error}",
+                        "managed assembly {:?} could not be exported from {}: {error}",
                         assembly.assembly_name, assembly.source_virtual_path
                     ))
                 })?;
@@ -961,7 +983,7 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
                     bytes,
                     meta: Some(PlannedProjectMeta {
                         importer_class: "PluginImporter".to_owned(),
-                        importer: plugin_importer_yaml(project_version)?,
+                        importer: plugin_importer_yaml(editor_version_text)?,
                     }),
                     label: assembly.assembly_name.clone(),
                 });
@@ -1782,7 +1804,43 @@ fn plan_saved_assembly_exports(
             source_virtual_path,
             relative_path: format!("Assets/Plugins/{file_name}"),
             guid: calculate_assembly_guid(&file_name).to_byte_array(),
+            generated_forwarder: None,
         });
+    }
+
+    if let Some(mscorlib) = catalog.assembly("mscorlib") {
+        let mscorlib_path = mscorlib.source_virtual_path.clone().ok_or_else(|| {
+            invalid_project("loaded mscorlib has no source VFS stream for forwarding modules")
+        })?;
+        for helper_name in [
+            "System.Runtime.CompilerServices.Unsafe",
+            "System.Runtime.InteropServices",
+        ] {
+            if catalog.assembly(helper_name).is_some() {
+                continue;
+            }
+            let is_reference = reference_assembly_maps
+                .guid_for(&version, helper_name)
+                .map_err(|error| {
+                    invalid_project(format!(
+                        "forwarding assembly {helper_name:?} reference lookup failed: {error}"
+                    ))
+                })?
+                .is_some();
+            if assembly_export_type(is_reference, true, settings.script_export_mode, helper_name)
+                != AssemblyExportType::Save
+            {
+                continue;
+            }
+            let file_name = add_assembly_file_extension(helper_name);
+            exports.push(SavedAssemblyExport {
+                assembly_name: helper_name.to_owned(),
+                source_virtual_path: mscorlib_path.clone(),
+                relative_path: format!("Assets/Plugins/{file_name}"),
+                guid: calculate_assembly_guid(&file_name).to_byte_array(),
+                generated_forwarder: Some(helper_name.to_owned()),
+            });
+        }
     }
     Ok(exports)
 }
@@ -2592,22 +2650,34 @@ fn mono_importer_yaml(execution_order: i16) -> Result<UnityYamlNode, Box<dyn Err
     Ok(importer)
 }
 
-fn plugin_importer_yaml(
-    project_version: SceneUnityVersion,
-) -> Result<UnityYamlNode, Box<dyn Error>> {
-    if !matches!(
-        (project_version.major, project_version.minor),
-        (2019, 4) | (2021, 2)
-    ) {
+fn plugin_importer_yaml(unity_version_text: &str) -> Result<UnityYamlNode, Box<dyn Error>> {
+    let version = FactoryUnityVersion::parse(unity_version_text).ok_or_else(|| {
+        invalid_project(format!(
+            "PluginImporter export cannot parse Unity version {unity_version_text:?}"
+        ))
+    })?;
+    if version.is_unsupported() {
         return Err(invalid_project(format!(
-            "PluginImporter field layout is source-runtime verified only for Unity 2019.4 and 2021.2, not {}.{}",
-            project_version.major, project_version.minor
+            "PluginImporter export does not support baseline-unsupported Unity version {unity_version_text:?}"
         )));
     }
+    let version_bits = version.source_order_bits().ok_or_else(|| {
+        invalid_project(format!(
+            "PluginImporter export cannot order Unity version {unity_version_text:?}"
+        ))
+    })?;
+    // The frozen class-1050 dispatch changes the generated PluginImporter type at 2023.3.0a15;
+    // that version switches platformData from the old pair sequence to the named map.
+    let named_platform_data_from = FactoryUnityVersion::parse("2023.3.0a15")
+        .and_then(|version| version.source_order_bits())
+        .ok_or_else(|| invalid_project("invalid internal PluginImporter version transition"))?;
+    let uses_named_platform_data = version_bits >= named_platform_data_from;
     let mut importer = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
     importer.insert_field(
         "serializedVersion",
-        UnityYamlNode::scalar(super::unity_yaml::UnityYamlScalar::Signed(2)),
+        UnityYamlNode::scalar(super::unity_yaml::UnityYamlScalar::Signed(
+            if uses_named_platform_data { 3 } else { 2 },
+        )),
     )?;
     importer.insert_field(
         "externalObjects",
@@ -2637,42 +2707,73 @@ fn plugin_importer_yaml(
         )?;
     }
 
-    let mut platform_data = UnityYamlNode::sequence(UnityYamlSequenceStyle::Block);
-    let mut any_platform = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
-    any_platform.insert_field("Any", UnityYamlNode::string(""))?;
-    let mut any_settings = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
-    any_settings.insert_field(
-        "enabled",
-        UnityYamlNode::scalar(super::unity_yaml::UnityYamlScalar::Signed(1)),
-    )?;
-    any_settings.insert_field(
-        "settings",
-        UnityYamlNode::mapping(UnityYamlMappingStyle::Flow),
-    )?;
-    let mut any_entry = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
-    any_entry.insert_field("first", any_platform)?;
-    any_entry.insert_field("second", any_settings)?;
-    platform_data.push(any_entry)?;
+    let platform_data = if uses_named_platform_data {
+        let mut platform_data = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+        let mut any_settings = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+        any_settings.insert_field(
+            "enabled",
+            UnityYamlNode::scalar(super::unity_yaml::UnityYamlScalar::Signed(1)),
+        )?;
+        any_settings.insert_field(
+            "settings",
+            UnityYamlNode::mapping(UnityYamlMappingStyle::Flow),
+        )?;
+        platform_data.insert_field("Any", any_settings)?;
 
-    let mut editor_platform = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
-    editor_platform.insert_field("Editor", UnityYamlNode::string("Editor"))?;
-    let mut editor_settings = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
-    editor_settings.insert_field(
-        "enabled",
-        UnityYamlNode::scalar(super::unity_yaml::UnityYamlScalar::Signed(0)),
-    )?;
-    let mut initialized = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
-    initialized.insert_field(
-        "DefaultValueInitialized",
-        UnityYamlNode::scalar(super::unity_yaml::UnityYamlScalar::PlainString(
-            "true".to_owned(),
-        )),
-    )?;
-    editor_settings.insert_field("settings", initialized)?;
-    let mut editor_entry = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
-    editor_entry.insert_field("first", editor_platform)?;
-    editor_entry.insert_field("second", editor_settings)?;
-    platform_data.push(editor_entry)?;
+        let mut editor_settings = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+        editor_settings.insert_field(
+            "enabled",
+            UnityYamlNode::scalar(super::unity_yaml::UnityYamlScalar::Signed(0)),
+        )?;
+        let mut editor_defaults = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+        editor_defaults.insert_field(
+            "DefaultValueInitialized",
+            UnityYamlNode::scalar(super::unity_yaml::UnityYamlScalar::PlainString(
+                "true".to_owned(),
+            )),
+        )?;
+        editor_settings.insert_field("settings", editor_defaults)?;
+        platform_data.insert_field("Editor", editor_settings)?;
+        platform_data
+    } else {
+        let mut platform_data = UnityYamlNode::sequence(UnityYamlSequenceStyle::Block);
+        let mut any_platform = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+        any_platform.insert_field("Any", UnityYamlNode::string(""))?;
+        let mut any_settings = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+        any_settings.insert_field(
+            "enabled",
+            UnityYamlNode::scalar(super::unity_yaml::UnityYamlScalar::Signed(1)),
+        )?;
+        any_settings.insert_field(
+            "settings",
+            UnityYamlNode::mapping(UnityYamlMappingStyle::Flow),
+        )?;
+        let mut any_entry = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+        any_entry.insert_field("first", any_platform)?;
+        any_entry.insert_field("second", any_settings)?;
+        platform_data.push(any_entry)?;
+
+        let mut editor_platform = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+        editor_platform.insert_field("Editor", UnityYamlNode::string("Editor"))?;
+        let mut editor_settings = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+        editor_settings.insert_field(
+            "enabled",
+            UnityYamlNode::scalar(super::unity_yaml::UnityYamlScalar::Signed(0)),
+        )?;
+        let mut initialized = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+        initialized.insert_field(
+            "DefaultValueInitialized",
+            UnityYamlNode::scalar(super::unity_yaml::UnityYamlScalar::PlainString(
+                "true".to_owned(),
+            )),
+        )?;
+        editor_settings.insert_field("settings", initialized)?;
+        let mut editor_entry = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+        editor_entry.insert_field("first", editor_platform)?;
+        editor_entry.insert_field("second", editor_settings)?;
+        platform_data.push(editor_entry)?;
+        platform_data
+    };
     importer.insert_field("platformData", platform_data)?;
 
     let mut output = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
@@ -3051,7 +3152,7 @@ mod tests {
     use super::{
         asset_family_fallback, export_workspace_yaml_project_with_assembly_catalog,
         export_workspace_yaml_project_with_settings, new_collection_guid, package_manifest_json,
-        source_reference_assembly_maps, WorkspaceProjectExportLimits,
+        plugin_importer_yaml, source_reference_assembly_maps, WorkspaceProjectExportLimits,
     };
     use crate::export::settings::ExportDefaults;
     use crate::export::settings_file::ExportSettingsFile;
@@ -3094,6 +3195,55 @@ mod tests {
         let after = SceneUnityVersion::parse("2019.2.0f1").unwrap();
         assert!(!package_manifest_json(before).contains("com.unity.modules.androidjni"));
         assert!(package_manifest_json(after).contains("\"com.unity.modules.androidjni\""));
+    }
+
+    #[test]
+    fn plugin_importer_layout_tracks_the_source_class_version_transition() {
+        let cases = [
+            (
+                "2019.1.0f1",
+                include_str!(
+                    "../processing/managed_assembly_unsafe_forwarder_2019a1_source_meta.txt"
+                ),
+            ),
+            (
+                "2023.3.0a14",
+                include_str!(
+                    "../processing/managed_assembly_unsafe_forwarder_2023a14_source_meta.txt"
+                ),
+            ),
+            (
+                "2023.3.0a15",
+                include_str!(
+                    "../processing/managed_assembly_unsafe_forwarder_2023a15_source_meta.txt"
+                ),
+            ),
+            (
+                "2023.3.0a16",
+                include_str!(
+                    "../processing/managed_assembly_unsafe_forwarder_2023a16_source_meta.txt"
+                ),
+            ),
+        ];
+        for (version, source_meta) in cases {
+            let importer = plugin_importer_yaml(version).expect("source-backed importer version");
+            let rust_importer = crate::export::unity_yaml::write_unity_yaml_mapping(
+                &importer,
+                crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+            )
+            .expect("PluginImporter YAML serializes");
+            let source_importer = source_meta
+                .replace("\r\n", "\n")
+                .split_once("PluginImporter:\n")
+                .expect("source metadata has a PluginImporter body")
+                .1
+                .to_owned();
+            let indented_rust_importer = rust_importer
+                .lines()
+                .map(|line| format!("  {line}\n"))
+                .collect::<String>();
+            assert_eq!(indented_rust_importer, source_importer, "Unity {version}");
+        }
     }
 
     #[test]

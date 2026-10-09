@@ -4183,3 +4183,31 @@ These results do not pass the first-phase gate. The reference .NET solution buil
 - The Rust PE layouts differ in size from the source outputs: 3,072 versus 5,120 bytes (complex), 2,560 versus 4,608 bytes (FixtureScripts), and 2,560 versus 5,120 bytes (managed-reference). These fixtures do not prove all PE resource, signing, or machine variants. The source-added `System.Runtime.CompilerServices.Unsafe.dll` and `ProjectSettings/EditorSettings.asset` remain missing; the broader script/runtime and project-export rows remain open.
 - Full Rust validation passed on this code state: `cargo test --workspace --locked` (1,565 library tests and 112 CLI tests passed; 1 doctest ignored), `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo fmt --all -- --check`. `tools/verify-baseline.ps1` verified all 1,449 frozen source files unchanged. `git diff --check` passed before this log append and must be rerun after documentation edits.
 - The header-indexed parity report still has 386 rows, 362 verified, 12 implemented but unverified, 8 in progress, 3 investigated, and 1 externally blocked (24 non-verified); it correctly returns `phase1_gate: OPEN`. No broad row closed. Phase 1 remains active, Phase 2 remains locked, and no user AssetBundle or UABEA content was accessed.
+
+
+
+## 2026-10-09 manager-generated forwarder assemblies and PluginImporter version boundary
+
+- Source behavior was replayed from the isolated frozen AssetRipper build with the 4,608-byte mscorlib-v2 fixture (SHA-256 53A2E6C134A91E88849DC7BD4D53E2EA27223FA609CE2CA70872A7DC523A0115). At Unity 2019.1, the project contains both System.Runtime.CompilerServices.Unsafe.dll and System.Runtime.InteropServices.dll. At Unity 2023.3.0a16, only Unsafe is selected by the manager reference map.
+- Fresh source project probes at Unity 2023.3.0a14 and 2023.3.0a15 confirmed the PluginImporter schema boundary: a14 emits serializedVersion 2 with sequence platformData; a15 emits serializedVersion 3 with named platformData. The generated class-dispatch fixture records class 1050 changing to PluginImporter_2023_3_0_a15 at the same boundary. Source metadata fixtures for 2019.1, a14, a15, and a16 are checked in under src/processing/managed_assembly_*_source_meta.txt.
+- Rust now synthesizes both helper modules from loaded mscorlib, applies the versioned reference-map routing, and derives the PluginImporter layout from the full Unity version. The integrated 2019.1 regression compares both helper DLL outputs to the Rust writer with only the nondeterministic COFF timestamp normalized, verifies source MonoBehaviour YAML, compares both PluginImporter v2 sidecars after removing only guid/timeCreated, and preserves the inputs. The 2023.3.0a16 regression verifies Unsafe-only routing and source-matched v3 metadata. The boundary unit test compares complete importer bodies for 2019.1, 2023.3.0a14, 2023.3.0a15, and 2023.3.0a16.
+- Source/Rust helper DLL models matched under the independent .NET 10 System.Reflection.Metadata probe: Unsafe 6/6 rows and InteropServices 5/5 rows. The comparison includes module MVID, PE machine, assembly identity, assembly references and key tokens, and exported type identity, attributes, and implementation.
+- Focused Rust checks passed:
+
+  ```powershell
+  cargo test --workspace --locked forwarder_matches_source_helper_metadata -- --nocapture
+  cargo test --workspace --locked plugin_importer_layout_tracks_the_source_class_version_transition -- --nocapture
+  cargo test --workspace --locked export_project_matches_source_manager_backed_mscorlib2_reference_pointer -- --nocapture
+  cargo test --workspace --locked export_project_preserves_manager_backed_pointer_when_saved_assembly_is_absent -- --nocapture
+  ```
+
+- Independent PEReader commands and results:
+
+  ```powershell
+  dotnet run --project tools/probes/managed-project/ManagedProjectProbe.csproj --no-build -- compare-managed-assembly-pe src/processing/managed_assembly_unsafe_forwarder_source_fixture.dll target/unsafe-forwarder-rust.dll
+  dotnet run --project tools/probes/managed-project/ManagedProjectProbe.csproj --no-build -- compare-managed-assembly-pe src/processing/managed_assembly_interop_services_forwarder_source_fixture.dll target/interop-forwarder-rust.dll
+  ```
+
+  Both exited 0; source/Rust row counts were 6/6 and 5/5 respectively. The source a14/a15 probes were run with the same project and `export-manager-reference-script` command, targeting separate input/output/rows roots under target/pluginimporter-boundary-source.
+- Full current-worktree validation passed: `cargo test --workspace --locked --quiet` (1,568 library tests passed, 1 ignored; 112 CLI tests passed; 1 doctest ignored), `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo fmt --all -- --check`. `tools/verify-baseline.ps1` verified all 1,449 frozen source files unchanged. `git diff --check` passed. The header-indexed parity reporter recognized all 386 rows with no malformed or duplicate IDs; counts remain 362 verified, 12 implemented-unverified, 8 in progress, 3 investigated, and 1 externally blocked (24 non-verified). Its exit 1 reflects the open gate.
+- This closes only the bounded forwarder-helper generation and importer-layout source behavior under the open TYPE-SCRIPT-001 and EXPORT-UNITY-001 rows. Blockers: 24 before -> 24 after; broad ledger rows closed: none. Phase 1 remains OPEN and Phase 2 remains locked. Unity Editor import/runtime remains unavailable without a valid Editor license. No user AssetBundle or UABEA content was accessed.

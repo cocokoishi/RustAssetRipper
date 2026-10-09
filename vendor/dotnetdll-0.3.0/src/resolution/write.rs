@@ -501,6 +501,9 @@ pub(crate) fn write_impl(res: &Resolution, opts: Options) -> Result<Vec<u8>> {
                 export.flags |= 0x0020_0000;
                 index::Implementation::AssemblyRef(a.0 + 1)
             }
+            TypeImplementation::AssemblyReference { assembly } => {
+                index::Implementation::AssemblyRef(assembly.0 + 1)
+            }
         };
 
         write_attrs!(e.attributes, ExportedType(idx + 1));

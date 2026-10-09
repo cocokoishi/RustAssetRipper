@@ -4,14 +4,16 @@
 //! Parsed type and field facts are owned so assemblies can be indexed and queried after the
 //! bounded input byte slice has been released.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::io;
 
 use dotnetdll::prelude::{
-    BaseType, MemberType, MethodReferenceParent, MethodType, ReadOptions, Resolution,
-    ResolutionScope, ResolvedDebug, TypeSource, UserMethod, UserType, ValueKind, WriteOptions,
+    Assembly, BaseType, ExportedType, ExternalAssemblyReference, MemberType, MethodReferenceParent,
+    MethodType, Module, ReadOptions, Resolution, ResolutionScope, ResolvedDebug, TypeFlags,
+    TypeImplementation, TypeSource, UserMethod, UserType, ValueKind, WriteOptions,
 };
 
 use crate::io::dependency::DependencyFilePath;
@@ -430,6 +432,86 @@ fn managed_pe_is_32_bit(file_name: &str, bytes: &[u8]) -> Result<bool, Box<Manag
     }
 }
 
+/// Computes the strong-name public-key token, which is the final eight SHA-1 digest bytes in
+/// reverse order as specified by the CLR assembly identity format.
+fn strong_name_public_key_token(public_key: &[u8]) -> Vec<u8> {
+    let digest = sha1_digest(public_key);
+    digest[12..20].iter().rev().copied().collect()
+}
+
+fn sha1_digest(input: &[u8]) -> [u8; 20] {
+    fn compress(state: &mut [u32; 5], block: &[u8; 64]) {
+        let mut words = [0u32; 80];
+        for (index, chunk) in block.chunks_exact(4).enumerate() {
+            words[index] = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        }
+        for index in 16..80 {
+            words[index] =
+                (words[index - 3] ^ words[index - 8] ^ words[index - 14] ^ words[index - 16])
+                    .rotate_left(1);
+        }
+
+        let [mut a, mut b, mut c, mut d, mut e] = *state;
+        for (index, word) in words.iter().enumerate() {
+            let (function, constant) = match index {
+                0..=19 => ((b & c) | ((!b) & d), 0x5a82_7999),
+                20..=39 => (b ^ c ^ d, 0x6ed9_eba1),
+                40..=59 => ((b & c) | (b & d) | (c & d), 0x8f1b_bcdc),
+                _ => (b ^ c ^ d, 0xca62_c1d6),
+            };
+            let next = a
+                .rotate_left(5)
+                .wrapping_add(function)
+                .wrapping_add(e)
+                .wrapping_add(constant)
+                .wrapping_add(*word);
+            e = d;
+            d = c;
+            c = b.rotate_left(30);
+            b = a;
+            a = next;
+        }
+        state[0] = state[0].wrapping_add(a);
+        state[1] = state[1].wrapping_add(b);
+        state[2] = state[2].wrapping_add(c);
+        state[3] = state[3].wrapping_add(d);
+        state[4] = state[4].wrapping_add(e);
+    }
+
+    let mut state = [
+        0x6745_2301,
+        0xefcd_ab89,
+        0x98ba_dcfe,
+        0x1032_5476,
+        0xc3d2_e1f0,
+    ];
+    let mut full_blocks = input.chunks_exact(64);
+    for chunk in &mut full_blocks {
+        let mut block = [0u8; 64];
+        block.copy_from_slice(chunk);
+        compress(&mut state, &block);
+    }
+
+    let remaining = full_blocks.remainder();
+    let mut tail = [0u8; 128];
+    tail[..remaining.len()].copy_from_slice(remaining);
+    tail[remaining.len()] = 0x80;
+    let tail_length = if remaining.len() < 56 { 64 } else { 128 };
+    let bit_length = (input.len() as u64).wrapping_mul(8);
+    tail[tail_length - 8..tail_length].copy_from_slice(&bit_length.to_be_bytes());
+    for chunk in tail[..tail_length].chunks_exact(64) {
+        let mut block = [0u8; 64];
+        block.copy_from_slice(chunk);
+        compress(&mut state, &block);
+    }
+
+    let mut digest = [0u8; 20];
+    for (chunk, word) in digest.chunks_exact_mut(4).zip(state) {
+        chunk.copy_from_slice(&word.to_be_bytes());
+    }
+    digest
+}
+
 impl ManagedAssembly {
     pub fn parse(
         file_name: &str,
@@ -565,6 +647,205 @@ impl ManagedAssembly {
             source_virtual_path: None,
             types,
         })
+    }
+
+    /// Builds the source `ForwardingAssemblyGenerator` helper used by manager-backed Save mode.
+    ///
+    /// AssetRipper creates a small `System.Runtime.CompilerServices.Unsafe` assembly which
+    /// forwards that type to the loaded `mscorlib`. Its module MVID is a deterministic MD5 of
+    /// the helper assembly name. The generated assembly reference retains the loaded `mscorlib`
+    /// version and signing identity.
+    pub fn create_unsafe_forwarder(
+        mscorlib_file_name: &str,
+        mscorlib_bytes: &[u8],
+        limits: ManagedAssemblyLimits,
+    ) -> Result<Vec<u8>, Box<ManagedAssemblyError>> {
+        const HELPER_NAME: &str = "System.Runtime.CompilerServices.Unsafe";
+        let (is_32_bit, corlib) =
+            Self::parse_forwarding_mscorlib(mscorlib_file_name, mscorlib_bytes, limits)?;
+        let corlib_assembly = corlib.assembly.as_ref().ok_or_else(|| {
+            managed_assembly_error(
+                mscorlib_file_name,
+                ManagedAssemblyErrorKind::AssemblyIdentityMissing,
+            )
+        })?;
+        Self::write_forwarding_assembly(
+            mscorlib_file_name,
+            corlib_assembly,
+            HELPER_NAME,
+            &[(
+                "System.Runtime.CompilerServices".to_owned(),
+                "Unsafe".to_owned(),
+            )],
+            is_32_bit,
+            limits,
+        )
+    }
+
+    /// Builds the source `System.Runtime.InteropServices` forwarding module from public,
+    /// top-level `mscorlib` types in that namespace family.
+    pub fn create_interop_services_forwarder(
+        mscorlib_file_name: &str,
+        mscorlib_bytes: &[u8],
+        limits: ManagedAssemblyLimits,
+    ) -> Result<Vec<u8>, Box<ManagedAssemblyError>> {
+        const HELPER_NAME: &str = "System.Runtime.InteropServices";
+        const TYPE_NAMESPACE_PREFIX: &str = "System.Runtime.InteropServices";
+
+        let (is_32_bit, corlib) =
+            Self::parse_forwarding_mscorlib(mscorlib_file_name, mscorlib_bytes, limits)?;
+        let corlib_assembly = corlib.assembly.as_ref().ok_or_else(|| {
+            managed_assembly_error(
+                mscorlib_file_name,
+                ManagedAssemblyErrorKind::AssemblyIdentityMissing,
+            )
+        })?;
+        let mut exported_types = Vec::new();
+        exported_types
+            .try_reserve_exact(corlib.type_definitions.len())
+            .map_err(|_| {
+                managed_assembly_error(
+                    mscorlib_file_name,
+                    ManagedAssemblyErrorKind::AllocationFailed {
+                        requested: corlib.type_definitions.len(),
+                    },
+                )
+            })?;
+        for definition in &corlib.type_definitions {
+            let Some(namespace) = definition.namespace.as_deref() else {
+                continue;
+            };
+            if !matches!(
+                definition.flags.accessibility,
+                dotnetdll::prelude::TypeAccessibility::Public
+            ) || !namespace.starts_with(TYPE_NAMESPACE_PREFIX)
+            {
+                continue;
+            }
+            exported_types.push((namespace.to_owned(), definition.name.to_string()));
+        }
+        Self::write_forwarding_assembly(
+            mscorlib_file_name,
+            corlib_assembly,
+            HELPER_NAME,
+            &exported_types,
+            is_32_bit,
+            limits,
+        )
+    }
+
+    fn parse_forwarding_mscorlib<'a>(
+        file_name: &str,
+        bytes: &'a [u8],
+        limits: ManagedAssemblyLimits,
+    ) -> Result<(bool, Resolution<'a>), Box<ManagedAssemblyError>> {
+        if bytes.len() > limits.max_file_bytes {
+            return Err(managed_assembly_error(
+                file_name,
+                ManagedAssemblyErrorKind::FileSizeLimitExceeded {
+                    file_bytes: bytes.len(),
+                    limit: limits.max_file_bytes,
+                },
+            ));
+        }
+        let is_32_bit = managed_pe_is_32_bit(file_name, bytes)?;
+        let corlib = Resolution::parse(bytes, ReadOptions::default()).map_err(|error| {
+            managed_assembly_error(
+                file_name,
+                ManagedAssemblyErrorKind::MetadataParse(error.to_string()),
+            )
+        })?;
+        if corlib.type_definitions.len() > limits.max_types {
+            return Err(managed_assembly_error(
+                file_name,
+                ManagedAssemblyErrorKind::TypeCountLimitExceeded {
+                    count: corlib.type_definitions.len(),
+                    limit: limits.max_types,
+                },
+            ));
+        }
+        Ok((is_32_bit, corlib))
+    }
+
+    fn write_forwarding_assembly(
+        mscorlib_file_name: &str,
+        corlib_assembly: &Assembly<'_>,
+        helper_name: &str,
+        exported_types: &[(String, String)],
+        is_32_bit: bool,
+        limits: ManagedAssemblyLimits,
+    ) -> Result<Vec<u8>, Box<ManagedAssemblyError>> {
+        let public_key_or_token = corlib_assembly.public_key.as_ref().map(|key| {
+            if corlib_assembly.flags.has_full_public_key {
+                Cow::Owned(strong_name_public_key_token(key.as_ref()))
+            } else {
+                Cow::Owned(key.to_vec())
+            }
+        });
+        let corlib_reference = ExternalAssemblyReference {
+            attributes: Vec::new(),
+            version: corlib_assembly.version,
+            has_full_public_key: false,
+            public_key_or_token,
+            name: corlib_assembly.name.clone(),
+            culture: corlib_assembly.culture.clone(),
+            hash_value: None,
+        };
+
+        let mut resolution = Resolution::new(Module::new(helper_name));
+        resolution.module.mvid = crate::export::script_hashing::unity_guid_to_system_bytes(
+            crate::export::script_hashing::calculate_assembly_guid(helper_name),
+        );
+        let mut assembly = Assembly::new(helper_name);
+        assembly.version = corlib_assembly.version;
+        resolution.assembly = Some(assembly);
+        let corlib_reference_index = resolution.push_assembly_reference(corlib_reference);
+        resolution
+            .exported_types
+            .try_reserve_exact(exported_types.len())
+            .map_err(|_| {
+                managed_assembly_error(
+                    mscorlib_file_name,
+                    ManagedAssemblyErrorKind::AllocationFailed {
+                        requested: exported_types.len(),
+                    },
+                )
+            })?;
+        for (namespace, name) in exported_types {
+            resolution.exported_types.push(ExportedType {
+                attributes: Vec::new(),
+                // AsmResolver's ExportedType constructor defaults to NotPublic; mirror the
+                // source `new ExportedType(corLibReference, namespace, name)` behavior.
+                flags: TypeFlags::default(),
+                name: name.as_str().into(),
+                namespace: Some(namespace.as_str().into()),
+                implementation: TypeImplementation::AssemblyReference {
+                    assembly: corlib_reference_index,
+                },
+            });
+        }
+
+        let output = resolution
+            .write(WriteOptions {
+                is_32_bit,
+                ..WriteOptions::default()
+            })
+            .map_err(|error| {
+                managed_assembly_error(
+                    mscorlib_file_name,
+                    ManagedAssemblyErrorKind::Serialization(error.to_string()),
+                )
+            })?;
+        if output.len() > limits.max_file_bytes {
+            return Err(managed_assembly_error(
+                mscorlib_file_name,
+                ManagedAssemblyErrorKind::FileSizeLimitExceeded {
+                    file_bytes: output.len(),
+                    limit: limits.max_file_bytes,
+                },
+            ));
+        }
+        Ok(output)
     }
 
     /// Reserializes a managed PE for the source manager-backed `Save` export path.
@@ -1209,6 +1490,10 @@ pub enum ManagedAssemblyErrorKind {
         limit: usize,
     },
     MetadataParse(String),
+    AssemblyIdentityMissing,
+    AllocationFailed {
+        requested: usize,
+    },
     TypeCountLimitExceeded {
         count: usize,
         limit: usize,
@@ -1250,6 +1535,13 @@ impl Display for ManagedAssemblyError {
             ManagedAssemblyErrorKind::MetadataParse(reason) => {
                 write!(formatter, "CLR metadata could not be parsed: {reason}")
             }
+            ManagedAssemblyErrorKind::AssemblyIdentityMissing => {
+                formatter.write_str("CLR metadata has no assembly identity")
+            }
+            ManagedAssemblyErrorKind::AllocationFailed { requested } => write!(
+                formatter,
+                "could not allocate space for {requested} forwarded type records"
+            ),
             ManagedAssemblyErrorKind::TypeCountLimitExceeded { count, limit } => {
                 write!(
                     formatter,
@@ -1310,9 +1602,9 @@ mod tests {
     };
 
     use super::{
-        has_cli_directory, resolve_mono_script_object, ManagedAssembly, ManagedAssemblyCatalog,
-        ManagedAssemblyCatalogLimits, ManagedAssemblyErrorKind, ManagedAssemblyLimits,
-        ManagedAssemblyLoadErrorKind, ManagedScriptResolutionOutcome,
+        has_cli_directory, resolve_mono_script_object, sha1_digest, ManagedAssembly,
+        ManagedAssemblyCatalog, ManagedAssemblyCatalogLimits, ManagedAssemblyErrorKind,
+        ManagedAssemblyLimits, ManagedAssemblyLoadErrorKind, ManagedScriptResolutionOutcome,
     };
     use crate::io::dependency::DependencyFilePath;
     use crate::io::filesystem::VirtualFileSystem;
@@ -1326,6 +1618,185 @@ mod tests {
     use crate::serialized_file::object_workspace::WorkspaceObject;
 
     const ASSEMBLY_BYTES: &[u8] = include_bytes!("managed_assembly_fixture.dll");
+    const UNSAFE_FORWARDER_SOURCE: &[u8] =
+        include_bytes!("managed_assembly_unsafe_forwarder_source_fixture.dll");
+    const INTEROP_FORWARDER_SOURCE: &[u8] =
+        include_bytes!("managed_assembly_interop_services_forwarder_source_fixture.dll");
+
+    #[test]
+    fn strong_name_sha1_matches_standard_vectors() {
+        fn hex(bytes: &[u8]) -> String {
+            bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+        }
+
+        assert_eq!(
+            hex(&sha1_digest(b"")),
+            "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+        );
+        assert_eq!(
+            hex(&sha1_digest(b"abc")),
+            "a9993e364706816aba3e25717850c26c9cd0d89d"
+        );
+    }
+
+    #[test]
+    fn unsafe_forwarder_matches_source_helper_metadata() {
+        let mscorlib = include_bytes!("managed_assembly_mscorlib2_fixture.dll");
+        let output = ManagedAssembly::create_unsafe_forwarder(
+            "mscorlib.dll",
+            mscorlib,
+            ManagedAssemblyLimits::default(),
+        )
+        .expect("generated helper assembly serializes");
+        std::fs::write("target/unsafe-forwarder-rust.dll", &output)
+            .expect("save Rust helper for independent PEReader comparison");
+        let source = Resolution::parse(UNSAFE_FORWARDER_SOURCE, ReadOptions::default())
+            .expect("source-generated helper parses");
+        let generated = Resolution::parse(&output, ReadOptions::default())
+            .expect("Rust-generated helper parses");
+
+        let source_assembly = source.assembly.as_ref().expect("source assembly identity");
+        let generated_assembly = generated
+            .assembly
+            .as_ref()
+            .expect("generated assembly identity");
+        assert_eq!(source_assembly.name, generated_assembly.name);
+        assert_eq!(
+            (
+                source_assembly.version.major,
+                source_assembly.version.minor,
+                source_assembly.version.build,
+                source_assembly.version.revision,
+            ),
+            (
+                generated_assembly.version.major,
+                generated_assembly.version.minor,
+                generated_assembly.version.build,
+                generated_assembly.version.revision,
+            )
+        );
+        assert_eq!(source.module.name, generated.module.name);
+        assert_eq!(source.module.mvid, generated.module.mvid);
+        assert_eq!(source.assembly_references.len(), 1);
+        assert_eq!(generated.assembly_references.len(), 1);
+        assert_eq!(
+            source.assembly_references[0].name,
+            generated.assembly_references[0].name
+        );
+        assert_eq!(
+            (
+                source.assembly_references[0].version.major,
+                source.assembly_references[0].version.minor,
+                source.assembly_references[0].version.build,
+                source.assembly_references[0].version.revision,
+            ),
+            (
+                generated.assembly_references[0].version.major,
+                generated.assembly_references[0].version.minor,
+                generated.assembly_references[0].version.build,
+                generated.assembly_references[0].version.revision,
+            )
+        );
+        assert_eq!(
+            source.assembly_references[0].public_key_or_token.as_deref(),
+            generated.assembly_references[0]
+                .public_key_or_token
+                .as_deref()
+        );
+        assert_eq!(source.exported_types.len(), 1);
+        assert_eq!(generated.exported_types.len(), 1);
+        for exported_type in [&source.exported_types[0], &generated.exported_types[0]] {
+            assert_eq!(exported_type.name, "Unsafe");
+            assert_eq!(
+                exported_type.namespace.as_deref(),
+                Some("System.Runtime.CompilerServices")
+            );
+            assert!(matches!(
+                exported_type.flags.accessibility,
+                dotnetdll::prelude::TypeAccessibility::NotPublic
+            ));
+            assert!(matches!(
+                exported_type.implementation,
+                dotnetdll::prelude::TypeImplementation::TypeForwarder(_)
+            ));
+        }
+        assert_eq!(
+            super::managed_pe_is_32_bit("source Unsafe.dll", UNSAFE_FORWARDER_SOURCE).unwrap(),
+            super::managed_pe_is_32_bit("Rust Unsafe.dll", &output).unwrap()
+        );
+    }
+
+    #[test]
+    fn interop_forwarder_matches_source_helper_metadata() {
+        let mscorlib = include_bytes!("managed_assembly_mscorlib2_fixture.dll");
+        let output = ManagedAssembly::create_interop_services_forwarder(
+            "mscorlib.dll",
+            mscorlib,
+            ManagedAssemblyLimits::default(),
+        )
+        .expect("generated helper assembly serializes");
+        std::fs::write("target/interop-forwarder-rust.dll", &output)
+            .expect("save Rust helper for independent PEReader comparison");
+        let source = Resolution::parse(INTEROP_FORWARDER_SOURCE, ReadOptions::default())
+            .expect("source-generated helper parses");
+        let generated = Resolution::parse(&output, ReadOptions::default())
+            .expect("Rust-generated helper parses");
+
+        let source_assembly = source.assembly.as_ref().expect("source assembly identity");
+        let generated_assembly = generated
+            .assembly
+            .as_ref()
+            .expect("generated assembly identity");
+        assert_eq!(source_assembly.name, generated_assembly.name);
+        assert_eq!(
+            (
+                source_assembly.version.major,
+                source_assembly.version.minor,
+                source_assembly.version.build,
+                source_assembly.version.revision,
+            ),
+            (
+                generated_assembly.version.major,
+                generated_assembly.version.minor,
+                generated_assembly.version.build,
+                generated_assembly.version.revision,
+            )
+        );
+        assert_eq!(source.module.name, generated.module.name);
+        assert_eq!(source.module.mvid, generated.module.mvid);
+        assert_eq!(source.assembly_references.len(), 1);
+        assert_eq!(generated.assembly_references.len(), 1);
+        assert_eq!(
+            source.assembly_references[0].name,
+            generated.assembly_references[0].name
+        );
+        assert_eq!(
+            source.assembly_references[0].public_key_or_token.as_deref(),
+            generated.assembly_references[0]
+                .public_key_or_token
+                .as_deref()
+        );
+        assert_eq!(source.exported_types.len(), generated.exported_types.len());
+        for (source_type, generated_type) in
+            source.exported_types.iter().zip(&generated.exported_types)
+        {
+            assert_eq!(source_type.namespace, generated_type.namespace);
+            assert_eq!(source_type.name, generated_type.name);
+            assert!(matches!(
+                source_type.implementation,
+                dotnetdll::prelude::TypeImplementation::TypeForwarder(_)
+            ));
+            assert!(matches!(
+                generated_type.implementation,
+                dotnetdll::prelude::TypeImplementation::TypeForwarder(_)
+            ));
+        }
+        assert_eq!(
+            super::managed_pe_is_32_bit("source InteropServices.dll", INTEROP_FORWARDER_SOURCE)
+                .unwrap(),
+            super::managed_pe_is_32_bit("Rust InteropServices.dll", &output).unwrap()
+        );
+    }
 
     #[test]
     fn managed_reference_assembly_writer_preserves_the_source_module_model() {

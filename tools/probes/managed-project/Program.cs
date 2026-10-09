@@ -2200,15 +2200,36 @@ static string[] ReadManagedAssemblyPeRows(string path)
     MetadataReader reader = peReader.GetMetadataReader();
     var signatureProvider = new ManagedAssemblySignatureProvider();
     var rows = new List<string>();
+    ModuleDefinition module = reader.GetModuleDefinition();
+    rows.Add($"MODULE|{reader.GetString(module.Name)}|{reader.GetGuid(module.Mvid)}");
+    rows.Add($"MACHINE|{peReader.PEHeaders.CoffHeader.Machine}");
     if (reader.IsAssembly)
     {
         System.Reflection.Metadata.AssemblyDefinition assembly = reader.GetAssemblyDefinition();
-        rows.Add($"ASSEMBLY|{reader.GetString(assembly.Name)}|{assembly.Version}|{assembly.Flags}");
+        string publicKey = assembly.PublicKey.IsNil ? "" : Convert.ToHexString(reader.GetBlobBytes(assembly.PublicKey));
+        rows.Add($"ASSEMBLY|{reader.GetString(assembly.Name)}|{assembly.Version}|{assembly.Flags}|{publicKey}");
     }
     foreach (AssemblyReferenceHandle handle in reader.AssemblyReferences)
     {
         AssemblyReference reference = reader.GetAssemblyReference(handle);
-        rows.Add($"REFERENCE|{reader.GetString(reference.Name)}|{reference.Version}|{reference.Flags}");
+        string publicKeyOrToken = reference.PublicKeyOrToken.IsNil
+            ? ""
+            : Convert.ToHexString(reader.GetBlobBytes(reference.PublicKeyOrToken));
+        string culture = reference.Culture.IsNil ? "" : reader.GetString(reference.Culture);
+        rows.Add($"REFERENCE|{reader.GetString(reference.Name)}|{reference.Version}|{reference.Flags}|{culture}|{publicKeyOrToken}");
+    }
+    foreach (ExportedTypeHandle handle in reader.ExportedTypes)
+    {
+        ExportedType exported = reader.GetExportedType(handle);
+        string namespaceName = exported.Namespace.IsNil ? "" : reader.GetString(exported.Namespace);
+        string implementation = exported.Implementation.Kind switch
+        {
+            HandleKind.AssemblyReference => $"ASSEMBLY:{reader.GetString(reader.GetAssemblyReference((AssemblyReferenceHandle)exported.Implementation).Name)}",
+            HandleKind.ExportedType => $"EXPORTED:{reader.GetString(reader.GetExportedType((ExportedTypeHandle)exported.Implementation).Name)}",
+            HandleKind.AssemblyFile => $"FILE:{reader.GetString(reader.GetAssemblyFile((AssemblyFileHandle)exported.Implementation).Name)}",
+            _ => exported.Implementation.Kind.ToString(),
+        };
+        rows.Add($"EXPORTED_TYPE|{namespaceName}|{reader.GetString(exported.Name)}|{exported.Attributes}|{implementation}");
     }
     rows = rows.OrderBy(row => row, StringComparer.Ordinal).ToList();
     foreach (TypeDefinitionHandle typeHandle in reader.TypeDefinitions)

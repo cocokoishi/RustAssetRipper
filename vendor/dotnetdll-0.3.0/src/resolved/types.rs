@@ -566,7 +566,8 @@ impl ResolvedDebug for ExternalTypeReference<'_> {
                     Some(e) => match e.implementation {
                         TypeImplementation::Nested(_) => panic!("exported type ref scopes cannot be nested"),
                         TypeImplementation::ModuleFile { file, .. } => &res[file].name,
-                        TypeImplementation::TypeForwarder(a) => &res[a].name,
+                    TypeImplementation::TypeForwarder(a)
+                    | TypeImplementation::AssemblyReference { assembly: a } => &res[a].name,
                     },
                     None => panic!("missing exported type entry for type ref"),
                 },
@@ -612,6 +613,10 @@ pub enum TypeImplementation {
     /// type moves between assemblies:
     /// <https://learn.microsoft.com/dotnet/standard/assembly/type-forwarding>
     TypeForwarder(AssemblyRefIndex),
+    /// Uses an AssemblyRef implementation while preserving caller-supplied flags without adding
+    /// the ECMA-335 `Forwarder` bit. This matches source metadata writers that emit an AssemblyRef
+    /// implementation with default `NotPublic` flags.
+    AssemblyReference { assembly: AssemblyRefIndex },
 }
 
 /// A type exported by and made available in this assembly, but not present in the module that defines the assembly.

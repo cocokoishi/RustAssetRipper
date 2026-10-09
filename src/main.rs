@@ -10308,6 +10308,80 @@ mod tests {
         assert!(status.contains("0 resolved, 0 valid, 0 abstract, 1 unresolved"));
         let behaviour_output = output_root.join("Assets/MonoBehaviour/ReferenceRoot.asset");
         assert_eq!(fs::read(&behaviour_output).unwrap(), expected_behaviour);
+        let plugin_dlls = project_tree(&output_root)
+            .iter()
+            .filter(|path| path.starts_with("Assets/Plugins/") && path.ends_with(".dll"))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            plugin_dlls,
+            vec![
+                "Assets/Plugins/System.Runtime.CompilerServices.Unsafe.dll".to_owned(),
+                "Assets/Plugins/System.Runtime.InteropServices.dll".to_owned(),
+            ],
+            "the Unity 2019.1 manager map routes both generated forwarding modules into the project"
+        );
+        let unsafe_output =
+            fs::read(output_root.join("Assets/Plugins/System.Runtime.CompilerServices.Unsafe.dll"))
+                .unwrap();
+        let normalize_coff_timestamp = |bytes: &[u8]| {
+            let mut normalized = bytes.to_vec();
+            let pe_header = u32::from_le_bytes(bytes[0x3c..0x40].try_into().unwrap()) as usize;
+            normalized[pe_header + 8..pe_header + 12].fill(0);
+            normalized
+        };
+        let expected_unsafe =
+            assetripper::processing::managed_assembly::ManagedAssembly::create_unsafe_forwarder(
+                "mscorlib.dll",
+                &mscorlib_bytes,
+                Default::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            normalize_coff_timestamp(&unsafe_output),
+            normalize_coff_timestamp(&expected_unsafe),
+            "the project route writes the generated Unsafe forwarder with only its COFF timestamp varying"
+        );
+        let interop_output =
+            fs::read(output_root.join("Assets/Plugins/System.Runtime.InteropServices.dll"))
+                .unwrap();
+        let expected_interop =
+            assetripper::processing::managed_assembly::ManagedAssembly::create_interop_services_forwarder(
+                "mscorlib.dll",
+                &mscorlib_bytes,
+                Default::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            normalize_coff_timestamp(&interop_output),
+            normalize_coff_timestamp(&expected_interop),
+            "the project route writes the generated InteropServices forwarder with only its COFF timestamp varying"
+        );
+        let normalize_plugin_meta = |text: &str| {
+            text.lines()
+                .filter(|line| !line.starts_with("guid: ") && !line.starts_with("timeCreated: "))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        for (relative_meta, source_fixture) in [
+            (
+                "Assets/Plugins/System.Runtime.CompilerServices.Unsafe.dll.meta",
+                include_str!("processing/managed_assembly_unsafe_forwarder_2019a1_source_meta.txt"),
+            ),
+            (
+                "Assets/Plugins/System.Runtime.InteropServices.dll.meta",
+                include_str!(
+                    "processing/managed_assembly_interop_forwarder_2019a1_source_meta.txt"
+                ),
+            ),
+        ] {
+            let rust_meta = fs::read_to_string(output_root.join(relative_meta)).unwrap();
+            assert_eq!(
+                normalize_plugin_meta(&rust_meta),
+                normalize_plugin_meta(source_fixture),
+                "the manager helper uses the frozen-source PluginImporter v2 layout"
+            );
+        }
         assert!(
             !project_tree(&output_root)
                 .iter()
@@ -10397,16 +10471,37 @@ mod tests {
         ));
         assert!(status.contains("MonoScript types: 0 resolved, 0 valid, 0 abstract, 1 unresolved"));
         assert!(status.contains("1 MonoScript entries have unavailable source content"));
-        assert!(status.contains("source GUID/fileID pointer is retained and no DLL is emitted"));
+        assert!(status.contains(
+            "source GUID/fileID pointer is retained and the missing script DLL is not fabricated"
+        ));
         let behaviour_output = output_root.join("Assets/MonoBehaviour/ReferenceRoot.asset");
         assert_eq!(fs::read(&behaviour_output).unwrap(), expected_behaviour);
+        let plugin_dlls = project_tree(&output_root)
+            .iter()
+            .filter(|path| path.starts_with("Assets/Plugins/") && path.ends_with(".dll"))
+            .cloned()
+            .collect::<Vec<_>>();
         assert_eq!(
-            project_tree(&output_root)
-                .iter()
-                .filter(|path| path.to_ascii_lowercase().ends_with(".dll"))
-                .count(),
-            0,
-            "no DLL is fabricated for a missing manager assembly"
+            plugin_dlls,
+            vec!["Assets/Plugins/System.Runtime.CompilerServices.Unsafe.dll".to_owned()],
+            "the source compiler helper is exported, while the absent Mono.Cecil DLL is not fabricated"
+        );
+        let helper_meta = fs::read_to_string(
+            output_root.join("Assets/Plugins/System.Runtime.CompilerServices.Unsafe.dll.meta"),
+        )
+        .unwrap();
+        let source_helper_meta =
+            include_str!("processing/managed_assembly_unsafe_forwarder_2023a16_source_meta.txt");
+        let normalize_meta = |text: &str| {
+            text.lines()
+                .filter(|line| !line.starts_with("guid: ") && !line.starts_with("timeCreated: "))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert_eq!(
+            normalize_meta(&helper_meta),
+            normalize_meta(source_helper_meta),
+            "Unity 2023.3 uses the source PluginImporter v3 named platform layout"
         );
         assert_eq!(fs::read(&script_path).unwrap(), script_bytes);
         assert_eq!(fs::read(&behaviour_path).unwrap(), behaviour_bytes);

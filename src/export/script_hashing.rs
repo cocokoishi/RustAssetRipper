@@ -421,6 +421,15 @@ pub fn unity_guid_md5_hash(input: &[u8]) -> UnityGuid {
     )
 }
 
+/// Converts Unity-layout GUID bytes to the `System.Guid.ToByteArray` layout used in PE MVIDs.
+/// `UnityGuid`'s explicit `Guid` conversion reuses the same byte swap and nibble swap as
+/// `ConvertSystemOrUnityBytes`.
+pub fn unity_guid_to_system_bytes(guid: UnityGuid) -> [u8; 16] {
+    let mut bytes = guid.to_byte_array();
+    convert_system_or_unity_bytes(&mut bytes);
+    bytes
+}
+
 /// `UnityGuid.Md5Hash(assemblyName, namespace, className)`: MD5 the concatenated UTF-8 bytes.
 /// The baseline concatenates caller-supplied spans; lengths are bounded here instead of the
 /// unbounded `stackalloc`/GC allocation.
