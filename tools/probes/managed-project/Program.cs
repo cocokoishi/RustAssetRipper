@@ -69,12 +69,18 @@ if (args.Length > 0 && args[0] == "export-reference-script")
 
 if (args.Length > 0 && args[0] == "export-manager-reference-script")
 {
-    if (args.Length != 5)
+    if (args.Length < 5 || args.Length > 7)
     {
-        Console.Error.WriteLine("usage: managed-project export-manager-reference-script <input-root> <output-root> <rows-file> <mscorlib-v2-file>");
+        Console.Error.WriteLine("usage: managed-project export-manager-reference-script <input-root> <output-root> <rows-file> <mscorlib-v2-file> [assembly-name] [unity-version]");
         return 2;
     }
-    return ExportManagerReferenceScript(args[1], args[2], args[3], args[4]);
+    return ExportManagerReferenceScript(
+        args[1],
+        args[2],
+        args[3],
+        args[4],
+        args.Length > 5 ? args[5] : "Mono.Cecil",
+        args.Length > 6 ? args[6] : "2019.1.0f1");
 }
 
 if (args.Length > 0 && args[0] == "export-textasset")
@@ -771,7 +777,9 @@ static int ExportManagerReferenceScript(
     string inputRootArgument,
     string outputRootArgument,
     string rowsArgument,
-    string mscorlibV2Argument)
+    string mscorlibV2Argument,
+    string assemblyName,
+    string unityVersion)
 {
     string inputRoot = Path.GetFullPath(inputRootArgument);
     string outputRoot = Path.GetFullPath(outputRootArgument);
@@ -794,8 +802,7 @@ static int ExportManagerReferenceScript(
     string scriptInputPath = Path.Combine(inputRoot, "reference_script.assets");
     string behaviourInputPath = Path.Combine(inputRoot, "reference_behaviour.assets");
     string mscorlibInputPath = Path.Combine(inputRoot, "mscorlib.dll");
-    const string unityVersion = "2019.1.0f1";
-    byte[] scriptInputBytes = BuildReferenceScriptFile("Mono.Cecil", unityVersion);
+    byte[] scriptInputBytes = BuildReferenceScriptFile(assemblyName, unityVersion);
     byte[] behaviourInputBytes = BuildReferenceBehaviourFile(unityVersion);
     byte[] mscorlibInputBytes = File.ReadAllBytes(mscorlibV2Path);
     File.WriteAllBytes(scriptInputPath, scriptInputBytes);
@@ -817,7 +824,7 @@ static int ExportManagerReferenceScript(
         .ToArray();
     if (scripts.Length != 1 || !scripts[0].StartsWith("MonoScript|7|", StringComparison.Ordinal))
     {
-        throw new InvalidDataException($"expected one source Mono.Cecil MonoScript at PathID 7: {string.Join(';', scripts)}");
+        throw new InvalidDataException($"expected one source {assemblyName} MonoScript at PathID 7: {string.Join(';', scripts)}");
     }
     handler.Export(gameData, outputRoot, LocalFileSystem.Instance);
 

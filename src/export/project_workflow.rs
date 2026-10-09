@@ -148,6 +148,8 @@ pub struct WorkspaceProjectExportReport {
     pub collection_count: usize,
     /// Objects whose baseline collection writes nothing, with the reason.
     pub skipped_objects: Vec<ProjectExportNotice>,
+    /// MonoScript pointers retained for assemblies whose content was not supplied to import.
+    pub unresolved_script_dependencies: Vec<ProjectExportNotice>,
     /// Files written through the generic asset-family renderer instead of their own.
     pub fallbacks: Vec<ProjectExportNotice>,
     /// Unknown or unreadable objects preserved through the source raw-data exporter. Their
@@ -212,6 +214,7 @@ struct ScriptExportDetails {
     pointer_guid: [u8; 16],
     pointer_file_id: i64,
     export_type: AssemblyExportType,
+    missing_assembly: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -445,6 +448,7 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
         .try_reserve_exact(objects.report().object_count)
         .map_err(|_| invalid_project("could not allocate routed project objects"))?;
     let mut notices: Vec<ProjectExportNotice> = Vec::new();
+    let mut unresolved_script_dependencies: Vec<ProjectExportNotice> = Vec::new();
     let mut fallback_notices: Vec<ProjectExportNotice> = Vec::new();
     let mut opaque_fallback_notices: Vec<ProjectExportNotice> = Vec::new();
     let mut next_collection_index = 0usize;
@@ -529,6 +533,21 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
             } else {
                 None
             };
+            if let Some(script) = script_export
+                .as_ref()
+                .filter(|script| script.missing_assembly)
+            {
+                unresolved_script_dependencies.push(ProjectExportNotice {
+                    subject: format!(
+                        "MonoScript assembly {:?} ({}.{}, ScriptExportMode::{:?})",
+                        script.identity.assembly,
+                        script.identity.namespace,
+                        script.identity.class,
+                        settings.script_export_mode
+                    ),
+                    reason: "the assembly is absent from the imported catalog; its source assembly GUID/fileID pointer is retained and no DLL is emitted",
+                });
+            }
             let is_opaque_fallback = opaque_objects.contains(&(file_index, object_index));
             let raw_fallback_kind_matches = match kind {
                 ExportCollectionKind::Unknown => {
@@ -1425,6 +1444,7 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
         project_version,
         collection_count,
         skipped_objects: report.skipped,
+        unresolved_script_dependencies,
         fallbacks: report.fallbacks,
         opaque_fallbacks: opaque_fallback_notices,
         processing_warnings,
@@ -1528,6 +1548,7 @@ fn plan_script_export_details(
         settings.script_export_mode,
         &identity.assembly,
     );
+    let mut missing_assembly = false;
     if export_type == AssemblyExportType::Save {
         let catalog = managed_assemblies.ok_or_else(|| {
             invalid_project(format!(
@@ -1538,17 +1559,15 @@ fn plan_script_export_details(
                 settings.script_export_mode
             ))
         })?;
-        let assembly = catalog.assembly(&identity.assembly).ok_or_else(|| {
-            invalid_project(format!(
-                "file {} object {} PathID {} MonoScript assembly {:?} is not present in the imported assembly catalog",
-                object.file_index, object.object_index, object.path_id, identity.assembly
-            ))
-        })?;
-        if assembly.source_virtual_path.is_none() {
-            return Err(invalid_project(format!(
-                "file {} object {} PathID {} MonoScript assembly {:?} has no source VFS stream to save",
-                object.file_index, object.object_index, object.path_id, identity.assembly
-            )));
+        match catalog.assembly(&identity.assembly) {
+            Some(assembly) if assembly.source_virtual_path.is_none() => {
+                return Err(invalid_project(format!(
+                    "file {} object {} PathID {} MonoScript assembly {:?} has no source VFS stream to save",
+                    object.file_index, object.object_index, object.path_id, identity.assembly
+                )))
+            }
+            Some(_) => {}
+            None => missing_assembly = true,
         }
     } else if export_type != AssemblyExportType::Decompile
         && !(export_type == AssemblyExportType::Skip && reference_guid.is_some())
@@ -1626,6 +1645,7 @@ fn plan_script_export_details(
         pointer_guid,
         pointer_file_id,
         export_type,
+        missing_assembly,
     }))
 }
 

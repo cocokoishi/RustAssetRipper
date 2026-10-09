@@ -1760,6 +1760,16 @@ fn export_project_to<W: io::Write>(
             writeln!(status_output, "  - {}: {}", notice.subject, notice.reason)?;
         }
     }
+    if !report.unresolved_script_dependencies.is_empty() {
+        writeln!(
+            status_output,
+            "{} MonoScript assembly dependencies were not imported; source pointers are retained, but their DLL content is absent:",
+            report.unresolved_script_dependencies.len()
+        )?;
+        for notice in report.unresolved_script_dependencies.iter().take(10) {
+            writeln!(status_output, "  - {}: {}", notice.subject, notice.reason)?;
+        }
+    }
     if !report.processing_warnings.is_empty() {
         writeln!(
             status_output,
@@ -9964,6 +9974,101 @@ mod tests {
                 .iter()
                 .any(|path| path.to_ascii_lowercase().ends_with(".cs")),
             "a reference-map MonoScript uses the reference pointer without a local script file"
+        );
+        assert_eq!(fs::read(&script_path).unwrap(), script_bytes);
+        assert_eq!(fs::read(&behaviour_path).unwrap(), behaviour_bytes);
+        assert_eq!(fs::read(&mscorlib_path).unwrap(), mscorlib_bytes);
+
+        input.files.extend(
+            project_tree(&output_root)
+                .iter()
+                .map(|path| output_root.join(path)),
+        );
+        input
+            .subdirectories
+            .extend(project_directories(&output_root));
+    }
+
+    #[test]
+    fn export_project_preserves_manager_backed_pointer_when_saved_assembly_is_absent() {
+        let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
+        let fixture =
+            include_str!("processing/managed_reference_missing_assembly_project_fixture.txt");
+        let decode_hex = |hex: &str| {
+            assert!(hex.len().is_multiple_of(2), "fixture hex has even length");
+            hex.as_bytes()
+                .chunks_exact(2)
+                .map(|pair| {
+                    u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16)
+                        .expect("fixture hex is valid")
+                })
+                .collect::<Vec<_>>()
+        };
+        let input_bytes = |name: &str| {
+            let prefix = format!("INPUT_HEX|{name}|");
+            fixture
+                .lines()
+                .find_map(|line| line.strip_prefix(&prefix))
+                .map(decode_hex)
+                .unwrap_or_else(|| panic!("missing-assembly fixture includes {prefix}"))
+        };
+        let expected_behaviour = fixture
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("CONTENT_HEX|Assets/MonoBehaviour/ReferenceRoot.asset|")
+            })
+            .map(decode_hex)
+            .expect("missing-assembly fixture includes the source MonoBehaviour YAML");
+
+        let directory = TestInputDirectory::new_root();
+        let input_root = directory.join("manager-missing-assembly-input");
+        fs::create_dir(&input_root).unwrap();
+        let script_path = input_root.join("reference_script.assets");
+        let behaviour_path = input_root.join("reference_behaviour.assets");
+        let mscorlib_path = input_root.join("mscorlib.dll");
+        let script_bytes = input_bytes("reference_script.assets");
+        let behaviour_bytes = input_bytes("reference_behaviour.assets");
+        let mscorlib_bytes = input_bytes("mscorlib.dll");
+        fs::write(&script_path, &script_bytes).unwrap();
+        fs::write(&behaviour_path, &behaviour_bytes).unwrap();
+        fs::write(&mscorlib_path, &mscorlib_bytes).unwrap();
+        let mut input = TestInputDirectory {
+            directory: directory.clone(),
+            files: vec![
+                script_path.clone(),
+                behaviour_path.clone(),
+                mscorlib_path.clone(),
+            ],
+            subdirectories: vec![input_root.clone()],
+        };
+        let output_root = directory.join("manager-missing-assembly-project");
+        let mut status = Vec::new();
+        super::export_project_to(
+            &[input_root],
+            &output_root,
+            false,
+            &default_export_settings(),
+            &mut status,
+        )
+        .expect("preserve a manager-backed MonoScript pointer without its DLL input");
+
+        let status = String::from_utf8(status).unwrap();
+        assert!(status.contains(
+            "Mono assembly metadata: 1 loaded from 1 candidates (0 native/non-CLI skipped)"
+        ));
+        assert!(status.contains("MonoScript types: 0 resolved, 0 valid, 0 abstract, 1 unresolved"));
+        assert!(status.contains("1 MonoScript assembly dependencies were not imported"));
+        assert!(status
+            .contains("source assembly GUID/fileID pointer is retained and no DLL is emitted"));
+        let behaviour_output = output_root.join("Assets/MonoBehaviour/ReferenceRoot.asset");
+        assert_eq!(fs::read(&behaviour_output).unwrap(), expected_behaviour);
+        assert_eq!(
+            project_tree(&output_root)
+                .iter()
+                .filter(|path| path.to_ascii_lowercase().ends_with(".dll"))
+                .count(),
+            0,
+            "no DLL is fabricated for a missing manager assembly"
         );
         assert_eq!(fs::read(&script_path).unwrap(), script_bytes);
         assert_eq!(fs::read(&behaviour_path).unwrap(), behaviour_bytes);
