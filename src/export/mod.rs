@@ -38,6 +38,7 @@ pub mod project_output;
 pub mod project_plan;
 pub mod project_workflow;
 pub mod redirect_collection;
+pub mod reference_assemblies;
 pub mod registration;
 pub mod res_wiring;
 pub mod resource_extensions;

@@ -9530,6 +9530,185 @@ mod tests {
     }
 
     #[test]
+    fn export_project_matches_source_generic_empty_script_without_a_manager() {
+        let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
+        let fixture = include_str!("processing/generic_script_project_fixture.txt");
+        let fixture_hex = |prefix: &str| {
+            fixture
+                .lines()
+                .find_map(|line| line.strip_prefix(prefix))
+                .unwrap_or_else(|| panic!("generic MonoScript fixture includes {prefix}"))
+        };
+        let decode_hex = |hex: &str| {
+            assert!(hex.len().is_multiple_of(2), "fixture hex has even length");
+            hex.as_bytes()
+                .chunks_exact(2)
+                .map(|pair| {
+                    u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16)
+                        .expect("fixture hex is valid")
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let input_bytes = decode_hex(fixture_hex("INPUT_HEX|generic_script.assets|"));
+        assert_eq!(input_bytes.len(), 200);
+        let directory = TestInputDirectory::new_root();
+        let source_path = directory.join("generic_script.assets");
+        let output_root = directory.join("project-generic-empty-script");
+        fs::write(&source_path, &input_bytes).unwrap();
+        let mut input = TestInputDirectory {
+            directory: directory.clone(),
+            files: vec![source_path.clone()],
+            subdirectories: Vec::new(),
+        };
+        let mut status = Vec::new();
+        super::export_project_to(
+            std::slice::from_ref(&source_path),
+            &output_root,
+            false,
+            &default_export_settings(),
+            &mut status,
+        )
+        .expect("a source EmptyScriptExportCollection produces the generic script route");
+
+        let script_relative = "Assets/Scripts/GameScripts/Game/Widget`1.cs";
+        let sidecar_relative = "Assets/Scripts/GameScripts/Game/Widget`1.cs.meta";
+        let definition_relative = "Assets/Scripts/GameScripts/GameScripts.asmdef";
+        let read_expected = |relative: &str| {
+            let prefix = format!("CONTENT_HEX|{relative}|");
+            decode_hex(fixture_hex(&prefix))
+        };
+        let script_path = output_root.join(script_relative);
+        let sidecar_path = output_root.join(sidecar_relative);
+        let definition_path = output_root.join(definition_relative);
+        let script = fs::read(&script_path).expect("generic C# output");
+        assert_eq!(script, read_expected(script_relative));
+        let sidecar = fs::read_to_string(&sidecar_path).expect("MonoImporter sidecar");
+        let normalized_sidecar = sidecar
+            .lines()
+            .filter(|line| !line.starts_with("timeCreated: "))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        assert_eq!(
+            normalized_sidecar.as_bytes(),
+            read_expected(sidecar_relative),
+            "the source MonoImporter sidecar matches after excluding only timeCreated"
+        );
+        assert_eq!(
+            fs::read(&definition_path).expect("source assembly definition"),
+            read_expected(definition_relative),
+            "the no-manager assembly definition matches source JSON bytes"
+        );
+        assert_eq!(fs::read(&source_path).unwrap(), input_bytes);
+
+        input.files.extend(
+            project_tree(&output_root)
+                .iter()
+                .map(|path| output_root.join(path)),
+        );
+        input
+            .subdirectories
+            .extend(project_directories(&output_root));
+    }
+
+    #[test]
+    fn export_project_matches_source_reference_monoscript_pointer_without_a_manager() {
+        let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
+        let fixture = include_str!("processing/reference_script_project_fixture.txt");
+        let decode_hex = |hex: &str| {
+            assert!(hex.len().is_multiple_of(2), "fixture hex has even length");
+            hex.as_bytes()
+                .chunks_exact(2)
+                .map(|pair| {
+                    u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16)
+                        .expect("fixture hex is valid")
+                })
+                .collect::<Vec<_>>()
+        };
+        let input_bytes = |name: &str| {
+            let prefix = format!("INPUT_HEX|{name}|");
+            fixture
+                .lines()
+                .find_map(|line| line.strip_prefix(&prefix))
+                .map(decode_hex)
+                .unwrap_or_else(|| panic!("reference MonoScript fixture includes {prefix}"))
+        };
+        let expected_file = |relative: &str| {
+            let prefix = format!("CONTENT_HEX|{relative}|");
+            fixture
+                .lines()
+                .find_map(|line| line.strip_prefix(&prefix))
+                .map(decode_hex)
+                .unwrap_or_else(|| panic!("reference MonoScript fixture includes {prefix}"))
+        };
+
+        let directory = TestInputDirectory::new_root();
+        let script_path = directory.join("reference_script.assets");
+        let behaviour_path = directory.join("reference_behaviour.assets");
+        let output_root = directory.join("project-reference-script");
+        let script_bytes = input_bytes("reference_script.assets");
+        let behaviour_bytes = input_bytes("reference_behaviour.assets");
+        fs::write(&script_path, &script_bytes).unwrap();
+        fs::write(&behaviour_path, &behaviour_bytes).unwrap();
+        let mut input = TestInputDirectory {
+            directory: directory.clone(),
+            files: vec![script_path.clone(), behaviour_path.clone()],
+            subdirectories: Vec::new(),
+        };
+        let mut status = Vec::new();
+        super::export_project_to(
+            &[script_path.clone(), behaviour_path.clone()],
+            &output_root,
+            false,
+            &default_export_settings(),
+            &mut status,
+        )
+        .expect("no-manager reference MonoScript and its dependent MonoBehaviour export");
+
+        let script_relative = "Assets/Scripts/UnityEngine/UnityEngine/Object.cs";
+        let sidecar_relative = "Assets/Scripts/UnityEngine/UnityEngine/Object.cs.meta";
+        let definition_relative = "Assets/Scripts/UnityEngine/UnityEngine.asmdef";
+        let behaviour_relative = "Assets/MonoBehaviour/ReferenceRoot.asset";
+        let script = fs::read(output_root.join(script_relative)).expect("reference script output");
+        assert_eq!(script, expected_file(script_relative));
+        let sidecar = fs::read_to_string(output_root.join(sidecar_relative))
+            .expect("script MonoImporter sidecar");
+        let normalized_sidecar = sidecar
+            .lines()
+            .filter(|line| !line.starts_with("timeCreated: "))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        assert_eq!(
+            normalized_sidecar.as_bytes(),
+            expected_file(sidecar_relative)
+        );
+        assert_eq!(
+            fs::read(output_root.join(definition_relative)).expect("source assembly definition"),
+            expected_file(definition_relative)
+        );
+        let behaviour = fs::read(output_root.join(behaviour_relative))
+            .expect("MonoBehaviour referencing the framework MonoScript");
+        assert_eq!(
+            behaviour,
+            expected_file(behaviour_relative),
+            "the m_Script pointer must use the versioned reference GUID and script file ID"
+        );
+        assert_eq!(fs::read(&script_path).unwrap(), script_bytes);
+        assert_eq!(fs::read(&behaviour_path).unwrap(), behaviour_bytes);
+
+        input.files.extend(
+            project_tree(&output_root)
+                .iter()
+                .map(|path| output_root.join(path)),
+        );
+        input
+            .subdirectories
+            .extend(project_directories(&output_root));
+    }
+
+    #[test]
     fn export_project_skips_unknown_object_when_raw_fallback_setting_is_disabled() {
         let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
         let bytes = source_factory_fixture_bytes("unknown_no_tree");

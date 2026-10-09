@@ -271,15 +271,23 @@ pub fn filter_assembly_references<'a>(
         .collect()
 }
 
-/// The `.asmdef` body for one assembly name and its filtered references.
+/// The `.asmdef` body for one assembly name and its filtered references, using the source
+/// `System.Text.Json` indented layout and Windows line endings.
 pub fn assembly_definition_json(assembly_name: &str, references: &[&str]) -> String {
-    let body = references
-        .iter()
-        .map(|reference| format!("\"{}\"", escape_asmdef_string(reference)))
-        .collect::<Vec<_>>()
-        .join(",");
+    let body = if references.is_empty() {
+        "[]".to_owned()
+    } else {
+        format!(
+            "[\r\n    {}\r\n  ]",
+            references
+                .iter()
+                .map(|reference| format!("\"{}\"", escape_asmdef_string(reference)))
+                .collect::<Vec<_>>()
+                .join(",\r\n    ")
+        )
+    };
     format!(
-        "{{\"name\":\"{}\",\"references\":[{}],\"allowUnsafeCode\":true}}",
+        "{{\r\n  \"name\": \"{}\",\r\n  \"references\": {},\r\n  \"allowUnsafeCode\": true\r\n}}",
         escape_asmdef_string(assembly_name),
         body
     )
@@ -494,11 +502,11 @@ mod tests {
         assert_eq!(references, ["Shared", "Shared"]);
         assert_eq!(
             assembly_definition_json("MyGame", &references),
-            "{\"name\":\"MyGame\",\"references\":[\"Shared\",\"Shared\"],\"allowUnsafeCode\":true}"
+            "{\r\n  \"name\": \"MyGame\",\r\n  \"references\": [\r\n    \"Shared\",\r\n    \"Shared\"\r\n  ],\r\n  \"allowUnsafeCode\": true\r\n}"
         );
         assert_eq!(
             assembly_definition_json("Empty", &[]),
-            "{\"name\":\"Empty\",\"references\":[],\"allowUnsafeCode\":true}"
+            "{\r\n  \"name\": \"Empty\",\r\n  \"references\": [],\r\n  \"allowUnsafeCode\": true\r\n}"
         );
         // The empty-script flow shares the 2017.3 gate.
         assert!(emit_assembly_definitions(true, version("2017.3.0f1")));

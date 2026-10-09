@@ -2,10 +2,14 @@
 // It authors only synthetic SerializedFiles under the caller's scratch directory,
 // then imports and exports those files through the frozen AssetRipper product path.
 using System.Security.Cryptography;
+using System.Collections;
+using System.Reflection;
 using System.Text;
 using AssetRipper.Export.Configuration;
 using AssetRipper.Export.UnityProjects;
+using AssetRipper.Export.UnityProjects.Scripts;
 using AssetRipper.Import.Logging;
+using AssetRipper.Import.Structure.Assembly.Managers;
 using AssetRipper.IO.Endian;
 using AssetRipper.IO.Files;
 using AssetRipper.IO.Files.SerializedFiles;
@@ -21,6 +25,36 @@ if (args.Length > 0 && args[0] == "export-mono-structure")
         return 2;
     }
     return ExportMonoStructure(args[1], args[2], args[3]);
+}
+
+if (args.Length > 0 && args[0] == "export-empty-script")
+{
+    if (args.Length != 4)
+    {
+        Console.Error.WriteLine("usage: managed-project export-empty-script <input-root> <output-root> <rows-file>");
+        return 2;
+    }
+    return ExportEmptyScript(args[1], args[2], args[3]);
+}
+
+if (args.Length > 0 && args[0] == "export-reference-script")
+{
+    if (args.Length != 4)
+    {
+        Console.Error.WriteLine("usage: managed-project export-reference-script <input-root> <output-root> <rows-file>");
+        return 2;
+    }
+    return ExportReferenceScript(args[1], args[2], args[3]);
+}
+
+if (args.Length > 0 && args[0] == "reference-assembly-map")
+{
+    if (args.Length != 2)
+    {
+        Console.Error.WriteLine("usage: managed-project reference-assembly-map <new-output-file>");
+        return 2;
+    }
+    return DumpReferenceAssemblyMap(args[1]);
 }
 
 if (args.Length != 3)
@@ -161,6 +195,350 @@ static int ExportMonoStructure(string inputRootArgument, string outputRootArgume
     }
     Console.WriteLine($"source_object={monoBehaviours[0]}");
     Console.WriteLine($"mono_behaviour={Path.GetRelativePath(outputRoot, monoYamlPath).Replace('\\', '/')}");
+    return 0;
+}
+
+static int ExportEmptyScript(string inputRootArgument, string outputRootArgument, string rowsArgument)
+{
+    string inputRoot = Path.GetFullPath(inputRootArgument);
+    string outputRoot = Path.GetFullPath(outputRootArgument);
+    string rowsPath = Path.GetFullPath(rowsArgument);
+    EnsureEmptyOrMissingDirectory(inputRoot, "input");
+    EnsureEmptyOrMissingDirectory(outputRoot, "output");
+    if (File.Exists(rowsPath) || Directory.Exists(rowsPath))
+    {
+        throw new IOException($"refusing to overwrite probe rows {rowsPath}");
+    }
+
+    Directory.CreateDirectory(inputRoot);
+    Directory.CreateDirectory(outputRoot);
+    Directory.CreateDirectory(Path.GetDirectoryName(rowsPath)!);
+    string inputPath = Path.Combine(inputRoot, "generic_script.assets");
+    byte[] inputBytes = BuildGenericScriptFile();
+    File.WriteAllBytes(inputPath, inputBytes);
+
+    Logger.Add(new ConsoleLogger());
+    ExportHandler handler = new(new FullConfiguration());
+    var gameData = handler.LoadAndProcess([inputRoot], LocalFileSystem.Instance);
+    var monoScripts = gameData.GameBundle.FetchAssets()
+        .Where(asset => asset.ClassID == 115 && asset.PathID == 7)
+        .Select(asset => $"{asset.ClassName}|{asset.PathID}|{asset}")
+        .ToArray();
+    if (monoScripts.Length != 1 || !monoScripts[0].StartsWith("MonoScript|7|", StringComparison.Ordinal))
+    {
+        throw new InvalidDataException($"expected one source MonoScript at PathID 7: {string.Join(";", monoScripts)}");
+    }
+    handler.Export(gameData, outputRoot, LocalFileSystem.Instance);
+
+    string assetsRoot = Path.Combine(outputRoot, "ExportedProject", "Assets");
+    string[] relativePaths =
+    [
+        "Scripts/GameScripts/Game/Widget`1.cs",
+        "Scripts/GameScripts/Game/Widget`1.cs.meta",
+        "Scripts/GameScripts/GameScripts.asmdef",
+    ];
+    string[] absolutePaths = relativePaths.Select(path => Path.Combine(assetsRoot, path)).ToArray();
+    foreach (string path in absolutePaths)
+    {
+        if (!File.Exists(path))
+        {
+            throw new FileNotFoundException($"expected source script output {path}");
+        }
+    }
+
+    using StreamWriter rows = new(rowsPath, false, new UTF8Encoding(false)) { NewLine = "\n" };
+    rows.WriteLine("# Frozen AssetRipper generic MonoScript output with no managed assembly input.");
+    rows.WriteLine($"OBJECT|{monoScripts[0]}");
+    WriteInputRow(rows, inputPath, inputBytes);
+    for (int index = 0; index < relativePaths.Length; index++)
+    {
+        byte[] bytes = File.ReadAllBytes(absolutePaths[index]);
+        if (relativePaths[index].EndsWith(".meta", StringComparison.Ordinal))
+        {
+            bytes = NormalizeMonoImporterMeta(bytes);
+        }
+        rows.WriteLine($"FILE|Assets/{relativePaths[index]}|{bytes.Length}|{Convert.ToHexString(SHA256.HashData(bytes))}");
+        rows.WriteLine($"CONTENT_HEX|Assets/{relativePaths[index]}|{Convert.ToHexString(bytes)}");
+    }
+    Console.WriteLine($"source_object={monoScripts[0]}");
+    Console.WriteLine($"script=Assets/{relativePaths[0]}");
+    Console.WriteLine($"sidecar=Assets/{relativePaths[1]}");
+    Console.WriteLine($"assembly_definition=Assets/{relativePaths[2]}");
+    return 0;
+}
+
+static byte[] NormalizeMonoImporterMeta(byte[] bytes)
+{
+    string text = Encoding.UTF8.GetString(bytes);
+    string[] lines = text.Split(["\r\n", "\n"], StringSplitOptions.None);
+    string normalized = string.Join(
+        "\n",
+        lines.Where(line => !line.StartsWith("timeCreated: ", StringComparison.Ordinal)));
+    return Encoding.UTF8.GetBytes(normalized);
+}
+
+static byte[] BuildGenericScriptFile()
+{
+    List<byte> payload = [];
+    WriteString(payload, "Widget"); // m_Name
+    WriteI32(payload, 17); // m_ExecutionOrder
+    payload.AddRange(new byte[16]); // Hash128 m_PropertiesHash
+    WriteString(payload, "Widget`1"); // m_ClassName
+    WriteString(payload, "Game"); // m_Namespace
+    WriteString(payload, "GameScripts"); // m_AssemblyName
+
+    SerializedType monoScriptType = new() { RawTypeID = 115 };
+    SerializedFile file = new SerializedFileBuilder
+    {
+        Generation = FormatVersion.StoresTypeDependencies,
+        Version = UnityVersion.Parse("2019.4.40f1"),
+        Platform = (BuildTarget)19,
+        EndianType = EndianType.LittleEndian,
+        HasTypeTree = false,
+        Types = { monoScriptType },
+        Objects =
+        {
+            new ObjectInfo(monoScriptType)
+            {
+                FileID = 7,
+                TypeID = 115,
+                ObjectData = payload.ToArray(),
+            },
+        },
+    }.Build();
+    file.FilePath = "generic_script.assets";
+    return file.ToByteArray();
+}
+
+static int ExportReferenceScript(string inputRootArgument, string outputRootArgument, string rowsArgument)
+{
+    string inputRoot = Path.GetFullPath(inputRootArgument);
+    string outputRoot = Path.GetFullPath(outputRootArgument);
+    string rowsPath = Path.GetFullPath(rowsArgument);
+    EnsureEmptyOrMissingDirectory(inputRoot, "input");
+    EnsureEmptyOrMissingDirectory(outputRoot, "output");
+    if (File.Exists(rowsPath) || Directory.Exists(rowsPath))
+    {
+        throw new IOException($"refusing to overwrite probe rows {rowsPath}");
+    }
+
+    Directory.CreateDirectory(inputRoot);
+    Directory.CreateDirectory(outputRoot);
+    Directory.CreateDirectory(Path.GetDirectoryName(rowsPath)!);
+    string scriptInputPath = Path.Combine(inputRoot, "reference_script.assets");
+    string behaviourInputPath = Path.Combine(inputRoot, "reference_behaviour.assets");
+    byte[] scriptInputBytes = BuildReferenceScriptFile();
+    byte[] behaviourInputBytes = BuildReferenceBehaviourFile();
+    File.WriteAllBytes(scriptInputPath, scriptInputBytes);
+    File.WriteAllBytes(behaviourInputPath, behaviourInputBytes);
+
+    Logger.Add(new ConsoleLogger());
+    ExportHandler handler = new(new FullConfiguration());
+    var gameData = handler.LoadAndProcess([inputRoot], LocalFileSystem.Instance);
+    var scripts = gameData.GameBundle.FetchAssets()
+        .Where(asset => asset.ClassID == 115 && asset.PathID == 7)
+        .Select(asset => $"{asset.ClassName}|{asset.PathID}|{asset}")
+        .ToArray();
+    if (scripts.Length != 1 || !scripts[0].StartsWith("MonoScript|7|", StringComparison.Ordinal))
+    {
+        throw new InvalidDataException($"expected one source reference MonoScript at PathID 7: {string.Join(";", scripts)}");
+    }
+    handler.Export(gameData, outputRoot, LocalFileSystem.Instance);
+
+    string assetsRoot = Path.Combine(outputRoot, "ExportedProject", "Assets");
+    string scriptRelative = "Scripts/UnityEngine/UnityEngine/Object.cs";
+    string sidecarRelative = scriptRelative + ".meta";
+    string definitionRelative = "Scripts/UnityEngine/UnityEngine.asmdef";
+    string scriptPath = Path.Combine(assetsRoot, scriptRelative);
+    string sidecarPath = Path.Combine(assetsRoot, sidecarRelative);
+    string definitionPath = Path.Combine(assetsRoot, definitionRelative);
+    foreach (string path in new[] { scriptPath, sidecarPath, definitionPath })
+    {
+        if (!File.Exists(path))
+        {
+            throw new FileNotFoundException($"expected source reference-script output {path}");
+        }
+    }
+    string? behaviourPath = Directory.Exists(assetsRoot)
+        ? Directory.GetFiles(assetsRoot, "*.asset", SearchOption.AllDirectories)
+            .FirstOrDefault(path => File.ReadAllText(path).Contains("m_Name: ReferenceRoot", StringComparison.Ordinal))
+        : null;
+    if (behaviourPath is null)
+    {
+        throw new InvalidDataException("source export did not write the expected referencing MonoBehaviour asset");
+    }
+
+    using StreamWriter rows = new(rowsPath, false, new UTF8Encoding(false)) { NewLine = "\n" };
+    rows.WriteLine("# Frozen AssetRipper no-manager reference MonoScript pointer and project-export probe.");
+    rows.WriteLine($"OBJECT|{scripts[0]}");
+    WriteInputRow(rows, scriptInputPath, scriptInputBytes);
+    WriteInputRow(rows, behaviourInputPath, behaviourInputBytes);
+    foreach ((string relative, string path) in new[]
+    {
+        ($"Assets/{scriptRelative}", scriptPath),
+        ($"Assets/{sidecarRelative}", sidecarPath),
+        ($"Assets/{definitionRelative}", definitionPath),
+        ($"Assets/{Path.GetRelativePath(assetsRoot, behaviourPath).Replace('\\', '/')}", behaviourPath),
+    })
+    {
+        byte[] bytes = File.ReadAllBytes(path);
+        if (relative.EndsWith(".meta", StringComparison.Ordinal))
+        {
+            bytes = NormalizeMonoImporterMeta(bytes);
+        }
+        rows.WriteLine($"FILE|{relative}|{bytes.Length}|{Convert.ToHexString(SHA256.HashData(bytes))}");
+        rows.WriteLine($"CONTENT_HEX|{relative}|{Convert.ToHexString(bytes)}");
+    }
+    Console.WriteLine($"source_object={scripts[0]}");
+    Console.WriteLine($"script=Assets/{scriptRelative}");
+    Console.WriteLine($"sidecar=Assets/{sidecarRelative}");
+    Console.WriteLine($"assembly_definition=Assets/{definitionRelative}");
+    Console.WriteLine($"behaviour=Assets/{Path.GetRelativePath(assetsRoot, behaviourPath).Replace('\\', '/')}");
+    return 0;
+}
+
+static byte[] BuildReferenceScriptFile()
+{
+    List<byte> scriptPayload = [];
+    WriteString(scriptPayload, "Object"); // m_Name
+    WriteI32(scriptPayload, 0); // m_ExecutionOrder
+    scriptPayload.AddRange(new byte[16]); // Hash128 m_PropertiesHash
+    WriteString(scriptPayload, "Object"); // m_ClassName
+    WriteString(scriptPayload, "UnityEngine"); // m_Namespace
+    WriteString(scriptPayload, "UnityEngine"); // m_AssemblyName
+
+    SerializedType monoScriptType = new() { RawTypeID = 115 };
+    SerializedFile file = new SerializedFileBuilder
+    {
+        Generation = FormatVersion.StoresTypeDependencies,
+        Version = UnityVersion.Parse("2019.4.40f1"),
+        Platform = (BuildTarget)19,
+        EndianType = EndianType.LittleEndian,
+        HasTypeTree = false,
+        Types = { monoScriptType },
+        Objects =
+        {
+            new ObjectInfo(monoScriptType)
+            {
+                FileID = 7,
+                TypeID = 115,
+                ObjectData = scriptPayload.ToArray(),
+            },
+        },
+    }.Build();
+    file.FilePath = "reference_script.assets";
+    return file.ToByteArray();
+}
+
+static byte[] BuildReferenceBehaviourFile()
+{
+    List<byte> behaviourPayload = [];
+    WriteI32(behaviourPayload, 0); // m_GameObject.m_FileID
+    WriteI64(behaviourPayload, 0); // m_GameObject.m_PathID
+    behaviourPayload.Add(1); // m_Enabled
+    while (behaviourPayload.Count % 4 != 0)
+    {
+        behaviourPayload.Add(0);
+    }
+    WriteI32(behaviourPayload, 1); // m_Script.m_FileID -> reference_script.assets
+    WriteI64(behaviourPayload, 7); // m_Script.m_PathID -> referenced MonoScript
+    WriteString(behaviourPayload, "ReferenceRoot"); // m_Name
+    WriteI32(behaviourPayload, 789); // m_Health
+
+    SerializedType monoBehaviourType = new() { RawTypeID = 114 };
+    AssignTree(monoBehaviourType, MonoBehaviourTargetTree());
+    SerializedFile file = new SerializedFileBuilder
+    {
+        Generation = FormatVersion.StoresTypeDependencies,
+        Version = UnityVersion.Parse("2019.4.40f1"),
+        Platform = (BuildTarget)19,
+        EndianType = EndianType.LittleEndian,
+        HasTypeTree = true,
+        Types = { monoBehaviourType },
+        Dependencies =
+        {
+            new FileIdentifier
+            {
+                AssetPath = "reference_script.assets",
+                PathNameOrigin = "reference_script.assets",
+                PathName = "reference_script.assets",
+                Type = AssetType.Serialized,
+            },
+        },
+        Objects =
+        {
+            new ObjectInfo(monoBehaviourType)
+            {
+                FileID = 8,
+                TypeID = 114,
+                ObjectData = behaviourPayload.ToArray(),
+            },
+        },
+    }.Build();
+    file.FilePath = "reference_behaviour.assets";
+    return file.ToByteArray();
+}
+
+static int DumpReferenceAssemblyMap(string outputPathArgument)
+{
+    string outputPath = Path.GetFullPath(outputPathArgument);
+    if (File.Exists(outputPath) || Directory.Exists(outputPath))
+    {
+        throw new IOException($"refusing to overwrite reference assembly map {outputPath}");
+    }
+    Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
+
+    FieldInfo dataField = typeof(ReferenceAssemblies).GetField(
+        "assemblyDataFile",
+        BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new MissingFieldException(typeof(ReferenceAssemblies).FullName, "assemblyDataFile");
+    object dataFile = dataField.GetValue(null)
+        ?? throw new InvalidDataException("AssetRipper reference assembly data did not initialize");
+    PropertyInfo assembliesProperty = dataFile.GetType().GetProperty("Assemblies")
+        ?? throw new MissingMemberException(dataFile.GetType().FullName, "Assemblies");
+    IEnumerable assemblies = (IEnumerable)(assembliesProperty.GetValue(dataFile)
+        ?? throw new InvalidDataException("AssetRipper reference assembly versions were empty"));
+    var manager = new BaseManager(_ => { });
+    List<(string Version, int MapId)> versionRows = [];
+    Dictionary<string, int> mapIds = new(StringComparer.Ordinal);
+    List<(int Id, string[] Entries)> maps = [];
+
+    foreach (object pair in assemblies)
+    {
+        Type pairType = pair.GetType();
+        UnityVersion version = (UnityVersion)(pairType.GetProperty("Key")?.GetValue(pair)
+            ?? throw new MissingMemberException(pairType.FullName, "Key"));
+        string versionText = version.ToString();
+        string[] entries = ReferenceAssemblies.GetReferenceAssemblies(manager, version)
+            .OrderBy(mapping => mapping.Key, StringComparer.Ordinal)
+            .Select(mapping => $"{mapping.Key}|{mapping.Value}")
+            .ToArray();
+        string canonicalMap = string.Join("\n", entries);
+        if (!mapIds.TryGetValue(canonicalMap, out int mapId))
+        {
+            mapId = maps.Count;
+            mapIds.Add(canonicalMap, mapId);
+            maps.Add((mapId, entries));
+        }
+        versionRows.Add((versionText, mapId));
+    }
+
+    using StreamWriter writer = new(outputPath, false, new UTF8Encoding(false)) { NewLine = "\n" };
+    writer.WriteLine("# AssetRipper ReferenceAssemblies.GetReferenceAssemblies with HasMscorlib2=false.");
+    foreach ((string version, int mapId) in versionRows)
+    {
+        writer.WriteLine($"VERSION|{version}|{mapId}");
+    }
+    foreach ((int mapId, string[] entries) in maps)
+    {
+        foreach (string entry in entries)
+        {
+            writer.WriteLine($"ENTRY|{mapId}|{entry}");
+        }
+    }
+    Console.WriteLine($"versions={versionRows.Count}");
+    Console.WriteLine($"unique_maps={maps.Count}");
+    Console.WriteLine($"output={outputPath}");
     return 0;
 }
 

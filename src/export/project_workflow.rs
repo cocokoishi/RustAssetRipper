@@ -26,7 +26,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::io::filesystem::VirtualFileSystem;
 use crate::io::platform_structure::PlatformResourceProvider;
-use crate::processing::asset_factory::FactoryAssetKind;
+use crate::processing::asset_factory::{FactoryAssetKind, FactoryUnityVersion};
 use crate::processing::managed_assembly::mono_script_export_identity;
 use crate::processing::scene_collections::{
     SceneDefinitionGuidPlan, SceneDefinitionPathSource, SceneGuidWords,
@@ -40,7 +40,9 @@ use crate::serialized_file::reference_graph::{MultiFilePPtrResolution, MultiFile
 use crate::serialized_file::workspace::SerializedFileWorkspace;
 
 use super::collection_kind::ExportCollectionKind;
-use super::collection_paths::plan_script_export_paths;
+use super::collection_paths::{
+    plan_script_export_paths, remove_assembly_file_extension, scripts_folder_name,
+};
 use super::empty_script::{empty_script_content, is_predefined_assembly, MonoScriptIdentity};
 use super::export_extension::DEFAULT_EXPORT_EXTENSION;
 use super::pointer_map::{
@@ -61,6 +63,7 @@ use super::project_exporter::{
     ProjectPathPlanner,
 };
 use super::project_plan::plan_scene_export_paths;
+use super::reference_assemblies::ReferenceAssemblyMaps;
 use super::scene_collection::{
     plan_workspace_scene_export_ids_with_processed_assets, ExportAssetCollectionIdentity,
     ExportAssetIdentity, ExportAssetObjectKey, SceneExportIdAssignment, SceneExportIdPlanLimits,
@@ -69,8 +72,13 @@ use super::scene_collection::{
 use super::scene_wiring::{
     process_workspace_scenes_and_prefabs, WorkspaceSceneProcessing, WorkspaceSceneProcessingLimits,
 };
-use super::script_export_flow::{assembly_export_type, AssemblyExportType};
-use super::script_hashing::{calculate_script_guid_str, ScriptHashLimits};
+use super::script_export_flow::{
+    assembly_definition_file_name, assembly_definition_json, assembly_export_type,
+    emit_assembly_definitions, AssemblyExportType,
+};
+use super::script_hashing::{
+    calculate_script_file_id_str, calculate_script_guid_str, ScriptHashLimits,
+};
 use super::settings_file::ExportSettingsFile;
 use super::shader_export::{
     export_shader_text, unity_patches, yaml_shader_patch_texts, yaml_shader_patches,
@@ -176,7 +184,11 @@ struct RoutedObject<'a> {
     selection: super::project_exporter::CollectionSelection,
     route: ObjectRoute,
     collection_index: usize,
+    /// GUID written into the collection's `.meta` file.
     guid: [u8; 16],
+    /// GUID registered in the source project pointer map. A reference MonoScript uses the
+    /// reference assembly GUID here while retaining its calculated script GUID in its `.meta`.
+    pointer_guid: [u8; 16],
     file_id: i64,
 }
 
@@ -185,6 +197,8 @@ struct ScriptExportDetails {
     identity: MonoScriptIdentity,
     execution_order: i16,
     guid: [u8; 16],
+    pointer_guid: [u8; 16],
+    pointer_file_id: i64,
 }
 
 /// One processed Scene collection staged for the Unity project exporter.
@@ -268,6 +282,21 @@ pub fn export_workspace_yaml_project_with_script_manager(
     limits: WorkspaceProjectExportLimits,
 ) -> Result<WorkspaceProjectExportReport, Box<dyn Error>> {
     let (editor_version_text, project_version) = workspace_project_version(workspace)?;
+    let has_mono_scripts = objects
+        .objects()
+        .iter()
+        .any(|object| object.factory.class_id == 115);
+    let reference_assembly_maps = if assembly_manager_is_set || !has_mono_scripts {
+        None
+    } else {
+        Some(
+            ReferenceAssemblyMaps::from_source_fixture().map_err(|error| {
+                invalid_project(format!(
+                    "source reference assembly map could not be loaded: {error}"
+                ))
+            })?,
+        )
+    };
     let settings_facts = ProjectExportSettings::from_export_settings(settings, project_version);
     if objects.report().object_count > limits.max_objects {
         return Err(invalid_project(format!(
@@ -417,7 +446,13 @@ pub fn export_workspace_yaml_project_with_script_manager(
             let selection = select_collection_with_shader_text(facts, settings_facts, shader_text)?;
             let kind = selection.kind();
             let script_export = if class_id == 115 {
-                plan_script_export_details(object, settings, assembly_manager_is_set)?
+                plan_script_export_details(
+                    object,
+                    settings,
+                    assembly_manager_is_set,
+                    editor_version_text,
+                    reference_assembly_maps.as_ref(),
+                )?
             } else {
                 None
             };
@@ -556,11 +591,10 @@ pub fn export_workspace_yaml_project_with_script_manager(
                     })?
                 }
                 ObjectRoute::Script => {
-                    super::script_export_flow::decompiled_file_id().map_err(|error| {
-                        invalid_project(format!(
-                            "MonoScript export ID could not be planned: {error}"
-                        ))
-                    })?
+                    script_export
+                        .as_ref()
+                        .ok_or_else(|| invalid_project("MonoScript route has no export details"))?
+                        .pointer_file_id
                 }
                 _ => object_info.path_id,
             };
@@ -569,6 +603,9 @@ pub fn export_workspace_yaml_project_with_script_manager(
             } else {
                 mint_unique_collection_guid(&mut next_guid_sequence, &mut used_guids)?
             };
+            let pointer_guid = script_export
+                .as_ref()
+                .map_or(guid, |script| script.pointer_guid);
             routed.push(RoutedObject {
                 object,
                 class_id,
@@ -581,6 +618,7 @@ pub fn export_workspace_yaml_project_with_script_manager(
                 route,
                 collection_index,
                 guid,
+                pointer_guid,
                 file_id,
             });
         }
@@ -650,7 +688,7 @@ pub fn export_workspace_yaml_project_with_script_manager(
         }
         collection_metadata.push(ExportCollectionPointerMetadata {
             collection_index: entry.collection_index,
-            guid: entry.guid,
+            guid: entry.pointer_guid,
             asset_type: if entry.route == ObjectRoute::Script {
                 UnityProjectAssetType::Meta
             } else {
@@ -740,7 +778,7 @@ pub fn export_workspace_yaml_project_with_script_manager(
                     unity_patches::PATCHES_RELATIVE_DIRECTORY,
                     unity_patches::patch_file_name(name)
                 );
-                add_shader_support_file(
+                add_project_support_file(
                     &mut support_files,
                     &mut support_file_indexes,
                     relative_path,
@@ -928,6 +966,47 @@ pub fn export_workspace_yaml_project_with_script_manager(
             meta,
             label: entry.selection.collection_name.to_owned(),
         });
+    }
+
+    // `EmptyScriptExportCollection` writes an asmdef for each non-predefined assembly when no
+    // managed assembly manager was initialized. Its details have no module, so the source JSON
+    // contains an empty reference array.
+    if !assembly_manager_is_set
+        && emit_assembly_definitions(
+            routed
+                .iter()
+                .any(|entry| entry.route == ObjectRoute::Script),
+            project_version,
+        )
+    {
+        let mut emitted_assemblies = HashSet::new();
+        for entry in &routed {
+            if entry.route != ObjectRoute::Script {
+                continue;
+            }
+            let script = entry.script_export.as_ref().ok_or_else(|| {
+                invalid_project("MonoScript route has no validated script identity")
+            })?;
+            let assembly = &script.identity.assembly;
+            if is_predefined_assembly(assembly) || !emitted_assemblies.insert(assembly.clone()) {
+                continue;
+            }
+            let assembly_folder = remove_assembly_file_extension(assembly);
+            let relative_path = format!(
+                "Assets/{}/{}/{}",
+                scripts_folder_name(assembly_folder),
+                assembly_folder,
+                assembly_definition_file_name(assembly_folder)
+            );
+            let bytes = assembly_definition_json(assembly_folder, &[]).into_bytes();
+            add_project_support_file(
+                &mut support_files,
+                &mut support_file_indexes,
+                relative_path,
+                &bytes,
+                files.len(),
+            )?;
+        }
     }
 
     for prefab in &prefab_collections {
@@ -1207,6 +1286,8 @@ fn plan_script_export_details(
     object: &WorkspaceObject,
     settings: &ExportSettingsFile,
     assembly_manager_is_set: bool,
+    unity_version_text: &str,
+    reference_assembly_maps: Option<&ReferenceAssemblyMaps>,
 ) -> Result<Option<ScriptExportDetails>, Box<dyn Error>> {
     let metadata = mono_script_export_identity(object).map_err(|error| {
         invalid_project(format!(
@@ -1222,19 +1303,43 @@ fn plan_script_export_details(
     if identity.is_injected() {
         return Ok(None);
     }
-    if !is_predefined_assembly(&identity.assembly) {
+    if assembly_manager_is_set && !is_predefined_assembly(&identity.assembly) {
         return Err(invalid_project(format!(
-            "file {} object {} PathID {} MonoScript assembly {:?} requires reference-assembly lookup or saved-assembly export, which is not wired into the project path",
+            "file {} object {} PathID {} MonoScript assembly {:?} requires manager-backed reference-map or assembly-export handling, which is not wired into the project path",
             object.file_index, object.object_index, object.path_id, identity.assembly
         )));
     }
+    let reference_guid = if assembly_manager_is_set {
+        None
+    } else {
+        let version = FactoryUnityVersion::parse(unity_version_text).ok_or_else(|| {
+            invalid_project(format!(
+                "file {} object {} PathID {} MonoScript reference lookup cannot parse Unity version {unity_version_text:?}",
+                object.file_index, object.object_index, object.path_id
+            ))
+        })?;
+        let maps = reference_assembly_maps.ok_or_else(|| {
+            invalid_project("MonoScript reference lookup has no source reference assembly map")
+        })?;
+        maps.guid_for(&version, &identity.assembly)
+            .map_err(|error| {
+                invalid_project(format!(
+                    "file {} object {} PathID {} MonoScript reference lookup failed: {error}",
+                    object.file_index, object.object_index, object.path_id
+                ))
+            })?
+    };
     let export_type = assembly_export_type(
-        false,
+        reference_guid.is_some(),
         assembly_manager_is_set,
         settings.script_export_mode,
         &identity.assembly,
     );
-    if export_type != AssemblyExportType::Decompile {
+    if export_type != AssemblyExportType::Decompile
+        && !(export_type == AssemblyExportType::Skip
+            && !assembly_manager_is_set
+            && reference_guid.is_some())
+    {
         return Err(invalid_project(format!(
             "file {} object {} PathID {} MonoScript selects {export_type:?} for ScriptExportMode::{:?}; that script export route is not wired into the project path",
             object.file_index,
@@ -1243,7 +1348,7 @@ fn plan_script_export_details(
             settings.script_export_mode
         )));
     }
-    let guid = calculate_script_guid_str(
+    let script_guid = calculate_script_guid_str(
         &identity.assembly,
         &identity.namespace,
         &identity.class,
@@ -1254,12 +1359,49 @@ fn plan_script_export_details(
             "file {} object {} PathID {} MonoScript GUID could not be calculated: {error}",
             object.file_index, object.object_index, object.path_id
         ))
-    })?
-    .to_byte_array();
+    })?;
+    let (pointer_guid, pointer_file_id) = match export_type {
+        AssemblyExportType::Decompile => (
+            script_guid.to_byte_array(),
+            super::script_export_flow::decompiled_file_id().map_err(|error| {
+                invalid_project(format!("MonoScript export ID could not be planned: {error}"))
+            })?,
+        ),
+        AssemblyExportType::Skip => {
+            let file_id = calculate_script_file_id_str(
+                &identity.namespace,
+                &identity.class,
+                ScriptHashLimits::default(),
+            )
+            .map_err(|error| {
+                invalid_project(format!(
+                    "file {} object {} PathID {} MonoScript file ID could not be calculated: {error}",
+                    object.file_index, object.object_index, object.path_id
+                ))
+            })?;
+            (
+                reference_guid
+                    .ok_or_else(|| invalid_project("skipped MonoScript has no reference GUID"))?
+                    .to_byte_array(),
+                i64::from(file_id),
+            )
+        }
+        AssemblyExportType::Save => {
+            return Err(invalid_project(format!(
+                "file {} object {} PathID {} MonoScript selects Save for ScriptExportMode::{:?}; that script export route is not wired into the project path",
+                object.file_index,
+                object.object_index,
+                object.path_id,
+                settings.script_export_mode
+            )))
+        }
+    };
     Ok(Some(ScriptExportDetails {
         identity,
         execution_order: metadata.execution_order,
-        guid,
+        guid: script_guid.to_byte_array(),
+        pointer_guid,
+        pointer_file_id,
     }))
 }
 
@@ -2246,7 +2388,7 @@ fn shader_non_modifiable_textures_yaml(
     Ok(output)
 }
 
-fn add_shader_support_file(
+fn add_project_support_file(
     files: &mut Vec<PlannedProjectSupportFile>,
     indexes: &mut HashMap<String, usize>,
     relative_path: String,
@@ -2259,7 +2401,7 @@ fn add_shader_support_file(
             .ok_or_else(|| invalid_project("Shader support-file index is inconsistent"))?;
         if existing.bytes != bytes {
             return Err(invalid_project(format!(
-                "Shader exporters generated conflicting support file {relative_path:?}"
+                "project exporters generated conflicting support file {relative_path:?}"
             )));
         }
         if before_file_index < existing.before_file_index {
