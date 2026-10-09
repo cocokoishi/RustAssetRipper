@@ -2392,7 +2392,8 @@ impl SchemeReader {
     /// 2. When the prefix is a GZip or Brotli wrapper, the layer is decompressed *directly from the
     ///    seekable stream* through the streaming codec entry points, so the compressed input is
     ///    never materialized. The decoded layer is bounded per layer and cumulatively exactly like
-    ///    the in-memory dispatcher, and deeper wrapper nesting continues through that same path.
+    ///    the in-memory dispatcher; any deeper wrapper is handled by that same bounded state
+    ///    machine after the outer layer has been decoded.
     /// 3. Otherwise the finally dispatched layer is materialized, because every container and leaf
     ///    parser in this port reads contiguous bytes.
     pub fn read_path_streaming(
@@ -2401,6 +2402,17 @@ impl SchemeReader {
     ) -> Result<DispatchedFile<'static>, SchemeError> {
         let mut stream = open_logical_file(path)
             .map_err(|error| SchemeError::new(SchemeErrorKind::StreamInput(error)))?;
+        Self::read_stream(&mut stream, limits)
+    }
+
+    /// Read and dispatch a seekable stream through the same bounded streaming path as a local
+    /// file. Outer GZip/Brotli wrappers are decoded from the stream without first copying their
+    /// compressed input; the final container or leaf is materialized under `max_input_bytes`
+    /// because the current format parsers consume contiguous byte slices.
+    pub fn read_stream<R: Read + Seek>(
+        stream: &mut R,
+        limits: SchemeReaderLimits,
+    ) -> Result<DispatchedFile<'static>, SchemeError> {
         let stream_length = stream
             .seek(SeekFrom::End(0))
             .map_err(|error| SchemeError::new(SchemeErrorKind::StreamInput(error)))?;
@@ -2411,9 +2423,9 @@ impl SchemeReader {
             }));
         }
 
-        let prefix = read_stream_prefix(&mut stream, stream_length)?;
+        let prefix = read_stream_prefix(stream, stream_length)?;
         if let Some(kind) = detect_primary_file_kind_with_length(&prefix, stream_length) {
-            let contents = Self::materialize_stream(&mut stream, stream_length)?;
+            let contents = Self::materialize_stream(stream, stream_length)?;
             return Ok(DispatchedFile {
                 contents: Cow::Owned(contents),
                 kind,
@@ -2430,7 +2442,7 @@ impl SchemeReader {
             None
         };
         let Some(wrapper_kind) = wrapper_kind else {
-            let contents = Self::materialize_stream(&mut stream, stream_length)?;
+            let contents = Self::materialize_stream(stream, stream_length)?;
             let kind = detect_file_kind_with_length(&contents, stream_length);
             return Ok(DispatchedFile {
                 contents: Cow::Owned(contents),
@@ -3224,41 +3236,6 @@ impl SchemeReader {
             || is_serialized_file(input)
     }
 
-    /// Read a complete seekable logical file, such as a file assembled from split parts, into
-    /// bounded storage and dispatch it from its beginning.
-    pub fn read_stream<R: Read + Seek>(
-        stream: &mut R,
-        limits: SchemeReaderLimits,
-    ) -> Result<DispatchedFile<'static>, SchemeError> {
-        let stream_length = stream
-            .seek(SeekFrom::End(0))
-            .map_err(|error| SchemeError::new(SchemeErrorKind::StreamInput(error)))?;
-        if stream_length > u64::try_from(limits.max_input_bytes).unwrap_or(u64::MAX) {
-            return Err(SchemeError::new(SchemeErrorKind::InputSizeLimitExceeded {
-                requested: stream_length,
-                limit: limits.max_input_bytes,
-            }));
-        }
-        let length = usize::try_from(stream_length).map_err(|_| {
-            SchemeError::new(SchemeErrorKind::InputLengthNotRepresentable {
-                length: stream_length,
-            })
-        })?;
-        stream
-            .seek(SeekFrom::Start(0))
-            .map_err(|error| SchemeError::new(SchemeErrorKind::StreamInput(error)))?;
-
-        let mut contents = Vec::new();
-        contents.try_reserve_exact(length).map_err(|_| {
-            SchemeError::new(SchemeErrorKind::InputAllocationFailed { requested: length })
-        })?;
-        contents.resize(length, 0);
-        stream
-            .read_exact(&mut contents)
-            .map_err(|error| SchemeError::new(SchemeErrorKind::StreamInput(error)))?;
-        Self::read_cow_with_limits(Cow::Owned(contents), limits)
-    }
-
     pub fn read_with_limits(
         input: &[u8],
         limits: SchemeReaderLimits,
@@ -3628,7 +3605,7 @@ mod tests {
         compress_gzip, decompress_brotli, has_brotli_file_signature,
     };
     use crate::io::filesystem::VirtualFileSystem;
-    use std::io::{Cursor, Seek, SeekFrom};
+    use std::io::{Cursor, Read, Seek, SeekFrom};
     use std::path::PathBuf;
 
     fn unique_temp_file_path(extension: &str) -> PathBuf {
@@ -3792,6 +3769,167 @@ mod tests {
         assert_eq!(file.kind(), FileKind::Resource);
         assert_eq!(file.bytes(), b"stream payload");
         assert_eq!(file.wrappers()[0].kind, WrapperKind::Gzip);
+    }
+
+    #[test]
+    fn seekable_stream_dispatch_matches_both_source_scheme_reader_routes() {
+        let fixture = include_str!("io/io_differential_stream_fixture.txt");
+        let mut path_rows = std::collections::BTreeMap::new();
+        let mut stream_rows = Vec::new();
+        for line in fixture.lines() {
+            if let Some(rest) = line.strip_prefix("SCHEME|") {
+                let mut fields = rest.split('|');
+                let case = fields.next().expect("scheme case");
+                let input = fields
+                    .next()
+                    .and_then(|field| field.strip_prefix("in="))
+                    .unwrap_or_else(|| panic!("{case}: missing source input"));
+                let outcome = fields.collect::<Vec<_>>().join("|");
+                assert!(
+                    path_rows
+                        .insert(case.to_owned(), (decode_hex_fixture(input), outcome))
+                        .is_none(),
+                    "duplicate source path case {case}"
+                );
+            } else if let Some(rest) = line.strip_prefix("SCHEME_STREAM|") {
+                stream_rows.push(rest);
+            }
+        }
+        assert_eq!(path_rows.len(), 47, "source LoadFile cases");
+        assert_eq!(
+            stream_rows.len(),
+            path_rows.len(),
+            "source SmartStream cases"
+        );
+
+        fn expected_scheme_name(file: &super::DispatchedFile<'_>) -> &'static str {
+            match file.wrappers().first().map(|wrapper| wrapper.kind) {
+                Some(WrapperKind::Gzip) => "GZipFile",
+                Some(WrapperKind::Brotli) => "BrotliFile",
+                None => match file.kind() {
+                    super::FileKind::UnityFs => "FileStreamBundleFile",
+                    super::FileKind::UnityRaw => "RawBundleFile",
+                    super::FileKind::UnityWebBundle => "WebBundleFile",
+                    super::FileKind::UnityArchive => "ArchiveBundleFile",
+                    super::FileKind::UnityWebData => "WebFile",
+                    super::FileKind::SerializedFile => "SerializedFile",
+                    super::FileKind::Resource => "ResourceFile",
+                },
+            }
+        }
+
+        for rest in stream_rows {
+            let mut fields = rest.split('|');
+            let case = fields.next().expect("stream case");
+            let source_outcome = fields.collect::<Vec<_>>().join("|");
+            let (input, path_outcome) = path_rows
+                .get(case)
+                .unwrap_or_else(|| panic!("{case}: no matching source LoadFile case"));
+            assert_eq!(
+                source_outcome, *path_outcome,
+                "{case}: LoadFile and ReadFile(SmartStream) source outcomes"
+            );
+
+            let in_memory = SchemeReader::read_with_limits(input, SchemeReaderLimits::default())
+                .unwrap_or_else(|error| panic!("{case}: in-memory dispatch failed: {error}"));
+            let mut cursor = Cursor::new(input.clone());
+            let streamed = SchemeReader::read_stream(&mut cursor, SchemeReaderLimits::default())
+                .unwrap_or_else(|error| panic!("{case}: seekable-stream dispatch failed: {error}"));
+            assert_eq!(streamed.kind(), in_memory.kind(), "{case}: dispatched kind");
+            assert_eq!(
+                streamed.wrappers(),
+                in_memory.wrappers(),
+                "{case}: wrappers"
+            );
+            assert_eq!(
+                streamed.bytes(),
+                in_memory.bytes(),
+                "{case}: dispatched bytes"
+            );
+
+            if let Some(source_throw) = source_outcome.strip_prefix("THROW:") {
+                assert!(
+                    streamed.parse().is_err(),
+                    "{case}: reference threw {source_throw}, Rust parsed"
+                );
+                continue;
+            }
+
+            let source_type = source_outcome
+                .split('|')
+                .find_map(|field| field.strip_prefix("type="))
+                .unwrap_or_else(|| panic!("{case}: missing source type"));
+            if source_type == "ResourceFile" && has_brotli_file_signature(input) {
+                // The frozen source detector misses this RFC-valid marker; its direct Brotli
+                // decoder accepts the same bytes. Rust keeps the source bug classified in
+                // DIFF-BROTLI-METADATA-001 and recognizes the valid wrapper here.
+                assert_eq!(
+                    expected_scheme_name(&streamed),
+                    "BrotliFile",
+                    "{case}: scheme"
+                );
+                assert!(matches!(streamed.kind(), super::FileKind::UnityFs));
+            } else {
+                assert_eq!(
+                    expected_scheme_name(&streamed),
+                    source_type,
+                    "{case}: scheme"
+                );
+            }
+            let source_fixed = source_outcome
+                .split('|')
+                .find_map(|field| field.strip_prefix("fixed="))
+                .unwrap_or_else(|| panic!("{case}: missing source fixed name"));
+            assert_eq!(source_fixed, format!("{case}.bin"), "{case}: file name");
+        }
+    }
+
+    #[test]
+    fn seekable_stream_wrapper_decode_does_not_read_into_a_whole_input_buffer() {
+        struct CountedCursor {
+            cursor: Cursor<Vec<u8>>,
+            largest_read_request: usize,
+        }
+
+        impl Read for CountedCursor {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                self.largest_read_request = self.largest_read_request.max(buffer.len());
+                self.cursor.read(buffer)
+            }
+        }
+
+        impl Seek for CountedCursor {
+            fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+                self.cursor.seek(position)
+            }
+        }
+
+        let mut state = 0x1234_5678u32;
+        let payload_len = 1024 * 1024;
+        let mut payload = Vec::with_capacity(payload_len);
+        for _ in 0..payload_len {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            payload.push((state >> 24) as u8);
+        }
+        let compressed = compress_gzip(&payload, payload.len() + 64 * 1024).unwrap();
+        assert!(compressed.len() > 256 * 1024);
+        let compressed_len = compressed.len();
+        let mut stream = CountedCursor {
+            cursor: Cursor::new(compressed),
+            largest_read_request: 0,
+        };
+
+        let dispatched = SchemeReader::read_stream(&mut stream, SchemeReaderLimits::default())
+            .expect("bounded wrapper streaming dispatch");
+        assert_eq!(dispatched.kind(), super::FileKind::Resource);
+        assert_eq!(dispatched.bytes(), payload);
+        assert!(
+            stream.largest_read_request < compressed_len,
+            "compressed input was requested as one whole buffer: largest read {}, input {compressed_len}",
+            stream.largest_read_request
+        );
     }
 
     #[test]

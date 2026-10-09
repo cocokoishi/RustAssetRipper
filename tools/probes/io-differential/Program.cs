@@ -60,6 +60,7 @@ public static class Program
 		Lines.Add("#   AssetRipper.IO.Files.dll from 0Bins/AssetRipper.GUI.Free/Release of the frozen reference.");
 		Lines.Add("# SCHEME rows: SchemeReader.LoadFile + ReadContentsRecursively over probe-built container bytes;");
 		Lines.Add("#   the trailing field is the recursive inventory (CONTAINER/CODEC/SER/RES/FAIL).");
+		Lines.Add("# SCHEME_STREAM rows: SchemeReader.ReadFile(SmartStream) over the same bytes and recursive inventory.");
 		Lines.Add("# STREAM rows: observable stream semantics; each field is name=value, pipe separated.");
 		Lines.Add("# RESOURCE rows: Bundle.ResolveResource outcomes over a real in-memory bundle hierarchy.");
 		Lines.Add("# Format: SECTION|case|field=value|...");
@@ -739,6 +740,21 @@ public static class Program
 			catch (Exception ex)
 			{
 				Lines.Add($"SCHEME|{name}|in={Hex(data)}|THROW:{ex.GetType().Name}:{Sanitize(ex.Message)}");
+			}
+
+			try
+			{
+				using SmartStream input = SmartStream.CreateMemory(data);
+				FileBase file = SchemeReader.ReadFile(input, path, Path.GetFileName(path));
+				file.ReadContentsRecursively();
+				List<string> parts = new();
+				Dump(file, parts, 0);
+				Lines.Add($"SCHEME_STREAM|{name}|type={file.GetType().Name}|fixed={file.NameFixed}"
+					+ $"|tree={string.Join(",", parts)}");
+			}
+			catch (Exception ex)
+			{
+				Lines.Add($"SCHEME_STREAM|{name}|THROW:{ex.GetType().Name}:{Sanitize(ex.Message)}");
 			}
 		}
 	}
