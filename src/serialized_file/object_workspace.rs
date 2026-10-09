@@ -1065,6 +1065,19 @@ impl ObjectWorkspace {
         &self.objects
     }
 
+    /// Return the contiguous object records for one workspace file.
+    ///
+    /// `load_from_vfs` stores these records by ascending `(file_index, object_index)`, so this
+    /// avoids rescanning unrelated files when a caller processes scene data file by file.
+    pub fn objects_for_file(&self, file_index: usize) -> &[WorkspaceObject] {
+        let start = self
+            .objects
+            .partition_point(|object| object.file_index < file_index);
+        let end =
+            start + self.objects[start..].partition_point(|object| object.file_index == file_index);
+        &self.objects[start..end]
+    }
+
     /// Find an object by its stable workspace file/object-table indexes.
     ///
     /// Objects are stored in ascending file index and then object index order by

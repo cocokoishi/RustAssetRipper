@@ -16,6 +16,7 @@ use crate::serialized_file::metadata::{ObjectInfo, SerializedFileMetadata};
 use crate::serialized_file::object::{
     ObjectDecodeLimits, ParsedObjectPayload, SerializedValue, SerializedValueLookupError,
 };
+use crate::serialized_file::object_workspace::WorkspaceObject;
 use crate::serialized_file::reference_graph::{
     MultiFileObjectReference, MultiFilePPtrResolution, MultiFileReferenceGraph,
 };
@@ -644,6 +645,71 @@ impl SceneGraph {
                 object_scene_class_id(object),
                 root,
             )?;
+        }
+        builder.finish()
+    }
+
+    /// Build from the payloads already materialized by the workspace object factory.
+    ///
+    /// This preserves generated TPK TypeTree decoding for files that do not carry a TypeTree,
+    /// while retaining decode failures as explicit graph issues.
+    pub fn from_materialized_workspace(
+        metadata: &SerializedFileMetadata,
+        file_index: usize,
+        workspace_objects: &[WorkspaceObject],
+        limits: SceneGraphLimits,
+    ) -> Result<Self, SceneGraphBuildError> {
+        if workspace_objects.len() != metadata.objects.len() {
+            return Err(SceneGraphBuildError::MaterializedObjectCountMismatch {
+                expected: metadata.objects.len(),
+                actual: workspace_objects.len(),
+            });
+        }
+
+        let mut builder = SceneGraphBuilder::new(metadata, limits)?;
+        for (object_index, (metadata_object, workspace_object)) in
+            metadata.objects.iter().zip(workspace_objects).enumerate()
+        {
+            if workspace_object.file_index != file_index
+                || workspace_object.object_index != object_index
+                || workspace_object.path_id != metadata_object.path_id
+            {
+                return Err(SceneGraphBuildError::MaterializedObjectIdentityMismatch {
+                    object_index,
+                    expected_file_index: file_index,
+                    actual_file_index: workspace_object.file_index,
+                    actual_object_index: workspace_object.object_index,
+                    expected_path_id: metadata_object.path_id,
+                    actual_path_id: workspace_object.path_id,
+                });
+            }
+            if !is_scene_object_class(object_scene_class_id(metadata_object)) {
+                continue;
+            }
+            match &workspace_object.payload {
+                Ok(payload)
+                    if payload.object_index == object_index
+                        && payload.path_id == metadata_object.path_id =>
+                {
+                    builder.add_payload(payload)?
+                }
+                Ok(payload) => {
+                    return Err(SceneGraphBuildError::MaterializedPayloadIdentityMismatch {
+                        object_index,
+                        expected_path_id: metadata_object.path_id,
+                        payload_object_index: payload.object_index,
+                        payload_path_id: payload.path_id,
+                    });
+                }
+                Err(error) => builder.push_issue(SceneGraphIssue {
+                    object_index,
+                    path_id: metadata_object.path_id,
+                    field_path: None,
+                    kind: SceneGraphIssueKind::ObjectDecodeFailed {
+                        message: error.to_string(),
+                    },
+                })?,
+            }
         }
         builder.finish()
     }
@@ -3093,6 +3159,24 @@ pub enum SceneGraphBuildError {
         object_index: usize,
         class_id: Option<i32>,
     },
+    MaterializedObjectCountMismatch {
+        expected: usize,
+        actual: usize,
+    },
+    MaterializedObjectIdentityMismatch {
+        object_index: usize,
+        expected_file_index: usize,
+        actual_file_index: usize,
+        actual_object_index: usize,
+        expected_path_id: i64,
+        actual_path_id: i64,
+    },
+    MaterializedPayloadIdentityMismatch {
+        object_index: usize,
+        expected_path_id: i64,
+        payload_object_index: usize,
+        payload_path_id: i64,
+    },
 }
 
 impl Display for SceneGraphBuildError {
@@ -3155,6 +3239,30 @@ impl Display for SceneGraphBuildError {
             } => write!(
                 f,
                 "decoded scene root at object index {object_index} has non-scene class ID {class_id:?}"
+            ),
+            Self::MaterializedObjectCountMismatch { expected, actual } => write!(
+                f,
+                "materialized workspace contains {actual} objects, but the source file has {expected} object records"
+            ),
+            Self::MaterializedObjectIdentityMismatch {
+                object_index,
+                expected_file_index,
+                actual_file_index,
+                actual_object_index,
+                expected_path_id,
+                actual_path_id,
+            } => write!(
+                f,
+                "materialized object at file {actual_file_index}, object {actual_object_index}, PathID {actual_path_id} does not match file {expected_file_index}, object {object_index}, PathID {expected_path_id}"
+            ),
+            Self::MaterializedPayloadIdentityMismatch {
+                object_index,
+                expected_path_id,
+                payload_object_index,
+                payload_path_id,
+            } => write!(
+                f,
+                "materialized payload at object {payload_object_index}, PathID {payload_path_id} does not match object {object_index}, PathID {expected_path_id}"
             ),
         }
     }

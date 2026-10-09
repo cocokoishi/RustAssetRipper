@@ -529,3 +529,11 @@ The following bounded evidence supplements the existing stable-ID rows. It does 
 | `EXPORT-UNITY-001` | Source and Rust managed-reference YAML subtrees match after normalizing only the randomly generated target GUID. The modern format-21 project route now gets class identity from the resolved factory TypeID when the legacy object-table class ID is absent. | Status remains `实现中`; the whole root MonoBehaviour YAML still differs because Rust omits six source-emitted default fields. Other exporter families, full project settings/post-export, and GUI workflows remain open. |
 
 The fixture contains serialized TypeTrees and reference-type metadata, so it adds no missing-TypeTree evidence for `SER-TT-ABSENT-001` and no assembly-backed recovery evidence for `TYPE-SCRIPT-001`. See the input hashes, exact probe command, and full-file YAML difference in `docs/differential-findings.md` (`DIFF-MANAGED-REF-PROJECT-001`).
+
+## Scene graph materialization and unresolved component evidence (2026-10-09)
+
+| Feature ID | Verification evidence | Status and remaining scope |
+|---|---|---|
+| `SER-TT-ABSENT-001` | The source-authored `scene_unresolved_source_fixture.txt` uses a generated TPK GameObject layout with no embedded TypeTree. Rust scene processing now consumes the same materialized `ObjectWorkspace` payload and recovers the ordered `m_Component` pointer. | Status remains `实现中`; this covers one generated GameObject layout and does not complete TPK class/version materialization. |
+| `OBJ-REF-001` | The recovered component pointer remains `MissingDependency { external_index: 0, path_id: 99 }`; the joined summary does not rewrite it as null. | Status remains `实现中`; this is one absent external dependency and does not cover the complete cross-file, cross-bundle, built-in, cycle, or export-ID space. |
+| `PROC-SCENE-001` | `workspace_scene_processing_keeps_unresolved_no_type_tree_components_indeterminate` verifies one unresolved component issue and zero synthetic Transform plans. The frozen source processor instead adds a Transform when its component lookup cannot resolve the external PPtr; the behavior difference and raw input evidence are recorded as `DIFF-PROC-SCENE-UNRESOLVED-COMPONENT-001`. | Status remains `实现中`; source Scene/Prefab membership, broader hierarchy shapes, export behavior, and other version branches remain open. |

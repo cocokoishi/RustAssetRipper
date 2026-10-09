@@ -126,8 +126,8 @@ use assetripper::serialized_file::reference_graph::{
     MultiFileReferenceGraphLimits,
 };
 use assetripper::serialized_file::workspace::{
-    SerializedFileDependencyReport, SerializedFileWorkspace, SerializedFileWorkspaceLimits,
-    SerializedFileWorkspaceLoadOptions, WorkspaceSerializedBundle,
+    LoadedSerializedFile, SerializedFileDependencyReport, SerializedFileWorkspace,
+    SerializedFileWorkspaceLimits, SerializedFileWorkspaceLoadOptions, WorkspaceSerializedBundle,
 };
 
 const MAX_INPUT_PATHS: usize = 100_000;
@@ -255,6 +255,45 @@ fn load_object_workspace(
         limits,
         active_class_layout_source(),
     )
+}
+
+fn build_workspace_scene_graph(
+    filesystem: &VirtualFileSystem,
+    file_index: usize,
+    file: &LoadedSerializedFile,
+    decoded_objects: &ObjectWorkspace,
+) -> Result<SceneGraph, Box<dyn Error>> {
+    let workspace_objects = decoded_objects.objects_for_file(file_index);
+    let all_scene_objects_materialized = file
+        .metadata
+        .objects
+        .iter()
+        .enumerate()
+        .filter(|(_, object)| matches!(workspace_object_class_id(object), Some(1 | 4 | 224 | 1001)))
+        .all(|(object_index, _)| {
+            workspace_objects
+                .get(object_index)
+                .is_some_and(|object| object.payload.is_ok())
+        });
+    if all_scene_objects_materialized {
+        return Ok(SceneGraph::from_materialized_workspace(
+            &file.metadata,
+            file_index,
+            workspace_objects,
+            SceneGraphLimits::default(),
+        )?);
+    }
+
+    // Preserve the existing file-TypeTree diagnostic path when ObjectWorkspace could not
+    // materialize a scene object; a failed generated read must not erase a detectable edge.
+    let maximum_bytes = usize::try_from(SerializedFileWorkspaceLimits::default().max_file_bytes)
+        .unwrap_or(usize::MAX);
+    let bytes = filesystem.read_all_bytes(&file.virtual_path, maximum_bytes)?;
+    let parsed_file = SerializedFile::parse(&bytes)?;
+    Ok(SceneGraph::build(
+        &parsed_file,
+        SceneGraphLimits::default(),
+    )?)
 }
 const MAX_REFERENCE_GRAPH_DIAGNOSTICS: usize = 128;
 const MAX_GENERATED_TRANSFORM_DIAGNOSTICS: usize = 128;
@@ -3449,8 +3488,6 @@ fn print_workspace_summary_with_optional_resources_to<W: io::Write>(
             object_report.undecoded_objects - decode_diagnostics,
         )?;
     }
-    drop(decoded_objects);
-
     let mut build_settings_paths = None;
     let mut selected_build_settings = None;
     'select_build_settings: for &file_index in source_collection_file_indices.iter().rev() {
@@ -3631,17 +3668,8 @@ fn print_workspace_summary_with_optional_resources_to<W: io::Write>(
         }
 
         if contains_scene_objects || scene_collection_flags[file_index] {
-            if file_bytes.is_none() {
-                let maximum_bytes =
-                    usize::try_from(SerializedFileWorkspaceLimits::default().max_file_bytes)
-                        .unwrap_or(usize::MAX);
-                file_bytes = Some(filesystem.read_all_bytes(&file.virtual_path, maximum_bytes)?);
-            }
-            let Some(file_bytes) = file_bytes.as_deref() else {
-                return Err(invalid_data("scene input bytes were not retained").into());
-            };
-            let parsed_file = SerializedFile::parse(file_bytes)?;
-            let mut scene_graph = SceneGraph::build(&parsed_file, SceneGraphLimits::default())?;
+            let mut scene_graph =
+                build_workspace_scene_graph(filesystem, file_index, file, &decoded_objects)?;
             scene_graph.resolve_with_multi_file_graph(
                 file_index,
                 &file.file_name,
@@ -4013,12 +4041,8 @@ fn print_workspace_summary_with_optional_resources_to<W: io::Write>(
             .files()
             .get(file_index)
             .ok_or_else(|| invalid_data("scene collection file index is invalid"))?;
-        let maximum_bytes =
-            usize::try_from(SerializedFileWorkspaceLimits::default().max_file_bytes)
-                .unwrap_or(usize::MAX);
-        let bytes = filesystem.read_all_bytes(&file.virtual_path, maximum_bytes)?;
-        let parsed_file = SerializedFile::parse(&bytes)?;
-        let mut scene_graph = SceneGraph::build(&parsed_file, SceneGraphLimits::default())?;
+        let mut scene_graph =
+            build_workspace_scene_graph(filesystem, file_index, file, &decoded_objects)?;
         scene_graph.resolve_with_multi_file_graph(
             file_index,
             &file.file_name,
@@ -4047,6 +4071,7 @@ fn print_workspace_summary_with_optional_resources_to<W: io::Write>(
             &multi_file_graph,
         )?;
     }
+    drop(decoded_objects);
 
     let scene_path_set = if let Some(paths) = build_settings_paths.as_deref() {
         BuildSettingsScenePathSet::Unique(paths)
@@ -4695,14 +4720,14 @@ mod tests {
     };
     use assetripper::export::settings::{ExportDefaults, ShaderExportMode};
     use assetripper::export::settings_file::ExportSettingsFile;
-    use assetripper::io::dependency::DependencyFilePath;
+    use assetripper::io::dependency::{DependencyFilePath, DependencyIndexLimits};
     use assetripper::io::filesystem::VirtualFileSystem;
     use assetripper::io::platform_file_inventory::PlatformWorkspaceLoadOptions;
     use assetripper::io::platform_structure::{
         detect_platform_structure, PlatformKind, PlatformStructure, PlatformStructureLimits,
     };
-    use assetripper::scheme::BatchMountReport;
     use assetripper::scheme::FileKind;
+    use assetripper::scheme::{BatchMountReport, ContainerMountLimits};
     use assetripper::serialized_file::collection_workspace::{
         WorkspaceAssetCollections, WorkspaceCollectionLimits,
     };
@@ -11546,6 +11571,63 @@ mod tests {
                 assert!(summary.contains("MissingLocalObject { path_id: 99 }"));
             }
         }
+    }
+
+    #[test]
+    fn workspace_scene_processing_keeps_unresolved_no_type_tree_components_indeterminate() {
+        let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
+        let fixture = include_str!("processing/scene_unresolved_source_fixture.txt");
+        let input_hex = fixture
+            .lines()
+            .find_map(|line| line.strip_prefix("INPUT_HEX|"))
+            .expect("scene processor fixture contains its source-authored input bytes");
+        assert!(
+            input_hex.len().is_multiple_of(2),
+            "fixture hex has even length"
+        );
+        let input_bytes = input_hex
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16)
+                    .expect("fixture hex is valid")
+            })
+            .collect::<Vec<_>>();
+        let mut filesystem = VirtualFileSystem::new();
+        let virtual_path = "/game/UnresolvedComponent.unity";
+        insert_vfs_file(&mut filesystem, virtual_path, &input_bytes);
+        let input = DependencyFilePath {
+            file_name: "UnresolvedComponent.unity".to_owned(),
+            virtual_path: virtual_path.to_owned(),
+        };
+        let (workspace, dependencies) = super::load_workspace_with_dependencies(
+            &mut filesystem,
+            std::slice::from_ref(&input),
+            std::slice::from_ref(&input),
+            &[],
+            SerializedFileWorkspaceLimits::default(),
+            DependencyIndexLimits::default(),
+            ContainerMountLimits::default(),
+        )
+        .unwrap();
+
+        let mut output = Vec::new();
+        super::print_workspace_summary_to(&mut output, &filesystem, &workspace, &dependencies)
+            .unwrap();
+        let summary = String::from_utf8(output).unwrap();
+        assert!(summary.contains(
+            "field \"m_Component[0].component\": MissingDependency { external_index: 0, path_id: 99 }"
+        ));
+        assert!(summary.contains(
+            "Scene graph: 1 GameObjects, 0 Transforms, 1 relationships, 0 decode issues, complete=false"
+        ));
+        assert!(summary.contains("Workspace root candidates: 0, root issues: 1"));
+        assert!(
+            summary.contains("Generated Prefab Transforms planned for non-scene GameObjects: 0")
+        );
+        assert!(summary.contains(
+            "hierarchy file 0: 1 GameObjects, 0 Transforms, 0 component candidates, 0 roots, 1 root issues, 1 relationships, complete=false"
+        ));
     }
 
     #[test]

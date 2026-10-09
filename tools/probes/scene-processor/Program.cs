@@ -6,6 +6,8 @@
 //   GameBundle, then run the real SceneDefinitionProcessor and PrefabProcessor in source order
 //   and dump the observable outcome (collections, scene definitions, generated hierarchies,
 //   generated Transform objects). Writes only the rows file; reads only inputs.
+// Mode notree-unresolved-component <input> <rows>: author a no-TypeTree GameObject with one
+//   missing external Transform PPtr and record the real processor output.
 using System.Collections;
 using System.Reflection;
 using AssetRipper.Assets;
@@ -36,7 +38,7 @@ using System.Security.Cryptography;
 
 if (args.Length == 0)
 {
-	Console.Error.WriteLine("usage: tpk <version> <classId...> | naming <version> <name...> | process <rows> <file...> | legacy-export <input> <rows> <output> | raw-fallback-export <input> <rows> <output>");
+	Console.Error.WriteLine("usage: tpk <version> <classId...> | naming <version> <name...> | process <rows> <file...> | notree-unresolved-component <input> <rows> | legacy-export <input> <rows> <output> | raw-fallback-export <input> <rows> <output>");
 	return 2;
 }
 
@@ -65,6 +67,11 @@ try
 	if (args[0] == "notree-prefab-export" && args.Length == 4)
 	{
 		ExportNoTreePrefab(args[1], args[2], args[3]);
+		return 0;
+	}
+	if (args[0] == "notree-unresolved-component" && args.Length == 3)
+	{
+		ProbeNoTreeUnresolvedComponent(args[1], args[2]);
 		return 0;
 	}
 	if (args[0] == "raw-fallback-export" && args.Length == 4)
@@ -394,6 +401,112 @@ static byte[] BuildNoTreePrefabFile()
 		},
 	}.Build();
 	file.FilePath = "NoTreeRoot.unity";
+	return file.ToByteArray();
+}
+
+static void ProbeNoTreeUnresolvedComponent(string inputPath, string rowsPath)
+{
+	string inputFullPath = Path.GetFullPath(inputPath);
+	string rowsFullPath = Path.GetFullPath(rowsPath);
+	string processorRowsPath = rowsFullPath + ".processor";
+	if (File.Exists(inputFullPath) || Directory.Exists(inputFullPath))
+	{
+		throw new IOException($"refusing to overwrite probe input {inputFullPath}");
+	}
+	if (File.Exists(rowsFullPath) || Directory.Exists(rowsFullPath)
+		|| File.Exists(processorRowsPath) || Directory.Exists(processorRowsPath))
+	{
+		throw new IOException($"refusing to overwrite probe rows {rowsFullPath}");
+	}
+	Directory.CreateDirectory(Path.GetDirectoryName(inputFullPath)!);
+	Directory.CreateDirectory(Path.GetDirectoryName(rowsFullPath)!);
+	byte[] inputBytes = BuildNoTreeUnresolvedComponentFile();
+	File.WriteAllBytes(inputFullPath, inputBytes);
+	Process(processorRowsPath, [inputFullPath]);
+
+	using StreamWriter rows = new(rowsFullPath, false, new System.Text.UTF8Encoding(false)) { NewLine = "\n" };
+	rows.WriteLine("# Frozen AssetRipper source processor output for an unresolved no-TypeTree component PPtr.");
+	rows.WriteLine($"INPUT|{Path.GetFileName(inputFullPath)}|{inputBytes.Length}|{Convert.ToHexString(SHA256.HashData(inputBytes))}");
+	rows.WriteLine($"INPUT_HEX|{Convert.ToHexString(inputBytes)}");
+	foreach (string row in File.ReadLines(processorRowsPath))
+	{
+		rows.WriteLine(row);
+	}
+	File.Delete(processorRowsPath);
+}
+
+static byte[] BuildNoTreeUnresolvedComponentFile()
+{
+	UnityVersion version = UnityVersion.Parse("2019.4.40f1");
+	SerializedFile template = new SerializedFileBuilder
+	{
+		Generation = FormatVersion.Unknown_10,
+		Version = version,
+		Platform = BuildTarget.NoTarget,
+		EndianType = EndianType.LittleEndian,
+		HasTypeTree = false,
+	}.Build();
+	GameAssetFactory factory = new(new BaseManager(_ => { }));
+	GameBundle bundle = new();
+	SerializedAssetCollection collection = bundle.AddCollectionFromSerializedFile(template, factory);
+	IUnityObjectBase gameObjectAsset = AssetFactory.CreateSerialized(new AssetInfo(collection, 10, 1), version)
+		?? throw new InvalidDataException("source factory did not create the unresolved-component GameObject");
+	if (gameObjectAsset is not IGameObject gameObject)
+	{
+		throw new InvalidDataException($"source factory returned {gameObjectAsset.GetType().Name}, expected IGameObject");
+	}
+	gameObject.Name = new Utf8String("UnresolvedComponentRoot");
+	gameObject.Layer = 3;
+	gameObject.IsActive_Boolean = true;
+	SerializedFile externalTemplate = new SerializedFileBuilder
+	{
+		Generation = FormatVersion.Unknown_10,
+		Version = version,
+		Platform = BuildTarget.NoTarget,
+		EndianType = EndianType.LittleEndian,
+		HasTypeTree = false,
+	}.Build();
+	externalTemplate.FilePath = "missing_component.assets";
+	SerializedAssetCollection externalCollection = bundle.AddCollectionFromSerializedFile(externalTemplate, factory);
+	collection.AddDependency(externalCollection);
+	IUnityObjectBase missingTransform = AssetFactory.CreateSerialized(new AssetInfo(externalCollection, 99, 4), version)
+		?? throw new InvalidDataException("source factory did not create the unresolved external Transform");
+	if (missingTransform is not ITransform transform)
+	{
+		throw new InvalidDataException($"source factory returned {missingTransform.GetType().Name}, expected ITransform");
+	}
+	gameObject.AddComponent(ClassIDType.Transform, transform);
+	byte[] payload = WriteAsset(gameObjectAsset, true);
+	SerializedType gameObjectType = new() { RawTypeID = 1 };
+	SerializedFile file = new SerializedFileBuilder
+	{
+		Generation = FormatVersion.Unknown_10,
+		Version = version,
+		Platform = BuildTarget.NoTarget,
+		EndianType = EndianType.LittleEndian,
+		HasTypeTree = false,
+		Types = { gameObjectType },
+		Dependencies =
+		{
+			new FileIdentifier
+			{
+				AssetPath = "missing_component.assets",
+				PathNameOrigin = "missing_component.assets",
+				PathName = "missing_component.assets",
+				Type = AssetType.Serialized,
+			},
+		},
+		Objects =
+		{
+			new ObjectInfo(gameObjectType)
+			{
+				FileID = 10,
+				TypeID = 1,
+				ObjectData = payload,
+			},
+		},
+	}.Build();
+	file.FilePath = "UnresolvedComponent.unity";
 	return file.ToByteArray();
 }
 
