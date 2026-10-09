@@ -69,9 +69,9 @@ if (args.Length > 0 && args[0] == "export-reference-script")
 
 if (args.Length > 0 && args[0] == "export-manager-reference-script")
 {
-    if (args.Length < 5 || args.Length > 7)
+    if (args.Length < 5 || args.Length > 8)
     {
-        Console.Error.WriteLine("usage: managed-project export-manager-reference-script <input-root> <output-root> <rows-file> <mscorlib-v2-file> [assembly-name] [unity-version]");
+        Console.Error.WriteLine("usage: managed-project export-manager-reference-script <input-root> <output-root> <rows-file> <mscorlib-v2-file> [assembly-name] [unity-version] [script-export-mode]");
         return 2;
     }
     return ExportManagerReferenceScript(
@@ -80,7 +80,8 @@ if (args.Length > 0 && args[0] == "export-manager-reference-script")
         args[3],
         args[4],
         args.Length > 5 ? args[5] : "Mono.Cecil",
-        args.Length > 6 ? args[6] : "2019.1.0f1");
+        args.Length > 6 ? args[6] : "2019.1.0f1",
+        args.Length > 7 ? Enum.Parse<ScriptExportMode>(args[7], ignoreCase: false) : null);
 }
 
 if (args.Length > 0 && args[0] == "export-textasset")
@@ -779,7 +780,8 @@ static int ExportManagerReferenceScript(
     string rowsArgument,
     string mscorlibV2Argument,
     string assemblyName,
-    string unityVersion)
+    string unityVersion,
+    ScriptExportMode? scriptExportMode)
 {
     string inputRoot = Path.GetFullPath(inputRootArgument);
     string outputRoot = Path.GetFullPath(outputRootArgument);
@@ -810,7 +812,12 @@ static int ExportManagerReferenceScript(
     File.WriteAllBytes(mscorlibInputPath, mscorlibInputBytes);
 
     Logger.Add(new ConsoleLogger());
-    ExportHandler handler = new(new FullConfiguration());
+    FullConfiguration configuration = new();
+    if (scriptExportMode is not null)
+    {
+        configuration.ExportSettings.ScriptExportMode = scriptExportMode.Value;
+    }
+    ExportHandler handler = new(configuration);
     var gameData = handler.LoadAndProcess([inputRoot], LocalFileSystem.Instance);
     if (!gameData.AssemblyManager.IsSet || !gameData.AssemblyManager.HasMscorlib2)
     {
@@ -840,6 +847,10 @@ static int ExportManagerReferenceScript(
 
     using StreamWriter rows = new(rowsPath, false, new UTF8Encoding(false)) { NewLine = "\n" };
     rows.WriteLine($"MANAGER|{gameData.AssemblyManager.ScriptingBackend}|{gameData.AssemblyManager.IsSet}|{gameData.AssemblyManager.HasMscorlib2}");
+    if (scriptExportMode is not null)
+    {
+        rows.WriteLine($"MODE|{configuration.ExportSettings.ScriptExportMode}");
+    }
     rows.WriteLine($"OBJECT|{scripts[0]}");
     WriteInputRow(rows, scriptInputPath, scriptInputBytes);
     WriteInputRow(rows, behaviourInputPath, behaviourInputBytes);

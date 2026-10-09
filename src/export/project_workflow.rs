@@ -36,6 +36,7 @@ use crate::processing::scene_collections::{
     SceneDefinitionGuidPlan, SceneDefinitionPathSource, SceneGuidWords,
 };
 use crate::processing::scene_naming::SceneUnityVersion;
+use crate::processing::script_identity::ScriptIdentifier;
 use crate::resource::{RootResourceFileCatalog, StreamedResourceContentLimits};
 use crate::resources::shader::{script_has_decompiled_text, ShaderView, SHADER_CLASS_ID};
 use crate::serialized_file::object::ParsedObjectPayload;
@@ -148,8 +149,8 @@ pub struct WorkspaceProjectExportReport {
     pub collection_count: usize,
     /// Objects whose baseline collection writes nothing, with the reason.
     pub skipped_objects: Vec<ProjectExportNotice>,
-    /// MonoScript pointers retained for assemblies whose content was not supplied to import.
-    pub unresolved_script_dependencies: Vec<ProjectExportNotice>,
+    /// MonoScript pointers retained when the source has no matching type or assembly content.
+    pub unresolved_script_content: Vec<ProjectExportNotice>,
     /// Files written through the generic asset-family renderer instead of their own.
     pub fallbacks: Vec<ProjectExportNotice>,
     /// Unknown or unreadable objects preserved through the source raw-data exporter. Their
@@ -174,8 +175,8 @@ enum ObjectRoute {
     Manager,
     /// `ScriptExportCollection`/`EmptyScriptExportCollection`: deterministic `.cs` and MonoImporter metadata.
     Script,
-    /// A manager-backed MonoScript whose collection only registers a pointer; saved DLL bytes
-    /// are staged once per loaded assembly.
+    /// A manager-backed MonoScript whose source collection only registers a pointer; saved DLL
+    /// bytes are staged once per loaded assembly when present.
     ScriptPointerOnly,
     /// `UnknownExportCollection`: raw payload bytes, no `.meta`.
     Unknown,
@@ -215,6 +216,7 @@ struct ScriptExportDetails {
     pointer_file_id: i64,
     export_type: AssemblyExportType,
     missing_assembly: bool,
+    source_script_present: Option<bool>,
 }
 
 #[derive(Clone, Debug)]
@@ -448,7 +450,7 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
         .try_reserve_exact(objects.report().object_count)
         .map_err(|_| invalid_project("could not allocate routed project objects"))?;
     let mut notices: Vec<ProjectExportNotice> = Vec::new();
-    let mut unresolved_script_dependencies: Vec<ProjectExportNotice> = Vec::new();
+    let mut unresolved_script_content: Vec<ProjectExportNotice> = Vec::new();
     let mut fallback_notices: Vec<ProjectExportNotice> = Vec::new();
     let mut opaque_fallback_notices: Vec<ProjectExportNotice> = Vec::new();
     let mut next_collection_index = 0usize;
@@ -533,11 +535,24 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
             } else {
                 None
             };
-            if let Some(script) = script_export
-                .as_ref()
-                .filter(|script| script.missing_assembly)
-            {
-                unresolved_script_dependencies.push(ProjectExportNotice {
+            if let Some(script) = script_export.as_ref().filter(|script| {
+                script.missing_assembly || script.source_script_present == Some(false)
+            }) {
+                let reason = match (script.missing_assembly, script.source_script_present) {
+                    (true, Some(false)) => {
+                        "the assembly and script type are absent; its source decompile pointer is retained and no .cs file is emitted"
+                    }
+                    (false, Some(false)) => {
+                        "the imported manager has no matching script type; its source pointer is retained and no .cs file is emitted"
+                    }
+                    (true, _) => {
+                        "the assembly is absent from the imported catalog; its source GUID/fileID pointer is retained and no DLL is emitted"
+                    }
+                    (false, _) => {
+                        "the source script content is unavailable; its pointer is retained and no .cs file is emitted"
+                    }
+                };
+                unresolved_script_content.push(ProjectExportNotice {
                     subject: format!(
                         "MonoScript assembly {:?} ({}.{}, ScriptExportMode::{:?})",
                         script.identity.assembly,
@@ -545,7 +560,7 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
                         script.identity.class,
                         settings.script_export_mode
                     ),
-                    reason: "the assembly is absent from the imported catalog; its source assembly GUID/fileID pointer is retained and no DLL is emitted",
+                    reason,
                 });
             }
             let is_opaque_fallback = opaque_objects.contains(&(file_index, object_index));
@@ -592,6 +607,9 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
                     if script.export_type == AssemblyExportType::Save
                         || (script.export_type == AssemblyExportType::Skip
                             && assembly_manager_is_set)
+                        || (script.export_type == AssemblyExportType::Decompile
+                            && assembly_manager_is_set
+                            && script.source_script_present == Some(false))
                     {
                         ObjectRoute::ScriptPointerOnly
                     } else {
@@ -1444,7 +1462,7 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
         project_version,
         collection_count,
         skipped_objects: report.skipped,
-        unresolved_script_dependencies,
+        unresolved_script_content,
         fallbacks: report.fallbacks,
         opaque_fallbacks: opaque_fallback_notices,
         processing_warnings,
@@ -1549,6 +1567,7 @@ fn plan_script_export_details(
         &identity.assembly,
     );
     let mut missing_assembly = false;
+    let mut source_script_present = None;
     if export_type == AssemblyExportType::Save {
         let catalog = managed_assemblies.ok_or_else(|| {
             invalid_project(format!(
@@ -1569,6 +1588,19 @@ fn plan_script_export_details(
             Some(_) => {}
             None => missing_assembly = true,
         }
+    } else if export_type == AssemblyExportType::Decompile && assembly_manager_is_set {
+        let catalog = managed_assemblies.ok_or_else(|| {
+            invalid_project(format!(
+                "file {} object {} PathID {} MonoScript type presence requires the imported assembly catalog",
+                object.file_index, object.object_index, object.path_id
+            ))
+        })?;
+        missing_assembly = !catalog.contains_assembly(&identity.assembly);
+        source_script_present = Some(catalog.is_present(&ScriptIdentifier {
+            assembly: identity.assembly.clone(),
+            namespace: identity.namespace.clone(),
+            name: Some(identity.class.clone()),
+        }));
     } else if export_type != AssemblyExportType::Decompile
         && !(export_type == AssemblyExportType::Skip && reference_guid.is_some())
     {
@@ -1646,6 +1678,7 @@ fn plan_script_export_details(
         pointer_file_id,
         export_type,
         missing_assembly,
+        source_script_present,
     }))
 }
 
