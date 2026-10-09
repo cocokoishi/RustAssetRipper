@@ -54,6 +54,20 @@ if (args.Length > 0 && args[0] == "export-texture-project")
         args.Length == 7 ? args[6] : "inline");
 }
 
+if (args.Length > 0 && args[0] == "export-path-id-map-project")
+{
+    if (args.Length is < 4 or > 5)
+    {
+        Console.Error.WriteLine("usage: managed-project export-path-id-map-project <input-root> <output-root> <rows-file> [unity-version]");
+        return 2;
+    }
+    return ExportPathIdMapProject(
+        args[1],
+        args[2],
+        args[3],
+        args.Length == 5 ? args[4] : "2019.4.40f1");
+}
+
 if (args.Length == 1 && args[0] == "dump-texture-enums")
 {
     return DumpTextureEnums();
@@ -493,6 +507,15 @@ static int ExportSiblingBundleReferenceOrder(string inputRootArgument, string ou
             rows.WriteLine($"CONTENT|{relative}|{Convert.ToBase64String(stableBytes)}");
         }
     }
+    string pathIdMapRelative = "AuxiliaryFiles/path_id_map.json";
+    string pathIdMapPath = Path.Combine(outputRoot, "AuxiliaryFiles", "path_id_map.json");
+    if (!File.Exists(pathIdMapPath))
+    {
+        throw new InvalidDataException("sibling-bundle export omitted AuxiliaryFiles/path_id_map.json");
+    }
+    byte[] pathIdMapBytes = File.ReadAllBytes(pathIdMapPath);
+    rows.WriteLine($"FILE|{pathIdMapRelative}|{pathIdMapBytes.Length}|{Convert.ToHexString(SHA256.HashData(pathIdMapBytes))}");
+    rows.WriteLine($"SOURCE_OUTPUT|{pathIdMapRelative}|{Convert.ToHexString(pathIdMapBytes)}");
     Console.WriteLine($"source_objects={string.Join(';', sourceObjects)}");
     Console.WriteLine($"selected_target=FirstTarget|{firstTargetGuid}");
     Console.WriteLine($"bundle_bytes={outerBundle.Length}");
@@ -2089,6 +2112,118 @@ static int ExportTextureProject(
         rows.WriteLine($"SOURCE_OUTPUT|{relativePath}|{Convert.ToHexString(outputBytes)}");
     }
     Console.WriteLine($"TEXTURE_PROJECT|input={inputBytes.Length}|storage={storageMode}|files={Directory.GetFiles(outputRoot, "*", SearchOption.AllDirectories).Length}|format={imageFormatName}");
+    return 0;
+}
+
+static int ExportPathIdMapProject(
+    string inputRootValue,
+    string outputRootValue,
+    string rowsValue,
+    string unityVersionText)
+{
+    string inputRoot = Path.GetFullPath(inputRootValue);
+    string outputRoot = Path.GetFullPath(outputRootValue);
+    string rowsPath = Path.GetFullPath(rowsValue);
+    EnsureEmptyOrMissingDirectory(inputRoot, "input");
+    EnsureEmptyOrMissingDirectory(outputRoot, "output");
+    if (File.Exists(rowsPath) || Directory.Exists(rowsPath))
+    {
+        throw new IOException($"rows file must be new: {rowsPath}");
+    }
+    Directory.CreateDirectory(inputRoot);
+    Directory.CreateDirectory(outputRoot);
+    Directory.CreateDirectory(Path.GetDirectoryName(rowsPath)!);
+
+    UnityVersion version = UnityVersion.Parse(unityVersionText);
+    GameBundle bundle = new();
+    ProcessedAssetCollection collection = new(bundle);
+    collection.GetType().GetProperty("Version")!.SetValue(collection, version);
+    SerializedFileBuilder builder = new()
+    {
+        Generation = FormatVersion.StoresTypeDependencies,
+        Version = version,
+        Platform = (BuildTarget)19,
+        EndianType = EndianType.LittleEndian,
+        HasTypeTree = false,
+    };
+
+    void AddGeneratedAsset(
+        string factoryName,
+        int classId,
+        long pathId,
+        string assetName,
+        Action<object>? configure = null)
+    {
+        object asset = MakeGenerated(
+            $"AssetRipper.SourceGenerated.Classes.ClassID_{classId}.{factoryName}",
+            classId,
+            pathId,
+            collection,
+            version);
+        SetGeneratedProperty(asset, "Name", assetName);
+        configure?.Invoke(asset);
+        byte[] body;
+        using (MemoryStream bodyStream = new())
+        using (AssetWriter writer = new(bodyStream, collection))
+        {
+            ((IAssetWritable)asset).WriteRelease(writer);
+            body = bodyStream.ToArray();
+        }
+
+        SerializedType serializedType = new() { RawTypeID = classId };
+        builder.Types.Add(serializedType);
+        builder.Objects.Add(new ObjectInfo(serializedType)
+        {
+            FileID = pathId,
+            TypeID = classId,
+            SerializedTypeIndex = builder.Types.Count - 1,
+            ObjectData = body,
+        });
+    }
+
+    AddGeneratedAsset("Mesh", 43, 101, "MeshFixture");
+    AddGeneratedAsset("Texture2D", 28, 202, "TextureFixture", texture =>
+    {
+        SetGeneratedProperty(texture, "Width_C28", 2);
+        SetGeneratedProperty(texture, "Height_C28", 2);
+        SetGeneratedProperty(texture, "ImageCount_C28", 1);
+        SetGeneratedProperty(texture, "MipMap_C28", false);
+        SetGeneratedProperty(texture, "CompleteImageSize_C28_Int32", 16);
+        SetGeneratedProperty(texture, "Format_C28E", 4); // RGBA32
+        SetGeneratedProperty(texture, "ImageData_C28", new byte[]
+        {
+            10, 20, 30, 255,
+            40, 50, 60, 255,
+            70, 80, 90, 255,
+            100, 110, 120, 255,
+        });
+    });
+    AddGeneratedAsset("AudioClip", 83, 303, "AudioFixture");
+    AddGeneratedAsset("TextAsset", 49, 404, "TextFixture");
+
+    SerializedFile serializedFile = builder.Build();
+    serializedFile.FilePath = "PathMapFixture.assets";
+    byte[] inputBytes = serializedFile.ToByteArray();
+    string inputPath = Path.Combine(inputRoot, "PathMapFixture.assets");
+    File.WriteAllBytes(inputPath, inputBytes);
+
+    FullConfiguration configuration = new();
+    ExportHandler handler = new(configuration);
+    var gameData = handler.LoadAndProcess([inputRoot], LocalFileSystem.Instance);
+    handler.Export(gameData, outputRoot, LocalFileSystem.Instance);
+
+    string pathIdMapPath = Path.Combine(outputRoot, "AuxiliaryFiles", "path_id_map.json");
+    if (!File.Exists(pathIdMapPath))
+    {
+        throw new InvalidDataException("project export omitted AuxiliaryFiles/path_id_map.json");
+    }
+    byte[] pathIdMapBytes = File.ReadAllBytes(pathIdMapPath);
+    using StreamWriter rows = new(rowsPath, false, new UTF8Encoding(false)) { NewLine = "\n" };
+    rows.WriteLine($"UNITY_VERSION|{unityVersionText}");
+    WriteInputRow(rows, inputPath, inputBytes);
+    rows.WriteLine($"PATH_ID_MAP|{pathIdMapBytes.Length}|{Convert.ToHexString(SHA256.HashData(pathIdMapBytes))}");
+    rows.WriteLine($"PATH_ID_MAP_HEX|{Convert.ToHexString(pathIdMapBytes)}");
+    Console.WriteLine($"PATH_ID_MAP_PROJECT|input={inputBytes.Length}|version={unityVersionText}|map={pathIdMapBytes.Length}");
     return 0;
 }
 

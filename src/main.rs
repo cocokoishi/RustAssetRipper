@@ -148,9 +148,13 @@ struct MainFileTypeTreeTestLayouts;
 impl ClassLayoutSource for MainFileTypeTreeTestLayouts {
     fn generated_class_name(
         &self,
-        _class_id: i32,
-        _version: &FactoryUnityVersion,
+        class_id: i32,
+        version: &FactoryUnityVersion,
     ) -> Result<Option<&str>, SourceFactoryLookupError> {
+        if assetripper::export::path_id_map::has_path_id_map_generated_types(class_id) {
+            return assetripper::processing::asset_factory::reference_class_layouts()
+                .generated_class_name(class_id, version);
+        }
         Ok(Some("SyntheticTypeTreeTestObject"))
     }
 
@@ -1742,13 +1746,14 @@ fn export_project_to<W: io::Write>(
     )?;
     writeln!(
         status_output,
-        "Wrote a Unity project to {:?}: {} SerializedFiles, {} objects in {} asset files ({} with importer metadata; support-file count {}), {} bytes (project version {}).",
+        "Wrote a Unity project to {:?}: {} SerializedFiles, {} objects in {} asset files ({} with importer metadata; support-file count {}; post-exporter file count {}), {} bytes (project version {}).",
         output_root,
         report.serialized_file_count,
         report.exported_object_count,
         report.asset_file_count,
         report.meta_file_count,
         report.support_file_count,
+        report.post_export_file_count,
         report.total_asset_payload_bytes,
         report.project_version.major
     )?;
@@ -4792,7 +4797,7 @@ fn invalid_data_owned(message: String) -> io::Error {
 
 fn print_usage() {
     println!(
-        "Usage:\n  assetripper-rs inspect <input-directory> [input-directory ...]\n  assetripper-rs inspect-files <input-file> [input-file ...]\n  assetripper-rs export-project [--delete-existing] [--settings <path>] <output-directory> <input-file-or-directory> [input-file-or-directory ...]\n  assetripper-rs export-object-yaml <serialized-file-index> <path-id> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-file-yaml <serialized-file-index> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-texture [--settings <path>] <serialized-file-index> <path-id> <new-output-image> <input-file> [input-file ...]\n  assetripper-rs export-mesh <serialized-file-index> <path-id> <new-output-glb> <input-file> [input-file ...]\n  assetripper-rs export-shader [--shader-export-mode <dummy|yaml|decompile>] [--settings <path>] <serialized-file-index> <path-id> <new-output-shader> <input-file> [input-file ...]\n  assetripper-rs export-audio [--settings <path>] <serialized-file-index> <path-id> <new-output-audio> <input-file> [input-file ...]\n  assetripper-rs save-default-settings [--settings <path>]\n  assetripper-rs delete-default-settings\n  assetripper-rs --help\n  assetripper-rs --version\n\n`inspect` mounts directories into isolated VFS roots. `inspect-files` dispatches explicitly selected file paths, registers top-level ResourceFiles as GameBundle root inputs, and reports the parsed SerializedFiles. `export-project` loads mixed file and directory inputs, resolves cross-file references and streamed resources, and writes processed Scene collections as `.unity` YAML with `DefaultImporter` `.meta`, Material `.mat` YAML with cross-file Shader pointer mapping; Shader collections write `.shader` plus `ShaderImporter` in Dummy/Decompile modes (raw source text wins when present) or `.asset` plus `NativeFormatImporter` and version-gated patches in YAML mode; TextAssets write raw `m_Script` bytes with `TextScriptImporter` metadata and a `TextExportMode`-selected extension; other routed objects use generic YAML `.asset` files, `ProjectSettings/ProjectVersion.txt`, and the default package manifest. It stages all project outputs before writing and refuses undecoded objects, unresolved pointers, or objects omitted by YAML conversion. The generated Scene hierarchy's effective `AssetBundleName` remains null because its `GeneratedObjectBase` setter is a no-op; its `.meta` bundle-name field is blank. Duplicate BuildSettings paths keep the first Scene output. The output directory must not be empty or named `Desktop`, `Documents`, or `Downloads`; an existing non-empty directory aborts the export unless `--delete-existing` is given, which deletes and recreates it exactly like the reference exporter does after deletion consent. Processed Scene and modern/legacy Prefab collections are supported on the routed workspace path; remaining class-specific exporter/importer families (including complete Material/Shader field coverage), settings application, and post-exporters remain open parity work. `export-object-yaml` writes one decoded object as YAML. `export-file-yaml` writes YAML-exportable objects from one SerializedFile in object-table order, resolves streamed Mesh and image-texture bytes, preserves intra-file references through source PathIDs, and refuses unresolved or cross-file references. It reports ImageTexture objects omitted by the baseline when they have no usable image data. `export-texture` decodes one class-28 Texture2D, resolves its inline or streamed image data, and writes a PNG/BMP/TGA image; the output extension selects the format (otherwise the configured settings format, default PNG). `export-mesh` decodes one class-43 Mesh, resolves its vertex data and compressed mesh, and writes a glTF 2.0 binary file with one node per sub-mesh, converting Unity's left-handed coordinates to glTF's right-handed space and rewriting the sub-mesh topology. `export-shader` decodes one class-48 Shader and writes `.shader` text: decompiled script text is written verbatim under every mode, otherwise `dummy` (the default) and `decompile` render the fallback dummy body and `yaml` reports that YAML mode writes a YAML asset instead. `export-audio` decodes one class-83 AudioClip, resolves its inline or streamed audio data, and writes the decoded bytes; tracker audio passes through, `FSB5` reports the external-decoder requirement, and unknown bytes fail with the reference diagnostic. None of the commands replaces an existing output file."
+        "Usage:\n  assetripper-rs inspect <input-directory> [input-directory ...]\n  assetripper-rs inspect-files <input-file> [input-file ...]\n  assetripper-rs export-project [--delete-existing] [--settings <path>] <output-directory> <input-file-or-directory> [input-file-or-directory ...]\n  assetripper-rs export-object-yaml <serialized-file-index> <path-id> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-file-yaml <serialized-file-index> <new-output-yaml> <input-file> [input-file ...]\n  assetripper-rs export-texture [--settings <path>] <serialized-file-index> <path-id> <new-output-image> <input-file> [input-file ...]\n  assetripper-rs export-mesh <serialized-file-index> <path-id> <new-output-glb> <input-file> [input-file ...]\n  assetripper-rs export-shader [--shader-export-mode <dummy|yaml|decompile>] [--settings <path>] <serialized-file-index> <path-id> <new-output-shader> <input-file> [input-file ...]\n  assetripper-rs export-audio [--settings <path>] <serialized-file-index> <path-id> <new-output-audio> <input-file> [input-file ...]\n  assetripper-rs save-default-settings [--settings <path>]\n  assetripper-rs delete-default-settings\n  assetripper-rs --help\n  assetripper-rs --version\n\n`inspect` mounts directories into isolated VFS roots. `inspect-files` dispatches explicitly selected file paths, registers top-level ResourceFiles as GameBundle root inputs, and reports the parsed SerializedFiles. `export-project` loads mixed file and directory inputs, resolves cross-file references and streamed resources, and writes processed Scene collections as `.unity` YAML with `DefaultImporter` `.meta`, Material `.mat` YAML with cross-file Shader pointer mapping; Shader collections write `.shader` plus `ShaderImporter` in Dummy/Decompile modes (raw source text wins when present) or `.asset` plus `NativeFormatImporter` and version-gated patches in YAML mode; TextAssets write raw `m_Script` bytes with `TextScriptImporter` metadata and a `TextExportMode`-selected extension; other routed objects use generic YAML `.asset` files, `ProjectSettings/ProjectVersion.txt`, the default package manifest, and `AuxiliaryFiles/path_id_map.json`. It stages all project outputs before writing and refuses undecoded objects, unresolved pointers, or objects omitted by YAML conversion. The generated Scene hierarchy's effective `AssetBundleName` remains null because its `GeneratedObjectBase` setter is a no-op; its `.meta` bundle-name field is blank. Duplicate BuildSettings paths keep the first Scene output. The output directory must not be empty or named `Desktop`, `Documents`, or `Downloads`; an existing non-empty directory aborts the export unless `--delete-existing` is given, which deletes and recreates it exactly like the reference exporter does after deletion consent. Processed Scene and modern/legacy Prefab collections are supported on the routed workspace path; remaining class-specific exporter/importer families (including complete Material/Shader field coverage), settings application, conditional StreamingAssets and GameAssemblies post-exporters, and full project-output parity remain open. `export-object-yaml` writes one decoded object as YAML. `export-file-yaml` writes YAML-exportable objects from one SerializedFile in object-table order, resolves streamed Mesh and image-texture bytes, preserves intra-file references through source PathIDs, and refuses unresolved or cross-file references. It reports ImageTexture objects omitted by the baseline when they have no usable image data. `export-texture` decodes one class-28 Texture2D, resolves its inline or streamed image data, and writes a PNG/BMP/TGA image; the output extension selects the format (otherwise the configured settings format, default PNG). `export-mesh` decodes one class-43 Mesh, resolves its vertex data and compressed mesh, and writes a glTF 2.0 binary file with one node per sub-mesh, converting Unity's left-handed coordinates to glTF's right-handed space and rewriting the sub-mesh topology. `export-shader` decodes one class-48 Shader and writes `.shader` text: decompiled script text is written verbatim under every mode, otherwise `dummy` (the default) and `decompile` render the fallback dummy body and `yaml` reports that YAML mode writes a YAML asset instead. `export-audio` decodes one class-83 AudioClip, resolves its inline or streamed audio data, and writes the decoded bytes; tracker audio passes through, `FSB5` reports the external-decoder requirement, and unknown bytes fail with the reference diagnostic. None of the commands replaces an existing output file."
     );
 }
 
@@ -9602,6 +9607,94 @@ mod tests {
     }
 
     #[test]
+    fn export_project_path_id_map_matches_source_for_all_asset_interfaces() {
+        let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
+        let fixture = include_str!("export/path_id_map_source_2019_4_fixture.txt");
+
+        fn decode_hex(hex: &str) -> Vec<u8> {
+            assert!(hex.len().is_multiple_of(2), "fixture hex has even length");
+            hex.as_bytes()
+                .chunks_exact(2)
+                .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+                .collect()
+        }
+
+        let input_bytes = fixture
+            .lines()
+            .find_map(|line| line.strip_prefix("INPUT_HEX|PathMapFixture.assets|"))
+            .map(decode_hex)
+            .expect("source fixture contains its SerializedFile bytes");
+        let source_input_identity = fixture
+            .lines()
+            .find_map(|line| line.strip_prefix("INPUT|PathMapFixture.assets|"))
+            .expect("source fixture contains its SerializedFile identity");
+        let source_input_columns = source_input_identity.split('|').collect::<Vec<_>>();
+        assert_eq!(source_input_columns.len(), 2);
+        assert_eq!(
+            source_input_columns[0].parse::<usize>().unwrap(),
+            input_bytes.len()
+        );
+        assert_eq!(
+            source_input_columns[1],
+            "821FEB2CB7CE45575D9BDD1690D918742C39FB96063070C70DC9456041102D36"
+        );
+        let expected_map = fixture
+            .lines()
+            .find_map(|line| line.strip_prefix("PATH_ID_MAP_HEX|"))
+            .map(decode_hex)
+            .expect("source fixture contains the production PathIdMap bytes");
+        let source_identity = fixture
+            .lines()
+            .find_map(|line| line.strip_prefix("PATH_ID_MAP|"))
+            .expect("source fixture contains PathIdMap length and hash");
+        let source_columns = source_identity.split('|').collect::<Vec<_>>();
+        assert_eq!(source_columns.len(), 2);
+        assert_eq!(
+            source_columns[0].parse::<usize>().unwrap(),
+            expected_map.len()
+        );
+        assert_eq!(
+            source_columns[1],
+            "A72BFB37C562ABA832F0F6E427993013A3138D7ACDE14527B60EF7B65D2ACCBA"
+        );
+
+        let directory = TestInputDirectory::new_root();
+        let source_path = directory.join("PathMapFixture.assets");
+        let output_root = directory.join("path-id-map-project");
+        fs::write(&source_path, &input_bytes).unwrap();
+        super::run(
+            [
+                std::ffi::OsString::from("export-project"),
+                output_root.clone().into_os_string(),
+                source_path.clone().into_os_string(),
+            ]
+            .into_iter(),
+        )
+        .expect("production export-project writes the all-interface source fixture");
+
+        let path_id_map = fs::read(output_root.join("AuxiliaryFiles/path_id_map.json")).unwrap();
+        assert_eq!(path_id_map, expected_map);
+        let path_id_map_text = std::str::from_utf8(&path_id_map).unwrap();
+        for expected in [
+            "\"PathID\": 101",
+            "\"Name\": \"MeshFixture\"",
+            "\"Type\": \"Mesh\"",
+            "\"PathID\": 202",
+            "\"Name\": \"TextureFixture\"",
+            "\"Type\": \"Texture2D\"",
+            "\"PathID\": 303",
+            "\"Name\": \"AudioFixture\"",
+            "\"Type\": \"AudioClip\"",
+            "\"PathID\": 404",
+            "\"Name\": \"TextFixture\"",
+            "\"Type\": \"TextAsset\"",
+        ] {
+            assert!(path_id_map_text.contains(expected), "missing {expected}");
+        }
+        assert_eq!(fs::read(&source_path).unwrap(), input_bytes);
+    }
+
+    #[test]
     fn export_project_matches_source_for_standalone_generated_texture_versions() {
         let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
 
@@ -9614,7 +9707,12 @@ mod tests {
         }
 
         fn source_row_bytes(fixture: &str, relative_path: &str) -> Vec<u8> {
-            let prefix = format!("SOURCE_OUTPUT|ExportedProject/{relative_path}|");
+            let source_path = if relative_path.starts_with("AuxiliaryFiles/") {
+                relative_path.to_owned()
+            } else {
+                format!("ExportedProject/{relative_path}")
+            };
+            let prefix = format!("SOURCE_OUTPUT|{source_path}|");
             let hex = fixture
                 .lines()
                 .find_map(|line| line.strip_prefix(&prefix))
@@ -9769,6 +9867,11 @@ mod tests {
                 normalize_manifest(&rust_manifest),
                 normalize_manifest(&source_manifest),
                 "package manifest differs beyond line endings for Unity {unity_version} {storage}"
+            );
+            assert_eq!(
+                fs::read(output_root.join("AuxiliaryFiles/path_id_map.json")).unwrap(),
+                source_row_bytes(fixture, "AuxiliaryFiles/path_id_map.json"),
+                "PathIdMap post-export output differs for Unity {unity_version} {storage}"
             );
             assert!(!output_root
                 .join("Assets/Texture2D/TextureFixture.texture2D")
@@ -11119,6 +11222,24 @@ mod tests {
         assert_eq!(expected_meta, normalize_meta(&root_meta_path));
         assert_eq!(expected_meta, normalize_meta(&first_target_meta_path));
         assert_eq!(expected_meta, normalize_meta(&second_target_meta_path));
+        let source_path_id_map_hex = source_fixture
+            .lines()
+            .find_map(|line| line.strip_prefix("SOURCE_OUTPUT|AuxiliaryFiles/path_id_map.json|"))
+            .expect("source fixture records the serialized collection order in PathIdMap");
+        let source_path_id_map = source_path_id_map_hex
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16)
+                    .expect("source PathIdMap fixture contains valid hex")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            fs::read(output_root.join("AuxiliaryFiles/path_id_map.json"))
+                .expect("project export writes the PathIdMap post-export file"),
+            source_path_id_map,
+            "PathIdMap collection names/order differ across sibling nested bundles"
+        );
         assert_eq!(fs::read(&bundle_path).unwrap(), bundled_fixture);
 
         fs::remove_dir_all(&output_root).expect("remove sibling-bundle project output");
@@ -11665,6 +11786,7 @@ mod tests {
                 output_root.join("Assets/Mesh"),
                 output_root.join("Assets/Shader"),
                 output_root.join("Assets/Texture2D"),
+                output_root.join("AuxiliaryFiles"),
                 output_root.join("ProjectSettings"),
                 output_root.join("Packages"),
             ],
@@ -11697,11 +11819,23 @@ mod tests {
                 "Assets/Shader/Test_Simple.shader.meta".to_owned(),
                 "Assets/Texture2D/Texture2D.texture2D".to_owned(),
                 "Assets/Texture2D/Texture2D.texture2D.meta".to_owned(),
+                "AuxiliaryFiles/path_id_map.json".to_owned(),
                 "Packages/manifest.json".to_owned(),
                 "ProjectSettings/ProjectSettings.asset".to_owned(),
                 "ProjectSettings/ProjectVersion.txt".to_owned(),
             ],
             "actual project tree: {actual:#?}\nstatus:\n{status}"
+        );
+        let path_id_map = fs::read_to_string(output_root.join("AuxiliaryFiles/path_id_map.json"))
+            .expect("project export writes the PathIdMap post-export file");
+        assert!(path_id_map.contains("\"Type\": \"Mesh\""), "{path_id_map}");
+        assert!(
+            path_id_map.contains("\"Type\": \"Texture2D\""),
+            "{path_id_map}"
+        );
+        assert!(
+            path_id_map.contains("\"Type\": \"Shader\""),
+            "{path_id_map}"
         );
 
         // The cross-file PPtr renders the target object's own collection GUID.

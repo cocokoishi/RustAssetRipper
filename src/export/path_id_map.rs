@@ -22,6 +22,91 @@
 //! supplies them explicitly instead of this module guessing. Textual layout and the asset
 //! filter are what the snapshot pins.
 
+use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
+
+/// Exact generated-type interface evidence for the class families used by `PathIdMapExporter`.
+const GENERATED_TYPE_INTERFACES: &str =
+    include_str!("path_id_map_generated_type_interfaces_fixture.txt");
+
+/// The PathIdMap-relevant generated interfaces of one concrete source-generated type.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PathIdMapGeneratedTypeInterfaces {
+    pub is_mesh: bool,
+    pub is_texture: bool,
+    pub is_audio_clip: bool,
+    pub is_text_asset: bool,
+    pub is_named: bool,
+}
+
+impl PathIdMapGeneratedTypeInterfaces {
+    pub const fn is_recorded(self) -> bool {
+        self.is_mesh || self.is_texture || self.is_audio_clip || self.is_text_asset
+    }
+}
+
+struct GeneratedTypeInterfaceTable {
+    types: HashMap<(i32, &'static str), PathIdMapGeneratedTypeInterfaces>,
+    class_ids: HashSet<i32>,
+}
+
+fn generated_type_interface_table() -> &'static GeneratedTypeInterfaceTable {
+    static TABLE: OnceLock<GeneratedTypeInterfaceTable> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut types = HashMap::new();
+        let mut class_ids = HashSet::new();
+        for line in GENERATED_TYPE_INTERFACES.lines() {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut columns = line.split('\t');
+            assert_eq!(
+                columns.next(),
+                Some("TYPE"),
+                "invalid path-ID type fixture row"
+            );
+            let class_id = columns
+                .next()
+                .and_then(|value| value.parse::<i32>().ok())
+                .expect("path-ID type fixture class ID is an integer");
+            let type_name = columns
+                .next()
+                .filter(|value| !value.is_empty())
+                .expect("path-ID type fixture has a type name");
+            let interfaces = columns.next().unwrap_or_default();
+            let has = |target: &str| interfaces.split(',').any(|name| name == target);
+            let facts = PathIdMapGeneratedTypeInterfaces {
+                is_mesh: has("IMesh"),
+                is_texture: has("ITexture"),
+                is_audio_clip: has("IAudioClip"),
+                is_text_asset: has("ITextAsset"),
+                is_named: has("INamed"),
+            };
+            assert!(types.insert((class_id, type_name), facts).is_none());
+            class_ids.insert(class_id);
+        }
+        GeneratedTypeInterfaceTable { types, class_ids }
+    })
+}
+
+/// Whether this class ID has any generated type implementing a PathIdMap interface.
+pub fn has_path_id_map_generated_types(class_id: i32) -> bool {
+    generated_type_interface_table()
+        .class_ids
+        .contains(&class_id)
+}
+
+/// Exact source-generated interface membership for one factory-selected concrete type.
+pub fn generated_type_interfaces(
+    class_id: i32,
+    generated_type_name: &str,
+) -> Option<PathIdMapGeneratedTypeInterfaces> {
+    generated_type_interface_table()
+        .types
+        .get(&(class_id, generated_type_name))
+        .copied()
+}
+
 /// One recorded asset in `path_id_map.json`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SerializedAssetInfo {
@@ -314,8 +399,9 @@ fn push_unicode_escape(code: u32, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_serialized_file, encode_json_string, serialize_path_id_map_with_newline,
-        PathIdMapAssetFacts, SerializedAssetInfo, SerializedFileInfo, SerializedGameInfo,
+        build_serialized_file, encode_json_string, generated_type_interfaces,
+        has_path_id_map_generated_types, serialize_path_id_map_with_newline, PathIdMapAssetFacts,
+        SerializedAssetInfo, SerializedFileInfo, SerializedGameInfo,
     };
 
     const CRLF: &str = "\r\n";
@@ -506,5 +592,62 @@ mod tests {
         assert_eq!(named.to_entry().name.as_deref(), Some("Has"));
         assert_eq!(unnamed.to_entry().name, None);
         assert_eq!(named.to_entry().type_name.as_deref(), Some("Texture2D"));
+    }
+
+    #[test]
+    fn generated_type_facts_preserve_the_shader_text_asset_version_boundary() {
+        let legacy = generated_type_interfaces(48, "Shader_5")
+            .expect("Unity 5 Shader type is in the frozen generated assembly");
+        assert!(legacy.is_text_asset);
+        assert!(legacy.is_named);
+        let current = generated_type_interfaces(48, "Shader_5_5")
+            .expect("Unity 5.5 Shader type is in the frozen generated assembly");
+        assert!(!current.is_text_asset);
+        assert!(current.is_named);
+        assert!(!current.is_recorded());
+
+        let legacy_include = generated_type_interfaces(109, "CGProgram_2020")
+            .expect("Unity 2020 CGProgram type is in the frozen generated assembly");
+        assert!(legacy_include.is_text_asset);
+        let newer_include = generated_type_interfaces(109, "ShaderInclude_2021_2_0_a8")
+            .expect("Unity 2021 ShaderInclude type is in the frozen generated assembly");
+        assert!(!newer_include.is_text_asset);
+        assert!(has_path_id_map_generated_types(109));
+        assert!(!has_path_id_map_generated_types(1));
+    }
+
+    #[test]
+    fn path_id_map_fixture_covers_every_source_factory_type_in_its_class_families() {
+        let fixture = include_str!("../processing/source_factory_dispatch_fixture.txt");
+        let mut checked = 0usize;
+        for line in fixture.lines().filter(|line| line.starts_with("GEN|")) {
+            let mut columns = line.split('|');
+            assert_eq!(columns.next(), Some("GEN"));
+            let class_id = columns
+                .next()
+                .and_then(|value| value.parse::<i32>().ok())
+                .expect("source factory row has a class ID");
+            let _version = columns
+                .next()
+                .expect("source factory row has a Unity version");
+            let _version_hex = columns
+                .next()
+                .expect("source factory row has a version key");
+            let type_name = columns
+                .next()
+                .expect("source factory row has a generated type");
+            if !has_path_id_map_generated_types(class_id) || type_name.starts_with("THROW:") {
+                continue;
+            }
+            assert!(
+                generated_type_interfaces(class_id, type_name).is_some(),
+                "source factory generated type {class_id}:{type_name} is missing from the path-ID interface map"
+            );
+            checked += 1;
+        }
+        assert_eq!(
+            checked, 309,
+            "fixture covers {checked} source factory-generated types in PathIdMap class families"
+        );
     }
 }

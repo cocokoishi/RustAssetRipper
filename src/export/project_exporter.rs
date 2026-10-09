@@ -583,6 +583,13 @@ pub struct PlannedProjectSupportFile {
     pub before_file_index: usize,
 }
 
+/// A file written by an `IPostExporter` after the asset collections and standard project files.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlannedProjectPostExportFile {
+    pub relative_path: String,
+    pub bytes: Vec<u8>,
+}
+
 /// The complete staged project: nothing is written until `execute_project_export` runs.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProjectExportPlan {
@@ -592,6 +599,8 @@ pub struct ProjectExportPlan {
     pub files: Vec<PlannedProjectFile>,
     /// Collection-generated project files such as editor patches, with no importer sidecar.
     pub support_files: Vec<PlannedProjectSupportFile>,
+    /// Post-exporter files written in source order after ProjectVersion and the package manifest.
+    pub post_export_files: Vec<PlannedProjectPostExportFile>,
     /// Objects whose collection writes nothing, with the baseline reason.
     pub skipped: Vec<ProjectExportNotice>,
     /// Files that used the generic asset-family renderer instead of their own.
@@ -605,6 +614,7 @@ impl ProjectExportPlan {
         self.files
             .len()
             .checked_add(self.support_files.len())
+            .and_then(|count| count.checked_add(self.post_export_files.len()))
             .ok_or(ProjectExportError::ProjectFileCountOverflow)?;
         let platform = ProjectPathPlanner::host_platform();
         let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -643,6 +653,26 @@ impl ProjectExportPlan {
                     reason: "support-file insertion index exceeds the staged asset-file count",
                 });
             }
+            if !seen.insert(file.relative_path.clone()) {
+                return Err(ProjectExportError::DuplicateProjectPath {
+                    relative_path: file.relative_path.clone(),
+                    first: file.relative_path.clone(),
+                    second: file.relative_path.clone(),
+                });
+            }
+            if platform == HostPathPlatform::Windows {
+                let folded = file.relative_path.to_lowercase();
+                if let Some(first) = seen_insensitive.insert(folded, file.relative_path.clone()) {
+                    return Err(ProjectExportError::DuplicateProjectPath {
+                        relative_path: file.relative_path.clone(),
+                        first,
+                        second: file.relative_path.clone(),
+                    });
+                }
+            }
+        }
+        for file in &self.post_export_files {
+            validate_host_relative_path(&file.relative_path, platform)?;
             if !seen.insert(file.relative_path.clone()) {
                 return Err(ProjectExportError::DuplicateProjectPath {
                     relative_path: file.relative_path.clone(),
@@ -715,6 +745,7 @@ pub struct ProjectExportReport {
     pub file_count: usize,
     pub asset_file_count: usize,
     pub support_file_count: usize,
+    pub post_export_file_count: usize,
     pub meta_file_count: usize,
     pub total_asset_bytes: usize,
     pub events: Vec<ProjectExportEvent>,
@@ -722,9 +753,8 @@ pub struct ProjectExportReport {
     pub fallbacks: Vec<ProjectExportNotice>,
 }
 
-/// Execute one staged plan, mirroring `ExportHandler.Export`:
-/// `prepare_export_root` (the consent/target guard), the export loop's file writes, then the
-/// `ProjectVersion`/`PackageManifest` post-exporters.
+/// Execute one staged plan, mirroring `ExportHandler.Export`: `prepare_export_root` (the
+/// consent/target guard), the export loop's file writes, then the post-exporters.
 pub fn execute_project_export(
     output_root: &Path,
     delete_existing: bool,
@@ -735,9 +765,8 @@ pub fn execute_project_export(
     plan.validate()?;
     prepare_export_root(output_root, delete_existing)?;
 
-    // `ExportHandler.Export` runs the export loop first and the post-exporters last. Writing
-    // the two post-export files up front would be observable on a failed asset write, so the
-    // same order is kept: every asset, then `ProjectVersion.txt`, then `manifest.json`.
+    // `ExportHandler.Export` runs the export loop first and the post-exporters last. Preserve
+    // their order so a failed collection write cannot leave post-export output behind.
     let mut events = vec![ProjectExportEvent::ExportStarted];
     let mut asset_file_count = 0usize;
     let mut meta_file_count = 0usize;
@@ -817,6 +846,9 @@ pub fn execute_project_export(
         plan.package_manifest.as_bytes(),
         limits,
     )?;
+    for file in &plan.post_export_files {
+        write_new_project_file(output_root, &file.relative_path, &file.bytes, limits)?;
+    }
     events.push(ProjectExportEvent::ExportFinished);
 
     let mut skipped = Vec::new();
@@ -838,6 +870,7 @@ pub fn execute_project_export(
         file_count: plan.files.len() + plan.support_files.len(),
         asset_file_count,
         support_file_count,
+        post_export_file_count: plan.post_export_files.len(),
         meta_file_count,
         total_asset_bytes,
         events,
@@ -1577,6 +1610,7 @@ mod tests {
                 planned_file("Assets/a/x.asset"),
             ],
             support_files: Vec::new(),
+            post_export_files: Vec::new(),
             skipped: Vec::new(),
             fallbacks: Vec::new(),
         };
@@ -1590,6 +1624,18 @@ mod tests {
         }
         let plan = ProjectExportPlan {
             files: vec![planned_file("ProjectSettings/ProjectVersion.txt")],
+            ..plan
+        };
+        assert!(matches!(
+            plan.validate(),
+            Err(ProjectExportError::DuplicateProjectPath { .. })
+        ));
+        let plan = ProjectExportPlan {
+            files: vec![planned_file("AuxiliaryFiles/path_id_map.json")],
+            post_export_files: vec![PlannedProjectPostExportFile {
+                relative_path: "AuxiliaryFiles/path_id_map.json".to_owned(),
+                bytes: b"{}".to_vec(),
+            }],
             ..plan
         };
         assert!(matches!(

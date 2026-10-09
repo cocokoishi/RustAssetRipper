@@ -56,11 +56,16 @@ use super::collection_paths::{
 };
 use super::empty_script::{empty_script_content, is_predefined_assembly, MonoScriptIdentity};
 use super::export_extension::DEFAULT_EXPORT_EXTENSION;
+use super::path_id_map::{
+    build_serialized_file, generated_type_interfaces, has_path_id_map_generated_types,
+    serialize_path_id_map, PathIdMapAssetFacts, SerializedGameInfo,
+};
 use super::pointer_map::{
     ExportCollectionPointerMetadata, ExportPointerMapLimits, ExportedAssetPointerEntry,
     ProjectExportPointerMap, ProjectPointerRequest, ProjectPointerResolution,
     UnityProjectAssetType,
 };
+use super::post_export::PATH_ID_MAP_FILE;
 use super::prefab_collection::{
     generate_prefab_source_pointer, plan_prefab_export_ids, PrefabAssetRepresentation,
     PrefabExportIdPlan, PrefabExportPlanLimits, PrefabHierarchyAssetGroups, VersionedPrefabAsset,
@@ -70,8 +75,9 @@ use super::project_exporter::{
     native_format_importer_for_version, object_class_name, package_manifest_json,
     project_version_file, select_collection_with_claim_facts,
     shader_importer_for_version_with_non_modifiable_textures, ObjectClassFacts, PlannedProjectFile,
-    PlannedProjectMeta, PlannedProjectSupportFile, ProjectExportError, ProjectExportNotice,
-    ProjectExportPlan, ProjectExportSettings, ProjectPathPlanner,
+    PlannedProjectMeta, PlannedProjectPostExportFile, PlannedProjectSupportFile,
+    ProjectExportError, ProjectExportNotice, ProjectExportPlan, ProjectExportSettings,
+    ProjectPathPlanner,
 };
 use super::project_plan::plan_scene_export_paths;
 use super::reference_assemblies::ReferenceAssemblyMaps;
@@ -150,6 +156,7 @@ pub struct WorkspaceProjectExportReport {
     pub exported_object_count: usize,
     pub asset_file_count: usize,
     pub support_file_count: usize,
+    pub post_export_file_count: usize,
     /// Asset files that received an importer sidecar.
     pub meta_file_count: usize,
     pub total_asset_payload_bytes: usize,
@@ -1638,12 +1645,18 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
     }
 
     let manifest = package_manifest_json(project_version);
+    let path_id_map = build_path_id_map(workspace, objects)?;
+    let path_id_map_bytes = serialize_path_id_map(&path_id_map).into_bytes();
     let plan = ProjectExportPlan {
         project_version_text: editor_version_text.to_owned(),
         project_version_file: project_version_file(editor_version_text, project_version),
         package_manifest: manifest,
         files,
         support_files,
+        post_export_files: vec![PlannedProjectPostExportFile {
+            relative_path: PATH_ID_MAP_FILE.to_owned(),
+            bytes: path_id_map_bytes,
+        }],
         skipped: notices,
         fallbacks: fallback_notices,
     };
@@ -1659,6 +1672,7 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
         exported_object_count,
         asset_file_count: report.asset_file_count,
         support_file_count: report.support_file_count,
+        post_export_file_count: report.post_export_file_count,
         meta_file_count: report.meta_file_count,
         total_asset_payload_bytes: total_bytes,
         project_version,
@@ -3033,6 +3047,60 @@ fn workspace_project_version(
     Ok((editor_version_text, project_version))
 }
 
+/// Build the `PathIdMapExporter` input in source collection and object-table order.
+fn build_path_id_map(
+    workspace: &SerializedFileWorkspace,
+    objects: &ObjectWorkspace,
+) -> Result<SerializedGameInfo, Box<dyn Error>> {
+    let mut files = Vec::new();
+    files
+        .try_reserve_exact(workspace.files().len())
+        .map_err(|_| invalid_project("could not reserve PathIdMap serialized-file records"))?;
+    for (file_index, file) in workspace.files().iter().enumerate() {
+        let collection_name = crate::io::special_names::fix_file_identifier(&file.file_name);
+        let objects_in_file = objects.objects_for_file(file_index);
+        let mut assets = Vec::new();
+        assets
+            .try_reserve_exact(objects_in_file.len())
+            .map_err(|_| invalid_project("could not reserve PathIdMap object records"))?;
+        for object in objects_in_file {
+            let crate::processing::asset_factory::FactoryAssetKind::Generated(generated_type) =
+                &object.factory.kind
+            else {
+                // The source raw and TypeTree fallback wrappers do not implement generated
+                // asset interfaces, even when their class ID has generated types in other
+                // versions.
+                continue;
+            };
+            let class_id = object.factory.class_id;
+            if !has_path_id_map_generated_types(class_id) {
+                continue;
+            }
+            let Some(interfaces) = generated_type_interfaces(class_id, generated_type) else {
+                return Err(invalid_project(format!(
+                    "PathIdMap has no frozen generated-interface record for class {class_id} type {generated_type:?} in {} PathID {}",
+                    file.file_name, object.path_id
+                )));
+            };
+            if !interfaces.is_recorded() {
+                continue;
+            }
+            assets.push(PathIdMapAssetFacts {
+                is_mesh: interfaces.is_mesh,
+                is_texture: interfaces.is_texture,
+                is_audio_clip: interfaces.is_audio_clip,
+                is_text_asset: interfaces.is_text_asset,
+                is_named: interfaces.is_named,
+                name: interfaces.is_named.then_some(object.factory.name.as_str()),
+                class_name: object.factory.class_name.as_ref(),
+                path_id: object.path_id,
+            });
+        }
+        files.push(build_serialized_file(Some(&collection_name), &assets));
+    }
+    Ok(SerializedGameInfo { files })
+}
+
 /// The named asset name (`INamed.Name`) of one decoded payload, if the TypeTree has one.
 fn object_asset_name(payload: &ParsedObjectPayload) -> Option<String> {
     for field in ["m_Name", "Name"] {
@@ -3728,7 +3796,8 @@ mod tests {
     #[test]
     fn project_export_matches_source_for_a_generated_legacy_prefab() {
         let bytes = include_bytes!("legacy_prefab_2017_4_input.unity");
-        let (filesystem, workspace) = load_workspace_bytes_with_source_factory(bytes);
+        let (filesystem, workspace) =
+            load_workspace_named_bytes_with_source_factory("LegacyRoot.unity", bytes);
         let objects = ObjectWorkspace::load_from_vfs(
             &filesystem,
             &workspace,
@@ -3784,9 +3853,33 @@ mod tests {
         assert!(!prefab_meta.contains("PrefabImporter:"), "{prefab_meta}");
         assert_eq!(report.asset_file_count, 1);
         assert_eq!(report.meta_file_count, 1);
+        assert_eq!(report.post_export_file_count, 1);
         assert_eq!(report.collection_count, 1);
         assert_eq!(report.exported_object_count, 3);
         assert!(report.processing_warnings.is_empty());
+
+        let path_id_map =
+            std::fs::read(output_root.join("AuxiliaryFiles/path_id_map.json")).unwrap();
+        let expected_path_id_map = include_str!("legacy_prefab_source_2017_4_probe_fixture.txt")
+            .lines()
+            .find_map(|line| line.strip_prefix("FILE|AuxiliaryFiles/path_id_map.json|"))
+            .expect("frozen source fixture records the PathIdMap output")
+            .split('|')
+            .collect::<Vec<_>>();
+        assert_eq!(path_id_map.len().to_string(), expected_path_id_map[0]);
+        let expected_empty_map = crate::export::path_id_map::serialize_path_id_map(
+            &crate::export::path_id_map::SerializedGameInfo {
+                files: vec![crate::export::path_id_map::SerializedFileInfo {
+                    name: Some("legacyroot.unity".to_owned()),
+                    assets: Vec::new(),
+                }],
+            },
+        );
+        assert_eq!(
+            path_id_map,
+            expected_empty_map.as_bytes(),
+            "empty PathIdMap body differs from the source fixture's collection name and shape"
+        );
 
         std::fs::remove_dir_all(output_root).unwrap();
     }

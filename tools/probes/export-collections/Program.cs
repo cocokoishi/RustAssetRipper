@@ -1,4 +1,5 @@
-// Dumps the generated AssetRipper.SourceGenerated class-ID -> exporter-target interface map.
+// Dumps generated AssetRipper.SourceGenerated interface maps used by project export and
+// PathIdMapExporter.
 //
 // The frozen snapshot ships no generated sources: the generated assembly is produced by
 // AssetRipper.AssemblyDumper from the Unity reference assemblies. This probe reads the
@@ -25,6 +26,7 @@ string defaultPath = Path.Combine(
     "AssetRipper.SourceGenerated.dll");
 string path = args.Length > 0 && !args[0].StartsWith("--", StringComparison.Ordinal) ? args[0] : defaultPath;
 bool dumpAll = args.Contains("--all");
+bool dumpPathIdMapTypes = args.Contains("--path-id-map-types");
 bool detail = args.Contains("--detail");
 
 // The interfaces named by `ProjectExporter` registrations plus the claim predicates.
@@ -102,6 +104,8 @@ AssemblyLoadContext.Default.Resolving += (_, name) =>
 Assembly assembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(fullPath);
 
 SortedDictionary<int, SortedSet<string>> rows = new();
+SortedDictionary<(int ClassId, string Name), SortedSet<string>> pathIdMapTypes = new();
+HashSet<int> pathIdMapClassIds = new();
 
 foreach (Type type in assembly.GetTypes())
 {
@@ -116,6 +120,25 @@ foreach (Type type in assembly.GetTypes())
         continue;
     }
     Type[] interfaces = type.GetInterfaces();
+    if (dumpPathIdMapTypes)
+    {
+        if (!type.IsClass || type.IsAbstract)
+        {
+            continue;
+        }
+        string[] pathIdMapInterfaces = interfaces
+            .Select(i => i.Name)
+            .Where(name => name is "IMesh" or "ITexture" or "IAudioClip" or "ITextAsset" or "INamed")
+            .Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        if (pathIdMapInterfaces.Any(name => name is "IMesh" or "ITexture" or "IAudioClip" or "ITextAsset"))
+        {
+            pathIdMapClassIds.Add(classId);
+        }
+        pathIdMapTypes[(classId, type.Name)] = new SortedSet<string>(pathIdMapInterfaces, StringComparer.Ordinal);
+        continue;
+    }
     if (detail && classId is 48 or 109)
     {
         Console.WriteLine($"TYPE\t{classId}\t{type.FullName}\t{string.Join(",", interfaces.Select(i => i.Name).Order(StringComparer.Ordinal))}");
@@ -138,6 +161,20 @@ foreach (Type type in assembly.GetTypes())
         }
         names.Add(name);
     }
+}
+
+if (dumpPathIdMapTypes)
+{
+    foreach (KeyValuePair<(int ClassId, string Name), SortedSet<string>> row in pathIdMapTypes)
+    {
+        if (!pathIdMapClassIds.Contains(row.Key.ClassId))
+        {
+            continue;
+        }
+        string interfaceList = row.Value.Count == 0 ? "-" : string.Join(",", row.Value);
+        Console.WriteLine($"TYPE\t{row.Key.ClassId}\t{row.Key.Name}\t{interfaceList}");
+    }
+    return;
 }
 
 foreach (KeyValuePair<int, SortedSet<string>> row in rows)

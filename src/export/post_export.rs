@@ -75,6 +75,9 @@ impl PostExporterKind {
 /// The asset kinds `PathIdMapExporter` records: `IMesh`, `ITexture`, `IAudioClip`, `ITextAsset`.
 pub const PATH_ID_MAP_ASSET_KINDS: [&str; 4] = ["Mesh", "Texture", "AudioClip", "TextAsset"];
 
+/// Portable destination of `PathIdMapExporter` relative to `ExportRootPath`.
+pub const PATH_ID_MAP_FILE: &str = "AuxiliaryFiles/path_id_map.json";
+
 /// Build the `ProjectVersion.txt` body around a caller-rendered version string.
 ///
 /// The baseline writes `m_EditorVersion: {version}\n` and appends
