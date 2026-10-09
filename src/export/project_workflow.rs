@@ -15,7 +15,10 @@
 //! generated Transforms, pointer mapping, and `PrefabImporter` metadata. A source-matched legacy
 //! generated Prefab route covers a synthetic Unity 2017.4.40f1 hierarchy; other legacy branches,
 //! full AssetBundle-derived importer metadata, and the remaining class-specific exporters remain
-//! required integrations.
+//! required integrations. A manager-backed `DllExportWithoutRenaming` route saves catalog-backed
+//! assemblies to `Assets/Plugins` with source GUID/fileID mapping and a source-pinned Unity 2019.4
+//! `PluginImporter`; assembly reserialization and additional manager-resolved assemblies remain
+//! unresolved.
 
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -28,7 +31,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::io::filesystem::VirtualFileSystem;
 use crate::io::platform_structure::PlatformResourceProvider;
 use crate::processing::asset_factory::{FactoryAssetKind, FactoryUnityVersion};
-use crate::processing::managed_assembly::mono_script_export_identity;
+use crate::processing::managed_assembly::{mono_script_export_identity, ManagedAssemblyCatalog};
 use crate::processing::scene_collections::{
     SceneDefinitionGuidPlan, SceneDefinitionPathSource, SceneGuidWords,
 };
@@ -75,11 +78,12 @@ use super::scene_wiring::{
     process_workspace_scenes_and_prefabs, WorkspaceSceneProcessing, WorkspaceSceneProcessingLimits,
 };
 use super::script_export_flow::{
-    assembly_definition_file_name, assembly_definition_json, assembly_export_type,
-    emit_assembly_definitions, AssemblyExportType,
+    add_assembly_file_extension, assembly_definition_file_name, assembly_definition_json,
+    assembly_export_type, emit_assembly_definitions, AssemblyExportType,
 };
 use super::script_hashing::{
-    calculate_script_file_id_str, calculate_script_guid_str, ScriptHashLimits,
+    calculate_assembly_guid, calculate_script_file_id_str, calculate_script_guid_str,
+    ScriptHashLimits,
 };
 use super::settings_file::ExportSettingsFile;
 use super::shader_export::{
@@ -168,6 +172,9 @@ enum ObjectRoute {
     Manager,
     /// `ScriptExportCollection`/`EmptyScriptExportCollection`: deterministic `.cs` and MonoImporter metadata.
     Script,
+    /// A manager-backed MonoScript whose collection only registers a pointer; saved DLL bytes
+    /// are staged once per loaded assembly.
+    ScriptPointerOnly,
     /// `UnknownExportCollection`: raw payload bytes, no `.meta`.
     Unknown,
     /// `UnreadableExportCollection`: raw payload bytes, no `.meta`.
@@ -204,6 +211,15 @@ struct ScriptExportDetails {
     guid: [u8; 16],
     pointer_guid: [u8; 16],
     pointer_file_id: i64,
+    export_type: AssemblyExportType,
+}
+
+#[derive(Clone, Debug)]
+struct SavedAssemblyExport {
+    assembly_name: String,
+    source_virtual_path: String,
+    relative_path: String,
+    guid: [u8; 16],
 }
 
 #[derive(Clone, Debug)]
@@ -292,12 +308,60 @@ pub fn export_workspace_yaml_project_with_script_manager(
     assembly_manager_is_set: bool,
     limits: WorkspaceProjectExportLimits,
 ) -> Result<WorkspaceProjectExportReport, Box<dyn Error>> {
+    export_workspace_yaml_project_with_assembly_catalog(
+        output_root,
+        delete_existing,
+        filesystem,
+        root_catalog,
+        resource_provider,
+        workspace,
+        objects,
+        reference_graph,
+        settings,
+        assembly_manager_is_set,
+        None,
+        limits,
+    )
+}
+
+/// Execute project export with the imported assembly catalog available to script exporters.
+#[allow(clippy::too_many_arguments)]
+pub fn export_workspace_yaml_project_with_assembly_catalog(
+    output_root: &Path,
+    delete_existing: bool,
+    filesystem: &VirtualFileSystem,
+    root_catalog: &RootResourceFileCatalog,
+    resource_provider: &PlatformResourceProvider<'_>,
+    workspace: &SerializedFileWorkspace,
+    objects: &ObjectWorkspace,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+    settings: &ExportSettingsFile,
+    assembly_manager_is_set: bool,
+    managed_assemblies: Option<&ManagedAssemblyCatalog>,
+    limits: WorkspaceProjectExportLimits,
+) -> Result<WorkspaceProjectExportReport, Box<dyn Error>> {
     let (editor_version_text, project_version) = workspace_project_version(workspace)?;
     let has_mono_scripts = objects
         .objects()
         .iter()
         .any(|object| object.factory.class_id == 115);
-    let reference_assembly_maps = if assembly_manager_is_set || !has_mono_scripts {
+    let managed_reference_table_available = if let Some(catalog) = managed_assemblies {
+        match catalog.assembly("mscorlib") {
+            Some(assembly) => match assembly.version_major {
+                Some(2) => false,
+                Some(_) => true,
+                None => {
+                    return Err(invalid_project(
+                        "Mono reference lookup found mscorlib without a manifest version",
+                    ))
+                }
+            },
+            None => true,
+        }
+    } else {
+        !assembly_manager_is_set
+    };
+    let reference_assembly_maps = if !has_mono_scripts || !managed_reference_table_available {
         None
     } else {
         Some(
@@ -483,6 +547,7 @@ pub fn export_workspace_yaml_project_with_script_manager(
                     object,
                     settings,
                     assembly_manager_is_set,
+                    managed_assemblies,
                     editor_version_text,
                     reference_assembly_maps.as_ref(),
                 )?
@@ -529,7 +594,18 @@ pub fn export_workspace_yaml_project_with_script_manager(
                     (ObjectRoute::Asset, "", asset_family_fallback(selection.collection_name))
                 }
                 ExportCollectionKind::Script | ExportCollectionKind::EmptyScript
-                    if script_export.is_some() => (ObjectRoute::Script, "", None),
+                    if let Some(script) = script_export.as_ref() => (
+                    if script.export_type == AssemblyExportType::Save
+                        || (script.export_type == AssemblyExportType::Skip
+                            && assembly_manager_is_set)
+                    {
+                        ObjectRoute::ScriptPointerOnly
+                    } else {
+                        ObjectRoute::Script
+                    },
+                    "",
+                    None,
+                ),
                 ExportCollectionKind::Script | ExportCollectionKind::EmptyScript
                     if class_id == 115 => (
                     ObjectRoute::Skipped,
@@ -628,7 +704,7 @@ pub fn export_workspace_yaml_project_with_script_manager(
                             "class {class_id} export file ID could not be planned: {error}"
                         ))
                     })?,
-                ObjectRoute::Script => {
+                ObjectRoute::Script | ObjectRoute::ScriptPointerOnly => {
                     script_export
                         .as_ref()
                         .ok_or_else(|| invalid_project("MonoScript route has no export details"))?
@@ -662,6 +738,22 @@ pub fn export_workspace_yaml_project_with_script_manager(
             });
         }
     }
+
+    let saved_assemblies = if assembly_manager_is_set && has_mono_scripts {
+        let catalog = managed_assemblies.ok_or_else(|| {
+            invalid_project(
+                "manager-backed MonoScript project export requires the imported assembly catalog",
+            )
+        })?;
+        plan_saved_assembly_exports(
+            catalog,
+            reference_assembly_maps.as_ref(),
+            editor_version_text,
+            settings,
+        )?
+    } else {
+        Vec::new()
+    };
 
     for prefab in &mut prefab_collections {
         prefab.collection_index = next_collection_index;
@@ -728,7 +820,10 @@ pub fn export_workspace_yaml_project_with_script_manager(
         collection_metadata.push(ExportCollectionPointerMetadata {
             collection_index: entry.collection_index,
             guid: entry.pointer_guid,
-            asset_type: if entry.route == ObjectRoute::Script {
+            asset_type: if matches!(
+                entry.route,
+                ObjectRoute::Script | ObjectRoute::ScriptPointerOnly
+            ) {
                 UnityProjectAssetType::Meta
             } else {
                 UnityProjectAssetType::Serialized
@@ -793,16 +888,60 @@ pub fn export_workspace_yaml_project_with_script_manager(
     // Pass 3: materialize every routed object into a staged file.
     let mut planner = ProjectPathPlanner::new(ProjectPathPlanner::host_platform());
     let mut files = Vec::new();
+    let staged_file_capacity = collection_count
+        .checked_add(saved_assemblies.len())
+        .ok_or_else(|| invalid_project("staged project file count overflows"))?;
     files
-        .try_reserve_exact(collection_count)
+        .try_reserve_exact(staged_file_capacity)
         .map_err(|_| invalid_project("could not allocate staged project asset files"))?;
     let mut support_files = Vec::new();
     let mut support_file_indexes = HashMap::new();
     let mut total_bytes = 0usize;
     let mut exported_object_count = 0usize;
     let mut raw_file_cache: HashMap<usize, Vec<u8>> = HashMap::new();
+    let mut saved_assemblies_emitted = false;
     for entry in &routed {
+        if entry.class_id == 115 && !saved_assemblies_emitted {
+            for assembly in &saved_assemblies {
+                let bytes = filesystem
+                    .read_all_bytes(
+                        &assembly.source_virtual_path,
+                        limits.max_total_asset_payload_bytes,
+                    )
+                    .map_err(|error| {
+                        invalid_project(format!(
+                            "saved assembly {:?} could not be read from {}: {error}",
+                            assembly.assembly_name, assembly.source_virtual_path
+                        ))
+                    })?;
+                total_bytes = total_bytes
+                    .checked_add(bytes.len())
+                    .ok_or_else(|| invalid_project("project output byte count overflows"))?;
+                if total_bytes > limits.max_total_asset_payload_bytes {
+                    return Err(invalid_project(format!(
+                        "project output uses {total_bytes} bytes, exceeding the limit {}",
+                        limits.max_total_asset_payload_bytes
+                    )));
+                }
+                files.push(PlannedProjectFile {
+                    collection_name: "ScriptExportCollection",
+                    kind: ExportCollectionKind::Script,
+                    relative_path: assembly.relative_path.clone(),
+                    guid: assembly.guid,
+                    bytes,
+                    meta: Some(PlannedProjectMeta {
+                        importer_class: "PluginImporter".to_owned(),
+                        importer: plugin_importer_yaml(project_version)?,
+                    }),
+                    label: assembly.assembly_name.clone(),
+                });
+            }
+            saved_assemblies_emitted = true;
+        }
         if entry.route == ObjectRoute::Skipped {
+            continue;
+        }
+        if entry.route == ObjectRoute::ScriptPointerOnly {
             continue;
         }
         if entry.route == ObjectRoute::ShaderYaml {
@@ -859,6 +998,9 @@ pub fn export_workspace_yaml_project_with_script_manager(
                         ))
                     })?
                     .into_bytes()
+            }
+            ObjectRoute::ScriptPointerOnly => {
+                unreachable!("pointer-only MonoScripts are filtered before file planning")
             }
             ObjectRoute::TextAsset => {
                 let script = &entry
@@ -951,6 +1093,9 @@ pub fn export_workspace_yaml_project_with_script_manager(
                 )?
                 .relative_asset_path
             }
+            ObjectRoute::ScriptPointerOnly => {
+                unreachable!("pointer-only MonoScripts are filtered before path planning")
+            }
             ObjectRoute::Manager => planner.plan_manager_path(&entry.class_name)?,
             ObjectRoute::Unknown => planner.plan_unknown_path(
                 &entry.class_name,
@@ -997,6 +1142,9 @@ pub fn export_workspace_yaml_project_with_script_manager(
                     importer_class: "MonoImporter".to_owned(),
                     importer: mono_importer_yaml(script.execution_order)?,
                 })
+            }
+            ObjectRoute::ScriptPointerOnly => {
+                unreachable!("pointer-only MonoScripts are filtered before metadata planning")
             }
             ObjectRoute::ShaderText => {
                 let shader = entry.shader_view.as_ref().ok_or_else(|| {
@@ -1357,6 +1505,7 @@ fn plan_script_export_details(
     object: &WorkspaceObject,
     settings: &ExportSettingsFile,
     assembly_manager_is_set: bool,
+    managed_assemblies: Option<&ManagedAssemblyCatalog>,
     unity_version_text: &str,
     reference_assembly_maps: Option<&ReferenceAssemblyMaps>,
 ) -> Result<Option<ScriptExportDetails>, Box<dyn Error>> {
@@ -1374,31 +1523,29 @@ fn plan_script_export_details(
     if identity.is_injected() {
         return Ok(None);
     }
-    if assembly_manager_is_set && !is_predefined_assembly(&identity.assembly) {
-        return Err(invalid_project(format!(
-            "file {} object {} PathID {} MonoScript assembly {:?} requires manager-backed reference-map or assembly-export handling, which is not wired into the project path",
-            object.file_index, object.object_index, object.path_id, identity.assembly
-        )));
-    }
-    let reference_guid = if assembly_manager_is_set {
-        None
-    } else {
-        let version = FactoryUnityVersion::parse(unity_version_text).ok_or_else(|| {
-            invalid_project(format!(
-                "file {} object {} PathID {} MonoScript reference lookup cannot parse Unity version {unity_version_text:?}",
-                object.file_index, object.object_index, object.path_id
-            ))
-        })?;
-        let maps = reference_assembly_maps.ok_or_else(|| {
-            invalid_project("MonoScript reference lookup has no source reference assembly map")
-        })?;
-        maps.guid_for(&version, &identity.assembly)
-            .map_err(|error| {
+    let reference_guid = match reference_assembly_maps {
+        Some(maps) => {
+            let version = FactoryUnityVersion::parse(unity_version_text).ok_or_else(|| {
                 invalid_project(format!(
-                    "file {} object {} PathID {} MonoScript reference lookup failed: {error}",
+                    "file {} object {} PathID {} MonoScript reference lookup cannot parse Unity version {unity_version_text:?}",
                     object.file_index, object.object_index, object.path_id
                 ))
-            })?
+            })?;
+            maps.guid_for(&version, &identity.assembly)
+                .map_err(|error| {
+                    invalid_project(format!(
+                        "file {} object {} PathID {} MonoScript reference lookup failed: {error}",
+                        object.file_index, object.object_index, object.path_id
+                    ))
+                })?
+        }
+        None if assembly_manager_is_set => {
+            return Err(invalid_project(format!(
+                "file {} object {} PathID {} MonoScript reference classification requires the manager-backed reference map, which is unavailable for this mscorlib configuration",
+                object.file_index, object.object_index, object.path_id
+            )))
+        }
+        None => None,
     };
     let export_type = assembly_export_type(
         reference_guid.is_some(),
@@ -1406,10 +1553,30 @@ fn plan_script_export_details(
         settings.script_export_mode,
         &identity.assembly,
     );
-    if export_type != AssemblyExportType::Decompile
-        && !(export_type == AssemblyExportType::Skip
-            && !assembly_manager_is_set
-            && reference_guid.is_some())
+    if export_type == AssemblyExportType::Save {
+        let catalog = managed_assemblies.ok_or_else(|| {
+            invalid_project(format!(
+                "file {} object {} PathID {} MonoScript selects Save for ScriptExportMode::{:?}, but the imported assembly catalog was not supplied to project export",
+                object.file_index,
+                object.object_index,
+                object.path_id,
+                settings.script_export_mode
+            ))
+        })?;
+        let assembly = catalog.assembly(&identity.assembly).ok_or_else(|| {
+            invalid_project(format!(
+                "file {} object {} PathID {} MonoScript assembly {:?} is not present in the imported assembly catalog",
+                object.file_index, object.object_index, object.path_id, identity.assembly
+            ))
+        })?;
+        if assembly.source_virtual_path.is_none() {
+            return Err(invalid_project(format!(
+                "file {} object {} PathID {} MonoScript assembly {:?} has no source VFS stream to save",
+                object.file_index, object.object_index, object.path_id, identity.assembly
+            )));
+        }
+    } else if export_type != AssemblyExportType::Decompile
+        && !(export_type == AssemblyExportType::Skip && reference_guid.is_some())
     {
         return Err(invalid_project(format!(
             "file {} object {} PathID {} MonoScript selects {export_type:?} for ScriptExportMode::{:?}; that script export route is not wired into the project path",
@@ -1435,7 +1602,9 @@ fn plan_script_export_details(
         AssemblyExportType::Decompile => (
             script_guid.to_byte_array(),
             super::script_export_flow::decompiled_file_id().map_err(|error| {
-                invalid_project(format!("MonoScript export ID could not be planned: {error}"))
+                invalid_project(format!(
+                    "MonoScript export ID could not be planned: {error}"
+                ))
             })?,
         ),
         AssemblyExportType::Skip => {
@@ -1458,13 +1627,21 @@ fn plan_script_export_details(
             )
         }
         AssemblyExportType::Save => {
-            return Err(invalid_project(format!(
-                "file {} object {} PathID {} MonoScript selects Save for ScriptExportMode::{:?}; that script export route is not wired into the project path",
-                object.file_index,
-                object.object_index,
-                object.path_id,
-                settings.script_export_mode
-            )))
+            let file_id = calculate_script_file_id_str(
+                &identity.namespace,
+                &identity.class,
+                ScriptHashLimits::default(),
+            )
+            .map_err(|error| {
+                invalid_project(format!(
+                    "file {} object {} PathID {} MonoScript file ID could not be calculated: {error}",
+                    object.file_index, object.object_index, object.path_id
+                ))
+            })?;
+            (
+                calculate_assembly_guid(&identity.assembly).to_byte_array(),
+                i64::from(file_id),
+            )
         }
     };
     Ok(Some(ScriptExportDetails {
@@ -1473,7 +1650,64 @@ fn plan_script_export_details(
         guid: script_guid.to_byte_array(),
         pointer_guid,
         pointer_file_id,
+        export_type,
     }))
+}
+
+fn plan_saved_assembly_exports(
+    catalog: &ManagedAssemblyCatalog,
+    reference_assembly_maps: Option<&ReferenceAssemblyMaps>,
+    unity_version_text: &str,
+    settings: &ExportSettingsFile,
+) -> Result<Vec<SavedAssemblyExport>, Box<dyn Error>> {
+    let version = FactoryUnityVersion::parse(unity_version_text).ok_or_else(|| {
+        invalid_project(format!(
+            "saved assembly export cannot parse Unity version {unity_version_text:?}"
+        ))
+    })?;
+    let reference_assembly_maps = reference_assembly_maps.ok_or_else(|| {
+        invalid_project(
+            "saved assembly export requires a source reference map for this mscorlib configuration",
+        )
+    })?;
+    let mut exports = Vec::new();
+    exports
+        .try_reserve_exact(catalog.assemblies().len())
+        .map_err(|_| invalid_project("could not allocate saved assembly export plans"))?;
+    for assembly in catalog.assemblies() {
+        let is_reference = reference_assembly_maps
+            .guid_for(&version, &assembly.assembly_name)
+            .map_err(|error| {
+                invalid_project(format!(
+                    "assembly {:?} reference lookup failed: {error}",
+                    assembly.assembly_name
+                ))
+            })?
+            .is_some();
+        if assembly_export_type(
+            is_reference,
+            true,
+            settings.script_export_mode,
+            &assembly.assembly_name,
+        ) != AssemblyExportType::Save
+        {
+            continue;
+        }
+        let source_virtual_path = assembly.source_virtual_path.clone().ok_or_else(|| {
+            invalid_project(format!(
+                "saved assembly {:?} has no source VFS stream",
+                assembly.assembly_name
+            ))
+        })?;
+        let file_name = add_assembly_file_extension(&assembly.assembly_name);
+        exports.push(SavedAssemblyExport {
+            assembly_name: assembly.assembly_name.clone(),
+            source_virtual_path,
+            relative_path: format!("Assets/Plugins/{file_name}"),
+            guid: calculate_assembly_guid(&file_name).to_byte_array(),
+        });
+    }
+    Ok(exports)
 }
 
 fn prepare_scene_collections(
@@ -2275,6 +2509,102 @@ fn mono_importer_yaml(execution_order: i16) -> Result<UnityYamlNode, Box<dyn Err
         UnityYamlNode::scalar(super::unity_yaml::UnityYamlScalar::Signed(0)),
     )?;
     importer.insert_field("icon", icon)?;
+    importer.insert_field("userData", UnityYamlNode::string(""))?;
+    importer.insert_field("assetBundleName", UnityYamlNode::string(""))?;
+    importer.insert_field("assetBundleVariant", UnityYamlNode::string(""))?;
+    Ok(importer)
+}
+
+fn plugin_importer_yaml(
+    project_version: SceneUnityVersion,
+) -> Result<UnityYamlNode, Box<dyn Error>> {
+    if (project_version.major, project_version.minor) != (2019, 4) {
+        return Err(invalid_project(format!(
+            "PluginImporter field layout is source-runtime pinned only for Unity 2019.4, not {}.{}",
+            project_version.major, project_version.minor
+        )));
+    }
+    let mut importer = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    importer.insert_field(
+        "serializedVersion",
+        UnityYamlNode::scalar(super::unity_yaml::UnityYamlScalar::Signed(2)),
+    )?;
+    importer.insert_field(
+        "externalObjects",
+        UnityYamlNode::mapping(UnityYamlMappingStyle::Flow),
+    )?;
+    importer.insert_field(
+        "iconMap",
+        UnityYamlNode::mapping(UnityYamlMappingStyle::Flow),
+    )?;
+    importer.insert_field(
+        "executionOrder",
+        UnityYamlNode::mapping(UnityYamlMappingStyle::Flow),
+    )?;
+    importer.insert_field(
+        "defineConstraints",
+        UnityYamlNode::sequence(UnityYamlSequenceStyle::Block),
+    )?;
+    for field in [
+        "isPreloaded",
+        "isOverridable",
+        "isExplicitlyReferenced",
+        "validateReferences",
+    ] {
+        importer.insert_field(
+            field,
+            UnityYamlNode::scalar(super::unity_yaml::UnityYamlScalar::Signed(0)),
+        )?;
+    }
+
+    let mut platform_data = UnityYamlNode::sequence(UnityYamlSequenceStyle::Block);
+    let mut any_platform = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    any_platform.insert_field("Any", UnityYamlNode::string(""))?;
+    let mut any_settings = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    any_settings.insert_field(
+        "enabled",
+        UnityYamlNode::scalar(super::unity_yaml::UnityYamlScalar::Signed(1)),
+    )?;
+    any_settings.insert_field(
+        "settings",
+        UnityYamlNode::mapping(UnityYamlMappingStyle::Flow),
+    )?;
+    let mut any_entry = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    any_entry.insert_field("first", any_platform)?;
+    any_entry.insert_field("second", any_settings)?;
+    platform_data.push(any_entry)?;
+
+    let mut editor_platform = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    editor_platform.insert_field("Editor", UnityYamlNode::string("Editor"))?;
+    let mut editor_settings = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    editor_settings.insert_field(
+        "enabled",
+        UnityYamlNode::scalar(super::unity_yaml::UnityYamlScalar::Signed(0)),
+    )?;
+    let mut initialized = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    initialized.insert_field(
+        "DefaultValueInitialized",
+        UnityYamlNode::scalar(super::unity_yaml::UnityYamlScalar::PlainString(
+            "true".to_owned(),
+        )),
+    )?;
+    editor_settings.insert_field("settings", initialized)?;
+    let mut editor_entry = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    editor_entry.insert_field("first", editor_platform)?;
+    editor_entry.insert_field("second", editor_settings)?;
+    platform_data.push(editor_entry)?;
+    importer.insert_field("platformData", platform_data)?;
+
+    let mut output = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    output.insert_field(
+        "dllType",
+        UnityYamlNode::scalar(super::unity_yaml::UnityYamlScalar::Signed(0)),
+    )?;
+    output.insert_field(
+        "scriptingRuntimeVersion",
+        UnityYamlNode::scalar(super::unity_yaml::UnityYamlScalar::Signed(0)),
+    )?;
+    importer.insert_field("output", output)?;
     importer.insert_field("userData", UnityYamlNode::string(""))?;
     importer.insert_field("assetBundleName", UnityYamlNode::string(""))?;
     importer.insert_field("assetBundleVariant", UnityYamlNode::string(""))?;

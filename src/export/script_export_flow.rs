@@ -25,8 +25,9 @@
 //! The `.asmdef` body is `{"name","references","allowUnsafeCode":true}` with references in
 //! module order minus null and reference-known entries. String escaping covers ASCII
 //! controls, quotes, and backslashes; non-ASCII encoder details follow System.Text.Json and
-//! stay open. Decompilation, assembly saving, and reference-dictionary construction need the
-//! assembly manager and stay outside; all selections below run on caller-supplied facts.
+//! stay open. This module models selection and pointer facts. `project_workflow` handles one
+//! manager-backed VFS DLL-save route; source PE reserialization, broader manager assembly
+//! discovery, decompilation, and manager-backed reference-map construction remain open.
 
 use super::empty_script::MonoScriptIdentity;
 use super::ids::{get_main_export_id, ExportIdError};

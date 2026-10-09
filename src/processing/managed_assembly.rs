@@ -169,6 +169,12 @@ pub enum ManagedPrimitiveType {
 pub struct ManagedAssembly {
     pub file_name: String,
     pub assembly_name: String,
+    /// Manifest major version used by the source manager's `HasMscorlib2` check.
+    pub version_major: Option<u16>,
+    /// Virtual source path when this assembly was loaded from the imported GameStructure.
+    /// The source manager may return a cached input stream or a reserialized assembly stream;
+    /// project byte parity is tracked independently from this path identity.
+    pub source_virtual_path: Option<String>,
     /// TypeDef table order is observable when duplicate namespace/name pairs occur.
     pub types: Vec<ManagedTypeDefinition>,
 }
@@ -452,6 +458,10 @@ impl ManagedAssembly {
             .map(|assembly| assembly.name.to_string())
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| file_stem(file_name));
+        let version_major = resolution
+            .assembly
+            .as_ref()
+            .map(|assembly| assembly.version.major);
 
         let mut types = Vec::with_capacity(resolution.type_definitions.len());
         for (definition_index, definition) in resolution.enumerate_type_definitions() {
@@ -512,6 +522,8 @@ impl ManagedAssembly {
         Ok(Self {
             file_name: file_name.to_owned(),
             assembly_name,
+            version_major,
+            source_virtual_path: None,
             types,
         })
     }
@@ -618,7 +630,12 @@ impl ManagedAssemblyCatalog {
                 continue;
             }
             catalog
-                .insert(&path.file_name, &bytes, limits.assembly)
+                .insert_with_source_path(
+                    &path.file_name,
+                    Some(&path.virtual_path),
+                    &bytes,
+                    limits.assembly,
+                )
                 .map_err(|source| {
                     managed_assembly_load_error(
                         Some(path.virtual_path.clone()),
@@ -640,7 +657,18 @@ impl ManagedAssemblyCatalog {
         bytes: &[u8],
         limits: ManagedAssemblyLimits,
     ) -> Result<usize, Box<ManagedAssemblyError>> {
-        let assembly = ManagedAssembly::parse(file_name, bytes, limits)?;
+        self.insert_with_source_path(file_name, None, bytes, limits)
+    }
+
+    fn insert_with_source_path(
+        &mut self,
+        file_name: &str,
+        source_virtual_path: Option<&str>,
+        bytes: &[u8],
+        limits: ManagedAssemblyLimits,
+    ) -> Result<usize, Box<ManagedAssemblyError>> {
+        let mut assembly = ManagedAssembly::parse(file_name, bytes, limits)?;
+        assembly.source_virtual_path = source_virtual_path.map(str::to_owned);
         let path_alias = file_stem(file_name);
         if let Some(previous) = self.aliases.get(&path_alias) {
             return Err(managed_assembly_error(
@@ -660,6 +688,13 @@ impl ManagedAssemblyCatalog {
         // manifest alias while keeping the path-derived `Dictionary.Add` collision strict.
         self.aliases.insert(manifest_alias, index);
         Ok(index)
+    }
+
+    /// Resolve one assembly name through the same path/manifest aliases as the source manager.
+    pub fn assembly(&self, name: &str) -> Option<&ManagedAssembly> {
+        self.aliases
+            .get(name)
+            .and_then(|index| self.assemblies.get(*index))
     }
 
     pub fn find_type(&self, script_id: &ScriptIdentifier) -> Option<&ManagedTypeDefinition> {
@@ -1437,6 +1472,13 @@ mod tests {
         assert!(report.processed_bytes > ASSEMBLY_BYTES.len() as u64);
         assert!(catalog.contains_assembly("Assembly-CSharp"));
         assert!(catalog.contains_assembly("FixtureScripts"));
+        let assembly = catalog.assembly("FixtureScripts").unwrap();
+        assert_eq!(assembly.version_major, Some(1));
+        assert_eq!(
+            assembly.source_virtual_path.as_deref(),
+            Some("/Assembly-CSharp.dll")
+        );
+        assert!(catalog.assembly("mscorlib").is_none());
 
         let error = super::ManagedAssemblyCatalog::load_from_vfs(
             &filesystem,

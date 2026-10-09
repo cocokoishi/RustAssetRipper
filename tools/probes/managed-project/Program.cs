@@ -57,6 +57,16 @@ if (args.Length > 0 && args[0] == "export-textasset")
     return ExportTextAsset(args[1], args[2], args[3], args[4]);
 }
 
+if (args.Length > 0 && args[0] == "export-saved-script")
+{
+    if (args.Length != 5)
+    {
+        Console.Error.WriteLine("usage: managed-project export-saved-script <input-root> <output-root> <rows-file> <assembly-file>");
+        return 2;
+    }
+    return ExportSavedScript(args[1], args[2], args[3], args[4]);
+}
+
 if (args.Length > 0 && args[0] == "reference-assembly-map")
 {
     if (args.Length != 2)
@@ -467,6 +477,196 @@ static int ExportTextAsset(string inputRootArgument, string outputRootArgument, 
     Console.WriteLine($"text_asset={textAssets[0]}");
     Console.WriteLine($"project_assets={files.Length}");
     return 0;
+}
+
+static int ExportSavedScript(string inputRootArgument, string outputRootArgument, string rowsArgument, string assemblyArgument)
+{
+    string inputRoot = Path.GetFullPath(inputRootArgument);
+    string outputRoot = Path.GetFullPath(outputRootArgument);
+    string rowsPath = Path.GetFullPath(rowsArgument);
+    string assemblyPath = Path.GetFullPath(assemblyArgument);
+    EnsureEmptyOrMissingDirectory(inputRoot, "input");
+    EnsureEmptyOrMissingDirectory(outputRoot, "output");
+    if (!File.Exists(assemblyPath))
+    {
+        throw new FileNotFoundException("managed assembly fixture is missing", assemblyPath);
+    }
+    if (File.Exists(rowsPath) || Directory.Exists(rowsPath))
+    {
+        throw new IOException($"refusing to overwrite probe rows {rowsPath}");
+    }
+
+    Directory.CreateDirectory(inputRoot);
+    Directory.CreateDirectory(outputRoot);
+    Directory.CreateDirectory(Path.GetDirectoryName(rowsPath)!);
+    string scriptPath = Path.Combine(inputRoot, "saved_script.assets");
+    string behaviourPath = Path.Combine(inputRoot, "saved_behaviour.assets");
+    string dllPath = Path.Combine(inputRoot, "FixtureScripts.dll");
+    byte[] scriptBytes = BuildSavedScriptFile();
+    byte[] behaviourBytes = BuildSavedBehaviourFile();
+    byte[] assemblyBytes = File.ReadAllBytes(assemblyPath);
+    File.WriteAllBytes(scriptPath, scriptBytes);
+    File.WriteAllBytes(behaviourPath, behaviourBytes);
+    File.WriteAllBytes(dllPath, assemblyBytes);
+
+    Logger.Add(new ConsoleLogger());
+    FullConfiguration configuration = new();
+    configuration.ExportSettings.ScriptExportMode = ScriptExportMode.DllExportWithoutRenaming;
+    ExportHandler handler = new(configuration);
+    var gameData = handler.LoadAndProcess([inputRoot], LocalFileSystem.Instance);
+    string[] scripts = gameData.GameBundle.FetchAssets()
+        .Where(asset => asset.ClassID == 115 && asset.PathID == 7)
+        .Select(asset => $"{asset.ClassName}|{asset.PathID}|{asset}")
+        .ToArray();
+    if (scripts.Length != 1 || !scripts[0].StartsWith("MonoScript|7|", StringComparison.Ordinal))
+    {
+        throw new InvalidDataException($"expected one saved MonoScript at PathID 7: {string.Join(';', scripts)}");
+    }
+    handler.Export(gameData, outputRoot, LocalFileSystem.Instance);
+
+    string assetsRoot = Path.Combine(outputRoot, "ExportedProject", "Assets");
+    string savedDllPath = Path.Combine(assetsRoot, "Plugins", "FixtureScripts.dll");
+    string savedMetaPath = savedDllPath + ".meta";
+    if (!File.Exists(savedDllPath) || !File.Exists(savedMetaPath))
+    {
+        string[] actual = Directory.Exists(assetsRoot)
+            ? Directory.GetFiles(assetsRoot, "*", SearchOption.AllDirectories)
+                .Select(path => Path.GetRelativePath(assetsRoot, path).Replace('\\', '/'))
+                .Order(StringComparer.Ordinal)
+                .ToArray()
+            : [];
+        throw new FileNotFoundException($"expected saved assembly and PluginImporter sidecar; found {string.Join(';', actual)}");
+    }
+    string? behaviourOutputPath = Directory.Exists(assetsRoot)
+        ? Directory.GetFiles(assetsRoot, "*.asset", SearchOption.AllDirectories)
+            .FirstOrDefault(path => File.ReadAllText(path).Contains("m_Name: SavedScriptRoot", StringComparison.Ordinal))
+        : null;
+    if (behaviourOutputPath is null)
+    {
+        throw new InvalidDataException("source export did not write the assembly-backed MonoBehaviour asset");
+    }
+
+    using StreamWriter rows = new(rowsPath, false, new UTF8Encoding(false)) { NewLine = "\n" };
+    rows.WriteLine("# Frozen AssetRipper manager-backed ScriptExportCollection DLL save output.");
+    rows.WriteLine("MODE|DllExportWithoutRenaming");
+    rows.WriteLine($"OBJECT|{scripts[0]}");
+    WriteInputRow(rows, scriptPath, scriptBytes);
+    WriteInputRow(rows, behaviourPath, behaviourBytes);
+    rows.WriteLine($"INPUT|FixtureScripts.dll|{assemblyBytes.Length}|{Convert.ToHexString(SHA256.HashData(assemblyBytes))}");
+    string[] outputs =
+    [
+        savedDllPath,
+        savedMetaPath,
+        behaviourOutputPath,
+    ];
+    foreach (string path in outputs)
+    {
+        string relative = $"Assets/{Path.GetRelativePath(assetsRoot, path).Replace('\\', '/')}";
+        byte[] bytes = File.ReadAllBytes(path);
+        if (relative.EndsWith(".meta", StringComparison.Ordinal))
+        {
+            bytes = NormalizeMonoImporterMeta(bytes);
+        }
+        rows.WriteLine($"FILE|{relative}|{bytes.Length}|{Convert.ToHexString(SHA256.HashData(bytes))}");
+        if (!relative.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
+        {
+            rows.WriteLine($"CONTENT_HEX|{relative}|{Convert.ToHexString(bytes)}");
+        }
+    }
+    foreach (string path in Directory.GetFiles(Path.Combine(assetsRoot, "Plugins"), "*.dll")
+        .Where(path => !string.Equals(Path.GetFileName(path), "FixtureScripts.dll", StringComparison.Ordinal))
+        .OrderBy(path => path, StringComparer.Ordinal))
+    {
+        byte[] bytes = File.ReadAllBytes(path);
+        rows.WriteLine($"SOURCE_EXTRA_PLUGIN|Assets/Plugins/{Path.GetFileName(path)}|{bytes.Length}|{Convert.ToHexString(SHA256.HashData(bytes))}");
+    }
+    Console.WriteLine($"source_object={scripts[0]}");
+    Console.WriteLine("mode=DllExportWithoutRenaming");
+    Console.WriteLine("assembly=Assets/Plugins/FixtureScripts.dll");
+    Console.WriteLine($"behaviour=Assets/{Path.GetRelativePath(assetsRoot, behaviourOutputPath).Replace('\\', '/')}");
+    return 0;
+}
+
+static byte[] BuildSavedScriptFile()
+{
+    List<byte> payload = [];
+    WriteString(payload, "HeroController"); // m_Name
+    WriteI32(payload, 0); // m_ExecutionOrder
+    payload.AddRange(new byte[16]); // Hash128 m_PropertiesHash
+    WriteString(payload, "HeroController"); // m_ClassName
+    WriteString(payload, "Game"); // m_Namespace
+    WriteString(payload, "FixtureScripts"); // m_AssemblyName
+
+    SerializedType monoScriptType = new() { RawTypeID = 115 };
+    SerializedFile file = new SerializedFileBuilder
+    {
+        Generation = FormatVersion.StoresTypeDependencies,
+        Version = UnityVersion.Parse("2019.4.40f1"),
+        Platform = (BuildTarget)19,
+        EndianType = EndianType.LittleEndian,
+        HasTypeTree = false,
+        Types = { monoScriptType },
+        Objects =
+        {
+            new ObjectInfo(monoScriptType)
+            {
+                FileID = 7,
+                TypeID = 115,
+                ObjectData = payload.ToArray(),
+            },
+        },
+    }.Build();
+    file.FilePath = "saved_script.assets";
+    return file.ToByteArray();
+}
+
+static byte[] BuildSavedBehaviourFile()
+{
+    List<byte> payload = [];
+    WriteI32(payload, 0); // m_GameObject.m_FileID
+    WriteI64(payload, 0); // m_GameObject.m_PathID
+    payload.Add(1); // m_Enabled
+    while (payload.Count % 4 != 0)
+    {
+        payload.Add(0);
+    }
+    WriteI32(payload, 1); // m_Script.m_FileID -> saved_script.assets
+    WriteI64(payload, 7); // m_Script.m_PathID -> saved MonoScript
+    WriteString(payload, "SavedScriptRoot"); // m_Name
+    WriteI32(payload, 789); // m_Health
+
+    SerializedType monoBehaviourType = new() { RawTypeID = 114 };
+    AssignTree(monoBehaviourType, MonoBehaviourTargetTree());
+    SerializedFile file = new SerializedFileBuilder
+    {
+        Generation = FormatVersion.StoresTypeDependencies,
+        Version = UnityVersion.Parse("2019.4.40f1"),
+        Platform = (BuildTarget)19,
+        EndianType = EndianType.LittleEndian,
+        HasTypeTree = true,
+        Types = { monoBehaviourType },
+        Dependencies =
+        {
+            new FileIdentifier
+            {
+                AssetPath = "saved_script.assets",
+                PathNameOrigin = "saved_script.assets",
+                PathName = "saved_script.assets",
+                Type = AssetType.Serialized,
+            },
+        },
+        Objects =
+        {
+            new ObjectInfo(monoBehaviourType)
+            {
+                FileID = 8,
+                TypeID = 114,
+                ObjectData = payload.ToArray(),
+            },
+        },
+    }.Build();
+    file.FilePath = "saved_behaviour.assets";
+    return file.ToByteArray();
 }
 
 static byte[] BuildReferenceScriptFile()

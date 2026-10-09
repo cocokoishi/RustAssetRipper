@@ -17,7 +17,7 @@ use assetripper::export::pointer_map::{
     ProjectExportPointerMap, UnityProjectAssetType,
 };
 use assetripper::export::project_workflow::{
-    export_workspace_yaml_project_with_script_manager, WorkspaceProjectExportLimits,
+    export_workspace_yaml_project_with_assembly_catalog, WorkspaceProjectExportLimits,
 };
 use assetripper::export::scene_collection::{
     ExportAssetCollectionIdentity, ExportAssetIdentity, SceneExportIdAssignment,
@@ -1654,7 +1654,7 @@ fn export_project_to<W: io::Write>(
     let reference_graph = workspace.reference_graph(MultiFileReferenceGraphLimits::default())?;
     let provider =
         PlatformResourceProvider::with_mixed_data_paths(platform.as_ref(), Some(&mixed.data_paths));
-    let report = export_workspace_yaml_project_with_script_manager(
+    let report = export_workspace_yaml_project_with_assembly_catalog(
         output_root,
         delete_existing,
         &filesystem,
@@ -1665,6 +1665,7 @@ fn export_project_to<W: io::Write>(
         &reference_graph,
         settings,
         mono_manager_initialized,
+        mono_manager_initialized.then_some(&managed_assemblies),
         WorkspaceProjectExportLimits::default(),
     )?;
     writeln!(
@@ -4718,7 +4719,7 @@ mod tests {
         load_object_workspace, load_workspace_from_vfs, merge_mount_report, remaining_budget_u64,
         remaining_budget_usize, source_bundle_for_collection, WorkspaceSerializedBundle,
     };
-    use assetripper::export::settings::{ExportDefaults, ShaderExportMode};
+    use assetripper::export::settings::{ExportDefaults, ScriptExportMode, ShaderExportMode};
     use assetripper::export::settings_file::ExportSettingsFile;
     use assetripper::io::dependency::{DependencyFilePath, DependencyIndexLimits};
     use assetripper::io::filesystem::VirtualFileSystem;
@@ -9805,6 +9806,118 @@ mod tests {
         );
         assert_eq!(fs::read(&script_path).unwrap(), script_bytes);
         assert_eq!(fs::read(&behaviour_path).unwrap(), behaviour_bytes);
+
+        input.files.extend(
+            project_tree(&output_root)
+                .iter()
+                .map(|path| output_root.join(path)),
+        );
+        input
+            .subdirectories
+            .extend(project_directories(&output_root));
+    }
+
+    #[test]
+    fn export_project_saves_managed_assembly_and_maps_script_pointer() {
+        let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
+        let fixture = include_str!("processing/managed_assembly_saved_project_fixture.txt");
+        let decode_hex = |hex: &str| {
+            assert!(hex.len().is_multiple_of(2), "fixture hex has even length");
+            hex.as_bytes()
+                .chunks_exact(2)
+                .map(|pair| {
+                    u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16)
+                        .expect("fixture hex is valid")
+                })
+                .collect::<Vec<_>>()
+        };
+        let input_bytes = |name: &str| {
+            let prefix = format!("INPUT_HEX|{name}|");
+            fixture
+                .lines()
+                .find_map(|line| line.strip_prefix(&prefix))
+                .map(decode_hex)
+                .unwrap_or_else(|| panic!("saved-script fixture includes {prefix}"))
+        };
+        let source_output = |relative: &str| {
+            let prefix = format!("CONTENT_HEX|{relative}|");
+            fixture
+                .lines()
+                .find_map(|line| line.strip_prefix(&prefix))
+                .map(decode_hex)
+                .unwrap_or_else(|| panic!("saved-script fixture includes {prefix}"))
+        };
+
+        let directory = TestInputDirectory::new_root();
+        let script_path = directory.join("saved_script.assets");
+        let behaviour_path = directory.join("saved_behaviour.assets");
+        let assembly_path = directory.join("FixtureScripts.dll");
+        let script_bytes = input_bytes("saved_script.assets");
+        let behaviour_bytes = input_bytes("saved_behaviour.assets");
+        fs::write(&script_path, &script_bytes).unwrap();
+        fs::write(&behaviour_path, &behaviour_bytes).unwrap();
+        fs::write(
+            &assembly_path,
+            include_bytes!("processing/managed_assembly_fixture.dll"),
+        )
+        .unwrap();
+        let output_root = directory.join("project-saved-script");
+        let mut input = TestInputDirectory {
+            directory: directory.clone(),
+            files: vec![
+                script_path.clone(),
+                behaviour_path.clone(),
+                assembly_path.clone(),
+            ],
+            subdirectories: Vec::new(),
+        };
+        let mut settings = default_export_settings();
+        settings.script_export_mode = ScriptExportMode::DllExportWithoutRenaming;
+        let mut status = Vec::new();
+        super::export_project_to(
+            std::slice::from_ref(&directory),
+            &output_root,
+            false,
+            &settings,
+            &mut status,
+        )
+        .expect("manager-backed DllExportWithoutRenaming saves the assembly");
+
+        let assembly_output = output_root.join("Assets/Plugins/FixtureScripts.dll");
+        let assembly_meta = output_root.join("Assets/Plugins/FixtureScripts.dll.meta");
+        let behaviour_output = output_root.join("Assets/MonoBehaviour/SavedScriptRoot.asset");
+        assert_eq!(
+            fs::read(&assembly_output).expect("saved assembly bytes"),
+            include_bytes!("processing/managed_assembly_fixture.dll"),
+            "the Rust save path retains the original imported assembly stream"
+        );
+        let normalized_meta = fs::read_to_string(&assembly_meta)
+            .expect("PluginImporter sidecar")
+            .lines()
+            .filter(|line| !line.starts_with("timeCreated: "))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        assert_eq!(
+            normalized_meta.as_bytes(),
+            source_output("Assets/Plugins/FixtureScripts.dll.meta"),
+            "PluginImporter metadata matches the frozen 2019.4 source output after removing only its generated timestamp"
+        );
+        assert_eq!(
+            fs::read(&behaviour_output).expect("saved-assembly MonoBehaviour YAML"),
+            source_output("Assets/MonoBehaviour/SavedScriptRoot.asset"),
+            "the MonoScript pointer uses the assembly GUID and script file ID"
+        );
+        assert!(
+            !output_root
+                .join("Assets/Scripts/FixtureScripts/Game/HeroController.cs")
+                .exists(),
+            "a manager-backed Save route does not emit the empty dummy script"
+        );
+        assert_eq!(fs::read(&script_path).unwrap(), script_bytes);
+        assert_eq!(fs::read(&behaviour_path).unwrap(), behaviour_bytes);
+        let status = String::from_utf8(status).unwrap();
+        assert!(status.contains("MonoScript types: 1 resolved"), "{status}");
 
         input.files.extend(
             project_tree(&output_root)

@@ -2,6 +2,18 @@
 
 This log records behavior differences found between the Rust port and the frozen local source. A source-code analysis is identified as such; it is not described as an executed C# differential.
 
+## DIFF-MANAGED-DLL-SAVE-001 — manager-backed assembly save output
+
+| Field | Finding |
+|---|---|
+| Status | Partial source match for one Unity 2019.4.40f1 `DllExportWithoutRenaming` case. Pointer YAML and normalized `PluginImporter` metadata match; assembly bytes and the complete manager assembly set do not. `TYPE-SCRIPT-001` remains in progress. |
+| Source location | `Scripts/ScriptExporter.cs` (`GetExportType`, `CreateExportPointer`); `Scripts/ScriptExportCollection.cs` (`Export`, `OnAssemblyExported`); `Import/Structure/Assembly/Managers/BaseManager.cs` (`Read`, `GetStreamForAssembly`); Rust: `src/processing/managed_assembly.rs`, `src/export/project_workflow.rs`, and `src/main.rs`. |
+| Input evidence | `src/processing/managed_assembly_saved_project_fixture.txt` records a source-authored Unity 2019.4.40f1 MonoScript and cross-file MonoBehaviour plus the 4,608-byte `FixtureScripts.dll` input (SHA-256 `52117F6D87359D5F82D9985A6582ED59E55FA4C8193DD7456D7DC78DE5E946F1`). The input contains MonoScript `Game.HeroController` in assembly `FixtureScripts`. |
+| Source-runtime evidence | `tools/probes/managed-project/Program.cs` ran `ExportHandler.LoadAndProcess` and `ExportHandler.Export` under .NET SDK 10.0.401 against the isolated frozen source. The source wrote `Assets/Plugins/FixtureScripts.dll`, its `PluginImporter` sidecar, and `Assets/MonoBehaviour/SavedScriptRoot.asset`; it also wrote `System.Runtime.CompilerServices.Unsafe.dll`. The saved FixtureScripts DLL is 4,608 bytes with SHA-256 `713CD36E68542FB6567B1780BD566A8434FE5F80C1538622809EE0FD6C25E5D2`, different from its input hash. The extra 1,536-byte runtime DLL has SHA-256 `3A99A568B6C5C0140EA4E2B00FF1D694DFA19A22AAE5FC45ECDF32F8ECE54A88`. |
+| Source behavior | In the tested mode, custom assemblies select `Save`. Script pointers use `CalculateAssemblyGuid` and the MonoScript file ID. The collection saves manager assemblies under `Assets/Plugins` and wraps them in `PluginImporter` metadata with `Any` enabled and `Editor` disabled plus `DefaultValueInitialized: true`. |
+| Rust behavior and regression | The import catalog now retains each assembly's virtual source path and manifest major version. `export-project` resolves custom MonoScript identities through that catalog, stages each loaded save-mode assembly once as a `.dll`, maps the MonoScript pointer to the assembly GUID/file ID, and emits the 2019.4 PluginImporter sidecar. `export_project_saves_managed_assembly_and_maps_script_pointer` passes: the full MonoBehaviour YAML and normalized PluginImporter sidecar match the source fixture, and the original input files remain unchanged. Rust currently writes the original VFS DLL bytes, so its DLL hash is the input hash rather than the source output hash. It also lacks the source manager's additional `System.Runtime.CompilerServices.Unsafe` assembly in this input path. |
+| Open investigation | `IAssemblyManager.SaveAssembly` copies `GetStreamForAssembly`; `BaseManager.GetStreamForAssembly` may return a cached input stream or serialize the loaded `AssemblyDefinition` when no cached stream exists. The observed source hash proves the path used here does not equal the original DLL, but the exact processing/cache transition has not yet been isolated. Rust PE rewriting, source-manager dependency closure, manager-backed reference-map selection for `HasMscorlib2`, and other export modes remain open. |
+
 ## DIFF-TEXTASSET-PROJECT-001 — TextAsset collection output and TextExportMode
 
 | Field | Finding |
