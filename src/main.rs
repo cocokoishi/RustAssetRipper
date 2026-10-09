@@ -9722,6 +9722,160 @@ mod tests {
     }
 
     #[test]
+    fn export_project_matches_complex_missing_typetree_script_fields() {
+        let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
+        let fixture = include_str!("processing/managed_assembly_schema_project_fixture.txt");
+        let decode_hex = |hex: &str| {
+            assert!(hex.len().is_multiple_of(2), "fixture hex has even length");
+            hex.as_bytes()
+                .chunks_exact(2)
+                .map(|pair| {
+                    u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16)
+                        .expect("source fixture contains valid hexadecimal")
+                })
+                .collect::<Vec<_>>()
+        };
+        let artifact_bytes = |prefix: &str| {
+            let row = fixture
+                .lines()
+                .find_map(|line| line.strip_prefix(prefix))
+                .unwrap_or_else(|| panic!("managed-schema fixture includes {prefix}"));
+            let mut fields = row.splitn(3, '|');
+            let expected_length = fields
+                .next()
+                .expect("fixture artifact has a length")
+                .parse::<usize>()
+                .expect("fixture artifact length is numeric");
+            let expected_hash = fields.next().expect("fixture artifact has a SHA-256");
+            assert_eq!(expected_hash.len(), 64, "fixture hash is SHA-256");
+            let bytes = decode_hex(
+                fields
+                    .next()
+                    .expect("fixture artifact has hexadecimal bytes"),
+            );
+            assert_eq!(bytes.len(), expected_length, "fixture artifact length");
+            bytes
+        };
+
+        let input_bytes = decode_hex(
+            fixture
+                .lines()
+                .find_map(|line| line.strip_prefix("INPUT_HEX|managed_schema.assets|"))
+                .expect("managed-schema fixture includes the SerializedFile input"),
+        );
+        let assembly_bytes =
+            include_bytes!("processing/managed_assembly_schema_complex_fixture.dll");
+        let assembly_row = fixture
+            .lines()
+            .find(|line| line.starts_with("ASSEMBLY|ComplexFixtureScripts.dll|"))
+            .expect("managed-schema fixture includes the assembly identity");
+        assert!(
+            assembly_row
+                .contains("|5120|D6E4155E931CFBC44ED92A44CC2436873D71DFBE293E9C568304DD118F2D6389"),
+            "{assembly_row}"
+        );
+        assert_eq!(assembly_bytes.len(), 5_120);
+        for object in [
+            "OBJECT|MonoBehaviour|42|RichRoot",
+            "OBJECT|MonoScript|7|RichController",
+            "OBJECT|TextAsset|9|Target",
+        ] {
+            assert!(
+                fixture.lines().any(|line| line == object),
+                "missing {object}"
+            );
+        }
+
+        let source_yaml =
+            artifact_bytes("YAML_HEX|ExportedProject/Assets/MonoBehaviour/RichRoot.asset|");
+        let source_target =
+            artifact_bytes("TARGET_HEX|ExportedProject/Assets/TextAsset/Target.txt|");
+        let source_target_meta =
+            artifact_bytes("TARGET_META_HEX|ExportedProject/Assets/TextAsset/Target.txt.meta|");
+        let source_plugin_meta = artifact_bytes(
+            "PLUGIN_META_HEX|ExportedProject/Assets/Plugins/ComplexFixtureScripts.dll.meta|",
+        );
+        let source_yaml = String::from_utf8(source_yaml).expect("source YAML is UTF-8");
+        assert_eq!(
+            source_yaml.matches("__TEXTASSET_GUID__").count(),
+            1,
+            "the source fixture normalizes only the generated TextAsset pointer GUID"
+        );
+
+        let directory = TestInputDirectory::new_root();
+        let source_path = directory.join("managed_schema.assets");
+        let assembly_path = directory.join("ComplexFixtureScripts.dll");
+        let output_root = directory.join("project-managed-schema");
+        fs::write(&source_path, &input_bytes).unwrap();
+        fs::write(&assembly_path, assembly_bytes).unwrap();
+        let mut input = TestInputDirectory {
+            directory: directory.clone(),
+            files: vec![source_path.clone(), assembly_path.clone()],
+            subdirectories: Vec::new(),
+        };
+
+        super::run(
+            [
+                std::ffi::OsString::from("export-project"),
+                output_root.clone().into_os_string(),
+                directory.clone().into_os_string(),
+            ]
+            .into_iter(),
+        )
+        .expect("the product project-export route recovers the complex managed schema");
+
+        let behaviour_path = output_root.join("Assets/MonoBehaviour/RichRoot.asset");
+        let target_path = output_root.join("Assets/TextAsset/Target.txt");
+        let target_meta_path = output_root.join("Assets/TextAsset/Target.txt.meta");
+        let plugin_meta_path = output_root.join("Assets/Plugins/ComplexFixtureScripts.dll.meta");
+        let target_guid = meta_guid(&target_meta_path);
+        let expected_yaml = source_yaml.replace("__TEXTASSET_GUID__", &target_guid);
+        let actual_yaml = fs::read(&behaviour_path).expect("recovered MonoBehaviour YAML");
+        assert_eq!(
+            actual_yaml,
+            expected_yaml.as_bytes(),
+            "all recovered fields and both object pointers match the source project export after normalizing only the generated target GUID"
+        );
+        assert_eq!(
+            fs::read(&target_path).expect("exported TextAsset"),
+            source_target,
+            "TextAsset bytes match the source project export"
+        );
+
+        let normalize_meta = |path: &std::path::Path| {
+            fs::read_to_string(path)
+                .expect("importer sidecar is readable")
+                .lines()
+                .filter(|line| !line.starts_with("guid: ") && !line.starts_with("timeCreated: "))
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n"
+        };
+        assert_eq!(
+            normalize_meta(&target_meta_path).as_bytes(),
+            source_target_meta,
+            "TextScriptImporter metadata matches after removing only generated GUID and time"
+        );
+        assert_eq!(
+            normalize_meta(&plugin_meta_path).as_bytes(),
+            source_plugin_meta,
+            "PluginImporter metadata matches after removing only generated GUID and time"
+        );
+        assert_eq!(fs::read(&source_path).unwrap(), input_bytes);
+        assert_eq!(fs::read(&assembly_path).unwrap(), assembly_bytes);
+
+        input.files.extend(
+            project_tree(&output_root)
+                .iter()
+                .map(|path| output_root.join(path)),
+        );
+        input
+            .subdirectories
+            .extend(project_directories(&output_root));
+        drop(input);
+    }
+
+    #[test]
     fn export_project_matches_source_generic_empty_script_without_a_manager() {
         let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
         let fixture = include_str!("processing/generic_script_project_fixture.txt");

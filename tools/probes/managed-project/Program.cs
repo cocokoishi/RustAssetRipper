@@ -27,6 +27,16 @@ if (args.Length > 0 && args[0] == "export-mono-structure")
     return ExportMonoStructure(args[1], args[2], args[3]);
 }
 
+if (args.Length > 0 && args[0] == "export-managed-schema")
+{
+    if (args.Length != 5)
+    {
+        Console.Error.WriteLine("usage: managed-project export-managed-schema <input-root> <output-root> <rows-file> <assembly-file>");
+        return 2;
+    }
+    return ExportManagedSchema(args[1], args[2], args[3], args[4]);
+}
+
 if (args.Length > 0 && args[0] == "export-nested-reference-bundle")
 {
     if (args.Length != 4)
@@ -573,6 +583,220 @@ static int ExportMonoStructure(string inputRootArgument, string outputRootArgume
     Console.WriteLine($"source_object={monoBehaviours[0]}");
     Console.WriteLine($"mono_behaviour={Path.GetRelativePath(outputRoot, monoYamlPath).Replace('\\', '/')}");
     return 0;
+}
+
+static int ExportManagedSchema(
+    string inputRootArgument,
+    string outputRootArgument,
+    string rowsArgument,
+    string assemblyArgument)
+{
+    string inputRoot = Path.GetFullPath(inputRootArgument);
+    string outputRoot = Path.GetFullPath(outputRootArgument);
+    string rowsPath = Path.GetFullPath(rowsArgument);
+    string assemblyPath = Path.GetFullPath(assemblyArgument);
+    EnsureEmptyOrMissingDirectory(inputRoot, "input");
+    EnsureEmptyOrMissingDirectory(outputRoot, "output");
+    if (!File.Exists(assemblyPath))
+    {
+        throw new FileNotFoundException("managed schema fixture assembly is missing", assemblyPath);
+    }
+    if (File.Exists(rowsPath) || Directory.Exists(rowsPath))
+    {
+        throw new IOException($"refusing to overwrite probe rows {rowsPath}");
+    }
+
+    Directory.CreateDirectory(inputRoot);
+    Directory.CreateDirectory(outputRoot);
+    Directory.CreateDirectory(Path.GetDirectoryName(rowsPath)!);
+    string serializedPath = Path.Combine(inputRoot, "managed_schema.assets");
+    string inputAssemblyPath = Path.Combine(inputRoot, "ComplexFixtureScripts.dll");
+    byte[] serializedBytes = BuildManagedSchemaFile();
+    byte[] assemblyBytes = File.ReadAllBytes(assemblyPath);
+    File.WriteAllBytes(serializedPath, serializedBytes);
+    File.WriteAllBytes(inputAssemblyPath, assemblyBytes);
+
+    Logger.Add(new ConsoleLogger());
+    ExportHandler handler = new(new FullConfiguration());
+    var gameData = handler.LoadAndProcess([inputRoot], LocalFileSystem.Instance);
+    var matches = gameData.GameBundle.FetchAssets()
+        .Where(asset => (asset.ClassID == 114 && asset.PathID == 42)
+            || (asset.ClassID == 115 && asset.PathID == 7)
+            || (asset.ClassID == 49 && asset.PathID == 9))
+        .Select(asset => $"{asset.ClassName}|{asset.PathID}|{asset}")
+        .ToArray();
+    if (matches.Length != 3)
+    {
+        throw new InvalidDataException($"expected MonoBehaviour, MonoScript, and TextAsset objects; found {matches.Length}: {string.Join(";", matches)}");
+    }
+    handler.Export(gameData, outputRoot, LocalFileSystem.Instance);
+
+    string assetsRoot = Path.Combine(outputRoot, "ExportedProject", "Assets");
+    string? behaviourPath = Directory.GetFiles(assetsRoot, "*.asset", SearchOption.AllDirectories)
+        .FirstOrDefault(path => File.ReadAllText(path).Contains("m_Name: RichRoot", StringComparison.Ordinal));
+    if (behaviourPath is null)
+    {
+        throw new InvalidDataException("source project export did not write the RichRoot MonoBehaviour");
+    }
+    string? targetMetaPath = Directory.GetFiles(assetsRoot, "*.meta", SearchOption.AllDirectories)
+        .FirstOrDefault(path => File.ReadAllText(path).Contains("TextScriptImporter:", StringComparison.Ordinal));
+    if (targetMetaPath is null)
+    {
+        throw new InvalidDataException("source project export did not write a TextScriptImporter sidecar");
+    }
+    string targetPath = targetMetaPath[..^5];
+    if (!File.Exists(targetPath))
+    {
+        throw new FileNotFoundException("TextScriptImporter sidecar has no matching asset", targetPath);
+    }
+    string targetMeta = File.ReadAllText(targetMetaPath);
+    string targetGuid = targetMeta.Split('\n')
+        .Select(line => line.TrimEnd('\r'))
+        .FirstOrDefault(line => line.StartsWith("guid: ", StringComparison.Ordinal))?[6..]
+        ?? throw new InvalidDataException("TextScriptImporter sidecar has no GUID");
+    string behaviourText = File.ReadAllText(behaviourPath);
+    string targetPointerGuid = $"guid: {targetGuid}";
+    int pointerGuidCount = behaviourText.Split(targetPointerGuid, StringSplitOptions.None).Length - 1;
+    if (pointerGuidCount != 1)
+    {
+        throw new InvalidDataException(
+            $"expected one TextAsset pointer GUID in MonoBehaviour YAML, found {pointerGuidCount}");
+    }
+    byte[] normalizedBehaviourBytes = Encoding.UTF8.GetBytes(
+        behaviourText.Replace(targetPointerGuid, "guid: __TEXTASSET_GUID__", StringComparison.Ordinal));
+    byte[] normalizedTargetMetaBytes = Encoding.UTF8.GetBytes(string.Join("\n",
+        File.ReadAllLines(targetMetaPath)
+            .Where(line => !line.StartsWith("guid: ", StringComparison.Ordinal)
+                && !line.StartsWith("timeCreated: ", StringComparison.Ordinal))) + "\n");
+
+    using StreamWriter rows = new(rowsPath, false, new UTF8Encoding(false)) { NewLine = "\n" };
+    rows.WriteLine("# Frozen AssetRipper export for a no-TypeTree MonoBehaviour with nested and collection fields.");
+    rows.WriteLine("NORMALIZE|MonoBehaviour TextAsset PPtr GUID replaced with __TEXTASSET_GUID__.");
+    rows.WriteLine("NORMALIZE|Importer guid and timeCreated fields omitted.");
+    rows.WriteLine($"INPUT_HEX|managed_schema.assets|{Convert.ToHexString(serializedBytes)}");
+    rows.WriteLine($"ASSEMBLY|ComplexFixtureScripts.dll|{assemblyBytes.Length}|{Convert.ToHexString(SHA256.HashData(assemblyBytes))}");
+    foreach (string item in matches)
+    {
+        rows.WriteLine($"OBJECT|{item}");
+    }
+    string behaviourRelative = Path.GetRelativePath(outputRoot, behaviourPath).Replace('\\', '/');
+    rows.WriteLine($"YAML_HEX|{behaviourRelative}|{normalizedBehaviourBytes.Length}|{Convert.ToHexString(SHA256.HashData(normalizedBehaviourBytes))}|{Convert.ToHexString(normalizedBehaviourBytes)}");
+    string targetRelative = Path.GetRelativePath(outputRoot, targetPath).Replace('\\', '/');
+    byte[] targetBytes = File.ReadAllBytes(targetPath);
+    rows.WriteLine($"TARGET_HEX|{targetRelative}|{targetBytes.Length}|{Convert.ToHexString(SHA256.HashData(targetBytes))}|{Convert.ToHexString(targetBytes)}");
+    string targetMetaRelative = Path.GetRelativePath(outputRoot, targetMetaPath).Replace('\\', '/');
+    rows.WriteLine($"TARGET_META_HEX|{targetMetaRelative}|{normalizedTargetMetaBytes.Length}|{Convert.ToHexString(SHA256.HashData(normalizedTargetMetaBytes))}|{Convert.ToHexString(normalizedTargetMetaBytes)}");
+    string pluginDllPath = Path.Combine(assetsRoot, "Plugins", "ComplexFixtureScripts.dll");
+    if (!File.Exists(pluginDllPath))
+    {
+        throw new FileNotFoundException("source project export did not save the managed assembly", pluginDllPath);
+    }
+    byte[] pluginDllBytes = File.ReadAllBytes(pluginDllPath);
+    string pluginDllRelative = Path.GetRelativePath(outputRoot, pluginDllPath).Replace('\\', '/');
+    rows.WriteLine($"PLUGIN_DLL|{pluginDllRelative}|{pluginDllBytes.Length}|{Convert.ToHexString(SHA256.HashData(pluginDllBytes))}");
+    string pluginMetaPath = pluginDllPath + ".meta";
+    if (!File.Exists(pluginMetaPath))
+    {
+        throw new FileNotFoundException("source project export did not write a PluginImporter sidecar", pluginMetaPath);
+    }
+    byte[] normalizedPluginMetaBytes = Encoding.UTF8.GetBytes(string.Join("\n",
+        File.ReadAllLines(pluginMetaPath)
+            .Where(line => !line.StartsWith("guid: ", StringComparison.Ordinal)
+                && !line.StartsWith("timeCreated: ", StringComparison.Ordinal))) + "\n");
+    string pluginMetaRelative = Path.GetRelativePath(outputRoot, pluginMetaPath).Replace('\\', '/');
+    rows.WriteLine($"PLUGIN_META_HEX|{pluginMetaRelative}|{normalizedPluginMetaBytes.Length}|{Convert.ToHexString(SHA256.HashData(normalizedPluginMetaBytes))}|{Convert.ToHexString(normalizedPluginMetaBytes)}");
+    Console.WriteLine($"mono_behaviour={behaviourRelative}");
+    Console.WriteLine($"target={targetRelative}");
+    return 0;
+}
+
+static byte[] BuildManagedSchemaFile()
+{
+    List<byte> behaviour = [];
+    WriteI32(behaviour, 0); // m_GameObject.m_FileID
+    WriteI64(behaviour, 0); // m_GameObject.m_PathID
+    behaviour.Add(1); // m_Enabled
+    AlignFour(behaviour);
+    WriteI32(behaviour, 0); // m_Script.m_FileID
+    WriteI64(behaviour, 7); // m_Script.m_PathID
+    WriteString(behaviour, "RichRoot"); // m_Name
+
+    WriteI64(behaviour, 0x0102030405060708); // inherited sequence
+    WriteI32(behaviour, 45); // health
+    WriteI32(behaviour, 3); // samples.Length
+    WriteI32(behaviour, 4);
+    WriteI32(behaviour, 5);
+    WriteI32(behaviour, 6);
+    WriteI32(behaviour, 2); // weights.Count
+    WriteI32(behaviour, BitConverter.SingleToInt32Bits(0.25f));
+    WriteI32(behaviour, BitConverter.SingleToInt32Bits(0.75f));
+    WriteI32(behaviour, 99); // stats.score
+    WriteString(behaviour, "nest"); // stats.label
+    WriteI32(behaviour, 0); // target.m_FileID
+    WriteI64(behaviour, 9); // target.m_PathID -> local TextAsset
+    behaviour.Add(1); // active
+    AlignFour(behaviour);
+    behaviour.Add(1); // phase.Active
+    AlignFour(behaviour);
+
+    List<byte> script = [];
+    WriteString(script, "RichController"); // m_Name
+    WriteI32(script, 0); // m_ExecutionOrder
+    script.AddRange(new byte[16]); // m_PropertiesHash
+    WriteString(script, "RichController"); // m_ClassName
+    WriteString(script, "Game"); // m_Namespace
+    WriteString(script, "ComplexFixtureScripts"); // m_AssemblyName
+
+    List<byte> textAsset = [];
+    WriteString(textAsset, "Target"); // m_Name
+    WriteString(textAsset, "project-export-target"); // m_Script
+
+    SerializedType behaviourType = new() { RawTypeID = 114 };
+    SerializedType scriptType = new() { RawTypeID = 115 };
+    SerializedType textAssetType = new() { RawTypeID = 49 };
+    SerializedFile file = new SerializedFileBuilder
+    {
+        Generation = FormatVersion.StoresTypeDependencies,
+        Version = UnityVersion.Parse("2019.4.40f1"),
+        Platform = (BuildTarget)19,
+        EndianType = EndianType.LittleEndian,
+        HasTypeTree = false,
+        Types = { behaviourType, scriptType, textAssetType },
+        Objects =
+        {
+            new ObjectInfo(behaviourType)
+            {
+                FileID = 42,
+                TypeID = 114,
+                SerializedTypeIndex = 0,
+                ObjectData = behaviour.ToArray(),
+            },
+            new ObjectInfo(scriptType)
+            {
+                FileID = 7,
+                TypeID = 115,
+                SerializedTypeIndex = 1,
+                ObjectData = script.ToArray(),
+            },
+            new ObjectInfo(textAssetType)
+            {
+                FileID = 9,
+                TypeID = 49,
+                SerializedTypeIndex = 2,
+                ObjectData = textAsset.ToArray(),
+            },
+        },
+    }.Build();
+    file.FilePath = "managed_schema.assets";
+    return file.ToByteArray();
+}
+
+static void AlignFour(List<byte> bytes)
+{
+    while ((bytes.Count & 3) != 0)
+    {
+        bytes.Add(0);
+    }
 }
 
 static int ExportEmptyScript(string inputRootArgument, string outputRootArgument, string rowsArgument)

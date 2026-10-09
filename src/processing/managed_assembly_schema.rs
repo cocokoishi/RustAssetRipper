@@ -797,7 +797,7 @@ impl TreeBuilder {
 
     fn children(&self, type_: &SerializableType) -> Result<Vec<NodeSpec>, ManagedSchemaErrorKind> {
         match type_.kind {
-            SerializableKind::String => Ok(vec![NodeSpec::array(
+            SerializableKind::String => Ok(vec![NodeSpec::array_with_version(
                 "Array",
                 "Array",
                 vec![
@@ -805,6 +805,7 @@ impl TreeBuilder {
                     NodeSpec::leaf("char", "data", 1),
                 ],
                 false,
+                1,
             )]),
             SerializableKind::EnginePointer => Ok(vec![
                 NodeSpec::leaf("SInt32", "m_FileID", 1),
@@ -879,10 +880,20 @@ impl NodeSpec {
     }
 
     fn array(type_name: &str, name: &str, children: Vec<Self>, align: bool) -> Self {
+        Self::array_with_version(type_name, name, children, align, 0)
+    }
+
+    fn array_with_version(
+        type_name: &str,
+        name: &str,
+        children: Vec<Self>,
+        align: bool,
+        version: i32,
+    ) -> Self {
         Self {
             type_name: type_name.to_owned(),
             name: name.to_owned(),
-            version: 0,
+            version,
             align,
             any_child_align: children
                 .iter()
@@ -983,7 +994,7 @@ fn field_node(field: &SerializableField) -> NodeSpec {
 
 fn type_node_spec(type_: &SerializableType, name: &str, align: bool) -> NodeSpec {
     let children = match type_.kind {
-        SerializableKind::String => vec![NodeSpec::array(
+        SerializableKind::String => vec![NodeSpec::array_with_version(
             "Array",
             "Array",
             vec![
@@ -991,6 +1002,7 @@ fn type_node_spec(type_: &SerializableType, name: &str, align: bool) -> NodeSpec
                 NodeSpec::leaf("char", "data", 1),
             ],
             false,
+            1,
         )],
         SerializableKind::EnginePointer => vec![
             NodeSpec::leaf("SInt32", "m_FileID", 1),
@@ -1494,5 +1506,82 @@ mod tests {
             rust_nodes, source_nodes,
             "Rust schema matches FieldSerializer"
         );
+    }
+
+    #[test]
+    fn builds_source_schema_for_nested_and_collection_fields() {
+        const ASSEMBLY_BYTES: &[u8] = include_bytes!("managed_assembly_schema_complex_fixture.dll");
+        const SOURCE_FIXTURE: &str = include_str!("managed_assembly_schema_complex_fixture.txt");
+
+        let mut catalog = ManagedAssemblyCatalog::default();
+        catalog
+            .insert(
+                "ComplexFixtureScripts.dll",
+                ASSEMBLY_BYTES,
+                ManagedAssemblyLimits::default(),
+            )
+            .unwrap();
+        let script =
+            ScriptIdentifier::try_new("ComplexFixtureScripts", "Game", "RichController").unwrap();
+        let schema = build_mono_behaviour_schema(
+            &catalog,
+            &script,
+            "2019.4.40f1",
+            ManagedSchemaLimits::default(),
+        )
+        .unwrap();
+
+        let source_nodes = SOURCE_FIXTURE
+            .lines()
+            .filter_map(|line| line.strip_prefix("SCHEMA_NODE|"))
+            .map(|line| {
+                let parts: Vec<_> = line.split('|').collect();
+                assert_eq!(parts.len(), 5, "source schema row {line:?}");
+                (
+                    parts[0].parse::<u8>().expect("source node level"),
+                    parts[1].to_owned(),
+                    parts[2].to_owned(),
+                    parts[3].parse::<i32>().expect("source node version"),
+                    parts[4].parse::<u32>().expect("source node meta flags"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let rust_nodes = schema
+            .type_tree
+            .nodes
+            .iter()
+            .map(|node| {
+                (
+                    node.level,
+                    node.type_name.clone().expect("schema node type"),
+                    node.name.clone().expect("schema node name"),
+                    node.version,
+                    node.meta_flags,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rust_nodes, source_nodes,
+            "Rust schema matches FieldSerializer"
+        );
+        assert!(schema
+            .skipped_fields
+            .iter()
+            .any(|field| field.contains("ignored")));
+        assert!(schema
+            .skipped_fields
+            .iter()
+            .any(|field| field.contains("staticValue")));
+        assert!(schema
+            .skipped_fields
+            .iter()
+            .any(|field| field.contains("locked")));
+        assert!(rust_nodes.iter().any(|node| node.2 == "samples"));
+        assert!(rust_nodes.iter().any(|node| node.2 == "weights"));
+        assert!(rust_nodes.iter().any(|node| node.2 == "stats"));
+        assert!(rust_nodes.iter().any(|node| node.1 == "PPtr<Object>"));
+        assert!(rust_nodes
+            .iter()
+            .any(|node| node.2 == "phase" && node.1 == "UInt8"));
     }
 }

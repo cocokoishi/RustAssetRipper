@@ -834,7 +834,7 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
             guid: entry.pointer_guid,
             asset_type: if matches!(
                 entry.route,
-                ObjectRoute::Script | ObjectRoute::ScriptPointerOnly
+                ObjectRoute::Script | ObjectRoute::ScriptPointerOnly | ObjectRoute::TextAsset
             ) {
                 UnityProjectAssetType::Meta
             } else {
@@ -3028,8 +3028,9 @@ fn invalid_project(message: impl Into<String>) -> Box<dyn Error> {
 #[cfg(test)]
 mod tests {
     use super::{
-        asset_family_fallback, export_workspace_yaml_project_with_settings, new_collection_guid,
-        package_manifest_json, source_reference_assembly_maps, WorkspaceProjectExportLimits,
+        asset_family_fallback, export_workspace_yaml_project_with_assembly_catalog,
+        export_workspace_yaml_project_with_settings, new_collection_guid, package_manifest_json,
+        source_reference_assembly_maps, WorkspaceProjectExportLimits,
     };
     use crate::export::settings::ExportDefaults;
     use crate::export::settings_file::ExportSettingsFile;
@@ -3042,7 +3043,10 @@ mod tests {
     use crate::io::filesystem::VirtualFileSystem;
     use crate::io::platform_structure::PlatformResourceProvider;
     use crate::processing::asset_factory::FactoryUnityVersion;
-    use crate::processing::managed_assembly::{ManagedAssemblyCatalog, ManagedAssemblyLimits};
+    use crate::processing::managed_assembly::{
+        ManagedAssemblyCatalog, ManagedAssemblyCatalogLimits, ManagedAssemblyLimits,
+    };
+    use crate::processing::managed_assembly_schema::ManagedSchemaLimits;
     use crate::processing::scene_naming::SceneUnityVersion;
     use crate::resource::RootResourceFileCatalog;
     use crate::serialized_file::object_workspace::{ObjectWorkspace, ObjectWorkspaceLimits};
@@ -3555,6 +3559,322 @@ mod tests {
         assert_eq!(report.collection_count, 1);
         assert_eq!(report.exported_object_count, 2);
         assert!(report.processing_warnings.is_empty());
+
+        std::fs::remove_dir_all(output_root).unwrap();
+    }
+
+    /// Reads one `KEY|field|field...` row from the frozen complex managed-schema project fixture.
+    fn managed_schema_fixture_row(key: &str) -> Vec<String> {
+        include_str!("managed_schema_project_fixture.txt")
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{key}|")))
+            .unwrap_or_else(|| panic!("frozen source fixture has no {key} row"))
+            .split('|')
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn managed_schema_fixture_hex() -> Vec<u8> {
+        let hex = &managed_schema_fixture_row("INPUT_HEX")[0];
+        assert_eq!(
+            hex.len() % 2,
+            0,
+            "frozen source fixture hex has an odd length"
+        );
+        hex.as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16)
+                    .expect("frozen source fixture holds ASCII hexadecimal bytes")
+            })
+            .collect()
+    }
+
+    fn decode_base64(value: &str) -> Vec<u8> {
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        assert_eq!(value.len() % 4, 0, "base64 length is a multiple of four");
+        let mut bytes = Vec::with_capacity(value.len() / 4 * 3);
+        let chunks = value.as_bytes().chunks_exact(4);
+        let chunk_count = chunks.len();
+        for (chunk_index, chunk) in chunks.enumerate() {
+            let last_chunk = chunk_index + 1 == chunk_count;
+            let padding = match &chunk[2..] {
+                b"==" => 2,
+                [_, b'='] => 1,
+                _ => 0,
+            };
+            assert!(padding == 0 || last_chunk, "base64 padding is final");
+            assert!(
+                chunk[0] != b'=' && chunk[1] != b'=',
+                "base64 has two leading sextets"
+            );
+            assert!(
+                chunk[2] != b'=' || chunk[3] == b'=',
+                "base64 padding is contiguous"
+            );
+            let decode = |byte: u8| {
+                ALPHABET
+                    .iter()
+                    .position(|candidate| *candidate == byte)
+                    .expect("frozen source fixture base64 uses the standard alphabet")
+                    as u8
+            };
+            let first = decode(chunk[0]);
+            let second = decode(chunk[1]);
+            let third = if chunk[2] == b'=' {
+                0
+            } else {
+                decode(chunk[2])
+            };
+            let fourth = if chunk[3] == b'=' {
+                0
+            } else {
+                decode(chunk[3])
+            };
+            if padding == 2 {
+                assert_eq!(second & 0x0f, 0, "unused base64 bits are zero");
+            } else if padding == 1 {
+                assert_eq!(third & 0x03, 0, "unused base64 bits are zero");
+            }
+            bytes.push((first << 2) | (second >> 4));
+            if padding < 2 {
+                bytes.push((second << 4) | (third >> 2));
+            }
+            if padding == 0 {
+                bytes.push((third << 6) | fourth);
+            }
+        }
+        bytes
+    }
+
+    fn normalized_meta_text(text: &str) -> String {
+        text.lines()
+            .filter(|line| !line.starts_with("guid: ") && !line.starts_with("timeCreated: "))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn project_export_matches_source_for_a_complex_no_type_tree_managed_schema() {
+        // The frozen source snapshot exported a source-authored Unity 2019.4.40f1 (generation 21)
+        // SerializedFile that carries a no-TypeTree MonoBehaviour with inherited scalar fields, an
+        // int array, a `List<float>`, a nested serializable struct with a string, a serialized
+        // private bool, an enum, and a `UnityEngine.Object` pointer to a sibling TextAsset. This
+        // regresses the whole complex no-TypeTree schema/export route against those source rows.
+        //
+        // The only permitted normalization is the generated TextAsset GUID, which the source mints
+        // per export; see `managed_schema_project_fixture.txt`. The source additionally wrote
+        // `ProjectSettings/EditorSettings.asset` and a manager-resolved `System.Runtime.CompilerServices.Unsafe.dll`;
+        // Rust still does not emit either, so the complete file tree is deliberately not asserted
+        // here and those gaps stay open under `EXPORT-UNITY-001`.
+        let input_bytes = managed_schema_fixture_hex();
+        let assembly_bytes =
+            include_bytes!("../processing/managed_assembly_schema_complex_fixture.dll");
+        let assembly_row = managed_schema_fixture_row("ASSEMBLY");
+        assert_eq!(assembly_row[0], "ComplexFixtureScripts.dll");
+        assert_eq!(
+            assembly_row[1].parse::<usize>().unwrap(),
+            assembly_bytes.len()
+        );
+
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem.create_directory(Some("/game")).unwrap();
+        filesystem
+            .write_all_bytes("/game/managed_schema.assets", &input_bytes)
+            .unwrap();
+        filesystem
+            .write_all_bytes("/game/ComplexFixtureScripts.dll", assembly_bytes)
+            .unwrap();
+        let inputs = [
+            DependencyFilePath {
+                file_name: "managed_schema.assets".to_owned(),
+                virtual_path: "/game/managed_schema.assets".to_owned(),
+            },
+            DependencyFilePath {
+                file_name: "ComplexFixtureScripts.dll".to_owned(),
+                virtual_path: "/game/ComplexFixtureScripts.dll".to_owned(),
+            },
+        ];
+        let (catalog, assembly_report) = ManagedAssemblyCatalog::load_from_vfs(
+            &filesystem,
+            &inputs,
+            ManagedAssemblyCatalogLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(assembly_report.loaded_count, 1, "{assembly_report:?}");
+        assert_eq!(assembly_report.candidate_count, 2, "{assembly_report:?}");
+        assert!(
+            assembly_report.skipped_non_cli.is_empty(),
+            "{assembly_report:?}"
+        );
+        assert_eq!(
+            assembly_report.processed_bytes,
+            u64::try_from(assembly_bytes.len()).unwrap()
+        );
+        assert!(catalog.contains_assembly("ComplexFixtureScripts"));
+        assert!(catalog.is_valid(
+            &crate::processing::script_identity::ScriptIdentifier::try_new(
+                "ComplexFixtureScripts",
+                "Game",
+                "RichController",
+            )
+            .unwrap()
+        ));
+
+        let mut workspace = SerializedFileWorkspace::load_from_vfs(
+            &filesystem,
+            &inputs[..1],
+            SerializedFileWorkspaceLimits::default(),
+        )
+        .unwrap();
+        let mut objects = ObjectWorkspace::load_from_vfs(
+            &filesystem,
+            &workspace,
+            ObjectWorkspaceLimits::default(),
+        )
+        .unwrap();
+        let recovery = objects
+            .recover_mono_behaviour_structures(
+                &filesystem,
+                &mut workspace,
+                &catalog,
+                ObjectWorkspaceLimits::default(),
+                ManagedSchemaLimits::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            recovery.behaviours.len(),
+            1,
+            "one MonoBehaviour is recovered"
+        );
+        assert!(matches!(
+            recovery.behaviours[0].outcome,
+            crate::serialized_file::object_workspace::ManagedBehaviourRecoveryOutcome::Recovered { .. }
+        ));
+        // The MonoScript, the assembly-backed MonoBehaviour, and the sibling TextAsset all decode
+        // through the recovered source structures on this route.
+        let object_report = objects.report();
+        assert_eq!(
+            object_report.object_count, 3,
+            "all input objects are reported"
+        );
+        assert_eq!(object_report.decoded_objects, 3, "all objects are decoded");
+        assert_eq!(
+            object_report.undecoded_objects, 0,
+            "no object remains opaque"
+        );
+        assert_eq!(object_report.total_undecoded_raw_bytes, 0);
+        assert!(object_report.is_complete());
+        let reference_graph = workspace
+            .reference_graph(MultiFileReferenceGraphLimits::default())
+            .unwrap();
+        assert!(reference_graph.is_complete());
+
+        let root_catalog = RootResourceFileCatalog::default();
+        let provider = PlatformResourceProvider::new(None, None);
+        let settings = ExportSettingsFile::from(ExportDefaults::default());
+        let output_root = crate::test_support::unique_test_directory("project-managed-schema-e2e");
+        let report = export_workspace_yaml_project_with_assembly_catalog(
+            &output_root,
+            false,
+            &filesystem,
+            &root_catalog,
+            &provider,
+            &workspace,
+            &objects,
+            &reference_graph,
+            &settings,
+            true,
+            Some(&catalog),
+            WorkspaceProjectExportLimits::default(),
+        )
+        .unwrap();
+        assert!(report.processing_warnings.is_empty(), "{report:?}");
+        // The MonoScript supplies the schema and the assembly is a supporting file; only the
+        // recovered MonoBehaviour and TextAsset count as exported SerializedFile objects.
+        assert_eq!(report.exported_object_count, 2);
+        assert_eq!(report.asset_file_count, 3);
+
+        // The MonoBehaviour document must be byte-identical to the frozen source output once the
+        // generated TextAsset GUID is substituted for the source GUID the source minted for it.
+        let text_asset_row = managed_schema_fixture_row("TARGET");
+        let source_text_asset_guid = managed_schema_fixture_row("TARGET_GUID")[0].clone();
+        let source_text_asset_bytes = decode_base64(&text_asset_row[3]);
+        let rust_text_asset_meta =
+            std::fs::read_to_string(output_root.join("Assets/TextAsset/Target.txt.meta")).unwrap();
+        let rust_text_asset_guid = rust_text_asset_meta
+            .lines()
+            .find_map(|line| line.strip_prefix("guid: "))
+            .expect("Rust TextAsset export carries a GUID")
+            .to_owned();
+        assert_ne!(
+            rust_text_asset_guid, source_text_asset_guid,
+            "each export mints its own TextAsset GUID"
+        );
+
+        let yaml_row = managed_schema_fixture_row("YAML");
+        let source_yaml = String::from_utf8(decode_base64(&yaml_row[3])).unwrap();
+        let normalized_source_yaml =
+            source_yaml.replace(&source_text_asset_guid, &rust_text_asset_guid);
+        let rust_yaml =
+            std::fs::read_to_string(output_root.join("Assets/MonoBehaviour/RichRoot.asset"))
+                .unwrap();
+        assert_eq!(
+            rust_yaml.replace("\r\n", "\n"),
+            normalized_source_yaml.replace("\r\n", "\n")
+        );
+        assert_eq!(
+            yaml_row[1].parse::<usize>().unwrap(),
+            source_yaml.len(),
+            "the frozen source MonoBehaviour document length is pinned"
+        );
+        // The nested `UnityEngine.Object` pointer must resolve as a Meta asset, matching
+        // `TextAssetExporter`'s inherited `BinaryAssetExporter.ToExportType` of `AssetType.Meta`.
+        assert!(
+            rust_yaml.contains(&format!(
+                "  target: {{fileID: 4900000, guid: {rust_text_asset_guid}, type: 3}}"
+            )),
+            "{rust_yaml}"
+        );
+        assert!(
+            rust_yaml.contains(
+                "m_Script: {fileID: -915535769, guid: b19bcd3f8dffca40198d81b88e4464bb, type: 3}"
+            ),
+            "{rust_yaml}"
+        );
+
+        // TextAsset content and its importer sidecar must match the source output exactly.
+        assert_eq!(
+            std::fs::read(output_root.join("Assets/TextAsset/Target.txt")).unwrap(),
+            source_text_asset_bytes
+        );
+        assert_eq!(
+            text_asset_row[1].parse::<usize>().unwrap(),
+            source_text_asset_bytes.len()
+        );
+        let source_target_meta =
+            String::from_utf8(decode_base64(&managed_schema_fixture_row("TARGET_META")[0]))
+                .unwrap();
+        assert_eq!(
+            normalized_meta_text(&rust_text_asset_meta),
+            normalized_meta_text(&source_target_meta)
+        );
+
+        // The saved assembly must be copied byte-for-byte and carry the source PluginImporter body.
+        let exported_assembly =
+            std::fs::read(output_root.join("Assets/Plugins/ComplexFixtureScripts.dll")).unwrap();
+        assert_eq!(exported_assembly, assembly_bytes);
+        let rust_plugin_meta = std::fs::read_to_string(
+            output_root.join("Assets/Plugins/ComplexFixtureScripts.dll.meta"),
+        )
+        .unwrap();
+        let source_plugin_meta =
+            String::from_utf8(decode_base64(&managed_schema_fixture_row("PLUGIN_META")[0]))
+                .unwrap();
+        assert_eq!(
+            normalized_meta_text(&rust_plugin_meta),
+            normalized_meta_text(&source_plugin_meta)
+        );
 
         std::fs::remove_dir_all(output_root).unwrap();
     }
