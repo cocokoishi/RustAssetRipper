@@ -22,9 +22,10 @@
 //! `m_AudioData` with `m_Type`/`m_Format` (`Has_AudioData`/`Has_Type`/`Has_Format`
 //! true, `Has_Resource` false on `AudioClip_3_5`); Unity 5.0+ carries `m_Resource`
 //! with `m_CompressionFormat` (gates reversed on `AudioClip_5` and later, confirmed
-//! by probing the shipped `AssetRipper.SourceGenerated.dll`). The `m_`-prefixed
-//! serialized names follow the generated-property convention; no class-83 TypeTree
-//! dump has been run to confirm them.
+//! by probing the shipped `AssetRipper.SourceGenerated.dll`). The generated
+//! `StreamedResource` members are `m_Source`, `m_Offset`, and `m_Size`; a source-authored
+//! Unity 2019.4 class-83 no-TypeTree fixture confirms their payload layout and 64-bit size.
+//! Legacy `StreamingInfo`-shaped resource values are also accepted.
 //!
 //! Differential evidence: `audio_generated_api_fixture.txt` (probe
 //! `Temp/opencode/audioprops`, `IAudioClip` properties/gates, per-version gate
@@ -33,9 +34,7 @@
 use std::error::Error;
 use std::fmt::{self, Display};
 
-use crate::resource::{
-    extract_streamed_resource_info, StreamedResourceInfo, StreamedResourceInfoError,
-};
+use crate::resource::{extract_streamed_resource_info, StreamedResourceInfoError};
 use crate::serialized_file::object::{SerializedValue, SerializedValueLookupError};
 
 /// The serialized inline audio bytes field.
@@ -105,13 +104,34 @@ impl Display for AudioClipViewError {
 
 impl Error for AudioClipViewError {}
 
+/// The class-83 `StreamedResource` descriptor (`m_Source`, `m_Offset`, `m_Size`).
+///
+/// Unlike `StreamingInfo`, generated AudioClip resource sizes are 64-bit in the frozen source
+/// schemas, so this view retains the full range width.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AudioClipResourceInfo {
+    /// Source resource path; an empty value means the descriptor is unset.
+    pub path: String,
+    /// Byte offset in the resource file.
+    pub offset: u64,
+    /// Byte count in the resource file.
+    pub size: u64,
+}
+
+impl AudioClipResourceInfo {
+    /// The source `IStreamedResource.IsSet` rule checks whether the path is nonempty.
+    pub fn is_set(&self) -> bool {
+        !self.path.is_empty()
+    }
+}
+
 /// Where `AudioClipExtensions.GetAudioData` would read the clip bytes from.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AudioDataSource<'a> {
     /// Present, nonempty inline `m_AudioData`.
     Inline(&'a [u8]),
     /// The `m_Resource` streamed descriptor; content fetching stays caller-side.
-    Resource(&'a StreamedResourceInfo),
+    Resource(&'a AudioClipResourceInfo),
     /// Neither source applies.
     Empty,
 }
@@ -124,7 +144,7 @@ pub struct AudioClipView {
     /// Raw inline `m_AudioData` bytes, when present (possibly empty).
     pub audio_data: Option<Vec<u8>>,
     /// The `m_Resource` streamed descriptor, when present.
-    pub resource: Option<StreamedResourceInfo>,
+    pub resource: Option<AudioClipResourceInfo>,
     /// Raw `m_Type` value, when present.
     pub sound_type: Option<i32>,
     /// Raw `m_Format` value, when present.
@@ -306,19 +326,93 @@ fn optional_i32(
 fn optional_stream(
     root: &SerializedValue,
     name: &'static str,
-) -> Result<Option<StreamedResourceInfo>, AudioClipViewError> {
+) -> Result<Option<AudioClipResourceInfo>, AudioClipViewError> {
     match lookup(root, name)? {
         None => Ok(None),
         Some(value) => {
-            let info = extract_streamed_resource_info(value).map_err(|source| {
-                AudioClipViewError::StreamInfo {
+            let info =
+                audio_resource_info(value).map_err(|source| AudioClipViewError::StreamInfo {
                     field: name,
                     source,
-                }
-            })?;
+                })?;
             Ok(Some(info))
         }
     }
+}
+
+fn audio_resource_info(
+    value: &SerializedValue,
+) -> Result<AudioClipResourceInfo, StreamedResourceInfoError> {
+    match extract_streamed_resource_info(value) {
+        Ok(info) => Ok(AudioClipResourceInfo {
+            path: info.path,
+            offset: info.offset,
+            size: u64::from(info.size),
+        }),
+        Err(StreamedResourceInfoError::MissingField { field: "path" }) => {
+            let path_value = required_audio_resource_field(value, "m_Source")?;
+            let path_bytes = match path_value {
+                SerializedValue::StringBytes(bytes) => bytes,
+                other => {
+                    return Err(StreamedResourceInfoError::WrongFieldType {
+                        field: "m_Source",
+                        expected: "UTF-8 string",
+                        actual: serialized_kind(other),
+                    })
+                }
+            };
+            let utf8_path = std::str::from_utf8(path_bytes).map_err(|error| {
+                StreamedResourceInfoError::InvalidUtf8Path {
+                    valid_up_to: error.valid_up_to(),
+                    error_len: error.error_len(),
+                }
+            })?;
+            let mut path = String::new();
+            path.try_reserve_exact(utf8_path.len()).map_err(|_| {
+                StreamedResourceInfoError::AllocationFailed {
+                    requested: utf8_path.len(),
+                }
+            })?;
+            path.push_str(utf8_path);
+
+            let offset = match required_audio_resource_field(value, "m_Offset")? {
+                SerializedValue::U32(offset) => u64::from(*offset),
+                SerializedValue::U64(offset) => *offset,
+                other => {
+                    return Err(StreamedResourceInfoError::WrongFieldType {
+                        field: "m_Offset",
+                        expected: "UInt32 or UInt64",
+                        actual: serialized_kind(other),
+                    })
+                }
+            };
+            let size = match required_audio_resource_field(value, "m_Size")? {
+                SerializedValue::U32(size) => u64::from(*size),
+                SerializedValue::U64(size) => *size,
+                other => {
+                    return Err(StreamedResourceInfoError::WrongFieldType {
+                        field: "m_Size",
+                        expected: "UInt32 or UInt64",
+                        actual: serialized_kind(other),
+                    })
+                }
+            };
+            Ok(AudioClipResourceInfo { path, offset, size })
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn required_audio_resource_field<'a>(
+    root: &'a SerializedValue,
+    name: &'static str,
+) -> Result<&'a SerializedValue, StreamedResourceInfoError> {
+    root.unique_field_in_base_chain(name)
+        .map_err(|source| StreamedResourceInfoError::FieldLookup {
+            field: name,
+            source,
+        })?
+        .ok_or(StreamedResourceInfoError::MissingField { field: name })
 }
 
 #[cfg(test)]
@@ -557,6 +651,30 @@ mod tests {
         }
         assert!(view.check_asset_integrity(|| true));
         assert!(!view.check_asset_integrity(|| false));
+    }
+
+    #[test]
+    fn generated_audio_resource_keeps_source_offset_and_full_u64_size() {
+        let root = SerializedValue::Struct(vec![
+            field(AUDIO_DATA_FIELD, SerializedValue::Bytes(Vec::new())),
+            field(
+                AUDIO_RESOURCE_FIELD,
+                SerializedValue::Struct(vec![
+                    field("m_Source", string_value("audio.resS")),
+                    field("m_Offset", SerializedValue::U64(7)),
+                    field("m_Size", SerializedValue::U64(u64::from(u32::MAX) + 1)),
+                ]),
+            ),
+        ]);
+        let view = AudioClipView::from_value(&root).unwrap();
+        match view.audio_data_source() {
+            AudioDataSource::Resource(info) => {
+                assert_eq!(info.path, "audio.resS");
+                assert_eq!(info.offset, 7);
+                assert_eq!(info.size, u64::from(u32::MAX) + 1);
+            }
+            other => panic!("expected generated StreamedResource, got {other:?}"),
+        }
     }
 
     #[test]

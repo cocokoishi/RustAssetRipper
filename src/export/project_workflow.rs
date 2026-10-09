@@ -5,9 +5,10 @@
 //! frozen `ProjectExporter.CreateCollection` stack walk ([`crate::export::project_exporter`]),
 //! every route is materialized into a staged [`ProjectExportPlan`], and only then does
 //! `execute_project_export` touch the disk. Objects whose baseline collection is not exportable
-//! are reported as explicit notices; families whose specialized renderer is not ported fall back
-//! to the generic Unity YAML asset family instead of being dropped. TextAssets with non-empty
-//! `m_Script` bytes use their binary exporter, settings-based extension, and TextScriptImporter.
+//! are reported as explicit notices. Some unported families retain an explicit generic YAML
+//! fallback; AudioClip uses the source `YamlAudioExportCollection` path only when that collection
+//! wins and no unresolved audio data would be dropped. TextAssets with non-empty `m_Script` bytes
+//! use their binary exporter, settings-based extension, and TextScriptImporter.
 //!
 //! Scene definitions are processed into workspace hierarchies and emitted as `.unity` files
 //! through the scene collection route, with scene IDs, pointers, and `DefaultImporter` metadata.
@@ -183,6 +184,8 @@ enum ObjectRoute {
     Asset,
     /// `TextAssetExportCollection`: raw `m_Script` bytes, mode-based extension, and TextScriptImporter.
     TextAsset,
+    /// `YamlAudioExportCollection`: AudioClip YAML with the source `audioclip` extension.
+    AudioYaml,
     /// `TextureExportCollection`: a converted image plus the generated TextureImporter sidecar.
     TextureImage,
     /// `ShaderExportCollection` using `DummyShaderTextExporter` or `SimpleShaderExporter`.
@@ -512,6 +515,15 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
             } else {
                 None
             };
+            let audio_view = if class_id == crate::resources::audio::AUDIO_CLIP_CLASS_ID {
+                payload
+                    .map(|payload| {
+                        crate::resources::audio::AudioClipView::from_value(&payload.root)
+                    })
+                    .transpose()?
+            } else {
+                None
+            };
             let shader_text = match shader_view.as_ref().and_then(|view| view.script.as_deref()) {
                 None => crate::export::collection_claims::ShaderTextState::NoScript,
                 Some(script) if script_has_decompiled_text(script) => {
@@ -540,6 +552,49 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
                 claim_facts.main = ClaimMainKind::SpriteInformation;
             }
             let selection = select_collection_with_claim_facts(facts, settings_facts, claim_facts)?;
+            let audio_yaml_route = if selection.exporter == "YamlAudioExporter" {
+                let view = audio_view.as_ref().ok_or_else(|| {
+                    invalid_project(
+                        "YamlAudioExporter was selected without decoded AudioClip fields",
+                    )
+                })?;
+                let has_inline_data = view
+                    .audio_data
+                    .as_ref()
+                    .is_some_and(|bytes| !bytes.is_empty());
+                let has_stream_data = view
+                    .resource
+                    .as_ref()
+                    .is_some_and(|resource| resource.is_set());
+                let can_preserve_audio = match settings.audio_export_format {
+                    crate::export::settings::AudioExportFormat::Yaml => !has_stream_data,
+                    crate::export::settings::AudioExportFormat::Default
+                    | crate::export::settings::AudioExportFormat::PreferWav => {
+                        !has_inline_data && !has_stream_data
+                    }
+                    crate::export::settings::AudioExportFormat::Native => false,
+                };
+                if !can_preserve_audio {
+                    return Err(invalid_project(format!(
+                        "file {file_index} object {object_index} PathID {} selected YamlAudioExporter, but this project route cannot preserve its inline or streamed AudioClip data under {:?}",
+                        object.path_id, settings.audio_export_format
+                    )));
+                }
+                true
+            } else {
+                false
+            };
+            if class_id == crate::resources::audio::AUDIO_CLIP_CLASS_ID
+                && matches!(
+                    selection.exporter,
+                    "NativeAudioExporter" | "AudioClipExporter"
+                )
+            {
+                return Err(invalid_project(format!(
+                    "file {file_index} object {object_index} PathID {} selected {}, whose binary AudioClip project route is not integrated",
+                    object.path_id, selection.exporter
+                )));
+            }
             let text_asset_export = if selection.exporter == "TextAssetExporter" {
                 let script = text_asset_script.ok_or_else(|| {
                     invalid_project("TextAssetExporter was selected without decoded m_Script bytes")
@@ -644,6 +699,9 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
                 ExportCollectionKind::Unreadable => (ObjectRoute::Unreadable, "", None),
                 ExportCollectionKind::Asset if selection.exporter == "TextAssetExporter" => {
                     (ObjectRoute::TextAsset, "", None)
+                }
+                ExportCollectionKind::Asset if audio_yaml_route => {
+                    (ObjectRoute::AudioYaml, "", None)
                 }
                 ExportCollectionKind::Asset if selection.exporter == "YamlShaderExporter" => {
                     (ObjectRoute::ShaderYaml, "", None)
@@ -771,6 +829,7 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
             };
             let file_id = match route {
                 ObjectRoute::Asset
+                | ObjectRoute::AudioYaml
                 | ObjectRoute::TextureImage
                 | ObjectRoute::TextAsset
                 | ObjectRoute::ShaderText
@@ -1219,7 +1278,10 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
                         ))
                     })?
             }
-            ObjectRoute::Asset | ObjectRoute::ShaderYaml | ObjectRoute::Manager => {
+            ObjectRoute::Asset
+            | ObjectRoute::AudioYaml
+            | ObjectRoute::ShaderYaml
+            | ObjectRoute::Manager => {
                 let source = identity_of(entry);
                 let document = workspace_object_to_unity_yaml_document_with_streamed_resources(
                     workspace,
@@ -1233,7 +1295,7 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
                     limits.yaml_collection.object_conversion,
                     &streamed_resources,
                 )?;
-                let Some(document) = document else {
+                let Some(mut document) = document else {
                     notices.push(ProjectExportNotice {
                         subject: entry.selection.collection_name.to_owned(),
                         reason:
@@ -1241,6 +1303,17 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
                     });
                     continue;
                 };
+                if entry.route == ObjectRoute::AudioYaml {
+                    add_generated_audio_yaml_defaults(
+                        &mut document,
+                        match &entry.object.factory.kind {
+                            FactoryAssetKind::Generated(generated_type) => {
+                                Some(generated_type.as_str())
+                            }
+                            _ => None,
+                        },
+                    )?;
+                }
                 write_unity_yaml_documents(&[document], limits.yaml_write)?.into_bytes()
             }
             ObjectRoute::Skipped => unreachable!("skipped routes are filtered above"),
@@ -1275,6 +1348,7 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
                 };
                 planner.plan_asset_path(&identity, extension)?
             }
+            ObjectRoute::AudioYaml => planner.plan_asset_path(&identity, "audioclip")?,
             ObjectRoute::TextureImage => {
                 let texture = entry.texture_export.as_ref().ok_or_else(|| {
                     invalid_project("TextureExportCollection route has no planned image extension")
@@ -1318,20 +1392,22 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
             ObjectRoute::Skipped => unreachable!("skipped routes are filtered above"),
         };
         let meta = match entry.route {
-            ObjectRoute::Asset | ObjectRoute::ShaderYaml => Some(PlannedProjectMeta {
-                importer_class: "NativeFormatImporter".to_owned(),
-                importer: native_format_importer_for_version(
-                    entry.file_id,
-                    project_version,
-                    entry
-                        .object
-                        .payload
-                        .as_ref()
-                        .ok()
-                        .and_then(object_asset_bundle_name)
-                        .as_deref(),
-                )?,
-            }),
+            ObjectRoute::Asset | ObjectRoute::AudioYaml | ObjectRoute::ShaderYaml => {
+                Some(PlannedProjectMeta {
+                    importer_class: "NativeFormatImporter".to_owned(),
+                    importer: native_format_importer_for_version(
+                        entry.file_id,
+                        project_version,
+                        entry
+                            .object
+                            .payload
+                            .as_ref()
+                            .ok()
+                            .and_then(object_asset_bundle_name)
+                            .as_deref(),
+                    )?,
+                })
+            }
             ObjectRoute::TextureImage => Some(PlannedProjectMeta {
                 importer_class: "TextureImporter".to_owned(),
                 importer: entry
@@ -3390,6 +3466,160 @@ fn new_collection_guid(sequence: u64) -> [u8; 16] {
 
 fn invalid_project(message: impl Into<String>) -> Box<dyn Error> {
     Box::new(io::Error::new(io::ErrorKind::InvalidData, message.into()))
+}
+
+fn add_generated_audio_yaml_defaults(
+    document: &mut crate::export::unity_yaml::UnityYamlDocument,
+    generated_type: Option<&str>,
+) -> Result<(), Box<dyn Error>> {
+    let Some(generated_type) = generated_type else {
+        return Ok(());
+    };
+    let body = match &mut document.root.kind {
+        crate::export::unity_yaml::UnityYamlNodeKind::Mapping { entries, .. } => entries
+            .iter_mut()
+            .find_map(|(key, value)| audio_yaml_key_matches(key, "AudioClip").then_some(value)),
+        _ => None,
+    }
+    .ok_or_else(|| invalid_project("AudioClip YAML document has no AudioClip mapping"))?;
+    let fields = match &mut body.kind {
+        crate::export::unity_yaml::UnityYamlNodeKind::Mapping { entries, .. } => entries,
+        _ => return Err(invalid_project("AudioClip YAML body is not a mapping")),
+    };
+    let mut base_fields = vec![
+        (
+            "m_ObjectHideFlags",
+            crate::export::unity_yaml::UnityYamlNode::scalar(
+                crate::export::unity_yaml::UnityYamlScalar::Unsigned(0),
+            ),
+        ),
+        ("m_CorrespondingSourceObject", audio_yaml_null_pointer()?),
+        ("m_PrefabInstance", audio_yaml_null_pointer()?),
+        ("m_PrefabAsset", audio_yaml_null_pointer()?),
+    ];
+    fields
+        .try_reserve(base_fields.len() + 2)
+        .map_err(|_| invalid_project("AudioClip generated defaults cannot be allocated"))?;
+    for (name, value) in base_fields.drain(..).rev() {
+        if !audio_yaml_mapping_has_field(fields, name) {
+            fields.insert(
+                0,
+                (
+                    crate::export::unity_yaml::UnityYamlNode::plain_string(name),
+                    value,
+                ),
+            );
+        }
+    }
+
+    if generated_type == "AudioClip_2018_3" {
+        let has_editor_resource = audio_yaml_mapping_has_field(fields, "m_EditorResource");
+        let has_editor_compression =
+            audio_yaml_mapping_has_field(fields, "m_EditorCompressionFormat");
+        if !has_editor_resource || !has_editor_compression {
+            let mut editor_resource = crate::export::unity_yaml::UnityYamlNode::mapping(
+                crate::export::unity_yaml::UnityYamlMappingStyle::Block,
+            );
+            editor_resource
+                .insert_field(
+                    "m_Source",
+                    crate::export::unity_yaml::UnityYamlNode::scalar(
+                        crate::export::unity_yaml::UnityYamlScalar::PlainString(String::new()),
+                    ),
+                )
+                .and_then(|()| {
+                    editor_resource.insert_field(
+                        "m_Offset",
+                        crate::export::unity_yaml::UnityYamlNode::scalar(
+                            crate::export::unity_yaml::UnityYamlScalar::Unsigned(0),
+                        ),
+                    )
+                })
+                .and_then(|()| {
+                    editor_resource.insert_field(
+                        "m_Size",
+                        crate::export::unity_yaml::UnityYamlNode::scalar(
+                            crate::export::unity_yaml::UnityYamlScalar::Unsigned(0),
+                        ),
+                    )
+                })
+                .map_err(|error| {
+                    invalid_project(format!(
+                        "AudioClip editor resource cannot be built: {error}"
+                    ))
+                })?;
+            let editor_compression = crate::export::unity_yaml::UnityYamlNode::scalar(
+                crate::export::unity_yaml::UnityYamlScalar::Unsigned(0),
+            );
+            let insertion_index = fields
+                .iter()
+                .position(|(key, _)| audio_yaml_key_matches(key, "m_CompressionFormat"))
+                .map_or(fields.len(), |index| index + 1);
+            if !has_editor_resource {
+                fields.insert(
+                    insertion_index,
+                    (
+                        crate::export::unity_yaml::UnityYamlNode::plain_string("m_EditorResource"),
+                        editor_resource,
+                    ),
+                );
+            }
+            if !has_editor_compression {
+                let editor_index = fields
+                    .iter()
+                    .position(|(key, _)| audio_yaml_key_matches(key, "m_EditorResource"))
+                    .map_or(fields.len(), |index| index + 1);
+                fields.insert(
+                    editor_index,
+                    (
+                        crate::export::unity_yaml::UnityYamlNode::plain_string(
+                            "m_EditorCompressionFormat",
+                        ),
+                        editor_compression,
+                    ),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn audio_yaml_key_matches(node: &crate::export::unity_yaml::UnityYamlNode, expected: &str) -> bool {
+    matches!(
+        &node.kind,
+        crate::export::unity_yaml::UnityYamlNodeKind::Scalar(
+            crate::export::unity_yaml::UnityYamlScalar::PlainString(value)
+        ) if value == expected
+    )
+}
+
+fn audio_yaml_mapping_has_field(
+    fields: &[(
+        crate::export::unity_yaml::UnityYamlNode,
+        crate::export::unity_yaml::UnityYamlNode,
+    )],
+    name: &str,
+) -> bool {
+    fields
+        .iter()
+        .any(|(key, _)| audio_yaml_key_matches(key, name))
+}
+
+fn audio_yaml_null_pointer() -> Result<crate::export::unity_yaml::UnityYamlNode, Box<dyn Error>> {
+    let mut pointer = crate::export::unity_yaml::UnityYamlNode::mapping(
+        crate::export::unity_yaml::UnityYamlMappingStyle::Flow,
+    );
+    pointer
+        .insert_field(
+            "fileID",
+            crate::export::unity_yaml::UnityYamlNode::scalar(
+                crate::export::unity_yaml::UnityYamlScalar::Unsigned(0),
+            ),
+        )
+        .map_err(|error| {
+            invalid_project(format!("AudioClip base PPtr cannot be built: {error}"))
+        })?;
+    Ok(pointer)
 }
 
 #[cfg(test)]

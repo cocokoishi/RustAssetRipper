@@ -89,10 +89,11 @@ use assetripper::processing::scene_metadata::{
     decode_build_settings_scene_paths_from_parts, BuildSettingsSceneLimits,
 };
 use assetripper::resource::{
-    resolve_and_read_streamed_resource_info, resolve_streamed_resource_info,
-    scan_streamed_resource_infos, ResolvedResourceFile, RootResourceCatalogLimits,
-    RootResourceFileCatalog, StreamedResourceContentLimits, StreamedResourceContentResolution,
-    StreamedResourceInfo, StreamedResourceResolution, StreamedResourceScanLimits,
+    resolve_and_read_streamed_resource_info, resolve_and_read_streamed_resource_range,
+    resolve_streamed_resource_info, scan_streamed_resource_infos, ResolvedResourceFile,
+    RootResourceCatalogLimits, RootResourceFileCatalog, StreamedResourceContentLimits,
+    StreamedResourceContentResolution, StreamedResourceInfo, StreamedResourceRange,
+    StreamedResourceResolution, StreamedResourceScanLimits,
 };
 use assetripper::resources::audio::{AudioClipView, AudioDataSource, AUDIO_CLIP_CLASS_ID};
 use assetripper::resources::glb::build_glb;
@@ -1894,11 +1895,15 @@ fn export_audio_to<W: io::Write>(
             }
             let provider =
                 PlatformResourceProvider::with_mixed_data_paths(None, Some(&mixed.data_paths));
-            let resolution = resolve_and_read_streamed_resource_info(
+            let resolution = resolve_and_read_streamed_resource_range(
                 &filesystem,
                 &workspace,
                 container_bundle_index,
-                info,
+                StreamedResourceRange {
+                    path: &info.path,
+                    offset: info.offset,
+                    size: info.size,
+                },
                 &root_resources,
                 &provider,
                 StreamedResourceContentLimits::default(),
@@ -9691,6 +9696,116 @@ mod tests {
         ] {
             assert!(path_id_map_text.contains(expected), "missing {expected}");
         }
+        assert_eq!(fs::read(&source_path).unwrap(), input_bytes);
+    }
+
+    #[test]
+    fn export_project_matches_source_for_empty_audio_yaml_fallback() {
+        let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
+        let input_fixture = include_str!("export/path_id_map_source_2019_4_fixture.txt");
+        let output_fixture =
+            include_str!("export/audio_project_fallback_source_2019_4_fixture.txt");
+
+        fn decode_hex(hex: &str) -> Vec<u8> {
+            assert!(hex.len().is_multiple_of(2), "fixture hex has even length");
+            hex.as_bytes()
+                .chunks_exact(2)
+                .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+                .collect()
+        }
+
+        fn fixture_hex(fixture: &str, prefix: &str) -> Vec<u8> {
+            let hex = fixture
+                .lines()
+                .find_map(|line| line.strip_prefix(prefix))
+                .unwrap_or_else(|| panic!("source audio fixture is missing {prefix}"));
+            decode_hex(hex)
+        }
+
+        fn normalized_lines(text: &str) -> String {
+            let normalized = text
+                .replace("\r\n", "\n")
+                .lines()
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("{normalized}\n")
+        }
+
+        fn normalized_meta(text: &str) -> String {
+            let normalized = text
+                .lines()
+                .map(|line| {
+                    if line.starts_with("guid: ") {
+                        "guid: <GUID>"
+                    } else if line.starts_with("timeCreated: ") {
+                        "timeCreated: <TIME>"
+                    } else {
+                        line
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("{normalized}\n")
+        }
+
+        let input_bytes = fixture_hex(input_fixture, "INPUT_HEX|PathMapFixture.assets|");
+        let expected_yaml = fixture_hex(output_fixture, "SOURCE_YAML_HEX|");
+        let expected_meta = fixture_hex(output_fixture, "SOURCE_META_NORMALIZED_HEX|");
+        let expected_yaml_row = output_fixture
+            .lines()
+            .find(|line| line.starts_with("SOURCE_YAML|"))
+            .expect("source fixture records the AudioClip YAML identity")
+            .split('|')
+            .collect::<Vec<_>>();
+        assert_eq!(expected_yaml_row.len(), 4);
+        assert_eq!(
+            expected_yaml_row[2].parse::<usize>().unwrap(),
+            expected_yaml.len()
+        );
+        assert_eq!(
+            expected_yaml_row[3],
+            "D095CD9DF9BB19BB49E841079E94F1B4BE652E0C846B456FE0238786EACD018F"
+        );
+
+        let directory = TestInputDirectory::new_root();
+        let source_path = directory.join("PathMapFixture.assets");
+        let output_root = directory.join("audio-project-fallback");
+        fs::write(&source_path, &input_bytes).unwrap();
+        super::run(
+            [
+                std::ffi::OsString::from("export-project"),
+                output_root.clone().into_os_string(),
+                source_path.clone().into_os_string(),
+            ]
+            .into_iter(),
+        )
+        .expect("production export-project writes the source AudioClip fallback");
+
+        let audio_path = output_root.join("Assets/AudioClip/AudioFixture.audioclip");
+        let audio_meta_path = output_root.join("Assets/AudioClip/AudioFixture.audioclip.meta");
+        assert!(audio_path.is_file(), "source extension is audioclip");
+        assert!(
+            audio_meta_path.is_file(),
+            "source YAML audio collection emits metadata"
+        );
+        assert!(
+            !output_root
+                .join("Assets/AudioClip/AudioFixture.asset")
+                .exists(),
+            "AudioClip must not silently use the generic asset extension"
+        );
+        let actual_yaml = fs::read_to_string(&audio_path).unwrap();
+        assert_eq!(
+            normalized_lines(&actual_yaml).as_bytes(),
+            normalized_lines(std::str::from_utf8(&expected_yaml).unwrap()).as_bytes(),
+            "empty AudioClip YAML matches frozen AssetRipper output"
+        );
+        let actual_meta = fs::read_to_string(&audio_meta_path).unwrap();
+        assert_eq!(
+            normalized_meta(&actual_meta).as_bytes(),
+            expected_meta,
+            "NativeFormatImporter metadata matches frozen AssetRipper output"
+        );
         assert_eq!(fs::read(&source_path).unwrap(), input_bytes);
     }
 

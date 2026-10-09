@@ -566,6 +566,17 @@ pub struct StreamedResourceInfo {
     pub size: u32,
 }
 
+/// A borrowed byte range in an external streamed-resource file.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StreamedResourceRange<'a> {
+    /// Resource path relative to the owning container or provider.
+    pub path: &'a str,
+    /// Starting byte offset in the resource file.
+    pub offset: u64,
+    /// Byte count to read.
+    pub size: u64,
+}
+
 impl StreamedResourceInfo {
     /// Matches the source `StreamingInfo.IsSet` rule, which checks whether Path is nonempty.
     pub fn is_set(&self) -> bool {
@@ -1338,14 +1349,43 @@ pub fn resolve_and_read_streamed_resource_info<'a>(
     provider: &PlatformResourceProvider<'_>,
     limits: StreamedResourceContentLimits,
 ) -> Result<StreamedResourceContentResolution<'a>, StreamedResourceContentError> {
-    if !info.is_set() {
+    resolve_and_read_streamed_resource_range(
+        filesystem,
+        workspace,
+        source_bundle_index,
+        StreamedResourceRange {
+            path: &info.path,
+            offset: info.offset,
+            size: u64::from(info.size),
+        },
+        root_catalog,
+        provider,
+        limits,
+    )
+}
+
+/// Resolves and reads a streamed byte range whose size is 64-bit in the owning asset schema.
+///
+/// `StreamingInfo` uses a 32-bit size, but generated `StreamedResource` fields such as modern
+/// AudioClip resources use 64-bit sizes. Keeping the range width here avoids narrowing before the
+/// existing bounded reader validates and materializes the data.
+pub fn resolve_and_read_streamed_resource_range<'a>(
+    filesystem: &VirtualFileSystem,
+    workspace: &'a SerializedFileWorkspace,
+    source_bundle_index: Option<usize>,
+    range: StreamedResourceRange<'_>,
+    root_catalog: &'a RootResourceFileCatalog,
+    provider: &PlatformResourceProvider<'_>,
+    limits: StreamedResourceContentLimits,
+) -> Result<StreamedResourceContentResolution<'a>, StreamedResourceContentError> {
+    if range.path.is_empty() {
         return Ok(StreamedResourceContentResolution::Unset);
     }
     let resource = resolve_resource_file_with_root_catalog(
         filesystem,
         workspace,
         source_bundle_index,
-        &info.path,
+        range.path,
         root_catalog,
         provider,
         limits.resource_lookup,
@@ -1363,10 +1403,15 @@ pub fn resolve_and_read_streamed_resource_info<'a>(
             });
         }
     };
-    let bytes =
-        read_streamed_resource_info_bytes(filesystem, resource_path, info, limits.range_read)
-            .map_err(StreamedResourceContentError::Read)?
-            .ok_or(StreamedResourceContentError::UnexpectedUnsetAfterLookup)?;
+    let bytes = read_streamed_resource_bytes(
+        filesystem,
+        resource_path,
+        range.offset,
+        range.size,
+        limits.range_read,
+    )
+    .map_err(StreamedResourceContentError::Read)?
+    .ok_or(StreamedResourceContentError::UnexpectedUnsetAfterLookup)?;
     Ok(StreamedResourceContentResolution::Resolved { resource, bytes })
 }
 
@@ -1692,11 +1737,12 @@ mod tests {
         check_streamed_resource_integrity, extract_streamed_resource_info,
         find_streamed_resource_infos, open_streamed_resource_range, read_streamed_resource_bytes,
         read_streamed_resource_info_bytes, resolve_and_read_streamed_resource_info,
-        resolve_streamed_resource_info, ExplicitRootResourceInput, InvalidStreamedResourceRange,
-        LocatedStreamedResourceInfo, ResolvedResourceFile, RootResourceCatalogError,
-        RootResourceCatalogLimits, RootResourceFileCatalog, StreamedResourceContentError,
-        StreamedResourceContentLimits, StreamedResourceContentResolution, StreamedResourceError,
-        StreamedResourceInfo, StreamedResourceInfoError, StreamedResourceLimits,
+        resolve_and_read_streamed_resource_range, resolve_streamed_resource_info,
+        ExplicitRootResourceInput, InvalidStreamedResourceRange, LocatedStreamedResourceInfo,
+        ResolvedResourceFile, RootResourceCatalogError, RootResourceCatalogLimits,
+        RootResourceFileCatalog, StreamedResourceContentError, StreamedResourceContentLimits,
+        StreamedResourceContentResolution, StreamedResourceError, StreamedResourceInfo,
+        StreamedResourceInfoError, StreamedResourceLimits, StreamedResourceRange,
         StreamedResourceResolution, StreamedResourceScanError, StreamedResourceScanLimits,
     };
     use crate::io::filesystem::VirtualFileSystem;
@@ -2089,6 +2135,29 @@ mod tests {
                 bytes: b"2345".to_vec(),
             }
         );
+        assert_eq!(
+            resolve_and_read_streamed_resource_range(
+                &filesystem,
+                &workspace,
+                None,
+                StreamedResourceRange {
+                    path: "root.resS",
+                    offset: 2,
+                    size: 4,
+                },
+                &catalog,
+                &provider,
+                StreamedResourceContentLimits::default(),
+            )
+            .unwrap(),
+            StreamedResourceContentResolution::Resolved {
+                resource: ResolvedResourceFile::ExplicitRoot {
+                    resource_index: 0,
+                    virtual_path: "/explicit/root.resS",
+                },
+                bytes: b"2345".to_vec(),
+            }
+        );
     }
 
     #[test]
@@ -2182,6 +2251,26 @@ mod tests {
                     ..
                 }
             ))
+        ));
+
+        let wide_size = u64::from(u32::MAX) + 1;
+        assert!(matches!(
+            resolve_and_read_streamed_resource_range(
+                &filesystem,
+                &workspace,
+                None,
+                StreamedResourceRange {
+                    path: "root.resS",
+                    offset: 0,
+                    size: wide_size,
+                },
+                &catalog,
+                &provider,
+                content_limits,
+            ),
+            Err(StreamedResourceContentError::Read(
+                StreamedResourceError::MaterializationLimitExceeded { size, .. }
+            )) if size == wide_size
         ));
 
         let over_limit = StreamedResourceInfo {
