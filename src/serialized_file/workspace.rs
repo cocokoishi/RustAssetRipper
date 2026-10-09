@@ -5932,6 +5932,141 @@ mod tests {
     }
 
     #[test]
+    fn object_workspace_resolves_unloaded_monobehaviour_script_to_local_monoscript() {
+        let fixture = crate::processing::asset_factory::PROBE_FIXTURE;
+        let hex = fixture
+            .lines()
+            .find_map(|line| line.strip_prefix("SF_HEX|mono_unloaded|"))
+            .expect("the source fixture includes a MonoBehaviour with a local MonoScript");
+        assert!(hex.len().is_multiple_of(2), "fixture hex has even length");
+        let bytes = hex
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let digits = std::str::from_utf8(pair).expect("fixture hex is ASCII");
+                u8::from_str_radix(digits, 16).expect("fixture hex is valid")
+            })
+            .collect::<Vec<_>>();
+
+        let filesystem = virtual_file_system("/game/mono_unloaded.assets", &bytes);
+        let workspace = SerializedFileWorkspace::load_from_vfs(
+            &filesystem,
+            &[input("/game/mono_unloaded.assets")],
+            SerializedFileWorkspaceLimits::default(),
+        )
+        .expect("workspace loads the source-authored two-object file");
+        assert_eq!(workspace.files().len(), 1);
+        assert_eq!(workspace.files()[0].metadata.objects.len(), 2);
+        assert_eq!(workspace.files()[0].metadata.objects[0].path_id, 42);
+        assert_eq!(workspace.files()[0].metadata.objects[1].path_id, 7);
+        assert!(
+            !workspace.files()[0]
+                .reference_graph
+                .object_scan_is_complete(0),
+            "the script-specific remainder remains unloaded"
+        );
+        assert!(workspace.files()[0]
+            .reference_graph
+            .object_scan_is_complete(1));
+
+        let objects = ObjectWorkspace::load_from_vfs(
+            &filesystem,
+            &workspace,
+            ObjectWorkspaceLimits::default(),
+        )
+        .expect("factory materializes both the MonoBehaviour header and MonoScript");
+        assert_eq!(objects.objects().len(), 2);
+        let behaviour = &objects.objects()[0];
+        assert_eq!(behaviour.path_id, 42);
+        assert_eq!(behaviour.factory.class_id, 114);
+        assert_eq!(behaviour.factory.name, "Behaviour");
+        assert!(matches!(
+            behaviour.factory.structure.as_ref().map(|structure| structure.outcome),
+            Some(crate::processing::asset_factory::MonoBehaviourStructureOutcome::UseUnloadedRemainder)
+        ));
+        assert!(!behaviour.is_fully_materialized());
+        let behaviour_payload = behaviour
+            .payload
+            .as_ref()
+            .expect("the generated MonoBehaviour header remains available");
+        assert_eq!(
+            behaviour_payload
+                .root
+                .unique_field("m_Script")
+                .expect("unique script pointer field")
+                .expect("script pointer field exists"),
+            &SerializedValue::PPtr {
+                file_id: 0,
+                path_id: 7,
+            }
+        );
+
+        let mono_script = &objects.objects()[1];
+        assert_eq!(mono_script.path_id, 7);
+        assert_eq!(mono_script.factory.class_id, 115);
+        assert_eq!(mono_script.factory.name, "HeroController");
+        assert!(matches!(
+            &mono_script.factory.kind,
+            crate::processing::asset_factory::FactoryAssetKind::Generated(_)
+        ));
+
+        let graph = workspace
+            .reference_graph(
+                crate::serialized_file::reference_graph::MultiFileReferenceGraphLimits::default(),
+            )
+            .expect("the cross-file reference graph joins the local objects");
+        let references: Vec<_> = graph.references_from_object(0, 0).collect();
+        assert_eq!(references.len(), 2, "{references:?}");
+        let script_reference = references
+            .iter()
+            .find(|reference| reference.field_path == "m_Script")
+            .expect("the generated MonoBehaviour header exposes m_Script");
+        assert_eq!(script_reference.file_id, 0);
+        assert_eq!(script_reference.path_id, 7);
+        assert_eq!(
+            script_reference.resolution,
+            crate::serialized_file::reference_graph::MultiFilePPtrResolution::Object {
+                target_file_index: 0,
+                target_object_index: 1,
+            }
+        );
+        let game_object_reference = references
+            .iter()
+            .find(|reference| reference.field_path == "m_GameObject")
+            .expect("the generated MonoBehaviour header exposes m_GameObject");
+        assert_eq!(
+            game_object_reference.resolution,
+            crate::serialized_file::reference_graph::MultiFilePPtrResolution::Null
+        );
+        assert_eq!(graph.object_class_id(0, 1), Some(115));
+        assert!(
+            !graph.is_complete(),
+            "the unloaded script remainder stays explicit"
+        );
+        assert!(workspace.files()[0]
+            .reference_graph
+            .issues()
+            .iter()
+            .any(|issue| {
+                matches!(
+                    issue,
+                    crate::serialized_file::reference_graph::ReferenceGraphIssue::UnparsedTrailingPayload {
+                        object_index: 0,
+                        path_id: 42,
+                        byte_count: 4,
+                    }
+                )
+            }));
+        assert_eq!(
+            filesystem
+                .read_all_bytes("/game/mono_unloaded.assets", usize::MAX)
+                .expect("source fixture remains mounted"),
+            bytes,
+            "factory and graph integration preserve input bytes"
+        );
+    }
+
+    #[test]
     fn object_workspace_keeps_unknown_no_tree_objects_unresolved() {
         let fixture = crate::processing::asset_factory::PROBE_FIXTURE;
         let hex = fixture

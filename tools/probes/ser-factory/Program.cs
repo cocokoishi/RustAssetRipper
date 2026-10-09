@@ -981,7 +981,35 @@ static SerializedFile BuildMonoBehaviourFile()
 	WriteI64(payload, 7);          // m_Script.m_PathID
 	WriteString(payload, "Behaviour");
 	payload.AddRange([0xDE, 0xAD, 0xBE, 0xEF]);
-	return BuildFile("mono_unloaded.assets", "2019.4.40f1", 114, null, payload.ToArray());
+	SerializedType monoBehaviourType = new() { RawTypeID = 114 };
+	SerializedType monoScriptType = new() { RawTypeID = 115 };
+	byte[] monoScriptPayload = BuildMonoScriptFile().Objects[0].ObjectData;
+	SerializedFile file = new SerializedFileBuilder
+	{
+		Generation = FormatVersion.Unknown_10,
+		Version = UnityVersion.Parse("2019.4.40f1"),
+		Platform = (BuildTarget)19,
+		EndianType = EndianType.LittleEndian,
+		HasTypeTree = false,
+		Types = { monoBehaviourType, monoScriptType },
+		Objects =
+		{
+			new ObjectInfo(monoBehaviourType)
+			{
+				FileID = 42,
+				TypeID = 114,
+				ObjectData = payload.ToArray(),
+			},
+			new ObjectInfo(monoScriptType)
+			{
+				FileID = 7,
+				TypeID = 115,
+				ObjectData = monoScriptPayload,
+			},
+		},
+	}.Build();
+	file.FilePath = "mono_unloaded.assets";
+	return file;
 }
 
 // A MonoBehaviour whose type carries a script TypeTree: the generated header is
