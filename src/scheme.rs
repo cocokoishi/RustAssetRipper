@@ -5428,7 +5428,8 @@ mod tests {
     /// LZHAM with valid-sibling continuation), multi-block entries crossing a boundary,
     /// combined and uncombined directory metadata, front/end placement and padding alignment,
     /// Raw/Web headers for every bundle version 1 through 8, Web's last-scene selection, nested
-    /// bundle entries, UnityArchive rejection, plain-resource fallback, and GZip recursion.
+    /// bundle entries, UnityArchive rejection, plain-resource fallback, and GZip recursion. The
+    /// v7 at-end cases also combine compressed metadata with padded and multi-block entry data.
     #[test]
     fn scheme_dispatch_matches_the_reference_runtime_fixture() {
         fn wrapper_name(kind: WrapperKind) -> &'static str {
@@ -5785,7 +5786,7 @@ mod tests {
             );
             checked += 1;
         }
-        assert_eq!(checked, 41, "reference fixture row count");
+        assert_eq!(checked, 43, "reference fixture row count");
     }
 
     #[test]

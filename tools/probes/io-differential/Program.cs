@@ -659,6 +659,27 @@ public static class Program
 				needsPaddingAtStart: true,
 				directoryCombined: true,
 				new[] { new Entry("data/file.bin", Ascii("0123456789")) })),
+			("ufs_v7_atend_lz4meta_multiblock_padded", BuildUnityFs(
+				7,
+				2,
+				new byte[] { 2, 0 },
+				blocksInfoAtEnd: true,
+				needsPaddingAtStart: true,
+				directoryCombined: true,
+				new[]
+				{
+					new Entry("cross.bin", Ascii("ABCDEFGHIJ")),
+					new Entry("tail.bin", Ascii("FGHIJ")),
+				},
+				new[] { 5 })),
+			("ufs_v7_atend_lzma_meta_lz4block", BuildUnityFs(
+				7,
+				1,
+				new byte[] { 2 },
+				blocksInfoAtEnd: true,
+				needsPaddingAtStart: false,
+				directoryCombined: true,
+				new[] { new Entry("data/file.bin", Ascii("0123456789")) })),
 			("ufs_nested_webdata", BuildUnityFs(6, 0, 0, false, new[] { new Entry("inner.webdata", webData) })),
 			("raw_v1", BuildRawWeb(false, 1, new[] { new Entry("a.bin", Ascii("0123456789")) })),
 			("raw_v2", BuildRawWeb(false, 2, new[] { new Entry("a.bin", Ascii("0123456789")) })),
