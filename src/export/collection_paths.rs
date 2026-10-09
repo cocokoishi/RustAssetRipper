@@ -64,7 +64,8 @@ pub struct PlannedScriptPaths {
     pub subdirectory: String,
     pub file_name: String,
     pub file_path: String,
-    /// The `Assets`-relative portable path with `/` separators.
+    /// The `Assets`-relative path with source host separators normalized. POSIX backslashes in
+    /// assembly, namespace, or class names remain literal path characters.
     pub relative_asset_path: String,
 }
 
@@ -139,10 +140,13 @@ pub fn plan_script_export_paths(
         platform,
     );
     let file_path = join_path(&subdirectory, &file_name, platform);
-    let portable_folder = folder_path.replace('\\', "/");
+    let relative_folder = match platform {
+        HostPathPlatform::Windows => folder_path.replace('\\', "/"),
+        HostPathPlatform::Unix => folder_path.clone(),
+    };
     let relative_asset_path = join_path(
         ASSETS_DIRECTORY,
-        &join_path(&portable_folder, &file_name, HostPathPlatform::Unix),
+        &join_path(&relative_folder, &file_name, HostPathPlatform::Unix),
         HostPathPlatform::Unix,
     );
     Ok(PlannedScriptPaths {

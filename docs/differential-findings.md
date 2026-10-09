@@ -564,6 +564,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Regression evidence | Five fixture-driven tests match all 86 probed rows plus the composition steps; OS-dependent rows degrade exactly like the source on non-Windows hosts. |
 | Remaining comparison | Writing the asset bytes and the `{file}.meta` sidecar stays with the export pipeline; the add-only sidecar refusal (vs source overwrite) is the documented deviation. |
 
+## DIFF-PROJECT-PATH-HOST-001 - preserve host path semantics through staged project output
+
+| Field | Finding |
+|---|---|
+| Source behavior | `AssetExportCollection.Export` fixes the best directory, joins it below the project root with `FileSystem.Path.Join`, plans a unique name against the destination directory, then writes the asset and `{file}.meta`. `FileSystem.FixInvalidPathCharacters` removes the host's directory separators from the invalid-character set before applying its path sanitizer. The source's `System.IO.Path` recognizes the backslash character as a Windows separator; POSIX uses forward slash only, so a POSIX backslash remains part of one path component. File existence and case collision behavior follow the host filesystem. |
+| Source evidence | A fresh .NET SDK 10.0.401 run of `tools/probes/local-filesystem/LocalFileSystemProbe.csproj` against the isolated AssetRipper `AssetRipper.IO.Files.dll` exited 0. Its 10 `PATH_HELPERS` rows matched `src/io/local_filesystem_fixture.txt`; Windows outputs include a backslash-separated join, `filename=beta.ext`, and a backslash-separated relative path. The same fixture's 86-row filename probe covers `FixInvalidPathCharacters`, reserved names, truncation, extension handling, and unique-name state. |
+| Rust change | `asset_path` and `collection_paths` normalize backslashes only for Windows relative-path serialization. `ProjectExportPlan` validates with host separator and collision rules. `project_output` splits and writes using host separators and applies Windows-only filename restrictions on Windows. |
+| Regression evidence | `path_planning_keeps_posix_backslashes_as_literal_characters`, `planned_file_collision_checks_follow_host_case_sensitivity`, `output_path_components_follow_host_backslash_semantics`, and `project_asset_and_meta_writers_follow_host_backslash_semantics` pass. The last test writes both asset bytes and the sidecar to the host-resolved path. Full Windows validation passed 1,572 library tests, 112 CLI tests, one ignored doctest, warnings-denied Clippy, rustfmt, `git diff --check`, and the 1,449-file baseline verifier. |
+| Remaining difference | POSIX source-runtime execution is still missing. WSL is not installed; live GitHub Actions run `37951663657` failed all five jobs before starting any steps (zero steps), so it supplied no Linux test evidence. The Windows collision key currently uses Rust `to_lowercase`; equivalence to every Windows filesystem comparison mode is not established. `EXP-FILE-NAME-001` remains implemented but unverified; this finding closes no broad feature row. Phase 1 remains OPEN. |
+
 ## DIFF-MONO-UTILS-001 - managed type classification and engine-asset names
 
 | Field | Finding |

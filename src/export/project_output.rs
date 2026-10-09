@@ -45,6 +45,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use super::asset_path::HostPathPlatform;
 use super::meta::{UnityMetaFile, UnityMetaFileError, UnityMetaFileOptions};
 use super::meta_emission::decide_asset_collection_export;
 use super::meta_emission::export_meta_mechanics::META_EXTENSION;
@@ -191,9 +192,9 @@ impl Error for UnityProjectOutputError {
 
 /// Write one `.meta` sidecar beneath `output_root` without deleting or replacing existing files.
 ///
-/// The asset itself is not written by this function. `relative_asset_path` is validated as a
-/// portable relative path, existing directory links are rejected, and the sidecar is created with
-/// `create_new` so a collision is an error rather than an overwrite.
+/// The asset itself is not written by this function. `relative_asset_path` is validated using
+/// the host's path separators, existing directory links are rejected, and the sidecar is created
+/// with `create_new` so a collision is an error rather than an overwrite.
 pub fn write_unity_meta_sidecar(
     output_root: &Path,
     relative_asset_path: &str,
@@ -307,13 +308,13 @@ fn ensure_output_directory(
     Ok(current_directory)
 }
 
-/// Caller facts for one `AssetExportCollection.Export` step: the planned portable
+/// Caller facts for one `AssetExportCollection.Export` step: the planned host-relative
 /// relative asset path, the caller-owned export GUID, and the importer record.
 ///
 /// The source mints a random GUID per collection; the Rust pipeline requires a
 /// caller-supplied nonzero GUID instead so repeated exports stay deterministic.
 pub struct AssetExportWithMetaPlan {
-    /// Portable relative asset path including the planned unique file name.
+    /// Host-relative asset path including the planned unique file name.
     pub relative_asset_path: String,
     /// The export GUID (rejected when zero).
     pub guid: [u8; 16],
@@ -357,7 +358,7 @@ pub fn export_asset_with_meta(
     let components = validated_path_components(&plan.relative_asset_path, path_limits)?;
     let (dir_components, [file_name]) = components.split_at(components.len() - 1) else {
         return Err(UnityProjectOutputError::InvalidRelativePath {
-            reason: "path must contain only ordinary, portable relative components",
+            reason: "path must contain only ordinary relative components",
         });
     };
     // The source creates the export subdirectory before the asset writer runs
@@ -405,7 +406,7 @@ pub fn write_new_project_file(
     let components = validated_path_components(relative_path, path_limits)?;
     let (directory_components, [file_name]) = components.split_at(components.len() - 1) else {
         return Err(UnityProjectOutputError::InvalidRelativePath {
-            reason: "path must contain only ordinary, portable relative components",
+            reason: "path must contain only ordinary relative components",
         });
     };
     let directory = ensure_output_directory(output_root, directory_components)?;
@@ -530,6 +531,19 @@ fn validated_path_components(
     path: &str,
     limits: UnityProjectOutputLimits,
 ) -> Result<Vec<&str>, UnityProjectOutputError> {
+    let platform = if cfg!(windows) {
+        HostPathPlatform::Windows
+    } else {
+        HostPathPlatform::Unix
+    };
+    validated_path_components_for_platform(path, limits, platform)
+}
+
+fn validated_path_components_for_platform(
+    path: &str,
+    limits: UnityProjectOutputLimits,
+    platform: HostPathPlatform,
+) -> Result<Vec<&str>, UnityProjectOutputError> {
     if path.len() > limits.max_relative_path_bytes {
         return Err(UnityProjectOutputError::RelativePathTooLong {
             byte_count: path.len(),
@@ -542,23 +556,28 @@ fn validated_path_components(
         });
     }
     let mut components = Vec::new();
-    for component in path.split(['/', '\\']) {
+    let is_separator = |character| {
+        character == '/' || (platform == HostPathPlatform::Windows && character == '\\')
+    };
+    for component in path.split(is_separator) {
         if components.len() >= limits.max_path_components {
             return Err(UnityProjectOutputError::TooManyPathComponents {
                 count: components.len().saturating_add(1),
                 limit: limits.max_path_components,
             });
         }
+        let invalid_windows_component = platform == HostPathPlatform::Windows
+            && (component.contains([':', '<', '>', '"', '|', '?', '*'])
+                || component.ends_with([' ', '.'])
+                || is_windows_device_name(component));
         if component.is_empty()
             || component == "."
             || component == ".."
-            || component.contains([':', '<', '>', '"', '|', '?', '*'])
+            || invalid_windows_component
             || component.chars().any(char::is_control)
-            || component.ends_with([' ', '.'])
-            || is_windows_device_name(component)
         {
             return Err(UnityProjectOutputError::InvalidRelativePath {
-                reason: "path must contain only ordinary, portable relative components",
+                reason: "path must contain only ordinary relative components",
             });
         }
         components
@@ -596,6 +615,7 @@ mod tests {
         single_asset_contains, single_asset_export_id, single_asset_export_pointer,
         SingleAssetExportId, SingleAssetExportPointer,
     };
+    use super::{validated_path_components_for_platform, HostPathPlatform};
     use super::{UnityProjectOutputError, UnityProjectOutputLimits};
     use crate::export::meta::{UnityMetaFile, UnityMetaFileOptions};
     use crate::export::unity_yaml::{UnityYamlMappingStyle, UnityYamlNode, UnityYamlWriteLimits};
@@ -710,6 +730,53 @@ mod tests {
             );
         }
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn output_path_components_follow_host_backslash_semantics() {
+        let path = "Assets/Folder\\Literal/Icon.png";
+        let limits = UnityProjectOutputLimits::default();
+        assert_eq!(
+            validated_path_components_for_platform(path, limits, HostPathPlatform::Unix).unwrap(),
+            vec!["Assets", "Folder\\Literal", "Icon.png"]
+        );
+        assert_eq!(
+            validated_path_components_for_platform(path, limits, HostPathPlatform::Windows)
+                .unwrap(),
+            vec!["Assets", "Folder", "Literal", "Icon.png"]
+        );
+    }
+
+    #[test]
+    fn project_asset_and_meta_writers_follow_host_backslash_semantics() {
+        let root = TestOutputRoot::new();
+        let asset = write_new_project_file(
+            root.path(),
+            "Assets/Folder\\Literal/Icon.png",
+            b"image bytes",
+            UnityProjectOutputLimits::default(),
+        )
+        .unwrap();
+        let sidecar = write_unity_meta_sidecar(
+            root.path(),
+            "Assets/Folder\\Literal/Icon.png",
+            meta(),
+            UnityProjectOutputLimits::default(),
+            UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+
+        let expected_asset = fs::canonicalize(root.path())
+            .unwrap()
+            .join("Assets")
+            .join("Folder\\Literal")
+            .join("Icon.png");
+        assert_eq!(asset, expected_asset);
+        assert_eq!(fs::read(&asset).unwrap(), b"image bytes");
+        assert_eq!(sidecar.path, expected_asset.with_file_name("Icon.png.meta"));
+        assert!(fs::read(&sidecar.path)
+            .unwrap()
+            .starts_with(b"fileFormatVersion: 2\n"));
     }
 
     #[test]

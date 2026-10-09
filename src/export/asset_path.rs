@@ -551,8 +551,8 @@ pub fn get_unique_file_name(
 ///
 /// `subdirectory` is `Path.Join(project_directory, fixed_directory)` and `file_path` is
 /// `Path.Join(subdirectory, file_name)`, both using the supplied platform conventions.
-/// `relative_asset_path` is the portable `fixed_directory/file_name` form accepted by the
-/// add-only `.meta` sidecar writer, with every separator normalized to `/`.
+/// `relative_asset_path` uses `/` as its directory separator. A backslash remains literal on
+/// POSIX and is normalized only when it is a Windows path separator.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlannedAssetPaths {
     pub subdirectory: String,
@@ -591,8 +591,12 @@ pub fn plan_asset_export_paths(
         &subdirectory,
     )?;
     let file_path = join_path(&subdirectory, &file_name, platform);
+    let relative_directory = match platform {
+        HostPathPlatform::Windows => Cow::Owned(fixed_directory.replace('\\', "/")),
+        HostPathPlatform::Unix => Cow::Borrowed(fixed_directory.as_str()),
+    };
     let relative_asset_path = owned_concat(
-        &fixed_directory.replace('\\', "/"),
+        &relative_directory,
         &owned_concat("/", &file_name, "export relative asset path")?,
         "export relative asset path",
     )?;

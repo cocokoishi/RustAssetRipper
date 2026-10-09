@@ -557,14 +557,15 @@ pub struct PlannedProjectMeta {
     pub importer: UnityYamlNode,
 }
 
-/// One staged project file: the portable relative path, the exact bytes, and the sidecar.
+/// One staged project file: its host-relative path, exact bytes, and sidecar.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlannedProjectFile {
     /// The baseline collection type this file came from.
     pub collection_name: &'static str,
     /// The audited family of that collection.
     pub kind: ExportCollectionKind,
-    /// Portable project-relative destination with `/` separators.
+    /// Project-relative destination with `/` structural separators. A backslash may be a literal
+    /// filename character on POSIX.
     pub relative_path: String,
     pub guid: [u8; 16],
     pub bytes: Vec<u8>,
@@ -598,21 +599,24 @@ pub struct ProjectExportPlan {
 }
 
 impl ProjectExportPlan {
-    /// Fail-closed path validation: every destination is a portable, non-escaping,
+    /// Fail-closed path validation: every destination is a non-escaping, host-relative,
     /// collision-free `assets`-side path, and no planned file shadows a post-export file.
     pub fn validate(&self) -> Result<(), ProjectExportError> {
         self.files
             .len()
             .checked_add(self.support_files.len())
             .ok_or(ProjectExportError::ProjectFileCountOverflow)?;
+        let platform = ProjectPathPlanner::host_platform();
         let mut seen: BTreeSet<String> = BTreeSet::new();
         let mut seen_insensitive: HashMap<String, String> = HashMap::new();
         for reserved in [PROJECT_VERSION_FILE, PACKAGE_MANIFEST_FILE] {
             seen.insert(reserved.to_owned());
-            seen_insensitive.insert(reserved.to_lowercase(), reserved.to_owned());
+            if platform == HostPathPlatform::Windows {
+                seen_insensitive.insert(reserved.to_lowercase(), reserved.to_owned());
+            }
         }
         for file in &self.files {
-            validate_portable_relative_path(&file.relative_path)?;
+            validate_host_relative_path(&file.relative_path, platform)?;
             if !seen.insert(file.relative_path.clone()) {
                 return Err(ProjectExportError::DuplicateProjectPath {
                     relative_path: file.relative_path.clone(),
@@ -620,17 +624,19 @@ impl ProjectExportPlan {
                     second: file.relative_path.clone(),
                 });
             }
-            let folded = file.relative_path.to_lowercase();
-            if let Some(first) = seen_insensitive.insert(folded, file.relative_path.clone()) {
-                return Err(ProjectExportError::DuplicateProjectPath {
-                    relative_path: file.relative_path.clone(),
-                    first,
-                    second: file.relative_path.clone(),
-                });
+            if platform == HostPathPlatform::Windows {
+                let folded = file.relative_path.to_lowercase();
+                if let Some(first) = seen_insensitive.insert(folded, file.relative_path.clone()) {
+                    return Err(ProjectExportError::DuplicateProjectPath {
+                        relative_path: file.relative_path.clone(),
+                        first,
+                        second: file.relative_path.clone(),
+                    });
+                }
             }
         }
         for file in &self.support_files {
-            validate_portable_relative_path(&file.relative_path)?;
+            validate_host_relative_path(&file.relative_path, platform)?;
             if file.before_file_index > self.files.len() {
                 return Err(ProjectExportError::InvalidProjectPath {
                     relative_path: file.relative_path.clone(),
@@ -644,13 +650,15 @@ impl ProjectExportPlan {
                     second: file.relative_path.clone(),
                 });
             }
-            let folded = file.relative_path.to_lowercase();
-            if let Some(first) = seen_insensitive.insert(folded, file.relative_path.clone()) {
-                return Err(ProjectExportError::DuplicateProjectPath {
-                    relative_path: file.relative_path.clone(),
-                    first,
-                    second: file.relative_path.clone(),
-                });
+            if platform == HostPathPlatform::Windows {
+                let folded = file.relative_path.to_lowercase();
+                if let Some(first) = seen_insensitive.insert(folded, file.relative_path.clone()) {
+                    return Err(ProjectExportError::DuplicateProjectPath {
+                        relative_path: file.relative_path.clone(),
+                        first,
+                        second: file.relative_path.clone(),
+                    });
+                }
             }
         }
         if self
@@ -667,7 +675,10 @@ impl ProjectExportPlan {
     }
 }
 
-fn validate_portable_relative_path(value: &str) -> Result<(), ProjectExportError> {
+fn validate_host_relative_path(
+    value: &str,
+    platform: HostPathPlatform,
+) -> Result<(), ProjectExportError> {
     let invalid = |reason: &'static str| ProjectExportError::InvalidProjectPath {
         relative_path: value.to_owned(),
         reason,
@@ -675,10 +686,10 @@ fn validate_portable_relative_path(value: &str) -> Result<(), ProjectExportError
     if value.is_empty() {
         return Err(invalid("path is empty"));
     }
-    if value.contains('\\') {
-        return Err(invalid("path separators must be portable '/'"));
+    if platform == HostPathPlatform::Windows && value.contains('\\') {
+        return Err(invalid("Windows separators must be normalized to '/'"));
     }
-    if value.starts_with('/') || value.contains(':') {
+    if value.starts_with('/') || (platform == HostPathPlatform::Windows && value.contains(':')) {
         return Err(invalid("path must be relative to the project root"));
     }
     for component in value.split('/') {
@@ -1040,14 +1051,15 @@ impl ProjectPathPlanner {
                     },
                 }
             })?;
-        let portable = portable_path(&planned.relative_path);
+        let normalized_path =
+            normalize_relative_path_for_host(&planned.relative_path, self.platform);
         self.file_system
             .directories
             .insert(planned_path_key(&planned.subdirectory, self.platform));
         self.file_system
             .files
             .insert(planned_path_key(&planned.file_path, self.platform));
-        self.register(&portable)
+        self.register(&normalized_path)
     }
 
     /// `UnknownExportCollection.Export`: `AssetRipper/UnknownAssets/<class>/<name>.unknown`.
@@ -1099,9 +1111,9 @@ impl ProjectPathPlanner {
     }
 
     fn register(&self, relative_path: &str) -> Result<String, ProjectExportError> {
-        let portable = portable_path(relative_path);
-        validate_portable_relative_path(&portable)?;
-        Ok(portable)
+        let normalized_path = normalize_relative_path_for_host(relative_path, self.platform);
+        validate_host_relative_path(&normalized_path, self.platform)?;
+        Ok(normalized_path)
     }
 }
 
@@ -1117,8 +1129,11 @@ fn plan_error(error: super::asset_path::AssetPathError) -> ProjectExportError {
     }
 }
 
-fn portable_path(value: &str) -> String {
-    value.replace('\\', "/")
+fn normalize_relative_path_for_host(value: &str, platform: HostPathPlatform) -> String {
+    match platform {
+        HostPathPlatform::Windows => value.replace('\\', "/"),
+        HostPathPlatform::Unix => value.to_owned(),
+    }
 }
 
 /// Canonicalize an in-memory path key using the host's path separator rules.
@@ -1128,7 +1143,7 @@ fn portable_path(value: &str) -> String {
 /// planner must canonicalize them before emulating `Directory.Exists` and `File.Exists`.
 fn planned_path_key(value: &str, platform: HostPathPlatform) -> String {
     match platform {
-        HostPathPlatform::Windows => value.replace('/', "\\"),
+        HostPathPlatform::Windows => value.replace('/', "\\").to_lowercase(),
         HostPathPlatform::Unix => value.to_owned(),
     }
 }
@@ -1475,8 +1490,65 @@ mod tests {
     }
 
     #[test]
-    fn portable_paths_reject_escapes_and_collisions() {
-        assert!(validate_portable_relative_path("Assets/GameObject/Thing.asset").is_ok());
+    fn path_planning_keeps_posix_backslashes_as_literal_characters() {
+        let identity = ExportAssetPathIdentity {
+            class_name: "Texture2D".to_owned(),
+            original_directory: Some("Assets/Folder\\Literal".to_owned()),
+            named_name: Some("Icon".to_owned()),
+            ..ExportAssetPathIdentity::default()
+        };
+        let mut unix = ProjectPathPlanner::new(HostPathPlatform::Unix);
+        let mut windows = ProjectPathPlanner::new(HostPathPlatform::Windows);
+
+        assert_eq!(
+            unix.plan_asset_path(&identity, "png").unwrap(),
+            "Assets/Folder\\Literal/Icon.png"
+        );
+        assert_eq!(
+            windows.plan_asset_path(&identity, "png").unwrap(),
+            "Assets/Folder/Literal/Icon.png"
+        );
+    }
+
+    #[test]
+    fn planned_file_collision_checks_follow_host_case_sensitivity() {
+        let upper = ExportAssetPathIdentity {
+            class_name: "Texture2D".to_owned(),
+            named_name: Some("Icon".to_owned()),
+            ..ExportAssetPathIdentity::default()
+        };
+        let lower = ExportAssetPathIdentity {
+            named_name: Some("icon".to_owned()),
+            ..upper.clone()
+        };
+        let mut unix = ProjectPathPlanner::new(HostPathPlatform::Unix);
+        assert_eq!(
+            unix.plan_asset_path(&upper, "png").unwrap(),
+            "Assets/Texture2D/Icon.png"
+        );
+        assert_eq!(
+            unix.plan_asset_path(&lower, "png").unwrap(),
+            "Assets/Texture2D/icon.png"
+        );
+
+        let mut windows = ProjectPathPlanner::new(HostPathPlatform::Windows);
+        assert_eq!(
+            windows.plan_asset_path(&upper, "png").unwrap(),
+            "Assets/Texture2D/Icon.png"
+        );
+        assert_eq!(
+            windows.plan_asset_path(&lower, "png").unwrap(),
+            "Assets/Texture2D/icon_0.png"
+        );
+    }
+
+    #[test]
+    fn host_relative_paths_reject_escapes_and_collisions() {
+        assert!(validate_host_relative_path(
+            "Assets/GameObject/Thing.asset",
+            HostPathPlatform::Windows
+        )
+        .is_ok());
         for bad in [
             "",
             "/absolute",
@@ -1487,10 +1559,15 @@ mod tests {
             "Assets//Thing.asset",
         ] {
             assert!(
-                validate_portable_relative_path(bad).is_err(),
+                validate_host_relative_path(bad, HostPathPlatform::Windows).is_err(),
                 "{bad:?} must be rejected"
             );
         }
+        assert!(validate_host_relative_path(
+            "Assets/Folder\\Literal/Thing.asset",
+            HostPathPlatform::Unix
+        )
+        .is_ok());
         let plan = ProjectExportPlan {
             project_version_text: "2019.4.0f1".to_owned(),
             project_version_file: String::new(),
@@ -1503,10 +1580,14 @@ mod tests {
             skipped: Vec::new(),
             fallbacks: Vec::new(),
         };
-        assert!(matches!(
-            plan.validate(),
-            Err(ProjectExportError::DuplicateProjectPath { .. })
-        ));
+        if cfg!(windows) {
+            assert!(matches!(
+                plan.validate(),
+                Err(ProjectExportError::DuplicateProjectPath { .. })
+            ));
+        } else {
+            assert!(plan.validate().is_ok());
+        }
         let plan = ProjectExportPlan {
             files: vec![planned_file("ProjectSettings/ProjectVersion.txt")],
             ..plan
