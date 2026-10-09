@@ -10,6 +10,7 @@
 //   missing external Transform PPtr and record the real processor output.
 using System.Collections;
 using System.Reflection;
+using AssetRipper.Checksum;
 using AssetRipper.Assets;
 using AssetRipper.Assets.Bundles;
 using AssetRipper.Assets.Collections;
@@ -33,12 +34,16 @@ using AssetRipper.SourceGenerated;
 using AssetRipper.SourceGenerated.Classes.ClassID_1;
 using AssetRipper.SourceGenerated.Classes.ClassID_142;
 using AssetRipper.SourceGenerated.Classes.ClassID_4;
+using AssetRipper.SourceGenerated.Classes.ClassID_43;
 using AssetRipper.SourceGenerated.Extensions;
+using AssetRipper.SourceGenerated.Subclasses.BlendShapeData;
+using AssetRipper.SourceGenerated.Subclasses.MeshBlendShape;
+using AssetRipper.SourceGenerated.Subclasses.MeshBlendShapeChannel;
 using System.Security.Cryptography;
 
 if (args.Length == 0)
 {
-	Console.Error.WriteLine("usage: tpk <version> <classId...> | naming <version> <name...> | process <rows> <file...> | notree-unresolved-component <input> <rows> | legacy-export <input> <rows> <output> | raw-fallback-export <input> <rows> <output>");
+	Console.Error.WriteLine("usage: tpk <version> <classId...> | naming <version> <name...> | process <rows> <file...> | blend-shape <rows> | notree-unresolved-component <input> <rows> | legacy-export <input> <rows> <output> | raw-fallback-export <input> <rows> <output>");
 	return 2;
 }
 
@@ -52,6 +57,11 @@ try
 	if (args[0] == "naming" && args.Length >= 3)
 	{
 		DumpSceneNaming(args[1], args[2..]);
+		return 0;
+	}
+	if (args[0] == "blend-shape" && args.Length == 2)
+	{
+		ProbeBlendShape(args[1]);
 		return 0;
 	}
 	if (args[0] == "process" && args.Length >= 3)
@@ -85,10 +95,126 @@ try
 catch (Exception ex)
 {
 	Console.Error.WriteLine($"PROBE_FAIL|{ex.GetType().FullName}|{OneLine(ex.Message)}");
+	Console.Error.WriteLine(ex.StackTrace);
 	return 1;
 }
 
 static string OneLine(string value) => value.Replace('\r', ' ').Replace('\n', ' ');
+
+static void ProbeBlendShape(string rowsPath)
+{
+	if (File.Exists(rowsPath) || Directory.Exists(rowsPath))
+	{
+		throw new IOException($"refusing to overwrite probe rows {rowsPath}");
+	}
+	Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(rowsPath))!);
+	using StreamWriter rows = new(rowsPath, false, new System.Text.UTF8Encoding(false)) { NewLine = "\n" };
+
+	IMesh modern = CreateMesh(UnityVersion.Parse("5.0.0f1"));
+	if (!modern.Has_Shapes())
+	{
+		throw new InvalidDataException($"2015 mesh {modern.GetType().Name} has no generated m_Shapes property");
+	}
+	IBlendShapeData blendShapeData = modern.Shapes;
+	MeshBlendShapeChannel first = blendShapeData.Channels.AddNew();
+	first.SetValues("Smile", 2, 3);
+	uint smileHash = Crc32Algorithm.HashUTF8("Smile");
+	MeshBlendShapeChannel second = blendShapeData.Channels.AddNew();
+	second.SetValues("Frown", 7, 1);
+	second.NameHash = smileHash;
+	string? firstMatch = modern.FindBlendShapeNameByCRC(smileHash);
+	string? modernMiss = modern.FindBlendShapeNameByCRC(Crc32Algorithm.HashUTF8("Missing"));
+	rows.WriteLine($"MESH|5.0.0f1|{modern.GetType().Name}|shapes={modern.Has_Shapes()}|shapes_list={modern.Has_ShapesList()}");
+	rows.WriteLine($"SET|{first.Name.String}|{first.NameHash}|{first.FrameIndex}|{first.FrameCount}");
+	rows.WriteLine($"SET|{second.Name.String}|{second.NameHash}|{second.FrameIndex}|{second.FrameCount}");
+	rows.WriteLine($"QUERY|channels-first-match|{smileHash}|{firstMatch ?? "<null>"}");
+	rows.WriteLine($"QUERY|channels-miss|{Crc32Algorithm.HashUTF8("Missing")}|{modernMiss ?? "<null>"}");
+
+	IMesh legacy = CreateMesh(UnityVersion.Parse("4.1.0f1"));
+	if (!legacy.Has_ShapesList())
+	{
+		throw new InvalidDataException($"4.1 mesh {legacy.GetType().Name} has no generated m_ShapesList property");
+	}
+	MeshBlendShape_4_1 absentName = legacy.ShapesList.AddNew();
+	absentName.Name_R = null;
+	MeshBlendShape_4_1 emptyName = legacy.ShapesList.AddNew();
+	emptyName.Name = new Utf8String(string.Empty);
+	MeshBlendShape_4_1 named = legacy.ShapesList.AddNew();
+	named.Name = new Utf8String("LegacySmile");
+	uint emptyHash = Crc32Algorithm.HashUTF8(string.Empty);
+	uint legacyHash = Crc32Algorithm.HashUTF8("LegacySmile");
+	string? emptyMatch = legacy.FindBlendShapeNameByCRC(emptyHash);
+	string? legacyMatch = legacy.FindBlendShapeNameByCRC(legacyHash);
+	string? legacyMiss = legacy.FindBlendShapeNameByCRC(Crc32Algorithm.HashUTF8("Missing"));
+	rows.WriteLine($"MESH|4.1.0f1|{legacy.GetType().Name}|shapes={legacy.Has_Shapes()}|shapes_list={legacy.Has_ShapesList()}");
+	rows.WriteLine($"QUERY|legacy-absent-name|{emptyHash}|{(absentName.IsCRCMatch(emptyHash) ? "true" : "false")}");
+	rows.WriteLine($"QUERY|legacy-empty-name|{emptyHash}|{(emptyName.IsCRCMatch(emptyHash) ? "true" : "false")}");
+	rows.WriteLine($"QUERY|legacy-name|{legacyHash}|{legacyMatch ?? "<null>"}");
+	rows.WriteLine($"QUERY|legacy-miss|{Crc32Algorithm.HashUTF8("Missing")}|{legacyMiss ?? "<null>"}");
+	if (emptyMatch is not null)
+	{
+		rows.WriteLine($"QUERY|legacy-empty-resolved|{emptyHash}|<empty>");
+	}
+	IMesh serializedLegacy = CreateMesh(UnityVersion.Parse("4.1.0f1"));
+	var serializedLegacyShapes = serializedLegacy.ShapesList
+		?? throw new InvalidDataException("4.1 mesh has no generated ShapesList collection");
+	serializedLegacyShapes.AddNew().Name = new Utf8String(string.Empty);
+	serializedLegacyShapes.AddNew().Name = new Utf8String("LegacySmile");
+	byte[] modernFile = SerializeMesh(modern, UnityVersion.Parse("5.0.0f1"), "Mesh2015.assets");
+	byte[] legacyFile = SerializeMesh(serializedLegacy, UnityVersion.Parse("4.1.0f1"), "Mesh41.assets");
+	WriteInputRow(rows, "modern", modernFile);
+	WriteInputRow(rows, "legacy", legacyFile);
+	rows.Flush();
+
+	Console.WriteLine($"modern_mesh={modern.GetType().Name}; first_match={firstMatch ?? "<null>"}; miss={modernMiss ?? "<null>"}");
+	Console.WriteLine($"legacy_mesh={legacy.GetType().Name}; absent_match={absentName.IsCRCMatch(emptyHash)}; empty_match={emptyName.IsCRCMatch(emptyHash)}; name_match={legacyMatch ?? "<null>"}; miss={legacyMiss ?? "<null>"}");
+}
+
+static IMesh CreateMesh(UnityVersion version)
+{
+	SerializedFile template = new SerializedFileBuilder
+	{
+		Generation = FormatVersion.Unknown_10,
+		Version = version,
+		Platform = BuildTarget.NoTarget,
+		EndianType = EndianType.LittleEndian,
+		HasTypeTree = false,
+	}.Build();
+	GameAssetFactory factory = new(new BaseManager(_ => { }));
+	GameBundle bundle = new();
+	SerializedAssetCollection collection = bundle.AddCollectionFromSerializedFile(template, factory);
+	IUnityObjectBase asset = AssetFactory.CreateSerialized(new AssetInfo(collection, 42, 43), version)
+		?? throw new InvalidDataException($"source factory did not create a Mesh for {version}");
+	return asset as IMesh
+		?? throw new InvalidDataException($"source factory returned {asset.GetType().Name}, expected IMesh");
+}
+
+static byte[] SerializeMesh(IMesh mesh, UnityVersion version, string fileName)
+{
+	SerializedType type = new() { RawTypeID = 43 };
+	byte[] payload = WriteAsset((IUnityObjectBase)mesh, true);
+	SerializedFile file = new SerializedFileBuilder
+	{
+		Generation = FormatVersion.Unknown_10,
+		Version = version,
+		Platform = BuildTarget.NoTarget,
+		EndianType = EndianType.LittleEndian,
+		HasTypeTree = false,
+		Types = { type },
+		Objects =
+		{
+			new ObjectInfo(type) { FileID = 42, TypeID = 43, ObjectData = payload },
+		},
+	}.Build();
+	file.FilePath = fileName;
+	return file.ToByteArray();
+}
+
+static void WriteInputRow(StreamWriter rows, string name, byte[] bytes)
+{
+	rows.WriteLine($"INPUT|{name}|{bytes.Length}|{Convert.ToHexString(SHA256.HashData(bytes))}");
+	rows.WriteLine($"INPUT_HEX|{name}|{Convert.ToHexString(bytes)}");
+}
 
 static void DumpTpk(string versionText, string[] classIds)
 {

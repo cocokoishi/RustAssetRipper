@@ -45,9 +45,6 @@ use crate::serialized_file::object::{
 /// The serialized mesh field carrying `BlendShapeData`.
 pub const BLEND_SHAPES_FIELD: &str = "m_Shapes";
 
-/// The serialized mesh field carrying the legacy shape list (`MeshBlendShape_4_1`).
-pub const BLEND_SHAPES_LIST_FIELD: &str = "m_ShapesList";
-
 /// `BlendShapeData` channel list field.
 const CHANNELS_FIELD: &str = "channels";
 
@@ -57,7 +54,8 @@ const CHANNEL_NAME_FIELD: &str = "name";
 /// `MeshBlendShapeChannel` name-hash field.
 const CHANNEL_NAME_HASH_FIELD: &str = "nameHash";
 
-/// Legacy `MeshBlendShape_4_1` name field.
+/// Legacy `MeshBlendShape_4_1` name field. The serialized list is named `m_Shapes` and
+/// is exposed by the generated API as `IMesh.ShapesList`.
 const SHAPE_NAME_FIELD: &str = "name";
 
 /// A failure while reading a blend-shape lookup view.
@@ -157,13 +155,13 @@ pub fn find_channel_name_by_crc(channels: &[BlendShapeChannelName], crc: u32) ->
         .and_then(|channel| channel.name.as_deref())
 }
 
-/// The name records a mesh lookup reads: `m_Shapes` channels or legacy
-/// `m_ShapesList` names.
+/// The name records a mesh lookup reads from the versioned `m_Shapes` payload: modern
+/// `BlendShapeData` channels or legacy `MeshBlendShape_4_1` entries (`IMesh.ShapesList`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct BlendShapeLookupView {
-    /// `m_Shapes`/`channels` records, when `m_Shapes` is present.
+    /// `m_Shapes`/`channels` records for modern `BlendShapeData` layouts.
     pub channels: Option<Vec<BlendShapeChannelName>>,
-    /// `m_ShapesList` names, when `m_ShapesList` is present. A `None` entry is a
+    /// Legacy `m_Shapes` array names exposed as `IMesh.ShapesList`. A `None` entry is a
     /// shape record without a name, which never matches.
     pub shapes_list_names: Option<Vec<Option<String>>>,
 }
@@ -171,31 +169,35 @@ pub struct BlendShapeLookupView {
 impl BlendShapeLookupView {
     /// Reads the name records from a decoded `Mesh` payload.
     ///
-    /// Absent `m_Shapes`/`m_ShapesList` fields read as absent (the `Has_` gates);
-    /// a present-but-wrongly-typed field is an explicit error.
+    /// Modern files encode `m_Shapes` as a `BlendShapeData` struct; legacy 4.1 files encode
+    /// the same serialized field as an array of `MeshBlendShape_4_1`. The source-generated
+    /// `Has_Shapes`/`Has_ShapesList` gates correspond to those distinct wire shapes. A
+    /// present-but-unsupported field kind is an explicit error.
     pub fn from_value(root: &SerializedValue) -> Result<Self, BlendShapeViewError> {
-        let channels = match lookup(root, BLEND_SHAPES_FIELD)? {
-            None => None,
-            Some(value) => {
-                let fields = as_struct(value, BLEND_SHAPES_FIELD)?;
+        let (channels, shapes_list_names) = match lookup(root, BLEND_SHAPES_FIELD)? {
+            None => (None, None),
+            Some(SerializedValue::Struct(fields)) => {
                 let mut records = Vec::new();
                 if let Some(list) = find_field(fields, CHANNELS_FIELD)? {
                     for item in as_array(list, CHANNELS_FIELD)? {
                         records.push(read_channel(item)?);
                     }
                 }
-                Some(records)
+                (Some(records), None)
             }
-        };
-        let shapes_list_names = match lookup(root, BLEND_SHAPES_LIST_FIELD)? {
-            None => None,
-            Some(value) => {
+            Some(SerializedValue::Array(items)) => {
                 let mut names = Vec::new();
-                for item in as_array(value, BLEND_SHAPES_LIST_FIELD)? {
-                    let fields = as_struct(item, BLEND_SHAPES_LIST_FIELD)?;
+                for item in items {
+                    let fields = as_struct(item, BLEND_SHAPES_FIELD)?;
                     names.push(optional_lossy_string(fields, SHAPE_NAME_FIELD)?);
                 }
-                Some(names)
+                (None, Some(names))
+            }
+            Some(other) => {
+                return Err(BlendShapeViewError::WrongType {
+                    field: BLEND_SHAPES_FIELD,
+                    actual: serialized_kind(other),
+                })
             }
         };
         Ok(Self {
@@ -204,9 +206,9 @@ impl BlendShapeLookupView {
         })
     }
 
-    /// `MeshExtensions.FindBlendShapeNameByCRC`: with `m_Shapes` present the
-    /// channel table decides (even when it finds nothing); otherwise the legacy
-    /// list is scanned with `IsCRCMatch` semantics. No shape data means no name.
+    /// `MeshExtensions.FindBlendShapeNameByCRC`: modern `m_Shapes` channel data decides
+    /// (even when it finds nothing); otherwise legacy `m_Shapes` array entries are scanned
+    /// with `IsCRCMatch` semantics. No shape data means no name.
     pub fn find_shape_name_by_crc(&self, crc: u32) -> Option<&str> {
         if let Some(channels) = &self.channels {
             return find_channel_name_by_crc(channels, crc);
@@ -373,6 +375,12 @@ fn serialized_kind(value: &SerializedValue) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::io::dependency::DependencyFilePath;
+    use crate::io::filesystem::VirtualFileSystem;
+    use crate::serialized_file::object_workspace::{ObjectWorkspace, ObjectWorkspaceLimits};
+    use crate::serialized_file::workspace::{
+        SerializedFileWorkspace, SerializedFileWorkspaceLimits,
+    };
 
     fn field(name: &str, value: SerializedValue) -> SerializedFieldValue {
         SerializedFieldValue {
@@ -411,7 +419,7 @@ mod tests {
 
     fn shapes_list_root(names: Vec<Option<&str>>) -> SerializedValue {
         struct_value(vec![field(
-            BLEND_SHAPES_LIST_FIELD,
+            BLEND_SHAPES_FIELD,
             SerializedValue::Array(
                 names
                     .into_iter()
@@ -521,39 +529,21 @@ mod tests {
     }
 
     #[test]
-    fn view_decodes_both_name_records() {
+    fn view_decodes_modern_channel_records() {
         let smile = crc32_ieee(b"Smile");
-        let root = struct_value(vec![
-            field(
-                BLEND_SHAPES_FIELD,
-                struct_value(vec![field(
-                    CHANNELS_FIELD,
-                    SerializedValue::Array(vec![
-                        channel(Some("Smile"), Some(smile)),
-                        channel(None, Some(0x1234_5678)),
-                    ]),
-                )]),
-            ),
-            field(
-                BLEND_SHAPES_LIST_FIELD,
-                SerializedValue::Array(vec![struct_value(vec![field(
-                    SHAPE_NAME_FIELD,
-                    SerializedValue::StringBytes(b"Smile".to_vec()),
-                )])]),
-            ),
+        let root = shapes_root(vec![
+            channel(Some("Smile"), Some(smile)),
+            channel(None, Some(0x1234_5678)),
         ]);
         let view = BlendShapeLookupView::from_value(&root).unwrap();
         assert_eq!(view.channels.as_ref().map(Vec::len), Some(2));
-        assert_eq!(view.shapes_list_names.as_ref().map(Vec::len), Some(1));
+        assert_eq!(view.shapes_list_names, None);
         assert_eq!(view.find_shape_name_by_crc(smile), Some("Smile"));
     }
 
     #[test]
     fn view_rejects_wrongly_typed_fields() {
-        let root = struct_value(vec![field(
-            BLEND_SHAPES_FIELD,
-            SerializedValue::Array(vec![]),
-        )]);
+        let root = struct_value(vec![field(BLEND_SHAPES_FIELD, SerializedValue::U32(42))]);
         assert!(matches!(
             BlendShapeLookupView::from_value(&root),
             Err(BlendShapeViewError::WrongType { .. })
@@ -654,5 +644,178 @@ mod tests {
         };
         assert_eq!(view.find_shape_name_by_crc(hash), Some("Smile"));
         assert!(is_crc_match(Some("Smile"), hash));
+    }
+
+    #[test]
+    fn source_generated_legacy_and_modern_meshes_resolve_blend_shape_bindings() {
+        let fixture = include_str!("blend_shape_source_fixture.txt");
+        let input_bytes = |name: &str| {
+            let hex = fixture
+                .lines()
+                .find_map(|line| line.strip_prefix(&format!("INPUT_HEX|{name}|")))
+                .unwrap_or_else(|| panic!("source blend-shape fixture lacks {name} input"));
+            assert!(
+                hex.len().is_multiple_of(2),
+                "source fixture hex has even length"
+            );
+            hex.as_bytes()
+                .chunks_exact(2)
+                .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+                .collect::<Vec<_>>()
+        };
+        let expected_query = |name: &str| {
+            fixture
+                .lines()
+                .find_map(|line| line.strip_prefix(&format!("QUERY|{name}|")))
+                .unwrap_or_else(|| panic!("source blend-shape fixture lacks {name} query"))
+        };
+        let modern_bytes = input_bytes("modern");
+        let legacy_bytes = input_bytes("legacy");
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem
+            .create_directory(Some("/blend-shapes"))
+            .expect("create source fixture directory");
+        filesystem
+            .write_all_bytes("/blend-shapes/modern.assets", &modern_bytes)
+            .expect("write source-generated modern Mesh");
+        filesystem
+            .write_all_bytes("/blend-shapes/legacy.assets", &legacy_bytes)
+            .expect("write source-generated legacy Mesh");
+
+        let inputs = [
+            DependencyFilePath {
+                file_name: "modern.assets".to_owned(),
+                virtual_path: "/blend-shapes/modern.assets".to_owned(),
+            },
+            DependencyFilePath {
+                file_name: "legacy.assets".to_owned(),
+                virtual_path: "/blend-shapes/legacy.assets".to_owned(),
+            },
+        ];
+        let workspace = SerializedFileWorkspace::load_from_vfs(
+            &filesystem,
+            &inputs,
+            SerializedFileWorkspaceLimits::default(),
+        )
+        .expect("source-generated no-TypeTree Mesh SerializedFiles parse");
+        assert_eq!(workspace.files().len(), 2);
+        assert!(workspace
+            .files()
+            .iter()
+            .all(|file| file
+                .metadata
+                .types
+                .iter()
+                .all(|serialized_type| serialized_type
+                    .type_tree
+                    .as_ref()
+                    .is_none_or(|tree| tree.nodes.is_empty()))));
+
+        let objects = ObjectWorkspace::load_from_vfs(
+            &filesystem,
+            &workspace,
+            ObjectWorkspaceLimits::default(),
+        )
+        .expect("source TPK layouts materialize the generated Mesh payloads");
+        assert_eq!(objects.report().object_count, 2);
+        assert!(objects.report().is_complete(), "{:?}", objects.report());
+
+        let modern_object = objects
+            .objects()
+            .iter()
+            .find(|object| object.file_index == 0)
+            .expect("modern Mesh object exists");
+        assert_eq!(modern_object.factory.class_id, 43);
+        let modern_payload = modern_object.payload.as_ref().expect("modern Mesh decodes");
+        let modern_view = BlendShapeLookupView::from_value(&modern_payload.root)
+            .expect("modern m_Shapes struct decodes as BlendShapeData");
+        let first_hash: u32 = expected_query("channels-first-match")
+            .split('|')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let missing_hash: u32 = expected_query("channels-miss")
+            .split('|')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(modern_view.channels.as_ref().map(Vec::len), Some(2));
+        let modern_channels = modern_view.channels.as_ref().unwrap();
+        assert_eq!(modern_channels[0].name.as_deref(), Some("Smile"));
+        assert_eq!(modern_channels[0].name_hash, Some(first_hash));
+        assert_eq!(modern_channels[1].name.as_deref(), Some("Frown"));
+        assert_eq!(modern_channels[1].name_hash, Some(first_hash));
+        let shapes = lookup(&modern_payload.root, BLEND_SHAPES_FIELD)
+            .expect("modern m_Shapes lookup succeeds")
+            .expect("modern m_Shapes is present");
+        let shape_fields =
+            as_struct(shapes, BLEND_SHAPES_FIELD).expect("modern m_Shapes is a struct");
+        let channels = find_field(shape_fields, CHANNELS_FIELD)
+            .expect("modern channel lookup succeeds")
+            .expect("modern channels are present");
+        let SerializedValue::Array(channels) = channels else {
+            panic!("modern channels are serialized as an array");
+        };
+        for (index, expected_frame_index, expected_frame_count) in [(0, 2, 3), (1, 7, 1)] {
+            let fields = as_struct(&channels[index], CHANNELS_FIELD)
+                .expect("source-generated channel is a struct");
+            assert!(matches!(
+                find_field(fields, "frameIndex").expect("frameIndex lookup succeeds"),
+                Some(SerializedValue::I32(value)) if *value == expected_frame_index
+            ));
+            assert!(matches!(
+                find_field(fields, "frameCount").expect("frameCount lookup succeeds"),
+                Some(SerializedValue::I32(value)) if *value == expected_frame_count
+            ));
+        }
+        assert_eq!(
+            modern_view.find_shape_name_by_crc(first_hash),
+            Some("Smile")
+        );
+        assert_eq!(modern_view.find_shape_name_by_crc(missing_hash), None);
+        assert_eq!(
+            expected_query("channels-first-match"),
+            format!("{first_hash}|Smile")
+        );
+        assert!(fixture.contains(&format!("QUERY|channels-miss|{missing_hash}|<null>")));
+
+        let legacy_object = objects
+            .objects()
+            .iter()
+            .find(|object| object.file_index == 1)
+            .expect("legacy Mesh object exists");
+        assert_eq!(legacy_object.factory.class_id, 43);
+        let legacy_payload = legacy_object.payload.as_ref().expect("legacy Mesh decodes");
+        let legacy_view = BlendShapeLookupView::from_value(&legacy_payload.root)
+            .expect("legacy m_Shapes array decodes as MeshBlendShape_4_1 records");
+        let empty_hash: u32 = expected_query("legacy-empty-name")
+            .split('|')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let legacy_hash: u32 = expected_query("legacy-name")
+            .split('|')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(legacy_view.channels, None);
+        assert_eq!(
+            legacy_view.shapes_list_names,
+            Some(vec![Some(String::new()), Some("LegacySmile".to_owned())])
+        );
+        assert_eq!(legacy_view.find_shape_name_by_crc(empty_hash), Some(""));
+        assert_eq!(
+            legacy_view.find_shape_name_by_crc(legacy_hash),
+            Some("LegacySmile")
+        );
+        assert!(!is_crc_match(None, empty_hash));
+        assert!(is_crc_match(Some(""), empty_hash));
+        assert!(fixture.contains(&format!("QUERY|legacy-absent-name|{empty_hash}|false")));
+        assert!(fixture.contains(&format!("QUERY|legacy-empty-name|{empty_hash}|true")));
+        assert!(fixture.contains(&format!("QUERY|legacy-name|{legacy_hash}|LegacySmile")));
     }
 }
