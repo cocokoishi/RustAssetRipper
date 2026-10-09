@@ -1,9 +1,7 @@
 //! Frozen source reference-assembly GUID tables used by MonoScript export.
 //!
 //! The embedded rows were emitted by `ReferenceAssemblies.GetReferenceAssemblies` for every
-//! version boundary in the frozen AssetRipper snapshot with `HasMscorlib2 == false`. That is
-//! the manager state used by the source `EmptyScriptExportCollection` path. Manager-backed
-//! exports must provide their own table because their mscorlib choice can differ.
+//! version boundary in the frozen AssetRipper snapshot with both values of `HasMscorlib2`.
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -14,6 +12,8 @@ use crate::processing::asset_factory::FactoryUnityVersion;
 use super::script_hashing::UnityGuid;
 
 const SOURCE_FIXTURE: &str = include_str!("../processing/reference_assembly_map_fixture.txt");
+const MSCORLIB2_SOURCE_FIXTURE: &str =
+    include_str!("../processing/reference_assembly_map_mscorlib2_fixture.txt");
 
 /// Frozen source maps keyed by the source Unity version boundaries.
 #[derive(Clone, Debug)]
@@ -25,10 +25,26 @@ pub struct ReferenceAssemblyMaps {
 impl ReferenceAssemblyMaps {
     /// Parse the checked-in source-runtime capture.
     pub fn from_source_fixture() -> Result<Self, ReferenceAssemblyMapError> {
+        Self::from_source_fixture_with_mscorlib2(false)
+    }
+
+    /// Parse the source-runtime capture selected by `IAssemblyManager.HasMscorlib2`.
+    pub fn from_source_fixture_with_mscorlib2(
+        has_mscorlib2: bool,
+    ) -> Result<Self, ReferenceAssemblyMapError> {
+        let fixture = if has_mscorlib2 {
+            MSCORLIB2_SOURCE_FIXTURE
+        } else {
+            SOURCE_FIXTURE
+        };
+        Self::parse_source_fixture(fixture)
+    }
+
+    fn parse_source_fixture(fixture: &str) -> Result<Self, ReferenceAssemblyMapError> {
         let mut versions = Vec::new();
         let mut maps = BTreeMap::<usize, BTreeMap<String, UnityGuid>>::new();
 
-        for (line_number, line) in SOURCE_FIXTURE.lines().enumerate() {
+        for (line_number, line) in fixture.lines().enumerate() {
             let line = line.trim_end_matches('\r');
             if line.is_empty() || line.starts_with('#') {
                 continue;
@@ -245,6 +261,66 @@ mod tests {
         assert_eq!(maps.guid_for(&before, "NoSuchAssembly").unwrap(), None);
         let unordered = FactoryUnityVersion::parse("2019.4.40z0").unwrap();
         assert!(maps.guid_for(&unordered, "UnityEngine").is_err());
+    }
+
+    #[test]
+    fn source_reference_map_uses_the_mscorlib_two_assembly_list() {
+        let mscorlib_four =
+            ReferenceAssemblyMaps::from_source_fixture_with_mscorlib2(false).unwrap();
+        let mscorlib_two = ReferenceAssemblyMaps::from_source_fixture_with_mscorlib2(true).unwrap();
+        assert_eq!(mscorlib_two.version_count(), 111);
+        assert_eq!(mscorlib_two.map_count(), 69);
+
+        let version = FactoryUnityVersion::parse("2019.1.0f1").unwrap();
+        assert_eq!(
+            mscorlib_four.guid_for(&version, "Mono.Cecil").unwrap(),
+            None
+        );
+        assert_eq!(
+            mscorlib_two
+                .guid_for(&version, "Mono.Cecil")
+                .unwrap()
+                .unwrap()
+                .to_unity_string(),
+            "f70555f144d8491a825f0804e09c671c"
+        );
+
+        let engine_guid = UnityGuid::new(0x1F55_507F, 0xA194_8D44, 0x4080_F528, 0xC176_C90E);
+        assert_eq!(
+            mscorlib_two.guid_for(&version, "UnityEngine").unwrap(),
+            Some(engine_guid)
+        );
+    }
+
+    #[test]
+    fn mscorlib_two_reference_map_replays_every_source_version_boundary() {
+        let maps = ReferenceAssemblyMaps::from_source_fixture_with_mscorlib2(true).unwrap();
+        let all_assemblies = maps
+            .maps
+            .values()
+            .flat_map(|map| map.keys().cloned())
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut checked_versions = 0;
+
+        for line in MSCORLIB2_SOURCE_FIXTURE.lines() {
+            let Some(row) = line.strip_prefix("VERSION|") else {
+                continue;
+            };
+            let (version_text, map_id_text) = row.split_once('|').unwrap();
+            let version = FactoryUnityVersion::parse(version_text).unwrap();
+            let map_id = map_id_text.parse::<usize>().unwrap();
+            let expected = maps.maps.get(&map_id).unwrap();
+            for assembly in &all_assemblies {
+                assert_eq!(
+                    maps.guid_for(&version, assembly).unwrap(),
+                    expected.get(assembly).copied(),
+                    "source map mismatch for Unity {version_text} assembly {assembly}"
+                );
+            }
+            checked_versions += 1;
+        }
+
+        assert_eq!(checked_versions, 111);
     }
 
     #[test]

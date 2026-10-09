@@ -4025,3 +4025,25 @@ These results do not pass the first-phase gate. The reference .NET solution buil
 - No feature row closed. Parity remains 386 rows with 24 non-verified and `phase1_gate: OPEN`; `OBJ-REF-001` and `EXPORT-UNITY-001` remain open. Phase 2 stays locked; no user AssetBundle or UABEA content was accessed, and Unity Editor import/runtime validation was not run. See `DIFF-OBJ-REF-NESTED-SIBLING-ORDER-001`.
 - After the fresh source replay refreshed the fixture rows, the final `cargo test --workspace --locked --quiet` rerun again passed 1,551 library tests (1 ignored), 106 CLI tests, and 1 ignored doc test; `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` also exited 0.
 - Final documentation-and-source integrity gates passed: `cargo fmt --all -- --check`, `git diff --check`, and `powershell.exe -ExecutionPolicy Bypass -File .\tools\verify-baseline.ps1` exited 0; the baseline verifier found all 1,449 reference files unchanged. Direct script invocation was blocked by the local unsigned-script execution policy, so the validation scripts were rerun with `-ExecutionPolicy Bypass`. `powershell.exe -ExecutionPolicy Bypass -File .\tools\parity-report.ps1` returned its expected exit 1: 386 recognized rows (362 verified, 12 implemented but unverified, 8 in progress, 3 investigated, 1 externally blocked), 24 non-verified rows, no malformed or duplicate IDs, and `phase1_gate: OPEN`.
+
+## 2026-10-09 manager-backed mscorlib2 reference maps
+
+- The isolated frozen-source probe now exercises `IAssemblyManager.HasMscorlib2 == true`. It loaded `C:\Windows\Microsoft.NET\Framework\v2.0.50727\mscorlib.dll` into `BaseManager`, verified the `mscorlib` identity and major version 2, and replayed `ReferenceAssemblies.GetReferenceAssemblies` for all 111 source version boundaries. Both exact source commands exited 0:
+
+  ```powershell
+  & "$env:LOCALAPPDATA\Microsoft\dotnet\dotnet.exe" run --project tools/probes/managed-project/ManagedProjectProbe.csproj --configuration Release -p:ReferenceRoot="$env:LOCALAPPDATA\Temp\opencode\ar-ref" -- reference-assembly-map-mscorlib2 target/reference_assembly_map_mscorlib2_fixture.txt C:\Windows\Microsoft.NET\Framework\v2.0.50727\mscorlib.dll
+  & "$env:LOCALAPPDATA\Microsoft\dotnet\dotnet.exe" run --project tools/probes/managed-project/ManagedProjectProbe.csproj --configuration Release -p:ReferenceRoot="$env:LOCALAPPDATA\Temp\opencode\ar-ref" -- reference-assembly-map-mscorlib2 target/reference_assembly_map_mscorlib2_replay.txt C:\Windows\Microsoft.NET\Framework\v2.0.50727\mscorlib.dll
+  ```
+
+  The 895,780-byte source capture has 69 unique maps and 13,359 entries; SHA-256 `81A5A4380C555B35260058EE68AEE1E23B4952FA76F1CE7E97AEDAC638222626`. The fresh second run reproduced the hash exactly. For Unity 2019.1.0f1, `Mono.Cecil` is present in the `HasMscorlib2=true` result and absent from the no-manager `false` result.
+- Rust `ReferenceAssemblyMaps` now parses both source tables. Project export selects the manager-backed map when the managed catalog contains `mscorlib` with manifest major 2; absent mscorlib falls back to the source's major-4 table. The 4,608-byte `mscorlib.dll` identity fixture (major 2; SHA-256 `53A2E6C134A91E88849DC7BD4D53E2EA27223FA609CE2CA70872A7DC523A0115`) was built with the following command (exit 0; existing `CS0169` unused-field warning):
+
+  ```powershell
+  $fixtureOut = Join-Path (Get-Location) 'target/mscorlib-two-fixture'
+  $fixtureObj = Join-Path (Get-Location) 'target/mscorlib-two-fixture-obj'
+  & "$env:LOCALAPPDATA\Microsoft\dotnet\dotnet.exe" build tools/probes/managed-assembly-fixture/ManagedAssemblyFixture.csproj --configuration Release -p:AssemblyName=mscorlib -p:AssemblyVersion=2.0.0.0 -p:FileVersion=2.0.0.0 -p:BaseIntermediateOutputPath="$fixtureObj\" -p:OutputPath="$fixtureOut\"
+  ```
+
+  It exercises catalog parsing and production map selection. The regression replays every assembly membership/GUID cell across all 111 manager-backed version boundaries.
+- `cargo test --workspace --locked reference_map -- --nocapture` passed four focused tests. Full validation passed: `cargo test --workspace --locked --quiet` (1,554 library tests passed, 1 ignored; 106 CLI tests passed; 1 doc test ignored); warnings-denied all-target/all-feature Clippy; `cargo fmt --all -- --check`; `git diff --check`; and the frozen-baseline verifier (all 1,449 source files unchanged). The parity report returned its expected exit 1: all 386 rows have recognized statuses, 24 remain non-verified, and `phase1_gate` is `OPEN`.
+- This settles source map generation and production selection only. No manager-backed reference MonoScript pointer was exported and compared end to end. `TYPE-SCRIPT-001` remains in progress; Phase 1 is incomplete and Phase 2 remains locked. No user AssetBundle or UABEA content was accessed. Unity Editor import/runtime validation was not run. See `DIFF-MONOSCRIPT-REFERENCE-MSCORLIB2-001`.

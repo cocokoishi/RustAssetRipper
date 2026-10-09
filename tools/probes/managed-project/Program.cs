@@ -94,7 +94,17 @@ if (args.Length > 0 && args[0] == "reference-assembly-map")
         Console.Error.WriteLine("usage: managed-project reference-assembly-map <new-output-file>");
         return 2;
     }
-    return DumpReferenceAssemblyMap(args[1]);
+    return DumpReferenceAssemblyMap(args[1], null);
+}
+
+if (args.Length > 0 && args[0] == "reference-assembly-map-mscorlib2")
+{
+    if (args.Length != 3)
+    {
+        Console.Error.WriteLine("usage: managed-project reference-assembly-map-mscorlib2 <new-output-file> <mscorlib-v2-file>");
+        return 2;
+    }
+    return DumpReferenceAssemblyMap(args[1], args[2]);
 }
 
 if (args.Length != 3)
@@ -1081,7 +1091,7 @@ static byte[] BuildReferenceBehaviourFile()
     return file.ToByteArray();
 }
 
-static int DumpReferenceAssemblyMap(string outputPathArgument)
+static int DumpReferenceAssemblyMap(string outputPathArgument, string? mscorlibV2Path)
 {
     string outputPath = Path.GetFullPath(outputPathArgument);
     if (File.Exists(outputPath) || Directory.Exists(outputPath))
@@ -1101,6 +1111,18 @@ static int DumpReferenceAssemblyMap(string outputPathArgument)
     IEnumerable assemblies = (IEnumerable)(assembliesProperty.GetValue(dataFile)
         ?? throw new InvalidDataException("AssetRipper reference assembly versions were empty"));
     var manager = new BaseManager(_ => { });
+    if (mscorlibV2Path is not null)
+    {
+        using FileStream mscorlibStream = File.OpenRead(mscorlibV2Path);
+        AsmResolver.DotNet.AssemblyDefinition mscorlib =
+            AsmResolver.DotNet.AssemblyDefinition.FromStream(mscorlibStream, createRuntimeContext: false);
+        if (mscorlib.Name?.ToString() != "mscorlib" || mscorlib.Version.Major != 2)
+        {
+            throw new InvalidDataException(
+                $"expected an assembly named mscorlib with major version 2; got {mscorlib.Name} {mscorlib.Version}");
+        }
+        manager.Add(mscorlib);
+    }
     List<(string Version, int MapId)> versionRows = [];
     Dictionary<string, int> mapIds = new(StringComparer.Ordinal);
     List<(int Id, string[] Entries)> maps = [];
@@ -1126,7 +1148,9 @@ static int DumpReferenceAssemblyMap(string outputPathArgument)
     }
 
     using StreamWriter writer = new(outputPath, false, new UTF8Encoding(false)) { NewLine = "\n" };
-    writer.WriteLine("# AssetRipper ReferenceAssemblies.GetReferenceAssemblies with HasMscorlib2=false.");
+    writer.WriteLine(mscorlibV2Path is null
+        ? "# AssetRipper ReferenceAssemblies.GetReferenceAssemblies with HasMscorlib2=false."
+        : "# AssetRipper ReferenceAssemblies.GetReferenceAssemblies with HasMscorlib2=true.");
     foreach ((string version, int mapId) in versionRows)
     {
         writer.WriteLine($"VERSION|{version}|{mapId}");

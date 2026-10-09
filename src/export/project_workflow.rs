@@ -345,33 +345,8 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
         .objects()
         .iter()
         .any(|object| object.factory.class_id == 115);
-    let managed_reference_table_available = if let Some(catalog) = managed_assemblies {
-        match catalog.assembly("mscorlib") {
-            Some(assembly) => match assembly.version_major {
-                Some(2) => false,
-                Some(_) => true,
-                None => {
-                    return Err(invalid_project(
-                        "Mono reference lookup found mscorlib without a manifest version",
-                    ))
-                }
-            },
-            None => true,
-        }
-    } else {
-        !assembly_manager_is_set
-    };
-    let reference_assembly_maps = if !has_mono_scripts || !managed_reference_table_available {
-        None
-    } else {
-        Some(
-            ReferenceAssemblyMaps::from_source_fixture().map_err(|error| {
-                invalid_project(format!(
-                    "source reference assembly map could not be loaded: {error}"
-                ))
-            })?,
-        )
-    };
+    let reference_assembly_maps =
+        source_reference_assembly_maps(has_mono_scripts, managed_assemblies)?;
     let settings_facts = ProjectExportSettings::from_export_settings(settings, project_version);
     if objects.report().object_count > limits.max_objects {
         return Err(invalid_project(format!(
@@ -1652,6 +1627,37 @@ fn plan_script_export_details(
         pointer_file_id,
         export_type,
     }))
+}
+
+fn source_reference_assembly_maps(
+    has_mono_scripts: bool,
+    managed_assemblies: Option<&ManagedAssemblyCatalog>,
+) -> Result<Option<ReferenceAssemblyMaps>, Box<dyn Error>> {
+    if !has_mono_scripts {
+        return Ok(None);
+    }
+
+    let has_mscorlib2 = match managed_assemblies.and_then(|catalog| catalog.assembly("mscorlib")) {
+        Some(assembly) => match assembly.version_major {
+            Some(major) => major == 2,
+            None => {
+                return Err(invalid_project(
+                    "Mono reference lookup found mscorlib without a manifest version",
+                ))
+            }
+        },
+        // MonoManager falls back to the .NET runtime's version 4 mscorlib when the
+        // imported platform does not contain one. An absent manager also selects false.
+        None => false,
+    };
+
+    ReferenceAssemblyMaps::from_source_fixture_with_mscorlib2(has_mscorlib2)
+        .map(Some)
+        .map_err(|error| {
+            invalid_project(format!(
+                "source reference assembly map could not be loaded: {error}"
+            ))
+        })
 }
 
 fn plan_saved_assembly_exports(
@@ -2970,7 +2976,7 @@ fn invalid_project(message: impl Into<String>) -> Box<dyn Error> {
 mod tests {
     use super::{
         asset_family_fallback, export_workspace_yaml_project_with_settings, new_collection_guid,
-        package_manifest_json, WorkspaceProjectExportLimits,
+        package_manifest_json, source_reference_assembly_maps, WorkspaceProjectExportLimits,
     };
     use crate::export::settings::ExportDefaults;
     use crate::export::settings_file::ExportSettingsFile;
@@ -2982,6 +2988,8 @@ mod tests {
     use crate::io::dependency::DependencyFilePath;
     use crate::io::filesystem::VirtualFileSystem;
     use crate::io::platform_structure::PlatformResourceProvider;
+    use crate::processing::asset_factory::FactoryUnityVersion;
+    use crate::processing::managed_assembly::{ManagedAssemblyCatalog, ManagedAssemblyLimits};
     use crate::processing::scene_naming::SceneUnityVersion;
     use crate::resource::RootResourceFileCatalog;
     use crate::serialized_file::object_workspace::{ObjectWorkspace, ObjectWorkspaceLimits};
@@ -3007,6 +3015,37 @@ mod tests {
         let after = SceneUnityVersion::parse("2019.2.0f1").unwrap();
         assert!(!package_manifest_json(before).contains("com.unity.modules.androidjni"));
         assert!(package_manifest_json(after).contains("\"com.unity.modules.androidjni\""));
+    }
+
+    #[test]
+    fn project_reference_map_selects_the_manager_mscorlib_version() {
+        let mut catalog = ManagedAssemblyCatalog::default();
+        catalog
+            .insert(
+                "mscorlib.dll",
+                include_bytes!("../processing/managed_assembly_mscorlib2_fixture.dll"),
+                ManagedAssemblyLimits::default(),
+            )
+            .unwrap();
+        assert_eq!(catalog.assembly("mscorlib").unwrap().version_major, Some(2));
+
+        let version = FactoryUnityVersion::parse("2019.1.0f1").unwrap();
+        let manager_maps = source_reference_assembly_maps(true, Some(&catalog))
+            .unwrap()
+            .unwrap();
+        assert!(manager_maps
+            .guid_for(&version, "Mono.Cecil")
+            .unwrap()
+            .is_some());
+
+        let fallback_maps = source_reference_assembly_maps(true, None).unwrap().unwrap();
+        assert_eq!(
+            fallback_maps.guid_for(&version, "Mono.Cecil").unwrap(),
+            None
+        );
+        assert!(source_reference_assembly_maps(false, Some(&catalog))
+            .unwrap()
+            .is_none());
     }
 
     #[test]
