@@ -342,6 +342,105 @@ pub(super) fn append_lighting_data_renderer_records(
     Ok(uv_mesh_targets)
 }
 
+pub(super) fn append_lighting_data_light_records(
+    type_tree: &crate::serialized_file::metadata::TypeTree,
+    root: &mut SerializedValue,
+    lights: &[LightingDataLightInput<'_>],
+) -> Result<(), Box<dyn Error>> {
+    for light in lights {
+        if light.file_id == 0 {
+            return Err(invalid_project(format!(
+                "LightingDataAsset Light {:?}:{} has a null Scene export fileID",
+                light.identity.collection, light.identity.path_id
+            )));
+        }
+        let mut identifier = default_lighting_data_array_element(
+            type_tree,
+            "m_Lights",
+            light.identity.object_index,
+        )?;
+        set_lighting_data_i64_field(&mut identifier, "targetObject", light.file_id)?;
+        set_lighting_data_i64_field(&mut identifier, "targetPrefab", 0)?;
+        append_lighting_data_array(root, "m_Lights", identifier)?;
+
+        if unique_lighting_data_field_index(root, "m_LightBakingOutputs")?.is_some() {
+            let mut baking_output = default_lighting_data_array_element(
+                type_tree,
+                "m_LightBakingOutputs",
+                light.identity.object_index,
+            )?;
+            if let Some(source_value) = light
+                .value
+                .unique_field_in_base_chain("m_BakingOutput")
+                .map_err(|error| {
+                    invalid_project(format!(
+                        "LightingDataAsset Light {:?}:{} m_BakingOutput lookup failed: {error}",
+                        light.identity.collection, light.identity.path_id
+                    ))
+                })?
+            {
+                copy_lighting_data_struct_by_name(
+                    &mut baking_output,
+                    source_value,
+                    "Light.m_BakingOutput",
+                )?;
+            }
+            append_lighting_data_array(root, "m_LightBakingOutputs", baking_output)?;
+        }
+    }
+    Ok(())
+}
+
+fn copy_lighting_data_struct_by_name(
+    destination: &mut SerializedValue,
+    source: &SerializedValue,
+    context: &str,
+) -> Result<(), Box<dyn Error>> {
+    match (destination, source) {
+        (SerializedValue::Struct(destination_fields), SerializedValue::Struct(source_fields)) => {
+            if destination_fields.len() != source_fields.len() {
+                return Err(invalid_project(format!(
+                    "{context} has {} fields, but the LightingDataAsset layout expects {}",
+                    source_fields.len(),
+                    destination_fields.len()
+                )));
+            }
+            for destination_field in destination_fields {
+                let mut source_matches = source_fields
+                    .iter()
+                    .filter(|field| field.name == destination_field.name);
+                let source_field = source_matches.next().ok_or_else(|| {
+                    invalid_project(format!(
+                        "{context} is missing field {}",
+                        destination_field.name
+                    ))
+                })?;
+                if source_matches.next().is_some() {
+                    return Err(invalid_project(format!(
+                        "{context} duplicates field {}",
+                        destination_field.name
+                    )));
+                }
+                copy_lighting_data_struct_by_name(
+                    &mut destination_field.value,
+                    &source_field.value,
+                    &format!("{context}.{}", destination_field.name),
+                )?;
+            }
+            Ok(())
+        }
+        (destination, source)
+            if std::mem::discriminant(destination) == std::mem::discriminant(source) =>
+        {
+            *destination = source.clone();
+            Ok(())
+        }
+        (destination, source) => Err(invalid_project(format!(
+            "{context} source value {source:?} does not match the LightingDataAsset field shape {destination:?}"
+        ))),
+    }
+}
+
 fn source_renderer_field<'value>(
     renderer: &'value LightingDataRendererInput<'_>,
     name: &str,

@@ -91,6 +91,7 @@ pub(super) fn validate_bounded_lighting_data_scene(
     hierarchy: &WorkspaceSceneHierarchyScene,
     owner: WorkspaceSceneObjectIdentity,
     assignments: &[SceneExportIdAssignment],
+    version: SceneUnityVersion,
 ) -> Result<(), Box<dyn Error>> {
     let mut unsupported_objects = Vec::new();
     const RENDERER_CLASS_IDS: [i32; 18] = [
@@ -115,7 +116,7 @@ pub(super) fn validate_bounded_lighting_data_scene(
     ];
     for assignment in assignments {
         let class_id = assignment.asset.class_id;
-        if class_id == 108 || class_id == 218 {
+        if class_id == 218 || (class_id == 108 && (version.major != 5 || version.minor != 6)) {
             unsupported_objects.push(format!(
                 "scene object {:?}:{} class {class_id} has LightingDataAsset data that is not implemented",
                 assignment.asset.collection, assignment.asset.path_id
@@ -144,7 +145,8 @@ pub(super) fn validate_bounded_lighting_data_scene(
                 ));
                 continue;
             };
-            if (class_id == 108 || class_id == 218)
+            if class_id == 218
+                || (class_id == 108 && (version.major != 5 || version.minor != 6))
                 || (RENDERER_CLASS_IDS.contains(&class_id) && class_id != 23)
             {
                 unsupported_objects.push(format!(
@@ -289,6 +291,48 @@ pub(super) fn collect_lighting_data_renderer_inputs<'object>(
         });
     }
     Ok(renderers)
+}
+
+pub(super) fn collect_lighting_data_light_inputs<'object>(
+    assignments: &[SceneExportIdAssignment],
+    objects: &'object ObjectWorkspace,
+) -> Result<Vec<LightingDataLightInput<'object>>, Box<dyn Error>> {
+    let mut lights = Vec::new();
+    lights
+        .try_reserve(assignments.len())
+        .map_err(|_| invalid_project("could not allocate LightingDataAsset light inputs"))?;
+    for assignment in assignments
+        .iter()
+        .filter(|assignment| assignment.asset.class_id == 108)
+    {
+        let file_index = serialized_file_index(assignment.asset, "Light")?;
+        let object = objects
+            .get(file_index, assignment.asset.object_index)
+            .ok_or_else(|| {
+                invalid_project(format!(
+                    "LightingDataAsset Light {}:{} is missing from ObjectWorkspace",
+                    file_index, assignment.asset.path_id
+                ))
+            })?;
+        if object.path_id != assignment.asset.path_id || object.factory.class_id != 108 {
+            return Err(invalid_project(format!(
+                "LightingDataAsset Light identity mismatch at {}:{}",
+                file_index, assignment.asset.path_id
+            )));
+        }
+        let payload = object.payload.as_ref().map_err(|error| {
+            invalid_project(format!(
+                "LightingDataAsset Light {}:{} could not be decoded: {error}",
+                file_index, assignment.asset.path_id
+            ))
+        })?;
+        lights.push(LightingDataLightInput {
+            identity: assignment.asset,
+            file_id: assignment.file_id,
+            value: &payload.root,
+        });
+    }
+    Ok(lights)
 }
 
 fn scene_renderer_is_lightmapped(

@@ -77,18 +77,6 @@ pub(super) fn prepare_generated_collections(
         let Some(owner_identity) = hierarchy.lighting_data_dependency_owner() else {
             continue;
         };
-        let renderer_inputs =
-            collect_lighting_data_renderer_inputs(&scene.assignments, objects, reference_graph)?;
-        validate_bounded_lighting_data_scene(hierarchy, owner_identity, &scene.assignments)?;
-        let render_settings_identity =
-            scene_manager_identity(hierarchy, SceneManagerKind::RenderSettings).ok_or_else(
-                || {
-                    invalid_project(format!(
-                        "LightmapSettings {}:{} has no RenderSettings owner",
-                        owner_identity.file_index, owner_identity.path_id
-                    ))
-                },
-            )?;
         let source_owner = export_identity_for_scene_object(owner_identity)?;
         let owner_file = workspace
             .files()
@@ -122,6 +110,24 @@ pub(super) fn prepare_generated_collections(
                 owner_file.file_name
             ))
         })?;
+        let renderer_inputs =
+            collect_lighting_data_renderer_inputs(&scene.assignments, objects, reference_graph)?;
+        let light_inputs = collect_lighting_data_light_inputs(&scene.assignments, objects)?;
+        validate_bounded_lighting_data_scene(
+            hierarchy,
+            owner_identity,
+            &scene.assignments,
+            scene_version,
+        )?;
+        let render_settings_identity =
+            scene_manager_identity(hierarchy, SceneManagerKind::RenderSettings).ok_or_else(
+                || {
+                    invalid_project(format!(
+                        "LightmapSettings {}:{} has no RenderSettings owner",
+                        owner_identity.file_index, owner_identity.path_id
+                    ))
+                },
+            )?;
         let (type_tree, _) = reference_class_layouts()
             .tpk_trees(1120, &source_version)
             .map_err(|error| {
@@ -179,6 +185,7 @@ pub(super) fn prepare_generated_collections(
         )?;
         let renderer_uv_mesh_targets =
             append_lighting_data_renderer_records(&type_tree, &mut root, &renderer_inputs)?;
+        append_lighting_data_light_records(&type_tree, &mut root, &light_inputs)?;
         let collection_index = next_collection_index;
         next_collection_index = next_collection_index
             .checked_add(1)

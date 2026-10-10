@@ -313,6 +313,13 @@ struct LightingDataRendererInput<'object> {
     uv_mesh_target: Option<ExportAssetIdentity>,
 }
 
+#[derive(Clone, Copy)]
+struct LightingDataLightInput<'object> {
+    identity: ExportAssetIdentity,
+    file_id: i64,
+    value: &'object SerializedValue,
+}
+
 struct PreparedSceneCollections {
     processing: WorkspaceSceneProcessing,
     routed: Vec<RoutedSceneCollection>,

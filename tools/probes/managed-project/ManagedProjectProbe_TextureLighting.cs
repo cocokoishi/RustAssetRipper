@@ -453,6 +453,35 @@ ObjectData = textureBody,
             collection,
             version);
         List<object> assets = new() { lightmapSettings, renderSettings, texture };
+        if (sceneKind == "light")
+        {
+            object gameObject = MakeGenerated(
+                "AssetRipper.SourceGenerated.Classes.ClassID_1.GameObject",
+                1,
+                103,
+                collection,
+                version);
+            SetGeneratedProperty(gameObject, "Name", "BakedLightFixture");
+            object transform = MakeGenerated(
+                "AssetRipper.SourceGenerated.Classes.ClassID_4.Transform",
+                4,
+                104,
+                collection,
+                version);
+            object light = MakeGenerated(
+                "AssetRipper.SourceGenerated.Classes.ClassID_108.Light",
+                108,
+                105,
+                collection,
+                version);
+            SetGeneratedAssetPointer(transform, "GameObject_C4", collection, gameObject);
+            SetGeneratedAssetPointer(light, "GameObject_C8", collection, gameObject);
+            AddGeneratedAssetPointer(gameObject, "Components", collection, transform);
+            AddGeneratedAssetPointer(gameObject, "Components", collection, light);
+            assets.Add(gameObject);
+            assets.Add(transform);
+            assets.Add(light);
+        }
         if (sceneKind is "mesh-renderer" or "mesh-filter-renderer")
         {
             object gameObject = MakeGenerated(
@@ -512,7 +541,7 @@ ObjectData = textureBody,
             assets.Add(transform);
             assets.Add(renderer);
         }
-        else if (sceneKind != "empty")
+        else if (sceneKind is not ("empty" or "light"))
         {
             throw new ArgumentException($"unsupported lightmap scene fixture: {sceneKind}");
         }

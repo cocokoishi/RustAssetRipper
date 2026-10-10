@@ -571,6 +571,134 @@
     }
 
     #[test]
+    fn export_project_maps_5_6_light_to_lighting_data() {
+        let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
+
+        fn decode_hex(hex: &str) -> Vec<u8> {
+            assert!(hex.len().is_multiple_of(2), "fixture hex has even length");
+            hex.as_bytes()
+                .chunks_exact(2)
+                .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+                .collect()
+        }
+
+        fn fixture_value(fixture: &str, prefix: &str) -> Vec<u8> {
+            let hex = fixture
+                .lines()
+                .find_map(|line| line.strip_prefix(prefix))
+                .unwrap_or_else(|| panic!("source light fixture lacks {prefix}"));
+            decode_hex(hex)
+        }
+
+        fn normalize(text: &str) -> String {
+            let mut output = String::with_capacity(text.len());
+            for line in text.lines() {
+                let chars = line.chars().collect::<Vec<_>>();
+                let mut normalized = String::with_capacity(line.len());
+                let mut index = 0;
+                while index < chars.len() {
+                    let is_guid = index + 32 <= chars.len()
+                        && (index == 0 || !chars[index - 1].is_ascii_hexdigit())
+                        && chars[index..index + 32]
+                            .iter()
+                            .all(|character| character.is_ascii_hexdigit())
+                        && (index + 32 == chars.len()
+                            || !chars[index + 32].is_ascii_hexdigit());
+                    if is_guid {
+                        normalized.push_str("<GUID>");
+                        index += 32;
+                    } else {
+                        normalized.push(chars[index]);
+                        index += 1;
+                    }
+                }
+                if normalized.starts_with("timeCreated: ") {
+                    normalized = "timeCreated: <TIME>".to_owned();
+                }
+                output.push_str(&normalized);
+                output.push('\n');
+            }
+            output
+        }
+
+        let fixture = include_str!("export/lightmap_project_source_5_6_light_fixture.txt");
+        assert!(fixture.lines().any(|line| line == "UNITY_VERSION|5.6.0f1"));
+        let input_bytes = fixture_value(fixture, "INPUT_HEX|LightmapFixture.assets|");
+        let directory = TestInputDirectory::new_root();
+        let source_path = directory.join("LightmapFixture.assets");
+        let settings_path = directory.join("lightmap-light-settings.json");
+        let output_root = directory.join("project-lightmap-5.6-light");
+        fs::write(&source_path, &input_bytes).unwrap();
+        let settings = include_str!("export/settings_file_defaults.json")
+            .replace("\"ImageExportFormat\": 4", "\"ImageExportFormat\": 0")
+            .replace(
+                "\"LightmapTextureExportFormat\": 2",
+                "\"LightmapTextureExportFormat\": 1",
+            )
+            .replace(
+                "\"PreferOriginalTextureExtension\": true",
+                "\"PreferOriginalTextureExtension\": false",
+            );
+        fs::write(&settings_path, settings).unwrap();
+        super::run(
+            [
+                std::ffi::OsString::from("export-project"),
+                std::ffi::OsString::from("--settings"),
+                settings_path.into_os_string(),
+                output_root.clone().into_os_string(),
+                source_path.clone().into_os_string(),
+            ]
+            .into_iter(),
+        )
+        .expect("Unity 5.6 Light LightingDataAsset export succeeds");
+
+        let lighting_data_path =
+            output_root.join("Assets/Scenes/lightmapfixture.assets/LightingData.asset");
+        let lighting_data = fs::read_to_string(&lighting_data_path).unwrap();
+        let source_lighting_data = fixture_value(
+            fixture,
+            "SOURCE_OUTPUT|ExportedProject/Assets/Scenes/lightmapfixture.assets/LightingData.asset|",
+        );
+        assert_eq!(
+            normalize(&lighting_data),
+            normalize(std::str::from_utf8(&source_lighting_data).unwrap()),
+            "complete Unity 5.6 LightingDataAsset Light arrays differ from frozen source"
+        );
+        assert!(lighting_data.contains("m_Lights:\n  - targetObject: 105\n    targetPrefab: 0"));
+        assert!(lighting_data.contains(
+            "m_LightBakingOutputs:\n  - probeOcclusionLightIndex: 0\n    occlusionMaskChannel: 0\n    lightmappingMask: 0"
+        ));
+
+        let lighting_data_meta = fs::read_to_string(format!(
+            "{}.meta",
+            lighting_data_path.display()
+        ))
+        .unwrap();
+        let source_lighting_data_meta = fixture_value(
+            fixture,
+            "SOURCE_OUTPUT|ExportedProject/Assets/Scenes/lightmapfixture.assets/LightingData.asset.meta|",
+        );
+        assert_eq!(
+            normalize(&lighting_data_meta),
+            normalize(std::str::from_utf8(&source_lighting_data_meta).unwrap()),
+            "Unity 5.6 LightingDataAsset metadata differs from frozen source"
+        );
+        let lighting_data_guid = lighting_data_meta
+            .lines()
+            .find_map(|line| line.strip_prefix("guid: "))
+            .expect("LightingDataAsset metadata contains a GUID");
+        let scene = fs::read_to_string(
+            output_root.join("Assets/Scenes/lightmapfixture.assets.unity"),
+        )
+        .unwrap();
+        assert!(scene.contains("--- !u!108 &105\nLight:"));
+        assert!(scene.contains(&format!(
+            "m_LightingDataAsset: {{fileID: 112000000, guid: {lighting_data_guid}, type: 2}}"
+        )));
+        assert_eq!(fs::read(&source_path).unwrap(), input_bytes);
+    }
+
+    #[test]
     fn export_project_recovers_assembly_backed_monobehaviour_structure() {
         let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
         let directory = TestInputDirectory::new_root();
