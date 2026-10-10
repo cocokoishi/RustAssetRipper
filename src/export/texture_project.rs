@@ -27,6 +27,7 @@ pub enum TextureImporterLayout {
     Unity5_3,
     Unity5_4,
     Unity5_6,
+    Unity2017_2,
     Unity2017_4,
     Unity2018_2,
     Unity2018_3,
@@ -42,6 +43,7 @@ impl TextureImporterLayout {
             (5, 3) => Some(Self::Unity5_3),
             (5, 4) => Some(Self::Unity5_4),
             (5, 5 | 6) => Some(Self::Unity5_6),
+            (2017, 2) => Some(Self::Unity2017_2),
             (2017, 4) => Some(Self::Unity2017_4),
             (2018, 2) => Some(Self::Unity2018_2),
             (2018, 3) => Some(Self::Unity2018_3),
@@ -185,8 +187,11 @@ fn texture_importer(
         TextureImporterLayout::Unity5_6 => {
             return texture_importer_v4_5_6(&facts, asset_bundle_name, sprite_mesh_type)
         }
+        TextureImporterLayout::Unity2017_2 => {
+            return texture_importer_v4_2017(&facts, asset_bundle_name, sprite_mesh_type, true)
+        }
         TextureImporterLayout::Unity2017_4 => {
-            return texture_importer_v4_2017(&facts, asset_bundle_name, sprite_mesh_type)
+            return texture_importer_v4_2017(&facts, asset_bundle_name, sprite_mesh_type, false)
         }
         TextureImporterLayout::Unity2018_2 => {
             return texture_importer_v7(&facts, asset_bundle_name, sprite_mesh_type, true, true)
@@ -423,8 +428,9 @@ fn texture_importer_v4_2017(
     facts: &TextureImporterFacts,
     asset_bundle_name: Option<&str>,
     sprite_mesh_type: i64,
+    is_2017_2: bool,
 ) -> Result<UnityYamlNode, Box<dyn Error>> {
-    mapping(vec![
+    let mut importer = mapping(vec![
         ("serializedVersion", signed(4)),
         ("name", UnityYamlNode::string("")),
         ("fileIDToRecycleName", empty_mapping()),
@@ -447,9 +453,16 @@ fn texture_importer_v4_2017(
         ("spriteMeshType", signed(sprite_mesh_type)),
         ("alignment", signed(0)),
         ("spritePivot", point2(0.5, 0.5)?),
-        ("spritePixelsToUnits", float(100.0)),
-        ("spriteBorder", point4(0.0, 0.0, 0.0, 0.0)?),
-        ("spriteGenerateFallbackPhysicsShape", signed(1)),
+    ])?;
+    if is_2017_2 {
+        importer.insert_field("spriteBorder", point4(0.0, 0.0, 0.0, 0.0)?)?;
+        importer.insert_field("spritePixelsToUnits", float(100.0))?;
+    } else {
+        importer.insert_field("spritePixelsToUnits", float(100.0))?;
+        importer.insert_field("spriteBorder", point4(0.0, 0.0, 0.0, 0.0)?)?;
+        importer.insert_field("spriteGenerateFallbackPhysicsShape", signed(1))?;
+    }
+    for (name, value) in [
         ("alphaUsage", signed(1)),
         ("alphaIsTransparency", signed(1)),
         ("spriteTessellationDetail", signed(-1)),
@@ -458,20 +471,30 @@ fn texture_importer_v4_2017(
         ("maxTextureSizeSet", signed(0)),
         ("compressionQualitySet", signed(0)),
         ("textureFormatSet", signed(0)),
-        (
-            "platformSettings",
-            platform_settings_2017(facts.max_texture_size)?,
-        ),
-        ("spriteSheet", sprite_sheet_2017()?),
-        ("spritePackingTag", UnityYamlNode::string("")),
-        ("output", texture_output(false)?),
-        ("userData", UnityYamlNode::string("")),
-        (
-            "assetBundleName",
-            UnityYamlNode::string(asset_bundle_name.unwrap_or("")),
-        ),
-        ("assetBundleVariant", UnityYamlNode::string("")),
-    ])
+    ] {
+        importer.insert_field(name, value)?;
+    }
+    importer.insert_field(
+        "platformSettings",
+        platform_settings_2017(facts.max_texture_size, !is_2017_2)?,
+    )?;
+    importer.insert_field("spriteSheet", sprite_sheet_2017()?)?;
+    importer.insert_field("spritePackingTag", UnityYamlNode::string(""))?;
+    importer.insert_field(
+        "output",
+        if is_2017_2 {
+            texture_output_5_6()?
+        } else {
+            texture_output(false)?
+        },
+    )?;
+    importer.insert_field("userData", UnityYamlNode::string(""))?;
+    importer.insert_field(
+        "assetBundleName",
+        UnityYamlNode::string(asset_bundle_name.unwrap_or("")),
+    )?;
+    importer.insert_field("assetBundleVariant", UnityYamlNode::string(""))?;
+    Ok(importer)
 }
 
 fn texture_importer_v7(
@@ -717,8 +740,11 @@ fn platform_settings_5_6(max_texture_size: i32) -> Result<UnityYamlNode, Box<dyn
     ])?])
 }
 
-fn platform_settings_2017(max_texture_size: i32) -> Result<UnityYamlNode, Box<dyn Error>> {
-    sequence_block(vec![mapping(vec![
+fn platform_settings_2017(
+    max_texture_size: i32,
+    has_android_etc2_fallback_override: bool,
+) -> Result<UnityYamlNode, Box<dyn Error>> {
+    let mut platform = mapping(vec![
         (
             "buildTarget",
             UnityYamlNode::plain_string("DefaultTexturePlatform"),
@@ -731,8 +757,11 @@ fn platform_settings_2017(max_texture_size: i32) -> Result<UnityYamlNode, Box<dy
         ("crunchedCompression", signed(0)),
         ("allowsAlphaSplitting", signed(0)),
         ("overridden", signed(0)),
-        ("androidETC2FallbackOverride", signed(0)),
-    ])?])
+    ])?;
+    if has_android_etc2_fallback_override {
+        platform.insert_field("androidETC2FallbackOverride", signed(0))?;
+    }
+    sequence_block(vec![platform])
 }
 
 fn platform_settings_v2(max_texture_size: i32) -> Result<UnityYamlNode, Box<dyn Error>> {

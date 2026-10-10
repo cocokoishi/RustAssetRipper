@@ -80,9 +80,21 @@
                 "legacy-parent",
             ),
             (
+                "5.5.0f1",
+                include_str!("export/lightmap_project_source_5_5_fixture.txt"),
+                "none",
+                "legacy-parent",
+            ),
+            (
                 "5.6.0f1",
                 include_str!("export/lightmap_project_source_5_6_fixture.txt"),
                 "none",
+                "legacy-parent",
+            ),
+            (
+                "2017.2.0f3",
+                include_str!("export/lightmap_project_source_2017_2_fixture.txt"),
+                "pointer",
                 "legacy-parent",
             ),
             (
