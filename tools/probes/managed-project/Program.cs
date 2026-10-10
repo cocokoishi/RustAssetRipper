@@ -181,12 +181,17 @@ if (args.Length > 0 && args[0] == "export-mono-structure")
 
 if (args.Length > 0 && args[0] == "export-managed-schema")
 {
-    if (args.Length != 5)
+    if (args.Length is not 5 and not 6)
     {
-        Console.Error.WriteLine("usage: managed-project export-managed-schema <input-root> <output-root> <rows-file> <assembly-file>");
+        Console.Error.WriteLine("usage: managed-project export-managed-schema <input-root> <output-root> <rows-file> <assembly-file> [unity-version]");
         return 2;
     }
-    return ExportManagedSchema(args[1], args[2], args[3], args[4]);
+    return ExportManagedSchema(
+        args[1],
+        args[2],
+        args[3],
+        args[4],
+        args.Length == 6 ? args[5] : "2019.4.40f1");
 }
 
 if (args.Length > 0 && args[0] == "export-managed-reference-schema")

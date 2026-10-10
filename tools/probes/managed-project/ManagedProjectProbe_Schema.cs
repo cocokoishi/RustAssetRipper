@@ -10,6 +10,7 @@ using AssetRipper.Assets.Bundles;
 using AssetRipper.Assets.Collections;
 using AssetRipper.Assets.IO.Writing;
 using AssetRipper.Assets.Metadata;
+using AssetRipper.Checksum;
 using AssetRipper.Export.Configuration;
 using AssetRipper.Export.UnityProjects;
 using AssetRipper.Export.UnityProjects.Scripts;
@@ -90,7 +91,8 @@ internal static partial class ManagedProjectProbe
         string inputRootArgument,
         string outputRootArgument,
         string rowsArgument,
-        string assemblyArgument)
+        string assemblyArgument,
+        string unityVersionText)
     {
         string inputRoot = Path.GetFullPath(inputRootArgument);
         string outputRoot = Path.GetFullPath(outputRootArgument);
@@ -112,7 +114,7 @@ internal static partial class ManagedProjectProbe
         Directory.CreateDirectory(Path.GetDirectoryName(rowsPath)!);
         string serializedPath = Path.Combine(inputRoot, "managed_schema.assets");
         string inputAssemblyPath = Path.Combine(inputRoot, "ComplexFixtureScripts.dll");
-        byte[] serializedBytes = BuildManagedSchemaFile();
+        byte[] serializedBytes = BuildManagedSchemaFile(unityVersionText);
         byte[] assemblyBytes = File.ReadAllBytes(assemblyPath);
         File.WriteAllBytes(serializedPath, serializedBytes);
         File.WriteAllBytes(inputAssemblyPath, assemblyBytes);
@@ -174,11 +176,29 @@ internal static partial class ManagedProjectProbe
         rows.WriteLine("# Frozen AssetRipper export for a no-TypeTree MonoBehaviour with nested and collection fields.");
         rows.WriteLine("NORMALIZE|MonoBehaviour TextAsset PPtr GUID replaced with __TEXTASSET_GUID__.");
         rows.WriteLine("NORMALIZE|Importer guid and timeCreated fields omitted.");
+        rows.WriteLine($"UNITY_VERSION|{unityVersionText}");
         rows.WriteLine($"INPUT_HEX|managed_schema.assets|{Convert.ToHexString(serializedBytes)}");
         rows.WriteLine($"ASSEMBLY|ComplexFixtureScripts.dll|{assemblyBytes.Length}|{Convert.ToHexString(SHA256.HashData(assemblyBytes))}");
         foreach (string item in matches)
         {
             rows.WriteLine($"OBJECT|{item}");
+        }
+        var monoScript = gameData.GameBundle.FetchAssets()
+            .OfType<AssetRipper.SourceGenerated.Classes.ClassID_115.IMonoScript>()
+            .Single(script => script.PathID == 7);
+        SerializableType behaviour = monoScript.GetBehaviourType(gameData.AssemblyManager)
+            ?? throw new InvalidDataException("source MonoScript has no serializable behaviour type");
+        var sourcePathCache = new AssetRipper.Processing.AnimationClips.PathChecksumCache(gameData);
+        sourcePathCache.Add(monoScript);
+        foreach (SerializableType.Field field in behaviour.Fields)
+        {
+            DumpScriptPath(field, string.Empty, 0, sourcePathCache, rows);
+        }
+        foreach (string path in new[] { "target", "target.m_FileID", "target.m_PathID" })
+        {
+            uint checksum = Crc32Algorithm.HashUTF8(path);
+            sourcePathCache.TryGetPath(checksum, out string? cachedPath);
+            rows.WriteLine($"SCRIPT_PATH_LOOKUP|{path}|{checksum}|{cachedPath ?? "<null>"}");
         }
         string behaviourRelative = Path.GetRelativePath(outputRoot, behaviourPath).Replace('\\', '/');
         rows.WriteLine($"YAML_HEX|{behaviourRelative}|{normalizedBehaviourBytes.Length}|{Convert.ToHexString(SHA256.HashData(normalizedBehaviourBytes))}|{Convert.ToHexString(normalizedBehaviourBytes)}");
@@ -209,6 +229,35 @@ internal static partial class ManagedProjectProbe
         Console.WriteLine($"mono_behaviour={behaviourRelative}");
         Console.WriteLine($"target={targetRelative}");
         return 0;
+    }
+
+    private static void DumpScriptPath(
+        SerializableType.Field field,
+        string parentPath,
+        int depth,
+        AssetRipper.Processing.AnimationClips.PathChecksumCache cache,
+        StreamWriter rows)
+    {
+        if (depth > 10)
+        {
+            return;
+        }
+        if (field.Type.IsPrimitive())
+        {
+            string path = parentPath + field.Name;
+            uint crc = Crc32Algorithm.HashUTF8(path);
+            if (!cache.TryGetPath(crc, out string? cachedPath) || cachedPath != path)
+            {
+                throw new InvalidDataException($"source PathChecksumCache omitted {path:?}");
+            }
+            rows.WriteLine($"SCRIPT_PATH|{path}|{crc}");
+            return;
+        }
+        string nestedPath = parentPath + field.Name + ".";
+        foreach (SerializableType.Field child in field.Type.Fields)
+        {
+            DumpScriptPath(child, nestedPath, depth + 1, cache, rows);
+        }
     }
 
     internal static int ExportManagedReferenceSchema(
@@ -430,7 +479,7 @@ internal static partial class ManagedProjectProbe
         return value;
     }
 
-    internal static byte[] BuildManagedSchemaFile()
+    internal static byte[] BuildManagedSchemaFile(string unityVersionText)
     {
         List<byte> behaviour = [];
         WriteI32(behaviour, 0); // m_GameObject.m_FileID
@@ -477,7 +526,7 @@ internal static partial class ManagedProjectProbe
         SerializedFile file = new SerializedFileBuilder
         {
             Generation = FormatVersion.StoresTypeDependencies,
-            Version = UnityVersion.Parse("2019.4.40f1"),
+            Version = UnityVersion.Parse(unityVersionText),
             Platform = (BuildTarget)19,
             EndianType = EndianType.LittleEndian,
             HasTypeTree = false,

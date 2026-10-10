@@ -12,6 +12,7 @@ use crate::processing::managed_assembly::{
     ManagedTypeSignature,
 };
 use crate::processing::script_identity::ScriptIdentifier;
+use crate::resources::path_checksum::ChecksumField;
 use crate::serialized_file::managed_types::{
     is_serializable_unity_struct, is_unity_engine_value_type,
 };
@@ -42,6 +43,8 @@ impl Default for ManagedSchemaLimits {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ManagedScriptSchema {
     pub type_tree: TypeTree,
+    /// The `SerializableType.Fields` shape used by animation script-property hashing.
+    pub path_checksum_fields: Vec<ChecksumField>,
     /// Fields excluded by the source `WillUnitySerialize` rules or recursive-cycle handling.
     /// Keeping this list makes intentional source-compatible omissions auditable.
     pub skipped_fields: Vec<String>,
@@ -241,11 +244,30 @@ pub fn build_mono_behaviour_schema(
         .build_definition(&identity, &[], 0)
         .map_err(|kind| schema_error(builder.root_identity.clone(), kind))?;
     let fields = mono_behaviour_structure_fields(&root.fields);
+    let path_checksum_fields = checksum_fields(fields);
     let type_tree = build_tree_from_fields(&root, fields, limits, &builder.root_identity)?;
     Ok(ManagedScriptSchema {
         type_tree,
+        path_checksum_fields,
         skipped_fields: builder.skipped_fields,
     })
+}
+
+fn checksum_fields(fields: &[SerializableField]) -> Vec<ChecksumField> {
+    fields
+        .iter()
+        .map(|field| {
+            let type_ = &field.type_;
+            ChecksumField {
+                name: field.name.clone(),
+                is_primitive: matches!(
+                    type_.kind,
+                    SerializableKind::Primitive(_) | SerializableKind::String
+                ),
+                children: checksum_fields(&type_.fields),
+            }
+        })
+        .collect()
 }
 
 /// Build the source `SerializableTreeType.FromReferencedObjectNode` field shape for one dynamic
@@ -1497,6 +1519,7 @@ mod tests {
     use super::{build_mono_behaviour_schema, ManagedSchemaLimits};
     use crate::processing::managed_assembly::{ManagedAssemblyCatalog, ManagedAssemblyLimits};
     use crate::processing::script_identity::ScriptIdentifier;
+    use crate::resources::path_checksum::{PathChecksumCache, PathChecksumLimits};
 
     const ASSEMBLY_BYTES: &[u8] = include_bytes!("managed_assembly_fixture.dll");
     const MANAGED_ASSEMBLY_FIXTURE: &str = include_str!("managed_assembly_fixture.txt");
@@ -1651,5 +1674,97 @@ mod tests {
         assert!(rust_nodes
             .iter()
             .any(|node| node.2 == "phase" && node.1 == "UInt8"));
+
+        let source_paths = SOURCE_FIXTURE
+            .lines()
+            .filter_map(|line| line.strip_prefix("SCRIPT_PATH|"))
+            .map(|line| {
+                let (path, checksum) = line
+                    .split_once('|')
+                    .expect("source script path row has a checksum");
+                (path, checksum.parse::<u32>().expect("source path checksum"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(source_paths.len(), 8, "source path oracle is populated");
+
+        let mut cache = PathChecksumCache::new(PathChecksumLimits::default()).unwrap();
+        cache
+            .add_fields(&schema.path_checksum_fields, "", 0)
+            .unwrap();
+        for (path, checksum) in source_paths {
+            assert_eq!(
+                cache.try_get_path(checksum),
+                Some(path),
+                "MonoScript field path {path:?} matches source PathChecksumCache"
+            );
+        }
+    }
+
+    #[test]
+    fn matches_source_monoscript_path_lookups_for_unity_2022_3() {
+        const ASSEMBLY_BYTES: &[u8] = include_bytes!("managed_assembly_schema_complex_fixture.dll");
+        const SOURCE_FIXTURE: &str =
+            include_str!("managed_assembly_path_checksum_2022_3_fixture.txt");
+
+        let mut catalog = ManagedAssemblyCatalog::default();
+        catalog
+            .insert(
+                "ComplexFixtureScripts.dll",
+                ASSEMBLY_BYTES,
+                ManagedAssemblyLimits::default(),
+            )
+            .unwrap();
+        let script =
+            ScriptIdentifier::try_new("ComplexFixtureScripts", "Game", "RichController").unwrap();
+        let schema = build_mono_behaviour_schema(
+            &catalog,
+            &script,
+            "2022.3.22f1",
+            ManagedSchemaLimits::default(),
+        )
+        .unwrap();
+        let mut cache = PathChecksumCache::new(PathChecksumLimits::default()).unwrap();
+        cache
+            .add_fields(&schema.path_checksum_fields, "", 0)
+            .unwrap();
+
+        let source_paths = SOURCE_FIXTURE
+            .lines()
+            .filter_map(|line| line.strip_prefix("SCRIPT_PATH|"))
+            .map(|line| {
+                let (path, checksum) = line
+                    .split_once('|')
+                    .expect("source script path row has a checksum");
+                (path, checksum.parse::<u32>().expect("source path checksum"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(source_paths.len(), 8);
+        for (path, checksum) in source_paths {
+            assert_eq!(cache.try_get_path(checksum), Some(path));
+        }
+
+        let source_lookups = SOURCE_FIXTURE
+            .lines()
+            .filter_map(|line| line.strip_prefix("SCRIPT_PATH_LOOKUP|"))
+            .map(|line| {
+                let mut parts = line.splitn(3, '|');
+                let path = parts.next().expect("source lookup path");
+                let checksum = parts
+                    .next()
+                    .expect("source lookup checksum")
+                    .parse::<u32>()
+                    .expect("source lookup checksum integer");
+                let expected = parts.next().expect("source lookup result");
+                (path, checksum, expected)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(source_lookups.len(), 3);
+        for (path, checksum, expected) in source_lookups {
+            assert_eq!(
+                cache.try_get_path(checksum).unwrap_or("<null>"),
+                expected,
+                "MonoScript path lookup for {path:?} matches source"
+            );
+        }
     }
 }
