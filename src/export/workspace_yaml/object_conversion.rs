@@ -1,371 +1,428 @@
-#[allow(clippy::too_many_arguments)]
-fn workspace_object_to_unity_yaml_document_with_context(
-    workspace: &SerializedFileWorkspace,
-    reference_graph: &MultiFileReferenceGraph<'_>,
-    pointer_map: &ProjectExportPointerMap,
-    object: &WorkspaceObject,
-    source: ExportAssetIdentity,
-    file_id: i64,
-    current_collection_index: usize,
-    missing_reference_guid: Option<[u8; 16]>,
-    limits: UnityYamlObjectConversionLimits,
-    streamed_resources: Option<&WorkspaceStreamedYamlResourceContext<'_, '_>>,
-    generated_component_overlay: Option<&WorkspaceGeneratedComponentYamlOverlay>,
-    generated_prefab_internal: Option<&WorkspaceGeneratedPrefabInternalPointer>,
-    generated_lighting_data: Option<&WorkspaceGeneratedLightingDataYamlPointer>,
-) -> Result<Option<UnityYamlDocument>, UnityYamlWorkspaceExportError> {
-    let file_index = match source.collection {
-        ExportAssetCollectionIdentity::SerializedFile { file_index } => file_index,
-        ExportAssetCollectionIdentity::ProcessedCollection { .. } => {
-            return Err(UnityYamlWorkspaceExportError::ProcessedObjectIdentity { source });
-        }
-    };
-    if object.file_index != file_index
-        || object.object_index != source.object_index
-        || object.path_id != source.path_id
-    {
-        return Err(UnityYamlWorkspaceExportError::WorkspaceIdentityMismatch {
-            source,
-            object_file_index: object.file_index,
-            object_index: object.object_index,
-            path_id: object.path_id,
-        });
-    }
+use std::str;
 
-    let file = workspace
-        .files()
-        .get(file_index)
-        .ok_or(UnityYamlWorkspaceExportError::MissingWorkspaceFile { file_index })?;
-    let metadata_object = file.metadata.objects.get(object.object_index).ok_or(
-        UnityYamlWorkspaceExportError::MissingMetadataObject {
-            file_index,
-            object_index: object.object_index,
-        },
-    )?;
-    if metadata_object.path_id != source.path_id
-        || metadata_object.resolved_type_index != object.resolved_type_index
-        || metadata_object.class_id.map(i32::from) != object.class_id.map(i32::from)
-        || crate::processing::asset_factory::resolve_read_class_id(metadata_object.raw_type_id)
-            != object.factory.class_id
-        || metadata_object.is_stripped != object.is_stripped
-    {
-        return Err(UnityYamlWorkspaceExportError::MetadataIdentityMismatch {
-            file_index,
-            object_index: object.object_index,
-        });
-    }
-    let class_id = object.factory.class_id;
-    if source.class_id != class_id {
-        return Err(UnityYamlWorkspaceExportError::ClassIdMismatch {
-            source_class_id: source.class_id,
-            object_class_id: class_id,
-        });
-    }
-    let payload =
-        object
-            .payload
-            .as_ref()
-            .map_err(|source| UnityYamlWorkspaceExportError::ObjectDecode {
-                file_index,
-                object_index: object.object_index,
-                message: source.to_string(),
-            })?;
-    if payload.object_index != object.object_index || payload.path_id != source.path_id {
-        return Err(UnityYamlWorkspaceExportError::PayloadIdentityMismatch {
-            file_index,
-            object_index: object.object_index,
-            payload_object_index: payload.object_index,
-            payload_path_id: payload.path_id,
-        });
-    }
-    if let Some(overlay) = generated_component_overlay {
-        if class_id != 1
-            || overlay.payload.object_index != payload.object_index
-            || overlay.payload.path_id != payload.path_id
-            || overlay.payload.type_name != payload.type_name
-            || overlay.payload.consumed_bytes != payload.consumed_bytes
-            || overlay.payload.trailing_bytes != payload.trailing_bytes
-            || overlay.pointer.source != source
-            || overlay.pointer.file_id <= 0
-            || overlay.pointer.path_id == 0
-            || overlay.pointer.target.class_id != 4
-            || !matches!(
-                overlay.pointer.target.collection,
-                ExportAssetCollectionIdentity::ProcessedCollection { .. }
-            )
+use crate::processing::asset_factory::{
+    reference_class_layouts, ClassLayoutSource, FactoryAssetKind, FactoryUnityVersion,
+};
+use crate::processing::scene_naming::SceneUnityVersion;
+use crate::resource::{resolve_and_read_streamed_resource_info, StreamedResourceContentResolution};
+use crate::serialized_file::object::{
+    default_value_for_type_tree_node, ObjectDefaultValueLimits, SerializedFieldValue,
+    SerializedValue,
+};
+use crate::serialized_file::object_workspace::WorkspaceObject;
+use crate::serialized_file::reference_graph::{MultiFilePPtrResolution, MultiFileReferenceGraph};
+use crate::serialized_file::workspace::SerializedFileWorkspace;
+
+use super::super::pointer_map::{
+    ProjectExportPointerMap, ProjectPointerRequest, ProjectPointerResolution,
+    UnityProjectAssetType, UnresolvedProjectPointer,
+};
+use super::super::scene_collection::{ExportAssetCollectionIdentity, ExportAssetIdentity};
+use super::super::streamed_assets::{
+    has_streamed_yaml_asset_field, prepare_streamed_yaml_asset, StreamedYamlAssetError,
+    StreamedYamlAssetKind, StreamedYamlAssetPreparation,
+};
+use super::super::unity_yaml::UnityYamlDocument;
+use super::super::value_yaml::{
+    serialized_object_value_to_unity_yaml_document, UnityYamlObjectConversionError,
+    UnityYamlObjectConversionHints, UnityYamlObjectConversionLimits, UnityYamlObjectFieldMode,
+    UnityYamlPPtrRequest,
+};
+use super::error::UnityYamlWorkspaceExportError;
+use super::model::{
+    WorkspaceGeneratedComponentYamlOverlay, WorkspaceGeneratedComponentYamlPointer,
+    WorkspaceGeneratedLightingDataYamlPointer, WorkspaceGeneratedPrefabInternalPointer,
+    WorkspaceStreamedYamlResourceContext, WorkspaceYamlExportContext,
+};
+
+pub(super) struct WorkspaceYamlObjectConversionRequest<'object> {
+    pub(super) object: &'object WorkspaceObject,
+    pub(super) source: ExportAssetIdentity,
+    pub(super) file_id: i64,
+    pub(super) generated_component_overlay: Option<&'object WorkspaceGeneratedComponentYamlOverlay>,
+    pub(super) generated_prefab_internal: Option<&'object WorkspaceGeneratedPrefabInternalPointer>,
+    pub(super) generated_lighting_data: Option<&'object WorkspaceGeneratedLightingDataYamlPointer>,
+}
+
+impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'graph, 'provider> {
+    pub(super) fn convert(
+        &self,
+        request: WorkspaceYamlObjectConversionRequest<'_>,
+    ) -> Result<Option<UnityYamlDocument>, UnityYamlWorkspaceExportError> {
+        let WorkspaceYamlObjectConversionRequest {
+            object,
+            source,
+            file_id,
+            generated_component_overlay,
+            generated_prefab_internal,
+            generated_lighting_data,
+        } = request;
+        let workspace = self.workspace;
+        let reference_graph = self.reference_graph;
+        let pointer_map = self.pointer_map;
+        let current_collection_index = self.current_collection_index;
+        let missing_reference_guid = self.missing_reference_guid;
+        let limits = self.limits;
+        let streamed_resources = self.streamed_resources.as_ref();
+        let file_index = match source.collection {
+            ExportAssetCollectionIdentity::SerializedFile { file_index } => file_index,
+            ExportAssetCollectionIdentity::ProcessedCollection { .. } => {
+                return Err(UnityYamlWorkspaceExportError::ProcessedObjectIdentity { source });
+            }
+        };
+        if object.file_index != file_index
+            || object.object_index != source.object_index
+            || object.path_id != source.path_id
         {
-            return Err(UnityYamlWorkspaceExportError::GeneratedComponentOverlayInvariant {
+            return Err(UnityYamlWorkspaceExportError::WorkspaceIdentityMismatch {
                 source,
-                message: "edited GameObject payload or planned component pointer disagrees with the source identity".to_owned(),
+                object_file_index: object.file_index,
+                object_index: object.object_index,
+                path_id: object.path_id,
             });
         }
-    }
-    if !payload.trailing_bytes.is_empty() {
-        return Err(UnityYamlWorkspaceExportError::UnparsedTrailingPayload {
-            file_index,
-            object_index: object.object_index,
-            byte_count: payload.trailing_bytes.len(),
-        });
-    }
 
-    let type_index =
-        object
-            .resolved_type_index
-            .ok_or(UnityYamlWorkspaceExportError::MissingResolvedType {
-                file_index,
-                object_index: object.object_index,
-            })?;
-    let serialized_type = file.metadata.types.get(type_index).ok_or(
-        UnityYamlWorkspaceExportError::InvalidResolvedType {
-            file_index,
-            object_index: object.object_index,
-            type_index,
-            type_count: file.metadata.types.len(),
-        },
-    )?;
-    let type_tree = object
-        .recovered_type_tree
-        .as_deref()
-        .or(serialized_type.type_tree.as_ref())
-        .ok_or(UnityYamlWorkspaceExportError::MissingTypeTree {
-            file_index,
-            object_index: object.object_index,
-            type_index,
-        })?;
-    let unity_version_text = file.metadata.prefix.unity_version_text.as_deref();
-    let unity_version = unity_version_text
-        .and_then(SceneUnityVersion::parse)
-        .ok_or_else(|| UnityYamlWorkspaceExportError::UnityVersionUnavailable {
-            file_index,
-            unity_version_text: unity_version_text.map(str::to_owned),
-        })?;
-
-    let graph_identity = reference_graph
-        .object_identity(file_index, object.object_index)
-        .ok_or(
-            UnityYamlWorkspaceExportError::ReferenceGraphIdentityMissing {
+        let file = workspace
+            .files()
+            .get(file_index)
+            .ok_or(UnityYamlWorkspaceExportError::MissingWorkspaceFile { file_index })?;
+        let metadata_object = file.metadata.objects.get(object.object_index).ok_or(
+            UnityYamlWorkspaceExportError::MissingMetadataObject {
                 file_index,
                 object_index: object.object_index,
             },
         )?;
-    if graph_identity.path_id != source.path_id {
-        return Err(
-            UnityYamlWorkspaceExportError::ReferenceGraphIdentityMismatch {
+        if metadata_object.path_id != source.path_id
+            || metadata_object.resolved_type_index != object.resolved_type_index
+            || metadata_object.class_id.map(i32::from) != object.class_id.map(i32::from)
+            || crate::processing::asset_factory::resolve_read_class_id(metadata_object.raw_type_id)
+                != object.factory.class_id
+            || metadata_object.is_stripped != object.is_stripped
+        {
+            return Err(UnityYamlWorkspaceExportError::MetadataIdentityMismatch {
                 file_index,
                 object_index: object.object_index,
-                expected_path_id: source.path_id,
-                graph_path_id: graph_identity.path_id,
-            },
-        );
-    }
-    if reference_graph.object_class_id(file_index, object.object_index) != Some(class_id) {
-        return Err(
-            UnityYamlWorkspaceExportError::ReferenceGraphClassIdMismatch {
+            });
+        }
+        let class_id = object.factory.class_id;
+        if source.class_id != class_id {
+            return Err(UnityYamlWorkspaceExportError::ClassIdMismatch {
+                source_class_id: source.class_id,
+                object_class_id: class_id,
+            });
+        }
+        let payload = object.payload.as_ref().map_err(|source| {
+            UnityYamlWorkspaceExportError::ObjectDecode {
                 file_index,
                 object_index: object.object_index,
-                expected_class_id: class_id,
-                graph_class_id: reference_graph.object_class_id(file_index, object.object_index),
-            },
-        );
-    }
-    if reference_graph.object_scan_is_complete(file_index, object.object_index) != Some(true) {
-        return Err(UnityYamlWorkspaceExportError::ReferenceScanIncomplete {
-            file_index,
-            object_index: object.object_index,
-        });
-    }
-
-    let mut streamed_export_root = None;
-    let streamed_asset_kind = if class_id == 43 {
-        Some(StreamedYamlAssetKind::Mesh)
-    } else if crate::export::project_exporter::class_interfaces(class_id).contains(&"IImageTexture")
-    {
-        Some(StreamedYamlAssetKind::ImageTexture)
-    } else {
-        None
-    };
-    if let Some(asset_kind) = streamed_asset_kind {
-        let staging_limits = streamed_resources
-            .map(|context| context.staging_limits)
-            .unwrap_or_default();
-        let has_stream =
-            has_streamed_yaml_asset_field(&payload.root, asset_kind).map_err(|source| {
-                UnityYamlWorkspaceExportError::StreamedAssetPreparation {
-                    file_index,
-                    object_index: object.object_index,
-                    source: Box::new(source),
-                }
-            })?;
-        if has_stream {
-            if payload.allocated_bytes > staging_limits.max_source_value_copy_bytes {
-                return Err(UnityYamlWorkspaceExportError::StreamedAssetPreparation {
-                    file_index,
-                    object_index: object.object_index,
-                    source: Box::new(StreamedYamlAssetError::SourceValueCopyLimitExceeded {
-                        size: payload.allocated_bytes,
-                        limit: staging_limits.max_source_value_copy_bytes,
-                    }),
-                });
+                message: source.to_string(),
             }
-            let mut export_root = payload.root.clone();
-            match prepare_streamed_yaml_asset(&mut export_root, asset_kind, None, staging_limits) {
-                Ok(
-                    StreamedYamlAssetPreparation::NoStreamField
-                    | StreamedYamlAssetPreparation::StreamUnset
-                    | StreamedYamlAssetPreparation::ExistingInlineData { .. },
-                ) => {}
-                Ok(StreamedYamlAssetPreparation::ImageTextureWithoutData) => return Ok(None),
-                Ok(StreamedYamlAssetPreparation::Materialized { .. }) => {
-                    return Err(UnityYamlWorkspaceExportError::StreamedAssetInvariant {
+        })?;
+        if payload.object_index != object.object_index || payload.path_id != source.path_id {
+            return Err(UnityYamlWorkspaceExportError::PayloadIdentityMismatch {
+                file_index,
+                object_index: object.object_index,
+                payload_object_index: payload.object_index,
+                payload_path_id: payload.path_id,
+            });
+        }
+        if let Some(overlay) = generated_component_overlay {
+            if class_id != 1
+                || overlay.payload.object_index != payload.object_index
+                || overlay.payload.path_id != payload.path_id
+                || overlay.payload.type_name != payload.type_name
+                || overlay.payload.consumed_bytes != payload.consumed_bytes
+                || overlay.payload.trailing_bytes != payload.trailing_bytes
+                || overlay.pointer.source != source
+                || overlay.pointer.file_id <= 0
+                || overlay.pointer.path_id == 0
+                || overlay.pointer.target.class_id != 4
+                || !matches!(
+                    overlay.pointer.target.collection,
+                    ExportAssetCollectionIdentity::ProcessedCollection { .. }
+                )
+            {
+                return Err(UnityYamlWorkspaceExportError::GeneratedComponentOverlayInvariant {
+                source,
+                message: "edited GameObject payload or planned component pointer disagrees with the source identity".to_owned(),
+            });
+            }
+        }
+        if !payload.trailing_bytes.is_empty() {
+            return Err(UnityYamlWorkspaceExportError::UnparsedTrailingPayload {
+                file_index,
+                object_index: object.object_index,
+                byte_count: payload.trailing_bytes.len(),
+            });
+        }
+
+        let type_index = object.resolved_type_index.ok_or(
+            UnityYamlWorkspaceExportError::MissingResolvedType {
+                file_index,
+                object_index: object.object_index,
+            },
+        )?;
+        let serialized_type = file.metadata.types.get(type_index).ok_or(
+            UnityYamlWorkspaceExportError::InvalidResolvedType {
+                file_index,
+                object_index: object.object_index,
+                type_index,
+                type_count: file.metadata.types.len(),
+            },
+        )?;
+        let type_tree = object
+            .recovered_type_tree
+            .as_deref()
+            .or(serialized_type.type_tree.as_ref())
+            .ok_or(UnityYamlWorkspaceExportError::MissingTypeTree {
+                file_index,
+                object_index: object.object_index,
+                type_index,
+            })?;
+        let unity_version_text = file.metadata.prefix.unity_version_text.as_deref();
+        let unity_version = unity_version_text
+            .and_then(SceneUnityVersion::parse)
+            .ok_or_else(|| UnityYamlWorkspaceExportError::UnityVersionUnavailable {
+                file_index,
+                unity_version_text: unity_version_text.map(str::to_owned),
+            })?;
+
+        let graph_identity = reference_graph
+            .object_identity(file_index, object.object_index)
+            .ok_or(
+                UnityYamlWorkspaceExportError::ReferenceGraphIdentityMissing {
+                    file_index,
+                    object_index: object.object_index,
+                },
+            )?;
+        if graph_identity.path_id != source.path_id {
+            return Err(
+                UnityYamlWorkspaceExportError::ReferenceGraphIdentityMismatch {
+                    file_index,
+                    object_index: object.object_index,
+                    expected_path_id: source.path_id,
+                    graph_path_id: graph_identity.path_id,
+                },
+            );
+        }
+        if reference_graph.object_class_id(file_index, object.object_index) != Some(class_id) {
+            return Err(
+                UnityYamlWorkspaceExportError::ReferenceGraphClassIdMismatch {
+                    file_index,
+                    object_index: object.object_index,
+                    expected_class_id: class_id,
+                    graph_class_id: reference_graph
+                        .object_class_id(file_index, object.object_index),
+                },
+            );
+        }
+        if reference_graph.object_scan_is_complete(file_index, object.object_index) != Some(true) {
+            return Err(UnityYamlWorkspaceExportError::ReferenceScanIncomplete {
+                file_index,
+                object_index: object.object_index,
+            });
+        }
+
+        let mut streamed_export_root = None;
+        let streamed_asset_kind = if class_id == 43 {
+            Some(StreamedYamlAssetKind::Mesh)
+        } else if crate::export::project_exporter::class_interfaces(class_id)
+            .contains(&"IImageTexture")
+        {
+            Some(StreamedYamlAssetKind::ImageTexture)
+        } else {
+            None
+        };
+        if let Some(asset_kind) = streamed_asset_kind {
+            let staging_limits = streamed_resources
+                .map(|context| context.staging_limits)
+                .unwrap_or_default();
+            let has_stream =
+                has_streamed_yaml_asset_field(&payload.root, asset_kind).map_err(|source| {
+                    UnityYamlWorkspaceExportError::StreamedAssetPreparation {
                         file_index,
                         object_index: object.object_index,
-                        message: "staging reported materialization without supplied bytes"
-                            .to_owned(),
+                        source: Box::new(source),
+                    }
+                })?;
+            if has_stream {
+                if payload.allocated_bytes > staging_limits.max_source_value_copy_bytes {
+                    return Err(UnityYamlWorkspaceExportError::StreamedAssetPreparation {
+                        file_index,
+                        object_index: object.object_index,
+                        source: Box::new(StreamedYamlAssetError::SourceValueCopyLimitExceeded {
+                            size: payload.allocated_bytes,
+                            limit: staging_limits.max_source_value_copy_bytes,
+                        }),
                     });
                 }
-                Err(StreamedYamlAssetError::StreamContentRequired { resource }) => {
-                    if asset_kind == StreamedYamlAssetKind::ImageTexture && resource.size == 0 {
-                        return Ok(None);
-                    }
-                    let Some(context) = streamed_resources else {
-                        return Err(UnityYamlWorkspaceExportError::StreamedAssetPreparation {
+                let mut export_root = payload.root.clone();
+                match prepare_streamed_yaml_asset(
+                    &mut export_root,
+                    asset_kind,
+                    None,
+                    staging_limits,
+                ) {
+                    Ok(
+                        StreamedYamlAssetPreparation::NoStreamField
+                        | StreamedYamlAssetPreparation::StreamUnset
+                        | StreamedYamlAssetPreparation::ExistingInlineData { .. },
+                    ) => {}
+                    Ok(StreamedYamlAssetPreparation::ImageTextureWithoutData) => return Ok(None),
+                    Ok(StreamedYamlAssetPreparation::Materialized { .. }) => {
+                        return Err(UnityYamlWorkspaceExportError::StreamedAssetInvariant {
                             file_index,
                             object_index: object.object_index,
-                            source: Box::new(StreamedYamlAssetError::StreamContentRequired {
-                                resource: resource.clone(),
-                            }),
+                            message: "staging reported materialization without supplied bytes"
+                                .to_owned(),
                         });
-                    };
-                    let resolution = resolve_and_read_streamed_resource_info(
-                        context.filesystem,
-                        workspace,
-                        file.container_bundle_index,
-                        &resource,
-                        context.root_catalog,
-                        context.provider,
-                        context.content_limits,
-                    )
-                    .map_err(|source| {
-                        UnityYamlWorkspaceExportError::StreamedResourceResolution {
-                            file_index,
-                            object_index: object.object_index,
-                            path: resource.path.clone(),
-                            source: Box::new(source),
+                    }
+                    Err(StreamedYamlAssetError::StreamContentRequired { resource }) => {
+                        if asset_kind == StreamedYamlAssetKind::ImageTexture && resource.size == 0 {
+                            return Ok(None);
                         }
-                    })?;
-                    let bytes = match resolution {
-                        StreamedResourceContentResolution::Resolved { bytes, .. } => bytes,
-                        StreamedResourceContentResolution::Missing {
-                            unavailable_data_paths,
-                        } => {
-                            return Err(UnityYamlWorkspaceExportError::StreamedResourceMissing {
+                        let Some(context) = streamed_resources else {
+                            return Err(UnityYamlWorkspaceExportError::StreamedAssetPreparation {
                                 file_index,
                                 object_index: object.object_index,
-                                path: resource.path,
-                                unavailable_data_paths,
+                                source: Box::new(StreamedYamlAssetError::StreamContentRequired {
+                                    resource: resource.clone(),
+                                }),
                             });
-                        }
-                        StreamedResourceContentResolution::Unset => {
-                            return Err(
+                        };
+                        let resolution = resolve_and_read_streamed_resource_info(
+                            context.filesystem,
+                            workspace,
+                            file.container_bundle_index,
+                            &resource,
+                            context.root_catalog,
+                            context.provider,
+                            context.content_limits,
+                        )
+                        .map_err(|source| {
+                            UnityYamlWorkspaceExportError::StreamedResourceResolution {
+                                file_index,
+                                object_index: object.object_index,
+                                path: resource.path.clone(),
+                                source: Box::new(source),
+                            }
+                        })?;
+                        let bytes = match resolution {
+                            StreamedResourceContentResolution::Resolved { bytes, .. } => bytes,
+                            StreamedResourceContentResolution::Missing {
+                                unavailable_data_paths,
+                            } => {
+                                return Err(
+                                    UnityYamlWorkspaceExportError::StreamedResourceMissing {
+                                        file_index,
+                                        object_index: object.object_index,
+                                        path: resource.path,
+                                        unavailable_data_paths,
+                                    },
+                                );
+                            }
+                            StreamedResourceContentResolution::Unset => {
+                                return Err(
                                 UnityYamlWorkspaceExportError::StreamedResourceUnexpectedUnset {
                                     file_index,
                                     object_index: object.object_index,
                                     path: resource.path,
                                 },
                             );
+                            }
+                        };
+                        if asset_kind == StreamedYamlAssetKind::ImageTexture && bytes.is_empty() {
+                            return Ok(None);
                         }
-                    };
-                    if asset_kind == StreamedYamlAssetKind::ImageTexture && bytes.is_empty() {
-                        return Ok(None);
+                        let preparation = prepare_streamed_yaml_asset(
+                            &mut export_root,
+                            asset_kind,
+                            Some(&bytes),
+                            context.staging_limits,
+                        )
+                        .map_err(|source| {
+                            UnityYamlWorkspaceExportError::StreamedAssetPreparation {
+                                file_index,
+                                object_index: object.object_index,
+                                source: Box::new(source),
+                            }
+                        })?;
+                        if preparation == StreamedYamlAssetPreparation::ImageTextureWithoutData {
+                            return Ok(None);
+                        }
                     }
-                    let preparation = prepare_streamed_yaml_asset(
-                        &mut export_root,
-                        asset_kind,
-                        Some(&bytes),
-                        context.staging_limits,
-                    )
-                    .map_err(|source| {
-                        UnityYamlWorkspaceExportError::StreamedAssetPreparation {
+                    Err(source) => {
+                        return Err(UnityYamlWorkspaceExportError::StreamedAssetPreparation {
                             file_index,
                             object_index: object.object_index,
                             source: Box::new(source),
-                        }
-                    })?;
-                    if preparation == StreamedYamlAssetPreparation::ImageTextureWithoutData {
-                        return Ok(None);
+                        });
                     }
                 }
-                Err(source) => {
-                    return Err(UnityYamlWorkspaceExportError::StreamedAssetPreparation {
-                        file_index,
-                        object_index: object.object_index,
-                        source: Box::new(source),
-                    });
-                }
+                streamed_export_root = Some(export_root);
             }
-            streamed_export_root = Some(export_root);
         }
-    }
-    let mut export_root = streamed_export_root
-        .or_else(|| generated_component_overlay.map(|overlay| overlay.payload.root.clone()));
-    if let Some(pointer) = generated_prefab_internal {
-        if export_root.is_none() {
-            export_root = Some(payload.root.clone());
+        let mut export_root = streamed_export_root
+            .or_else(|| generated_component_overlay.map(|overlay| overlay.payload.root.clone()));
+        if let Some(pointer) = generated_prefab_internal {
+            if export_root.is_none() {
+                export_root = Some(payload.root.clone());
+            }
+            let Some(root) = export_root.as_mut() else {
+                return Err(UnityYamlWorkspaceExportError::GeneratedPrefabInvariant {
+                    source,
+                    message: "generated Prefab pointer overlay has no object value".to_owned(),
+                });
+            };
+            apply_generated_prefab_internal_overlay(root, pointer)?;
         }
-        let Some(root) = export_root.as_mut() else {
-            return Err(UnityYamlWorkspaceExportError::GeneratedPrefabInvariant {
-                source,
-                message: "generated Prefab pointer overlay has no object value".to_owned(),
-            });
-        };
-        apply_generated_prefab_internal_overlay(root, pointer)?;
-    }
-    let mut generated_lighting_data_field_path = None;
-    if let Some(pointer) = generated_lighting_data.filter(|pointer| pointer.source == source) {
-        if source.class_id != 157 {
-            return Err(UnityYamlWorkspaceExportError::GeneratedLightingDataInvariant {
+        let mut generated_lighting_data_field_path = None;
+        if let Some(pointer) = generated_lighting_data.filter(|pointer| pointer.source == source) {
+            if source.class_id != 157 {
+                return Err(UnityYamlWorkspaceExportError::GeneratedLightingDataInvariant {
                 source,
                 message: format!(
                     "planned LightingDataAsset pointer belongs to class {}, expected LightmapSettings class 157",
                     source.class_id
                 ),
             });
-        }
-        if export_root.is_none() {
-            export_root = Some(payload.root.clone());
-        }
-        let Some(root) = export_root.as_mut() else {
-            return Err(
-                UnityYamlWorkspaceExportError::GeneratedLightingDataInvariant {
-                    source,
-                    message: "LightmapSettings pointer overlay has no decoded value".to_owned(),
-                },
+            }
+            if export_root.is_none() {
+                export_root = Some(payload.root.clone());
+            }
+            let Some(root) = export_root.as_mut() else {
+                return Err(
+                    UnityYamlWorkspaceExportError::GeneratedLightingDataInvariant {
+                        source,
+                        message: "LightmapSettings pointer overlay has no decoded value".to_owned(),
+                    },
+                );
+            };
+            generated_lighting_data_field_path = Some(
+                apply_generated_lighting_data_pointer_overlay(root, pointer)?,
             );
-        };
-        generated_lighting_data_field_path = Some(apply_generated_lighting_data_pointer_overlay(
-            root, pointer,
-        )?);
-    }
-    let export_root = export_root.as_ref().unwrap_or(&payload.root);
+        }
+        let export_root = export_root.as_ref().unwrap_or(&payload.root);
 
-    let mut editor_manager_type_tree = None;
-    let mut editor_manager_root = None;
-    if matches!(class_id, 104 | 157)
-        && matches!(&object.factory.kind, FactoryAssetKind::Generated(_))
-    {
-        let unity_version_text = unity_version_text.ok_or_else(|| {
-            UnityYamlWorkspaceExportError::SceneManagerEditorFormatInvariant {
-                source,
-                message: "source Unity version is unavailable".to_owned(),
-            }
-        })?;
-        let factory_version = FactoryUnityVersion::parse(unity_version_text).ok_or_else(|| {
-            UnityYamlWorkspaceExportError::SceneManagerEditorFormatInvariant {
-                source,
-                message: format!("source Unity version {unity_version_text:?} is invalid"),
-            }
-        })?;
-        let (_, editor_tree) = reference_class_layouts()
+        let mut editor_manager_type_tree = None;
+        let mut editor_manager_root = None;
+        if matches!(class_id, 104 | 157)
+            && matches!(&object.factory.kind, FactoryAssetKind::Generated(_))
+        {
+            let unity_version_text = unity_version_text.ok_or_else(|| {
+                UnityYamlWorkspaceExportError::SceneManagerEditorFormatInvariant {
+                    source,
+                    message: "source Unity version is unavailable".to_owned(),
+                }
+            })?;
+            let factory_version =
+                FactoryUnityVersion::parse(unity_version_text).ok_or_else(|| {
+                    UnityYamlWorkspaceExportError::SceneManagerEditorFormatInvariant {
+                        source,
+                        message: format!("source Unity version {unity_version_text:?} is invalid"),
+                    }
+                })?;
+            let (_, editor_tree) = reference_class_layouts()
             .tpk_trees(class_id, &factory_version)
             .map_err(|error| {
                 UnityYamlWorkspaceExportError::SceneManagerEditorFormatInvariant {
@@ -381,28 +438,28 @@ fn workspace_object_to_unity_yaml_document_with_context(
                     ),
                 }
             })?;
-        let editor_type_name = editor_tree
-            .nodes
-            .first()
-            .and_then(|node| node.type_name.as_deref())
-            .ok_or_else(
-                || UnityYamlWorkspaceExportError::SceneManagerEditorFormatInvariant {
-                    source,
-                    message: "reference editor TypeTree has no root type name".to_owned(),
-                },
-            )?;
-        let source_type_name = type_tree
-            .nodes
-            .first()
-            .and_then(|node| node.type_name.as_deref())
-            .ok_or_else(
-                || UnityYamlWorkspaceExportError::SceneManagerEditorFormatInvariant {
-                    source,
-                    message: "source TypeTree has no root type name".to_owned(),
-                },
-            )?;
-        if editor_type_name != source_type_name {
-            return Err(
+            let editor_type_name = editor_tree
+                .nodes
+                .first()
+                .and_then(|node| node.type_name.as_deref())
+                .ok_or_else(|| {
+                    UnityYamlWorkspaceExportError::SceneManagerEditorFormatInvariant {
+                        source,
+                        message: "reference editor TypeTree has no root type name".to_owned(),
+                    }
+                })?;
+            let source_type_name = type_tree
+                .nodes
+                .first()
+                .and_then(|node| node.type_name.as_deref())
+                .ok_or_else(|| {
+                    UnityYamlWorkspaceExportError::SceneManagerEditorFormatInvariant {
+                        source,
+                        message: "source TypeTree has no root type name".to_owned(),
+                    }
+                })?;
+            if editor_type_name != source_type_name {
+                return Err(
                 UnityYamlWorkspaceExportError::SceneManagerEditorFormatInvariant {
                     source,
                     message: format!(
@@ -410,220 +467,229 @@ fn workspace_object_to_unity_yaml_document_with_context(
                     ),
                 },
             );
-        }
-        let mut root = default_value_for_type_tree_node(
-            &editor_tree,
-            object.object_index,
-            0,
-            ObjectDefaultValueLimits::default(),
-        )
-        .map_err(|error| {
-            UnityYamlWorkspaceExportError::SceneManagerEditorFormatInvariant {
-                source,
-                message: format!("could not construct editor defaults: {error}"),
             }
-        })?;
-        merge_editor_default_value(&mut root, export_root, "").map_err(|message| {
-            UnityYamlWorkspaceExportError::SceneManagerEditorFormatInvariant { source, message }
-        })?;
-        ensure_scene_manager_hide_flags(&mut root).map_err(|message| {
-            UnityYamlWorkspaceExportError::SceneManagerEditorFormatInvariant { source, message }
-        })?;
-        if class_id == 157 {
-            apply_lightmap_settings_editor_defaults(&mut root).map_err(|message| {
+            let mut root = default_value_for_type_tree_node(
+                &editor_tree,
+                object.object_index,
+                0,
+                ObjectDefaultValueLimits::default(),
+            )
+            .map_err(|error| {
+                UnityYamlWorkspaceExportError::SceneManagerEditorFormatInvariant {
+                    source,
+                    message: format!("could not construct editor defaults: {error}"),
+                }
+            })?;
+            merge_editor_default_value(&mut root, export_root, "").map_err(|message| {
                 UnityYamlWorkspaceExportError::SceneManagerEditorFormatInvariant { source, message }
             })?;
-        }
-        editor_manager_type_tree = Some(editor_tree);
-        editor_manager_root = Some(root);
-        if let Some(pointer) = generated_lighting_data.filter(|pointer| pointer.source == source) {
-            let Some(root) = editor_manager_root.as_mut() else {
-                return Err(
+            ensure_scene_manager_hide_flags(&mut root).map_err(|message| {
+                UnityYamlWorkspaceExportError::SceneManagerEditorFormatInvariant { source, message }
+            })?;
+            if class_id == 157 {
+                apply_lightmap_settings_editor_defaults(&mut root).map_err(|message| {
+                    UnityYamlWorkspaceExportError::SceneManagerEditorFormatInvariant {
+                        source,
+                        message,
+                    }
+                })?;
+            }
+            editor_manager_type_tree = Some(editor_tree);
+            editor_manager_root = Some(root);
+            if let Some(pointer) =
+                generated_lighting_data.filter(|pointer| pointer.source == source)
+            {
+                let Some(root) = editor_manager_root.as_mut() else {
+                    return Err(
                     UnityYamlWorkspaceExportError::GeneratedLightingDataInvariant {
                         source,
                         message: "editor LightmapSettings root is unavailable for the generated pointer overlay"
                             .to_owned(),
                     },
                 );
-            };
-            generated_lighting_data_field_path = Some(
-                apply_generated_lighting_data_pointer_overlay(root, pointer)?,
-            );
+                };
+                generated_lighting_data_field_path = Some(
+                    apply_generated_lighting_data_pointer_overlay(root, pointer)?,
+                );
+            }
         }
-    }
-    // Keep the decoded release/generated tree distinct from the editor tree. The editor
-    // format needs defaults from its TypeTree, while conversion hints for fields omitted
-    // from that editor layout must fall back to the original source layout.
-    let source_type_tree = type_tree;
-    let type_tree = editor_manager_type_tree
-        .as_ref()
-        .map_or(type_tree, |tree| tree.as_ref());
-    let type_root =
-        type_tree
-            .nodes
-            .first()
-            .ok_or(UnityYamlWorkspaceExportError::EmptyTypeTree {
-                file_index,
-                object_index: object.object_index,
-                type_index,
-            })?;
-    let export_root = editor_manager_root.as_ref().unwrap_or(export_root);
-    let mut hints =
-        UnityYamlObjectConversionHints::from_type_tree(type_tree, unity_version, limits)
-            .map_err(UnityYamlWorkspaceExportError::Conversion)?;
-    if editor_manager_type_tree.is_some() {
-        let source_hints =
-            UnityYamlObjectConversionHints::from_type_tree(source_type_tree, unity_version, limits)
+        // Keep the decoded release/generated tree distinct from the editor tree. The editor
+        // format needs defaults from its TypeTree, while conversion hints for fields omitted
+        // from that editor layout must fall back to the original source layout.
+        let source_type_tree = type_tree;
+        let type_tree = editor_manager_type_tree
+            .as_ref()
+            .map_or(type_tree, |tree| tree.as_ref());
+        let type_root =
+            type_tree
+                .nodes
+                .first()
+                .ok_or(UnityYamlWorkspaceExportError::EmptyTypeTree {
+                    file_index,
+                    object_index: object.object_index,
+                    type_index,
+                })?;
+        let export_root = editor_manager_root.as_ref().unwrap_or(export_root);
+        let mut hints =
+            UnityYamlObjectConversionHints::from_type_tree(type_tree, unity_version, limits)
                 .map_err(UnityYamlWorkspaceExportError::Conversion)?;
-        merge_editor_yaml_hints_with_source_fallback(&mut hints, source_hints)
-            .map_err(UnityYamlWorkspaceExportError::Conversion)?;
-    }
-    let generated_game_object_or_transform =
-        matches!(class_id, 1 | 4) && matches!(&object.factory.kind, FactoryAssetKind::Generated(_));
-    if generated_game_object_or_transform
-        || matches!(class_id, 104 | 157)
-        || (generated_prefab_internal.is_some()
-            && matches!(&object.factory.kind, FactoryAssetKind::Generated(_)))
-    {
-        // Generated source classes walk their original member names. TPK recovery has already
-        // selected the class layout; YAML compatibility aliases would rename serialized fields.
-        hints.field_name_aliases.clear();
-        hints.preserve_type_tree_field_names = true;
-    }
-
-    let mut pointer_error = None;
-    let mut generated_component_pointer_seen = false;
-    let mut generated_prefab_internal_pointer_seen = false;
-    let mut generated_lighting_data_pointer_seen = false;
-    let mut generated_lighting_data_pointer_observations = Vec::new();
-    let document = serialized_object_value_to_unity_yaml_document(
-        source,
-        &payload.type_name,
-        type_root.version,
-        file_id,
-        // SerializedFile's stripped bit selects a serialized type layout; the baseline YAML
-        // marker comes from the owning hierarchy's StrippedAssets set, which is not wired
-        // here (see `is_stripped_document` for the decision shape).
-        false,
-        export_root,
-        &hints,
-        UnityYamlObjectFieldMode::ProjectAsset,
-        unity_version,
-        missing_reference_guid,
-        limits,
-        |request| {
-            if generated_lighting_data.is_some()
-                && generated_lighting_data_pointer_observations.len() < 16
-            {
-                generated_lighting_data_pointer_observations.push(format!(
-                    "source {:?}, field {:?}, fileID {}, PathID {}",
-                    request.source, request.field_path, request.file_id, request.path_id
-                ));
-            }
-            if let (Some(pointer), Some(field_path)) = (
-                generated_lighting_data,
-                generated_lighting_data_field_path.as_deref(),
-            ) {
-                if request.source == pointer.source && request.field_path == field_path {
-                    return resolve_generated_lighting_data_pointer(
-                        request,
-                        pointer,
-                        pointer_map,
-                        current_collection_index,
-                        &mut generated_lighting_data_pointer_seen,
-                        &mut pointer_error,
-                    );
-                }
-            }
-            if let Some(pointer) = generated_prefab_internal {
-                if request.source == pointer.source
-                    && request.field_path.rsplit('.').next() == Some("m_PrefabInternal")
-                {
-                    return resolve_generated_prefab_internal_pointer(
-                        request,
-                        pointer,
-                        pointer_map,
-                        current_collection_index,
-                        &mut generated_prefab_internal_pointer_seen,
-                        &mut pointer_error,
-                    );
-                }
-            }
-            if let Some(overlay) = generated_component_overlay {
-                if request.source == overlay.pointer.source
-                    && request.field_path == overlay.pointer.field_path
-                {
-                    return resolve_generated_component_pointer(
-                        request,
-                        &overlay.pointer,
-                        pointer_map,
-                        current_collection_index,
-                        &mut generated_component_pointer_seen,
-                        &mut pointer_error,
-                    );
-                }
-            }
-            resolve_workspace_pointer(
-                request,
-                reference_graph,
-                pointer_map,
-                current_collection_index,
-                &mut pointer_error,
+        if editor_manager_type_tree.is_some() {
+            let source_hints = UnityYamlObjectConversionHints::from_type_tree(
+                source_type_tree,
+                unity_version,
+                limits,
             )
-        },
-    );
-    if let Some(error) = pointer_error {
-        return Err(error);
-    }
-    let document = document.map_err(UnityYamlWorkspaceExportError::Conversion)?;
-    if generated_component_overlay.is_some() && !generated_component_pointer_seen {
-        return Err(
-            UnityYamlWorkspaceExportError::GeneratedComponentOverlayInvariant {
-                source,
-                message: "generated component PPtr was not visited by the YAML walker".to_owned(),
+            .map_err(UnityYamlWorkspaceExportError::Conversion)?;
+            merge_editor_yaml_hints_with_source_fallback(&mut hints, source_hints)
+                .map_err(UnityYamlWorkspaceExportError::Conversion)?;
+        }
+        let generated_game_object_or_transform = matches!(class_id, 1 | 4)
+            && matches!(&object.factory.kind, FactoryAssetKind::Generated(_));
+        if generated_game_object_or_transform
+            || matches!(class_id, 104 | 157)
+            || (generated_prefab_internal.is_some()
+                && matches!(&object.factory.kind, FactoryAssetKind::Generated(_)))
+        {
+            // Generated source classes walk their original member names. TPK recovery has already
+            // selected the class layout; YAML compatibility aliases would rename serialized fields.
+            hints.field_name_aliases.clear();
+            hints.preserve_type_tree_field_names = true;
+        }
+
+        let mut pointer_error = None;
+        let mut generated_component_pointer_seen = false;
+        let mut generated_prefab_internal_pointer_seen = false;
+        let mut generated_lighting_data_pointer_seen = false;
+        let mut generated_lighting_data_pointer_observations = Vec::new();
+        let document = serialized_object_value_to_unity_yaml_document(
+            source,
+            &payload.type_name,
+            type_root.version,
+            file_id,
+            // SerializedFile's stripped bit selects a serialized type layout; the baseline YAML
+            // marker comes from the owning hierarchy's StrippedAssets set, which is not wired
+            // here (see `is_stripped_document` for the decision shape).
+            false,
+            export_root,
+            &hints,
+            UnityYamlObjectFieldMode::ProjectAsset,
+            unity_version,
+            missing_reference_guid,
+            limits,
+            |request| {
+                if generated_lighting_data.is_some()
+                    && generated_lighting_data_pointer_observations.len() < 16
+                {
+                    generated_lighting_data_pointer_observations.push(format!(
+                        "source {:?}, field {:?}, fileID {}, PathID {}",
+                        request.source, request.field_path, request.file_id, request.path_id
+                    ));
+                }
+                if let (Some(pointer), Some(field_path)) = (
+                    generated_lighting_data,
+                    generated_lighting_data_field_path.as_deref(),
+                ) {
+                    if request.source == pointer.source && request.field_path == field_path {
+                        return resolve_generated_lighting_data_pointer(
+                            request,
+                            pointer,
+                            pointer_map,
+                            current_collection_index,
+                            &mut generated_lighting_data_pointer_seen,
+                            &mut pointer_error,
+                        );
+                    }
+                }
+                if let Some(pointer) = generated_prefab_internal {
+                    if request.source == pointer.source
+                        && request.field_path.rsplit('.').next() == Some("m_PrefabInternal")
+                    {
+                        return resolve_generated_prefab_internal_pointer(
+                            request,
+                            pointer,
+                            pointer_map,
+                            current_collection_index,
+                            &mut generated_prefab_internal_pointer_seen,
+                            &mut pointer_error,
+                        );
+                    }
+                }
+                if let Some(overlay) = generated_component_overlay {
+                    if request.source == overlay.pointer.source
+                        && request.field_path == overlay.pointer.field_path
+                    {
+                        return resolve_generated_component_pointer(
+                            request,
+                            &overlay.pointer,
+                            pointer_map,
+                            current_collection_index,
+                            &mut generated_component_pointer_seen,
+                            &mut pointer_error,
+                        );
+                    }
+                }
+                resolve_workspace_pointer(
+                    request,
+                    reference_graph,
+                    pointer_map,
+                    current_collection_index,
+                    &mut pointer_error,
+                )
             },
         );
-    }
-    if generated_prefab_internal.is_some() && !generated_prefab_internal_pointer_seen {
-        return Err(UnityYamlWorkspaceExportError::GeneratedPrefabInvariant {
-            source,
-            message: "generated m_PrefabInternal PPtr was not visited by the YAML walker"
-                .to_owned(),
-        });
-    }
-    if generated_lighting_data_field_path.is_some() && !generated_lighting_data_pointer_seen {
-        let field_path = generated_lighting_data_field_path
-            .as_deref()
-            .unwrap_or("<missing>");
-        let root_fields = export_root
-            .struct_fields()
-            .map(|fields| {
-                fields
-                    .iter()
-                    .map(|field| field.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            })
-            .unwrap_or_else(|| "<non-struct>".to_owned());
-        let pointer_value = export_root
-            .unique_field_in_base_chain("m_LightingDataAsset")
-            .map(|value| format!("{value:?}"))
-            .unwrap_or_else(|error| format!("<lookup failed: {error}>"));
-        let pointer_observation = if generated_lighting_data_pointer_observations.is_empty() {
-            "no non-null class-157 PPtr was presented to the pointer resolver".to_owned()
-        } else {
-            generated_lighting_data_pointer_observations.join("; ")
-        };
-        let root_special_schemas = format!(
-            "SceneObjectIdentifier={}, Hash128={}",
-            hints.scene_object_identifier_schemas.contains_key(""),
-            hints.hash128_schemas.contains_key("")
-        );
-        let lightmaps_value = export_root
-            .unique_field_in_base_chain("m_Lightmaps")
-            .map(|value| format!("{value:?}"))
-            .unwrap_or_else(|error| format!("<lookup failed: {error}>"));
-        return Err(
+        if let Some(error) = pointer_error {
+            return Err(error);
+        }
+        let document = document.map_err(UnityYamlWorkspaceExportError::Conversion)?;
+        if generated_component_overlay.is_some() && !generated_component_pointer_seen {
+            return Err(
+                UnityYamlWorkspaceExportError::GeneratedComponentOverlayInvariant {
+                    source,
+                    message: "generated component PPtr was not visited by the YAML walker"
+                        .to_owned(),
+                },
+            );
+        }
+        if generated_prefab_internal.is_some() && !generated_prefab_internal_pointer_seen {
+            return Err(UnityYamlWorkspaceExportError::GeneratedPrefabInvariant {
+                source,
+                message: "generated m_PrefabInternal PPtr was not visited by the YAML walker"
+                    .to_owned(),
+            });
+        }
+        if generated_lighting_data_field_path.is_some() && !generated_lighting_data_pointer_seen {
+            let field_path = generated_lighting_data_field_path
+                .as_deref()
+                .unwrap_or("<missing>");
+            let root_fields = export_root
+                .struct_fields()
+                .map(|fields| {
+                    fields
+                        .iter()
+                        .map(|field| field.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_else(|| "<non-struct>".to_owned());
+            let pointer_value = export_root
+                .unique_field_in_base_chain("m_LightingDataAsset")
+                .map(|value| format!("{value:?}"))
+                .unwrap_or_else(|error| format!("<lookup failed: {error}>"));
+            let pointer_observation = if generated_lighting_data_pointer_observations.is_empty() {
+                "no non-null class-157 PPtr was presented to the pointer resolver".to_owned()
+            } else {
+                generated_lighting_data_pointer_observations.join("; ")
+            };
+            let root_special_schemas = format!(
+                "SceneObjectIdentifier={}, Hash128={}",
+                hints.scene_object_identifier_schemas.contains_key(""),
+                hints.hash128_schemas.contains_key("")
+            );
+            let lightmaps_value = export_root
+                .unique_field_in_base_chain("m_Lightmaps")
+                .map(|value| format!("{value:?}"))
+                .unwrap_or_else(|error| format!("<lookup failed: {error}>"));
+            return Err(
             UnityYamlWorkspaceExportError::GeneratedLightingDataInvariant {
                 source,
                 message: format!(
@@ -631,8 +697,9 @@ fn workspace_object_to_unity_yaml_document_with_context(
                 ),
             },
         );
+        }
+        Ok(Some(document))
     }
-    Ok(Some(document))
 }
 
 fn resolve_generated_component_pointer(
@@ -1448,174 +1515,71 @@ fn resolve_workspace_pointer(
     }
 }
 
-#[derive(Debug)]
-pub enum UnityYamlWorkspaceExportError {
-    ProcessedObjectIdentity {
-        source: ExportAssetIdentity,
-    },
-    GeneratedTransformInvariant {
-        source: ExportAssetIdentity,
-        message: String,
-    },
-    GeneratedComponentOverlayInvariant {
-        source: ExportAssetIdentity,
-        message: String,
-    },
-    GeneratedPrefabInvariant {
-        source: ExportAssetIdentity,
-        message: String,
-    },
-    GeneratedLightingDataInvariant {
-        source: ExportAssetIdentity,
-        message: String,
-    },
-    SceneManagerEditorFormatInvariant {
-        source: ExportAssetIdentity,
-        message: String,
-    },
-    ImageTextureSkippedWithoutContent {
-        source: ExportAssetIdentity,
-    },
-    WorkspaceIdentityMismatch {
-        source: ExportAssetIdentity,
-        object_file_index: usize,
-        object_index: usize,
-        path_id: i64,
-    },
-    MissingWorkspaceFile {
-        file_index: usize,
-    },
-    MissingMetadataObject {
-        file_index: usize,
-        object_index: usize,
-    },
-    MetadataIdentityMismatch {
-        file_index: usize,
-        object_index: usize,
-    },
-    MissingClassId {
-        file_index: usize,
-        object_index: usize,
-    },
-    ClassIdMismatch {
-        source_class_id: i32,
-        object_class_id: i32,
-    },
-    ObjectDecode {
-        file_index: usize,
-        object_index: usize,
-        message: String,
-    },
-    PayloadIdentityMismatch {
-        file_index: usize,
-        object_index: usize,
-        payload_object_index: usize,
-        payload_path_id: i64,
-    },
-    UnparsedTrailingPayload {
-        file_index: usize,
-        object_index: usize,
-        byte_count: usize,
-    },
-    MissingResolvedType {
-        file_index: usize,
-        object_index: usize,
-    },
-    InvalidResolvedType {
-        file_index: usize,
-        object_index: usize,
-        type_index: usize,
-        type_count: usize,
-    },
-    MissingTypeTree {
-        file_index: usize,
-        object_index: usize,
-        type_index: usize,
-    },
-    EmptyTypeTree {
-        file_index: usize,
-        object_index: usize,
-        type_index: usize,
-    },
-    UnityVersionUnavailable {
-        file_index: usize,
-        unity_version_text: Option<String>,
-    },
-    ReferenceGraphIdentityMissing {
-        file_index: usize,
-        object_index: usize,
-    },
-    ReferenceGraphIdentityMismatch {
-        file_index: usize,
-        object_index: usize,
-        expected_path_id: i64,
-        graph_path_id: i64,
-    },
-    ReferenceGraphClassIdMismatch {
-        file_index: usize,
-        object_index: usize,
-        expected_class_id: i32,
-        graph_class_id: Option<i32>,
-    },
-    ReferenceScanIncomplete {
-        file_index: usize,
-        object_index: usize,
-    },
-    ReferenceEdgeMissing {
-        file_index: usize,
-        object_index: usize,
-        field_path: String,
-        file_id: i32,
-        path_id: i64,
-    },
-    ReferenceEdgeAmbiguous {
-        file_index: usize,
-        object_index: usize,
-        field_path: String,
-        file_id: i32,
-        path_id: i64,
-    },
-    NonNullPointerResolvedAsNull {
-        file_index: usize,
-        object_index: usize,
-        field_path: String,
-        path_id: i64,
-    },
-    ReferenceTargetIdentityMissing {
-        file_index: usize,
-        object_index: usize,
-    },
-    ReferenceTargetClassIdMissing {
-        file_index: usize,
-        object_index: usize,
-    },
-    StreamedAssetPreparation {
-        file_index: usize,
-        object_index: usize,
-        source: Box<StreamedYamlAssetError>,
-    },
-    StreamedResourceResolution {
-        file_index: usize,
-        object_index: usize,
-        path: String,
-        source: Box<StreamedResourceContentError>,
-    },
-    StreamedResourceMissing {
-        file_index: usize,
-        object_index: usize,
-        path: String,
-        unavailable_data_paths: Vec<String>,
-    },
-    StreamedResourceUnexpectedUnset {
-        file_index: usize,
-        object_index: usize,
-        path: String,
-    },
-    StreamedAssetInvariant {
-        file_index: usize,
-        object_index: usize,
-        message: String,
-    },
-    PointerMap(ExportPointerMapError),
-    Conversion(UnityYamlObjectConversionError),
+/// Convert one workspace object using the established positional export entry point.
+#[allow(clippy::too_many_arguments)]
+pub fn workspace_object_to_unity_yaml_document(
+    workspace: &SerializedFileWorkspace,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+    pointer_map: &ProjectExportPointerMap,
+    object: &WorkspaceObject,
+    source: ExportAssetIdentity,
+    file_id: i64,
+    current_collection_index: usize,
+    missing_reference_guid: Option<[u8; 16]>,
+    limits: UnityYamlObjectConversionLimits,
+) -> Result<UnityYamlDocument, UnityYamlWorkspaceExportError> {
+    let context = WorkspaceYamlExportContext::new(
+        workspace,
+        reference_graph,
+        pointer_map,
+        current_collection_index,
+        missing_reference_guid,
+        limits,
+    );
+    let Some(document) = context.convert(WorkspaceYamlObjectConversionRequest {
+        object,
+        source,
+        file_id,
+        generated_component_overlay: None,
+        generated_prefab_internal: None,
+        generated_lighting_data: None,
+    })?
+    else {
+        return Err(UnityYamlWorkspaceExportError::ImageTextureSkippedWithoutContent { source });
+    };
+    Ok(document)
+}
+
+/// Convert one workspace object while resolving streamed data for Mesh and image-texture YAML.
+/// Returns `None` when the baseline exporter skips an image texture with no usable data.
+#[allow(clippy::too_many_arguments)]
+pub fn workspace_object_to_unity_yaml_document_with_streamed_resources(
+    workspace: &SerializedFileWorkspace,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+    pointer_map: &ProjectExportPointerMap,
+    object: &WorkspaceObject,
+    source: ExportAssetIdentity,
+    file_id: i64,
+    current_collection_index: usize,
+    missing_reference_guid: Option<[u8; 16]>,
+    limits: UnityYamlObjectConversionLimits,
+    streamed_resources: &WorkspaceStreamedYamlResourceContext<'_, '_>,
+) -> Result<Option<UnityYamlDocument>, UnityYamlWorkspaceExportError> {
+    WorkspaceYamlExportContext::new(
+        workspace,
+        reference_graph,
+        pointer_map,
+        current_collection_index,
+        missing_reference_guid,
+        limits,
+    )
+    .with_streamed_resources(streamed_resources)
+    .convert(WorkspaceYamlObjectConversionRequest {
+        object,
+        source,
+        file_id,
+        generated_component_overlay: None,
+        generated_prefab_internal: None,
+        generated_lighting_data: None,
+    })
 }
