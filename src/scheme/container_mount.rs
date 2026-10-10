@@ -852,6 +852,68 @@ fn mount_unityfs_stream_tree_at(
             continue;
         }
 
+        if child_kind == Some(FileKind::UnityWebData) {
+            let child_depth = depth.checked_add(1).ok_or_else(|| {
+                ContainerMountError::new(
+                    state.report.clone(),
+                    ContainerMountErrorKind::NestingDepthLimitExceeded {
+                        depth: usize::MAX,
+                        limit: state.limits.max_depth,
+                    },
+                )
+            })?;
+            let child_size = entry_stream.length().map_err(|source| {
+                ContainerMountError::new(
+                    state.report.clone(),
+                    ContainerMountErrorKind::FileSystem {
+                        entry_index: index,
+                        path: path.clone(),
+                        source,
+                    },
+                )
+            })?;
+            let child_owned_bytes = if source_backed { 0 } else { child_size };
+            let requested_active_bytes = state
+                .active_nested_bytes
+                .checked_add(child_owned_bytes)
+                .ok_or_else(|| {
+                ContainerMountError::new(
+                    state.report.clone(),
+                    ContainerMountErrorKind::ActiveNestedContainerLimitExceeded {
+                        entry_index: index,
+                        requested_total: u64::MAX,
+                        limit: state.limits.max_active_nested_bytes,
+                    },
+                )
+            })?;
+            if requested_active_bytes > state.limits.max_active_nested_bytes {
+                return Err(ContainerMountError::new(
+                    state.report.clone(),
+                    ContainerMountErrorKind::ActiveNestedContainerLimitExceeded {
+                        entry_index: index,
+                        requested_total: requested_active_bytes,
+                        limit: state.limits.max_active_nested_bytes,
+                    },
+                ));
+            }
+            state.active_nested_bytes = requested_active_bytes;
+            let result = mount_webdata_stream_tree_at(
+                &entry_stream,
+                WebDataStreamContext {
+                    destination_root: Some(&path),
+                    depth: child_depth,
+                    parent_bundle_index: Some(container_bundle_index),
+                    parent_entry_index: Some(index),
+                    source_name: Some(node.path.as_str()),
+                },
+                scheme_limits,
+                state,
+            );
+            state.active_nested_bytes -= child_owned_bytes;
+            result?;
+            continue;
+        }
+
         if matches!(
             child_kind,
             Some(FileKind::SerializedFile | FileKind::Resource)

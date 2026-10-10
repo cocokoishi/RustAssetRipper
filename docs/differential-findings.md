@@ -2044,4 +2044,15 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Source-derived behavior | Top-level UnityWebData entries are recursively dispatched in directory order; the GZip entry becomes a ResourceFile with the decoded payload and original entry name. |
 | Rust change | `mount_path` and `mount_paths` route direct UnityWebData streams into the bounded directory reader. It reads only the header after a 20-byte prefix, then copies entry ranges with a fixed 64 KiB buffer into temporary SmartStreams before dispatch. Resource and SerializedFile results mount from their backing streams; other kinds retain the existing recursive dispatch path. Header, input, entry, nesting, path, and output limits remain enforced. |
 | Regression evidence | `source_webdata_entries_mount_file_backed_through_both_path_apis` replays both frozen source rows through both production APIs, checks exact paths and bytes, requires file-backed mounted entries, and removes each input while the VFS outputs remain live. |
-| Remaining comparison | This covers direct top-level WebData inputs. WebData nested inside UnityFS, other Raw/Web container entry paths, generic final-layer parsing, and Unix retained-reader runtime validation remain open; `IO-STREAM-001` remains in progress. |
+| Remaining comparison | This covers direct top-level WebData inputs. The source-probed UnityFS-nested case is recorded in `DIFF-IO-STREAM-WEBDATA-UNITYFS-001`; other Raw/Web container entry paths, generic final-layer parsing, and Unix retained-reader runtime validation remain open. `IO-STREAM-001` remains in progress. |
+
+## DIFF-IO-STREAM-WEBDATA-UNITYFS-001 — UnityFS nested WebData stream mounting
+
+| Field | Finding |
+|---|---|
+| Source location | `AssetRipper.IO.Files/BundleFiles/FileStream/FileStreamBundleFile.cs`; `AssetRipper.IO.Files/WebFiles/WebFile.cs`; recursive `SchemeReader` dispatch |
+| Input evidence | Frozen source row `SCHEME|ufs_nested_webdata` in `src/io/io_differential_fixture.txt`; it contains one UnityFS `inner.webdata` entry and the source recursive inventory for two ResourceFiles. |
+| Source-derived behavior | A UnityFS entry recognized as WebData is recursively mounted as a child container; its parent bundle index, parent entry index, nested scope, direct ResourceFile order, names, and bytes are retained. |
+| Rust change | The file-backed UnityFS tree now sends a direct UnityWebData entry stream to `mount_webdata_stream_tree_at`, preserving the shared mount report and nested depth/active-byte limits. It no longer converts that complete child container to an owned `Vec` before reading the WebData directory. |
+| Regression evidence | `source_unityfs_nested_webdata_mounts_file_backed_through_both_path_apis` replays the frozen row through `mount_path` and `mount_paths`, compares parent/scope metadata, resource order and paths, exact payload bytes, and file-backed output, then removes the source file while mounted VFSes remain live. |
+| Remaining comparison | This covers the source-probed UnityFS direct-entry route. UnityWeb/UnityRaw nested WebData and other container entries, generic final-layer parsing, and Unix retained-reader runtime validation remain open; `IO-STREAM-001` remains in progress. |

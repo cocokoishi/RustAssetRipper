@@ -263,6 +263,135 @@ fn source_webdata_entries_mount_file_backed_through_both_path_apis() {
     }
 }
 
+#[test]
+fn source_unityfs_nested_webdata_mounts_file_backed_through_both_path_apis() {
+    let row = include_str!("../../io/io_differential_fixture.txt")
+        .lines()
+        .find(|line| line.starts_with("SCHEME|ufs_nested_webdata|"))
+        .expect("frozen source UnityFS-with-WebData row");
+    let fields: Vec<&str> = row.split('|').collect();
+    let input = fields
+        .iter()
+        .find_map(|field| field.strip_prefix("in="))
+        .map(decode_hex_fixture)
+        .expect("source UnityFS row includes exact input bytes");
+    assert!(fields.contains(&"tree=CONTAINER:FileStreamBundleFile:ufs_nested_webdata.bin:res=0:failed=0,CONTAINER:WebFile:inner.webdata:res=2:failed=0,RES:inner.bin:77656221,RES:sub/deep.bin:64656570"));
+    let expected_entries = [
+        ("inner.bin", b"web!".as_slice()),
+        ("sub/deep.bin", b"deep".as_slice()),
+    ];
+
+    let directory = unique_temp_file_path("dir");
+    std::fs::create_dir(&directory).expect("create source bundle directory");
+    let path = directory.join("ufs_nested_webdata.bin");
+    std::fs::write(&path, input).expect("write frozen source UnityFS bytes");
+
+    let mut path_filesystem = VirtualFileSystem::new();
+    let path_report = SchemeReader::mount_path(
+        &path,
+        &mut path_filesystem,
+        Some("/ufs-webdata-path"),
+        SchemeReaderLimits::default(),
+        ContainerMountLimits::default(),
+    )
+    .expect("mount source UnityFS with nested WebData by path");
+    assert_eq!(path_report.mounted_entries, expected_entries.len());
+    assert!(path_report.failed_entries.is_empty());
+    assert_eq!(path_report.container_bundles.len(), 2);
+    assert_eq!(
+        path_report.container_scopes,
+        ["/ufs-webdata-path", "/ufs-webdata-path/inner.webdata"]
+    );
+    assert_eq!(
+        path_report.container_bundles[0].name_fixed.as_deref(),
+        Some("ufs_nested_webdata.bin")
+    );
+    assert_eq!(
+        path_report.container_bundles[1].parent_bundle_index,
+        Some(0)
+    );
+    assert_eq!(path_report.container_bundles[1].parent_entry_index, Some(0));
+    assert_eq!(
+        path_report.container_bundles[1].name_fixed.as_deref(),
+        Some("inner.webdata")
+    );
+    assert_eq!(path_report.resource_files.len(), expected_entries.len());
+    for (index, (name, expected)) in expected_entries.iter().enumerate() {
+        let resource = &path_report.resource_files[index];
+        assert_eq!(resource.name, *name);
+        assert_eq!(resource.container_bundle_index, 1);
+        assert_eq!(resource.entry_index, index);
+        assert_eq!(resource.resource_index, index);
+        let virtual_path = format!("/ufs-webdata-path/inner.webdata/{name}");
+        assert_eq!(resource.virtual_path, virtual_path);
+        assert_eq!(
+            path_filesystem
+                .open_file(&virtual_path)
+                .unwrap()
+                .stream_type(),
+            crate::io::stream::SmartStreamType::File
+        );
+        assert_eq!(
+            path_filesystem
+                .read_all_bytes(&virtual_path, expected.len())
+                .unwrap(),
+            *expected
+        );
+    }
+
+    let mut batch_filesystem = VirtualFileSystem::new();
+    let inputs = [PathMountInput {
+        path: path.clone(),
+        destination_root: Some("/ufs-webdata-batch".to_owned()),
+    }];
+    let batch_report = SchemeReader::mount_paths(
+        &inputs,
+        &mut batch_filesystem,
+        SchemeReaderLimits::default(),
+        ContainerMountLimits::default(),
+        BatchMountLimits::default(),
+    )
+    .expect("mount source UnityFS with nested WebData by batch path");
+    assert_eq!(batch_report.completed_inputs, 1);
+    assert_eq!(batch_report.mounted_entries, expected_entries.len());
+    assert_eq!(batch_report.container_trees.len(), 1);
+    assert!(batch_report.container_trees[0].failed_entries.is_empty());
+    assert_eq!(batch_report.container_trees[0].container_bundles.len(), 2);
+    assert_eq!(
+        batch_report.container_trees[0].container_scopes,
+        ["/ufs-webdata-batch", "/ufs-webdata-batch/inner.webdata"]
+    );
+    assert_eq!(
+        batch_report.container_trees[0].resource_files.len(),
+        expected_entries.len()
+    );
+    for (index, (name, _)) in expected_entries.iter().enumerate() {
+        let resource = &batch_report.container_trees[0].resource_files[index];
+        assert_eq!(resource.name, *name);
+        assert_eq!(resource.container_bundle_index, 1);
+        assert_eq!(resource.resource_index, index);
+    }
+    for (name, expected) in expected_entries {
+        let virtual_path = format!("/ufs-webdata-batch/inner.webdata/{name}");
+        assert_eq!(
+            batch_filesystem
+                .open_file(&virtual_path)
+                .unwrap()
+                .stream_type(),
+            crate::io::stream::SmartStreamType::File
+        );
+        assert_eq!(
+            batch_filesystem
+                .read_all_bytes(&virtual_path, expected.len())
+                .unwrap(),
+            expected
+        );
+    }
+
+    std::fs::remove_file(&path).expect("mounted nested WebData no longer holds the input file");
+    std::fs::remove_dir(&directory).expect("remove source bundle directory");
+}
+
 /// Single-path import against reference-written bytes.
 ///
 /// The WebData containers below were written by the frozen
