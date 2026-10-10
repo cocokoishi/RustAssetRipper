@@ -521,6 +521,124 @@ fn source_unityweb_nested_webdata_mounts_file_backed_through_both_path_apis() {
     std::fs::remove_dir(&directory).expect("remove source bundle directory");
 }
 
+#[test]
+fn source_unityraw_nested_unityfs_mounts_file_backed_through_both_path_apis() {
+    let row = include_str!("../../io/io_differential_stream_fixture.txt")
+        .lines()
+        .find(|line| line.starts_with("SCHEME|raw_nested_unityfs|"))
+        .expect("frozen source UnityRaw-with-UnityFS row");
+    let fields: Vec<&str> = row.split('|').collect();
+    let input = fields
+        .iter()
+        .find_map(|field| field.strip_prefix("in="))
+        .map(decode_hex_fixture)
+        .expect("source UnityRaw row includes exact input bytes");
+    assert!(fields.contains(&"tree=CONTAINER:RawBundleFile:raw_nested_unityfs.bin:res=0:failed=0,CONTAINER:FileStreamBundleFile:nested.bundle:res=1:failed=0,RES:data/file.bin:30313233343536373839"));
+    let expected_payload = b"0123456789";
+
+    let directory = unique_temp_file_path("dir");
+    std::fs::create_dir(&directory).expect("create source bundle directory");
+    let path = directory.join("raw_nested_unityfs.bin");
+    std::fs::write(&path, input).expect("write frozen source UnityRaw bytes");
+
+    let mut path_filesystem = VirtualFileSystem::new();
+    let path_report = SchemeReader::mount_path(
+        &path,
+        &mut path_filesystem,
+        Some("/raw-unityfs-path"),
+        SchemeReaderLimits::default(),
+        ContainerMountLimits::default(),
+    )
+    .expect("mount source UnityRaw with nested UnityFS by path");
+    assert_eq!(path_report.mounted_entries, 1);
+    assert!(path_report.failed_entries.is_empty());
+    assert_eq!(path_report.container_bundles.len(), 2);
+    assert_eq!(
+        path_report.container_scopes,
+        ["/raw-unityfs-path", "/raw-unityfs-path/nested.bundle"]
+    );
+    assert_eq!(
+        path_report.container_bundles[0].name_fixed.as_deref(),
+        Some("raw_nested_unityfs.bin")
+    );
+    assert_eq!(
+        path_report.container_bundles[1].parent_bundle_index,
+        Some(0)
+    );
+    assert_eq!(path_report.container_bundles[1].parent_entry_index, Some(0));
+    assert_eq!(
+        path_report.container_bundles[1].name_fixed.as_deref(),
+        Some("nested.bundle")
+    );
+    assert_eq!(path_report.resource_files.len(), 1);
+    let path_resource = &path_report.resource_files[0];
+    assert_eq!(path_resource.name, "data/file.bin");
+    assert_eq!(path_resource.container_bundle_index, 1);
+    assert_eq!(path_resource.entry_index, 0);
+    assert_eq!(path_resource.resource_index, 0);
+    let path_output = "/raw-unityfs-path/nested.bundle/data/file.bin";
+    assert_eq!(path_resource.virtual_path, path_output);
+    assert_eq!(
+        path_filesystem
+            .open_file(path_output)
+            .unwrap()
+            .stream_type(),
+        crate::io::stream::SmartStreamType::File
+    );
+    assert_eq!(
+        path_filesystem
+            .read_all_bytes(path_output, expected_payload.len())
+            .unwrap(),
+        expected_payload
+    );
+
+    let mut batch_filesystem = VirtualFileSystem::new();
+    let inputs = [PathMountInput {
+        path: path.clone(),
+        destination_root: Some("/raw-unityfs-batch".to_owned()),
+    }];
+    let batch_report = SchemeReader::mount_paths(
+        &inputs,
+        &mut batch_filesystem,
+        SchemeReaderLimits::default(),
+        ContainerMountLimits::default(),
+        BatchMountLimits::default(),
+    )
+    .expect("mount source UnityRaw with nested UnityFS by batch path");
+    assert_eq!(batch_report.completed_inputs, 1);
+    assert_eq!(batch_report.mounted_entries, 1);
+    assert_eq!(batch_report.container_trees.len(), 1);
+    assert!(batch_report.container_trees[0].failed_entries.is_empty());
+    assert_eq!(batch_report.container_trees[0].container_bundles.len(), 2);
+    assert_eq!(
+        batch_report.container_trees[0].container_scopes,
+        ["/raw-unityfs-batch", "/raw-unityfs-batch/nested.bundle"]
+    );
+    assert_eq!(batch_report.container_trees[0].resource_files.len(), 1);
+    let batch_resource = &batch_report.container_trees[0].resource_files[0];
+    assert_eq!(batch_resource.name, "data/file.bin");
+    assert_eq!(batch_resource.container_bundle_index, 1);
+    assert_eq!(batch_resource.resource_index, 0);
+    let batch_output = "/raw-unityfs-batch/nested.bundle/data/file.bin";
+    assert_eq!(batch_resource.virtual_path, batch_output);
+    assert_eq!(
+        batch_filesystem
+            .open_file(batch_output)
+            .unwrap()
+            .stream_type(),
+        crate::io::stream::SmartStreamType::File
+    );
+    assert_eq!(
+        batch_filesystem
+            .read_all_bytes(batch_output, expected_payload.len())
+            .unwrap(),
+        expected_payload
+    );
+
+    std::fs::remove_file(&path).expect("mounted nested UnityFS no longer holds the input file");
+    std::fs::remove_dir(&directory).expect("remove source bundle directory");
+}
+
 /// Single-path import against reference-written bytes.
 ///
 /// The WebData containers below were written by the frozen

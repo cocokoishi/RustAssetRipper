@@ -149,6 +149,34 @@ impl<'a> RawWebBundle<'a> {
         read_header(&mut reader, input_size, limits)
     }
 
+    pub(crate) fn parse_unityraw_directory_prefix(
+        header: &RawWebHeader,
+        metadata: &[u8],
+        data_size: usize,
+        limits: RawWebLimits,
+    ) -> Result<Vec<RawWebEntry>, RawWebError> {
+        if header.kind != RawWebKind::UnityRaw {
+            return Err(RawWebError::new(
+                0,
+                RawWebErrorKind::InvalidSignature {
+                    actual: "UnityWeb".to_owned(),
+                },
+            ));
+        }
+        if metadata.len() > limits.max_metadata_bytes {
+            return Err(RawWebError::new(
+                header.header_size,
+                RawWebErrorKind::LimitExceeded {
+                    field: "metadata bytes",
+                    requested: metadata.len() as u64,
+                    limit: limits.max_metadata_bytes,
+                },
+            ));
+        }
+        Self::parse_directory_metadata(header, metadata, data_size, limits)
+            .map(|(entries, _)| entries)
+    }
+
     pub(crate) fn from_owned_data(
         header: RawWebHeader,
         data: Vec<u8>,
@@ -212,6 +240,21 @@ impl<'a> RawWebBundle<'a> {
     ) -> Result<Self, RawWebError> {
         let metadata_limit = data.len().min(limits.max_metadata_bytes);
         let metadata = &data[..metadata_limit];
+        let (entries, _) = Self::parse_directory_metadata(&header, metadata, data.len(), limits)?;
+
+        Ok(Self {
+            header,
+            entries,
+            data,
+        })
+    }
+
+    fn parse_directory_metadata(
+        header: &RawWebHeader,
+        metadata: &[u8],
+        data_size: usize,
+        limits: RawWebLimits,
+    ) -> Result<(Vec<RawWebEntry>, usize), RawWebError> {
         let metadata_base = match header.kind {
             RawWebKind::UnityRaw => header.header_size,
             RawWebKind::UnityWeb => 0,
@@ -219,7 +262,7 @@ impl<'a> RawWebBundle<'a> {
         let mut metadata_reader =
             BinaryReader::with_base_offset(metadata, Endian::Big, metadata_base)
                 .map_err(|error| RawWebError::binary(error, "metadata"))?;
-        let entries = read_entries(&mut metadata_reader, data.len(), limits)?;
+        let entries = read_entries(&mut metadata_reader, data_size, limits)?;
         let metadata_size = metadata_reader.position();
         if let Some(declared_size) = header.uncompressed_blocks_info_size {
             if declared_size > 0 && declared_size as usize != metadata_size {
@@ -232,12 +275,7 @@ impl<'a> RawWebBundle<'a> {
                 ));
             }
         }
-
-        Ok(Self {
-            header,
-            entries,
-            data,
-        })
+        Ok((entries, metadata_size))
     }
 
     pub fn read_entry(&self, entry_index: usize) -> Result<&[u8], RawWebError> {

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use super::container_mount::{
     checked_container_entry_path, directory_input_destination, directory_relative_destination,
     mount_container_entry_at_path, mount_container_stream_at_path, mount_unityfs_stream_tree,
-    mount_unityweb_stream_tree, mount_webdata_stream_tree,
+    mount_unityraw_stream_tree, mount_unityweb_stream_tree, mount_webdata_stream_tree,
 };
 use super::*;
 use crate::io::discovery::discover_directory_inputs;
@@ -287,6 +287,23 @@ impl SchemeReader {
                 )
             })?;
             return mount_unityweb_stream_tree(
+                &stream_dispatched.stream,
+                Some(&source_name),
+                filesystem,
+                destination_root,
+                scheme_limits,
+                mount_limits,
+            );
+        }
+
+        if stream_dispatched.kind == FileKind::UnityRaw {
+            let source_name = logical_file_name(input_path).ok_or_else(|| {
+                ContainerMountError::new(
+                    ContainerMountReport::default(),
+                    ContainerMountErrorKind::InputPathHasNoFileName,
+                )
+            })?;
+            return mount_unityraw_stream_tree(
                 &stream_dispatched.stream,
                 Some(&source_name),
                 filesystem,
@@ -896,6 +913,7 @@ impl SchemeReader {
                 || root_kind == FileKind::UnityFs
                 || root_kind == FileKind::UnityWebData
                 || root_kind == FileKind::UnityWebBundle
+                || root_kind == FileKind::UnityRaw
                 || root_is_file
             {
                 None
@@ -1091,6 +1109,31 @@ impl SchemeReader {
                 })?;
                 match stream_dispatched.as_ref() {
                     Some(dispatched) => mount_unityweb_stream_tree(
+                        &dispatched.stream,
+                        Some(&source_name),
+                        filesystem,
+                        destination,
+                        scheme_limits,
+                        per_input_mount_limits,
+                    ),
+                    None => Err(ContainerMountError::new(
+                        ContainerMountReport::default(),
+                        ContainerMountErrorKind::NotContainer,
+                    )),
+                }
+            } else if root_kind == FileKind::UnityRaw {
+                let source_name = logical_file_name(&input.path).ok_or_else(|| {
+                    BatchMountError::new(
+                        report.clone(),
+                        Some(input.path.clone()),
+                        BatchMountErrorKind::InputMount(Box::new(ContainerMountError::new(
+                            ContainerMountReport::default(),
+                            ContainerMountErrorKind::InputPathHasNoFileName,
+                        ))),
+                    )
+                })?;
+                match stream_dispatched.as_ref() {
+                    Some(dispatched) => mount_unityraw_stream_tree(
                         &dispatched.stream,
                         Some(&source_name),
                         filesystem,

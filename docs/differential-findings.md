@@ -2067,3 +2067,14 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | `mount_path` and `mount_paths` read a bounded UnityWeb header prefix and the declared compressed scene, decode it under the existing chunk limit, then copy each directory entry in bounded chunks to temporary `SmartStream` backing before dispatch. A direct WebData child recurses through the shared mount report and parent/scope metadata. Header, input, decompression, path, entry, nesting, and output checks remain enforced. |
 | Regression evidence | `source_unityweb_nested_webdata_mounts_file_backed_through_both_path_apis` replays the frozen row through both production APIs, checks container parent indexes and scope paths, ResourceFile order and paths, exact payload bytes, file-backed output, and source-file release while mounted VFSes remain live. |
 | Remaining comparison | This covers the frozen UnityWeb-to-WebData route. UnityRaw and other Raw/Web container entry paths, generic final-layer parsing, and Unix retained-reader runtime validation remain open; `IO-STREAM-001` remains in progress. |
+
+## DIFF-IO-STREAM-RAW-UNITYFS-001 — UnityRaw nested UnityFS stream mounting
+
+| Field | Finding |
+|---|---|
+| Source location | `AssetRipper.IO.Files/BundleFiles/Raw/RawBundleFile.cs`; `RawWebBundleFile.cs`; recursive `SchemeReader` dispatch |
+| Input evidence | Frozen source row `SCHEME|raw_nested_unityfs` in `src/io/io_differential_stream_fixture.txt`; its inventory records a UnityRaw bundle containing one UnityFS bundle and the exact `data/file.bin` payload. |
+| Source-derived behavior | The UnityRaw directory identifies `nested.bundle`; recursive scheme dispatch mounts that entry as a UnityFS container and retains its child ResourceFile path and bytes. |
+| Rust change | The stream mount reads a bounded UnityRaw header prefix and metadata range, validates directory entries against the post-header data size, and copies entry ranges to temporary SmartStreams in 64 KiB chunks. A direct UnityFS child enters the file-backed UnityFS tree route. UnityFS ranges over temporary-file backing now remain file-backed temporary ranges; original in-memory stream behavior is unchanged. |
+| Regression evidence | `source_unityraw_nested_unityfs_mounts_file_backed_through_both_path_apis` replays the frozen row through `mount_path` and `mount_paths`, checks bundle parent/scope metadata, ResourceFile path and bytes, file-backed output, and source-file release while the VFSes remain live. |
+| Remaining comparison | This covers the frozen UnityRaw-to-UnityFS route. UnityRaw-to-WebData and other Raw/Web nested-container paths, generic final-layer parsing, and Unix retained-reader runtime validation remain open; `IO-STREAM-001` remains in progress. |

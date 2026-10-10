@@ -792,6 +792,79 @@ impl SmartStream {
         self.create_partial_with_limit(offset, length, DEFAULT_MAX_PARTIAL_COPY_BYTES)
     }
 
+    pub(crate) fn create_partial_file_backed(
+        &self,
+        offset: u64,
+        length: u64,
+    ) -> io::Result<(Self, bool)> {
+        self.ensure_non_null()?;
+        if !self.can_read() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "stream is not readable",
+            ));
+        }
+        let mut backend = self.lock_backend()?;
+        if let SmartStreamBackend::File(file) = &*backend {
+            let range = FileRangeStream::from_shared_file(Arc::clone(file), offset, length)?;
+            return Ok((
+                Self::new(
+                    SmartStreamBackend::Range(range),
+                    SmartStreamType::File,
+                    true,
+                    false,
+                ),
+                true,
+            ));
+        }
+        if let SmartStreamBackend::Range(range) = &*backend {
+            let partial = range.subrange(offset, length)?;
+            return Ok((
+                Self::new(
+                    SmartStreamBackend::Range(partial),
+                    SmartStreamType::File,
+                    true,
+                    false,
+                ),
+                true,
+            ));
+        }
+        if let SmartStreamBackend::Temporary(temporary) = &mut *backend {
+            let file = temporary.file_mut()?;
+            let original_position = file.stream_position()?;
+            let result = (|| {
+                let source_length = file.seek(SeekFrom::End(0))?;
+                validate_file_range(source_length, offset, length)?;
+                file.seek(SeekFrom::Start(offset))?;
+                let mut output = SmartStream::create_temp()?;
+                let mut remaining = length;
+                let mut buffer = [0u8; 64 * 1024];
+                while remaining > 0 {
+                    let chunk_size = buffer
+                        .len()
+                        .min(usize::try_from(remaining).unwrap_or(usize::MAX));
+                    file.read_exact(&mut buffer[..chunk_size])?;
+                    output.write_all(&buffer[..chunk_size])?;
+                    remaining -= chunk_size as u64;
+                }
+                output.flush()?;
+                output.seek(SeekFrom::Start(0))?;
+                Ok(output)
+            })();
+            let restore = file.seek(SeekFrom::Start(original_position));
+            let output = match (result, restore) {
+                (Err(error), _) => return Err(error),
+                (Ok(_), Err(error)) => return Err(error),
+                (Ok(output), Ok(_)) => output,
+            };
+            return Ok((output, false));
+        }
+
+        drop(backend);
+        self.create_partial(offset, length)
+            .map(|partial| (partial, false))
+    }
+
     pub fn create_partial_with_limit(
         &self,
         offset: u64,

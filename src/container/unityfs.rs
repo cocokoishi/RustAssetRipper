@@ -9,7 +9,7 @@ use crate::compression::zstd::{
     decompress_block as decompress_zstd_block, has_frame_magic, ZstdBlockError,
 };
 use crate::io::binary::{BinaryError, BinaryReader, Endian};
-use crate::io::stream::{SmartStream, SmartStreamType};
+use crate::io::stream::SmartStream;
 
 const UNITY_FS_MAGIC: &str = "UnityFS";
 const BLOCK_INFO_AT_END: u32 = 0x80;
@@ -556,9 +556,9 @@ impl UnityFsStreamBundle {
                         UnityFsErrorKind::AddressSpaceOverflow("source-backed entry offset"),
                     )
                 })?;
-            let stream = self
+            let (stream, source_backed) = self
                 .source
-                .create_partial(absolute_offset, entry.size)
+                .create_partial_file_backed(absolute_offset, entry.size)
                 .map_err(|error| {
                     stream_input_error(
                         usize::try_from(absolute_offset).unwrap_or(usize::MAX),
@@ -566,7 +566,6 @@ impl UnityFsStreamBundle {
                         error,
                     )
                 })?;
-            let source_backed = stream.stream_type() == SmartStreamType::File;
             return Ok((stream, source_backed));
         }
 
