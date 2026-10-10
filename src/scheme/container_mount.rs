@@ -351,13 +351,36 @@ fn mount_unityfs_stream_tree_at(
                 continue;
             }
         };
-        let child_kind =
+        let mut child_kind =
             probe_direct_stream_kind(&mut entry_stream, scheme_limits).map_err(|error| {
                 ContainerMountError::new(
                     state.report.clone(),
                     ContainerMountErrorKind::Scheme(error),
                 )
             })?;
+        if child_kind.is_none() {
+            // The reference container reader unwraps one compression layer, then keeps its
+            // decoded bytes as a ResourceFile without dispatching a nested container or asset.
+            entry_stream = SchemeReader::unwrap_one_wrapper_stream(
+                entry_stream.create_reference(),
+                scheme_limits,
+            )
+            .map_err(|error| {
+                ContainerMountError::new(
+                    state.report.clone(),
+                    ContainerMountErrorKind::Scheme(error),
+                )
+            })?
+            .ok_or_else(|| {
+                ContainerMountError::new(
+                    state.report.clone(),
+                    ContainerMountErrorKind::Scheme(SchemeError::new(
+                        SchemeErrorKind::NotContainer,
+                    )),
+                )
+            })?;
+            child_kind = Some(FileKind::Resource);
+        }
         if child_kind == Some(FileKind::UnityFs) {
             let child_depth = depth.checked_add(1).ok_or_else(|| {
                 ContainerMountError::new(

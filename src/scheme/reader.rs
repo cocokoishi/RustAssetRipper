@@ -437,6 +437,87 @@ impl SchemeReader {
         }
     }
 
+    /// Decode one outer wrapper layer to a bounded temporary stream.
+    ///
+    /// UnityFS container entries use the source container's one-layer unwrap behavior: the
+    /// decoded bytes remain a ResourceFile even when they resemble another container or a
+    /// SerializedFile. This helper intentionally does not dispatch the decoded layer again.
+    pub(crate) fn unwrap_one_wrapper_stream(
+        mut stream: SmartStream,
+        limits: SchemeReaderLimits,
+    ) -> Result<Option<SmartStream>, SchemeError> {
+        let stream_length = stream
+            .length()
+            .map_err(|error| SchemeError::new(SchemeErrorKind::StreamInput(error)))?;
+        if stream_length > u64::try_from(limits.max_input_bytes).unwrap_or(u64::MAX) {
+            return Err(SchemeError::new(SchemeErrorKind::InputSizeLimitExceeded {
+                requested: stream_length,
+                limit: limits.max_input_bytes,
+            }));
+        }
+        let prefix = read_smart_stream_prefix(&stream, stream_length)?;
+        let wrapper_kind = if has_gzip_magic(&prefix) {
+            Some(WrapperKind::Gzip)
+        } else if has_brotli_file_signature(&prefix) {
+            Some(WrapperKind::Brotli)
+        } else {
+            None
+        };
+        let Some(wrapper_kind) = wrapper_kind else {
+            return Ok(None);
+        };
+        if limits.max_wrapper_depth == 0 {
+            return Err(SchemeError::new(SchemeErrorKind::WrapperDepthExceeded {
+                limit: limits.max_wrapper_depth,
+            }));
+        }
+
+        stream
+            .seek(SeekFrom::Start(0))
+            .map_err(|error| SchemeError::new(SchemeErrorKind::StreamInput(error)))?;
+        let mut output = SmartStream::create_temp()
+            .map_err(|error| SchemeError::new(SchemeErrorKind::StreamOutput(error)))?;
+        let output_size = match wrapper_kind {
+            WrapperKind::Gzip => decompress_gzip_stream_to(
+                &mut stream,
+                &mut output,
+                limits.max_decompressed_bytes_per_layer,
+            ),
+            WrapperKind::Brotli => decompress_brotli_stream_to(
+                &mut stream,
+                &mut output,
+                limits.max_decompressed_bytes_per_layer,
+            ),
+        }
+        .map_err(|source| {
+            SchemeError::new(SchemeErrorKind::WrapperDecode {
+                kind: wrapper_kind,
+                source,
+            })
+        })?;
+        if output_size > limits.max_total_decompressed_bytes {
+            return Err(SchemeError::new(
+                SchemeErrorKind::TotalDecompressionLimitExceeded {
+                    requested: output_size,
+                    limit: limits.max_total_decompressed_bytes,
+                },
+            ));
+        }
+        if output_size > limits.max_input_bytes {
+            return Err(SchemeError::new(SchemeErrorKind::InputSizeLimitExceeded {
+                requested: u64::try_from(output_size).unwrap_or(u64::MAX),
+                limit: limits.max_input_bytes,
+            }));
+        }
+        output
+            .flush()
+            .map_err(|error| SchemeError::new(SchemeErrorKind::StreamOutput(error)))?;
+        output
+            .seek(SeekFrom::Start(0))
+            .map_err(|error| SchemeError::new(SchemeErrorKind::StreamOutput(error)))?;
+        Ok(Some(output))
+    }
+
     /// Check whether a seekable input is a direct UnityFS container without reading its body.
     pub(super) fn is_direct_unityfs_stream<R: Read + Seek>(
         stream: &mut R,

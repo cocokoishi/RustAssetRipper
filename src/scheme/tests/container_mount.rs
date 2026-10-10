@@ -197,6 +197,83 @@ fn recursively_mounts_nested_and_wrapper_containers_under_their_entry_paths() {
 }
 
 #[test]
+fn source_unityfs_wrapped_entries_decode_one_layer_and_stay_resource_files() {
+    let row = include_str!("../../container/unityfs_nested_wrapper_source_fixture.txt")
+        .lines()
+        .find(|line| line.starts_with("SCHEME|ufs_nested_gzip_serialized_and_bundle|"))
+        .expect("source runtime nested-wrapper UnityFS row");
+    let fields: Vec<&str> = row.split('|').collect();
+    let input = fields
+        .iter()
+        .find_map(|field| field.strip_prefix("in="))
+        .map(decode_hex_fixture)
+        .expect("source UnityFS input bytes");
+    let source_tree = fields
+        .iter()
+        .find_map(|field| field.strip_prefix("tree="))
+        .expect("source UnityFS recursive inventory");
+    assert!(source_tree.starts_with(
+        "CONTAINER:FileStreamBundleFile:ufs_nested_gzip_serialized_and_bundle.bin:res=3:failed=0"
+    ));
+
+    let expected_entries = source_tree
+        .split(',')
+        .skip(1)
+        .map(|entry| {
+            let entry = entry
+                .strip_prefix("RES:")
+                .expect("source nested wrapper remains a ResourceFile");
+            let (name, bytes) = entry
+                .split_once(':')
+                .expect("source resource row contains a name and bytes");
+            (name.to_owned(), decode_hex_fixture(bytes))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(expected_entries.len(), 3);
+
+    let path = unique_temp_file_path("bundle");
+    std::fs::write(&path, input).expect("write frozen source bundle bytes");
+    let mut filesystem = VirtualFileSystem::new();
+    let report = SchemeReader::mount_path(
+        &path,
+        &mut filesystem,
+        Some("/source-wrapped-entries"),
+        SchemeReaderLimits::default(),
+        ContainerMountLimits::default(),
+    )
+    .expect("mount frozen source bundle");
+
+    assert_eq!(report.mounted_entries, expected_entries.len());
+    assert_eq!(report.resource_files.len(), expected_entries.len());
+    assert!(report.serialized_files.is_empty());
+    for (name, expected_bytes) in expected_entries {
+        let resource = report
+            .resource_files
+            .iter()
+            .find(|resource| resource.name == name)
+            .expect("source ResourceFile is present in the mount report");
+        let mounted_stream = filesystem
+            .open_file(&resource.virtual_path)
+            .expect("mounted wrapper ResourceFile is openable");
+        assert_eq!(
+            mounted_stream.stream_type(),
+            crate::io::stream::SmartStreamType::File,
+            "source-backed wrapper bytes stay file-backed"
+        );
+        assert_eq!(
+            filesystem
+                .read_all_bytes(&resource.virtual_path, expected_bytes.len())
+                .unwrap(),
+            expected_bytes,
+            "source wrapper bytes for {name}"
+        );
+    }
+
+    drop(filesystem);
+    std::fs::remove_file(&path).expect("remove frozen source bundle bytes");
+}
+
+#[test]
 fn recursively_mounted_serialized_file_records_preserve_each_container_entry_order() {
     let direct_first = serialized_file_header_fixture();
     let nested_leaf = serialized_file_header_fixture();

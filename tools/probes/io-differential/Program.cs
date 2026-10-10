@@ -689,6 +689,17 @@ public static class Program
 				directoryCombined: true,
 				new[] { new Entry("data/file.bin", Ascii("0123456789")) })),
 			("ufs_nested_webdata", BuildUnityFs(6, 0, 0, false, new[] { new Entry("inner.webdata", webData) })),
+			("ufs_nested_gzip_serialized_and_bundle", BuildUnityFs(
+				6,
+				0,
+				0,
+				false,
+				new[]
+				{
+					new Entry("managed.assets.gz", BuildGZip(serializedFile)),
+					new Entry("nested.bundle.gz", BuildGZip(ufsNone)),
+					new Entry("double.assets.gz", BuildGZip(BuildGZip(serializedFile))),
+				})),
 			("raw_v1", BuildRawWeb(false, 1, new[] { new Entry("a.bin", Ascii("0123456789")) })),
 			("raw_v2", BuildRawWeb(false, 2, new[] { new Entry("a.bin", Ascii("0123456789")) })),
 			("raw_v3", BuildRawWeb(false, 3, new[] { new Entry("a.bin", Ascii("0123456789")) })),
