@@ -40,6 +40,7 @@ pub(super) struct WorkspaceYamlObjectConversionRequest<'object> {
     pub(super) source: ExportAssetIdentity,
     pub(super) file_id: i64,
     pub(super) processed_animation_root: Option<&'object SerializedValue>,
+    pub(super) animation_clip_editor_format: bool,
     pub(super) generated_component_overlay: Option<&'object WorkspaceGeneratedComponentYamlOverlay>,
     pub(super) generated_prefab_internal: Option<&'object WorkspaceGeneratedPrefabInternalPointer>,
     pub(super) generated_lighting_data: Option<&'object WorkspaceGeneratedLightingDataYamlPointer>,
@@ -55,6 +56,7 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
             source,
             file_id,
             processed_animation_root,
+            animation_clip_editor_format,
             generated_component_overlay,
             generated_prefab_internal,
             generated_lighting_data,
@@ -423,7 +425,8 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
         let unity_5_6_scene_object = unity_version_text
             .and_then(FactoryUnityVersion::parse)
             .is_some_and(|version| version.major == 5 && version.minor == 6);
-        if (matches!(class_id, 104 | 157)
+        if ((animation_clip_editor_format && class_id == 74)
+            || matches!(class_id, 104 | 157)
             || (unity_5_6_scene_object && matches!(class_id, 1 | 4 | 23 | 33 | 108)))
             && matches!(&object.factory.kind, FactoryAssetKind::Generated(_))
         {
@@ -516,6 +519,14 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
                 apply_lightmap_settings_editor_defaults(&mut root)
                     .map_err(|message| scene_editor_format_error(source, class_id, message))?;
             }
+            if animation_clip_editor_format && class_id == 74 {
+                apply_animation_clip_editor_format(
+                    &mut root,
+                    export_root,
+                    processed_animation_root.is_some(),
+                )
+                .map_err(|message| scene_editor_format_error(source, class_id, message))?;
+            }
             if matches!(class_id, 1 | 4 | 23) {
                 apply_scene_object_editor_format(
                     &mut root,
@@ -580,6 +591,7 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
         let generated_game_object_or_transform = matches!(class_id, 1 | 4)
             && matches!(&object.factory.kind, FactoryAssetKind::Generated(_));
         if generated_game_object_or_transform
+            || (animation_clip_editor_format && class_id == 74)
             || (editor_manager_type_tree.is_some() && matches!(class_id, 23 | 33 | 104 | 108 | 157))
             || (generated_prefab_internal.is_some()
                 && matches!(&object.factory.kind, FactoryAssetKind::Generated(_)))
@@ -1076,11 +1088,170 @@ fn scene_editor_format_error(
     class_id: i32,
     message: String,
 ) -> UnityYamlWorkspaceExportError {
-    if matches!(class_id, 104 | 157) {
+    if class_id == 74 {
+        UnityYamlWorkspaceExportError::AnimationClipEditorFormatInvariant { source, message }
+    } else if matches!(class_id, 104 | 157) {
         UnityYamlWorkspaceExportError::SceneManagerEditorFormatInvariant { source, message }
     } else {
         UnityYamlWorkspaceExportError::SceneObjectEditorFormatInvariant { source, message }
     }
+}
+
+fn apply_animation_clip_editor_format(
+    editor_root: &mut SerializedValue,
+    source_root: &SerializedValue,
+    processed: bool,
+) -> Result<(), String> {
+    let settings = editor_root
+        .unique_field_in_base_chain_mut("m_AnimationClipSettings")
+        .map_err(|error| format!("could not inspect editor m_AnimationClipSettings: {error}"))?
+        .ok_or_else(|| "editor AnimationClip has no m_AnimationClipSettings field".to_owned())?;
+
+    set_animation_clip_editor_field(settings, "m_StopTime", SerializedValue::F32(1.0))?;
+    set_animation_clip_editor_field(
+        settings,
+        "m_KeepOriginalPositionY",
+        SerializedValue::Bool(true),
+    )?;
+    if !processed {
+        return Ok(());
+    }
+
+    let muscle = source_root
+        .unique_field_in_base_chain("m_MuscleClip")
+        .map_err(|error| format!("could not inspect source m_MuscleClip: {error}"))?
+        .ok_or_else(|| "processed AnimationClip has no source m_MuscleClip".to_owned())?;
+    let muscle_fields = [
+        (
+            "m_StartTime",
+            &["m_StartTime", "startTime", "StartTime"][..],
+        ),
+        ("m_StopTime", &["m_StopTime", "stopTime", "StopTime"][..]),
+        (
+            "m_OrientationOffsetY",
+            &[
+                "m_OrientationOffsetY",
+                "orientationOffsetY",
+                "OrientationOffsetY",
+            ][..],
+        ),
+        ("m_Level", &["m_Level", "level", "Level"][..]),
+        (
+            "m_CycleOffset",
+            &["m_CycleOffset", "cycleOffset", "CycleOffset"][..],
+        ),
+        ("m_LoopTime", &["m_LoopTime", "loopTime", "LoopTime"][..]),
+        (
+            "m_LoopBlend",
+            &["m_LoopBlend", "loopBlend", "LoopBlend"][..],
+        ),
+        (
+            "m_LoopBlendOrientation",
+            &[
+                "m_LoopBlendOrientation",
+                "loopBlendOrientation",
+                "LoopBlendOrientation",
+            ][..],
+        ),
+        (
+            "m_LoopBlendPositionY",
+            &[
+                "m_LoopBlendPositionY",
+                "loopBlendPositionY",
+                "LoopBlendPositionY",
+            ][..],
+        ),
+        (
+            "m_LoopBlendPositionXZ",
+            &[
+                "m_LoopBlendPositionXZ",
+                "loopBlendPositionXZ",
+                "LoopBlendPositionXZ",
+            ][..],
+        ),
+        (
+            "m_KeepOriginalOrientation",
+            &[
+                "m_KeepOriginalOrientation",
+                "keepOriginalOrientation",
+                "KeepOriginalOrientation",
+            ][..],
+        ),
+        (
+            "m_KeepOriginalPositionY",
+            &[
+                "m_KeepOriginalPositionY",
+                "keepOriginalPositionY",
+                "KeepOriginalPositionY",
+            ][..],
+        ),
+        (
+            "m_KeepOriginalPositionXZ",
+            &[
+                "m_KeepOriginalPositionXZ",
+                "keepOriginalPositionXZ",
+                "KeepOriginalPositionXZ",
+            ][..],
+        ),
+        (
+            "m_HeightFromFeet",
+            &["m_HeightFromFeet", "heightFromFeet", "HeightFromFeet"][..],
+        ),
+    ];
+    for (target_name, source_aliases) in muscle_fields {
+        let source_value = unique_animation_clip_field(muscle, source_aliases, target_name)?;
+        set_animation_clip_editor_field(settings, target_name, source_value.clone())?;
+    }
+    set_animation_clip_editor_field(
+        settings,
+        "m_AdditiveReferencePoseTime",
+        SerializedValue::F32(0.0),
+    )?;
+    set_animation_clip_editor_field(
+        settings,
+        "m_HasAdditiveReferencePose",
+        SerializedValue::Bool(false),
+    )?;
+    set_animation_clip_editor_field(settings, "m_Mirror", SerializedValue::Bool(false))?;
+    Ok(())
+}
+
+fn unique_animation_clip_field<'a>(
+    value: &'a SerializedValue,
+    aliases: &[&str],
+    field: &str,
+) -> Result<&'a SerializedValue, String> {
+    let mut found = None;
+    for &alias in aliases {
+        let candidate = value
+            .unique_field_in_base_chain(alias)
+            .map_err(|error| format!("could not inspect source {field}: {error}"))?;
+        if let Some(candidate) = candidate {
+            if found.is_some() {
+                return Err(format!("source {field} has ambiguous aliases {aliases:?}"));
+            }
+            found = Some(candidate);
+        }
+    }
+    found.ok_or_else(|| format!("source AnimationClip has no {field} field"))
+}
+
+fn set_animation_clip_editor_field(
+    settings: &mut SerializedValue,
+    field: &str,
+    value: SerializedValue,
+) -> Result<(), String> {
+    let target = settings
+        .unique_field_in_base_chain_mut(field)
+        .map_err(|error| format!("could not inspect editor AnimationClip.{field}: {error}"))?
+        .ok_or_else(|| format!("editor AnimationClip has no {field} field"))?;
+    if std::mem::discriminant(target) != std::mem::discriminant(&value) {
+        return Err(format!(
+            "editor AnimationClip.{field} has value {target:?}, incompatible with source value {value:?}"
+        ));
+    }
+    *target = value;
+    Ok(())
 }
 
 fn apply_scene_object_editor_format(
@@ -1929,8 +2100,9 @@ pub fn workspace_object_to_unity_yaml_document(
         object,
         source,
         file_id,
-        generated_component_overlay: None,
         processed_animation_root: None,
+        animation_clip_editor_format: false,
+        generated_component_overlay: None,
         generated_prefab_internal: None,
         generated_lighting_data: None,
     })?
@@ -1968,6 +2140,7 @@ pub fn workspace_object_to_unity_yaml_document_with_streamed_resources(
         limits,
         None,
         streamed_resources,
+        false,
     )
 }
 
@@ -1986,6 +2159,8 @@ pub fn workspace_object_to_unity_yaml_document_with_processed_animation_root(
     limits: UnityYamlObjectConversionLimits,
     processed_animation_root: Option<&SerializedValue>,
     streamed_resources: &WorkspaceStreamedYamlResourceContext<'_, '_>,
+    animation_clip_editor_format: bool,
+) -> Result<Option<UnityYamlDocument>, UnityYamlWorkspaceExportError> {
     WorkspaceYamlExportContext::new(
         workspace,
         reference_graph,
@@ -1999,8 +2174,9 @@ pub fn workspace_object_to_unity_yaml_document_with_processed_animation_root(
         object,
         source,
         file_id,
-        generated_component_overlay: None,
         processed_animation_root,
+        animation_clip_editor_format,
+        generated_component_overlay: None,
         generated_prefab_internal: None,
         generated_lighting_data: None,
     })

@@ -1819,7 +1819,85 @@ mod tests {
             .expect("source assembly metadata GUID");
         assert_eq!(plugin_guid, source_plugin_guid);
 
+        let prefab_pointer_row = SOURCE_FIXTURE
+            .lines()
+            .find_map(|line| line.strip_prefix("PREFAB_MEMBER_POINTER|"))
+            .expect("source Prefab member PPtr projection");
+        let mut prefab_pointer_columns = prefab_pointer_row.split('|');
+        let prefab_path = prefab_pointer_columns.next().expect("Prefab output path");
+        let prefab_file_id = prefab_pointer_columns
+            .next()
+            .expect("Prefab member fileID")
+            .parse::<i64>()
+            .expect("Prefab member fileID is numeric");
+        let prefab_pointer_type = prefab_pointer_columns
+            .next()
+            .expect("Prefab member PPtr type")
+            .parse::<i32>()
+            .expect("Prefab member PPtr type is numeric");
+        assert!(
+            prefab_pointer_columns.next().is_none(),
+            "Prefab pointer row shape"
+        );
+        let prefab_meta = std::fs::read_to_string(output_root.join(format!("{prefab_path}.meta")))
+            .expect("exported Root.prefab metadata");
+        let prefab_guid = prefab_meta
+            .lines()
+            .find_map(|line| line.strip_prefix("guid: "))
+            .expect("exported Prefab GUID");
+        let expected_prefab_pointer = format!(
+            "{{fileID: {prefab_file_id}, guid: {prefab_guid}, type: {prefab_pointer_type}}}"
+        );
+
         let lines = animation_documents[0].lines().collect::<Vec<_>>();
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.contains(&expected_prefab_pointer))
+                .count(),
+            3,
+            "both source object-reference keys and pptrCurveMapping retain the source Prefab member pointer"
+        );
+        for line in SOURCE_FIXTURE
+            .lines()
+            .filter_map(|line| line.strip_prefix("EDITOR_ROOT|"))
+        {
+            assert!(
+                lines.iter().any(|actual| actual.trim() == line),
+                "AnimationClip editor root is missing source field {line}"
+            );
+        }
+        for line in SOURCE_FIXTURE
+            .lines()
+            .filter_map(|line| line.strip_prefix("EDITOR_SETTING|"))
+        {
+            assert!(
+                lines.iter().any(|actual| actual.trim() == line),
+                "AnimationClip editor settings differ from source field {line}"
+            );
+        }
+        for field in SOURCE_FIXTURE
+            .lines()
+            .filter_map(|line| line.strip_prefix("EDITOR_EMPTY_ARRAY|"))
+        {
+            assert!(
+                lines
+                    .iter()
+                    .any(|actual| actual.trim() == format!("{field}: []")),
+                "AnimationClip editor output is missing empty array {field}"
+            );
+        }
+        for field in SOURCE_FIXTURE
+            .lines()
+            .filter_map(|line| line.strip_prefix("EDITOR_ABSENT|"))
+        {
+            assert!(
+                lines
+                    .iter()
+                    .all(|actual| actual.trim() != format!("{field}:")),
+                "release-only AnimationClip field {field} leaked into project YAML"
+            );
+        }
         let attribute_index = lines
             .iter()
             .position(|line| line.trim() == "attribute: health")

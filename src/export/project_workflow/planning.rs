@@ -500,6 +500,7 @@ pub(super) fn plan_routed_asset_files(
                         limits.yaml_collection.object_conversion,
                         animation_clip_root,
                         &streamed_resources,
+                        true,
                     )?;
                 let Some(mut document) = document else {
                     notices.push(ProjectExportNotice {

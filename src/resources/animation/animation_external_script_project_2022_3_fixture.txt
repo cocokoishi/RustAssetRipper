@@ -6,9 +6,36 @@ INPUT|scripts.assets|488|F6895443304BC2A0C9FFBDFCAA43641C12A9E0EDFC6548DC71923D2
 ASSEMBLY|ComplexFixtureScripts.dll|5120|D6E4155E931CFBC44ED92A44CC2436873D71DFBE293E9C568304DD118F2D6389
 SOURCE_ANIM|ExportedProject/Assets/AnimationClip/AnimationClip.anim|23469|AD67A10E5E731B06FBDDC8EE8D530B4C5013B2B1806F8FAC905CE2CD856E0CC2
 PLUGIN_GUID|b19bcd3f8dffca40198d81b88e4464bb
+PREFAB_MEMBER_POINTER|Assets/GameObject/Root.prefab|1709254077376921|2
 SCRIPT_OUTPUT|attribute|health
 SCRIPT_OUTPUT|path|path_0xB6C65665_WvpMuNH
 SCRIPT_OUTPUT|classID|114
 SCRIPT_OUTPUT|script|{fileID: -915535769, guid: __PLUGIN_GUID__, type: 3}
 SCRIPT_KEY|tangentMode|1|2
-KNOWN_DIFFERENCE|The full source .anim emits m_AnimationClipSettings while the current Rust value-tree export emits raw m_MuscleClip data; broader full-file YAML parity remains open.
+EDITOR_ROOT|m_ObjectHideFlags: 0
+EDITOR_ROOT|m_CorrespondingSourceObject: {fileID: 0}
+EDITOR_ROOT|m_PrefabInstance: {fileID: 0}
+EDITOR_ROOT|m_PrefabAsset: {fileID: 0}
+EDITOR_SETTING|serializedVersion: 2
+EDITOR_SETTING|m_AdditiveReferencePoseClip: {fileID: 0}
+EDITOR_SETTING|m_AdditiveReferencePoseTime: 0
+EDITOR_SETTING|m_StartTime: 0
+EDITOR_SETTING|m_StopTime: 2
+EDITOR_SETTING|m_OrientationOffsetY: 0
+EDITOR_SETTING|m_Level: 0.25
+EDITOR_SETTING|m_CycleOffset: 0
+EDITOR_SETTING|m_HasAdditiveReferencePose: 0
+EDITOR_SETTING|m_LoopTime: 1
+EDITOR_SETTING|m_LoopBlend: 0
+EDITOR_SETTING|m_LoopBlendOrientation: 0
+EDITOR_SETTING|m_LoopBlendPositionY: 0
+EDITOR_SETTING|m_LoopBlendPositionXZ: 0
+EDITOR_SETTING|m_KeepOriginalOrientation: 0
+EDITOR_SETTING|m_KeepOriginalPositionY: 0
+EDITOR_SETTING|m_KeepOriginalPositionXZ: 0
+EDITOR_SETTING|m_HeightFromFeet: 0
+EDITOR_SETTING|m_Mirror: 0
+EDITOR_EMPTY_ARRAY|m_EditorCurves
+EDITOR_EMPTY_ARRAY|m_EulerEditorCurves
+EDITOR_ABSENT|m_MuscleClipSize
+EDITOR_ABSENT|m_MuscleClip

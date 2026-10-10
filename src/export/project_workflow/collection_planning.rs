@@ -324,7 +324,8 @@ pub(super) fn build_project_pointer_map(
         }));
     }
     for prefab in prefabs {
-        let source_pointer = generate_prefab_source_pointer(prefab.guid, prefab.representation)
+        // Keep validating the distinct source-prefab pointer's GUID and main fileID.
+        let _source_pointer = generate_prefab_source_pointer(prefab.guid, prefab.representation)
             .map_err(|error| invalid_project(format!("Prefab pointer planning failed: {error}")))?;
         collection_count = collection_count
             .checked_add(1)
@@ -332,7 +333,11 @@ pub(super) fn build_project_pointer_map(
         collection_metadata.push(ExportCollectionPointerMetadata {
             collection_index: prefab.collection_index,
             guid: prefab.guid,
-            asset_type: source_pointer.asset_type,
+            // PPtrs to assets contained in a PrefabExportCollection use the YAML
+            // exporter's serialized type. GenerateMetaPtrForPrefab is a separate
+            // pointer used for IPrefabInstance.SourcePrefabP, not this collection's
+            // ordinary member references.
+            asset_type: UnityProjectAssetType::Serialized,
         });
         pointer_entries.extend(
             prefab
