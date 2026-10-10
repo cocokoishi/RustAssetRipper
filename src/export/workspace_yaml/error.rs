@@ -35,6 +35,10 @@ pub enum UnityYamlWorkspaceExportError {
         source: ExportAssetIdentity,
         message: String,
     },
+    SceneObjectEditorFormatInvariant {
+        source: ExportAssetIdentity,
+        message: String,
+    },
     ImageTextureSkippedWithoutContent {
         source: ExportAssetIdentity,
     },
@@ -207,6 +211,10 @@ impl Display for UnityYamlWorkspaceExportError {
             Self::SceneManagerEditorFormatInvariant { source, message } => write!(
                 f,
                 "Scene manager editor-format materialization failed for {source:?}: {message}"
+            ),
+            Self::SceneObjectEditorFormatInvariant { source, message } => write!(
+                f,
+                "Scene object editor-format materialization failed for {source:?}: {message}"
             ),
             Self::ImageTextureSkippedWithoutContent { source } => write!(
                 f,

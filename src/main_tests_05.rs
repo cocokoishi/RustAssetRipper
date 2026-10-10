@@ -553,6 +553,15 @@
             output_root.join("Assets/Scenes/lightmapfixture.assets.unity"),
         )
         .unwrap();
+        let source_scene = fixture_value(
+            fixture,
+            "SOURCE_OUTPUT|ExportedProject/Assets/Scenes/lightmapfixture.assets.unity|",
+        );
+        assert_eq!(
+            normalize(&scene),
+            normalize(std::str::from_utf8(&source_scene).unwrap()),
+            "complete Unity 5.6 Scene editor-format YAML differs from frozen source"
+        );
         assert!(scene.contains("--- !u!33 &106\nMeshFilter:"));
         assert!(scene.contains("--- !u!23 &105\nMeshRenderer:"));
         assert!(scene.contains(&format!(

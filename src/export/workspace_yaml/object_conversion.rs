@@ -406,66 +406,77 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
 
         let mut editor_manager_type_tree = None;
         let mut editor_manager_root = None;
-        if matches!(class_id, 104 | 157)
+        let unity_5_6_scene_object = unity_version_text
+            .and_then(FactoryUnityVersion::parse)
+            .is_some_and(|version| version.major == 5 && version.minor == 6);
+        if (matches!(class_id, 104 | 157)
+            || (unity_5_6_scene_object && matches!(class_id, 1 | 4 | 23 | 33)))
             && matches!(&object.factory.kind, FactoryAssetKind::Generated(_))
         {
             let unity_version_text = unity_version_text.ok_or_else(|| {
-                UnityYamlWorkspaceExportError::SceneManagerEditorFormatInvariant {
+                scene_editor_format_error(
                     source,
-                    message: "source Unity version is unavailable".to_owned(),
-                }
+                    class_id,
+                    "source Unity version is unavailable".to_owned(),
+                )
             })?;
             let factory_version =
                 FactoryUnityVersion::parse(unity_version_text).ok_or_else(|| {
-                    UnityYamlWorkspaceExportError::SceneManagerEditorFormatInvariant {
+                    scene_editor_format_error(
                         source,
-                        message: format!("source Unity version {unity_version_text:?} is invalid"),
-                    }
+                        class_id,
+                        format!("source Unity version {unity_version_text:?} is invalid"),
+                    )
                 })?;
             let (_, editor_tree) = reference_class_layouts()
             .tpk_trees(class_id, &factory_version)
             .map_err(|error| {
-                UnityYamlWorkspaceExportError::SceneManagerEditorFormatInvariant {
+                scene_editor_format_error(
                     source,
-                    message: format!("could not load the editor TypeTree: {error}"),
-                }
+                    class_id,
+                    format!("could not load the editor TypeTree: {error}"),
+                )
             })?
             .ok_or_else(|| {
-                UnityYamlWorkspaceExportError::SceneManagerEditorFormatInvariant {
+                scene_editor_format_error(
                     source,
-                    message: format!(
+                    class_id,
+                    format!(
                         "no reference editor TypeTree exists for class {class_id} at Unity {unity_version_text}"
                     ),
-                }
+                )
             })?;
             let editor_type_name = editor_tree
                 .nodes
                 .first()
                 .and_then(|node| node.type_name.as_deref())
                 .ok_or_else(|| {
-                    UnityYamlWorkspaceExportError::SceneManagerEditorFormatInvariant {
+                    scene_editor_format_error(
                         source,
-                        message: "reference editor TypeTree has no root type name".to_owned(),
-                    }
+                        class_id,
+                        "reference editor TypeTree has no root type name".to_owned(),
+                    )
                 })?;
             let source_type_name = type_tree
                 .nodes
                 .first()
                 .and_then(|node| node.type_name.as_deref())
                 .ok_or_else(|| {
-                    UnityYamlWorkspaceExportError::SceneManagerEditorFormatInvariant {
+                    scene_editor_format_error(
                         source,
-                        message: "source TypeTree has no root type name".to_owned(),
-                    }
+                        class_id,
+                        "source TypeTree has no root type name".to_owned(),
+                    )
                 })?;
             if editor_type_name != source_type_name {
                 return Err(
-                UnityYamlWorkspaceExportError::SceneManagerEditorFormatInvariant {
+                scene_editor_format_error(
                     source,
-                    message: format!(
+                    class_id,
+                    format!(
                         "editor TypeTree root {editor_type_name:?} differs from source root {source_type_name:?}"
                     ),
-                },
+                ),
             );
             }
             let mut root = default_value_for_type_tree_node(
@@ -475,24 +486,33 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
                 ObjectDefaultValueLimits::default(),
             )
             .map_err(|error| {
-                UnityYamlWorkspaceExportError::SceneManagerEditorFormatInvariant {
+                scene_editor_format_error(
                     source,
-                    message: format!("could not construct editor defaults: {error}"),
-                }
+                    class_id,
+                    format!("could not construct editor defaults: {error}"),
+                )
             })?;
-            merge_editor_default_value(&mut root, export_root, "").map_err(|message| {
-                UnityYamlWorkspaceExportError::SceneManagerEditorFormatInvariant { source, message }
-            })?;
-            ensure_scene_manager_hide_flags(&mut root).map_err(|message| {
-                UnityYamlWorkspaceExportError::SceneManagerEditorFormatInvariant { source, message }
-            })?;
+            merge_editor_default_value(&mut root, export_root, "")
+                .map_err(|message| scene_editor_format_error(source, class_id, message))?;
+            if matches!(class_id, 104 | 157) {
+                ensure_scene_manager_hide_flags(&mut root)
+                    .map_err(|message| scene_editor_format_error(source, class_id, message))?;
+            }
             if class_id == 157 {
-                apply_lightmap_settings_editor_defaults(&mut root).map_err(|message| {
-                    UnityYamlWorkspaceExportError::SceneManagerEditorFormatInvariant {
-                        source,
-                        message,
-                    }
-                })?;
+                apply_lightmap_settings_editor_defaults(&mut root)
+                    .map_err(|message| scene_editor_format_error(source, class_id, message))?;
+            }
+            if matches!(class_id, 1 | 4 | 23) {
+                apply_scene_object_editor_format(
+                    &mut root,
+                    export_root,
+                    class_id,
+                    source,
+                    file_index,
+                    object.object_index,
+                    reference_graph,
+                )
+                .map_err(|message| scene_editor_format_error(source, class_id, message))?;
             }
             editor_manager_type_tree = Some(editor_tree);
             editor_manager_root = Some(root);
@@ -546,7 +566,7 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
         let generated_game_object_or_transform = matches!(class_id, 1 | 4)
             && matches!(&object.factory.kind, FactoryAssetKind::Generated(_));
         if generated_game_object_or_transform
-            || matches!(class_id, 104 | 157)
+            || (editor_manager_type_tree.is_some() && matches!(class_id, 23 | 33 | 104 | 157))
             || (generated_prefab_internal.is_some()
                 && matches!(&object.factory.kind, FactoryAssetKind::Generated(_)))
         {
@@ -1035,6 +1055,330 @@ fn merge_editor_default_value(
             Ok(())
         }
     }
+}
+
+fn scene_editor_format_error(
+    source: ExportAssetIdentity,
+    class_id: i32,
+    message: String,
+) -> UnityYamlWorkspaceExportError {
+    if matches!(class_id, 104 | 157) {
+        UnityYamlWorkspaceExportError::SceneManagerEditorFormatInvariant { source, message }
+    } else {
+        UnityYamlWorkspaceExportError::SceneObjectEditorFormatInvariant { source, message }
+    }
+}
+
+fn apply_scene_object_editor_format(
+    editor_root: &mut SerializedValue,
+    source_root: &SerializedValue,
+    class_id: i32,
+    source: ExportAssetIdentity,
+    file_index: usize,
+    object_index: usize,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+) -> Result<(), String> {
+    match class_id {
+        1 => apply_game_object_editor_format(editor_root, source_root),
+        4 => apply_transform_editor_format(
+            editor_root,
+            source_root,
+            source,
+            file_index,
+            object_index,
+            reference_graph,
+        ),
+        23 => apply_renderer_editor_format(editor_root),
+        _ => Ok(()),
+    }
+}
+
+fn apply_game_object_editor_format(
+    editor_root: &mut SerializedValue,
+    source_root: &SerializedValue,
+) -> Result<(), String> {
+    let tag_id = match source_root
+        .unique_field_in_base_chain("m_Tag")
+        .map_err(|error| format!("could not inspect GameObject.m_Tag: {error}"))?
+    {
+        Some(SerializedValue::I8(value)) => i32::from(*value),
+        Some(SerializedValue::U8(value)) => i32::from(*value),
+        Some(SerializedValue::I16(value)) => i32::from(*value),
+        Some(SerializedValue::U16(value)) => i32::from(*value),
+        Some(SerializedValue::I32(value)) => *value,
+        Some(SerializedValue::U32(value)) => i32::try_from(*value)
+            .map_err(|_| format!("GameObject.m_Tag value {value} exceeds Int32"))?,
+        Some(value) => {
+            return Err(format!(
+                "GameObject.m_Tag has value {value:?}, expected an integer"
+            ));
+        }
+        None => return Err("source GameObject has no m_Tag field".to_owned()),
+    };
+    let tag_name = match tag_id {
+        0 => "Untagged".to_owned(),
+        1 => "Respawn".to_owned(),
+        2 => "Finish".to_owned(),
+        3 => "EditorOnly".to_owned(),
+        5 => "MainCamera".to_owned(),
+        6 => "Player".to_owned(),
+        7 => "GameController".to_owned(),
+        value => format!("unknown_{value}"),
+    };
+    let tag_string = editor_root
+        .unique_field_in_base_chain_mut("m_TagString")
+        .map_err(|error| format!("could not inspect GameObject.m_TagString: {error}"))?
+        .ok_or_else(|| "editor GameObject has no m_TagString field".to_owned())?;
+    let SerializedValue::StringBytes(bytes) = tag_string else {
+        return Err(format!(
+            "editor GameObject.m_TagString has value {tag_string:?}, expected a string"
+        ));
+    };
+    bytes.clear();
+    bytes
+        .try_reserve_exact(tag_name.len())
+        .map_err(|_| "could not allocate GameObject.m_TagString".to_owned())?;
+    bytes.extend_from_slice(tag_name.as_bytes());
+    Ok(())
+}
+
+fn apply_transform_editor_format(
+    editor_root: &mut SerializedValue,
+    source_root: &SerializedValue,
+    source: ExportAssetIdentity,
+    file_index: usize,
+    object_index: usize,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+) -> Result<(), String> {
+    if editor_root
+        .unique_field_in_base_chain("m_RootOrder")
+        .map_err(|error| format!("could not inspect Transform.m_RootOrder: {error}"))?
+        .is_some()
+    {
+        let root_order_value = calculate_scene_transform_root_order(
+            source_root,
+            source,
+            file_index,
+            object_index,
+            reference_graph,
+        )?;
+        let root_order = editor_root
+            .unique_field_in_base_chain_mut("m_RootOrder")
+            .map_err(|error| format!("could not update Transform.m_RootOrder: {error}"))?
+            .ok_or_else(|| "editor Transform lost m_RootOrder".to_owned())?;
+        let SerializedValue::I32(value) = root_order else {
+            return Err(format!(
+                "editor Transform.m_RootOrder has value {root_order:?}, expected Int32"
+            ));
+        };
+        *value = root_order_value;
+    }
+
+    if editor_root
+        .unique_field_in_base_chain("m_LocalEulerAnglesHint")
+        .map_err(|error| format!("could not inspect Transform.m_LocalEulerAnglesHint: {error}"))?
+        .is_some()
+    {
+        let rotation = source_root
+            .unique_field_in_base_chain("m_LocalRotation")
+            .map_err(|error| format!("could not inspect Transform.m_LocalRotation: {error}"))?
+            .ok_or_else(|| "source Transform has no m_LocalRotation field".to_owned())?;
+        let rotation = read_scene_quaternion(rotation, "Transform.m_LocalRotation")?;
+        let euler = crate::resources::quaternion::euler_hint_from_rotation(rotation);
+        set_scene_vector3(
+            editor_root,
+            "m_LocalEulerAnglesHint",
+            euler,
+            "Transform.m_LocalEulerAnglesHint",
+        )?;
+    }
+    Ok(())
+}
+
+fn calculate_scene_transform_root_order(
+    source_root: &SerializedValue,
+    source: ExportAssetIdentity,
+    file_index: usize,
+    object_index: usize,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+) -> Result<i32, String> {
+    let (file_id, path_id) = match source_root
+        .unique_field_in_base_chain("m_Father")
+        .map_err(|error| format!("could not inspect Transform.m_Father: {error}"))?
+    {
+        Some(SerializedValue::PPtr { file_id, path_id }) => (*file_id, *path_id),
+        Some(value) => {
+            return Err(format!(
+                "Transform.m_Father has value {value:?}, expected a PPtr"
+            ));
+        }
+        None => return Err("source Transform has no m_Father field".to_owned()),
+    };
+    if path_id == 0 {
+        return Ok(0);
+    }
+
+    let mut father_edges = reference_graph
+        .references_from_object(file_index, object_index)
+        .filter(|edge| {
+            edge.field_path.rsplit('.').next() == Some("m_Father")
+                && edge.file_id == file_id
+                && edge.path_id == path_id
+        });
+    let father_edge = father_edges
+        .next()
+        .ok_or_else(|| "non-null Transform.m_Father has no reference graph edge".to_owned())?;
+    if father_edges.next().is_some() {
+        return Err("Transform.m_Father has duplicate reference graph edges".to_owned());
+    }
+    let (parent_file_index, parent_object_index) = match &father_edge.resolution {
+        MultiFilePPtrResolution::Object {
+            target_file_index,
+            target_object_index,
+        } => (*target_file_index, *target_object_index),
+        resolution => {
+            return Err(format!(
+                "non-null Transform.m_Father resolves as {resolution:?}"
+            ));
+        }
+    };
+    if reference_graph.object_class_id(parent_file_index, parent_object_index) != Some(4) {
+        return Err("Transform.m_Father does not resolve to a Transform object".to_owned());
+    }
+    if reference_graph.object_scan_is_complete(parent_file_index, parent_object_index) != Some(true)
+    {
+        return Err("parent Transform reference scan is incomplete".to_owned());
+    }
+
+    let mut root_order = None::<usize>;
+    for edge in reference_graph.references_from_object(parent_file_index, parent_object_index) {
+        let Some(child_index) = scene_transform_child_index(edge.field_path)? else {
+            continue;
+        };
+        if matches!(
+            &edge.resolution,
+            MultiFilePPtrResolution::Object {
+                target_file_index,
+                target_object_index,
+            } if *target_file_index == file_index && *target_object_index == object_index
+        ) {
+            if root_order.is_some_and(|previous| previous == child_index) {
+                return Err(format!(
+                    "parent Transform has duplicate child reference at index {child_index}"
+                ));
+            }
+            root_order = Some(root_order.map_or(child_index, |previous| previous.max(child_index)));
+        }
+    }
+    let root_order = root_order.ok_or_else(|| {
+        format!("Transform {source:?} was not found among its father's serialized children")
+    })?;
+    i32::try_from(root_order)
+        .map_err(|_| format!("Transform root order {root_order} exceeds Int32"))
+}
+
+fn scene_transform_child_index(field_path: &str) -> Result<Option<usize>, String> {
+    let leaf = field_path.rsplit('.').next().unwrap_or(field_path);
+    let Some(index) = leaf.strip_prefix("m_Children[") else {
+        return Ok(None);
+    };
+    let index = index
+        .strip_suffix(']')
+        .ok_or_else(|| format!("malformed Transform child field path {field_path:?}"))?;
+    let index = index
+        .parse::<usize>()
+        .map_err(|_| format!("malformed Transform child index in {field_path:?}"))?;
+    Ok(Some(index))
+}
+
+fn read_scene_quaternion(value: &SerializedValue, context: &str) -> Result<[f32; 4], String> {
+    let SerializedValue::Struct(fields) = value else {
+        return Err(format!("{context} has value {value:?}, expected a struct"));
+    };
+    let mut components = [0.0; 4];
+    for (index, name) in ["x", "y", "z", "w"].into_iter().enumerate() {
+        let mut matching = fields.iter().filter(|field| field.name == name);
+        let field = matching
+            .next()
+            .ok_or_else(|| format!("{context} has no {name} component"))?;
+        if matching.next().is_some() {
+            return Err(format!("{context} has duplicate {name} components"));
+        }
+        let SerializedValue::F32(value) = &field.value else {
+            return Err(format!("{context}.{name} is not Float32"));
+        };
+        components[index] = *value;
+    }
+    Ok(components)
+}
+
+fn set_scene_vector3(
+    root: &mut SerializedValue,
+    field_name: &str,
+    components: [f32; 3],
+    context: &str,
+) -> Result<(), String> {
+    let value = root
+        .unique_field_in_base_chain_mut(field_name)
+        .map_err(|error| format!("could not inspect {context}: {error}"))?
+        .ok_or_else(|| format!("editor object has no {context} field"))?;
+    let SerializedValue::Struct(fields) = value else {
+        return Err(format!("{context} has value {value:?}, expected a struct"));
+    };
+    for (name, component) in ["x", "y", "z"].into_iter().zip(components) {
+        let mut matching = fields.iter_mut().filter(|field| field.name == name);
+        let field = matching
+            .next()
+            .ok_or_else(|| format!("{context} has no {name} component"))?;
+        if matching.next().is_some() {
+            return Err(format!("{context} has duplicate {name} components"));
+        }
+        let SerializedValue::F32(value) = &mut field.value else {
+            return Err(format!("{context}.{name} is not Float32"));
+        };
+        *value = component;
+    }
+    Ok(())
+}
+
+fn apply_renderer_editor_format(root: &mut SerializedValue) -> Result<(), String> {
+    const DEFAULTS: &[(&str, SceneEditorFormatDefault)] = &[
+        ("m_ScaleInLightmap", SceneEditorFormatDefault::F32(1.0)),
+        ("m_ReceiveGI", SceneEditorFormatDefault::I32(1)),
+        ("m_PreserveUVs", SceneEditorFormatDefault::Bool(false)),
+        (
+            "m_IgnoreNormalsForChartDetection",
+            SceneEditorFormatDefault::Bool(false),
+        ),
+        ("m_ImportantGI", SceneEditorFormatDefault::Bool(false)),
+        (
+            "m_StitchLightmapSeams",
+            SceneEditorFormatDefault::Bool(false),
+        ),
+        (
+            "m_SelectedEditorRenderState",
+            SceneEditorFormatDefault::I32(3),
+        ),
+        ("m_MinimumChartSize", SceneEditorFormatDefault::I32(4)),
+        ("m_AutoUVMaxDistance", SceneEditorFormatDefault::F32(0.5)),
+        ("m_AutoUVMaxAngle", SceneEditorFormatDefault::F32(89.0)),
+    ];
+    for (field, default) in DEFAULTS {
+        set_scene_editor_format_default(root, field, *default)?;
+    }
+    if let Some(lightmap_parameters) = root
+        .unique_field_in_base_chain_mut("m_LightmapParameters")
+        .map_err(|error| format!("could not inspect m_LightmapParameters: {error}"))?
+    {
+        let SerializedValue::PPtr { file_id, path_id } = lightmap_parameters else {
+            return Err(format!(
+                "m_LightmapParameters has value {lightmap_parameters:?}, expected a PPtr"
+            ));
+        };
+        *file_id = 0;
+        *path_id = 0;
+    }
+    Ok(())
 }
 
 fn merge_editor_yaml_hints_with_source_fallback(
