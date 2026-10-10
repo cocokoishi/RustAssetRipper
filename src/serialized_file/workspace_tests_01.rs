@@ -241,8 +241,8 @@
         use super::WorkspaceResourceLookupError;
 
         // One step per level plus the root-scope step always suffices.
-        assert_eq!(super::bundle_walk_step_limit(0), 1);
-        assert_eq!(super::bundle_walk_step_limit(2), 3);
+        assert_eq!(super::resource_resolution::bundle_walk_step_limit(0), 1);
+        assert_eq!(super::resource_resolution::bundle_walk_step_limit(2), 3);
         // Two bundles parenting each other never reach the root scope: the walk
         // reports the cycle instead of hanging (the source would loop forever).
         let workspace = SerializedFileWorkspace {

@@ -278,10 +278,6 @@ fn engine_resource_collection_alias(fixed_name: &str) -> Option<&str> {
 /// ascends one level per step and finishes at the root scope, so `bundle_count + 1`
 /// steps always suffice; anything beyond that is a parent cycle (the source would
 /// loop forever here), reported as `BundleParentCycle` instead of hanging.
-fn bundle_walk_step_limit(bundle_count: usize) -> usize {
-    bundle_count.saturating_add(1)
-}
-
 impl<'a> SourceBundleCollectionLookup<'a> {
     fn build(
         workspace: &'a SerializedFileWorkspace,
@@ -1118,8 +1114,12 @@ fn workspace_error(
 #[path = "workspace/container_index.rs"]
 mod container_index;
 use container_index::*;
+#[path = "workspace/collection_order.rs"]
+mod collection_order;
 #[path = "workspace/loader.rs"]
 mod loader;
+#[path = "workspace/resource_resolution.rs"]
+mod resource_resolution;
 
 #[cfg(test)]
 #[path = "workspace_tests.rs"]
