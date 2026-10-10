@@ -1146,12 +1146,110 @@ fn source_standalone_serialized_file_dispatches_through_the_bounded_path_reader(
     assert_eq!(mounted.mounted_bytes, input.len() as u64);
     assert_eq!(
         filesystem
+            .open_file("/serialized/serialized_file_direct.bin")
+            .unwrap()
+            .stream_type(),
+        crate::io::stream::SmartStreamType::File
+    );
+    assert_eq!(
+        filesystem
             .read_all_bytes("/serialized/serialized_file_direct.bin", input.len())
             .unwrap(),
         input
     );
     std::fs::remove_file(&path).expect("remove source SerializedFile bytes");
     std::fs::remove_dir(&directory).expect("remove serialized-file scratch directory");
+}
+
+#[test]
+fn source_gzip_wrapped_resource_mounts_file_backed_through_both_path_apis() {
+    let row = include_str!("../../compression/gzip_resource_source_fixture.txt")
+        .lines()
+        .find(|line| line.starts_with("SCHEME|gzip_plain_resource|"))
+        .expect("source GZip-wrapped ResourceFile SchemeReader row");
+    let fields: Vec<&str> = row.split('|').collect();
+    let input = fields
+        .iter()
+        .find_map(|field| field.strip_prefix("in="))
+        .map(decode_hex_fixture)
+        .expect("source GZip input bytes");
+    let source_tree = fields
+        .iter()
+        .find_map(|field| field.strip_prefix("tree="))
+        .expect("source GZip output inventory");
+    let expected = source_tree
+        .split(',')
+        .find_map(|entry| entry.strip_prefix("RES:gzip_plain_resource.bin:"))
+        .map(decode_hex_fixture)
+        .expect("source decoded ResourceFile bytes");
+
+    let directory = crate::test_support::unique_test_path("gzip-resource-mount", "dir");
+    std::fs::create_dir(&directory).expect("create GZip mount scratch directory");
+    let path = directory.join("gzip_plain_resource.bin");
+    std::fs::write(&path, &input).expect("write source GZip bytes");
+
+    let mut path_filesystem = crate::io::filesystem::VirtualFileSystem::new();
+    let path_report = SchemeReader::mount_path(
+        &path,
+        &mut path_filesystem,
+        Some("/gzip-resource"),
+        SchemeReaderLimits::default(),
+        super::ContainerMountLimits::default(),
+    )
+    .expect("mount source GZip resource through mount_path");
+    assert_eq!(path_report.mounted_entries, 1);
+    assert_eq!(path_report.mounted_bytes, expected.len() as u64);
+    assert_eq!(
+        path_filesystem
+            .open_file("/gzip-resource/gzip_plain_resource.bin")
+            .unwrap()
+            .stream_type(),
+        crate::io::stream::SmartStreamType::File
+    );
+    assert_eq!(
+        path_filesystem
+            .read_all_bytes("/gzip-resource/gzip_plain_resource.bin", expected.len())
+            .unwrap(),
+        expected
+    );
+
+    let mut batch_filesystem = crate::io::filesystem::VirtualFileSystem::new();
+    let inputs = [super::PathMountInput {
+        path: path.clone(),
+        destination_root: Some("/gzip-resource-batch".to_owned()),
+    }];
+    let batch_report = SchemeReader::mount_paths(
+        &inputs,
+        &mut batch_filesystem,
+        SchemeReaderLimits::default(),
+        super::ContainerMountLimits::default(),
+        super::BatchMountLimits::default(),
+    )
+    .expect("mount source GZip resource through mount_paths");
+    assert_eq!(batch_report.completed_inputs, 1);
+    assert_eq!(batch_report.mounted_entries, 1);
+    assert_eq!(batch_report.mounted_bytes, expected.len() as u64);
+    assert_eq!(
+        batch_filesystem
+            .open_file("/gzip-resource-batch/gzip_plain_resource.bin")
+            .unwrap()
+            .stream_type(),
+        crate::io::stream::SmartStreamType::File
+    );
+    assert_eq!(
+        batch_filesystem
+            .read_all_bytes(
+                "/gzip-resource-batch/gzip_plain_resource.bin",
+                expected.len()
+            )
+            .unwrap(),
+        expected
+    );
+
+    std::fs::remove_file(&path).expect("remove source GZip bytes");
+    drop(batch_filesystem);
+    drop(path_filesystem);
+    std::fs::remove_dir(&directory).expect("remove GZip mount scratch directory");
 }
 
 #[test]

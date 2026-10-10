@@ -537,7 +537,7 @@ struct UnityFsStreamContext<'a> {
     source_name: Option<&'a str>,
 }
 
-fn mount_container_stream_at_path(
+pub(super) fn mount_container_stream_at_path(
     filesystem: &mut VirtualFileSystem,
     path: &str,
     entry_index: usize,

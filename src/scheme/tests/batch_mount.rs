@@ -20,6 +20,16 @@ fn mount_path_imports_a_root_resource_under_its_logical_filename() {
     assert_eq!(report.mounted_bytes, 19);
     assert_eq!(
         filesystem
+            .open_file(&format!(
+                "/inputs/{}",
+                path.file_name().unwrap().to_string_lossy()
+            ))
+            .unwrap()
+            .stream_type(),
+        crate::io::stream::SmartStreamType::File
+    );
+    assert_eq!(
+        filesystem
             .read_all_bytes(
                 &format!("/inputs/{}", path.file_name().unwrap().to_string_lossy()),
                 64,
@@ -617,6 +627,13 @@ fn mount_paths_imports_explicit_roots_and_honors_each_destination() {
             virtual_path: resource_virtual_path.clone(),
             kind: FileKind::Resource,
         }])
+    );
+    assert_eq!(
+        filesystem
+            .open_file(&resource_virtual_path)
+            .unwrap()
+            .stream_type(),
+        crate::io::stream::SmartStreamType::File
     );
     assert_eq!(
         filesystem

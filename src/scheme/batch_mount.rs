@@ -1,16 +1,116 @@
 use std::collections::BTreeSet;
-use std::io::{Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::Arc;
 
 use super::container_mount::{
     checked_container_entry_path, directory_input_destination, directory_relative_destination,
-    mount_container_entry_at_path, mount_unityfs_stream_tree,
+    mount_container_entry_at_path, mount_container_stream_at_path, mount_unityfs_stream_tree,
 };
 use super::*;
 use crate::io::discovery::discover_directory_inputs;
 use crate::io::filesystem::VirtualFileSystem;
 use crate::io::stream::{logical_file_name, logical_file_path, open_logical_file, SmartStream};
+
+fn detach_mount_stream(
+    mut source: SmartStream,
+    path: &str,
+    entry_index: usize,
+    limits: ContainerMountLimits,
+    report: &ContainerMountReport,
+) -> Result<SmartStream, ContainerMountError> {
+    let length = source.length().map_err(|source| {
+        ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::FileSystem {
+                entry_index,
+                path: path.to_owned(),
+                source,
+            },
+        )
+    })?;
+    let requested_total = report.mounted_bytes.checked_add(length).ok_or_else(|| {
+        ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::TotalOutputSizeOverflow { entry_index },
+        )
+    })?;
+    if requested_total > limits.max_total_output_bytes {
+        return Err(ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::TotalOutputLimitExceeded {
+                entry_index,
+                requested_total,
+                limit: limits.max_total_output_bytes,
+            },
+        ));
+    }
+    source.seek(SeekFrom::Start(0)).map_err(|source| {
+        ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::FileSystem {
+                entry_index,
+                path: path.to_owned(),
+                source,
+            },
+        )
+    })?;
+    let mut detached = SmartStream::create_temp().map_err(|source| {
+        ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::FileSystem {
+                entry_index,
+                path: path.to_owned(),
+                source,
+            },
+        )
+    })?;
+    let copied = std::io::copy(&mut source.take(length), &mut detached).map_err(|source| {
+        ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::FileSystem {
+                entry_index,
+                path: path.to_owned(),
+                source,
+            },
+        )
+    })?;
+    if copied != length {
+        return Err(ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::FileSystem {
+                entry_index,
+                path: path.to_owned(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    format!("input stream ended at {copied} of {length} bytes"),
+                ),
+            },
+        ));
+    }
+    detached.flush().map_err(|source| {
+        ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::FileSystem {
+                entry_index,
+                path: path.to_owned(),
+                source,
+            },
+        )
+    })?;
+    detached.seek(SeekFrom::Start(0)).map_err(|source| {
+        ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::FileSystem {
+                entry_index,
+                path: path.to_owned(),
+                source,
+            },
+        )
+    })?;
+    Ok(detached)
+}
+
 struct BatchInputRequest {
     path: std::path::PathBuf,
     source_bytes: u64,
@@ -159,6 +259,41 @@ impl SchemeReader {
                 scheme_limits,
                 mount_limits,
             );
+        }
+
+        if matches!(
+            stream_dispatched.kind,
+            FileKind::SerializedFile | FileKind::Resource
+        ) {
+            let file_name = logical_file_name(input_path).ok_or_else(|| {
+                ContainerMountError::new(
+                    ContainerMountReport::default(),
+                    ContainerMountErrorKind::InputPathHasNoFileName,
+                )
+            })?;
+            let mut report = ContainerMountReport::default();
+            let virtual_path =
+                checked_container_entry_path(filesystem, destination_root, &file_name, 0, &report)?;
+            let stream = if stream_dispatched.has_wrappers() {
+                stream_dispatched.stream
+            } else {
+                detach_mount_stream(
+                    stream_dispatched.stream,
+                    &virtual_path,
+                    0,
+                    mount_limits,
+                    &report,
+                )?
+            };
+            mount_container_stream_at_path(
+                filesystem,
+                &virtual_path,
+                0,
+                stream,
+                mount_limits,
+                &mut report,
+            )?;
+            return Ok(report);
         }
 
         let dispatched = stream_dispatched
@@ -721,7 +856,8 @@ impl SchemeReader {
                 .as_ref()
                 .map(|dispatched| dispatched.kind)
                 .unwrap_or(FileKind::UnityFs);
-            let dispatched = if direct_unityfs || root_kind == FileKind::UnityFs {
+            let root_is_file = matches!(root_kind, FileKind::SerializedFile | FileKind::Resource);
+            let dispatched = if direct_unityfs || root_kind == FileKind::UnityFs || root_is_file {
                 None
             } else {
                 let Some(stream_dispatched) = stream_dispatched.take() else {
@@ -872,6 +1008,62 @@ impl SchemeReader {
                         scheme_limits,
                         per_input_mount_limits,
                     ),
+                    None => Err(ContainerMountError::new(
+                        ContainerMountReport::default(),
+                        ContainerMountErrorKind::NotContainer,
+                    )),
+                }
+            } else if root_is_file {
+                let file_name = logical_file_name(&input.path).ok_or_else(|| {
+                    BatchMountError::new(
+                        report.clone(),
+                        Some(input.path.clone()),
+                        BatchMountErrorKind::InputMount(Box::new(ContainerMountError::new(
+                            ContainerMountReport::default(),
+                            ContainerMountErrorKind::InputPathHasNoFileName,
+                        ))),
+                    )
+                })?;
+                let virtual_path = checked_container_entry_path(
+                    filesystem,
+                    destination,
+                    &file_name,
+                    0,
+                    &ContainerMountReport::default(),
+                )
+                .map_err(|error| {
+                    BatchMountError::new(
+                        report.clone(),
+                        Some(input.path.clone()),
+                        BatchMountErrorKind::InputMount(Box::new(error)),
+                    )
+                })?;
+                match stream_dispatched.take() {
+                    Some(dispatched) => {
+                        let mut input_report = ContainerMountReport::default();
+                        let stream = if dispatched.has_wrappers() {
+                            Ok(dispatched.stream)
+                        } else {
+                            detach_mount_stream(
+                                dispatched.stream,
+                                &virtual_path,
+                                0,
+                                per_input_mount_limits,
+                                &input_report,
+                            )
+                        };
+                        stream.and_then(|stream| {
+                            mount_container_stream_at_path(
+                                filesystem,
+                                &virtual_path,
+                                0,
+                                stream,
+                                per_input_mount_limits,
+                                &mut input_report,
+                            )
+                            .map(|()| input_report)
+                        })
+                    }
                     None => Err(ContainerMountError::new(
                         ContainerMountReport::default(),
                         ContainerMountErrorKind::NotContainer,

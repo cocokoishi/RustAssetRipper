@@ -1,0 +1,2 @@
+# Frozen AssetRipper IO.Files runtime (.NET SDK 10.0.401); C#-written GZipFile with a plain ResourceFile payload.
+SCHEME|gzip_plain_resource|in=1F8B080000000000000A4BAFCA2C50282F4A2C28484D51284A2DCE2F2D4A4E5548AA2C492D0600EE59FCBA1B000000|type=GZipFile|fixed=gzip_plain_resource.bin|tree=CODEC:GZipFile,RES:gzip_plain_resource.bin:677A69702077726170706564207265736F75726365206279746573

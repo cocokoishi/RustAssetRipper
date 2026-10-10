@@ -144,6 +144,10 @@ pub(crate) struct StreamDispatchedFile {
 }
 
 impl StreamDispatchedFile {
+    pub(crate) fn has_wrappers(&self) -> bool {
+        !self.wrappers.is_empty()
+    }
+
     #[cfg(test)]
     pub(crate) fn wrappers(&self) -> &[WrapperLayer] {
         &self.wrappers

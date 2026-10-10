@@ -2023,3 +2023,14 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | `mount_unityfs_stream_tree_at` decodes one wrapper layer into a bounded temporary SmartStream and mounts that output as a ResourceFile, preserving the source entry name and order. Wrapper, input, decompressed-size, and output-size failures remain errors. |
 | Regression evidence | `source_unityfs_wrapped_entries_decode_one_layer_and_stay_resource_files` mounts the frozen bundle through `mount_path`, checks all three file-backed ResourceFile results against the source inventory, and confirms there are no parsed SerializedFiles. The focused regression passes. |
 | Remaining comparison | Other UnityFS entry kinds, other container families, and generic final-layer materialization remain open under `IO-STREAM-001`. |
+
+## DIFF-IO-STREAM-TOP-LEVEL-LEAF-001 — top-level wrapped ResourceFile mounting
+
+| Field | Finding |
+|---|---|
+| Source location | `AssetRipper.IO.Files/SchemeReader.cs` (`LoadFile`, recursive source behavior); `CompressedFiles/GZipFile.cs`; `ResourceFiles/ResourceFile.cs` |
+| Input evidence | `src/compression/gzip_resource_source_fixture.txt`, replayed from the isolated .NET 10 IO.Files runtime probe against the frozen AssetRipper assembly. The source identifies `gzip_plain_resource.bin` as a `GZipFile` containing a plain ResourceFile with bytes `677A69702077726170706564207265736F75726365206279746573`. |
+| Source-derived behavior | A top-level GZip wrapper is decoded to one ResourceFile while preserving the leaf name and exact decoded bytes. The committed probe row was reproduced byte-for-byte from the isolated source runtime. |
+| Rust change | `mount_path` and `mount_paths` now pass file-backed `SerializedFile` and `Resource` dispatch results to `mount_container_stream_at_path` instead of calling `into_dispatched` and materializing the final payload. Direct input streams are copied in bounded chunks to a temporary backing stream so the VFS does not retain a lock on the caller's source file; decoded wrapper streams already use temporary backing and are mounted directly. Existing output bounds and path validation remain active. |
+| Regression evidence | `source_gzip_wrapped_resource_mounts_file_backed_through_both_path_apis` writes the source input to the source leaf name, exercises both production path APIs, checks one entry and the decoded bytes, and confirms each mounted file remains backed by `SmartStreamType::File`. The focused regression passed. |
+| Remaining comparison | Other final leaf/container kinds, compressed/non-direct container entries, and Unix retained-reader runtime validation remain open. `IO-STREAM-001` remains in progress; this bounded case closes no parity row. |

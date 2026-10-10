@@ -725,6 +725,7 @@ public static class Program
 			("plain", Ascii("plain resource bytes")),
 			("serialized_file_direct", serializedFile),
 			("gzip_ufs", BuildGZip(ufsNone)),
+			("gzip_plain_resource", BuildGZip(Ascii("gzip wrapped resource bytes"))),
 			("brotli_ufs", BuildBrotli(ufsNone)),
 		};
 
