@@ -8,7 +8,7 @@ use crate::processing::asset_factory::{
     reference_class_layouts, ClassLayoutSource, FactoryFileFacts, FactoryObjectMaterialization,
     FactoryUnityVersion,
 };
-use crate::serialized_file::file::SerializedFile;
+use crate::serialized_file::file::{SerializedFile, SerializedFileError, StreamSerializedFile};
 use crate::serialized_file::workspace::SerializedFileWorkspace;
 impl ObjectWorkspace {
     /// Decode every object in workspace order. Unsupported or malformed TypeTrees remain as
@@ -111,39 +111,67 @@ impl ObjectWorkspace {
                 ));
             }
             let maximum_bytes = usize::try_from(limits.max_file_bytes).unwrap_or(usize::MAX);
-            let file_bytes = filesystem
-                .read_all_bytes(&file.virtual_path, maximum_bytes)
-                .map_err(|source| {
+            let stream_file =
+                StreamSerializedFile::try_parse(stream, maximum_bytes).map_err(|source| {
                     object_workspace_error(
                         file_index,
                         &file.virtual_path,
                         None,
-                        ObjectWorkspaceErrorKind::FileSystem(source),
+                        ObjectWorkspaceErrorKind::StreamSerializedFile(source),
                     )
                 })?;
-            let parsed_file = SerializedFile::parse(&file_bytes).map_err(|source| {
+            let mut materialized_file_bytes = None;
+            if let Some(stream_file) = &stream_file {
+                if stream_file.header != file.header || stream_file.metadata != file.metadata {
+                    return Err(object_workspace_error(
+                        file_index,
+                        &file.virtual_path,
+                        None,
+                        ObjectWorkspaceErrorKind::FileChangedSinceWorkspaceLoad,
+                    ));
+                }
+            } else {
+                let file_bytes = filesystem
+                    .read_all_bytes(&file.virtual_path, maximum_bytes)
+                    .map_err(|source| {
+                        object_workspace_error(
+                            file_index,
+                            &file.virtual_path,
+                            None,
+                            ObjectWorkspaceErrorKind::FileSystem(source),
+                        )
+                    })?;
+                let parsed_file = SerializedFile::parse(&file_bytes).map_err(|source| {
+                    object_workspace_error(
+                        file_index,
+                        &file.virtual_path,
+                        None,
+                        ObjectWorkspaceErrorKind::SerializedFile(source),
+                    )
+                })?;
+                if parsed_file.header != file.header || parsed_file.metadata != file.metadata {
+                    return Err(object_workspace_error(
+                        file_index,
+                        &file.virtual_path,
+                        None,
+                        ObjectWorkspaceErrorKind::FileChangedSinceWorkspaceLoad,
+                    ));
+                }
+                materialized_file_bytes = Some(file_bytes);
+            }
+            let file_size = usize::try_from(file_bytes).map_err(|_| {
                 object_workspace_error(
                     file_index,
                     &file.virtual_path,
                     None,
-                    ObjectWorkspaceErrorKind::SerializedFile(source),
+                    ObjectWorkspaceErrorKind::InvalidObjectPayloadRange,
                 )
             })?;
-            if parsed_file.header != file.header || parsed_file.metadata != file.metadata {
-                return Err(object_workspace_error(
-                    file_index,
-                    &file.virtual_path,
-                    None,
-                    ObjectWorkspaceErrorKind::FileChangedSinceWorkspaceLoad,
-                ));
-            }
 
             for (object_index, object_info) in file.metadata.objects.iter().enumerate() {
                 let raw_payload_range = object_info
                     .data_range(&file.header)
-                    .filter(|range| {
-                        range.end <= u64::try_from(file_bytes.len()).unwrap_or(u64::MAX)
-                    })
+                    .filter(|range| range.end <= file_size as u64)
                     .ok_or_else(|| {
                         object_workspace_error(
                             file_index,
@@ -152,6 +180,47 @@ impl ObjectWorkspace {
                             ObjectWorkspaceErrorKind::InvalidObjectPayloadRange,
                         )
                     })?;
+                let payload_start = usize::try_from(raw_payload_range.start).map_err(|_| {
+                    object_workspace_error(
+                        file_index,
+                        &file.virtual_path,
+                        Some(object_index),
+                        ObjectWorkspaceErrorKind::InvalidObjectPayloadRange,
+                    )
+                })?;
+                let payload_end = usize::try_from(raw_payload_range.end).map_err(|_| {
+                    object_workspace_error(
+                        file_index,
+                        &file.virtual_path,
+                        Some(object_index),
+                        ObjectWorkspaceErrorKind::InvalidObjectPayloadRange,
+                    )
+                })?;
+                let raw_payload = if let Some(stream_file) = &stream_file {
+                    stream_file
+                        .read_object_payload_bytes(object_index)
+                        .map_err(|source| {
+                            object_workspace_error(
+                                file_index,
+                                &file.virtual_path,
+                                Some(object_index),
+                                ObjectWorkspaceErrorKind::SerializedFile(source),
+                            )
+                        })?
+                } else {
+                    materialized_file_bytes
+                        .as_deref()
+                        .and_then(|bytes| bytes.get(payload_start..payload_end))
+                        .ok_or_else(|| {
+                            object_workspace_error(
+                                file_index,
+                                &file.virtual_path,
+                                Some(object_index),
+                                ObjectWorkspaceErrorKind::InvalidObjectPayloadRange,
+                            )
+                        })?
+                        .to_vec()
+                };
                 let mut decode_limits = limits.object_decode;
                 decode_limits.max_decoded_allocation_bytes =
                     decode_limits.max_decoded_allocation_bytes.min(
@@ -159,19 +228,20 @@ impl ObjectWorkspace {
                             .max_total_decoded_allocation_bytes
                             .saturating_sub(report.total_decoded_allocation_bytes),
                     );
-                let platform = target_platform_label(parsed_file.metadata.prefix.target_platform);
-                let materialization =
-                    crate::processing::asset_factory::materialize_object_for_workspace(
-                        &parsed_file,
-                        &FactoryFileFacts {
-                            collection_name: &file.file_name,
-                            file_path: &file.virtual_path,
-                            platform: &platform,
-                        },
-                        layouts,
-                        object_index,
-                        &decode_limits,
-                    )
+                let platform = target_platform_label(file.metadata.prefix.target_platform);
+                let materialization = crate::processing::asset_factory::materialize_object_for_workspace_from_payload(
+                    &file.header,
+                    &file.metadata,
+                    &FactoryFileFacts {
+                        collection_name: &file.file_name,
+                        file_path: &file.virtual_path,
+                        platform: &platform,
+                    },
+                    layouts,
+                    object_index,
+                    &raw_payload,
+                    &decode_limits,
+                )
                     .map_err(|source| {
                         object_workspace_error(
                             file_index,
@@ -187,24 +257,32 @@ impl ObjectWorkspace {
                 let object_class_id = state.class_id;
                 let is_mono_behaviour =
                     object_class_id == crate::processing::asset_factory::MONO_BEHAVIOUR_CLASS_ID;
-                let has_file_type_tree = parsed_file
+                let has_file_type_tree = file
                     .metadata
                     .objects
                     .get(object_index)
                     .and_then(|object| object.resolved_type_index)
-                    .and_then(|type_index| parsed_file.metadata.types.get(type_index))
+                    .and_then(|type_index| file.metadata.types.get(type_index))
                     .and_then(|serialized_type| serialized_type.type_tree.as_ref())
                     .is_some_and(|tree| !tree.nodes.is_empty());
                 let mut recovered_type_tree = None;
                 let payload = if is_mono_behaviour && has_file_type_tree {
-                    parsed_file.decode_object_payload_with_limits(object_index, &decode_limits)
+                    file.metadata
+                        .decode_object_payload_from_data_with_limits(
+                            &raw_payload,
+                            &file.header,
+                            object_index,
+                            file_size,
+                            &decode_limits,
+                        )
+                        .map_err(SerializedFileError::from_object)
                 } else if state.kind.is_recoverable() {
                     factory_payload.ok_or_else(|| factory_outcome_error(&state))
                 } else {
                     Err(factory_outcome_error(&state))
                 };
                 if state.kind.is_recoverable() && !has_file_type_tree {
-                    let version = parsed_file
+                    let version = file
                         .metadata
                         .prefix
                         .unity_version_text
@@ -216,9 +294,14 @@ impl ObjectWorkspace {
                         .ok()
                         .flatten()
                         .map(|(release, editor)| {
-                            if parsed_file
-                                .object_read_flags(&file.virtual_path, &file.file_name)
-                                .is_release()
+                            if crate::serialized_file::object::serialized_file_object_read_flags(
+                                file.header.format_version,
+                                file.metadata.prefix.target_platform,
+                                &file.virtual_path,
+                                &file.file_name,
+                                file.metadata.prefix.body_endian,
+                            )
+                            .is_release()
                             {
                                 release
                             } else {

@@ -178,8 +178,8 @@ impl SerializedFileWorkspace {
 
         for input in inputs {
             let max_file_bytes = usize::try_from(limits.max_file_bytes).unwrap_or(usize::MAX);
-            let bytes = filesystem
-                .read_all_bytes(&input.virtual_path, max_file_bytes)
+            let stream = filesystem
+                .open_file(&input.virtual_path)
                 .map_err(|source| {
                     workspace_error(
                         report,
@@ -187,24 +187,78 @@ impl SerializedFileWorkspace {
                         SerializedFileWorkspaceErrorKind::FileSystem(source),
                     )
                 })?;
-            let dispatched =
-                SchemeReader::read_with_limits(&bytes, limits.scheme).map_err(|source| {
+            let input_file_bytes = stream.length().map_err(|source| {
+                workspace_error(
+                    report,
+                    Some(&input.virtual_path),
+                    SerializedFileWorkspaceErrorKind::FileSystem(source),
+                )
+            })?;
+            let stream_file =
+                StreamSerializedFile::try_parse(stream, max_file_bytes).map_err(|source| {
                     workspace_error(
                         report,
                         Some(&input.virtual_path),
-                        SerializedFileWorkspaceErrorKind::Scheme(source),
+                        SerializedFileWorkspaceErrorKind::StreamSerializedFile(source),
                     )
                 })?;
-            if dispatched.kind() != FileKind::SerializedFile {
-                return Err(workspace_error(
-                    report,
-                    Some(&input.virtual_path),
-                    SerializedFileWorkspaceErrorKind::NotSerializedFile {
-                        detected_kind: dispatched.kind(),
+            let (header, metadata, reference_graph) = if let Some(stream_file) = stream_file {
+                let decode_context = StreamObjectDecodeContext::new(
+                    &stream_file.header,
+                    &stream_file.metadata,
+                    stream_file.file_size(),
+                    &limits.reference_graph.object_decode,
+                    &input.file_name,
+                    &input.virtual_path,
+                    layouts,
+                );
+                let graph = ObjectReferenceGraph::build_with_payload_decoder(
+                    &stream_file.metadata,
+                    limits.reference_graph,
+                    |object_index| -> Result<DecodedReferenceObject, SerializedFileError> {
+                        let payload = stream_file.read_object_payload_bytes(object_index)?;
+                        decode_object_payload_with_generated_fallback_from_data(
+                            &decode_context,
+                            object_index,
+                            &payload,
+                        )
                     },
-                ));
-            }
-            let (header, metadata, reference_graph) = {
+                )
+                .map_err(|source| {
+                    workspace_error(
+                        report,
+                        Some(&input.virtual_path),
+                        SerializedFileWorkspaceErrorKind::ReferenceGraph(source),
+                    )
+                })?;
+                (stream_file.header, stream_file.metadata, graph)
+            } else {
+                let bytes = filesystem
+                    .read_all_bytes(&input.virtual_path, max_file_bytes)
+                    .map_err(|source| {
+                        workspace_error(
+                            report,
+                            Some(&input.virtual_path),
+                            SerializedFileWorkspaceErrorKind::FileSystem(source),
+                        )
+                    })?;
+                let dispatched =
+                    SchemeReader::read_with_limits(&bytes, limits.scheme).map_err(|source| {
+                        workspace_error(
+                            report,
+                            Some(&input.virtual_path),
+                            SerializedFileWorkspaceErrorKind::Scheme(source),
+                        )
+                    })?;
+                if dispatched.kind() != FileKind::SerializedFile {
+                    return Err(workspace_error(
+                        report,
+                        Some(&input.virtual_path),
+                        SerializedFileWorkspaceErrorKind::NotSerializedFile {
+                            detected_kind: dispatched.kind(),
+                        },
+                    ));
+                }
                 let ParsedFile::SerializedFile(parsed) = dispatched.parse().map_err(|source| {
                     workspace_error(
                         report,
@@ -281,7 +335,7 @@ impl SerializedFileWorkspace {
 
             report.completed_input_bytes = report
                 .completed_input_bytes
-                .checked_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX))
+                .checked_add(input_file_bytes)
                 .ok_or_else(|| {
                     workspace_error(
                         report,

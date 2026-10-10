@@ -1,11 +1,14 @@
 use crate::io::binary::Endian;
 use crate::processing::source_tpk::SourceTpkLookupError;
 use crate::serialized_file::file::SerializedFile;
-use crate::serialized_file::metadata::{unity_version_aligns_arrays, ObjectInfo, TypeTree};
+use crate::serialized_file::header::SerializedFileHeader;
+use crate::serialized_file::metadata::{
+    unity_version_aligns_arrays, ObjectInfo, SerializedFileMetadata, TypeTree,
+};
 use crate::serialized_file::object::{
     classify_type_tree_usability, decode_typetree_payload, raw_data_class_name,
-    ManagedPayloadDecodeContext, ObjectDecodeError, ObjectDecodeLimits, ParsedObjectPayload,
-    SerializedValue, TypeTreeUsability,
+    serialized_file_object_read_flags, ManagedPayloadDecodeContext, ObjectDecodeError,
+    ObjectDecodeLimits, ParsedObjectPayload, SerializedValue, TypeTreeUsability,
 };
 
 use super::decisions::*;
@@ -25,7 +28,16 @@ pub fn materialize_object(
     object_index: usize,
     limits: &ObjectDecodeLimits,
 ) -> Result<FactoryAsset, FactoryEngineError> {
-    materialize_object_inner(file, facts, source, object_index, limits, true)
+    let raw_bytes = object_payload_slice(file, object_index)?;
+    materialize_object_inner(
+        MaterializationFile::from(file),
+        facts,
+        source,
+        object_index,
+        limits,
+        raw_bytes,
+        true,
+    )
 }
 
 /// Materialize one object for `ObjectWorkspace` without retaining a duplicate of its raw bytes.
@@ -37,16 +49,49 @@ pub fn materialize_object_for_workspace(
     object_index: usize,
     limits: &ObjectDecodeLimits,
 ) -> Result<FactoryObjectMaterialization, FactoryEngineError> {
-    materialize_object_inner(file, facts, source, object_index, limits, false)
-        .map(FactoryAsset::into_workspace_materialization)
+    let raw_bytes = object_payload_slice(file, object_index)?;
+    materialize_object_inner(
+        MaterializationFile::from(file),
+        facts,
+        source,
+        object_index,
+        limits,
+        raw_bytes,
+        false,
+    )
+    .map(FactoryAsset::into_workspace_materialization)
+}
+
+/// Materialize an object whose exact SerializedFile payload range was read from a file-backed
+/// stream. The metadata and offsets remain those of the original file.
+pub(crate) fn materialize_object_for_workspace_from_payload(
+    header: &SerializedFileHeader,
+    metadata: &SerializedFileMetadata,
+    facts: &FactoryFileFacts<'_>,
+    source: &dyn ClassLayoutSource,
+    object_index: usize,
+    raw_bytes: &[u8],
+    limits: &ObjectDecodeLimits,
+) -> Result<FactoryObjectMaterialization, FactoryEngineError> {
+    materialize_object_inner(
+        MaterializationFile { header, metadata },
+        facts,
+        source,
+        object_index,
+        limits,
+        raw_bytes,
+        false,
+    )
+    .map(FactoryAsset::into_workspace_materialization)
 }
 
 fn materialize_object_inner(
-    file: &SerializedFile<'_>,
+    file: MaterializationFile<'_>,
     facts: &FactoryFileFacts<'_>,
     source: &dyn ClassLayoutSource,
     object_index: usize,
     limits: &ObjectDecodeLimits,
+    raw_bytes: &[u8],
     retain_raw_bytes: bool,
 ) -> Result<FactoryAsset, FactoryEngineError> {
     let object = file.metadata.objects.get(object_index).ok_or(
@@ -55,7 +100,6 @@ fn materialize_object_inner(
             object_count: file.metadata.objects.len(),
         },
     )?;
-    let raw_bytes = object_payload_slice(file, object_index)?;
     let raw = if retain_raw_bytes {
         raw_bytes.to_vec()
     } else {
@@ -100,7 +144,7 @@ fn materialize_object_inner(
 
     if class_id == MONO_BEHAVIOUR_CLASS_ID {
         read_monobehaviour(
-            file,
+            &file,
             facts,
             source,
             object_index,
@@ -114,7 +158,7 @@ fn materialize_object_inner(
 
     read_normal_object(
         NormalObjectReadContext {
-            file,
+            file: &file,
             facts,
             source,
             limits,
@@ -144,10 +188,41 @@ fn object_payload_slice<'a>(
         .ok_or(FactoryEngineError::InvalidObjectPayloadRange { object_index })
 }
 
-fn serialized_type_tree<'a>(
-    file: &'a SerializedFile<'_>,
+#[derive(Clone, Copy)]
+struct MaterializationFile<'a> {
+    header: &'a SerializedFileHeader,
+    metadata: &'a SerializedFileMetadata,
+}
+
+impl<'a> From<&'a SerializedFile<'_>> for MaterializationFile<'a> {
+    fn from(file: &'a SerializedFile<'_>) -> Self {
+        Self {
+            header: &file.header,
+            metadata: &file.metadata,
+        }
+    }
+}
+
+impl MaterializationFile<'_> {
+    fn object_read_flags(
+        &self,
+        file_path: &str,
+        file_name: &str,
+    ) -> crate::serialized_file::transfer_flags::TransferInstructionFlags {
+        serialized_file_object_read_flags(
+            self.header.format_version,
+            self.metadata.prefix.target_platform,
+            file_path,
+            file_name,
+            self.metadata.prefix.body_endian,
+        )
+    }
+}
+
+fn serialized_type_tree<'metadata>(
+    file: &MaterializationFile<'metadata>,
     object_index: usize,
-) -> Option<&'a TypeTree> {
+) -> Option<&'metadata TypeTree> {
     let object = file.metadata.objects.get(object_index)?;
     let type_index = object.resolved_type_index?;
     file.metadata.types.get(type_index)?.type_tree.as_ref()
@@ -220,7 +295,7 @@ fn create_asset(
 /// The layout a created asset reads its fields with: TPK class layout first (the
 /// generated classes are generated from it), then the file's own TypeTree.
 fn class_layout(
-    file: &SerializedFile<'_>,
+    file: &MaterializationFile<'_>,
     source: &dyn ClassLayoutSource,
     class_id: i32,
     version: &FactoryUnityVersion,
@@ -252,7 +327,7 @@ struct NormalAttempt {
 
 #[derive(Clone, Copy)]
 struct NormalObjectReadContext<'a, 'file, 'facts> {
-    file: &'a SerializedFile<'file>,
+    file: &'a MaterializationFile<'file>,
     facts: &'a FactoryFileFacts<'facts>,
     source: &'a dyn ClassLayoutSource,
     limits: &'a ObjectDecodeLimits,
@@ -349,7 +424,7 @@ fn apply_attempt(asset: &mut FactoryAsset, attempt: NormalAttempt, raw_bytes: &[
 }
 
 fn try_read_normal_object(
-    file: &SerializedFile<'_>,
+    file: &MaterializationFile<'_>,
     facts: &FactoryFileFacts<'_>,
     source: &dyn ClassLayoutSource,
     object_index: usize,

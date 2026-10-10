@@ -9,12 +9,14 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::io;
 
+use super::file::{SerializedFileError, SerializedFileStreamError, StreamSerializedFile};
 use super::header::SerializedFileHeader;
 use super::metadata::SerializedFileMetadata;
 use super::reference_graph::{
+    decode_object_payload_with_generated_fallback_from_data, DecodedReferenceObject,
     MultiFileReferenceGraph, MultiFileReferenceGraphBuildError, MultiFileReferenceGraphLimits,
     NamedObjectReferenceGraph, ObjectReferenceGraph, ReferenceGraphBuildError,
-    ReferenceGraphLimits,
+    ReferenceGraphLimits, StreamObjectDecodeContext,
 };
 use crate::io::dependency::{
     DependencyDispatchError, DependencyFilePath, DependencyIndex, DependencyIndexBuildError,
@@ -815,6 +817,7 @@ pub enum SerializedFileWorkspaceErrorKind {
     },
     ReferenceCountOverflow,
     FileSystem(io::Error),
+    StreamSerializedFile(SerializedFileStreamError),
     DependencyIndexBuild(Box<DependencyIndexBuildError>),
     DependencyLookup(Box<DependencyLookupError>),
     DependencyDispatch(Box<DependencyDispatchError>),
@@ -1068,6 +1071,9 @@ impl Display for SerializedFileWorkspaceErrorKind {
             } => write!(f, "reference count {requested_total} exceeds limit {limit}"),
             Self::ReferenceCountOverflow => f.write_str("aggregate reference count overflows"),
             Self::FileSystem(error) => write!(f, "VFS error: {error}"),
+            Self::StreamSerializedFile(error) => {
+                write!(f, "file-backed SerializedFile parse error: {error}")
+            }
             Self::DependencyIndexBuild(error) => {
                 write!(f, "could not build dependency index: {error}")
             }
@@ -1086,6 +1092,7 @@ impl Error for SerializedFileWorkspaceError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match &self.kind {
             SerializedFileWorkspaceErrorKind::FileSystem(error) => Some(error),
+            SerializedFileWorkspaceErrorKind::StreamSerializedFile(error) => Some(error),
             SerializedFileWorkspaceErrorKind::DependencyIndexBuild(error) => Some(error.as_ref()),
             SerializedFileWorkspaceErrorKind::DependencyLookup(error) => Some(error.as_ref()),
             SerializedFileWorkspaceErrorKind::DependencyDispatch(error) => Some(error.as_ref()),

@@ -1,5 +1,5 @@
 use crate::processing::asset_factory::{FactoryAssetKind, FactoryEngineError, FactoryObjectState};
-use crate::serialized_file::file::SerializedFileError;
+use crate::serialized_file::file::{SerializedFileError, SerializedFileStreamError};
 use crate::serialized_file::object::ObjectDecodeError;
 use crate::serialized_file::reference_graph::{
     MultiFileReferenceGraphBuildError, ReferenceGraphBuildError,
@@ -41,6 +41,7 @@ pub enum ObjectWorkspaceErrorKind {
     UndecodedRawByteCountOverflow,
     FileSystem(io::Error),
     SerializedFile(SerializedFileError),
+    StreamSerializedFile(SerializedFileStreamError),
     MultiFileReferenceGraphBuild(MultiFileReferenceGraphBuildError),
     ReferenceGraphBuild(ReferenceGraphBuildError),
     WorkspaceFileIndexOutOfBounds,
@@ -99,6 +100,9 @@ impl Display for ObjectWorkspaceErrorKind {
             }
             Self::FileSystem(error) => write!(f, "VFS error: {error}"),
             Self::SerializedFile(error) => write!(f, "could not parse source object file: {error}"),
+            Self::StreamSerializedFile(error) => {
+                write!(f, "could not parse file-backed source object file: {error}")
+            }
             Self::MultiFileReferenceGraphBuild(error) => {
                 write!(f, "could not build joined reference graph: {error}")
             }
@@ -121,6 +125,7 @@ impl Error for ObjectWorkspaceError {
             ObjectWorkspaceErrorKind::FileSystem(error) => Some(error),
             ObjectWorkspaceErrorKind::FactoryMaterialization(error) => Some(error),
             ObjectWorkspaceErrorKind::SerializedFile(error) => Some(error),
+            ObjectWorkspaceErrorKind::StreamSerializedFile(error) => Some(error),
             ObjectWorkspaceErrorKind::MultiFileReferenceGraphBuild(error) => Some(error),
             ObjectWorkspaceErrorKind::ReferenceGraphBuild(error) => Some(error),
             _ => None,

@@ -160,6 +160,115 @@ impl SerializedFileMetadata {
         )
     }
 
+    /// Decode one independently-read object payload while retaining its original file offset.
+    /// The caller must provide the exact object range from the SerializedFile stream.
+    pub(crate) fn decode_object_payload_from_data_with_limits(
+        &self,
+        payload: &[u8],
+        header: &SerializedFileHeader,
+        object_index: usize,
+        actual_file_size: usize,
+        limits: &ObjectDecodeLimits,
+    ) -> Result<ParsedObjectPayload, ObjectDecodeError> {
+        self.ensure_object_version_supported(object_index)?;
+        header
+            .validate_for_file_size(actual_file_size)
+            .map_err(ObjectDecodeError::from_header)?;
+        let object = self.objects.get(object_index).ok_or_else(|| {
+            ObjectDecodeError::new(
+                0,
+                ObjectDecodeErrorKind::InvalidObjectIndex {
+                    object_index,
+                    object_count: self.objects.len(),
+                },
+            )
+        })?;
+        let type_index = object.resolved_type_index.ok_or_else(|| {
+            ObjectDecodeError::new(
+                0,
+                ObjectDecodeErrorKind::ObjectTypeUnresolved { object_index },
+            )
+        })?;
+        let serialized_type = self.types.get(type_index).ok_or_else(|| {
+            ObjectDecodeError::new(
+                0,
+                ObjectDecodeErrorKind::InvalidResolvedTypeIndex {
+                    object_index,
+                    type_index,
+                    type_count: self.types.len(),
+                },
+            )
+        })?;
+        let type_tree = match classify_type_tree_usability(serialized_type.type_tree.as_ref()) {
+            TypeTreeUsability::Missing => {
+                return Err(ObjectDecodeError::new(
+                    0,
+                    ObjectDecodeErrorKind::MissingTypeTree { object_index },
+                ));
+            }
+            TypeTreeUsability::Empty => {
+                return Err(ObjectDecodeError::new(
+                    0,
+                    ObjectDecodeErrorKind::EmptyTypeTree { object_index },
+                ));
+            }
+            TypeTreeUsability::Present => serialized_type.type_tree.as_ref().ok_or_else(|| {
+                ObjectDecodeError::new(0, ObjectDecodeErrorKind::MissingTypeTree { object_index })
+            })?,
+        };
+        let data_range = object.data_range(header).ok_or_else(|| {
+            ObjectDecodeError::new(
+                0,
+                ObjectDecodeErrorKind::ObjectDataRangeOverflow { object_index },
+            )
+        })?;
+        let expected_len = data_range
+            .end
+            .checked_sub(data_range.start)
+            .ok_or_else(|| {
+                ObjectDecodeError::new(
+                    0,
+                    ObjectDecodeErrorKind::ObjectDataRangeOverflow { object_index },
+                )
+            })?;
+        if data_range.end > actual_file_size as u64 || expected_len != payload.len() as u64 {
+            return Err(ObjectDecodeError::new(
+                usize::try_from(data_range.start).unwrap_or(usize::MAX),
+                ObjectDecodeErrorKind::ObjectDataOutOfBounds {
+                    object_index,
+                    start: data_range.start,
+                    end: data_range.end,
+                    file_size: actual_file_size,
+                },
+            ));
+        }
+        let start = usize::try_from(data_range.start).map_err(|_| {
+            ObjectDecodeError::new(
+                0,
+                ObjectDecodeErrorKind::ObjectDataRangeOverflow { object_index },
+            )
+        })?;
+        let mut budget = DecodeBudget {
+            limits,
+            allocated_bytes: 0,
+            managed_type_references: &self.reference_types,
+            managed_reference_type_resolver: None,
+            stream_offset: start,
+            managed_registry_depth: 0,
+        };
+        self.decode_object_payload_from_payload(
+            payload,
+            start,
+            ObjectDecodeTarget {
+                index: object_index,
+                object,
+                fallback_type_id: serialized_type.raw_type_id,
+            },
+            type_tree,
+            &mut budget,
+        )
+    }
+
     fn ensure_object_version_supported(
         &self,
         object_index: usize,
@@ -188,15 +297,8 @@ impl SerializedFileMetadata {
         type_tree: &TypeTree,
         budget: &mut DecodeBudget<'_>,
     ) -> Result<ParsedObjectPayload, ObjectDecodeError> {
-        let ObjectDecodeTarget {
-            index: object_index,
-            object,
-            fallback_type_id,
-        } = target;
-        let type_root = type_tree.nodes.first().ok_or_else(|| {
-            ObjectDecodeError::new(0, ObjectDecodeErrorKind::EmptyTypeTree { object_index })
-        })?;
-        let type_layout = TypeTreeLayout::new(type_tree, object_index, 0)?;
+        let object_index = target.index;
+        let object = target.object;
         let data_range = object.data_range(header).ok_or_else(|| {
             ObjectDecodeError::new(
                 0,

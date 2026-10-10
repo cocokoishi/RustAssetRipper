@@ -231,13 +231,44 @@ impl ObjectReferenceGraph {
         )
     }
 
+    /// Build a graph from object payloads supplied one at a time by a caller-owned input source.
+    /// This preserves the graph's bounded working set for file-backed SerializedFiles.
+    pub(crate) fn build_with_payload_decoder(
+        metadata: &SerializedFileMetadata,
+        limits: ReferenceGraphLimits,
+        decode: impl FnMut(usize) -> Result<DecodedReferenceObject, SerializedFileError>,
+    ) -> Result<Self, ReferenceGraphBuildError> {
+        Self::build_with_decoder_internal(metadata, limits, None, decode)
+    }
+
     fn build_internal(
         file: &SerializedFile<'_>,
         limits: ReferenceGraphLimits,
         fallback: Option<SourceTypeTreeFallback<'_>>,
         payload_overrides: Option<&[(usize, ParsedObjectPayload)]>,
     ) -> Result<Self, ReferenceGraphBuildError> {
-        let object_count = file.metadata.objects.len();
+        Self::build_with_decoder_internal(
+            &file.metadata,
+            limits,
+            payload_overrides,
+            |object_index| {
+                decode_object_payload_with_generated_fallback(
+                    file,
+                    object_index,
+                    &limits.object_decode,
+                    fallback,
+                )
+            },
+        )
+    }
+
+    fn build_with_decoder_internal(
+        metadata: &SerializedFileMetadata,
+        limits: ReferenceGraphLimits,
+        payload_overrides: Option<&[(usize, ParsedObjectPayload)]>,
+        mut decode: impl FnMut(usize) -> Result<DecodedReferenceObject, SerializedFileError>,
+    ) -> Result<Self, ReferenceGraphBuildError> {
+        let object_count = metadata.objects.len();
         if object_count > limits.max_objects {
             return Err(ReferenceGraphBuildError::ObjectCountLimitExceeded {
                 object_count,
@@ -249,7 +280,7 @@ impl ObjectReferenceGraph {
             .try_reserve_exact(object_count)
             .map_err(|_| ReferenceGraphBuildError::allocation("PathID index", object_count))?;
         path_id_index.extend(
-            file.metadata
+            metadata
                 .objects
                 .iter()
                 .enumerate()
@@ -267,7 +298,7 @@ impl ObjectReferenceGraph {
             issues: Vec::new(),
         };
 
-        for (object_index, object) in file.metadata.objects.iter().enumerate() {
+        for (object_index, object) in metadata.objects.iter().enumerate() {
             graph.attempted_objects += 1;
             let override_payload = payload_overrides.and_then(|overrides| {
                 overrides
@@ -290,12 +321,7 @@ impl ObjectReferenceGraph {
                     incomplete_outcome: None,
                 })
             } else {
-                decode_object_payload_with_generated_fallback(
-                    file,
-                    object_index,
-                    &limits.object_decode,
-                    fallback,
-                )
+                decode(object_index)
             };
             let decoded = match decoded_result {
                 Ok(payload) => payload,
@@ -769,10 +795,138 @@ impl ObjectReferenceGraph {
     }
 }
 
-struct DecodedReferenceObject {
-    payload: ParsedObjectPayload,
-    unparsed_tail_bytes: usize,
-    incomplete_outcome: Option<SerializedFileError>,
+pub(crate) struct DecodedReferenceObject {
+    pub(crate) payload: ParsedObjectPayload,
+    pub(crate) unparsed_tail_bytes: usize,
+    pub(crate) incomplete_outcome: Option<SerializedFileError>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct StreamObjectDecodeContext<'a> {
+    header: &'a crate::serialized_file::header::SerializedFileHeader,
+    metadata: &'a SerializedFileMetadata,
+    actual_file_size: usize,
+    limits: &'a ObjectDecodeLimits,
+    collection_name: &'a str,
+    file_path: &'a str,
+    layouts: &'a dyn crate::processing::asset_factory::ClassLayoutSource,
+}
+
+impl<'a> StreamObjectDecodeContext<'a> {
+    pub(crate) fn new(
+        header: &'a crate::serialized_file::header::SerializedFileHeader,
+        metadata: &'a SerializedFileMetadata,
+        actual_file_size: usize,
+        limits: &'a ObjectDecodeLimits,
+        collection_name: &'a str,
+        file_path: &'a str,
+        layouts: &'a dyn crate::processing::asset_factory::ClassLayoutSource,
+    ) -> Self {
+        Self {
+            header,
+            metadata,
+            actual_file_size,
+            limits,
+            collection_name,
+            file_path,
+            layouts,
+        }
+    }
+}
+
+pub(crate) fn decode_object_payload_with_generated_fallback_from_data(
+    context: &StreamObjectDecodeContext<'_>,
+    object_index: usize,
+    payload_bytes: &[u8],
+) -> Result<DecodedReferenceObject, SerializedFileError> {
+    let StreamObjectDecodeContext {
+        header,
+        metadata,
+        actual_file_size,
+        limits,
+        collection_name,
+        file_path,
+        layouts,
+    } = *context;
+    let platform = reference_graph_platform_label(metadata.prefix.target_platform);
+    let materialization =
+        crate::processing::asset_factory::materialize_object_for_workspace_from_payload(
+            header,
+            metadata,
+            &crate::processing::asset_factory::FactoryFileFacts {
+                collection_name,
+                file_path,
+                platform: &platform,
+            },
+            layouts,
+            object_index,
+            payload_bytes,
+            limits,
+        )
+        .map_err(|error| {
+            let class_id = metadata
+                .objects
+                .get(object_index)
+                .map(crate::processing::asset_factory::object_read_class_id)
+                .unwrap_or_default();
+            SerializedFileError::from_object(ObjectDecodeError::factory_object_outcome(
+                object_index,
+                class_id,
+                "factory materialization failure".to_owned(),
+                Some(error.to_string()),
+            ))
+        })?;
+    let crate::processing::asset_factory::FactoryObjectMaterialization {
+        state,
+        payload: factory_payload,
+    } = materialization;
+
+    let has_file_type_tree = metadata
+        .objects
+        .get(object_index)
+        .and_then(|object| object.resolved_type_index)
+        .and_then(|type_index| metadata.types.get(type_index))
+        .and_then(|serialized_type| serialized_type.type_tree.as_ref())
+        .is_some_and(|tree| !tree.nodes.is_empty());
+    let payload = if state.class_id == crate::processing::asset_factory::MONO_BEHAVIOUR_CLASS_ID
+        && has_file_type_tree
+    {
+        metadata
+            .decode_object_payload_from_data_with_limits(
+                payload_bytes,
+                header,
+                object_index,
+                actual_file_size,
+                limits,
+            )
+            .map_err(SerializedFileError::from_object)?
+    } else if state.kind.is_recoverable() {
+        factory_payload.ok_or_else(|| factory_object_outcome_error(&state))?
+    } else {
+        return Err(factory_object_outcome_error(&state));
+    };
+
+    let unparsed_tail_bytes = match state.tail {
+        Some(
+            crate::processing::asset_factory::ObjectTailOutcome::Exact
+            | crate::processing::asset_factory::ObjectTailOutcome::ZeroPadding
+            | crate::processing::asset_factory::ObjectTailOutcome::ChineseTextureFields,
+        ) => 0,
+        Some(crate::processing::asset_factory::ObjectTailOutcome::IncorrectByteCount) | None => {
+            payload.trailing_bytes.len()
+        }
+    };
+    let is_fully_materialized = state.is_fully_materialized(Some(&payload));
+    let incomplete_outcome = if !is_fully_materialized && unparsed_tail_bytes == 0 {
+        Some(factory_object_outcome_error(&state))
+    } else {
+        None
+    };
+    Ok(DecodedReferenceObject {
+        payload,
+        unparsed_tail_bytes,
+        incomplete_outcome,
+    })
 }
 
 fn decode_object_payload_with_generated_fallback(

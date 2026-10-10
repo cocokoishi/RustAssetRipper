@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
+use std::io;
 
 use super::format_version::FormatVersion;
 use super::header::{HeaderError, SerializedFileHeader};
@@ -11,6 +12,7 @@ use super::object::{
     serialized_file_object_read_flags, ObjectDecodeError, ObjectDecodeLimits, ParsedObjectPayload,
 };
 use super::transfer_flags::TransferInstructionFlags;
+use crate::io::stream::SmartStream;
 
 mod writer;
 pub use writer::{
@@ -116,6 +118,214 @@ impl<'a> SerializedFile<'a> {
             file_name,
             self.metadata.prefix.body_endian,
         )
+    }
+}
+
+/// A file-backed SerializedFile view that keeps the input stream open and reads object data
+/// ranges only when requested. Metadata remains owned because it is indexed across the file.
+pub(crate) struct StreamSerializedFile {
+    stream: SmartStream,
+    file_size: usize,
+    pub header: SerializedFileHeader,
+    pub metadata: SerializedFileMetadata,
+}
+
+impl StreamSerializedFile {
+    /// Return `Ok(None)` when the stream does not have a valid SerializedFile header. Once a
+    /// header and declared file size match, malformed metadata is an error and is not retried
+    /// as another file scheme.
+    pub(crate) fn try_parse(
+        stream: SmartStream,
+        maximum_file_bytes: usize,
+    ) -> Result<Option<Self>, SerializedFileStreamError> {
+        let file_size = usize::try_from(
+            stream
+                .length()
+                .map_err(|source| SerializedFileStreamError::Io { offset: 0, source })?,
+        )
+        .map_err(|_| SerializedFileStreamError::FileSizeNotAddressable)?;
+        if file_size > maximum_file_bytes {
+            return Err(SerializedFileStreamError::FileSizeLimitExceeded {
+                file_size,
+                limit: maximum_file_bytes,
+            });
+        }
+
+        let header_probe_bytes = file_size.min(48);
+        let mut header_probe = vec![0; header_probe_bytes];
+        if header_probe_bytes != 0 {
+            stream
+                .read_exact_at(0, &mut header_probe)
+                .map_err(|source| SerializedFileStreamError::Io { offset: 0, source })?;
+        }
+        let Ok(header) = SerializedFileHeader::parse(&header_probe) else {
+            return Ok(None);
+        };
+        if header.validate_for_file_size(file_size).is_err() {
+            return Ok(None);
+        }
+
+        let metadata_size = usize::try_from(header.metadata_size)
+            .map_err(|_| SerializedFileStreamError::MetadataSizeNotAddressable)?;
+        let metadata_offset = if header.format_version.metadata_at_end() {
+            let Some(offset) = file_size.checked_sub(metadata_size) else {
+                return Ok(None);
+            };
+            offset
+        } else {
+            header.header_size
+        };
+        let mut metadata_bytes = Vec::new();
+        metadata_bytes
+            .try_reserve_exact(metadata_size)
+            .map_err(|_| SerializedFileStreamError::AllocationFailed {
+                resource: "SerializedFile metadata region",
+                requested: metadata_size,
+            })?;
+        metadata_bytes.resize(metadata_size, 0);
+        stream
+            .read_exact_at(metadata_offset as u64, &mut metadata_bytes)
+            .map_err(|source| SerializedFileStreamError::Io {
+                offset: metadata_offset as u64,
+                source,
+            })?;
+        let metadata = SerializedFileMetadata::parse_metadata_region(
+            &metadata_bytes,
+            metadata_offset,
+            file_size,
+            &header,
+        )
+        .map_err(SerializedFileStreamError::Metadata)?;
+
+        Ok(Some(Self {
+            stream,
+            file_size,
+            header,
+            metadata,
+        }))
+    }
+
+    pub(crate) fn read_object_payload_bytes(
+        &self,
+        object_index: usize,
+    ) -> Result<Vec<u8>, SerializedFileError> {
+        let object = self.metadata.objects.get(object_index).ok_or_else(|| {
+            SerializedFileError::from_object(ObjectDecodeError::new(
+                0,
+                super::object::ObjectDecodeErrorKind::InvalidObjectIndex {
+                    object_index,
+                    object_count: self.metadata.objects.len(),
+                },
+            ))
+        })?;
+        let data_range = object.data_range(&self.header).ok_or_else(|| {
+            SerializedFileError::from_object(ObjectDecodeError::new(
+                0,
+                super::object::ObjectDecodeErrorKind::ObjectDataRangeOverflow { object_index },
+            ))
+        })?;
+        let length =
+            usize::try_from(data_range.end.saturating_sub(data_range.start)).map_err(|_| {
+                SerializedFileError::from_object(ObjectDecodeError::new(
+                    0,
+                    super::object::ObjectDecodeErrorKind::ObjectDataRangeOverflow { object_index },
+                ))
+            })?;
+        if data_range.end > self.file_size as u64 {
+            return Err(SerializedFileError::from_object(ObjectDecodeError::new(
+                usize::try_from(data_range.start).unwrap_or(usize::MAX),
+                super::object::ObjectDecodeErrorKind::ObjectDataOutOfBounds {
+                    object_index,
+                    start: data_range.start,
+                    end: data_range.end,
+                    file_size: self.file_size,
+                },
+            )));
+        }
+        let mut payload = Vec::new();
+        payload.try_reserve_exact(length).map_err(|_| {
+            SerializedFileError::from_object(ObjectDecodeError::new(
+                usize::try_from(data_range.start).unwrap_or(usize::MAX),
+                super::object::ObjectDecodeErrorKind::AllocationFailed {
+                    path: format!("object {object_index} streamed payload"),
+                    count: length,
+                },
+            ))
+        })?;
+        payload.resize(length, 0);
+        self.stream
+            .read_exact_at(data_range.start, &mut payload)
+            .map_err(|source| {
+                SerializedFileError::from_object(ObjectDecodeError::new(
+                    usize::try_from(data_range.start).unwrap_or(usize::MAX),
+                    super::object::ObjectDecodeErrorKind::ObjectDataReadFailed {
+                        object_index,
+                        offset: data_range.start,
+                        message: source.to_string(),
+                    },
+                ))
+            })?;
+        Ok(payload)
+    }
+
+    pub(crate) fn file_size(&self) -> usize {
+        self.file_size
+    }
+}
+
+#[derive(Debug)]
+pub enum SerializedFileStreamError {
+    Io {
+        offset: u64,
+        source: io::Error,
+    },
+    Metadata(SerializedFileMetadataError),
+    FileSizeNotAddressable,
+    MetadataSizeNotAddressable,
+    FileSizeLimitExceeded {
+        file_size: usize,
+        limit: usize,
+    },
+    AllocationFailed {
+        resource: &'static str,
+        requested: usize,
+    },
+}
+
+impl Display for SerializedFileStreamError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io { offset, source } => {
+                write!(f, "SerializedFile stream read failed at {offset}: {source}")
+            }
+            Self::Metadata(source) => Display::fmt(source, f),
+            Self::FileSizeNotAddressable => {
+                f.write_str("SerializedFile size exceeds this platform's address space")
+            }
+            Self::MetadataSizeNotAddressable => {
+                f.write_str("SerializedFile metadata size exceeds this platform's address space")
+            }
+            Self::FileSizeLimitExceeded { file_size, limit } => write!(
+                f,
+                "SerializedFile stream size {file_size} exceeds configured limit {limit}"
+            ),
+            Self::AllocationFailed {
+                resource,
+                requested,
+            } => {
+                write!(f, "could not allocate {requested} bytes for {resource}")
+            }
+        }
+    }
+}
+
+impl Error for SerializedFileStreamError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Io { source, .. } => Some(source),
+            Self::Metadata(source) => Some(source),
+            _ => None,
+        }
     }
 }
 
@@ -244,11 +454,34 @@ mod tests {
     use super::{
         is_serialized_file, SerializedExternalFileInsertion, SerializedFile,
         SerializedFileErrorKind, SerializedFileRewriteErrorKind, SerializedFileRewriteLimits,
-        SerializedObjectInsertion,
+        SerializedObjectInsertion, StreamSerializedFile,
     };
+    use crate::io::stream::SmartStream;
     use crate::serialized_file::format_version::FormatVersion;
     use crate::serialized_file::metadata::FileIdentifier;
     use crate::serialized_file::object::SerializedValue;
+    use std::io::{Cursor, Read, Seek, SeekFrom};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    struct CountingCursor {
+        cursor: Cursor<Vec<u8>>,
+        bytes_read: Arc<AtomicUsize>,
+    }
+
+    impl Read for CountingCursor {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let count = self.cursor.read(buffer)?;
+            self.bytes_read.fetch_add(count, Ordering::Relaxed);
+            Ok(count)
+        }
+    }
+
+    impl Seek for CountingCursor {
+        fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+            self.cursor.seek(position)
+        }
+    }
 
     fn put_u16_le(output: &mut Vec<u8>, value: u16) {
         output.extend_from_slice(&value.to_le_bytes());
@@ -340,6 +573,109 @@ mod tests {
         file.extend_from_slice(&payload);
         file.extend_from_slice(&metadata);
         file
+    }
+
+    #[test]
+    fn file_backed_workspace_reader_matches_slice_parse_without_reading_the_data_gap() {
+        let original = make_generation_8_file();
+        let metadata_size =
+            usize::try_from(i32::from_be_bytes(original[0..4].try_into().unwrap())).unwrap();
+        let metadata_offset = original.len() - metadata_size;
+        let padding = vec![0; 1024 * 1024];
+        let mut input = Vec::with_capacity(original.len() + padding.len());
+        input.extend_from_slice(&original[..metadata_offset]);
+        input.extend_from_slice(&padding);
+        input.extend_from_slice(&original[metadata_offset..]);
+        let file_size = u32::try_from(input.len()).unwrap();
+        input[4..8].copy_from_slice(&file_size.to_be_bytes());
+
+        let expected = SerializedFile::parse(&input).unwrap();
+        let bytes_read = Arc::new(AtomicUsize::new(0));
+        let stream = SmartStream::from_reader(Box::new(CountingCursor {
+            cursor: Cursor::new(input.clone()),
+            bytes_read: Arc::clone(&bytes_read),
+        }))
+        .unwrap();
+        let streamed = StreamSerializedFile::try_parse(stream, input.len())
+            .unwrap()
+            .expect("generation-8 SerializedFile is recognized");
+
+        assert_eq!(streamed.header, expected.header);
+        assert_eq!(streamed.metadata, expected.metadata);
+        assert!(
+            bytes_read.load(Ordering::Relaxed) < input.len() / 2,
+            "metadata-only parse read {} of {} file bytes",
+            bytes_read.load(Ordering::Relaxed),
+            input.len()
+        );
+
+        let object_range = expected.metadata.objects[0]
+            .data_range(&expected.header)
+            .unwrap();
+        let streamed_payload = streamed.read_object_payload_bytes(0).unwrap();
+        let start = usize::try_from(object_range.start).unwrap();
+        let end = usize::try_from(object_range.end).unwrap();
+        assert_eq!(streamed_payload, input[start..end]);
+        let streamed_value = streamed
+            .metadata
+            .decode_object_payload_from_data_with_limits(
+                &streamed_payload,
+                &streamed.header,
+                0,
+                streamed.file_size(),
+                &crate::serialized_file::object::ObjectDecodeLimits::default(),
+            )
+            .unwrap();
+        assert_eq!(streamed_value, expected.decode_object_payload(0).unwrap());
+        assert!(
+            bytes_read.load(Ordering::Relaxed) < input.len() / 2,
+            "metadata and object reads consumed {} of {} file bytes",
+            bytes_read.load(Ordering::Relaxed),
+            input.len()
+        );
+    }
+
+    #[test]
+    fn source_runtime_serialized_file_fixture_matches_file_backed_metadata_and_ranges() {
+        let input_hex = include_str!("../io/serialized_file_scheme_fixture.txt")
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("SCHEME|serialized_file_direct|")?
+                    .split('|')
+                    .find_map(|field| field.strip_prefix("in="))
+            })
+            .expect("source-runtime fixture contains direct SerializedFile bytes");
+        let input = input_hex
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let digit = |byte: u8| match byte {
+                    b'0'..=b'9' => byte - b'0',
+                    b'a'..=b'f' => byte - b'a' + 10,
+                    b'A'..=b'F' => byte - b'A' + 10,
+                    _ => panic!("invalid hex in source SerializedFile fixture"),
+                };
+                (digit(pair[0]) << 4) | digit(pair[1])
+            })
+            .collect::<Vec<_>>();
+        assert!(input_hex.len().is_multiple_of(2));
+        let expected = SerializedFile::parse(&input).unwrap();
+        let stream = SmartStream::from_memory(input.clone());
+        let streamed = StreamSerializedFile::try_parse(stream, input.len())
+            .unwrap()
+            .expect("source-runtime fixture parses as a SerializedFile");
+
+        assert_eq!(streamed.header, expected.header);
+        assert_eq!(streamed.metadata, expected.metadata);
+        for (object_index, object) in expected.metadata.objects.iter().enumerate() {
+            let range = object.data_range(&expected.header).unwrap();
+            let start = usize::try_from(range.start).unwrap();
+            let end = usize::try_from(range.end).unwrap();
+            assert_eq!(
+                streamed.read_object_payload_bytes(object_index).unwrap(),
+                input[start..end]
+            );
+        }
     }
 
     fn make_generation_10_file() -> Vec<u8> {

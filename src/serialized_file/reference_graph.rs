@@ -9,6 +9,10 @@ pub use self::multi_file::{
     MultiFileReferenceGraph, MultiFileReferenceGraphBuildError, MultiFileReferenceGraphLimits,
     NamedObjectReferenceGraph,
 };
+pub(crate) use self::per_file::{
+    decode_object_payload_with_generated_fallback_from_data, DecodedReferenceObject,
+    StreamObjectDecodeContext,
+};
 pub use self::per_file::{
     ObjectReferenceGraph, ReferenceGraphIssue, ReferenceGraphLimits, SerializedManagedObject,
     SerializedManagedReference, SerializedManagedReferenceResolution, SerializedObjectReference,

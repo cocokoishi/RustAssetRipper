@@ -26,6 +26,7 @@ pub use self::layouts::{
     decode_no_usable_type_tree_payload, materialize_file_objects, reference_class_layouts,
     ReferenceClassLayouts, TypeTreePayloadRecovery, PROBE_FIXTURE,
 };
+pub(crate) use self::materialize::materialize_object_for_workspace_from_payload;
 pub use self::materialize::{
     materialize_object, materialize_object_for_workspace, object_read_class_id,
 };

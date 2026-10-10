@@ -76,6 +76,58 @@ impl SerializedFileMetadataPrefix {
         }
 
         let metadata = &file_bytes[metadata_offset..metadata_end];
+        Self::parse_metadata_region_with_limit(
+            metadata,
+            metadata_offset,
+            file_bytes.len(),
+            header,
+            maximum_version_string_bytes,
+        )
+    }
+
+    /// Parse a metadata region that was read independently from the object-data region.
+    ///
+    /// `actual_file_size` and `metadata_offset` retain the original file coordinates so the
+    /// same bounds checks and diagnostics apply to streamed inputs as to contiguous inputs.
+    pub(crate) fn parse_metadata_region_with_limit(
+        metadata: &[u8],
+        metadata_offset: usize,
+        actual_file_size: usize,
+        header: &SerializedFileHeader,
+        maximum_version_string_bytes: usize,
+    ) -> Result<Self, MetadataPrefixError> {
+        header
+            .validate_for_file_size(actual_file_size)
+            .map_err(MetadataPrefixError::from_header)?;
+
+        let metadata_size = usize::try_from(header.metadata_size).map_err(|_| {
+            MetadataPrefixError::new(0, MetadataPrefixErrorKind::LayoutOverflow("metadata size"))
+        })?;
+        let expected_offset = if header.format_version.metadata_at_end() {
+            actual_file_size.checked_sub(metadata_size).ok_or_else(|| {
+                MetadataPrefixError::new(
+                    0,
+                    MetadataPrefixErrorKind::InvalidMetadataRange {
+                        start: 0,
+                        end: metadata_size,
+                        file_size: actual_file_size,
+                    },
+                )
+            })?
+        } else {
+            header.header_size
+        };
+        if metadata_offset != expected_offset || metadata.len() != metadata_size {
+            return Err(MetadataPrefixError::new(
+                metadata_offset,
+                MetadataPrefixErrorKind::InvalidMetadataRange {
+                    start: metadata_offset,
+                    end: metadata_offset.saturating_add(metadata.len()),
+                    file_size: actual_file_size,
+                },
+            ));
+        }
+
         let initial_endian = header.data_endian.unwrap_or(Endian::Little);
         let mut reader = BinaryReader::with_base_offset(metadata, initial_endian, metadata_offset)
             .map_err(MetadataPrefixError::from_binary)?;

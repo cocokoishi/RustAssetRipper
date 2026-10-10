@@ -61,17 +61,85 @@ impl SerializedFileMetadata {
             .validate_for_file_size(file_bytes.len())
             .map_err(SerializedFileMetadataError::from_header)?;
 
-        let prefix = SerializedFileMetadataPrefix::parse_file(file_bytes, header)
-            .map_err(SerializedFileMetadataError::from_prefix)?;
-        let metadata_end = prefix
-            .metadata_offset
-            .checked_add(prefix.metadata_size)
+        let metadata_size = usize::try_from(header.metadata_size).map_err(|_| {
+            SerializedFileMetadataError::new(
+                0,
+                SerializedFileMetadataErrorKind::LayoutOverflow("metadata size"),
+            )
+        })?;
+        let metadata_offset = if header.format_version.metadata_at_end() {
+            file_bytes.len().checked_sub(metadata_size).ok_or_else(|| {
+                SerializedFileMetadataError::new(
+                    0,
+                    SerializedFileMetadataErrorKind::InvalidMetadataRange {
+                        start: 0,
+                        end: metadata_size,
+                        file_size: file_bytes.len(),
+                    },
+                )
+            })?
+        } else {
+            header.header_size
+        };
+        let metadata_end = metadata_offset.checked_add(metadata_size).ok_or_else(|| {
+            SerializedFileMetadataError::new(
+                metadata_offset,
+                SerializedFileMetadataErrorKind::LayoutOverflow("metadata end"),
+            )
+        })?;
+        let metadata_region = file_bytes
+            .get(metadata_offset..metadata_end)
             .ok_or_else(|| {
                 SerializedFileMetadataError::new(
-                    prefix.metadata_offset,
-                    SerializedFileMetadataErrorKind::LayoutOverflow("metadata end"),
+                    metadata_offset,
+                    SerializedFileMetadataErrorKind::InvalidMetadataRange {
+                        start: metadata_offset,
+                        end: metadata_end,
+                        file_size: file_bytes.len(),
+                    },
                 )
             })?;
+        Self::parse_metadata_region_inner(
+            metadata_region,
+            metadata_offset,
+            file_bytes.len(),
+            header,
+            collect_rewrite_layouts,
+        )
+    }
+
+    pub(crate) fn parse_metadata_region(
+        metadata_region: &[u8],
+        metadata_offset: usize,
+        actual_file_size: usize,
+        header: &SerializedFileHeader,
+    ) -> Result<Self, SerializedFileMetadataError> {
+        Self::parse_metadata_region_inner(
+            metadata_region,
+            metadata_offset,
+            actual_file_size,
+            header,
+            false,
+        )
+        .map(|(metadata, _)| metadata)
+    }
+
+    fn parse_metadata_region_inner(
+        metadata_region: &[u8],
+        metadata_offset: usize,
+        actual_file_size: usize,
+        header: &SerializedFileHeader,
+        collect_rewrite_layouts: bool,
+    ) -> Result<(Self, Option<SerializedFileMetadataRewriteLayouts>), SerializedFileMetadataError>
+    {
+        let prefix = SerializedFileMetadataPrefix::parse_metadata_region_with_limit(
+            metadata_region,
+            metadata_offset,
+            actual_file_size,
+            header,
+            super::metadata_prefix::DEFAULT_MAX_VERSION_STRING_BYTES,
+        )
+        .map_err(SerializedFileMetadataError::from_prefix)?;
         let tables_offset = prefix
             .metadata_offset
             .checked_add(prefix.consumed_bytes)
@@ -81,16 +149,18 @@ impl SerializedFileMetadata {
                     SerializedFileMetadataErrorKind::LayoutOverflow("table offset"),
                 )
             })?;
-        let tables = file_bytes.get(tables_offset..metadata_end).ok_or_else(|| {
-            SerializedFileMetadataError::new(
-                tables_offset,
-                SerializedFileMetadataErrorKind::InvalidMetadataRange {
-                    start: tables_offset,
-                    end: metadata_end,
-                    file_size: file_bytes.len(),
-                },
-            )
-        })?;
+        let tables = metadata_region
+            .get(prefix.consumed_bytes..)
+            .ok_or_else(|| {
+                SerializedFileMetadataError::new(
+                    tables_offset,
+                    SerializedFileMetadataErrorKind::InvalidMetadataRange {
+                        start: tables_offset,
+                        end: prefix.metadata_offset.saturating_add(prefix.metadata_size),
+                        file_size: actual_file_size,
+                    },
+                )
+            })?;
         let mut reader = BinaryReader::with_base_offset(tables, prefix.body_endian, tables_offset)
             .map_err(SerializedFileMetadataError::from_binary)?;
         let generation = header.format_version;

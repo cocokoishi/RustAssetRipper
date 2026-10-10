@@ -10,7 +10,7 @@ pub struct ObjectDecodeError {
 }
 
 impl ObjectDecodeError {
-    pub(super) fn new(offset: usize, kind: ObjectDecodeErrorKind) -> Self {
+    pub(crate) fn new(offset: usize, kind: ObjectDecodeErrorKind) -> Self {
         Self { offset, kind }
     }
 
@@ -169,6 +169,11 @@ pub enum ObjectDecodeErrorKind {
         start: u64,
         end: u64,
         file_size: usize,
+    },
+    ObjectDataReadFailed {
+        object_index: usize,
+        offset: u64,
+        message: String,
     },
     InvalidTypeTreeNodeIndex {
         node_index: usize,
@@ -358,6 +363,14 @@ impl Display for ObjectDecodeErrorKind {
             } => write!(
                 f,
                 "object {object_index} payload range {start}..{end} exceeds input size {file_size}"
+            ),
+            Self::ObjectDataReadFailed {
+                object_index,
+                offset,
+                message,
+            } => write!(
+                f,
+                "object {object_index} payload read failed at byte offset {offset}: {message}"
             ),
             Self::InvalidTypeTreeNodeIndex { node_index } => {
                 write!(f, "TypeTree node index {node_index} is out of bounds")
