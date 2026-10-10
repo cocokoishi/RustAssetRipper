@@ -1,52 +1,10 @@
-/// `Bundle.ResolveCollection` engine-resource fallback: when the fixed dependency
-/// name has no loaded file, these spellings alias each other before the dependency
-/// counts as missing. Resolver-driven builds delegate this fallback to the caller
-/// resolver; it applies here to the flat name join only.
-fn engine_resource_alias(normalized_name: &str) -> Option<&'static str> {
-    match normalized_name {
-        crate::io::special_names::DEFAULT_RESOURCE_NAME_1 => {
-            Some(crate::io::special_names::DEFAULT_RESOURCE_NAME_2)
-        }
-        crate::io::special_names::DEFAULT_RESOURCE_NAME_2 => {
-            Some(crate::io::special_names::DEFAULT_RESOURCE_NAME_1)
-        }
-        crate::io::special_names::BUILTIN_EXTRA_NAME_1 => {
-            Some(crate::io::special_names::BUILTIN_EXTRA_NAME_2)
-        }
-        crate::io::special_names::BUILTIN_EXTRA_NAME_2 => {
-            Some(crate::io::special_names::BUILTIN_EXTRA_NAME_1)
-        }
-        _ => None,
-    }
-}
+use std::collections::HashMap;
+use std::error::Error;
+use std::fmt::{self, Display, Formatter};
 
-/// `AssetCollection.TryGetDependency` file-index gate over caller facts.
-///
-/// PPtr file 0 addresses the local file (callers handle it before this gate);
-/// positive file `n` addresses external slot `n - 1`. Negative, shifted, and
-/// past-the-table IDs have no slot: callers map the miss to their invalid-ID
-/// outcome, mirroring the source null return. A returned index is always
-/// in-bounds for a table of `external_count` entries.
-fn external_table_index(file_id: i32, external_count: usize) -> Option<usize> {
-    let index = file_id.checked_sub(1)?;
-    let index = usize::try_from(index).ok()?;
-    (index < external_count).then_some(index)
-}
+use crate::serialized_file::object::SerializedValue;
 
-fn local_path_id_resolution(graph: &ObjectReferenceGraph, path_id: i64) -> LocalPathIdResolution {
-    let first = graph
-        .path_id_index
-        .partition_point(|(candidate, _)| *candidate < path_id);
-    let end = graph
-        .path_id_index
-        .partition_point(|(candidate, _)| *candidate <= path_id);
-    match end - first {
-        0 => LocalPathIdResolution::Missing,
-        1 => LocalPathIdResolution::Unique(graph.path_id_index[first].1),
-        match_count => LocalPathIdResolution::Ambiguous(match_count),
-    }
-}
-
+use super::*;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReferenceGraphBuildError {
     AllocationFailed {
@@ -71,7 +29,7 @@ pub enum ReferenceGraphBuildError {
 }
 
 impl ReferenceGraphBuildError {
-    fn allocation(resource: &'static str, requested: usize) -> Self {
+    pub(super) fn allocation(resource: &'static str, requested: usize) -> Self {
         Self::AllocationFailed {
             resource,
             requested,
@@ -114,7 +72,7 @@ impl Display for ReferenceGraphBuildError {
 impl Error for ReferenceGraphBuildError {}
 
 #[derive(Debug)]
-enum WalkIssue {
+pub(super) enum WalkIssue {
     FieldPathLimitExceeded {
         parent_field_path: String,
         component_bytes: usize,
@@ -143,9 +101,9 @@ enum WalkIssue {
 }
 
 #[derive(Default)]
-struct LocalManagedReferenceGraph {
-    objects: Vec<SerializedManagedObject>,
-    references: Vec<SerializedManagedReference>,
+pub(super) struct LocalManagedReferenceGraph {
+    pub(super) objects: Vec<SerializedManagedObject>,
+    pub(super) references: Vec<SerializedManagedReference>,
 }
 
 #[derive(Clone, Copy)]
@@ -162,7 +120,7 @@ struct PendingManagedReference {
     indexed: bool,
 }
 
-fn collect_managed_reference_graph(
+pub(super) fn collect_managed_reference_graph(
     root: &SerializedValue,
     field_path: &mut String,
     source_object_index: usize,
@@ -351,7 +309,7 @@ fn collect_managed_reference_graph(
                         assembly_name,
                         has_content: matches!(
                             &entry.data,
-                            super::managed_registry::ManagedRegistryEntryData::Content(_)
+                            super::super::managed_registry::ManagedRegistryEntryData::Content(_)
                         ),
                     });
 
@@ -364,16 +322,18 @@ fn collect_managed_reference_graph(
                     )?;
                     append_path_component(field_path, "data", true, limits.max_field_path_bytes)?;
                     let nested = match &entry.data {
-                        super::managed_registry::ManagedRegistryEntryData::Empty => Ok(()),
-                        super::managed_registry::ManagedRegistryEntryData::Content(data) => visit(
-                            data,
-                            field_path,
-                            Some(registry_scope_id),
-                            graph,
-                            pending,
-                            scope_paths,
-                            context,
-                        ),
+                        super::super::managed_registry::ManagedRegistryEntryData::Empty => Ok(()),
+                        super::super::managed_registry::ManagedRegistryEntryData::Content(data) => {
+                            visit(
+                                data,
+                                field_path,
+                                Some(registry_scope_id),
+                                graph,
+                                pending,
+                                scope_paths,
+                                context,
+                            )
+                        }
                     };
                     field_path.truncate(registry_field_length);
                     nested?;
@@ -413,8 +373,8 @@ fn collect_managed_reference_graph(
     for (managed_object_index, object) in graph.objects.iter().enumerate() {
         if matches!(
             object.reference_id,
-            super::managed_registry::UNKNOWN_REFERENCE_ID
-                | super::managed_registry::NULL_REFERENCE_ID
+            super::super::managed_registry::UNKNOWN_REFERENCE_ID
+                | super::super::managed_registry::NULL_REFERENCE_ID
         ) {
             continue;
         }
@@ -435,10 +395,10 @@ fn collect_managed_reference_graph(
         })?;
     for edge in pending {
         let resolution = match edge.reference_id {
-            super::managed_registry::NULL_REFERENCE_ID => {
+            super::super::managed_registry::NULL_REFERENCE_ID => {
                 SerializedManagedReferenceResolution::Null
             }
-            super::managed_registry::UNKNOWN_REFERENCE_ID => {
+            super::super::managed_registry::UNKNOWN_REFERENCE_ID => {
                 SerializedManagedReferenceResolution::Unknown
             }
             reference_id => match edge.registry_scope_id.and_then(|scope_id| {
@@ -487,7 +447,7 @@ fn copy_owned_string(value: &str, resource: &'static str) -> Result<String, Walk
     Ok(copied)
 }
 
-fn collect_references(
+pub(super) fn collect_references(
     value: &SerializedValue,
     field_path: &mut String,
     object_index: usize,
@@ -558,8 +518,8 @@ fn collect_references(
                 )?;
                 append_path_component(field_path, "data", true, limits.max_field_path_bytes)?;
                 let nested = match &entry.data {
-                    super::managed_registry::ManagedRegistryEntryData::Empty => Ok(()),
-                    super::managed_registry::ManagedRegistryEntryData::Content(value) => {
+                    super::super::managed_registry::ManagedRegistryEntryData::Empty => Ok(()),
+                    super::super::managed_registry::ManagedRegistryEntryData::Content(value) => {
                         collect_references(
                             value,
                             field_path,
