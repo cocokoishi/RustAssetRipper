@@ -1,3 +1,65 @@
+use std::collections::HashMap;
+
+use crate::serialized_file::collection_workspace::WorkspaceAssetCollections;
+use crate::serialized_file::object::SerializedValue;
+use crate::serialized_file::object_workspace::{ObjectWorkspace, WorkspaceObject};
+use crate::serialized_file::workspace::SerializedFileWorkspace;
+
+use super::bundle_names::{
+    workspace_object_class_id, AssetBundleContainerTarget, WorkspaceAssetBundleNamePlan,
+};
+use super::path_model::{
+    export_path_metadata_bytes, export_path_record_bytes, original_path_detail_slices,
+    try_copy_export_path_string, BundledAssetsExportMode, WorkspaceAssetBundlePathError,
+    WorkspaceAssetExportPath, WorkspaceAssetExportPathLimits, WorkspaceAssetExportPathReport,
+    WorkspaceAssetExportPathTable, WorkspaceOriginalPathPlans,
+};
+use super::resource_manager::WorkspaceResourceManagerPathPlan;
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct BundleOriginalPathEffect {
+    pub(super) original_path: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct OriginalPathDetails {
+    pub(super) directory: Option<String>,
+    pub(super) name: Option<String>,
+    pub(super) extension: Option<String>,
+}
+
+pub(super) struct WorkspaceAssetBundlePathApplyState<'a> {
+    records: &'a mut Vec<WorkspaceAssetExportPath>,
+    record_index: &'a mut HashMap<(usize, usize), usize>,
+    metadata_bytes: &'a mut usize,
+    operation_count: &'a mut usize,
+    report: &'a mut WorkspaceAssetExportPathReport,
+    limits: WorkspaceAssetExportPathLimits,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum WorkspaceOriginalPathEventKind {
+    AssetBundle(usize),
+    ResourceManager(usize),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct WorkspaceOriginalPathEvent {
+    pub(super) collection_index: usize,
+    pub(super) source_object_index: usize,
+    pub(super) container_entry_index: usize,
+    pub(super) kind: WorkspaceOriginalPathEventKind,
+}
+
+pub(super) fn sort_workspace_original_path_events(events: &mut [WorkspaceOriginalPathEvent]) {
+    events.sort_unstable_by_key(|event| {
+        (
+            event.collection_index,
+            event.source_object_index,
+            event.container_entry_index,
+        )
+    });
+}
+
 /// Apply ResourceManager and AssetBundle path updates in `GameBundle.FetchAssets()` order.
 ///
 /// The per-object Container order is retained, then GroupByBundleName collection directories
@@ -704,68 +766,9 @@ fn checked_path_operation_count(
     Ok(requested)
 }
 
-fn export_path_record_bytes(
-    record: &WorkspaceAssetExportPath,
-) -> Result<usize, WorkspaceAssetBundlePathError> {
-    optional_string_bytes(record.asset_bundle_name.as_ref())
-        .checked_add(optional_string_bytes(record.original_path.as_ref()))
-        .and_then(|bytes| {
-            bytes.checked_add(optional_string_bytes(record.original_directory.as_ref()))
-        })
-        .and_then(|bytes| bytes.checked_add(optional_string_bytes(record.original_name.as_ref())))
-        .and_then(|bytes| {
-            bytes.checked_add(optional_string_bytes(record.original_extension.as_ref()))
-        })
-        .and_then(|bytes| {
-            bytes.checked_add(optional_string_bytes(record.override_directory.as_ref()))
-        })
-        .and_then(|bytes| bytes.checked_add(optional_string_bytes(record.override_name.as_ref())))
-        .and_then(|bytes| {
-            bytes.checked_add(optional_string_bytes(record.override_extension.as_ref()))
-        })
-        .ok_or(WorkspaceAssetBundlePathError::MetadataByteCountOverflow)
-}
-
-fn export_path_metadata_bytes(
-    records: &[WorkspaceAssetExportPath],
-) -> Result<usize, WorkspaceAssetBundlePathError> {
-    records.iter().try_fold(0usize, |total, record| {
-        total
-            .checked_add(export_path_record_bytes(record)?)
-            .ok_or(WorkspaceAssetBundlePathError::MetadataByteCountOverflow)
-    })
-}
-
-fn optional_string_bytes(value: Option<&String>) -> usize {
-    value.map_or(0, String::len)
-}
-
-fn try_copy_export_path_string(value: &str) -> Result<String, WorkspaceAssetBundlePathError> {
-    let mut copy = String::new();
-    copy.try_reserve_exact(value.len()).map_err(|_| {
-        WorkspaceAssetBundlePathError::AllocationFailed {
-            resource: "export path metadata string",
-            requested: value.len(),
-        }
-    })?;
-    copy.push_str(value);
-    Ok(copy)
-}
-
-fn nonempty_string(value: Option<String>) -> Option<String> {
-    value.filter(|value| !value.is_empty())
-}
-
-fn normalize_path_extension(value: Option<String>) -> Option<String> {
-    value.and_then(|mut value| {
-        if value.starts_with('.') {
-            value.remove(0);
-        }
-        nonempty_string(Some(value))
-    })
-}
-
-fn original_path_details(path: &str) -> Result<OriginalPathDetails, WorkspaceAssetBundlePathError> {
+pub(super) fn original_path_details(
+    path: &str,
+) -> Result<OriginalPathDetails, WorkspaceAssetBundlePathError> {
     let details = original_path_detail_slices(path);
     Ok(OriginalPathDetails {
         directory: details
@@ -780,37 +783,7 @@ fn original_path_details(path: &str) -> Result<OriginalPathDetails, WorkspaceAss
     })
 }
 
-fn original_path_detail_slices(path: &str) -> OriginalPathDetailSlices<'_> {
-    let path_value = std::path::Path::new(path);
-    let directory = path_value
-        .parent()
-        .and_then(std::path::Path::to_str)
-        .filter(|value| !value.is_empty());
-    let ends_with_separator = path.ends_with('/') || (cfg!(windows) && path.ends_with('\\'));
-    let name = if ends_with_separator {
-        None
-    } else {
-        path_value
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .filter(|value| !value.is_empty())
-    };
-    let extension = if ends_with_separator {
-        None
-    } else {
-        path_value
-            .extension()
-            .and_then(|value| value.to_str())
-            .filter(|value| !value.is_empty())
-    };
-    OriginalPathDetailSlices {
-        directory,
-        name,
-        extension,
-    }
-}
-
-fn calculated_original_path(
+pub(super) fn calculated_original_path(
     record: &WorkspaceAssetExportPath,
 ) -> Result<Option<String>, WorkspaceAssetBundlePathError> {
     if record.original_directory.is_none()
@@ -853,7 +826,10 @@ fn calculated_original_path(
     }
 }
 
-fn resource_manager_path_should_replace(current_path: Option<&str>, candidate_path: &str) -> bool {
+pub(super) fn resource_manager_path_should_replace(
+    current_path: Option<&str>,
+    candidate_path: &str,
+) -> bool {
     current_path.is_none_or(|current_path| {
         current_path.encode_utf16().count() < candidate_path.encode_utf16().count()
     })
@@ -891,7 +867,7 @@ fn workspace_named_asset_name(
     try_copy_export_path_string(name).map(Some)
 }
 
-fn restore_original_name(
+pub(super) fn restore_original_name(
     record: &mut WorkspaceAssetExportPath,
     asset_name: &str,
     report: &mut WorkspaceAssetExportPathReport,
@@ -925,7 +901,7 @@ fn restore_original_name(
     Ok(false)
 }
 
-fn initialize_shader_overrides(
+pub(super) fn initialize_shader_overrides(
     record: &mut WorkspaceAssetExportPath,
     report: &mut WorkspaceAssetExportPathReport,
 ) -> Result<(), WorkspaceAssetBundlePathError> {
@@ -986,7 +962,7 @@ fn apply_original_path_postprocessing(
     Ok(())
 }
 
-fn bundle_container_original_path(
+pub(super) fn bundle_container_original_path(
     container_path: &str,
     bundle_name: &str,
     mode: BundledAssetsExportMode,
@@ -1066,7 +1042,9 @@ fn is_path_rooted_for_host(path: &str) -> bool {
     }
 }
 
-fn ensure_starts_with_assets(path: &str) -> Result<String, WorkspaceAssetBundlePathError> {
+pub(super) fn ensure_starts_with_assets(
+    path: &str,
+) -> Result<String, WorkspaceAssetBundlePathError> {
     if path.starts_with("Assets/") {
         return try_copy_export_path_string(path);
     }
@@ -1136,510 +1114,35 @@ fn join_project_path(parts: &[&str]) -> Result<String, WorkspaceAssetBundlePathE
     Ok(result)
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum WorkspaceAssetBundlePathError {
-    AllocationFailed {
-        resource: &'static str,
-        requested: usize,
-    },
-    CountOverflow {
-        resource: &'static str,
-    },
-    CountLimitExceeded {
-        resource: &'static str,
-        count: usize,
-        limit: usize,
-    },
-    MetadataByteCountOverflow,
-    MetadataByteLimitExceeded {
-        byte_count: usize,
-        limit: usize,
-    },
-    IncompleteNamePlan {
-        issue_count: usize,
-    },
-    IncompleteResourceManagerPlan {
-        issue_count: usize,
-    },
-    DuplicateMetadataIdentity {
-        file_index: usize,
-        object_index: usize,
-    },
-    InvalidNamePlan {
-        resource: &'static str,
-        index: usize,
-    },
-    InvalidMetadataIndex {
-        index: usize,
-    },
-    WorkspaceIndexOutOfBounds {
-        resource: &'static str,
-        index: usize,
-        count: usize,
-    },
-    InvalidWorkspaceIdentity {
-        resource: &'static str,
-        index: usize,
-    },
-    ObjectIdentityMismatch {
-        file_index: usize,
-        object_index: usize,
-    },
-    ObjectRangeOutOfBounds {
-        start: usize,
-        end: usize,
-        object_count: usize,
-    },
-    ObjectPayloadUnavailable {
-        file_index: usize,
-        object_index: usize,
-    },
-    NamedAssetFieldLookup {
-        file_index: usize,
-        object_index: usize,
-        source: SerializedValueLookupError,
-    },
-    InvalidNamedAssetUtf8 {
-        file_index: usize,
-        object_index: usize,
-        valid_up_to: usize,
-    },
-    ClassNameUnavailable {
-        file_index: usize,
-        object_index: usize,
-    },
-}
-
-impl Display for WorkspaceAssetBundlePathError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::AllocationFailed {
-                resource,
-                requested,
-            } => write!(
-                formatter,
-                "could not allocate {requested} entries or bytes for {resource}"
-            ),
-            Self::CountOverflow { resource } => write!(formatter, "{resource} count overflows"),
-            Self::CountLimitExceeded {
-                resource,
-                count,
-                limit,
-            } => write!(
-                formatter,
-                "{resource} count {count} exceeds processing limit {limit}"
-            ),
-            Self::MetadataByteCountOverflow => {
-                formatter.write_str("AssetBundle export metadata byte count overflows")
-            }
-            Self::MetadataByteLimitExceeded { byte_count, limit } => write!(
-                formatter,
-                "AssetBundle export metadata uses {byte_count} bytes, exceeding limit {limit}"
-            ),
-            Self::IncompleteNamePlan { issue_count } => write!(
-                formatter,
-                "cannot apply AssetBundle paths from a name plan with {issue_count} unresolved issues"
-            ),
-            Self::IncompleteResourceManagerPlan { issue_count } => write!(
-                formatter,
-                "cannot apply ResourceManager paths from a plan with {issue_count} unresolved issues"
-            ),
-            Self::DuplicateMetadataIdentity {
-                file_index,
-                object_index,
-            } => write!(
-                formatter,
-                "export path metadata contains duplicate object {file_index}:{object_index}"
-            ),
-            Self::InvalidNamePlan { resource, index } => {
-                write!(formatter, "AssetBundle name plan has invalid {resource} {index}")
-            }
-            Self::InvalidMetadataIndex { index } => {
-                write!(formatter, "export path metadata index {index} is invalid")
-            }
-            Self::WorkspaceIndexOutOfBounds {
-                resource,
-                index,
-                count,
-            } => write!(
-                formatter,
-                "{resource} index {index} is outside workspace count {count}"
-            ),
-            Self::InvalidWorkspaceIdentity { resource, index } => {
-                write!(formatter, "workspace has invalid {resource} at index {index}")
-            }
-            Self::ObjectIdentityMismatch {
-                file_index,
-                object_index,
-            } => write!(
-                formatter,
-                "workspace object identity mismatch at {file_index}:{object_index}"
-            ),
-            Self::ObjectRangeOutOfBounds {
-                start,
-                end,
-                object_count,
-            } => write!(
-                formatter,
-                "workspace object range {start}..{end} is outside {object_count} objects"
-            ),
-            Self::ObjectPayloadUnavailable {
-                file_index,
-                object_index,
-            } => write!(
-                formatter,
-                "cannot determine ClassName for object {file_index}:{object_index} because its payload is undecoded"
-            ),
-            Self::NamedAssetFieldLookup {
-                file_index,
-                object_index,
-                source,
-            } => write!(
-                formatter,
-                "cannot determine whether object {file_index}:{object_index} implements INamed: {source}"
-            ),
-            Self::InvalidNamedAssetUtf8 {
-                file_index,
-                object_index,
-                valid_up_to,
-            } => write!(
-                formatter,
-                "object {file_index}:{object_index} has invalid UTF-8 in m_Name at byte {valid_up_to}"
-            ),
-            Self::ClassNameUnavailable {
-                file_index,
-                object_index,
-            } => write!(
-                formatter,
-                "object {file_index}:{object_index} has no TypeTree ClassName for AssetBundle grouping"
-            ),
-        }
-    }
-}
-
-impl Error for WorkspaceAssetBundlePathError {}
-
-fn push_workspace_asset_bundle_issue(
-    plan: &mut WorkspaceAssetBundleNamePlan,
-    issue: WorkspaceAssetBundleNameIssue,
-    limit: usize,
-) -> Result<(), WorkspaceAssetBundleNamePlanError> {
-    if plan.issues.len() >= limit {
-        return Err(WorkspaceAssetBundleNamePlanError::IssueLimitExceeded {
-            count: plan.issues.len().saturating_add(1),
-            limit,
-        });
-    }
-    plan.issues.try_reserve(1).map_err(|_| {
-        WorkspaceAssetBundleNamePlanError::AllocationFailed {
-            resource: "AssetBundle name issues",
-            requested: plan.issues.len().saturating_add(1),
-        }
-    })?;
-    plan.issues.push(issue);
-    Ok(())
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum WorkspaceAssetBundleNamePlanError {
-    AllocationFailed {
-        resource: &'static str,
-        requested: usize,
-    },
-    FileIndexOutOfBounds {
-        file_index: usize,
-        file_count: usize,
-    },
-    ObjectRangeOutOfBounds {
-        start: usize,
-        end: usize,
-        object_count: usize,
-    },
-    ObjectFileIdentityMismatch {
-        expected_file_index: usize,
-        actual_file_index: usize,
-    },
-    AssetBundleCountLimitExceeded {
-        count: usize,
-        limit: usize,
-    },
-    ContainerEntryCountLimitExceeded {
-        count: usize,
-        limit: usize,
-    },
-    MetadataByteLimitExceeded {
-        byte_count: usize,
-        limit: usize,
-    },
-    CountOverflow {
-        resource: &'static str,
-    },
-    IssueLimitExceeded {
-        count: usize,
-        limit: usize,
-    },
-    TargetObjectIndexOutOfBounds {
-        file_index: usize,
-        object_index: usize,
-    },
-    TargetObjectIdentityMismatch {
-        file_index: usize,
-        object_index: usize,
-        expected_path_id: i64,
-        actual_path_id: i64,
-    },
-}
-
-impl Display for WorkspaceAssetBundleNamePlanError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::AllocationFailed { resource, requested } => write!(
-                formatter,
-                "could not allocate {requested} entries for {resource}"
-            ),
-            Self::FileIndexOutOfBounds {
-                file_index,
-                file_count,
-            } => write!(
-                formatter,
-                "AssetBundle collection file index {file_index} is outside {file_count} files"
-            ),
-            Self::ObjectRangeOutOfBounds {
-                start,
-                end,
-                object_count,
-            } => write!(
-                formatter,
-                "AssetBundle collection object range {start}..{end} is outside {object_count} decoded objects"
-            ),
-            Self::ObjectFileIdentityMismatch {
-                expected_file_index,
-                actual_file_index,
-            } => write!(
-                formatter,
-                "AssetBundle object belongs to file {actual_file_index}; collection belongs to file {expected_file_index}"
-            ),
-            Self::AssetBundleCountLimitExceeded { count, limit } => write!(
-                formatter,
-                "AssetBundle count {count} exceeds processing limit {limit}"
-            ),
-            Self::ContainerEntryCountLimitExceeded { count, limit } => write!(
-                formatter,
-                "AssetBundle Container entry count {count} exceeds processing limit {limit}"
-            ),
-            Self::MetadataByteLimitExceeded { byte_count, limit } => write!(
-                formatter,
-                "AssetBundle names and Container paths use {byte_count} bytes, exceeding limit {limit}"
-            ),
-            Self::CountOverflow { resource } => {
-                write!(formatter, "{resource} count or byte size overflows")
-            }
-            Self::IssueLimitExceeded { count, limit } => write!(
-                formatter,
-                "AssetBundle processing issue count {count} exceeds limit {limit}"
-            ),
-            Self::TargetObjectIndexOutOfBounds {
-                file_index,
-                object_index,
-            } => write!(
-                formatter,
-                "AssetBundle local target object {file_index}:{object_index} is absent from the object workspace"
-            ),
-            Self::TargetObjectIdentityMismatch {
-                file_index,
-                object_index,
-                expected_path_id,
-                actual_path_id,
-            } => write!(
-                formatter,
-                "AssetBundle target {file_index}:{object_index} has PathID {actual_path_id}, expected {expected_path_id}"
-            ),
-        }
-    }
-}
-
-impl Error for WorkspaceAssetBundleNamePlanError {}
-
-fn workspace_object_class_id(object: &WorkspaceObject) -> Option<i32> {
-    object
-        .class_id
-        .map(i32::from)
-        .or_else(|| object.resolved_type_index.map(|_| object.raw_type_id))
-}
-
-fn asset_bundle_container_target(resolution: PPtrResolution<'_>) -> AssetBundleContainerTarget {
-    match resolution {
-        PPtrResolution::Null => AssetBundleContainerTarget::Null,
-        PPtrResolution::LocalObject { object_index } => {
-            AssetBundleContainerTarget::LocalObject { object_index }
-        }
-        PPtrResolution::ExternalDependency {
-            file_id,
-            external_index,
-            path_id,
-            ..
-        } => AssetBundleContainerTarget::SharedFile {
-            file_id,
-            external_index,
-            path_id,
+/// Apply the AssetBundle portion of `OriginalPathProcessor` to export-owned path metadata.
+///
+/// The input name plan must be complete. Bundle Container assignments run in source order, then
+/// GroupByBundleName collection directories are filled with the baseline's `??=` behavior.
+pub fn apply_workspace_asset_bundle_paths(
+    workspace: &SerializedFileWorkspace,
+    objects: &ObjectWorkspace,
+    collections: &WorkspaceAssetCollections,
+    bundle_plan: &WorkspaceAssetBundleNamePlan,
+    mode: BundledAssetsExportMode,
+    export_paths: WorkspaceAssetExportPathTable,
+    limits: WorkspaceAssetExportPathLimits,
+) -> Result<
+    (
+        WorkspaceAssetExportPathTable,
+        WorkspaceAssetExportPathReport,
+    ),
+    WorkspaceAssetBundlePathError,
+> {
+    apply_workspace_original_paths(
+        workspace,
+        objects,
+        collections,
+        WorkspaceOriginalPathPlans {
+            asset_bundles: bundle_plan,
+            resource_managers: &WorkspaceResourceManagerPathPlan::default(),
         },
-        PPtrResolution::MissingLocalObject { path_id } => {
-            AssetBundleContainerTarget::MissingLocalObject { path_id }
-        }
-        PPtrResolution::AmbiguousLocalObject {
-            path_id,
-            match_count,
-        } => AssetBundleContainerTarget::AmbiguousLocalObject {
-            path_id,
-            match_count,
-        },
-        PPtrResolution::InvalidFileId {
-            file_id,
-            external_count,
-        } => AssetBundleContainerTarget::InvalidFileId {
-            file_id,
-            external_count,
-        },
-    }
-}
-
-fn copy_name(value: &str, resource: &'static str) -> Result<String, AssetBundleNameDecodeError> {
-    let mut name = String::new();
-    name.try_reserve_exact(value.len()).map_err(|_| {
-        AssetBundleNameDecodeError::AllocationFailed {
-            resource,
-            requested: value.len(),
-        }
-    })?;
-    name.push_str(value);
-    Ok(name)
-}
-
-fn value_type_name(value: &SerializedValue) -> &'static str {
-    match value {
-        SerializedValue::Bool(_) => "bool",
-        SerializedValue::I8(_) => "i8",
-        SerializedValue::U8(_) => "u8",
-        SerializedValue::I16(_) => "i16",
-        SerializedValue::U16(_) => "u16",
-        SerializedValue::Char(_) => "char",
-        SerializedValue::I32(_) => "i32",
-        SerializedValue::U32(_) => "u32",
-        SerializedValue::I64(_) => "i64",
-        SerializedValue::U64(_) => "u64",
-        SerializedValue::F32(_) => "f32",
-        SerializedValue::F64(_) => "f64",
-        SerializedValue::StringBytes(_) => "string",
-        SerializedValue::Bytes(_) => "bytes",
-        SerializedValue::Array(_) => "array",
-        SerializedValue::Struct(_) => "struct",
-        SerializedValue::PPtr { .. } => "PPtr",
-        SerializedValue::ManagedReferenceId { .. } => "managed reference ID",
-        SerializedValue::ManagedReferenceRegistry(_) => "managed reference registry",
-        SerializedValue::Raw { .. } => "raw",
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum AssetBundleNameDecodeError {
-    FieldLookup {
-        field_name: &'static str,
-        source: SerializedValueLookupError,
-    },
-    DuplicateAliases {
-        first: &'static str,
-        second: &'static str,
-    },
-    WrongType {
-        field_name: &'static str,
-        actual: &'static str,
-    },
-    InvalidUtf8 {
-        field_name: &'static str,
-        valid_up_to: usize,
-    },
-    AllocationFailed {
-        resource: &'static str,
-        requested: usize,
-    },
-}
-
-impl Display for AssetBundleNameDecodeError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::FieldLookup { field_name, source } => {
-                write!(
-                    formatter,
-                    "AssetBundle {field_name} lookup failed: {source}"
-                )
-            }
-            Self::DuplicateAliases { first, second } => write!(
-                formatter,
-                "AssetBundle serialized name has both {first} and {second} fields"
-            ),
-            Self::WrongType { field_name, actual } => write!(
-                formatter,
-                "AssetBundle {field_name} has type {actual}; expected string"
-            ),
-            Self::InvalidUtf8 {
-                field_name,
-                valid_up_to,
-            } => write!(
-                formatter,
-                "AssetBundle {field_name} is not UTF-8 (valid through byte {valid_up_to})"
-            ),
-            Self::AllocationFailed {
-                resource,
-                requested,
-            } => write!(
-                formatter,
-                "could not allocate {requested} bytes for {resource}"
-            ),
-        }
-    }
-}
-
-impl Error for AssetBundleNameDecodeError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::FieldLookup { source, .. } => Some(source),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum AssetBundleContainerMapError {
-    Name(AssetBundleNameDecodeError),
-    Container(AssetBundleContainerDecodeError),
-    AllocationFailed {
-        resource: &'static str,
-        requested: usize,
-    },
-}
-
-impl Display for AssetBundleContainerMapError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Name(source) => Display::fmt(source, formatter),
-            Self::Container(source) => Display::fmt(source, formatter),
-            Self::AllocationFailed {
-                resource,
-                requested,
-            } => write!(
-                formatter,
-                "could not allocate {requested} entries for {resource}"
-            ),
-        }
-    }
-}
-
-impl Error for AssetBundleContainerMapError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Name(source) => Some(source),
-            Self::Container(source) => Some(source),
-            Self::AllocationFailed { .. } => None,
-        }
-    }
+        mode,
+        export_paths,
+        limits,
+    )
 }

@@ -28,10 +28,36 @@
 //! - The `IsStreamedSceneAssetBundle` `Debug.Assert` in `PrefabProcessor` has no release
 //!   behavior; streamed-scene path recovery itself lives in `scene_collections.rs`.
 
-include!("asset_bundle_names_and_plans.rs");
-include!("asset_bundle_path_application.rs");
+mod bundle_names;
+mod path_application;
+mod path_model;
+mod resource_manager;
+
+pub use self::bundle_names::{
+    asset_bundle_name_for_asset, get_asset_bundle_name, map_asset_bundle_container,
+    plan_workspace_asset_bundle_names, resolve_asset_bundle_container_reference,
+    AssetBundleContainerMapError, AssetBundleContainerMapping, AssetBundleContainerNameMap,
+    AssetBundleContainerTarget, AssetBundleNameDecodeError, WorkspaceAssetBundleNameAssignment,
+    WorkspaceAssetBundleNameIssue, WorkspaceAssetBundleNameIssueKind,
+    WorkspaceAssetBundleNameLimits, WorkspaceAssetBundleNamePlan,
+    WorkspaceAssetBundleNamePlanError, WorkspaceAssetBundleNameRecord,
+    WorkspaceAssetBundleReferenceRecord,
+};
+pub use self::path_application::{
+    apply_workspace_asset_bundle_paths, apply_workspace_original_paths,
+};
+pub use self::path_model::{
+    BundledAssetsExportMode, WorkspaceAssetBundlePathError, WorkspaceAssetExportPath,
+    WorkspaceAssetExportPathLimits, WorkspaceAssetExportPathReport, WorkspaceAssetExportPathTable,
+    WorkspaceOriginalPathPlans,
+};
+pub use self::resource_manager::{
+    plan_workspace_resource_manager_paths, WorkspaceResourceManagerPathAssignment,
+    WorkspaceResourceManagerPathIssue, WorkspaceResourceManagerPathIssueKind,
+    WorkspaceResourceManagerPathLimits, WorkspaceResourceManagerPathPlan,
+    WorkspaceResourceManagerPathPlanError,
+};
 
 #[cfg(test)]
-mod tests {
-    include!("asset_bundle_tests_01.rs");
-}
+#[path = "asset_bundle/tests/mod.rs"]
+mod tests;
