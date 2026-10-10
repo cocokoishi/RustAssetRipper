@@ -201,7 +201,8 @@ pub(super) fn scene_default_importer(
     let mut importer = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
     if (version.major, version.minor) < (2018, 3) {
         importer.insert_field("name", UnityYamlNode::string(""))?;
-    } else {
+    }
+    if (version.major, version.minor) >= (2017, 2) {
         importer.insert_field(
             "externalObjects",
             UnityYamlNode::mapping(UnityYamlMappingStyle::Flow),

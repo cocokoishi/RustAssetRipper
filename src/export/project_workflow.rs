@@ -84,12 +84,12 @@ use super::prefab_collection::{
 };
 use super::project_exporter::{
     claim_facts_for_shader_text, execute_project_export, export_extension_for,
-    native_format_importer_for_version, object_class_name, package_manifest_json,
-    project_version_file, select_collection_with_claim_facts,
-    shader_importer_for_version_with_non_modifiable_textures, ObjectClassFacts, PlannedProjectFile,
-    PlannedProjectMeta, PlannedProjectPostExportFile, PlannedProjectSupportFile,
-    ProjectExportError, ProjectExportNotice, ProjectExportPlan, ProjectExportSettings,
-    ProjectPathPlanner,
+    lighting_data_native_format_importer_for_version, native_format_importer_for_version,
+    object_class_name, package_manifest_json, project_version_file,
+    select_collection_with_claim_facts, shader_importer_for_version_with_non_modifiable_textures,
+    ObjectClassFacts, PlannedProjectFile, PlannedProjectMeta, PlannedProjectPostExportFile,
+    PlannedProjectSupportFile, ProjectExportError, ProjectExportNotice, ProjectExportPlan,
+    ProjectExportSettings, ProjectPathPlanner,
 };
 use super::project_plan::plan_scene_export_paths;
 use super::reference_assemblies::ReferenceAssemblyMaps;

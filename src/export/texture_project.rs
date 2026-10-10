@@ -192,7 +192,7 @@ fn texture_importer(
             return texture_importer_v7(&facts, asset_bundle_name, sprite_mesh_type, true, true)
         }
         TextureImporterLayout::Unity2018_3 => {
-            return texture_importer_v7(&facts, asset_bundle_name, sprite_mesh_type, false, false)
+            return texture_importer_v7(&facts, asset_bundle_name, sprite_mesh_type, false, true)
         }
         TextureImporterLayout::Unity2019_4 | TextureImporterLayout::Unity2022_3 => {}
     }
@@ -794,7 +794,6 @@ fn sprite_sheet_v7() -> Result<UnityYamlNode, Box<dyn Error>> {
         ("physicsShape", empty_sequence()),
         ("bones", empty_sequence()),
         ("spriteID", UnityYamlNode::string("")),
-        ("internalID", signed(0)),
         ("vertices", empty_sequence()),
         ("indices", UnityYamlNode::string("")),
         ("edges", empty_sequence()),

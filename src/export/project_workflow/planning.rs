@@ -1060,7 +1060,11 @@ pub(super) fn plan_lighting_data_files(
             bytes,
             meta: Some(PlannedProjectMeta {
                 importer_class: "NativeFormatImporter".to_owned(),
-                importer: native_format_importer_for_version(112_000_000, project_version, None)?,
+                importer: lighting_data_native_format_importer_for_version(
+                    112_000_000,
+                    project_version,
+                    None,
+                )?,
             }),
             label: "LightingData".to_owned(),
         });
