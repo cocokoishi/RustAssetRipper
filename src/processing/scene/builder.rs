@@ -1,3 +1,6 @@
+use super::errors::SceneGraphBuildError;
+use super::*;
+
 impl<'a> SceneGraphBuilder<'a> {
     fn new(
         metadata: &'a SerializedFileMetadata,
@@ -778,168 +781,6 @@ fn object_scene_class_id(object: &ObjectInfo) -> Option<i32> {
         .or_else(|| object.resolved_type_index.map(|_| object.raw_type_id))
 }
 
-fn hierarchy_kind_rank(kind: SceneRelationshipKind) -> u8 {
-    match kind {
-        SceneRelationshipKind::GameObjectComponent => 0,
-        SceneRelationshipKind::ComponentGameObject => 1,
-        SceneRelationshipKind::TransformParent => 2,
-        SceneRelationshipKind::TransformChild => 3,
-        SceneRelationshipKind::PrefabInstanceRootGameObject => 4,
-    }
-}
-
-fn hierarchy_relationship_range(
-    index: &[IndexedHierarchyRelationship],
-    source_object_index: usize,
-    kind: SceneRelationshipKind,
-) -> std::ops::Range<usize> {
-    let key = (source_object_index, hierarchy_kind_rank(kind));
-    let start = index.partition_point(|entry| {
-        (entry.source_object_index, hierarchy_kind_rank(entry.kind)) < key
-    });
-    let end = index.partition_point(|entry| {
-        (entry.source_object_index, hierarchy_kind_rank(entry.kind)) <= key
-    });
-    start..end
-}
-
-fn scene_relationship_range(
-    index: &[IndexedSceneRelationship],
-    source_object_index: usize,
-    kind: SceneRelationshipKind,
-) -> std::ops::Range<usize> {
-    let key = (source_object_index, hierarchy_kind_rank(kind));
-    let start = index.partition_point(|entry| {
-        (entry.source_object_index, hierarchy_kind_rank(entry.kind)) < key
-    });
-    let end = index.partition_point(|entry| {
-        (entry.source_object_index, hierarchy_kind_rank(entry.kind)) <= key
-    });
-    start..end
-}
-
-fn push_scene_root_issue(
-    issues: &mut Vec<SceneRootDiscoveryIssue>,
-    limit: usize,
-    issue: SceneRootDiscoveryIssue,
-) -> Result<(), SceneRootDiscoveryError> {
-    let requested = issues
-        .len()
-        .checked_add(1)
-        .ok_or(SceneRootDiscoveryError::CountOverflow { resource: "issues" })?;
-    if requested > limit {
-        return Err(SceneRootDiscoveryError::IssueCountLimitExceeded { requested, limit });
-    }
-    issues
-        .try_reserve(1)
-        .map_err(|_| SceneRootDiscoveryError::AllocationFailed {
-            resource: "issues",
-            requested,
-        })?;
-    issues.push(issue);
-    Ok(())
-}
-
-fn push_scene_root_candidate(
-    roots: &mut Vec<SceneRootCandidate>,
-    limit: usize,
-    root: SceneRootCandidate,
-) -> Result<(), SceneRootDiscoveryError> {
-    let requested = roots
-        .len()
-        .checked_add(1)
-        .ok_or(SceneRootDiscoveryError::CountOverflow { resource: "roots" })?;
-    if requested > limit {
-        return Err(SceneRootDiscoveryError::RootCountLimitExceeded { requested, limit });
-    }
-    roots
-        .try_reserve(1)
-        .map_err(|_| SceneRootDiscoveryError::AllocationFailed {
-            resource: "roots",
-            requested,
-        })?;
-    roots.push(root);
-    Ok(())
-}
-
-fn push_workspace_scene_root_issue(
-    discovery: &mut WorkspaceSceneRootDiscovery,
-    limit: usize,
-    issue: WorkspaceSceneRootDiscoveryIssue,
-) -> Result<(), SceneRootDiscoveryError> {
-    let requested = discovery
-        .issues
-        .len()
-        .checked_add(1)
-        .ok_or(SceneRootDiscoveryError::CountOverflow { resource: "issues" })?;
-    if requested > limit {
-        return Err(SceneRootDiscoveryError::IssueCountLimitExceeded { requested, limit });
-    }
-    discovery
-        .issues
-        .try_reserve(1)
-        .map_err(|_| SceneRootDiscoveryError::AllocationFailed {
-            resource: "workspace root issues",
-            requested,
-        })?;
-    discovery.issues.push(issue);
-    Ok(())
-}
-
-fn push_workspace_scene_root_candidate(
-    discovery: &mut WorkspaceSceneRootDiscovery,
-    limit: usize,
-    root: WorkspaceSceneRootCandidate,
-) -> Result<(), SceneRootDiscoveryError> {
-    let requested = discovery
-        .roots
-        .len()
-        .checked_add(1)
-        .ok_or(SceneRootDiscoveryError::CountOverflow { resource: "roots" })?;
-    if requested > limit {
-        return Err(SceneRootDiscoveryError::RootCountLimitExceeded { requested, limit });
-    }
-    discovery
-        .roots
-        .try_reserve(1)
-        .map_err(|_| SceneRootDiscoveryError::AllocationFailed {
-            resource: "workspace root candidates",
-            requested,
-        })?;
-    discovery.roots.push(root);
-    Ok(())
-}
-
-fn push_workspace_hierarchy_issue(
-    audit: &mut WorkspaceSceneHierarchyAudit,
-    limit: usize,
-    issue: WorkspaceSceneHierarchyIssue,
-) -> Result<(), SceneGraphAuditError> {
-    let requested =
-        audit
-            .issues
-            .len()
-            .checked_add(1)
-            .ok_or(SceneGraphAuditError::CountOverflow {
-                resource: "workspace hierarchy issues",
-            })?;
-    if requested > limit {
-        return Err(SceneGraphAuditError::IssueLimitExceeded {
-            count: requested,
-            limit,
-        });
-    }
-    audit
-        .issues
-        .try_reserve(1)
-        .map_err(|_| SceneGraphAuditError::AllocationFailed {
-            resource: "workspace hierarchy issues",
-            requested,
-        })?;
-    audit.issues.push(issue);
-    Ok(())
-}
-
 fn is_scene_object_class(class_id: Option<i32>) -> bool {
     matches!(
         class_id,
@@ -977,516 +818,151 @@ fn value_type_name(value: &SerializedValue) -> &'static str {
     }
 }
 
-fn reference_field_path_matches(
-    reference: &MultiFileObjectReference<'_>,
-    relationship_field_path: &str,
-) -> bool {
-    reference.field_path == relationship_field_path
-        || reference
-            .field_path
-            .strip_suffix(relationship_field_path)
-            .and_then(|prefix| prefix.strip_suffix('.'))
-            .is_some_and(|prefix| prefix.split('.').all(|segment| segment == "Base"))
-}
-
-fn reference_field_path_matches_array_element(
-    reference: &MultiFileObjectReference<'_>,
-    field_name: &str,
-) -> bool {
-    let mut path = reference.field_path;
-    while let Some(base_path) = path.strip_prefix("Base.") {
-        path = base_path;
-    }
-    let Some(element) = path
-        .strip_prefix(field_name)
-        .and_then(|value| value.strip_prefix('['))
-    else {
-        return false;
-    };
-    let Some((index, suffix)) = element.split_once(']') else {
-        return false;
-    };
-    !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit()) && suffix.is_empty()
-}
-
-fn scene_target_from_multi_file_resolution(
-    resolution: &MultiFilePPtrResolution,
-    source_file_index: usize,
-) -> SceneRelationshipTarget {
-    match resolution {
-        MultiFilePPtrResolution::Null => SceneRelationshipTarget::Null,
-        MultiFilePPtrResolution::Object {
-            target_file_index,
-            target_object_index,
-        } if *target_file_index == source_file_index => SceneRelationshipTarget::LocalObject {
-            object_index: *target_object_index,
-        },
-        MultiFilePPtrResolution::Object {
-            target_file_index,
-            target_object_index,
-        } => SceneRelationshipTarget::WorkspaceObject {
-            file_index: *target_file_index,
-            object_index: *target_object_index,
-        },
-        MultiFilePPtrResolution::MissingLocalObject { path_id } => {
-            SceneRelationshipTarget::MissingLocalObject { path_id: *path_id }
-        }
-        MultiFilePPtrResolution::AmbiguousLocalObject {
-            path_id,
-            match_count,
-        } => SceneRelationshipTarget::AmbiguousLocalObject {
-            path_id: *path_id,
-            match_count: *match_count,
-        },
-        MultiFilePPtrResolution::MissingDependency {
-            external_index,
-            path_id,
-        } => SceneRelationshipTarget::MissingDependency {
-            external_index: *external_index,
-            path_id: *path_id,
-        },
-        MultiFilePPtrResolution::AmbiguousDependency {
-            external_index,
-            path_id,
-            candidate_count,
-        } => SceneRelationshipTarget::AmbiguousDependency {
-            external_index: *external_index,
-            path_id: *path_id,
-            candidate_count: *candidate_count,
-        },
-        MultiFilePPtrResolution::MissingExternalObject {
-            target_file_index,
-            path_id,
-        } => SceneRelationshipTarget::MissingExternalObject {
-            file_index: *target_file_index,
-            path_id: *path_id,
-        },
-        MultiFilePPtrResolution::AmbiguousExternalObject {
-            target_file_index,
-            path_id,
-            match_count,
-        } => SceneRelationshipTarget::AmbiguousExternalObject {
-            file_index: *target_file_index,
-            path_id: *path_id,
-            match_count: *match_count,
-        },
-        MultiFilePPtrResolution::InvalidFileId {
-            file_id,
-            external_count,
-        } => SceneRelationshipTarget::InvalidFileId {
-            file_id: *file_id,
-            external_count: *external_count,
-        },
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum SceneGraphResolveError {
-    SourceFileIndexOutOfBounds {
-        file_index: usize,
-        file_count: usize,
-    },
-    SourceFileNameMismatch {
-        file_index: usize,
-        expected: String,
-        actual: String,
-    },
-    ObjectTableMismatch {
-        file_index: usize,
-        object_index: usize,
-    },
-    ObjectIdentityMismatch {
-        file_index: usize,
-        object_index: usize,
-        scene_path_id: i64,
-        graph_path_id: i64,
-    },
-    ObjectCountMismatch {
-        file_index: usize,
-        scene_graph_object_count: usize,
-        reference_object_count: usize,
-    },
-    ReferenceFieldNotFound {
-        relationship_index: usize,
-        object_index: usize,
-        field_path: String,
-    },
-    ReferenceFieldAmbiguous {
-        relationship_index: usize,
-        object_index: usize,
-        field_path: String,
-    },
-    ReferenceValueMismatch {
-        relationship_index: usize,
-        object_index: usize,
-        field_path: String,
-        scene_file_id: i32,
-        scene_path_id: i64,
-        graph_file_id: i32,
-        graph_path_id: i64,
-    },
-    AllocationFailed {
-        requested: usize,
-    },
-}
-
-impl Display for SceneGraphResolveError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::SourceFileIndexOutOfBounds {
-                file_index,
-                file_count,
-            } => write!(
-                f,
-                "scene source file index {file_index} is outside the {file_count}-file reference graph"
-            ),
-            Self::SourceFileNameMismatch {
-                file_index,
-                expected,
-                actual,
-            } => write!(
-                f,
-                "scene source file {file_index} has normalized name '{actual}', but the reference graph has '{expected}'"
-            ),
-            Self::ObjectTableMismatch {
-                file_index,
-                object_index,
-            } => write!(
-                f,
-                "scene object {file_index}:{object_index} is absent from the reference graph"
-            ),
-            Self::ObjectIdentityMismatch {
-                file_index,
-                object_index,
-                scene_path_id,
-                graph_path_id,
-            } => write!(
-                f,
-                "scene object {file_index}:{object_index} has PathID {scene_path_id}, but the reference graph has PathID {graph_path_id}"
-            ),
-            Self::ObjectCountMismatch {
-                file_index,
-                scene_graph_object_count,
-                reference_object_count,
-            } => write!(
-                f,
-                "scene graph file {file_index} has {scene_graph_object_count} object records, but the reference graph has {reference_object_count}"
-            ),
-            Self::ReferenceFieldNotFound {
-                relationship_index,
-                object_index,
-                field_path,
-            } => write!(
-                f,
-                "scene relationship {relationship_index} for object {object_index} has no matching decoded reference at '{field_path}'"
-            ),
-            Self::ReferenceFieldAmbiguous {
-                relationship_index,
-                object_index,
-                field_path,
-            } => write!(
-                f,
-                "scene relationship {relationship_index} for object {object_index} matches multiple decoded references at '{field_path}'"
-            ),
-            Self::ReferenceValueMismatch {
-                relationship_index,
-                object_index,
-                field_path,
-                scene_file_id,
-                scene_path_id,
-                graph_file_id,
-                graph_path_id,
-            } => write!(
-                f,
-                "scene relationship {relationship_index} for object {object_index} at '{field_path}' has PPtr ({scene_file_id}, {scene_path_id}), but the reference graph has ({graph_file_id}, {graph_path_id})"
-            ),
-            Self::AllocationFailed { requested } => write!(
-                f,
-                "could not reserve {requested} resolved scene targets"
-            ),
-        }
-    }
-}
-
-impl Error for SceneGraphResolveError {}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum SceneGraphBuildError {
-    ObjectCountLimitExceeded {
-        object_count: usize,
-        limit: usize,
-    },
-    RelationshipLimitExceeded {
-        requested_count: usize,
-        limit: usize,
-    },
-    IssueLimitExceeded {
-        requested_count: usize,
-        limit: usize,
-    },
-    ResourceLimitExceeded {
-        resource: &'static str,
-        requested: usize,
-        limit: usize,
-    },
-    CountOverflow {
-        resource: &'static str,
-    },
-    AllocationFailed {
-        resource: &'static str,
-        requested: usize,
-    },
-    InvalidObjectIndex {
-        object_index: usize,
-        object_count: usize,
-    },
-    DecodedRootCountMismatch {
-        expected: usize,
-        actual: usize,
-    },
-    DuplicateDecodedRoot {
-        object_index: usize,
-    },
-    UnexpectedDecodedRoot {
-        object_index: usize,
-        class_id: Option<i32>,
-    },
-    MaterializedObjectCountMismatch {
-        expected: usize,
-        actual: usize,
-    },
-    MaterializedObjectIdentityMismatch {
-        object_index: usize,
-        expected_file_index: usize,
-        actual_file_index: usize,
-        actual_object_index: usize,
-        expected_path_id: i64,
-        actual_path_id: i64,
-    },
-    MaterializedPayloadIdentityMismatch {
-        object_index: usize,
-        expected_path_id: i64,
-        payload_object_index: usize,
-        payload_path_id: i64,
-    },
-}
-
-impl Display for SceneGraphBuildError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ObjectCountLimitExceeded { object_count, limit } => write!(
-                f,
-                "scene graph object count {object_count} exceeds configured limit {limit}"
-            ),
-            Self::RelationshipLimitExceeded {
-                requested_count,
-                limit,
-            } => write!(
-                f,
-                "scene graph relationship count {requested_count} exceeds configured limit {limit}"
-            ),
-            Self::IssueLimitExceeded {
-                requested_count,
-                limit,
-            } => write!(
-                f,
-                "scene graph issue count {requested_count} exceeds configured limit {limit}"
-            ),
-            Self::ResourceLimitExceeded {
-                resource,
-                requested,
-                limit,
-            } => write!(
-                f,
-                "scene graph requires {requested} units for {resource}, above configured limit {limit}"
-            ),
-            Self::CountOverflow { resource } => {
-                write!(f, "scene graph count overflows for {resource}")
+impl SceneGraph {
+    /// Decode GameObject, Transform, RectTransform, and PrefabInstance payloads from one file.
+    ///
+    /// Other object records remain in `objects` as potential relationship targets. This stage
+    /// does not load external files or synthesize reciprocal relationships.
+    pub fn build(
+        file: &SerializedFile<'_>,
+        limits: SceneGraphLimits,
+    ) -> Result<Self, SceneGraphBuildError> {
+        let mut builder = SceneGraphBuilder::new(&file.metadata, limits)?;
+        for (object_index, object) in file.metadata.objects.iter().enumerate() {
+            if !is_scene_object_class(object_scene_class_id(object)) {
+                continue;
             }
-            Self::AllocationFailed {
-                resource,
-                requested,
-            } => write!(
-                f,
-                "could not reserve {requested} entries for scene graph {resource}"
-            ),
-            Self::InvalidObjectIndex {
-                object_index,
-                object_count,
-            } => write!(
-                f,
-                "decoded scene root refers to object index {object_index}, but the table has {object_count} objects"
-            ),
-            Self::DecodedRootCountMismatch { expected, actual } => write!(
-                f,
-                "decoded scene roots contain {actual} entries, but the object table has {expected} scene objects"
-            ),
-            Self::DuplicateDecodedRoot { object_index } => write!(
-                f,
-                "decoded scene roots contain object index {object_index} more than once"
-            ),
-            Self::UnexpectedDecodedRoot {
-                object_index,
-                class_id,
-            } => write!(
-                f,
-                "decoded scene root at object index {object_index} has non-scene class ID {class_id:?}"
-            ),
-            Self::MaterializedObjectCountMismatch { expected, actual } => write!(
-                f,
-                "materialized workspace contains {actual} objects, but the source file has {expected} object records"
-            ),
-            Self::MaterializedObjectIdentityMismatch {
-                object_index,
-                expected_file_index,
-                actual_file_index,
-                actual_object_index,
-                expected_path_id,
-                actual_path_id,
-            } => write!(
-                f,
-                "materialized object at file {actual_file_index}, object {actual_object_index}, PathID {actual_path_id} does not match file {expected_file_index}, object {object_index}, PathID {expected_path_id}"
-            ),
-            Self::MaterializedPayloadIdentityMismatch {
-                object_index,
-                expected_path_id,
-                payload_object_index,
-                payload_path_id,
-            } => write!(
-                f,
-                "materialized payload at object {payload_object_index}, PathID {payload_path_id} does not match object {object_index}, PathID {expected_path_id}"
-            ),
+            match file.decode_object_payload_with_limits(object_index, &limits.object_decode) {
+                Ok(payload) => builder.add_payload(&payload)?,
+                Err(error) => builder.push_issue(SceneGraphIssue {
+                    object_index,
+                    path_id: object.path_id,
+                    field_path: None,
+                    kind: SceneGraphIssueKind::ObjectDecodeFailed {
+                        message: error.to_string(),
+                    },
+                })?,
+            }
         }
+        builder.finish()
     }
-}
 
-impl Error for SceneGraphBuildError {}
-
-/// The asset kinds `SceneHierarchyObject.Create` sorts on, in source arm order.
-///
-/// Interface checks (`IGameObject`, `ILevelGameManager`, `ISceneRoots`, …) and the
-/// `IsComponentOnGameObject` pointer test need live objects and stay caller-side;
-/// the caller reports the winning arm, including which side of the MonoBehaviour
-/// gate the asset falls on.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum SceneHierarchyAssetKind {
-    /// `IGameObject`.
-    GameObject,
-    /// `IMonoBehaviour` with `IsComponentOnGameObject`.
-    AttachedMonoBehaviour,
-    /// `IMonoBehaviour` without a GameObject: matched by no arm, ignored.
-    DetachedMonoBehaviour,
-    /// Any other `IComponent`.
-    Component,
-    /// `ILevelGameManager`.
-    LevelGameManager,
-    /// `IPrefabInstance`.
-    PrefabInstance,
-    /// `ISceneRoots`.
-    SceneRoots,
-    /// Anything else: matched by no arm, ignored.
-    Other,
-}
-
-/// Which list `SceneHierarchyObject.Create` files the asset into.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum SceneHierarchySlot {
-    /// `GameObjects`.
-    GameObjects,
-    /// `Components`.
-    Components,
-    /// `Managers`.
-    Managers,
-    /// `PrefabInstances`.
-    PrefabInstances,
-    /// `SceneRoots` (a single assignment: repeated roots overwrite, caller keeps last).
-    SceneRoots,
-    /// Matched by no arm; the asset lands in no list.
-    Ignored,
-}
-
-/// `SceneHierarchyObject.Create` (`AssetRipper/Source/AssetRipper.Processing/Prefabs/SceneHierarchyObject.cs`
-/// lines 82-108): GameObjects, attached MonoBehaviours, and other components file into
-/// their lists; managers, prefab instances, and scene roots file into theirs; detached
-/// MonoBehaviours and anything else are ignored.
-pub const fn classify_scene_hierarchy_asset(kind: SceneHierarchyAssetKind) -> SceneHierarchySlot {
-    match kind {
-        SceneHierarchyAssetKind::GameObject => SceneHierarchySlot::GameObjects,
-        SceneHierarchyAssetKind::AttachedMonoBehaviour | SceneHierarchyAssetKind::Component => {
-            SceneHierarchySlot::Components
+    /// Build from already decoded roots, useful to processors that share an object decode pass.
+    /// Every supplied root must correspond to the matching object-table index.
+    pub fn from_decoded_roots(
+        metadata: &SerializedFileMetadata,
+        roots: &[(usize, SerializedValue)],
+        limits: SceneGraphLimits,
+    ) -> Result<Self, SceneGraphBuildError> {
+        let mut builder = SceneGraphBuilder::new(metadata, limits)?;
+        let expected_root_count = metadata
+            .objects
+            .iter()
+            .filter(|object| is_scene_object_class(object_scene_class_id(object)))
+            .count();
+        if roots.len() != expected_root_count {
+            return Err(SceneGraphBuildError::DecodedRootCountMismatch {
+                expected: expected_root_count,
+                actual: roots.len(),
+            });
         }
-        SceneHierarchyAssetKind::LevelGameManager => SceneHierarchySlot::Managers,
-        SceneHierarchyAssetKind::PrefabInstance => SceneHierarchySlot::PrefabInstances,
-        SceneHierarchyAssetKind::SceneRoots => SceneHierarchySlot::SceneRoots,
-        SceneHierarchyAssetKind::DetachedMonoBehaviour | SceneHierarchyAssetKind::Other => {
-            SceneHierarchySlot::Ignored
+        let mut seen = Vec::new();
+        seen.try_reserve_exact(metadata.objects.len())
+            .map_err(|_| SceneGraphBuildError::AllocationFailed {
+                resource: "decoded scene root index",
+                requested: metadata.objects.len(),
+            })?;
+        seen.resize(metadata.objects.len(), false);
+        for (object_index, root) in roots {
+            let object = metadata.objects.get(*object_index).ok_or(
+                SceneGraphBuildError::InvalidObjectIndex {
+                    object_index: *object_index,
+                    object_count: metadata.objects.len(),
+                },
+            )?;
+            if !is_scene_object_class(object_scene_class_id(object)) {
+                return Err(SceneGraphBuildError::UnexpectedDecodedRoot {
+                    object_index: *object_index,
+                    class_id: object_scene_class_id(object),
+                });
+            }
+            if std::mem::replace(&mut seen[*object_index], true) {
+                return Err(SceneGraphBuildError::DuplicateDecodedRoot {
+                    object_index: *object_index,
+                });
+            }
+            builder.add_root(
+                *object_index,
+                object.path_id,
+                object_scene_class_id(object),
+                root,
+            )?;
         }
+        builder.finish()
     }
-}
 
-/// `SceneHierarchyObject.FetchDependencies` edge labels in walk order
-/// (`AssetRipper/Source/AssetRipper.Processing/Prefabs/SceneHierarchyObject.cs` lines 43-54
-/// with `GameObjectHierarchyObject.FetchDependencies` first): one `{List}[]` label per
-/// member of `GameObjects`, `Components`, `PrefabInstances`, and `Managers`, then a single
-/// `SceneRoots` label when a root block applies. Counts arrive as caller facts; pointer
-/// resolution stays caller-side.
-pub fn scene_hierarchy_dependency_fields(
-    game_objects: usize,
-    components: usize,
-    prefab_instances: usize,
-    managers: usize,
-    has_scene_roots: bool,
-) -> Vec<String> {
-    let mut fields = Vec::new();
-    for _ in 0..game_objects {
-        fields.push("GameObjects[]".to_owned());
-    }
-    for _ in 0..components {
-        fields.push("Components[]".to_owned());
-    }
-    for _ in 0..prefab_instances {
-        fields.push("PrefabInstances[]".to_owned());
-    }
-    for _ in 0..managers {
-        fields.push("Managers[]".to_owned());
-    }
-    if has_scene_roots {
-        fields.push("SceneRoots".to_owned());
-    }
-    fields
-}
-
-/// Caller-reported `GameObjectExtensions.IsRoot` facts for one hierarchy GameObject.
-///
-/// Facts arrive in `GameObjects` order; the component lookup and the father-pointer
-/// resolution (including cross-file targets) stay caller-side.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SceneHierarchyRootFact {
-    /// Whether the GameObject carries a Transform component.
-    pub has_transform: bool,
-    /// Whether that Transform's father pointer resolved to null.
-    /// Ignored when there is no Transform.
-    pub father_is_null: bool,
-}
-
-/// `GameObjectExtensions.IsRoot` (`AssetRipper/Source/AssetRipper.SourceGenerated.Extensions/GameObjectExtensions.cs`
-/// lines 117-120) over caller facts: a GameObject is a root when it has no Transform
-/// (the source `?.` yields null) or its Transform father is null.
-pub const fn is_scene_hierarchy_root(fact: SceneHierarchyRootFact) -> bool {
-    !fact.has_transform || fact.father_is_null
-}
-
-/// `SceneHierarchyObject.GetRoots` (`AssetRipper/Source/AssetRipper.Processing/Prefabs/SceneHierarchyObject.cs`
-/// lines 73-76): hierarchy-order indexes of the GameObjects that are roots.
-///
-/// This is the export-time filter over the assembled hierarchy; `discover_local_roots`
-/// runs the same rule during graph discovery with diagnostics for unresolved links.
-pub fn scene_hierarchy_root_indexes(facts: &[SceneHierarchyRootFact]) -> Vec<usize> {
-    let mut roots = Vec::new();
-    for (index, fact) in facts.iter().enumerate() {
-        if is_scene_hierarchy_root(*fact) {
-            roots.push(index);
+    /// Build from the payloads already materialized by the workspace object factory.
+    ///
+    /// This preserves generated TPK TypeTree decoding for files that do not carry a TypeTree,
+    /// while retaining decode failures as explicit graph issues.
+    pub fn from_materialized_workspace(
+        metadata: &SerializedFileMetadata,
+        file_index: usize,
+        workspace_objects: &[WorkspaceObject],
+        limits: SceneGraphLimits,
+    ) -> Result<Self, SceneGraphBuildError> {
+        if workspace_objects.len() != metadata.objects.len() {
+            return Err(SceneGraphBuildError::MaterializedObjectCountMismatch {
+                expected: metadata.objects.len(),
+                actual: workspace_objects.len(),
+            });
         }
+
+        let mut builder = SceneGraphBuilder::new(metadata, limits)?;
+        for (object_index, (metadata_object, workspace_object)) in
+            metadata.objects.iter().zip(workspace_objects).enumerate()
+        {
+            if workspace_object.file_index != file_index
+                || workspace_object.object_index != object_index
+                || workspace_object.path_id != metadata_object.path_id
+            {
+                return Err(SceneGraphBuildError::MaterializedObjectIdentityMismatch {
+                    object_index,
+                    expected_file_index: file_index,
+                    actual_file_index: workspace_object.file_index,
+                    actual_object_index: workspace_object.object_index,
+                    expected_path_id: metadata_object.path_id,
+                    actual_path_id: workspace_object.path_id,
+                });
+            }
+            if !is_scene_object_class(object_scene_class_id(metadata_object)) {
+                continue;
+            }
+            match &workspace_object.payload {
+                Ok(payload)
+                    if payload.object_index == object_index
+                        && payload.path_id == metadata_object.path_id =>
+                {
+                    builder.add_payload(payload)?
+                }
+                Ok(payload) => {
+                    return Err(SceneGraphBuildError::MaterializedPayloadIdentityMismatch {
+                        object_index,
+                        expected_path_id: metadata_object.path_id,
+                        payload_object_index: payload.object_index,
+                        payload_path_id: payload.path_id,
+                    });
+                }
+                Err(error) => builder.push_issue(SceneGraphIssue {
+                    object_index,
+                    path_id: metadata_object.path_id,
+                    field_path: None,
+                    kind: SceneGraphIssueKind::ObjectDecodeFailed {
+                        message: error.to_string(),
+                    },
+                })?,
+            }
+        }
+        builder.finish()
     }
-    roots
 }
