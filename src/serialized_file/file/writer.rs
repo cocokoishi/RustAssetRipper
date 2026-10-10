@@ -1,7 +1,15 @@
-include!("writer_metadata.rs");
-include!("writer_bytes.rs");
+mod bytes;
+mod execution;
+mod metadata;
+mod model;
+mod plan;
+mod request;
+mod rewrite;
+
+pub use model::{
+    SerializedExternalFileInsertion, SerializedFileRewriteError, SerializedFileRewriteErrorKind,
+    SerializedFileRewriteLimits, SerializedObjectInsertion,
+};
 
 #[cfg(test)]
-mod tests {
-    include!("writer_tests_01.rs");
-}
+mod tests;

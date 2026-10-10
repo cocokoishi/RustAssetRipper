@@ -1,4 +1,11 @@
-fn patch_object_records(
+use super::model::{SerializedFileRewriteError, SerializedFileRewriteErrorKind};
+use crate::io::binary::Endian;
+use crate::serialized_file::format_version::FormatVersion;
+use crate::serialized_file::metadata::ObjectRecordLayout;
+pub(super) const DATA_ALIGNMENT: usize = 16;
+pub(super) const MAX_HEADER_SIZE: usize = 48;
+
+pub(super) fn patch_object_records(
     output: &mut [u8],
     metadata_output_offset: usize,
     metadata_size: usize,
@@ -91,7 +98,7 @@ fn patch_object_records(
     Ok(())
 }
 
-fn check_metadata_field(
+pub(super) fn check_metadata_field(
     field_offset: usize,
     field_width: usize,
     metadata_size: usize,
@@ -118,7 +125,7 @@ fn check_metadata_field(
     Ok(())
 }
 
-fn patch_header(
+pub(super) fn patch_header(
     output: &mut [u8],
     version: FormatVersion,
     endian: Endian,
@@ -219,12 +226,12 @@ fn patch_header(
     Ok(())
 }
 
-fn serialized_header_size(version: FormatVersion) -> usize {
+pub(super) fn serialized_header_size(version: FormatVersion) -> usize {
     16 + usize::from(version.has_endianness()) * 4
         + usize::from(version.has_large_file_support()) * 28
 }
 
-fn copy_input(
+pub(super) fn copy_input(
     input: &[u8],
     max_output_file_bytes: usize,
 ) -> Result<Vec<u8>, SerializedFileRewriteError> {
@@ -245,7 +252,7 @@ fn copy_input(
     Ok(output)
 }
 
-fn append_output(
+pub(super) fn append_output(
     output: &mut Vec<u8>,
     bytes: &[u8],
     limit: usize,
@@ -270,7 +277,7 @@ fn append_output(
     Ok(())
 }
 
-fn reserve_output(
+pub(super) fn reserve_output(
     output: &mut Vec<u8>,
     requested_capacity: usize,
     limit: usize,
@@ -296,7 +303,7 @@ fn reserve_output(
     Ok(())
 }
 
-fn align_output(
+pub(super) fn align_output(
     output: &mut Vec<u8>,
     alignment: usize,
     limit: usize,
@@ -307,7 +314,7 @@ fn align_output(
     append_output(output, &ZEROES[..padding], limit, object_index)
 }
 
-fn patch_bytes(
+pub(super) fn patch_bytes(
     output: &mut [u8],
     start: usize,
     bytes: &[u8],
@@ -336,49 +343,52 @@ fn patch_bytes(
     Ok(())
 }
 
-fn encode_u32(value: u32, endian: Endian) -> [u8; 4] {
+pub(super) fn encode_u32(value: u32, endian: Endian) -> [u8; 4] {
     match endian {
         Endian::Little => value.to_le_bytes(),
         Endian::Big => value.to_be_bytes(),
     }
 }
 
-fn encode_i32(value: i32, endian: Endian) -> [u8; 4] {
+pub(super) fn encode_i32(value: i32, endian: Endian) -> [u8; 4] {
     match endian {
         Endian::Little => value.to_le_bytes(),
         Endian::Big => value.to_be_bytes(),
     }
 }
 
-fn encode_i16(value: i16, endian: Endian) -> [u8; 2] {
+pub(super) fn encode_i16(value: i16, endian: Endian) -> [u8; 2] {
     match endian {
         Endian::Little => value.to_le_bytes(),
         Endian::Big => value.to_be_bytes(),
     }
 }
 
-fn encode_u16(value: u16, endian: Endian) -> [u8; 2] {
+pub(super) fn encode_u16(value: u16, endian: Endian) -> [u8; 2] {
     match endian {
         Endian::Little => value.to_le_bytes(),
         Endian::Big => value.to_be_bytes(),
     }
 }
 
-fn encode_i64(value: i64, endian: Endian) -> [u8; 8] {
+pub(super) fn encode_i64(value: i64, endian: Endian) -> [u8; 8] {
     match endian {
         Endian::Little => value.to_le_bytes(),
         Endian::Big => value.to_be_bytes(),
     }
 }
 
-fn rewrite_error(
+pub(super) fn rewrite_error(
     object_index: Option<usize>,
     kind: SerializedFileRewriteErrorKind,
 ) -> SerializedFileRewriteError {
     SerializedFileRewriteError::new(object_index, kind)
 }
 
-fn allocation_error(resource: &'static str, requested: usize) -> SerializedFileRewriteError {
+pub(super) fn allocation_error(
+    resource: &'static str,
+    requested: usize,
+) -> SerializedFileRewriteError {
     rewrite_error(
         None,
         SerializedFileRewriteErrorKind::AllocationFailed {
