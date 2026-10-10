@@ -1,4 +1,6 @@
-fn prepend_lighting_data_object_fields(
+use super::*;
+
+pub(super) fn prepend_lighting_data_object_fields(
     root: &mut SerializedValue,
     version: &FactoryUnityVersion,
 ) -> Result<(), Box<dyn Error>> {
@@ -55,7 +57,7 @@ fn prepend_lighting_data_object_fields(
     Ok(())
 }
 
-fn set_lighting_data_guid_field(
+pub(super) fn set_lighting_data_guid_field(
     root: &mut SerializedValue,
     name: &str,
     guid: [u8; 16],
@@ -115,7 +117,7 @@ fn null_project_pointer() -> SerializedValue {
     }
 }
 
-fn unique_lighting_data_field_index(
+pub(super) fn unique_lighting_data_field_index(
     root: &SerializedValue,
     name: &str,
 ) -> Result<Option<usize>, Box<dyn Error>> {
@@ -135,7 +137,7 @@ fn unique_lighting_data_field_index(
     Ok(first)
 }
 
-fn set_required_lighting_data_field(
+pub(super) fn set_required_lighting_data_field(
     root: &mut SerializedValue,
     name: &str,
     value: SerializedValue,
@@ -150,7 +152,7 @@ fn set_required_lighting_data_field(
     Ok(())
 }
 
-fn copy_required_lighting_data_field(
+pub(super) fn copy_required_lighting_data_field(
     source: &SerializedValue,
     destination: &mut SerializedValue,
     source_name: &str,
@@ -171,7 +173,7 @@ fn copy_required_lighting_data_field(
     set_required_lighting_data_field(destination, destination_name, value)
 }
 
-fn copy_optional_lighting_data_field(
+pub(super) fn copy_optional_lighting_data_field(
     source: &SerializedValue,
     destination: &mut SerializedValue,
     source_name: &str,
@@ -226,7 +228,7 @@ fn is_default_lighting_data_value(value: &SerializedValue) -> bool {
     }
 }
 
-fn copy_render_settings_probe(
+pub(super) fn copy_render_settings_probe(
     render_settings: &SerializedValue,
     destination: &mut SerializedValue,
     source_name: &str,
@@ -305,7 +307,7 @@ fn ensure_lighting_data_value_shape(
     Ok(())
 }
 
-fn lighting_data_bytes_field_value(
+pub(super) fn lighting_data_bytes_field_value(
     root: &SerializedValue,
     name: &str,
     bytes: Vec<u8>,
@@ -324,7 +326,7 @@ fn lighting_data_bytes_field_value(
     }
 }
 
-fn contains_non_null_pointer(value: &SerializedValue) -> bool {
+pub(super) fn contains_non_null_pointer(value: &SerializedValue) -> bool {
     match value {
         SerializedValue::PPtr { path_id, .. } => *path_id != 0,
         SerializedValue::Array(values) => values.iter().any(contains_non_null_pointer),
@@ -335,7 +337,7 @@ fn contains_non_null_pointer(value: &SerializedValue) -> bool {
     }
 }
 
-fn create_empty_lighting_enlighten_data(
+pub(super) fn create_empty_lighting_enlighten_data(
     version: &FactoryUnityVersion,
 ) -> Result<Vec<u8>, Box<dyn Error>> {
     let bundle_version: i32 = if (version.major, version.minor) >= (2022, 2) {
@@ -389,7 +391,7 @@ fn create_empty_lighting_enlighten_data(
     Ok(bytes)
 }
 
-fn generated_lighting_data_asset_to_yaml(
+pub(super) fn generated_lighting_data_asset_to_yaml(
     asset: &RoutedLightingDataAsset,
     reference_graph: &MultiFileReferenceGraph<'_>,
     pointer_map: &ProjectExportPointerMap,
@@ -661,583 +663,4 @@ fn is_lighting_data_texture_field(field_path: &str) -> bool {
             field_path.rsplit('.').next(),
             Some("m_Lightmap" | "m_DirLightmap" | "m_ShadowMask")
         )
-}
-
-fn text_asset_script_bytes(
-    payload: &ParsedObjectPayload,
-) -> Result<Option<Vec<u8>>, Box<dyn Error>> {
-    let script = payload
-        .root
-        .unique_field_in_base_chain("m_Script")
-        .map_err(|error| invalid_project(format!("TextAsset m_Script lookup failed: {error}")))?;
-    let Some(crate::serialized_file::object::SerializedValue::StringBytes(bytes)) = script else {
-        if script.is_none() {
-            return Ok(None);
-        }
-        return Err(invalid_project(
-            "TextAsset m_Script field is not a serialized string",
-        ));
-    };
-    let mut output = Vec::new();
-    output
-        .try_reserve_exact(bytes.len())
-        .map_err(|_| invalid_project("could not allocate TextAsset script bytes"))?;
-    output.extend_from_slice(bytes);
-    Ok(Some(output))
-}
-
-fn object_asset_bundle_name(payload: &ParsedObjectPayload) -> Option<String> {
-    for field in ["AssetBundleName_R", "AssetBundleName", "m_AssetBundleName"] {
-        if let Ok(Some(crate::serialized_file::object::SerializedValue::StringBytes(bytes))) =
-            payload.root.unique_field_in_base_chain(field)
-        {
-            return Some(String::from_utf8_lossy(bytes).into_owned());
-        }
-    }
-    None
-}
-
-fn shader_non_modifiable_textures_yaml(
-    shader: &ShaderView,
-    entry: &RoutedObject<'_>,
-    objects: &ObjectWorkspace,
-    reference_graph: &MultiFileReferenceGraph<'_>,
-    pointer_map: &ProjectExportPointerMap,
-    project_version: SceneUnityVersion,
-) -> Result<UnityYamlNode, Box<dyn Error>> {
-    let Some(textures) = shader.non_modifiable_textures.as_deref() else {
-        return Ok(UnityYamlNode::sequence(UnityYamlSequenceStyle::Flow));
-    };
-    if textures.is_empty() {
-        return Ok(UnityYamlNode::sequence(UnityYamlSequenceStyle::Flow));
-    }
-    let mut output = UnityYamlNode::sequence(UnityYamlSequenceStyle::Block);
-    for (index, texture) in textures.iter().enumerate() {
-        let expected_path = format!("m_NonModifiableTextures[{index}].second");
-        let mut matching = reference_graph
-            .references_from_object(entry.object.file_index, entry.object.object_index)
-            .filter(|reference| {
-                reference.field_path == expected_path
-                    && reference.file_id == texture.file_id
-                    && reference.path_id == texture.path_id
-            });
-        let reference = matching.next().ok_or_else(|| {
-            invalid_project(format!(
-                "ShaderImporter texture key {:?} at index {index} has no matching PPtr scan edge at {expected_path:?}",
-                texture.name
-            ))
-        })?;
-        if matching.next().is_some() {
-            return Err(invalid_project(format!(
-                "ShaderImporter texture key {:?} at index {index} has duplicate PPtr scan edges",
-                texture.name
-            )));
-        }
-
-        let resolution = match &reference.resolution {
-            MultiFilePPtrResolution::Null => ProjectPointerResolution::Null,
-            MultiFilePPtrResolution::Object {
-                target_file_index,
-                target_object_index,
-            } => {
-                let target = objects
-                    .get(*target_file_index, *target_object_index)
-                    .ok_or_else(|| {
-                        invalid_project(format!(
-                            "ShaderImporter texture key {:?} resolves to absent workspace object {target_file_index}:{target_object_index}",
-                            texture.name
-                        ))
-                    })?;
-                let identity = ExportAssetIdentity {
-                    collection: ExportAssetCollectionIdentity::SerializedFile {
-                        file_index: target.file_index,
-                    },
-                    object_index: target.object_index,
-                    path_id: target.path_id,
-                    class_id: target.factory.class_id,
-                };
-                pointer_map.resolve(
-                    ProjectPointerRequest::ResolvedAsset(identity),
-                    entry.collection_index,
-                )?
-            }
-            unresolved => {
-                return Err(invalid_project(format!(
-                    "ShaderImporter texture key {:?} at {expected_path:?} has unresolved input PPtr {:?}",
-                    texture.name, unresolved
-                )));
-            }
-        };
-        let pointer = project_pointer_to_unity_yaml(
-            &resolution,
-            project_version,
-            Some(crate::export::script_hashing::UnityGuid::MISSING_REFERENCE.to_byte_array()),
-        )
-        .map_err(|error| {
-            invalid_project(format!(
-                "ShaderImporter texture key {:?} PPtr could not be converted to project YAML: {error}",
-                texture.name
-            ))
-        })?;
-        let mut pair = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
-        pair.insert_field(texture.name.clone(), pointer)?;
-        output.push(pair)?;
-    }
-    Ok(output)
-}
-
-fn add_project_support_file(
-    files: &mut Vec<PlannedProjectSupportFile>,
-    indexes: &mut HashMap<String, usize>,
-    relative_path: String,
-    bytes: &[u8],
-    before_file_index: usize,
-) -> Result<(), Box<dyn Error>> {
-    if let Some(index) = indexes.get(&relative_path).copied() {
-        let existing = files
-            .get(index)
-            .ok_or_else(|| invalid_project("Shader support-file index is inconsistent"))?;
-        if existing.bytes != bytes {
-            return Err(invalid_project(format!(
-                "project exporters generated conflicting support file {relative_path:?}"
-            )));
-        }
-        if before_file_index < existing.before_file_index {
-            files[index].before_file_index = before_file_index;
-        }
-        return Ok(());
-    }
-
-    let mut owned_bytes = Vec::new();
-    owned_bytes
-        .try_reserve_exact(bytes.len())
-        .map_err(|_| invalid_project("could not allocate Shader support file bytes"))?;
-    owned_bytes.extend_from_slice(bytes);
-    files
-        .try_reserve(1)
-        .map_err(|_| invalid_project("could not allocate Shader support-file list"))?;
-    indexes
-        .try_reserve(1)
-        .map_err(|_| invalid_project("could not allocate Shader support-file index"))?;
-    let index = files.len();
-    indexes.insert(relative_path.clone(), index);
-    files.push(PlannedProjectSupportFile {
-        relative_path,
-        bytes: owned_bytes,
-        before_file_index,
-    });
-    Ok(())
-}
-
-/// The collection names whose generic YAML document is the baseline content.
-fn asset_family_fallback(collection_name: &str) -> Option<&'static str> {
-    match collection_name {
-        "AssetExportCollection"
-        | "ScriptableObjectExportCollection"
-        | "ScriptableObjectGroupExportCollection"
-        | "YamlStreamedAssetExportCollection"
-        | "ShaderExportCollection" => None,
-        "AnimatorControllerExportCollection" => Some(
-            "the animator-controller renderer is not ported; the object was written through the \
-             generic asset family",
-        ),
-        "AudioMixerExportCollection" => Some(
-            "the audio-mixer renderer is not ported; the object was written through the generic \
-             asset family",
-        ),
-        "TerrainYamlExportCollection" => Some(
-            "the terrain renderer is not ported; the object was written through the generic asset \
-             family",
-        ),
-        _ => Some(
-            "the specialized exporter for this collection is not wired into the project path; the \
-             object was written through the generic asset family",
-        ),
-    }
-}
-
-fn raw_payload_bytes(
-    filesystem: &VirtualFileSystem,
-    workspace: &SerializedFileWorkspace,
-    object: &WorkspaceObject,
-    cache: &mut HashMap<usize, Vec<u8>>,
-    limits: WorkspaceProjectExportLimits,
-) -> Result<Vec<u8>, Box<dyn Error>> {
-    let file = workspace.files().get(object.file_index).ok_or_else(|| {
-        invalid_project(format!(
-            "raw payload needs workspace file {}",
-            object.file_index
-        ))
-    })?;
-    if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(object.file_index) {
-        let bytes =
-            filesystem.read_all_bytes(&file.virtual_path, limits.max_total_asset_payload_bytes)?;
-        entry.insert(bytes);
-    }
-    let bytes = cache
-        .get(&object.file_index)
-        .expect("file bytes cached above");
-    let start = usize::try_from(object.raw_payload_range.start)
-        .map_err(|_| invalid_project("raw payload offset does not fit the host address space"))?;
-    let end = usize::try_from(object.raw_payload_range.end)
-        .map_err(|_| invalid_project("raw payload end does not fit the host address space"))?;
-    let slice = bytes
-        .get(start..end)
-        .ok_or(ProjectExportError::MissingRawPayload {
-            file_index: object.file_index,
-            object_index: object.object_index,
-        })?;
-    Ok(slice.to_vec())
-}
-
-fn validate_decoded_object(
-    object: &WorkspaceObject,
-    path_id: i64,
-    reference_graph: &MultiFileReferenceGraph<'_>,
-) -> Result<(), Box<dyn Error>> {
-    if reference_graph.object_scan_is_complete(object.file_index, object.object_index) != Some(true)
-    {
-        return Err(invalid_project(format!(
-            "file {} object {} PathID {path_id} has no complete PPtr scan",
-            object.file_index, object.object_index
-        )));
-    }
-    for reference in reference_graph.references_from_object(object.file_index, object.object_index)
-    {
-        match &reference.resolution {
-            MultiFilePPtrResolution::Null | MultiFilePPtrResolution::Object { .. } => {}
-            unresolved => {
-                return Err(invalid_project(format!(
-                    "file {} object {} PathID {path_id} has unresolved PPtr at {:?}: {unresolved:?}",
-                    object.file_index, object.object_index, reference.field_path
-                )));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn new_collection_guid(sequence: u64) -> [u8; 16] {
-    static NEXT_GUID: AtomicU64 = AtomicU64::new(0);
-    let counter = NEXT_GUID.fetch_add(1, Ordering::Relaxed);
-    let time = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let identity = (sequence, counter, std::process::id(), time);
-    let first = std::collections::hash_map::RandomState::new().hash_one((&identity, 0u8));
-    let second = std::collections::hash_map::RandomState::new().hash_one((&identity, 1u8));
-    let mut guid = [0u8; 16];
-    guid[..8].copy_from_slice(&first.to_le_bytes());
-    guid[8..].copy_from_slice(&second.to_le_bytes());
-    if guid == [0; 16] {
-        guid[0] = 1;
-    }
-    guid
-}
-
-fn invalid_project(message: impl Into<String>) -> Box<dyn Error> {
-    Box::new(io::Error::new(io::ErrorKind::InvalidData, message.into()))
-}
-
-fn add_generated_audio_yaml_defaults(
-    document: &mut crate::export::unity_yaml::UnityYamlDocument,
-    generated_type: Option<&str>,
-) -> Result<(), Box<dyn Error>> {
-    let Some(generated_type) = generated_type else {
-        return Ok(());
-    };
-    let body = match &mut document.root.kind {
-        crate::export::unity_yaml::UnityYamlNodeKind::Mapping { entries, .. } => entries
-            .iter_mut()
-            .find_map(|(key, value)| audio_yaml_key_matches(key, "AudioClip").then_some(value)),
-        _ => None,
-    }
-    .ok_or_else(|| invalid_project("AudioClip YAML document has no AudioClip mapping"))?;
-    let fields = match &mut body.kind {
-        crate::export::unity_yaml::UnityYamlNodeKind::Mapping { entries, .. } => entries,
-        _ => return Err(invalid_project("AudioClip YAML body is not a mapping")),
-    };
-    let mut base_fields = vec![
-        (
-            "m_ObjectHideFlags",
-            crate::export::unity_yaml::UnityYamlNode::scalar(
-                crate::export::unity_yaml::UnityYamlScalar::Unsigned(0),
-            ),
-        ),
-        ("m_CorrespondingSourceObject", audio_yaml_null_pointer()?),
-        ("m_PrefabInstance", audio_yaml_null_pointer()?),
-        ("m_PrefabAsset", audio_yaml_null_pointer()?),
-    ];
-    fields
-        .try_reserve(base_fields.len() + 2)
-        .map_err(|_| invalid_project("AudioClip generated defaults cannot be allocated"))?;
-    for (name, value) in base_fields.drain(..).rev() {
-        if !audio_yaml_mapping_has_field(fields, name) {
-            fields.insert(
-                0,
-                (
-                    crate::export::unity_yaml::UnityYamlNode::plain_string(name),
-                    value,
-                ),
-            );
-        }
-    }
-
-    if generated_type == "AudioClip_2018_3" {
-        let has_editor_resource = audio_yaml_mapping_has_field(fields, "m_EditorResource");
-        let has_editor_compression =
-            audio_yaml_mapping_has_field(fields, "m_EditorCompressionFormat");
-        if !has_editor_resource || !has_editor_compression {
-            let mut editor_resource = crate::export::unity_yaml::UnityYamlNode::mapping(
-                crate::export::unity_yaml::UnityYamlMappingStyle::Block,
-            );
-            editor_resource
-                .insert_field(
-                    "m_Source",
-                    crate::export::unity_yaml::UnityYamlNode::scalar(
-                        crate::export::unity_yaml::UnityYamlScalar::PlainString(String::new()),
-                    ),
-                )
-                .and_then(|()| {
-                    editor_resource.insert_field(
-                        "m_Offset",
-                        crate::export::unity_yaml::UnityYamlNode::scalar(
-                            crate::export::unity_yaml::UnityYamlScalar::Unsigned(0),
-                        ),
-                    )
-                })
-                .and_then(|()| {
-                    editor_resource.insert_field(
-                        "m_Size",
-                        crate::export::unity_yaml::UnityYamlNode::scalar(
-                            crate::export::unity_yaml::UnityYamlScalar::Unsigned(0),
-                        ),
-                    )
-                })
-                .map_err(|error| {
-                    invalid_project(format!(
-                        "AudioClip editor resource cannot be built: {error}"
-                    ))
-                })?;
-            let editor_compression = crate::export::unity_yaml::UnityYamlNode::scalar(
-                crate::export::unity_yaml::UnityYamlScalar::Unsigned(0),
-            );
-            let insertion_index = fields
-                .iter()
-                .position(|(key, _)| audio_yaml_key_matches(key, "m_CompressionFormat"))
-                .map_or(fields.len(), |index| index + 1);
-            if !has_editor_resource {
-                fields.insert(
-                    insertion_index,
-                    (
-                        crate::export::unity_yaml::UnityYamlNode::plain_string("m_EditorResource"),
-                        editor_resource,
-                    ),
-                );
-            }
-            if !has_editor_compression {
-                let editor_index = fields
-                    .iter()
-                    .position(|(key, _)| audio_yaml_key_matches(key, "m_EditorResource"))
-                    .map_or(fields.len(), |index| index + 1);
-                fields.insert(
-                    editor_index,
-                    (
-                        crate::export::unity_yaml::UnityYamlNode::plain_string(
-                            "m_EditorCompressionFormat",
-                        ),
-                        editor_compression,
-                    ),
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
-fn audio_yaml_key_matches(node: &crate::export::unity_yaml::UnityYamlNode, expected: &str) -> bool {
-    matches!(
-        &node.kind,
-        crate::export::unity_yaml::UnityYamlNodeKind::Scalar(
-            crate::export::unity_yaml::UnityYamlScalar::PlainString(value)
-        ) if value == expected
-    )
-}
-
-fn rewrite_audio_yaml_resource(
-    document: &mut crate::export::unity_yaml::UnityYamlDocument,
-    resource: &crate::resources::audio::AudioClipResourceInfo,
-    sidecar_source: Option<&str>,
-    sidecar_bytes: Option<&[u8]>,
-) -> Result<(), Box<dyn Error>> {
-    let audio_body = match &mut document.root.kind {
-        crate::export::unity_yaml::UnityYamlNodeKind::Mapping { entries, .. } => {
-            let mut audio_body_index = None;
-            for (index, (key, _)) in entries.iter().enumerate() {
-                if audio_yaml_key_matches(key, "AudioClip")
-                    && audio_body_index.replace(index).is_some()
-                {
-                    return Err(invalid_project(
-                        "AudioClip YAML document has duplicate AudioClip mappings",
-                    ));
-                }
-            }
-            let index = audio_body_index.ok_or_else(|| {
-                invalid_project("AudioClip YAML document has no AudioClip mapping")
-            })?;
-            &mut entries[index].1
-        }
-        _ => {
-            return Err(invalid_project(
-                "AudioClip YAML document root is not a mapping",
-            ))
-        }
-    };
-    let resource_mapping = match &mut audio_body.kind {
-        crate::export::unity_yaml::UnityYamlNodeKind::Mapping { entries, .. } => {
-            let mut resource_index = None;
-            for (index, (key, _)) in entries.iter().enumerate() {
-                if audio_yaml_key_matches(key, "m_Resource")
-                    && resource_index.replace(index).is_some()
-                {
-                    return Err(invalid_project(
-                        "AudioClip YAML body has duplicate m_Resource mappings",
-                    ));
-                }
-            }
-            let index = resource_index
-                .ok_or_else(|| invalid_project("AudioClip YAML body has no m_Resource mapping"))?;
-            &mut entries[index].1
-        }
-        _ => return Err(invalid_project("AudioClip YAML body is not a mapping")),
-    };
-    let fields = match &mut resource_mapping.kind {
-        crate::export::unity_yaml::UnityYamlNodeKind::Mapping { entries, .. } => entries,
-        _ => {
-            return Err(invalid_project(
-                "AudioClip m_Resource value is not a mapping",
-            ))
-        }
-    };
-    let (source, size) = match (resource.size, sidecar_source, sidecar_bytes) {
-        (0, None, None) => ("", 0),
-        (0, Some(_), _) => {
-            return Err(invalid_project(
-                "AudioClip sidecar source path exists without streamed bytes",
-            ));
-        }
-        (_, None, _) => {
-            return Err(invalid_project(
-                "AudioClip streamed bytes have no planned sidecar source path",
-            ));
-        }
-        (_, Some(_), None) => {
-            return Err(invalid_project(
-                "AudioClip sidecar source path exists without resolved streamed bytes",
-            ));
-        }
-        (source_size, Some(path), Some(bytes)) => {
-            let sidecar_size = u64::try_from(bytes.len()).map_err(|_| {
-                invalid_project("AudioClip sidecar length does not fit its serialized size")
-            })?;
-            if sidecar_size != source_size {
-                return Err(invalid_project(format!(
-                    "AudioClip source range declares {} bytes but the sidecar contains {sidecar_size}",
-                    source_size
-                )));
-            }
-            (path, sidecar_size)
-        }
-    };
-    set_audio_yaml_resource_field(
-        fields,
-        &["m_Source", "path"],
-        "source path",
-        crate::export::unity_yaml::UnityYamlNode::plain_string(source),
-    )?;
-    set_audio_yaml_resource_field(
-        fields,
-        &["m_Offset", "offset"],
-        "offset",
-        crate::export::unity_yaml::UnityYamlNode::scalar(
-            crate::export::unity_yaml::UnityYamlScalar::Unsigned(0),
-        ),
-    )?;
-    set_audio_yaml_resource_field(
-        fields,
-        &["m_Size", "size"],
-        "size",
-        crate::export::unity_yaml::UnityYamlNode::scalar(
-            crate::export::unity_yaml::UnityYamlScalar::Unsigned(size),
-        ),
-    )?;
-    Ok(())
-}
-
-fn set_audio_yaml_resource_field(
-    fields: &mut [(
-        crate::export::unity_yaml::UnityYamlNode,
-        crate::export::unity_yaml::UnityYamlNode,
-    )],
-    aliases: &[&str],
-    field_label: &str,
-    value: crate::export::unity_yaml::UnityYamlNode,
-) -> Result<(), Box<dyn Error>> {
-    let mut matching_index = None;
-    for (index, (key, _)) in fields.iter().enumerate() {
-        if aliases
-            .iter()
-            .any(|alias| audio_yaml_key_matches(key, alias))
-            && matching_index.replace(index).is_some()
-        {
-            return Err(invalid_project(format!(
-                "AudioClip m_Resource has duplicate {field_label} fields"
-            )));
-        }
-    }
-    let index = matching_index.ok_or_else(|| {
-        invalid_project(format!(
-            "AudioClip m_Resource has no serialized {field_label} field"
-        ))
-    })?;
-    fields[index].1 = value;
-    Ok(())
-}
-
-fn project_relative_path_for_host(path: &str) -> String {
-    if cfg!(windows) {
-        path.replace('/', "\\")
-    } else {
-        path.to_owned()
-    }
-}
-
-fn audio_yaml_mapping_has_field(
-    fields: &[(
-        crate::export::unity_yaml::UnityYamlNode,
-        crate::export::unity_yaml::UnityYamlNode,
-    )],
-    name: &str,
-) -> bool {
-    fields
-        .iter()
-        .any(|(key, _)| audio_yaml_key_matches(key, name))
-}
-
-fn audio_yaml_null_pointer() -> Result<crate::export::unity_yaml::UnityYamlNode, Box<dyn Error>> {
-    let mut pointer = crate::export::unity_yaml::UnityYamlNode::mapping(
-        crate::export::unity_yaml::UnityYamlMappingStyle::Flow,
-    );
-    pointer
-        .insert_field(
-            "fileID",
-            crate::export::unity_yaml::UnityYamlNode::scalar(
-                crate::export::unity_yaml::UnityYamlScalar::Unsigned(0),
-            ),
-        )
-        .map_err(|error| {
-            invalid_project(format!("AudioClip base PPtr cannot be built: {error}"))
-        })?;
-    Ok(pointer)
 }
