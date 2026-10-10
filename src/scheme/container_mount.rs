@@ -1,3 +1,27 @@
+use std::borrow::Cow;
+use std::io::{Seek, SeekFrom};
+use std::path::Path;
+
+use super::reader::probe_direct_stream_kind;
+use super::*;
+use crate::container::unityfs::{UnityFsError, UnityFsStreamBundle};
+use crate::io::filesystem::VirtualFileSystem;
+use crate::io::special_names::fix_file_identifier;
+use crate::io::stream::SmartStream;
+struct ContainerTreeMountState<'a> {
+    filesystem: &'a mut VirtualFileSystem,
+    limits: ContainerMountLimits,
+    visited_entries: usize,
+    active_nested_bytes: u64,
+    container_scope_path_bytes: u64,
+    container_bundle_name_bytes: u64,
+    bundle_serialized_file_counts: Vec<usize>,
+    bundle_resource_file_counts: Vec<usize>,
+    resource_file_path_bytes: u64,
+    resource_file_name_bytes: u64,
+    report: ContainerMountReport,
+}
+
 fn record_container_scope(
     virtual_path: Option<&str>,
     state: &mut ContainerTreeMountState<'_>,
@@ -226,7 +250,7 @@ fn record_container_bundle(
     Ok(bundle_index)
 }
 
-fn mount_unityfs_stream_tree(
+pub(super) fn mount_unityfs_stream_tree(
     source: &SmartStream,
     source_name: Option<&str>,
     filesystem: &mut VirtualFileSystem,
@@ -926,7 +950,7 @@ enum ContainerEntryPathError {
     AllocationFailed { requested: usize },
 }
 
-fn directory_input_destination(
+pub(super) fn directory_input_destination(
     destination_root: Option<&str>,
     relative_path: &Path,
 ) -> Result<Option<String>, ()> {
@@ -934,7 +958,7 @@ fn directory_input_destination(
     directory_relative_destination(destination_root, relative_parent)
 }
 
-fn directory_relative_destination(
+pub(super) fn directory_relative_destination(
     destination_root: Option<&str>,
     relative_path: &Path,
 ) -> Result<Option<String>, ()> {
@@ -1008,13 +1032,611 @@ fn container_entry_path(
 }
 
 /// Parsed file contents. Views borrow from the owning [`DispatchedFile`].
-#[derive(Debug)]
-pub enum ParsedFile<'a> {
-    UnityFs(UnityFsBundle<'a>),
-    RawWeb(RawWebBundle<'a>),
-    WebData(WebFile<'a>),
-    SerializedFile(SerializedFile<'a>),
-    Resource(&'a [u8]),
+impl<'a> DispatchedFile<'a> {
+    pub fn mount_container_entries(
+        &self,
+        filesystem: &mut VirtualFileSystem,
+        destination_root: Option<&str>,
+        limits: ContainerMountLimits,
+    ) -> Result<ContainerMountReport, ContainerMountError> {
+        let mut report = ContainerMountReport::default();
+        let parsed = self.parse().map_err(|error| {
+            ContainerMountError::new(report.clone(), ContainerMountErrorKind::Scheme(error))
+        })?;
+
+        match parsed {
+            ParsedFile::UnityFs(bundle) => {
+                preflight_entry_count(bundle.nodes.len(), limits, &report)?;
+                preflight_output_sizes(bundle.nodes.iter().map(|node| node.size), limits, &report)?;
+                for (index, node) in bundle.nodes.iter().enumerate() {
+                    let path = checked_container_entry_path(
+                        filesystem,
+                        destination_root,
+                        node.path.as_str(),
+                        index,
+                        &report,
+                    )?;
+                    let bytes = match bundle.read_entry(index) {
+                        Ok(bytes) => bytes,
+                        Err(error) => {
+                            record_failed_container_entry(
+                                &mut report,
+                                node.path.as_str(),
+                                path,
+                                None,
+                                index,
+                                error,
+                                limits,
+                            )?;
+                            continue;
+                        }
+                    };
+                    mount_container_entry_at_path(
+                        filesystem,
+                        &path,
+                        index,
+                        bytes,
+                        limits,
+                        &mut report,
+                    )?;
+                }
+            }
+            ParsedFile::RawWeb(bundle) => {
+                preflight_entry_count(bundle.entries.len(), limits, &report)?;
+                preflight_output_sizes(
+                    bundle.entries.iter().map(|entry| u64::from(entry.size)),
+                    limits,
+                    &report,
+                )?;
+                for (index, entry) in bundle.entries.iter().enumerate() {
+                    let bytes = bundle.read_entry(index).map_err(|error| {
+                        ContainerMountError::new(
+                            report.clone(),
+                            ContainerMountErrorKind::Scheme(SchemeError::new(
+                                SchemeErrorKind::RawWeb(error),
+                            )),
+                        )
+                    })?;
+                    mount_container_entry(
+                        filesystem,
+                        destination_root,
+                        entry.path.as_str(),
+                        index,
+                        Cow::Borrowed(bytes),
+                        limits,
+                        &mut report,
+                    )?;
+                }
+            }
+            ParsedFile::WebData(web_file) => {
+                preflight_entry_count(web_file.entries.len(), limits, &report)?;
+                preflight_output_sizes(
+                    web_file.entries.iter().map(|entry| u64::from(entry.size)),
+                    limits,
+                    &report,
+                )?;
+                for (index, entry) in web_file.entries.iter().enumerate() {
+                    let bytes = web_file.entry_data(index).ok_or_else(|| {
+                        ContainerMountError::new(
+                            report.clone(),
+                            ContainerMountErrorKind::Scheme(SchemeError::new(
+                                SchemeErrorKind::WebDataEntryIndexOutOfBounds {
+                                    index,
+                                    entry_count: web_file.entries.len(),
+                                },
+                            )),
+                        )
+                    })?;
+                    mount_container_entry(
+                        filesystem,
+                        destination_root,
+                        entry.name.as_str(),
+                        index,
+                        Cow::Borrowed(bytes),
+                        limits,
+                        &mut report,
+                    )?;
+                }
+            }
+            ParsedFile::SerializedFile(_) | ParsedFile::Resource(_) => {
+                return Err(ContainerMountError::new(
+                    report,
+                    ContainerMountErrorKind::NotContainer,
+                ));
+            }
+        }
+
+        Ok(report)
+    }
+
+    /// Recursively mount leaf entries from nested containers and wrapper files.
+    ///
+    /// Recognized nested containers become virtual directories named after their parent entry;
+    /// their contained leaves are mounted below that path. Container and wrapper payloads are
+    /// parsed in memory and are not inserted as leaf files. Entry count, nesting depth, and total
+    /// mounted bytes are bounded across the complete traversal. UnityFS block-read failures are
+    /// retained as source-style failed-entry records while later siblings continue.
+    pub fn mount_container_tree(
+        &self,
+        filesystem: &mut VirtualFileSystem,
+        destination_root: Option<&str>,
+        limits: ContainerMountLimits,
+    ) -> Result<ContainerMountReport, ContainerMountError> {
+        self.mount_container_tree_with_source_name(filesystem, destination_root, None, limits)
+    }
+
+    /// Mount a container while retaining the source FileBase name used to create its Bundle.
+    pub fn mount_container_tree_with_source_name(
+        &self,
+        filesystem: &mut VirtualFileSystem,
+        destination_root: Option<&str>,
+        source_name: Option<&str>,
+        limits: ContainerMountLimits,
+    ) -> Result<ContainerMountReport, ContainerMountError> {
+        let mut state = ContainerTreeMountState {
+            filesystem,
+            limits,
+            visited_entries: 0,
+            active_nested_bytes: 0,
+            container_scope_path_bytes: 0,
+            container_bundle_name_bytes: 0,
+            bundle_serialized_file_counts: Vec::new(),
+            bundle_resource_file_counts: Vec::new(),
+            resource_file_path_bytes: 0,
+            resource_file_name_bytes: 0,
+            report: ContainerMountReport::default(),
+        };
+        self.mount_container_tree_at(destination_root, 0, None, None, source_name, &mut state)?;
+        Ok(state.report)
+    }
+
+    fn mount_container_tree_at(
+        &self,
+        destination_root: Option<&str>,
+        depth: usize,
+        parent_bundle_index: Option<usize>,
+        parent_entry_index: Option<usize>,
+        source_name: Option<&str>,
+        state: &mut ContainerTreeMountState<'_>,
+    ) -> Result<(), ContainerMountError> {
+        let container_scope_index = record_container_scope(destination_root, state)?;
+        let container_bundle_index = record_container_bundle(
+            container_scope_index,
+            parent_bundle_index,
+            parent_entry_index,
+            source_name,
+            state,
+        )?;
+        if depth > state.limits.max_depth {
+            return Err(ContainerMountError::new(
+                state.report.clone(),
+                ContainerMountErrorKind::NestingDepthLimitExceeded {
+                    depth,
+                    limit: state.limits.max_depth,
+                },
+            ));
+        }
+
+        let parsed = self.parse().map_err(|error| {
+            ContainerMountError::new(state.report.clone(), ContainerMountErrorKind::Scheme(error))
+        })?;
+        match parsed {
+            ParsedFile::UnityFs(bundle) => {
+                preflight_tree_entry_count(bundle.nodes.len(), state)?;
+                for (index, node) in bundle.nodes.iter().enumerate() {
+                    let path = checked_container_entry_path(
+                        state.filesystem,
+                        destination_root,
+                        node.path.as_str(),
+                        index,
+                        &state.report,
+                    )?;
+                    let bytes = match bundle.read_entry(index) {
+                        Ok(bytes) => bytes,
+                        Err(error) => {
+                            record_failed_container_entry(
+                                &mut state.report,
+                                node.path.as_str(),
+                                path,
+                                Some(container_bundle_index),
+                                index,
+                                error,
+                                state.limits,
+                            )?;
+                            continue;
+                        }
+                    };
+                    let child = SchemeReader::read_cow_with_limits(bytes, self.limits).map_err(
+                        |error| {
+                            ContainerMountError::new(
+                                state.report.clone(),
+                                ContainerMountErrorKind::Scheme(error),
+                            )
+                        },
+                    )?;
+                    mount_tree_child(
+                        child,
+                        ContainerTreeEntry {
+                            virtual_path: path,
+                            source_name: node.path.as_str(),
+                            entry_index: index,
+                        },
+                        container_scope_index,
+                        container_bundle_index,
+                        depth,
+                        state,
+                    )?;
+                }
+            }
+            ParsedFile::RawWeb(bundle) => {
+                preflight_tree_entry_count(bundle.entries.len(), state)?;
+                for (index, entry) in bundle.entries.iter().enumerate() {
+                    let path = checked_container_entry_path(
+                        state.filesystem,
+                        destination_root,
+                        entry.path.as_str(),
+                        index,
+                        &state.report,
+                    )?;
+                    let bytes = bundle.read_entry(index).map_err(|error| {
+                        ContainerMountError::new(
+                            state.report.clone(),
+                            ContainerMountErrorKind::Scheme(SchemeError::new(
+                                SchemeErrorKind::RawWeb(error),
+                            )),
+                        )
+                    })?;
+                    let child =
+                        SchemeReader::read_cow_with_limits(Cow::Borrowed(bytes), self.limits)
+                            .map_err(|error| {
+                                ContainerMountError::new(
+                                    state.report.clone(),
+                                    ContainerMountErrorKind::Scheme(error),
+                                )
+                            })?;
+                    mount_tree_child(
+                        child,
+                        ContainerTreeEntry {
+                            virtual_path: path,
+                            source_name: entry.path.as_str(),
+                            entry_index: index,
+                        },
+                        container_scope_index,
+                        container_bundle_index,
+                        depth,
+                        state,
+                    )?;
+                }
+            }
+            ParsedFile::WebData(web_file) => {
+                preflight_tree_entry_count(web_file.entries.len(), state)?;
+                for (index, entry) in web_file.entries.iter().enumerate() {
+                    let path = checked_container_entry_path(
+                        state.filesystem,
+                        destination_root,
+                        entry.name.as_str(),
+                        index,
+                        &state.report,
+                    )?;
+                    let bytes = web_file.entry_data(index).ok_or_else(|| {
+                        ContainerMountError::new(
+                            state.report.clone(),
+                            ContainerMountErrorKind::Scheme(SchemeError::new(
+                                SchemeErrorKind::WebDataEntryIndexOutOfBounds {
+                                    index,
+                                    entry_count: web_file.entries.len(),
+                                },
+                            )),
+                        )
+                    })?;
+                    let child =
+                        SchemeReader::read_cow_with_limits(Cow::Borrowed(bytes), self.limits)
+                            .map_err(|error| {
+                                ContainerMountError::new(
+                                    state.report.clone(),
+                                    ContainerMountErrorKind::Scheme(error),
+                                )
+                            })?;
+                    mount_tree_child(
+                        child,
+                        ContainerTreeEntry {
+                            virtual_path: path,
+                            source_name: entry.name.as_str(),
+                            entry_index: index,
+                        },
+                        container_scope_index,
+                        container_bundle_index,
+                        depth,
+                        state,
+                    )?;
+                }
+            }
+            ParsedFile::SerializedFile(_) | ParsedFile::Resource(_) => {
+                return Err(ContainerMountError::new(
+                    state.report.clone(),
+                    ContainerMountErrorKind::NotContainer,
+                ));
+            }
+        }
+
+        Ok(())
+    }
 }
 
-pub struct SchemeReader;
+fn preflight_entry_count(
+    count: usize,
+    limits: ContainerMountLimits,
+    report: &ContainerMountReport,
+) -> Result<(), ContainerMountError> {
+    if count > limits.max_entries {
+        return Err(ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::EntryCountLimitExceeded {
+                count,
+                limit: limits.max_entries,
+            },
+        ));
+    }
+    Ok(())
+}
+
+fn preflight_output_sizes(
+    sizes: impl IntoIterator<Item = u64>,
+    limits: ContainerMountLimits,
+    report: &ContainerMountReport,
+) -> Result<(), ContainerMountError> {
+    let mut total = 0u64;
+    for (entry_index, size) in sizes.into_iter().enumerate() {
+        total = total.checked_add(size).ok_or_else(|| {
+            ContainerMountError::new(
+                report.clone(),
+                ContainerMountErrorKind::TotalOutputSizeOverflow { entry_index },
+            )
+        })?;
+        if total > limits.max_total_output_bytes {
+            return Err(ContainerMountError::new(
+                report.clone(),
+                ContainerMountErrorKind::TotalOutputLimitExceeded {
+                    entry_index,
+                    requested_total: total,
+                    limit: limits.max_total_output_bytes,
+                },
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn record_failed_container_entry(
+    report: &mut ContainerMountReport,
+    source_name: &str,
+    virtual_path: String,
+    container_bundle_index: Option<usize>,
+    entry_index: usize,
+    error: UnityFsError,
+    limits: ContainerMountLimits,
+) -> Result<(), ContainerMountError> {
+    let requested_count = report.failed_entries.len().checked_add(1).ok_or_else(|| {
+        ContainerMountError::new(report.clone(), ContainerMountErrorKind::EntryCountOverflow)
+    })?;
+    if requested_count > limits.max_failed_entries {
+        return Err(ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::FailedEntryCountLimitExceeded {
+                count: requested_count,
+                limit: limits.max_failed_entries,
+            },
+        ));
+    }
+    let record_bytes = u64::try_from(source_name.len())
+        .ok()
+        .and_then(|source_bytes| {
+            u64::try_from(virtual_path.len())
+                .ok()
+                .and_then(|path_bytes| source_bytes.checked_add(path_bytes))
+        })
+        .ok_or_else(|| {
+            ContainerMountError::new(
+                report.clone(),
+                ContainerMountErrorKind::FailedEntryMetadataLimitExceeded {
+                    requested: u64::MAX,
+                    limit: limits.max_total_failed_entry_metadata_bytes,
+                },
+            )
+        })?;
+    let requested_metadata_bytes = report
+        .failed_entry_metadata_bytes
+        .checked_add(record_bytes)
+        .ok_or_else(|| {
+            ContainerMountError::new(
+                report.clone(),
+                ContainerMountErrorKind::FailedEntryMetadataLimitExceeded {
+                    requested: u64::MAX,
+                    limit: limits.max_total_failed_entry_metadata_bytes,
+                },
+            )
+        })?;
+    if requested_metadata_bytes > limits.max_total_failed_entry_metadata_bytes {
+        return Err(ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::FailedEntryMetadataLimitExceeded {
+                requested: requested_metadata_bytes,
+                limit: limits.max_total_failed_entry_metadata_bytes,
+            },
+        ));
+    }
+
+    let mut owned_source_name = String::new();
+    owned_source_name
+        .try_reserve_exact(source_name.len())
+        .map_err(|_| {
+            ContainerMountError::new(
+                report.clone(),
+                ContainerMountErrorKind::FailedEntryAllocationFailed {
+                    requested: source_name.len(),
+                },
+            )
+        })?;
+    owned_source_name.push_str(source_name);
+    report.failed_entries.try_reserve(1).map_err(|_| {
+        ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::FailedEntryAllocationFailed {
+                requested: requested_count,
+            },
+        )
+    })?;
+    report.failed_entries.push(FailedContainerEntry {
+        virtual_path,
+        source_name: owned_source_name,
+        container_bundle_index,
+        entry_index,
+        error,
+    });
+    report.failed_entry_metadata_bytes = requested_metadata_bytes;
+    Ok(())
+}
+
+fn mount_container_entry<'a>(
+    filesystem: &mut VirtualFileSystem,
+    destination_root: Option<&str>,
+    entry_name: &str,
+    entry_index: usize,
+    bytes: Cow<'a, [u8]>,
+    limits: ContainerMountLimits,
+    report: &mut ContainerMountReport,
+) -> Result<(), ContainerMountError> {
+    let path = checked_container_entry_path(
+        filesystem,
+        destination_root,
+        entry_name,
+        entry_index,
+        report,
+    )?;
+    mount_container_entry_at_path(filesystem, &path, entry_index, bytes, limits, report)
+}
+
+pub(super) fn mount_container_entry_at_path<'a>(
+    filesystem: &mut VirtualFileSystem,
+    path: &str,
+    entry_index: usize,
+    bytes: Cow<'a, [u8]>,
+    limits: ContainerMountLimits,
+    report: &mut ContainerMountReport,
+) -> Result<(), ContainerMountError> {
+    let entry_size = u64::try_from(bytes.len()).map_err(|_| {
+        ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::TotalOutputSizeOverflow { entry_index },
+        )
+    })?;
+    let new_total = report
+        .mounted_bytes
+        .checked_add(entry_size)
+        .ok_or_else(|| {
+            ContainerMountError::new(
+                report.clone(),
+                ContainerMountErrorKind::TotalOutputSizeOverflow { entry_index },
+            )
+        })?;
+    if new_total > limits.max_total_output_bytes {
+        return Err(ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::TotalOutputLimitExceeded {
+                entry_index,
+                requested_total: new_total,
+                limit: limits.max_total_output_bytes,
+            },
+        ));
+    }
+
+    let owned_bytes = match bytes {
+        Cow::Owned(bytes) => bytes,
+        Cow::Borrowed(bytes) => {
+            let mut owned = Vec::new();
+            owned.try_reserve_exact(bytes.len()).map_err(|_| {
+                ContainerMountError::new(
+                    report.clone(),
+                    ContainerMountErrorKind::EntryAllocationFailed {
+                        entry_index,
+                        requested: bytes.len(),
+                    },
+                )
+            })?;
+            owned.extend_from_slice(bytes);
+            owned
+        }
+    };
+    filesystem
+        .insert_file_stream_with_parents(path, SmartStream::from_memory(owned_bytes))
+        .map_err(|source| {
+            ContainerMountError::new(
+                report.clone(),
+                ContainerMountErrorKind::FileSystem {
+                    entry_index,
+                    path: path.to_owned(),
+                    source,
+                },
+            )
+        })?;
+    report.mounted_entries += 1;
+    report.mounted_bytes = new_total;
+    Ok(())
+}
+
+pub(super) fn checked_container_entry_path(
+    filesystem: &VirtualFileSystem,
+    destination_root: Option<&str>,
+    entry_name: &str,
+    entry_index: usize,
+    report: &ContainerMountReport,
+) -> Result<String, ContainerMountError> {
+    container_entry_path(
+        destination_root,
+        entry_name,
+        filesystem.limits().max_path_bytes,
+    )
+    .map_err(|error| {
+        let kind = match error {
+            ContainerEntryPathError::Invalid => ContainerMountErrorKind::InvalidEntryPath {
+                entry_index,
+                path: entry_name.to_owned(),
+            },
+            ContainerEntryPathError::TooLong => ContainerMountErrorKind::EntryPathTooLong {
+                entry_index,
+                path: entry_name.to_owned(),
+                limit: filesystem.limits().max_path_bytes,
+            },
+            ContainerEntryPathError::AllocationFailed { requested } => {
+                ContainerMountErrorKind::EntryPathAllocationFailed {
+                    entry_index,
+                    requested,
+                }
+            }
+        };
+        ContainerMountError::new(report.clone(), kind)
+    })
+}
+
+fn preflight_tree_entry_count(
+    count: usize,
+    state: &mut ContainerTreeMountState<'_>,
+) -> Result<(), ContainerMountError> {
+    let requested = state.visited_entries.checked_add(count).ok_or_else(|| {
+        ContainerMountError::new(
+            state.report.clone(),
+            ContainerMountErrorKind::EntryCountOverflow,
+        )
+    })?;
+    if requested > state.limits.max_entries {
+        return Err(ContainerMountError::new(
+            state.report.clone(),
+            ContainerMountErrorKind::EntryCountLimitExceeded {
+                count: requested,
+                limit: state.limits.max_entries,
+            },
+        ));
+    }
+    state.visited_entries = requested;
+    Ok(())
+}
