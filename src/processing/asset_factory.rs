@@ -1,35 +1,45 @@
-//! Asset-creation dispatch ported from `AssetRipper.Import.AssetCreation.GameAssetFactory`.
-//!
-//! Covers the first audited slice of `SER-TT-ABSENT-001`: the `ReadAsset` top dispatch,
-//! the `ReadNormalObject` fallback chain with its engine-collection gate, the
-//! `TryReadNormalObject` tail rules with their control-flow composition, the `CreateAsset` three outcomes, the `CreateEngineAsset` name switch,
-//! the `ReadMonoBehaviour` structure-source decision, the `MakeError_*` and
-//! `LogMonoBehaviorReadException` diagnostic texts, the `RawDataObject`/`UnknownObject`/
-//! `UnreadableObject` hash and synthetic-name rules, and the `ReadExtraTextureFields`
-//! 24-byte tail layout, plus the structure-resolver selection, the player-settings
-//! class predicate, the MonoBehaviour structure field-start rule, and the `ReadData`
-//! stripped-TypeID fallback with its `ReadAsset` handoff, and the `TypeTreeObject`
-//! read/convert plan. Byte reading,
-//! node building, and assembly-backed MonoBehaviour structures stay outside: they need
-//! generated objects and live assemblies. Version facts arrive precomputed because the
-//! Rust tree has no parsed Unity-version model yet.
-//!
-//! The frozen `AssetFactory.CreateSerialized` class/version selection is now captured
-//! as offline data for 404 class IDs across 1,838 source query versions. Deliberately
-//! open: per-class generated serializers and generated-object materialization through
-//! the product `ObjectWorkspace`/export pipeline; `SerializableStructure` and live-
-//! assembly `UnloadedStructure` recovery for MonoBehaviours; and full fidelity for
-//! reader tails, stripped-version defaults, and all engine-collection/error paths.
-//! The selection table does not stand in for those object and product behaviors.
-//!
-//! Differential evidence: the `ENGINE` rows of `mono_utils_fixture.txt` (probe
-//! `Temp/opencode/monoutilsprobe` resolving all 21 engine names at 2019.4.0f1, SDK
-//! 10.0.401); the dispatch and fallback rules are source-read over caller facts.
+//! Source-derived asset factory decisions and SerializedFile object materialization.
 
-include!("asset_factory_dispatch.rs");
-include!("asset_factory_materialization.rs");
+mod decisions;
+mod layouts;
+mod materialize;
+mod model;
+
+pub use self::decisions::{
+    bump_patch_build, chinese_texture_warning_message, classify_created_asset,
+    classify_object_tail, classify_read_data_path, classify_read_path,
+    decide_monobehaviour_structure, decide_normal_object, decide_try_read_object,
+    engine_asset_kind, incorrect_byte_count_message, is_engine_collection_name,
+    is_player_settings_class, monobehaviour_layout_mismatch_message,
+    monobehaviour_structure_start_index, raw_data_hash, read_exception_message,
+    resolve_read_class_id, select_structure_resolver, select_typetree_read_plan,
+    unknown_asset_name, unreadable_asset_name, AssetReadPath, CreatedAssetKind, EngineAssetKind,
+    MonoBehaviourReadFacts, MonoBehaviourReadLog, MonoBehaviourStructureOutcome, NormalObjectLog,
+    NormalObjectOutcome, NormalReadFacts, ObjectTailOutcome, StructureResolverKind, TryReadFacts,
+    TryReadLog, TryReadOutcome, TypeTreeReadPlan, CHINESE_TEXTURE_EXTRA_BYTES,
+    CHINESE_TEXTURE_ORIGINAL_GUID_OFFSET, CHINESE_TEXTURE_ORIGINAL_GUID_SIZE,
+    CHINESE_TEXTURE_ORIGINAL_HEIGHT_OFFSET, CHINESE_TEXTURE_ORIGINAL_WIDTH_OFFSET,
+    MONO_BEHAVIOUR_CLASS_ID, MONO_BEHAVIOUR_EDITOR_CLASS_ID_FIELD, MONO_BEHAVIOUR_NAME_FIELD,
+    PLAYER_SETTINGS_CLASS_ID,
+};
+pub use self::layouts::{
+    decode_no_usable_type_tree_payload, materialize_file_objects, reference_class_layouts,
+    ReferenceClassLayouts, TypeTreePayloadRecovery, PROBE_FIXTURE,
+};
+pub use self::materialize::{
+    materialize_object, materialize_object_for_workspace, object_read_class_id,
+};
+pub use self::model::{
+    ChineseTextureFields, ClassLayoutSource, FactoryAsset, FactoryAssetKind, FactoryEngineError,
+    FactoryFileFacts, FactoryLogLevel, FactoryObjectMaterialization, FactoryObjectState,
+    FactoryStructure, FactoryUnityVersion, FactoryVersionType,
+};
+pub use crate::processing::source_factory_dispatch::SourceFactoryLookupError;
+pub use crate::processing::source_tpk::{SourceTpkLookupError, SourceTpkTrees};
 
 #[cfg(test)]
-mod tests {
-    include!("asset_factory_tests_01.rs");
-}
+pub(crate) use self::model::FileTypeTreeTestLayouts;
+
+#[cfg(test)]
+#[path = "asset_factory/tests/mod.rs"]
+mod tests;

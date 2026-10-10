@@ -1,199 +1,21 @@
-/// `ReadMonoBehaviour`: the generated header, then the structure source decision.
-#[allow(clippy::too_many_arguments)]
-fn read_monobehaviour(
-    file: &SerializedFile<'_>,
-    facts: &FactoryFileFacts<'_>,
-    source: &dyn ClassLayoutSource,
-    object_index: usize,
-    limits: &ObjectDecodeLimits,
-    version: &FactoryUnityVersion,
-    payload_bytes: &[u8],
-    asset: &mut FactoryAsset,
-) {
-    let generated_name = match source.generated_class_name(MONO_BEHAVIOUR_CLASS_ID, version) {
-        Ok(name) => name.unwrap_or("MonoBehaviour").to_owned(),
-        Err(error) => {
-            asset.kind = FactoryAssetKind::Unreadable;
-            asset.log_level = FactoryLogLevel::Error;
-            asset.log_message = Some(error.to_string());
-            return;
-        }
-    };
-    asset.kind = FactoryAssetKind::Generated(generated_name);
-    let arrays_align =
-        unity_version_aligns_arrays(file.metadata.prefix.unity_version_text.as_deref());
-    let read_flags = file.object_read_flags(facts.file_path, facts.collection_name);
-    let header = class_layout(
-        file,
-        source,
-        MONO_BEHAVIOUR_CLASS_ID,
-        version,
-        object_index,
-        read_flags.is_release(),
-    )
-    .map_err(|error| {
-        ObjectDecodeError::source_type_tree_lookup(
-            object_index,
-            MONO_BEHAVIOUR_CLASS_ID,
-            version.text.clone(),
-            error.to_string(),
-        )
-    })
-    .and_then(|layout| {
-        layout
-            .map(|tree| {
-                decode_with_tree(
-                    &tree,
-                    payload_bytes,
-                    file.metadata.prefix.body_endian,
-                    arrays_align,
-                    &file.metadata.reference_types,
-                    object_index,
-                    file.metadata.objects[object_index].path_id,
-                    limits,
-                )
-            })
-            .transpose()
-    });
+use std::sync::{Arc, OnceLock};
 
-    let (header_ok, header_payload) = match header {
-        Ok(Some(payload)) => (true, Some(payload)),
-        Ok(None) => (false, None),
-        Err(_) => (false, None),
-    };
-    let consumed = header_payload
-        .as_ref()
-        .map(|payload| payload.consumed_bytes)
-        .unwrap_or(0);
-    let remainder = payload_bytes.get(consumed..).unwrap_or_default().to_vec();
+use crate::processing::source_factory_dispatch::SourceFactoryDispatch;
+use crate::processing::source_tpk::{SourceTpkDatabase, SourceTpkLookupError};
+use crate::serialized_file::file::SerializedFile;
+use crate::serialized_file::metadata::{TypeTree, TypeTreeNode};
+use crate::serialized_file::object::{ObjectDecodeError, ObjectDecodeLimits, ParsedObjectPayload};
 
-    let file_tree = serialized_type_tree(file, object_index);
-    let has_type_tree = matches!(
-        classify_type_tree_usability(file_tree),
-        TypeTreeUsability::Present
-    );
-    let start_index = file_tree
-        .map(|tree| {
-            let names: Vec<&str> = tree
-                .nodes
-                .iter()
-                .skip(1)
-                .filter(|node| node.level == 1)
-                .map(|node| node.name.as_deref().unwrap_or(""))
-                .collect();
-            monobehaviour_structure_start_index(&names)
-        })
-        .unwrap_or(0);
-    let structure_tree = file_tree.and_then(|tree| structure_subtree(tree, start_index));
-    let structure_read = structure_tree.as_ref().map(|tree| {
-        decode_with_tree(
-            tree,
-            &remainder,
-            file.metadata.prefix.body_endian,
-            arrays_align,
-            &file.metadata.reference_types,
-            object_index,
-            file.metadata.objects[object_index].path_id,
-            limits,
-        )
-    });
-    let structure_try_read_ok = matches!(
-        structure_read.as_ref(),
-        Some(Ok(payload)) if payload.consumed_bytes == remainder.len()
-    );
-    let structure_facts = MonoBehaviourReadFacts {
-        read_threw: !header_ok,
-        has_type_tree,
-        type_tree_parse_ok: structure_tree.is_some(),
-        structure_try_read_ok,
-    };
-    let (outcome, log) = decide_monobehaviour_structure(&structure_facts);
-    let fields = match (&outcome, structure_read) {
-        (MonoBehaviourStructureOutcome::UseParsedStructure, Some(Ok(payload))) => {
-            Some(payload.root)
-        }
-        _ => None,
-    };
-    asset.payload = header_payload;
-    asset.name = named_field_owned(&asset.payload).unwrap_or_default();
-    asset.structure = Some(FactoryStructure {
-        outcome,
-        fields,
-        unloaded_remainder: match outcome {
-            MonoBehaviourStructureOutcome::UseUnloadedRemainder => remainder,
-            _ => Vec::new(),
-        },
-    });
-    match log {
-        MonoBehaviourReadLog::Silent => {
-            asset.log_level = FactoryLogLevel::Silent;
-            asset.log_message = None;
-        }
-        MonoBehaviourReadLog::ErrorLayoutMismatch => {
-            asset.log_level = FactoryLogLevel::Error;
-            asset.log_message = Some(monobehaviour_layout_mismatch_message(
-                asset.kind.generated_name().unwrap_or("MonoBehaviour"),
-                "",
-                "ArgumentOutOfRangeException",
-            ));
-        }
-    }
-}
-
-/// A TypeTree rooted at `start_index`, with levels rebased so the sub-root is level 0.
-/// This is the field list `SerializableTreeType.FromRootNode(root, true)` builds for a
-/// MonoBehaviour structure: the root plus the fields after the base MonoBehaviour fields.
-fn structure_subtree(tree: &TypeTree, start_index: usize) -> Option<TypeTree> {
-    let root = tree.nodes.first()?;
-    let mut child_indices = Vec::new();
-    for (index, node) in tree.nodes.iter().enumerate().skip(1) {
-        if node.level == 1 {
-            child_indices.push(index);
-        }
-    }
-    let first = *child_indices.get(start_index)?;
-    let base_level = tree.nodes[first].level;
-    let mut nodes = Vec::new();
-    nodes.push(root.clone());
-    for node in tree.nodes.iter().skip(first) {
-        let mut node = node.clone();
-        node.level = node.level.checked_sub(base_level)?.checked_add(1)?;
-        nodes.push(node);
-    }
-    nodes[0].level = 0;
-    // The synthesized nodes use direct names, so no string buffer is required.
-    Some(TypeTree {
-        nodes,
-        string_buffer: Vec::new(),
-    })
-}
-
-impl FactoryAssetKind {
-    fn generated_name(&self) -> Option<&str> {
-        match self {
-            Self::Generated(name) => Some(name),
-            _ => None,
-        }
-    }
-}
-
-trait VersionText {
-    fn text_or_default(&self) -> &str;
-}
-
-impl VersionText for FactoryUnityVersion {
-    fn text_or_default(&self) -> &str {
-        if self.text.is_empty() {
-            "0.0.0"
-        } else {
-            &self.text
-        }
-    }
-}
-
+use super::decisions::MONO_BEHAVIOUR_CLASS_ID;
+use super::decisions::{classify_object_tail, ObjectTailOutcome};
+use super::materialize::materialize_object;
+use super::materialize::{object_read_class_id, TEXTURE2D_CLASS_ID};
+use super::model::{ClassLayoutSource, FactoryAsset, FactoryFileFacts, FactoryUnityVersion};
+use super::FactoryEngineError;
+use crate::processing::source_factory_dispatch::SourceFactoryLookupError;
 /// The committed reference probe output: the `GEN` generated-class identities, the
 /// `TPK`/`NODE` real TypeTrees, and the authored case files.
-pub const PROBE_FIXTURE: &str = include_str!("asset_factory_fixture.txt");
+pub const PROBE_FIXTURE: &str = include_str!("../asset_factory_fixture.txt");
 
 /// Class identity and class layouts pinned by isolated reference probes. The explicit
 /// fixture parsed by `parse` is bounded to its authored cases; the production accessor
