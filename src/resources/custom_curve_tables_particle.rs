@@ -1,7 +1,7 @@
 include!("custom_curve_tables_particle_01.rs");
 include!("custom_curve_tables_particle_02.rs");
 
-const PARTICLE_SYSTEM_PATHS_STORAGE: [(u32, &str); 1792] =
+static PARTICLE_SYSTEM_PATHS_STORAGE: [(u32, &str); 1792] =
     combine_particle_system_paths();
 
 const fn combine_particle_system_paths() -> [(u32, &'static str); 1792] {
