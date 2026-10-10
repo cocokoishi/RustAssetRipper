@@ -22,6 +22,14 @@ use super::unity_yaml::{
 /// The source importer layouts replayed by the committed project-export fixtures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TextureImporterLayout {
+    Unity5_0,
+    Unity5_2,
+    Unity5_3,
+    Unity5_4,
+    Unity5_6,
+    Unity2017_4,
+    Unity2018_2,
+    Unity2018_3,
     Unity2019_4,
     Unity2022_3,
 }
@@ -29,6 +37,14 @@ pub enum TextureImporterLayout {
 impl TextureImporterLayout {
     pub fn for_project_version(version: SceneUnityVersion) -> Option<Self> {
         match (version.major, version.minor) {
+            (5, 0 | 1) => Some(Self::Unity5_0),
+            (5, 2) => Some(Self::Unity5_2),
+            (5, 3) => Some(Self::Unity5_3),
+            (5, 4) => Some(Self::Unity5_4),
+            (5, 5 | 6) => Some(Self::Unity5_6),
+            (2017, 4) => Some(Self::Unity2017_4),
+            (2018, 2) => Some(Self::Unity2018_2),
+            (2018, 3) => Some(Self::Unity2018_3),
             (2019, 4) => Some(Self::Unity2019_4),
             (2022, 3) => Some(Self::Unity2022_3),
             _ => None,
@@ -73,6 +89,50 @@ pub fn plan_texture_project_export(
     settings: &ExportSettingsFile,
     asset_bundle_name: Option<&str>,
 ) -> Result<TextureProjectPlan, Box<dyn Error>> {
+    plan_texture_project_export_with_sprite_mesh_type(root, version, settings, asset_bundle_name, 0)
+}
+
+/// Build the specialized lightmap importer used by `LightmapExportCollection`.
+///
+/// Unlike the ordinary texture collection, this source collection leaves the importer factory's
+/// `SpriteMeshType.Tight` default intact because it does not run `TextureExportCollection.AddSprites`.
+pub fn plan_lightmap_texture_project_export(
+    root: &SerializedValue,
+    version: SceneUnityVersion,
+    settings: &ExportSettingsFile,
+    asset_bundle_name: Option<&str>,
+) -> Result<TextureProjectPlan, Box<dyn Error>> {
+    let mut plan = plan_texture_project_export_with_sprite_mesh_type(
+        root,
+        version,
+        settings,
+        asset_bundle_name,
+        1,
+    )?;
+    let image_format = match settings.lightmap_texture_export_format {
+        crate::export::settings::LightmapTextureExportFormat::Exr => {
+            crate::export::settings::ImageExportFormat::Exr
+        }
+        crate::export::settings::LightmapTextureExportFormat::Image => settings.image_export_format,
+        crate::export::settings::LightmapTextureExportFormat::Yaml => {
+            return Err(invalid_data(
+                "YAML lightmap mode cannot use the LightmapTextureAssetExporter",
+            ));
+        }
+    };
+    plan.image_format = ImageExportFormat::from_settings_format(image_format);
+    plan.extension =
+        image_format.texture_extension(settings.prefer_original_texture_extension, None);
+    Ok(plan)
+}
+
+fn plan_texture_project_export_with_sprite_mesh_type(
+    root: &SerializedValue,
+    version: SceneUnityVersion,
+    settings: &ExportSettingsFile,
+    asset_bundle_name: Option<&str>,
+    sprite_mesh_type: i64,
+) -> Result<TextureProjectPlan, Box<dyn Error>> {
     let layout = TextureImporterLayout::for_project_version(version).ok_or_else(|| {
         invalid_data(format!(
             "TextureImporter serialization is not source-pinned for Unity {}.{}",
@@ -84,7 +144,7 @@ pub fn plan_texture_project_export(
     let extension = settings
         .image_export_format
         .texture_extension(settings.prefer_original_texture_extension, None);
-    let importer = texture_importer(root, &view, layout, asset_bundle_name)?;
+    let importer = texture_importer(root, &view, layout, asset_bundle_name, sprite_mesh_type)?;
     Ok(TextureProjectPlan {
         view,
         image_format,
@@ -98,8 +158,44 @@ fn texture_importer(
     texture: &Texture2DView,
     layout: TextureImporterLayout,
     asset_bundle_name: Option<&str>,
+    sprite_mesh_type: i64,
 ) -> Result<UnityYamlNode, Box<dyn Error>> {
     let facts = TextureImporterFacts::from_value(root, texture)?;
+    match layout {
+        TextureImporterLayout::Unity5_0 => {
+            return texture_importer_v2(&facts, asset_bundle_name, sprite_mesh_type, false, false)
+        }
+        TextureImporterLayout::Unity5_2 => {
+            return texture_importer_v2(&facts, asset_bundle_name, sprite_mesh_type, true, false)
+        }
+        TextureImporterLayout::Unity5_3 => {
+            return texture_importer_v2(&facts, asset_bundle_name, sprite_mesh_type, true, true)
+        }
+        TextureImporterLayout::Unity5_4 => {
+            return texture_importer_v2_with_sheet_version(
+                &facts,
+                asset_bundle_name,
+                sprite_mesh_type,
+                true,
+                true,
+                true,
+                true,
+            )
+        }
+        TextureImporterLayout::Unity5_6 => {
+            return texture_importer_v4_5_6(&facts, asset_bundle_name, sprite_mesh_type)
+        }
+        TextureImporterLayout::Unity2017_4 => {
+            return texture_importer_v4_2017(&facts, asset_bundle_name, sprite_mesh_type)
+        }
+        TextureImporterLayout::Unity2018_2 => {
+            return texture_importer_v7(&facts, asset_bundle_name, sprite_mesh_type, true, true)
+        }
+        TextureImporterLayout::Unity2018_3 => {
+            return texture_importer_v7(&facts, asset_bundle_name, sprite_mesh_type, false, false)
+        }
+        TextureImporterLayout::Unity2019_4 | TextureImporterLayout::Unity2022_3 => {}
+    }
     let modern = layout == TextureImporterLayout::Unity2022_3;
     let mut importer = mapping(vec![
         ("serializedVersion", signed(if modern { 12 } else { 11 })),
@@ -130,7 +226,7 @@ fn texture_importer(
     importer.insert_field("compressionQuality", signed(50))?;
     importer.insert_field("spriteMode", signed(1))?;
     importer.insert_field("spriteExtrude", signed(1))?;
-    importer.insert_field("spriteMeshType", signed(0))?;
+    importer.insert_field("spriteMeshType", signed(sprite_mesh_type))?;
     importer.insert_field("alignment", signed(0))?;
     importer.insert_field("spritePivot", point2(0.5, 0.5)?)?;
     importer.insert_field("spritePixelsToUnits", float(100.0))?;
@@ -170,6 +266,279 @@ fn texture_importer(
     importer.insert_field("output", texture_output(modern)?)?;
     importer.insert_field("pSDRemoveMatte", signed(0))?;
     if !modern {
+        importer.insert_field("pSDShowRemoveMatteOption", signed(0))?;
+    }
+    importer.insert_field("userData", UnityYamlNode::string(""))?;
+    importer.insert_field(
+        "assetBundleName",
+        UnityYamlNode::string(asset_bundle_name.unwrap_or("")),
+    )?;
+    importer.insert_field("assetBundleVariant", UnityYamlNode::string(""))?;
+    Ok(importer)
+}
+
+fn texture_importer_v2(
+    facts: &TextureImporterFacts,
+    asset_bundle_name: Option<&str>,
+    sprite_mesh_type: i64,
+    allow_alpha_splitting: bool,
+    sprite_sheet_outline: bool,
+) -> Result<UnityYamlNode, Box<dyn Error>> {
+    texture_importer_v2_with_sheet_version(
+        facts,
+        asset_bundle_name,
+        sprite_mesh_type,
+        allow_alpha_splitting,
+        false,
+        sprite_sheet_outline,
+        false,
+    )
+}
+
+fn texture_importer_v2_with_sheet_version(
+    facts: &TextureImporterFacts,
+    asset_bundle_name: Option<&str>,
+    sprite_mesh_type: i64,
+    allow_alpha_splitting: bool,
+    sprite_sheet_serialized_version: bool,
+    sprite_sheet_outline: bool,
+    sprite_tessellation_detail: bool,
+) -> Result<UnityYamlNode, Box<dyn Error>> {
+    let mut importer = mapping(vec![
+        ("serializedVersion", signed(2)),
+        ("name", UnityYamlNode::string("")),
+        ("fileIDToRecycleName", empty_mapping()),
+        ("mipmaps", mipmaps_v2(facts.enable_mipmap)?),
+        ("bumpmap", bumpmap(false)?),
+        ("isReadable", boolean_int(facts.is_readable)),
+        ("grayScaleToAlpha", signed(0)),
+        ("generateCubemap", signed(0)),
+        ("cubemapConvolution", signed(0)),
+        ("cubemapConvolutionSteps", signed(0)),
+        ("cubemapConvolutionExponent", signed(0)),
+        ("seamlessCubemap", signed(0)),
+        ("textureFormat", signed(i64::from(facts.format))),
+        ("maxTextureSize", signed(i64::from(facts.max_texture_size))),
+        ("textureSettings", texture_settings_v1(facts)?),
+        ("nPOTScale", signed(0)),
+        ("lightmap", signed(0)),
+        ("rGBM", signed(0)),
+        ("compressionQuality", signed(50)),
+    ])?;
+    if allow_alpha_splitting {
+        importer.insert_field("allowsAlphaSplitting", signed(0))?;
+    }
+    for (name, value) in [
+        ("spriteMode", 1),
+        ("spriteExtrude", 1),
+        ("spriteMeshType", sprite_mesh_type),
+        ("alignment", 0),
+    ] {
+        importer.insert_field(name, signed(value))?;
+    }
+    importer.insert_field("spritePivot", point2(0.5, 0.5)?)?;
+    importer.insert_field("spriteBorder", point4(0.0, 0.0, 0.0, 0.0)?)?;
+    importer.insert_field("spritePixelsToUnits", float(100.0))?;
+    importer.insert_field("alphaIsTransparency", signed(1))?;
+    if sprite_tessellation_detail {
+        importer.insert_field("spriteTessellationDetail", signed(-1))?;
+    }
+    importer.insert_field("textureType", signed(if facts.normal_map { 1 } else { 0 }))?;
+    importer.insert_field(
+        "buildTargetSettings",
+        build_target_settings_v2(facts.max_texture_size, allow_alpha_splitting)?,
+    )?;
+    importer.insert_field(
+        "spriteSheet",
+        sprite_sheet_v2(sprite_sheet_serialized_version, sprite_sheet_outline)?,
+    )?;
+    importer.insert_field("spritePackingTag", UnityYamlNode::string(""))?;
+    importer.insert_field("output", texture_output_v2()?)?;
+    importer.insert_field("userData", UnityYamlNode::string(""))?;
+    importer.insert_field(
+        "assetBundleName",
+        UnityYamlNode::string(asset_bundle_name.unwrap_or("")),
+    )?;
+    importer.insert_field("assetBundleVariant", UnityYamlNode::string(""))?;
+    Ok(importer)
+}
+
+fn texture_importer_v4_5_6(
+    facts: &TextureImporterFacts,
+    asset_bundle_name: Option<&str>,
+    sprite_mesh_type: i64,
+) -> Result<UnityYamlNode, Box<dyn Error>> {
+    mapping(vec![
+        ("serializedVersion", signed(4)),
+        ("name", UnityYamlNode::string("")),
+        ("fileIDToRecycleName", empty_mapping()),
+        (
+            "mipmaps",
+            mipmaps_v4_5_6(facts.enable_mipmap, facts.srgb_texture)?,
+        ),
+        ("bumpmap", bumpmap(false)?),
+        ("isReadable", boolean_int(facts.is_readable)),
+        ("grayScaleToAlpha", signed(0)),
+        ("generateCubemap", signed(6)),
+        ("cubemapConvolution", signed(0)),
+        ("seamlessCubemap", signed(0)),
+        ("textureFormat", signed(i64::from(facts.format))),
+        ("maxTextureSize", signed(i64::from(facts.max_texture_size))),
+        ("textureSettings", texture_settings_v1(facts)?),
+        ("nPOTScale", signed(0)),
+        ("lightmap", signed(0)),
+        ("compressionQuality", signed(50)),
+        ("spriteMode", signed(1)),
+        ("spriteExtrude", signed(1)),
+        ("spriteMeshType", signed(sprite_mesh_type)),
+        ("alignment", signed(0)),
+        ("spritePivot", point2(0.5, 0.5)?),
+        ("spriteBorder", point4(0.0, 0.0, 0.0, 0.0)?),
+        ("spritePixelsToUnits", float(100.0)),
+        ("alphaUsage", signed(1)),
+        ("alphaIsTransparency", signed(1)),
+        ("spriteTessellationDetail", signed(-1)),
+        ("textureType", signed(if facts.normal_map { 1 } else { 0 })),
+        ("textureShape", signed(1)),
+        ("maxTextureSizeSet", signed(0)),
+        ("compressionQualitySet", signed(0)),
+        ("textureFormatSet", signed(0)),
+        (
+            "platformSettings",
+            platform_settings_5_6(facts.max_texture_size)?,
+        ),
+        ("spriteSheet", sprite_sheet_5_6()?),
+        ("spritePackingTag", UnityYamlNode::string("")),
+        ("output", texture_output_5_6()?),
+        ("userData", UnityYamlNode::string("")),
+        (
+            "assetBundleName",
+            UnityYamlNode::string(asset_bundle_name.unwrap_or("")),
+        ),
+        ("assetBundleVariant", UnityYamlNode::string("")),
+    ])
+}
+
+fn texture_importer_v4_2017(
+    facts: &TextureImporterFacts,
+    asset_bundle_name: Option<&str>,
+    sprite_mesh_type: i64,
+) -> Result<UnityYamlNode, Box<dyn Error>> {
+    mapping(vec![
+        ("serializedVersion", signed(4)),
+        ("name", UnityYamlNode::string("")),
+        ("fileIDToRecycleName", empty_mapping()),
+        ("externalObjects", empty_mapping()),
+        ("mipmaps", mipmaps(facts.enable_mipmap, facts.srgb_texture)?),
+        ("bumpmap", bumpmap(false)?),
+        ("isReadable", boolean_int(facts.is_readable)),
+        ("grayScaleToAlpha", signed(0)),
+        ("generateCubemap", signed(6)),
+        ("cubemapConvolution", signed(0)),
+        ("seamlessCubemap", signed(0)),
+        ("textureFormat", signed(i64::from(facts.format))),
+        ("maxTextureSize", signed(i64::from(facts.max_texture_size))),
+        ("textureSettings", texture_settings(facts)?),
+        ("nPOTScale", signed(0)),
+        ("lightmap", signed(0)),
+        ("compressionQuality", signed(50)),
+        ("spriteMode", signed(1)),
+        ("spriteExtrude", signed(1)),
+        ("spriteMeshType", signed(sprite_mesh_type)),
+        ("alignment", signed(0)),
+        ("spritePivot", point2(0.5, 0.5)?),
+        ("spritePixelsToUnits", float(100.0)),
+        ("spriteBorder", point4(0.0, 0.0, 0.0, 0.0)?),
+        ("spriteGenerateFallbackPhysicsShape", signed(1)),
+        ("alphaUsage", signed(1)),
+        ("alphaIsTransparency", signed(1)),
+        ("spriteTessellationDetail", signed(-1)),
+        ("textureType", signed(if facts.normal_map { 1 } else { 0 })),
+        ("textureShape", signed(1)),
+        ("maxTextureSizeSet", signed(0)),
+        ("compressionQualitySet", signed(0)),
+        ("textureFormatSet", signed(0)),
+        (
+            "platformSettings",
+            platform_settings_2017(facts.max_texture_size)?,
+        ),
+        ("spriteSheet", sprite_sheet_2017()?),
+        ("spritePackingTag", UnityYamlNode::string("")),
+        ("output", texture_output(false)?),
+        ("userData", UnityYamlNode::string("")),
+        (
+            "assetBundleName",
+            UnityYamlNode::string(asset_bundle_name.unwrap_or("")),
+        ),
+        ("assetBundleVariant", UnityYamlNode::string("")),
+    ])
+}
+
+fn texture_importer_v7(
+    facts: &TextureImporterFacts,
+    asset_bundle_name: Option<&str>,
+    sprite_mesh_type: i64,
+    has_name: bool,
+    has_psd_remove_matte_option: bool,
+) -> Result<UnityYamlNode, Box<dyn Error>> {
+    let mut importer = mapping(vec![("serializedVersion", signed(7))])?;
+    if has_name {
+        importer.insert_field("name", UnityYamlNode::string(""))?;
+    }
+    importer.insert_field("fileIDToRecycleName", empty_mapping())?;
+    importer.insert_field("externalObjects", empty_mapping())?;
+    for (name, value) in [
+        ("mipmaps", mipmaps(facts.enable_mipmap, facts.srgb_texture)?),
+        ("bumpmap", bumpmap(false)?),
+        ("isReadable", boolean_int(facts.is_readable)),
+    ] {
+        importer.insert_field(name, value)?;
+    }
+    importer.insert_field("streamingMipmaps", boolean_int(facts.streaming_mipmaps))?;
+    importer.insert_field(
+        "streamingMipmapsPriority",
+        signed(i64::from(facts.streaming_mipmaps_priority)),
+    )?;
+    for (name, value) in [
+        ("grayScaleToAlpha", signed(0)),
+        ("generateCubemap", signed(6)),
+        ("cubemapConvolution", signed(0)),
+        ("seamlessCubemap", signed(0)),
+        ("textureFormat", signed(i64::from(facts.format))),
+        ("maxTextureSize", signed(i64::from(facts.max_texture_size))),
+        ("textureSettings", texture_settings(facts)?),
+        ("nPOTScale", signed(0)),
+        ("lightmap", signed(0)),
+        ("compressionQuality", signed(50)),
+        ("spriteMode", signed(1)),
+        ("spriteExtrude", signed(1)),
+        ("spriteMeshType", signed(sprite_mesh_type)),
+        ("alignment", signed(0)),
+        ("spritePivot", point2(0.5, 0.5)?),
+        ("spritePixelsToUnits", float(100.0)),
+        ("spriteBorder", point4(0.0, 0.0, 0.0, 0.0)?),
+        ("spriteGenerateFallbackPhysicsShape", signed(1)),
+        ("alphaUsage", signed(1)),
+        ("alphaIsTransparency", signed(1)),
+        ("spriteTessellationDetail", signed(-1)),
+        ("textureType", signed(if facts.normal_map { 1 } else { 0 })),
+        ("textureShape", signed(1)),
+        ("singleChannelComponent", signed(0)),
+        ("maxTextureSizeSet", signed(0)),
+        ("compressionQualitySet", signed(0)),
+        ("textureFormatSet", signed(0)),
+        (
+            "platformSettings",
+            platform_settings_v2(facts.max_texture_size)?,
+        ),
+        ("spriteSheet", sprite_sheet_v7()?),
+        ("spritePackingTag", UnityYamlNode::string("")),
+        ("output", texture_output(false)?),
+        ("pSDRemoveMatte", signed(0)),
+    ] {
+        importer.insert_field(name, value)?;
+    }
+    if has_psd_remove_matte_option {
         importer.insert_field("pSDShowRemoveMatteOption", signed(0))?;
     }
     importer.insert_field("userData", UnityYamlNode::string(""))?;
@@ -273,6 +642,221 @@ fn bumpmap(modern: bool) -> Result<UnityYamlNode, Box<dyn Error>> {
         node.insert_field("flipGreenChannel", signed(0))?;
     }
     Ok(node)
+}
+
+fn mipmaps_v2(enable_mipmap: bool) -> Result<UnityYamlNode, Box<dyn Error>> {
+    mapping(vec![
+        ("mipMapMode", signed(0)),
+        ("enableMipMap", boolean_int(enable_mipmap)),
+        ("linearTexture", signed(0)),
+        ("correctGamma", signed(0)),
+        ("fadeOut", signed(0)),
+        ("borderMipMap", signed(0)),
+        ("mipMapFadeDistanceStart", signed(1)),
+        ("mipMapFadeDistanceEnd", signed(3)),
+    ])
+}
+
+fn mipmaps_v4_5_6(
+    enable_mipmap: bool,
+    srgb_texture: bool,
+) -> Result<UnityYamlNode, Box<dyn Error>> {
+    mapping(vec![
+        ("mipMapMode", signed(0)),
+        ("enableMipMap", boolean_int(enable_mipmap)),
+        ("sRGBTexture", boolean_int(srgb_texture)),
+        ("linearTexture", signed(0)),
+        ("fadeOut", signed(0)),
+        ("borderMipMap", signed(0)),
+        ("mipMapFadeDistanceStart", signed(1)),
+        ("mipMapFadeDistanceEnd", signed(3)),
+    ])
+}
+
+fn texture_settings_v1(facts: &TextureImporterFacts) -> Result<UnityYamlNode, Box<dyn Error>> {
+    mapping(vec![
+        ("filterMode", signed(i64::from(facts.filter_mode))),
+        ("aniso", signed(i64::from(facts.aniso))),
+        ("mipBias", float(f64::from(facts.mip_bias))),
+        ("wrapMode", signed(i64::from(facts.wrap_u))),
+    ])
+}
+
+fn build_target_settings_v2(
+    max_texture_size: i32,
+    allow_alpha_splitting: bool,
+) -> Result<UnityYamlNode, Box<dyn Error>> {
+    let mut platform = mapping(vec![
+        (
+            "buildTarget",
+            UnityYamlNode::plain_string("DefaultTexturePlatform"),
+        ),
+        ("maxTextureSize", signed(i64::from(max_texture_size))),
+        ("textureFormat", signed(-1)),
+        ("compressionQuality", signed(50)),
+    ])?;
+    if allow_alpha_splitting {
+        platform.insert_field("allowsAlphaSplitting", signed(0))?;
+    }
+    sequence_block(vec![platform])
+}
+
+fn platform_settings_5_6(max_texture_size: i32) -> Result<UnityYamlNode, Box<dyn Error>> {
+    sequence_block(vec![mapping(vec![
+        (
+            "buildTarget",
+            UnityYamlNode::plain_string("DefaultTexturePlatform"),
+        ),
+        ("maxTextureSize", signed(i64::from(max_texture_size))),
+        ("textureFormat", signed(-1)),
+        ("textureCompression", signed(2)),
+        ("compressionQuality", signed(50)),
+        ("crunchedCompression", signed(0)),
+        ("allowsAlphaSplitting", signed(0)),
+        ("overridden", signed(0)),
+    ])?])
+}
+
+fn platform_settings_2017(max_texture_size: i32) -> Result<UnityYamlNode, Box<dyn Error>> {
+    sequence_block(vec![mapping(vec![
+        (
+            "buildTarget",
+            UnityYamlNode::plain_string("DefaultTexturePlatform"),
+        ),
+        ("maxTextureSize", signed(i64::from(max_texture_size))),
+        ("resizeAlgorithm", signed(0)),
+        ("textureFormat", signed(-1)),
+        ("textureCompression", signed(2)),
+        ("compressionQuality", signed(50)),
+        ("crunchedCompression", signed(0)),
+        ("allowsAlphaSplitting", signed(0)),
+        ("overridden", signed(0)),
+        ("androidETC2FallbackOverride", signed(0)),
+    ])?])
+}
+
+fn platform_settings_v2(max_texture_size: i32) -> Result<UnityYamlNode, Box<dyn Error>> {
+    sequence_block(vec![mapping(vec![
+        ("serializedVersion", signed(2)),
+        (
+            "buildTarget",
+            UnityYamlNode::plain_string("DefaultTexturePlatform"),
+        ),
+        ("maxTextureSize", signed(i64::from(max_texture_size))),
+        ("resizeAlgorithm", signed(0)),
+        ("textureFormat", signed(-1)),
+        ("textureCompression", signed(2)),
+        ("compressionQuality", signed(50)),
+        ("crunchedCompression", signed(0)),
+        ("allowsAlphaSplitting", signed(0)),
+        ("overridden", signed(0)),
+        ("androidETC2FallbackOverride", signed(0)),
+    ])?])
+}
+
+fn sprite_sheet_v2(
+    serialized_version: bool,
+    outline: bool,
+) -> Result<UnityYamlNode, Box<dyn Error>> {
+    let mut fields = Vec::new();
+    if serialized_version {
+        fields.push(("serializedVersion", signed(2)));
+    }
+    fields.push(("sprites", empty_sequence()));
+    if outline {
+        fields.push(("outline", empty_sequence()));
+    }
+    mapping(fields)
+}
+
+fn sprite_sheet_5_6() -> Result<UnityYamlNode, Box<dyn Error>> {
+    mapping(vec![
+        ("serializedVersion", signed(2)),
+        ("sprites", empty_sequence()),
+        ("outline", empty_sequence()),
+    ])
+}
+
+fn sprite_sheet_2017() -> Result<UnityYamlNode, Box<dyn Error>> {
+    mapping(vec![
+        ("serializedVersion", signed(2)),
+        ("sprites", empty_sequence()),
+        ("outline", empty_sequence()),
+        ("physicsShape", empty_sequence()),
+    ])
+}
+
+fn sprite_sheet_v7() -> Result<UnityYamlNode, Box<dyn Error>> {
+    mapping(vec![
+        ("serializedVersion", signed(2)),
+        ("sprites", empty_sequence()),
+        ("outline", empty_sequence()),
+        ("physicsShape", empty_sequence()),
+        ("bones", empty_sequence()),
+        ("spriteID", UnityYamlNode::string("")),
+        ("internalID", signed(0)),
+        ("vertices", empty_sequence()),
+        ("indices", UnityYamlNode::string("")),
+        ("edges", empty_sequence()),
+        ("weights", empty_sequence()),
+    ])
+}
+
+fn texture_output_v2() -> Result<UnityYamlNode, Box<dyn Error>> {
+    mapping(vec![
+        (
+            "textureImportInstructions",
+            mapping(vec![
+                ("compressedFormat", signed(0)),
+                ("uncompressedFormat", signed(0)),
+                ("recommendedFormat", signed(0)),
+                ("desiredFormat", signed(0)),
+                ("usageMode", signed(0)),
+                ("colorSpace", signed(0)),
+                ("width", signed(0)),
+                ("height", signed(0)),
+                ("compressionQuality", signed(0)),
+            ])?,
+        ),
+        (
+            "sourceTextureInformation",
+            mapping(vec![
+                ("width", signed(0)),
+                ("height", signed(0)),
+                ("doesTextureContainAlpha", signed(0)),
+                ("sourceWasHDR", signed(0)),
+            ])?,
+        ),
+        ("importInspectorWarnings", UnityYamlNode::string("")),
+    ])
+}
+
+fn texture_output_5_6() -> Result<UnityYamlNode, Box<dyn Error>> {
+    mapping(vec![
+        (
+            "textureImportInstructions",
+            mapping(vec![
+                ("compressedFormat", signed(0)),
+                ("uncompressedFormat", signed(0)),
+                ("desiredFormat", signed(0)),
+                ("usageMode", signed(0)),
+                ("colorSpace", signed(0)),
+                ("width", signed(0)),
+                ("height", signed(0)),
+                ("compressionQuality", signed(0)),
+            ])?,
+        ),
+        (
+            "sourceTextureInformation",
+            mapping(vec![
+                ("width", signed(0)),
+                ("height", signed(0)),
+                ("doesTextureContainAlpha", signed(0)),
+                ("sourceWasHDR", signed(0)),
+            ])?,
+        ),
+        ("importInspectorWarnings", UnityYamlNode::string("")),
+    ])
 }
 
 fn texture_settings(facts: &TextureImporterFacts) -> Result<UnityYamlNode, Box<dyn Error>> {
