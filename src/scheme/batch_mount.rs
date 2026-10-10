@@ -136,12 +136,39 @@ impl SchemeReader {
                 mount_limits,
             );
         }
-        let dispatched = Self::read_stream(&mut stream, scheme_limits).map_err(|error| {
-            ContainerMountError::new(
-                ContainerMountReport::default(),
-                ContainerMountErrorKind::Scheme(error),
-            )
-        })?;
+        let stream_dispatched =
+            Self::dispatch_stream_file_backed(stream, scheme_limits).map_err(|error| {
+                ContainerMountError::new(
+                    ContainerMountReport::default(),
+                    ContainerMountErrorKind::Scheme(error),
+                )
+            })?;
+
+        if stream_dispatched.kind == FileKind::UnityFs {
+            let source_name = logical_file_name(input_path).ok_or_else(|| {
+                ContainerMountError::new(
+                    ContainerMountReport::default(),
+                    ContainerMountErrorKind::InputPathHasNoFileName,
+                )
+            })?;
+            return mount_unityfs_stream_tree(
+                &stream_dispatched.stream,
+                Some(&source_name),
+                filesystem,
+                destination_root,
+                scheme_limits,
+                mount_limits,
+            );
+        }
+
+        let dispatched = stream_dispatched
+            .into_dispatched(scheme_limits)
+            .map_err(|error| {
+                ContainerMountError::new(
+                    ContainerMountReport::default(),
+                    ContainerMountErrorKind::Scheme(error),
+                )
+            })?;
 
         Self::mount_dispatched_path(
             input_path,
@@ -671,26 +698,59 @@ impl SchemeReader {
                         ))),
                     )
                 })?;
-            let dispatched = if direct_unityfs {
+            let mut stream_dispatched = if direct_unityfs {
                 None
             } else {
                 Some(
-                    Self::read_stream(&mut stream, scheme_limits).map_err(|error| {
-                        BatchMountError::new(
-                            report.clone(),
-                            Some(input.path.clone()),
-                            BatchMountErrorKind::InputMount(Box::new(ContainerMountError::new(
-                                ContainerMountReport::default(),
-                                ContainerMountErrorKind::Scheme(error),
-                            ))),
-                        )
-                    })?,
+                    Self::dispatch_stream_file_backed(stream.create_reference(), scheme_limits)
+                        .map_err(|error| {
+                            BatchMountError::new(
+                                report.clone(),
+                                Some(input.path.clone()),
+                                BatchMountErrorKind::InputMount(Box::new(
+                                    ContainerMountError::new(
+                                        ContainerMountReport::default(),
+                                        ContainerMountErrorKind::Scheme(error),
+                                    ),
+                                )),
+                            )
+                        })?,
                 )
             };
-            let root_kind = dispatched
+            let root_kind = stream_dispatched
                 .as_ref()
-                .map(DispatchedFile::kind)
+                .map(|dispatched| dispatched.kind)
                 .unwrap_or(FileKind::UnityFs);
+            let dispatched = if direct_unityfs || root_kind == FileKind::UnityFs {
+                None
+            } else {
+                let Some(stream_dispatched) = stream_dispatched.take() else {
+                    return Err(BatchMountError::new(
+                        report,
+                        Some(input.path),
+                        BatchMountErrorKind::InputMount(Box::new(ContainerMountError::new(
+                            ContainerMountReport::default(),
+                            ContainerMountErrorKind::NotContainer,
+                        ))),
+                    ));
+                };
+                Some(
+                    stream_dispatched
+                        .into_dispatched(scheme_limits)
+                        .map_err(|error| {
+                            BatchMountError::new(
+                                report.clone(),
+                                Some(input.path.clone()),
+                                BatchMountErrorKind::InputMount(Box::new(
+                                    ContainerMountError::new(
+                                        ContainerMountReport::default(),
+                                        ContainerMountErrorKind::Scheme(error),
+                                    ),
+                                )),
+                            )
+                        })?,
+                )
+            };
             let is_container = direct_unityfs || is_container_kind(root_kind);
             let destination = if is_container {
                 input.container_destination.as_deref()
@@ -792,6 +852,31 @@ impl SchemeReader {
                     scheme_limits,
                     per_input_mount_limits,
                 )
+            } else if root_kind == FileKind::UnityFs {
+                let source_name = logical_file_name(&input.path).ok_or_else(|| {
+                    BatchMountError::new(
+                        report.clone(),
+                        Some(input.path.clone()),
+                        BatchMountErrorKind::InputMount(Box::new(ContainerMountError::new(
+                            ContainerMountReport::default(),
+                            ContainerMountErrorKind::InputPathHasNoFileName,
+                        ))),
+                    )
+                })?;
+                match stream_dispatched.as_ref() {
+                    Some(dispatched) => mount_unityfs_stream_tree(
+                        &dispatched.stream,
+                        Some(&source_name),
+                        filesystem,
+                        destination,
+                        scheme_limits,
+                        per_input_mount_limits,
+                    ),
+                    None => Err(ContainerMountError::new(
+                        ContainerMountReport::default(),
+                        ContainerMountErrorKind::NotContainer,
+                    )),
+                }
             } else {
                 match dispatched {
                     Some(dispatched) => Self::mount_dispatched_path(

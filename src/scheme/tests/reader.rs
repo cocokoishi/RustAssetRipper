@@ -981,9 +981,69 @@ fn wrapper_scheme_runtime_fixture_covers_brotli_detection_and_webdata_gzip() {
     std::fs::write(&path, &source_brotli_input).expect("write reference wrapper bytes");
     let streamed = SchemeReader::read_path_streaming(&path, SchemeReaderLimits::default())
         .expect("file-backed Brotli wrapper dispatch");
-    std::fs::remove_file(&path).expect("remove reference wrapper bytes");
     assert_eq!(streamed.kind(), FileKind::UnityFs);
     assert_eq!(streamed.wrappers(), dispatched.wrappers());
+
+    let file_backed = SchemeReader::dispatch_stream_file_backed(
+        crate::io::stream::SmartStream::open_read(&path).unwrap(),
+        SchemeReaderLimits::default(),
+    )
+    .expect("file-backed Brotli wrapper stays seekable");
+    assert_eq!(file_backed.kind, FileKind::UnityFs);
+    assert_eq!(
+        file_backed.wrappers(),
+        &[crate::scheme::WrapperLayer {
+            kind: WrapperKind::Brotli,
+            input_size: source_brotli_input.len(),
+            output_size: source_direct_output.len(),
+        }]
+    );
+    assert_eq!(
+        file_backed.stream.stream_type(),
+        crate::io::stream::SmartStreamType::File,
+        "decoded UnityFS is backed by a temporary stream"
+    );
+
+    let mut path_mount_files = crate::io::filesystem::VirtualFileSystem::new();
+    let path_mount = SchemeReader::mount_path(
+        &path,
+        &mut path_mount_files,
+        Some("/brotli-mount-path"),
+        SchemeReaderLimits::default(),
+        super::ContainerMountLimits::default(),
+    )
+    .expect("mount_path streams wrapped UnityFS from its temporary backing stream");
+    assert_eq!(path_mount.mounted_entries, 1);
+    assert_eq!(
+        path_mount_files
+            .read_all_bytes("/brotli-mount-path/data/file.bin", 32)
+            .unwrap(),
+        b"0123456789"
+    );
+
+    let mut batch_mount_files = crate::io::filesystem::VirtualFileSystem::new();
+    let batch_input = [super::PathMountInput {
+        path: path.clone(),
+        destination_root: Some("/brotli-batch-path".to_owned()),
+    }];
+    let batch_mount = SchemeReader::mount_paths(
+        &batch_input,
+        &mut batch_mount_files,
+        SchemeReaderLimits::default(),
+        super::ContainerMountLimits::default(),
+        super::BatchMountLimits::default(),
+    )
+    .expect("mount_paths streams wrapped UnityFS from its temporary backing stream");
+    assert_eq!(batch_mount.completed_inputs, 1);
+    assert_eq!(batch_mount.mounted_entries, 1);
+    assert_eq!(
+        batch_mount_files
+            .read_all_bytes("/brotli-batch-path/data/file.bin", 32)
+            .unwrap(),
+        b"0123456789"
+    );
+    std::fs::remove_file(&path).expect("remove reference wrapper bytes");
+
     let mut filesystem = crate::io::filesystem::VirtualFileSystem::new();
     let mounted = streamed
         .mount_container_tree(

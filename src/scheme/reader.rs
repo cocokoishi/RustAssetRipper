@@ -135,6 +135,42 @@ impl<'a> DispatchedFile<'a> {
         }
     }
 }
+
+/// A dispatched file that retains its original or temporary seekable byte stream.
+pub(crate) struct StreamDispatchedFile {
+    pub(crate) stream: SmartStream,
+    pub(crate) kind: FileKind,
+    wrappers: Vec<WrapperLayer>,
+}
+
+impl StreamDispatchedFile {
+    #[cfg(test)]
+    pub(crate) fn wrappers(&self) -> &[WrapperLayer] {
+        &self.wrappers
+    }
+
+    pub(crate) fn into_dispatched(
+        self,
+        limits: SchemeReaderLimits,
+    ) -> Result<DispatchedFile<'static>, SchemeError> {
+        let Self {
+            mut stream,
+            kind,
+            wrappers,
+        } = self;
+        let length = stream
+            .length()
+            .map_err(|error| SchemeError::new(SchemeErrorKind::StreamInput(error)))?;
+        let contents = SchemeReader::materialize_stream(&mut stream, length)?;
+        Ok(DispatchedFile {
+            contents: Cow::Owned(contents),
+            kind,
+            wrappers,
+            limits,
+        })
+    }
+}
+
 impl SchemeReader {
     /// Probe a raw VFS file header without reading the complete file or decoding wrappers.
     ///
@@ -273,17 +309,14 @@ impl SchemeReader {
         Self::read_cow_with_state(Cow::Owned(output), limits, vec![layer], output_size)
     }
 
-    /// Strip outer wrappers into bounded temporary streams when the final layer is a
-    /// SerializedFile. `None` leaves non-SerializedFile dispatch on the existing scheme path.
-    ///
-    /// Unlike `read_stream`, this route does not keep the fully decoded layer in a `Vec`; each
-    /// wrapper is decoded in bounded chunks to a temporary `SmartStream`, which the downstream
-    /// SerializedFile parser can read by range.
-    pub(crate) fn unwrap_serialized_file_stream(
+    /// Dispatch a seekable file while keeping wrapper output in bounded temporary streams.
+    /// Direct inputs retain their original backing stream. Callers can use the result stream for
+    /// range-aware parsers or materialize it only when a slice-based parser requires that.
+    pub(crate) fn dispatch_stream_file_backed(
         mut stream: SmartStream,
         limits: SchemeReaderLimits,
-    ) -> Result<Option<SmartStream>, SchemeError> {
-        let mut wrapper_depth = 0usize;
+    ) -> Result<StreamDispatchedFile, SchemeError> {
+        let mut wrappers = Vec::new();
         let mut total_decompressed = 0usize;
         loop {
             let stream_length = stream
@@ -296,11 +329,12 @@ impl SchemeReader {
                 }));
             }
             let prefix = read_smart_stream_prefix(&stream, stream_length)?;
-            if is_serialized_file_with_length(&prefix, stream_length) {
-                return Ok(Some(stream));
-            }
-            if detect_primary_file_kind_with_length(&prefix, stream_length).is_some() {
-                return Ok(None);
+            if let Some(kind) = detect_primary_file_kind_with_length(&prefix, stream_length) {
+                return Ok(StreamDispatchedFile {
+                    stream,
+                    kind,
+                    wrappers,
+                });
             }
 
             let wrapper_kind = if has_gzip_magic(&prefix) {
@@ -311,9 +345,13 @@ impl SchemeReader {
                 None
             };
             let Some(wrapper_kind) = wrapper_kind else {
-                return Ok(None);
+                return Ok(StreamDispatchedFile {
+                    stream,
+                    kind: detect_file_kind_with_length(&prefix, stream_length),
+                    wrappers,
+                });
             };
-            if wrapper_depth >= limits.max_wrapper_depth {
+            if wrappers.len() >= limits.max_wrapper_depth {
                 return Err(SchemeError::new(SchemeErrorKind::WrapperDepthExceeded {
                     limit: limits.max_wrapper_depth,
                 }));
@@ -366,11 +404,36 @@ impl SchemeReader {
             output
                 .seek(SeekFrom::Start(0))
                 .map_err(|error| SchemeError::new(SchemeErrorKind::StreamOutput(error)))?;
-            total_decompressed = total_after_layer;
-            wrapper_depth = wrapper_depth.checked_add(1).ok_or_else(|| {
-                SchemeError::new(SchemeErrorKind::TotalDecompressedLengthOverflow)
+            wrappers.try_reserve(1).map_err(|_| {
+                SchemeError::new(SchemeErrorKind::AllocationFailed {
+                    requested: wrappers.len().saturating_add(1),
+                })
             })?;
+            let input_size = usize::try_from(stream_length).map_err(|_| {
+                SchemeError::new(SchemeErrorKind::InputLengthNotRepresentable {
+                    length: stream_length,
+                })
+            })?;
+            wrappers.push(WrapperLayer {
+                kind: wrapper_kind,
+                input_size,
+                output_size,
+            });
+            total_decompressed = total_after_layer;
             stream = output;
+        }
+    }
+
+    /// Keep a direct or wrapped SerializedFile in a seekable stream for range-based loading.
+    pub(crate) fn unwrap_serialized_file_stream(
+        stream: SmartStream,
+        limits: SchemeReaderLimits,
+    ) -> Result<Option<SmartStream>, SchemeError> {
+        let dispatched = Self::dispatch_stream_file_backed(stream, limits)?;
+        if dispatched.kind == FileKind::SerializedFile {
+            Ok(Some(dispatched.stream))
+        } else {
+            Ok(None)
         }
     }
 
