@@ -8,6 +8,7 @@ use crate::processing::asset_factory::{
     reference_class_layouts, ClassLayoutSource, FactoryFileFacts, FactoryObjectMaterialization,
     FactoryUnityVersion,
 };
+use crate::scheme::{SchemeReader, SchemeReaderLimits};
 use crate::serialized_file::file::{SerializedFile, SerializedFileError, StreamSerializedFile};
 use crate::serialized_file::workspace::SerializedFileWorkspace;
 impl ObjectWorkspace {
@@ -111,7 +112,27 @@ impl ObjectWorkspace {
                 ));
             }
             let maximum_bytes = usize::try_from(limits.max_file_bytes).unwrap_or(usize::MAX);
-            let stream_file =
+            let default_scheme_limits = SchemeReaderLimits::default();
+            let stream_scheme_limits = SchemeReaderLimits {
+                max_input_bytes: maximum_bytes,
+                max_decompressed_bytes_per_layer: default_scheme_limits
+                    .max_decompressed_bytes_per_layer
+                    .min(maximum_bytes),
+                max_total_decompressed_bytes: default_scheme_limits
+                    .max_total_decompressed_bytes
+                    .min(maximum_bytes),
+                ..default_scheme_limits
+            };
+            let stream = SchemeReader::unwrap_serialized_file_stream(stream, stream_scheme_limits)
+                .map_err(|source| {
+                    object_workspace_error(
+                        file_index,
+                        &file.virtual_path,
+                        None,
+                        ObjectWorkspaceErrorKind::Scheme(source),
+                    )
+                })?;
+            let stream_file = if let Some(stream) = stream {
                 StreamSerializedFile::try_parse(stream, maximum_bytes).map_err(|source| {
                     object_workspace_error(
                         file_index,
@@ -119,7 +140,10 @@ impl ObjectWorkspace {
                         None,
                         ObjectWorkspaceErrorKind::StreamSerializedFile(source),
                     )
-                })?;
+                })?
+            } else {
+                None
+            };
             let mut materialized_file_bytes = None;
             if let Some(stream_file) = &stream_file {
                 if stream_file.header != file.header || stream_file.metadata != file.metadata {
@@ -159,7 +183,10 @@ impl ObjectWorkspace {
                 }
                 materialized_file_bytes = Some(file_bytes);
             }
-            let file_size = usize::try_from(file_bytes).map_err(|_| {
+            let file_size_bytes = stream_file.as_ref().map_or(file_bytes, |stream_file| {
+                u64::try_from(stream_file.file_size()).unwrap_or(u64::MAX)
+            });
+            let file_size = usize::try_from(file_size_bytes).map_err(|_| {
                 object_workspace_error(
                     file_index,
                     &file.virtual_path,

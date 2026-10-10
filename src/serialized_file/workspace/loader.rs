@@ -194,14 +194,25 @@ impl SerializedFileWorkspace {
                     SerializedFileWorkspaceErrorKind::FileSystem(source),
                 )
             })?;
-            let stream_file =
+            let stream = SchemeReader::unwrap_serialized_file_stream(stream, limits.scheme)
+                .map_err(|source| {
+                    workspace_error(
+                        report,
+                        Some(&input.virtual_path),
+                        SerializedFileWorkspaceErrorKind::Scheme(source),
+                    )
+                })?;
+            let stream_file = if let Some(stream) = stream {
                 StreamSerializedFile::try_parse(stream, max_file_bytes).map_err(|source| {
                     workspace_error(
                         report,
                         Some(&input.virtual_path),
                         SerializedFileWorkspaceErrorKind::StreamSerializedFile(source),
                     )
-                })?;
+                })?
+            } else {
+                None
+            };
             let (header, metadata, reference_graph) = if let Some(stream_file) = stream_file {
                 let decode_context = StreamObjectDecodeContext::new(
                     &stream_file.header,

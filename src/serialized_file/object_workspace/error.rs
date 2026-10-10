@@ -1,4 +1,5 @@
 use crate::processing::asset_factory::{FactoryAssetKind, FactoryEngineError, FactoryObjectState};
+use crate::scheme::SchemeError;
 use crate::serialized_file::file::{SerializedFileError, SerializedFileStreamError};
 use crate::serialized_file::object::ObjectDecodeError;
 use crate::serialized_file::reference_graph::{
@@ -40,6 +41,7 @@ pub enum ObjectWorkspaceErrorKind {
     },
     UndecodedRawByteCountOverflow,
     FileSystem(io::Error),
+    Scheme(SchemeError),
     SerializedFile(SerializedFileError),
     StreamSerializedFile(SerializedFileStreamError),
     MultiFileReferenceGraphBuild(MultiFileReferenceGraphBuildError),
@@ -99,6 +101,7 @@ impl Display for ObjectWorkspaceErrorKind {
                 f.write_str("aggregate undecoded raw payload byte count overflows")
             }
             Self::FileSystem(error) => write!(f, "VFS error: {error}"),
+            Self::Scheme(error) => write!(f, "could not decode source file stream: {error}"),
             Self::SerializedFile(error) => write!(f, "could not parse source object file: {error}"),
             Self::StreamSerializedFile(error) => {
                 write!(f, "could not parse file-backed source object file: {error}")
@@ -123,6 +126,7 @@ impl Error for ObjectWorkspaceError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match &self.kind {
             ObjectWorkspaceErrorKind::FileSystem(error) => Some(error),
+            ObjectWorkspaceErrorKind::Scheme(error) => Some(error),
             ObjectWorkspaceErrorKind::FactoryMaterialization(error) => Some(error),
             ObjectWorkspaceErrorKind::SerializedFile(error) => Some(error),
             ObjectWorkspaceErrorKind::StreamSerializedFile(error) => Some(error),

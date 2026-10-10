@@ -1,15 +1,15 @@
 use std::borrow::Cow;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use crate::compression::wrappers::{
-    decompress_brotli, decompress_brotli_stream, decompress_gzip, decompress_gzip_stream,
-    has_brotli_file_signature, has_gzip_magic,
+    decompress_brotli, decompress_brotli_stream, decompress_brotli_stream_to, decompress_gzip,
+    decompress_gzip_stream, decompress_gzip_stream_to, has_brotli_file_signature, has_gzip_magic,
 };
 use crate::container::raw_web::{RawWebBundle, RawWebKind};
 use crate::container::unityfs::UnityFsBundle;
 use crate::container::web_file::WebFile;
-use crate::io::stream::open_logical_file;
+use crate::io::stream::{open_logical_file, SmartStream};
 use crate::serialized_file::file::SerializedFile;
 use crate::serialized_file::format_version::FormatVersion;
 
@@ -273,6 +273,107 @@ impl SchemeReader {
         Self::read_cow_with_state(Cow::Owned(output), limits, vec![layer], output_size)
     }
 
+    /// Strip outer wrappers into bounded temporary streams when the final layer is a
+    /// SerializedFile. `None` leaves non-SerializedFile dispatch on the existing scheme path.
+    ///
+    /// Unlike `read_stream`, this route does not keep the fully decoded layer in a `Vec`; each
+    /// wrapper is decoded in bounded chunks to a temporary `SmartStream`, which the downstream
+    /// SerializedFile parser can read by range.
+    pub(crate) fn unwrap_serialized_file_stream(
+        mut stream: SmartStream,
+        limits: SchemeReaderLimits,
+    ) -> Result<Option<SmartStream>, SchemeError> {
+        let mut wrapper_depth = 0usize;
+        let mut total_decompressed = 0usize;
+        loop {
+            let stream_length = stream
+                .length()
+                .map_err(|error| SchemeError::new(SchemeErrorKind::StreamInput(error)))?;
+            if stream_length > u64::try_from(limits.max_input_bytes).unwrap_or(u64::MAX) {
+                return Err(SchemeError::new(SchemeErrorKind::InputSizeLimitExceeded {
+                    requested: stream_length,
+                    limit: limits.max_input_bytes,
+                }));
+            }
+            let prefix = read_smart_stream_prefix(&stream, stream_length)?;
+            if is_serialized_file_with_length(&prefix, stream_length) {
+                return Ok(Some(stream));
+            }
+            if detect_primary_file_kind_with_length(&prefix, stream_length).is_some() {
+                return Ok(None);
+            }
+
+            let wrapper_kind = if has_gzip_magic(&prefix) {
+                Some(WrapperKind::Gzip)
+            } else if has_brotli_file_signature(&prefix) {
+                Some(WrapperKind::Brotli)
+            } else {
+                None
+            };
+            let Some(wrapper_kind) = wrapper_kind else {
+                return Ok(None);
+            };
+            if wrapper_depth >= limits.max_wrapper_depth {
+                return Err(SchemeError::new(SchemeErrorKind::WrapperDepthExceeded {
+                    limit: limits.max_wrapper_depth,
+                }));
+            }
+
+            stream
+                .seek(SeekFrom::Start(0))
+                .map_err(|error| SchemeError::new(SchemeErrorKind::StreamInput(error)))?;
+            let mut output = SmartStream::create_temp()
+                .map_err(|error| SchemeError::new(SchemeErrorKind::StreamOutput(error)))?;
+            let output_size = match wrapper_kind {
+                WrapperKind::Gzip => decompress_gzip_stream_to(
+                    &mut stream,
+                    &mut output,
+                    limits.max_decompressed_bytes_per_layer,
+                ),
+                WrapperKind::Brotli => decompress_brotli_stream_to(
+                    &mut stream,
+                    &mut output,
+                    limits.max_decompressed_bytes_per_layer,
+                ),
+            }
+            .map_err(|source| {
+                SchemeError::new(SchemeErrorKind::WrapperDecode {
+                    kind: wrapper_kind,
+                    source,
+                })
+            })?;
+            let total_after_layer =
+                total_decompressed.checked_add(output_size).ok_or_else(|| {
+                    SchemeError::new(SchemeErrorKind::TotalDecompressedLengthOverflow)
+                })?;
+            if total_after_layer > limits.max_total_decompressed_bytes {
+                return Err(SchemeError::new(
+                    SchemeErrorKind::TotalDecompressionLimitExceeded {
+                        requested: total_after_layer,
+                        limit: limits.max_total_decompressed_bytes,
+                    },
+                ));
+            }
+            if output_size > limits.max_input_bytes {
+                return Err(SchemeError::new(SchemeErrorKind::InputSizeLimitExceeded {
+                    requested: u64::try_from(output_size).unwrap_or(u64::MAX),
+                    limit: limits.max_input_bytes,
+                }));
+            }
+            output
+                .flush()
+                .map_err(|error| SchemeError::new(SchemeErrorKind::StreamOutput(error)))?;
+            output
+                .seek(SeekFrom::Start(0))
+                .map_err(|error| SchemeError::new(SchemeErrorKind::StreamOutput(error)))?;
+            total_decompressed = total_after_layer;
+            wrapper_depth = wrapper_depth.checked_add(1).ok_or_else(|| {
+                SchemeError::new(SchemeErrorKind::TotalDecompressedLengthOverflow)
+            })?;
+            stream = output;
+        }
+    }
+
     /// Check whether a seekable input is a direct UnityFS container without reading its body.
     pub(super) fn is_direct_unityfs_stream<R: Read + Seek>(
         stream: &mut R,
@@ -416,6 +517,17 @@ fn read_stream_prefix<R: Read + Seek>(stream: &mut R, length: u64) -> Result<Vec
     let mut prefix = vec![0u8; prefix_length];
     stream
         .read_exact(&mut prefix)
+        .map_err(|error| SchemeError::new(SchemeErrorKind::StreamInput(error)))?;
+    Ok(prefix)
+}
+
+fn read_smart_stream_prefix(stream: &SmartStream, length: u64) -> Result<Vec<u8>, SchemeError> {
+    let prefix_length = usize::try_from(length)
+        .unwrap_or(usize::MAX)
+        .min(STREAM_PROBE_BYTES);
+    let mut prefix = vec![0u8; prefix_length];
+    stream
+        .read_exact_at(0, &mut prefix)
         .map_err(|error| SchemeError::new(SchemeErrorKind::StreamInput(error)))?;
     Ok(prefix)
 }

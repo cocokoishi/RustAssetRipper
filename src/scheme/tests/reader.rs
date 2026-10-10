@@ -1094,6 +1094,230 @@ fn source_standalone_serialized_file_dispatches_through_the_bounded_path_reader(
     std::fs::remove_dir(&directory).expect("remove serialized-file scratch directory");
 }
 
+#[test]
+fn file_backed_wrapper_path_spools_a_source_serialized_file_to_ranges() {
+    let row = include_str!("../../io/serialized_file_scheme_fixture.txt")
+        .lines()
+        .find(|line| line.starts_with("SCHEME|serialized_file_direct|"))
+        .expect("source standalone SerializedFile SchemeReader row");
+    let input = row
+        .split('|')
+        .find_map(|field| field.strip_prefix("in="))
+        .map(decode_hex_fixture)
+        .expect("source SerializedFile input bytes");
+    let expected = crate::serialized_file::file::SerializedFile::parse(&input).unwrap();
+    let compressed = compress_gzip(&input, input.len() + 4096).unwrap();
+    let input_stream = crate::io::stream::SmartStream::from_memory(compressed);
+
+    let unwrapped =
+        SchemeReader::unwrap_serialized_file_stream(input_stream, SchemeReaderLimits::default())
+            .unwrap()
+            .expect("GZip wrapper contains a SerializedFile");
+    assert_eq!(
+        unwrapped.stream_type(),
+        crate::io::stream::SmartStreamType::File,
+        "decoded bytes are spooled to a temporary file-backed stream"
+    );
+
+    let streamed =
+        crate::serialized_file::file::StreamSerializedFile::try_parse(unwrapped, input.len())
+            .unwrap()
+            .expect("spooled source fixture parses as a SerializedFile");
+    assert_eq!(streamed.header, expected.header);
+    assert_eq!(streamed.metadata, expected.metadata);
+    for (object_index, object) in expected.metadata.objects.iter().enumerate() {
+        let range = object.data_range(&expected.header).unwrap();
+        let start = usize::try_from(range.start).unwrap();
+        let end = usize::try_from(range.end).unwrap();
+        assert_eq!(
+            streamed.read_object_payload_bytes(object_index).unwrap(),
+            input[start..end],
+            "source fixture object {object_index} range"
+        );
+    }
+}
+
+#[test]
+fn compressed_source_serialized_file_matches_both_workspace_loaders() {
+    let row = include_str!("../../io/serialized_file_scheme_fixture.txt")
+        .lines()
+        .find(|line| line.starts_with("SCHEME|serialized_file_direct|"))
+        .expect("source standalone SerializedFile SchemeReader row");
+    let input = row
+        .split('|')
+        .find_map(|field| field.strip_prefix("in="))
+        .map(decode_hex_fixture)
+        .expect("source SerializedFile input bytes");
+    let compressed = compress_gzip(&input, input.len() + 4096).unwrap();
+
+    fn load(
+        bytes: &[u8],
+    ) -> (
+        crate::serialized_file::workspace::SerializedFileWorkspace,
+        crate::serialized_file::object_workspace::ObjectWorkspace,
+    ) {
+        let mut filesystem = crate::io::filesystem::VirtualFileSystem::new();
+        filesystem.create_directory(Some("/game")).unwrap();
+        filesystem
+            .write_all_bytes("/game/source.assets", bytes)
+            .unwrap();
+        let inputs = [crate::io::dependency::DependencyFilePath {
+            file_name: "source.assets".to_owned(),
+            virtual_path: "/game/source.assets".to_owned(),
+        }];
+        let workspace = crate::serialized_file::workspace::SerializedFileWorkspace::load_from_vfs(
+            &filesystem,
+            &inputs,
+            crate::serialized_file::workspace::SerializedFileWorkspaceLimits::default(),
+        )
+        .unwrap();
+        let objects = crate::serialized_file::object_workspace::ObjectWorkspace::load_from_vfs(
+            &filesystem,
+            &workspace,
+            crate::serialized_file::object_workspace::ObjectWorkspaceLimits::default(),
+        )
+        .unwrap();
+        (workspace, objects)
+    }
+
+    let (plain_workspace, plain_objects) = load(&input);
+    let (wrapped_workspace, wrapped_objects) = load(&compressed);
+    assert_eq!(plain_workspace.files().len(), 1);
+    assert_eq!(wrapped_workspace.files().len(), 1);
+    assert_eq!(
+        wrapped_workspace.files()[0].header,
+        plain_workspace.files()[0].header
+    );
+    assert_eq!(
+        wrapped_workspace.files()[0].metadata,
+        plain_workspace.files()[0].metadata
+    );
+    assert_eq!(
+        wrapped_workspace.files()[0].reference_graph,
+        plain_workspace.files()[0].reference_graph
+    );
+    assert_eq!(wrapped_objects.report(), plain_objects.report());
+    assert_eq!(wrapped_objects.objects(), plain_objects.objects());
+}
+
+#[test]
+fn file_backed_wrapper_spooling_enforces_decoded_input_limits() {
+    let input = vec![b'a'; 4096];
+    let compressed = compress_gzip(&input, input.len() + 4096).unwrap();
+    let limits = SchemeReaderLimits {
+        max_input_bytes: 1024,
+        ..SchemeReaderLimits::default()
+    };
+    let result = SchemeReader::unwrap_serialized_file_stream(
+        crate::io::stream::SmartStream::from_memory(compressed),
+        limits,
+    );
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("decoded output beyond max_input_bytes must fail"),
+    };
+    assert!(matches!(
+        error.kind(),
+        SchemeErrorKind::InputSizeLimitExceeded { limit, .. } if *limit == 1024
+    ));
+}
+
+#[test]
+fn file_backed_wrapper_spooling_enforces_depth_layer_and_cumulative_limits() {
+    fn expect_error(
+        result: Result<Option<crate::io::stream::SmartStream>, crate::scheme::SchemeError>,
+    ) -> crate::scheme::SchemeError {
+        match result {
+            Err(error) => error,
+            Ok(_) => panic!("configured wrapper bound must fail closed"),
+        }
+    }
+
+    let row = include_str!("../../io/serialized_file_scheme_fixture.txt")
+        .lines()
+        .find(|line| line.starts_with("SCHEME|serialized_file_direct|"))
+        .expect("source standalone SerializedFile SchemeReader row");
+    let input = row
+        .split('|')
+        .find_map(|field| field.strip_prefix("in="))
+        .map(decode_hex_fixture)
+        .expect("source SerializedFile input bytes");
+    let inner = compress_gzip(&input, input.len() + 4096).unwrap();
+    let outer = compress_gzip(&inner, inner.len() + 4096).unwrap();
+
+    let depth_error = expect_error(SchemeReader::unwrap_serialized_file_stream(
+        crate::io::stream::SmartStream::from_memory(outer.clone()),
+        SchemeReaderLimits {
+            max_wrapper_depth: 1,
+            ..SchemeReaderLimits::default()
+        },
+    ));
+    assert!(matches!(
+        depth_error.kind(),
+        SchemeErrorKind::WrapperDepthExceeded { limit: 1 }
+    ));
+
+    let layer_error = expect_error(SchemeReader::unwrap_serialized_file_stream(
+        crate::io::stream::SmartStream::from_memory(outer.clone()),
+        SchemeReaderLimits {
+            max_decompressed_bytes_per_layer: inner.len() - 1,
+            ..SchemeReaderLimits::default()
+        },
+    ));
+    assert!(matches!(
+        layer_error.kind(),
+        SchemeErrorKind::WrapperDecode {
+            source,
+            ..
+        } if matches!(
+            source.kind(),
+            crate::compression::wrappers::WrapperCodecErrorKind::OutputLimitExceeded { .. }
+        )
+    ));
+
+    let cumulative_error = expect_error(SchemeReader::unwrap_serialized_file_stream(
+        crate::io::stream::SmartStream::from_memory(outer),
+        SchemeReaderLimits {
+            max_total_decompressed_bytes: inner.len() + input.len() - 1,
+            ..SchemeReaderLimits::default()
+        },
+    ));
+    assert!(matches!(
+        cumulative_error.kind(),
+        SchemeErrorKind::TotalDecompressionLimitExceeded { limit, .. }
+            if *limit == inner.len() + input.len() - 1
+    ));
+}
+
+#[test]
+fn brotli_stream_sink_matches_the_frozen_source_decode() {
+    let fixture = include_str!("../../compression/wrapper_scheme_runtime_fixture.txt");
+    let input_hex = fixture
+        .lines()
+        .find(|line| line.starts_with("SCHEME|brotli_ufs|"))
+        .and_then(|line| line.split('|').find_map(|field| field.strip_prefix("in=")))
+        .expect("source Brotli scheme input");
+    let expected_hex = fixture
+        .lines()
+        .find(|line| line.starts_with("BROTLI|brotli_ufs|"))
+        .and_then(|line| {
+            line.split('|')
+                .find_map(|field| field.strip_prefix("decoded="))
+        })
+        .expect("source Brotli direct-decode output");
+    let input = decode_hex_fixture(input_hex);
+    let expected = decode_hex_fixture(expected_hex);
+    let mut output = crate::io::stream::SmartStream::create_temp().unwrap();
+    let output_length = crate::compression::wrappers::decompress_brotli_stream_to(
+        std::io::Cursor::new(input),
+        &mut output,
+        expected.len(),
+    )
+    .unwrap();
+    assert_eq!(output_length, expected.len());
+    assert_eq!(output.to_vec(expected.len()).unwrap(), expected);
+}
+
 /// The streaming path enforces the same wrapper bounds before materializing a layer.
 #[test]
 fn streaming_dispatch_enforces_wrapper_and_input_limits() {

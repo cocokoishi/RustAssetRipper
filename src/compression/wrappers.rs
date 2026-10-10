@@ -167,6 +167,16 @@ pub fn decompress_gzip_stream<R: Read>(
     decompress_limited(decoder, maximum_output_size, "GZip")
 }
 
+/// Decode a GZip wrapper to a caller-owned sink while bounding the decoded byte count.
+pub fn decompress_gzip_stream_to<R: Read, W: Write>(
+    reader: R,
+    writer: W,
+    maximum_output_size: usize,
+) -> Result<usize, WrapperCodecError> {
+    let decoder = flate2::read::MultiGzDecoder::new(reader);
+    decompress_limited_to(decoder, writer, maximum_output_size, "GZip")
+}
+
 pub fn decompress_brotli(
     input: &[u8],
     maximum_output_size: usize,
@@ -181,6 +191,16 @@ pub fn decompress_brotli_stream<R: Read>(
 ) -> Result<Vec<u8>, WrapperCodecError> {
     let decoder = brotli_decompressor::Decompressor::new(reader, 4096);
     decompress_limited(decoder, maximum_output_size, "Brotli")
+}
+
+/// Decode a Brotli wrapper to a caller-owned sink while bounding the decoded byte count.
+pub fn decompress_brotli_stream_to<R: Read, W: Write>(
+    reader: R,
+    writer: W,
+    maximum_output_size: usize,
+) -> Result<usize, WrapperCodecError> {
+    let decoder = brotli_decompressor::Decompressor::new(reader, 4096);
+    decompress_limited_to(decoder, writer, maximum_output_size, "Brotli")
 }
 
 fn decompress_limited<R: Read>(
@@ -218,6 +238,47 @@ fn decompress_limited<R: Read>(
             WrapperCodecError::new(WrapperCodecErrorKind::AllocationFailed { codec, requested })
         })?;
         output.extend_from_slice(&buffer[..bytes_read]);
+    }
+}
+
+fn decompress_limited_to<R: Read, W: Write>(
+    mut decoder: R,
+    mut writer: W,
+    maximum_output_size: usize,
+    codec: &'static str,
+) -> Result<usize, WrapperCodecError> {
+    let mut output_length = 0usize;
+    let mut buffer = [0u8; 8192];
+    loop {
+        let remaining = maximum_output_size - output_length;
+        let read_limit = remaining.saturating_add(1).min(buffer.len());
+        let bytes_read = decoder.read(&mut buffer[..read_limit]).map_err(|error| {
+            WrapperCodecError::new(WrapperCodecErrorKind::Decoder {
+                codec,
+                detail: error.to_string(),
+            })
+        })?;
+        if bytes_read == 0 {
+            return Ok(output_length);
+        }
+        if bytes_read > remaining {
+            return Err(WrapperCodecError::new(
+                WrapperCodecErrorKind::OutputLimitExceeded {
+                    codec,
+                    limit: maximum_output_size,
+                },
+            ));
+        }
+        let requested = output_length.checked_add(bytes_read).ok_or_else(|| {
+            WrapperCodecError::new(WrapperCodecErrorKind::OutputLengthOverflow { codec })
+        })?;
+        writer.write_all(&buffer[..bytes_read]).map_err(|error| {
+            WrapperCodecError::new(WrapperCodecErrorKind::Writer {
+                codec,
+                detail: error.to_string(),
+            })
+        })?;
+        output_length = requested;
     }
 }
 
@@ -347,6 +408,10 @@ pub enum WrapperCodecErrorKind {
         codec: &'static str,
         detail: String,
     },
+    Writer {
+        codec: &'static str,
+        detail: String,
+    },
     Encoder {
         codec: &'static str,
         detail: String,
@@ -369,6 +434,7 @@ impl Display for WrapperCodecErrorKind {
                 )
             }
             Self::Decoder { codec, detail } => write!(formatter, "{codec} decoder: {detail}"),
+            Self::Writer { codec, detail } => write!(formatter, "{codec} output writer: {detail}"),
             Self::Encoder { codec, detail } => write!(formatter, "{codec} encoder: {detail}"),
         }
     }
@@ -377,8 +443,8 @@ impl Display for WrapperCodecErrorKind {
 #[cfg(test)]
 mod tests {
     use super::{
-        compress_gzip, decompress_brotli, decompress_gzip, has_brotli_file_signature,
-        has_gzip_magic, WrapperCodecErrorKind, BROTLI_FILE_SIGNATURE,
+        compress_gzip, decompress_brotli, decompress_gzip, decompress_gzip_stream_to,
+        has_brotli_file_signature, has_gzip_magic, WrapperCodecErrorKind, BROTLI_FILE_SIGNATURE,
     };
     fn stored_gzip_member(payload: &[u8]) -> Vec<u8> {
         assert!(payload.len() <= u16::MAX as usize);
@@ -431,6 +497,29 @@ mod tests {
                 limit: 4,
             }
         );
+    }
+
+    #[test]
+    fn streaming_gzip_sink_write_failure_is_reported() {
+        struct FailedSink;
+
+        impl std::io::Write for FailedSink {
+            fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("simulated full temporary disk"))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let encoded = compress_gzip(b"stream output must fail visibly", 1024).unwrap();
+        let error =
+            decompress_gzip_stream_to(std::io::Cursor::new(encoded), FailedSink, 1024).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            WrapperCodecErrorKind::Writer { codec: "GZip", .. }
+        ));
     }
 
     #[test]

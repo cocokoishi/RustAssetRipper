@@ -571,6 +571,7 @@ impl Error for SchemeError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match &self.kind {
             SchemeErrorKind::StreamInput(error) => Some(error),
+            SchemeErrorKind::StreamOutput(error) => Some(error),
             SchemeErrorKind::WrapperDecode { source, .. } => Some(source),
             SchemeErrorKind::UnityFs(error) => Some(error),
             SchemeErrorKind::RawWeb(error) => Some(error),
@@ -594,6 +595,7 @@ pub enum SchemeErrorKind {
         requested: usize,
     },
     StreamInput(std::io::Error),
+    StreamOutput(std::io::Error),
     WrapperDepthExceeded {
         limit: usize,
     },
@@ -641,6 +643,7 @@ impl Display for SchemeErrorKind {
                 write!(formatter, "could not allocate {requested} input bytes")
             }
             Self::StreamInput(error) => write!(formatter, "input stream: {error}"),
+            Self::StreamOutput(error) => write!(formatter, "temporary output stream: {error}"),
             Self::WrapperDepthExceeded { limit } => {
                 write!(formatter, "compressed wrapper nesting exceeds limit {limit}")
             }
