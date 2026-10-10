@@ -620,19 +620,28 @@ pub(super) fn plan_routed_asset_files(
         };
         let meta = match entry.route {
             ObjectRoute::Asset | ObjectRoute::AudioYaml | ObjectRoute::ShaderYaml => {
-                Some(PlannedProjectMeta {
-                    importer_class: "NativeFormatImporter".to_owned(),
-                    importer: native_format_importer_for_version(
+                let asset_bundle_name = entry
+                    .object
+                    .payload
+                    .as_ref()
+                    .ok()
+                    .and_then(object_asset_bundle_name);
+                let importer = if entry.class_id == 43 {
+                    mesh_native_format_importer_for_version(
                         entry.file_id,
                         project_version,
-                        entry
-                            .object
-                            .payload
-                            .as_ref()
-                            .ok()
-                            .and_then(object_asset_bundle_name)
-                            .as_deref(),
-                    )?,
+                        asset_bundle_name.as_deref(),
+                    )?
+                } else {
+                    native_format_importer_for_version(
+                        entry.file_id,
+                        project_version,
+                        asset_bundle_name.as_deref(),
+                    )?
+                };
+                Some(PlannedProjectMeta {
+                    importer_class: "NativeFormatImporter".to_owned(),
+                    importer,
                 })
             }
             ObjectRoute::TextureImage => Some(PlannedProjectMeta {

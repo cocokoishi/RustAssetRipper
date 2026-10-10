@@ -539,9 +539,11 @@
             fixture,
             "SOURCE_OUTPUT|ExportedProject/Assets/Mesh/LightmappedMesh.asset.meta|",
         );
-        assert!(std::str::from_utf8(&source_mesh_meta)
-            .unwrap()
-            .contains("mainObjectFileID: 4300000"));
+        assert_eq!(
+            normalize(&mesh_meta),
+            normalize(std::str::from_utf8(&source_mesh_meta).unwrap()),
+            "Unity 5.6 Mesh metadata differs from frozen source"
+        );
         let mesh_guid = metadata_guid(&mesh_meta);
         assert!(lighting_data.contains(&format!(
             "uvMesh: {{fileID: 4300000, guid: {mesh_guid}, type: 2}}"

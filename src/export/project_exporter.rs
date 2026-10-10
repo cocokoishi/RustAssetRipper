@@ -906,7 +906,7 @@ pub fn native_format_importer_for_version(
     version: SceneUnityVersion,
     asset_bundle_name: Option<&str>,
 ) -> Result<UnityYamlNode, Box<dyn Error>> {
-    native_format_importer_for_version_with_legacy_lighting_data_id(
+    native_format_importer_for_version_with_legacy_main_object_id(
         main_file_id,
         version,
         asset_bundle_name,
@@ -914,14 +914,14 @@ pub fn native_format_importer_for_version(
     )
 }
 
-/// Unity 5.6 LightingDataAsset source exports include the NativeFormatImporter main object ID,
-/// although the general importer source probe only establishes this field from Unity 2017.1.
+/// Unity 5.6 LightingDataAsset and Mesh source exports include the NativeFormatImporter main
+/// object ID, although the general importer source probe only establishes it from Unity 2017.1.
 pub(super) fn lighting_data_native_format_importer_for_version(
     main_file_id: i64,
     version: SceneUnityVersion,
     asset_bundle_name: Option<&str>,
 ) -> Result<UnityYamlNode, Box<dyn Error>> {
-    native_format_importer_for_version_with_legacy_lighting_data_id(
+    native_format_importer_for_version_with_legacy_main_object_id(
         main_file_id,
         version,
         asset_bundle_name,
@@ -929,11 +929,25 @@ pub(super) fn lighting_data_native_format_importer_for_version(
     )
 }
 
-fn native_format_importer_for_version_with_legacy_lighting_data_id(
+/// Unity 5.6 Mesh source exports also include the NativeFormatImporter main object ID.
+pub(super) fn mesh_native_format_importer_for_version(
     main_file_id: i64,
     version: SceneUnityVersion,
     asset_bundle_name: Option<&str>,
-    include_legacy_lighting_data_id: bool,
+) -> Result<UnityYamlNode, Box<dyn Error>> {
+    native_format_importer_for_version_with_legacy_main_object_id(
+        main_file_id,
+        version,
+        asset_bundle_name,
+        true,
+    )
+}
+
+fn native_format_importer_for_version_with_legacy_main_object_id(
+    main_file_id: i64,
+    version: SceneUnityVersion,
+    asset_bundle_name: Option<&str>,
+    include_legacy_main_object_id: bool,
 ) -> Result<UnityYamlNode, Box<dyn Error>> {
     let mut importer = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
     if !unity_major_minor_at_least(version, 2018, 3) {
@@ -946,7 +960,7 @@ fn native_format_importer_for_version_with_legacy_lighting_data_id(
         )?;
     }
     if unity_major_minor_at_least(version, 2017, 1)
-        || (include_legacy_lighting_data_id && version.major == 5 && version.minor >= 6)
+        || (include_legacy_main_object_id && version.major == 5 && version.minor >= 6)
     {
         importer.insert_field(
             "mainObjectFileID",
