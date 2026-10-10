@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{BufReader, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use super::reader::probe_direct_stream_kind;
@@ -749,9 +749,10 @@ fn mount_unityweb_stream_tree_at(
         ));
     }
 
-    let bundle = read_unityweb_bundle_stream(source, source_name, scheme_limits, &state.report)?;
-    preflight_tree_entry_count(bundle.entries.len(), state)?;
-    for (index, entry) in bundle.entries.iter().enumerate() {
+    let (decompressed, entries) =
+        read_unityweb_bundle_stream(source, source_name, scheme_limits, &state.report)?;
+    preflight_tree_entry_count(entries.len(), state)?;
+    for (index, entry) in entries.iter().enumerate() {
         let virtual_path = checked_container_entry_path(
             state.filesystem,
             destination_root,
@@ -759,14 +760,18 @@ fn mount_unityweb_stream_tree_at(
             index,
             &state.report,
         )?;
-        let entry_bytes = bundle.read_entry(index).map_err(|error| {
-            ContainerMountError::new(
-                state.report.clone(),
-                ContainerMountErrorKind::Scheme(SchemeError::new(SchemeErrorKind::RawWeb(error))),
-            )
-        })?;
-        let entry_stream =
-            copy_raw_web_entry_to_temp(entry_bytes, &virtual_path, index, &state.report)?;
+        let entry_stream = copy_container_stream_range_to_temp(
+            ContainerStreamRange {
+                container_name: "UnityWeb",
+                source: &decompressed,
+                offset: u64::from(entry.offset),
+                size: u64::from(entry.size),
+                path: &virtual_path,
+                entry_index: index,
+                scheme_limits,
+            },
+            &state.report,
+        )?;
         let dispatched = SchemeReader::dispatch_stream_file_backed(entry_stream, scheme_limits)
             .map_err(|error| {
                 ContainerMountError::new(
@@ -875,7 +880,7 @@ fn read_unityweb_bundle_stream(
     source_name: Option<&str>,
     scheme_limits: SchemeReaderLimits,
     report: &ContainerMountReport,
-) -> Result<RawWebBundle<'static>, ContainerMountError> {
+) -> Result<(SmartStream, Vec<RawWebEntry>), ContainerMountError> {
     let path = source_name.unwrap_or("<UnityWeb>");
     let input_length = source.length().map_err(|source| {
         ContainerMountError::new(
@@ -952,18 +957,6 @@ fn read_unityweb_bundle_stream(
             )
         })?;
     let compressed_size = compressed_end - compressed_start;
-    let mut compressed = Vec::new();
-    compressed.try_reserve_exact(compressed_size).map_err(|_| {
-        ContainerMountError::new(
-            report.clone(),
-            ContainerMountErrorKind::Scheme(SchemeError::new(
-                SchemeErrorKind::InputAllocationFailed {
-                    requested: compressed_size,
-                },
-            )),
-        )
-    })?;
-    compressed.resize(compressed_size, 0);
     let compressed_offset = u64::try_from(compressed_start).map_err(|_| {
         ContainerMountError::new(
             report.clone(),
@@ -974,23 +967,82 @@ fn read_unityweb_bundle_stream(
             )),
         )
     })?;
-    source
-        .read_exact_at(compressed_offset, &mut compressed)
+    let compressed_length = u64::try_from(compressed_size).map_err(|_| {
+        ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::Scheme(SchemeError::new(
+                SchemeErrorKind::InputLengthNotRepresentable {
+                    length: input_length,
+                },
+            )),
+        )
+    })?;
+    let (compressed, _) = source
+        .create_partial_file_backed(compressed_offset, compressed_length)
         .map_err(|source| stream_read_error(report, path, 0, source))?;
-
-    let data = RawWebBundle::decode_unityweb_scene(&header, &compressed, scheme_limits.raw_web)
-        .map_err(|error| {
-            ContainerMountError::new(
-                report.clone(),
-                ContainerMountErrorKind::Scheme(SchemeError::new(SchemeErrorKind::RawWeb(error))),
-            )
-        })?;
-    RawWebBundle::from_owned_data(header, data, scheme_limits.raw_web).map_err(|error| {
+    let mut compressed = BufReader::with_capacity(64 * 1024, compressed);
+    let mut decompressed =
+        SmartStream::create_temp().map_err(|source| stream_read_error(report, path, 0, source))?;
+    RawWebBundle::decode_unityweb_scene_to_writer(
+        &header,
+        &mut compressed,
+        scheme_limits.raw_web,
+        &mut decompressed,
+    )
+    .map_err(|error| {
         ContainerMountError::new(
             report.clone(),
             ContainerMountErrorKind::Scheme(SchemeError::new(SchemeErrorKind::RawWeb(error))),
         )
-    })
+    })?;
+    decompressed
+        .flush()
+        .map_err(|source| stream_read_error(report, path, 0, source))?;
+    decompressed
+        .seek(SeekFrom::Start(0))
+        .map_err(|source| stream_read_error(report, path, 0, source))?;
+    let decompressed_length = decompressed
+        .length()
+        .map_err(|source| stream_read_error(report, path, 0, source))?;
+    let decompressed_size = usize::try_from(decompressed_length).map_err(|_| {
+        ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::Scheme(SchemeError::new(
+                SchemeErrorKind::InputLengthNotRepresentable {
+                    length: decompressed_length,
+                },
+            )),
+        )
+    })?;
+    let metadata_size = decompressed_size.min(scheme_limits.raw_web.max_metadata_bytes);
+    let mut metadata = Vec::new();
+    metadata.try_reserve_exact(metadata_size).map_err(|_| {
+        ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::Scheme(SchemeError::new(
+                SchemeErrorKind::InputAllocationFailed {
+                    requested: metadata_size,
+                },
+            )),
+        )
+    })?;
+    metadata.resize(metadata_size, 0);
+    decompressed
+        .read_exact_at(0, &mut metadata)
+        .map_err(|source| stream_read_error(report, path, 0, source))?;
+    let entries = RawWebBundle::parse_unityweb_directory_prefix(
+        &header,
+        &metadata,
+        decompressed_size,
+        scheme_limits.raw_web,
+    )
+    .map_err(|error| {
+        ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::Scheme(SchemeError::new(SchemeErrorKind::RawWeb(error))),
+        )
+    })?;
+    Ok((decompressed, entries))
 }
 
 fn stream_read_error(
@@ -1007,28 +1059,6 @@ fn stream_read_error(
             source,
         },
     )
-}
-
-fn copy_raw_web_entry_to_temp(
-    bytes: &[u8],
-    path: &str,
-    entry_index: usize,
-    report: &ContainerMountReport,
-) -> Result<SmartStream, ContainerMountError> {
-    let mut output = SmartStream::create_temp()
-        .map_err(|source| stream_read_error(report, path, entry_index, source))?;
-    for chunk in bytes.chunks(64 * 1024) {
-        output
-            .write_all(chunk)
-            .map_err(|source| stream_read_error(report, path, entry_index, source))?;
-    }
-    output
-        .flush()
-        .map_err(|source| stream_read_error(report, path, entry_index, source))?;
-    output
-        .seek(SeekFrom::Start(0))
-        .map_err(|source| stream_read_error(report, path, entry_index, source))?;
-    Ok(output)
 }
 
 struct WebDataStreamContext<'a> {

@@ -2078,3 +2078,14 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | The stream mount reads a bounded UnityRaw header prefix and metadata range, validates directory entries against the post-header data size, and copies entry ranges to temporary SmartStreams in 64 KiB chunks. A direct UnityFS child enters the file-backed UnityFS tree route. UnityFS ranges over temporary-file backing now remain file-backed temporary ranges; original in-memory stream behavior is unchanged. |
 | Regression evidence | `source_unityraw_nested_unityfs_mounts_file_backed_through_both_path_apis` replays the frozen row through `mount_path` and `mount_paths`, checks bundle parent/scope metadata, ResourceFile path and bytes, file-backed output, and source-file release while the VFSes remain live. |
 | Remaining comparison | This covers the frozen UnityRaw-to-UnityFS route. UnityRaw-to-WebData and other Raw/Web nested-container paths, generic final-layer parsing, and Unix retained-reader runtime validation remain open; `IO-STREAM-001` remains in progress. |
+
+## DIFF-IO-STREAM-WEB-SCENE-001 — bounded UnityWeb scene decoding
+
+| Field | Finding |
+|---|---|
+| Source location | `AssetRipper.IO.Files/BundleFiles/RawWeb/WebBundleFile.cs`; recursive `SchemeReader` dispatch |
+| Input evidence | Frozen source row `SCHEME|web_nested_webdata` in `src/io/io_differential_stream_fixture.txt`; it contains a UnityWeb scene with a nested WebData bundle and two ResourceFiles. |
+| Source-derived behavior | The last UnityWeb scene is decompressed, its directory is parsed, and nested entries are dispatched with the same ordered ResourceFile names and payload bytes. |
+| Rust change | The compressed scene range is read as a bounded stream, the size-prefixed LZMA decoder writes directly to temporary-file backing under the declared output limit, only the bounded directory prefix is buffered, and entry ranges are copied in fixed-size chunks before dispatch. |
+| Regression evidence | `source_unityweb_nested_webdata_mounts_file_backed_through_both_path_apis` replays the frozen row through both production APIs and compares parent/scope metadata, entry order and paths, exact bytes, file-backed output, and source-file release. `decodes_sharpcompress_encoded_size_prefixed_payloads` exercises the writer decoder against independent AssetRipper SharpCompress vectors and checks the output cap. |
+| Remaining comparison | This removes the full compressed-scene and decompressed-scene `Vec` allocations from the file-backed mount route. Other UnityRaw/UnityWeb nested branches, parser paths that need contiguous bytes, and Unix retained-reader runtime validation remain open under `IO-STREAM-001` / `IO-FS-IMPORT-PRESERVE-DIRECTORY-001`. |

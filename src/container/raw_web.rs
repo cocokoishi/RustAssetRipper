@@ -11,8 +11,11 @@
 use std::borrow::Cow;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
+use std::io::{BufRead, Write};
 
-use crate::compression::lzma::{decompress_size_block, LzmaBlockError};
+use crate::compression::lzma::{
+    decompress_size_block, decompress_size_block_to_writer, LzmaBlockError,
+};
 use crate::io::binary::{BinaryError, BinaryReader, Endian};
 
 const RAW_MAGIC: &str = "UnityRaw";
@@ -177,12 +180,32 @@ impl<'a> RawWebBundle<'a> {
             .map(|(entries, _)| entries)
     }
 
-    pub(crate) fn from_owned_data(
-        header: RawWebHeader,
-        data: Vec<u8>,
+    pub(crate) fn parse_unityweb_directory_prefix(
+        header: &RawWebHeader,
+        metadata: &[u8],
+        data_size: usize,
         limits: RawWebLimits,
-    ) -> Result<RawWebBundle<'static>, RawWebError> {
-        RawWebBundle::<'static>::parse_header_and_data(header, Cow::Owned(data), limits)
+    ) -> Result<Vec<RawWebEntry>, RawWebError> {
+        if header.kind != RawWebKind::UnityWeb {
+            return Err(RawWebError::new(
+                0,
+                RawWebErrorKind::InvalidSignature {
+                    actual: "UnityRaw".to_owned(),
+                },
+            ));
+        }
+        if metadata.len() > limits.max_metadata_bytes {
+            return Err(RawWebError::new(
+                header.header_size,
+                RawWebErrorKind::LimitExceeded {
+                    field: "metadata bytes",
+                    requested: metadata.len() as u64,
+                    limit: limits.max_metadata_bytes,
+                },
+            ));
+        }
+        Self::parse_directory_metadata(header, metadata, data_size, limits)
+            .map(|(entries, _)| entries)
     }
 
     pub(crate) fn decode_unityweb_scene(
@@ -199,6 +222,27 @@ impl<'a> RawWebBundle<'a> {
         .map_err(|error| {
             RawWebError::new(
                 header.header_size + error.input_offset(),
+                RawWebErrorKind::Lzma(error),
+            )
+        })
+    }
+
+    pub(crate) fn decode_unityweb_scene_to_writer<R: BufRead, W: Write>(
+        header: &RawWebHeader,
+        compressed: &mut R,
+        limits: RawWebLimits,
+        output: &mut W,
+    ) -> Result<(), RawWebError> {
+        let scene = Self::last_scene(header)?;
+        decompress_size_block_to_writer(
+            compressed,
+            scene.decompressed_size as usize,
+            limits.max_decompressed_chunk_bytes,
+            output,
+        )
+        .map_err(|error| {
+            RawWebError::new(
+                header.header_size.saturating_add(error.input_offset()),
                 RawWebErrorKind::Lzma(error),
             )
         })

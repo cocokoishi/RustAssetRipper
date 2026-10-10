@@ -12,7 +12,7 @@
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
-use std::io::{self, Cursor, Write};
+use std::io::{self, BufRead, Cursor, Read, Write};
 
 /// Decode a Unity LZMA payload: five LZMA properties bytes followed by a raw stream.
 ///
@@ -73,6 +73,127 @@ pub fn decompress_size_block(
         expected_output_size,
         maximum_output_size,
     )
+}
+
+/// Decode a size-prefixed Unity LZMA stream into a writer without buffering the decoded payload.
+///
+/// The input must be bounded to the compressed block. The declared and expected decoded sizes
+/// must match, and both the output length and decoder history remain within the configured limit.
+pub fn decompress_size_block_to_writer<R: BufRead, W: Write>(
+    input: &mut R,
+    expected_output_size: usize,
+    maximum_output_size: usize,
+    output: &mut W,
+) -> Result<(), LzmaBlockError> {
+    let mut input = CountedBufRead::new(input);
+    let mut header = [0u8; 13];
+    if input.read_exact(&mut header).is_err() {
+        return Err(LzmaBlockError::new(
+            0,
+            LzmaBlockErrorKind::SizeHeaderTooShort {
+                actual: input.consumed,
+            },
+        ));
+    }
+    let declared_size = u64::from_le_bytes(header[5..13].try_into().unwrap());
+    if declared_size != expected_output_size as u64 {
+        return Err(LzmaBlockError::new(
+            5,
+            LzmaBlockErrorKind::DeclaredSizeMismatch {
+                declared: declared_size,
+                expected: expected_output_size,
+            },
+        ));
+    }
+    if expected_output_size > maximum_output_size {
+        return Err(LzmaBlockError::new(
+            0,
+            LzmaBlockErrorKind::OutputLimitExceeded {
+                requested: expected_output_size,
+                limit: maximum_output_size,
+            },
+        ));
+    }
+
+    let property_byte = header[0];
+    if property_byte >= 9 * 5 * 5 {
+        return Err(LzmaBlockError::new(
+            0,
+            LzmaBlockErrorKind::InvalidProperties {
+                value: property_byte,
+            },
+        ));
+    }
+    let lc = u32::from(property_byte % 9);
+    let property_tail = u32::from(property_byte / 9);
+    let lp = property_tail % 5;
+    let pb = property_tail / 5;
+    let declared_dictionary_size =
+        u32::from_le_bytes([header[1], header[2], header[3], header[4]]).max(4096);
+    let index_limit = usize::MAX / 2;
+    let effective_dictionary_size = (declared_dictionary_size as usize)
+        .min(maximum_output_size.max(1))
+        .min(index_limit.max(1));
+    let effective_dictionary_size = u32::try_from(effective_dictionary_size).map_err(|_| {
+        LzmaBlockError::new(
+            1,
+            LzmaBlockErrorKind::DictionarySizeUnrepresentable {
+                size: effective_dictionary_size,
+            },
+        )
+    })?;
+    let params = lzma_rs::decompress::raw::LzmaParams::new(
+        lzma_rs::decompress::raw::LzmaProperties { lc, lp, pb },
+        effective_dictionary_size,
+        Some(expected_output_size as u64),
+    );
+    let mut decoder = lzma_rs::decompress::raw::LzmaDecoder::new(
+        params,
+        Some(maximum_output_size.min(index_limit)),
+    )
+    .map_err(|error| LzmaBlockError::new(0, LzmaBlockErrorKind::Decoder(error.to_string())))?;
+
+    let mut writer = BoundedWriter {
+        output,
+        maximum: expected_output_size,
+        written: 0,
+        exceeded: false,
+        output_error: None,
+    };
+    let decode_result = decoder.decompress(&mut input, &mut writer);
+    let input_offset = input.consumed;
+    let written = writer.written;
+    let exceeded = writer.exceeded;
+    let output_error = writer.output_error.take();
+    drop(writer);
+
+    if exceeded {
+        return Err(LzmaBlockError::new(
+            input_offset,
+            LzmaBlockErrorKind::OutputExceeded {
+                expected: expected_output_size,
+            },
+        ));
+    }
+    if let Some(error) = output_error {
+        return Err(LzmaBlockError::new(
+            input_offset,
+            LzmaBlockErrorKind::OutputWriteError(error),
+        ));
+    }
+    decode_result.map_err(|error| {
+        LzmaBlockError::new(input_offset, LzmaBlockErrorKind::Decoder(error.to_string()))
+    })?;
+    if written != expected_output_size {
+        return Err(LzmaBlockError::new(
+            input_offset,
+            LzmaBlockErrorKind::OutputSizeMismatch {
+                expected: expected_output_size,
+                actual: written,
+            },
+        ));
+    }
+    Ok(())
 }
 
 /// Encode a Unity LZMA block: five LZMA properties bytes followed by a raw stream.
@@ -390,6 +511,86 @@ impl Write for BoundedOutput {
     }
 }
 
+struct CountedBufRead<'a, R> {
+    input: &'a mut R,
+    consumed: usize,
+}
+
+impl<'a, R> CountedBufRead<'a, R> {
+    fn new(input: &'a mut R) -> Self {
+        Self { input, consumed: 0 }
+    }
+}
+
+impl<R: BufRead> Read for CountedBufRead<'_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let read = self.input.read(buffer)?;
+        self.consumed = self.consumed.saturating_add(read);
+        Ok(read)
+    }
+}
+
+impl<R: BufRead> BufRead for CountedBufRead<'_, R> {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        self.input.fill_buf()
+    }
+
+    fn consume(&mut self, amount: usize) {
+        self.input.consume(amount);
+        self.consumed = self.consumed.saturating_add(amount);
+    }
+}
+
+struct BoundedWriter<'a, W> {
+    output: &'a mut W,
+    maximum: usize,
+    written: usize,
+    exceeded: bool,
+    output_error: Option<String>,
+}
+
+impl<W: Write> Write for BoundedWriter<'_, W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.is_empty() {
+            return Ok(0);
+        }
+        let remaining = self.maximum.saturating_sub(self.written);
+        if remaining == 0 {
+            self.exceeded = true;
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "decoded output exceeds expected size",
+            ));
+        }
+        let allowed = remaining.min(bytes.len());
+        let written = match self.output.write(&bytes[..allowed]) {
+            Ok(written) => written,
+            Err(error) => {
+                self.output_error = Some(error.to_string());
+                return Err(error);
+            }
+        };
+        self.written = self.written.checked_add(written).ok_or_else(|| {
+            self.exceeded = true;
+            io::Error::new(io::ErrorKind::InvalidData, "decoded output length overflow")
+        })?;
+        if allowed < bytes.len() {
+            self.exceeded = true;
+        }
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self.output.flush() {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.output_error = Some(error.to_string());
+                Err(error)
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LzmaBlockError {
     input_offset: usize,
@@ -429,6 +630,7 @@ enum LzmaBlockErrorKind {
     AllocationFailed { requested: usize },
     OutputExceeded { expected: usize },
     OutputSizeMismatch { expected: usize, actual: usize },
+    OutputWriteError(String),
     Decoder(String),
 }
 
@@ -472,6 +674,7 @@ impl Display for LzmaBlockErrorKind {
                 formatter,
                 "decoded output has {actual} bytes, expected {expected}"
             ),
+            Self::OutputWriteError(detail) => write!(formatter, "LZMA output writer: {detail}"),
             Self::Decoder(detail) => write!(formatter, "LZMA decoder: {detail}"),
         }
     }
@@ -483,7 +686,7 @@ mod tests {
 
     use super::{
         compress_block, compress_size_block, decompress_block, decompress_size_block,
-        LzmaBlockErrorKind, LzmaEncodeErrorKind,
+        decompress_size_block_to_writer, LzmaBlockErrorKind, LzmaEncodeErrorKind,
     };
 
     #[test]
@@ -719,6 +922,29 @@ mod tests {
             .as_slice(),
             expected_scene_text
         );
+        let mut streamed_scene_text = Vec::new();
+        decompress_size_block_to_writer(
+            &mut Cursor::new(&scene_text),
+            expected_scene_text.len(),
+            expected_scene_text.len(),
+            &mut streamed_scene_text,
+        )
+        .unwrap();
+        assert_eq!(streamed_scene_text, expected_scene_text);
+        let output_limit = decompress_size_block_to_writer(
+            &mut Cursor::new(&scene_text),
+            expected_scene_text.len(),
+            expected_scene_text.len() - 1,
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            output_limit.kind,
+            LzmaBlockErrorKind::OutputLimitExceeded {
+                requested: expected_scene_text.len(),
+                limit: expected_scene_text.len() - 1,
+            }
+        );
 
         let sequence = parse_hex(
             "5D00001000000100000000000000000052500A84F99BB28021A969D627E03E065A5F048D53D404BA39570509C15524DE9DB871593160A19FF96F4973F2C8EA8CBA1A8B29692180FE338366AF466DEC9E898A0B83F03C0E898E3FED5FE79E90D91CFF32F4B2E03951B2D21415B4C571BADB06E3799A9FBB38C1B000AC930BAA0619031208155B9BC848F0322EFE2DA087C8F0A4E0D251EB8D675692B24D84C5F18631DF6A625BC2792DD9F73C73BA747407D83CA9562224A166F85A845F3067D2F64B492E7F20EBDBF8100E947877C73F6BEFB4CD95E26FF6446E06CF0B821ACBDB7AF0578D98FF90C03EE6C1124175EE032896EB09370E1E",
@@ -730,6 +956,15 @@ mod tests {
                 .unwrap(),
             expected_sequence
         );
+        let mut streamed_sequence = Vec::new();
+        decompress_size_block_to_writer(
+            &mut Cursor::new(&sequence),
+            expected_sequence.len(),
+            expected_sequence.len(),
+            &mut streamed_sequence,
+        )
+        .unwrap();
+        assert_eq!(streamed_sequence, expected_sequence);
     }
 
     fn parse_hex(hex: &str) -> Vec<u8> {
