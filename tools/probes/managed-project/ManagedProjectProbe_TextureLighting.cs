@@ -453,7 +453,7 @@ ObjectData = textureBody,
             collection,
             version);
         List<object> assets = new() { lightmapSettings, renderSettings, texture };
-        if (sceneKind == "light")
+        if (sceneKind is "light" or "light-nonzero-baking")
         {
             object gameObject = MakeGenerated(
                 "AssetRipper.SourceGenerated.Classes.ClassID_1.GameObject",
@@ -474,6 +474,14 @@ ObjectData = textureBody,
                 105,
                 collection,
                 version);
+            if (sceneKind == "light-nonzero-baking")
+            {
+                object bakingOutput = FindGeneratedProperty(light, "BakingOutput").GetValue(light)
+                    ?? throw new InvalidOperationException("Light.BakingOutput is null");
+                SetGeneratedProperty(bakingOutput, "ProbeOcclusionLightIndex", 7);
+                SetGeneratedProperty(bakingOutput, "OcclusionMaskChannel", 3);
+                SetGeneratedProperty(bakingOutput, "LightmappingMask", 258);
+            }
             SetGeneratedAssetPointer(transform, "GameObject_C4", collection, gameObject);
             SetGeneratedAssetPointer(light, "GameObject_C8", collection, gameObject);
             AddGeneratedAssetPointer(gameObject, "Components", collection, transform);
@@ -541,7 +549,7 @@ ObjectData = textureBody,
             assets.Add(transform);
             assets.Add(renderer);
         }
-        else if (sceneKind is not ("empty" or "light"))
+        else if (sceneKind is not ("empty" or "light" or "light-nonzero-baking"))
         {
             throw new ArgumentException($"unsupported lightmap scene fixture: {sceneKind}");
         }

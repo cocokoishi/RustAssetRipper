@@ -644,7 +644,7 @@
             [
                 std::ffi::OsString::from("export-project"),
                 std::ffi::OsString::from("--settings"),
-                settings_path.into_os_string(),
+                settings_path.clone().into_os_string(),
                 output_root.clone().into_os_string(),
                 source_path.clone().into_os_string(),
             ]
@@ -705,6 +705,78 @@
             "m_LightingDataAsset: {{fileID: 112000000, guid: {lighting_data_guid}, type: 2}}"
         )));
         assert_eq!(fs::read(&source_path).unwrap(), input_bytes);
+
+        let baking_fixture = include_str!("export/lightmap_project_source_5_6_light_baking_fixture.txt");
+        assert!(baking_fixture
+            .lines()
+            .any(|line| line == "UNITY_VERSION|5.6.0f1"));
+        let baking_input_bytes =
+            fixture_value(baking_fixture, "INPUT_HEX|LightmapFixture.assets|");
+        fs::write(&source_path, &baking_input_bytes).unwrap();
+        let baking_output_root = directory.join("project-lightmap-5.6-light-baking");
+        super::run(
+            [
+                std::ffi::OsString::from("export-project"),
+                std::ffi::OsString::from("--settings"),
+                settings_path.into_os_string(),
+                baking_output_root.clone().into_os_string(),
+                source_path.clone().into_os_string(),
+            ]
+            .into_iter(),
+        )
+        .expect("Unity 5.6 nonzero Light BakingOutput export succeeds");
+
+        let baking_lighting_data_path = baking_output_root
+            .join("Assets/Scenes/lightmapfixture.assets/LightingData.asset");
+        let baking_lighting_data = fs::read_to_string(&baking_lighting_data_path).unwrap();
+        let source_baking_lighting_data = fixture_value(
+            baking_fixture,
+            "SOURCE_OUTPUT|ExportedProject/Assets/Scenes/lightmapfixture.assets/LightingData.asset|",
+        );
+        assert_eq!(
+            normalize(&baking_lighting_data),
+            normalize(std::str::from_utf8(&source_baking_lighting_data).unwrap()),
+            "complete Unity 5.6 nonzero Light BakingOutput differs from frozen source"
+        );
+        assert!(baking_lighting_data.contains(
+            "m_LightBakingOutputs:\n  - probeOcclusionLightIndex: 7\n    occlusionMaskChannel: 3\n    lightmappingMask: 258"
+        ));
+
+        let baking_lighting_data_meta = fs::read_to_string(format!(
+            "{}.meta",
+            baking_lighting_data_path.display()
+        ))
+        .unwrap();
+        let source_baking_lighting_data_meta = fixture_value(
+            baking_fixture,
+            "SOURCE_OUTPUT|ExportedProject/Assets/Scenes/lightmapfixture.assets/LightingData.asset.meta|",
+        );
+        assert_eq!(
+            normalize(&baking_lighting_data_meta),
+            normalize(std::str::from_utf8(&source_baking_lighting_data_meta).unwrap()),
+            "Unity 5.6 nonzero Light LightingDataAsset metadata differs from frozen source"
+        );
+        let baking_lighting_data_guid = baking_lighting_data_meta
+            .lines()
+            .find_map(|line| line.strip_prefix("guid: "))
+            .expect("nonzero Light LightingDataAsset metadata contains a GUID");
+        let baking_scene = fs::read_to_string(
+            baking_output_root.join("Assets/Scenes/lightmapfixture.assets.unity"),
+        )
+        .unwrap();
+        let source_baking_scene = fixture_value(
+            baking_fixture,
+            "SOURCE_OUTPUT|ExportedProject/Assets/Scenes/lightmapfixture.assets.unity|",
+        );
+        assert_eq!(
+            normalize(&baking_scene),
+            normalize(std::str::from_utf8(&source_baking_scene).unwrap()),
+            "complete Unity 5.6 Scene output for nonzero Light BakingOutput differs from frozen source"
+        );
+        assert!(baking_scene.contains(&format!(
+            "m_LightingDataAsset: {{fileID: 112000000, guid: {baking_lighting_data_guid}, type: 2}}"
+        )));
+        assert_eq!(fs::read(&source_path).unwrap(), baking_input_bytes);
     }
 
     #[test]
