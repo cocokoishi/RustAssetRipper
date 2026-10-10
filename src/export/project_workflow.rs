@@ -301,6 +301,7 @@ struct RoutedLightingDataAsset {
     source_version: SceneUnityVersion,
     type_tree: crate::serialized_file::metadata::TypeTree,
     root: SerializedValue,
+    renderer_uv_mesh_targets: Vec<Option<ExportAssetIdentity>>,
 }
 
 #[derive(Clone, Copy)]
@@ -308,6 +309,7 @@ struct LightingDataRendererInput<'object> {
     identity: ExportAssetIdentity,
     file_id: i64,
     value: &'object SerializedValue,
+    uv_mesh_target: Option<ExportAssetIdentity>,
 }
 
 struct PreparedSceneCollections {

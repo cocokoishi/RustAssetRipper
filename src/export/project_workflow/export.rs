@@ -245,6 +245,7 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
     } = prepare_generated_collections(GeneratedCollectionPreparationContext {
         workspace,
         objects,
+        reference_graph,
         scene_processing: &scene_processing,
         scenes: scene_collections,
         prefabs: prefab_collections,

@@ -7,9 +7,10 @@ pub(super) struct PreparedGeneratedCollections {
     pub(super) next_collection_index: usize,
 }
 
-pub(super) struct GeneratedCollectionPreparationContext<'context> {
+pub(super) struct GeneratedCollectionPreparationContext<'context, 'graph> {
     pub(super) workspace: &'context SerializedFileWorkspace,
     pub(super) objects: &'context ObjectWorkspace,
+    pub(super) reference_graph: &'context MultiFileReferenceGraph<'graph>,
     pub(super) scene_processing: &'context WorkspaceSceneProcessing,
     pub(super) scenes: Vec<RoutedSceneCollection>,
     pub(super) prefabs: Vec<RoutedPrefabCollection>,
@@ -19,11 +20,12 @@ pub(super) struct GeneratedCollectionPreparationContext<'context> {
 }
 
 pub(super) fn prepare_generated_collections(
-    context: GeneratedCollectionPreparationContext<'_>,
+    context: GeneratedCollectionPreparationContext<'_, '_>,
 ) -> Result<PreparedGeneratedCollections, Box<dyn Error>> {
     let GeneratedCollectionPreparationContext {
         workspace,
         objects,
+        reference_graph,
         scene_processing,
         scenes,
         prefabs,
@@ -75,7 +77,8 @@ pub(super) fn prepare_generated_collections(
         let Some(owner_identity) = hierarchy.lighting_data_dependency_owner() else {
             continue;
         };
-        let renderer_inputs = collect_lighting_data_renderer_inputs(&scene.assignments, objects)?;
+        let renderer_inputs =
+            collect_lighting_data_renderer_inputs(&scene.assignments, objects, reference_graph)?;
         validate_bounded_lighting_data_scene(hierarchy, owner_identity, &scene.assignments)?;
         let render_settings_identity =
             scene_manager_identity(hierarchy, SceneManagerKind::RenderSettings).ok_or_else(
@@ -174,7 +177,8 @@ pub(super) fn prepare_generated_collections(
             &source_version,
             scene.guid,
         )?;
-        append_lighting_data_renderer_records(&type_tree, &mut root, &renderer_inputs)?;
+        let renderer_uv_mesh_targets =
+            append_lighting_data_renderer_records(&type_tree, &mut root, &renderer_inputs)?;
         let collection_index = next_collection_index;
         next_collection_index = next_collection_index
             .checked_add(1)
@@ -199,6 +203,7 @@ pub(super) fn prepare_generated_collections(
             source_version: scene_version,
             type_tree: (*type_tree).clone(),
             root,
+            renderer_uv_mesh_targets,
         });
     }
 

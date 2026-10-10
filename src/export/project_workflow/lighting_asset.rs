@@ -271,7 +271,11 @@ pub(super) fn append_lighting_data_renderer_records(
     type_tree: &crate::serialized_file::metadata::TypeTree,
     root: &mut SerializedValue,
     renderers: &[LightingDataRendererInput<'_>],
-) -> Result<(), Box<dyn Error>> {
+) -> Result<Vec<Option<ExportAssetIdentity>>, Box<dyn Error>> {
+    let mut uv_mesh_targets = Vec::new();
+    uv_mesh_targets
+        .try_reserve_exact(renderers.len())
+        .map_err(|_| invalid_project("could not allocate LightingDataAsset UvMesh targets"))?;
     for renderer in renderers {
         let source_index = source_renderer_field(renderer, "m_LightmapIndex")?;
         let lightmap_index = match source_index {
@@ -309,6 +313,20 @@ pub(super) fn append_lighting_data_renderer_records(
             "m_LightmappedRendererData",
             renderer.identity.object_index,
         )?;
+        if let Some(target) = renderer.uv_mesh_target {
+            if target.class_id != 43 || target.path_id == 0 {
+                return Err(invalid_project(format!(
+                    "MeshRenderer {:?}:{} has invalid UvMesh identity {:?}",
+                    renderer.identity.collection, renderer.identity.path_id, target
+                )));
+            }
+            let uv_mesh_pointer = SerializedValue::PPtr {
+                file_id: 0,
+                path_id: target.path_id,
+            };
+            ensure_lighting_data_value_shape(&data, "uvMesh", &uv_mesh_pointer)?;
+            set_required_lighting_data_field(&mut data, "uvMesh", uv_mesh_pointer)?;
+        }
         set_lighting_data_u16_field(&mut data, "lightmapIndex", lightmap_index)?;
         set_lighting_data_u16_field(&mut data, "lightmapIndexDynamic", u16::MAX)?;
         copy_renderer_vector_field(renderer, &mut data, "m_LightmapTilingOffset", "lightmapST")?;
@@ -319,8 +337,9 @@ pub(super) fn append_lighting_data_renderer_records(
             "lightmapSTDynamic",
         )?;
         append_lighting_data_array(root, "m_LightmappedRendererData", data)?;
+        uv_mesh_targets.push(renderer.uv_mesh_target);
     }
-    Ok(())
+    Ok(uv_mesh_targets)
 }
 
 fn source_renderer_field<'value>(
@@ -681,6 +700,65 @@ fn resolve_generated_lighting_data_pointer(
             ),
         );
     }
+    if let Some(index) = lighting_data_uv_mesh_index(request.field_path) {
+        let Some(target) = asset.renderer_uv_mesh_targets.get(index) else {
+            return fail(
+                error,
+                format!(
+                    "UvMesh field {:?} has no corresponding lightmapped renderer target",
+                    request.field_path
+                ),
+            );
+        };
+        let Some(target) = *target else {
+            return fail(
+                error,
+                format!(
+                    "UvMesh field {:?} is non-null but source MeshFilter data has no Mesh target",
+                    request.field_path
+                ),
+            );
+        };
+        if target.class_id != 43 || request.file_id != 0 || request.path_id != target.path_id {
+            return fail(
+                error,
+                format!(
+                    "UvMesh field {:?} synthetic source pair ({}, {}) does not match Mesh {}",
+                    request.field_path, request.file_id, request.path_id, target.path_id
+                ),
+            );
+        }
+        return match pointer_map.resolve(
+            ProjectPointerRequest::ResolvedAsset(target),
+            asset.collection_index,
+        ) {
+            Ok(ProjectPointerResolution::Mapped(pointer)) => {
+                ProjectPointerResolution::Mapped(pointer)
+            }
+            Ok(ProjectPointerResolution::MissingExportedTarget { .. }) => fail(
+                error,
+                format!(
+                    "LightingDataAsset UvMesh target {:?}:{} is omitted from project export",
+                    target.collection, target.path_id
+                ),
+            ),
+            Ok(ProjectPointerResolution::UnresolvedInput(unresolved)) => fail(
+                error,
+                format!(
+                    "LightingDataAsset UvMesh target is unresolved: {:?}",
+                    unresolved.resolution
+                ),
+            ),
+            Ok(ProjectPointerResolution::Null) => fail(
+                error,
+                "non-null LightingDataAsset UvMesh unexpectedly mapped to null".to_owned(),
+            ),
+            Err(source) => fail(
+                error,
+                format!("LightingDataAsset UvMesh pointer-map lookup failed: {source}"),
+            ),
+        };
+    }
     if request.field_path == "m_Scene" {
         if request.file_id != 0 || request.path_id != i64::MIN {
             return fail(
@@ -851,6 +929,16 @@ fn resolve_generated_lighting_data_pointer(
             ),
         ),
     }
+}
+
+fn lighting_data_uv_mesh_index(field_path: &str) -> Option<usize> {
+    let index = field_path
+        .strip_prefix("m_LightmappedRendererData[")?
+        .strip_suffix("].uvMesh")?;
+    if index.is_empty() || !index.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    index.parse().ok()
 }
 
 fn is_lighting_data_texture_field(field_path: &str) -> bool {

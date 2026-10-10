@@ -323,6 +323,8 @@ ObjectData = textureBody,
                 ("AssetRipper.SourceGenerated.Classes.ClassID_1.GameObject", 1),
                 ("AssetRipper.SourceGenerated.Classes.ClassID_108.Light", 108),
                 ("AssetRipper.SourceGenerated.Classes.ClassID_4.Transform", 4),
+                ("AssetRipper.SourceGenerated.Classes.ClassID_33.MeshFilter", 33),
+                ("AssetRipper.SourceGenerated.Classes.ClassID_43.Mesh", 43),
                 ("AssetRipper.SourceGenerated.Classes.ClassID_23.MeshRenderer", 23),
                 ("AssetRipper.SourceGenerated.Classes.ClassID_218.Terrain", 218),
             })
@@ -335,6 +337,7 @@ ObjectData = textureBody,
                         || property.Name.Contains("Baking", StringComparison.Ordinal)
                         || property.Name.Contains("Renderer", StringComparison.Ordinal)
                         || property.Name.Contains("Terrain", StringComparison.Ordinal)
+                        || property.Name.Contains("Mesh", StringComparison.Ordinal)
                         || property.Name.Contains("GameObject", StringComparison.Ordinal))
                     {
                         Console.WriteLine($"PROPERTY|{classId}|{property.Name}|{property.PropertyType.FullName}");
@@ -450,7 +453,7 @@ ObjectData = textureBody,
             collection,
             version);
         List<object> assets = new() { lightmapSettings, renderSettings, texture };
-        if (sceneKind == "mesh-renderer")
+        if (sceneKind is "mesh-renderer" or "mesh-filter-renderer")
         {
             object gameObject = MakeGenerated(
                 "AssetRipper.SourceGenerated.Classes.ClassID_1.GameObject",
@@ -483,6 +486,27 @@ ObjectData = textureBody,
             SetGeneratedAssetPointer(transform, "GameObject_C4", collection, gameObject);
             SetGeneratedAssetPointer(renderer, "GameObject_C25", collection, gameObject);
             AddGeneratedAssetPointer(gameObject, "Components", collection, transform);
+            if (sceneKind == "mesh-filter-renderer")
+            {
+                object meshFilter = MakeGenerated(
+                    "AssetRipper.SourceGenerated.Classes.ClassID_33.MeshFilter",
+                    33,
+                    106,
+                    collection,
+                    version);
+                object mesh = MakeGenerated(
+                    "AssetRipper.SourceGenerated.Classes.ClassID_43.Mesh",
+                    43,
+                    107,
+                    collection,
+                    version);
+                SetGeneratedProperty(mesh, "Name", "LightmappedMesh");
+                SetGeneratedAssetPointer(meshFilter, "GameObject_C2", collection, gameObject);
+                SetGeneratedAssetPointer(meshFilter, "Mesh", collection, mesh);
+                AddGeneratedAssetPointer(gameObject, "Components", collection, meshFilter);
+                assets.Add(meshFilter);
+                assets.Add(mesh);
+            }
             AddGeneratedAssetPointer(gameObject, "Components", collection, renderer);
             assets.Add(gameObject);
             assets.Add(transform);

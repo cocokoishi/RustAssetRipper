@@ -113,17 +113,6 @@ pub(super) fn validate_bounded_lighting_data_scene(
         1_971_053_207,
         646_504_946,
     ];
-    if assignments
-        .iter()
-        .any(|assignment| assignment.asset.class_id == 23)
-        && assignments
-            .iter()
-            .any(|assignment| assignment.asset.class_id == 33)
-    {
-        unsupported_objects.push(
-            "MeshRenderer is paired with a MeshFilter, but LightingDataAsset UvMesh reference mapping is not implemented".to_owned(),
-        );
-    }
     for assignment in assignments {
         let class_id = assignment.asset.class_id;
         if class_id == 108 || class_id == 218 {
@@ -179,7 +168,49 @@ pub(super) fn validate_bounded_lighting_data_scene(
 pub(super) fn collect_lighting_data_renderer_inputs<'object>(
     assignments: &[SceneExportIdAssignment],
     objects: &'object ObjectWorkspace,
+    reference_graph: &MultiFileReferenceGraph<'_>,
 ) -> Result<Vec<LightingDataRendererInput<'object>>, Box<dyn Error>> {
+    let mut mesh_filters_by_game_object =
+        HashMap::<ExportAssetObjectKey, Vec<ExportAssetIdentity>>::new();
+    mesh_filters_by_game_object
+        .try_reserve(assignments.len())
+        .map_err(|_| invalid_project("could not allocate LightingDataAsset MeshFilter index"))?;
+    for assignment in assignments
+        .iter()
+        .filter(|assignment| assignment.asset.class_id == 33)
+    {
+        let file_index = serialized_file_index(assignment.asset, "MeshFilter")?;
+        let object = objects
+            .get(file_index, assignment.asset.object_index)
+            .ok_or_else(|| {
+                invalid_project(format!(
+                    "LightingDataAsset MeshFilter {}:{} is missing from ObjectWorkspace",
+                    file_index, assignment.asset.path_id
+                ))
+            })?;
+        if object.path_id != assignment.asset.path_id || object.factory.class_id != 33 {
+            return Err(invalid_project(format!(
+                "LightingDataAsset MeshFilter identity mismatch at {}:{}",
+                file_index, assignment.asset.path_id
+            )));
+        }
+        let payload = object.payload.as_ref().map_err(|error| {
+            invalid_project(format!(
+                "LightingDataAsset MeshFilter {}:{} could not be decoded: {error}",
+                file_index, assignment.asset.path_id
+            ))
+        })?;
+        let game_object_key =
+            component_game_object_key(assignment.asset, &payload.root, reference_graph)?;
+        let filters = mesh_filters_by_game_object
+            .entry(game_object_key)
+            .or_default();
+        filters.try_reserve(1).map_err(|_| {
+            invalid_project("could not allocate LightingDataAsset MeshFilter associations")
+        })?;
+        filters.push(assignment.asset);
+    }
+
     let mut renderers = Vec::new();
     renderers
         .try_reserve(assignments.len())
@@ -216,13 +247,253 @@ pub(super) fn collect_lighting_data_renderer_inputs<'object>(
                 file_index, assignment.asset.path_id
             ))
         })?;
+        let uv_mesh_target = if scene_renderer_is_lightmapped(assignment.asset, &payload.root)? {
+            let game_object_key =
+                component_game_object_key(assignment.asset, &payload.root, reference_graph)?;
+            if let Some(filters) = mesh_filters_by_game_object.get(&game_object_key) {
+                if filters.len() != 1 {
+                    return Err(invalid_project(format!(
+                        "GameObject {:?} has {} MeshFilters in a LightingDataAsset scene; source TryGetComponent selection is ambiguous",
+                        game_object_key,
+                        filters.len()
+                    )));
+                }
+                let mesh_filter = filters[0];
+                let filter_file_index = serialized_file_index(mesh_filter, "MeshFilter")?;
+                let mesh_filter_object = objects
+                    .get(filter_file_index, mesh_filter.object_index)
+                    .ok_or_else(|| {
+                    invalid_project(format!(
+                        "LightingDataAsset MeshFilter {}:{} is missing from ObjectWorkspace",
+                        filter_file_index, mesh_filter.path_id
+                    ))
+                })?;
+                let mesh_filter_payload = mesh_filter_object.payload.as_ref().map_err(|error| {
+                    invalid_project(format!(
+                        "LightingDataAsset MeshFilter {}:{} could not be decoded: {error}",
+                        filter_file_index, mesh_filter.path_id
+                    ))
+                })?;
+                mesh_filter_mesh_target(mesh_filter, &mesh_filter_payload.root, reference_graph)?
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         renderers.push(LightingDataRendererInput {
             identity: assignment.asset,
             file_id: assignment.file_id,
             value: &payload.root,
+            uv_mesh_target,
         });
     }
     Ok(renderers)
+}
+
+fn scene_renderer_is_lightmapped(
+    renderer: ExportAssetIdentity,
+    root: &SerializedValue,
+) -> Result<bool, Box<dyn Error>> {
+    let value = root
+        .unique_field_in_base_chain("m_LightmapIndex")
+        .map_err(|error| {
+            invalid_project(format!(
+                "LightingDataAsset MeshRenderer {:?}:{} m_LightmapIndex lookup failed: {error}",
+                renderer.collection, renderer.path_id
+            ))
+        })?
+        .ok_or_else(|| {
+            invalid_project(format!(
+                "LightingDataAsset MeshRenderer {:?}:{} TypeTree has no m_LightmapIndex field",
+                renderer.collection, renderer.path_id
+            ))
+        })?;
+    let index = match value {
+        SerializedValue::U8(index) => u16::from(*index),
+        SerializedValue::U16(index) => *index,
+        value => {
+            return Err(invalid_project(format!(
+                "LightingDataAsset MeshRenderer {:?}:{} has unsupported m_LightmapIndex value {value:?}",
+                renderer.collection, renderer.path_id
+            )))
+        }
+    };
+    Ok(index != u16::MAX)
+}
+
+fn serialized_file_index(
+    identity: ExportAssetIdentity,
+    role: &str,
+) -> Result<usize, Box<dyn Error>> {
+    match identity.collection {
+        ExportAssetCollectionIdentity::SerializedFile { file_index } => Ok(file_index),
+        ExportAssetCollectionIdentity::ProcessedCollection { .. } => Err(invalid_project(format!(
+            "LightingDataAsset {role} {} is in an unmaterialized collection",
+            identity.path_id
+        ))),
+    }
+}
+
+fn component_game_object_key(
+    component: ExportAssetIdentity,
+    root: &SerializedValue,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+) -> Result<ExportAssetObjectKey, Box<dyn Error>> {
+    let file_index = serialized_file_index(component, "component")?;
+    let pointer = root
+        .unique_field_in_base_chain("m_GameObject")
+        .map_err(|error| {
+            invalid_project(format!(
+                "LightingDataAsset component {:?}:{} m_GameObject lookup failed: {error}",
+                component.collection, component.path_id
+            ))
+        })?
+        .ok_or_else(|| {
+            invalid_project(format!(
+                "LightingDataAsset component {:?}:{} TypeTree has no m_GameObject field",
+                component.collection, component.path_id
+            ))
+        })?;
+    let SerializedValue::PPtr { file_id, path_id } = pointer else {
+        return Err(invalid_project(format!(
+            "LightingDataAsset component {:?}:{} m_GameObject is not a PPtr",
+            component.collection, component.path_id
+        )));
+    };
+    if *path_id == 0 {
+        return Err(invalid_project(format!(
+            "LightingDataAsset component {:?}:{} has a null m_GameObject",
+            component.collection, component.path_id
+        )));
+    }
+    let mut matches = reference_graph
+        .references_from_object(file_index, component.object_index)
+        .filter(|edge| {
+            edge.file_id == *file_id
+                && edge.path_id == *path_id
+                && edge.field_path.ends_with("m_GameObject")
+        });
+    let edge = matches.next().ok_or_else(|| {
+        invalid_project(format!(
+            "LightingDataAsset component {:?}:{} m_GameObject has no matching reference-graph edge",
+            component.collection, component.path_id
+        ))
+    })?;
+    if matches.next().is_some() {
+        return Err(invalid_project(format!(
+            "LightingDataAsset component {:?}:{} m_GameObject matches multiple reference-graph edges",
+            component.collection, component.path_id
+        )));
+    }
+    match &edge.resolution {
+        MultiFilePPtrResolution::Object {
+            target_file_index,
+            target_object_index,
+        } => {
+            if reference_graph.object_class_id(*target_file_index, *target_object_index) != Some(1)
+            {
+                return Err(invalid_project(format!(
+                    "LightingDataAsset component {:?}:{} m_GameObject does not resolve to a GameObject",
+                    component.collection, component.path_id
+                )));
+            }
+            Ok(ExportAssetObjectKey {
+                collection: ExportAssetCollectionIdentity::SerializedFile {
+                    file_index: *target_file_index,
+                },
+                object_index: *target_object_index,
+            })
+        }
+        resolution => Err(invalid_project(format!(
+            "LightingDataAsset component {:?}:{} m_GameObject is unresolved: {resolution:?}",
+            component.collection, component.path_id
+        ))),
+    }
+}
+
+fn mesh_filter_mesh_target(
+    mesh_filter: ExportAssetIdentity,
+    root: &SerializedValue,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+) -> Result<Option<ExportAssetIdentity>, Box<dyn Error>> {
+    let file_index = serialized_file_index(mesh_filter, "MeshFilter")?;
+    let pointer = root
+        .unique_field_in_base_chain("m_Mesh")
+        .map_err(|error| {
+            invalid_project(format!(
+                "LightingDataAsset MeshFilter {:?}:{} m_Mesh lookup failed: {error}",
+                mesh_filter.collection, mesh_filter.path_id
+            ))
+        })?
+        .ok_or_else(|| {
+            invalid_project(format!(
+                "LightingDataAsset MeshFilter {:?}:{} TypeTree has no m_Mesh field",
+                mesh_filter.collection, mesh_filter.path_id
+            ))
+        })?;
+    let SerializedValue::PPtr { file_id, path_id } = pointer else {
+        return Err(invalid_project(format!(
+            "LightingDataAsset MeshFilter {:?}:{} m_Mesh is not a PPtr",
+            mesh_filter.collection, mesh_filter.path_id
+        )));
+    };
+    if *path_id == 0 {
+        return Ok(None);
+    }
+    let mut matches = reference_graph
+        .references_from_object(file_index, mesh_filter.object_index)
+        .filter(|edge| {
+            edge.file_id == *file_id
+                && edge.path_id == *path_id
+                && edge.field_path.ends_with("m_Mesh")
+        });
+    let edge = matches.next().ok_or_else(|| {
+        invalid_project(format!(
+            "LightingDataAsset MeshFilter {:?}:{} m_Mesh has no matching reference-graph edge",
+            mesh_filter.collection, mesh_filter.path_id
+        ))
+    })?;
+    if matches.next().is_some() {
+        return Err(invalid_project(format!(
+            "LightingDataAsset MeshFilter {:?}:{} m_Mesh matches multiple reference-graph edges",
+            mesh_filter.collection, mesh_filter.path_id
+        )));
+    }
+    let (target_file_index, target_object_index) = match &edge.resolution {
+        MultiFilePPtrResolution::Object {
+            target_file_index,
+            target_object_index,
+        } => (*target_file_index, *target_object_index),
+        resolution => {
+            return Err(invalid_project(format!(
+                "LightingDataAsset MeshFilter {:?}:{} m_Mesh is unresolved: {resolution:?}",
+                mesh_filter.collection, mesh_filter.path_id
+            )))
+        }
+    };
+    if reference_graph.object_class_id(target_file_index, target_object_index) != Some(43) {
+        return Err(invalid_project(format!(
+            "LightingDataAsset MeshFilter {:?}:{} m_Mesh does not resolve to class 43",
+            mesh_filter.collection, mesh_filter.path_id
+        )));
+    }
+    let target = reference_graph
+        .object_identity(target_file_index, target_object_index)
+        .ok_or_else(|| {
+            invalid_project(format!(
+                "LightingDataAsset MeshFilter {:?}:{} m_Mesh target has no object identity",
+                mesh_filter.collection, mesh_filter.path_id
+            ))
+        })?;
+    Ok(Some(ExportAssetIdentity {
+        collection: ExportAssetCollectionIdentity::SerializedFile {
+            file_index: target_file_index,
+        },
+        object_index: target_object_index,
+        path_id: target.path_id,
+        class_id: 43,
+    }))
 }
 
 pub(super) fn scene_manager_identity(

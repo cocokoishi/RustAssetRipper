@@ -425,6 +425,141 @@
     }
 
     #[test]
+    fn export_project_maps_5_6_lightmapped_renderer_uv_mesh() {
+        let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
+
+        fn decode_hex(hex: &str) -> Vec<u8> {
+            assert!(hex.len().is_multiple_of(2), "fixture hex has even length");
+            hex.as_bytes()
+                .chunks_exact(2)
+                .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+                .collect()
+        }
+
+        fn fixture_value(fixture: &str, prefix: &str) -> Vec<u8> {
+            let hex = fixture
+                .lines()
+                .find_map(|line| line.strip_prefix(prefix))
+                .unwrap_or_else(|| panic!("source lightmap fixture lacks {prefix}"));
+            decode_hex(hex)
+        }
+
+        fn normalize(text: &str) -> String {
+            let mut output = String::with_capacity(text.len());
+            for line in text.lines() {
+                let chars = line.chars().collect::<Vec<_>>();
+                let mut normalized = String::with_capacity(line.len());
+                let mut index = 0;
+                while index < chars.len() {
+                    let is_guid = index + 32 <= chars.len()
+                        && (index == 0 || !chars[index - 1].is_ascii_hexdigit())
+                        && chars[index..index + 32]
+                            .iter()
+                            .all(|character| character.is_ascii_hexdigit())
+                        && (index + 32 == chars.len()
+                            || !chars[index + 32].is_ascii_hexdigit());
+                    if is_guid {
+                        normalized.push_str("<GUID>");
+                        index += 32;
+                    } else {
+                        normalized.push(chars[index]);
+                        index += 1;
+                    }
+                }
+                if normalized.starts_with("timeCreated: ") {
+                    normalized = "timeCreated: <TIME>".to_owned();
+                }
+                output.push_str(&normalized);
+                output.push('\n');
+            }
+            output
+        }
+
+        fn metadata_guid(meta: &str) -> &str {
+            let guid = meta
+                .lines()
+                .find_map(|line| line.strip_prefix("guid: "))
+                .expect("metadata contains a GUID");
+            assert_eq!(guid.len(), 32);
+            assert!(guid.bytes().all(|byte| byte.is_ascii_hexdigit()));
+            guid
+        }
+
+        let fixture = include_str!("export/lightmap_project_source_5_6_meshfilter_fixture.txt");
+        assert!(fixture.lines().any(|line| line == "UNITY_VERSION|5.6.0f1"));
+        let input_bytes = fixture_value(fixture, "INPUT_HEX|LightmapFixture.assets|");
+        let directory = TestInputDirectory::new_root();
+        let source_path = directory.join("LightmapFixture.assets");
+        let settings_path = directory.join("lightmap-settings.json");
+        let output_root = directory.join("project-lightmap-5.6-meshfilter");
+        fs::write(&source_path, &input_bytes).unwrap();
+        let settings = include_str!("export/settings_file_defaults.json")
+            .replace("\"ImageExportFormat\": 4", "\"ImageExportFormat\": 0")
+            .replace(
+                "\"LightmapTextureExportFormat\": 2",
+                "\"LightmapTextureExportFormat\": 1",
+            )
+            .replace(
+                "\"PreferOriginalTextureExtension\": true",
+                "\"PreferOriginalTextureExtension\": false",
+            );
+        fs::write(&settings_path, settings).unwrap();
+        super::run(
+            [
+                std::ffi::OsString::from("export-project"),
+                std::ffi::OsString::from("--settings"),
+                settings_path.into_os_string(),
+                output_root.clone().into_os_string(),
+                source_path.clone().into_os_string(),
+            ]
+            .into_iter(),
+        )
+        .expect("Unity 5.6 source-authored MeshFilter/MeshRenderer export succeeds");
+
+        let lighting_data_path = output_root.join(
+            "Assets/Scenes/lightmapfixture.assets/LightingData.asset",
+        );
+        let lighting_data = fs::read_to_string(&lighting_data_path).unwrap();
+        let source_lighting_data = fixture_value(
+            fixture,
+            "SOURCE_OUTPUT|ExportedProject/Assets/Scenes/lightmapfixture.assets/LightingData.asset|",
+        );
+        assert_eq!(
+            normalize(&lighting_data),
+            normalize(std::str::from_utf8(&source_lighting_data).unwrap()),
+            "Unity 5.6 LightingDataAsset UvMesh pointer differs from frozen source"
+        );
+        assert!(lighting_data.contains("uvMesh: {fileID: 4300000, guid: "));
+        assert!(lighting_data.contains("lightmapIndex: 0"));
+        assert!(lighting_data.contains("targetObject: 105"));
+
+        let mesh_meta_path = output_root.join("Assets/Mesh/LightmappedMesh.asset.meta");
+        let mesh_meta = fs::read_to_string(&mesh_meta_path).unwrap();
+        let source_mesh_meta = fixture_value(
+            fixture,
+            "SOURCE_OUTPUT|ExportedProject/Assets/Mesh/LightmappedMesh.asset.meta|",
+        );
+        assert!(std::str::from_utf8(&source_mesh_meta)
+            .unwrap()
+            .contains("mainObjectFileID: 4300000"));
+        let mesh_guid = metadata_guid(&mesh_meta);
+        assert!(lighting_data.contains(&format!(
+            "uvMesh: {{fileID: 4300000, guid: {mesh_guid}, type: 2}}"
+        )));
+
+        let scene = fs::read_to_string(
+            output_root.join("Assets/Scenes/lightmapfixture.assets.unity"),
+        )
+        .unwrap();
+        assert!(scene.contains("--- !u!33 &106\nMeshFilter:"));
+        assert!(scene.contains("--- !u!23 &105\nMeshRenderer:"));
+        assert!(scene.contains(&format!(
+            "m_Mesh: {{fileID: 4300000, guid: {mesh_guid}, type: 2}}"
+        )));
+        assert_eq!(fs::read(&source_path).unwrap(), input_bytes);
+    }
+
+    #[test]
     fn export_project_recovers_assembly_backed_monobehaviour_structure() {
         let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
         let directory = TestInputDirectory::new_root();
