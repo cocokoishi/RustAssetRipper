@@ -86,6 +86,8 @@ A source-generated Unity 2019.4.40f1 no-TypeTree MonoBehaviour backed by Complex
 
 A frozen AssetRipper IO.Files runtime probe records a top-level GZip-wrapped plain ResourceFile as one decoded ResourceFile with the original leaf name. Production `mount_path` and `mount_paths` now retain the decoded SmartStream instead of materializing its final payload; `source_gzip_wrapped_resource_mounts_file_backed_through_both_path_apis` compares bytes and file-backed storage for both routes. This adds bounded source evidence under open `IO-STREAM-001`; the feature row remains in progress because other final leaf/container paths and non-direct entry integration remain open. See `DIFF-IO-STREAM-TOP-LEVEL-LEAF-001` and `docs/validation-log.md`.
 
+The production path APIs now stream a top-level UnityWebData directory from a bounded header read and copy each entry to a temporary SmartStream in fixed-size chunks before scheme dispatch. The frozen source plain-WebData and GZip-entry inventories are replayed through both `mount_path` and `mount_paths`; exact names/bytes, file-backed storage, and source-file release are checked by `source_webdata_entries_mount_file_backed_through_both_path_apis`. This adds independent evidence under open `IO-STREAM-001`; nested WebData inside UnityFS and other container routes remain open. See `DIFF-IO-STREAM-WEBDATA-PATH-001` and `docs/validation-log.md`.
+
 ## Dependency order
 1. Close the import, container, serialization, generated-object, and reference path together. Do not treat file inventory or decoded TypeTree values as a complete object model.
 2. Close workspace scene and Prefab materialization, then animation processing on those objects.

@@ -64,6 +64,13 @@ pub struct WebFile<'a> {
     pub header_size: usize,
 }
 
+/// Parsed WebData directory records without a borrowed whole-file buffer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct WebFileDirectory {
+    pub entries: Vec<WebFileEntry>,
+    pub header_size: usize,
+}
+
 impl<'a> WebFile<'a> {
     pub fn is_web_file(input: &[u8]) -> bool {
         let signature = WEB_FILE_SIGNATURE.as_bytes();
@@ -77,7 +84,22 @@ impl<'a> WebFile<'a> {
     }
 
     pub fn parse_with_limits(input: &'a [u8], limits: WebFileLimits) -> Result<Self, WebFileError> {
-        let mut reader = BinaryReader::new(input, Endian::Little);
+        let directory = WebFileDirectory::parse_header_with_limits(input, input.len(), limits)?;
+        Ok(Self {
+            input,
+            entries: directory.entries,
+            header_size: directory.header_size,
+        })
+    }
+}
+
+impl WebFileDirectory {
+    pub(crate) fn header_size_from_prefix(
+        prefix: &[u8],
+        input_size: usize,
+        limits: WebFileLimits,
+    ) -> Result<usize, WebFileError> {
+        let mut reader = BinaryReader::new(prefix, Endian::Little);
         let signature = reader
             .read_null_terminated_utf8(WEB_FILE_SIGNATURE.len() + 1)
             .map_err(|error| WebFileError::binary(error, "WebData signature"))?;
@@ -108,12 +130,36 @@ impl<'a> WebFile<'a> {
                 limit: limits.max_header_bytes,
             }));
         }
-        if header_size > input.len() {
+        if header_size > input_size {
             return Err(WebFileError::new(WebFileErrorKind::HeaderOutOfBounds {
                 declared: header_size,
-                input_size: input.len(),
+                input_size,
             }));
         }
+        Ok(header_size)
+    }
+
+    pub(crate) fn parse_header_with_limits(
+        header_bytes: &[u8],
+        input_size: usize,
+        limits: WebFileLimits,
+    ) -> Result<WebFileDirectory, WebFileError> {
+        let header_size = Self::header_size_from_prefix(header_bytes, input_size, limits)?;
+        if header_size > header_bytes.len() {
+            return Err(WebFileError::new(WebFileErrorKind::HeaderBytesIncomplete {
+                declared: header_size,
+                available: header_bytes.len(),
+            }));
+        }
+
+        let available_size = header_bytes.len().min(input_size);
+        let mut reader = BinaryReader::new(&header_bytes[..available_size], Endian::Little);
+        reader
+            .read_null_terminated_utf8(WEB_FILE_SIGNATURE.len() + 1)
+            .map_err(|error| WebFileError::binary(error, "WebData signature"))?;
+        reader
+            .read_i32()
+            .map_err(|error| WebFileError::binary(error, "WebData header length"))?;
 
         let mut entries = Vec::new();
         while reader.position() < header_size {
@@ -152,6 +198,21 @@ impl<'a> WebFile<'a> {
                 ));
             }
 
+            if header_bytes.len() == header_size {
+                if let Some(position) = reader.position().checked_add(4) {
+                    if position > header_size && position <= input_size {
+                        return Err(WebFileError::new(
+                            WebFileErrorKind::DirectoryEntryCrossesHeader {
+                                entry: entries.len(),
+                                record_offset,
+                                header_size,
+                                position,
+                            },
+                        ));
+                    }
+                }
+            }
+
             // Entry names use a four-byte little-endian length prefix, matching
             // `EndianWriter.Write(string)` behind `WebFileEntry.Write` (proven
             // against reference-written files; see the differential test).
@@ -165,6 +226,18 @@ impl<'a> WebFile<'a> {
                     declared: name_length,
                     limit: limits.max_entry_name_bytes,
                 }));
+            }
+            if let Some(position) = reader.position().checked_add(name_length) {
+                if position > header_size && position <= input_size {
+                    return Err(WebFileError::new(
+                        WebFileErrorKind::DirectoryEntryCrossesHeader {
+                            entry: entries.len(),
+                            record_offset,
+                            header_size,
+                            position,
+                        },
+                    ));
+                }
             }
             let name = reader
                 .read_utf8(name_length)
@@ -180,7 +253,7 @@ impl<'a> WebFile<'a> {
                 ));
             }
 
-            let range = entry_byte_range(entries.len(), offset as u32, size as u32, input.len())?;
+            let range = entry_byte_range(entries.len(), offset as u32, size as u32, input_size)?;
 
             let mut owned_name = String::new();
             owned_name.try_reserve_exact(name.len()).map_err(|_| {
@@ -211,13 +284,14 @@ impl<'a> WebFile<'a> {
             ));
         }
 
-        Ok(Self {
-            input,
+        Ok(WebFileDirectory {
             entries,
             header_size,
         })
     }
+}
 
+impl<'a> WebFile<'a> {
     pub fn entry_data(&self, index: usize) -> Option<&'a [u8]> {
         let entry = self.entries.get(index)?;
         self.input.get(entry.range.clone())
@@ -428,6 +502,10 @@ pub enum WebFileErrorKind {
         declared: usize,
         input_size: usize,
     },
+    HeaderBytesIncomplete {
+        declared: usize,
+        available: usize,
+    },
     EntryLimitExceeded {
         limit: usize,
     },
@@ -507,6 +585,13 @@ impl Display for WebFileErrorKind {
             } => write!(
                 formatter,
                 "WebData header ends at {declared}, beyond input size {input_size}"
+            ),
+            Self::HeaderBytesIncomplete {
+                declared,
+                available,
+            } => write!(
+                formatter,
+                "WebData directory needs {declared} header bytes, but only {available} were read"
             ),
             Self::EntryLimitExceeded { limit } => {
                 write!(formatter, "WebData entry count exceeds configured limit {limit}")

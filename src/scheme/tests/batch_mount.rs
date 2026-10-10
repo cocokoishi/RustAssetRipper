@@ -137,6 +137,132 @@ fn mount_path_connects_root_webdata_to_recursive_virtual_mounting() {
     std::fs::remove_file(path).unwrap();
 }
 
+#[test]
+fn source_webdata_entries_mount_file_backed_through_both_path_apis() {
+    let cases = [
+        (
+            "webdata",
+            include_str!("../../io/io_differential_fixture.txt"),
+            "SCHEME|webdata|",
+            "CONTAINER:WebFile:webdata.bin:res=2:failed=0,RES:inner.bin:77656221,RES:sub/deep.bin:64656570",
+            vec![("inner.bin", b"web!".as_slice()), ("sub/deep.bin", b"deep".as_slice())],
+        ),
+        (
+            "webdata-gzip-entry",
+            include_str!("../../io/io_differential_stream_fixture.txt"),
+            "SCHEME|webdata_gzip_entry|",
+            "CONTAINER:WebFile:webdata_gzip_entry.bin:res=1:failed=0,RES:nested.gz:7765626461746120677A6970207061796C6F6164",
+            vec![("nested.gz", b"webdata gzip payload".as_slice())],
+        ),
+    ];
+
+    for (case_name, fixture, row_prefix, expected_tree, expected_entries) in cases {
+        let row = fixture
+            .lines()
+            .find(|line| line.starts_with(row_prefix))
+            .unwrap_or_else(|| panic!("source fixture has no {row_prefix:?} row"));
+        let fields: Vec<&str> = row.split('|').collect();
+        let input = fields
+            .iter()
+            .find_map(|field| field.strip_prefix("in="))
+            .map(decode_hex_fixture)
+            .expect("source WebData row includes exact input bytes");
+        assert!(fields.contains(&format!("tree={expected_tree}").as_str()));
+
+        let path = unique_temp_file_path("webdata");
+        std::fs::write(&path, input).expect("write frozen source WebData bytes");
+
+        let mut path_filesystem = VirtualFileSystem::new();
+        let path_report = SchemeReader::mount_path(
+            &path,
+            &mut path_filesystem,
+            Some("/webdata-path"),
+            SchemeReaderLimits::default(),
+            ContainerMountLimits::default(),
+        )
+        .unwrap_or_else(|error| panic!("mount source {case_name} WebData by path: {error}"));
+        assert_eq!(path_report.mounted_entries, expected_entries.len());
+        assert_eq!(path_report.resource_files.len(), expected_entries.len());
+        let expected_names = expected_entries
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            path_report
+                .resource_files
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            expected_names,
+            "source {case_name} resource order is retained"
+        );
+        for (name, expected) in &expected_entries {
+            let virtual_path = format!("/webdata-path/{name}");
+            assert_eq!(
+                path_filesystem
+                    .open_file(&virtual_path)
+                    .unwrap()
+                    .stream_type(),
+                crate::io::stream::SmartStreamType::File,
+                "source {case_name} entry remains file-backed"
+            );
+            assert_eq!(
+                path_filesystem
+                    .read_all_bytes(&virtual_path, expected.len())
+                    .unwrap(),
+                *expected,
+                "source {case_name} entry bytes match the reference inventory"
+            );
+        }
+
+        let mut batch_filesystem = VirtualFileSystem::new();
+        let batch_inputs = [PathMountInput {
+            path: path.clone(),
+            destination_root: Some("/webdata-batch".to_owned()),
+        }];
+        let batch_report = SchemeReader::mount_paths(
+            &batch_inputs,
+            &mut batch_filesystem,
+            SchemeReaderLimits::default(),
+            ContainerMountLimits::default(),
+            BatchMountLimits::default(),
+        )
+        .unwrap_or_else(|error| panic!("mount source {case_name} WebData by batch path: {error}"));
+        assert_eq!(batch_report.completed_inputs, 1);
+        assert_eq!(batch_report.mounted_entries, expected_entries.len());
+        assert_eq!(batch_report.container_trees.len(), 1);
+        assert_eq!(
+            batch_report.container_trees[0]
+                .resource_files
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            expected_names,
+            "batch source {case_name} resource order is retained"
+        );
+        for (name, expected) in &expected_entries {
+            let virtual_path = format!("/webdata-batch/{name}");
+            assert_eq!(
+                batch_filesystem
+                    .open_file(&virtual_path)
+                    .unwrap()
+                    .stream_type(),
+                crate::io::stream::SmartStreamType::File,
+                "batch source {case_name} entry remains file-backed"
+            );
+            assert_eq!(
+                batch_filesystem
+                    .read_all_bytes(&virtual_path, expected.len())
+                    .unwrap(),
+                *expected,
+                "batch source {case_name} entry bytes match the reference inventory"
+            );
+        }
+
+        std::fs::remove_file(&path).expect("mounted WebData entries no longer hold source file");
+    }
+}
+
 /// Single-path import against reference-written bytes.
 ///
 /// The WebData containers below were written by the frozen

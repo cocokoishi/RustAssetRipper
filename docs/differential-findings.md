@@ -2034,3 +2034,14 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | `mount_path` and `mount_paths` now pass file-backed `SerializedFile` and `Resource` dispatch results to `mount_container_stream_at_path` instead of calling `into_dispatched` and materializing the final payload. Direct input streams are copied in bounded chunks to a temporary backing stream so the VFS does not retain a lock on the caller's source file; decoded wrapper streams already use temporary backing and are mounted directly. Existing output bounds and path validation remain active. |
 | Regression evidence | `source_gzip_wrapped_resource_mounts_file_backed_through_both_path_apis` writes the source input to the source leaf name, exercises both production path APIs, checks one entry and the decoded bytes, and confirms each mounted file remains backed by `SmartStreamType::File`. The focused regression passed. |
 | Remaining comparison | Other final leaf/container kinds, compressed/non-direct container entries, and Unix retained-reader runtime validation remain open. `IO-STREAM-001` remains in progress; this bounded case closes no parity row. |
+
+## DIFF-IO-STREAM-WEBDATA-PATH-001 — top-level WebData streaming mount
+
+| Field | Finding |
+|---|---|
+| Source location | `AssetRipper.IO.Files/SchemeReader.cs` (`LoadFile`, recursive source behavior); `AssetRipper.IO.Files/WebFiles/WebFile.cs`; `ResourceFile.cs` |
+| Input evidence | Frozen source rows `SCHEME|webdata` in `src/io/io_differential_fixture.txt` and `SCHEME|webdata_gzip_entry` in `src/io/io_differential_stream_fixture.txt`, with exact source-mounted inventories and payload bytes. |
+| Source-derived behavior | Top-level UnityWebData entries are recursively dispatched in directory order; the GZip entry becomes a ResourceFile with the decoded payload and original entry name. |
+| Rust change | `mount_path` and `mount_paths` route direct UnityWebData streams into the bounded directory reader. It reads only the header after a 20-byte prefix, then copies entry ranges with a fixed 64 KiB buffer into temporary SmartStreams before dispatch. Resource and SerializedFile results mount from their backing streams; other kinds retain the existing recursive dispatch path. Header, input, entry, nesting, path, and output limits remain enforced. |
+| Regression evidence | `source_webdata_entries_mount_file_backed_through_both_path_apis` replays both frozen source rows through both production APIs, checks exact paths and bytes, requires file-backed mounted entries, and removes each input while the VFS outputs remain live. |
+| Remaining comparison | This covers direct top-level WebData inputs. WebData nested inside UnityFS, other Raw/Web container entry paths, generic final-layer parsing, and Unix retained-reader runtime validation remain open; `IO-STREAM-001` remains in progress. |

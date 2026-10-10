@@ -1,10 +1,11 @@
 use std::borrow::Cow;
-use std::io::{Seek, SeekFrom};
+use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 
 use super::reader::probe_direct_stream_kind;
 use super::*;
 use crate::container::unityfs::{UnityFsError, UnityFsStreamBundle};
+use crate::container::web_file::WebFileDirectory;
 use crate::io::filesystem::VirtualFileSystem;
 use crate::io::special_names::fix_file_identifier;
 use crate::io::stream::SmartStream;
@@ -284,6 +285,414 @@ pub(super) fn mount_unityfs_stream_tree(
         &mut state,
     )?;
     Ok(state.report)
+}
+
+pub(super) fn mount_webdata_stream_tree(
+    source: &SmartStream,
+    source_name: Option<&str>,
+    filesystem: &mut VirtualFileSystem,
+    destination_root: Option<&str>,
+    scheme_limits: SchemeReaderLimits,
+    limits: ContainerMountLimits,
+) -> Result<ContainerMountReport, ContainerMountError> {
+    let mut state = ContainerTreeMountState {
+        filesystem,
+        limits,
+        visited_entries: 0,
+        active_nested_bytes: 0,
+        container_scope_path_bytes: 0,
+        container_bundle_name_bytes: 0,
+        bundle_serialized_file_counts: Vec::new(),
+        bundle_resource_file_counts: Vec::new(),
+        resource_file_path_bytes: 0,
+        resource_file_name_bytes: 0,
+        report: ContainerMountReport::default(),
+    };
+    mount_webdata_stream_tree_at(
+        source,
+        WebDataStreamContext {
+            destination_root,
+            depth: 0,
+            parent_bundle_index: None,
+            parent_entry_index: None,
+            source_name,
+        },
+        scheme_limits,
+        &mut state,
+    )?;
+    Ok(state.report)
+}
+
+struct WebDataStreamContext<'a> {
+    destination_root: Option<&'a str>,
+    depth: usize,
+    parent_bundle_index: Option<usize>,
+    parent_entry_index: Option<usize>,
+    source_name: Option<&'a str>,
+}
+
+fn mount_webdata_stream_tree_at(
+    source: &SmartStream,
+    context: WebDataStreamContext<'_>,
+    scheme_limits: SchemeReaderLimits,
+    state: &mut ContainerTreeMountState<'_>,
+) -> Result<(), ContainerMountError> {
+    let WebDataStreamContext {
+        destination_root,
+        depth,
+        parent_bundle_index,
+        parent_entry_index,
+        source_name,
+    } = context;
+    let container_scope_index = record_container_scope(destination_root, state)?;
+    let container_bundle_index = record_container_bundle(
+        container_scope_index,
+        parent_bundle_index,
+        parent_entry_index,
+        source_name,
+        state,
+    )?;
+    if depth > state.limits.max_depth {
+        return Err(ContainerMountError::new(
+            state.report.clone(),
+            ContainerMountErrorKind::NestingDepthLimitExceeded {
+                depth,
+                limit: state.limits.max_depth,
+            },
+        ));
+    }
+
+    let directory = read_webdata_directory(source, source_name, scheme_limits, &state.report)?;
+    preflight_tree_entry_count(directory.entries.len(), state)?;
+    for (index, entry) in directory.entries.iter().enumerate() {
+        let virtual_path = checked_container_entry_path(
+            state.filesystem,
+            destination_root,
+            entry.name.as_str(),
+            index,
+            &state.report,
+        )?;
+        let entry_stream = copy_webdata_entry_to_temp(
+            source,
+            u64::from(entry.offset),
+            u64::from(entry.size),
+            &virtual_path,
+            index,
+            scheme_limits,
+            &state.report,
+        )?;
+        let dispatched = SchemeReader::dispatch_stream_file_backed(entry_stream, scheme_limits)
+            .map_err(|error| {
+                ContainerMountError::new(
+                    state.report.clone(),
+                    ContainerMountErrorKind::Scheme(error),
+                )
+            })?;
+
+        match dispatched.kind {
+            FileKind::SerializedFile => {
+                let serialized_file = prepare_mounted_serialized_file(
+                    &virtual_path,
+                    index,
+                    container_scope_index,
+                    container_bundle_index,
+                    state,
+                )?;
+                mount_container_stream_at_path(
+                    state.filesystem,
+                    &virtual_path,
+                    index,
+                    dispatched.stream,
+                    state.limits,
+                    &mut state.report,
+                )?;
+                state.report.serialized_file_path_bytes = serialized_file.total_path_bytes;
+                state.report.serialized_files.push(serialized_file.record);
+                state.bundle_serialized_file_counts[container_bundle_index] =
+                    serialized_file.next_bundle_collection_count;
+            }
+            FileKind::Resource => {
+                let resource_file = prepare_mounted_resource_file(
+                    &virtual_path,
+                    entry.name.as_str(),
+                    index,
+                    container_scope_index,
+                    container_bundle_index,
+                    state,
+                )?;
+                mount_container_stream_at_path(
+                    state.filesystem,
+                    &virtual_path,
+                    index,
+                    dispatched.stream,
+                    state.limits,
+                    &mut state.report,
+                )?;
+                state.resource_file_path_bytes = resource_file.total_path_bytes;
+                state.report.resource_file_path_bytes = resource_file.total_path_bytes;
+                state.resource_file_name_bytes = resource_file.total_name_bytes;
+                state.report.resource_file_name_bytes = resource_file.total_name_bytes;
+                state.report.resource_files.push(resource_file.record);
+                state.bundle_resource_file_counts[container_bundle_index] =
+                    resource_file.next_bundle_resource_count;
+            }
+            _ => {
+                let child = dispatched.into_dispatched(scheme_limits).map_err(|error| {
+                    ContainerMountError::new(
+                        state.report.clone(),
+                        ContainerMountErrorKind::Scheme(error),
+                    )
+                })?;
+                mount_tree_child(
+                    child,
+                    ContainerTreeEntry {
+                        virtual_path,
+                        source_name: entry.name.as_str(),
+                        entry_index: index,
+                    },
+                    container_scope_index,
+                    container_bundle_index,
+                    depth,
+                    state,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn read_webdata_directory(
+    source: &SmartStream,
+    source_name: Option<&str>,
+    scheme_limits: SchemeReaderLimits,
+    report: &ContainerMountReport,
+) -> Result<WebFileDirectory, ContainerMountError> {
+    const WEB_DATA_PREFIX_SIZE: usize = 20;
+
+    let path = source_name.unwrap_or("<WebData>");
+    let input_length = source.length().map_err(|source| {
+        ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::FileSystem {
+                entry_index: 0,
+                path: path.to_owned(),
+                source,
+            },
+        )
+    })?;
+    if input_length > u64::try_from(scheme_limits.max_input_bytes).unwrap_or(u64::MAX) {
+        return Err(ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::Scheme(SchemeError::new(
+                SchemeErrorKind::InputSizeLimitExceeded {
+                    requested: input_length,
+                    limit: scheme_limits.max_input_bytes,
+                },
+            )),
+        ));
+    }
+    let input_size = usize::try_from(input_length).map_err(|_| {
+        ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::Scheme(SchemeError::new(
+                SchemeErrorKind::InputLengthNotRepresentable {
+                    length: input_length,
+                },
+            )),
+        )
+    })?;
+    let prefix_size = input_size.min(WEB_DATA_PREFIX_SIZE);
+    let mut prefix = [0u8; WEB_DATA_PREFIX_SIZE];
+    source
+        .read_exact_at(0, &mut prefix[..prefix_size])
+        .map_err(|source| {
+            ContainerMountError::new(
+                report.clone(),
+                ContainerMountErrorKind::FileSystem {
+                    entry_index: 0,
+                    path: path.to_owned(),
+                    source,
+                },
+            )
+        })?;
+    let header_size = WebFileDirectory::header_size_from_prefix(
+        &prefix[..prefix_size],
+        input_size,
+        scheme_limits.web_file,
+    )
+    .map_err(|error| {
+        ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::Scheme(SchemeError::new(SchemeErrorKind::WebFile(error))),
+        )
+    })?;
+    let mut header = Vec::new();
+    header.try_reserve_exact(header_size).map_err(|_| {
+        ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::FileSystem {
+                entry_index: 0,
+                path: path.to_owned(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::OutOfMemory,
+                    format!("could not allocate {header_size} WebData directory bytes"),
+                ),
+            },
+        )
+    })?;
+    header.resize(header_size, 0);
+    source.read_exact_at(0, &mut header).map_err(|source| {
+        ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::FileSystem {
+                entry_index: 0,
+                path: path.to_owned(),
+                source,
+            },
+        )
+    })?;
+    WebFileDirectory::parse_header_with_limits(&header, input_size, scheme_limits.web_file).map_err(
+        |error| {
+            ContainerMountError::new(
+                report.clone(),
+                ContainerMountErrorKind::Scheme(SchemeError::new(SchemeErrorKind::WebFile(error))),
+            )
+        },
+    )
+}
+
+fn copy_webdata_entry_to_temp(
+    source: &SmartStream,
+    offset: u64,
+    size: u64,
+    path: &str,
+    entry_index: usize,
+    scheme_limits: SchemeReaderLimits,
+    report: &ContainerMountReport,
+) -> Result<SmartStream, ContainerMountError> {
+    if size > u64::try_from(scheme_limits.max_input_bytes).unwrap_or(u64::MAX) {
+        return Err(ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::Scheme(SchemeError::new(
+                SchemeErrorKind::InputSizeLimitExceeded {
+                    requested: size,
+                    limit: scheme_limits.max_input_bytes,
+                },
+            )),
+        ));
+    }
+    let end = offset.checked_add(size).ok_or_else(|| {
+        ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::FileSystem {
+                entry_index,
+                path: path.to_owned(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "WebData entry range overflows",
+                ),
+            },
+        )
+    })?;
+    let source_length = source.length().map_err(|source| {
+        ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::FileSystem {
+                entry_index,
+                path: path.to_owned(),
+                source,
+            },
+        )
+    })?;
+    if end > source_length {
+        return Err(ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::FileSystem {
+                entry_index,
+                path: path.to_owned(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    format!("WebData entry range {offset}..{end} exceeds {source_length} bytes"),
+                ),
+            },
+        ));
+    }
+
+    let mut output = SmartStream::create_temp().map_err(|source| {
+        ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::FileSystem {
+                entry_index,
+                path: path.to_owned(),
+                source,
+            },
+        )
+    })?;
+    let mut copied = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    while copied < size {
+        let remaining = size - copied;
+        let chunk_size = buffer
+            .len()
+            .min(usize::try_from(remaining).unwrap_or(usize::MAX));
+        let read_offset = offset.checked_add(copied).ok_or_else(|| {
+            ContainerMountError::new(
+                report.clone(),
+                ContainerMountErrorKind::FileSystem {
+                    entry_index,
+                    path: path.to_owned(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "WebData entry copy offset overflows",
+                    ),
+                },
+            )
+        })?;
+        source
+            .read_exact_at(read_offset, &mut buffer[..chunk_size])
+            .map_err(|source| {
+                ContainerMountError::new(
+                    report.clone(),
+                    ContainerMountErrorKind::FileSystem {
+                        entry_index,
+                        path: path.to_owned(),
+                        source,
+                    },
+                )
+            })?;
+        output.write_all(&buffer[..chunk_size]).map_err(|source| {
+            ContainerMountError::new(
+                report.clone(),
+                ContainerMountErrorKind::FileSystem {
+                    entry_index,
+                    path: path.to_owned(),
+                    source,
+                },
+            )
+        })?;
+        copied += chunk_size as u64;
+    }
+    output.flush().map_err(|source| {
+        ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::FileSystem {
+                entry_index,
+                path: path.to_owned(),
+                source,
+            },
+        )
+    })?;
+    output.seek(SeekFrom::Start(0)).map_err(|source| {
+        ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::FileSystem {
+                entry_index,
+                path: path.to_owned(),
+                source,
+            },
+        )
+    })?;
+    Ok(output)
 }
 
 fn mount_unityfs_stream_tree_at(
