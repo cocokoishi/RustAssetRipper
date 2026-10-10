@@ -120,6 +120,16 @@ if (args.Length > 0 && args[0] == "export-lightmap-light-baking-project")
     return ExportLightmapProject(args[1], args[2], args[3], "Image", "Bmp", "5.6.0f1", "light-nonzero-baking");
 }
 
+if (args.Length > 0 && args[0] == "export-lightmap-multiple-lights-baking-project")
+{
+    if (args.Length != 4)
+    {
+        Console.Error.WriteLine("usage: managed-project export-lightmap-multiple-lights-baking-project <input-root> <output-root> <rows-file>");
+        return 2;
+    }
+    return ExportLightmapProject(args[1], args[2], args[3], "Image", "Bmp", "5.6.0f1", "light-multiple-baking");
+}
+
 if (args.Length > 0 && args[0] == "export-path-id-map-project")
 {
     if (args.Length is < 4 or > 5)

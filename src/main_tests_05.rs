@@ -718,7 +718,7 @@
             [
                 std::ffi::OsString::from("export-project"),
                 std::ffi::OsString::from("--settings"),
-                settings_path.into_os_string(),
+                settings_path.clone().into_os_string(),
                 baking_output_root.clone().into_os_string(),
                 source_path.clone().into_os_string(),
             ]
@@ -777,6 +777,84 @@
             "m_LightingDataAsset: {{fileID: 112000000, guid: {baking_lighting_data_guid}, type: 2}}"
         )));
         assert_eq!(fs::read(&source_path).unwrap(), baking_input_bytes);
+
+        let multiple_fixture =
+            include_str!("export/lightmap_project_source_5_6_multiple_lights_fixture.txt");
+        assert!(multiple_fixture
+            .lines()
+            .any(|line| line == "UNITY_VERSION|5.6.0f1"));
+        let multiple_input_bytes =
+            fixture_value(multiple_fixture, "INPUT_HEX|LightmapFixture.assets|");
+        fs::write(&source_path, &multiple_input_bytes).unwrap();
+        let multiple_output_root = directory.join("project-lightmap-5.6-multiple-lights");
+        super::run(
+            [
+                std::ffi::OsString::from("export-project"),
+                std::ffi::OsString::from("--settings"),
+                settings_path.into_os_string(),
+                multiple_output_root.clone().into_os_string(),
+                source_path.clone().into_os_string(),
+            ]
+            .into_iter(),
+        )
+        .expect("Unity 5.6 multiple Light LightingDataAsset export succeeds");
+
+        let multiple_lighting_data_path = multiple_output_root
+            .join("Assets/Scenes/lightmapfixture.assets/LightingData.asset");
+        let multiple_lighting_data = fs::read_to_string(&multiple_lighting_data_path).unwrap();
+        let source_multiple_lighting_data = fixture_value(
+            multiple_fixture,
+            "SOURCE_OUTPUT|ExportedProject/Assets/Scenes/lightmapfixture.assets/LightingData.asset|",
+        );
+        assert_eq!(
+            normalize(&multiple_lighting_data),
+            normalize(std::str::from_utf8(&source_multiple_lighting_data).unwrap()),
+            "complete Unity 5.6 multiple-Light LightingDataAsset differs from frozen source"
+        );
+        assert!(multiple_lighting_data.contains(
+            "m_Lights:\n  - targetObject: 105\n    targetPrefab: 0\n  - targetObject: 106\n    targetPrefab: 0"
+        ));
+        assert!(multiple_lighting_data.contains(
+            "m_LightBakingOutputs:\n  - probeOcclusionLightIndex: 7\n    occlusionMaskChannel: 3\n    lightmappingMask: 258\n  - probeOcclusionLightIndex: 4\n    occlusionMaskChannel: 2\n    lightmappingMask: 513"
+        ));
+
+        let multiple_lighting_data_meta = fs::read_to_string(format!(
+            "{}.meta",
+            multiple_lighting_data_path.display()
+        ))
+        .unwrap();
+        let source_multiple_lighting_data_meta = fixture_value(
+            multiple_fixture,
+            "SOURCE_OUTPUT|ExportedProject/Assets/Scenes/lightmapfixture.assets/LightingData.asset.meta|",
+        );
+        assert_eq!(
+            normalize(&multiple_lighting_data_meta),
+            normalize(std::str::from_utf8(&source_multiple_lighting_data_meta).unwrap()),
+            "Unity 5.6 multiple-Light LightingDataAsset metadata differs from frozen source"
+        );
+        let multiple_lighting_data_guid = multiple_lighting_data_meta
+            .lines()
+            .find_map(|line| line.strip_prefix("guid: "))
+            .expect("multiple-Light LightingDataAsset metadata contains a GUID");
+        let multiple_scene = fs::read_to_string(
+            multiple_output_root.join("Assets/Scenes/lightmapfixture.assets.unity"),
+        )
+        .unwrap();
+        let source_multiple_scene = fixture_value(
+            multiple_fixture,
+            "SOURCE_OUTPUT|ExportedProject/Assets/Scenes/lightmapfixture.assets.unity|",
+        );
+        assert_eq!(
+            normalize(&multiple_scene),
+            normalize(std::str::from_utf8(&source_multiple_scene).unwrap()),
+            "complete Unity 5.6 multiple-Light Scene differs from frozen source"
+        );
+        assert!(multiple_scene.contains("--- !u!108 &105\nLight:"));
+        assert!(multiple_scene.contains("--- !u!108 &106\nLight:"));
+        assert!(multiple_scene.contains(&format!(
+            "m_LightingDataAsset: {{fileID: 112000000, guid: {multiple_lighting_data_guid}, type: 2}}"
+        )));
+        assert_eq!(fs::read(&source_path).unwrap(), multiple_input_bytes);
     }
 
     #[test]

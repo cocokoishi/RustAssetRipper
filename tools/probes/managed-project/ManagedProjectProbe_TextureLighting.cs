@@ -453,7 +453,7 @@ ObjectData = textureBody,
             collection,
             version);
         List<object> assets = new() { lightmapSettings, renderSettings, texture };
-        if (sceneKind is "light" or "light-nonzero-baking")
+        if (sceneKind is "light" or "light-nonzero-baking" or "light-multiple-baking")
         {
             object gameObject = MakeGenerated(
                 "AssetRipper.SourceGenerated.Classes.ClassID_1.GameObject",
@@ -474,7 +474,7 @@ ObjectData = textureBody,
                 105,
                 collection,
                 version);
-            if (sceneKind == "light-nonzero-baking")
+            if (sceneKind is "light-nonzero-baking" or "light-multiple-baking")
             {
                 object bakingOutput = FindGeneratedProperty(light, "BakingOutput").GetValue(light)
                     ?? throw new InvalidOperationException("Light.BakingOutput is null");
@@ -489,6 +489,24 @@ ObjectData = textureBody,
             assets.Add(gameObject);
             assets.Add(transform);
             assets.Add(light);
+            if (sceneKind == "light-multiple-baking")
+            {
+                object secondLight = MakeGenerated(
+                    "AssetRipper.SourceGenerated.Classes.ClassID_108.Light",
+                    108,
+                    106,
+                    collection,
+                    version);
+                object secondBakingOutput =
+                    FindGeneratedProperty(secondLight, "BakingOutput").GetValue(secondLight)
+                    ?? throw new InvalidOperationException("Second Light.BakingOutput is null");
+                SetGeneratedProperty(secondBakingOutput, "ProbeOcclusionLightIndex", 4);
+                SetGeneratedProperty(secondBakingOutput, "OcclusionMaskChannel", 2);
+                SetGeneratedProperty(secondBakingOutput, "LightmappingMask", 513);
+                SetGeneratedAssetPointer(secondLight, "GameObject_C8", collection, gameObject);
+                AddGeneratedAssetPointer(gameObject, "Components", collection, secondLight);
+                assets.Add(secondLight);
+            }
         }
         if (sceneKind is "mesh-renderer" or "mesh-filter-renderer")
         {
@@ -549,7 +567,7 @@ ObjectData = textureBody,
             assets.Add(transform);
             assets.Add(renderer);
         }
-        else if (sceneKind is not ("empty" or "light" or "light-nonzero-baking"))
+        else if (sceneKind is not ("empty" or "light" or "light-nonzero-baking" or "light-multiple-baking"))
         {
             throw new ArgumentException($"unsupported lightmap scene fixture: {sceneKind}");
         }
