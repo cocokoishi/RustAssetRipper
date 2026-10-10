@@ -31,6 +31,10 @@ pub enum UnityYamlWorkspaceExportError {
         source: ExportAssetIdentity,
         message: String,
     },
+    AnimationClipEditorFormatInvariant {
+        source: ExportAssetIdentity,
+        message: String,
+    },
     SceneManagerEditorFormatInvariant {
         source: ExportAssetIdentity,
         message: String,
@@ -207,6 +211,10 @@ impl Display for UnityYamlWorkspaceExportError {
             Self::GeneratedLightingDataInvariant { source, message } => write!(
                 f,
                 "generated LightingDataAsset YAML export failed for {source:?}: {message}"
+            ),
+            Self::AnimationClipEditorFormatInvariant { source, message } => write!(
+                f,
+                "processed AnimationClip YAML export failed for {source:?}: {message}"
             ),
             Self::SceneManagerEditorFormatInvariant { source, message } => write!(
                 f,

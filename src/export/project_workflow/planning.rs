@@ -14,6 +14,7 @@ pub(super) struct RoutedAssetPlanningContext<'context, 'object, 'provider, 'grap
     pub(super) assembly_manager_is_set: bool,
     pub(super) pointer_map: &'context ProjectExportPointerMap,
     pub(super) streamed_resources: WorkspaceStreamedYamlResourceContext<'context, 'provider>,
+    pub(super) processed_animation_roots: &'context HashMap<(usize, usize), SerializedValue>,
     pub(super) limits: WorkspaceProjectExportLimits,
 }
 
@@ -119,6 +120,7 @@ pub(super) fn plan_routed_asset_files(
         assembly_manager_is_set,
         pointer_map,
         streamed_resources,
+        processed_animation_roots,
         limits,
     } = *context;
     let mut total_bytes = builder.total_bytes;
@@ -483,18 +485,22 @@ pub(super) fn plan_routed_asset_files(
             | ObjectRoute::ShaderYaml
             | ObjectRoute::Manager => {
                 let source = identity_of(entry);
-                let document = workspace_object_to_unity_yaml_document_with_streamed_resources(
-                    workspace,
-                    reference_graph,
-                    pointer_map,
-                    entry.object,
-                    source,
-                    entry.file_id,
-                    entry.collection_index,
-                    None,
-                    limits.yaml_collection.object_conversion,
-                    &streamed_resources,
-                )?;
+                let animation_clip_root = processed_animation_roots
+                    .get(&(entry.object.file_index, entry.object.object_index));
+                let document =
+                    workspace_object_to_unity_yaml_document_with_processed_animation_root(
+                        workspace,
+                        reference_graph,
+                        pointer_map,
+                        entry.object,
+                        source,
+                        entry.file_id,
+                        entry.collection_index,
+                        None,
+                        limits.yaml_collection.object_conversion,
+                        animation_clip_root,
+                        &streamed_resources,
+                    )?;
                 let Some(mut document) = document else {
                     notices.push(ProjectExportNotice {
                         subject: entry.selection.collection_name.to_owned(),

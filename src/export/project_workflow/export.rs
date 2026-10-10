@@ -108,6 +108,38 @@ fn validate_workspace_project_export<'inputs, 'provider, 'graph>(
     )?;
     let lightmap_texture_directories = lightmap_texture_scene_directories(
         &scene_processing,
+    let has_animation_clips =
+        inputs
+            .workspace
+            .files()
+            .iter()
+            .enumerate()
+            .any(|(file_index, file)| {
+                (0..file.metadata.objects.len()).any(|object_index| {
+                    inputs
+                        .reference_graph
+                        .object_class_id(file_index, object_index)
+                        == Some(74)
+                })
+            });
+    let processed_animation_roots = if has_animation_clips {
+        process_workspace_animation_clips(
+            inputs.workspace,
+            inputs.objects,
+            inputs.reference_graph,
+            &scene_processing.graph,
+            inputs.managed_assemblies,
+            inputs.limits.yaml_collection.object_conversion.max_values,
+        )
+        .map_err(|error| {
+            invalid_project(format!(
+                "AnimationClip editor-format conversion failed: {error}"
+            ))
+        })?
+    } else {
+        HashMap::new()
+    };
+
         inputs.objects,
         inputs.reference_graph,
     )?;
@@ -129,6 +161,7 @@ fn validate_workspace_project_export<'inputs, 'provider, 'graph>(
         used_guids,
         lightmap_texture_directories,
     })
+        processed_animation_roots,
 }
 
 /// Execute project export with the imported assembly catalog available to script exporters.
@@ -179,6 +212,7 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
         lightmap_texture_directories,
     } = context;
     let WorkspaceProjectExportInputs {
+        processed_animation_roots,
         output_root,
         delete_existing,
         filesystem,
@@ -303,6 +337,7 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
             objects,
             reference_graph,
             pointer_map: &pointer_map,
+            processed_animation_roots: &processed_animation_roots,
             prefabs: &prefab_collections,
             scene_processing: &scene_processing,
             editor_version_text,

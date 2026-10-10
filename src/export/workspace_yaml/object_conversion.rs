@@ -39,6 +39,7 @@ pub(super) struct WorkspaceYamlObjectConversionRequest<'object> {
     pub(super) object: &'object WorkspaceObject,
     pub(super) source: ExportAssetIdentity,
     pub(super) file_id: i64,
+    pub(super) processed_animation_root: Option<&'object SerializedValue>,
     pub(super) generated_component_overlay: Option<&'object WorkspaceGeneratedComponentYamlOverlay>,
     pub(super) generated_prefab_internal: Option<&'object WorkspaceGeneratedPrefabInternalPointer>,
     pub(super) generated_lighting_data: Option<&'object WorkspaceGeneratedLightingDataYamlPointer>,
@@ -53,6 +54,7 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
             object,
             source,
             file_id,
+            processed_animation_root,
             generated_component_overlay,
             generated_prefab_internal,
             generated_lighting_data,
@@ -147,6 +149,17 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
                 message: "edited GameObject payload or planned component pointer disagrees with the source identity".to_owned(),
             });
             }
+        }
+        if processed_animation_root.is_some()
+            && (class_id != 74
+                || generated_component_overlay.is_some()
+                || generated_prefab_internal.is_some()
+                || generated_lighting_data.is_some())
+        {
+            return Err(UnityYamlWorkspaceExportError::AnimationClipEditorFormatInvariant {
+                source,
+                message: "processed AnimationClip root is attached to an incompatible object or another generated overlay".to_owned(),
+            });
         }
         if !payload.trailing_bytes.is_empty() {
             return Err(UnityYamlWorkspaceExportError::UnparsedTrailingPayload {
@@ -363,6 +376,7 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
             }
         }
         let mut export_root = streamed_export_root
+            .or_else(|| processed_animation_root.cloned())
             .or_else(|| generated_component_overlay.map(|overlay| overlay.payload.root.clone()));
         if let Some(pointer) = generated_prefab_internal {
             if export_root.is_none() {
@@ -1762,15 +1776,46 @@ fn resolve_workspace_pointer(
                 && edge.file_id == request.file_id
                 && edge.path_id == request.path_id
         });
-    let Some(edge) = matching_edges.next() else {
-        *error = Some(UnityYamlWorkspaceExportError::ReferenceEdgeMissing {
-            file_index,
-            object_index: request.source.object_index,
-            field_path: request.field_path.to_owned(),
-            file_id: request.file_id,
-            path_id: request.path_id,
-        });
-        return ProjectPointerResolution::Null;
+    let edge = if let Some(edge) = matching_edges.next() {
+        if matching_edges.next().is_some() {
+            *error = Some(UnityYamlWorkspaceExportError::ReferenceEdgeAmbiguous {
+                file_index,
+                object_index: request.source.object_index,
+                field_path: request.field_path.to_owned(),
+                file_id: request.file_id,
+                path_id: request.path_id,
+            });
+            return ProjectPointerResolution::Null;
+        }
+        edge
+    } else {
+        // AnimationClip conversion appends PPtr keys whose paths did not exist in the scanned
+        // source TypeTree. Resolve them only through an identical serialized pointer already
+        // present in this same object, and only when every matching source edge agrees.
+        let mut pair_matches = reference_graph
+            .references_from_object(file_index, request.source.object_index)
+            .filter(|edge| edge.file_id == request.file_id && edge.path_id == request.path_id);
+        let Some(edge) = pair_matches.next() else {
+            *error = Some(UnityYamlWorkspaceExportError::ReferenceEdgeMissing {
+                file_index,
+                object_index: request.source.object_index,
+                field_path: request.field_path.to_owned(),
+                file_id: request.file_id,
+                path_id: request.path_id,
+            });
+            return ProjectPointerResolution::Null;
+        };
+        if pair_matches.any(|candidate| candidate.resolution != edge.resolution) {
+            *error = Some(UnityYamlWorkspaceExportError::ReferenceEdgeAmbiguous {
+                file_index,
+                object_index: request.source.object_index,
+                field_path: request.field_path.to_owned(),
+                file_id: request.file_id,
+                path_id: request.path_id,
+            });
+            return ProjectPointerResolution::Null;
+        }
+        edge
     };
     if matching_edges.next().is_some() {
         *error = Some(UnityYamlWorkspaceExportError::ReferenceEdgeAmbiguous {
@@ -1885,6 +1930,7 @@ pub fn workspace_object_to_unity_yaml_document(
         source,
         file_id,
         generated_component_overlay: None,
+        processed_animation_root: None,
         generated_prefab_internal: None,
         generated_lighting_data: None,
     })?
@@ -1909,6 +1955,37 @@ pub fn workspace_object_to_unity_yaml_document_with_streamed_resources(
     limits: UnityYamlObjectConversionLimits,
     streamed_resources: &WorkspaceStreamedYamlResourceContext<'_, '_>,
 ) -> Result<Option<UnityYamlDocument>, UnityYamlWorkspaceExportError> {
+) -> Result<Option<UnityYamlDocument>, UnityYamlWorkspaceExportError> {
+    workspace_object_to_unity_yaml_document_with_processed_animation_root(
+        workspace,
+        reference_graph,
+        pointer_map,
+        object,
+        source,
+        file_id,
+        current_collection_index,
+        missing_reference_guid,
+        limits,
+        None,
+        streamed_resources,
+    )
+}
+
+/// Convert one workspace object using an already processed AnimationClip root when present.
+/// Other object families retain the same streamed-resource conversion behavior.
+#[allow(clippy::too_many_arguments)]
+pub fn workspace_object_to_unity_yaml_document_with_processed_animation_root(
+    workspace: &SerializedFileWorkspace,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+    pointer_map: &ProjectExportPointerMap,
+    object: &WorkspaceObject,
+    source: ExportAssetIdentity,
+    file_id: i64,
+    current_collection_index: usize,
+    missing_reference_guid: Option<[u8; 16]>,
+    limits: UnityYamlObjectConversionLimits,
+    processed_animation_root: Option<&SerializedValue>,
+    streamed_resources: &WorkspaceStreamedYamlResourceContext<'_, '_>,
     WorkspaceYamlExportContext::new(
         workspace,
         reference_graph,
@@ -1923,6 +2000,7 @@ pub fn workspace_object_to_unity_yaml_document_with_streamed_resources(
         source,
         file_id,
         generated_component_overlay: None,
+        processed_animation_root,
         generated_prefab_internal: None,
         generated_lighting_data: None,
     })

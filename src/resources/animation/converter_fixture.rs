@@ -4,7 +4,8 @@
 //! `tools/probes/anim-convert/Program.cs::RunConvert`; the expected output is captured by the
 //! shipped AssetRipper.Processing runtime in `clip_convert_fixture.txt`. This checks orchestration
 //! across streamed, dense, and constant curves, scene lookups, binding classification, events,
-//! and PPtr curves in one comparison. It does not replace the missing ObjectWorkspace caller.
+//! and PPtr curves in one comparison. The production workspace caller and project-YAML path are
+//! exercised separately by `export::anim_wiring` tests.
 
 use std::fmt::Write as _;
 
@@ -19,6 +20,7 @@ use crate::resources::animation::converter::{process_clip, ConverterContext};
 use crate::resources::animation::scene_facts::{
     build_path_checksum_cache, GameObjectFacts, PathCacheAsset, SceneFactsTable,
 };
+use crate::resources::animation::serialized_clip::read_animation_clip_for_conversion;
 use crate::resources::muscle_clip_info::{MuscleClipConstantView, MuscleClipInfoView};
 use crate::resources::path_checksum::{PathChecksumCache, PathChecksumLimits, ProcessedScriptSet};
 use crate::resources::vertex_data_blob::{EndianType, UnityVersion};
@@ -146,6 +148,187 @@ fn source_generated_nondefault_animation_clip_materializes_through_object_worksp
     assert!(
         matches!(constant_samples.first(), Some(SerializedValue::F32(value)) if *value == 777.0)
     );
+
+    let version = UnityVersion::parse("2022.3.0f1").unwrap();
+    let mut converted =
+        read_animation_clip_for_conversion(&payload.root, version, EndianType::Little)
+            .expect("source-generated serialized fields adapt to converter input");
+    let (_, scene, path_assets) = source_probe_input();
+    let mut checksum_cache = PathChecksumCache::new(PathChecksumLimits::default()).unwrap();
+    build_path_checksum_cache(&mut checksum_cache, &path_assets, &scene).unwrap();
+    process_clip(
+        &mut converted,
+        &mut ConverterContext {
+            scene: &scene,
+            checksum_cache: &mut checksum_cache,
+            processed_scripts: &mut ProcessedScriptSet::default(),
+        },
+    )
+    .expect("materialized clip runs through production converter");
+    let expected = include_str!("clip_convert_fixture.txt")
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(format_clip(&converted), expected);
+}
+
+#[test]
+fn source_generated_existing_curves_materialize_and_survive_conversion() {
+    let path = "/animation/animation_workspace_existing_curves.assets";
+    let bytes = include_bytes!("animation_workspace_existing_curves_fixture.assets");
+    let mut filesystem = VirtualFileSystem::new();
+    filesystem
+        .create_directory(Some("/animation"))
+        .expect("create fixture directory");
+    filesystem
+        .write_all_bytes(path, bytes)
+        .expect("write source-generated curve fixture to the test VFS");
+    let workspace = SerializedFileWorkspace::load_from_vfs(
+        &filesystem,
+        &[DependencyFilePath {
+            file_name: "animation_workspace_existing_curves.assets".to_owned(),
+            virtual_path: path.to_owned(),
+        }],
+        SerializedFileWorkspaceLimits::default(),
+    )
+    .expect("source-generated curve SerializedFile parses and scans");
+    let objects =
+        ObjectWorkspace::load_from_vfs(&filesystem, &workspace, ObjectWorkspaceLimits::default())
+            .expect("ObjectWorkspace materializes source-generated curves");
+    assert_eq!(objects.report().object_count, 13);
+    assert!(objects.report().is_complete());
+    let clip_object = objects
+        .objects()
+        .iter()
+        .find(|object| object.factory.class_id == 74)
+        .expect("generated AnimationClip object");
+    let payload = clip_object
+        .payload
+        .as_ref()
+        .expect("AnimationClip payload materializes");
+
+    let version = UnityVersion::parse("2022.3.0f1").unwrap();
+    let mut clip = read_animation_clip_for_conversion(&payload.root, version, EndianType::Little)
+        .expect("existing source curve arrays adapt without dropping fields");
+    assert_eq!(clip.position_curves.len(), 1);
+    assert_eq!(clip.position_curves[0].path, "preserved/vector");
+    assert_eq!(clip.position_curves[0].envelope.pre_infinity, 3);
+    assert_eq!(clip.position_curves[0].envelope.post_infinity, 4);
+    assert_eq!(clip.position_curves[0].envelope.rotation_order, Some(2));
+    assert_eq!(clip.position_curves[0].curve.len(), 1);
+    let position_key = clip.position_curves[0].curve[0];
+    assert_eq!(position_key.time.to_bits(), 0x3E00_0000);
+    assert_eq!(position_key.value.x.to_bits(), 0x3FA0_0000);
+    assert_eq!(position_key.value.y.to_bits(), 0xC020_0000);
+    assert_eq!(position_key.value.z.to_bits(), 0x4070_0000);
+    assert_eq!(position_key.weighted_mode, Some(2));
+
+    assert_eq!(clip.rotation_curves.len(), 1);
+    assert_eq!(clip.rotation_curves[0].path, "preserved/rotation");
+    assert_eq!(clip.rotation_curves[0].curve.len(), 1);
+    assert_eq!(
+        clip.rotation_curves[0].curve[0].value.w.to_bits(),
+        0x3F40_0000
+    );
+    assert_eq!(clip.float_curves.len(), 1);
+    assert_eq!(clip.float_curves[0].path, "preserved/float");
+    assert_eq!(clip.float_curves[0].attribute, "m_PreservedValue");
+    assert_eq!(clip.float_curves[0].class_id, 114);
+    assert_eq!(clip.float_curves[0].flags, 17);
+    assert_eq!(clip.float_curves[0].curve[0].value.to_bits(), 0xC14C_0000);
+    assert_eq!(clip.pptr_curves.len(), 1);
+    assert_eq!(clip.pptr_curves[0].path, "preserved/pointer");
+    assert_eq!(clip.pptr_curves[0].flags, 23);
+    assert_eq!(
+        clip.pptr_curves[0].curve[0].value,
+        Some(PPtrValue {
+            file_id: 0,
+            path_id: 1010,
+        })
+    );
+
+    let (_, scene, path_assets) = source_probe_input();
+    let mut checksum_cache = PathChecksumCache::new(PathChecksumLimits::default()).unwrap();
+    build_path_checksum_cache(&mut checksum_cache, &path_assets, &scene).unwrap();
+    process_clip(
+        &mut clip,
+        &mut ConverterContext {
+            scene: &scene,
+            checksum_cache: &mut checksum_cache,
+            processed_scripts: &mut ProcessedScriptSet::default(),
+        },
+    )
+    .expect("source-generated clip converts while retaining original curves");
+    assert_existing_curves_match_source(&clip);
+}
+
+pub(crate) fn assert_existing_curves_match_source(clip: &AnimationClipObject) {
+    let expected = include_str!("clip_convert_existing_curves_fixture.txt")
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(format_clip(clip), expected);
+}
+
+#[test]
+fn serialized_clip_adapter_preserves_external_curve_script_identity() {
+    let path = "/animation/animation_workspace_existing_curves.assets";
+    let bytes = include_bytes!("animation_workspace_existing_curves_fixture.assets");
+    let mut filesystem = VirtualFileSystem::new();
+    filesystem
+        .create_directory(Some("/animation"))
+        .expect("create fixture directory");
+    filesystem
+        .write_all_bytes(path, bytes)
+        .expect("write source-generated curve fixture to the test VFS");
+    let workspace = SerializedFileWorkspace::load_from_vfs(
+        &filesystem,
+        &[DependencyFilePath {
+            file_name: "animation_workspace_existing_curves.assets".to_owned(),
+            virtual_path: path.to_owned(),
+        }],
+        SerializedFileWorkspaceLimits::default(),
+    )
+    .expect("source-generated curve SerializedFile parses and scans");
+    let objects =
+        ObjectWorkspace::load_from_vfs(&filesystem, &workspace, ObjectWorkspaceLimits::default())
+            .expect("ObjectWorkspace materializes source-generated curves");
+    let payload = objects
+        .objects()
+        .iter()
+        .find(|object| object.factory.class_id == 74)
+        .and_then(|object| object.payload.as_ref().ok())
+        .expect("AnimationClip payload materializes");
+    let mut root = payload.root.clone();
+    let curves = root
+        .unique_field_in_base_chain_mut("m_FloatCurves")
+        .unwrap()
+        .unwrap();
+    let SerializedValue::Array(curves) = curves else {
+        panic!("source FloatCurves field is not an array");
+    };
+    let script = curves[0]
+        .unique_field_in_base_chain_mut("script")
+        .unwrap()
+        .unwrap();
+    *script = SerializedValue::PPtr {
+        file_id: 1,
+        path_id: 2121,
+    };
+
+    let clip = read_animation_clip_for_conversion(
+        &root,
+        UnityVersion::parse("2022.3.0f1").unwrap(),
+        EndianType::Little,
+    )
+    .expect("conversion adapter preserves collection-scoped Script pointers");
+    let script = clip.float_curves[0]
+        .script
+        .expect("first source float curve retains its Script pointer");
+    assert_eq!(script.file_id, 1);
+    assert_eq!(script.path_id, 2121);
 }
 
 fn unique_field<'a>(value: &'a SerializedValue, name: &str) -> &'a SerializedValue {

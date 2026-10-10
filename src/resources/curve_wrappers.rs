@@ -27,10 +27,13 @@ fn set_default_envelope(envelope: &mut CurveEnvelope) {
     }
 }
 
-/// A script pointer, modeled as the referenced asset's path id.
+/// A serialized script pointer. Workspace conversion temporarily replaces the pair with a
+/// stable local identity and restores the source pair before writing the converted clip.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct ScriptReference {
-    /// The referenced script's path id.
+    /// The referenced collection index (`m_FileID`).
+    pub file_id: i32,
+    /// The referenced object's path id (`m_PathID`).
     pub path_id: i64,
 }
 
@@ -214,7 +217,10 @@ mod tests {
                         envelope: envelope(parts[9] == "1"),
                         ..FloatCurveView::default()
                     };
-                    let script = ScriptReference { path_id: 1 };
+                    let script = ScriptReference {
+                        file_id: 0,
+                        path_id: 1,
+                    };
                     float_curve_set_values(
                         &mut curve,
                         parts[3],
@@ -230,7 +236,10 @@ mod tests {
                 }
                 "PC" => {
                     let mut curve = PPtrCurveView::default();
-                    let script = ScriptReference { path_id: 1 };
+                    let script = ScriptReference {
+                        file_id: 0,
+                        path_id: 1,
+                    };
                     pptr_curve_set_values(
                         &mut curve,
                         parts[3],
@@ -301,12 +310,18 @@ mod tests {
         vector3_curve_set_values_with_rotation_order(&mut legacy, "new", ROTATION_ORDER_YZX);
         assert_eq!(legacy.envelope.rotation_order, None);
         // Float: every field lands, including the script pointer.
-        let script = ScriptReference { path_id: 42 };
+        let script = ScriptReference {
+            file_id: 0,
+            path_id: 42,
+        };
         let mut curve = FloatCurveView {
             path: "old".to_string(),
             attribute: "old".to_string(),
             class_id: 1,
-            script: Some(ScriptReference { path_id: 1 }),
+            script: Some(ScriptReference {
+                file_id: 0,
+                path_id: 1,
+            }),
             envelope: junk,
         };
         float_curve_set_values(&mut curve, "p", "a", 115, script);

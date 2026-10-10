@@ -19,6 +19,8 @@ using AssetRipper.IO.Files.SerializedFiles.Parser;
 //   workspace <out> <serialized-file>
 //                       write the same generated non-default graph as a no-TypeTree
 //                       SerializedFile before conversion
+//   workspace-existing-curves <out> <serialized-file>
+//                       include pre-existing vector, quaternion, float, and PPtr curves
 public static class Program
 {
     private static Assembly Sg = null!;
@@ -53,6 +55,36 @@ public static class Program
                 try
                 {
                     return RunConvert(args[1], args[2]);
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine(ex.ToString());
+                    return 3;
+                }
+            case "workspace-existing-curves":
+                try
+                {
+                    return RunConvert(args[1], args[2], includeExistingCurves: true);
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine(ex.ToString());
+                    return 3;
+                }
+            case "workspace-external-script":
+                if (args.Length != 4)
+                {
+                    Console.Error.WriteLine("usage: anim-convert workspace-external-script <animation-file> <script-serialized-file> <assembly-file>");
+                    return 2;
+                }
+                try
+                {
+                    return RunConvert(
+                        string.Empty,
+                        args[1],
+                        includeExistingCurves: true,
+                        externalScriptSerializedFile: args[2],
+                        externalScriptAssemblyFile: args[3]);
                 }
                 catch (Exception ex)
                 {
@@ -371,12 +403,18 @@ public static class Program
     // Conversion differential
     // ---------------------------------------------------------------------------------
 
-    private static int RunConvert(string output, string? serializedWorkspace = null)
+    private static int RunConvert(
+        string output,
+        string? serializedWorkspace = null,
+        bool includeExistingCurves = false,
+        string? externalScriptSerializedFile = null,
+        string? externalScriptAssemblyFile = null)
     {
         var bundle = new AssetRipper.Assets.Bundles.GameBundle();
         var collection = new AssetRipper.Assets.Collections.ProcessedAssetCollection(bundle);
         object version = AssetRipper.Primitives.UnityVersion.Parse("2022.3.0f1");
         collection.SetLayout(AssetRipper.Primitives.UnityVersion.Parse("2022.3.0f1"));
+        collection.FilePath = "animation_workspace.assets";
 
         // ---- materialized scene graph -------------------------------------------------
         object rootGo = NewAsset(typeof(AssetRipper.SourceGenerated.Classes.ClassID_1.GameObject), collection, 1010, 1, version);
@@ -480,6 +518,11 @@ public static class Program
             }
             Set(binding, "CustomType", bindingSpecs[i].CustomType);
             Set(binding, "IsPPtrCurve", bindingSpecs[i].IsPPtr);
+            if (externalScriptSerializedFile is not null && i == 7)
+            {
+                SetExternalPPtr(Get(binding, "Script")!, 1, 7);
+                Set(binding, "Attribute", Crc32("health"));
+            }
         }
         object mapping = Get(bindingConstant, "PptrCurveMapping")!;
         Clear(mapping);
@@ -586,13 +629,36 @@ public static class Program
         Set(animationEvent, "IntParameter", 7);
         Set(animationEvent, "Time", 0.75f);
 
+        if (includeExistingCurves)
+        {
+            SeedExistingCurves(clip, rootGo);
+        }
+
         if (serializedWorkspace is not null)
         {
             WriteSerializedWorkspace(
                 serializedWorkspace,
                 collection,
                 version,
-                [rootGo, armGo, legGo, rootTr, armTr, legTr, skin, mesh, renderer, material, controller, animator, clip]);
+                [rootGo, armGo, legGo, rootTr, armTr, legTr, skin, mesh, renderer, material, controller, animator, clip],
+                externalScriptSerializedFile is null ? null : "scripts.assets");
+        }
+
+        if (externalScriptSerializedFile is not null)
+        {
+            if (externalScriptAssemblyFile is null)
+            {
+                throw new ArgumentException("external-script workspace requires its managed assembly");
+            }
+            string inputDirectory = Path.GetDirectoryName(Path.GetFullPath(serializedWorkspace!))!;
+            File.Copy(
+                Path.GetFullPath(externalScriptSerializedFile),
+                Path.Combine(inputDirectory, "scripts.assets"));
+            File.Copy(
+                Path.GetFullPath(externalScriptAssemblyFile),
+                Path.Combine(inputDirectory, "ComplexFixtureScripts.dll"));
+            Console.WriteLine($"wrote source-generated external-script workspace {Path.Combine(inputDirectory, "animation_workspace.assets")}");
+            return 0;
         }
 
         var checksumType = Type.GetType("AssetRipper.Processing.AnimationClips.PathChecksumCache, AssetRipper.Processing")!;
@@ -607,11 +673,123 @@ public static class Program
         return 0;
     }
 
+    private static void SeedExistingCurves(object clip, object referencedObject)
+    {
+        object position = AddNew(Get(clip, "PositionCurves_C74")!);
+        SetUtf8(position, "Path", "preserved/vector");
+        object positionCurve = Get(position, "Curve")!;
+        Set(positionCurve, "PreInfinity", 3);
+        Set(positionCurve, "PostInfinity", 4);
+        if (Gate(positionCurve, "Has_RotationOrder"))
+        {
+            Set(positionCurve, "RotationOrder", 2);
+        }
+        object positionKeys = Get(positionCurve, "Curve")!;
+        object positionKey = AddNew(positionKeys);
+        Set(positionKey, "Time", 0.125f);
+        SetVector(positionKey, "Value", new[] { 1.25f, -2.5f, 3.75f });
+        SetVector(positionKey, "InSlope", new[] { 4.5f, 5.5f, 6.5f });
+        SetVector(positionKey, "OutSlope", new[] { 7.5f, 8.5f, 9.5f });
+        SetVector(positionKey, "InWeight", new[] { 0.1f, 0.2f, 0.3f });
+        SetVector(positionKey, "OutWeight", new[] { 0.4f, 0.5f, 0.6f });
+        Set(positionKey, "TangentMode", 0);
+        if (Gate(positionKey, "Has_WeightedMode"))
+        {
+            Set(positionKey, "WeightedMode", 2);
+        }
+
+        object rotation = AddNew(Get(clip, "RotationCurves_C74")!);
+        SetUtf8(rotation, "Path", "preserved/rotation");
+        object rotationCurve = Get(rotation, "Curve")!;
+        Set(rotationCurve, "PreInfinity", 1);
+        Set(rotationCurve, "PostInfinity", 2);
+        if (Gate(rotationCurve, "Has_RotationOrder"))
+        {
+            Set(rotationCurve, "RotationOrder", 5);
+        }
+        object rotationKey = AddNew(Get(rotationCurve, "Curve")!);
+        Set(rotationKey, "Time", 0.375f);
+        SetVector(rotationKey, "Value", new[] { 0.125f, -0.25f, 0.5f, 0.75f });
+        SetVector(rotationKey, "InSlope", new[] { 1.25f, 1.5f, 1.75f, 2.0f });
+        SetVector(rotationKey, "OutSlope", new[] { 2.25f, 2.5f, 2.75f, 3.0f });
+        SetVector(rotationKey, "InWeight", new[] { 0.15f, 0.25f, 0.35f, 0.45f });
+        SetVector(rotationKey, "OutWeight", new[] { 0.55f, 0.65f, 0.75f, 0.85f });
+        Set(rotationKey, "TangentMode", 0);
+        if (Gate(rotationKey, "Has_WeightedMode"))
+        {
+            Set(rotationKey, "WeightedMode", 1);
+        }
+
+        object floating = AddNew(Get(clip, "FloatCurves_C74")!);
+        SetUtf8(floating, "Path", "preserved/float");
+        SetUtf8(floating, "Attribute", "m_PreservedValue");
+        Set(floating, "ClassID", 114);
+        if (Gate(floating, "Has_Flags"))
+        {
+            Set(floating, "Flags", 17);
+        }
+        object script = Get(floating, "Script")!;
+        SetAsset(script, null);
+        object floatCurve = Get(floating, "Curve")!;
+        Set(floatCurve, "PreInfinity", 2);
+        Set(floatCurve, "PostInfinity", 3);
+        if (Gate(floatCurve, "Has_RotationOrder"))
+        {
+            Set(floatCurve, "RotationOrder", 4);
+        }
+        object floatKey = AddNew(Get(floatCurve, "Curve")!);
+        Set(floatKey, "Time", 0.625f);
+        Set(floatKey, "Value", -12.75f);
+        Set(floatKey, "InSlope", 3.25f);
+        Set(floatKey, "OutSlope", -4.5f);
+        if (Gate(floatKey, "Has_InWeight"))
+        {
+            Set(floatKey, "InWeight", 0.125f);
+        }
+        if (Gate(floatKey, "Has_OutWeight"))
+        {
+            Set(floatKey, "OutWeight", 0.875f);
+        }
+        Set(floatKey, "TangentMode", 0);
+        if (Gate(floatKey, "Has_WeightedMode"))
+        {
+            Set(floatKey, "WeightedMode", 3);
+        }
+
+        object pointerCurve = AddNew(Get(clip, "PPtrCurves_C74")!);
+        SetUtf8(pointerCurve, "Path", "preserved/pointer");
+        SetUtf8(pointerCurve, "Attribute", "m_PreservedObject");
+        Set(pointerCurve, "ClassID", 114);
+        if (Gate(pointerCurve, "Has_Flags"))
+        {
+            Set(pointerCurve, "Flags", 23);
+        }
+        object pointerKey = AddNew(Get(pointerCurve, "Curve")!);
+        Set(pointerKey, "Time", 0.875f);
+        SetAsset(Get(pointerKey, "Value")!, referencedObject);
+    }
+
+    private static void SetVector(object target, string field, float[] values)
+    {
+        object vector = Get(target, field)!;
+        string[] names = values.Length switch
+        {
+            3 => new[] { "X", "Y", "Z" },
+            4 => new[] { "X", "Y", "Z", "W" },
+            _ => throw new ArgumentOutOfRangeException(nameof(values)),
+        };
+        for (int index = 0; index < values.Length; index++)
+        {
+            Set(vector, names[index], values[index]);
+        }
+    }
+
     private static void WriteSerializedWorkspace(
         string output,
         object collection,
         object version,
-        IReadOnlyList<object> assets)
+        IReadOnlyList<object> assets,
+        string? externalDependencyPath = null)
     {
         var builder = new SerializedFileBuilder
         {
@@ -621,6 +799,15 @@ public static class Program
             EndianType = EndianType.LittleEndian,
             HasTypeTree = false,
         };
+        if (externalDependencyPath is not null)
+        {
+            builder.Dependencies.Add(new FileIdentifier
+            {
+                PathName = externalDependencyPath,
+                PathNameOrigin = externalDependencyPath,
+                AssetPath = AssetRipper.Primitives.Utf8String.Empty,
+            });
+        }
 
         Dictionary<int, SerializedType> typesByClassId = new();
         foreach (object asset in assets.OrderBy(asset => Convert.ToInt64(Get(asset, "PathID"))))
@@ -654,6 +841,21 @@ public static class Program
         Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
         File.WriteAllBytes(fullPath, file.ToByteArray());
         Console.WriteLine($"wrote source-generated workspace {fullPath} objects={assets.Count} bytes={new FileInfo(fullPath).Length}");
+    }
+
+    private static void SetExternalPPtr(object pointer, int fileId, long pathId)
+    {
+        TrySetInt(pointer, "FileID_", fileId);
+        TrySetInt(pointer, "m_FileID_", fileId);
+        if (!TrySetPathId(pointer, pathId))
+        {
+            throw new InvalidOperationException($"could not set external PPtr PathID {pathId} on {pointer.GetType().FullName}");
+        }
+        if (Convert.ToInt32(Get(pointer, "FileID_")) != fileId
+            || Convert.ToInt64(Get(pointer, "PathID__Int64")) != pathId)
+        {
+            throw new InvalidOperationException($"external PPtr identity did not retain ({fileId}, {pathId})");
+        }
     }
 
     private static void AddComponent(object gameObject, object component, int classId)

@@ -60,6 +60,7 @@ use crate::serialized_file::object_workspace::{ObjectWorkspace, WorkspaceObject}
 use crate::serialized_file::reference_graph::{MultiFilePPtrResolution, MultiFileReferenceGraph};
 use crate::serialized_file::workspace::SerializedFileWorkspace;
 
+use super::anim_wiring::process_workspace_animation_clips;
 use super::asset_path::ExportAssetPathIdentity;
 use super::collection_claims::ClaimMainKind;
 use super::collection_kind::ExportCollectionKind;
@@ -130,6 +131,7 @@ use super::value_yaml::{
     UnityYamlObjectConversionLimits, UnityYamlObjectFieldMode, UnityYamlPPtrRequest,
 };
 use super::workspace_yaml::{
+    workspace_object_to_unity_yaml_document_with_processed_animation_root,
     workspace_object_to_unity_yaml_document_with_streamed_resources,
     workspace_prefab_hierarchy_to_unity_yaml_with_generated_transforms,
     workspace_scene_assignments_to_unity_yaml_with_project_generated_assets,
@@ -366,6 +368,7 @@ struct WorkspaceProjectExportContext<'inputs, 'provider, 'graph> {
     settings_facts: ProjectExportSettings,
     opaque_objects: HashSet<(usize, usize)>,
     scene_processing: WorkspaceSceneProcessing,
+    processed_animation_roots: HashMap<(usize, usize), SerializedValue>,
     scene_collections: Vec<RoutedSceneCollection>,
     scene_member_keys: HashSet<ExportAssetObjectKey>,
     prefab_collections: Vec<RoutedPrefabCollection>,

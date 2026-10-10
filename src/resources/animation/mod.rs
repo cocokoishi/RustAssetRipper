@@ -19,6 +19,7 @@ pub mod clip_object;
 pub mod converter;
 pub mod field_hashes;
 pub mod scene_facts;
+pub mod serialized_clip;
 
 #[cfg(test)]
-mod converter_fixture;
+pub(crate) mod converter_fixture;

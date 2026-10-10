@@ -1,0 +1,14 @@
+# Projection from the frozen AssetRipper project export for a 2022.3 AnimationClip whose
+# GenericBinding.Script is FileID 1 / PathID 7 into scripts.assets.
+UNITY_VERSION|2022.3.22f1
+INPUT|animation_workspace.assets|4624|BDA77CF1738A2FA48822B9CBAB188A34716B332FCDD127AEC67EC4F14580D232
+INPUT|scripts.assets|488|F6895443304BC2A0C9FFBDFCAA43641C12A9E0EDFC6548DC71923D29329A15C7
+ASSEMBLY|ComplexFixtureScripts.dll|5120|D6E4155E931CFBC44ED92A44CC2436873D71DFBE293E9C568304DD118F2D6389
+SOURCE_ANIM|ExportedProject/Assets/AnimationClip/AnimationClip.anim|23469|AD67A10E5E731B06FBDDC8EE8D530B4C5013B2B1806F8FAC905CE2CD856E0CC2
+PLUGIN_GUID|b19bcd3f8dffca40198d81b88e4464bb
+SCRIPT_OUTPUT|attribute|health
+SCRIPT_OUTPUT|path|path_0xB6C65665_WvpMuNH
+SCRIPT_OUTPUT|classID|114
+SCRIPT_OUTPUT|script|{fileID: -915535769, guid: __PLUGIN_GUID__, type: 3}
+SCRIPT_KEY|tangentMode|1|2
+KNOWN_DIFFERENCE|The full source .anim emits m_AnimationClipSettings while the current Rust value-tree export emits raw m_MuscleClip data; broader full-file YAML parity remains open.
