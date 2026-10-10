@@ -75,7 +75,8 @@ pub(super) fn prepare_generated_collections(
         let Some(owner_identity) = hierarchy.lighting_data_dependency_owner() else {
             continue;
         };
-        validate_bounded_lighting_data_scene(hierarchy, owner_identity)?;
+        let renderer_inputs = collect_lighting_data_renderer_inputs(&scene.assignments, objects)?;
+        validate_bounded_lighting_data_scene(hierarchy, owner_identity, &scene.assignments)?;
         let render_settings_identity =
             scene_manager_identity(hierarchy, SceneManagerKind::RenderSettings).ok_or_else(
                 || {
@@ -165,7 +166,7 @@ pub(super) fn prepare_generated_collections(
                     render_settings_identity.file_index, render_settings_identity.path_id
                 ))
             })?;
-        let root = build_lighting_data_asset_root(
+        let mut root = build_lighting_data_asset_root(
             &type_tree,
             owner_identity.object_index,
             &source_owner_payload.root,
@@ -173,6 +174,7 @@ pub(super) fn prepare_generated_collections(
             &source_version,
             scene.guid,
         )?;
+        append_lighting_data_renderer_records(&type_tree, &mut root, &renderer_inputs)?;
         let collection_index = next_collection_index;
         next_collection_index = next_collection_index
             .checked_add(1)

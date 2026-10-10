@@ -90,30 +90,77 @@ pub(super) fn object_asset_name(payload: &ParsedObjectPayload) -> Option<String>
 pub(super) fn validate_bounded_lighting_data_scene(
     hierarchy: &WorkspaceSceneHierarchyScene,
     owner: WorkspaceSceneObjectIdentity,
+    assignments: &[SceneExportIdAssignment],
 ) -> Result<(), Box<dyn Error>> {
     let mut unsupported_objects = Vec::new();
-    for collection in hierarchy.collections() {
-        if collection.game_object_count() != 0
-            || collection.transform_count() != 0
-            || !collection.component_candidates().is_empty()
-        {
+    const RENDERER_CLASS_IDS: [i32; 18] = [
+        23,
+        25,
+        26,
+        96,
+        120,
+        137,
+        161,
+        199,
+        212,
+        227,
+        331,
+        483_693_784,
+        73_398_921,
+        1_120_581_460,
+        1_931_382_933,
+        1_931_382_934,
+        1_971_053_207,
+        646_504_946,
+    ];
+    if assignments
+        .iter()
+        .any(|assignment| assignment.asset.class_id == 23)
+        && assignments
+            .iter()
+            .any(|assignment| assignment.asset.class_id == 33)
+    {
+        unsupported_objects.push(
+            "MeshRenderer is paired with a MeshFilter, but LightingDataAsset UvMesh reference mapping is not implemented".to_owned(),
+        );
+    }
+    for assignment in assignments {
+        let class_id = assignment.asset.class_id;
+        if class_id == 108 || class_id == 218 {
             unsupported_objects.push(format!(
-                "file {} has {} GameObjects, {} Transforms, and {} component candidates",
-                collection.collection_file_index(),
-                collection.game_object_count(),
-                collection.transform_count(),
-                collection.component_candidates().len()
+                "scene object {:?}:{} class {class_id} has LightingDataAsset data that is not implemented",
+                assignment.asset.collection, assignment.asset.path_id
+            ));
+        } else if RENDERER_CLASS_IDS.contains(&class_id) && class_id != 23 {
+            unsupported_objects.push(format!(
+                "renderer scene object {:?}:{} class {class_id} is outside the supported MeshRenderer route",
+                assignment.asset.collection, assignment.asset.path_id
             ));
         }
+    }
+    for collection in hierarchy.collections() {
         for asset in collection.scene_assets() {
-            if matches!(
-                asset.category,
-                WorkspaceSceneAssetCategory::GameObject
-                    | WorkspaceSceneAssetCategory::PrefabInstance
-            ) {
+            if asset.category == WorkspaceSceneAssetCategory::PrefabInstance {
                 unsupported_objects.push(format!(
-                    "file {} object {} class {:?} is outside the bounded LightingDataAsset route",
-                    asset.identity.file_index, asset.identity.object_index, asset.identity.class_id
+                    "file {} object {} is a PrefabInstance outside the bounded LightingDataAsset route",
+                    asset.identity.file_index, asset.identity.object_index
+                ));
+            }
+        }
+        for candidate in collection.component_candidates() {
+            let Some(class_id) = candidate.identity.class_id else {
+                unsupported_objects.push(format!(
+                    "file {} object {} has an unclassified component in the LightingDataAsset scene",
+                    candidate.identity.file_index, candidate.identity.object_index
+                ));
+                continue;
+            };
+            if (class_id == 108 || class_id == 218)
+                || (RENDERER_CLASS_IDS.contains(&class_id) && class_id != 23)
+            {
+                unsupported_objects.push(format!(
+                    "file {} object {} class {class_id} has LightingDataAsset data that is not implemented",
+                    candidate.identity.file_index, candidate.identity.object_index
                 ));
             }
         }
@@ -127,6 +174,55 @@ pub(super) fn validate_bounded_lighting_data_scene(
         )));
     }
     Ok(())
+}
+
+pub(super) fn collect_lighting_data_renderer_inputs<'object>(
+    assignments: &[SceneExportIdAssignment],
+    objects: &'object ObjectWorkspace,
+) -> Result<Vec<LightingDataRendererInput<'object>>, Box<dyn Error>> {
+    let mut renderers = Vec::new();
+    renderers
+        .try_reserve(assignments.len())
+        .map_err(|_| invalid_project("could not allocate LightingDataAsset renderer inputs"))?;
+    for assignment in assignments
+        .iter()
+        .filter(|assignment| assignment.asset.class_id == 23)
+    {
+        let ExportAssetCollectionIdentity::SerializedFile { file_index } =
+            assignment.asset.collection
+        else {
+            return Err(invalid_project(format!(
+                "LightingDataAsset MeshRenderer {} belongs to an unmaterialized collection",
+                assignment.asset.path_id
+            )));
+        };
+        let object = objects
+            .get(file_index, assignment.asset.object_index)
+            .ok_or_else(|| {
+                invalid_project(format!(
+                    "LightingDataAsset MeshRenderer {}:{} is missing from ObjectWorkspace",
+                    file_index, assignment.asset.path_id
+                ))
+            })?;
+        if object.path_id != assignment.asset.path_id || object.factory.class_id != 23 {
+            return Err(invalid_project(format!(
+                "LightingDataAsset MeshRenderer identity mismatch at {}:{}",
+                file_index, assignment.asset.path_id
+            )));
+        }
+        let payload = object.payload.as_ref().map_err(|error| {
+            invalid_project(format!(
+                "LightingDataAsset MeshRenderer {}:{} could not be decoded: {error}",
+                file_index, assignment.asset.path_id
+            ))
+        })?;
+        renderers.push(LightingDataRendererInput {
+            identity: assignment.asset,
+            file_id: assignment.file_id,
+            value: &payload.root,
+        });
+    }
+    Ok(renderers)
 }
 
 pub(super) fn scene_manager_identity(

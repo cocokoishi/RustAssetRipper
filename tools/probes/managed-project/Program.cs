@@ -60,6 +60,11 @@ if (args.Length == 1 && args[0] == "describe-lightmap")
     return DescribeLightmap();
 }
 
+if (args.Length == 1 && args[0] == "describe-lighting-assets")
+{
+    return DescribeLightingAssets();
+}
+
 if (args.Length == 1 && args[0] == "describe-lightmap-versions")
 {
     return DescribeLightmapVersions();
@@ -73,6 +78,16 @@ if (args.Length > 0 && args[0] == "export-lightmap-project")
         return 2;
     }
     return ExportLightmapProject(args[1], args[2], args[3], args[4], args[5], args[6]);
+}
+
+if (args.Length > 0 && args[0] == "export-lightmap-renderer-project")
+{
+    if (args.Length != 4)
+    {
+        Console.Error.WriteLine("usage: managed-project export-lightmap-renderer-project <input-root> <output-root> <rows-file>");
+        return 2;
+    }
+    return ExportLightmapProject(args[1], args[2], args[3], "Image", "Bmp", "5.6.0f1", "mesh-renderer");
 }
 
 if (args.Length > 0 && args[0] == "export-path-id-map-project")

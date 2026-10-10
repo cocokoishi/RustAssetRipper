@@ -284,13 +284,105 @@ ObjectData = textureBody,
         return 0;
     }
 
+    internal static int DescribeLightingAssets()
+    {
+        Assembly generatedAssembly = Assembly.Load("AssetRipper.SourceGenerated");
+        Type rendererInterface = generatedAssembly.GetType(
+            "AssetRipper.SourceGenerated.Classes.ClassID_25.IRenderer")
+            ?? throw new InvalidOperationException("IRenderer generated interface was not found");
+        foreach (Type type in generatedAssembly.GetTypes())
+        {
+            if (type.IsInterface || !rendererInterface.IsAssignableFrom(type))
+            {
+                continue;
+            }
+            string? namespaceValue = type.Namespace;
+            if (namespaceValue is null || !namespaceValue.StartsWith(
+                "AssetRipper.SourceGenerated.Classes.ClassID_", StringComparison.Ordinal))
+            {
+                continue;
+            }
+            string classIdText = namespaceValue["AssetRipper.SourceGenerated.Classes.ClassID_".Length..];
+            if (int.TryParse(classIdText, out int classId))
+            {
+                Console.WriteLine($"RENDERER_CLASS_ID|{classId}");
+            }
+        }
+
+        foreach (string versionText in new[] { "5.6.0f1", "2019.4.40f1" })
+        {
+            UnityVersion version = UnityVersion.Parse(versionText);
+            GameBundle bundle = new();
+            ProcessedAssetCollection collection = new(bundle);
+            collection.GetType().GetProperty("Version")!.SetValue(collection, version);
+            Console.WriteLine($"VERSION|{versionText}");
+
+            foreach ((string factory, int classId) in new[]
+            {
+                ("AssetRipper.SourceGenerated.Classes.ClassID_1120.LightingDataAsset", 1120),
+                ("AssetRipper.SourceGenerated.Classes.ClassID_1.GameObject", 1),
+                ("AssetRipper.SourceGenerated.Classes.ClassID_108.Light", 108),
+                ("AssetRipper.SourceGenerated.Classes.ClassID_4.Transform", 4),
+                ("AssetRipper.SourceGenerated.Classes.ClassID_23.MeshRenderer", 23),
+                ("AssetRipper.SourceGenerated.Classes.ClassID_218.Terrain", 218),
+            })
+            {
+                object asset = MakeGenerated(factory, classId, classId, collection, version);
+                Console.WriteLine($"ASSET|{classId}|{asset.GetType().FullName}");
+                foreach (PropertyInfo property in asset.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance))
+                {
+                    if (property.Name.Contains("Light", StringComparison.Ordinal)
+                        || property.Name.Contains("Baking", StringComparison.Ordinal)
+                        || property.Name.Contains("Renderer", StringComparison.Ordinal)
+                        || property.Name.Contains("Terrain", StringComparison.Ordinal)
+                        || property.Name.Contains("GameObject", StringComparison.Ordinal))
+                    {
+                        Console.WriteLine($"PROPERTY|{classId}|{property.Name}|{property.PropertyType.FullName}");
+                    }
+                }
+                if (classId == 23)
+                {
+                    foreach (string field in new[] { "LightmapIndex_C25_Byte", "LightmapIndex_C25_UInt16" })
+                    {
+                        Console.WriteLine($"FIELD|{classId}|{field}|{HasGeneratedField(asset, field)}|{FindGeneratedProperty(asset, field).GetValue(asset)}");
+                    }
+                }
+
+                foreach (string propertyName in new[]
+                {
+                    "Components", "LightmappedRendererDataIDs", "LightmappedRendererData", "Lights", "LightBakingOutputs",
+                })
+                {
+                    PropertyInfo? property = asset.GetType().GetProperty(propertyName, BindingFlags.Public | BindingFlags.Instance);
+                    if (property?.GetValue(asset) is not { } list)
+                    {
+                        continue;
+                    }
+                    MethodInfo? addNew = list.GetType().GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                        .SingleOrDefault(method => method.Name == "AddNew" && method.GetParameters().Length == 0);
+                    if (addNew?.Invoke(list, null) is not { } item)
+                    {
+                        continue;
+                    }
+                    Console.WriteLine($"ITEM|{propertyName}|{item.GetType().FullName}");
+                    foreach (PropertyInfo itemProperty in item.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance))
+                    {
+                        Console.WriteLine($"ITEM_PROPERTY|{propertyName}|{itemProperty.Name}|{itemProperty.PropertyType.FullName}");
+                    }
+                }
+            }
+        }
+        return 0;
+    }
+
     internal static int ExportLightmapProject(
         string inputRootValue,
         string outputRootValue,
         string rowsValue,
         string lightmapFormatName,
         string imageFormatName,
-        string unityVersionText)
+        string unityVersionText,
+        string sceneKind = "empty")
     {
         string inputRoot = Path.GetFullPath(inputRootValue);
         string outputRoot = Path.GetFullPath(outputRootValue);
@@ -357,7 +449,49 @@ ObjectData = textureBody,
             102,
             collection,
             version);
-        object[] assets = { lightmapSettings, renderSettings, texture };
+        List<object> assets = new() { lightmapSettings, renderSettings, texture };
+        if (sceneKind == "mesh-renderer")
+        {
+            object gameObject = MakeGenerated(
+                "AssetRipper.SourceGenerated.Classes.ClassID_1.GameObject",
+                1,
+                103,
+                collection,
+                version);
+            SetGeneratedProperty(gameObject, "Name", "LightmappedRenderer");
+            object transform = MakeGenerated(
+                "AssetRipper.SourceGenerated.Classes.ClassID_4.Transform",
+                4,
+                104,
+                collection,
+                version);
+            object renderer = MakeGenerated(
+                "AssetRipper.SourceGenerated.Classes.ClassID_23.MeshRenderer",
+                23,
+                105,
+                collection,
+                version);
+            if (HasGeneratedField(renderer, "LightmapIndex_C25_UInt16"))
+            {
+                SetGeneratedProperty(renderer, "LightmapIndex_C25_UInt16", (ushort)0);
+            }
+            else
+            {
+                SetGeneratedProperty(renderer, "LightmapIndex_C25_Byte", (byte)0);
+            }
+            SetVector4(renderer, "LightmapTilingOffset_C25", 1, 1, 0, 0);
+            SetGeneratedAssetPointer(transform, "GameObject_C4", collection, gameObject);
+            SetGeneratedAssetPointer(renderer, "GameObject_C25", collection, gameObject);
+            AddGeneratedAssetPointer(gameObject, "Components", collection, transform);
+            AddGeneratedAssetPointer(gameObject, "Components", collection, renderer);
+            assets.Add(gameObject);
+            assets.Add(transform);
+            assets.Add(renderer);
+        }
+        else if (sceneKind != "empty")
+        {
+            throw new ArgumentException($"unsupported lightmap scene fixture: {sceneKind}");
+        }
         MethodInfo addAsset = collection.GetType().GetMethod("AddAsset", BindingFlags.NonPublic | BindingFlags.Instance)
             ?? throw new MissingMethodException(collection.GetType().FullName, "AddAsset");
         SerializedFileBuilder builder = new()
@@ -430,6 +564,45 @@ ObjectData = textureBody,
         }
         Console.WriteLine($"LIGHTMAP_PROJECT|input={inputBytes.Length}|version={unityVersionText}|files={Directory.GetFiles(outputRoot, "*", SearchOption.AllDirectories).Length}|format={lightmapFormatName}|image={imageFormatName}");
         return 0;
+    }
+
+    private static void SetVector4(object asset, string propertyName, float x, float y, float z, float w)
+    {
+        object vector = FindGeneratedProperty(asset, propertyName).GetValue(asset)
+            ?? throw new InvalidOperationException($"generated {propertyName} has no value");
+        SetGeneratedProperty(vector, "X", x);
+        SetGeneratedProperty(vector, "Y", y);
+        SetGeneratedProperty(vector, "Z", z);
+        SetGeneratedProperty(vector, "W", w);
+    }
+
+    private static void SetGeneratedAssetPointer(object owner, string propertyName, AssetCollection collection, object target)
+    {
+        object pointer = FindGeneratedProperty(owner, propertyName).GetValue(owner)
+            ?? throw new InvalidOperationException($"generated {propertyName} pointer is null");
+        MethodInfo setter = pointer.GetType().GetMethods(BindingFlags.Public | BindingFlags.Instance)
+            .Single(method => method.Name == "SetAsset"
+                && method.GetParameters().Length == 2
+                && method.GetParameters()[1].ParameterType.IsInstanceOfType(target));
+        setter.Invoke(pointer, new[] { collection, target });
+    }
+
+    private static void AddGeneratedAssetPointer(object owner, string propertyName, AssetCollection collection, object target)
+    {
+        object list = FindGeneratedProperty(owner, propertyName).GetValue(owner)
+            ?? throw new InvalidOperationException($"generated {propertyName} list is null");
+        MethodInfo add = list.GetType().GetMethods(BindingFlags.Public | BindingFlags.Instance)
+            .Single(method => method.Name == "AddNew" && method.GetParameters().Length == 0);
+        object component = add.Invoke(list, null)
+            ?? throw new InvalidOperationException($"generated {propertyName}.AddNew returned null");
+        SetGeneratedProperty(component, "ClassID", (int)target.GetType().GetProperty("ClassID")!.GetValue(target)!);
+        object pointer = FindGeneratedProperty(component, "Component").GetValue(component)
+            ?? throw new InvalidOperationException($"generated {propertyName} component pointer is null");
+        MethodInfo setter = pointer.GetType().GetMethods(BindingFlags.Public | BindingFlags.Instance)
+            .Single(method => method.Name == "SetAsset"
+                && method.GetParameters().Length == 2
+                && method.GetParameters()[1].ParameterType.IsInstanceOfType(target));
+        setter.Invoke(pointer, new[] { collection, target });
     }
 
     internal static int ExportPathIdMapProject(

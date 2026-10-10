@@ -303,6 +303,13 @@ struct RoutedLightingDataAsset {
     root: SerializedValue,
 }
 
+#[derive(Clone, Copy)]
+struct LightingDataRendererInput<'object> {
+    identity: ExportAssetIdentity,
+    file_id: i64,
+    value: &'object SerializedValue,
+}
+
 struct PreparedSceneCollections {
     processing: WorkspaceSceneProcessing,
     routed: Vec<RoutedSceneCollection>,

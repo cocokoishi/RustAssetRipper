@@ -267,6 +267,202 @@ pub(super) fn copy_render_settings_probe(
     }
 }
 
+pub(super) fn append_lighting_data_renderer_records(
+    type_tree: &crate::serialized_file::metadata::TypeTree,
+    root: &mut SerializedValue,
+    renderers: &[LightingDataRendererInput<'_>],
+) -> Result<(), Box<dyn Error>> {
+    for renderer in renderers {
+        let source_index = source_renderer_field(renderer, "m_LightmapIndex")?;
+        let lightmap_index = match source_index {
+            SerializedValue::U8(value) if *value == u8::MAX => u16::MAX,
+            SerializedValue::U8(value) => u16::from(*value),
+            SerializedValue::U16(value) => *value,
+            value => {
+                return Err(invalid_project(format!(
+                    "MeshRenderer {:?}:{} has unsupported m_LightmapIndex value {value:?}",
+                    renderer.identity.collection, renderer.identity.path_id
+                )))
+            }
+        };
+        if lightmap_index == u16::MAX {
+            continue;
+        }
+        if renderer.file_id == 0 {
+            return Err(invalid_project(format!(
+                "lightmapped MeshRenderer {:?}:{} has a null Scene export fileID",
+                renderer.identity.collection, renderer.identity.path_id
+            )));
+        }
+
+        let mut identifier = default_lighting_data_array_element(
+            type_tree,
+            "m_LightmappedRendererDataIDs",
+            renderer.identity.object_index,
+        )?;
+        set_lighting_data_i64_field(&mut identifier, "targetObject", renderer.file_id)?;
+        set_lighting_data_i64_field(&mut identifier, "targetPrefab", 0)?;
+        append_lighting_data_array(root, "m_LightmappedRendererDataIDs", identifier)?;
+
+        let mut data = default_lighting_data_array_element(
+            type_tree,
+            "m_LightmappedRendererData",
+            renderer.identity.object_index,
+        )?;
+        set_lighting_data_u16_field(&mut data, "lightmapIndex", lightmap_index)?;
+        set_lighting_data_u16_field(&mut data, "lightmapIndexDynamic", u16::MAX)?;
+        copy_renderer_vector_field(renderer, &mut data, "m_LightmapTilingOffset", "lightmapST")?;
+        copy_renderer_vector_field(
+            renderer,
+            &mut data,
+            "m_LightmapTilingOffsetDynamic",
+            "lightmapSTDynamic",
+        )?;
+        append_lighting_data_array(root, "m_LightmappedRendererData", data)?;
+    }
+    Ok(())
+}
+
+fn source_renderer_field<'value>(
+    renderer: &'value LightingDataRendererInput<'_>,
+    name: &str,
+) -> Result<&'value SerializedValue, Box<dyn Error>> {
+    renderer
+        .value
+        .unique_field_in_base_chain(name)
+        .map_err(|error| {
+            invalid_project(format!(
+                "MeshRenderer {:?}:{} field lookup for {name} failed: {error}",
+                renderer.identity.collection, renderer.identity.path_id
+            ))
+        })?
+        .ok_or_else(|| {
+            invalid_project(format!(
+                "MeshRenderer {:?}:{} TypeTree has no {name} field",
+                renderer.identity.collection, renderer.identity.path_id
+            ))
+        })
+}
+
+fn copy_renderer_vector_field(
+    renderer: &LightingDataRendererInput<'_>,
+    destination: &mut SerializedValue,
+    source_name: &str,
+    destination_name: &str,
+) -> Result<(), Box<dyn Error>> {
+    let value = source_renderer_field(renderer, source_name)?.clone();
+    ensure_lighting_data_value_shape(destination, destination_name, &value)?;
+    set_required_lighting_data_field(destination, destination_name, value)
+}
+
+fn default_lighting_data_array_element(
+    type_tree: &crate::serialized_file::metadata::TypeTree,
+    field_name: &str,
+    object_index: usize,
+) -> Result<SerializedValue, Box<dyn Error>> {
+    let field_node = unique_type_tree_child(type_tree, 0, field_name)?.ok_or_else(|| {
+        invalid_project(format!(
+            "LightingDataAsset TypeTree has no {field_name} array field"
+        ))
+    })?;
+    let array_node = unique_type_tree_child(type_tree, field_node, "Array")?.ok_or_else(|| {
+        invalid_project(format!(
+            "LightingDataAsset TypeTree {field_name} field has no Array node"
+        ))
+    })?;
+    let data_node = unique_type_tree_child(type_tree, array_node, "data")?.ok_or_else(|| {
+        invalid_project(format!(
+            "LightingDataAsset TypeTree {field_name} array has no data node"
+        ))
+    })?;
+    default_value_for_type_tree_node(
+        type_tree,
+        object_index,
+        data_node,
+        ObjectDefaultValueLimits::default(),
+    )
+    .map_err(|error| {
+        invalid_project(format!(
+            "LightingDataAsset {field_name} element default could not be built: {error}"
+        ))
+    })
+}
+
+fn unique_type_tree_child(
+    type_tree: &crate::serialized_file::metadata::TypeTree,
+    parent_index: usize,
+    child_name: &str,
+) -> Result<Option<usize>, Box<dyn Error>> {
+    let parent = type_tree.nodes.get(parent_index).ok_or_else(|| {
+        invalid_project(format!(
+            "LightingDataAsset TypeTree parent node {parent_index} is out of range"
+        ))
+    })?;
+    let child_level = parent.level.checked_add(1).ok_or_else(|| {
+        invalid_project(format!(
+            "LightingDataAsset TypeTree node {parent_index} level overflows"
+        ))
+    })?;
+    let mut matches = Vec::new();
+    for (index, node) in type_tree.nodes.iter().enumerate().skip(parent_index + 1) {
+        if node.level <= parent.level {
+            break;
+        }
+        if node.level == child_level && node.name.as_deref() == Some(child_name) {
+            matches.push(index);
+        }
+    }
+    if matches.len() > 1 {
+        return Err(invalid_project(format!(
+            "LightingDataAsset TypeTree node {parent_index} has duplicate {child_name} children"
+        )));
+    }
+    Ok(matches.first().copied())
+}
+
+fn append_lighting_data_array(
+    root: &mut SerializedValue,
+    field_name: &str,
+    element: SerializedValue,
+) -> Result<(), Box<dyn Error>> {
+    let index = unique_lighting_data_field_index(root, field_name)?.ok_or_else(|| {
+        invalid_project(format!(
+            "LightingDataAsset TypeTree has no {field_name} field"
+        ))
+    })?;
+    let SerializedValue::Struct(fields) = root else {
+        return Err(invalid_project("LightingDataAsset value is not a struct"));
+    };
+    let SerializedValue::Array(elements) = &mut fields[index].value else {
+        return Err(invalid_project(format!(
+            "LightingDataAsset {field_name} field is not an array"
+        )));
+    };
+    elements.try_reserve(1).map_err(|_| {
+        invalid_project(format!("could not allocate LightingDataAsset {field_name}"))
+    })?;
+    elements.push(element);
+    Ok(())
+}
+
+fn set_lighting_data_i64_field(
+    value: &mut SerializedValue,
+    field_name: &str,
+    field_value: i64,
+) -> Result<(), Box<dyn Error>> {
+    ensure_lighting_data_value_shape(value, field_name, &SerializedValue::I64(field_value))?;
+    set_required_lighting_data_field(value, field_name, SerializedValue::I64(field_value))
+}
+
+fn set_lighting_data_u16_field(
+    value: &mut SerializedValue,
+    field_name: &str,
+    field_value: u16,
+) -> Result<(), Box<dyn Error>> {
+    ensure_lighting_data_value_shape(value, field_name, &SerializedValue::U16(field_value))?;
+    set_required_lighting_data_field(value, field_name, SerializedValue::U16(field_value))
+}
+
 fn ensure_lighting_data_value_shape(
     root: &SerializedValue,
     name: &str,
