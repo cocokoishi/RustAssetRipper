@@ -1,241 +1,10 @@
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WorkspaceSceneHierarchyMembershipIssue {
-    IncompleteCollectionGraph {
-        file_index: usize,
-    },
-    IncompleteReferenceScans {
-        file_index: usize,
-    },
-    InvalidSceneAssetIdentity {
-        identity: WorkspaceSceneObjectIdentity,
-        collection_file_index: usize,
-        expected_class_id: Option<i32>,
-    },
-    DuplicateSceneAsset {
-        identity: WorkspaceSceneObjectIdentity,
-    },
-    ConflictingSceneAssetIdentity {
-        existing: WorkspaceSceneObjectIdentity,
-        conflicting: WorkspaceSceneObjectIdentity,
-    },
-    ConflictingComponentIdentity {
-        existing: WorkspaceSceneObjectIdentity,
-        conflicting: WorkspaceSceneObjectIdentity,
-    },
-    ConflictingComponentGameObjectEvidence {
-        identity: WorkspaceSceneObjectIdentity,
-        existing: WorkspaceSceneComponentEvidence,
-        conflicting: WorkspaceSceneComponentEvidence,
-    },
-    ComponentOutsideSceneCollections {
-        identity: WorkspaceSceneObjectIdentity,
-        evidence: WorkspaceSceneComponentEvidence,
-    },
-    ComponentClassIdUnavailable {
-        identity: WorkspaceSceneObjectIdentity,
-    },
-    MonoBehaviourGameObjectReferenceUnavailable {
-        identity: WorkspaceSceneObjectIdentity,
-    },
-    UnclassifiedComponentCandidate {
-        identity: WorkspaceSceneObjectIdentity,
-        evidence: WorkspaceSceneComponentEvidence,
-    },
-}
+use std::collections::HashSet;
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct WorkspaceSceneHierarchyMembership {
-    game_objects: Vec<WorkspaceSceneObjectIdentity>,
-    components: Vec<WorkspaceSceneObjectIdentity>,
-    prefab_instances: Vec<WorkspaceSceneObjectIdentity>,
-    managers: Vec<WorkspaceSceneObjectIdentity>,
-    scene_roots: Option<WorkspaceSceneObjectIdentity>,
-    issues: Vec<WorkspaceSceneHierarchyMembershipIssue>,
-}
-
-impl WorkspaceSceneHierarchyMembership {
-    pub fn game_objects(&self) -> &[WorkspaceSceneObjectIdentity] {
-        &self.game_objects
-    }
-
-    pub fn components(&self) -> &[WorkspaceSceneObjectIdentity] {
-        &self.components
-    }
-
-    pub fn prefab_instances(&self) -> &[WorkspaceSceneObjectIdentity] {
-        &self.prefab_instances
-    }
-
-    pub fn managers(&self) -> &[WorkspaceSceneObjectIdentity] {
-        &self.managers
-    }
-
-    pub fn scene_roots(&self) -> Option<WorkspaceSceneObjectIdentity> {
-        self.scene_roots
-    }
-
-    pub fn issues(&self) -> &[WorkspaceSceneHierarchyMembershipIssue] {
-        &self.issues
-    }
-
-    pub fn is_complete(&self) -> bool {
-        self.issues.is_empty()
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum WorkspaceSceneHierarchyMembershipError {
-    AssetLimitExceeded {
-        requested: usize,
-        limit: usize,
-    },
-    IssueLimitExceeded {
-        requested: usize,
-        limit: usize,
-    },
-    CountOverflow {
-        resource: &'static str,
-    },
-    DuplicateCollectionFileIndex {
-        file_index: usize,
-    },
-    AllocationFailed {
-        resource: &'static str,
-        requested: usize,
-    },
-}
-
-impl Display for WorkspaceSceneHierarchyMembershipError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::AssetLimitExceeded { requested, limit } => write!(
-                f,
-                "Scene hierarchy membership needs {requested} assets/candidates, exceeding limit {limit}"
-            ),
-            Self::IssueLimitExceeded { requested, limit } => write!(
-                f,
-                "Scene hierarchy membership has {requested} issues, exceeding limit {limit}"
-            ),
-            Self::CountOverflow { resource } => {
-                write!(f, "Scene hierarchy membership count overflowed for {resource}")
-            }
-            Self::DuplicateCollectionFileIndex { file_index } => write!(
-                f,
-                "SceneDefinition repeats workspace collection file index {file_index}"
-            ),
-            Self::AllocationFailed { resource, requested } => {
-                write!(f, "could not allocate {requested} entries for {resource}")
-            }
-        }
-    }
-}
-
-impl Error for WorkspaceSceneHierarchyMembershipError {}
-
-fn charge_membership_asset(
-    count: &mut usize,
-    limit: usize,
-) -> Result<(), WorkspaceSceneHierarchyMembershipError> {
-    let requested =
-        count
-            .checked_add(1)
-            .ok_or(WorkspaceSceneHierarchyMembershipError::CountOverflow {
-                resource: "ordered asset membership",
-            })?;
-    if requested > limit {
-        return Err(WorkspaceSceneHierarchyMembershipError::AssetLimitExceeded {
-            requested,
-            limit,
-        });
-    }
-    *count = requested;
-    Ok(())
-}
-
-fn push_membership_asset(
-    count: &mut usize,
-    assets: &mut Vec<WorkspaceSceneObjectIdentity>,
-    identity: WorkspaceSceneObjectIdentity,
-    limit: usize,
-) -> Result<(), WorkspaceSceneHierarchyMembershipError> {
-    let requested =
-        count
-            .checked_add(1)
-            .ok_or(WorkspaceSceneHierarchyMembershipError::CountOverflow {
-                resource: "ordered asset membership",
-            })?;
-    if requested > limit {
-        return Err(WorkspaceSceneHierarchyMembershipError::AssetLimitExceeded {
-            requested,
-            limit,
-        });
-    }
-    assets.try_reserve(1).map_err(|_| {
-        WorkspaceSceneHierarchyMembershipError::AllocationFailed {
-            resource: "ordered Scene hierarchy category",
-            requested,
-        }
-    })?;
-    assets.push(identity);
-    *count = requested;
-    Ok(())
-}
-
-fn push_membership_issue(
-    issues: &mut Vec<WorkspaceSceneHierarchyMembershipIssue>,
-    issue: WorkspaceSceneHierarchyMembershipIssue,
-    limit: usize,
-) -> Result<(), WorkspaceSceneHierarchyMembershipError> {
-    let requested = issues.len().checked_add(1).ok_or(
-        WorkspaceSceneHierarchyMembershipError::CountOverflow {
-            resource: "membership diagnostics",
-        },
-    )?;
-    if requested > limit {
-        return Err(WorkspaceSceneHierarchyMembershipError::IssueLimitExceeded {
-            requested,
-            limit,
-        });
-    }
-    issues.try_reserve(1).map_err(|_| {
-        WorkspaceSceneHierarchyMembershipError::AllocationFailed {
-            resource: "Scene hierarchy membership diagnostics",
-            requested,
-        }
-    })?;
-    issues.push(issue);
-    Ok(())
-}
-
-/// Scene graphs associated with source collection ownership, in SceneDefinition order.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct WorkspaceSceneHierarchies {
-    scenes: Vec<WorkspaceSceneHierarchyScene>,
-    non_scene_collections: Vec<WorkspaceSceneCollectionHierarchy>,
-    collection_graph_index: Vec<WorkspaceSceneCollectionGraphIndexEntry>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct WorkspaceSceneCollectionGraphIndexEntry {
-    file_index: usize,
-    scene_index: Option<usize>,
-    collection_index: usize,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct WorkspaceObjectKey {
-    file_index: usize,
-    object_index: usize,
-}
-
-impl From<WorkspaceSceneObjectIdentity> for WorkspaceObjectKey {
-    fn from(identity: WorkspaceSceneObjectIdentity) -> Self {
-        Self {
-            file_index: identity.file_index,
-            object_index: identity.object_index,
-        }
-    }
-}
+use super::prefab_roots::resolve_transform_game_object;
+use super::reference_mapping::{
+    resolve_relationship_identity, RelationshipIdentityResolution, WorkspaceObjectKey,
+};
+use super::*;
 
 enum WorkspaceHierarchyWalkAction {
     Enter {
@@ -246,33 +15,6 @@ enum WorkspaceHierarchyWalkAction {
 }
 
 impl WorkspaceSceneHierarchies {
-    pub fn scenes(&self) -> &[WorkspaceSceneHierarchyScene] {
-        &self.scenes
-    }
-
-    pub fn non_scene_collections(&self) -> &[WorkspaceSceneCollectionHierarchy] {
-        &self.non_scene_collections
-    }
-
-    fn collection_graph_for_file(
-        &self,
-        file_index: usize,
-    ) -> Option<&WorkspaceSceneCollectionHierarchy> {
-        let index = self
-            .collection_graph_index
-            .binary_search_by_key(&file_index, |entry| entry.file_index)
-            .ok()?;
-        let entry = self.collection_graph_index.get(index)?;
-        match entry.scene_index {
-            Some(scene_index) => self
-                .scenes
-                .get(scene_index)?
-                .collections()
-                .get(entry.collection_index),
-            None => self.non_scene_collections.get(entry.collection_index),
-        }
-    }
-
     /// Walks the source `GameObjectExtensions.FetchHierarchy` order across loaded collection files.
     pub fn fetch_game_object_hierarchy(
         &self,
@@ -472,53 +214,6 @@ impl WorkspaceSceneHierarchies {
         Ok(walk)
     }
 
-    /// Returns PrefabInstance identities in workspace file-index and serialized object order.
-    pub fn prefab_instance_identities(
-        &self,
-    ) -> impl Iterator<Item = WorkspaceSceneObjectIdentity> + '_ {
-        self.collection_graph_index.iter().flat_map(move |entry| {
-            self.collection_graph_for_file(entry.file_index)
-                .into_iter()
-                .flat_map(|graph| graph.scene_assets.iter())
-                .filter_map(|asset| {
-                    (asset.category == WorkspaceSceneAssetCategory::PrefabInstance)
-                        .then_some(asset.identity)
-                })
-        })
-    }
-
-    /// Returns recognized scene asset identities in caller-supplied collection traversal order.
-    /// Assets inside each collection retain serialized object-table order.
-    pub fn scene_asset_identities_in_collection_order<'a>(
-        &'a self,
-        collection_file_indices: &'a [usize],
-    ) -> impl Iterator<Item = WorkspaceSceneAssetIdentity> + 'a {
-        collection_file_indices.iter().flat_map(move |&file_index| {
-            self.collection_graph_for_file(file_index)
-                .into_iter()
-                .flat_map(|graph| graph.scene_assets.iter().copied())
-        })
-    }
-
-    /// Returns PrefabInstance identities in the supplied source collection traversal order.
-    ///
-    /// Each collection's assets retain serialized object-table order. The caller supplies the
-    /// `GameBundle.FetchAssets()` collection order; workspace file indices alone do not encode
-    /// that order for nested bundles.
-    pub fn prefab_instance_identities_in_collection_order<'a>(
-        &'a self,
-        collection_file_indices: &'a [usize],
-    ) -> impl Iterator<Item = WorkspaceSceneObjectIdentity> + 'a {
-        self.scene_asset_identities_in_collection_order(collection_file_indices)
-            .filter_map(|asset| {
-                (asset.category == WorkspaceSceneAssetCategory::PrefabInstance)
-                    .then_some(asset.identity)
-            })
-    }
-
-    /// Follows the source `GameObjectExtensions.GetRoot` rule: select the first Transform in
-    /// `m_Component`, then follow `m_Father` while its target has a non-null `m_GameObject`.
-    /// A GameObject without a Transform resolves to itself, matching the state after the source
     /// `AddMissingTransforms` pass has supplied its generated Transform.
     pub fn get_root_game_object(
         &self,
@@ -870,135 +565,7 @@ impl WorkspaceSceneHierarchies {
         }
         Ok(walk)
     }
-
-    /// Resolves one serialized `PrefabInstance.m_RootGameObject` edge against retained graphs.
-    /// A missing or malformed field remains `FieldUnavailable`; it is never converted to null.
-    pub fn resolve_prefab_instance_root(
-        &self,
-        prefab_instance: WorkspaceSceneObjectIdentity,
-    ) -> Result<WorkspacePrefabInstanceRootResolution, WorkspacePrefabInstanceRootError> {
-        if prefab_instance.class_id != Some(PREFAB_INSTANCE_CLASS_ID) {
-            return Err(WorkspacePrefabInstanceRootError::NotPrefabInstance {
-                identity: prefab_instance,
-            });
-        }
-        let Some(graph) = self.collection_graph_for_file(prefab_instance.file_index) else {
-            return Err(WorkspacePrefabInstanceRootError::MissingCollectionGraph {
-                file_index: prefab_instance.file_index,
-            });
-        };
-        let key = (prefab_instance.file_index, prefab_instance.object_index);
-        let has_prefab_instance = graph
-            .scene_assets
-            .binary_search_by_key(&key, |asset| {
-                (asset.identity.file_index, asset.identity.object_index)
-            })
-            .ok()
-            .and_then(|index| graph.scene_assets.get(index))
-            .filter(|asset| {
-                asset.category == WorkspaceSceneAssetCategory::PrefabInstance
-                    && asset.identity == prefab_instance
-            })
-            .is_some();
-        if !has_prefab_instance {
-            return Err(WorkspacePrefabInstanceRootError::MissingPrefabInstance {
-                identity: prefab_instance,
-            });
-        }
-        let relationships =
-            graph.prefab_root_relationships_for_object(prefab_instance.object_index);
-        if relationships.is_empty() {
-            return Ok(WorkspacePrefabInstanceRootResolution::FieldUnavailable);
-        }
-        if relationships.len() > 1 {
-            return Ok(
-                WorkspacePrefabInstanceRootResolution::DuplicateRootReferences {
-                    match_count: relationships.len(),
-                },
-            );
-        }
-        let relationship_index = relationships[0].relationship_index;
-        let Some(relationship) = graph.relationships.get(relationship_index) else {
-            return Err(WorkspacePrefabInstanceRootError::InvalidRelationshipIndex {
-                relationship_index,
-                relationship_count: graph.relationships.len(),
-            });
-        };
-        if relationship.source_object_index != prefab_instance.object_index
-            || relationship.kind != SceneRelationshipKind::PrefabInstanceRootGameObject
-            || relationship.source_path_id != prefab_instance.path_id
-        {
-            return Err(
-                WorkspacePrefabInstanceRootError::RelationshipIndexMismatch {
-                    expected_object_index: prefab_instance.object_index,
-                    relationship_index,
-                    actual_object_index: relationship.source_object_index,
-                    kind: relationship.kind,
-                },
-            );
-        }
-        let resolution = match resolve_relationship_identity(self, graph, relationship) {
-            RelationshipIdentityResolution::Null => WorkspacePrefabInstanceRootResolution::Null,
-            RelationshipIdentityResolution::Resolved(identity)
-                if identity.class_id == Some(GAME_OBJECT_CLASS_ID) =>
-            {
-                WorkspacePrefabInstanceRootResolution::Resolved(identity)
-            }
-            RelationshipIdentityResolution::Resolved(identity) => {
-                WorkspacePrefabInstanceRootResolution::TargetClassMismatch {
-                    target: identity,
-                    actual_class_id: identity.class_id,
-                }
-            }
-            RelationshipIdentityResolution::Unresolved(target) => {
-                WorkspacePrefabInstanceRootResolution::UnresolvedTarget(target)
-            }
-            RelationshipIdentityResolution::Unavailable {
-                target_file_index,
-                target_object_index,
-                path_id,
-            } => WorkspacePrefabInstanceRootResolution::TargetIdentityUnavailable {
-                target_file_index,
-                target_object_index,
-                path_id,
-            },
-            RelationshipIdentityResolution::PathMismatch {
-                identity,
-                expected_path_id,
-            } => WorkspacePrefabInstanceRootResolution::TargetIdentityPathMismatch {
-                expected_path_id,
-                actual_path_id: identity.path_id,
-            },
-        };
-        Ok(resolution)
-    }
-
-    pub fn scene_for_collection(
-        &self,
-        definitions: &WorkspaceSceneDefinitions,
-        collection_file_index: usize,
-    ) -> Option<&WorkspaceSceneHierarchyScene> {
-        definitions
-            .scene_index_for_collection(collection_file_index)
-            .and_then(|scene_index| self.scenes.get(scene_index))
-    }
 }
-
-enum RelationshipIdentityResolution {
-    Null,
-    Resolved(WorkspaceSceneObjectIdentity),
-    Unresolved(SceneRelationshipTarget),
-    Unavailable {
-        target_file_index: usize,
-        target_object_index: usize,
-        path_id: i64,
-    },
-    PathMismatch {
-        identity: WorkspaceSceneObjectIdentity,
-        expected_path_id: i64,
-    },
-}
-
 fn note_incomplete_collection_graph(
     graph: &WorkspaceSceneCollectionHierarchy,
     visited_graphs: &mut HashSet<usize>,
@@ -1103,92 +670,6 @@ fn push_hierarchy_walk_issue(
     walk.issues.push(issue);
     Ok(())
 }
-
-fn workspace_object_identity(
-    graph: &WorkspaceSceneCollectionHierarchy,
-    file_index: usize,
-    object_index: usize,
-) -> Option<WorkspaceSceneObjectIdentity> {
-    let key = (file_index, object_index);
-    graph
-        .scene_assets()
-        .binary_search_by_key(&key, |asset| {
-            (asset.identity.file_index, asset.identity.object_index)
-        })
-        .ok()
-        .and_then(|index| graph.scene_assets().get(index))
-        .map(|asset| asset.identity)
-        .or_else(|| {
-            graph
-                .component_candidates()
-                .binary_search_by_key(&key, |candidate| {
-                    (
-                        candidate.identity.file_index,
-                        candidate.identity.object_index,
-                    )
-                })
-                .ok()
-                .and_then(|index| graph.component_candidates().get(index))
-                .map(|candidate| candidate.identity)
-        })
-        .or_else(|| {
-            if file_index != graph.collection_file_index() {
-                return None;
-            }
-            graph
-                .scene_objects()
-                .binary_search_by_key(&object_index, |object| object.object_index)
-                .ok()
-                .and_then(|index| graph.scene_objects().get(index))
-                .map(|object| WorkspaceSceneObjectIdentity {
-                    file_index,
-                    object_index,
-                    path_id: object.path_id,
-                    class_id: object.class_id,
-                })
-        })
-}
-
-fn resolve_relationship_identity(
-    workspace: &WorkspaceSceneHierarchies,
-    source_graph: &WorkspaceSceneCollectionHierarchy,
-    relationship: &SceneRelationship,
-) -> RelationshipIdentityResolution {
-    let (target_file_index, target_object_index) = match &relationship.target {
-        SceneRelationshipTarget::Null => return RelationshipIdentityResolution::Null,
-        SceneRelationshipTarget::LocalObject { object_index } => {
-            (source_graph.collection_file_index(), *object_index)
-        }
-        SceneRelationshipTarget::WorkspaceObject {
-            file_index,
-            object_index,
-        } => (*file_index, *object_index),
-        target => return RelationshipIdentityResolution::Unresolved(target.clone()),
-    };
-    let identity = workspace_object_identity(source_graph, target_file_index, target_object_index)
-        .or_else(|| {
-            workspace
-                .collection_graph_for_file(target_file_index)
-                .and_then(|graph| {
-                    workspace_object_identity(graph, target_file_index, target_object_index)
-                })
-        });
-    let Some(identity) = identity else {
-        return RelationshipIdentityResolution::Unavailable {
-            target_file_index,
-            target_object_index,
-            path_id: relationship.path_id,
-        };
-    };
-    if identity.path_id != relationship.path_id {
-        return RelationshipIdentityResolution::PathMismatch {
-            identity,
-            expected_path_id: relationship.path_id,
-        };
-    }
-    RelationshipIdentityResolution::Resolved(identity)
-}
-
 fn graph_index_walk_error(
     error: WorkspaceSceneHierarchyError,
 ) -> WorkspaceGameObjectHierarchyWalkError {
@@ -1656,3 +1137,54 @@ fn collect_hierarchy_children(
     }
     Ok(children)
 }
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WorkspaceGameObjectHierarchyWalkError {
+    AllocationFailed {
+        resource: &'static str,
+        requested: usize,
+    },
+    CountOverflow {
+        resource: &'static str,
+    },
+    ResourceLimitExceeded {
+        resource: &'static str,
+        requested: usize,
+        limit: usize,
+    },
+    RootIsNotGameObject {
+        identity: WorkspaceSceneObjectIdentity,
+    },
+    GraphInvariantFailed {
+        message: String,
+    },
+}
+
+impl Display for WorkspaceGameObjectHierarchyWalkError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AllocationFailed {
+                resource,
+                requested,
+            } => {
+                write!(f, "could not allocate {requested} entries for {resource}")
+            }
+            Self::CountOverflow { resource } => write!(f, "{resource} count overflows usize"),
+            Self::ResourceLimitExceeded {
+                resource,
+                requested,
+                limit,
+            } => write!(f, "{resource} count {requested} exceeds limit {limit}"),
+            Self::RootIsNotGameObject { identity } => write!(
+                f,
+                "hierarchy root file {} object {} PathID {} is not a GameObject",
+                identity.file_index, identity.object_index, identity.path_id
+            ),
+            Self::GraphInvariantFailed { message } => {
+                write!(f, "hierarchy graph index is inconsistent: {message}")
+            }
+        }
+    }
+}
+
+impl Error for WorkspaceGameObjectHierarchyWalkError {}
