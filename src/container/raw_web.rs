@@ -133,23 +133,83 @@ impl<'a> RawWebBundle<'a> {
                                 },
                             )
                         })?;
-                let decompressed_size = scene.decompressed_size as usize;
-                Cow::Owned(
-                    decompress_size_block(
-                        compressed,
-                        decompressed_size,
-                        limits.max_decompressed_chunk_bytes,
-                    )
-                    .map_err(|error| {
-                        RawWebError::new(
-                            header.header_size + error.input_offset(),
-                            RawWebErrorKind::Lzma(error),
-                        )
-                    })?,
-                )
+                Cow::Owned(Self::decode_unityweb_scene(&header, compressed, limits)?)
             }
         };
 
+        Self::parse_header_and_data(header, data, limits)
+    }
+
+    pub(crate) fn parse_header_prefix(
+        prefix: &[u8],
+        input_size: usize,
+        limits: RawWebLimits,
+    ) -> Result<RawWebHeader, RawWebError> {
+        let mut reader = BinaryReader::new(prefix, Endian::Big);
+        read_header(&mut reader, input_size, limits)
+    }
+
+    pub(crate) fn from_owned_data(
+        header: RawWebHeader,
+        data: Vec<u8>,
+        limits: RawWebLimits,
+    ) -> Result<RawWebBundle<'static>, RawWebError> {
+        RawWebBundle::<'static>::parse_header_and_data(header, Cow::Owned(data), limits)
+    }
+
+    pub(crate) fn decode_unityweb_scene(
+        header: &RawWebHeader,
+        compressed: &[u8],
+        limits: RawWebLimits,
+    ) -> Result<Vec<u8>, RawWebError> {
+        let scene = Self::last_scene(header)?;
+        decompress_size_block(
+            compressed,
+            scene.decompressed_size as usize,
+            limits.max_decompressed_chunk_bytes,
+        )
+        .map_err(|error| {
+            RawWebError::new(
+                header.header_size + error.input_offset(),
+                RawWebErrorKind::Lzma(error),
+            )
+        })
+    }
+
+    pub(crate) fn last_scene(header: &RawWebHeader) -> Result<RawWebScene, RawWebError> {
+        header.scenes.last().copied().ok_or_else(|| {
+            RawWebError::new(header.header_size, RawWebErrorKind::WebBundleHasNoScenes)
+        })
+    }
+
+    pub(crate) fn last_scene_compressed_range(
+        header: &RawWebHeader,
+        input_size: usize,
+    ) -> Result<(usize, usize), RawWebError> {
+        let scene = Self::last_scene(header)?;
+        let offset = header.header_size;
+        let size = scene.compressed_size as usize;
+        let end = offset.checked_add(size).ok_or_else(|| {
+            RawWebError::new(offset, RawWebErrorKind::ChunkRangeOverflow { offset, size })
+        })?;
+        if end > input_size {
+            return Err(RawWebError::new(
+                offset,
+                RawWebErrorKind::ChunkOutOfBounds {
+                    offset,
+                    size,
+                    input_size,
+                },
+            ));
+        }
+        Ok((offset, end))
+    }
+
+    fn parse_header_and_data(
+        header: RawWebHeader,
+        data: Cow<'a, [u8]>,
+        limits: RawWebLimits,
+    ) -> Result<Self, RawWebError> {
         let metadata_limit = data.len().min(limits.max_metadata_bytes);
         let metadata = &data[..metadata_limit];
         let metadata_base = match header.kind {

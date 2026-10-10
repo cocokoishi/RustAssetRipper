@@ -2056,3 +2056,14 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | The file-backed UnityFS tree now sends a direct UnityWebData entry stream to `mount_webdata_stream_tree_at`, preserving the shared mount report and nested depth/active-byte limits. It no longer converts that complete child container to an owned `Vec` before reading the WebData directory. |
 | Regression evidence | `source_unityfs_nested_webdata_mounts_file_backed_through_both_path_apis` replays the frozen row through `mount_path` and `mount_paths`, compares parent/scope metadata, resource order and paths, exact payload bytes, and file-backed output, then removes the source file while mounted VFSes remain live. |
 | Remaining comparison | This covers the source-probed UnityFS direct-entry route. UnityWeb/UnityRaw nested WebData and other container entries, generic final-layer parsing, and Unix retained-reader runtime validation remain open; `IO-STREAM-001` remains in progress. |
+
+## DIFF-IO-STREAM-WEBDATA-UNITYWEB-001 — UnityWeb nested WebData stream mounting
+
+| Field | Finding |
+|---|---|
+| Source location | `AssetRipper.IO.Files/BundleFiles/RawWeb/RawWebBundleFile.cs`; `AssetRipper.IO.Files/WebFiles/WebFile.cs`; recursive `SchemeReader` dispatch |
+| Input evidence | Frozen source row `SCHEME|web_nested_webdata` in `src/io/io_differential_fixture.txt`; the row records the UnityWeb header, compressed scene, nested WebData entry, and two exact ResourceFile payloads. |
+| Source-derived behavior | The UnityWeb scene directory identifies `nested.webdata`; recursive scheme dispatch mounts that child as a WebData container and preserves its two ordered ResourceFiles and exact payload bytes. |
+| Rust change | `mount_path` and `mount_paths` read a bounded UnityWeb header prefix and the declared compressed scene, decode it under the existing chunk limit, then copy each directory entry in bounded chunks to temporary `SmartStream` backing before dispatch. A direct WebData child recurses through the shared mount report and parent/scope metadata. Header, input, decompression, path, entry, nesting, and output checks remain enforced. |
+| Regression evidence | `source_unityweb_nested_webdata_mounts_file_backed_through_both_path_apis` replays the frozen row through both production APIs, checks container parent indexes and scope paths, ResourceFile order and paths, exact payload bytes, file-backed output, and source-file release while mounted VFSes remain live. |
+| Remaining comparison | This covers the frozen UnityWeb-to-WebData route. UnityRaw and other Raw/Web container entry paths, generic final-layer parsing, and Unix retained-reader runtime validation remain open; `IO-STREAM-001` remains in progress. |

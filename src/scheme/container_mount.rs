@@ -4,6 +4,7 @@ use std::path::Path;
 
 use super::reader::probe_direct_stream_kind;
 use super::*;
+use crate::container::raw_web::{RawWebBundle, RawWebKind};
 use crate::container::unityfs::{UnityFsError, UnityFsStreamBundle};
 use crate::container::web_file::WebFileDirectory;
 use crate::io::filesystem::VirtualFileSystem;
@@ -321,6 +322,355 @@ pub(super) fn mount_webdata_stream_tree(
         &mut state,
     )?;
     Ok(state.report)
+}
+
+pub(super) fn mount_unityweb_stream_tree(
+    source: &SmartStream,
+    source_name: Option<&str>,
+    filesystem: &mut VirtualFileSystem,
+    destination_root: Option<&str>,
+    scheme_limits: SchemeReaderLimits,
+    limits: ContainerMountLimits,
+) -> Result<ContainerMountReport, ContainerMountError> {
+    let mut state = ContainerTreeMountState {
+        filesystem,
+        limits,
+        visited_entries: 0,
+        active_nested_bytes: 0,
+        container_scope_path_bytes: 0,
+        container_bundle_name_bytes: 0,
+        bundle_serialized_file_counts: Vec::new(),
+        bundle_resource_file_counts: Vec::new(),
+        resource_file_path_bytes: 0,
+        resource_file_name_bytes: 0,
+        report: ContainerMountReport::default(),
+    };
+    mount_unityweb_stream_tree_at(
+        source,
+        WebDataStreamContext {
+            destination_root,
+            depth: 0,
+            parent_bundle_index: None,
+            parent_entry_index: None,
+            source_name,
+        },
+        scheme_limits,
+        &mut state,
+    )?;
+    Ok(state.report)
+}
+
+fn mount_unityweb_stream_tree_at(
+    source: &SmartStream,
+    context: WebDataStreamContext<'_>,
+    scheme_limits: SchemeReaderLimits,
+    state: &mut ContainerTreeMountState<'_>,
+) -> Result<(), ContainerMountError> {
+    let WebDataStreamContext {
+        destination_root,
+        depth,
+        parent_bundle_index,
+        parent_entry_index,
+        source_name,
+    } = context;
+    let container_scope_index = record_container_scope(destination_root, state)?;
+    let container_bundle_index = record_container_bundle(
+        container_scope_index,
+        parent_bundle_index,
+        parent_entry_index,
+        source_name,
+        state,
+    )?;
+    if depth > state.limits.max_depth {
+        return Err(ContainerMountError::new(
+            state.report.clone(),
+            ContainerMountErrorKind::NestingDepthLimitExceeded {
+                depth,
+                limit: state.limits.max_depth,
+            },
+        ));
+    }
+
+    let bundle = read_unityweb_bundle_stream(source, source_name, scheme_limits, &state.report)?;
+    preflight_tree_entry_count(bundle.entries.len(), state)?;
+    for (index, entry) in bundle.entries.iter().enumerate() {
+        let virtual_path = checked_container_entry_path(
+            state.filesystem,
+            destination_root,
+            entry.path.as_str(),
+            index,
+            &state.report,
+        )?;
+        let entry_bytes = bundle.read_entry(index).map_err(|error| {
+            ContainerMountError::new(
+                state.report.clone(),
+                ContainerMountErrorKind::Scheme(SchemeError::new(SchemeErrorKind::RawWeb(error))),
+            )
+        })?;
+        let entry_stream =
+            copy_raw_web_entry_to_temp(entry_bytes, &virtual_path, index, &state.report)?;
+        let dispatched = SchemeReader::dispatch_stream_file_backed(entry_stream, scheme_limits)
+            .map_err(|error| {
+                ContainerMountError::new(
+                    state.report.clone(),
+                    ContainerMountErrorKind::Scheme(error),
+                )
+            })?;
+
+        match dispatched.kind {
+            FileKind::SerializedFile => {
+                let serialized_file = prepare_mounted_serialized_file(
+                    &virtual_path,
+                    index,
+                    container_scope_index,
+                    container_bundle_index,
+                    state,
+                )?;
+                mount_container_stream_at_path(
+                    state.filesystem,
+                    &virtual_path,
+                    index,
+                    dispatched.stream,
+                    state.limits,
+                    &mut state.report,
+                )?;
+                state.report.serialized_file_path_bytes = serialized_file.total_path_bytes;
+                state.report.serialized_files.push(serialized_file.record);
+                state.bundle_serialized_file_counts[container_bundle_index] =
+                    serialized_file.next_bundle_collection_count;
+            }
+            FileKind::Resource => {
+                let resource_file = prepare_mounted_resource_file(
+                    &virtual_path,
+                    entry.path.as_str(),
+                    index,
+                    container_scope_index,
+                    container_bundle_index,
+                    state,
+                )?;
+                mount_container_stream_at_path(
+                    state.filesystem,
+                    &virtual_path,
+                    index,
+                    dispatched.stream,
+                    state.limits,
+                    &mut state.report,
+                )?;
+                state.resource_file_path_bytes = resource_file.total_path_bytes;
+                state.report.resource_file_path_bytes = resource_file.total_path_bytes;
+                state.resource_file_name_bytes = resource_file.total_name_bytes;
+                state.report.resource_file_name_bytes = resource_file.total_name_bytes;
+                state.report.resource_files.push(resource_file.record);
+                state.bundle_resource_file_counts[container_bundle_index] =
+                    resource_file.next_bundle_resource_count;
+            }
+            FileKind::UnityWebData => {
+                let child_depth = depth.checked_add(1).ok_or_else(|| {
+                    ContainerMountError::new(
+                        state.report.clone(),
+                        ContainerMountErrorKind::NestingDepthLimitExceeded {
+                            depth: usize::MAX,
+                            limit: state.limits.max_depth,
+                        },
+                    )
+                })?;
+                mount_webdata_stream_tree_at(
+                    &dispatched.stream,
+                    WebDataStreamContext {
+                        destination_root: Some(&virtual_path),
+                        depth: child_depth,
+                        parent_bundle_index: Some(container_bundle_index),
+                        parent_entry_index: Some(index),
+                        source_name: Some(entry.path.as_str()),
+                    },
+                    scheme_limits,
+                    state,
+                )?;
+            }
+            _ => {
+                let child = dispatched.into_dispatched(scheme_limits).map_err(|error| {
+                    ContainerMountError::new(
+                        state.report.clone(),
+                        ContainerMountErrorKind::Scheme(error),
+                    )
+                })?;
+                mount_tree_child(
+                    child,
+                    ContainerTreeEntry {
+                        virtual_path,
+                        source_name: entry.path.as_str(),
+                        entry_index: index,
+                    },
+                    container_scope_index,
+                    container_bundle_index,
+                    depth,
+                    state,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn read_unityweb_bundle_stream(
+    source: &SmartStream,
+    source_name: Option<&str>,
+    scheme_limits: SchemeReaderLimits,
+    report: &ContainerMountReport,
+) -> Result<RawWebBundle<'static>, ContainerMountError> {
+    let path = source_name.unwrap_or("<UnityWeb>");
+    let input_length = source.length().map_err(|source| {
+        ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::FileSystem {
+                entry_index: 0,
+                path: path.to_owned(),
+                source,
+            },
+        )
+    })?;
+    if input_length > u64::try_from(scheme_limits.max_input_bytes).unwrap_or(u64::MAX) {
+        return Err(ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::Scheme(SchemeError::new(
+                SchemeErrorKind::InputSizeLimitExceeded {
+                    requested: input_length,
+                    limit: scheme_limits.max_input_bytes,
+                },
+            )),
+        ));
+    }
+    let input_size = usize::try_from(input_length).map_err(|_| {
+        ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::Scheme(SchemeError::new(
+                SchemeErrorKind::InputLengthNotRepresentable {
+                    length: input_length,
+                },
+            )),
+        )
+    })?;
+
+    let prefix_size = input_size.min(scheme_limits.raw_web.max_header_bytes);
+    let mut prefix = Vec::new();
+    prefix.try_reserve_exact(prefix_size).map_err(|_| {
+        ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::Scheme(SchemeError::new(
+                SchemeErrorKind::InputAllocationFailed {
+                    requested: prefix_size,
+                },
+            )),
+        )
+    })?;
+    prefix.resize(prefix_size, 0);
+    source
+        .read_exact_at(0, &mut prefix)
+        .map_err(|source| stream_read_error(report, path, 0, source))?;
+
+    let header = RawWebBundle::parse_header_prefix(&prefix, input_size, scheme_limits.raw_web)
+        .map_err(|error| {
+            ContainerMountError::new(
+                report.clone(),
+                ContainerMountErrorKind::Scheme(SchemeError::new(SchemeErrorKind::RawWeb(error))),
+            )
+        })?;
+    if header.kind != RawWebKind::UnityWeb {
+        return Err(ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::Scheme(SchemeError::new(
+                SchemeErrorKind::DetectedKindChanged {
+                    detected: FileKind::UnityWebBundle,
+                    parsed: header.kind,
+                },
+            )),
+        ));
+    }
+    let (compressed_start, compressed_end) =
+        RawWebBundle::last_scene_compressed_range(&header, input_size).map_err(|error| {
+            ContainerMountError::new(
+                report.clone(),
+                ContainerMountErrorKind::Scheme(SchemeError::new(SchemeErrorKind::RawWeb(error))),
+            )
+        })?;
+    let compressed_size = compressed_end - compressed_start;
+    let mut compressed = Vec::new();
+    compressed.try_reserve_exact(compressed_size).map_err(|_| {
+        ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::Scheme(SchemeError::new(
+                SchemeErrorKind::InputAllocationFailed {
+                    requested: compressed_size,
+                },
+            )),
+        )
+    })?;
+    compressed.resize(compressed_size, 0);
+    let compressed_offset = u64::try_from(compressed_start).map_err(|_| {
+        ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::Scheme(SchemeError::new(
+                SchemeErrorKind::InputLengthNotRepresentable {
+                    length: input_length,
+                },
+            )),
+        )
+    })?;
+    source
+        .read_exact_at(compressed_offset, &mut compressed)
+        .map_err(|source| stream_read_error(report, path, 0, source))?;
+
+    let data = RawWebBundle::decode_unityweb_scene(&header, &compressed, scheme_limits.raw_web)
+        .map_err(|error| {
+            ContainerMountError::new(
+                report.clone(),
+                ContainerMountErrorKind::Scheme(SchemeError::new(SchemeErrorKind::RawWeb(error))),
+            )
+        })?;
+    RawWebBundle::from_owned_data(header, data, scheme_limits.raw_web).map_err(|error| {
+        ContainerMountError::new(
+            report.clone(),
+            ContainerMountErrorKind::Scheme(SchemeError::new(SchemeErrorKind::RawWeb(error))),
+        )
+    })
+}
+
+fn stream_read_error(
+    report: &ContainerMountReport,
+    path: &str,
+    entry_index: usize,
+    source: std::io::Error,
+) -> ContainerMountError {
+    ContainerMountError::new(
+        report.clone(),
+        ContainerMountErrorKind::FileSystem {
+            entry_index,
+            path: path.to_owned(),
+            source,
+        },
+    )
+}
+
+fn copy_raw_web_entry_to_temp(
+    bytes: &[u8],
+    path: &str,
+    entry_index: usize,
+    report: &ContainerMountReport,
+) -> Result<SmartStream, ContainerMountError> {
+    let mut output = SmartStream::create_temp()
+        .map_err(|source| stream_read_error(report, path, entry_index, source))?;
+    for chunk in bytes.chunks(64 * 1024) {
+        output
+            .write_all(chunk)
+            .map_err(|source| stream_read_error(report, path, entry_index, source))?;
+    }
+    output
+        .flush()
+        .map_err(|source| stream_read_error(report, path, entry_index, source))?;
+    output
+        .seek(SeekFrom::Start(0))
+        .map_err(|source| stream_read_error(report, path, entry_index, source))?;
+    Ok(output)
 }
 
 struct WebDataStreamContext<'a> {
