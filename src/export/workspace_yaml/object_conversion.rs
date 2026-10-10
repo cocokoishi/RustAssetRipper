@@ -410,7 +410,7 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
             .and_then(FactoryUnityVersion::parse)
             .is_some_and(|version| version.major == 5 && version.minor == 6);
         if (matches!(class_id, 104 | 157)
-            || (unity_5_6_scene_object && matches!(class_id, 1 | 4 | 23 | 33)))
+            || (unity_5_6_scene_object && matches!(class_id, 1 | 4 | 23 | 33 | 108)))
             && matches!(&object.factory.kind, FactoryAssetKind::Generated(_))
         {
             let unity_version_text = unity_version_text.ok_or_else(|| {
@@ -566,7 +566,7 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
         let generated_game_object_or_transform = matches!(class_id, 1 | 4)
             && matches!(&object.factory.kind, FactoryAssetKind::Generated(_));
         if generated_game_object_or_transform
-            || (editor_manager_type_tree.is_some() && matches!(class_id, 23 | 33 | 104 | 157))
+            || (editor_manager_type_tree.is_some() && matches!(class_id, 23 | 33 | 104 | 108 | 157))
             || (generated_prefab_internal.is_some()
                 && matches!(&object.factory.kind, FactoryAssetKind::Generated(_)))
         {
