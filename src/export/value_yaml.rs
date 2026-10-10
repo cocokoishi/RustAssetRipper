@@ -1,11 +1,19 @@
-//! Bounded conversion from decoded SerializedValue trees to Unity YAML object documents.
+mod conversion;
+mod field_rules;
+mod layout;
+mod model;
+mod object_document;
+mod paths;
+mod type_rules;
 
-include!("value_yaml_layout.rs");
-include!("value_yaml_conversion.rs");
-include!("value_yaml_path_helpers.rs");
+pub use model::{
+    UnityYamlDictionaryRepresentation, UnityYamlEmptyArrayKind, UnityYamlGuidSchema,
+    UnityYamlHash128Schema, UnityYamlObjectConversionError, UnityYamlObjectConversionHints,
+    UnityYamlObjectConversionLimits, UnityYamlObjectFieldMode, UnityYamlPPtrRequest,
+    UnityYamlPropertyNameSchema, UnityYamlPropertyNameValueKind,
+    UnityYamlSceneObjectIdentifierSchema,
+};
+pub use object_document::serialized_object_value_to_unity_yaml_document;
 
 #[cfg(test)]
-mod tests {
-    include!("value_yaml_tests_01.rs");
-    include!("value_yaml_tests_02.rs");
-}
+mod tests;

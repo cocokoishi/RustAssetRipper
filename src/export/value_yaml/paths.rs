@@ -1,4 +1,7 @@
-fn serialized_version_for_path(
+use super::model::{
+    UnityYamlObjectConversionError, UnityYamlObjectConversionHints, UnityYamlObjectConversionLimits,
+};
+pub(super) fn serialized_version_for_path(
     field_path: &str,
     hints: &UnityYamlObjectConversionHints,
     limits: UnityYamlObjectConversionLimits,
@@ -13,7 +16,7 @@ fn serialized_version_for_path(
     Ok(hints.serialized_version_paths.get(&canonical_path).copied())
 }
 
-fn canonical_array_path(
+pub(super) fn canonical_array_path(
     path: &str,
     max_bytes: usize,
 ) -> Result<String, UnityYamlObjectConversionError> {
@@ -56,7 +59,7 @@ fn canonical_array_path(
     Ok(canonical)
 }
 
-fn child_field_path(
+pub(super) fn child_field_path(
     parent: &str,
     name: &str,
     max_bytes: usize,
@@ -91,7 +94,7 @@ fn child_field_path(
     Ok(path)
 }
 
-fn indexed_field_path(
+pub(super) fn indexed_field_path(
     parent: &str,
     index: usize,
     max_bytes: usize,
@@ -125,7 +128,7 @@ fn indexed_field_path(
     Ok(path)
 }
 
-fn try_copy_string(
+pub(super) fn try_copy_string(
     value: &str,
     resource: &'static str,
 ) -> Result<String, UnityYamlObjectConversionError> {
@@ -140,13 +143,17 @@ fn try_copy_string(
     Ok(copy)
 }
 
-struct ConversionBudget {
+pub(super) struct ConversionBudget {
     visited: usize,
-    limits: UnityYamlObjectConversionLimits,
+    pub(super) limits: UnityYamlObjectConversionLimits,
 }
 
 impl ConversionBudget {
-    fn visit(&mut self, depth: usize) -> Result<(), UnityYamlObjectConversionError> {
+    pub(super) fn new(limits: UnityYamlObjectConversionLimits) -> Self {
+        Self { visited: 0, limits }
+    }
+
+    pub(super) fn visit(&mut self, depth: usize) -> Result<(), UnityYamlObjectConversionError> {
         if depth > self.limits.max_depth {
             return Err(UnityYamlObjectConversionError::DepthLimitExceeded {
                 requested: depth,
@@ -168,7 +175,10 @@ impl ConversionBudget {
         Ok(())
     }
 
-    fn check_field_path(&self, path: &str) -> Result<(), UnityYamlObjectConversionError> {
+    pub(super) fn check_field_path(
+        &self,
+        path: &str,
+    ) -> Result<(), UnityYamlObjectConversionError> {
         if path.len() > self.limits.max_field_path_bytes {
             return Err(UnityYamlObjectConversionError::FieldPathLimitExceeded {
                 requested: path.len(),
@@ -177,4 +187,32 @@ impl ConversionBudget {
         }
         Ok(())
     }
+}
+
+pub(super) fn wildcard_element_path(
+    parent: &str,
+    limits: UnityYamlObjectConversionLimits,
+) -> Result<String, UnityYamlObjectConversionError> {
+    let requested = parent.len().checked_add(3).ok_or(
+        UnityYamlObjectConversionError::FieldPathLimitExceeded {
+            requested: usize::MAX,
+            limit: limits.max_field_path_bytes,
+        },
+    )?;
+    if requested > limits.max_field_path_bytes {
+        return Err(UnityYamlObjectConversionError::FieldPathLimitExceeded {
+            requested,
+            limit: limits.max_field_path_bytes,
+        });
+    }
+    let mut path = String::new();
+    path.try_reserve_exact(requested).map_err(|_| {
+        UnityYamlObjectConversionError::AllocationFailed {
+            resource: "Unity YAML array schema path",
+            requested,
+        }
+    })?;
+    path.push_str(parent);
+    path.push_str("[*]");
+    Ok(path)
 }

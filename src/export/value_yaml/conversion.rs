@@ -1,66 +1,60 @@
-fn flatten_mapping_field(
-    body: &mut UnityYamlNode,
-    field_name: &str,
-) -> Result<(), UnityYamlObjectConversionError> {
-    let UnityYamlNodeKind::Mapping { entries, .. } = &mut body.kind else {
-        return Err(UnityYamlObjectConversionError::NodeBuild(
-            UnityYamlNodeBuildError::NotAMapping,
-        ));
-    };
-    let mut field_index = None;
-    for (index, (key, _)) in entries.iter().enumerate() {
-        if matches!(
-            &key.kind,
-            UnityYamlNodeKind::Scalar(
-                UnityYamlScalar::PlainString(name) | UnityYamlScalar::String(name)
-            ) if name == field_name
-        ) && field_index.replace(index).is_some()
-        {
-            return Err(UnityYamlObjectConversionError::InvalidTypeTree {
-                node_index: 0,
-                reason: "MonoBehaviour contains multiple m_Structure fields",
-            });
-        }
-    }
-    let Some(field_index) = field_index else {
-        return Ok(());
-    };
-    let (_, structure) = entries.remove(field_index);
-    let UnityYamlNodeKind::Mapping {
-        entries: structure_fields,
-        ..
-    } = structure.kind
-    else {
-        return Err(UnityYamlObjectConversionError::InvalidTypeTree {
-            node_index: 0,
-            reason: "MonoBehaviour m_Structure is not a structure",
-        });
-    };
-    entries
-        .try_reserve(structure_fields.len().saturating_sub(1))
-        .map_err(|_| UnityYamlObjectConversionError::AllocationFailed {
-            resource: "flattened MonoBehaviour YAML fields",
-            requested: entries.len().saturating_add(structure_fields.len()),
-        })?;
-    entries.splice(field_index..field_index, structure_fields);
-    Ok(())
-}
+use std::fmt::Display;
+use std::fmt::Write as _;
 
-fn take_yaml_mapping_field(
-    entries: &mut Vec<(UnityYamlNode, UnityYamlNode)>,
-    field_name: &str,
-) -> Option<(UnityYamlNode, UnityYamlNode)> {
-    let index = entries.iter().position(|(key, _)| {
-        matches!(
-            &key.kind,
-            UnityYamlNodeKind::Scalar(
-                UnityYamlScalar::PlainString(value) | UnityYamlScalar::String(value)
-            ) if value == field_name
-        )
-    })?;
-    Some(entries.remove(index))
-}
+use crate::processing::scene_naming::SceneUnityVersion;
+use crate::serialized_file::object::{SerializedFieldValue, SerializedValue};
 
+use super::super::pointer_map::ProjectPointerResolution;
+use super::super::scene_collection::ExportAssetIdentity;
+use super::super::unity_yaml::{
+    format_dotnet_f32, format_dotnet_f64, format_hash128, format_unity_guid_words,
+    project_pointer_to_unity_yaml, UnityYamlMappingStyle, UnityYamlNode, UnityYamlNodeBuildError,
+    UnityYamlNodeKind, UnityYamlScalar, UnityYamlSequenceStyle,
+};
+use super::field_rules::baseline_yaml_field_name;
+use super::model::{
+    UnityYamlDictionaryRepresentation, UnityYamlEmptyArrayKind, UnityYamlGuidSchema,
+    UnityYamlHash128Schema, UnityYamlObjectConversionError, UnityYamlObjectConversionHints,
+    UnityYamlObjectConversionLimits, UnityYamlObjectFieldMode, UnityYamlPPtrRequest,
+    UnityYamlPropertyNameSchema, UnityYamlPropertyNameValueKind,
+    UnityYamlSceneObjectIdentifierSchema,
+};
+use super::paths::{
+    canonical_array_path, child_field_path, indexed_field_path, serialized_version_for_path,
+    try_copy_string, ConversionBudget,
+};
+
+const IMPORTER_FIELDS_TO_SKIP: &[&str] = &[
+    "m_ObjectHideFlags",
+    "m_ExtensionPtr",
+    "m_PrefabParentObject",
+    "m_CorrespondingSourceObject",
+    "m_PrefabInternal",
+    "m_PrefabAsset",
+    "m_PrefabInstance",
+];
+
+const STRIPPED_ASSET_ALLOWED_FIELDS: &[&str] = &[
+    "m_CorrespondingSourceObject",
+    "m_PrefabAsset",
+    "m_PrefabInstance",
+    "m_PrefabInternal",
+    "m_PrefabParentObject",
+];
+
+pub(super) const STRIPPED_MONO_BEHAVIOUR_ALLOWED_FIELDS: &[&str] = &[
+    "m_CorrespondingSourceObject",
+    "m_EditorClassIdentifier",
+    "m_EditorHideFlags",
+    "m_Enabled",
+    "m_GameObject",
+    "m_Name",
+    "m_PrefabAsset",
+    "m_PrefabInstance",
+    "m_PrefabInternal",
+    "m_PrefabParentObject",
+    "m_Script",
+];
 #[allow(clippy::too_many_arguments)]
 fn append_struct_fields<F>(
     destination: &mut UnityYamlNode,
@@ -320,7 +314,7 @@ where
 
 #[allow(clippy::too_many_arguments)]
 fn convert_managed_reference_registry<F>(
-    registry: &super::super::serialized_file::managed_registry::ManagedRegistryRead,
+    registry: &crate::serialized_file::managed_registry::ManagedRegistryRead,
     field_path: &str,
     depth: usize,
     source: ExportAssetIdentity,
@@ -407,24 +401,24 @@ where
                 budget.visit(depth + 3)?;
                 budget.check_field_path(&data_path)?;
                 let data = match &entry.data {
-                    super::super::serialized_file::managed_registry::ManagedRegistryEntryData::Empty => {
+                    crate::serialized_file::managed_registry::ManagedRegistryEntryData::Empty => {
                         UnityYamlNode::mapping(UnityYamlMappingStyle::Block)
                     }
-                    super::super::serialized_file::managed_registry::ManagedRegistryEntryData::Content(value) => {
-                        convert_value(
-                            value,
-                            &data_path,
-                            depth + 3,
-                            source,
-                            hints,
-                            field_mode,
-                            unity_version,
-                            missing_reference_guid,
-                            limits,
-                            budget,
-                            resolve_pointer,
-                        )?
-                    }
+                    crate::serialized_file::managed_registry::ManagedRegistryEntryData::Content(
+                        value,
+                    ) => convert_value(
+                        value,
+                        &data_path,
+                        depth + 3,
+                        source,
+                        hints,
+                        field_mode,
+                        unity_version,
+                        missing_reference_guid,
+                        limits,
+                        budget,
+                        resolve_pointer,
+                    )?,
                 };
                 entry_mapping
                     .insert_field("data", data)
@@ -1149,7 +1143,9 @@ fn format_dictionary_numeric_key<T: Display>(
 /// Render a `float` dictionary key exactly like the source `ToString`: the same
 /// invariant-culture shortest form the YAML value scalars use, not Rust `Display`
 /// (which disagrees on fixed/scientific notation choices and exponent padding).
-fn format_dictionary_float32_key(value: f32) -> Result<String, UnityYamlObjectConversionError> {
+pub(super) fn format_dictionary_float32_key(
+    value: f32,
+) -> Result<String, UnityYamlObjectConversionError> {
     if value.is_nan() {
         try_copy_string("NaN", "Unity dictionary floating-point key")
     } else if value == f32::INFINITY {
@@ -1165,7 +1161,9 @@ fn format_dictionary_float32_key(value: f32) -> Result<String, UnityYamlObjectCo
 }
 
 /// Render a `double` dictionary key exactly like the source `ToString`.
-fn format_dictionary_float64_key(value: f64) -> Result<String, UnityYamlObjectConversionError> {
+pub(super) fn format_dictionary_float64_key(
+    value: f64,
+) -> Result<String, UnityYamlObjectConversionError> {
     if value.is_nan() {
         try_copy_string("NaN", "Unity dictionary floating-point key")
     } else if value == f64::INFINITY {
@@ -1200,211 +1198,6 @@ fn importer_field_is_excluded(
     Ok(false)
 }
 
-fn baseline_type_scoped_field_aliases(type_name: &str) -> &'static [(&'static str, &'static str)] {
-    const ANIMATION_CLIP_ALIASES: &[(&str, &str)] =
-        &[("m_AnimationClipSettings", "m_MuscleClipInfo")];
-    const GENERIC_BINDING_ALIASES: &[(&str, &str)] = &[("m_TypeID", "m_ClassID")];
-    const ANIMATOR_CONTROLLER_ALIASES: &[(&str, &str)] = &[
-        ("m_AnimatorEvents", "m_AnimatorParameters"),
-        ("m_Layers", "m_AnimatorLayers"),
-    ];
-    const ANIMATOR_CONTROLLER_LAYER_ALIASES: &[(&str, &str)] = &[("m_HumanMask", "m_Mask")];
-    const BLEND_TREE_ALIASES: &[(&str, &str)] = &[
-        ("m_BlendEvent", "m_BlendParameter"),
-        ("m_BlendEventY", "m_BlendParameterY"),
-    ];
-    const LIGHTMAP_SETTINGS_ALIASES: &[(&str, &str)] =
-        &[("m_LightmapSnapshot", "m_LightingDataAsset")];
-    const TEXTURE_3D_ALIASES: &[(&str, &str)] = &[
-        ("m_DataSize", "m_CompleteImageSize"),
-        ("m_ImageCount", "m_Depth"),
-    ];
-    const MESH_RENDERER_ALIASES: &[(&str, &str)] = &[("m_StitchSeams", "m_StitchLightmapSeams")];
-    const PREFAB_ALIASES: &[(&str, &str)] = &[
-        ("m_IsPrefabParent", "m_IsPrefabAsset"),
-        ("m_ParentPrefab", "m_SourcePrefab"),
-    ];
-    const LAYER_CONSTANT_ALIASES: &[(&str, &str)] = &[(
-        "m_StateMachineMotionSetIndex",
-        "m_StateMachineSynchronizedLayerIndex",
-    )];
-    const CONTROLLER_CONSTANT_ALIASES: &[(&str, &str)] = &[("m_HumanLayerArray", "m_LayerArray")];
-    const STATE_MACHINE_CONSTANT_ALIASES: &[(&str, &str)] =
-        &[("m_MotionSetCount", "m_SynchronizedLayerCount")];
-    const BUILD_SETTINGS_ALIASES: &[(&str, &str)] = &[("m_Levels", "m_Scenes")];
-    const HEIGHTMAP_ALIASES: &[(&str, &str)] = &[
-        (
-            "m_EnableSurfaceMaskTextureCompression",
-            "m_EnableHolesTextureCompression",
-        ),
-        ("m_SurfaceMask", "m_Holes"),
-        ("m_SurfaceMaskLOD", "m_HolesLOD"),
-    ];
-    const GRAPHICS_SETTINGS_ALIASES: &[(&str, &str)] = &[
-        ("m_BuildTargetShaderSettings", "m_TierSettings"),
-        ("m_AlbedoSwatchInfos", "m_AlbedoSwitchInfos"),
-    ];
-    const TEXTURE_IMPORTER_ALIASES: &[(&str, &str)] =
-        &[("m_BuildTargetSettings", "m_PlatformSettings")];
-    const BUILD_TARGET_SHADER_SETTINGS_ALIASES: &[(&str, &str)] =
-        &[("m_ShaderSettings", "m_Settings")];
-    const BINDING_ALIASES: &[(&str, &str)] = &[("m_Set", "m_EncodedData")];
-    const CONSTANT_BUFFER_PARAMETER_ALIASES: &[(&str, &str)] =
-        &[("m_Index", "m_OffsetInConstantBuffer")];
-    const VERTEX_DATA_ALIASES: &[(&str, &str)] = &[("m_DataSize", "m_Data")];
-    const COMPUTE_SHADER_VARIANT_ALIASES: &[(&str, &str)] = &[("m_Kernels", "m_KernelParents")];
-    const SHADER_ALIASES: &[(&str, &str)] = &[("m_SubProgramBlob", "m_CompressedBlob")];
-    const GAME_OBJECT_ALIASES: &[(&str, &str)] = &[("m_Component", "m_Components")];
-
-    match type_name {
-        "AnimationClip" => ANIMATION_CLIP_ALIASES,
-        "GenericBinding" => GENERIC_BINDING_ALIASES,
-        "AnimatorController" => ANIMATOR_CONTROLLER_ALIASES,
-        "AnimatorControllerLayer" => ANIMATOR_CONTROLLER_LAYER_ALIASES,
-        "BlendTree" => BLEND_TREE_ALIASES,
-        "LightmapSettings" => LIGHTMAP_SETTINGS_ALIASES,
-        "Texture3D" => TEXTURE_3D_ALIASES,
-        "MeshRenderer" => MESH_RENDERER_ALIASES,
-        "Prefab" => PREFAB_ALIASES,
-        "HumanLayerConstant" | "LayerConstant" => LAYER_CONSTANT_ALIASES,
-        "ControllerConstant" => CONTROLLER_CONSTANT_ALIASES,
-        "StateMachineConstant" => STATE_MACHINE_CONSTANT_ALIASES,
-        "BuildSettings" => BUILD_SETTINGS_ALIASES,
-        "Heightmap" => HEIGHTMAP_ALIASES,
-        "GraphicsSettings" => GRAPHICS_SETTINGS_ALIASES,
-        "TextureImporter" => TEXTURE_IMPORTER_ALIASES,
-        "BuildTargetShaderSettings" => BUILD_TARGET_SHADER_SETTINGS_ALIASES,
-        "Binding" => BINDING_ALIASES,
-        "MatrixParameter" | "StructParameter" | "VectorParameter" => {
-            CONSTANT_BUFFER_PARAMETER_ALIASES
-        }
-        "VertexData" => VERTEX_DATA_ALIASES,
-        "ComputeShaderPlatformVariant" => COMPUTE_SHADER_VARIANT_ALIASES,
-        "Shader" => SHADER_ALIASES,
-        "GameObject" => GAME_OBJECT_ALIASES,
-        _ => &[],
-    }
-}
-
-fn has_conditional_field_aliases(type_name: &str) -> bool {
-    matches!(
-        type_name,
-        "ParticleSystem" | "ShapeModule" | "ClipMuscleConstant" | "Xform" | "ValueArray" | "Mesh"
-    )
-}
-
-fn baseline_type_scoped_field_alias(
-    parent_type: &str,
-    field_name: &str,
-    field_type: &str,
-) -> Option<&'static str> {
-    match (parent_type, field_name) {
-        ("ClipMuscleConstant", "m_AverageSpeed") => match field_type {
-            "Vector4Float" | "float4" => Some("m_AverageSpeed4"),
-            "Vector3Float" | "float3" => Some("m_AverageSpeed3"),
-            _ => None,
-        },
-        ("Xform", "m_T") => match field_type {
-            "Vector4Float" | "float4" => Some("m_T4"),
-            "Vector3Float" | "float3" => Some("m_T3"),
-            _ => None,
-        },
-        ("Xform", "m_S") => match field_type {
-            "Vector4Float" | "float4" => Some("m_S4"),
-            "Vector3Float" | "float3" => Some("m_S3"),
-            _ => None,
-        },
-        ("ParticleSystem", "m_StartDelay") => Some(if field_type == "float" {
-            "m_StartDelay_Single"
-        } else {
-            "m_StartDelay_MinMaxCurve"
-        }),
-        ("ShapeModule", "m_Arc") if field_type != "float" => Some("m_ArcParameter"),
-        ("ShapeModule", "m_Radius") if field_type != "float" => Some("m_RadiusParameter"),
-        ("Mesh", "m_Shapes") if field_type == "vector" => Some("m_ShapesList"),
-        _ => baseline_type_scoped_field_aliases(parent_type)
-            .iter()
-            .find(|(source_name, _)| *source_name == field_name)
-            .map(|(_, alias)| *alias),
-    }
-}
-
-fn unsupported_contextual_field_alias_reason(
-    parent_type: &str,
-    field_name: &str,
-    field_type: &str,
-) -> Option<&'static str> {
-    let recognized_type = match (parent_type, field_name) {
-        ("ClipMuscleConstant", "m_AverageSpeed") => {
-            matches!(
-                field_type,
-                "Vector4Float" | "Vector3Float" | "float4" | "float3"
-            )
-        }
-        ("Xform", "m_T" | "m_S") => {
-            matches!(
-                field_type,
-                "Vector4Float" | "Vector3Float" | "float4" | "float3"
-            )
-        }
-        _ => true,
-    };
-    (!recognized_type).then_some("unsupported child TypeTree type for baseline field alias")
-}
-
-fn baseline_yaml_field_name(field_name: &str) -> Result<String, UnityYamlObjectConversionError> {
-    let replacement = match field_name {
-        "m_Image_data" => Some("m_ImageData"),
-        "m_TextureFormat" => Some("m_Format"),
-        "m_TextureDimension" => Some("m_Dimension"),
-        "m_ObjectHideFlags" => Some("m_HideFlags"),
-        "m_Val" => Some("m_Value"),
-        _ => None,
-    };
-    if let Some(replacement) = replacement {
-        return try_copy_string(replacement, "Unity baseline YAML field name");
-    }
-
-    for (source_prefix, output_prefix) in [
-        ("m_Dst", "m_Destination"),
-        ("m_Dest", "m_Destination"),
-        ("m_Src", "m_Source"),
-    ] {
-        let Some(suffix) = field_name.strip_prefix(source_prefix) else {
-            continue;
-        };
-        if !baseline_prefix_has_uppercase_initial(suffix) {
-            continue;
-        }
-        let requested = output_prefix.len().checked_add(suffix.len()).ok_or(
-            UnityYamlObjectConversionError::AllocationFailed {
-                resource: "Unity baseline YAML field name",
-                requested: usize::MAX,
-            },
-        )?;
-        let mut output_name = String::new();
-        output_name.try_reserve_exact(requested).map_err(|_| {
-            UnityYamlObjectConversionError::AllocationFailed {
-                resource: "Unity baseline YAML field name",
-                requested,
-            }
-        })?;
-        output_name.push_str(output_prefix);
-        output_name.push_str(suffix);
-        return Ok(output_name);
-    }
-
-    try_copy_string(field_name, "Unity baseline YAML field name")
-}
-
-fn baseline_prefix_has_uppercase_initial(suffix: &str) -> bool {
-    suffix
-        .encode_utf16()
-        .next()
-        .and_then(|unit| char::from_u32(u32::from(unit)))
-        .is_some_and(char::is_uppercase)
-}
-
 fn stripped_field_allowlist(class_id: i32, stripped: bool) -> Option<&'static [&'static str]> {
     stripped.then_some(stripped_fields_for_class_id(class_id))
 }
@@ -1433,30 +1226,6 @@ fn retain_stripped_yaml_fields(
         ) => allowed_fields.contains(&name.as_str()),
         _ => false,
     });
-    Ok(())
-}
-
-fn move_mapping_field_to_end(
-    mapping: &mut UnityYamlNode,
-    field_name: &str,
-) -> Result<(), UnityYamlObjectConversionError> {
-    let UnityYamlNodeKind::Mapping { entries, .. } = &mut mapping.kind else {
-        return Err(UnityYamlObjectConversionError::NodeBuild(
-            UnityYamlNodeBuildError::NotAMapping,
-        ));
-    };
-    let field_index = entries.iter().position(|(key, _)| {
-        matches!(
-            &key.kind,
-            UnityYamlNodeKind::Scalar(
-                UnityYamlScalar::String(name) | UnityYamlScalar::PlainString(name)
-            ) if name == field_name
-        )
-    });
-    if let Some(field_index) = field_index {
-        let field = entries.remove(field_index);
-        entries.push(field);
-    }
     Ok(())
 }
 
@@ -1584,93 +1353,6 @@ const fn hex_digit(nibble: u8) -> char {
     }
 }
 
-fn is_string_type_tree_node(
-    layout: &UnityYamlTypeTreeLayout<'_>,
-    node_index: usize,
-) -> Result<bool, UnityYamlObjectConversionError> {
-    let children = layout.child_indices(node_index)?;
-    if children.len() != 1 {
-        return Ok(false);
-    }
-    let Some(data_node) = layout.array_shape_data_node(children[0])? else {
-        return Ok(false);
-    };
-    Ok(matches!(layout.type_name(data_node)?, "char" | "UInt8")
-        && layout.first_child[data_node].is_none())
-}
-
-fn is_integer_type_tree_type(type_name: &str) -> bool {
-    matches!(
-        type_name,
-        "bool"
-            | "char"
-            | "SInt8"
-            | "UInt8"
-            | "SInt16"
-            | "UInt16"
-            | "SInt32"
-            | "UInt32"
-            | "SInt64"
-            | "UInt64"
-            | "FileSize"
-            | "signed char"
-            | "unsigned char"
-            | "short"
-            | "unsigned short"
-            | "int"
-            | "unsigned int"
-            | "long long"
-            | "unsigned long long"
-            | "Type*"
-    )
-}
-
-fn is_signed_file_id_type_tree_type(type_name: &str) -> bool {
-    matches!(type_name, "SInt64" | "long long")
-}
-
-fn is_valid_dictionary_key_type_tree_type(type_name: &str) -> bool {
-    type_name == "GUID"
-        || matches!(type_name, "string" | "Utf8String" | "float" | "double")
-        || is_integer_type_tree_type(type_name)
-}
-
-fn is_unsigned_byte_type_tree_type(type_name: &str) -> bool {
-    matches!(type_name, "UInt8" | "byte" | "unsigned char")
-}
-
-fn is_unsigned_word_type_tree_type(type_name: &str) -> bool {
-    matches!(type_name, "UInt32" | "uint" | "unsigned int")
-}
-
-fn wildcard_element_path(
-    parent: &str,
-    limits: UnityYamlObjectConversionLimits,
-) -> Result<String, UnityYamlObjectConversionError> {
-    let requested = parent.len().checked_add(3).ok_or(
-        UnityYamlObjectConversionError::FieldPathLimitExceeded {
-            requested: usize::MAX,
-            limit: limits.max_field_path_bytes,
-        },
-    )?;
-    if requested > limits.max_field_path_bytes {
-        return Err(UnityYamlObjectConversionError::FieldPathLimitExceeded {
-            requested,
-            limit: limits.max_field_path_bytes,
-        });
-    }
-    let mut path = String::new();
-    path.try_reserve_exact(requested).map_err(|_| {
-        UnityYamlObjectConversionError::AllocationFailed {
-            resource: "Unity YAML array schema path",
-            requested,
-        }
-    })?;
-    path.push_str(parent);
-    path.push_str("[*]");
-    Ok(path)
-}
-
 fn is_flow_mapped_path(
     path: &str,
     hints: &UnityYamlObjectConversionHints,
@@ -1684,4 +1366,72 @@ fn is_flow_mapped_path(
     }
     let canonical_path = canonical_array_path(path, limits.max_field_path_bytes)?;
     Ok(hints.flow_mapped_struct_paths.contains(&canonical_path))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn convert_object_body<F>(
+    source: ExportAssetIdentity,
+    serialized_version: i32,
+    stripped: bool,
+    root: &SerializedValue,
+    hints: &UnityYamlObjectConversionHints,
+    field_mode: UnityYamlObjectFieldMode,
+    unity_version: SceneUnityVersion,
+    missing_reference_guid: Option<[u8; 16]>,
+    limits: UnityYamlObjectConversionLimits,
+    resolve_pointer: &mut F,
+) -> Result<UnityYamlNode, UnityYamlObjectConversionError>
+where
+    F: FnMut(UnityYamlPPtrRequest<'_>) -> ProjectPointerResolution,
+{
+    let SerializedValue::Struct(fields) = root else {
+        return Err(UnityYamlObjectConversionError::RootIsNotStruct);
+    };
+    let mut budget = ConversionBudget::new(limits);
+    budget.visit(0)?;
+
+    let scene_object_identifier_schema = if field_mode == UnityYamlObjectFieldMode::ProjectAsset {
+        scene_object_identifier_schema_for_path("", hints, limits)?
+    } else {
+        None
+    };
+    let hash128_root_schema = hash128_schema_for_path("", hints, limits)?;
+    let mut body = if let Some(schema) = scene_object_identifier_schema {
+        convert_scene_object_identifier_value(fields, schema, "", 0, &mut budget)?
+    } else if let Some(schema) = hash128_root_schema {
+        convert_hash128_value(fields, schema, "", 0, limits, &mut budget)?
+    } else {
+        let mut body = UnityYamlNode::mapping(if is_flow_mapped_path("", hints, limits)? {
+            UnityYamlMappingStyle::Flow
+        } else {
+            UnityYamlMappingStyle::Block
+        });
+        if !stripped && serialized_version > 1 {
+            body.insert_field(
+                "serializedVersion",
+                UnityYamlNode::scalar(UnityYamlScalar::Signed(i64::from(serialized_version))),
+            )
+            .map_err(UnityYamlObjectConversionError::NodeBuild)?;
+        }
+        append_struct_fields(
+            &mut body,
+            fields,
+            "",
+            1,
+            source,
+            hints,
+            field_mode,
+            stripped_field_allowlist(source.class_id, stripped),
+            unity_version,
+            missing_reference_guid,
+            limits,
+            &mut budget,
+            resolve_pointer,
+        )?;
+        body
+    };
+    if stripped {
+        retain_stripped_yaml_fields(&mut body, source.class_id)?;
+    }
+    Ok(body)
 }
