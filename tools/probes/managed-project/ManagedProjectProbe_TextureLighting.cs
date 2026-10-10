@@ -453,7 +453,7 @@ ObjectData = textureBody,
             collection,
             version);
         List<object> assets = new() { lightmapSettings, renderSettings, texture };
-        if (sceneKind is "light" or "light-nonzero-baking" or "light-multiple-baking")
+        if (sceneKind is "light" or "light-nonzero-baking" or "light-multiple-baking" or "light-multiple-gameobjects-baking")
         {
             object gameObject = MakeGenerated(
                 "AssetRipper.SourceGenerated.Classes.ClassID_1.GameObject",
@@ -474,7 +474,7 @@ ObjectData = textureBody,
                 105,
                 collection,
                 version);
-            if (sceneKind is "light-nonzero-baking" or "light-multiple-baking")
+            if (sceneKind is "light-nonzero-baking" or "light-multiple-baking" or "light-multiple-gameobjects-baking")
             {
                 object bakingOutput = FindGeneratedProperty(light, "BakingOutput").GetValue(light)
                     ?? throw new InvalidOperationException("Light.BakingOutput is null");
@@ -505,6 +505,41 @@ ObjectData = textureBody,
                 SetGeneratedProperty(secondBakingOutput, "LightmappingMask", 513);
                 SetGeneratedAssetPointer(secondLight, "GameObject_C8", collection, gameObject);
                 AddGeneratedAssetPointer(gameObject, "Components", collection, secondLight);
+                assets.Add(secondLight);
+            }
+            if (sceneKind == "light-multiple-gameobjects-baking")
+            {
+                object secondGameObject = MakeGenerated(
+                    "AssetRipper.SourceGenerated.Classes.ClassID_1.GameObject",
+                    1,
+                    107,
+                    collection,
+                    version);
+                SetGeneratedProperty(secondGameObject, "Name", "BakedLightFixtureSecond");
+                object secondTransform = MakeGenerated(
+                    "AssetRipper.SourceGenerated.Classes.ClassID_4.Transform",
+                    4,
+                    108,
+                    collection,
+                    version);
+                object secondLight = MakeGenerated(
+                    "AssetRipper.SourceGenerated.Classes.ClassID_108.Light",
+                    108,
+                    109,
+                    collection,
+                    version);
+                object secondBakingOutput =
+                    FindGeneratedProperty(secondLight, "BakingOutput").GetValue(secondLight)
+                    ?? throw new InvalidOperationException("Second GameObject Light.BakingOutput is null");
+                SetGeneratedProperty(secondBakingOutput, "ProbeOcclusionLightIndex", 4);
+                SetGeneratedProperty(secondBakingOutput, "OcclusionMaskChannel", 2);
+                SetGeneratedProperty(secondBakingOutput, "LightmappingMask", 513);
+                SetGeneratedAssetPointer(secondTransform, "GameObject_C4", collection, secondGameObject);
+                SetGeneratedAssetPointer(secondLight, "GameObject_C8", collection, secondGameObject);
+                AddGeneratedAssetPointer(secondGameObject, "Components", collection, secondTransform);
+                AddGeneratedAssetPointer(secondGameObject, "Components", collection, secondLight);
+                assets.Add(secondGameObject);
+                assets.Add(secondTransform);
                 assets.Add(secondLight);
             }
         }
@@ -567,7 +602,7 @@ ObjectData = textureBody,
             assets.Add(transform);
             assets.Add(renderer);
         }
-        else if (sceneKind is not ("empty" or "light" or "light-nonzero-baking" or "light-multiple-baking"))
+        else if (sceneKind is not ("empty" or "light" or "light-nonzero-baking" or "light-multiple-baking" or "light-multiple-gameobjects-baking"))
         {
             throw new ArgumentException($"unsupported lightmap scene fixture: {sceneKind}");
         }

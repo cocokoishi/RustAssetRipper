@@ -791,7 +791,7 @@
             [
                 std::ffi::OsString::from("export-project"),
                 std::ffi::OsString::from("--settings"),
-                settings_path.into_os_string(),
+                settings_path.clone().into_os_string(),
                 multiple_output_root.clone().into_os_string(),
                 source_path.clone().into_os_string(),
             ]
@@ -855,6 +855,86 @@
             "m_LightingDataAsset: {{fileID: 112000000, guid: {multiple_lighting_data_guid}, type: 2}}"
         )));
         assert_eq!(fs::read(&source_path).unwrap(), multiple_input_bytes);
+
+        let multiple_gameobjects_fixture = include_str!(
+            "export/lightmap_project_source_5_6_multiple_gameobjects_fixture.txt"
+        );
+        assert!(multiple_gameobjects_fixture
+            .lines()
+            .any(|line| line == "UNITY_VERSION|5.6.0f1"));
+        let multiple_gameobjects_input_bytes =
+            fixture_value(multiple_gameobjects_fixture, "INPUT_HEX|LightmapFixture.assets|");
+        fs::write(&source_path, &multiple_gameobjects_input_bytes).unwrap();
+        let multiple_gameobjects_output_root =
+            directory.join("project-lightmap-5.6-multiple-gameobjects");
+        super::run(
+            [
+                std::ffi::OsString::from("export-project"),
+                std::ffi::OsString::from("--settings"),
+                settings_path.into_os_string(),
+                multiple_gameobjects_output_root.clone().into_os_string(),
+                source_path.clone().into_os_string(),
+            ]
+            .into_iter(),
+        )
+        .expect("Unity 5.6 Lights on separate GameObjects export to LightingDataAsset");
+
+        let multiple_gameobjects_lighting_data_path = multiple_gameobjects_output_root
+            .join("Assets/Scenes/lightmapfixture.assets/LightingData.asset");
+        let multiple_gameobjects_lighting_data =
+            fs::read_to_string(&multiple_gameobjects_lighting_data_path).unwrap();
+        let source_multiple_gameobjects_lighting_data = fixture_value(
+            multiple_gameobjects_fixture,
+            "SOURCE_OUTPUT|ExportedProject/Assets/Scenes/lightmapfixture.assets/LightingData.asset|",
+        );
+        assert_eq!(
+            normalize(&multiple_gameobjects_lighting_data),
+            normalize(std::str::from_utf8(&source_multiple_gameobjects_lighting_data).unwrap()),
+            "complete Unity 5.6 separate-GameObject LightingDataAsset differs from frozen source"
+        );
+        assert!(multiple_gameobjects_lighting_data.contains(
+            "m_Lights:\n  - targetObject: 105\n    targetPrefab: 0\n  - targetObject: 109\n    targetPrefab: 0"
+        ));
+        assert!(multiple_gameobjects_lighting_data.contains(
+            "m_LightBakingOutputs:\n  - probeOcclusionLightIndex: 7\n    occlusionMaskChannel: 3\n    lightmappingMask: 258\n  - probeOcclusionLightIndex: 4\n    occlusionMaskChannel: 2\n    lightmappingMask: 513"
+        ));
+        let multiple_gameobjects_lighting_data_meta = fs::read_to_string(format!(
+            "{}.meta",
+            multiple_gameobjects_lighting_data_path.display()
+        ))
+        .unwrap();
+        let source_multiple_gameobjects_lighting_data_meta = fixture_value(
+            multiple_gameobjects_fixture,
+            "SOURCE_OUTPUT|ExportedProject/Assets/Scenes/lightmapfixture.assets/LightingData.asset.meta|",
+        );
+        assert_eq!(
+            normalize(&multiple_gameobjects_lighting_data_meta),
+            normalize(std::str::from_utf8(&source_multiple_gameobjects_lighting_data_meta).unwrap()),
+            "Unity 5.6 separate-GameObject LightingDataAsset metadata differs from frozen source"
+        );
+        let multiple_gameobjects_lighting_data_guid = multiple_gameobjects_lighting_data_meta
+            .lines()
+            .find_map(|line| line.strip_prefix("guid: "))
+            .expect("separate-GameObject LightingDataAsset metadata contains a GUID");
+        let multiple_gameobjects_scene = fs::read_to_string(
+            multiple_gameobjects_output_root.join("Assets/Scenes/lightmapfixture.assets.unity"),
+        )
+        .unwrap();
+        let source_multiple_gameobjects_scene = fixture_value(
+            multiple_gameobjects_fixture,
+            "SOURCE_OUTPUT|ExportedProject/Assets/Scenes/lightmapfixture.assets.unity|",
+        );
+        assert_eq!(
+            normalize(&multiple_gameobjects_scene),
+            normalize(std::str::from_utf8(&source_multiple_gameobjects_scene).unwrap()),
+            "complete Unity 5.6 separate-GameObject Scene differs from frozen source"
+        );
+        assert!(multiple_gameobjects_scene.contains("--- !u!108 &105\nLight:"));
+        assert!(multiple_gameobjects_scene.contains("--- !u!108 &109\nLight:"));
+        assert!(multiple_gameobjects_scene.contains(&format!(
+            "m_LightingDataAsset: {{fileID: 112000000, guid: {multiple_gameobjects_lighting_data_guid}, type: 2}}"
+        )));
+        assert_eq!(fs::read(&source_path).unwrap(), multiple_gameobjects_input_bytes);
     }
 
     #[test]
