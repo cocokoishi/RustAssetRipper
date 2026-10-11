@@ -1881,7 +1881,7 @@ fn blend_tree_document(
     file_id: i64,
 ) -> Result<UnityYamlDocument, Box<dyn Error>> {
     let mut body = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
-    insert_field(&mut body, "serializedVersion", signed(1))?;
+    // Unity 2022.3's project YAML omits the runtime default serializedVersion=1.
     insert_field(&mut body, "m_ObjectHideFlags", signed(1))?;
     insert_field(&mut body, "m_CorrespondingSourceObject", local_pointer(0))?;
     insert_field(&mut body, "m_PrefabInstance", local_pointer(0))?;
@@ -1977,7 +1977,7 @@ fn child_motion_node(fields: ChildMotionFields) -> Result<UnityYamlNode, Box<dyn
         UnityYamlNode::string(fields.direct_blend_parameter),
     )?;
     insert_field(&mut child, "m_Mirror", signed(i64::from(fields.mirror)))?;
-    insert_field(&mut child, "m_IsAnim", signed(0))?;
+    // The false runtime IsAnim default is omitted from Unity 2022.3 project YAML.
     Ok(child)
 }
 
@@ -2717,6 +2717,16 @@ mod blend_tree_source_tests {
             .expect("fixture YAML field exists")
     }
 
+    fn yaml_optional_field<'a>(node: &'a UnityYamlNode, name: &str) -> Option<&'a UnityYamlNode> {
+        node_field(node, name).expect("fixture YAML node is a mapping")
+    }
+
+    fn scalar_default(node: &UnityYamlNode, name: &str, default: &str) -> String {
+        yaml_optional_field(node, name)
+            .map(scalar)
+            .unwrap_or_else(|| default.to_owned())
+    }
+
     fn scalar(node: &UnityYamlNode) -> String {
         match &node.kind {
             UnityYamlNodeKind::Scalar(UnityYamlScalar::Signed(value)) => value.to_string(),
@@ -2804,6 +2814,10 @@ mod blend_tree_source_tests {
         assert_eq!(documents[0].root.tag.as_deref(), Some("!u!206"));
         assert_eq!(documents[0].root.anchor.as_deref(), Some("7000000000"));
         let body = yaml_field(&documents[0].root, "BlendTree");
+        assert!(
+            yaml_optional_field(body, "serializedVersion").is_none(),
+            "the Unity 2022.3 project exporter omits the runtime default BlendTree version"
+        );
         let mut actual = vec![
             format!(
                 "TREE|class|{}",
@@ -2816,7 +2830,7 @@ mod blend_tree_source_tests {
             ),
             format!(
                 "TREE|serializedVersion|{}",
-                scalar(yaml_field(body, "serializedVersion"))
+                scalar_default(body, "serializedVersion", "1")
             ),
             format!(
                 "TREE|hideFlags|{}",
@@ -2855,6 +2869,10 @@ mod blend_tree_source_tests {
         assert_eq!(items.len(), clips.len());
         for (index, (child, expected_clip)) in items.iter().zip(&clips).enumerate() {
             assert_eq!(yaml_field(child, "m_Motion"), expected_clip);
+            assert!(
+                yaml_optional_field(child, "m_IsAnim").is_none(),
+                "the Unity 2022.3 project exporter omits the false runtime IsAnim default"
+            );
             let position = yaml_field(child, "m_Position");
             actual.push(format!(
                 "CHILD|{index}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
@@ -2866,7 +2884,7 @@ mod blend_tree_source_tests {
                 float_bits(yaml_field(child, "m_CycleOffset")),
                 scalar(yaml_field(child, "m_DirectBlendParameter")),
                 scalar(yaml_field(child, "m_Mirror")),
-                scalar(yaml_field(child, "m_IsAnim")),
+                scalar_default(child, "m_IsAnim", "0"),
             ));
         }
         let expected = include_str!("../../resources/animator_blendtree_source_2022_3_fixture.txt")
@@ -2969,6 +2987,10 @@ mod blend_tree_source_tests {
 
     fn tree_source_projection(document: &UnityYamlDocument, record: &str) -> Vec<String> {
         let body = yaml_field(&document.root, "BlendTree");
+        assert!(
+            yaml_optional_field(body, "serializedVersion").is_none(),
+            "the Unity 2022.3 project exporter omits the runtime default BlendTree version"
+        );
         let mut actual = vec![
             format!(
                 "{record}|class|{}",
@@ -2981,7 +3003,7 @@ mod blend_tree_source_tests {
             ),
             format!(
                 "{record}|serializedVersion|{}",
-                scalar(yaml_field(body, "serializedVersion"))
+                scalar_default(body, "serializedVersion", "1")
             ),
             format!(
                 "{record}|hideFlags|{}",
@@ -3021,6 +3043,10 @@ mod blend_tree_source_tests {
             panic!("BlendTree m_Childs is not a sequence");
         };
         for (index, child) in items.iter().enumerate() {
+            assert!(
+                yaml_optional_field(child, "m_IsAnim").is_none(),
+                "the Unity 2022.3 project exporter omits the false runtime IsAnim default"
+            );
             let position = yaml_field(child, "m_Position");
             actual.push(format!(
                 "CHILD|{record}|{index}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
@@ -3032,7 +3058,7 @@ mod blend_tree_source_tests {
                 float_bits(yaml_field(child, "m_CycleOffset")),
                 scalar(yaml_field(child, "m_DirectBlendParameter")),
                 scalar(yaml_field(child, "m_Mirror")),
-                scalar(yaml_field(child, "m_IsAnim")),
+                scalar_default(child, "m_IsAnim", "0"),
             ));
         }
         actual
