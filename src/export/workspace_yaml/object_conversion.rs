@@ -47,7 +47,16 @@ fn should_use_scene_editor_type_tree(class_id: i32, unity_version_text: Option<&
             && version.minor == 3
             && matches!(
                 class_id,
-                20 | 82 | 135 | 137 | 198 | 199 | 895_512_359 | 1_773_428_102
+                20 | 82
+                    | 95
+                    | 135
+                    | 137
+                    | 198
+                    | 199
+                    | 895_512_359
+                    | 1_773_428_102
+                    | 1_818_360_608
+                    | 1_818_360_609
             ));
     supported_version && supported_class
 }
@@ -2374,6 +2383,7 @@ mod tests {
             23,
             33,
             82,
+            95,
             108,
             135,
             137,
@@ -2381,6 +2391,8 @@ mod tests {
             199,
             895_512_359,
             1_773_428_102,
+            1_818_360_608,
+            1_818_360_609,
         ] {
             assert!(should_use_scene_editor_type_tree(
                 class_id,
@@ -2435,7 +2447,18 @@ mod tests {
             "m_PrefabAsset",
         ];
 
-        for class_id in [20, 82, 135, 1_773_428_102, 198, 199, 895_512_359] {
+        for class_id in [
+            20,
+            82,
+            95,
+            135,
+            1_773_428_102,
+            198,
+            199,
+            895_512_359,
+            1_818_360_608,
+            1_818_360_609,
+        ] {
             let (_, editor_tree) = reference_class_layouts()
                 .tpk_trees(class_id, &version)
                 .unwrap()
