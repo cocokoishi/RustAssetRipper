@@ -5,6 +5,7 @@ use crate::processing::asset_factory::{
 };
 use crate::processing::scene_naming::SceneUnityVersion;
 use crate::resource::{resolve_and_read_streamed_resource_info, StreamedResourceContentResolution};
+use crate::serialized_file::metadata::TypeTree;
 use crate::serialized_file::object::{
     default_value_for_type_tree_node, ObjectDefaultValueLimits, SerializedFieldValue,
     SerializedValue,
@@ -42,7 +43,12 @@ fn should_use_scene_editor_type_tree(class_id: i32, unity_version_text: Option<&
     let supported_version =
         (version.major == 5 && version.minor == 6) || (version.major == 2022 && version.minor == 3);
     let supported_class = matches!(class_id, 1 | 4 | 23 | 33 | 108)
-        || (version.major == 2022 && version.minor == 3 && class_id == 137);
+        || (version.major == 2022
+            && version.minor == 3
+            && matches!(
+                class_id,
+                20 | 82 | 135 | 137 | 198 | 199 | 895_512_359 | 1_773_428_102
+            ));
     supported_version && supported_class
 }
 
@@ -61,7 +67,7 @@ fn should_preserve_type_tree_field_names(
     generated_game_object_or_transform
         || generated_controller_member
         || (animation_clip_editor_format && class_id == 74)
-        || (editor_type_tree_used && matches!(class_id, 23 | 33 | 104 | 108 | 137 | 157))
+        || editor_type_tree_used
         || (generated_prefab_internal && generated)
 }
 
@@ -536,8 +542,15 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
                     format!("could not construct editor defaults: {error}"),
                 )
             })?;
-            merge_editor_default_value(&mut root, export_root, "")
-                .map_err(|message| scene_editor_format_error(source, class_id, message))?;
+            merge_editor_default_value(
+                &mut root,
+                export_root,
+                &editor_tree,
+                0,
+                object.object_index,
+                "",
+            )
+            .map_err(|message| scene_editor_format_error(source, class_id, message))?;
             if matches!(class_id, 104 | 157) {
                 ensure_scene_manager_hide_flags(&mut root)
                     .map_err(|message| scene_editor_format_error(source, class_id, message))?;
@@ -554,7 +567,7 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
                 )
                 .map_err(|message| scene_editor_format_error(source, class_id, message))?;
             }
-            if matches!(class_id, 1 | 4 | 23 | 137) {
+            if matches!(class_id, 1 | 4 | 23 | 137 | 199) {
                 apply_scene_object_editor_format(
                     &mut root,
                     export_root,
@@ -1081,10 +1094,14 @@ fn resolve_generated_prefab_internal_pointer(
 fn merge_editor_default_value(
     defaults: &mut SerializedValue,
     source: &SerializedValue,
+    type_tree: &TypeTree,
+    type_node_index: usize,
+    object_index: usize,
     field_path: &str,
 ) -> Result<(), String> {
     match (defaults, source) {
         (SerializedValue::Struct(default_fields), SerializedValue::Struct(source_fields)) => {
+            let tree_children = direct_type_tree_children(type_tree, type_node_index)?;
             for source_field in source_fields {
                 let child_path = if field_path.is_empty() {
                     source_field.name.clone()
@@ -1100,6 +1117,19 @@ fn merge_editor_default_value(
                     // YAML schema (for example lightmaps moved to LightingDataAsset).
                     continue;
                 };
+                let matching_tree_children = tree_children
+                    .iter()
+                    .copied()
+                    .filter(|&index| {
+                        type_tree.nodes[index].name.as_deref() == Some(&source_field.name)
+                    })
+                    .collect::<Vec<_>>();
+                let [child_node_index] = matching_tree_children.as_slice() else {
+                    return Err(format!(
+                        "editor TypeTree has {} schema nodes for field {child_path}",
+                        matching_tree_children.len()
+                    ));
+                };
                 if default_fields
                     .iter()
                     .skip(default_index + 1)
@@ -1110,9 +1140,44 @@ fn merge_editor_default_value(
                 merge_editor_default_value(
                     &mut default_fields[default_index].value,
                     &source_field.value,
+                    type_tree,
+                    *child_node_index,
+                    object_index,
                     &child_path,
                 )?;
             }
+            Ok(())
+        }
+        (SerializedValue::Array(default_items), SerializedValue::Array(source_items)) => {
+            let element_node_index = type_tree_array_element_node(type_tree, type_node_index)
+                .map_err(|message| format!("{field_path}: {message}"))?;
+            let template = default_value_for_type_tree_node(
+                type_tree,
+                object_index,
+                element_node_index,
+                ObjectDefaultValueLimits::default(),
+            )
+            .map_err(|error| {
+                format!("{field_path}: could not construct editor array element: {error}")
+            })?;
+            let mut merged_items = Vec::new();
+            merged_items
+                .try_reserve_exact(source_items.len())
+                .map_err(|_| format!("{field_path}: could not reserve editor array elements"))?;
+            for (index, source_item) in source_items.iter().enumerate() {
+                let item_path = format!("{field_path}[{index}]");
+                let mut item = template.clone();
+                merge_editor_default_value(
+                    &mut item,
+                    source_item,
+                    type_tree,
+                    element_node_index,
+                    object_index,
+                    &item_path,
+                )?;
+                merged_items.push(item);
+            }
+            *default_items = merged_items;
             Ok(())
         }
         (default, source) => {
@@ -1120,6 +1185,80 @@ fn merge_editor_default_value(
             Ok(())
         }
     }
+}
+
+fn direct_type_tree_children(
+    type_tree: &TypeTree,
+    node_index: usize,
+) -> Result<Vec<usize>, String> {
+    let node = type_tree
+        .nodes
+        .get(node_index)
+        .ok_or_else(|| format!("editor TypeTree node {node_index} is out of range"))?;
+    let child_level = node
+        .level
+        .checked_add(1)
+        .ok_or_else(|| format!("editor TypeTree node {node_index} has an invalid depth"))?;
+    let mut children = Vec::new();
+    for (index, candidate) in type_tree.nodes.iter().enumerate().skip(node_index + 1) {
+        if candidate.level <= node.level {
+            break;
+        }
+        if candidate.level == child_level {
+            children.push(index);
+        }
+    }
+    Ok(children)
+}
+
+fn type_tree_array_element_node(type_tree: &TypeTree, node_index: usize) -> Result<usize, String> {
+    let node = type_tree
+        .nodes
+        .get(node_index)
+        .ok_or_else(|| format!("editor TypeTree array node {node_index} is out of range"))?;
+    let array_node_index = if node.type_name.as_deref() == Some("Array") {
+        node_index
+    } else {
+        let array_children = direct_type_tree_children(type_tree, node_index)?
+            .into_iter()
+            .filter(|&child| {
+                type_tree.nodes[child].type_name.as_deref() == Some("Array")
+                    && type_tree.nodes[child].name.as_deref() == Some("Array")
+            })
+            .collect::<Vec<_>>();
+        match array_children.as_slice() {
+            [array_node_index] => *array_node_index,
+            _ => {
+                return Err(format!(
+                    "editor TypeTree node {node_index} does not identify one array schema"
+                ));
+            }
+        }
+    };
+    let children = direct_type_tree_children(type_tree, array_node_index)?;
+    let mut data_node_index = None;
+    let mut has_size = false;
+    for child_index in children {
+        match type_tree.nodes[child_index].name.as_deref() {
+            Some("size") => has_size = true,
+            Some("data") => {
+                if data_node_index.replace(child_index).is_some() {
+                    return Err(format!(
+                        "editor TypeTree array node {array_node_index} has duplicate data nodes"
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    if !has_size {
+        return Err(format!(
+            "editor TypeTree array node {array_node_index} has no size node"
+        ));
+    }
+    data_node_index.ok_or_else(|| {
+        format!("editor TypeTree array node {array_node_index} has no data element schema")
+    })
 }
 
 fn scene_editor_format_error(
@@ -1312,7 +1451,7 @@ fn apply_scene_object_editor_format(
             object_index,
             reference_graph,
         ),
-        23 | 137 => apply_renderer_editor_format(editor_root),
+        23 | 137 | 199 => apply_renderer_editor_format(editor_root),
         _ => Ok(()),
     }
 }
@@ -2228,14 +2367,29 @@ mod tests {
 
     #[test]
     fn unity_2022_3_scene_classes_use_editor_type_trees() {
-        for class_id in [1, 4, 23, 33, 108, 137] {
+        for class_id in [
+            1,
+            4,
+            20,
+            23,
+            33,
+            82,
+            108,
+            135,
+            137,
+            198,
+            199,
+            895_512_359,
+            1_773_428_102,
+        ] {
             assert!(should_use_scene_editor_type_tree(
                 class_id,
                 Some("2022.3.22f1")
             ));
         }
         assert!(!should_use_scene_editor_type_tree(1, Some("2022.2.0f1")));
-        assert!(!should_use_scene_editor_type_tree(20, Some("2022.3.22f1")));
+        assert!(!should_use_scene_editor_type_tree(24, Some("2022.3.22f1")));
+        assert!(!should_use_scene_editor_type_tree(20, Some("2022.2.0f1")));
         assert!(!should_use_scene_editor_type_tree(137, Some("5.6.0f1")));
         assert!(should_use_scene_editor_type_tree(1, Some("5.6.0f1")));
     }
@@ -2269,6 +2423,114 @@ mod tests {
                 .any(|node| node.name.as_deref() == Some("m_HideFlags")),
             "SkinnedMeshRenderer editor TypeTree unexpectedly has release m_HideFlags"
         );
+    }
+
+    #[test]
+    fn unity_2022_3_prefab_components_have_editor_base_fields() {
+        let version = FactoryUnityVersion::parse("2022.3.22f1").unwrap();
+        let expected_fields = [
+            "m_ObjectHideFlags",
+            "m_CorrespondingSourceObject",
+            "m_PrefabInstance",
+            "m_PrefabAsset",
+        ];
+
+        for class_id in [20, 82, 135, 1_773_428_102, 198, 199, 895_512_359] {
+            let (_, editor_tree) = reference_class_layouts()
+                .tpk_trees(class_id, &version)
+                .unwrap()
+                .unwrap_or_else(|| {
+                    panic!("Unity 2022.3 source TPK has no editor tree for class {class_id}")
+                });
+            for field in expected_fields {
+                assert!(
+                    editor_tree
+                        .nodes
+                        .iter()
+                        .any(|node| node.name.as_deref() == Some(field)),
+                    "class {class_id} editor TypeTree has no {field} field"
+                );
+            }
+            assert!(
+                !editor_tree
+                    .nodes
+                    .iter()
+                    .any(|node| node.name.as_deref() == Some("m_HideFlags")),
+                "class {class_id} editor TypeTree unexpectedly has release m_HideFlags"
+            );
+        }
+    }
+
+    #[test]
+    fn editor_type_tree_fields_are_preserved_inside_source_arrays() {
+        use crate::serialized_file::metadata::TypeTreeNode;
+
+        let node = |level, type_name: &str, name: &str| TypeTreeNode {
+            level,
+            version: 1,
+            type_flags: 0,
+            type_string_offset: None,
+            name_string_offset: None,
+            type_name: Some(type_name.to_owned()),
+            name: Some(name.to_owned()),
+            byte_size: -1,
+            index: 0,
+            meta_flags: 0,
+            reference_type_hash: None,
+        };
+        let editor_tree = TypeTree {
+            nodes: vec![
+                node(0, "Root", "Base"),
+                node(1, "vector", "curves"),
+                node(2, "Array", "Array"),
+                node(3, "int", "size"),
+                node(3, "Keyframe", "data"),
+                node(4, "float", "time"),
+                node(4, "int", "tangentMode"),
+                node(4, "int", "weightedMode"),
+            ],
+            string_buffer: Vec::new(),
+        };
+        let source = SerializedValue::Struct(vec![SerializedFieldValue {
+            name: "curves".to_owned(),
+            value: SerializedValue::Array(vec![SerializedValue::Struct(vec![
+                SerializedFieldValue {
+                    name: "time".to_owned(),
+                    value: SerializedValue::F32(1.25),
+                },
+                SerializedFieldValue {
+                    name: "weightedMode".to_owned(),
+                    value: SerializedValue::I32(2),
+                },
+            ])]),
+        }]);
+        let mut defaults = default_value_for_type_tree_node(
+            &editor_tree,
+            0,
+            0,
+            ObjectDefaultValueLimits::default(),
+        )
+        .unwrap();
+
+        merge_editor_default_value(&mut defaults, &source, &editor_tree, 0, 0, "").unwrap();
+
+        let SerializedValue::Struct(root_fields) = defaults else {
+            panic!("editor default root is not a struct");
+        };
+        let SerializedValue::Array(curves) = &root_fields[0].value else {
+            panic!("curve field is not an array");
+        };
+        let SerializedValue::Struct(keyframe) = &curves[0] else {
+            panic!("curve array element is not a struct");
+        };
+        let fields: Vec<_> = keyframe
+            .iter()
+            .map(|field| (field.name.as_str(), &field.value))
+            .collect();
+        assert_eq!(fields.len(), 3);
+        assert_eq!(fields[0], ("time", &SerializedValue::F32(1.25)));
+        assert_eq!(fields[1], ("tangentMode", &SerializedValue::I32(0)));
+        assert_eq!(fields[2], ("weightedMode", &SerializedValue::I32(2)));
     }
 
     #[test]
