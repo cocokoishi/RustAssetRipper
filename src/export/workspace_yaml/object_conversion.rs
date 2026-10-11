@@ -51,6 +51,7 @@ fn should_use_scene_editor_type_tree(class_id: i32, unity_version_text: Option<&
                     | 95
                     | 135
                     | 137
+                    | 319
                     | 198
                     | 199
                     | 895_512_359
@@ -2386,6 +2387,7 @@ mod tests {
             95,
             108,
             135,
+            319,
             137,
             198,
             199,
@@ -2438,7 +2440,7 @@ mod tests {
     }
 
     #[test]
-    fn unity_2022_3_prefab_components_have_editor_base_fields() {
+    fn unity_2022_3_editor_tree_classes_have_editor_base_fields() {
         let version = FactoryUnityVersion::parse("2022.3.22f1").unwrap();
         let expected_fields = [
             "m_ObjectHideFlags",
@@ -2452,6 +2454,7 @@ mod tests {
             82,
             95,
             135,
+            319,
             1_773_428_102,
             198,
             199,
