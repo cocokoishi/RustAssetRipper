@@ -1,16 +1,18 @@
 use super::*;
 
 const PREDEFINED_ENGINE_SHADERS_2022_3_11: &str = include_str!("predefined_shaders_2022_3_11.tsv");
+const PREDEFINED_ENGINE_MATERIALS_2022_3_11: &str =
+    include_str!("predefined_materials_2022_3_11.tsv");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct PredefinedEngineShaderTarget {
+struct PredefinedEngineAssetTarget {
     file_id: i64,
     guid: [u8; 16],
 }
 
 fn predefined_engine_shader_target(
     shader_view: &ShaderView,
-) -> Result<Option<PredefinedEngineShaderTarget>, Box<dyn Error>> {
+) -> Result<Option<PredefinedEngineAssetTarget>, Box<dyn Error>> {
     let Some(parsed) = shader_view.parsed.as_ref() else {
         return Ok(None);
     };
@@ -79,9 +81,165 @@ fn predefined_engine_shader_target(
         for (index, word) in words.iter().enumerate() {
             guid[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
         }
-        return Ok(Some(PredefinedEngineShaderTarget { file_id, guid }));
+        return Ok(Some(PredefinedEngineAssetTarget { file_id, guid }));
     }
     Ok(None)
+}
+
+fn predefined_engine_material_target(
+    name: &str,
+    shader_name: Option<&str>,
+    unity_version: Option<&str>,
+) -> Result<Option<PredefinedEngineAssetTarget>, Box<dyn Error>> {
+    let version_matches = unity_version
+        .and_then(crate::resources::vertex_data_blob::UnityVersion::parse)
+        .is_some_and(|version| version.major == 2022 && version.minor == 3 && version.patch >= 11);
+    if !version_matches {
+        return Ok(None);
+    }
+
+    for (line_index, line) in PREDEFINED_ENGINE_MATERIALS_2022_3_11.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut fields = line.splitn(4, '|');
+        let Some(file_id_text) = fields.next() else {
+            return Err(invalid_project(format!(
+                "predefined Material table row {} has no file ID",
+                line_index + 1
+            )));
+        };
+        let Some(resource_kind) = fields.next() else {
+            return Err(invalid_project(format!(
+                "predefined Material table row {} has no resource kind",
+                line_index + 1
+            )));
+        };
+        let Some(candidate_name) = fields.next() else {
+            return Err(invalid_project(format!(
+                "predefined Material table row {} has no name",
+                line_index + 1
+            )));
+        };
+        let Some(candidate_shader) = fields.next() else {
+            return Err(invalid_project(format!(
+                "predefined Material table row {} has no Shader name",
+                line_index + 1
+            )));
+        };
+        if candidate_name != name || candidate_shader != shader_name.unwrap_or_default() {
+            continue;
+        }
+        let file_id = file_id_text.parse::<i64>().map_err(|error| {
+            invalid_project(format!(
+                "predefined Material table row {} has an invalid file ID: {error}",
+                line_index + 1
+            ))
+        })?;
+        let words = match resource_kind {
+            "D" => crate::export::guid_policy::ENGINE_DEFAULT_RESOURCES_GUID_WORDS,
+            "F" => crate::export::guid_policy::ENGINE_BUILTIN_EXTRA_GUID_WORDS,
+            other => {
+                return Err(invalid_project(format!(
+                    "predefined Material table row {} has unknown resource kind {other:?}",
+                    line_index + 1
+                )));
+            }
+        };
+        let mut guid = [0; 16];
+        for (index, word) in words.iter().enumerate() {
+            guid[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        return Ok(Some(PredefinedEngineAssetTarget { file_id, guid }));
+    }
+    Ok(None)
+}
+
+fn resolved_material_shader_name(
+    material: &crate::resources::material::MaterialView,
+    source: &WorkspaceObject,
+    objects: &ObjectWorkspace,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+) -> Result<Option<Option<String>>, Box<dyn Error>> {
+    let Some((file_id, path_id)) = material.shader else {
+        return Ok(Some(None));
+    };
+    let mut matching_edges = reference_graph
+        .references_from_object(source.file_index, source.object_index)
+        .filter(|edge| {
+            edge.field_path == "m_Shader" && edge.file_id == file_id && edge.path_id == path_id
+        });
+    let Some(edge) = matching_edges.next() else {
+        return Err(invalid_project(format!(
+            "Material {}:{} has non-null m_Shader PPtr ({file_id}, {path_id}) without a matching reference-graph edge",
+            source.file_index, source.path_id
+        )));
+    };
+    if matching_edges.next().is_some() {
+        return Err(invalid_project(format!(
+            "Material {}:{} has duplicate reference-graph edges for m_Shader PPtr ({file_id}, {path_id})",
+            source.file_index, source.path_id
+        )));
+    }
+    match &edge.resolution {
+        MultiFilePPtrResolution::Object {
+            target_file_index,
+            target_object_index,
+        } if reference_graph.object_class_id(*target_file_index, *target_object_index)
+            == Some(SHADER_CLASS_ID) =>
+        {
+            let Some(target) = objects.get(*target_file_index, *target_object_index) else {
+                return Err(invalid_project(format!(
+                    "Material {}:{} m_Shader resolves to missing workspace object {target_file_index}:{target_object_index}",
+                    source.file_index, source.path_id
+                )));
+            };
+            let Ok(payload) = &target.payload else {
+                return Ok(None);
+            };
+            let view = ShaderView::from_value(&payload.root).map_err(|error| {
+                invalid_project(format!(
+                    "Material {}:{} resolved Shader {}:{} could not be read: {error}",
+                    source.file_index, source.path_id, target.file_index, target.path_id
+                ))
+            })?;
+            Ok(view.parsed.map(|form| Some(form.name)))
+        }
+        MultiFilePPtrResolution::PredefinedEngineAsset {
+            resource,
+            path_id,
+            class_id,
+            ..
+        } if *class_id == SHADER_CLASS_ID => Ok(
+            predefined_engine_shader_name(*resource, *path_id).map(|name| Some(name.to_owned()))
+        ),
+        _ => Ok(None),
+    }
+}
+
+fn predefined_engine_shader_name(
+    resource: crate::serialized_file::reference_graph::PredefinedEngineResourceKind,
+    path_id: i64,
+) -> Option<&'static str> {
+    let resource_kind = match resource {
+        crate::serialized_file::reference_graph::PredefinedEngineResourceKind::DefaultResources => {
+            "D"
+        }
+    };
+    PREDEFINED_ENGINE_SHADERS_2022_3_11
+        .lines()
+        .find_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                return None;
+            }
+            let mut fields = line.splitn(4, '|');
+            let file_id = fields.next()?.parse::<i64>().ok()?;
+            let candidate_resource = fields.next()?;
+            let name = fields.next()?;
+            (file_id == path_id && candidate_resource == resource_kind).then_some(name)
+        })
 }
 
 fn project_object_name(
@@ -299,8 +457,36 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                 } else {
                     None
                 };
+            let material_view = if source_engine_guid.is_none() && class_id == 21 {
+                payload
+                    .map(|payload| crate::resources::material::MaterialView::from_value(&payload.root))
+                    .transpose()
+                    .map_err(|error| {
+                        invalid_project(format!(
+                            "Material {}:{} could not be read for predefined engine-asset matching: {error}",
+                            file_index, object_info.path_id
+                        ))
+                    })?
+            } else {
+                None
+            };
+            let predefined_engine_material = if let Some(material) = material_view.as_ref() {
+                let resolved_shader_name =
+                    resolved_material_shader_name(material, object, objects, reference_graph)?;
+                match (material.name.as_deref(), resolved_shader_name) {
+                    (Some(name), Some(shader_name)) => predefined_engine_material_target(
+                        name,
+                        shader_name.as_deref(),
+                        file.metadata.prefix.unity_version_text.as_deref(),
+                    )?,
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            let predefined_engine_target = predefined_engine_shader.or(predefined_engine_material);
             let engine_guid =
-                source_engine_guid.or_else(|| predefined_engine_shader.map(|target| target.guid));
+                source_engine_guid.or_else(|| predefined_engine_target.map(|target| target.guid));
             let audio_view = if source_engine_guid.is_none()
                 && class_id == crate::resources::audio::AUDIO_CLIP_CLASS_ID
             {
@@ -857,7 +1043,7 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                         .pointer_file_id
                 }
                 ObjectRoute::EngineRedirect => {
-                    predefined_engine_shader.map_or(object_info.path_id, |target| target.file_id)
+                    predefined_engine_target.map_or(object_info.path_id, |target| target.file_id)
                 }
                 _ => object_info.path_id,
             };
@@ -1153,7 +1339,8 @@ fn font_collection_subasset<'object>(
 #[cfg(test)]
 mod tests {
     use super::{
-        predefined_engine_shader_target, project_object_name, should_report_unported_texture_route,
+        predefined_engine_material_target, predefined_engine_shader_target, project_object_name,
+        should_report_unported_texture_route,
     };
     use crate::export::project_workflow::SHADER_CLASS_ID;
     use crate::resources::shader::{ParsedShaderForm, ParsedShaderProperty, ShaderView};
@@ -1198,6 +1385,46 @@ mod tests {
         assert_eq!(
             predefined_engine_shader_target(&different_properties).unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn unity_2022_3_predefined_material_matches_name_and_resolved_shader() {
+        let target = predefined_engine_material_target(
+            "Default-Material",
+            Some("Standard"),
+            Some("2022.3.22f1"),
+        )
+        .unwrap()
+        .expect("2022.3 TPK maps Default-Material to builtin extra");
+        let mut expected_guid = [0; 16];
+        for (index, word) in crate::export::guid_policy::ENGINE_BUILTIN_EXTRA_GUID_WORDS
+            .iter()
+            .enumerate()
+        {
+            expected_guid[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        assert_eq!(target.file_id, 10303);
+        assert_eq!(target.guid, expected_guid);
+        assert_eq!(
+            predefined_engine_material_target(
+                "Default-Material",
+                Some("Unlit/Color"),
+                Some("2022.3.22f1")
+            )
+            .unwrap(),
+            None,
+            "the resolved Shader name is part of the baseline cache identity"
+        );
+        assert_eq!(
+            predefined_engine_material_target(
+                "Default-Material",
+                Some("Standard"),
+                Some("2022.3.10f1")
+            )
+            .unwrap(),
+            None,
+            "a TPK snapshot cannot be applied before its source version"
         );
     }
 
