@@ -369,7 +369,7 @@ impl SceneGraph {
                     if reference.source_path_id != target_identity.path_id {
                         return false;
                     }
-                    match counterpart_kind {
+                    let is_counterpart_field = match counterpart_kind {
                         SceneRelationshipKind::TransformParent => {
                             reference_field_path_matches(reference, "m_Father")
                         }
@@ -377,7 +377,17 @@ impl SceneGraph {
                             reference_field_path_matches_array_element(reference, "m_Children")
                         }
                         _ => false,
-                    }
+                    };
+                    is_counterpart_field
+                        && (relationship.kind != SceneRelationshipKind::TransformParent
+                            || matches!(
+                                &reference.resolution,
+                                MultiFilePPtrResolution::Object {
+                                    target_file_index: actual_file_index,
+                                    target_object_index: actual_object_index,
+                                } if *actual_file_index == source_file_index
+                                    && *actual_object_index == relationship.source_object_index
+                            ))
                 });
             let Some(counterpart_edge) = counterpart_edges.next() else {
                 push_workspace_hierarchy_issue(

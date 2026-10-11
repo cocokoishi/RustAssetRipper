@@ -241,6 +241,113 @@ impl ObjectReferenceGraph {
         Self::build_with_decoder_internal(metadata, limits, None, decode)
     }
 
+    /// A recovery pass may clear only the exact factory outcomes it repaired.
+    /// Preserve earlier bounds/scan failures, including those from stricter input
+    /// decode limits, even when a rebuilt graph can walk the recovered values.
+    pub(crate) fn preserve_prior_issues_after_recovery(
+        &mut self,
+        previous: &Self,
+        repaired: &std::collections::HashMap<usize, SerializedFileError>,
+        max_issues: usize,
+    ) -> Result<(), ReferenceGraphBuildError> {
+        fn location(issue: &ReferenceGraphIssue) -> (usize, u8, i64, &str, usize, usize) {
+            match issue {
+                ReferenceGraphIssue::ObjectDecodeFailed {
+                    object_index,
+                    path_id,
+                    ..
+                } => (*object_index, 0, *path_id, "", 0, 0),
+                ReferenceGraphIssue::UnparsedTrailingPayload {
+                    object_index,
+                    path_id,
+                    byte_count,
+                } => (*object_index, 1, *path_id, "", *byte_count, 0),
+                ReferenceGraphIssue::UnparsedRawValue {
+                    object_index,
+                    path_id,
+                    field_path,
+                    byte_count,
+                } => (*object_index, 2, *path_id, field_path, *byte_count, 0),
+                ReferenceGraphIssue::FieldPathLimitExceeded {
+                    object_index,
+                    path_id,
+                    parent_field_path,
+                    component_bytes,
+                    limit,
+                } => (
+                    *object_index,
+                    3,
+                    *path_id,
+                    parent_field_path,
+                    *component_bytes,
+                    *limit,
+                ),
+                ReferenceGraphIssue::EdgeLimitExceeded {
+                    object_index,
+                    path_id,
+                    field_path,
+                    limit,
+                } => (*object_index, 4, *path_id, field_path, *limit, 0),
+                ReferenceGraphIssue::ManagedObjectLimitExceeded {
+                    object_index,
+                    path_id,
+                    field_path,
+                    limit,
+                } => (*object_index, 5, *path_id, field_path, *limit, 0),
+                ReferenceGraphIssue::ManagedReferenceLimitExceeded {
+                    object_index,
+                    path_id,
+                    field_path,
+                    limit,
+                } => (*object_index, 6, *path_id, field_path, *limit, 0),
+                ReferenceGraphIssue::ManagedRegistryScopeLimitExceeded {
+                    object_index,
+                    path_id,
+                    field_path,
+                    limit,
+                } => (*object_index, 7, *path_id, field_path, *limit, 0),
+            }
+        }
+        let additional = {
+            let mut indexed = std::collections::HashMap::new();
+            indexed.try_reserve(self.issues.len()).map_err(|_| {
+                ReferenceGraphBuildError::allocation(
+                    "prior reference scan issue index",
+                    self.issues.len(),
+                )
+            })?;
+            for issue in &self.issues {
+                indexed.insert(location(issue), issue);
+            }
+            let mut additional = Vec::new();
+            additional.try_reserve(previous.issues.len()).map_err(|_| {
+                ReferenceGraphBuildError::allocation(
+                    "prior reference scan issues",
+                    previous.issues.len(),
+                )
+            })?;
+            for (index, issue) in previous.issues.iter().enumerate() {
+                if matches!(issue, ReferenceGraphIssue::ObjectDecodeFailed { object_index, error, .. }
+                    if repaired.get(object_index) == Some(error))
+                {
+                    continue;
+                }
+                if indexed
+                    .get(&location(issue))
+                    .is_some_and(|existing| *existing == issue)
+                {
+                    continue;
+                }
+                additional.push(index);
+            }
+            additional
+        };
+        for index in additional {
+            self.push_issue(previous.issues[index].clone(), max_issues)?;
+        }
+        Ok(())
+    }
+
     fn build_internal(
         file: &SerializedFile<'_>,
         limits: ReferenceGraphLimits,
@@ -1017,7 +1124,7 @@ fn decode_object_payload_with_generated_fallback(
     })
 }
 
-fn factory_object_outcome_error(
+pub(crate) fn factory_object_outcome_error(
     state: &crate::processing::asset_factory::FactoryObjectState,
 ) -> SerializedFileError {
     let outcome = match &state.kind {

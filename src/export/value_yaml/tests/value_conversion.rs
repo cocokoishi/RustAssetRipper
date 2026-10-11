@@ -1039,6 +1039,68 @@ fn type_tree_hints_drive_flow_structs_and_empty_array_shapes() {
 }
 
 #[test]
+fn nested_shader_variant_arrays_match_empty_array_hints_through_indices() {
+    let type_tree = TypeTree {
+        nodes: vec![
+            type_tree_node(0, "Shader", "Base", 0),
+            type_tree_node(1, "vector", "variants", 0),
+            type_tree_node(2, "Array", "Array", 0),
+            type_tree_node(3, "SInt32", "size", 0),
+            type_tree_node(3, "Variant", "data", 0),
+            type_tree_node(4, "vector", "kernels", 0),
+            type_tree_node(5, "Array", "Array", 0),
+            type_tree_node(6, "SInt32", "size", 0),
+            type_tree_node(6, "Kernel", "data", 0),
+            type_tree_node(7, "vector", "uniqueVariants", 0),
+            type_tree_node(8, "Array", "Array", 0),
+            type_tree_node(9, "SInt32", "size", 0),
+            type_tree_node(9, "UniqueVariant", "data", 0),
+            type_tree_node(10, "vector", "builtinSamplers", 0),
+            type_tree_node(11, "Array", "Array", 0),
+            type_tree_node(12, "SInt32", "size", 0),
+            type_tree_node(12, "BuiltinSampler", "data", 0),
+        ],
+        string_buffer: Vec::new(),
+    };
+    let hints = UnityYamlObjectConversionHints::from_type_tree(
+        &type_tree,
+        version(),
+        UnityYamlObjectConversionLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        hints
+            .empty_array_kinds
+            .get("variants[*].kernels[*].uniqueVariants[*].builtinSamplers"),
+        Some(&UnityYamlEmptyArrayKind::BlockSequence)
+    );
+
+    let value = SerializedValue::Struct(vec![field(
+        "variants",
+        SerializedValue::Array(vec![SerializedValue::Struct(vec![field(
+            "kernels",
+            SerializedValue::Array(vec![SerializedValue::Struct(vec![field(
+                "uniqueVariants",
+                SerializedValue::Array(vec![SerializedValue::Struct(vec![field(
+                    "builtinSamplers",
+                    SerializedValue::Array(Vec::new()),
+                )])]),
+            )])]),
+        )])]),
+    )]);
+    let document = convert_with_object_hints(&value, &hints, |_| {
+        unreachable!("the shader variant fixture contains no PPtrs")
+    })
+    .unwrap();
+    let output = crate::export::unity_yaml::write_unity_yaml_documents(
+        &[document],
+        crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+    )
+    .unwrap();
+    assert!(output.contains("builtinSamplers: []"), "{output}");
+}
+
+#[test]
 fn type_tree_hints_apply_root_flow_mapping_and_reject_invalid_levels() {
     let type_tree = TypeTree {
         nodes: vec![

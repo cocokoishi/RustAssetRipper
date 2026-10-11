@@ -1,0 +1,1382 @@
+# Unity 2022.3.0f1 source-runtime AnimatorController hierarchy projection
+# AnimatorControllerProcessor.Process -> VirtualAnimationFactory.CreateRootAnimatorStateMachine
+# MACHINE/STATE/TRANSITION rows carry owner identity, field, value; CONDITION rows carry owner, index, mode, parameter, float bits.
+# SOURCE_SERIALIZED_FILE_HEX contains a generated no-TypeTree SerializedFile before processing; SOURCE_YAML uses frozen YamlWalker with raw PPtr identities.
+SOURCE_SERIALIZED_FILE_HEX|00000040000008800000000A0000006000000000323032322E332E3066310013000000010000005B0000000000000000000000000000000100000010270000000000001C0800005B0000005B00000000000000000000000000000000000000001B0000004E6573746564205374617465204D616368696E6520536F75726365000000000001000000000000000000000000000000000000000000000000000000C71D9287000000000000803F010000000100000004000000020000000100000001000000B0E59C380000000000000000327500000000000000000000C4C8E1650000803E0000003E0000403F0001000000000000010000000100000001000000B0E59C380000000000000000387500000000000000000000C41021210000803E0000003E0000403F00010000000000000100000000000000000000002B1A167C00000000D47A929600000000000000000000000000000000000000000000803F0000000000010000010000000100000003000000F2D1E7CE0000403F0000000002000000000000000000000050F4F2FB0000803E0000003E0000403F00010000000000000100000000000000000000006BD5A32D00000000E02F53D600000000000000000000000000000000000000000000A03F0000003E0001000004000000010000000600000095E8F83700000040000000003675000000000000000000008B8A3A760000803E0000003E0000403F0101000000000000010000000100000002000000B0E59C3800000000000000003575000000000000000000004EBD94EA0000803E0000003E0000403F0101000000000000010000000100000001000000C136D6D500000000000000003A7500000000000000000000EE3F3CD90000803E0000003E0000403F0101000000000000010000000100000001000000B0E59C380000000000000000407500000000000000000000030C29590000803E0000003E0000403F010100000000000001000000000000000000000020E23B68000000007F0C8D4C00000000000000000000000000000000000000000000C03F0000803E00010000010000000100000001000000C136D6D50000000000000000347500000000000000000000A9B8E4640000803E0000003E0000403F0001000000000000010000000000000000000000ABAA54E9000000002D4986F500000000000000000000000000000000000000000000E03F0000C03E00010000020000000100000001000000C136D6D50000000000000000020000000000000000000000C7C31D4E0000003F00000000000000000000000000000000000100000100000001000000C136D6D50000000000000000367500000000000000000000B3B0C2780000003F00000000000000000000000000000000000100001600000002000000327500000100000001000000B0E59C3800000000000000000000000000000000C71D92870100000001000000447500000100000001000000B0E59C380000000000000000C71D9287000000000200000034750000010000000600000095E8F83700000040000000000100000000000000A9F2C83801000000010000000000000000000000A9F2C8380000000002000000020000000100000003000000F2D1E7CE0000403F000000000100000000000000CF164D730100000002000000030000000100000003000000F2D1E7CE0000403F000000003375000000000000CF164D730000000002000000347500000100000001000000C136D6D50000000000000000030000000000000000906B540100000002000000327500000100000001000000B0E59C380000000000000000317500000000000000906B5400000000020000003E7500000100000001000000B0E59C380000000000000000FFFFFFFF0000000085FD5C1F010000000000000085FD5C1F00000000000000009DFDBBD9010000000100000039750000000000009DFDBBD900000000000000005AE4A96D010000000100000035750000000000005AE4A96D0000000000000000A8414B150100000000000000A8414B1500000000000000002DCFC81F010000000100000034750000000000002DCFC81F00000000000000006E1351C801000000000000006E1351C80000000000000000A6F05FE901000000010000003075000000000000A6F05FE900000000000000000000000004000000F2D1E7CE0100000000000000B0E59C38040000000000000095E8F8370300000000000000C136D6D50900000001000000000000000000000000000000010000000000803E01000000020000000200000001000000180000000000000000000000C71D928706000000E4B8BBE5B1820000F2D1E7CE050000005370656564000000B0E59C38060000004D6F76696E67000095E8F837040000004D6F6465C136D6D5070000005472696767657200D47A92960B000000E4B8BBE5B1822E49646C65002B1A167C0400000049646C65E02F53D61B000000E4B8BBE5B1822E4C6F636F6D6F74696F6E2E446565702E57616C6B006BD5A32D0400000057616C6B7F0C8D4C1A000000E4B8BBE5B1822E4C6F636F6D6F74696F6E2E446565702E52756E000020E23B680300000052756E002D4986F513000000E4B8BBE5B1822E436F6D6261742E526561647900ABAA54E9050000005265616479000000C4C8E1650F000000456E7465724C6F636F6D6F74696F6E0050F4F2FB0900000057616C6B546F52756E0000008B8A3A760B000000456E746572436F6D626174004EBD94EA080000004578697444656570A9B8E4640C00000052657475726E546F44656570C7C31D4E08000000416E79546F52756EB3B0C2780B000000416E79546F436F6D62617400C41021210F0000004F66666572526F6F74506172656E7400EE3F3CD91D0000004F66666572446565706572506172656E745468726F7567684368696C64000000030C2959130000004F666665724578636C75646564506172656E7400000000000000000000000000000000000000000000000000
+INPUT_STATE|0|主层.Idle|96927AD4
+INPUT_STATE|1|主层.Locomotion.Deep.Walk|D6532FE0
+INPUT_STATE|2|主层.Locomotion.Deep.Run|4C8D0C7F
+INPUT_STATE|3|主层.Combat.Ready|F586492D
+INPUT_SELECTOR|0|主层|entry
+INPUT_SELECTOR_DESTINATION|0|0|30002
+INPUT_SELECTOR_DESTINATION|0|1|0
+INPUT_SELECTOR|1|主层|exit
+INPUT_SELECTOR_DESTINATION|1|0|30020
+INPUT_SELECTOR|2|主层.Locomotion|entry
+INPUT_SELECTOR_DESTINATION|2|0|30004
+INPUT_SELECTOR_DESTINATION|2|1|1
+INPUT_SELECTOR|3|主层.Locomotion|exit
+INPUT_SELECTOR_DESTINATION|3|0|0
+INPUT_SELECTOR|4|主层.Locomotion.Deep|entry
+INPUT_SELECTOR_DESTINATION|4|0|2
+INPUT_SELECTOR_DESTINATION|4|1|1
+INPUT_SELECTOR|5|主层.Locomotion.Deep|exit
+INPUT_SELECTOR_DESTINATION|5|0|3
+INPUT_SELECTOR_DESTINATION|5|1|30003
+INPUT_SELECTOR|6|主层.Combat|entry
+INPUT_SELECTOR_DESTINATION|6|0|30004
+INPUT_SELECTOR_DESTINATION|6|1|3
+INPUT_SELECTOR|7|主层.Combat|exit
+INPUT_SELECTOR_DESTINATION|7|0|30002
+INPUT_SELECTOR_DESTINATION|7|1|30001
+INPUT_SELECTOR|8|主层.Locomotion.Deep.失名|entry
+INPUT_SELECTOR_DESTINATION|8|0|30014
+INPUT_SELECTOR_DESTINATION|8|1|4294967295
+INPUT_SELECTOR|9|主层.Locomotion.Deep.失名|exit
+INPUT_SELECTOR|10|主层.Locomotion.Deep.失名.子|entry
+INPUT_SELECTOR|11|主层.Locomotion.Deep.失名.子|exit
+INPUT_SELECTOR_DESTINATION|11|0|30009
+INPUT_SELECTOR|12|主层.Locomotion.Deep.DirectExit|entry
+INPUT_SELECTOR|13|主层.Locomotion.Deep.DirectExit|exit
+INPUT_SELECTOR_DESTINATION|13|0|30005
+INPUT_SELECTOR|14|主层.Locomotion.Deep.Linked|entry
+INPUT_SELECTOR|15|主层.Locomotion.Deep.Linked|exit
+INPUT_SELECTOR|16|主层.Locomotion.Restricted|entry
+INPUT_SELECTOR|17|主层.Locomotion.Restricted|exit
+INPUT_SELECTOR_DESTINATION|17|0|30004
+INPUT_SELECTOR|18|主层.Disconnected|entry
+INPUT_SELECTOR|19|主层.Disconnected|exit
+INPUT_SELECTOR|20|主层.Orphan|entry
+INPUT_SELECTOR|21|主层.Orphan|exit
+INPUT_SELECTOR_DESTINATION|21|0|30000
+MACHINE|主层|name|主层
+MACHINE|主层|parent|
+MACHINE|主层|serializedVersion|6
+MACHINE|主层|default|主层.Idle
+MACHINE|主层|stateCount|1
+MACHINE|主层|machineCount|4
+MACHINE|主层|entryCount|1
+MACHINE|主层|anyCount|2
+MACHINE|主层|exitGroupCount|1
+CHILD_STATE|主层|主层.Idle|00000000|00000000|00000000
+STATE|主层.Idle|speed|3F800000
+STATE|主层.Idle|cycleOffset|00000000
+TRANSITION|STATE:主层.Idle:0|class|1101
+TRANSITION|STATE:主层.Idle:0|serializedVersion|3
+TRANSITION|STATE:主层.Idle:0|name|EnterLocomotion
+TRANSITION|STATE:主层.Idle:0|destinationState|
+TRANSITION|STATE:主层.Idle:0|destinationStateMachine|主层.Locomotion
+TRANSITION|STATE:主层.Idle:0|isExit|False
+CONDITION|STATE:主层.Idle:0|0|1|Moving|00000000
+TRANSITION|STATE:主层.Idle:0|TransitionDuration|3E800000
+TRANSITION|STATE:主层.Idle:0|TransitionOffset|3E000000
+TRANSITION|STATE:主层.Idle:0|ExitTime|3F400000
+TRANSITION|STATE:主层.Idle:0|HasExitTime|False
+TRANSITION|STATE:主层.Idle:0|HasFixedDuration|True
+TRANSITION|STATE:主层.Idle:0|InterruptionSource|0
+TRANSITION|STATE:主层.Idle:0|OrderedInterruption|True
+TRANSITION|STATE:主层.Idle:0|CanTransitionToSelf|False
+TRANSITION|STATE:主层.Idle:1|class|1101
+TRANSITION|STATE:主层.Idle:1|serializedVersion|3
+TRANSITION|STATE:主层.Idle:1|name|OfferRootParent
+TRANSITION|STATE:主层.Idle:1|destinationState|
+TRANSITION|STATE:主层.Idle:1|destinationStateMachine|主层.Locomotion.Deep.EMPTY_PohsvTN
+TRANSITION|STATE:主层.Idle:1|isExit|False
+CONDITION|STATE:主层.Idle:1|0|1|Moving|00000000
+TRANSITION|STATE:主层.Idle:1|TransitionDuration|3E800000
+TRANSITION|STATE:主层.Idle:1|TransitionOffset|3E000000
+TRANSITION|STATE:主层.Idle:1|ExitTime|3F400000
+TRANSITION|STATE:主层.Idle:1|HasExitTime|False
+TRANSITION|STATE:主层.Idle:1|HasFixedDuration|True
+TRANSITION|STATE:主层.Idle:1|InterruptionSource|0
+TRANSITION|STATE:主层.Idle:1|OrderedInterruption|True
+TRANSITION|STATE:主层.Idle:1|CanTransitionToSelf|False
+TRANSITION|ENTRY:主层:0|class|1109
+TRANSITION|ENTRY:主层:0|serializedVersion|1
+TRANSITION|ENTRY:主层:0|name|
+TRANSITION|ENTRY:主层:0|destinationState|
+TRANSITION|ENTRY:主层:0|destinationStateMachine|主层.Locomotion
+TRANSITION|ENTRY:主层:0|isExit|False
+CONDITION|ENTRY:主层:0|0|1|Moving|00000000
+TRANSITION|ANY:主层:0|class|1101
+TRANSITION|ANY:主层:0|serializedVersion|3
+TRANSITION|ANY:主层:0|name|AnyToRun
+TRANSITION|ANY:主层:0|destinationState|主层.Locomotion.Deep.Run
+TRANSITION|ANY:主层:0|destinationStateMachine|
+TRANSITION|ANY:主层:0|isExit|False
+CONDITION|ANY:主层:0|0|1|Trigger|00000000
+TRANSITION|ANY:主层:0|TransitionDuration|3F000000
+TRANSITION|ANY:主层:0|TransitionOffset|00000000
+TRANSITION|ANY:主层:0|ExitTime|00000000
+TRANSITION|ANY:主层:0|HasExitTime|False
+TRANSITION|ANY:主层:0|HasFixedDuration|False
+TRANSITION|ANY:主层:0|InterruptionSource|0
+TRANSITION|ANY:主层:0|OrderedInterruption|False
+TRANSITION|ANY:主层:0|CanTransitionToSelf|True
+TRANSITION|ANY:主层:1|class|1101
+TRANSITION|ANY:主层:1|serializedVersion|3
+TRANSITION|ANY:主层:1|name|AnyToCombat
+TRANSITION|ANY:主层:1|destinationState|
+TRANSITION|ANY:主层:1|destinationStateMachine|主层.Combat
+TRANSITION|ANY:主层:1|isExit|False
+CONDITION|ANY:主层:1|0|1|Trigger|00000000
+TRANSITION|ANY:主层:1|TransitionDuration|3F000000
+TRANSITION|ANY:主层:1|TransitionOffset|00000000
+TRANSITION|ANY:主层:1|ExitTime|00000000
+TRANSITION|ANY:主层:1|HasExitTime|False
+TRANSITION|ANY:主层:1|HasFixedDuration|False
+TRANSITION|ANY:主层:1|InterruptionSource|0
+TRANSITION|ANY:主层:1|OrderedInterruption|False
+TRANSITION|ANY:主层:1|CanTransitionToSelf|True
+EXIT_GROUP|主层|主层.Combat|2
+TRANSITION|EXIT:主层:主层.Combat:0|class|1109
+TRANSITION|EXIT:主层:主层.Combat:0|serializedVersion|1
+TRANSITION|EXIT:主层:主层.Combat:0|name|
+TRANSITION|EXIT:主层:主层.Combat:0|destinationState|
+TRANSITION|EXIT:主层:主层.Combat:0|destinationStateMachine|主层.Locomotion
+TRANSITION|EXIT:主层:主层.Combat:0|isExit|False
+CONDITION|EXIT:主层:主层.Combat:0|0|1|Moving|00000000
+TRANSITION|EXIT:主层:主层.Combat:1|class|1109
+TRANSITION|EXIT:主层:主层.Combat:1|serializedVersion|1
+TRANSITION|EXIT:主层:主层.Combat:1|name|
+TRANSITION|EXIT:主层:主层.Combat:1|destinationState|
+TRANSITION|EXIT:主层:主层.Combat:1|destinationStateMachine|
+TRANSITION|EXIT:主层:主层.Combat:1|isExit|True
+CHILD_MACHINE|主层|主层.Locomotion|437A0000|00000000|00000000
+MACHINE|主层.Locomotion|name|Locomotion
+MACHINE|主层.Locomotion|parent|主层
+MACHINE|主层.Locomotion|serializedVersion|6
+MACHINE|主层.Locomotion|default|主层.Locomotion.Deep.Walk
+MACHINE|主层.Locomotion|stateCount|0
+MACHINE|主层.Locomotion|machineCount|2
+MACHINE|主层.Locomotion|entryCount|1
+MACHINE|主层.Locomotion|anyCount|0
+MACHINE|主层.Locomotion|exitGroupCount|2
+TRANSITION|ENTRY:主层.Locomotion:0|class|1109
+TRANSITION|ENTRY:主层.Locomotion:0|serializedVersion|1
+TRANSITION|ENTRY:主层.Locomotion:0|name|
+TRANSITION|ENTRY:主层.Locomotion:0|destinationState|
+TRANSITION|ENTRY:主层.Locomotion:0|destinationStateMachine|主层.Locomotion.Deep
+TRANSITION|ENTRY:主层.Locomotion:0|isExit|False
+CONDITION|ENTRY:主层.Locomotion:0|0|6|Mode|40000000
+EXIT_GROUP|主层.Locomotion|主层.Locomotion.Deep|2
+TRANSITION|EXIT:主层.Locomotion:主层.Locomotion.Deep:0|class|1109
+TRANSITION|EXIT:主层.Locomotion:主层.Locomotion.Deep:0|serializedVersion|1
+TRANSITION|EXIT:主层.Locomotion:主层.Locomotion.Deep:0|name|
+TRANSITION|EXIT:主层.Locomotion:主层.Locomotion.Deep:0|destinationState|主层.Combat.Ready
+TRANSITION|EXIT:主层.Locomotion:主层.Locomotion.Deep:0|destinationStateMachine|
+TRANSITION|EXIT:主层.Locomotion:主层.Locomotion.Deep:0|isExit|False
+CONDITION|EXIT:主层.Locomotion:主层.Locomotion.Deep:0|0|3|Speed|3F400000
+TRANSITION|EXIT:主层.Locomotion:主层.Locomotion.Deep:1|class|1109
+TRANSITION|EXIT:主层.Locomotion:主层.Locomotion.Deep:1|serializedVersion|1
+TRANSITION|EXIT:主层.Locomotion:主层.Locomotion.Deep:1|name|
+TRANSITION|EXIT:主层.Locomotion:主层.Locomotion.Deep:1|destinationState|
+TRANSITION|EXIT:主层.Locomotion:主层.Locomotion.Deep:1|destinationStateMachine|
+TRANSITION|EXIT:主层.Locomotion:主层.Locomotion.Deep:1|isExit|True
+EXIT_GROUP|主层.Locomotion|主层.Locomotion.EMPTY_vwivlSN|1
+TRANSITION|EXIT:主层.Locomotion:主层.Locomotion.EMPTY_vwivlSN:0|class|1109
+TRANSITION|EXIT:主层.Locomotion:主层.Locomotion.EMPTY_vwivlSN:0|serializedVersion|1
+TRANSITION|EXIT:主层.Locomotion:主层.Locomotion.EMPTY_vwivlSN:0|name|
+TRANSITION|EXIT:主层.Locomotion:主层.Locomotion.EMPTY_vwivlSN:0|destinationState|
+TRANSITION|EXIT:主层.Locomotion:主层.Locomotion.EMPTY_vwivlSN:0|destinationStateMachine|主层.Locomotion.Deep
+TRANSITION|EXIT:主层.Locomotion:主层.Locomotion.EMPTY_vwivlSN:0|isExit|False
+CHILD_MACHINE|主层.Locomotion|主层.Locomotion.Deep|00000000|00000000|00000000
+MACHINE|主层.Locomotion.Deep|name|Deep
+MACHINE|主层.Locomotion.Deep|parent|主层.Locomotion
+MACHINE|主层.Locomotion.Deep|serializedVersion|6
+MACHINE|主层.Locomotion.Deep|default|主层.Locomotion.Deep.Walk
+MACHINE|主层.Locomotion.Deep|stateCount|2
+MACHINE|主层.Locomotion.Deep|machineCount|3
+MACHINE|主层.Locomotion.Deep|entryCount|1
+MACHINE|主层.Locomotion.Deep|anyCount|0
+MACHINE|主层.Locomotion.Deep|exitGroupCount|1
+CHILD_STATE|主层.Locomotion.Deep|主层.Locomotion.Deep.Walk|00000000|00000000|00000000
+STATE|主层.Locomotion.Deep.Walk|speed|3FA00000
+STATE|主层.Locomotion.Deep.Walk|cycleOffset|3E000000
+TRANSITION|STATE:主层.Locomotion.Deep.Walk:0|class|1101
+TRANSITION|STATE:主层.Locomotion.Deep.Walk:0|serializedVersion|3
+TRANSITION|STATE:主层.Locomotion.Deep.Walk:0|name|WalkToRun
+TRANSITION|STATE:主层.Locomotion.Deep.Walk:0|destinationState|主层.Locomotion.Deep.Run
+TRANSITION|STATE:主层.Locomotion.Deep.Walk:0|destinationStateMachine|
+TRANSITION|STATE:主层.Locomotion.Deep.Walk:0|isExit|False
+CONDITION|STATE:主层.Locomotion.Deep.Walk:0|0|3|Speed|3F400000
+TRANSITION|STATE:主层.Locomotion.Deep.Walk:0|TransitionDuration|3E800000
+TRANSITION|STATE:主层.Locomotion.Deep.Walk:0|TransitionOffset|3E000000
+TRANSITION|STATE:主层.Locomotion.Deep.Walk:0|ExitTime|3F400000
+TRANSITION|STATE:主层.Locomotion.Deep.Walk:0|HasExitTime|False
+TRANSITION|STATE:主层.Locomotion.Deep.Walk:0|HasFixedDuration|True
+TRANSITION|STATE:主层.Locomotion.Deep.Walk:0|InterruptionSource|0
+TRANSITION|STATE:主层.Locomotion.Deep.Walk:0|OrderedInterruption|True
+TRANSITION|STATE:主层.Locomotion.Deep.Walk:0|CanTransitionToSelf|False
+CHILD_STATE|主层.Locomotion.Deep|主层.Locomotion.Deep.Run|437A0000|00000000|00000000
+STATE|主层.Locomotion.Deep.Run|speed|3FC00000
+STATE|主层.Locomotion.Deep.Run|cycleOffset|3E800000
+TRANSITION|STATE:主层.Locomotion.Deep.Run:0|class|1101
+TRANSITION|STATE:主层.Locomotion.Deep.Run:0|serializedVersion|3
+TRANSITION|STATE:主层.Locomotion.Deep.Run:0|name|EnterCombat
+TRANSITION|STATE:主层.Locomotion.Deep.Run:0|destinationState|
+TRANSITION|STATE:主层.Locomotion.Deep.Run:0|destinationStateMachine|主层.Combat
+TRANSITION|STATE:主层.Locomotion.Deep.Run:0|isExit|False
+CONDITION|STATE:主层.Locomotion.Deep.Run:0|0|6|Mode|40000000
+TRANSITION|STATE:主层.Locomotion.Deep.Run:0|TransitionDuration|3E800000
+TRANSITION|STATE:主层.Locomotion.Deep.Run:0|TransitionOffset|3E000000
+TRANSITION|STATE:主层.Locomotion.Deep.Run:0|ExitTime|3F400000
+TRANSITION|STATE:主层.Locomotion.Deep.Run:0|HasExitTime|True
+TRANSITION|STATE:主层.Locomotion.Deep.Run:0|HasFixedDuration|True
+TRANSITION|STATE:主层.Locomotion.Deep.Run:0|InterruptionSource|0
+TRANSITION|STATE:主层.Locomotion.Deep.Run:0|OrderedInterruption|True
+TRANSITION|STATE:主层.Locomotion.Deep.Run:0|CanTransitionToSelf|False
+TRANSITION|STATE:主层.Locomotion.Deep.Run:1|class|1101
+TRANSITION|STATE:主层.Locomotion.Deep.Run:1|serializedVersion|3
+TRANSITION|STATE:主层.Locomotion.Deep.Run:1|name|ExitDeep
+TRANSITION|STATE:主层.Locomotion.Deep.Run:1|destinationState|
+TRANSITION|STATE:主层.Locomotion.Deep.Run:1|destinationStateMachine|
+TRANSITION|STATE:主层.Locomotion.Deep.Run:1|isExit|True
+CONDITION|STATE:主层.Locomotion.Deep.Run:1|0|2|Moving|00000000
+TRANSITION|STATE:主层.Locomotion.Deep.Run:1|TransitionDuration|3E800000
+TRANSITION|STATE:主层.Locomotion.Deep.Run:1|TransitionOffset|3E000000
+TRANSITION|STATE:主层.Locomotion.Deep.Run:1|ExitTime|3F400000
+TRANSITION|STATE:主层.Locomotion.Deep.Run:1|HasExitTime|True
+TRANSITION|STATE:主层.Locomotion.Deep.Run:1|HasFixedDuration|True
+TRANSITION|STATE:主层.Locomotion.Deep.Run:1|InterruptionSource|0
+TRANSITION|STATE:主层.Locomotion.Deep.Run:1|OrderedInterruption|True
+TRANSITION|STATE:主层.Locomotion.Deep.Run:1|CanTransitionToSelf|False
+TRANSITION|STATE:主层.Locomotion.Deep.Run:2|class|1101
+TRANSITION|STATE:主层.Locomotion.Deep.Run:2|serializedVersion|3
+TRANSITION|STATE:主层.Locomotion.Deep.Run:2|name|OfferDeeperParentThroughChild
+TRANSITION|STATE:主层.Locomotion.Deep.Run:2|destinationState|
+TRANSITION|STATE:主层.Locomotion.Deep.Run:2|destinationStateMachine|主层.Locomotion.Deep.EMPTY_PohsvTN.EMPTY_JmQjSmL
+TRANSITION|STATE:主层.Locomotion.Deep.Run:2|isExit|False
+CONDITION|STATE:主层.Locomotion.Deep.Run:2|0|1|Trigger|00000000
+TRANSITION|STATE:主层.Locomotion.Deep.Run:2|TransitionDuration|3E800000
+TRANSITION|STATE:主层.Locomotion.Deep.Run:2|TransitionOffset|3E000000
+TRANSITION|STATE:主层.Locomotion.Deep.Run:2|ExitTime|3F400000
+TRANSITION|STATE:主层.Locomotion.Deep.Run:2|HasExitTime|True
+TRANSITION|STATE:主层.Locomotion.Deep.Run:2|HasFixedDuration|True
+TRANSITION|STATE:主层.Locomotion.Deep.Run:2|InterruptionSource|0
+TRANSITION|STATE:主层.Locomotion.Deep.Run:2|OrderedInterruption|True
+TRANSITION|STATE:主层.Locomotion.Deep.Run:2|CanTransitionToSelf|False
+TRANSITION|STATE:主层.Locomotion.Deep.Run:3|class|1101
+TRANSITION|STATE:主层.Locomotion.Deep.Run:3|serializedVersion|3
+TRANSITION|STATE:主层.Locomotion.Deep.Run:3|name|OfferExcludedParent
+TRANSITION|STATE:主层.Locomotion.Deep.Run:3|destinationState|
+TRANSITION|STATE:主层.Locomotion.Deep.Run:3|destinationStateMachine|主层.Locomotion.EMPTY_vwivlSN
+TRANSITION|STATE:主层.Locomotion.Deep.Run:3|isExit|False
+CONDITION|STATE:主层.Locomotion.Deep.Run:3|0|1|Moving|00000000
+TRANSITION|STATE:主层.Locomotion.Deep.Run:3|TransitionDuration|3E800000
+TRANSITION|STATE:主层.Locomotion.Deep.Run:3|TransitionOffset|3E000000
+TRANSITION|STATE:主层.Locomotion.Deep.Run:3|ExitTime|3F400000
+TRANSITION|STATE:主层.Locomotion.Deep.Run:3|HasExitTime|True
+TRANSITION|STATE:主层.Locomotion.Deep.Run:3|HasFixedDuration|True
+TRANSITION|STATE:主层.Locomotion.Deep.Run:3|InterruptionSource|0
+TRANSITION|STATE:主层.Locomotion.Deep.Run:3|OrderedInterruption|True
+TRANSITION|STATE:主层.Locomotion.Deep.Run:3|CanTransitionToSelf|False
+TRANSITION|ENTRY:主层.Locomotion.Deep:0|class|1109
+TRANSITION|ENTRY:主层.Locomotion.Deep:0|serializedVersion|1
+TRANSITION|ENTRY:主层.Locomotion.Deep:0|name|
+TRANSITION|ENTRY:主层.Locomotion.Deep:0|destinationState|主层.Locomotion.Deep.Run
+TRANSITION|ENTRY:主层.Locomotion.Deep:0|destinationStateMachine|
+TRANSITION|ENTRY:主层.Locomotion.Deep:0|isExit|False
+CONDITION|ENTRY:主层.Locomotion.Deep:0|0|3|Speed|3F400000
+EXIT_GROUP|主层.Locomotion.Deep|主层.Locomotion.Deep.EMPTY_TrtVIKH|1
+TRANSITION|EXIT:主层.Locomotion.Deep:主层.Locomotion.Deep.EMPTY_TrtVIKH:0|class|1109
+TRANSITION|EXIT:主层.Locomotion.Deep:主层.Locomotion.Deep.EMPTY_TrtVIKH:0|serializedVersion|1
+TRANSITION|EXIT:主层.Locomotion.Deep:主层.Locomotion.Deep.EMPTY_TrtVIKH:0|name|
+TRANSITION|EXIT:主层.Locomotion.Deep:主层.Locomotion.Deep.EMPTY_TrtVIKH:0|destinationState|
+TRANSITION|EXIT:主层.Locomotion.Deep:主层.Locomotion.Deep.EMPTY_TrtVIKH:0|destinationStateMachine|
+TRANSITION|EXIT:主层.Locomotion.Deep:主层.Locomotion.Deep.EMPTY_TrtVIKH:0|isExit|True
+CHILD_MACHINE|主层.Locomotion.Deep|主层.Locomotion.Deep.EMPTY_PohsvTN|43FA0000|00000000|00000000
+MACHINE|主层.Locomotion.Deep.EMPTY_PohsvTN|name|EMPTY_PohsvTN
+MACHINE|主层.Locomotion.Deep.EMPTY_PohsvTN|parent|主层.Locomotion.Deep
+MACHINE|主层.Locomotion.Deep.EMPTY_PohsvTN|serializedVersion|6
+MACHINE|主层.Locomotion.Deep.EMPTY_PohsvTN|default|
+MACHINE|主层.Locomotion.Deep.EMPTY_PohsvTN|stateCount|0
+MACHINE|主层.Locomotion.Deep.EMPTY_PohsvTN|machineCount|1
+MACHINE|主层.Locomotion.Deep.EMPTY_PohsvTN|entryCount|1
+MACHINE|主层.Locomotion.Deep.EMPTY_PohsvTN|anyCount|0
+MACHINE|主层.Locomotion.Deep.EMPTY_PohsvTN|exitGroupCount|1
+TRANSITION|ENTRY:主层.Locomotion.Deep.EMPTY_PohsvTN:0|class|1109
+TRANSITION|ENTRY:主层.Locomotion.Deep.EMPTY_PohsvTN:0|serializedVersion|1
+TRANSITION|ENTRY:主层.Locomotion.Deep.EMPTY_PohsvTN:0|name|
+TRANSITION|ENTRY:主层.Locomotion.Deep.EMPTY_PohsvTN:0|destinationState|
+TRANSITION|ENTRY:主层.Locomotion.Deep.EMPTY_PohsvTN:0|destinationStateMachine|主层.Locomotion.Deep.EMPTY_sWURIMH
+TRANSITION|ENTRY:主层.Locomotion.Deep.EMPTY_PohsvTN:0|isExit|False
+CONDITION|ENTRY:主层.Locomotion.Deep.EMPTY_PohsvTN:0|0|1|Moving|00000000
+EXIT_GROUP|主层.Locomotion.Deep.EMPTY_PohsvTN|主层.Locomotion.Deep.EMPTY_PohsvTN.EMPTY_JmQjSmL|1
+TRANSITION|EXIT:主层.Locomotion.Deep.EMPTY_PohsvTN:主层.Locomotion.Deep.EMPTY_PohsvTN.EMPTY_JmQjSmL:0|class|1109
+TRANSITION|EXIT:主层.Locomotion.Deep.EMPTY_PohsvTN:主层.Locomotion.Deep.EMPTY_PohsvTN.EMPTY_JmQjSmL:0|serializedVersion|1
+TRANSITION|EXIT:主层.Locomotion.Deep.EMPTY_PohsvTN:主层.Locomotion.Deep.EMPTY_PohsvTN.EMPTY_JmQjSmL:0|name|
+TRANSITION|EXIT:主层.Locomotion.Deep.EMPTY_PohsvTN:主层.Locomotion.Deep.EMPTY_PohsvTN.EMPTY_JmQjSmL:0|destinationState|
+TRANSITION|EXIT:主层.Locomotion.Deep.EMPTY_PohsvTN:主层.Locomotion.Deep.EMPTY_PohsvTN.EMPTY_JmQjSmL:0|destinationStateMachine|
+TRANSITION|EXIT:主层.Locomotion.Deep.EMPTY_PohsvTN:主层.Locomotion.Deep.EMPTY_PohsvTN.EMPTY_JmQjSmL:0|isExit|True
+CHILD_MACHINE|主层.Locomotion.Deep.EMPTY_PohsvTN|主层.Locomotion.Deep.EMPTY_PohsvTN.EMPTY_JmQjSmL|00000000|00000000|00000000
+MACHINE|主层.Locomotion.Deep.EMPTY_PohsvTN.EMPTY_JmQjSmL|name|EMPTY_JmQjSmL
+MACHINE|主层.Locomotion.Deep.EMPTY_PohsvTN.EMPTY_JmQjSmL|parent|主层.Locomotion.Deep.EMPTY_PohsvTN
+MACHINE|主层.Locomotion.Deep.EMPTY_PohsvTN.EMPTY_JmQjSmL|serializedVersion|6
+MACHINE|主层.Locomotion.Deep.EMPTY_PohsvTN.EMPTY_JmQjSmL|default|
+MACHINE|主层.Locomotion.Deep.EMPTY_PohsvTN.EMPTY_JmQjSmL|stateCount|0
+MACHINE|主层.Locomotion.Deep.EMPTY_PohsvTN.EMPTY_JmQjSmL|machineCount|0
+MACHINE|主层.Locomotion.Deep.EMPTY_PohsvTN.EMPTY_JmQjSmL|entryCount|0
+MACHINE|主层.Locomotion.Deep.EMPTY_PohsvTN.EMPTY_JmQjSmL|anyCount|0
+MACHINE|主层.Locomotion.Deep.EMPTY_PohsvTN.EMPTY_JmQjSmL|exitGroupCount|0
+CHILD_MACHINE|主层.Locomotion.Deep|主层.Locomotion.Deep.EMPTY_TrtVIKH|00000000|42C80000|00000000
+MACHINE|主层.Locomotion.Deep.EMPTY_TrtVIKH|name|EMPTY_TrtVIKH
+MACHINE|主层.Locomotion.Deep.EMPTY_TrtVIKH|parent|主层.Locomotion.Deep
+MACHINE|主层.Locomotion.Deep.EMPTY_TrtVIKH|serializedVersion|6
+MACHINE|主层.Locomotion.Deep.EMPTY_TrtVIKH|default|
+MACHINE|主层.Locomotion.Deep.EMPTY_TrtVIKH|stateCount|0
+MACHINE|主层.Locomotion.Deep.EMPTY_TrtVIKH|machineCount|0
+MACHINE|主层.Locomotion.Deep.EMPTY_TrtVIKH|entryCount|0
+MACHINE|主层.Locomotion.Deep.EMPTY_TrtVIKH|anyCount|0
+MACHINE|主层.Locomotion.Deep.EMPTY_TrtVIKH|exitGroupCount|0
+CHILD_MACHINE|主层.Locomotion.Deep|主层.Locomotion.Deep.EMPTY_sWURIMH|437A0000|42C80000|00000000
+MACHINE|主层.Locomotion.Deep.EMPTY_sWURIMH|name|EMPTY_sWURIMH
+MACHINE|主层.Locomotion.Deep.EMPTY_sWURIMH|parent|主层.Locomotion.Deep
+MACHINE|主层.Locomotion.Deep.EMPTY_sWURIMH|serializedVersion|6
+MACHINE|主层.Locomotion.Deep.EMPTY_sWURIMH|default|
+MACHINE|主层.Locomotion.Deep.EMPTY_sWURIMH|stateCount|0
+MACHINE|主层.Locomotion.Deep.EMPTY_sWURIMH|machineCount|0
+MACHINE|主层.Locomotion.Deep.EMPTY_sWURIMH|entryCount|0
+MACHINE|主层.Locomotion.Deep.EMPTY_sWURIMH|anyCount|0
+MACHINE|主层.Locomotion.Deep.EMPTY_sWURIMH|exitGroupCount|0
+CHILD_MACHINE|主层.Locomotion|主层.Locomotion.EMPTY_vwivlSN|437A0000|00000000|00000000
+MACHINE|主层.Locomotion.EMPTY_vwivlSN|name|EMPTY_vwivlSN
+MACHINE|主层.Locomotion.EMPTY_vwivlSN|parent|主层.Locomotion
+MACHINE|主层.Locomotion.EMPTY_vwivlSN|serializedVersion|6
+MACHINE|主层.Locomotion.EMPTY_vwivlSN|default|
+MACHINE|主层.Locomotion.EMPTY_vwivlSN|stateCount|0
+MACHINE|主层.Locomotion.EMPTY_vwivlSN|machineCount|0
+MACHINE|主层.Locomotion.EMPTY_vwivlSN|entryCount|0
+MACHINE|主层.Locomotion.EMPTY_vwivlSN|anyCount|0
+MACHINE|主层.Locomotion.EMPTY_vwivlSN|exitGroupCount|0
+CHILD_MACHINE|主层|主层.Combat|43FA0000|00000000|00000000
+MACHINE|主层.Combat|name|Combat
+MACHINE|主层.Combat|parent|主层
+MACHINE|主层.Combat|serializedVersion|6
+MACHINE|主层.Combat|default|主层.Combat.Ready
+MACHINE|主层.Combat|stateCount|1
+MACHINE|主层.Combat|machineCount|0
+MACHINE|主层.Combat|entryCount|1
+MACHINE|主层.Combat|anyCount|0
+MACHINE|主层.Combat|exitGroupCount|0
+CHILD_STATE|主层.Combat|主层.Combat.Ready|00000000|00000000|00000000
+STATE|主层.Combat.Ready|speed|3FE00000
+STATE|主层.Combat.Ready|cycleOffset|3EC00000
+TRANSITION|STATE:主层.Combat.Ready:0|class|1101
+TRANSITION|STATE:主层.Combat.Ready:0|serializedVersion|3
+TRANSITION|STATE:主层.Combat.Ready:0|name|ReturnToDeep
+TRANSITION|STATE:主层.Combat.Ready:0|destinationState|
+TRANSITION|STATE:主层.Combat.Ready:0|destinationStateMachine|主层.Locomotion.Deep
+TRANSITION|STATE:主层.Combat.Ready:0|isExit|False
+CONDITION|STATE:主层.Combat.Ready:0|0|1|Trigger|00000000
+TRANSITION|STATE:主层.Combat.Ready:0|TransitionDuration|3E800000
+TRANSITION|STATE:主层.Combat.Ready:0|TransitionOffset|3E000000
+TRANSITION|STATE:主层.Combat.Ready:0|ExitTime|3F400000
+TRANSITION|STATE:主层.Combat.Ready:0|HasExitTime|False
+TRANSITION|STATE:主层.Combat.Ready:0|HasFixedDuration|True
+TRANSITION|STATE:主层.Combat.Ready:0|InterruptionSource|0
+TRANSITION|STATE:主层.Combat.Ready:0|OrderedInterruption|True
+TRANSITION|STATE:主层.Combat.Ready:0|CanTransitionToSelf|False
+TRANSITION|ENTRY:主层.Combat:0|class|1109
+TRANSITION|ENTRY:主层.Combat:0|serializedVersion|1
+TRANSITION|ENTRY:主层.Combat:0|name|
+TRANSITION|ENTRY:主层.Combat:0|destinationState|
+TRANSITION|ENTRY:主层.Combat:0|destinationStateMachine|主层.Locomotion.Deep
+TRANSITION|ENTRY:主层.Combat:0|isExit|False
+CONDITION|ENTRY:主层.Combat:0|0|1|Trigger|00000000
+CHILD_MACHINE|主层|主层.EMPTY_unIqLJH|00000000|42C80000|00000000
+MACHINE|主层.EMPTY_unIqLJH|name|EMPTY_unIqLJH
+MACHINE|主层.EMPTY_unIqLJH|parent|主层
+MACHINE|主层.EMPTY_unIqLJH|serializedVersion|6
+MACHINE|主层.EMPTY_unIqLJH|default|
+MACHINE|主层.EMPTY_unIqLJH|stateCount|0
+MACHINE|主层.EMPTY_unIqLJH|machineCount|0
+MACHINE|主层.EMPTY_unIqLJH|entryCount|0
+MACHINE|主层.EMPTY_unIqLJH|anyCount|0
+MACHINE|主层.EMPTY_unIqLJH|exitGroupCount|0
+CHILD_MACHINE|主层|主层.Extra StateMachine|437A0000|42C80000|00000000
+MACHINE|主层.Extra StateMachine|name|Extra StateMachine
+MACHINE|主层.Extra StateMachine|parent|主层
+MACHINE|主层.Extra StateMachine|serializedVersion|6
+MACHINE|主层.Extra StateMachine|default|主层.Extra StateMachine.New State
+MACHINE|主层.Extra StateMachine|stateCount|1
+MACHINE|主层.Extra StateMachine|machineCount|1
+MACHINE|主层.Extra StateMachine|entryCount|0
+MACHINE|主层.Extra StateMachine|anyCount|0
+MACHINE|主层.Extra StateMachine|exitGroupCount|1
+CHILD_STATE|主层.Extra StateMachine|主层.Extra StateMachine.New State|00000000|00000000|00000000
+STATE|主层.Extra StateMachine.New State|speed|3F800000
+STATE|主层.Extra StateMachine.New State|cycleOffset|00000000
+EXIT_GROUP|主层.Extra StateMachine|主层.Extra StateMachine.EMPTY_lKmnmJH|1
+TRANSITION|EXIT:主层.Extra StateMachine:主层.Extra StateMachine.EMPTY_lKmnmJH:0|class|1109
+TRANSITION|EXIT:主层.Extra StateMachine:主层.Extra StateMachine.EMPTY_lKmnmJH:0|serializedVersion|1
+TRANSITION|EXIT:主层.Extra StateMachine:主层.Extra StateMachine.EMPTY_lKmnmJH:0|name|
+TRANSITION|EXIT:主层.Extra StateMachine:主层.Extra StateMachine.EMPTY_lKmnmJH:0|destinationState|
+TRANSITION|EXIT:主层.Extra StateMachine:主层.Extra StateMachine.EMPTY_lKmnmJH:0|destinationStateMachine|主层
+TRANSITION|EXIT:主层.Extra StateMachine:主层.Extra StateMachine.EMPTY_lKmnmJH:0|isExit|False
+CHILD_MACHINE|主层.Extra StateMachine|主层.Extra StateMachine.EMPTY_lKmnmJH|437A0000|00000000|00000000
+MACHINE|主层.Extra StateMachine.EMPTY_lKmnmJH|name|EMPTY_lKmnmJH
+MACHINE|主层.Extra StateMachine.EMPTY_lKmnmJH|parent|主层.Extra StateMachine
+MACHINE|主层.Extra StateMachine.EMPTY_lKmnmJH|serializedVersion|6
+MACHINE|主层.Extra StateMachine.EMPTY_lKmnmJH|default|
+MACHINE|主层.Extra StateMachine.EMPTY_lKmnmJH|stateCount|0
+MACHINE|主层.Extra StateMachine.EMPTY_lKmnmJH|machineCount|0
+MACHINE|主层.Extra StateMachine.EMPTY_lKmnmJH|entryCount|0
+MACHINE|主层.Extra StateMachine.EMPTY_lKmnmJH|anyCount|0
+MACHINE|主层.Extra StateMachine.EMPTY_lKmnmJH|exitGroupCount|0
+SOURCE_OBJECT|1|1102|主层.Idle
+SOURCE_OBJECT|2|1102|主层.Locomotion.Deep.Walk
+SOURCE_OBJECT|3|1102|主层.Locomotion.Deep.Run
+SOURCE_OBJECT|4|1102|主层.Combat.Ready
+SOURCE_OBJECT|5|1107|主层
+SOURCE_OBJECT|6|1107|主层.Locomotion
+SOURCE_OBJECT|7|1107|主层.Locomotion.Deep
+SOURCE_OBJECT|8|1107|主层.Combat
+SOURCE_OBJECT|9|1107|主层.Locomotion.Deep.EMPTY_PohsvTN
+SOURCE_OBJECT|10|1107|主层.Locomotion.Deep.EMPTY_PohsvTN.EMPTY_JmQjSmL
+SOURCE_OBJECT|11|1107|主层.Locomotion.Deep.EMPTY_TrtVIKH
+SOURCE_OBJECT|12|1107|主层.Locomotion.Deep.EMPTY_sWURIMH
+SOURCE_OBJECT|13|1107|主层.Locomotion.EMPTY_vwivlSN
+SOURCE_OBJECT|14|1107|主层.EMPTY_unIqLJH
+SOURCE_OBJECT|15|1107|主层.Extra StateMachine.EMPTY_lKmnmJH
+SOURCE_OBJECT|16|1101|STATE:主层.Idle:0
+SOURCE_OBJECT|17|1101|STATE:主层.Idle:1
+SOURCE_OBJECT|18|1101|STATE:主层.Locomotion.Deep.Walk:0
+SOURCE_OBJECT|19|1101|STATE:主层.Locomotion.Deep.Run:0
+SOURCE_OBJECT|20|1101|STATE:主层.Locomotion.Deep.Run:1
+SOURCE_OBJECT|21|1101|STATE:主层.Locomotion.Deep.Run:2
+SOURCE_OBJECT|22|1101|STATE:主层.Locomotion.Deep.Run:3
+SOURCE_OBJECT|23|1101|STATE:主层.Combat.Ready:0
+SOURCE_OBJECT|24|1101|ANY:主层:0
+SOURCE_OBJECT|25|1101|ANY:主层:1
+SOURCE_OBJECT|26|1107|主层.Extra StateMachine
+SOURCE_OBJECT|27|1102|主层.Extra StateMachine.New State
+SOURCE_OBJECT|28|1109|ENTRY:主层:0
+SOURCE_OBJECT|29|1109|ENTRY:主层.Locomotion:0
+SOURCE_OBJECT|30|1109|ENTRY:主层.Locomotion.Deep:0
+SOURCE_OBJECT|31|1109|ENTRY:主层.Combat:0
+SOURCE_OBJECT|32|1109|ENTRY:主层.Locomotion.Deep.EMPTY_PohsvTN:0
+SOURCE_OBJECT|33|1109|EXIT:主层.Locomotion:主层.Locomotion.Deep:0
+SOURCE_OBJECT|34|1109|EXIT:主层.Locomotion:主层.Locomotion.Deep:1
+SOURCE_OBJECT|35|1109|EXIT:主层:主层.Combat:0
+SOURCE_OBJECT|36|1109|EXIT:主层:主层.Combat:1
+SOURCE_OBJECT|37|1109|EXIT:主层.Locomotion.Deep.EMPTY_PohsvTN:主层.Locomotion.Deep.EMPTY_PohsvTN.EMPTY_JmQjSmL:0
+SOURCE_OBJECT|38|1109|EXIT:主层.Locomotion.Deep:主层.Locomotion.Deep.EMPTY_TrtVIKH:0
+SOURCE_OBJECT|39|1109|EXIT:主层.Locomotion:主层.Locomotion.EMPTY_vwivlSN:0
+SOURCE_OBJECT|40|1109|EXIT:主层.Extra StateMachine:主层.Extra StateMachine.EMPTY_lKmnmJH:0
+SOURCE_OBJECT|10000|91|controller
+SOURCE_YAML_BEGIN
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!1102 &1
+AnimatorState:
+  serializedVersion: 6
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: Idle
+  m_Speed: 1
+  m_CycleOffset: 0
+  m_Transitions:
+  - {m_FileID: 0, m_PathID: 16, m_TargetClassID: 1101}
+  - {m_FileID: 0, m_PathID: 17, m_TargetClassID: 1101}
+  m_StateMachineBehaviours: []
+  m_Position: {x: 0, y: 0, z: 0}
+  m_IKOnFeet: 0
+  m_WriteDefaultValues: 1
+  m_Mirror: 0
+  m_SpeedParameterActive: 0
+  m_MirrorParameterActive: 0
+  m_CycleOffsetParameterActive: 0
+  m_TimeParameterActive: 0
+  m_Motion: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 207}
+  m_Tag:
+  m_SpeedParameter:
+  m_MirrorParameter:
+  m_CycleOffsetParameter:
+  m_TimeParameter:
+--- !u!1102 &2
+AnimatorState:
+  serializedVersion: 6
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: Walk
+  m_Speed: 1.25
+  m_CycleOffset: 0.125
+  m_Transitions:
+  - {m_FileID: 0, m_PathID: 18, m_TargetClassID: 1101}
+  m_StateMachineBehaviours: []
+  m_Position: {x: 0, y: 0, z: 0}
+  m_IKOnFeet: 0
+  m_WriteDefaultValues: 1
+  m_Mirror: 0
+  m_SpeedParameterActive: 0
+  m_MirrorParameterActive: 0
+  m_CycleOffsetParameterActive: 0
+  m_TimeParameterActive: 0
+  m_Motion: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 207}
+  m_Tag:
+  m_SpeedParameter:
+  m_MirrorParameter:
+  m_CycleOffsetParameter:
+  m_TimeParameter:
+--- !u!1102 &3
+AnimatorState:
+  serializedVersion: 6
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: Run
+  m_Speed: 1.5
+  m_CycleOffset: 0.25
+  m_Transitions:
+  - {m_FileID: 0, m_PathID: 19, m_TargetClassID: 1101}
+  - {m_FileID: 0, m_PathID: 20, m_TargetClassID: 1101}
+  - {m_FileID: 0, m_PathID: 21, m_TargetClassID: 1101}
+  - {m_FileID: 0, m_PathID: 22, m_TargetClassID: 1101}
+  m_StateMachineBehaviours: []
+  m_Position: {x: 250, y: 0, z: 0}
+  m_IKOnFeet: 0
+  m_WriteDefaultValues: 1
+  m_Mirror: 0
+  m_SpeedParameterActive: 0
+  m_MirrorParameterActive: 0
+  m_CycleOffsetParameterActive: 0
+  m_TimeParameterActive: 0
+  m_Motion: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 207}
+  m_Tag:
+  m_SpeedParameter:
+  m_MirrorParameter:
+  m_CycleOffsetParameter:
+  m_TimeParameter:
+--- !u!1102 &4
+AnimatorState:
+  serializedVersion: 6
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: Ready
+  m_Speed: 1.75
+  m_CycleOffset: 0.375
+  m_Transitions:
+  - {m_FileID: 0, m_PathID: 23, m_TargetClassID: 1101}
+  m_StateMachineBehaviours: []
+  m_Position: {x: 0, y: 0, z: 0}
+  m_IKOnFeet: 0
+  m_WriteDefaultValues: 1
+  m_Mirror: 0
+  m_SpeedParameterActive: 0
+  m_MirrorParameterActive: 0
+  m_CycleOffsetParameterActive: 0
+  m_TimeParameterActive: 0
+  m_Motion: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 207}
+  m_Tag:
+  m_SpeedParameter:
+  m_MirrorParameter:
+  m_CycleOffsetParameter:
+  m_TimeParameter:
+--- !u!1107 &5
+AnimatorStateMachine:
+  serializedVersion: 6
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: 主层
+  m_ChildStates:
+  - m_State: {m_FileID: 0, m_PathID: 1, m_TargetClassID: 1102}
+    m_Position: {x: 0, y: 0, z: 0}
+  m_ChildStateMachines:
+  - m_StateMachine: {m_FileID: 0, m_PathID: 6, m_TargetClassID: 1107}
+    m_Position: {x: 250, y: 0, z: 0}
+  - m_StateMachine: {m_FileID: 0, m_PathID: 8, m_TargetClassID: 1107}
+    m_Position: {x: 500, y: 0, z: 0}
+  - m_StateMachine: {m_FileID: 0, m_PathID: 14, m_TargetClassID: 1107}
+    m_Position: {x: 0, y: 100, z: 0}
+  - m_StateMachine: {m_FileID: 0, m_PathID: 26, m_TargetClassID: 1107}
+    m_Position: {x: 250, y: 100, z: 0}
+  m_AnyStateTransitions:
+  - {m_FileID: 0, m_PathID: 24, m_TargetClassID: 1101}
+  - {m_FileID: 0, m_PathID: 25, m_TargetClassID: 1101}
+  m_EntryTransitions:
+  - {m_FileID: 0, m_PathID: 28, m_TargetClassID: 1109}
+  m_StateMachineTransitions:
+  - first: {m_FileID: 0, m_PathID: 8, m_TargetClassID: 1107}
+    second:
+    - {m_FileID: 0, m_PathID: 35, m_TargetClassID: 1109}
+    - {m_FileID: 0, m_PathID: 36, m_TargetClassID: 1109}
+  m_StateMachineBehaviours: []
+  m_AnyStatePosition: {x: 0, y: -100, z: 0}
+  m_EntryPosition: {x: 250, y: -100, z: 0}
+  m_ExitPosition: {x: 500, y: -100, z: 0}
+  m_ParentStateMachinePosition: {x: 0, y: -200, z: 0}
+  m_DefaultState: {m_FileID: 0, m_PathID: 1, m_TargetClassID: 1102}
+--- !u!1107 &6
+AnimatorStateMachine:
+  serializedVersion: 6
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: Locomotion
+  m_ChildStates: []
+  m_ChildStateMachines:
+  - m_StateMachine: {m_FileID: 0, m_PathID: 7, m_TargetClassID: 1107}
+    m_Position: {x: 0, y: 0, z: 0}
+  - m_StateMachine: {m_FileID: 0, m_PathID: 13, m_TargetClassID: 1107}
+    m_Position: {x: 250, y: 0, z: 0}
+  m_AnyStateTransitions: []
+  m_EntryTransitions:
+  - {m_FileID: 0, m_PathID: 29, m_TargetClassID: 1109}
+  m_StateMachineTransitions:
+  - first: {m_FileID: 0, m_PathID: 7, m_TargetClassID: 1107}
+    second:
+    - {m_FileID: 0, m_PathID: 33, m_TargetClassID: 1109}
+    - {m_FileID: 0, m_PathID: 34, m_TargetClassID: 1109}
+  - first: {m_FileID: 0, m_PathID: 13, m_TargetClassID: 1107}
+    second:
+    - {m_FileID: 0, m_PathID: 39, m_TargetClassID: 1109}
+  m_StateMachineBehaviours: []
+  m_AnyStatePosition: {x: 0, y: -100, z: 0}
+  m_EntryPosition: {x: 250, y: -100, z: 0}
+  m_ExitPosition: {x: 500, y: -100, z: 0}
+  m_ParentStateMachinePosition: {x: 0, y: -200, z: 0}
+  m_DefaultState: {m_FileID: 0, m_PathID: 2, m_TargetClassID: 1102}
+--- !u!1107 &7
+AnimatorStateMachine:
+  serializedVersion: 6
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: Deep
+  m_ChildStates:
+  - m_State: {m_FileID: 0, m_PathID: 2, m_TargetClassID: 1102}
+    m_Position: {x: 0, y: 0, z: 0}
+  - m_State: {m_FileID: 0, m_PathID: 3, m_TargetClassID: 1102}
+    m_Position: {x: 250, y: 0, z: 0}
+  m_ChildStateMachines:
+  - m_StateMachine: {m_FileID: 0, m_PathID: 9, m_TargetClassID: 1107}
+    m_Position: {x: 500, y: 0, z: 0}
+  - m_StateMachine: {m_FileID: 0, m_PathID: 11, m_TargetClassID: 1107}
+    m_Position: {x: 0, y: 100, z: 0}
+  - m_StateMachine: {m_FileID: 0, m_PathID: 12, m_TargetClassID: 1107}
+    m_Position: {x: 250, y: 100, z: 0}
+  m_AnyStateTransitions: []
+  m_EntryTransitions:
+  - {m_FileID: 0, m_PathID: 30, m_TargetClassID: 1109}
+  m_StateMachineTransitions:
+  - first: {m_FileID: 0, m_PathID: 11, m_TargetClassID: 1107}
+    second:
+    - {m_FileID: 0, m_PathID: 38, m_TargetClassID: 1109}
+  m_StateMachineBehaviours: []
+  m_AnyStatePosition: {x: 0, y: -100, z: 0}
+  m_EntryPosition: {x: 250, y: -100, z: 0}
+  m_ExitPosition: {x: 500, y: -100, z: 0}
+  m_ParentStateMachinePosition: {x: 0, y: -200, z: 0}
+  m_DefaultState: {m_FileID: 0, m_PathID: 2, m_TargetClassID: 1102}
+--- !u!1107 &8
+AnimatorStateMachine:
+  serializedVersion: 6
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: Combat
+  m_ChildStates:
+  - m_State: {m_FileID: 0, m_PathID: 4, m_TargetClassID: 1102}
+    m_Position: {x: 0, y: 0, z: 0}
+  m_ChildStateMachines: []
+  m_AnyStateTransitions: []
+  m_EntryTransitions:
+  - {m_FileID: 0, m_PathID: 31, m_TargetClassID: 1109}
+  m_StateMachineTransitions: {}
+  m_StateMachineBehaviours: []
+  m_AnyStatePosition: {x: 0, y: -100, z: 0}
+  m_EntryPosition: {x: 250, y: -100, z: 0}
+  m_ExitPosition: {x: 500, y: -100, z: 0}
+  m_ParentStateMachinePosition: {x: 0, y: -200, z: 0}
+  m_DefaultState: {m_FileID: 0, m_PathID: 4, m_TargetClassID: 1102}
+--- !u!1107 &9
+AnimatorStateMachine:
+  serializedVersion: 6
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: EMPTY_PohsvTN
+  m_ChildStates: []
+  m_ChildStateMachines:
+  - m_StateMachine: {m_FileID: 0, m_PathID: 10, m_TargetClassID: 1107}
+    m_Position: {x: 0, y: 0, z: 0}
+  m_AnyStateTransitions: []
+  m_EntryTransitions:
+  - {m_FileID: 0, m_PathID: 32, m_TargetClassID: 1109}
+  m_StateMachineTransitions:
+  - first: {m_FileID: 0, m_PathID: 10, m_TargetClassID: 1107}
+    second:
+    - {m_FileID: 0, m_PathID: 37, m_TargetClassID: 1109}
+  m_StateMachineBehaviours: []
+  m_AnyStatePosition: {x: 0, y: -100, z: 0}
+  m_EntryPosition: {x: 250, y: -100, z: 0}
+  m_ExitPosition: {x: 500, y: -100, z: 0}
+  m_ParentStateMachinePosition: {x: 0, y: -200, z: 0}
+  m_DefaultState: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1102}
+--- !u!1107 &10
+AnimatorStateMachine:
+  serializedVersion: 6
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: EMPTY_JmQjSmL
+  m_ChildStates: []
+  m_ChildStateMachines: []
+  m_AnyStateTransitions: []
+  m_EntryTransitions: []
+  m_StateMachineTransitions: {}
+  m_StateMachineBehaviours: []
+  m_AnyStatePosition: {x: 0, y: -100, z: 0}
+  m_EntryPosition: {x: 250, y: -100, z: 0}
+  m_ExitPosition: {x: 500, y: -100, z: 0}
+  m_ParentStateMachinePosition: {x: 0, y: -200, z: 0}
+  m_DefaultState: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1102}
+--- !u!1107 &11
+AnimatorStateMachine:
+  serializedVersion: 6
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: EMPTY_TrtVIKH
+  m_ChildStates: []
+  m_ChildStateMachines: []
+  m_AnyStateTransitions: []
+  m_EntryTransitions: []
+  m_StateMachineTransitions: {}
+  m_StateMachineBehaviours: []
+  m_AnyStatePosition: {x: 0, y: -100, z: 0}
+  m_EntryPosition: {x: 250, y: -100, z: 0}
+  m_ExitPosition: {x: 500, y: -100, z: 0}
+  m_ParentStateMachinePosition: {x: 0, y: -200, z: 0}
+  m_DefaultState: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1102}
+--- !u!1107 &12
+AnimatorStateMachine:
+  serializedVersion: 6
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: EMPTY_sWURIMH
+  m_ChildStates: []
+  m_ChildStateMachines: []
+  m_AnyStateTransitions: []
+  m_EntryTransitions: []
+  m_StateMachineTransitions: {}
+  m_StateMachineBehaviours: []
+  m_AnyStatePosition: {x: 0, y: -100, z: 0}
+  m_EntryPosition: {x: 250, y: -100, z: 0}
+  m_ExitPosition: {x: 500, y: -100, z: 0}
+  m_ParentStateMachinePosition: {x: 0, y: -200, z: 0}
+  m_DefaultState: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1102}
+--- !u!1107 &13
+AnimatorStateMachine:
+  serializedVersion: 6
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: EMPTY_vwivlSN
+  m_ChildStates: []
+  m_ChildStateMachines: []
+  m_AnyStateTransitions: []
+  m_EntryTransitions: []
+  m_StateMachineTransitions: {}
+  m_StateMachineBehaviours: []
+  m_AnyStatePosition: {x: 0, y: -100, z: 0}
+  m_EntryPosition: {x: 250, y: -100, z: 0}
+  m_ExitPosition: {x: 500, y: -100, z: 0}
+  m_ParentStateMachinePosition: {x: 0, y: -200, z: 0}
+  m_DefaultState: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1102}
+--- !u!1107 &14
+AnimatorStateMachine:
+  serializedVersion: 6
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: EMPTY_unIqLJH
+  m_ChildStates: []
+  m_ChildStateMachines: []
+  m_AnyStateTransitions: []
+  m_EntryTransitions: []
+  m_StateMachineTransitions: {}
+  m_StateMachineBehaviours: []
+  m_AnyStatePosition: {x: 0, y: -100, z: 0}
+  m_EntryPosition: {x: 250, y: -100, z: 0}
+  m_ExitPosition: {x: 500, y: -100, z: 0}
+  m_ParentStateMachinePosition: {x: 0, y: -200, z: 0}
+  m_DefaultState: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1102}
+--- !u!1107 &15
+AnimatorStateMachine:
+  serializedVersion: 6
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: EMPTY_lKmnmJH
+  m_ChildStates: []
+  m_ChildStateMachines: []
+  m_AnyStateTransitions: []
+  m_EntryTransitions: []
+  m_StateMachineTransitions: {}
+  m_StateMachineBehaviours: []
+  m_AnyStatePosition: {x: 0, y: -100, z: 0}
+  m_EntryPosition: {x: 250, y: -100, z: 0}
+  m_ExitPosition: {x: 500, y: -100, z: 0}
+  m_ParentStateMachinePosition: {x: 0, y: -200, z: 0}
+  m_DefaultState: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1102}
+--- !u!1101 &16
+AnimatorStateTransition:
+  serializedVersion: 3
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: EnterLocomotion
+  m_Conditions:
+  - m_ConditionMode: 1
+    m_ConditionEvent: Moving
+    m_EventTreshold: 0
+  m_DstStateMachine: {m_FileID: 0, m_PathID: 6, m_TargetClassID: 1107}
+  m_DstState: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1102}
+  m_Solo: 0
+  m_Mute: 0
+  m_IsExit: 0
+  m_TransitionDuration: 0.25
+  m_TransitionOffset: 0.125
+  m_ExitTime: 0.75
+  m_HasExitTime: 0
+  m_HasFixedDuration: 1
+  m_InterruptionSource: 0
+  m_OrderedInterruption: 1
+  m_CanTransitionToSelf: 0
+--- !u!1101 &17
+AnimatorStateTransition:
+  serializedVersion: 3
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: OfferRootParent
+  m_Conditions:
+  - m_ConditionMode: 1
+    m_ConditionEvent: Moving
+    m_EventTreshold: 0
+  m_DstStateMachine: {m_FileID: 0, m_PathID: 9, m_TargetClassID: 1107}
+  m_DstState: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1102}
+  m_Solo: 0
+  m_Mute: 0
+  m_IsExit: 0
+  m_TransitionDuration: 0.25
+  m_TransitionOffset: 0.125
+  m_ExitTime: 0.75
+  m_HasExitTime: 0
+  m_HasFixedDuration: 1
+  m_InterruptionSource: 0
+  m_OrderedInterruption: 1
+  m_CanTransitionToSelf: 0
+--- !u!1101 &18
+AnimatorStateTransition:
+  serializedVersion: 3
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: WalkToRun
+  m_Conditions:
+  - m_ConditionMode: 3
+    m_ConditionEvent: Speed
+    m_EventTreshold: 0.75
+  m_DstStateMachine: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1107}
+  m_DstState: {m_FileID: 0, m_PathID: 3, m_TargetClassID: 1102}
+  m_Solo: 0
+  m_Mute: 0
+  m_IsExit: 0
+  m_TransitionDuration: 0.25
+  m_TransitionOffset: 0.125
+  m_ExitTime: 0.75
+  m_HasExitTime: 0
+  m_HasFixedDuration: 1
+  m_InterruptionSource: 0
+  m_OrderedInterruption: 1
+  m_CanTransitionToSelf: 0
+--- !u!1101 &19
+AnimatorStateTransition:
+  serializedVersion: 3
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: EnterCombat
+  m_Conditions:
+  - m_ConditionMode: 6
+    m_ConditionEvent: Mode
+    m_EventTreshold: 2
+  m_DstStateMachine: {m_FileID: 0, m_PathID: 8, m_TargetClassID: 1107}
+  m_DstState: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1102}
+  m_Solo: 0
+  m_Mute: 0
+  m_IsExit: 0
+  m_TransitionDuration: 0.25
+  m_TransitionOffset: 0.125
+  m_ExitTime: 0.75
+  m_HasExitTime: 1
+  m_HasFixedDuration: 1
+  m_InterruptionSource: 0
+  m_OrderedInterruption: 1
+  m_CanTransitionToSelf: 0
+--- !u!1101 &20
+AnimatorStateTransition:
+  serializedVersion: 3
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: ExitDeep
+  m_Conditions:
+  - m_ConditionMode: 2
+    m_ConditionEvent: Moving
+    m_EventTreshold: 0
+  m_DstStateMachine: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1107}
+  m_DstState: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1102}
+  m_Solo: 0
+  m_Mute: 0
+  m_IsExit: 1
+  m_TransitionDuration: 0.25
+  m_TransitionOffset: 0.125
+  m_ExitTime: 0.75
+  m_HasExitTime: 1
+  m_HasFixedDuration: 1
+  m_InterruptionSource: 0
+  m_OrderedInterruption: 1
+  m_CanTransitionToSelf: 0
+--- !u!1101 &21
+AnimatorStateTransition:
+  serializedVersion: 3
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: OfferDeeperParentThroughChild
+  m_Conditions:
+  - m_ConditionMode: 1
+    m_ConditionEvent: Trigger
+    m_EventTreshold: 0
+  m_DstStateMachine: {m_FileID: 0, m_PathID: 10, m_TargetClassID: 1107}
+  m_DstState: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1102}
+  m_Solo: 0
+  m_Mute: 0
+  m_IsExit: 0
+  m_TransitionDuration: 0.25
+  m_TransitionOffset: 0.125
+  m_ExitTime: 0.75
+  m_HasExitTime: 1
+  m_HasFixedDuration: 1
+  m_InterruptionSource: 0
+  m_OrderedInterruption: 1
+  m_CanTransitionToSelf: 0
+--- !u!1101 &22
+AnimatorStateTransition:
+  serializedVersion: 3
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: OfferExcludedParent
+  m_Conditions:
+  - m_ConditionMode: 1
+    m_ConditionEvent: Moving
+    m_EventTreshold: 0
+  m_DstStateMachine: {m_FileID: 0, m_PathID: 13, m_TargetClassID: 1107}
+  m_DstState: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1102}
+  m_Solo: 0
+  m_Mute: 0
+  m_IsExit: 0
+  m_TransitionDuration: 0.25
+  m_TransitionOffset: 0.125
+  m_ExitTime: 0.75
+  m_HasExitTime: 1
+  m_HasFixedDuration: 1
+  m_InterruptionSource: 0
+  m_OrderedInterruption: 1
+  m_CanTransitionToSelf: 0
+--- !u!1101 &23
+AnimatorStateTransition:
+  serializedVersion: 3
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: ReturnToDeep
+  m_Conditions:
+  - m_ConditionMode: 1
+    m_ConditionEvent: Trigger
+    m_EventTreshold: 0
+  m_DstStateMachine: {m_FileID: 0, m_PathID: 7, m_TargetClassID: 1107}
+  m_DstState: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1102}
+  m_Solo: 0
+  m_Mute: 0
+  m_IsExit: 0
+  m_TransitionDuration: 0.25
+  m_TransitionOffset: 0.125
+  m_ExitTime: 0.75
+  m_HasExitTime: 0
+  m_HasFixedDuration: 1
+  m_InterruptionSource: 0
+  m_OrderedInterruption: 1
+  m_CanTransitionToSelf: 0
+--- !u!1101 &24
+AnimatorStateTransition:
+  serializedVersion: 3
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: AnyToRun
+  m_Conditions:
+  - m_ConditionMode: 1
+    m_ConditionEvent: Trigger
+    m_EventTreshold: 0
+  m_DstStateMachine: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1107}
+  m_DstState: {m_FileID: 0, m_PathID: 3, m_TargetClassID: 1102}
+  m_Solo: 0
+  m_Mute: 0
+  m_IsExit: 0
+  m_TransitionDuration: 0.5
+  m_TransitionOffset: 0
+  m_ExitTime: 0
+  m_HasExitTime: 0
+  m_HasFixedDuration: 0
+  m_InterruptionSource: 0
+  m_OrderedInterruption: 0
+  m_CanTransitionToSelf: 1
+--- !u!1101 &25
+AnimatorStateTransition:
+  serializedVersion: 3
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: AnyToCombat
+  m_Conditions:
+  - m_ConditionMode: 1
+    m_ConditionEvent: Trigger
+    m_EventTreshold: 0
+  m_DstStateMachine: {m_FileID: 0, m_PathID: 8, m_TargetClassID: 1107}
+  m_DstState: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1102}
+  m_Solo: 0
+  m_Mute: 0
+  m_IsExit: 0
+  m_TransitionDuration: 0.5
+  m_TransitionOffset: 0
+  m_ExitTime: 0
+  m_HasExitTime: 0
+  m_HasFixedDuration: 0
+  m_InterruptionSource: 0
+  m_OrderedInterruption: 0
+  m_CanTransitionToSelf: 1
+--- !u!1107 &26
+AnimatorStateMachine:
+  serializedVersion: 6
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: Extra StateMachine
+  m_ChildStates:
+  - m_State: {m_FileID: 0, m_PathID: 27, m_TargetClassID: 1102}
+    m_Position: {x: 0, y: 0, z: 0}
+  m_ChildStateMachines:
+  - m_StateMachine: {m_FileID: 0, m_PathID: 15, m_TargetClassID: 1107}
+    m_Position: {x: 250, y: 0, z: 0}
+  m_AnyStateTransitions: []
+  m_EntryTransitions: []
+  m_StateMachineTransitions:
+  - first: {m_FileID: 0, m_PathID: 15, m_TargetClassID: 1107}
+    second:
+    - {m_FileID: 0, m_PathID: 40, m_TargetClassID: 1109}
+  m_StateMachineBehaviours: []
+  m_AnyStatePosition: {x: 0, y: -100, z: 0}
+  m_EntryPosition: {x: 250, y: -100, z: 0}
+  m_ExitPosition: {x: 500, y: -100, z: 0}
+  m_ParentStateMachinePosition: {x: 0, y: -200, z: 0}
+  m_DefaultState: {m_FileID: 0, m_PathID: 27, m_TargetClassID: 1102}
+--- !u!1102 &27
+AnimatorState:
+  serializedVersion: 6
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: New State
+  m_Speed: 1
+  m_CycleOffset: 0
+  m_Transitions: []
+  m_StateMachineBehaviours: []
+  m_Position: {x: 0, y: 0, z: 0}
+  m_IKOnFeet: 0
+  m_WriteDefaultValues: 1
+  m_Mirror: 0
+  m_SpeedParameterActive: 0
+  m_MirrorParameterActive: 0
+  m_CycleOffsetParameterActive: 0
+  m_TimeParameterActive: 0
+  m_Motion: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 207}
+  m_Tag:
+  m_SpeedParameter:
+  m_MirrorParameter:
+  m_CycleOffsetParameter:
+  m_TimeParameter:
+--- !u!1109 &28
+AnimatorTransition:
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name:
+  m_Conditions:
+  - m_ConditionMode: 1
+    m_ConditionEvent: Moving
+    m_EventTreshold: 0
+  m_DstStateMachine: {m_FileID: 0, m_PathID: 6, m_TargetClassID: 1107}
+  m_DstState: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1102}
+  m_Solo: 0
+  m_Mute: 0
+  m_IsExit: 0
+--- !u!1109 &29
+AnimatorTransition:
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name:
+  m_Conditions:
+  - m_ConditionMode: 6
+    m_ConditionEvent: Mode
+    m_EventTreshold: 2
+  m_DstStateMachine: {m_FileID: 0, m_PathID: 7, m_TargetClassID: 1107}
+  m_DstState: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1102}
+  m_Solo: 0
+  m_Mute: 0
+  m_IsExit: 0
+--- !u!1109 &30
+AnimatorTransition:
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name:
+  m_Conditions:
+  - m_ConditionMode: 3
+    m_ConditionEvent: Speed
+    m_EventTreshold: 0.75
+  m_DstStateMachine: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1107}
+  m_DstState: {m_FileID: 0, m_PathID: 3, m_TargetClassID: 1102}
+  m_Solo: 0
+  m_Mute: 0
+  m_IsExit: 0
+--- !u!1109 &31
+AnimatorTransition:
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name:
+  m_Conditions:
+  - m_ConditionMode: 1
+    m_ConditionEvent: Trigger
+    m_EventTreshold: 0
+  m_DstStateMachine: {m_FileID: 0, m_PathID: 7, m_TargetClassID: 1107}
+  m_DstState: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1102}
+  m_Solo: 0
+  m_Mute: 0
+  m_IsExit: 0
+--- !u!1109 &32
+AnimatorTransition:
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name:
+  m_Conditions:
+  - m_ConditionMode: 1
+    m_ConditionEvent: Moving
+    m_EventTreshold: 0
+  m_DstStateMachine: {m_FileID: 0, m_PathID: 12, m_TargetClassID: 1107}
+  m_DstState: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1102}
+  m_Solo: 0
+  m_Mute: 0
+  m_IsExit: 0
+--- !u!1109 &33
+AnimatorTransition:
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name:
+  m_Conditions:
+  - m_ConditionMode: 3
+    m_ConditionEvent: Speed
+    m_EventTreshold: 0.75
+  m_DstStateMachine: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1107}
+  m_DstState: {m_FileID: 0, m_PathID: 4, m_TargetClassID: 1102}
+  m_Solo: 0
+  m_Mute: 0
+  m_IsExit: 0
+--- !u!1109 &34
+AnimatorTransition:
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name:
+  m_Conditions: []
+  m_DstStateMachine: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1107}
+  m_DstState: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1102}
+  m_Solo: 0
+  m_Mute: 0
+  m_IsExit: 1
+--- !u!1109 &35
+AnimatorTransition:
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name:
+  m_Conditions:
+  - m_ConditionMode: 1
+    m_ConditionEvent: Moving
+    m_EventTreshold: 0
+  m_DstStateMachine: {m_FileID: 0, m_PathID: 6, m_TargetClassID: 1107}
+  m_DstState: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1102}
+  m_Solo: 0
+  m_Mute: 0
+  m_IsExit: 0
+--- !u!1109 &36
+AnimatorTransition:
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name:
+  m_Conditions: []
+  m_DstStateMachine: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1107}
+  m_DstState: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1102}
+  m_Solo: 0
+  m_Mute: 0
+  m_IsExit: 1
+--- !u!1109 &37
+AnimatorTransition:
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name:
+  m_Conditions: []
+  m_DstStateMachine: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1107}
+  m_DstState: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1102}
+  m_Solo: 0
+  m_Mute: 0
+  m_IsExit: 1
+--- !u!1109 &38
+AnimatorTransition:
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name:
+  m_Conditions: []
+  m_DstStateMachine: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1107}
+  m_DstState: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1102}
+  m_Solo: 0
+  m_Mute: 0
+  m_IsExit: 1
+--- !u!1109 &39
+AnimatorTransition:
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name:
+  m_Conditions: []
+  m_DstStateMachine: {m_FileID: 0, m_PathID: 7, m_TargetClassID: 1107}
+  m_DstState: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1102}
+  m_Solo: 0
+  m_Mute: 0
+  m_IsExit: 0
+--- !u!1109 &40
+AnimatorTransition:
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name:
+  m_Conditions: []
+  m_DstStateMachine: {m_FileID: 0, m_PathID: 5, m_TargetClassID: 1107}
+  m_DstState: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1102}
+  m_Solo: 0
+  m_Mute: 0
+  m_IsExit: 0
+--- !u!91 &10000
+AnimatorController:
+  serializedVersion: 5
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: Nested State Machine Source
+  m_AnimatorParameters:
+  - m_Name: Speed
+    m_Type: 1
+    m_DefaultFloat: 0.25
+    m_DefaultInt: 0
+    m_DefaultBool: 0
+    m_Controller: {m_FileID: 0, m_PathID: 10000, m_TargetClassID: 91}
+  - m_Name: Moving
+    m_Type: 4
+    m_DefaultFloat: 0
+    m_DefaultInt: 0
+    m_DefaultBool: 1
+    m_Controller: {m_FileID: 0, m_PathID: 10000, m_TargetClassID: 91}
+  - m_Name: Mode
+    m_Type: 3
+    m_DefaultFloat: 0
+    m_DefaultInt: 2
+    m_DefaultBool: 0
+    m_Controller: {m_FileID: 0, m_PathID: 10000, m_TargetClassID: 91}
+  - m_Name: Trigger
+    m_Type: 9
+    m_DefaultFloat: 0
+    m_DefaultInt: 0
+    m_DefaultBool: 0
+    m_Controller: {m_FileID: 0, m_PathID: 10000, m_TargetClassID: 91}
+  m_AnimatorLayers:
+  - serializedVersion: 5
+    m_Name: 主层
+    m_StateMachine: {m_FileID: 0, m_PathID: 5, m_TargetClassID: 1107}
+    m_Mask: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 319}
+    m_Motions: []
+    m_Behaviours: []
+    m_BlendingMode: 0
+    m_SyncedLayerIndex: -1
+    m_DefaultWeight: 1
+    m_IKPass: 1
+    m_SyncedLayerAffectsTiming: 0
+    m_Controller: {m_FileID: 0, m_PathID: 10000, m_TargetClassID: 91}
+SOURCE_YAML_END

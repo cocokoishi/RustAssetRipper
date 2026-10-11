@@ -7,11 +7,11 @@ mod walkers;
 pub use self::multi_file::{
     MultiFileObjectIdentity, MultiFileObjectReference, MultiFilePPtrResolution,
     MultiFileReferenceGraph, MultiFileReferenceGraphBuildError, MultiFileReferenceGraphLimits,
-    NamedObjectReferenceGraph,
+    NamedObjectReferenceGraph, PredefinedEngineResourceKind,
 };
 pub(crate) use self::per_file::{
-    decode_object_payload_with_generated_fallback_from_data, DecodedReferenceObject,
-    StreamObjectDecodeContext,
+    decode_object_payload_with_generated_fallback_from_data, factory_object_outcome_error,
+    DecodedReferenceObject, StreamObjectDecodeContext,
 };
 pub use self::per_file::{
     ObjectReferenceGraph, ReferenceGraphIssue, ReferenceGraphLimits, SerializedManagedObject,

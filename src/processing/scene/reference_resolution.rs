@@ -159,6 +159,17 @@ pub(super) fn scene_target_from_multi_file_resolution(
             file_index: *target_file_index,
             object_index: *target_object_index,
         },
+        MultiFilePPtrResolution::PredefinedEngineAsset {
+            external_index,
+            resource,
+            path_id,
+            class_id,
+        } => SceneRelationshipTarget::PredefinedEngineAsset {
+            external_index: *external_index,
+            resource: *resource,
+            path_id: *path_id,
+            class_id: *class_id,
+        },
         MultiFilePPtrResolution::MissingLocalObject { path_id } => {
             SceneRelationshipTarget::MissingLocalObject { path_id: *path_id }
         }

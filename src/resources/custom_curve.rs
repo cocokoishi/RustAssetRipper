@@ -535,6 +535,13 @@ pub fn is_unknown_path(path: &str) -> bool {
 /// routine without allocating a concatenated buffer. All resolver call sites
 /// pass ASCII prefixes, so callers must too.
 pub fn reverse_ascii_crc32(prefix: &str, attribute: u32) -> String {
+    reverse_utf8_crc32(prefix, attribute)
+}
+
+/// Reverses a CRC using the same seven ASCII suffix characters as the source
+/// `ReverseUTF8`. The prefix is hashed as UTF-8; the ASCII resolver above only
+/// supplies ASCII prefixes, for which the two source algorithms coincide.
+pub(crate) fn reverse_utf8_crc32(prefix: &str, attribute: u32) -> String {
     /// `(bit, constant)` of each of the 31 state-mixing rounds, in order; the
     /// 32nd mask (bit 31) is recorded without a further mix.
     const ROUNDS: [(u32, i32); 31] = [

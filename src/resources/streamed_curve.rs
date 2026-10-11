@@ -741,6 +741,16 @@ mod tests {
 
     #[test]
     fn frame_alignment_uses_the_absolute_buffer_offset() {
+        let before_alignment_gate = UnityVersion {
+            major: 2017,
+            minor: 0,
+            patch: 0,
+        };
+        let alignment_gate = UnityVersion {
+            major: 2017,
+            minor: 1,
+            patch: 0,
+        };
         let aligned = UnityVersion {
             major: 2019,
             minor: 4,
@@ -761,6 +771,12 @@ mod tests {
         assert_eq!(frame.time, 2.5);
         assert!(frame.curves.is_empty());
         assert_eq!(next, 12);
+        let (_, before_gate_next) =
+            StreamedFrame::read(&buffer, EndianType::Little, before_alignment_gate, 2).unwrap();
+        assert_eq!(before_gate_next, 10);
+        let (_, at_gate_next) =
+            StreamedFrame::read(&buffer, EndianType::Little, alignment_gate, 2).unwrap();
+        assert_eq!(at_gate_next, 12);
         let (_, legacy_next) = StreamedFrame::read(&buffer, EndianType::Little, legacy, 2).unwrap();
         assert_eq!(legacy_next, 10);
     }

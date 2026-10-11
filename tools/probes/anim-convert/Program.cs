@@ -7,6 +7,7 @@ using AssetRipper.IO.Endian;
 using AssetRipper.IO.Files;
 using AssetRipper.IO.Files.SerializedFiles;
 using AssetRipper.IO.Files.SerializedFiles.Parser;
+using AssetRipper.SourceGenerated.Extensions;
 
 // Reference-runtime probe for the animation processing workstream.
 //
@@ -21,6 +22,9 @@ using AssetRipper.IO.Files.SerializedFiles.Parser;
 //                       SerializedFile before conversion
 //   workspace-existing-curves <out> <serialized-file>
 //                       include pre-existing vector, quaternion, float, and PPtr curves
+//   controller-nested-state-machine <out>
+//                       reconstruct a compiled controller with an empty intermediate machine,
+//                       nested/sibling machines, and entry/exit/any/state transitions
 public static class Program
 {
     private static Assembly Sg = null!;
@@ -39,6 +43,13 @@ public static class Program
                 return DumpFieldHashes(args[1]);
             case "props":
                 return DumpProps(args[1]);
+            case "enum":
+                Type enumType = Resolve(args[1]);
+                foreach (object value in Enum.GetValues(enumType))
+                {
+                    Console.WriteLine($"{enumType.FullName}|{value}|{Convert.ToInt64(value)}");
+                }
+                return 0;
             case "types":
                 return DumpTypes(args.Length > 1 ? args[1] : "AnimationClip");
             case "convert":
@@ -91,6 +102,86 @@ public static class Program
                     Console.Error.WriteLine(ex.ToString());
                     return 3;
                 }
+            case "controller-blend-tree":
+                try
+                {
+                    return DumpControllerBlendTree(args[1]);
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine(ex.ToString());
+                    return 3;
+                }
+            case "controller-nested-blend-tree":
+                try
+                {
+                    return DumpControllerBlendTree(args[1], nested: true);
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine(ex.ToString());
+                    return 3;
+                }
+            case "controller-nested-state-machine":
+                if (args.Length is not (2 or 3))
+                {
+                    Console.Error.WriteLine("usage: anim-convert controller-nested-state-machine <out> [editor-input-hex]");
+                    return 2;
+                }
+                try
+                {
+                    return DumpControllerNestedStateMachine(args[1], args.Length == 3 ? args[2] : null);
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine(ex.ToString());
+                    return 3;
+                }
+            case "controller-empty-state-machine":
+                if (args.Length != 2)
+                {
+                    Console.Error.WriteLine("usage: anim-convert controller-empty-state-machine <out>");
+                    return 2;
+                }
+                try
+                {
+                    return DumpControllerNestedStateMachine(args[1], emptyMachines: true);
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine(ex.ToString());
+                    return 3;
+                }
+            case "controller-behaviour-state-machine":
+                if (args.Length is not (2 or 3))
+                {
+                    Console.Error.WriteLine("usage: anim-convert controller-behaviour-state-machine <out> [editor-input-hex]");
+                    return 2;
+                }
+                try
+                {
+                    return DumpControllerNestedStateMachine(args[1], args.Length == 3 ? args[2] : null, behaviourBindings: true);
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine(ex.ToString());
+                    return 3;
+                }
+            case "controller-shared-editor-state-machine":
+                if (args.Length != 3)
+                {
+                    Console.Error.WriteLine("usage: anim-convert controller-shared-editor-state-machine <out> <editor-input-hex>");
+                    return 2;
+                }
+                try
+                {
+                    return DumpControllerNestedStateMachine(args[1], args[2], behaviourBindings: true, sharedEditorInput: true);
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine(ex.ToString());
+                    return 3;
+                }
             default:
                 Console.Error.WriteLine($"unknown mode {mode}");
                 return 2;
@@ -125,6 +216,653 @@ public static class Program
             Console.WriteLine(type.FullName);
         }
         return 0;
+    }
+
+    private static int DumpControllerBlendTree(string output, bool nested = false)
+    {
+        var bundle = new AssetRipper.Assets.Bundles.GameBundle();
+        var collection = new AssetRipper.Assets.Collections.ProcessedAssetCollection(bundle);
+        object version = AssetRipper.Primitives.UnityVersion.Parse("2022.3.0f1");
+        collection.SetLayout((AssetRipper.Primitives.UnityVersion)version);
+        collection.FilePath = "source_blend_tree.assets";
+
+        object controller = NewAsset(
+            typeof(AssetRipper.SourceGenerated.Classes.ClassID_91.AnimatorController),
+            collection,
+            10000,
+            91,
+            version);
+        object firstClip = NewAsset(
+            typeof(AssetRipper.SourceGenerated.Classes.ClassID_74.AnimationClip),
+            collection,
+            10010,
+            74,
+            version);
+        object secondClip = NewAsset(
+            typeof(AssetRipper.SourceGenerated.Classes.ClassID_74.AnimationClip),
+            collection,
+            10011,
+            74,
+            version);
+        object? thirdClip = nested
+            ? NewAsset(
+                typeof(AssetRipper.SourceGenerated.Classes.ClassID_74.AnimationClip),
+                collection,
+                10012,
+                74,
+                version)
+            : null;
+        SetAsset(AddNew(Get(controller, "AnimationClips")!), firstClip);
+        SetAsset(AddNew(Get(controller, "AnimationClips")!), secondClip);
+        if (thirdClip is not null)
+        {
+            SetAsset(AddNew(Get(controller, "AnimationClips")!), thirdClip);
+        }
+
+        Type stateType = Resolve("AssetRipper.SourceGenerated.Subclasses.StateConstant.StateConstant_5");
+        object state = Activator.CreateInstance(stateType)!;
+        object treeOffset = AddNew(Get(state, "BlendTreeConstantArray")!);
+        object treeConstant = Get(treeOffset, "Data")!;
+        object nodes = Get(treeConstant, "NodeArray")!;
+        object rootOffset = AddNew(nodes);
+        object root = Get(rootOffset, "Data")!;
+        Set(root, "BlendType", 0u);
+        uint speedParameter = Crc32("Speed");
+        Set(root, "BlendEventID", speedParameter);
+        Set(root, "BlendEventYID", uint.MaxValue);
+        object tos = Get(controller, "TOS")!;
+        MethodInfo addTos = tos.GetType().GetMethods().First(method =>
+            method.Name == "Add" && method.GetParameters().Length == 2);
+        addTos.Invoke(tos, new object[] { speedParameter, new AssetRipper.Primitives.Utf8String("Speed") });
+        AddItem(Get(root, "ChildIndices")!, 1u);
+        AddItem(Get(root, "ChildIndices")!, 2u);
+        object blend1d = Get(Get(root, "Blend1dData")!, "Data")!;
+        AddItem(Get(blend1d, "ChildThresholdArray")!, -0.5f);
+        AddItem(Get(blend1d, "ChildThresholdArray")!, 0.75f);
+
+        if (nested)
+        {
+            object nestedOffset = AddNew(nodes);
+            object nestedNode = Get(nestedOffset, "Data")!;
+            Set(nestedNode, "BlendType", 0u);
+            Set(nestedNode, "CycleOffset", 0.0f);
+            uint nestedSpeedParameter = Crc32("NestedSpeed");
+            Set(nestedNode, "BlendEventID", nestedSpeedParameter);
+            Set(nestedNode, "BlendEventYID", uint.MaxValue);
+            MethodInfo addNestedTos = tos.GetType().GetMethods().First(method =>
+                method.Name == "Add" && method.GetParameters().Length == 2);
+            addNestedTos.Invoke(tos, new object[] { nestedSpeedParameter, new AssetRipper.Primitives.Utf8String("NestedSpeed") });
+            AddItem(Get(nestedNode, "ChildIndices")!, 3u);
+            AddItem(Get(nestedNode, "ChildIndices")!, 4u);
+            object nestedBlend1d = Get(Get(nestedNode, "Blend1dData")!, "Data")!;
+            AddItem(Get(nestedBlend1d, "ChildThresholdArray")!, 0.25f);
+            AddItem(Get(nestedBlend1d, "ChildThresholdArray")!, 1.25f);
+        }
+
+        object firstOffset = AddNew(nodes);
+        object firstNode = Get(firstOffset, "Data")!;
+        Set(firstNode, "ClipID", 0u);
+        Set(firstNode, "Duration", 2.0f);
+        Set(firstNode, "CycleOffset", 0.125f);
+        Set(firstNode, "Mirror", false);
+        object secondOffset = AddNew(nodes);
+        object secondNode = Get(secondOffset, "Data")!;
+        Set(secondNode, "ClipID", 1u);
+        Set(secondNode, "Duration", 4.0f);
+        Set(secondNode, "CycleOffset", 0.25f);
+        Set(secondNode, "Mirror", true);
+        if (nested)
+        {
+            object thirdOffset = AddNew(nodes);
+            object thirdNode = Get(thirdOffset, "Data")!;
+            Set(thirdNode, "ClipID", 2u);
+            Set(thirdNode, "Duration", 4.0f);
+            Set(thirdNode, "CycleOffset", 0.375f);
+            Set(thirdNode, "Mirror", false);
+        }
+
+        Type factory = ProcessingAsm.GetType("AssetRipper.Processing.AnimatorControllers.VirtualAnimationFactory")!;
+        object sourceTree = factory.GetMethod(
+                "CreateBlendTree",
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)!
+            .Invoke(null, new[] { collection, controller, state, 0 })!;
+
+        var rows = new StringBuilder();
+        AppendBlendTreeProjection(rows, nested ? "ROOT" : "TREE", sourceTree);
+        if (nested)
+        {
+            object nestedSourceTree = factory.GetMethod(
+                    "CreateBlendTree",
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)!
+                .Invoke(null, new[] { collection, controller, state, 1 })!;
+            AppendBlendTreeProjection(rows, "NESTED", nestedSourceTree);
+        }
+
+        string fullPath = Path.GetFullPath(output);
+        Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+        File.WriteAllText(fullPath, rows.ToString());
+        Console.WriteLine($"wrote source AnimatorController BlendTree rows={rows.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries).Length} path={fullPath}");
+        return 0;
+    }
+
+    private static void AppendBlendTreeProjection(StringBuilder rows, string record, object sourceTree)
+    {
+        AppendSourceRow(rows, record, "class", Get(sourceTree, "ClassID"));
+        AppendSourceRow(rows, record, "serializedVersion", Get(sourceTree, "SerializedVersion"));
+        AppendSourceRow(rows, record, "hideFlags", Get(sourceTree, "HideFlags"));
+        AppendSourceRow(rows, record, "name", Get(sourceTree, "Name"));
+        AppendSourceRow(rows, record, "blendParameter", Get(sourceTree, "BlendParameter"));
+        AppendSourceRow(rows, record, "blendParameterY", Get(sourceTree, "BlendParameterY"));
+        AppendSourceRow(rows, record, "blendType", Get(sourceTree, "BlendType_Int32") ?? Get(sourceTree, "BlendType_UInt32"));
+        AppendSourceRow(rows, record, "minThreshold", Hex(Convert.ToSingle(Get(sourceTree, "MinThreshold"))));
+        AppendSourceRow(rows, record, "maxThreshold", Hex(Convert.ToSingle(Get(sourceTree, "MaxThreshold"))));
+        AppendSourceRow(rows, record, "useAutomaticThresholds", Get(sourceTree, "UseAutomaticThresholds"));
+        AppendSourceRow(rows, record, "normalizedBlendValues", Get(sourceTree, "NormalizedBlendValues"));
+
+        object children = Get(sourceTree, "Childs")!;
+        for (int i = 0; i < Count(children); i++)
+        {
+            object child = At(children, i);
+            object position = Get(child, "Position")!;
+            var fields = new[]
+            {
+                record,
+                i.ToString(),
+                Convert.ToString(Get(child, "SerializedVersion"), System.Globalization.CultureInfo.InvariantCulture) ?? "missing",
+                Hex(Convert.ToSingle(Get(child, "Threshold"))),
+                Hex(Convert.ToSingle(Get(position, "X") ?? Get(position, "x"))),
+                Hex(Convert.ToSingle(Get(position, "Y") ?? Get(position, "y"))),
+                Hex(Convert.ToSingle(Get(child, "TimeScale"))),
+                Hex(Convert.ToSingle(Get(child, "CycleOffset"))),
+                Convert.ToString(Get(child, "DirectBlendParameter"), System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty,
+                Convert.ToBoolean(Get(child, "Mirror")) ? "1" : "0",
+                Convert.ToBoolean(Get(child, "IsAnim")) ? "1" : "0",
+            };
+            rows.Append("CHILD|").Append(string.Join('|', fields)).Append('\n');
+        }
+    }
+
+    private static void AppendSourceRow(StringBuilder builder, string record, string name, object? value)
+    {
+        string text = Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty;
+        builder.Append(record).Append('|').Append(name).Append('|').Append(text).Append('\n');
+    }
+
+    private static int DumpControllerNestedStateMachine(string output, string? editorInputOutput = null, bool emptyMachines = false, bool behaviourBindings = false, bool sharedEditorInput = false)
+    {
+        var bundle = new AssetRipper.Assets.Bundles.GameBundle();
+        var collection = new ProcessedAssetCollection(bundle);
+        var version = AssetRipper.Primitives.UnityVersion.Parse("2022.3.0f1");
+        collection.SetLayout(version);
+        collection.FilePath = "source_nested_state_machine.assets";
+        var controller = (AssetRipper.SourceGenerated.Classes.ClassID_91.IAnimatorController)NewAsset(
+            typeof(AssetRipper.SourceGenerated.Classes.ClassID_91.AnimatorController), collection,
+            10000, 91, version);
+        controller.Name_R = new AssetRipper.Primitives.Utf8String("Nested State Machine Source");
+        controller.TOS.Add(0, AssetRipper.Primitives.Utf8String.Empty);
+
+        uint Register(string text)
+        {
+            uint hash = Crc32(text);
+            controller.TOS.TryAdd(hash, new AssetRipper.Primitives.Utf8String(text));
+            return hash;
+        }
+
+        var constant = controller.Controller;
+        var layer = constant.LayerArray.AddNew().Data;
+        string rootName = emptyMachines ? "主层" : "Base";
+        layer.Binding = Register(rootName);
+        layer.StateMachineIndex = 0;
+        layer.DefaultWeight = 1.0f;
+        layer.IKPass = true;
+        foreach (var (name, type, index) in new (string, uint, uint)[]
+        {
+            ("Speed", 1, 0), ("Moving", 4, 0), ("Mode", 3, 0), ("Trigger", 9, 1),
+        })
+        {
+            var parameter = constant.Values.Data.ValueArray.AddNew();
+            parameter.ID = Register(name);
+            parameter.Type = type;
+            parameter.Index = index;
+        }
+        constant.DefaultValues.Data.FloatValues.Add(0.25f);
+        constant.DefaultValues.Data.BoolValues.Add(true);
+        constant.DefaultValues.Data.BoolValues.Add(false);
+        constant.DefaultValues.Data.IntValues.Add(2);
+        var compiled = constant.StateMachineArray.AddNew().Data;
+        compiled.DefaultState = 0;
+
+        string[] statePaths = { "Base.Idle", "Base.Locomotion.Deep.Walk", "Base.Locomotion.Deep.Run", "Base.Combat.Ready" };
+        if (emptyMachines)
+        {
+            statePaths = statePaths.Select(path => rootName + path[4..]).ToArray();
+        }
+        for (int i = 0; i < statePaths.Length; i++)
+        {
+            var state = compiled.StateConstantArray.AddNew().Data;
+            state.FullPathID = Register(statePaths[i]);
+            state.NameID = Register(statePaths[i][(statePaths[i].LastIndexOf('.') + 1)..]);
+            state.Speed = 1.0f + i * 0.25f;
+            state.CycleOffset = i * 0.125f;
+            state.WriteDefaultValues = true;
+        }
+
+        string[] machinePaths = { "Base", "Base.Locomotion", "Base.Locomotion.Deep", "Base.Combat" };
+        if (emptyMachines)
+        {
+            machinePaths = machinePaths.Concat(new[]
+            {
+                "Base.Locomotion.Deep.失名", "Base.Locomotion.Deep.失名.子",
+                "Base.Locomotion.Deep.DirectExit", "Base.Locomotion.Deep.Linked",
+                "Base.Locomotion.Restricted", "Base.Disconnected", "Base.Orphan",
+            }).Select(path => rootName + path[4..]).ToArray();
+        }
+        foreach (string path in machinePaths)
+        {
+            // Nested machine path text is deliberately not inserted into TOS: the source must recover
+            // the empty intermediate machine's path from its descendant state's full path.
+            foreach (bool isEntry in new[] { true, false })
+            {
+                var selector = compiled.SelectorStateConstantArray!.AddNew().Data;
+                selector.FullPathID = Crc32(path);
+                selector.IsEntry = isEntry;
+            }
+        }
+
+        void Condition(object transition, string parameter, uint mode, float threshold)
+        {
+            object condition = Get(AddNew(Get(transition, "ConditionConstantArray")!), "Data")!;
+            Set(condition, "EventID", Register(parameter));
+            Set(condition, "ConditionMode", mode);
+            Set(condition, "EventThreshold", threshold);
+        }
+
+        void Selector(int index, uint destination, string? parameter = null, uint mode = 1, float threshold = 0)
+        {
+            var transition = compiled.SelectorStateConstantArray![index].Data.TransitionConstantArray.AddNew().Data;
+            transition.Destination = destination;
+            if (parameter is not null)
+            {
+                Condition(transition, parameter, mode, threshold);
+            }
+        }
+
+        Selector(0, 30002, "Moving");
+        Selector(0, 0);
+        Selector(2, 30004, "Mode", 6, 2.0f);
+        Selector(2, 1);
+        Selector(3, 0); // unconditional return to Base's default: omitted by the source
+        Selector(4, 2, "Speed", 3, 0.75f);
+        Selector(4, 1);
+        Selector(5, 3, "Speed", 3, 0.75f);
+        Selector(5, 30003); // exit from Deep through Locomotion's exit selector
+        Selector(6, 30004, "Trigger");
+        Selector(6, 3);
+        Selector(7, 30002, "Moving");
+        Selector(7, 30001); // exit from Combat through Base's exit selector
+
+        void StateTransition(int stateIndex, uint destination, string name, string parameter, uint mode = 1, float threshold = 0)
+        {
+            var transition = compiled.StateConstantArray[stateIndex].Data.TransitionConstantArray.AddNew().Data;
+            transition.DestinationState = destination;
+            transition.UserID = Register(name);
+            transition.TransitionDuration = 0.25f;
+            transition.TransitionOffset = 0.125f;
+            transition.ExitTime = 0.75f;
+            transition.HasExitTime = stateIndex == 2;
+            transition.HasFixedDuration = true;
+            transition.OrderedInterruption = true;
+            transition.CanTransitionToSelf = false;
+            Condition(transition, parameter, mode, threshold);
+        }
+
+        StateTransition(0, 30002, "EnterLocomotion", "Moving");
+        StateTransition(1, 2, "WalkToRun", "Speed", 3, 0.75f);
+        StateTransition(2, 30006, "EnterCombat", "Mode", 6, 2.0f);
+        StateTransition(2, 30005, "ExitDeep", "Moving", 2);
+        StateTransition(3, 30004, "ReturnToDeep", "Trigger");
+        foreach (uint destination in new uint[] { 2, 30006 })
+        {
+            var transition = compiled.AnyStateTransitionConstantArray.AddNew().Data;
+            transition.DestinationState = destination;
+            transition.UserID = Register(destination == 2 ? "AnyToRun" : "AnyToCombat");
+            transition.TransitionDuration = 0.5f;
+            transition.CanTransitionToSelf = true;
+            Condition(transition, "Trigger", 1, 0);
+        }
+
+        if (emptyMachines)
+        {
+            // Empty paths never enter TOS. These connections independently exercise
+            // definitive parents, flagged chains, deeper proposals, sharing, parent
+            // exclusions, a disconnected node, and the source's extra-machine rule.
+            StateTransition(0, 30008, "OfferRootParent", "Moving");
+            StateTransition(2, 30010, "OfferDeeperParentThroughChild", "Trigger");
+            StateTransition(2, 30016, "OfferExcludedParent", "Moving");
+            Selector(8, 30014, "Moving");
+            Selector(8, uint.MaxValue);
+            Selector(11, 30009); // definitive child -> unknown parent's exit
+            Selector(13, 30005); // definitive child -> known parent's exit
+            Selector(17, 30004); // cannot directly parent Restricted under Deep
+            Selector(1, 30020, "Moving"); // Orphan cannot be under the root path
+            Selector(21, 30000); // Orphan cannot directly parent under the root either
+        }
+
+        var behaviourAssets = new List<AssetRipper.SourceGenerated.Classes.ClassID_114.IMonoBehaviour>();
+        if (behaviourBindings)
+        {
+            foreach (string name in new[] { "Root Behaviour", "State Behaviour" })
+            {
+                var behaviour = (AssetRipper.SourceGenerated.Classes.ClassID_114.IMonoBehaviour)NewAsset(
+                    typeof(AssetRipper.SourceGenerated.Classes.ClassID_114.MonoBehaviour), collection,
+                    20000 + behaviourAssets.Count, 114, version);
+                behaviour.Name_R = new AssetRipper.Primitives.Utf8String(name);
+                behaviour.Enabled = 1;
+                behaviourAssets.Add(behaviour);
+                controller.StateMachineBehavioursP.Add(behaviour);
+            }
+            controller.StateMachineBehavioursP.Add(null);
+            var description = controller.StateMachineBehaviourVectorDescription
+                ?? throw new InvalidOperationException("source controller has no behaviour description");
+            foreach (uint slot in new uint[] { 1, 0, 2, 0, 1, 2 })
+            {
+                description.StateMachineBehaviourIndices.Add(slot);
+            }
+            void Range(uint path, uint start, uint count)
+            {
+                object pair = AddNew(description.StateMachineBehaviourRanges);
+                object key = Get(pair, "Key")!;
+                object range = Get(pair, "Value")!;
+                Set(key, "LayerIndex", 0);
+                Set(key, "StateID", path);
+                Set(range, "StartIndex", start);
+                Set(range, "Count", count);
+            }
+            Range(Crc32(statePaths[0]), 0, 3); // states retain explicit null slot
+            Range(Crc32(machinePaths[0]), 3, 3); // machines omit the null slot
+            Range(Crc32(machinePaths[2]), 0, 1); // same behaviour bound on a child machine
+        }
+
+        byte[] releasePayload;
+        using (var payload = new MemoryStream())
+        {
+            using (var writer = new AssetWriter(payload, collection))
+            {
+                controller.WriteRelease(writer);
+            }
+            releasePayload = payload.ToArray();
+        }
+        var sourceBuilder = new SerializedFileBuilder
+        {
+            Generation = FormatVersion.Unknown_10,
+            Version = version,
+            Platform = (BuildTarget)19,
+            EndianType = EndianType.LittleEndian,
+            HasTypeTree = false,
+        };
+        var controllerType = new SerializedType { RawTypeID = 91 };
+        sourceBuilder.Types.Add(controllerType);
+        sourceBuilder.Objects.Add(new ObjectInfo(controllerType)
+        {
+            FileID = 10000,
+            TypeID = 91,
+            ObjectData = releasePayload,
+        });
+        if (behaviourBindings)
+        {
+            var behaviourType = new SerializedType { RawTypeID = 114 };
+            sourceBuilder.Types.Add(behaviourType);
+            foreach (var behaviour in behaviourAssets)
+            {
+                using var payload = new MemoryStream();
+                using (var writer = new AssetWriter(payload, collection)) { behaviour.WriteRelease(writer); }
+                sourceBuilder.Objects.Add(new ObjectInfo(behaviourType)
+                {
+                    FileID = behaviour.PathID, TypeID = 114, ObjectData = payload.ToArray(),
+                });
+            }
+        }
+        var sourceFile = sourceBuilder.Build();
+        sourceFile.FilePath = collection.FilePath;
+        byte[] serializedBytes = sourceFile.ToByteArray();
+
+        // Invoke the frozen processor's per-controller path, so layer construction and graph
+        // reconstruction run exactly as the production reference, without launching Unity.
+        Type processor = ProcessingAsm.GetType("AssetRipper.Processing.AnimatorControllers.AnimatorControllerProcessor")!;
+        processor.GetMethod("Process", BindingFlags.NonPublic | BindingFlags.Static, null,
+            new[] { typeof(AssetRipper.SourceGenerated.Classes.ClassID_91.IAnimatorController), typeof(ProcessedAssetCollection) }, null)!
+            .Invoke(null, new object[] { controller, collection });
+
+        var root = controller.AnimatorLayers[0].StateMachine.TryGetAsset(collection)!;
+        var identities = new Dictionary<IUnityObjectBase, string>();
+        identities.Add(controller, "controller");
+        void IndexMachine(AssetRipper.SourceGenerated.Classes.ClassID_1107.IAnimatorStateMachine machine, string path)
+        {
+            identities.Add(machine, path);
+            foreach (var child in machine.ChildStates!)
+            {
+                var state = child.State.TryGetAsset(collection)!;
+                identities.Add(state, path + "." + state.Name);
+            }
+            foreach (var child in machine.ChildStateMachines!)
+            {
+                var nestedMachine = child.StateMachine.TryGetAsset(collection)!;
+                IndexMachine(nestedMachine, path + "." + nestedMachine.Name);
+            }
+        }
+        IndexMachine(root, root.Name.String);
+        foreach (var behaviour in behaviourAssets) { identities.Add(behaviour, "BEHAVIOUR:" + behaviour.Name); }
+        string Identity(IUnityObjectBase? asset) => asset is null ? string.Empty : identities[asset];
+
+        var rows = new StringBuilder();
+        rows.Append("# Unity 2022.3.0f1 source-runtime AnimatorController hierarchy projection\n");
+        rows.Append("# AnimatorControllerProcessor.Process -> VirtualAnimationFactory.CreateRootAnimatorStateMachine\n");
+        rows.Append("# MACHINE/STATE/TRANSITION rows carry owner identity, field, value; CONDITION rows carry owner, index, mode, parameter, float bits.\n");
+        rows.Append("# SOURCE_SERIALIZED_FILE_HEX contains a generated no-TypeTree SerializedFile before processing; SOURCE_YAML uses frozen YamlWalker with raw PPtr identities.\n");
+        rows.Append("SOURCE_SERIALIZED_FILE_HEX|").Append(Convert.ToHexString(serializedBytes)).Append('\n');
+        for (int i = 0; i < statePaths.Length; i++)
+        {
+            rows.Append("INPUT_STATE|").Append(i).Append('|').Append(statePaths[i]).Append('|').Append(Hex(Crc32(statePaths[i]))).Append('\n');
+        }
+        for (int i = 0; i < compiled.SelectorStateConstantArray!.Count; i++)
+        {
+            var selector = compiled.SelectorStateConstantArray[i].Data;
+            rows.Append("INPUT_SELECTOR|").Append(i).Append('|').Append(machinePaths[i / 2]).Append('|').Append(selector.IsEntry ? "entry" : "exit").Append('\n');
+            for (int j = 0; j < selector.TransitionConstantArray.Count; j++)
+            {
+                rows.Append("INPUT_SELECTOR_DESTINATION|").Append(i).Append('|').Append(j).Append('|').Append(selector.TransitionConstantArray[j].Data.Destination).Append('\n');
+            }
+        }
+
+        void Transition(string owner, object transition)
+        {
+            identities.Add((IUnityObjectBase)transition, owner);
+            AppendSourceRow(rows, "TRANSITION|" + owner, "class", Get(transition, "ClassID"));
+            AppendSourceRow(rows, "TRANSITION|" + owner, "serializedVersion", Get(transition, "SerializedVersion"));
+            AppendSourceRow(rows, "TRANSITION|" + owner, "name", Get(transition, "Name"));
+            AppendSourceRow(rows, "TRANSITION|" + owner, "destinationState", Identity(Get(transition, "DestinationStateP") as IUnityObjectBase));
+            AppendSourceRow(rows, "TRANSITION|" + owner, "destinationStateMachine", Identity(Get(transition, "DestinationStateMachineP") as IUnityObjectBase));
+            AppendSourceRow(rows, "TRANSITION|" + owner, "isExit", Get(transition, "IsExit"));
+            object conditions = Get(transition, "Conditions")!;
+            for (int i = 0; i < Count(conditions); i++)
+            {
+                object condition = At(conditions, i);
+                rows.Append("CONDITION|").Append(owner).Append('|').Append(i).Append('|')
+                    .Append(Get(condition, "ConditionMode")).Append('|').Append(Get(condition, "ConditionEvent")).Append('|')
+                    .Append(Hex(Convert.ToSingle(Get(condition, "EventTreshold")))).Append('\n');
+            }
+            foreach (string field in new[] { "TransitionDuration", "TransitionOffset", "ExitTime" })
+            {
+                if (Get(transition, field) is object value)
+                {
+                    AppendSourceRow(rows, "TRANSITION|" + owner, field, Hex(Convert.ToSingle(value)));
+                }
+            }
+            foreach (string field in new[] { "HasExitTime", "HasFixedDuration", "InterruptionSource", "OrderedInterruption", "CanTransitionToSelf" })
+            {
+                if (Get(transition, field) is object value)
+                {
+                    AppendSourceRow(rows, "TRANSITION|" + owner, field, value);
+                }
+            }
+        }
+
+        void Machine(AssetRipper.SourceGenerated.Classes.ClassID_1107.IAnimatorStateMachine machine, string parent)
+        {
+            string path = Identity(machine);
+            AppendSourceRow(rows, "MACHINE|" + path, "name", machine.Name);
+            AppendSourceRow(rows, "MACHINE|" + path, "parent", parent);
+            AppendSourceRow(rows, "MACHINE|" + path, "serializedVersion", machine.SerializedVersion);
+            AppendSourceRow(rows, "MACHINE|" + path, "default", Identity(machine.DefaultStateP));
+            AppendSourceRow(rows, "MACHINE|" + path, "stateCount", machine.ChildStates!.Count);
+            AppendSourceRow(rows, "MACHINE|" + path, "machineCount", machine.ChildStateMachines!.Count);
+            AppendSourceRow(rows, "MACHINE|" + path, "entryCount", machine.EntryTransitions!.Count);
+            AppendSourceRow(rows, "MACHINE|" + path, "anyCount", machine.AnyStateTransitions!.Count);
+            AppendSourceRow(rows, "MACHINE|" + path, "exitGroupCount", machine.StateMachineTransitions!.Count);
+            foreach (var child in machine.ChildStates)
+            {
+                var state = child.State.TryGetAsset(collection)!;
+                string statePath = Identity(state);
+                rows.Append("CHILD_STATE|").Append(path).Append('|').Append(statePath);
+                AppendVec(rows, child.Position, new[] { "X", "Y", "Z" });
+                rows.Append('\n');
+                AppendSourceRow(rows, "STATE|" + statePath, "speed", Hex(state.Speed));
+                AppendSourceRow(rows, "STATE|" + statePath, "cycleOffset", Hex(state.CycleOffset));
+                for (int i = 0; i < state.TransitionsP.Count; i++)
+                {
+                    Transition("STATE:" + statePath + ":" + i, state.TransitionsP[i]!);
+                }
+            }
+            for (int i = 0; i < machine.EntryTransitionsP.Count; i++)
+            {
+                Transition("ENTRY:" + path + ":" + i, machine.EntryTransitionsP[i]!);
+            }
+            for (int i = 0; i < machine.AnyStateTransitionsP.Count; i++)
+            {
+                Transition("ANY:" + path + ":" + i, machine.AnyStateTransitionsP[i]!);
+            }
+            foreach (var pair in machine.StateMachineTransitions)
+            {
+                var childMachine = pair.Key.TryGetAsset(collection)!;
+                rows.Append("EXIT_GROUP|").Append(path).Append('|').Append(Identity(childMachine)).Append('|').Append(pair.Value.Count).Append('\n');
+                for (int i = 0; i < pair.Value.Count; i++)
+                {
+                    Transition("EXIT:" + path + ":" + Identity(childMachine) + ":" + i, pair.Value[i].TryGetAsset(collection)!);
+                }
+            }
+            foreach (var child in machine.ChildStateMachines)
+            {
+                var childMachine = child.StateMachine.TryGetAsset(collection)!;
+                rows.Append("CHILD_MACHINE|").Append(path).Append('|').Append(Identity(childMachine));
+                AppendVec(rows, child.Position, new[] { "X", "Y", "Z" });
+                rows.Append('\n');
+                Machine(childMachine, path);
+            }
+        }
+        Machine(root, string.Empty);
+        AppendControllerSourceYaml(rows, collection, version, identities);
+        if (sharedEditorInput)
+        {
+            var shared = (AssetRipper.SourceGenerated.Classes.ClassID_91.IAnimatorController)NewAsset(
+                typeof(AssetRipper.SourceGenerated.Classes.ClassID_91.AnimatorController), collection,
+                10001, 91, version);
+            shared.CopyValues(controller, new AssetRipper.Assets.Cloning.PPtrConverter(collection, collection));
+            shared.Name_R = new AssetRipper.Primitives.Utf8String("Shared State Machine Source");
+            foreach (var parameter in shared.AnimatorParameters)
+            {
+                SetAsset(parameter.Controller ?? throw new InvalidOperationException("2022.3 parameter has no controller pointer"), shared);
+            }
+            foreach (var sharedLayer in shared.AnimatorLayers)
+            {
+                SetAsset(sharedLayer.Controller ?? throw new InvalidOperationException("2022.3 layer has no controller pointer"), shared);
+            }
+            identities.Add(shared, "shared-controller");
+        }
+        if (editorInputOutput is not null)
+        {
+            var editorBuilder = new SerializedFileBuilder
+            {
+                Generation = FormatVersion.Unknown_10,
+                Version = version,
+                Platform = BuildTarget.NoTarget,
+                EndianType = EndianType.LittleEndian,
+                HasTypeTree = false,
+            };
+            var editorTypes = new Dictionary<int, SerializedType>();
+            foreach (IUnityObjectBase asset in identities.Keys.OrderBy(asset => asset.PathID))
+            {
+                if (!editorTypes.TryGetValue(asset.ClassID, out SerializedType? type))
+                {
+                    type = new SerializedType { RawTypeID = asset.ClassID };
+                    editorTypes.Add(asset.ClassID, type);
+                    editorBuilder.Types.Add(type);
+                }
+                using var payload = new MemoryStream();
+                using (var writer = new AssetWriter(payload, collection))
+                {
+                    asset.WriteEditor(writer);
+                }
+                editorBuilder.Objects.Add(new ObjectInfo(type)
+                {
+                    FileID = asset.PathID,
+                    TypeID = asset.ClassID,
+                    ObjectData = payload.ToArray(),
+                });
+            }
+            var editorFile = editorBuilder.Build();
+            editorFile.FilePath = "source_nested_state_machine_editor.assets";
+            string editorPath = Path.GetFullPath(editorInputOutput);
+            Directory.CreateDirectory(Path.GetDirectoryName(editorPath)!);
+            File.WriteAllText(editorPath,
+                $"# Frozen AssetRipper WriteEditor; Unity 2022.3.0f1, NoTarget, no TypeTree, {identities.Count} objects.\n"
+                + Convert.ToHexString(editorFile.ToByteArray()) + "\n", new UTF8Encoding(false));
+        }
+        string fullPath = Path.GetFullPath(output);
+        Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+        File.WriteAllText(fullPath, rows.ToString(), new UTF8Encoding(false));
+        Console.WriteLine($"wrote source nested AnimatorController machines={machinePaths.Length} states={statePaths.Length} path={fullPath}");
+        return 0;
+    }
+
+    private static void AppendControllerSourceYaml(
+        StringBuilder rows, ProcessedAssetCollection collection,
+        AssetRipper.Primitives.UnityVersion version,
+        IReadOnlyDictionary<IUnityObjectBase, string> identities)
+    {
+        // The export assembly is already copied by this probe's ReferenceRoot infrastructure;
+        // load it only for this mode, keeping existing conversion modes unchanged.
+        string directory = Path.Combine(AppContext.BaseDirectory, "ref");
+        Assembly? ResolveExportAssembly(System.Runtime.Loader.AssemblyLoadContext context, AssemblyName name)
+        {
+            string path = Path.Combine(directory, name.Name + ".dll");
+            return File.Exists(path) ? context.LoadFromAssemblyPath(path) : null;
+        }
+        System.Runtime.Loader.AssemblyLoadContext.Default.Resolving += ResolveExportAssembly;
+        try
+        {
+            var exporter = Assembly.LoadFrom(Path.Combine(directory, "AssetRipper.Export.UnityProjects.dll"));
+            var yaml = Assembly.LoadFrom(Path.Combine(directory, "AssetRipper.Yaml.dll"));
+            Type walkerType = exporter.GetType("AssetRipper.Export.UnityProjects.YamlWalker")!;
+            object walker = Activator.CreateInstance(walkerType)!;
+            walkerType.GetMethod("WithUnityVersion")!.Invoke(walker, new object[] { version });
+            Type writerType = yaml.GetType("AssetRipper.Yaml.YamlWriter")!;
+            object yamlWriter = Activator.CreateInstance(writerType)!;
+            foreach (IUnityObjectBase asset in collection.OrderBy(asset => asset.PathID))
+            {
+                string identity = identities[asset];
+                rows.Append("SOURCE_OBJECT|").Append(asset.PathID).Append('|').Append(asset.ClassID).Append('|').Append(identity).Append('\n');
+                object document = walkerType.GetMethod("ExportYamlDocument")!
+                    .Invoke(walker, new object[] { asset, asset.PathID })!;
+                writerType.GetMethod("AddDocument")!.Invoke(yamlWriter, new[] { document });
+            }
+            using var textWriter = new StringWriter(System.Globalization.CultureInfo.InvariantCulture);
+            writerType.GetMethod("Write")!.Invoke(yamlWriter, new object[] { textWriter });
+            rows.Append("SOURCE_YAML_BEGIN\n").Append(textWriter.ToString().Replace("\r\n", "\n")).Append("SOURCE_YAML_END\n");
+        }
+        finally
+        {
+            System.Runtime.Loader.AssemblyLoadContext.Default.Resolving -= ResolveExportAssembly;
+        }
     }
 
     private static int DumpProps(string name)

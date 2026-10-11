@@ -1,5 +1,8 @@
 use super::test_support::{element_layout, layout_node, make_file, node};
-use super::{ObjectDecodeErrorKind, ObjectEncodeErrorKind, ObjectEncodeLimits, SerializedValue};
+use super::{
+    ObjectDecodeErrorKind, ObjectDecodeLimits, ObjectEncodeErrorKind, ObjectEncodeLimits,
+    SerializedValue,
+};
 use crate::io::binary::Endian;
 use crate::serialized_file::metadata::TypeTree;
 #[test]
@@ -192,6 +195,62 @@ fn decodes_byte_arrays_with_versioned_alignment_before_the_next_field() {
                 value: SerializedValue::Bool(true),
             },
         ])
+    );
+}
+
+#[test]
+fn compact_u8_vectors_fit_a_byte_sized_decode_budget_and_roundtrip() {
+    let payload = [
+        8, 0, 0, 0, 0x10, 0x21, 0x32, 0x43, 0x54, 0x65, 0x76, 0x87, 8, 0, 0, 0, 0x98, 0xa9, 0xba,
+        0xcb, 0xdc, 0xed, 0xfe, 0x0f,
+    ];
+    let (file, header, mut metadata) = make_file(&payload);
+    metadata.types[0].type_tree = Some(TypeTree {
+        nodes: vec![
+            node(0, "Root", "Root", -1, 0),
+            node(1, "m_Bytes", "vector", -1, 0),
+            node(2, "Array", "Array", -1, 0),
+            node(3, "size", "int", 4, 0),
+            node(3, "data", "UInt8", 1, 0),
+            node(1, "m_Blob", "TypelessData", -1, 0),
+            node(2, "size", "int", 4, 0),
+            node(2, "data", "UInt8", 1, 0),
+        ],
+        string_buffer: Vec::new(),
+    });
+
+    let limits = ObjectDecodeLimits {
+        max_decoded_allocation_bytes: 256,
+        max_array_elements: 4,
+        ..ObjectDecodeLimits::default()
+    };
+    let object = metadata
+        .decode_object_payload_with_limits(&file, &header, 0, &limits)
+        .unwrap();
+    assert_eq!(
+        object.root.unique_field("m_Bytes").unwrap(),
+        Some(&SerializedValue::Bytes(vec![
+            0x10, 0x21, 0x32, 0x43, 0x54, 0x65, 0x76, 0x87,
+        ]))
+    );
+    assert_eq!(
+        object.root.unique_field("m_Blob").unwrap(),
+        Some(&SerializedValue::Bytes(vec![
+            0x98, 0xa9, 0xba, 0xcb, 0xdc, 0xed, 0xfe, 0x0f,
+        ]))
+    );
+    assert!(object.allocated_bytes <= limits.max_decoded_allocation_bytes);
+    assert_eq!(
+        metadata
+            .encode_object_payload(
+                &object,
+                ObjectEncodeLimits {
+                    max_array_elements: 4,
+                    ..ObjectEncodeLimits::default()
+                }
+            )
+            .unwrap(),
+        payload
     );
 }
 

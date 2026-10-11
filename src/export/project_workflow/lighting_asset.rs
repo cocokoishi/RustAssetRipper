@@ -284,7 +284,7 @@ pub(super) fn append_lighting_data_renderer_records(
             SerializedValue::U16(value) => *value,
             value => {
                 return Err(invalid_project(format!(
-                    "MeshRenderer {:?}:{} has unsupported m_LightmapIndex value {value:?}",
+                    "Renderer {:?}:{} has unsupported m_LightmapIndex value {value:?}",
                     renderer.identity.collection, renderer.identity.path_id
                 )))
             }
@@ -294,7 +294,7 @@ pub(super) fn append_lighting_data_renderer_records(
         }
         if renderer.file_id == 0 {
             return Err(invalid_project(format!(
-                "lightmapped MeshRenderer {:?}:{} has a null Scene export fileID",
+                "lightmapped Renderer {:?}:{} has a null Scene export fileID",
                 renderer.identity.collection, renderer.identity.path_id
             )));
         }
@@ -316,7 +316,7 @@ pub(super) fn append_lighting_data_renderer_records(
         if let Some(target) = renderer.uv_mesh_target {
             if target.class_id != 43 || target.path_id == 0 {
                 return Err(invalid_project(format!(
-                    "MeshRenderer {:?}:{} has invalid UvMesh identity {:?}",
+                    "Renderer {:?}:{} has invalid UvMesh identity {:?}",
                     renderer.identity.collection, renderer.identity.path_id, target
                 )));
             }
@@ -450,13 +450,13 @@ fn source_renderer_field<'value>(
         .unique_field_in_base_chain(name)
         .map_err(|error| {
             invalid_project(format!(
-                "MeshRenderer {:?}:{} field lookup for {name} failed: {error}",
+                "Renderer {:?}:{} field lookup for {name} failed: {error}",
                 renderer.identity.collection, renderer.identity.path_id
             ))
         })?
         .ok_or_else(|| {
             invalid_project(format!(
-                "MeshRenderer {:?}:{} TypeTree has no {name} field",
+                "Renderer {:?}:{} TypeTree has no {name} field",
                 renderer.identity.collection, renderer.identity.path_id
             ))
         })
@@ -640,14 +640,21 @@ pub(super) fn lighting_data_bytes_field_value(
     }
 }
 
-pub(super) fn contains_non_null_pointer(value: &SerializedValue) -> bool {
-    match value {
-        SerializedValue::PPtr { path_id, .. } => *path_id != 0,
-        SerializedValue::Array(values) => values.iter().any(contains_non_null_pointer),
-        SerializedValue::Struct(fields) => fields
-            .iter()
-            .any(|field| contains_non_null_pointer(&field.value)),
-        _ => false,
+pub(super) fn has_non_null_pointer_field(
+    value: &SerializedValue,
+    field_name: &str,
+) -> Result<bool, Box<dyn Error>> {
+    let Some(index) = unique_lighting_data_field_index(value, field_name)? else {
+        return Ok(false);
+    };
+    let fields = value
+        .struct_fields()
+        .expect("unique_lighting_data_field_index validates a struct");
+    match &fields[index].value {
+        SerializedValue::PPtr { path_id, .. } => Ok(*path_id != 0),
+        other => Err(invalid_project(format!(
+            "RenderSettings {field_name} has unsupported pointer value {other:?}"
+        ))),
     }
 }
 
@@ -969,6 +976,12 @@ fn resolve_generated_lighting_data_pointer(
             target_asset = Some(identity);
             ProjectPointerRequest::ResolvedAsset(identity)
         }
+        MultiFilePPtrResolution::PredefinedEngineAsset {
+            resource, path_id, ..
+        } => ProjectPointerRequest::PredefinedEngineAsset {
+            path_id: *path_id,
+            resource: *resource,
+        },
         resolution => ProjectPointerRequest::UnresolvedInput(UnresolvedProjectPointer {
             source_file_index: file_index,
             source_object_index: asset.source_owner.object_index,
@@ -1046,4 +1059,48 @@ fn is_lighting_data_texture_field(field_path: &str) -> bool {
             field_path.rsplit('.').next(),
             Some("m_Lightmap" | "m_DirLightmap" | "m_ShadowMask")
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{has_non_null_pointer_field, SerializedFieldValue, SerializedValue};
+
+    #[test]
+    fn render_settings_reflection_guard_is_scoped_to_generated_skybox() {
+        let render_settings = SerializedValue::Struct(vec![
+            SerializedFieldValue {
+                name: "m_HaloTexture".to_owned(),
+                value: SerializedValue::PPtr {
+                    file_id: 0,
+                    path_id: 42,
+                },
+            },
+            SerializedFieldValue {
+                name: "m_GeneratedSkyboxReflection".to_owned(),
+                value: SerializedValue::PPtr {
+                    file_id: 0,
+                    path_id: 0,
+                },
+            },
+        ]);
+
+        assert!(
+            !has_non_null_pointer_field(&render_settings, "m_GeneratedSkyboxReflection").unwrap()
+        );
+    }
+
+    #[test]
+    fn render_settings_reflection_guard_detects_non_null_generated_skybox() {
+        let render_settings = SerializedValue::Struct(vec![SerializedFieldValue {
+            name: "m_GeneratedSkyboxReflection".to_owned(),
+            value: SerializedValue::PPtr {
+                file_id: 0,
+                path_id: 42,
+            },
+        }]);
+
+        assert!(
+            has_non_null_pointer_field(&render_settings, "m_GeneratedSkyboxReflection").unwrap()
+        );
+    }
 }

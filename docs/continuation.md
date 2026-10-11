@@ -1,6 +1,6 @@
 # Continuation status
 
-> Current handoff: `docs/next-agent-handoff.md` is the authoritative, up-to-date continuation record for the 2026-10-03 state. Older sections below are historical and may name an earlier next task or earlier cloud checkpoint; read the handoff first, then consult the feature ledger and validation log.
+> Current handoff: `docs/next-agent-handoff.md` is the authoritative continuation record for the 2026-10-10 checkpoint. Older sections below are historical and may name an earlier next task or checkpoint; read the handoff first, then consult the feature ledger and validation log.
 
 ## Current phase
 

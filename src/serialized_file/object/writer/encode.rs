@@ -686,16 +686,6 @@ impl PayloadEncoder<'_, '_, '_> {
             let SerializedValue::Bytes(bytes) = value else {
                 return Err(self.value_mismatch(path, "TypelessData bytes", value));
             };
-            if bytes.len() > self.limits.max_array_elements {
-                return Err(ObjectEncodeError::new(
-                    self.object_index,
-                    path,
-                    ObjectEncodeErrorKind::ArrayElementLimitExceeded {
-                        requested: bytes.len(),
-                        limit: self.limits.max_array_elements,
-                    },
-                ));
-            }
             let length = i32::try_from(bytes.len()).map_err(|_| {
                 ObjectEncodeError::new(
                     self.object_index,
@@ -866,10 +856,41 @@ impl PayloadEncoder<'_, '_, '_> {
         depth: usize,
         align_nested_arrays: bool,
     ) -> Result<(), ObjectEncodeError> {
-        let (values, data_node) = match value {
-            SerializedValue::Array(values) => {
-                (values, self.array_data_node(array_node_index, path)?)
+        let data_node = self.array_data_node(array_node_index, path)?;
+        if let SerializedValue::Bytes(bytes) = value {
+            let data_type = self.type_tree.nodes[data_node].type_name.as_deref();
+            if !matches!(data_type, Some("char" | "UInt8"))
+                || !self.children(data_node, path)?.is_empty()
+            {
+                return Err(self.value_mismatch(path, "array", value));
             }
+            let count = i32::try_from(bytes.len()).map_err(|_| {
+                ObjectEncodeError::new(
+                    self.object_index,
+                    path,
+                    ObjectEncodeErrorKind::LengthOverflow {
+                        resource: "TypeTree array element count",
+                    },
+                )
+            })?;
+            self.write_i32(path, count)?;
+            self.write_bytes(path, bytes)?;
+            if align_nested_arrays
+                || (self.arrays_align
+                    && array_base_is_primitive(
+                        self.type_tree,
+                        data_node,
+                        self.object_index,
+                        self.output.len(),
+                    )
+                    .map_err(|error| invalid_tree(self.object_index, path, error))?)
+            {
+                self.align_four(path)?;
+            }
+            return Ok(());
+        }
+        let (values, data_node) = match value {
+            SerializedValue::Array(values) => (values, data_node),
             other => return Err(self.value_mismatch(path, "array", other)),
         };
         if values.len() > self.limits.max_array_elements {

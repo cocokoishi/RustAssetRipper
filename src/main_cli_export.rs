@@ -517,7 +517,7 @@ pub(super) fn export_mesh_to<W: io::Write>(
 /// future commands. Missing files, invalid UTF-8, oversized files, and schema violations
 /// are explicit input errors carrying the path.
 pub(super) fn load_cli_export_settings(path: &Path) -> Result<ExportSettingsFile, Box<dyn Error>> {
-    read_serialized_settings_file(path).map(|settings| settings.export)
+    read_export_settings_file(path)
 }
 
 /// Reads one `AssetRipper.Settings.json` file, shared by the explicit `--settings` flag
@@ -534,6 +534,13 @@ pub(super) fn read_export_settings_file(path: &Path) -> Result<ExportSettingsFil
 pub(super) fn load_default_export_settings_from_dir(
     directory: &Path,
 ) -> Result<Option<ExportSettingsFile>, Box<dyn Error>> {
+    load_default_serialized_settings_from_dir(directory)
+        .map(|settings| settings.map(|settings| settings.export))
+}
+
+pub(super) fn load_default_serialized_settings_from_dir(
+    directory: &Path,
+) -> Result<Option<assetripper::export::settings_file::SerializedSettingsFile>, Box<dyn Error>> {
     use assetripper::export::asset_path::HostPathPlatform;
     use assetripper::export::settings_file::default_settings_file_path;
 
@@ -549,7 +556,7 @@ pub(super) fn load_default_export_settings_from_dir(
     if !path.exists() {
         return Ok(None);
     }
-    read_export_settings_file(&path).map(Some)
+    read_serialized_settings_file(&path).map(Some)
 }
 
 /// Resolve the executable directory (`AppContext.BaseDirectory` in the source).
@@ -1011,13 +1018,19 @@ where
         ));
     }
     let settings = match settings_path {
-        Some(path) => read_export_settings_file(&path)?,
-        None => try_load_default_export_settings()?
-            .unwrap_or_else(|| ExportSettingsFile::from(ExportDefaults::default())),
+        Some(path) => read_serialized_settings_file(&path)?,
+        None => load_default_serialized_settings_from_dir(&executable_directory()?)?
+            .unwrap_or_else(|| {
+                assetripper::export::settings_file::SerializedSettingsFile::from_defaults(
+                    Default::default(),
+                    Default::default(),
+                    Default::default(),
+                )
+            }),
     };
     let stdout = io::stdout();
     let mut status_output = stdout.lock();
-    export_project_to(
+    export_project_to_with_serialized_settings(
         &inputs,
         &output_root,
         delete_existing,
@@ -1026,11 +1039,35 @@ where
     )
 }
 
+#[cfg(test)]
 pub(super) fn export_project_to<W: io::Write>(
     input_paths: &[PathBuf],
     output_root: &Path,
     delete_existing: bool,
     settings: &ExportSettingsFile,
+    status_output: &mut W,
+) -> Result<(), Box<dyn Error>> {
+    let mut full_settings =
+        assetripper::export::settings_file::SerializedSettingsFile::from_defaults(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        );
+    full_settings.export = settings.clone();
+    export_project_to_with_serialized_settings(
+        input_paths,
+        output_root,
+        delete_existing,
+        &full_settings,
+        status_output,
+    )
+}
+
+pub(super) fn export_project_to_with_serialized_settings<W: io::Write>(
+    input_paths: &[PathBuf],
+    output_root: &Path,
+    delete_existing: bool,
+    full_settings: &assetripper::export::settings_file::SerializedSettingsFile,
     status_output: &mut W,
 ) -> Result<(), Box<dyn Error>> {
     let (mut filesystem, selected_paths, mut mount_report) = mount_project_inputs(input_paths)?;
@@ -1050,12 +1087,34 @@ pub(super) fn export_project_to<W: io::Write>(
         &selected_paths,
         PlatformStructureLimits::default(),
     )?;
+    let original_streaming_assets = if full_settings
+        .import
+        .streaming_assets_mode
+        .skip_streaming_assets()
+    {
+        None
+    } else {
+        platform
+            .as_ref()
+            .and_then(|platform| platform.streaming_assets_path())
+            .map(|path| mount_original_streaming_assets(input_paths, &selected_paths, &path))
+            .transpose()?
+    };
     let platform_inventory = platform
         .as_ref()
         .map(|structure| {
             structure.collect_game_files(
                 &filesystem,
-                PlatformFileInventoryOptions::default(),
+                PlatformFileInventoryOptions {
+                    skip_streaming_assets: full_settings
+                        .import
+                        .streaming_assets_mode
+                        .skip_streaming_assets(),
+                    disable_script_import: full_settings
+                        .import
+                        .script_content_level
+                        .disables_script_import(),
+                },
                 PlatformFileInventoryLimits::default(),
             )
         })
@@ -1068,7 +1127,14 @@ pub(super) fn export_project_to<W: io::Write>(
     } else {
         PlatformScriptingBackend::Mono
     };
-    let scripting_backend = select_scripting_backend(false, platform_backend, Some(mixed_backend));
+    let scripting_backend = select_scripting_backend(
+        full_settings
+            .import
+            .script_content_level
+            .disables_script_import(),
+        platform_backend,
+        Some(mixed_backend),
+    );
     let manager_assemblies = if scripting_backend == PlatformScriptingBackend::Mono {
         if platform.is_some() {
             platform_inventory
@@ -1119,6 +1185,17 @@ pub(super) fn export_project_to<W: io::Write>(
     ensure_no_workspace_container_failures(&workspace)?;
     let mut objects =
         load_object_workspace(&filesystem, &workspace, ObjectWorkspaceLimits::default())?;
+    let empty_behaviours = objects.recover_header_only_null_script_behaviours(
+        &mut workspace,
+        ObjectWorkspaceLimits::default(),
+        ReferenceGraphLimits::default(),
+    )?;
+    if empty_behaviours != 0 {
+        writeln!(
+            status_output,
+            "Header-only MonoBehaviours: {empty_behaviours} complete."
+        )?;
+    }
     if mono_manager_initialized {
         let recovery = objects.recover_mono_behaviour_structures(
             &filesystem,
@@ -1218,9 +1295,12 @@ pub(super) fn export_project_to<W: io::Write>(
         )?;
     }
     let reference_graph = workspace.reference_graph(MultiFileReferenceGraphLimits::default())?;
-    let provider =
+    let mut provider =
         PlatformResourceProvider::with_mixed_data_paths(platform.as_ref(), Some(&mixed.data_paths));
-    let report = export_workspace_yaml_project_with_assembly_catalog(
+    if let Some(source) = &original_streaming_assets {
+        provider = provider.with_streaming_assets_filesystem(source);
+    }
+    let report = export_workspace_yaml_project_with_serialized_settings(
         output_root,
         delete_existing,
         &filesystem,
@@ -1229,7 +1309,7 @@ pub(super) fn export_project_to<W: io::Write>(
         &workspace,
         &objects,
         &reference_graph,
-        settings,
+        full_settings,
         mono_manager_initialized,
         mono_manager_initialized.then_some(&managed_assemblies),
         WorkspaceProjectExportLimits::default(),
@@ -1304,6 +1384,134 @@ pub(super) fn export_project_to<W: io::Write>(
         mount_report.discovered_source_bytes
     )?;
     Ok(())
+}
+
+/// Retain physical StreamingAssets independently of the expanded processing VFS.
+/// Copying must preserve wrapper bytes, container filenames, numbered split parts
+/// and empty directories. Only metadata and owning file handles are mounted here.
+pub(super) fn mount_original_streaming_assets(
+    input_paths: &[PathBuf],
+    selected_paths: &[String],
+    virtual_root: &str,
+) -> Result<VirtualFileSystem, Box<dyn Error>> {
+    let inputs = deduplicate_logical_input_paths(input_paths);
+    let physical_root = selected_paths
+        .iter()
+        .zip(&inputs)
+        .find_map(|(selected, physical)| {
+            let relative = virtual_root.strip_prefix(selected)?;
+            if !relative.is_empty() && !relative.starts_with('/') {
+                return None;
+            }
+            let mut root = physical.clone();
+            for component in relative
+                .trim_start_matches('/')
+                .split('/')
+                .filter(|part| !part.is_empty())
+            {
+                if component == "." || component == ".." {
+                    return None;
+                }
+                root.push(component);
+            }
+            Some(root)
+        })
+        .ok_or_else(|| {
+            invalid_input(format!(
+                "cannot locate original StreamingAssets for {virtual_root:?}"
+            ))
+        })?;
+    let mut source = VirtualFileSystem::new();
+    let metadata = match fs::symlink_metadata(&physical_root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(source),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(invalid_input(format!(
+            "StreamingAssets root {:?} is not a regular directory",
+            physical_root
+        )));
+    }
+    let limits = WorkspaceProjectExportLimits::default();
+    let mut entries = 1usize;
+    let mut total_bytes = 0u64;
+    source.create_directory(Some(virtual_root))?;
+    let mut pending = vec![(physical_root, virtual_root.to_owned(), 0usize)];
+    while let Some((directory, destination, depth)) = pending.pop() {
+        for entry in fs::read_dir(&directory)? {
+            let entry = entry?;
+            entries = entries
+                .checked_add(1)
+                .ok_or_else(|| invalid_input("StreamingAssets entry count overflows"))?;
+            if entries > limits.max_post_export_entries {
+                return Err(invalid_input(
+                    "StreamingAssets entry count exceeds its limit",
+                ));
+            }
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_symlink() {
+                return Err(invalid_input(format!(
+                    "StreamingAssets input {:?} is a symbolic link",
+                    path
+                )));
+            }
+            let name = entry.file_name();
+            let name = name
+                .to_str()
+                .ok_or_else(|| invalid_input("StreamingAssets filename is not valid UTF-8"))?;
+            // The VFS normalizes backslashes even on POSIX; accepting one would
+            // silently change an original filename during post-export copying.
+            if name.contains(['/', '\\']) {
+                return Err(invalid_input(format!(
+                    "StreamingAssets filename {name:?} cannot be represented by the VFS"
+                )));
+            }
+            let virtual_path = format!("{destination}/{name}");
+            if virtual_path.len() > source.limits().max_path_bytes {
+                return Err(invalid_input("StreamingAssets path exceeds its limit"));
+            }
+            if metadata.is_dir() {
+                let next_depth = depth
+                    .checked_add(1)
+                    .ok_or_else(|| invalid_input("StreamingAssets directory depth overflows"))?;
+                if next_depth > limits.project_output.max_path_components {
+                    return Err(invalid_input(
+                        "StreamingAssets directory depth exceeds its limit",
+                    ));
+                }
+                source.create_directory(Some(&virtual_path))?;
+                pending
+                    .try_reserve(1)
+                    .map_err(|_| invalid_input("could not retain StreamingAssets directories"))?;
+                pending.push((path, virtual_path, next_depth));
+            } else if metadata.is_file() {
+                total_bytes = total_bytes
+                    .checked_add(metadata.len())
+                    .ok_or_else(|| invalid_input("StreamingAssets byte count overflows"))?;
+                if total_bytes > limits.max_total_asset_payload_bytes as u64 {
+                    return Err(invalid_input(
+                        "StreamingAssets bytes exceed the project limit",
+                    ));
+                }
+                let stream = assetripper::io::stream::SmartStream::open_read(&path)?;
+                if stream.length()? != metadata.len() {
+                    return Err(invalid_input(format!(
+                        "StreamingAssets input {:?} changed while opening it",
+                        path
+                    )));
+                }
+                source.insert_file_stream_with_parents(&virtual_path, stream)?;
+            } else {
+                return Err(invalid_input(format!(
+                    "StreamingAssets input {:?} is not a regular file",
+                    path
+                )));
+            }
+        }
+    }
+    Ok(source)
 }
 
 pub(super) fn export_audio_to<W: io::Write>(

@@ -4,7 +4,9 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
-use crate::serialized_file::reference_graph::MultiFilePPtrResolution;
+use crate::serialized_file::reference_graph::{
+    MultiFilePPtrResolution, PredefinedEngineResourceKind,
+};
 
 use super::ids::{get_main_export_id, ExportIdError};
 use super::prefab_collection::PrefabExportIdAssignment;
@@ -73,6 +75,9 @@ pub enum ExportPointerMapError {
     DuplicateAssetIdentity {
         asset: ExportAssetIdentity,
     },
+    MissingCloneSource {
+        asset: ExportAssetIdentity,
+    },
     AssetIdentityMetadataMismatch {
         requested: ExportAssetIdentity,
         registered: ExportAssetIdentity,
@@ -110,6 +115,7 @@ impl Display for ExportPointerMapError {
             Self::DuplicateAssetIdentity { asset } => {
                 write!(f, "duplicate project export asset identity {asset:?}")
             }
+            Self::MissingCloneSource { asset } => write!(f, "collection-local export copy has no canonical source identity {asset:?}"),
             Self::AssetIdentityMetadataMismatch {
                 requested,
                 registered,
@@ -179,6 +185,10 @@ pub struct UnresolvedProjectPointer {
 pub enum ProjectPointerRequest {
     Null,
     ResolvedAsset(ExportAssetIdentity),
+    PredefinedEngineAsset {
+        path_id: i64,
+        resource: PredefinedEngineResourceKind,
+    },
     UnresolvedInput(UnresolvedProjectPointer),
 }
 
@@ -201,6 +211,7 @@ pub enum ProjectPointerResolution {
 pub struct ProjectExportPointerMap {
     assets: HashMap<ExportAssetObjectKey, ExportedAssetPointerEntry>,
     collections: HashMap<usize, ExportCollectionPointerMetadata>,
+    local_copies: HashMap<(usize, ExportAssetObjectKey), ExportedAssetPointerEntry>,
 }
 
 /// Collects Scene and Prefab plans and converts their IDs into one project pointer map.
@@ -384,7 +395,70 @@ impl ProjectExportPointerMap {
         Ok(Self {
             assets: asset_map,
             collections: collection_map,
+            local_copies: HashMap::new(),
         })
+    }
+
+    /// Register explicit copies without changing the canonical identity used by
+    /// references outside the owning collection. Generic duplicate registration
+    /// in `new` remains an error; only this bounded copy plan enables a local alias.
+    pub(crate) fn register_local_copies(
+        &mut self,
+        copies: &[ExportedAssetPointerEntry],
+        limits: ExportPointerMapLimits,
+    ) -> Result<(), ExportPointerMapError> {
+        let requested = self
+            .assets
+            .len()
+            .checked_add(self.local_copies.len())
+            .and_then(|count| count.checked_add(copies.len()))
+            .ok_or(ExportPointerMapError::AssetCountOverflow)?;
+        if requested > limits.max_assets {
+            return Err(ExportPointerMapError::AssetLimitExceeded {
+                requested,
+                limit: limits.max_assets,
+            });
+        }
+        let mut pending = HashMap::new();
+        pending
+            .try_reserve(copies.len())
+            .map_err(|_| ExportPointerMapError::AllocationFailed {
+                resource: "collection-local asset copies",
+                requested,
+            })?;
+        for &copy in copies {
+            let source = self
+                .assets
+                .get(&copy.asset.object_key())
+                .ok_or(ExportPointerMapError::MissingCloneSource { asset: copy.asset })?;
+            if source.asset != copy.asset {
+                return Err(ExportPointerMapError::AssetIdentityMetadataMismatch {
+                    requested: copy.asset,
+                    registered: source.asset,
+                });
+            }
+            if !self.collections.contains_key(&copy.collection_index) {
+                return Err(ExportPointerMapError::MissingCollectionMetadata {
+                    collection_index: copy.collection_index,
+                });
+            }
+            let key = (copy.collection_index, copy.asset.object_key());
+            if source.collection_index == copy.collection_index
+                || self.local_copies.contains_key(&key)
+                || pending.contains_key(&key)
+            {
+                return Err(ExportPointerMapError::DuplicateAssetIdentity { asset: copy.asset });
+            }
+            pending.insert(key, copy);
+        }
+        self.local_copies.try_reserve(pending.len()).map_err(|_| {
+            ExportPointerMapError::AllocationFailed {
+                resource: "collection-local asset copies",
+                requested,
+            }
+        })?;
+        self.local_copies.extend(pending);
+        Ok(())
     }
 
     pub fn resolve(
@@ -394,8 +468,28 @@ impl ProjectExportPointerMap {
     ) -> Result<ProjectPointerResolution, ExportPointerMapError> {
         match request {
             ProjectPointerRequest::Null => Ok(ProjectPointerResolution::Null),
+            ProjectPointerRequest::PredefinedEngineAsset { path_id, resource } => {
+                let words = match resource {
+                    PredefinedEngineResourceKind::DefaultResources => {
+                        super::guid_policy::ENGINE_DEFAULT_RESOURCES_GUID_WORDS
+                    }
+                };
+                let mut guid = [0; 16];
+                for (index, word) in words.iter().enumerate() {
+                    guid[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
+                }
+                Ok(ProjectPointerResolution::Mapped(UnityMetaPointer {
+                    file_id: path_id,
+                    guid: ExportPointerGuid::Collection(guid),
+                    asset_type: UnityProjectAssetType::Internal,
+                }))
+            }
             ProjectPointerRequest::ResolvedAsset(asset) => {
-                let Some(entry) = self.assets.get(&asset.object_key()) else {
+                let Some(entry) = self
+                    .local_copies
+                    .get(&(current_collection_index, asset.object_key()))
+                    .or_else(|| self.assets.get(&asset.object_key()))
+                else {
                     return Ok(ProjectPointerResolution::MissingExportedTarget {
                         asset,
                         pointer: UnityMetaPointer {
@@ -439,7 +533,9 @@ impl ProjectExportPointerMap {
             ProjectPointerRequest::UnresolvedInput(reference) => {
                 if matches!(
                     reference.resolution,
-                    MultiFilePPtrResolution::Null | MultiFilePPtrResolution::Object { .. }
+                    MultiFilePPtrResolution::Null
+                        | MultiFilePPtrResolution::Object { .. }
+                        | MultiFilePPtrResolution::PredefinedEngineAsset { .. }
                 ) {
                     return Err(ExportPointerMapError::InvalidUnresolvedReferenceStatus);
                 }
@@ -505,6 +601,94 @@ mod tests {
             ExportPointerMapLimits::default(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn collection_local_copies_preserve_canonical_external_references() {
+        let original = asset(0, 0, 10, 1);
+        let copy = entry(original, 77, 4);
+        let mut pointers = map();
+        pointers
+            .register_local_copies(&[copy], ExportPointerMapLimits::default())
+            .unwrap();
+        assert_eq!(
+            pointers
+                .resolve(ProjectPointerRequest::ResolvedAsset(original), 4)
+                .unwrap(),
+            ProjectPointerResolution::Mapped(UnityMetaPointer {
+                file_id: 77,
+                guid: ExportPointerGuid::None,
+                asset_type: UnityProjectAssetType::Serialized
+            })
+        );
+        assert_eq!(
+            pointers
+                .resolve(ProjectPointerRequest::ResolvedAsset(original), 0)
+                .unwrap(),
+            ProjectPointerResolution::Mapped(UnityMetaPointer {
+                file_id: 10,
+                guid: ExportPointerGuid::Collection([0x33; 16]),
+                asset_type: UnityProjectAssetType::Serialized
+            })
+        );
+        assert!(matches!(
+            pointers.register_local_copies(&[copy], ExportPointerMapLimits::default()),
+            Err(ExportPointerMapError::DuplicateAssetIdentity { .. })
+        ));
+        let missing = entry(asset(0, 3, 999, 114), 114000001, 4);
+        assert!(matches!(
+            pointers.register_local_copies(&[missing], ExportPointerMapLimits::default()),
+            Err(ExportPointerMapError::MissingCloneSource { .. })
+        ));
+        let mut rejected = map();
+        let before = rejected
+            .resolve(ProjectPointerRequest::ResolvedAsset(original), 4)
+            .unwrap();
+        assert!(matches!(
+            rejected.register_local_copies(&[copy, missing], ExportPointerMapLimits::default()),
+            Err(ExportPointerMapError::MissingCloneSource { .. })
+        ));
+        assert_eq!(
+            rejected
+                .resolve(ProjectPointerRequest::ResolvedAsset(original), 4)
+                .unwrap(),
+            before,
+            "a rejected copy batch cannot leave a partial reference remapping"
+        );
+        assert!(matches!(
+            map().register_local_copies(
+                &[copy],
+                ExportPointerMapLimits {
+                    max_assets: 2,
+                    ..ExportPointerMapLimits::default()
+                }
+            ),
+            Err(ExportPointerMapError::AssetLimitExceeded { .. })
+        ));
+    }
+
+    #[test]
+    fn predefined_engine_asset_pointers_keep_source_path_id_and_guid() {
+        let resolution = map()
+            .resolve(
+                ProjectPointerRequest::PredefinedEngineAsset {
+                    path_id: 10202,
+                    resource: PredefinedEngineResourceKind::DefaultResources,
+                },
+                0,
+            )
+            .unwrap();
+
+        assert_eq!(
+            resolution,
+            ProjectPointerResolution::Mapped(UnityMetaPointer {
+                file_id: 10202,
+                guid: ExportPointerGuid::Collection([
+                    0, 0, 0, 0, 0, 0, 0, 0, 14, 0, 0, 0, 0, 0, 0, 0,
+                ]),
+                asset_type: UnityProjectAssetType::Internal,
+            })
+        );
     }
 
     #[test]

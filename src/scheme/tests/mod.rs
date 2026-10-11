@@ -12,4 +12,5 @@ use std::path::PathBuf;
 mod batch_mount;
 mod container_mount;
 mod reader;
+mod stream_mount;
 mod support;

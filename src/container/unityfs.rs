@@ -58,6 +58,8 @@ pub struct UnityFsLimits {
     pub max_storage_blocks: usize,
     pub max_directory_nodes: usize,
     pub max_node_path_bytes: usize,
+    /// Maximum materialized directory-entry size. This remains finite while allowing
+    /// the large SerializedFile entries used by modern Unity projects.
     pub max_entry_bytes: usize,
     pub max_block_uncompressed_bytes: usize,
     pub max_zstd_window_bytes: usize,
@@ -71,7 +73,7 @@ impl Default for UnityFsLimits {
             max_storage_blocks: 1_000_000,
             max_directory_nodes: 1_000_000,
             max_node_path_bytes: 1024 * 1024,
-            max_entry_bytes: 512 * 1024 * 1024,
+            max_entry_bytes: 1024 * 1024 * 1024,
             max_block_uncompressed_bytes: 512 * 1024 * 1024,
             max_zstd_window_bytes: 128 * 1024 * 1024,
         }
@@ -623,7 +625,8 @@ impl UnityFsStreamBundle {
                             })?;
                     let mut part = self
                         .source
-                        .create_partial(part_offset, overlap_length)
+                        .create_partial_file_backed(part_offset, overlap_length)
+                        .map(|(stream, _)| stream)
                         .map_err(|error| {
                             stream_input_error(
                                 usize::try_from(part_offset).unwrap_or(usize::MAX),
@@ -642,7 +645,8 @@ impl UnityFsStreamBundle {
                     let compressed_size = u64::from(block.compressed_size);
                     let compressed = self
                         .source
-                        .create_partial(block_absolute_offset, compressed_size)
+                        .create_partial_file_backed(block_absolute_offset, compressed_size)
+                        .map(|(stream, _)| stream)
                         .map_err(|error| {
                             stream_input_error(
                                 usize::try_from(block_absolute_offset).unwrap_or(usize::MAX),

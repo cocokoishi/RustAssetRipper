@@ -84,14 +84,14 @@ use super::prefab_collection::{
     PrefabExportIdPlan, PrefabExportPlanLimits, PrefabHierarchyAssetGroups, VersionedPrefabAsset,
 };
 use super::project_exporter::{
-    claim_facts_for_shader_text, execute_project_export, export_extension_for,
+    claim_facts_for_shader_text, execute_project_export_with_streams, export_extension_for,
     lighting_data_native_format_importer_for_version, mesh_native_format_importer_for_version,
     native_format_importer_for_version, object_class_name, package_manifest_json,
     project_version_file, select_collection_with_claim_facts,
     shader_importer_for_version_with_non_modifiable_textures, ObjectClassFacts, PlannedProjectFile,
-    PlannedProjectMeta, PlannedProjectPostExportFile, PlannedProjectSupportFile,
-    ProjectExportError, ProjectExportNotice, ProjectExportPlan, ProjectExportSettings,
-    ProjectPathPlanner,
+    PlannedProjectMeta, PlannedProjectPostExportFile, PlannedProjectStreamFile,
+    PlannedProjectSupportFile, ProjectExportError, ProjectExportNotice, ProjectExportPlan,
+    ProjectExportSettings, ProjectPathPlanner, ProjectStreamPostExports,
 };
 use super::project_plan::plan_scene_export_paths;
 use super::reference_assemblies::ReferenceAssemblyMaps;
@@ -112,7 +112,8 @@ use super::script_hashing::{
     calculate_assembly_guid, calculate_script_file_id_str, calculate_script_guid_str,
     ScriptHashLimits,
 };
-use super::settings_file::ExportSettingsFile;
+use super::settings::StreamingAssetsMode;
+use super::settings_file::{ExportSettingsFile, SerializedSettingsFile};
 use super::shader_export::{
     export_shader_text, unity_patches, yaml_shader_patch_texts, yaml_shader_patches,
     YAML_SHADER_EXTENSION,
@@ -140,12 +141,14 @@ use super::workspace_yaml::{
 };
 
 const MAX_PROJECT_OBJECTS: usize = 20_000_000;
-const MAX_PROJECT_ASSET_PAYLOAD_BYTES: usize = 2 * 1024 * 1024 * 1024;
+const MAX_PROJECT_ASSET_PAYLOAD_BYTES: usize = 4 * 1024 * 1024 * 1024;
 
 /// Resource and allocation bounds for one workspace project export.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WorkspaceProjectExportLimits {
     pub max_objects: usize,
+    /// Original StreamingAssets files/directories and saved auxiliary assemblies.
+    pub max_post_export_entries: usize,
     pub max_total_asset_payload_bytes: usize,
     pub pointer_map: ExportPointerMapLimits,
     pub yaml_collection: UnityYamlWorkspaceCollectionLimits,
@@ -158,6 +161,7 @@ impl Default for WorkspaceProjectExportLimits {
     fn default() -> Self {
         Self {
             max_objects: MAX_PROJECT_OBJECTS,
+            max_post_export_entries: 1_000_000,
             max_total_asset_payload_bytes: MAX_PROJECT_ASSET_PAYLOAD_BYTES,
             pointer_map: ExportPointerMapLimits::default(),
             yaml_collection: UnityYamlWorkspaceCollectionLimits::default(),
@@ -241,6 +245,8 @@ struct RoutedObject<'a> {
     text_asset_export: Option<TextAssetExportDetails>,
     texture_export: Option<TextureProjectPlan>,
     script_export: Option<ScriptExportDetails>,
+    scriptable_object_group: Option<RoutedScriptableObjectGroup<'a>>,
+    controller_collection: Option<RoutedControllerCollection<'a>>,
     selection: super::project_exporter::CollectionSelection,
     route: ObjectRoute,
     collection_index: usize,
@@ -249,6 +255,17 @@ struct RoutedObject<'a> {
     /// GUID registered in the source project pointer map. A reference MonoScript uses the
     /// reference assembly GUID here while retaining its calculated script GUID in its `.meta`.
     pointer_guid: [u8; 16],
+    file_id: i64,
+}
+
+/// A generated ScriptableObjectGroup produced by the source Timeline/PostProcessing processor.
+struct RoutedScriptableObjectGroup<'a> {
+    extension: &'static str,
+    children: Vec<RoutedScriptableObjectGroupChild<'a>>,
+}
+
+struct RoutedScriptableObjectGroupChild<'a> {
+    object: &'a WorkspaceObject,
     file_id: i64,
 }
 
@@ -354,6 +371,7 @@ struct WorkspaceProjectExportInputs<'inputs, 'provider, 'graph> {
     objects: &'inputs ObjectWorkspace,
     reference_graph: &'inputs MultiFileReferenceGraph<'graph>,
     settings: &'inputs ExportSettingsFile,
+    streaming_assets_mode: StreamingAssetsMode,
     assembly_manager_is_set: bool,
     managed_assemblies: Option<&'inputs ManagedAssemblyCatalog>,
     limits: WorkspaceProjectExportLimits,
@@ -373,6 +391,8 @@ struct WorkspaceProjectExportContext<'inputs, 'provider, 'graph> {
     scene_member_keys: HashSet<ExportAssetObjectKey>,
     prefab_collections: Vec<RoutedPrefabCollection>,
     prefab_member_keys: HashSet<ExportAssetObjectKey>,
+    scriptable_object_groups: PreparedScriptableObjectGroups,
+    controller_collections: PreparedControllerCollections,
     processing_warnings: Vec<String>,
     used_guids: HashSet<[u8; 16]>,
     lightmap_texture_directories: HashMap<(usize, usize), String>,
@@ -403,6 +423,8 @@ struct ProjectRoutingContext<'context, 'graph> {
     opaque_objects: &'context HashSet<(usize, usize)>,
     scene_member_keys: &'context HashSet<ExportAssetObjectKey>,
     prefab_member_keys: &'context HashSet<ExportAssetObjectKey>,
+    scriptable_object_groups: &'context PreparedScriptableObjectGroups,
+    controller_collections: &'context PreparedControllerCollections,
     lightmap_texture_directories: &'context HashMap<(usize, usize), String>,
     existing_guids: &'context HashSet<[u8; 16]>,
 }
@@ -419,6 +441,8 @@ fn identity_of(entry: &RoutedObject<'_>) -> ExportAssetIdentity {
     }
 }
 
+mod animator_collections;
+mod animator_controller;
 mod asset_support;
 mod audio_asset;
 mod collection_planning;
@@ -428,10 +452,18 @@ mod importer_metadata;
 mod lighting_asset;
 mod object_routing;
 mod planning;
+mod post_export_outputs;
+mod project_settings;
 mod scene_collections;
 mod script_exports;
+mod scriptable_object_groups;
 mod workspace_identity;
 
+use self::animator_collections::{
+    hide_controller_behaviour, prepare_controller_collections, PreparedControllerCollections,
+    RoutedControllerCollection, RoutedControllerMember,
+};
+use self::animator_controller::rebuild_animator_controller_documents;
 use self::asset_support::*;
 use self::audio_asset::*;
 use self::collection_planning::{
@@ -449,13 +481,17 @@ use self::planning::{
 };
 use self::scene_collections::*;
 use self::script_exports::*;
+use self::scriptable_object_groups::*;
 use self::workspace_identity::*;
 
 pub use self::entrypoints::{
     export_workspace_yaml_project, export_workspace_yaml_project_with_script_manager,
     export_workspace_yaml_project_with_settings,
 };
-pub use self::export::export_workspace_yaml_project_with_assembly_catalog;
+pub use self::export::{
+    export_workspace_yaml_project_with_assembly_catalog,
+    export_workspace_yaml_project_with_serialized_settings,
+};
 
 #[cfg(test)]
 #[path = "project_workflow/tests/mod.rs"]

@@ -145,7 +145,8 @@ fn project_export_matches_source_for_a_complex_no_type_tree_managed_schema() {
     // The only permitted normalization is the generated TextAsset GUID, which the source mints
     // per export; see `managed_schema_project_fixture.txt`. The source additionally wrote
     // `ProjectSettings/EditorSettings.asset` and a manager-resolved `System.Runtime.CompilerServices.Unsafe.dll`;
-    // Rust still does not emit either, so the complete file tree is deliberately not asserted
+    // Rust emits EditorSettings now; the manager-resolved assembly gap still means
+    // the complete file tree is deliberately not asserted
     // here and those gaps stay open under `EXPORT-UNITY-001`.
     let input_bytes = managed_schema_fixture_hex();
     let assembly_bytes =

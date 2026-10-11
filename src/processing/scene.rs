@@ -19,6 +19,7 @@ use crate::serialized_file::object::{
 use crate::serialized_file::object_workspace::WorkspaceObject;
 use crate::serialized_file::reference_graph::{
     MultiFileObjectReference, MultiFilePPtrResolution, MultiFileReferenceGraph,
+    PredefinedEngineResourceKind,
 };
 
 const GAME_OBJECT_CLASS_ID: i32 = 1;
@@ -145,6 +146,12 @@ pub enum SceneRelationshipTarget {
     WorkspaceObject {
         file_index: usize,
         object_index: usize,
+    },
+    PredefinedEngineAsset {
+        external_index: usize,
+        resource: PredefinedEngineResourceKind,
+        path_id: i64,
+        class_id: i32,
     },
     ExternalObject {
         file_id: i32,

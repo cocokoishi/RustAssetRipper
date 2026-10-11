@@ -403,6 +403,41 @@ pub fn write_new_project_file(
     bytes: &[u8],
     path_limits: UnityProjectOutputLimits,
 ) -> Result<PathBuf, UnityProjectOutputError> {
+    write_new_project_stream(
+        output_root,
+        relative_path,
+        &mut io::Cursor::new(bytes),
+        bytes.len() as u64,
+        path_limits,
+    )
+}
+
+pub(super) fn validate_project_output_path(
+    relative_path: &str,
+    limits: UnityProjectOutputLimits,
+) -> Result<(), UnityProjectOutputError> {
+    validated_path_components(relative_path, limits).map(|_| ())
+}
+
+pub(super) fn create_project_directory(
+    output_root: &Path,
+    relative_path: &str,
+    limits: UnityProjectOutputLimits,
+) -> Result<PathBuf, UnityProjectOutputError> {
+    let components = validated_path_components(relative_path, limits)?;
+    ensure_output_directory(output_root, &components)
+}
+
+/// Copy exactly a preflighted, bounded stream without allocating its payload.
+/// The same confined directory walk and add-only creation protect ordinary files
+/// and original StreamingAssets files; a short read remains an export failure.
+pub(super) fn write_new_project_stream(
+    output_root: &Path,
+    relative_path: &str,
+    source: &mut impl io::Read,
+    expected_bytes: u64,
+    path_limits: UnityProjectOutputLimits,
+) -> Result<PathBuf, UnityProjectOutputError> {
     let components = validated_path_components(relative_path, path_limits)?;
     let (directory_components, [file_name]) = components.split_at(components.len() - 1) else {
         return Err(UnityProjectOutputError::InvalidRelativePath {
@@ -419,12 +454,21 @@ pub fn write_new_project_file(
             path: path.clone(),
             source,
         })?;
-    file.write_all(bytes)
-        .and_then(|()| file.flush())
-        .map_err(|source| UnityProjectOutputError::WriteAsset {
-            path: path.clone(),
-            source,
-        })?;
+    let mut copy = || -> io::Result<()> {
+        let mut buffer = [0u8; 64 * 1024];
+        let mut remaining = expected_bytes;
+        while remaining != 0 {
+            let count = remaining.min(buffer.len() as u64) as usize;
+            source.read_exact(&mut buffer[..count])?;
+            file.write_all(&buffer[..count])?;
+            remaining -= count as u64;
+        }
+        file.flush()
+    };
+    copy().map_err(|source| UnityProjectOutputError::WriteAsset {
+        path: path.clone(),
+        source,
+    })?;
     Ok(path)
 }
 

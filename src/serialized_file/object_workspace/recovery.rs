@@ -44,6 +44,180 @@ struct PendingManagedBehaviourRecovery {
 }
 
 impl ObjectWorkspace {
+    /// Resolve the known absence of script fields after materialization, matching
+    /// UnloadedStructure.LoadStructure for a null script with no remaining bytes.
+    /// No assembly manager is needed. Non-null scripts, unread data and failed
+    /// headers retain their lazy state and remain incomplete.
+    pub fn recover_header_only_null_script_behaviours(
+        &mut self,
+        workspace: &mut SerializedFileWorkspace,
+        limits: ObjectWorkspaceLimits,
+        graph_limits: ReferenceGraphLimits,
+    ) -> Result<usize, Box<ObjectWorkspaceError>> {
+        use crate::processing::asset_factory::ObjectTailOutcome;
+        use crate::serialized_file::reference_graph::{
+            factory_object_outcome_error, DecodedReferenceObject,
+        };
+        use std::collections::{HashMap, HashSet};
+        let allocation_error = || {
+            object_workspace_error(
+                0,
+                "<workspace>",
+                None,
+                ObjectWorkspaceErrorKind::AllocationFailed {
+                    resource: "empty script structure recovery",
+                    requested: self.objects.len(),
+                },
+            )
+        };
+        let mut pending = HashSet::new();
+        let mut files = HashSet::new();
+        for object in &self.objects {
+            let Ok(payload) = &object.payload else {
+                continue;
+            };
+            if !object.factory.has_complete_null_script_header(payload)
+                || object
+                    .raw_payload_range
+                    .end
+                    .checked_sub(object.raw_payload_range.start)
+                    != u64::try_from(payload.consumed_bytes).ok()
+            {
+                continue;
+            }
+            pending.try_reserve(1).map_err(|_| allocation_error())?;
+            files.try_reserve(1).map_err(|_| allocation_error())?;
+            pending.insert((object.file_index, object.object_index));
+            files.insert(object.file_index);
+        }
+        if pending.is_empty() {
+            return Ok(0);
+        }
+        let mut file_indexes = Vec::new();
+        file_indexes
+            .try_reserve_exact(files.len())
+            .map_err(|_| allocation_error())?;
+        file_indexes.extend(files);
+        file_indexes.sort_unstable();
+        let mut prepared_graphs = Vec::new();
+        prepared_graphs
+            .try_reserve_exact(file_indexes.len())
+            .map_err(|_| allocation_error())?;
+        for file_index in file_indexes {
+            let file = workspace.files().get(file_index).ok_or_else(|| {
+                object_workspace_error(
+                    file_index,
+                    "<workspace>",
+                    None,
+                    ObjectWorkspaceErrorKind::WorkspaceFileIndexOutOfBounds,
+                )
+            })?;
+            let objects = self.objects_for_file(file_index);
+            if objects.len() != file.metadata.objects.len()
+                || objects.iter().zip(&file.metadata.objects).enumerate().any(
+                    |(index, (object, metadata))| {
+                        object.object_index != index || object.path_id != metadata.path_id
+                    },
+                )
+            {
+                return Err(object_workspace_error(
+                    file_index,
+                    &file.virtual_path,
+                    None,
+                    ObjectWorkspaceErrorKind::FileChangedSinceWorkspaceLoad,
+                ));
+            }
+            let mut repaired = HashMap::new();
+            for object in objects
+                .iter()
+                .filter(|object| pending.contains(&(file_index, object.object_index)))
+            {
+                repaired.try_reserve(1).map_err(|_| allocation_error())?;
+                repaired.insert(
+                    object.object_index,
+                    factory_object_outcome_error(&object.factory),
+                );
+            }
+            // Reuse bounded decoded object values one at a time; no file/container
+            // payload is read or materialized again during empty structure recovery.
+            let mut graph = ObjectReferenceGraph::build_with_payload_decoder(
+                &file.metadata,
+                graph_limits,
+                |index| {
+                    let object = &objects[index];
+                    let payload = object.payload.clone()?;
+                    let unparsed_tail_bytes = if matches!(
+                        object.factory.tail,
+                        Some(
+                            ObjectTailOutcome::ZeroPadding
+                                | ObjectTailOutcome::ChineseTextureFields
+                        )
+                    ) {
+                        0
+                    } else {
+                        payload.trailing_bytes.len()
+                    };
+                    let incomplete_outcome = if !object.is_fully_materialized()
+                        && !pending.contains(&(file_index, index))
+                        && unparsed_tail_bytes == 0
+                    {
+                        Some(factory_object_outcome_error(&object.factory))
+                    } else {
+                        None
+                    };
+                    Ok(DecodedReferenceObject {
+                        payload,
+                        unparsed_tail_bytes,
+                        incomplete_outcome,
+                    })
+                },
+            )
+            .map_err(|source| {
+                object_workspace_error(
+                    file_index,
+                    &file.virtual_path,
+                    None,
+                    ObjectWorkspaceErrorKind::ReferenceGraphBuild(source),
+                )
+            })?;
+            graph
+                .preserve_prior_issues_after_recovery(
+                    &file.reference_graph,
+                    &repaired,
+                    graph_limits.max_issues,
+                )
+                .map_err(|source| {
+                    object_workspace_error(
+                        file_index,
+                        &file.virtual_path,
+                        None,
+                        ObjectWorkspaceErrorKind::ReferenceGraphBuild(source),
+                    )
+                })?;
+            prepared_graphs.push((file_index, graph));
+        }
+        for (file_index, graph) in prepared_graphs {
+            if !workspace.replace_reference_graph(file_index, graph) {
+                return Err(object_workspace_error(
+                    file_index,
+                    "<workspace>",
+                    None,
+                    ObjectWorkspaceErrorKind::WorkspaceFileIndexOutOfBounds,
+                ));
+            }
+        }
+        for object in &mut self.objects {
+            if pending.contains(&(object.file_index, object.object_index)) {
+                if let Some(structure) = object.factory.structure.as_mut() {
+                    structure.outcome = MonoBehaviourStructureOutcome::UseParsedStructure;
+                    structure.fields = Some(SerializedValue::Struct(Vec::new()));
+                }
+            }
+        }
+        self.recount_report(limits)?;
+        Ok(pending.len())
+    }
+
     /// Resolve source-generated MonoBehaviour headers through their `m_Script` PPtr, build the
     /// assembly-backed schema with the MonoScript file's Unity version, decode each saved
     /// remainder, and rebuild affected file reference scans from the recovered payloads.

@@ -35,7 +35,8 @@ use super::meta::UnityMetaFileOptions;
 use super::post_export::{default_package_dependencies, project_version_file_contents};
 use super::project_order::ProjectExportEvent;
 use super::project_output::{
-    export_asset_with_meta, write_new_project_file, AssetExportStep, AssetExportWithMetaPlan,
+    create_project_directory, export_asset_with_meta, validate_project_output_path,
+    write_new_project_file, write_new_project_stream, AssetExportStep, AssetExportWithMetaPlan,
     UnityProjectOutputLimits,
 };
 use super::project_plan::plan_manager_export_paths;
@@ -590,6 +591,109 @@ pub struct PlannedProjectPostExportFile {
     pub bytes: Vec<u8>,
 }
 
+/// Original input ranges and manager-saved assemblies retained until post-export.
+/// These are separate from contiguous collection/YAML buffers, so copying an
+/// arbitrarily large StreamingAssets tree never requires whole-file allocation.
+pub(super) struct PlannedProjectStreamFile {
+    pub relative_path: String,
+    pub stream: crate::io::stream::SmartStream,
+    pub byte_count: u64,
+}
+
+#[derive(Default)]
+pub(super) struct ProjectStreamPostExports {
+    pub directories: Vec<String>,
+    pub files: Vec<PlannedProjectStreamFile>,
+}
+
+impl ProjectStreamPostExports {
+    fn validate(
+        &self,
+        plan: &ProjectExportPlan,
+        limits: UnityProjectOutputLimits,
+    ) -> Result<(), Box<dyn Error>> {
+        let platform = ProjectPathPlanner::host_platform();
+        let key = |path: &str| {
+            if platform == HostPathPlatform::Windows {
+                path.to_lowercase()
+            } else {
+                path.to_owned()
+            }
+        };
+        let mut files = BTreeSet::new();
+        let mut insert_file = |path: &str| -> Result<(), Box<dyn Error>> {
+            validate_host_relative_path(path, platform)?;
+            validate_project_output_path(path, limits)?;
+            if !files.insert(key(path)) {
+                return Err(ProjectExportError::DuplicateProjectPath {
+                    relative_path: path.to_owned(),
+                    first: path.to_owned(),
+                    second: path.to_owned(),
+                }
+                .into());
+            }
+            Ok(())
+        };
+        insert_file(PROJECT_VERSION_FILE)?;
+        insert_file(PACKAGE_MANIFEST_FILE)?;
+        for file in &plan.files {
+            insert_file(&file.relative_path)?;
+            if file.meta.is_some() {
+                insert_file(&format!("{}.meta", file.relative_path))?;
+            }
+        }
+        for file in &plan.support_files {
+            insert_file(&file.relative_path)?;
+        }
+        for file in &plan.post_export_files {
+            insert_file(&file.relative_path)?;
+        }
+        for file in &self.files {
+            insert_file(&file.relative_path)?;
+            if !file.stream.can_read() || file.stream.length()? != file.byte_count {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("post-export backing changed for {}", file.relative_path),
+                )
+                .into());
+            }
+        }
+        for directory in &self.directories {
+            validate_host_relative_path(directory, platform)?;
+            validate_project_output_path(directory, limits)?;
+        }
+        for path in files
+            .iter()
+            .map(String::as_str)
+            .chain(self.directories.iter().map(String::as_str))
+        {
+            // A source directory or a file ancestor must never overwrite a staged
+            // asset, importer sidecar, support file or another post-export file.
+            let mut ancestor = path;
+            while let Some((parent, _)) = ancestor.rsplit_once('/') {
+                if files.contains(&key(parent)) {
+                    return Err(ProjectExportError::InvalidProjectPath {
+                        relative_path: path.to_owned(),
+                        reason: "a project file is used as an output directory",
+                    }
+                    .into());
+                }
+                ancestor = parent;
+            }
+        }
+        for directory in &self.directories {
+            if files.contains(&key(directory)) {
+                return Err(ProjectExportError::InvalidProjectPath {
+                    relative_path: directory.clone(),
+                    reason: "a post-export directory conflicts with a project file",
+                }
+                .into());
+            }
+        }
+        Ok(())
+    }
+}
+
 /// The complete staged project: nothing is written until `execute_project_export` runs.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProjectExportPlan {
@@ -762,7 +866,31 @@ pub fn execute_project_export(
     limits: UnityProjectOutputLimits,
     yaml_limits: UnityYamlWriteLimits,
 ) -> Result<ProjectExportReport, Box<dyn Error>> {
+    execute_project_export_with_streams(
+        output_root,
+        delete_existing,
+        plan,
+        &ProjectStreamPostExports::default(),
+        limits,
+        yaml_limits,
+    )
+}
+
+pub(super) fn execute_project_export_with_streams(
+    output_root: &Path,
+    delete_existing: bool,
+    plan: &ProjectExportPlan,
+    streamed_post_exports: &ProjectStreamPostExports,
+    limits: UnityProjectOutputLimits,
+    yaml_limits: UnityYamlWriteLimits,
+) -> Result<ProjectExportReport, Box<dyn Error>> {
     plan.validate()?;
+    streamed_post_exports.validate(plan, limits)?;
+    let post_export_file_count = plan
+        .post_export_files
+        .len()
+        .checked_add(streamed_post_exports.files.len())
+        .ok_or(ProjectExportError::ProjectFileCountOverflow)?;
     prepare_export_root(output_root, delete_existing)?;
 
     // `ExportHandler.Export` runs the export loop first and the post-exporters last. Preserve
@@ -846,6 +974,19 @@ pub fn execute_project_export(
         plan.package_manifest.as_bytes(),
         limits,
     )?;
+    for directory in &streamed_post_exports.directories {
+        create_project_directory(output_root, directory, limits)?;
+    }
+    for file in &streamed_post_exports.files {
+        let (mut stream, _) = file.stream.create_partial_file_backed(0, file.byte_count)?;
+        write_new_project_stream(
+            output_root,
+            &file.relative_path,
+            &mut stream,
+            file.byte_count,
+            limits,
+        )?;
+    }
     for file in &plan.post_export_files {
         write_new_project_file(output_root, &file.relative_path, &file.bytes, limits)?;
     }
@@ -870,7 +1011,7 @@ pub fn execute_project_export(
         file_count: plan.files.len() + plan.support_files.len(),
         asset_file_count,
         support_file_count,
-        post_export_file_count: plan.post_export_files.len(),
+        post_export_file_count,
         meta_file_count,
         total_asset_bytes,
         events,

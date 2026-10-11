@@ -318,6 +318,25 @@ impl FactoryObjectState {
             ) => false,
         }
     }
+
+    /// Eligibility for the processing step that resolves a source UnloadedStructure
+    /// to an empty field set. Materialization itself retains the original lazy state.
+    pub(crate) fn has_complete_null_script_header(&self, payload: &ParsedObjectPayload) -> bool {
+        self.class_id == super::decisions::MONO_BEHAVIOUR_CLASS_ID
+            && self.kind.is_recoverable()
+            && self.log_level != FactoryLogLevel::Error
+            && matches!(self.tail, None | Some(ObjectTailOutcome::Exact))
+            && payload.trailing_bytes.is_empty()
+            && self.structure.as_ref().is_some_and(|structure| {
+                structure.outcome == MonoBehaviourStructureOutcome::UseUnloadedRemainder
+                    && structure.unloaded_remainder.is_empty()
+                    && structure.fields.is_none()
+            })
+            && matches!(
+                payload.root.unique_field_in_base_chain("m_Script"),
+                Ok(Some(SerializedValue::PPtr { path_id: 0, .. }))
+            )
+    }
 }
 
 /// Typed source-factory values for one workspace object, without a second raw-byte copy.

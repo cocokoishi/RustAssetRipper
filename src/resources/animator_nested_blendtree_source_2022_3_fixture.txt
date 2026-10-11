@@ -1,0 +1,26 @@
+ROOT|class|206
+ROOT|serializedVersion|1
+ROOT|hideFlags|1
+ROOT|name|Blend Tree
+ROOT|blendParameter|Speed
+ROOT|blendParameterY|
+ROOT|blendType|0
+ROOT|minThreshold|BF000000
+ROOT|maxThreshold|3F400000
+ROOT|useAutomaticThresholds|False
+ROOT|normalizedBlendValues|False
+CHILD|ROOT|0|2|BF000000|00000000|00000000|3F800000|00000000||0|0
+CHILD|ROOT|1|2|3F400000|00000000|00000000|3F000000|3E000000||0|0
+NESTED|class|206
+NESTED|serializedVersion|1
+NESTED|hideFlags|1
+NESTED|name|Blend Tree
+NESTED|blendParameter|NestedSpeed
+NESTED|blendParameterY|
+NESTED|blendType|0
+NESTED|minThreshold|3E800000
+NESTED|maxThreshold|3FA00000
+NESTED|useAutomaticThresholds|False
+NESTED|normalizedBlendValues|False
+CHILD|NESTED|0|2|3E800000|00000000|00000000|3E800000|3E800000||1|0
+CHILD|NESTED|1|2|3FA00000|00000000|00000000|3E800000|3EC00000||0|0

@@ -1,0 +1,826 @@
+# Unity 2022.3.0f1 source-runtime AnimatorController hierarchy projection
+# AnimatorControllerProcessor.Process -> VirtualAnimationFactory.CreateRootAnimatorStateMachine
+# MACHINE/STATE/TRANSITION rows carry owner identity, field, value; CONDITION rows carry owner, index, mode, parameter, float bits.
+# SOURCE_SERIALIZED_FILE_HEX contains a generated no-TypeTree SerializedFile before processing; SOURCE_YAML uses frozen YamlWalker with raw PPtr identities.
+SOURCE_SERIALIZED_FILE_HEX|00000040000006680000000A0000006000000000323032322E332E3066310013000000010000005B000000000000000000000000000000010000001027000000000000040600005B0000005B00000000000000000000000000000000000000001B0000004E6573746564205374617465204D616368696E6520536F757263650000000000010000000000000000000000000000000000000000000000000000005F518660000000000000803F010000000100000004000000010000000100000001000000B0E59C380000000000000000327500000000000000000000C4C8E1650000803E0000003E0000403F00010000000000000100000000000000000000002B1A167C00000000079F36AC00000000000000000000000000000000000000000000803F0000000000010000010000000100000003000000F2D1E7CE0000403F0000000002000000000000000000000050F4F2FB0000803E0000003E0000403F00010000000000000100000000000000000000006BD5A32D0000000079269C3E00000000000000000000000000000000000000000000A03F0000003E0001000002000000010000000600000095E8F83700000040000000003675000000000000000000008B8A3A760000803E0000003E0000403F0101000000000000010000000100000002000000B0E59C3800000000000000003575000000000000000000004EBD94EA0000803E0000003E0000403F010100000000000001000000000000000000000020E23B680000000038A6503B00000000000000000000000000000000000000000000C03F0000803E00010000010000000100000001000000C136D6D50000000000000000347500000000000000000000A9B8E4640000803E0000003E0000403F0001000000000000010000000000000000000000ABAA54E900000000BD42904500000000000000000000000000000000000000000000E03F0000C03E00010000020000000100000001000000C136D6D50000000000000000020000000000000000000000C7C31D4E0000003F00000000000000000000000000000000000100000100000001000000C136D6D50000000000000000367500000000000000000000B3B0C2780000003F00000000000000000000000000000000000100000800000002000000327500000100000001000000B0E59C38000000000000000000000000000000005F51866001000000000000005F518660000000000200000034750000010000000600000095E8F83700000040000000000100000000000000933AA3A701000000010000000000000000000000933AA3A70000000002000000020000000100000003000000F2D1E7CE0000403F00000000010000000000000015C27E990100000002000000030000000100000003000000F2D1E7CE0000403F00000000337500000000000015C27E990000000002000000347500000100000001000000C136D6D5000000000000000003000000000000008F2A1E2E0100000002000000327500000100000001000000B0E59C38000000000000000031750000000000008F2A1E2E00000000000000000000000004000000F2D1E7CE0100000000000000B0E59C38040000000000000095E8F8370300000000000000C136D6D50900000001000000000000000000000000000000010000000000803E010000000200000002000000010000001500000000000000000000005F5186600400000042617365F2D1E7CE050000005370656564000000B0E59C38060000004D6F76696E67000095E8F837040000004D6F6465C136D6D5070000005472696767657200079F36AC09000000426173652E49646C650000002B1A167C0400000049646C6579269C3E19000000426173652E4C6F636F6D6F74696F6E2E446565702E57616C6B0000006BD5A32D0400000057616C6B38A6503B18000000426173652E4C6F636F6D6F74696F6E2E446565702E52756E20E23B680300000052756E00BD42904511000000426173652E436F6D6261742E5265616479000000ABAA54E9050000005265616479000000C4C8E1650F000000456E7465724C6F636F6D6F74696F6E0050F4F2FB0900000057616C6B546F52756E0000008B8A3A760B000000456E746572436F6D626174004EBD94EA080000004578697444656570A9B8E4640C00000052657475726E546F44656570C7C31D4E08000000416E79546F52756EB3B0C2780B000000416E79546F436F6D62617400000000000000000000000000000000000000000000000000
+INPUT_STATE|0|Base.Idle|AC369F07
+INPUT_STATE|1|Base.Locomotion.Deep.Walk|3E9C2679
+INPUT_STATE|2|Base.Locomotion.Deep.Run|3B50A638
+INPUT_STATE|3|Base.Combat.Ready|459042BD
+INPUT_SELECTOR|0|Base|entry
+INPUT_SELECTOR_DESTINATION|0|0|30002
+INPUT_SELECTOR_DESTINATION|0|1|0
+INPUT_SELECTOR|1|Base|exit
+INPUT_SELECTOR|2|Base.Locomotion|entry
+INPUT_SELECTOR_DESTINATION|2|0|30004
+INPUT_SELECTOR_DESTINATION|2|1|1
+INPUT_SELECTOR|3|Base.Locomotion|exit
+INPUT_SELECTOR_DESTINATION|3|0|0
+INPUT_SELECTOR|4|Base.Locomotion.Deep|entry
+INPUT_SELECTOR_DESTINATION|4|0|2
+INPUT_SELECTOR_DESTINATION|4|1|1
+INPUT_SELECTOR|5|Base.Locomotion.Deep|exit
+INPUT_SELECTOR_DESTINATION|5|0|3
+INPUT_SELECTOR_DESTINATION|5|1|30003
+INPUT_SELECTOR|6|Base.Combat|entry
+INPUT_SELECTOR_DESTINATION|6|0|30004
+INPUT_SELECTOR_DESTINATION|6|1|3
+INPUT_SELECTOR|7|Base.Combat|exit
+INPUT_SELECTOR_DESTINATION|7|0|30002
+INPUT_SELECTOR_DESTINATION|7|1|30001
+MACHINE|Base|name|Base
+MACHINE|Base|parent|
+MACHINE|Base|serializedVersion|6
+MACHINE|Base|default|Base.Idle
+MACHINE|Base|stateCount|1
+MACHINE|Base|machineCount|2
+MACHINE|Base|entryCount|1
+MACHINE|Base|anyCount|2
+MACHINE|Base|exitGroupCount|1
+CHILD_STATE|Base|Base.Idle|00000000|00000000|00000000
+STATE|Base.Idle|speed|3F800000
+STATE|Base.Idle|cycleOffset|00000000
+TRANSITION|STATE:Base.Idle:0|class|1101
+TRANSITION|STATE:Base.Idle:0|serializedVersion|3
+TRANSITION|STATE:Base.Idle:0|name|EnterLocomotion
+TRANSITION|STATE:Base.Idle:0|destinationState|
+TRANSITION|STATE:Base.Idle:0|destinationStateMachine|Base.Locomotion
+TRANSITION|STATE:Base.Idle:0|isExit|False
+CONDITION|STATE:Base.Idle:0|0|1|Moving|00000000
+TRANSITION|STATE:Base.Idle:0|TransitionDuration|3E800000
+TRANSITION|STATE:Base.Idle:0|TransitionOffset|3E000000
+TRANSITION|STATE:Base.Idle:0|ExitTime|3F400000
+TRANSITION|STATE:Base.Idle:0|HasExitTime|False
+TRANSITION|STATE:Base.Idle:0|HasFixedDuration|True
+TRANSITION|STATE:Base.Idle:0|InterruptionSource|0
+TRANSITION|STATE:Base.Idle:0|OrderedInterruption|True
+TRANSITION|STATE:Base.Idle:0|CanTransitionToSelf|False
+TRANSITION|ENTRY:Base:0|class|1109
+TRANSITION|ENTRY:Base:0|serializedVersion|1
+TRANSITION|ENTRY:Base:0|name|
+TRANSITION|ENTRY:Base:0|destinationState|
+TRANSITION|ENTRY:Base:0|destinationStateMachine|Base.Locomotion
+TRANSITION|ENTRY:Base:0|isExit|False
+CONDITION|ENTRY:Base:0|0|1|Moving|00000000
+TRANSITION|ANY:Base:0|class|1101
+TRANSITION|ANY:Base:0|serializedVersion|3
+TRANSITION|ANY:Base:0|name|AnyToRun
+TRANSITION|ANY:Base:0|destinationState|Base.Locomotion.Deep.Run
+TRANSITION|ANY:Base:0|destinationStateMachine|
+TRANSITION|ANY:Base:0|isExit|False
+CONDITION|ANY:Base:0|0|1|Trigger|00000000
+TRANSITION|ANY:Base:0|TransitionDuration|3F000000
+TRANSITION|ANY:Base:0|TransitionOffset|00000000
+TRANSITION|ANY:Base:0|ExitTime|00000000
+TRANSITION|ANY:Base:0|HasExitTime|False
+TRANSITION|ANY:Base:0|HasFixedDuration|False
+TRANSITION|ANY:Base:0|InterruptionSource|0
+TRANSITION|ANY:Base:0|OrderedInterruption|False
+TRANSITION|ANY:Base:0|CanTransitionToSelf|True
+TRANSITION|ANY:Base:1|class|1101
+TRANSITION|ANY:Base:1|serializedVersion|3
+TRANSITION|ANY:Base:1|name|AnyToCombat
+TRANSITION|ANY:Base:1|destinationState|
+TRANSITION|ANY:Base:1|destinationStateMachine|Base.Combat
+TRANSITION|ANY:Base:1|isExit|False
+CONDITION|ANY:Base:1|0|1|Trigger|00000000
+TRANSITION|ANY:Base:1|TransitionDuration|3F000000
+TRANSITION|ANY:Base:1|TransitionOffset|00000000
+TRANSITION|ANY:Base:1|ExitTime|00000000
+TRANSITION|ANY:Base:1|HasExitTime|False
+TRANSITION|ANY:Base:1|HasFixedDuration|False
+TRANSITION|ANY:Base:1|InterruptionSource|0
+TRANSITION|ANY:Base:1|OrderedInterruption|False
+TRANSITION|ANY:Base:1|CanTransitionToSelf|True
+EXIT_GROUP|Base|Base.Combat|2
+TRANSITION|EXIT:Base:Base.Combat:0|class|1109
+TRANSITION|EXIT:Base:Base.Combat:0|serializedVersion|1
+TRANSITION|EXIT:Base:Base.Combat:0|name|
+TRANSITION|EXIT:Base:Base.Combat:0|destinationState|
+TRANSITION|EXIT:Base:Base.Combat:0|destinationStateMachine|Base.Locomotion
+TRANSITION|EXIT:Base:Base.Combat:0|isExit|False
+CONDITION|EXIT:Base:Base.Combat:0|0|1|Moving|00000000
+TRANSITION|EXIT:Base:Base.Combat:1|class|1109
+TRANSITION|EXIT:Base:Base.Combat:1|serializedVersion|1
+TRANSITION|EXIT:Base:Base.Combat:1|name|
+TRANSITION|EXIT:Base:Base.Combat:1|destinationState|
+TRANSITION|EXIT:Base:Base.Combat:1|destinationStateMachine|
+TRANSITION|EXIT:Base:Base.Combat:1|isExit|True
+CHILD_MACHINE|Base|Base.Locomotion|437A0000|00000000|00000000
+MACHINE|Base.Locomotion|name|Locomotion
+MACHINE|Base.Locomotion|parent|Base
+MACHINE|Base.Locomotion|serializedVersion|6
+MACHINE|Base.Locomotion|default|Base.Locomotion.Deep.Walk
+MACHINE|Base.Locomotion|stateCount|0
+MACHINE|Base.Locomotion|machineCount|1
+MACHINE|Base.Locomotion|entryCount|1
+MACHINE|Base.Locomotion|anyCount|0
+MACHINE|Base.Locomotion|exitGroupCount|1
+TRANSITION|ENTRY:Base.Locomotion:0|class|1109
+TRANSITION|ENTRY:Base.Locomotion:0|serializedVersion|1
+TRANSITION|ENTRY:Base.Locomotion:0|name|
+TRANSITION|ENTRY:Base.Locomotion:0|destinationState|
+TRANSITION|ENTRY:Base.Locomotion:0|destinationStateMachine|Base.Locomotion.Deep
+TRANSITION|ENTRY:Base.Locomotion:0|isExit|False
+CONDITION|ENTRY:Base.Locomotion:0|0|6|Mode|40000000
+EXIT_GROUP|Base.Locomotion|Base.Locomotion.Deep|2
+TRANSITION|EXIT:Base.Locomotion:Base.Locomotion.Deep:0|class|1109
+TRANSITION|EXIT:Base.Locomotion:Base.Locomotion.Deep:0|serializedVersion|1
+TRANSITION|EXIT:Base.Locomotion:Base.Locomotion.Deep:0|name|
+TRANSITION|EXIT:Base.Locomotion:Base.Locomotion.Deep:0|destinationState|Base.Combat.Ready
+TRANSITION|EXIT:Base.Locomotion:Base.Locomotion.Deep:0|destinationStateMachine|
+TRANSITION|EXIT:Base.Locomotion:Base.Locomotion.Deep:0|isExit|False
+CONDITION|EXIT:Base.Locomotion:Base.Locomotion.Deep:0|0|3|Speed|3F400000
+TRANSITION|EXIT:Base.Locomotion:Base.Locomotion.Deep:1|class|1109
+TRANSITION|EXIT:Base.Locomotion:Base.Locomotion.Deep:1|serializedVersion|1
+TRANSITION|EXIT:Base.Locomotion:Base.Locomotion.Deep:1|name|
+TRANSITION|EXIT:Base.Locomotion:Base.Locomotion.Deep:1|destinationState|
+TRANSITION|EXIT:Base.Locomotion:Base.Locomotion.Deep:1|destinationStateMachine|
+TRANSITION|EXIT:Base.Locomotion:Base.Locomotion.Deep:1|isExit|True
+CHILD_MACHINE|Base.Locomotion|Base.Locomotion.Deep|00000000|00000000|00000000
+MACHINE|Base.Locomotion.Deep|name|Deep
+MACHINE|Base.Locomotion.Deep|parent|Base.Locomotion
+MACHINE|Base.Locomotion.Deep|serializedVersion|6
+MACHINE|Base.Locomotion.Deep|default|Base.Locomotion.Deep.Walk
+MACHINE|Base.Locomotion.Deep|stateCount|2
+MACHINE|Base.Locomotion.Deep|machineCount|0
+MACHINE|Base.Locomotion.Deep|entryCount|1
+MACHINE|Base.Locomotion.Deep|anyCount|0
+MACHINE|Base.Locomotion.Deep|exitGroupCount|0
+CHILD_STATE|Base.Locomotion.Deep|Base.Locomotion.Deep.Walk|00000000|00000000|00000000
+STATE|Base.Locomotion.Deep.Walk|speed|3FA00000
+STATE|Base.Locomotion.Deep.Walk|cycleOffset|3E000000
+TRANSITION|STATE:Base.Locomotion.Deep.Walk:0|class|1101
+TRANSITION|STATE:Base.Locomotion.Deep.Walk:0|serializedVersion|3
+TRANSITION|STATE:Base.Locomotion.Deep.Walk:0|name|WalkToRun
+TRANSITION|STATE:Base.Locomotion.Deep.Walk:0|destinationState|Base.Locomotion.Deep.Run
+TRANSITION|STATE:Base.Locomotion.Deep.Walk:0|destinationStateMachine|
+TRANSITION|STATE:Base.Locomotion.Deep.Walk:0|isExit|False
+CONDITION|STATE:Base.Locomotion.Deep.Walk:0|0|3|Speed|3F400000
+TRANSITION|STATE:Base.Locomotion.Deep.Walk:0|TransitionDuration|3E800000
+TRANSITION|STATE:Base.Locomotion.Deep.Walk:0|TransitionOffset|3E000000
+TRANSITION|STATE:Base.Locomotion.Deep.Walk:0|ExitTime|3F400000
+TRANSITION|STATE:Base.Locomotion.Deep.Walk:0|HasExitTime|False
+TRANSITION|STATE:Base.Locomotion.Deep.Walk:0|HasFixedDuration|True
+TRANSITION|STATE:Base.Locomotion.Deep.Walk:0|InterruptionSource|0
+TRANSITION|STATE:Base.Locomotion.Deep.Walk:0|OrderedInterruption|True
+TRANSITION|STATE:Base.Locomotion.Deep.Walk:0|CanTransitionToSelf|False
+CHILD_STATE|Base.Locomotion.Deep|Base.Locomotion.Deep.Run|437A0000|00000000|00000000
+STATE|Base.Locomotion.Deep.Run|speed|3FC00000
+STATE|Base.Locomotion.Deep.Run|cycleOffset|3E800000
+TRANSITION|STATE:Base.Locomotion.Deep.Run:0|class|1101
+TRANSITION|STATE:Base.Locomotion.Deep.Run:0|serializedVersion|3
+TRANSITION|STATE:Base.Locomotion.Deep.Run:0|name|EnterCombat
+TRANSITION|STATE:Base.Locomotion.Deep.Run:0|destinationState|
+TRANSITION|STATE:Base.Locomotion.Deep.Run:0|destinationStateMachine|Base.Combat
+TRANSITION|STATE:Base.Locomotion.Deep.Run:0|isExit|False
+CONDITION|STATE:Base.Locomotion.Deep.Run:0|0|6|Mode|40000000
+TRANSITION|STATE:Base.Locomotion.Deep.Run:0|TransitionDuration|3E800000
+TRANSITION|STATE:Base.Locomotion.Deep.Run:0|TransitionOffset|3E000000
+TRANSITION|STATE:Base.Locomotion.Deep.Run:0|ExitTime|3F400000
+TRANSITION|STATE:Base.Locomotion.Deep.Run:0|HasExitTime|True
+TRANSITION|STATE:Base.Locomotion.Deep.Run:0|HasFixedDuration|True
+TRANSITION|STATE:Base.Locomotion.Deep.Run:0|InterruptionSource|0
+TRANSITION|STATE:Base.Locomotion.Deep.Run:0|OrderedInterruption|True
+TRANSITION|STATE:Base.Locomotion.Deep.Run:0|CanTransitionToSelf|False
+TRANSITION|STATE:Base.Locomotion.Deep.Run:1|class|1101
+TRANSITION|STATE:Base.Locomotion.Deep.Run:1|serializedVersion|3
+TRANSITION|STATE:Base.Locomotion.Deep.Run:1|name|ExitDeep
+TRANSITION|STATE:Base.Locomotion.Deep.Run:1|destinationState|
+TRANSITION|STATE:Base.Locomotion.Deep.Run:1|destinationStateMachine|
+TRANSITION|STATE:Base.Locomotion.Deep.Run:1|isExit|True
+CONDITION|STATE:Base.Locomotion.Deep.Run:1|0|2|Moving|00000000
+TRANSITION|STATE:Base.Locomotion.Deep.Run:1|TransitionDuration|3E800000
+TRANSITION|STATE:Base.Locomotion.Deep.Run:1|TransitionOffset|3E000000
+TRANSITION|STATE:Base.Locomotion.Deep.Run:1|ExitTime|3F400000
+TRANSITION|STATE:Base.Locomotion.Deep.Run:1|HasExitTime|True
+TRANSITION|STATE:Base.Locomotion.Deep.Run:1|HasFixedDuration|True
+TRANSITION|STATE:Base.Locomotion.Deep.Run:1|InterruptionSource|0
+TRANSITION|STATE:Base.Locomotion.Deep.Run:1|OrderedInterruption|True
+TRANSITION|STATE:Base.Locomotion.Deep.Run:1|CanTransitionToSelf|False
+TRANSITION|ENTRY:Base.Locomotion.Deep:0|class|1109
+TRANSITION|ENTRY:Base.Locomotion.Deep:0|serializedVersion|1
+TRANSITION|ENTRY:Base.Locomotion.Deep:0|name|
+TRANSITION|ENTRY:Base.Locomotion.Deep:0|destinationState|Base.Locomotion.Deep.Run
+TRANSITION|ENTRY:Base.Locomotion.Deep:0|destinationStateMachine|
+TRANSITION|ENTRY:Base.Locomotion.Deep:0|isExit|False
+CONDITION|ENTRY:Base.Locomotion.Deep:0|0|3|Speed|3F400000
+CHILD_MACHINE|Base|Base.Combat|00000000|42C80000|00000000
+MACHINE|Base.Combat|name|Combat
+MACHINE|Base.Combat|parent|Base
+MACHINE|Base.Combat|serializedVersion|6
+MACHINE|Base.Combat|default|Base.Combat.Ready
+MACHINE|Base.Combat|stateCount|1
+MACHINE|Base.Combat|machineCount|0
+MACHINE|Base.Combat|entryCount|1
+MACHINE|Base.Combat|anyCount|0
+MACHINE|Base.Combat|exitGroupCount|0
+CHILD_STATE|Base.Combat|Base.Combat.Ready|00000000|00000000|00000000
+STATE|Base.Combat.Ready|speed|3FE00000
+STATE|Base.Combat.Ready|cycleOffset|3EC00000
+TRANSITION|STATE:Base.Combat.Ready:0|class|1101
+TRANSITION|STATE:Base.Combat.Ready:0|serializedVersion|3
+TRANSITION|STATE:Base.Combat.Ready:0|name|ReturnToDeep
+TRANSITION|STATE:Base.Combat.Ready:0|destinationState|
+TRANSITION|STATE:Base.Combat.Ready:0|destinationStateMachine|Base.Locomotion.Deep
+TRANSITION|STATE:Base.Combat.Ready:0|isExit|False
+CONDITION|STATE:Base.Combat.Ready:0|0|1|Trigger|00000000
+TRANSITION|STATE:Base.Combat.Ready:0|TransitionDuration|3E800000
+TRANSITION|STATE:Base.Combat.Ready:0|TransitionOffset|3E000000
+TRANSITION|STATE:Base.Combat.Ready:0|ExitTime|3F400000
+TRANSITION|STATE:Base.Combat.Ready:0|HasExitTime|False
+TRANSITION|STATE:Base.Combat.Ready:0|HasFixedDuration|True
+TRANSITION|STATE:Base.Combat.Ready:0|InterruptionSource|0
+TRANSITION|STATE:Base.Combat.Ready:0|OrderedInterruption|True
+TRANSITION|STATE:Base.Combat.Ready:0|CanTransitionToSelf|False
+TRANSITION|ENTRY:Base.Combat:0|class|1109
+TRANSITION|ENTRY:Base.Combat:0|serializedVersion|1
+TRANSITION|ENTRY:Base.Combat:0|name|
+TRANSITION|ENTRY:Base.Combat:0|destinationState|
+TRANSITION|ENTRY:Base.Combat:0|destinationStateMachine|Base.Locomotion.Deep
+TRANSITION|ENTRY:Base.Combat:0|isExit|False
+CONDITION|ENTRY:Base.Combat:0|0|1|Trigger|00000000
+SOURCE_OBJECT|1|1102|Base.Idle
+SOURCE_OBJECT|2|1102|Base.Locomotion.Deep.Walk
+SOURCE_OBJECT|3|1102|Base.Locomotion.Deep.Run
+SOURCE_OBJECT|4|1102|Base.Combat.Ready
+SOURCE_OBJECT|5|1107|Base
+SOURCE_OBJECT|6|1107|Base.Locomotion
+SOURCE_OBJECT|7|1107|Base.Locomotion.Deep
+SOURCE_OBJECT|8|1107|Base.Combat
+SOURCE_OBJECT|9|1101|STATE:Base.Idle:0
+SOURCE_OBJECT|10|1101|STATE:Base.Locomotion.Deep.Walk:0
+SOURCE_OBJECT|11|1101|STATE:Base.Locomotion.Deep.Run:0
+SOURCE_OBJECT|12|1101|STATE:Base.Locomotion.Deep.Run:1
+SOURCE_OBJECT|13|1101|STATE:Base.Combat.Ready:0
+SOURCE_OBJECT|14|1101|ANY:Base:0
+SOURCE_OBJECT|15|1101|ANY:Base:1
+SOURCE_OBJECT|16|1109|ENTRY:Base:0
+SOURCE_OBJECT|17|1109|ENTRY:Base.Locomotion:0
+SOURCE_OBJECT|18|1109|ENTRY:Base.Locomotion.Deep:0
+SOURCE_OBJECT|19|1109|ENTRY:Base.Combat:0
+SOURCE_OBJECT|20|1109|EXIT:Base.Locomotion:Base.Locomotion.Deep:0
+SOURCE_OBJECT|21|1109|EXIT:Base.Locomotion:Base.Locomotion.Deep:1
+SOURCE_OBJECT|22|1109|EXIT:Base:Base.Combat:0
+SOURCE_OBJECT|23|1109|EXIT:Base:Base.Combat:1
+SOURCE_OBJECT|10000|91|controller
+SOURCE_YAML_BEGIN
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!1102 &1
+AnimatorState:
+  serializedVersion: 6
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: Idle
+  m_Speed: 1
+  m_CycleOffset: 0
+  m_Transitions:
+  - {m_FileID: 0, m_PathID: 9, m_TargetClassID: 1101}
+  m_StateMachineBehaviours: []
+  m_Position: {x: 0, y: 0, z: 0}
+  m_IKOnFeet: 0
+  m_WriteDefaultValues: 1
+  m_Mirror: 0
+  m_SpeedParameterActive: 0
+  m_MirrorParameterActive: 0
+  m_CycleOffsetParameterActive: 0
+  m_TimeParameterActive: 0
+  m_Motion: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 207}
+  m_Tag:
+  m_SpeedParameter:
+  m_MirrorParameter:
+  m_CycleOffsetParameter:
+  m_TimeParameter:
+--- !u!1102 &2
+AnimatorState:
+  serializedVersion: 6
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: Walk
+  m_Speed: 1.25
+  m_CycleOffset: 0.125
+  m_Transitions:
+  - {m_FileID: 0, m_PathID: 10, m_TargetClassID: 1101}
+  m_StateMachineBehaviours: []
+  m_Position: {x: 0, y: 0, z: 0}
+  m_IKOnFeet: 0
+  m_WriteDefaultValues: 1
+  m_Mirror: 0
+  m_SpeedParameterActive: 0
+  m_MirrorParameterActive: 0
+  m_CycleOffsetParameterActive: 0
+  m_TimeParameterActive: 0
+  m_Motion: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 207}
+  m_Tag:
+  m_SpeedParameter:
+  m_MirrorParameter:
+  m_CycleOffsetParameter:
+  m_TimeParameter:
+--- !u!1102 &3
+AnimatorState:
+  serializedVersion: 6
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: Run
+  m_Speed: 1.5
+  m_CycleOffset: 0.25
+  m_Transitions:
+  - {m_FileID: 0, m_PathID: 11, m_TargetClassID: 1101}
+  - {m_FileID: 0, m_PathID: 12, m_TargetClassID: 1101}
+  m_StateMachineBehaviours: []
+  m_Position: {x: 250, y: 0, z: 0}
+  m_IKOnFeet: 0
+  m_WriteDefaultValues: 1
+  m_Mirror: 0
+  m_SpeedParameterActive: 0
+  m_MirrorParameterActive: 0
+  m_CycleOffsetParameterActive: 0
+  m_TimeParameterActive: 0
+  m_Motion: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 207}
+  m_Tag:
+  m_SpeedParameter:
+  m_MirrorParameter:
+  m_CycleOffsetParameter:
+  m_TimeParameter:
+--- !u!1102 &4
+AnimatorState:
+  serializedVersion: 6
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: Ready
+  m_Speed: 1.75
+  m_CycleOffset: 0.375
+  m_Transitions:
+  - {m_FileID: 0, m_PathID: 13, m_TargetClassID: 1101}
+  m_StateMachineBehaviours: []
+  m_Position: {x: 0, y: 0, z: 0}
+  m_IKOnFeet: 0
+  m_WriteDefaultValues: 1
+  m_Mirror: 0
+  m_SpeedParameterActive: 0
+  m_MirrorParameterActive: 0
+  m_CycleOffsetParameterActive: 0
+  m_TimeParameterActive: 0
+  m_Motion: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 207}
+  m_Tag:
+  m_SpeedParameter:
+  m_MirrorParameter:
+  m_CycleOffsetParameter:
+  m_TimeParameter:
+--- !u!1107 &5
+AnimatorStateMachine:
+  serializedVersion: 6
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: Base
+  m_ChildStates:
+  - m_State: {m_FileID: 0, m_PathID: 1, m_TargetClassID: 1102}
+    m_Position: {x: 0, y: 0, z: 0}
+  m_ChildStateMachines:
+  - m_StateMachine: {m_FileID: 0, m_PathID: 6, m_TargetClassID: 1107}
+    m_Position: {x: 250, y: 0, z: 0}
+  - m_StateMachine: {m_FileID: 0, m_PathID: 8, m_TargetClassID: 1107}
+    m_Position: {x: 0, y: 100, z: 0}
+  m_AnyStateTransitions:
+  - {m_FileID: 0, m_PathID: 14, m_TargetClassID: 1101}
+  - {m_FileID: 0, m_PathID: 15, m_TargetClassID: 1101}
+  m_EntryTransitions:
+  - {m_FileID: 0, m_PathID: 16, m_TargetClassID: 1109}
+  m_StateMachineTransitions:
+  - first: {m_FileID: 0, m_PathID: 8, m_TargetClassID: 1107}
+    second:
+    - {m_FileID: 0, m_PathID: 22, m_TargetClassID: 1109}
+    - {m_FileID: 0, m_PathID: 23, m_TargetClassID: 1109}
+  m_StateMachineBehaviours: []
+  m_AnyStatePosition: {x: 0, y: -100, z: 0}
+  m_EntryPosition: {x: 250, y: -100, z: 0}
+  m_ExitPosition: {x: 500, y: -100, z: 0}
+  m_ParentStateMachinePosition: {x: 0, y: -200, z: 0}
+  m_DefaultState: {m_FileID: 0, m_PathID: 1, m_TargetClassID: 1102}
+--- !u!1107 &6
+AnimatorStateMachine:
+  serializedVersion: 6
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: Locomotion
+  m_ChildStates: []
+  m_ChildStateMachines:
+  - m_StateMachine: {m_FileID: 0, m_PathID: 7, m_TargetClassID: 1107}
+    m_Position: {x: 0, y: 0, z: 0}
+  m_AnyStateTransitions: []
+  m_EntryTransitions:
+  - {m_FileID: 0, m_PathID: 17, m_TargetClassID: 1109}
+  m_StateMachineTransitions:
+  - first: {m_FileID: 0, m_PathID: 7, m_TargetClassID: 1107}
+    second:
+    - {m_FileID: 0, m_PathID: 20, m_TargetClassID: 1109}
+    - {m_FileID: 0, m_PathID: 21, m_TargetClassID: 1109}
+  m_StateMachineBehaviours: []
+  m_AnyStatePosition: {x: 0, y: -100, z: 0}
+  m_EntryPosition: {x: 250, y: -100, z: 0}
+  m_ExitPosition: {x: 500, y: -100, z: 0}
+  m_ParentStateMachinePosition: {x: 0, y: -200, z: 0}
+  m_DefaultState: {m_FileID: 0, m_PathID: 2, m_TargetClassID: 1102}
+--- !u!1107 &7
+AnimatorStateMachine:
+  serializedVersion: 6
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: Deep
+  m_ChildStates:
+  - m_State: {m_FileID: 0, m_PathID: 2, m_TargetClassID: 1102}
+    m_Position: {x: 0, y: 0, z: 0}
+  - m_State: {m_FileID: 0, m_PathID: 3, m_TargetClassID: 1102}
+    m_Position: {x: 250, y: 0, z: 0}
+  m_ChildStateMachines: []
+  m_AnyStateTransitions: []
+  m_EntryTransitions:
+  - {m_FileID: 0, m_PathID: 18, m_TargetClassID: 1109}
+  m_StateMachineTransitions: {}
+  m_StateMachineBehaviours: []
+  m_AnyStatePosition: {x: 0, y: -100, z: 0}
+  m_EntryPosition: {x: 250, y: -100, z: 0}
+  m_ExitPosition: {x: 500, y: -100, z: 0}
+  m_ParentStateMachinePosition: {x: 0, y: -200, z: 0}
+  m_DefaultState: {m_FileID: 0, m_PathID: 2, m_TargetClassID: 1102}
+--- !u!1107 &8
+AnimatorStateMachine:
+  serializedVersion: 6
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: Combat
+  m_ChildStates:
+  - m_State: {m_FileID: 0, m_PathID: 4, m_TargetClassID: 1102}
+    m_Position: {x: 0, y: 0, z: 0}
+  m_ChildStateMachines: []
+  m_AnyStateTransitions: []
+  m_EntryTransitions:
+  - {m_FileID: 0, m_PathID: 19, m_TargetClassID: 1109}
+  m_StateMachineTransitions: {}
+  m_StateMachineBehaviours: []
+  m_AnyStatePosition: {x: 0, y: -100, z: 0}
+  m_EntryPosition: {x: 250, y: -100, z: 0}
+  m_ExitPosition: {x: 500, y: -100, z: 0}
+  m_ParentStateMachinePosition: {x: 0, y: -200, z: 0}
+  m_DefaultState: {m_FileID: 0, m_PathID: 4, m_TargetClassID: 1102}
+--- !u!1101 &9
+AnimatorStateTransition:
+  serializedVersion: 3
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: EnterLocomotion
+  m_Conditions:
+  - m_ConditionMode: 1
+    m_ConditionEvent: Moving
+    m_EventTreshold: 0
+  m_DstStateMachine: {m_FileID: 0, m_PathID: 6, m_TargetClassID: 1107}
+  m_DstState: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1102}
+  m_Solo: 0
+  m_Mute: 0
+  m_IsExit: 0
+  m_TransitionDuration: 0.25
+  m_TransitionOffset: 0.125
+  m_ExitTime: 0.75
+  m_HasExitTime: 0
+  m_HasFixedDuration: 1
+  m_InterruptionSource: 0
+  m_OrderedInterruption: 1
+  m_CanTransitionToSelf: 0
+--- !u!1101 &10
+AnimatorStateTransition:
+  serializedVersion: 3
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: WalkToRun
+  m_Conditions:
+  - m_ConditionMode: 3
+    m_ConditionEvent: Speed
+    m_EventTreshold: 0.75
+  m_DstStateMachine: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1107}
+  m_DstState: {m_FileID: 0, m_PathID: 3, m_TargetClassID: 1102}
+  m_Solo: 0
+  m_Mute: 0
+  m_IsExit: 0
+  m_TransitionDuration: 0.25
+  m_TransitionOffset: 0.125
+  m_ExitTime: 0.75
+  m_HasExitTime: 0
+  m_HasFixedDuration: 1
+  m_InterruptionSource: 0
+  m_OrderedInterruption: 1
+  m_CanTransitionToSelf: 0
+--- !u!1101 &11
+AnimatorStateTransition:
+  serializedVersion: 3
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: EnterCombat
+  m_Conditions:
+  - m_ConditionMode: 6
+    m_ConditionEvent: Mode
+    m_EventTreshold: 2
+  m_DstStateMachine: {m_FileID: 0, m_PathID: 8, m_TargetClassID: 1107}
+  m_DstState: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1102}
+  m_Solo: 0
+  m_Mute: 0
+  m_IsExit: 0
+  m_TransitionDuration: 0.25
+  m_TransitionOffset: 0.125
+  m_ExitTime: 0.75
+  m_HasExitTime: 1
+  m_HasFixedDuration: 1
+  m_InterruptionSource: 0
+  m_OrderedInterruption: 1
+  m_CanTransitionToSelf: 0
+--- !u!1101 &12
+AnimatorStateTransition:
+  serializedVersion: 3
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: ExitDeep
+  m_Conditions:
+  - m_ConditionMode: 2
+    m_ConditionEvent: Moving
+    m_EventTreshold: 0
+  m_DstStateMachine: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1107}
+  m_DstState: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1102}
+  m_Solo: 0
+  m_Mute: 0
+  m_IsExit: 1
+  m_TransitionDuration: 0.25
+  m_TransitionOffset: 0.125
+  m_ExitTime: 0.75
+  m_HasExitTime: 1
+  m_HasFixedDuration: 1
+  m_InterruptionSource: 0
+  m_OrderedInterruption: 1
+  m_CanTransitionToSelf: 0
+--- !u!1101 &13
+AnimatorStateTransition:
+  serializedVersion: 3
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: ReturnToDeep
+  m_Conditions:
+  - m_ConditionMode: 1
+    m_ConditionEvent: Trigger
+    m_EventTreshold: 0
+  m_DstStateMachine: {m_FileID: 0, m_PathID: 7, m_TargetClassID: 1107}
+  m_DstState: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1102}
+  m_Solo: 0
+  m_Mute: 0
+  m_IsExit: 0
+  m_TransitionDuration: 0.25
+  m_TransitionOffset: 0.125
+  m_ExitTime: 0.75
+  m_HasExitTime: 0
+  m_HasFixedDuration: 1
+  m_InterruptionSource: 0
+  m_OrderedInterruption: 1
+  m_CanTransitionToSelf: 0
+--- !u!1101 &14
+AnimatorStateTransition:
+  serializedVersion: 3
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: AnyToRun
+  m_Conditions:
+  - m_ConditionMode: 1
+    m_ConditionEvent: Trigger
+    m_EventTreshold: 0
+  m_DstStateMachine: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1107}
+  m_DstState: {m_FileID: 0, m_PathID: 3, m_TargetClassID: 1102}
+  m_Solo: 0
+  m_Mute: 0
+  m_IsExit: 0
+  m_TransitionDuration: 0.5
+  m_TransitionOffset: 0
+  m_ExitTime: 0
+  m_HasExitTime: 0
+  m_HasFixedDuration: 0
+  m_InterruptionSource: 0
+  m_OrderedInterruption: 0
+  m_CanTransitionToSelf: 1
+--- !u!1101 &15
+AnimatorStateTransition:
+  serializedVersion: 3
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: AnyToCombat
+  m_Conditions:
+  - m_ConditionMode: 1
+    m_ConditionEvent: Trigger
+    m_EventTreshold: 0
+  m_DstStateMachine: {m_FileID: 0, m_PathID: 8, m_TargetClassID: 1107}
+  m_DstState: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1102}
+  m_Solo: 0
+  m_Mute: 0
+  m_IsExit: 0
+  m_TransitionDuration: 0.5
+  m_TransitionOffset: 0
+  m_ExitTime: 0
+  m_HasExitTime: 0
+  m_HasFixedDuration: 0
+  m_InterruptionSource: 0
+  m_OrderedInterruption: 0
+  m_CanTransitionToSelf: 1
+--- !u!1109 &16
+AnimatorTransition:
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name:
+  m_Conditions:
+  - m_ConditionMode: 1
+    m_ConditionEvent: Moving
+    m_EventTreshold: 0
+  m_DstStateMachine: {m_FileID: 0, m_PathID: 6, m_TargetClassID: 1107}
+  m_DstState: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1102}
+  m_Solo: 0
+  m_Mute: 0
+  m_IsExit: 0
+--- !u!1109 &17
+AnimatorTransition:
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name:
+  m_Conditions:
+  - m_ConditionMode: 6
+    m_ConditionEvent: Mode
+    m_EventTreshold: 2
+  m_DstStateMachine: {m_FileID: 0, m_PathID: 7, m_TargetClassID: 1107}
+  m_DstState: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1102}
+  m_Solo: 0
+  m_Mute: 0
+  m_IsExit: 0
+--- !u!1109 &18
+AnimatorTransition:
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name:
+  m_Conditions:
+  - m_ConditionMode: 3
+    m_ConditionEvent: Speed
+    m_EventTreshold: 0.75
+  m_DstStateMachine: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1107}
+  m_DstState: {m_FileID: 0, m_PathID: 3, m_TargetClassID: 1102}
+  m_Solo: 0
+  m_Mute: 0
+  m_IsExit: 0
+--- !u!1109 &19
+AnimatorTransition:
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name:
+  m_Conditions:
+  - m_ConditionMode: 1
+    m_ConditionEvent: Trigger
+    m_EventTreshold: 0
+  m_DstStateMachine: {m_FileID: 0, m_PathID: 7, m_TargetClassID: 1107}
+  m_DstState: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1102}
+  m_Solo: 0
+  m_Mute: 0
+  m_IsExit: 0
+--- !u!1109 &20
+AnimatorTransition:
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name:
+  m_Conditions:
+  - m_ConditionMode: 3
+    m_ConditionEvent: Speed
+    m_EventTreshold: 0.75
+  m_DstStateMachine: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1107}
+  m_DstState: {m_FileID: 0, m_PathID: 4, m_TargetClassID: 1102}
+  m_Solo: 0
+  m_Mute: 0
+  m_IsExit: 0
+--- !u!1109 &21
+AnimatorTransition:
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name:
+  m_Conditions: []
+  m_DstStateMachine: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1107}
+  m_DstState: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1102}
+  m_Solo: 0
+  m_Mute: 0
+  m_IsExit: 1
+--- !u!1109 &22
+AnimatorTransition:
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name:
+  m_Conditions:
+  - m_ConditionMode: 1
+    m_ConditionEvent: Moving
+    m_EventTreshold: 0
+  m_DstStateMachine: {m_FileID: 0, m_PathID: 6, m_TargetClassID: 1107}
+  m_DstState: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1102}
+  m_Solo: 0
+  m_Mute: 0
+  m_IsExit: 0
+--- !u!1109 &23
+AnimatorTransition:
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name:
+  m_Conditions: []
+  m_DstStateMachine: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1107}
+  m_DstState: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1102}
+  m_Solo: 0
+  m_Mute: 0
+  m_IsExit: 1
+--- !u!91 &10000
+AnimatorController:
+  serializedVersion: 5
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 18}
+  m_PrefabInstance: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001}
+  m_PrefabAsset: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 1001480554}
+  m_Name: Nested State Machine Source
+  m_AnimatorParameters:
+  - m_Name: Speed
+    m_Type: 1
+    m_DefaultFloat: 0.25
+    m_DefaultInt: 0
+    m_DefaultBool: 0
+    m_Controller: {m_FileID: 0, m_PathID: 10000, m_TargetClassID: 91}
+  - m_Name: Moving
+    m_Type: 4
+    m_DefaultFloat: 0
+    m_DefaultInt: 0
+    m_DefaultBool: 1
+    m_Controller: {m_FileID: 0, m_PathID: 10000, m_TargetClassID: 91}
+  - m_Name: Mode
+    m_Type: 3
+    m_DefaultFloat: 0
+    m_DefaultInt: 2
+    m_DefaultBool: 0
+    m_Controller: {m_FileID: 0, m_PathID: 10000, m_TargetClassID: 91}
+  - m_Name: Trigger
+    m_Type: 9
+    m_DefaultFloat: 0
+    m_DefaultInt: 0
+    m_DefaultBool: 0
+    m_Controller: {m_FileID: 0, m_PathID: 10000, m_TargetClassID: 91}
+  m_AnimatorLayers:
+  - serializedVersion: 5
+    m_Name: Base
+    m_StateMachine: {m_FileID: 0, m_PathID: 5, m_TargetClassID: 1107}
+    m_Mask: {m_FileID: 0, m_PathID: 0, m_TargetClassID: 319}
+    m_Motions: []
+    m_Behaviours: []
+    m_BlendingMode: 0
+    m_SyncedLayerIndex: -1
+    m_DefaultWeight: 1
+    m_IKPass: 1
+    m_SyncedLayerAffectsTiming: 0
+    m_Controller: {m_FileID: 0, m_PathID: 10000, m_TargetClassID: 91}
+SOURCE_YAML_END

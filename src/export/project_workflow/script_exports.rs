@@ -215,29 +215,44 @@ pub(super) fn plan_saved_assembly_exports(
             "saved assembly export requires a source reference map for this mscorlib configuration",
         )
     })?;
-    let mut exports = Vec::new();
-    exports
-        .try_reserve_exact(catalog.assemblies().len())
-        .map_err(|_| invalid_project("could not allocate saved assembly export plans"))?;
-    for assembly in catalog.assemblies() {
+    let mut exports = plan_manager_assembly_exports(catalog)?;
+    let mut filtered = Vec::new();
+    filtered
+        .try_reserve_exact(exports.len())
+        .map_err(|_| invalid_project("could not allocate selected assembly export plans"))?;
+    for export in exports.drain(..) {
         let is_reference = reference_assembly_maps
-            .guid_for(&version, &assembly.assembly_name)
-            .map_err(|error| {
-                invalid_project(format!(
-                    "assembly {:?} reference lookup failed: {error}",
-                    assembly.assembly_name
-                ))
-            })?
+            .guid_for(&version, &export.assembly_name)?
             .is_some();
         if assembly_export_type(
             is_reference,
             true,
             settings.script_export_mode,
-            &assembly.assembly_name,
-        ) != AssemblyExportType::Save
+            &export.assembly_name,
+        ) == AssemblyExportType::Save
         {
-            continue;
+            filtered.push(export);
         }
+    }
+    Ok(filtered)
+}
+
+/// Every assembly retained by the imported manager, independent of script mode
+/// or whether an individual MonoScript references it. Forwarders belong to the
+/// manager output as well as to the optional Plugins export.
+pub(super) fn plan_manager_assembly_exports(
+    catalog: &ManagedAssemblyCatalog,
+) -> Result<Vec<SavedAssemblyExport>, Box<dyn Error>> {
+    let mut exports = Vec::new();
+    let capacity = catalog
+        .assemblies()
+        .len()
+        .checked_add(2)
+        .ok_or_else(|| invalid_project("manager assembly export count overflows"))?;
+    exports
+        .try_reserve_exact(capacity)
+        .map_err(|_| invalid_project("could not allocate saved assembly export plans"))?;
+    for assembly in catalog.assemblies() {
         let source_virtual_path = assembly.source_virtual_path.clone().ok_or_else(|| {
             invalid_project(format!(
                 "saved assembly {:?} has no source VFS stream",
@@ -265,19 +280,6 @@ pub(super) fn plan_saved_assembly_exports(
             if catalog.assembly(helper_name).is_some() {
                 continue;
             }
-            let is_reference = reference_assembly_maps
-                .guid_for(&version, helper_name)
-                .map_err(|error| {
-                    invalid_project(format!(
-                        "forwarding assembly {helper_name:?} reference lookup failed: {error}"
-                    ))
-                })?
-                .is_some();
-            if assembly_export_type(is_reference, true, settings.script_export_mode, helper_name)
-                != AssemblyExportType::Save
-            {
-                continue;
-            }
             let file_name = add_assembly_file_extension(helper_name);
             exports.push(SavedAssemblyExport {
                 assembly_name: helper_name.to_owned(),
@@ -289,4 +291,53 @@ pub(super) fn plan_saved_assembly_exports(
         }
     }
     Ok(exports)
+}
+
+pub(super) fn materialize_assembly_export(
+    filesystem: &VirtualFileSystem,
+    assembly: &SavedAssemblyExport,
+    maximum_bytes: usize,
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    let input_bytes = filesystem
+        .read_all_bytes(
+            &assembly.source_virtual_path,
+            maximum_bytes.min(ManagedAssemblyLimits::default().max_file_bytes),
+        )
+        .map_err(|error| {
+            invalid_project(format!(
+                "managed assembly {:?} could not be read from {}: {error}",
+                assembly.assembly_name, assembly.source_virtual_path,
+            ))
+        })?;
+    let file_name = add_assembly_file_extension(&assembly.assembly_name);
+    let limits = ManagedAssemblyLimits {
+        max_file_bytes: maximum_bytes.min(ManagedAssemblyLimits::default().max_file_bytes),
+        ..ManagedAssemblyLimits::default()
+    };
+    let serialized = match assembly.generated_forwarder.as_deref() {
+        Some("System.Runtime.CompilerServices.Unsafe") => ManagedAssembly::create_unsafe_forwarder(
+            &assembly.source_virtual_path,
+            &input_bytes,
+            limits,
+        ),
+        Some("System.Runtime.InteropServices") => {
+            ManagedAssembly::create_interop_services_forwarder(
+                &assembly.source_virtual_path,
+                &input_bytes,
+                limits,
+            )
+        }
+        Some(name) => {
+            return Err(invalid_project(format!(
+                "unknown synthesized forwarding assembly {name:?}"
+            )))
+        }
+        None => ManagedAssembly::serialize_for_export(&file_name, &input_bytes, limits),
+    };
+    serialized.map_err(|error| {
+        invalid_project(format!(
+            "managed assembly {:?} could not be exported from {}: {error}",
+            assembly.assembly_name, assembly.source_virtual_path,
+        ))
+    })
 }

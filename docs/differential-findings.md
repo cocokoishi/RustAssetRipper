@@ -905,9 +905,9 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Source location | AssetRipper.Import/Structure/Assembly/Serializable/SerializableStructure.cs; TypeTrees/SerializableTreeType.cs (ToPrimititeType, IsString, AlignBytes); SerializableValue.cs (ReadUtf8StringAligned, per-field Align) |
 | Input evidence | Probe Temp/opencode/objfieldprobe (shipped Import DLL, SDK 10.0.401) reading one VALUES file plus one ARRAYS file. Committed as src/serialized_file/object_field_fixture.txt (9 lines). |
 | Source-derived behavior | All scalar, string, nested, and array values reproduce; string nodes need Array children; strings self-align; byte vectors align with AlignBytes plus pad. |
-| Root cause | No value deviation found. One latent rule difference noted: Rust aligns some arrays by Unity-version rule where the source uses the per-field AlignBytes flag; realistic files (flag plus pad together, or neither) agree on both sides. |
-| Rust change | src/serialized_file/object.rs tests object_scalar_string_nested_fields_match_reference and object_string_nested_empty_arrays_match_reference; fixture src/serialized_file/object_field_fixture.txt. No production change. |
-| Regression evidence | Both files reproduce every field on both sides; full suite 1370 plus 60 pass with warnings-denied Clippy. |
+| Root cause | Source evidence pins ordinary byte-vector fields as Array<U8>. Using the compact Bytes form for those in-limit arrays changes the decoded value shape. Large direct byte vectors also need bounded compact storage to avoid per-byte enum allocation. |
+| Rust change | src/serialized_file/object/codec.rs preserves Array<U8> for arrays within max_array_elements and uses Bytes only for direct char/UInt8 arrays above that element limit; the byte count is still charged to the decoded-allocation budget and checked against remaining payload. The object-field source fixture remains the semantic oracle. |
+| Regression evidence | object_scalar_string_nested_fields_match_reference and object_string_nested_empty_arrays_match_reference reproduce source field shapes; compact_u8_vectors_fit_a_byte_sized_decode_budget_and_roundtrip verifies over-limit compact representation and exact payload round-trip. Full workspace suite passed with 1,598 library tests and 124 CLI tests (one library test ignored). |
 | Remaining comparison | Managed-reference payloads, enum/generated semantics, fixed buffers, and unusual engine layouts stay with their rows; the full version/flag alignment matrix stays open. |
 
 ## DIFF-SER-OBJW-001 - Object encode and file rewrite
@@ -1939,7 +1939,7 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Remaining scope | The product route supports this bounded class-23 MeshRenderer LightingData path with no MeshFilter or one unambiguous MeshFilter/Mesh target. Its Mesh `.meta` matches source, including `mainObjectFileID: 4300000`. The other 17 source-generated renderer class IDs, static-batch GameObject flag propagation, custom TagManager-backed tags, other Light versions and mixed baking-output cases, Terrain arrays, Prefab-owned lighting data, and other Scene editor-format/version paths remain open under `PROC-SCENE-001`; this bounded source evidence does not close that row. No Unity Editor import/runtime validation was run. |
 | Evidence | `tools/probes/managed-project/ManagedProjectProbe_TextureLighting.cs`; `tools/probes/managed-project/Program.cs`; `src/export/lightmap_project_source_5_6_renderer_fixture.txt`; `src/export/project_workflow/collection_planning.rs`; `src/export/project_workflow/lighting_asset.rs`; `src/export/project_workflow/workspace_identity.rs`; `src/main_tests_05.rs`; `docs/feature-parity.md`; `docs/phase1-closure-inventory.md`; `docs/validation-log.md`. |
 
-## DIFF-ANIMATION-WORKSPACE-CONVERTER-001 ? serialized clip conversion input
+## DIFF-ANIMATION-WORKSPACE-CONVERTER-001 — serialized clip conversion input
 
 | Field | Finding |
 |---|---|
@@ -1949,7 +1949,7 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Remaining scope | This source-probe fixture continues to use its test scene table; production workspace scene facts and YAML serialization are covered separately by `DIFF-ANIMATION-PROJECT-EXPORT-001`. Unity dynamic sampling is unrun. |
 | Evidence | `src/resources/animation/animation_workspace_fixture.assets`; `src/resources/animation/clip_convert_fixture.txt`; `src/resources/animation/serialized_clip.rs`; `src/resources/animation/converter_fixture.rs`; `tools/probes/anim-convert/Program.cs`; `docs/feature-parity.md`; `docs/validation-log.md`. |
 
-## DIFF-ANIMATION-WORKSPACE-EXISTING-CURVES-001 ? existing curve preservation
+## DIFF-ANIMATION-WORKSPACE-EXISTING-CURVES-001 — existing curve preservation
 
 | Field | Finding |
 |---|---|
@@ -1960,7 +1960,7 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Remaining scope | This specific converter fixture still uses its source-probe scene table; the production graph-to-project path and Unity YAML curve writer are covered separately by `DIFF-ANIMATION-PROJECT-EXPORT-001`, and one external MonoScript binding is source-compared under `DIFF-ANIMATION-EXTERNAL-SCRIPT-001`. Broader pointer/file-index cases and Unity dynamic sampling remain open. |
 | Evidence | `tools/probes/anim-convert/Program.cs`; `src/resources/animation/animation_workspace_existing_curves_fixture.assets`; `src/resources/animation/clip_convert_existing_curves_fixture.txt`; `src/resources/animation/serialized_clip.rs`; `src/resources/animation/converter_fixture.rs`; `docs/feature-parity.md`; `docs/validation-log.md`. |
 
-## DIFF-ANIMATION-PROJECT-EXPORT-001 ? processed AnimationClip reaches Unity project YAML
+## DIFF-ANIMATION-PROJECT-EXPORT-001 — processed AnimationClip reaches Unity project YAML
 
 | Field | Finding |
 |---|---|
@@ -1970,7 +1970,8 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Regression evidence | `source_generated_workspace_builds_animation_roots_and_hierarchy_paths` calls full `export_workspace_yaml_project_with_settings` on `animation_workspace_existing_curves_fixture.assets`, uses workspace-derived hierarchy/avatar/TOS and Mesh/Material facts, compares the complete converter output with the frozen AssetRipper rows, finds the emitted `.anim`, checks the converted `Arm` curve plus Euler/PPtr curve arrays, and round-trips the converted clip value tree. |
 | Remaining scope | This source-generated Unity 2022.3 fixture now compares the complete source and Rust `.anim` after normalizing output GUIDs through each project's `.meta` paths; the files match line-for-line (905 lines). The independent external Script identity projection remains bounded to one assembly and one input edge. Unity import/dynamic sampling, broader managed Script and pointer cases, remaining AnimatorController/state-machine processing, and other version branches remain open. No feature row is closed by this finding. |
 | Evidence | `src/export/anim_wiring.rs`; `src/resources/animation/serialized_clip.rs`; `src/export/project_workflow/export.rs`; `src/export/project_workflow/planning.rs`; `src/export/workspace_yaml/object_conversion.rs`; `src/resources/animation/animation_workspace_existing_curves_fixture.assets`; `src/resources/animation/clip_convert_existing_curves_fixture.txt`; `docs/feature-parity.md`; `docs/validation-log.md`. |
-## DIFF-ANIMATION-MANAGED-SCRIPT-PATHS-001 ? Unity 2022.3 MonoScript checksum fields
+
+## DIFF-ANIMATION-MANAGED-SCRIPT-PATHS-001 — Unity 2022.3 MonoScript checksum fields
 
 | Field | Finding |
 |---|---|
@@ -1981,7 +1982,7 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Remaining scope | A source-authored script-bound AnimationClip with external `fileID=1, PathID=7` is now exercised and its emitted curve identity is compared under `DIFF-ANIMATION-EXTERNAL-SCRIPT-001`. Wider assembly/script coverage, other pointer/file-index cases, other source version branches, and Unity dynamic sampling remain open; this finding does not close the feature row. |
 | Evidence | `src/export/anim_wiring.rs`; `src/processing/managed_assembly_schema.rs`; `src/processing/managed_assembly_path_checksum_2022_3_fixture.txt`; `tools/probes/managed-project/ManagedProjectProbe_Schema.cs`; `tools/probes/managed-project/Program.cs`; `docs/feature-parity.md`; `docs/validation-log.md`. |
 
-## DIFF-ANIMATION-EXTERNAL-SCRIPT-001 ? external MonoScript binding in Unity 2022.3 project export
+## DIFF-ANIMATION-EXTERNAL-SCRIPT-001 — external MonoScript binding in Unity 2022.3 project export
 
 | Field | Finding |
 |---|---|
@@ -2089,3 +2090,72 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Rust change | The compressed scene range is read as a bounded stream, the size-prefixed LZMA decoder writes directly to temporary-file backing under the declared output limit, only the bounded directory prefix is buffered, and entry ranges are copied in fixed-size chunks before dispatch. |
 | Regression evidence | `source_unityweb_nested_webdata_mounts_file_backed_through_both_path_apis` replays the frozen row through both production APIs and compares parent/scope metadata, entry order and paths, exact bytes, file-backed output, and source-file release. `decodes_sharpcompress_encoded_size_prefixed_payloads` exercises the writer decoder against independent AssetRipper SharpCompress vectors and checks the output cap. |
 | Remaining comparison | This removes the full compressed-scene and decompressed-scene `Vec` allocations from the file-backed mount route. Other UnityRaw/UnityWeb nested branches, parser paths that need contiguous bytes, and Unix retained-reader runtime validation remain open under `IO-STREAM-001` / `IO-FS-IMPORT-PRESERVE-DIRECTORY-001`. |
+
+## DIFF-ANIMATOR-BLENDTREE-1D-2022-001 — Unity 2022.3 simple 1D BlendTree projection
+
+| Field | Finding |
+|---|---|
+| Source location | `Source/AssetRipper.Processing/AnimatorControllers/VirtualAnimationFactory.cs` (`CreateBlendTree`, `AddAndInitializeNewChild`) and generated `BlendTree_2018_3` / `ChildMotion_5` APIs |
+| Input evidence | A reference-runtime probe constructs a Unity 2022.3.0f1 AnimatorController, two AnimationClips, and a two-child Simple1D `BlendTreeNodeConstant`. The frozen output projection is committed as `src/resources/animator_blendtree_source_2022_3_fixture.txt` (SHA-256 `956F2050901BB6EE100B6A973BEC85D6FF2376616A64F9B87FF6B032F7B35DF2`). |
+| Source-derived behavior | AssetRipper creates a class-ID-206 BlendTree with serialized version 1 and `HideInHierarchy`, resolves the blend event through TOS, emits min/max thresholds, and creates ordered version-2 ChildMotion records. Child time scales are reciprocals of clip durations; cycle offsets and mirror flags come from the corresponding leaf nodes. |
+| Rust change | The 2022.3 project route reconstructs BlendTree and ChildMotion YAML subassets from the packed state constants, maps leaf clip pointers from the controller clip list, and preserves BlendTree references from AnimatorState. Cyclic or invalid node indexes fail with errors. BlendTree reconstruction outside Unity 2022.3 remains explicitly unsupported pending version-specific evidence. |
+| Regression evidence | `simple_1d_blend_tree_matches_frozen_source_runtime_projection` compares the reconstructed field projection to the frozen runtime fixture and independently checks that each child motion points to the corresponding supplied clip YAML identity. |
+| Remaining comparison | This verifies one Unity 2022.3 Simple1D BlendTree projection, not a full `.controller` project export. Nested state-machine hierarchy, 2D/direct BlendTrees, AnimatorController-wide source YAML comparison, and Unity Editor dynamic sampling remain open under `RES-ANIM-001`. |
+
+## DIFF-ANIMATOR-NESTED-BLENDTREE-1D-2022-001 — Unity 2022.3 nested Simple1D BlendTree projection
+
+| Field | Finding |
+|---|---|
+| Source location | `Source/AssetRipper.Processing/AnimatorControllers/VirtualAnimationFactory.cs` (`CreateMotion`, `CreateBlendTree`, `AddAndInitializeNewChild`) and generated `BlendTree_2018_3` / `ChildMotion_5` APIs |
+| Input evidence | A reference-runtime probe constructs a Unity 2022.3.0f1 parent Simple1D tree, one nested Simple1D child, distinct blend parameters, and three clip leaves. The parent and nested projections are committed as `src/resources/animator_nested_blendtree_source_2022_3_fixture.txt` (SHA-256 `B24EA9D3A3B9966E33576F38019BCC79479C84A443406CBB13F3B9187A661235`). |
+| Source-derived behavior | The parent ChildMotion points to a recursively generated BlendTree, uses time scale 1 and mirror false, and retains the nested node cycle offset. The nested tree retains its own blend parameter, thresholds, ordered clip motions, reciprocal duration time scales, cycle offsets, and mirror flags. |
+| Rust change | Recursive controller motion export emits each BlendTree as a separate class-ID-206 document and uses its generated local fileID from the parent ChildMotion. Leaf motions continue to point to their original AnimationClip document identities. |
+| Regression evidence | `nested_simple_1d_blend_tree_matches_frozen_source_runtime_projection` matches all 26 source projection rows and checks that the parent targets the nested document while nested children target the second and third supplied clip identities in order. |
+| Remaining comparison | This covers one Unity 2022.3 nested Simple1D graph, not complete controller export. Nested state-machine hierarchy, 2D/direct BlendTrees, other version branches, full `.controller` source YAML comparison, and Unity Editor dynamic sampling remain open under `RES-ANIM-001`. |
+
+## DIFF-ANIMATOR-NESTED-STATE-MACHINE-2022-001 — packed controller hierarchy to Unity project
+
+| Field | Finding |
+|---|---|
+| Source location | Frozen `AnimatorControllerProcessor.Process`, `AnimatorStateContext`, `AnimatorStateMachineContext`, `VirtualAnimationFactory`, and `YamlWalker` |
+| Input evidence | `animator_nested_state_machine_source_2022_3_fixture.txt` contains source-authored Unity 2022.3.0f1 release SerializedFile bytes without TypeTree, projections, object identities and all 24 source YAML documents; SHA-256 `E2EE06FF89D32C85DC25B8DE75A840DE88665A9992A8B27F062C3369B64BDB02`. Source-authored 24-object NoTarget editor input is `animator_nested_state_machine_editor_source_2022_3_input.hex`, SHA-256 `C170EE11FB131C9AE304BEFD84DD908A66FC9CB65FDE5A517EC48EEA8D810A16`. |
+| Rust change and evidence | Release project export reconstructs four nested machines and four globally indexed states, entry/default transitions, parent-owned child exits, suppressed default exits, root AnyState and editor positions. All 24 exported YAML objects match source after mapping local identities and raw source PPtr rendering. Regressions also verify synced-layer ownership, reserved root fileID, invalid destinations, and preservation of the source-authored editor hierarchy. |
+| Remaining comparison | Controller behaviours, shared-controller claims/cloning, editor hierarchy collection grouping, legacy and other version branches, other BlendTree types and Unity runtime sampling remain open under `PROC-ANIM-001` / `RES-ANIM-001`. |
+
+## DIFF-ANIMATOR-EMPTY-STATE-MACHINE-2022-001 — empty path and parent recovery
+
+| Field | Finding |
+|---|---|
+| Source location | `AnimatorStateMachineContext`: definitive exit parents, parent restrictions, state/selector proposals, linked-parent sharing, fallback, `GenerateFullPathsForUnknownStateMachines`; `Crc32Algorithm.ReverseUTF8` |
+| Input evidence | The same frozen runtime probe adds seven unknown empty selector groups without their path strings in TOS, a Chinese root, and discriminating transition connections. `animator_empty_state_machine_source_2022_3_fixture.txt` SHA-256 `0E727E28ADCEA9D60A735B0376BF07D0682CAD9475FA8A6E19D9F641576D119A` contains independent no-TypeTree input, hierarchy projections and all 41 source YAML documents. |
+| Rust change and evidence | Product export now infers definitive/possible parents in source order, enforces direct/subtree restrictions, shares deepest known parents, generates CRC-preserving UTF-8 `EMPTY_` paths, and reproduces source Extra StateMachine/New State fallback. All 41 project YAML documents and projected graph fields match source. Cyclic definitive parents fail closed; the generated default state does not expand valid packed destination indices. |
+| Difference found and fixed | The first focused execution exposed missing Extra StateMachine layout: source `SetChildrenPositions` visits it explicitly. Its generated default state now participates in the child count and grid; source expectations were unchanged. |
+| Remaining comparison | Controllers without any states but with nested selectors remain explicit errors; wider controller/version coverage and the unresolved domains above are not claimed complete. |
+
+## DIFF-ANIMATOR-BEHAVIOUR-COLLECTIONS-2022-001 — behaviour bindings and controller ownership
+
+| Field | Finding |
+|---|---|
+| Source | `AnimatorControllerExtensions.GetStateBehaviours` / `FetchEditorHierarchy`, `VirtualAnimationFactory`, `AnimatorControllerExportCollection`, `GameAssetFactory.ReadMonoBehaviour`, `UnloadedStructure.LoadStructure`, and `Pass108_WalkMethods.GetName`. |
+| Independent input | `AnimConvertProbe.dll controller-behaviour-state-machine` produces no-TypeTree release/editor inputs and complete source YAML; `controller-shared-editor-state-machine` authors a second controller sharing the same editor graph. Behaviour fixture SHA-256: `9417A557B01B8FEAE29A3F54860EC5533A3288B18825286D19FEBF12A79728A2`; shared editor input: `6CEAC47D83C738B200A7E808E138D1CAD36C1222A8ABF62C839FF42DD01EE238`. Regenerating the source projection retains the same hash. |
+| Implementation | Compiled layer/state ranges select ordered behaviour slots; states retain explicit null slots and machines omit them. Selected behaviours join the controller collection. Editor controllers retain their complete existing hierarchy. Shared members have collection-local copies and canonical external identities. Preparation and pointer registration remain bounded; rejected copy batches do not partially change mappings. Generated animation members retain their original serialized YAML names. |
+| Recovery correction | Initial materialization still preserves source `UnloadedStructure`, as required by the frozen generated-default matrix. An explicit later step resolves only a null-script header with no unread bytes, and rebuilds affected reference scans from bounded decoded object values without rereading a complete file. Only exact repaired factory failures are removed; earlier scan limits and unrelated failures remain explicit. |
+| Evidence | Full YAML comparison covers the 26-document behaviour graph, all 24 existing editor documents, and both complete 26-document shared editor outputs after local identity mapping. CLI export covers release, editor and shared inputs, checks all local targets, distinct metadata GUIDs and unchanged input. Tests retain overflow, non-null-script, unread-byte, earlier-scan-limit and allocation-limit rejection. |
+| Remaining | This does not establish the complete native ExportHandler shared-release cloning behavior, state-free nested selector reconstruction, other version/controller branches, or Unity runtime sampling. `PROC-ANIM-001` / `RES-ANIM-001` remain open. |
+
+## DIFF-GENERATED-EDITOR-SETTINGS-PROJECT-001 — generated project configuration output
+
+| Field | Finding |
+|---|---|
+| Source | `SceneDefinitionProcessor.Process` always creates EditorSettings; `EditorSettingsExtensions.SetToDefaults` sets only available generated properties; `ManagerExportCollection` writes anchor 1 without an importer sidecar. |
+| Existing evidence | Reuses `audio_project_stream_source_2019_4_fixture.txt` and `texture_project_source_2022_3_fixture.txt`; no existing source output was changed. Source-runtime enum inspection confirms Generic=1, AssetPipeline Version2=1, CacheServer AsPreferences=0 and the two play-mode flags 1/2. |
+| Implementation and validation | Project export constructs the editor layout from frozen TPK data, applies the existing settings model, writes `ProjectSettings/EditorSettings.asset`, and replaces imported settings at that destination without duplicate paths. Complete bytes match source for Unity 2019.4.40f1 and 2022.3.22f1. The existing inline/streamed texture CLI cases now compare EditorSettings and the entire source output file inventory as well as all previously checked artifacts. |
+| Remaining | Conditional StreamingAssets/GameAssemblies, other generated settings, complete settings application and Unity Editor import remain open under `EXPORT-UNITY-001`. Phase 1 remains OPEN; no user VRChat bundle or UABEA input was accessed. |
+
+## DIFF-PROJECT-CONDITIONAL-OUTPUTS-001 — original StreamingAssets and manager assemblies
+
+- Source: frozen `Project/StreamingAssetsPostExporter.cs`, `Scripts/DllPostExporter.cs`, `BaseManager.GetStreamForAssembly` / `ClearStreamCache`, and the platform StreamingAssets paths. The previous product path omitted both conditional output families.
+- Implementation: the planner retains bounded original stream ranges and directories; the writer copies in 64 KiB chunks with add-only, confined paths. The CLI keeps an original physical tree separately from the expanded processing VFS, including wrapper bytes, physical split parts and empty directories. Auxiliary GameAssemblies saves all catalog assemblies independently of MonoScript references or script export mode, with no `.meta`; Plugins output is reused when available. PE serialization still requires bounded contiguous buffers.
+- Settings: the project CLI retains serialized import/export records rather than dropping Import. StreamingAssetsMode controls post-export copying and platform inventory; ScriptContentLevel.Level0 disables the manager. Other import/processing integration, including filtering before recursive mounting, remains open.
+- Independent evidence: `tools/probes/managed-project/ManagedProjectProbe_PostExport.cs` calls the frozen post-exporters on generic inputs and an existing managed assembly. `src/export/post_export_source_2022_3_fixture.txt` captures original bytes, directories, all conditional skips, and the source-saved assembly (SHA-256 `7F433BEF9948E2B5DAE3FC4C686B591C2ABF6DCA184B1A7CD2B5BFA823C0E949`). Rust compares copied bytes/directories and the saved assembly identity/type/field model. A CLI project regression exercises Extract, persisted Ignore, and disabled scripts while preserving every original input.
+- Fail-closed checks: entry/aggregate-byte limits do not read copied payloads; path escapes, reserved Windows names, sidecar collisions and file-as-directory conflicts are rejected before consented output-root deletion. This closes the bounded conditional-output gap; source-manager dependency closure, all assembly processors, broader exporters and Unity runtime acceptance remain unclosed. Phase 1 is OPEN; no user AssetBundle was accessed.

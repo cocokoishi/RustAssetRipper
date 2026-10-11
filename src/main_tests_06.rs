@@ -905,6 +905,7 @@
                 "Assets/Texture2D/Texture2D.texture2D.meta".to_owned(),
                 "AuxiliaryFiles/path_id_map.json".to_owned(),
                 "Packages/manifest.json".to_owned(),
+                "ProjectSettings/EditorSettings.asset".to_owned(),
                 "ProjectSettings/ProjectSettings.asset".to_owned(),
                 "ProjectSettings/ProjectVersion.txt".to_owned(),
             ],
@@ -1298,4 +1299,206 @@
                 .map(|path| output_root.join(path)),
         );
         drop(input);
+    }
+
+    #[test]
+    fn export_project_preserves_original_streaming_tree_and_unreferenced_manager_assembly() {
+        let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
+        let fixture = include_str!("export/post_export_source_2022_3_fixture.txt");
+        let decode_hex = |hex: &str| {
+            hex.as_bytes()
+                .chunks_exact(2)
+                .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+                .collect::<Vec<_>>()
+        };
+        let directory = TestInputDirectory::new_root();
+        let game = directory.join("game");
+        let data = game.join("game_Data");
+        let streaming = data.join("StreamingAssets");
+        let managed = data.join("Managed");
+        fs::create_dir_all(&streaming).unwrap();
+        fs::create_dir(&managed).unwrap();
+        let mut input = TestInputDirectory {
+            directory,
+            files: Vec::new(),
+            subdirectories: vec![
+                game.clone(),
+                data.clone(),
+                streaming.clone(),
+                managed.clone(),
+            ],
+        };
+        let executable = game.join("game.exe");
+        fs::write(&executable, b"generic executable marker").unwrap();
+        input.files.push(executable);
+        let texture_fixture = include_str!("export/texture_project_source_2022_3_fixture.txt");
+        let texture_hex = texture_fixture
+            .lines()
+            .find_map(|line| line.strip_prefix("INPUT_HEX|"))
+            .unwrap()
+            .split_once('|')
+            .unwrap()
+            .1;
+        let texture = data.join("globalgamemanagers.assets");
+        fs::write(&texture, decode_hex(texture_hex)).unwrap();
+        input.files.push(texture);
+        let assembly = managed.join("FixtureScripts.dll");
+        fs::write(
+            &assembly,
+            include_bytes!("processing/managed_assembly_fixture.dll"),
+        )
+        .unwrap();
+        input.files.push(assembly.clone());
+        for line in fixture.lines() {
+            if let Some(path) = line.strip_prefix("INPUT_DIR|") {
+                let path = streaming.join(path);
+                fs::create_dir_all(&path).unwrap();
+                input.subdirectories.push(path);
+            } else if let Some(file) = line.strip_prefix("INPUT_FILE|") {
+                let (path, hex) = file.split_once('|').unwrap();
+                let path = streaming.join(path);
+                fs::write(&path, decode_hex(hex)).unwrap();
+                input.files.push(path);
+            }
+        }
+        let original = input
+            .files
+            .iter()
+            .map(|path| (path.clone(), fs::read(path).unwrap()))
+            .collect::<Vec<_>>();
+        for (ignore, disable_scripts) in [(false, false), (true, false), (false, true)] {
+            let output = input.directory.join(match (ignore, disable_scripts) {
+                (true, _) => "ignored-project",
+                (_, true) => "scripts-disabled-project",
+                _ => "copied-project",
+            });
+            let mut settings =
+                assetripper::export::settings_file::SerializedSettingsFile::from_defaults(
+                    Default::default(),
+                    Default::default(),
+                    Default::default(),
+                );
+            settings.export.image_export_format = assetripper::export::settings::ImageExportFormat::Bmp;
+            settings.import.streaming_assets_mode = if ignore {
+                assetripper::export::settings::StreamingAssetsMode::Ignore
+            } else {
+                assetripper::export::settings::StreamingAssetsMode::Extract
+            };
+            if disable_scripts {
+                settings.import.script_content_level =
+                    assetripper::export::settings::ScriptContentLevel::Level0;
+            }
+            if ignore {
+                let settings_path = input.directory.join("ignore.Settings.json");
+                fs::write(
+                    &settings_path,
+                    assetripper::export::settings_file::write_settings_file(&settings).unwrap(),
+                )
+                .unwrap();
+                input.files.push(settings_path.clone());
+                super::export_project_from_arguments(
+                    [
+                        output.as_os_str().to_owned(),
+                        std::ffi::OsString::from("--settings"),
+                        settings_path.as_os_str().to_owned(),
+                        game.as_os_str().to_owned(),
+                    ]
+                    .into_iter(),
+                )
+                .unwrap();
+            } else {
+                super::export_project_to_with_serialized_settings(
+                    &[game.clone()],
+                    &output,
+                    false,
+                    &settings,
+                    &mut Vec::new(),
+                )
+                .unwrap();
+            }
+            assert!(output
+                .join("ProjectSettings/EditorSettings.asset")
+                .is_file());
+            assert_eq!(output.join("Assets/StreamingAssets").exists(), !ignore);
+            for line in fixture.lines() {
+                if let Some(file) =
+                    line.strip_prefix("SOURCE_FILE|extract|ExportedProject/Assets/StreamingAssets/")
+                {
+                    let (path, hex) = file.split_once('|').unwrap();
+                    if !ignore {
+                        assert_eq!(
+                            fs::read(output.join("Assets/StreamingAssets").join(path)).unwrap(),
+                            decode_hex(hex),
+                            "source bytes for {path}"
+                        );
+                    }
+                } else if let Some(path) =
+                    line.strip_prefix("SOURCE_DIR|extract|ExportedProject/Assets/StreamingAssets/")
+                {
+                    if !ignore {
+                        assert!(output.join("Assets/StreamingAssets").join(path).is_dir());
+                    }
+                }
+            }
+            if disable_scripts {
+                assert!(!output.join("AuxiliaryFiles/GameAssemblies").exists());
+            } else {
+                let saved =
+                    fs::read(output.join("AuxiliaryFiles/GameAssemblies/FixtureScripts.dll")).unwrap();
+                let source_saved_hex = fixture
+                    .lines()
+                    .find_map(|line| {
+                        line.strip_prefix(
+                            "SOURCE_FILE|extract|AuxiliaryFiles/GameAssemblies/FixtureScripts.dll|",
+                        )
+                    })
+                    .unwrap();
+                let source_saved = decode_hex(source_saved_hex);
+                let actual_model = ManagedAssembly::parse(
+                    "FixtureScripts.dll",
+                    &saved,
+                    ManagedAssemblyLimits::default(),
+                )
+                .unwrap();
+                let source_model = ManagedAssembly::parse(
+                    "FixtureScripts.dll",
+                    &source_saved,
+                    ManagedAssemblyLimits::default(),
+                )
+                .unwrap();
+                assert_eq!(actual_model.types, source_model.types);
+            }
+            assert!(
+                !output.join("Assets/Plugins/FixtureScripts.dll").exists(),
+                "an unreferenced manager assembly still has auxiliary output"
+            );
+            assert!(!output
+                .join("AuxiliaryFiles/GameAssemblies/FixtureScripts.dll.meta")
+                .exists());
+            for (path, bytes) in &original {
+                assert_eq!(
+                    &fs::read(path).unwrap(),
+                    bytes,
+                    "original {}",
+                    path.display()
+                );
+            }
+            input
+                .files
+                .extend(project_tree(&output).iter().map(|path| output.join(path)));
+            let mut pending = vec![output];
+            while let Some(path) = pending.pop() {
+                input.subdirectories.push(path.clone());
+                for entry in fs::read_dir(path).unwrap() {
+                    let entry = entry.unwrap();
+                    if entry.file_type().unwrap().is_dir() {
+                        pending.push(entry.path());
+                    }
+                }
+            }
+        }
+        // Parent-first cleanup ordering includes all copied empty directories.
+        input
+            .subdirectories
+            .sort_by_key(|path| path.components().count());
     }

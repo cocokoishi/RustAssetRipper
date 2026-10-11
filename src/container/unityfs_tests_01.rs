@@ -270,6 +270,32 @@
     }
 
     #[test]
+    fn default_entry_bound_covers_large_files_and_explicit_lower_bounds_fail_closed() {
+        let default_limits = UnityFsLimits::default();
+        assert_eq!(default_limits.max_entry_bytes, 1024 * 1024 * 1024);
+        assert_eq!(default_limits.max_block_uncompressed_bytes, 512 * 1024 * 1024);
+
+        let input = make_bundle(b"entry data", 0, false, 0);
+        let limited_bundle = UnityFsBundle::parse_with_limits(
+            &input,
+            UnityFsLimits {
+                max_entry_bytes: 4,
+                ..default_limits
+            },
+        )
+        .unwrap();
+        let error = limited_bundle.read_entry(0).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            UnityFsErrorKind::LimitExceeded {
+                resource: "bundle entry",
+                requested: 10,
+                limit: 4,
+            }
+        ));
+    }
+
+    #[test]
     fn streamed_unityfs_reader_keeps_single_uncompressed_entry_file_backed() {
         use std::sync::atomic::{AtomicU64, Ordering};
 

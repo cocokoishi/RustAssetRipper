@@ -17,7 +17,7 @@ use assetripper::export::pointer_map::{
     ProjectExportPointerMap, UnityProjectAssetType,
 };
 use assetripper::export::project_workflow::{
-    export_workspace_yaml_project_with_assembly_catalog, WorkspaceProjectExportLimits,
+    export_workspace_yaml_project_with_serialized_settings, WorkspaceProjectExportLimits,
 };
 use assetripper::export::scene_collection::{
     ExportAssetCollectionIdentity, ExportAssetIdentity, SceneExportIdAssignment,
@@ -126,7 +126,7 @@ use assetripper::serialized_file::object_workspace::{
 };
 use assetripper::serialized_file::reference_graph::{
     MultiFileObjectReference, MultiFilePPtrResolution, MultiFileReferenceGraph,
-    MultiFileReferenceGraphLimits,
+    MultiFileReferenceGraphLimits, ReferenceGraphLimits,
 };
 use assetripper::serialized_file::workspace::{
     LoadedSerializedFile, PreExpandedContainer, SerializedFileDependencyReport,

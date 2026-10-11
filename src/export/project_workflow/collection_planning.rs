@@ -113,12 +113,7 @@ pub(super) fn prepare_generated_collections(
         let renderer_inputs =
             collect_lighting_data_renderer_inputs(&scene.assignments, objects, reference_graph)?;
         let light_inputs = collect_lighting_data_light_inputs(&scene.assignments, objects)?;
-        validate_bounded_lighting_data_scene(
-            hierarchy,
-            owner_identity,
-            &scene.assignments,
-            scene_version,
-        )?;
+        validate_bounded_lighting_data_scene(hierarchy, owner_identity, &scene.assignments)?;
         let render_settings_identity =
             scene_manager_identity(hierarchy, SceneManagerKind::RenderSettings).ok_or_else(
                 || {
@@ -253,8 +248,24 @@ pub(super) fn build_project_pointer_map(
             count.checked_add(scene.assignments.len())
         })
         .ok_or_else(|| invalid_project("project pointer count overflows"))?;
-    let pointer_capacity = routed
-        .len()
+    let routed_pointer_count = routed.iter().try_fold(0usize, |count, entry| {
+        count
+            .checked_add(1)?
+            .checked_add(
+                entry
+                    .scriptable_object_group
+                    .as_ref()
+                    .map_or(0, |group| group.children.len()),
+            )?
+            .checked_add(
+                entry
+                    .controller_collection
+                    .as_ref()
+                    .map_or(0, |group| group.children.len()),
+            )
+    });
+    let pointer_capacity = routed_pointer_count
+        .ok_or_else(|| invalid_project("project pointer count overflows"))?
         .checked_add(scene_assignment_count)
         .and_then(|count| count.checked_add(lighting_data_assets.len()))
         .and_then(|count| {
@@ -264,6 +275,22 @@ pub(super) fn build_project_pointer_map(
         })
         .ok_or_else(|| invalid_project("project pointer count overflows"))?;
     let mut pointer_entries = Vec::new();
+    let mut local_copies = Vec::new();
+    let local_copy_count = routed
+        .iter()
+        .try_fold(0usize, |count, entry| {
+            count.checked_add(entry.controller_collection.as_ref().map_or(0, |group| {
+                group
+                    .children
+                    .iter()
+                    .filter(|child| !child.register_global)
+                    .count()
+            }))
+        })
+        .ok_or_else(|| invalid_project("controller-local export copy count overflows"))?;
+    local_copies
+        .try_reserve_exact(local_copy_count)
+        .map_err(|_| invalid_project("could not allocate controller-local export copies"))?;
     pointer_entries
         .try_reserve_exact(pointer_capacity)
         .map_err(|_| invalid_project("could not allocate project export pointer entries"))?;
@@ -291,7 +318,10 @@ pub(super) fn build_project_pointer_map(
             guid: entry.pointer_guid,
             asset_type: if matches!(
                 entry.route,
-                ObjectRoute::Script | ObjectRoute::ScriptPointerOnly | ObjectRoute::TextAsset
+                ObjectRoute::Script
+                    | ObjectRoute::ScriptPointerOnly
+                    | ObjectRoute::TextAsset
+                    | ObjectRoute::TextureImage
             ) {
                 UnityProjectAssetType::Meta
             } else if entry.route == ObjectRoute::EngineRedirect {
@@ -305,6 +335,46 @@ pub(super) fn build_project_pointer_map(
             file_id: entry.file_id,
             collection_index: entry.collection_index,
         });
+        if let Some(group) = &entry.scriptable_object_group {
+            pointer_entries.extend(
+                group
+                    .children
+                    .iter()
+                    .map(|child| ExportedAssetPointerEntry {
+                        asset: ExportAssetIdentity {
+                            collection: ExportAssetCollectionIdentity::SerializedFile {
+                                file_index: child.object.file_index,
+                            },
+                            object_index: child.object.object_index,
+                            path_id: child.object.path_id,
+                            class_id: child.object.factory.class_id,
+                        },
+                        file_id: child.file_id,
+                        collection_index: entry.collection_index,
+                    }),
+            );
+        }
+        if let Some(group) = &entry.controller_collection {
+            for child in &group.children {
+                let pointer = ExportedAssetPointerEntry {
+                    asset: ExportAssetIdentity {
+                        collection: ExportAssetCollectionIdentity::SerializedFile {
+                            file_index: child.object.file_index,
+                        },
+                        object_index: child.object.object_index,
+                        path_id: child.object.path_id,
+                        class_id: child.object.factory.class_id,
+                    },
+                    file_id: child.file_id,
+                    collection_index: entry.collection_index,
+                };
+                if child.register_global {
+                    pointer_entries.push(pointer);
+                } else {
+                    local_copies.push(pointer);
+                }
+            }
+        }
     }
     for scene in scenes {
         collection_count = collection_count
@@ -366,7 +436,9 @@ pub(super) fn build_project_pointer_map(
             collection_index: lighting_data.collection_index,
         });
     }
-    let pointer_map = ProjectExportPointerMap::new(&pointer_entries, &collection_metadata, limits)?;
+    let mut pointer_map =
+        ProjectExportPointerMap::new(&pointer_entries, &collection_metadata, limits)?;
+    pointer_map.register_local_copies(&local_copies, limits)?;
     Ok(ProjectPointerPlan {
         pointer_map,
         collection_count,

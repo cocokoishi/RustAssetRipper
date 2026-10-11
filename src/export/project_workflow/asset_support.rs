@@ -98,6 +98,15 @@ pub(super) fn shader_non_modifiable_textures_yaml(
                     entry.collection_index,
                 )?
             }
+            MultiFilePPtrResolution::PredefinedEngineAsset {
+                resource, path_id, ..
+            } => pointer_map.resolve(
+                ProjectPointerRequest::PredefinedEngineAsset {
+                    path_id: *path_id,
+                    resource: *resource,
+                },
+                entry.collection_index,
+            )?,
             unresolved => {
                 return Err(invalid_project(format!(
                     "ShaderImporter texture key {:?} at {expected_path:?} has unresolved input PPtr {:?}",
@@ -174,10 +183,7 @@ pub(super) fn asset_family_fallback(collection_name: &str) -> Option<&'static st
         | "ScriptableObjectGroupExportCollection"
         | "YamlStreamedAssetExportCollection"
         | "ShaderExportCollection" => None,
-        "AnimatorControllerExportCollection" => Some(
-            "the animator-controller renderer is not ported; the object was written through the \
-             generic asset family",
-        ),
+        "AnimatorControllerExportCollection" => None,
         "AudioMixerExportCollection" => Some(
             "the audio-mixer renderer is not ported; the object was written through the generic \
              asset family",
@@ -242,7 +248,9 @@ pub(super) fn validate_decoded_object(
     for reference in reference_graph.references_from_object(object.file_index, object.object_index)
     {
         match &reference.resolution {
-            MultiFilePPtrResolution::Null | MultiFilePPtrResolution::Object { .. } => {}
+            MultiFilePPtrResolution::Null
+            | MultiFilePPtrResolution::Object { .. }
+            | MultiFilePPtrResolution::PredefinedEngineAsset { .. } => {}
             unresolved => {
                 return Err(invalid_project(format!(
                     "file {} object {} PathID {path_id} has unresolved PPtr at {:?}: {unresolved:?}",

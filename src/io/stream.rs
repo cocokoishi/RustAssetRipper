@@ -331,6 +331,62 @@ enum SmartStreamBackend {
     Reader(Box<dyn ReadSeek + Send>),
     Range(FileRangeStream),
     Temporary(TemporaryFile),
+    SharedRange(SharedStreamRange),
+}
+
+/// A read-only view with its own cursor and an owning reference to the source backing.
+/// In particular, retaining a range keeps a temporary file alive until the last view drops.
+struct SharedStreamRange {
+    source: SmartStream,
+    offset: u64,
+    length: u64,
+    position: u64,
+}
+
+impl Read for SharedStreamRange {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let available = self.length.saturating_sub(self.position);
+        let count = buffer
+            .len()
+            .min(usize::try_from(available).unwrap_or(usize::MAX));
+        if count == 0 {
+            return Ok(0);
+        }
+        let offset = self.offset.checked_add(self.position).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "shared range read offset overflows",
+            )
+        })?;
+        let read = self.source.read_at(offset, &mut buffer[..count])?;
+        self.position = self.position.checked_add(read as u64).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "shared range position overflows",
+            )
+        })?;
+        Ok(read)
+    }
+}
+
+impl Seek for SharedStreamRange {
+    fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
+        // These views replace copied memory/reader ranges and temporary-file ranges, all of
+        // which use standard end-relative offsets. Only FileRangeStream mirrors the baseline
+        // RandomAccessStream's inverted end-relative seek rule.
+        let target = match from {
+            SeekFrom::Start(position) => i128::from(position),
+            SeekFrom::Current(offset) => i128::from(self.position) + i128::from(offset),
+            SeekFrom::End(offset) => i128::from(self.length) + i128::from(offset),
+        };
+        self.position = u64::try_from(target).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "shared range seek position is negative or exceeds the address space",
+            )
+        })?;
+        Ok(self.position)
+    }
 }
 
 struct TemporaryFile {
@@ -364,6 +420,7 @@ impl Read for SmartStreamBackend {
             Self::Reader(reader) => reader.read(buffer),
             Self::Range(range) => range.read(buffer),
             Self::Temporary(file) => file.file_mut()?.read(buffer),
+            Self::SharedRange(range) => range.read(buffer),
         }
     }
 }
@@ -380,7 +437,7 @@ impl Write for SmartStreamBackend {
                 io::ErrorKind::PermissionDenied,
                 "reader-backed stream is read-only",
             )),
-            Self::Range(_) => Err(io::Error::new(
+            Self::Range(_) | Self::SharedRange(_) => Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "file range stream is read-only",
             )),
@@ -398,6 +455,7 @@ impl Write for SmartStreamBackend {
             Self::Reader(_) => Ok(()),
             Self::Range(_) => Ok(()),
             Self::Temporary(file) => file.file_mut()?.flush(),
+            Self::SharedRange(_) => Ok(()),
         }
     }
 }
@@ -413,6 +471,7 @@ impl Seek for SmartStreamBackend {
             Self::Reader(reader) => reader.seek(from),
             Self::Range(range) => range.seek(from),
             Self::Temporary(file) => file.file_mut()?.seek(from),
+            Self::SharedRange(range) => range.seek(from),
         }
     }
 }
@@ -496,7 +555,8 @@ impl SmartStream {
     /// Opens a regular file or its contiguous numbered `.splitN` parts as one logical stream.
     ///
     /// Regular files retain the positional file backend so nested ranges stay file-backed;
-    /// split families use the seekable multi-file reader and copy only requested partial ranges.
+    /// split families use the seekable multi-file reader. Internal bounded views retain either
+    /// backing without copying the requested ranges.
     pub fn open_read_multi(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref();
         if let Some(base_path) = split_base_path(path) {
@@ -669,6 +729,39 @@ impl SmartStream {
         }
     }
 
+    /// A single positioned read for bounded views. Keeping the read short preserves `Read`
+    /// semantics when a generic reader supplies a part or the backing has been truncated.
+    fn read_at(&self, offset: u64, buffer: &mut [u8]) -> io::Result<usize> {
+        self.ensure_non_null()?;
+        if !self.can_read() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "stream is not readable",
+            ));
+        }
+        let buffer_length = u64::try_from(buffer.len()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "read length does not fit in u64",
+            )
+        })?;
+        offset.checked_add(buffer_length).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "absolute read range overflows")
+        })?;
+
+        let mut backend = self.lock_backend()?;
+        let original_position = backend.seek(SeekFrom::Current(0))?;
+        let result = backend
+            .seek(SeekFrom::Start(offset))
+            .and_then(|_| backend.read(buffer));
+        let restore = backend.seek(SeekFrom::Start(original_position));
+        match (result, restore) {
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Ok(read), Ok(_)) => Ok(read),
+        }
+    }
+
     /// Reads exactly into `buffer` from an absolute byte offset without changing the shared
     /// stream position. The seek and read are performed under one backend lock.
     pub fn read_exact_at(&self, offset: u64, buffer: &mut [u8]) -> io::Result<()> {
@@ -742,10 +835,12 @@ impl SmartStream {
                 io::ErrorKind::PermissionDenied,
                 "reader-backed stream is read-only",
             )),
-            SmartStreamBackend::Range(_) => Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "file range stream is read-only",
-            )),
+            SmartStreamBackend::Range(_) | SmartStreamBackend::SharedRange(_) => {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "file range stream is read-only",
+                ))
+            }
             SmartStreamBackend::Temporary(file) => file.file_mut()?.set_len(length),
         }
     }
@@ -792,6 +887,10 @@ impl SmartStream {
         self.create_partial_with_limit(offset, length, DEFAULT_MAX_PARTIAL_COPY_BYTES)
     }
 
+    /// Retain a bounded view of any seekable backing without copying its payload.
+    /// The boolean records whether the result shares the input backing (always true here),
+    /// for the existing UnityFS entry-provenance API. Public `create_partial_with_limit`
+    /// still offers its original detached-copy behavior for memory and generic readers.
     pub(crate) fn create_partial_file_backed(
         &self,
         offset: u64,
@@ -804,65 +903,59 @@ impl SmartStream {
                 "stream is not readable",
             ));
         }
-        let mut backend = self.lock_backend()?;
-        if let SmartStreamBackend::File(file) = &*backend {
-            let range = FileRangeStream::from_shared_file(Arc::clone(file), offset, length)?;
-            return Ok((
+        validate_file_range(self.length()?, offset, length)?;
+        let backend = self.lock_backend()?;
+        let partial = match &*backend {
+            SmartStreamBackend::File(file) => Self::new(
+                SmartStreamBackend::Range(FileRangeStream::from_shared_file(
+                    Arc::clone(file),
+                    offset,
+                    length,
+                )?),
+                SmartStreamType::File,
+                true,
+                false,
+            ),
+            SmartStreamBackend::Range(range) => Self::new(
+                SmartStreamBackend::Range(range.subrange(offset, length)?),
+                SmartStreamType::File,
+                true,
+                false,
+            ),
+            // Flatten views: reads acquire only the view lock and the original backing lock,
+            // regardless of container depth. This also retains the temporary-file owner.
+            SmartStreamBackend::SharedRange(range) => {
+                let offset = range.offset.checked_add(offset).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "shared subrange offset overflows",
+                    )
+                })?;
                 Self::new(
-                    SmartStreamBackend::Range(range),
-                    SmartStreamType::File,
+                    SmartStreamBackend::SharedRange(SharedStreamRange {
+                        source: range.source.create_reference(),
+                        offset,
+                        length,
+                        position: 0,
+                    }),
+                    self.stream_type,
                     true,
                     false,
-                ),
+                )
+            }
+            _ => Self::new(
+                SmartStreamBackend::SharedRange(SharedStreamRange {
+                    source: self.create_reference(),
+                    offset,
+                    length,
+                    position: 0,
+                }),
+                self.stream_type,
                 true,
-            ));
-        }
-        if let SmartStreamBackend::Range(range) = &*backend {
-            let partial = range.subrange(offset, length)?;
-            return Ok((
-                Self::new(
-                    SmartStreamBackend::Range(partial),
-                    SmartStreamType::File,
-                    true,
-                    false,
-                ),
-                true,
-            ));
-        }
-        if let SmartStreamBackend::Temporary(temporary) = &mut *backend {
-            let file = temporary.file_mut()?;
-            let original_position = file.stream_position()?;
-            let result = (|| {
-                let source_length = file.seek(SeekFrom::End(0))?;
-                validate_file_range(source_length, offset, length)?;
-                file.seek(SeekFrom::Start(offset))?;
-                let mut output = SmartStream::create_temp()?;
-                let mut remaining = length;
-                let mut buffer = [0u8; 64 * 1024];
-                while remaining > 0 {
-                    let chunk_size = buffer
-                        .len()
-                        .min(usize::try_from(remaining).unwrap_or(usize::MAX));
-                    file.read_exact(&mut buffer[..chunk_size])?;
-                    output.write_all(&buffer[..chunk_size])?;
-                    remaining -= chunk_size as u64;
-                }
-                output.flush()?;
-                output.seek(SeekFrom::Start(0))?;
-                Ok(output)
-            })();
-            let restore = file.seek(SeekFrom::Start(original_position));
-            let output = match (result, restore) {
-                (Err(error), _) => return Err(error),
-                (Ok(_), Err(error)) => return Err(error),
-                (Ok(output), Ok(_)) => output,
-            };
-            return Ok((output, false));
-        }
-
-        drop(backend);
-        self.create_partial(offset, length)
-            .map(|partial| (partial, false))
+                false,
+            ),
+        };
+        Ok((partial, true))
     }
 
     pub fn create_partial_with_limit(
@@ -877,6 +970,12 @@ impl SmartStream {
                 io::ErrorKind::PermissionDenied,
                 "stream is not readable",
             ));
+        }
+        let is_shared_range = matches!(&*self.lock_backend()?, SmartStreamBackend::SharedRange(_));
+        if is_shared_range {
+            return self
+                .create_partial_file_backed(offset, length)
+                .map(|(stream, _)| stream);
         }
         let mut backend = self.lock_backend()?;
         if let SmartStreamBackend::File(file) = &*backend {
@@ -1411,6 +1510,219 @@ fn source_seek_target(position: u64, length: u64, from: SeekFrom) -> io::Result<
             "seek position is negative or exceeds the reference stream range",
         )
     })
+}
+
+#[cfg(test)]
+mod shared_range_tests {
+    use super::*;
+
+    #[test]
+    fn memory_ranges_keep_standard_end_seeks_and_report_truncated_backing() {
+        let mut owner = SmartStream::create_memory();
+        owner.write_all(b"0123456789").unwrap();
+        owner.seek(SeekFrom::Start(9)).unwrap();
+        let (mut range, shared) = owner.create_partial_file_backed(2, 6).unwrap();
+        assert!(shared);
+        assert_eq!(range.stream_type(), SmartStreamType::Memory);
+        assert_eq!(range.seek(SeekFrom::End(-2)).unwrap(), 4);
+        assert_eq!(range.seek(SeekFrom::End(2)).unwrap(), 8);
+        assert_eq!(range.read(&mut [0; 1]).unwrap(), 0);
+        assert_eq!(range.seek(SeekFrom::End(0)).unwrap(), 6);
+        assert!(range.seek(SeekFrom::End(-7)).is_err());
+        assert_eq!(range.position().unwrap(), 6);
+        assert_eq!(owner.position().unwrap(), 9);
+        assert_eq!(range.seek(SeekFrom::Start(u64::MAX)).unwrap(), u64::MAX);
+        assert!(range.seek(SeekFrom::Current(1)).is_err());
+        assert_eq!(range.position().unwrap(), u64::MAX);
+        assert_eq!(range.read(&mut [0; 1]).unwrap(), 0);
+
+        let (mut empty, _) = owner.create_partial_file_backed(10, 0).unwrap();
+        assert_eq!(empty.length().unwrap(), 0);
+        assert_eq!(empty.read(&mut [0; 1]).unwrap(), 0);
+        assert!(owner.create_partial_file_backed(11, 0).is_err());
+        let nested = range.create_partial_with_limit(1, 2, 0).unwrap();
+        assert_eq!(nested.to_vec(2).unwrap(), b"34");
+        assert_eq!(range.position().unwrap(), u64::MAX);
+
+        // A retained view observes source mutations; shrinking the source must produce short
+        // reads and EOF rather than a successful full range or an unadvanced range cursor.
+        owner.set_len(5).unwrap();
+        range.seek(SeekFrom::Start(0)).unwrap();
+        let mut bytes = [0xaa; 6];
+        assert_eq!(range.read(&mut bytes).unwrap(), 3);
+        assert_eq!(&bytes, b"234\xaa\xaa\xaa");
+        assert_eq!(range.position().unwrap(), 3);
+        assert_eq!(range.read(&mut bytes).unwrap(), 0);
+        assert_eq!(owner.position().unwrap(), 5);
+        range.seek(SeekFrom::Start(0)).unwrap();
+        assert_eq!(
+            range.read_exact(&mut bytes).unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+        assert_eq!(range.position().unwrap(), 3);
+        assert_eq!(range.length().unwrap(), 6);
+        assert_eq!(owner.position().unwrap(), 5);
+    }
+
+    #[test]
+    fn split_ranges_preserve_short_reads_and_sibling_positions() {
+        let parts =
+            MultiFileStream::new([Cursor::new(b"abc".to_vec()), Cursor::new(b"def".to_vec())])
+                .unwrap();
+        let mut source = SmartStream::from_reader(Box::new(parts)).unwrap();
+        source.seek(SeekFrom::Start(4)).unwrap();
+        let (mut range, _) = source.create_partial_file_backed(2, 3).unwrap();
+        let (mut sibling, _) = source.create_partial_file_backed(1, 4).unwrap();
+        let mut bytes = [0; 3];
+        assert_eq!(range.read(&mut bytes).unwrap(), 1);
+        assert_eq!(bytes[0], b'c');
+        assert_eq!(range.position().unwrap(), 1);
+        assert_eq!(source.position().unwrap(), 4);
+        assert_eq!(sibling.position().unwrap(), 0);
+        assert_eq!(range.read(&mut bytes).unwrap(), 2);
+        assert_eq!(&bytes[..2], b"de");
+        assert_eq!(range.read(&mut bytes).unwrap(), 0);
+        assert_eq!(range.position().unwrap(), 3);
+        assert_eq!(source.position().unwrap(), 4);
+        assert_eq!(range.seek(SeekFrom::End(-1)).unwrap(), 2);
+        assert_eq!(range.read(&mut bytes).unwrap(), 1);
+        assert_eq!(bytes[0], b'e');
+        drop(source);
+        drop(range);
+        let mut sibling_bytes = [0; 4];
+        sibling.read_exact(&mut sibling_bytes).unwrap();
+        assert_eq!(&sibling_bytes, b"bcde");
+    }
+
+    #[test]
+    fn reader_range_restores_source_cursor_after_a_read_error() {
+        struct FailingReader {
+            cursor: Cursor<Vec<u8>>,
+        }
+        impl Read for FailingReader {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                if self.cursor.position() == 4 {
+                    self.cursor.seek(SeekFrom::Current(1))?;
+                    return Err(io::Error::other("injected reader error"));
+                }
+                let count = buffer.len().min(2);
+                self.cursor.read(&mut buffer[..count])
+            }
+        }
+        impl Seek for FailingReader {
+            fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
+                self.cursor.seek(from)
+            }
+        }
+        let mut source = SmartStream::from_reader(Box::new(FailingReader {
+            cursor: Cursor::new(b"0123456789".to_vec()),
+        }))
+        .unwrap();
+        source.seek(SeekFrom::Start(8)).unwrap();
+        let (mut range, _) = source.create_partial_file_backed(2, 6).unwrap();
+        let mut bytes = [0xaa; 6];
+        assert_eq!(range.read(&mut bytes).unwrap(), 2);
+        assert_eq!(&bytes, b"23\xaa\xaa\xaa\xaa");
+        assert_eq!(source.position().unwrap(), 8);
+        assert_eq!(
+            range.read(&mut bytes).unwrap_err().kind(),
+            io::ErrorKind::Other
+        );
+        assert_eq!(range.position().unwrap(), 2);
+        assert_eq!(source.position().unwrap(), 8);
+        assert_eq!(&bytes, b"23\xaa\xaa\xaa\xaa");
+        assert_eq!(
+            range.read_exact_at(2, &mut [0; 1]).unwrap_err().kind(),
+            io::ErrorKind::Other
+        );
+        assert_eq!(range.position().unwrap(), 2);
+        assert_eq!(source.position().unwrap(), 8);
+    }
+
+    #[test]
+    fn temporary_ranges_retain_the_owner_and_have_independent_cursors() {
+        let mut owner = SmartStream::create_temp_in(crate::test_support::test_temp_root()).unwrap();
+        let path = {
+            let backend = owner.lock_backend().unwrap();
+            let SmartStreamBackend::Temporary(file) = &*backend else {
+                panic!("expected temporary backing");
+            };
+            file.path.clone()
+        };
+        owner.write_all(b"0123456789").unwrap();
+        owner.seek(SeekFrom::Start(7)).unwrap();
+        let (mut first, shared) = owner.create_partial_file_backed(2, 6).unwrap();
+        assert!(shared);
+        let (second, _) = owner.create_partial_file_backed(4, 3).unwrap();
+        let (nested, _) = first.create_partial_file_backed(1, 2).unwrap();
+        assert_eq!(owner.position().unwrap(), 7);
+        first.seek(SeekFrom::Start(4)).unwrap();
+        assert_eq!(second.position().unwrap(), 0);
+        assert!(!nested.can_write());
+        assert!(first.create_partial_file_backed(5, 2).is_err());
+        assert!(first.create_partial_file_backed(u64::MAX, 1).is_err());
+        // Flattening keeps the original owner, rather than a chain of parent-view locks.
+        {
+            let backend = nested.lock_backend().unwrap();
+            let SmartStreamBackend::SharedRange(range) = &*backend else {
+                panic!("expected shared range");
+            };
+            assert!(Arc::ptr_eq(
+                range.source.inner.as_ref().unwrap(),
+                owner.inner.as_ref().unwrap()
+            ));
+        }
+        drop(owner);
+        drop(first);
+        assert!(path.exists());
+        assert_eq!(nested.to_vec(2).unwrap(), b"34");
+        assert_eq!(second.to_vec(3).unwrap(), b"456");
+        drop(nested);
+        assert!(path.exists());
+        drop(second);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn generic_reader_ranges_do_not_copy_payload_on_creation() {
+        use std::sync::atomic::AtomicUsize;
+
+        struct CountReads {
+            cursor: Cursor<Vec<u8>>,
+            bytes_read: Arc<AtomicUsize>,
+        }
+        impl Read for CountReads {
+            fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+                let count = self.cursor.read(bytes)?;
+                self.bytes_read.fetch_add(count, Ordering::Relaxed);
+                Ok(count)
+            }
+        }
+        impl Seek for CountReads {
+            fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
+                self.cursor.seek(from)
+            }
+        }
+        let bytes_read = Arc::new(AtomicUsize::new(0));
+        let source = SmartStream::from_reader(Box::new(CountReads {
+            cursor: Cursor::new(b"0123456789".to_vec()),
+            bytes_read: Arc::clone(&bytes_read),
+        }))
+        .unwrap();
+        let (range, shared) = source.create_partial_file_backed(2, 6).unwrap();
+        assert!(shared);
+        let (nested, _) = range.create_partial_file_backed(1, 2).unwrap();
+        assert_eq!(bytes_read.load(Ordering::Relaxed), 0);
+        let mut bytes = [0; 2];
+        nested.read_exact_at(0, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"34");
+        assert_eq!(bytes_read.load(Ordering::Relaxed), 2);
+        assert_eq!(source.position().unwrap(), 0);
+        assert!(nested.read_exact_at(1, &mut bytes).is_err());
+        drop(source);
+        drop(range);
+        assert_eq!(nested.to_vec(2).unwrap(), b"34");
+    }
 }
 
 #[cfg(test)]

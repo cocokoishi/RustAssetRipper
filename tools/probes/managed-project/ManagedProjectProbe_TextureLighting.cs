@@ -452,6 +452,10 @@ ObjectData = textureBody,
             102,
             collection,
             version);
+        if (sceneKind == "render-settings-halo-texture")
+        {
+            SetGeneratedAssetPointer(renderSettings, "HaloTexture", collection, texture);
+        }
         List<object> assets = new() { lightmapSettings, renderSettings, texture };
         if (sceneKind is "light" or "light-nonzero-baking" or "light-multiple-baking" or "light-multiple-gameobjects-baking")
         {
@@ -602,7 +606,7 @@ ObjectData = textureBody,
             assets.Add(transform);
             assets.Add(renderer);
         }
-        else if (sceneKind is not ("empty" or "light" or "light-nonzero-baking" or "light-multiple-baking" or "light-multiple-gameobjects-baking"))
+        else if (sceneKind is not ("empty" or "light" or "light-nonzero-baking" or "light-multiple-baking" or "light-multiple-gameobjects-baking" or "render-settings-halo-texture"))
         {
             throw new ArgumentException($"unsupported lightmap scene fixture: {sceneKind}");
         }

@@ -79,7 +79,9 @@ fn validate_workspace_project_export<'inputs, 'provider, 'graph>(
             .filter(|reference| {
                 !matches!(
                     reference.resolution,
-                    MultiFilePPtrResolution::Null | MultiFilePPtrResolution::Object { .. }
+                    MultiFilePPtrResolution::Null
+                        | MultiFilePPtrResolution::Object { .. }
+                        | MultiFilePPtrResolution::PredefinedEngineAsset { .. }
                 )
             })
             .take(4)
@@ -106,8 +108,6 @@ fn validate_workspace_project_export<'inputs, 'provider, 'graph>(
         inputs.reference_graph,
         project_version,
     )?;
-    let lightmap_texture_directories = lightmap_texture_scene_directories(
-        &scene_processing,
     let has_animation_clips =
         inputs
             .workspace
@@ -139,7 +139,28 @@ fn validate_workspace_project_export<'inputs, 'provider, 'graph>(
     } else {
         HashMap::new()
     };
-
+    let mut already_owned_scene_objects = scene_member_keys.clone();
+    already_owned_scene_objects.extend(prefab_member_keys.iter().copied());
+    let controller_collections = prepare_controller_collections(
+        inputs.workspace,
+        inputs.objects,
+        inputs.reference_graph,
+        &already_owned_scene_objects,
+        inputs.limits.pointer_map,
+    )?;
+    already_owned_scene_objects.extend(
+        controller_collections
+            .member_keys
+            .iter()
+            .map(|&(file_index, object_index)| source_object_key(file_index, object_index)),
+    );
+    let scriptable_object_groups = prepare_scriptable_object_groups(
+        inputs.objects,
+        inputs.reference_graph,
+        &already_owned_scene_objects,
+    )?;
+    let lightmap_texture_directories = lightmap_texture_scene_directories(
+        &scene_processing,
         inputs.objects,
         inputs.reference_graph,
     )?;
@@ -153,15 +174,17 @@ fn validate_workspace_project_export<'inputs, 'provider, 'graph>(
         settings_facts,
         opaque_objects,
         scene_processing,
+        processed_animation_roots,
         scene_collections,
         scene_member_keys,
         prefab_collections,
         prefab_member_keys,
+        scriptable_object_groups,
+        controller_collections,
         processing_warnings,
         used_guids,
         lightmap_texture_directories,
     })
-        processed_animation_roots,
 }
 
 /// Execute project export with the imported assembly catalog available to script exporters.
@@ -180,6 +203,45 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
     managed_assemblies: Option<&ManagedAssemblyCatalog>,
     limits: WorkspaceProjectExportLimits,
 ) -> Result<WorkspaceProjectExportReport, Box<dyn Error>> {
+    let mut full_settings = SerializedSettingsFile::from_defaults(
+        Default::default(),
+        Default::default(),
+        Default::default(),
+    );
+    full_settings.export = settings.clone();
+    export_workspace_yaml_project_with_serialized_settings(
+        output_root,
+        delete_existing,
+        filesystem,
+        root_catalog,
+        resource_provider,
+        workspace,
+        objects,
+        reference_graph,
+        &full_settings,
+        assembly_manager_is_set,
+        managed_assemblies,
+        limits,
+    )
+}
+
+/// Project export with persisted import and export settings. Unlike the legacy
+/// export-record entrypoint, this preserves StreamingAssetsMode from the file.
+#[allow(clippy::too_many_arguments)]
+pub fn export_workspace_yaml_project_with_serialized_settings(
+    output_root: &Path,
+    delete_existing: bool,
+    filesystem: &VirtualFileSystem,
+    root_catalog: &RootResourceFileCatalog,
+    resource_provider: &PlatformResourceProvider<'_>,
+    workspace: &SerializedFileWorkspace,
+    objects: &ObjectWorkspace,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+    full_settings: &SerializedSettingsFile,
+    assembly_manager_is_set: bool,
+    managed_assemblies: Option<&ManagedAssemblyCatalog>,
+    limits: WorkspaceProjectExportLimits,
+) -> Result<WorkspaceProjectExportReport, Box<dyn Error>> {
     let context = validate_workspace_project_export(WorkspaceProjectExportInputs {
         output_root,
         delete_existing,
@@ -189,7 +251,8 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
         workspace,
         objects,
         reference_graph,
-        settings,
+        settings: &full_settings.export,
+        streaming_assets_mode: full_settings.import.streaming_assets_mode,
         assembly_manager_is_set,
         managed_assemblies,
         limits,
@@ -203,16 +266,18 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
         settings_facts,
         opaque_objects,
         scene_processing,
+        processed_animation_roots,
         scene_collections,
         scene_member_keys,
         prefab_collections,
         prefab_member_keys,
+        scriptable_object_groups,
+        controller_collections,
         processing_warnings,
         used_guids,
         lightmap_texture_directories,
     } = context;
     let WorkspaceProjectExportInputs {
-        processed_animation_roots,
         output_root,
         delete_existing,
         filesystem,
@@ -222,6 +287,7 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
         objects,
         reference_graph,
         settings,
+        streaming_assets_mode,
         assembly_manager_is_set,
         managed_assemblies,
         limits,
@@ -242,6 +308,8 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
         opaque_objects: &opaque_objects,
         scene_member_keys: &scene_member_keys,
         prefab_member_keys: &prefab_member_keys,
+        scriptable_object_groups: &scriptable_object_groups,
+        controller_collections: &controller_collections,
         lightmap_texture_directories: &lightmap_texture_directories,
         existing_guids: &used_guids,
     };
@@ -326,6 +394,7 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
             assembly_manager_is_set,
             pointer_map: &pointer_map,
             streamed_resources,
+            processed_animation_roots: &processed_animation_roots,
             limits,
         },
         &mut plan_builder,
@@ -337,7 +406,6 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
             objects,
             reference_graph,
             pointer_map: &pointer_map,
-            processed_animation_roots: &processed_animation_roots,
             prefabs: &prefab_collections,
             scene_processing: &scene_processing,
             editor_version_text,
@@ -373,32 +441,71 @@ pub fn export_workspace_yaml_project_with_assembly_catalog(
         },
         &mut plan_builder,
     )?;
+    let mut staged = plan_builder.finish();
+    let generated_editor_settings = project_settings::plan_generated_editor_settings(
+        editor_version_text,
+        project_version,
+        &mut staged,
+        limits,
+    )?;
     let StagedProjectFiles {
         files,
         support_files,
         total_bytes,
         exported_object_count,
-    } = plan_builder.finish();
+    } = staged;
     let manifest = package_manifest_json(project_version);
     let path_id_map = build_path_id_map(workspace, objects)?;
     let path_id_map_bytes = serialize_path_id_map(&path_id_map).into_bytes();
+    let mut post_export_files = Vec::new();
+    if let Some(settings) = generated_editor_settings {
+        post_export_files.push(settings);
+    }
+    post_export_files.push(PlannedProjectPostExportFile {
+        relative_path: PATH_ID_MAP_FILE.to_owned(),
+        bytes: path_id_map_bytes,
+    });
     let plan = ProjectExportPlan {
         project_version_text: editor_version_text.to_owned(),
         project_version_file: project_version_file(editor_version_text, project_version),
         package_manifest: manifest,
         files,
         support_files,
-        post_export_files: vec![PlannedProjectPostExportFile {
-            relative_path: PATH_ID_MAP_FILE.to_owned(),
-            bytes: path_id_map_bytes,
-        }],
+        post_export_files,
         skipped: notices,
         fallbacks: fallback_notices,
     };
-    let report = execute_project_export(
+    let post_export_base_bytes = total_bytes
+        .checked_add(plan.project_version_file.len())
+        .and_then(|bytes| bytes.checked_add(plan.package_manifest.len()))
+        .and_then(|bytes| {
+            bytes.checked_add(
+                plan.post_export_files
+                    .last()
+                    .map_or(0, |file| file.bytes.len()),
+            )
+        })
+        .ok_or_else(|| invalid_project("project output byte count overflows"))?;
+    let streamed_post_exports = post_export_outputs::plan_streamed_post_exports(
+        filesystem,
+        resource_provider,
+        if assembly_manager_is_set {
+            Some(managed_assemblies.ok_or_else(|| {
+                invalid_project("an initialized assembly manager has no imported catalog")
+            })?)
+        } else {
+            None
+        },
+        streaming_assets_mode,
+        &plan.files,
+        post_export_base_bytes,
+        limits,
+    )?;
+    let report = execute_project_export_with_streams(
         output_root,
         delete_existing,
         &plan,
+        &streamed_post_exports,
         limits.project_output,
         limits.yaml_write,
     )?;

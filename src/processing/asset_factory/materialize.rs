@@ -641,7 +641,7 @@ pub(super) fn decode_with_tree(
 /// `ReadMonoBehaviour`: the generated header, then the structure source decision.
 #[allow(clippy::too_many_arguments)]
 fn read_monobehaviour(
-    file: &SerializedFile<'_>,
+    file: &MaterializationFile<'_>,
     facts: &FactoryFileFacts<'_>,
     source: &dyn ClassLayoutSource,
     object_index: usize,
@@ -726,16 +726,24 @@ fn read_monobehaviour(
         .unwrap_or(0);
     let structure_tree = file_tree.and_then(|tree| structure_subtree(tree, start_index));
     let structure_read = structure_tree.as_ref().map(|tree| {
-        decode_with_tree(
-            tree,
-            &remainder,
-            file.metadata.prefix.body_endian,
-            arrays_align,
-            &file.metadata.reference_types,
-            object_index,
-            file.metadata.objects[object_index].path_id,
-            limits,
-        )
+        if tree.nodes.len() == 1 && remainder.is_empty() {
+            Ok(empty_structure_payload(
+                tree,
+                object_index,
+                file.metadata.objects[object_index].path_id,
+            ))
+        } else {
+            decode_with_tree(
+                tree,
+                &remainder,
+                file.metadata.prefix.body_endian,
+                arrays_align,
+                &file.metadata.reference_types,
+                object_index,
+                file.metadata.objects[object_index].path_id,
+                limits,
+            )
+        }
     });
     let structure_try_read_ok = matches!(
         structure_read.as_ref(),
@@ -791,7 +799,15 @@ fn structure_subtree(tree: &TypeTree, start_index: usize) -> Option<TypeTree> {
             child_indices.push(index);
         }
     }
-    let first = *child_indices.get(start_index)?;
+    let Some(first) = child_indices.get(start_index).copied() else {
+        if start_index == child_indices.len() {
+            return Some(TypeTree {
+                nodes: vec![root.clone()],
+                string_buffer: Vec::new(),
+            });
+        }
+        return None;
+    };
     let base_level = tree.nodes[first].level;
     let mut nodes = Vec::new();
     nodes.push(root.clone());
@@ -806,6 +822,26 @@ fn structure_subtree(tree: &TypeTree, start_index: usize) -> Option<TypeTree> {
         nodes,
         string_buffer: Vec::new(),
     })
+}
+
+fn empty_structure_payload(
+    tree: &TypeTree,
+    object_index: usize,
+    path_id: i64,
+) -> ParsedObjectPayload {
+    ParsedObjectPayload {
+        object_index,
+        path_id,
+        type_name: tree
+            .nodes
+            .first()
+            .and_then(|node| node.type_name.clone())
+            .unwrap_or_default(),
+        root: SerializedValue::Struct(Vec::new()),
+        consumed_bytes: 0,
+        trailing_bytes: Vec::new(),
+        allocated_bytes: 0,
+    }
 }
 
 impl FactoryAssetKind {
@@ -828,5 +864,58 @@ impl VersionText for FactoryUnityVersion {
         } else {
             &self.text
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::serialized_file::metadata::TypeTreeNode;
+
+    fn node(level: u8, type_name: &str, name: &str) -> TypeTreeNode {
+        TypeTreeNode {
+            level,
+            version: 1,
+            type_flags: 0,
+            type_string_offset: None,
+            name_string_offset: None,
+            type_name: Some(type_name.to_owned()),
+            name: Some(name.to_owned()),
+            byte_size: -1,
+            index: 0,
+            meta_flags: 0,
+            reference_type_hash: None,
+        }
+    }
+
+    #[test]
+    fn mono_behaviour_tree_with_only_base_fields_has_a_valid_empty_structure() {
+        let tree = TypeTree {
+            nodes: vec![
+                node(0, "MonoBehaviour", "Base"),
+                node(1, "PPtr<GameObject>", "m_GameObject"),
+                node(1, "UInt8", "m_Enabled"),
+                node(1, "PPtr<MonoScript>", "m_Script"),
+                node(1, "string", "m_Name"),
+            ],
+            string_buffer: Vec::new(),
+        };
+        let field_names = tree
+            .nodes
+            .iter()
+            .skip(1)
+            .filter(|node| node.level == 1)
+            .map(|node| node.name.as_deref().unwrap_or(""))
+            .collect::<Vec<_>>();
+        let start_index = monobehaviour_structure_start_index(&field_names);
+        assert_eq!(start_index, field_names.len());
+
+        let structure = structure_subtree(&tree, start_index)
+            .expect("a valid TypeTree with no script fields builds an empty structure");
+        assert_eq!(structure.nodes, [tree.nodes[0].clone()]);
+        let payload = empty_structure_payload(&structure, 894, 895);
+        assert_eq!(payload.consumed_bytes, 0);
+        assert_eq!(payload.trailing_bytes, []);
+        assert_eq!(payload.root, SerializedValue::Struct(Vec::new()));
     }
 }

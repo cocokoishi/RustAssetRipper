@@ -328,6 +328,26 @@ impl SerializedFileMetadata {
                 },
             )
         })?;
+        self.decode_object_payload_from_payload(payload, start, target, type_tree, budget)
+    }
+
+    fn decode_object_payload_from_payload(
+        &self,
+        payload: &[u8],
+        start: usize,
+        target: ObjectDecodeTarget<'_>,
+        type_tree: &TypeTree,
+        budget: &mut DecodeBudget<'_>,
+    ) -> Result<ParsedObjectPayload, ObjectDecodeError> {
+        let ObjectDecodeTarget {
+            index: object_index,
+            object,
+            fallback_type_id,
+        } = target;
+        let type_root = type_tree.nodes.first().ok_or_else(|| {
+            ObjectDecodeError::new(0, ObjectDecodeErrorKind::EmptyTypeTree { object_index })
+        })?;
+        let type_layout = TypeTreeLayout::new(type_tree, object_index, 0)?;
         let mut reader = BinaryReader::with_base_offset(payload, self.prefix.body_endian, start)
             .map_err(ObjectDecodeError::from_binary)?;
         let arrays_align = unity_version_aligns_arrays(self.prefix.unity_version_text.as_deref());
@@ -732,14 +752,6 @@ fn decode_node_value(
     {
         let length = read_i32(reader, &format!("{path} typeless data length"))?;
         let length = nonnegative_length(length, reader, object_index, path)?;
-        if length > budget.limits.max_array_elements {
-            return Err(decode_limit_error(
-                reader.offset(),
-                format!("{path} typeless data bytes"),
-                length,
-                budget.limits.max_array_elements,
-            ));
-        }
         if length > reader.remaining() {
             return Err(ObjectDecodeError::new(
                 reader.offset(),
@@ -927,7 +939,11 @@ fn decode_array(
         )?;
     let count = read_i32(reader, &format!("{path} array count"))?;
     let count = nonnegative_length(count, reader, object_index, path)?;
-    if count > budget.limits.max_array_elements {
+    let data_node_value = &type_tree.nodes[data_node];
+    let compact_byte_array = count > budget.limits.max_array_elements
+        && matches!(data_node_value.type_name.as_deref(), Some("char" | "UInt8"))
+        && direct_children(type_tree, data_node, object_index, reader.offset())?.is_empty();
+    if !compact_byte_array && count > budget.limits.max_array_elements {
         return Err(decode_limit_error(
             reader.offset(),
             format!("{path} array elements"),
@@ -970,6 +986,28 @@ fn decode_array(
                 remaining: reader.remaining(),
             },
         ));
+    }
+
+    // Large Unity byte vectors such as Mesh.m_IndexBuffer are stored contiguously in
+    // the payload. Representing each byte as a SerializedValue enum multiplies their
+    // decoded allocation by the enum size and can make a valid object appear to exceed
+    // the allocation budget by dozens of times. Keep the exact bytes instead; this is
+    // also the representation the Unity YAML writer uses for byte data.
+    if compact_byte_array {
+        budget.charge(count, reader.offset(), path)?;
+        let bytes = reader
+            .read_exact(count)
+            .map_err(|error| binary_error(error, &format!("{path} byte array")))?
+            .to_vec();
+        if align_nested_arrays
+            || (arrays_align
+                && array_base_is_primitive(type_tree, data_node, object_index, reader.offset())?)
+        {
+            reader
+                .align_relative(4)
+                .map_err(|error| binary_error(error, &format!("{path} array alignment")))?;
+        }
+        return Ok(SerializedValue::Bytes(bytes));
     }
 
     let mut values = reserve_values(count, reader.offset(), path, budget)?;

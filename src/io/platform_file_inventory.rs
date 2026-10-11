@@ -879,28 +879,8 @@ impl InventoryState<'_> {
         &mut self,
         structure: &PlatformStructure,
     ) -> Result<(), PlatformFileInventoryError> {
-        match structure.platform {
-            PlatformKind::Android => {}
-            PlatformKind::Ios => {
-                self.collect_optional_bundle_tree(&join_path(&structure.root_path, "Raw"))?;
-            }
-            PlatformKind::Windows
-            | PlatformKind::Linux
-            | PlatformKind::Mac
-            | PlatformKind::Switch
-            | PlatformKind::WiiU
-            | PlatformKind::WindowsPhone => {
-                if let Some(game_data_path) = &structure.game_data_path {
-                    self.collect_optional_bundle_tree(&join_path(
-                        game_data_path,
-                        "StreamingAssets",
-                    ))?;
-                }
-            }
-            PlatformKind::WebGl => {
-                self.collect_optional_bundle_tree(&structure.root_path)?;
-            }
-            PlatformKind::Ps4 | PlatformKind::WebPlayer => {}
+        if let Some(path) = structure.streaming_assets_path() {
+            self.collect_optional_bundle_tree(&path)?;
         }
         Ok(())
     }

@@ -1,0 +1,13 @@
+TREE|class|206
+TREE|serializedVersion|1
+TREE|hideFlags|1
+TREE|name|Blend Tree
+TREE|blendParameter|Speed
+TREE|blendParameterY|
+TREE|blendType|0
+TREE|minThreshold|BF000000
+TREE|maxThreshold|3F400000
+TREE|useAutomaticThresholds|False
+TREE|normalizedBlendValues|False
+CHILD|0|2|BF000000|00000000|00000000|3F000000|3E000000||0|0
+CHILD|1|2|3F400000|00000000|00000000|3E800000|3E800000||1|0

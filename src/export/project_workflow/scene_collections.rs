@@ -17,6 +17,7 @@ pub(super) fn lightmap_texture_scene_directories(
         }) {
             let (target_file_index, target_object_index) = match reference.resolution {
                 MultiFilePPtrResolution::Null => continue,
+                MultiFilePPtrResolution::PredefinedEngineAsset { .. } => continue,
                 MultiFilePPtrResolution::Object {
                     target_file_index,
                     target_object_index,

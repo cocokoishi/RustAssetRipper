@@ -1,5 +1,26 @@
 use super::*;
 
+const LIGHTING_DATA_RENDERER_CLASS_IDS: [i32; 18] = [
+    23,
+    25,
+    26,
+    96,
+    120,
+    137,
+    161,
+    199,
+    212,
+    227,
+    331,
+    483_693_784,
+    73_398_921,
+    1_120_581_460,
+    1_931_382_933,
+    1_931_382_934,
+    1_971_053_207,
+    646_504_946,
+];
+
 pub(super) fn workspace_project_version(
     workspace: &SerializedFileWorkspace,
 ) -> Result<(&str, SceneUnityVersion), Box<dyn Error>> {
@@ -91,39 +112,13 @@ pub(super) fn validate_bounded_lighting_data_scene(
     hierarchy: &WorkspaceSceneHierarchyScene,
     owner: WorkspaceSceneObjectIdentity,
     assignments: &[SceneExportIdAssignment],
-    version: SceneUnityVersion,
 ) -> Result<(), Box<dyn Error>> {
     let mut unsupported_objects = Vec::new();
-    const RENDERER_CLASS_IDS: [i32; 18] = [
-        23,
-        25,
-        26,
-        96,
-        120,
-        137,
-        161,
-        199,
-        212,
-        227,
-        331,
-        483_693_784,
-        73_398_921,
-        1_120_581_460,
-        1_931_382_933,
-        1_931_382_934,
-        1_971_053_207,
-        646_504_946,
-    ];
     for assignment in assignments {
         let class_id = assignment.asset.class_id;
-        if class_id == 218 || (class_id == 108 && (version.major != 5 || version.minor != 6)) {
+        if class_id == 218 {
             unsupported_objects.push(format!(
-                "scene object {:?}:{} class {class_id} has LightingDataAsset data that is not implemented",
-                assignment.asset.collection, assignment.asset.path_id
-            ));
-        } else if RENDERER_CLASS_IDS.contains(&class_id) && class_id != 23 {
-            unsupported_objects.push(format!(
-                "renderer scene object {:?}:{} class {class_id} is outside the supported MeshRenderer route",
+                "scene object {:?}:{} class {class_id} Terrain lighting data is not implemented",
                 assignment.asset.collection, assignment.asset.path_id
             ));
         }
@@ -145,12 +140,9 @@ pub(super) fn validate_bounded_lighting_data_scene(
                 ));
                 continue;
             };
-            if class_id == 218
-                || (class_id == 108 && (version.major != 5 || version.minor != 6))
-                || (RENDERER_CLASS_IDS.contains(&class_id) && class_id != 23)
-            {
+            if class_id == 218 {
                 unsupported_objects.push(format!(
-                    "file {} object {} class {class_id} has LightingDataAsset data that is not implemented",
+                    "file {} object {} class {class_id} Terrain lighting data is not implemented",
                     candidate.identity.file_index, candidate.identity.object_index
                 ));
             }
@@ -219,13 +211,13 @@ pub(super) fn collect_lighting_data_renderer_inputs<'object>(
         .map_err(|_| invalid_project("could not allocate LightingDataAsset renderer inputs"))?;
     for assignment in assignments
         .iter()
-        .filter(|assignment| assignment.asset.class_id == 23)
+        .filter(|assignment| LIGHTING_DATA_RENDERER_CLASS_IDS.contains(&assignment.asset.class_id))
     {
         let ExportAssetCollectionIdentity::SerializedFile { file_index } =
             assignment.asset.collection
         else {
             return Err(invalid_project(format!(
-                "LightingDataAsset MeshRenderer {} belongs to an unmaterialized collection",
+                "LightingDataAsset Renderer {} belongs to an unmaterialized collection",
                 assignment.asset.path_id
             )));
         };
@@ -233,19 +225,22 @@ pub(super) fn collect_lighting_data_renderer_inputs<'object>(
             .get(file_index, assignment.asset.object_index)
             .ok_or_else(|| {
                 invalid_project(format!(
-                    "LightingDataAsset MeshRenderer {}:{} is missing from ObjectWorkspace",
+                    "LightingDataAsset Renderer {}:{} is missing from ObjectWorkspace",
                     file_index, assignment.asset.path_id
                 ))
             })?;
-        if object.path_id != assignment.asset.path_id || object.factory.class_id != 23 {
+        if object.path_id != assignment.asset.path_id
+            || object.factory.class_id != assignment.asset.class_id
+            || !LIGHTING_DATA_RENDERER_CLASS_IDS.contains(&object.factory.class_id)
+        {
             return Err(invalid_project(format!(
-                "LightingDataAsset MeshRenderer identity mismatch at {}:{}",
+                "LightingDataAsset Renderer identity mismatch at {}:{}",
                 file_index, assignment.asset.path_id
             )));
         }
         let payload = object.payload.as_ref().map_err(|error| {
             invalid_project(format!(
-                "LightingDataAsset MeshRenderer {}:{} could not be decoded: {error}",
+                "LightingDataAsset Renderer {}:{} could not be decoded: {error}",
                 file_index, assignment.asset.path_id
             ))
         })?;
@@ -343,13 +338,13 @@ fn scene_renderer_is_lightmapped(
         .unique_field_in_base_chain("m_LightmapIndex")
         .map_err(|error| {
             invalid_project(format!(
-                "LightingDataAsset MeshRenderer {:?}:{} m_LightmapIndex lookup failed: {error}",
+                "LightingDataAsset Renderer {:?}:{} m_LightmapIndex lookup failed: {error}",
                 renderer.collection, renderer.path_id
             ))
         })?
         .ok_or_else(|| {
             invalid_project(format!(
-                "LightingDataAsset MeshRenderer {:?}:{} TypeTree has no m_LightmapIndex field",
+                "LightingDataAsset Renderer {:?}:{} TypeTree has no m_LightmapIndex field",
                 renderer.collection, renderer.path_id
             ))
         })?;
@@ -357,10 +352,11 @@ fn scene_renderer_is_lightmapped(
         SerializedValue::U8(index) => u16::from(*index),
         SerializedValue::U16(index) => *index,
         value => {
-            return Err(invalid_project(format!(
-                "LightingDataAsset MeshRenderer {:?}:{} has unsupported m_LightmapIndex value {value:?}",
+            let message = format!(
+                "LightingDataAsset Renderer {:?}:{} has unsupported m_LightmapIndex value {value:?}",
                 renderer.collection, renderer.path_id
-            )))
+            );
+            return Err(invalid_project(message));
         }
     };
     Ok(index != u16::MAX)
@@ -663,9 +659,9 @@ pub(super) fn build_lighting_data_asset_root(
         "m_BakedAmbientProbesInGamma",
     )?;
 
-    if contains_non_null_pointer(render_settings) {
+    if has_non_null_pointer_field(render_settings, "m_GeneratedSkyboxReflection")? {
         return Err(invalid_project(
-            "bounded LightingDataAsset generation cannot omit a non-null RenderSettings object reference used by the source reflection path",
+            "bounded LightingDataAsset generation cannot omit non-null RenderSettings.m_GeneratedSkyboxReflection cubemap data",
         ));
     }
     Ok(root)

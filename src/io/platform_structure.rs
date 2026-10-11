@@ -73,6 +73,9 @@ pub struct PlatformResourceProvider<'a> {
     pub platform: Option<&'a PlatformStructure>,
     pub mixed: Option<&'a PlatformStructure>,
     pub mixed_data_paths: Option<&'a [String]>,
+    // Container mounting expands the processing filesystem. Post-export copying
+    // instead needs the unchanged physical StreamingAssets files, including wrappers.
+    streaming_assets_filesystem: Option<&'a VirtualFileSystem>,
 }
 
 impl<'a> PlatformResourceProvider<'a> {
@@ -84,6 +87,7 @@ impl<'a> PlatformResourceProvider<'a> {
             platform,
             mixed,
             mixed_data_paths: None,
+            streaming_assets_filesystem: None,
         }
     }
 
@@ -97,7 +101,19 @@ impl<'a> PlatformResourceProvider<'a> {
             platform,
             mixed: None,
             mixed_data_paths,
+            streaming_assets_filesystem: None,
         }
+    }
+
+    /// Supply the original StreamingAssets tree when the processing VFS contains
+    /// expanded containers. This does not change dependency/resource lookup.
+    pub fn with_streaming_assets_filesystem(mut self, filesystem: &'a VirtualFileSystem) -> Self {
+        self.streaming_assets_filesystem = Some(filesystem);
+        self
+    }
+
+    pub(crate) fn streaming_assets_filesystem(&self) -> Option<&'a VirtualFileSystem> {
+        self.streaming_assets_filesystem
     }
 
     /// Looks for `original_name` in each source DataPath in order. This applies the baseline
@@ -179,6 +195,26 @@ impl<'a> PlatformResourceProvider<'a> {
         Ok(PlatformResourceLookup::Missing {
             unavailable_data_paths,
         })
+    }
+}
+
+impl PlatformStructure {
+    /// `PlatformGameStructure.StreamingAssetsPath`, before checking directory existence.
+    pub fn streaming_assets_path(&self) -> Option<String> {
+        match self.platform {
+            PlatformKind::Android | PlatformKind::Ps4 | PlatformKind::WebPlayer => None,
+            PlatformKind::Ios => Some(join_path(&self.root_path, "Raw")),
+            PlatformKind::WebGl => Some(self.root_path.clone()),
+            PlatformKind::Windows
+            | PlatformKind::Linux
+            | PlatformKind::Mac
+            | PlatformKind::Switch
+            | PlatformKind::WiiU
+            | PlatformKind::WindowsPhone => self
+                .game_data_path
+                .as_ref()
+                .map(|path| join_path(path, "StreamingAssets")),
+        }
     }
 }
 

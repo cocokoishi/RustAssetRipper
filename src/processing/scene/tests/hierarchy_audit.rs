@@ -110,12 +110,24 @@ fn audits_local_parent_pointers_that_target_non_transforms() {
 #[test]
 fn audits_reciprocal_transform_edges_across_serialized_files() {
     let child_bytes = make_transform_file_with_hierarchy(42, 1, 99, &[], &["parent.assets"], false);
-    let parent_bytes =
-        make_transform_file_with_hierarchy(99, 0, 0, &[(1, 42)], &["child.assets"], false);
+    let sibling_bytes =
+        make_transform_file_with_hierarchy(43, 1, 99, &[], &["parent.assets"], false);
+    let parent_bytes = make_transform_file_with_hierarchy(
+        99,
+        0,
+        0,
+        &[(1, 42), (2, 43)],
+        &["child.assets", "sibling.assets"],
+        false,
+    );
     let child_file = SerializedFile::parse(&child_bytes).unwrap();
+    let sibling_file = SerializedFile::parse(&sibling_bytes).unwrap();
     let parent_file = SerializedFile::parse(&parent_bytes).unwrap();
     let child_references =
         crate::serialized_file::reference_graph::ObjectReferenceGraph::build(&child_file).unwrap();
+    let sibling_references =
+        crate::serialized_file::reference_graph::ObjectReferenceGraph::build(&sibling_file)
+            .unwrap();
     let parent_references =
         crate::serialized_file::reference_graph::ObjectReferenceGraph::build(&parent_file).unwrap();
     let named_files = [
@@ -123,6 +135,11 @@ fn audits_reciprocal_transform_edges_across_serialized_files() {
             file_name: "child.assets",
             metadata: &child_file.metadata,
             graph: &child_references,
+        },
+        crate::serialized_file::reference_graph::NamedObjectReferenceGraph {
+            file_name: "sibling.assets",
+            metadata: &sibling_file.metadata,
+            graph: &sibling_references,
         },
         crate::serialized_file::reference_graph::NamedObjectReferenceGraph {
             file_name: "parent.assets",
@@ -148,15 +165,28 @@ fn audits_reciprocal_transform_edges_across_serialized_files() {
     let mut parent_scene = SceneGraph::build(&parent_file, SceneGraphLimits::default()).unwrap();
     let parent_audit = parent_scene
         .audit_workspace_transform_links(
-            1,
+            2,
             "parent.assets",
             &references,
             super::SceneHierarchyAuditLimits::default(),
         )
         .unwrap();
-    assert_eq!(parent_audit.relationships_checked(), 2);
+    assert_eq!(parent_audit.relationships_checked(), 3);
     assert!(parent_audit.issues().is_empty());
     assert!(parent_audit.is_complete());
+
+    let mut sibling_scene = SceneGraph::build(&sibling_file, SceneGraphLimits::default()).unwrap();
+    let sibling_audit = sibling_scene
+        .audit_workspace_transform_links(
+            1,
+            "sibling.assets",
+            &references,
+            super::SceneHierarchyAuditLimits::default(),
+        )
+        .unwrap();
+    assert_eq!(sibling_audit.relationships_checked(), 1);
+    assert!(sibling_audit.issues().is_empty());
+    assert!(sibling_audit.is_complete());
 }
 
 #[test]

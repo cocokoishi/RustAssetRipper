@@ -125,7 +125,10 @@ fn project_export_matches_source_for_a_generated_legacy_prefab() {
     assert!(!prefab_meta.contains("PrefabImporter:"), "{prefab_meta}");
     assert_eq!(report.asset_file_count, 1);
     assert_eq!(report.meta_file_count, 1);
-    assert_eq!(report.post_export_file_count, 1);
+    assert_eq!(report.post_export_file_count, 2);
+    assert!(output_root
+        .join("ProjectSettings/EditorSettings.asset")
+        .exists());
     assert_eq!(report.collection_count, 1);
     assert_eq!(report.exported_object_count, 3);
     assert!(report.processing_warnings.is_empty());

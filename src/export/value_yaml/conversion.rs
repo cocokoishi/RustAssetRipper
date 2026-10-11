@@ -812,6 +812,7 @@ fn convert_array<F>(
 where
     F: FnMut(UnityYamlPPtrRequest<'_>) -> ProjectPointerResolution,
 {
+    let empty_array_kind = empty_array_kind_for_path(field_path, hints, limits)?;
     if !force_block_sequence_for_path(field_path, hints, limits)? {
         if let Some(representation) = dictionary_representation_for_path(field_path, hints, limits)?
         {
@@ -833,13 +834,11 @@ where
     }
 
     if items.is_empty() {
-        let kind = hints
-            .empty_array_kinds
-            .get(field_path)
-            .copied()
-            .ok_or_else(|| UnityYamlObjectConversionError::MissingEmptyArrayHint {
+        let kind = empty_array_kind.ok_or_else(|| {
+            UnityYamlObjectConversionError::MissingEmptyArrayHint {
                 field_path: field_path.to_owned(),
-            })?;
+            }
+        })?;
         return match kind {
             UnityYamlEmptyArrayKind::IntegerHex => Ok(UnityYamlNode::plain_string(String::new())),
             UnityYamlEmptyArrayKind::BlockSequence => {
@@ -854,15 +853,15 @@ where
         };
     }
 
-    if let Some(kind) = hints.empty_array_kinds.get(field_path) {
-        if *kind == UnityYamlEmptyArrayKind::IntegerHex {
-            return convert_integer_array(items, field_path, depth, limits, budget);
-        }
-    } else if integer_array_width(&items[0]).is_some() {
+    if empty_array_kind == Some(UnityYamlEmptyArrayKind::IntegerHex) {
         return convert_integer_array(items, field_path, depth, limits, budget);
     }
 
-    let style = match hints.empty_array_kinds.get(field_path) {
+    if empty_array_kind.is_none() && integer_array_width(&items[0]).is_some() {
+        return convert_integer_array(items, field_path, depth, limits, budget);
+    }
+
+    let style = match empty_array_kind {
         Some(UnityYamlEmptyArrayKind::BlockCurveSequence) => UnityYamlSequenceStyle::BlockCurve,
         Some(UnityYamlEmptyArrayKind::FlowSequence) => UnityYamlSequenceStyle::Flow,
         _ => UnityYamlSequenceStyle::Block,
@@ -887,6 +886,21 @@ where
             .map_err(UnityYamlObjectConversionError::NodeBuild)?;
     }
     Ok(sequence)
+}
+
+fn empty_array_kind_for_path(
+    field_path: &str,
+    hints: &UnityYamlObjectConversionHints,
+    limits: UnityYamlObjectConversionLimits,
+) -> Result<Option<UnityYamlEmptyArrayKind>, UnityYamlObjectConversionError> {
+    if let Some(kind) = hints.empty_array_kinds.get(field_path) {
+        return Ok(Some(*kind));
+    }
+    if !field_path.contains('[') {
+        return Ok(None);
+    }
+    let canonical_path = canonical_array_path(field_path, limits.max_field_path_bytes)?;
+    Ok(hints.empty_array_kinds.get(&canonical_path).copied())
 }
 
 #[allow(clippy::too_many_arguments)]

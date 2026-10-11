@@ -1,5 +1,108 @@
 use super::*;
 
+const PREDEFINED_ENGINE_SHADERS_2022_3_11: &str = include_str!("predefined_shaders_2022_3_11.tsv");
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PredefinedEngineShaderTarget {
+    file_id: i64,
+    guid: [u8; 16],
+}
+
+fn predefined_engine_shader_target(
+    shader_view: &ShaderView,
+) -> Result<Option<PredefinedEngineShaderTarget>, Box<dyn Error>> {
+    let Some(parsed) = shader_view.parsed.as_ref() else {
+        return Ok(None);
+    };
+    for (line_index, line) in PREDEFINED_ENGINE_SHADERS_2022_3_11.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut fields = line.splitn(4, '|');
+        let Some(file_id_text) = fields.next() else {
+            return Err(invalid_project(format!(
+                "predefined Shader table row {} has no file ID",
+                line_index + 1
+            )));
+        };
+        let Some(resource_kind) = fields.next() else {
+            return Err(invalid_project(format!(
+                "predefined Shader table row {} has no resource kind",
+                line_index + 1
+            )));
+        };
+        let Some(name) = fields.next() else {
+            return Err(invalid_project(format!(
+                "predefined Shader table row {} has no name",
+                line_index + 1
+            )));
+        };
+        let Some(property_names_json) = fields.next() else {
+            return Err(invalid_project(format!(
+                "predefined Shader table row {} has no property names",
+                line_index + 1
+            )));
+        };
+        if name != parsed.name {
+            continue;
+        }
+        let properties_match = if property_names_json.is_empty() {
+            parsed.properties.is_empty()
+        } else {
+            parsed
+                .properties
+                .iter()
+                .map(|property| property.name.as_str())
+                .eq(property_names_json.split_whitespace())
+        };
+        if !properties_match {
+            continue;
+        }
+        let file_id = file_id_text.parse::<i64>().map_err(|error| {
+            invalid_project(format!(
+                "predefined Shader table row {} has an invalid file ID: {error}",
+                line_index + 1
+            ))
+        })?;
+        let words = match resource_kind {
+            "D" => crate::export::guid_policy::ENGINE_DEFAULT_RESOURCES_GUID_WORDS,
+            "F" => crate::export::guid_policy::ENGINE_BUILTIN_EXTRA_GUID_WORDS,
+            other => {
+                return Err(invalid_project(format!(
+                    "predefined Shader table row {} has unknown resource kind {other:?}",
+                    line_index + 1
+                )))
+            }
+        };
+        let mut guid = [0; 16];
+        for (index, word) in words.iter().enumerate() {
+            guid[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        return Ok(Some(PredefinedEngineShaderTarget { file_id, guid }));
+    }
+    Ok(None)
+}
+
+fn project_object_name(
+    class_id: i32,
+    payload: Option<&ParsedObjectPayload>,
+    shader_view: Option<&ShaderView>,
+) -> Option<String> {
+    if class_id == SHADER_CLASS_ID {
+        if let Some(name) = shader_view
+            .and_then(|view| view.parsed.as_ref())
+            .map(|form| form.name.as_str())
+            .filter(|name| !name.is_empty())
+        {
+            // In the current Shader layout, the generated IShader.Name property reads
+            // m_ParsedForm.Name. The root m_Name field is not the export identity.
+            return Some(name.to_owned());
+        }
+    }
+    payload.and_then(object_asset_name)
+}
+
 pub(super) fn route_project_objects<'context, 'graph>(
     context: &ProjectRoutingContext<'context, 'graph>,
 ) -> Result<RoutedProjectObjects<'context>, Box<dyn Error>> {
@@ -16,6 +119,8 @@ pub(super) fn route_project_objects<'context, 'graph>(
     let opaque_objects = context.opaque_objects;
     let scene_member_keys = context.scene_member_keys;
     let prefab_member_keys = context.prefab_member_keys;
+    let scriptable_object_groups = context.scriptable_object_groups;
+    let controller_collections = context.controller_collections;
     let lightmap_texture_directories = context.lightmap_texture_directories;
     let mut used_guids = context.existing_guids.clone();
     let mut next_guid_sequence = 0u64;
@@ -31,9 +136,20 @@ pub(super) fn route_project_objects<'context, 'graph>(
     for (file_index, file) in workspace.files().iter().enumerate() {
         for (object_index, object_info) in file.metadata.objects.iter().enumerate() {
             let source_key = source_object_key(file_index, object_index);
-            if scene_member_keys.contains(&source_key) || prefab_member_keys.contains(&source_key) {
+            if scene_member_keys.contains(&source_key)
+                || prefab_member_keys.contains(&source_key)
+                || controller_collections
+                    .member_keys
+                    .contains(&(file_index, object_index))
+                || scriptable_object_groups
+                    .member_keys
+                    .contains(&(file_index, object_index))
+            {
                 continue;
             }
+            let scriptable_group_plan = scriptable_object_groups
+                .roots
+                .get(&(file_index, object_index));
             let object = objects.get(file_index, object_index).ok_or_else(|| {
                 invalid_project(format!(
                     "workspace object is missing at file {file_index}, object {object_index}"
@@ -47,7 +163,7 @@ pub(super) fn route_project_objects<'context, 'graph>(
             // Newer SerializedFile generations omit the legacy object-table class ID;
             // the source factory resolves it from the serialized type table.
             let class_id = object.factory.class_id;
-            let engine_guid = engine_resource_collection_guid(&file.file_name);
+            let source_engine_guid = engine_resource_collection_guid(&file.file_name);
             let payload = object.payload.as_ref().ok();
             if payload.is_some() && !opaque_objects.contains(&(file_index, object_index)) {
                 validate_decoded_object(object, object_info.path_id, reference_graph)?;
@@ -60,14 +176,26 @@ pub(super) fn route_project_objects<'context, 'graph>(
                     ObjectClassFacts::new(class_id, payload.is_none())
                 }
             };
-            let shader_view = if engine_guid.is_none() && class_id == SHADER_CLASS_ID {
+            let shader_view = if source_engine_guid.is_none() && class_id == SHADER_CLASS_ID {
                 payload
                     .map(|payload| ShaderView::from_value(&payload.root))
                     .transpose()?
             } else {
                 None
             };
-            let audio_view = if engine_guid.is_none()
+            let predefined_engine_shader =
+                if source_engine_guid.is_none() && class_id == SHADER_CLASS_ID {
+                    shader_view
+                        .as_ref()
+                        .map(predefined_engine_shader_target)
+                        .transpose()?
+                        .flatten()
+                } else {
+                    None
+                };
+            let engine_guid =
+                source_engine_guid.or_else(|| predefined_engine_shader.map(|target| target.guid));
+            let audio_view = if source_engine_guid.is_none()
                 && class_id == crate::resources::audio::AUDIO_CLIP_CLASS_ID
             {
                 payload
@@ -85,7 +213,7 @@ pub(super) fn route_project_objects<'context, 'graph>(
                 }
                 Some(_) => crate::export::collection_claims::ShaderTextState::CompiledOrEmpty,
             };
-            let text_asset_script = if engine_guid.is_none() && class_id == 49 {
+            let text_asset_script = if source_engine_guid.is_none() && class_id == 49 {
                 payload.map(text_asset_script_bytes).transpose()?.flatten()
             } else {
                 None
@@ -121,8 +249,18 @@ pub(super) fn route_project_objects<'context, 'graph>(
                 // SpriteProcessor creates this generated main asset for a standalone ITexture2D.
                 // Keep selection in the ordinary registration walk with the processed fact.
                 claim_facts.main = ClaimMainKind::SpriteInformation;
+            } else if scriptable_group_plan.is_some() {
+                claim_facts.main = ClaimMainKind::ScriptableObjectGroup;
             }
             let selection = select_collection_with_claim_facts(facts, settings_facts, claim_facts)?;
+            if scriptable_group_plan.is_some()
+                && selection.exporter != "ScriptableObjectGroupExporter"
+            {
+                return Err(invalid_project(format!(
+                    "MonoBehaviour {}:{} was identified as a generated ScriptableObjectGroup root, but registration selected {}",
+                    file_index, object_info.path_id, selection.exporter
+                )));
+            }
             if selection.exporter == "LightmapTextureAssetExporter" && !texture_importer_supported {
                 return Err(invalid_project(format!(
                     "file {file_index} object {object_index} PathID {} selected LightmapTextureAssetExporter, but Unity {}.{} has no source-verified TextureImporter layout",
@@ -130,33 +268,23 @@ pub(super) fn route_project_objects<'context, 'graph>(
                 )));
             }
             let audio_yaml_route = if selection.exporter == "YamlAudioExporter" {
-                let view = audio_view.as_ref().ok_or_else(|| {
+                audio_view.as_ref().ok_or_else(|| {
                     invalid_project(
                         "YamlAudioExporter was selected without decoded AudioClip fields",
                     )
                 })?;
-                let has_inline_data = view
-                    .audio_data
-                    .as_ref()
-                    .is_some_and(|bytes| !bytes.is_empty());
-                let has_stream_data = view
-                    .resource
-                    .as_ref()
-                    .is_some_and(|resource| resource.is_set());
-                let can_preserve_audio = match settings.audio_export_format {
-                    crate::export::settings::AudioExportFormat::Yaml => true,
-                    crate::export::settings::AudioExportFormat::Default
-                    | crate::export::settings::AudioExportFormat::PreferWav => {
-                        !has_inline_data && !has_stream_data
-                    }
-                    crate::export::settings::AudioExportFormat::Native => false,
-                };
-                if !can_preserve_audio {
+                if settings.audio_export_format
+                    == crate::export::settings::AudioExportFormat::Native
+                {
                     return Err(invalid_project(format!(
-                        "file {file_index} object {object_index} PathID {} selected YamlAudioExporter, but this project route cannot preserve its inline or streamed AudioClip data under {:?}",
-                        object.path_id, settings.audio_export_format
+                        "file {file_index} object {object_index} PathID {} selected YamlAudioExporter under Native, whose binary AudioClip project route is not integrated",
+                        object.path_id
                     )));
                 }
+                // The source registers this YAML collection as the fallback after
+                // AudioClipExporter declines undecodable payloads. It preserves inline
+                // m_AudioData and stages a resolved m_Resource as a .resS sidecar even
+                // when Default or PreferWav is configured.
                 true
             } else {
                 false
@@ -244,7 +372,7 @@ pub(super) fn route_project_objects<'context, 'graph>(
                 None
             };
             let kind = selection.kind();
-            let script_export = if class_id == 115 && engine_guid.is_none() {
+            let script_export = if class_id == 115 && source_engine_guid.is_none() {
                 plan_script_export_details(
                     object,
                     settings,
@@ -447,7 +575,7 @@ pub(super) fn route_project_objects<'context, 'graph>(
             } else {
                 (
                     object_class_name(class_id, payload.map(|payload| payload.type_name.as_str())),
-                    payload.and_then(object_asset_name),
+                    project_object_name(class_id, payload, shader_view.as_ref()),
                 )
             };
             let file_id = match route {
@@ -468,8 +596,83 @@ pub(super) fn route_project_objects<'context, 'graph>(
                         .ok_or_else(|| invalid_project("MonoScript route has no export details"))?
                         .pointer_file_id
                 }
+                ObjectRoute::EngineRedirect => {
+                    predefined_engine_shader.map_or(object_info.path_id, |target| target.file_id)
+                }
                 _ => object_info.path_id,
             };
+            let scriptable_object_group = scriptable_group_plan
+                .map(|plan| {
+                    let mut children = Vec::new();
+                    children
+                        .try_reserve_exact(plan.children.len())
+                        .map_err(|_| {
+                            invalid_project(format!(
+                                "could not allocate ScriptableObjectGroup children for {}:{}",
+                                file_index, object_info.path_id
+                            ))
+                        })?;
+                    for member in &plan.children {
+                        let child = objects
+                            .get(member.file_index, member.object_index)
+                            .ok_or_else(|| {
+                                invalid_project(format!(
+                                    "ScriptableObjectGroup {}:{} member {}:{} is absent from ObjectWorkspace",
+                                    file_index,
+                                    object_info.path_id,
+                                    member.file_index,
+                                    member.object_index
+                                ))
+                            })?;
+                        if child.factory.class_id != 114 {
+                            return Err(invalid_project(format!(
+                                "ScriptableObjectGroup {}:{} member {}:{} has class ID {}, expected MonoBehaviour (114)",
+                                file_index,
+                                object_info.path_id,
+                                member.file_index,
+                                child.path_id,
+                                child.factory.class_id
+                            )));
+                        }
+                        children.push(RoutedScriptableObjectGroupChild {
+                            object: child,
+                            file_id: member.file_id,
+                        });
+                    }
+                    Ok::<_, Box<dyn Error>>(RoutedScriptableObjectGroup {
+                        extension: plan.extension,
+                        children,
+                    })
+                })
+                .transpose()?;
+            let controller_collection = controller_collections
+                .roots
+                .get(&(file_index, object_index))
+                .map(|plan| {
+                    let mut children = Vec::new();
+                    children
+                        .try_reserve_exact(plan.children.len())
+                        .map_err(|_| {
+                            invalid_project("could not allocate routed AnimatorController members")
+                        })?;
+                    for member in &plan.children {
+                        let object = objects.get(member.key.0, member.key.1).ok_or_else(|| {
+                            invalid_project(
+                                "routed AnimatorController member is absent from ObjectWorkspace",
+                            )
+                        })?;
+                        children.push(RoutedControllerMember {
+                            object,
+                            file_id: member.file_id,
+                            register_global: member.register_global,
+                        });
+                    }
+                    Ok::<_, Box<dyn Error>>(RoutedControllerCollection {
+                        is_release: plan.is_release,
+                        children,
+                    })
+                })
+                .transpose()?;
             let guid = if let Some(engine_guid) = engine_guid {
                 used_guids.insert(engine_guid);
                 engine_guid
@@ -493,6 +696,8 @@ pub(super) fn route_project_objects<'context, 'graph>(
                 text_asset_export,
                 texture_export,
                 script_export,
+                scriptable_object_group,
+                controller_collection,
                 selection,
                 route,
                 collection_index,
@@ -513,4 +718,130 @@ pub(super) fn route_project_objects<'context, 'graph>(
         next_guid_sequence,
         used_guids,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{predefined_engine_shader_target, project_object_name};
+    use crate::export::project_workflow::SHADER_CLASS_ID;
+    use crate::resources::shader::{ParsedShaderForm, ParsedShaderProperty, ShaderView};
+
+    #[test]
+    fn unity_2022_3_predefined_shader_matches_name_and_ordered_properties() {
+        let shader = ShaderView {
+            parsed: Some(ParsedShaderForm {
+                name: "Unlit/Color".to_owned(),
+                properties: vec![ParsedShaderProperty {
+                    name: "_Color".to_owned(),
+                    ..ParsedShaderProperty::default()
+                }],
+                ..ParsedShaderForm::default()
+            }),
+            ..ShaderView::default()
+        };
+
+        let target = predefined_engine_shader_target(&shader)
+            .unwrap()
+            .expect("the 2022.3 TPK contains Unlit/Color");
+        let mut expected_guid = [0; 16];
+        for (index, word) in crate::export::guid_policy::ENGINE_BUILTIN_EXTRA_GUID_WORDS
+            .iter()
+            .enumerate()
+        {
+            expected_guid[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        assert_eq!(target.file_id, 10755);
+        assert_eq!(target.guid, expected_guid);
+
+        let mut different_properties = shader;
+        different_properties.parsed.as_mut().unwrap().properties[0].name = "_MainTex".to_owned();
+        assert_eq!(
+            predefined_engine_shader_target(&different_properties).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn unity_2022_3_predefined_standard_shader_matches_all_ordered_properties() {
+        let property_names = [
+            "_Color",
+            "_MainTex",
+            "_Cutoff",
+            "_Glossiness",
+            "_GlossMapScale",
+            "_SmoothnessTextureChannel",
+            "_Metallic",
+            "_MetallicGlossMap",
+            "_SpecularHighlights",
+            "_GlossyReflections",
+            "_BumpScale",
+            "_BumpMap",
+            "_Parallax",
+            "_ParallaxMap",
+            "_OcclusionStrength",
+            "_OcclusionMap",
+            "_EmissionColor",
+            "_EmissionMap",
+            "_DetailMask",
+            "_DetailAlbedoMap",
+            "_DetailNormalMapScale",
+            "_DetailNormalMap",
+            "_UVSec",
+            "_Mode",
+            "_SrcBlend",
+            "_DstBlend",
+            "_ZWrite",
+        ];
+        let shader = ShaderView {
+            parsed: Some(ParsedShaderForm {
+                name: "Standard".to_owned(),
+                properties: property_names
+                    .iter()
+                    .map(|name| ParsedShaderProperty {
+                        name: (*name).to_owned(),
+                        ..ParsedShaderProperty::default()
+                    })
+                    .collect(),
+                ..ParsedShaderForm::default()
+            }),
+            ..ShaderView::default()
+        };
+
+        let target = predefined_engine_shader_target(&shader)
+            .unwrap()
+            .expect("the 2022.3 TPK contains Standard");
+        assert_eq!(target.file_id, 46);
+        let mut expected_guid = [0; 16];
+        for (index, word) in crate::export::guid_policy::ENGINE_BUILTIN_EXTRA_GUID_WORDS
+            .iter()
+            .enumerate()
+        {
+            expected_guid[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        assert_eq!(target.guid, expected_guid);
+
+        let mut reordered = shader;
+        reordered.parsed.as_mut().unwrap().properties.swap(0, 1);
+        assert_eq!(
+            predefined_engine_shader_target(&reordered).unwrap(),
+            None,
+            "property ordering is part of the predefined shader identity"
+        );
+    }
+
+    #[test]
+    fn shader_export_name_comes_from_parsed_form() {
+        let shader = ShaderView {
+            parsed: Some(ParsedShaderForm {
+                name: "Hidden/lilToonOutline".to_owned(),
+                ..ParsedShaderForm::default()
+            }),
+            ..ShaderView::default()
+        };
+
+        assert_eq!(
+            project_object_name(SHADER_CLASS_ID, None, Some(&shader)).as_deref(),
+            Some("Hidden/lilToonOutline")
+        );
+    }
 }

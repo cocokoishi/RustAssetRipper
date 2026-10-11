@@ -152,27 +152,6 @@ impl StreamDispatchedFile {
     pub(crate) fn wrappers(&self) -> &[WrapperLayer] {
         &self.wrappers
     }
-
-    pub(crate) fn into_dispatched(
-        self,
-        limits: SchemeReaderLimits,
-    ) -> Result<DispatchedFile<'static>, SchemeError> {
-        let Self {
-            mut stream,
-            kind,
-            wrappers,
-        } = self;
-        let length = stream
-            .length()
-            .map_err(|error| SchemeError::new(SchemeErrorKind::StreamInput(error)))?;
-        let contents = SchemeReader::materialize_stream(&mut stream, length)?;
-        Ok(DispatchedFile {
-            contents: Cow::Owned(contents),
-            kind,
-            wrappers,
-            limits,
-        })
-    }
 }
 
 impl SchemeReader {
@@ -211,8 +190,8 @@ impl SchemeReader {
     ///    never materialized. The decoded layer is bounded per layer and cumulatively exactly like
     ///    the in-memory dispatcher; any deeper wrapper is handled by that same bounded state
     ///    machine after the outer layer has been decoded.
-    /// 3. Otherwise the finally dispatched layer is materialized, because every container and leaf
-    ///    parser in this port reads contiguous bytes.
+    /// 3. The final layer is materialized for this public API's contiguous `DispatchedFile`
+    ///    result. Product mounting uses the separate file-backed dispatcher and range parsers.
     pub fn read_path_streaming(
         path: impl AsRef<Path>,
         limits: SchemeReaderLimits,
@@ -225,7 +204,7 @@ impl SchemeReader {
     /// Read and dispatch a seekable stream through the same bounded streaming path as a local
     /// file. Outer GZip/Brotli wrappers are decoded from the stream without first copying their
     /// compressed input; the final container or leaf is materialized under `max_input_bytes`
-    /// because the current format parsers consume contiguous byte slices.
+    /// to satisfy this public API's contiguous `DispatchedFile` result.
     pub fn read_stream<R: Read + Seek>(
         stream: &mut R,
         limits: SchemeReaderLimits,
@@ -530,7 +509,7 @@ impl SchemeReader {
         Ok(probe_direct_stream_kind(stream, limits)? == Some(FileKind::UnityFs))
     }
 
-    /// Materialize the remaining seekable layer into bounded storage.
+    /// Materialize the final layer for the public contiguous `DispatchedFile` API.
     fn materialize_stream<R: Read + Seek>(
         stream: &mut R,
         length: u64,

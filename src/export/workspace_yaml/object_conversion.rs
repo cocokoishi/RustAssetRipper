@@ -14,7 +14,7 @@ use crate::serialized_file::reference_graph::{MultiFilePPtrResolution, MultiFile
 use crate::serialized_file::workspace::SerializedFileWorkspace;
 
 use super::super::pointer_map::{
-    ProjectExportPointerMap, ProjectPointerRequest, ProjectPointerResolution,
+    ProjectExportPointerMap, ProjectPointerRequest, ProjectPointerResolution, UnityMetaPointer,
     UnityProjectAssetType, UnresolvedProjectPointer,
 };
 use super::super::scene_collection::{ExportAssetCollectionIdentity, ExportAssetIdentity};
@@ -590,7 +590,11 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
         }
         let generated_game_object_or_transform = matches!(class_id, 1 | 4)
             && matches!(&object.factory.kind, FactoryAssetKind::Generated(_));
+        let generated_controller_member =
+            matches!(class_id, 91 | 114 | 206 | 1101 | 1102 | 1107 | 1109)
+                && matches!(&object.factory.kind, FactoryAssetKind::Generated(_));
         if generated_game_object_or_transform
+            || generated_controller_member
             || (animation_clip_editor_format && class_id == 74)
             || (editor_manager_type_tree.is_some() && matches!(class_id, 23 | 33 | 104 | 108 | 157))
             || (generated_prefab_internal.is_some()
@@ -1926,6 +1930,14 @@ fn set_scene_editor_color_default(
     Ok(())
 }
 
+fn material_shader_pointer(mut pointer: UnityMetaPointer) -> UnityMetaPointer {
+    // Project Shader assets use Meta pointers; predefined engine assets keep type 0.
+    if pointer.asset_type != UnityProjectAssetType::Internal {
+        pointer.asset_type = UnityProjectAssetType::Meta;
+    }
+    pointer
+}
+
 fn resolve_workspace_pointer(
     request: UnityYamlPPtrRequest<'_>,
     reference_graph: &MultiFileReferenceGraph<'_>,
@@ -1988,16 +2000,6 @@ fn resolve_workspace_pointer(
         }
         edge
     };
-    if matching_edges.next().is_some() {
-        *error = Some(UnityYamlWorkspaceExportError::ReferenceEdgeAmbiguous {
-            file_index,
-            object_index: request.source.object_index,
-            field_path: request.field_path.to_owned(),
-            file_id: request.file_id,
-            path_id: request.path_id,
-        });
-        return ProjectPointerResolution::Null;
-    }
 
     let pointer_request = match &edge.resolution {
         MultiFilePPtrResolution::Null => {
@@ -2046,6 +2048,12 @@ fn resolve_workspace_pointer(
                 class_id,
             })
         }
+        MultiFilePPtrResolution::PredefinedEngineAsset {
+            resource, path_id, ..
+        } => ProjectPointerRequest::PredefinedEngineAsset {
+            path_id: *path_id,
+            resource: *resource,
+        },
         resolution => ProjectPointerRequest::UnresolvedInput(UnresolvedProjectPointer {
             source_file_index: file_index,
             source_object_index: request.source.object_index,
@@ -2058,14 +2066,11 @@ fn resolve_workspace_pointer(
         }),
     };
     match pointer_map.resolve(pointer_request, current_collection_index) {
-        Ok(ProjectPointerResolution::Mapped(mut pointer))
+        Ok(ProjectPointerResolution::Mapped(pointer))
             if request.source.class_id == 21
                 && request.field_path.rsplit('.').next() == Some("m_Shader") =>
         {
-            // AssetRipper's Material shader converter writes a Meta pointer (type 3), while
-            // ordinary serialized asset references use type 2.
-            pointer.asset_type = UnityProjectAssetType::Meta;
-            ProjectPointerResolution::Mapped(pointer)
+            ProjectPointerResolution::Mapped(material_shader_pointer(pointer))
         }
         Ok(resolution) => resolution,
         Err(source) => {
@@ -2127,7 +2132,6 @@ pub fn workspace_object_to_unity_yaml_document_with_streamed_resources(
     limits: UnityYamlObjectConversionLimits,
     streamed_resources: &WorkspaceStreamedYamlResourceContext<'_, '_>,
 ) -> Result<Option<UnityYamlDocument>, UnityYamlWorkspaceExportError> {
-) -> Result<Option<UnityYamlDocument>, UnityYamlWorkspaceExportError> {
     workspace_object_to_unity_yaml_document_with_processed_animation_root(
         workspace,
         reference_graph,
@@ -2180,4 +2184,29 @@ pub fn workspace_object_to_unity_yaml_document_with_processed_animation_root(
         generated_prefab_internal: None,
         generated_lighting_data: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::export::pointer_map::ExportPointerGuid;
+
+    #[test]
+    fn material_shader_pointer_preserves_predefined_internal_asset_type() {
+        let internal = UnityMetaPointer {
+            file_id: 10755,
+            guid: ExportPointerGuid::Collection([0xF0; 16]),
+            asset_type: UnityProjectAssetType::Internal,
+        };
+        assert_eq!(material_shader_pointer(internal), internal);
+
+        let project_asset = UnityMetaPointer {
+            asset_type: UnityProjectAssetType::Serialized,
+            ..internal
+        };
+        assert_eq!(
+            material_shader_pointer(project_asset).asset_type,
+            UnityProjectAssetType::Meta
+        );
+    }
 }

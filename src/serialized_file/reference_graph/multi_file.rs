@@ -1,12 +1,14 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
+use std::sync::OnceLock;
 
 use crate::serialized_file::metadata::{FileIdentifier, SerializedFileMetadata, TypeTree};
 
 use super::{external_table_index, ObjectReferenceGraph};
 
 type ExternalDependencyResolver<'a> = dyn FnMut(usize, &FileIdentifier) -> Option<usize> + 'a;
+const ENGINE_RESOURCES_2022_3_11: &str = include_str!("engine_resources_2022_3_11.tsv");
 
 #[derive(Clone, Copy)]
 struct ReferenceSource<'a> {
@@ -34,6 +36,92 @@ pub(super) fn engine_resource_alias(normalized_name: &str) -> Option<&'static st
         }
         _ => None,
     }
+}
+
+/// Engine collection identity for an object supplied by Unity rather than by a project file.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PredefinedEngineResourceKind {
+    DefaultResources,
+}
+
+fn predefined_engine_asset_resolution(
+    source_metadata: &SerializedFileMetadata,
+    identifier: &FileIdentifier,
+    external_index: usize,
+    path_id: i64,
+) -> Option<MultiFilePPtrResolution> {
+    let dependency_name = identifier.fixed_path_name();
+    if !crate::io::special_names::is_default_resource(&dependency_name) {
+        return None;
+    }
+    let version = source_metadata.prefix.unity_version_text.as_deref()?;
+    let class_id = default_resource_class_id(path_id, version)?;
+    Some(MultiFilePPtrResolution::PredefinedEngineAsset {
+        external_index,
+        resource: PredefinedEngineResourceKind::DefaultResources,
+        path_id,
+        class_id,
+    })
+}
+
+fn default_resource_class_id(path_id: i64, unity_version: &str) -> Option<i32> {
+    if !uses_engine_resources_2022_3_11(unity_version) {
+        return None;
+    }
+    static INDEX: OnceLock<HashMap<i64, i32>> = OnceLock::new();
+    INDEX
+        .get_or_init(|| {
+            let mut index = HashMap::new();
+            for line in ENGINE_RESOURCES_2022_3_11.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let Some((path_id, class_id)) = line.split_once('|') else {
+                    continue;
+                };
+                let (Ok(path_id), Ok(class_id)) = (path_id.parse(), class_id.parse()) else {
+                    continue;
+                };
+                index.insert(path_id, class_id);
+            }
+            index
+        })
+        .get(&path_id)
+        .copied()
+}
+
+fn uses_engine_resources_2022_3_11(unity_version: &str) -> bool {
+    let mut parts = unity_version.trim().split('.');
+    let (Some(major), Some(minor), Some(build_suffix)) = (parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    let (Ok(major), Ok(minor)) = (major.parse::<u32>(), minor.parse::<u32>()) else {
+        return false;
+    };
+    if (major, minor) != (2022, 3) {
+        return false;
+    }
+    let build_text: String = build_suffix
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    let Ok(build) = build_text.parse::<u32>() else {
+        return false;
+    };
+    if build > 11 {
+        return true;
+    }
+    if build < 11 {
+        return false;
+    }
+    matches!(
+        build_suffix
+            .get(build_text.len()..)
+            .and_then(|suffix| suffix.chars().next()),
+        Some('f' | 'p' | 'c')
+    )
 }
 
 /// Resource bounds for joining references from a set of already parsed SerializedFiles.
@@ -96,6 +184,12 @@ pub enum MultiFilePPtrResolution {
     Object {
         target_file_index: usize,
         target_object_index: usize,
+    },
+    PredefinedEngineAsset {
+        external_index: usize,
+        resource: PredefinedEngineResourceKind,
+        path_id: i64,
+        class_id: i32,
     },
     MissingLocalObject {
         path_id: i64,
@@ -495,7 +589,9 @@ impl<'a> MultiFileReferenceGraph<'a> {
             && self.references.iter().all(|reference| {
                 matches!(
                     reference.resolution,
-                    MultiFilePPtrResolution::Null | MultiFilePPtrResolution::Object { .. }
+                    MultiFilePPtrResolution::Null
+                        | MultiFilePPtrResolution::Object { .. }
+                        | MultiFilePPtrResolution::PredefinedEngineAsset { .. }
                 )
             })
     }
@@ -519,7 +615,9 @@ impl<'a> MultiFileReferenceGraph<'a> {
             && self.references.iter().all(|reference| {
                 matches!(
                     reference.resolution,
-                    MultiFilePPtrResolution::Null | MultiFilePPtrResolution::Object { .. }
+                    MultiFilePPtrResolution::Null
+                        | MultiFilePPtrResolution::Object { .. }
+                        | MultiFilePPtrResolution::PredefinedEngineAsset { .. }
                 )
             })
     }
@@ -564,6 +662,14 @@ impl<'a> MultiFileReferenceGraph<'a> {
                 target_file_index
             };
         let Some(target_file_index) = target_file_index else {
+            if let Some(resolution) = predefined_engine_asset_resolution(
+                source.metadata,
+                identifier,
+                external_index,
+                path_id,
+            ) {
+                return Ok(resolution);
+            }
             return Ok(MultiFilePPtrResolution::MissingDependency {
                 external_index,
                 path_id,
@@ -680,10 +786,16 @@ impl<'a> MultiFileReferenceGraph<'a> {
                 };
                 let (alias_first, alias_end) = self.name_range(alias);
                 match alias_end - alias_first {
-                    0 => MultiFilePPtrResolution::MissingDependency {
+                    0 => predefined_engine_asset_resolution(
+                        source_metadata,
+                        identifier,
                         external_index,
                         path_id,
-                    },
+                    )
+                    .unwrap_or(MultiFilePPtrResolution::MissingDependency {
+                        external_index,
+                        path_id,
+                    }),
                     1 => self.resolve_external_target(self.name_index[alias_first], path_id),
                     candidate_count => MultiFilePPtrResolution::AmbiguousDependency {
                         external_index,

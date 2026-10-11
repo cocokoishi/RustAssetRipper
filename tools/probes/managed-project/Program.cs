@@ -39,6 +39,11 @@ if (args.Length > 0 && args[0] == "compare-managed-assembly-pe")
     return CompareManagedAssemblyPe(args[1], args[2]);
 }
 
+if (args.Length == 4 && args[0] == "post-export")
+{
+    return ProbePostExports(args[1], args[2], args[3]);
+}
+
 if (args.Length > 0 && args[0] == "export-texture-project")
 {
     if (args.Length is < 5 or > 7)

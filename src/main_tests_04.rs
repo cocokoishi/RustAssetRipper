@@ -360,9 +360,15 @@
             &mut exported_files,
             &mut exported_directories,
         );
-        assert!(!exported_files.iter().any(|path| path
-            .extension()
-            .is_some_and(|extension| extension == "asset")));
+        let mut asset_files = exported_files.iter().filter(|path| path
+            .extension().is_some_and(|extension| extension == "asset")).cloned().collect::<Vec<_>>();
+        asset_files.sort();
+        let mut expected_settings = vec![
+            output_root.join("ProjectSettings/EditorSettings.asset"),
+            bytes_output_root.join("ProjectSettings/EditorSettings.asset"),
+        ];
+        expected_settings.sort();
+        assert_eq!(asset_files, expected_settings, "TextAsset routes emit no raw YAML assets; only the source-generated EditorSettings are .asset files");
         assert_eq!(fs::read(&source_path).unwrap(), source_bytes);
 
         input.files.extend(exported_files);
@@ -647,9 +653,8 @@
         let resource_path = input_root.join("AudioFixture.resS");
         let settings_path = directory.join("audio-yaml-settings.json");
         let output_root = directory.join("streamed-audio-project");
-        let settings = include_str!("export/settings_file_defaults.json")
-            .replace("\"AudioExportFormat\": 2", "\"AudioExportFormat\": 0");
-        assert!(settings.contains("\"AudioExportFormat\": 0"));
+        let settings = include_str!("export/settings_file_defaults.json");
+        assert!(settings.contains("\"AudioExportFormat\": 2"));
         fs::write(&source_path, &input_assets).unwrap();
         fs::write(&resource_path, &input_resource).unwrap();
         fs::write(&settings_path, settings).unwrap();
@@ -718,8 +723,7 @@
             .find_map(|line| line.strip_prefix("INPUT_HEX|AudioFixture.assets|"))
             .expect("fixture has the AudioClip SerializedFile bytes");
         let input_assets = decode_hex(input_assets_hex);
-        let settings = include_str!("export/settings_file_defaults.json")
-            .replace("\"AudioExportFormat\": 2", "\"AudioExportFormat\": 0");
+        let settings = include_str!("export/settings_file_defaults.json");
         let cases: [(&str, Option<&[u8]>, &str); 2] = [
             ("missing", None, "is missing"),
             ("truncated", Some(b"prefixAB"), "range"),
@@ -737,7 +741,7 @@
             if let Some(resource_bytes) = resource_bytes {
                 fs::write(&resource_path, resource_bytes).unwrap();
             }
-            fs::write(&settings_path, &settings).unwrap();
+            fs::write(&settings_path, settings).unwrap();
             let mut files = vec![source_path.clone(), settings_path.clone()];
             if resource_path.is_file() {
                 files.push(resource_path.clone());
@@ -950,6 +954,11 @@
                 source_row_bytes(fixture, "ProjectSettings/ProjectVersion.txt"),
                 "project version output differs for Unity {unity_version} {storage}"
             );
+            assert_eq!(
+                fs::read(output_root.join("ProjectSettings/EditorSettings.asset")).unwrap(),
+                source_row_bytes(fixture, "ProjectSettings/EditorSettings.asset"),
+                "generated editor settings differ for Unity {unity_version} {storage}"
+            );
             let source_manifest =
                 String::from_utf8(source_row_bytes(fixture, "Packages/manifest.json"))
                     .expect("source package manifest is UTF-8");
@@ -984,6 +993,18 @@
             let mut exported_files = Vec::new();
             let mut exported_directories = Vec::new();
             collect_output_tree(&output_root, &mut exported_files, &mut exported_directories);
+            let mut actual_paths = exported_files.iter()
+                .map(|path| path.strip_prefix(&output_root).unwrap().to_str().unwrap().replace('\\', "/"))
+                .collect::<Vec<_>>();
+            let mut expected_paths = fixture.lines()
+                .filter_map(|line| line.strip_prefix("SOURCE_OUTPUT|"))
+                .map(|row| {
+                    let path = row.split_once('|').unwrap().0;
+                    path.strip_prefix("ExportedProject/").unwrap_or(path).to_owned()
+                }).collect::<Vec<_>>();
+            actual_paths.sort();
+            expected_paths.sort();
+            assert_eq!(actual_paths, expected_paths, "the entire exported file inventory matches the source for Unity {unity_version} {storage}");
             input.files.extend(exported_files);
             input.subdirectories.extend(exported_directories);
         }

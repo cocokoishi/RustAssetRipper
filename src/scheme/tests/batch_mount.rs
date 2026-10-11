@@ -134,6 +134,7 @@ fn mount_path_connects_root_webdata_to_recursive_virtual_mounting() {
             .unwrap(),
         b"root WebData leaf"
     );
+    drop(filesystem);
     std::fs::remove_file(path).unwrap();
 }
 
@@ -259,7 +260,9 @@ fn source_webdata_entries_mount_file_backed_through_both_path_apis() {
             );
         }
 
-        std::fs::remove_file(&path).expect("mounted WebData entries no longer hold source file");
+        drop(batch_filesystem);
+        drop(path_filesystem);
+        std::fs::remove_file(&path).expect("release shared WebData source before scratch cleanup");
     }
 }
 
@@ -388,7 +391,9 @@ fn source_unityfs_nested_webdata_mounts_file_backed_through_both_path_apis() {
         );
     }
 
-    std::fs::remove_file(&path).expect("mounted nested WebData no longer holds the input file");
+    drop(batch_filesystem);
+    drop(path_filesystem);
+    std::fs::remove_file(&path).expect("release shared UnityFS source before scratch cleanup");
     std::fs::remove_dir(&directory).expect("remove source bundle directory");
 }
 
@@ -635,7 +640,9 @@ fn source_unityraw_nested_unityfs_mounts_file_backed_through_both_path_apis() {
         expected_payload
     );
 
-    std::fs::remove_file(&path).expect("mounted nested UnityFS no longer holds the input file");
+    drop(batch_filesystem);
+    drop(path_filesystem);
+    std::fs::remove_file(&path).expect("release shared UnityRaw source before scratch cleanup");
     std::fs::remove_dir(&directory).expect("remove source bundle directory");
 }
 
@@ -720,6 +727,7 @@ fn mount_path_matches_reference_written_webdata_and_fails_loud_on_gap() {
         .unwrap();
         assert_eq!(report.mounted_entries, 2);
         assert_reference_entries(&filesystem, "/inputs");
+        drop(filesystem);
         std::fs::remove_file(path).unwrap();
     }
 
@@ -862,6 +870,7 @@ fn mount_directory_preserves_paths_and_assembles_split_groups() {
             .unwrap(),
         b"other bundle"
     );
+    drop(filesystem);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -1149,6 +1158,7 @@ fn mount_paths_imports_explicit_roots_and_honors_each_destination() {
             .unwrap(),
         b"leaf"
     );
+    drop(filesystem);
     std::fs::remove_file(resource_path).unwrap();
     std::fs::remove_file(container_path).unwrap();
 }

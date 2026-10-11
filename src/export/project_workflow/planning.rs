@@ -134,54 +134,13 @@ pub(super) fn plan_routed_asset_files(
     for entry in routed {
         if entry.class_id == 115 && !saved_assemblies_emitted {
             for assembly in saved_assemblies {
-                let input_bytes = filesystem
-                    .read_all_bytes(
-                        &assembly.source_virtual_path,
-                        limits.max_total_asset_payload_bytes,
-                    )
-                    .map_err(|error| {
-                        invalid_project(format!(
-                            "managed assembly {:?} could not be read from {}: {error}",
-                            assembly.assembly_name, assembly.source_virtual_path
-                        ))
-                    })?;
-                let file_name = assembly
-                    .relative_path
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(&assembly.relative_path);
-                let serialized = match assembly.generated_forwarder.as_deref() {
-                    Some("System.Runtime.CompilerServices.Unsafe") => {
-                        ManagedAssembly::create_unsafe_forwarder(
-                            &assembly.source_virtual_path,
-                            &input_bytes,
-                            ManagedAssemblyLimits::default(),
-                        )
-                    }
-                    Some("System.Runtime.InteropServices") => {
-                        ManagedAssembly::create_interop_services_forwarder(
-                            &assembly.source_virtual_path,
-                            &input_bytes,
-                            ManagedAssemblyLimits::default(),
-                        )
-                    }
-                    Some(helper_name) => {
-                        return Err(invalid_project(format!(
-                            "unknown synthesized forwarding assembly {helper_name:?}"
-                        )))
-                    }
-                    None => ManagedAssembly::serialize_for_export(
-                        file_name,
-                        &input_bytes,
-                        ManagedAssemblyLimits::default(),
-                    ),
-                };
-                let bytes = serialized.map_err(|error| {
-                    invalid_project(format!(
-                        "managed assembly {:?} could not be exported from {}: {error}",
-                        assembly.assembly_name, assembly.source_virtual_path
-                    ))
-                })?;
+                let bytes = materialize_assembly_export(
+                    filesystem,
+                    assembly,
+                    limits
+                        .max_total_asset_payload_bytes
+                        .saturating_sub(total_bytes),
+                )?;
                 total_bytes = total_bytes
                     .checked_add(bytes.len())
                     .ok_or_else(|| invalid_project("project output byte count overflows"))?;
@@ -340,6 +299,7 @@ pub(super) fn plan_routed_asset_files(
         } else {
             None
         };
+        let mut additional_exported_document_count = 0usize;
         let bytes = match entry.route {
             ObjectRoute::Unknown | ObjectRoute::Unreadable => raw_payload_bytes(
                 filesystem,
@@ -503,6 +463,16 @@ pub(super) fn plan_routed_asset_files(
                         true,
                     )?;
                 let Some(mut document) = document else {
+                    if entry.scriptable_object_group.is_some()
+                        || entry.controller_collection.is_some()
+                    {
+                        return Err(invalid_project(format!(
+                            "{} root {}:{} produced no YAML document",
+                            entry.selection.collection_name,
+                            entry.object.file_index,
+                            entry.object.path_id
+                        )));
+                    }
                     notices.push(ProjectExportNotice {
                         subject: entry.selection.collection_name.to_owned(),
                         reason:
@@ -529,7 +499,119 @@ pub(super) fn plan_routed_asset_files(
                         )?;
                     }
                 }
-                write_unity_yaml_documents(&[document], limits.yaml_write)?.into_bytes()
+                if let Some(group) = &entry.scriptable_object_group {
+                    let document_capacity =
+                        group.children.len().checked_add(1).ok_or_else(|| {
+                            invalid_project("ScriptableObjectGroup document count overflows")
+                        })?;
+                    let mut documents = Vec::new();
+                    documents
+                        .try_reserve_exact(document_capacity)
+                        .map_err(|_| {
+                            invalid_project(format!(
+                                "could not allocate {} ScriptableObjectGroup YAML documents",
+                                document_capacity
+                            ))
+                        })?;
+                    documents.push(document);
+                    for child in &group.children {
+                        let source = ExportAssetIdentity {
+                            collection: ExportAssetCollectionIdentity::SerializedFile {
+                                file_index: child.object.file_index,
+                            },
+                            object_index: child.object.object_index,
+                            path_id: child.object.path_id,
+                            class_id: child.object.factory.class_id,
+                        };
+                        let document =
+                            workspace_object_to_unity_yaml_document_with_streamed_resources(
+                                workspace,
+                                reference_graph,
+                                pointer_map,
+                                child.object,
+                                source,
+                                child.file_id,
+                                entry.collection_index,
+                                None,
+                                limits.yaml_collection.object_conversion,
+                                &streamed_resources,
+                            )?
+                            .ok_or_else(|| {
+                                invalid_project(format!(
+                                    "ScriptableObjectGroup member {}:{} produced no YAML document",
+                                    child.object.file_index, child.object.path_id
+                                ))
+                            })?;
+                        documents.push(document);
+                    }
+                    additional_exported_document_count = documents.len().saturating_sub(1);
+                    write_unity_yaml_documents(&documents, limits.yaml_write)?.into_bytes()
+                } else if let Some(group) = &entry.controller_collection {
+                    let source_file =
+                        workspace
+                            .files()
+                            .get(entry.object.file_index)
+                            .ok_or_else(|| {
+                                invalid_project(
+                                    "AnimatorController references absent workspace file",
+                                )
+                            })?;
+                    let mut documents = if group.is_release {
+                        let payload = entry.object.payload.as_ref().map_err(|error| invalid_project(format!(
+                            "AnimatorController file {} object {} PathID {} could not be decoded: {error}",
+                            entry.object.file_index, entry.object.object_index, entry.object.path_id,
+                        )))?;
+                        rebuild_animator_controller_documents(
+                            document,
+                            payload,
+                            source_file.metadata.prefix.body_endian
+                                == crate::io::binary::Endian::Little,
+                            project_version,
+                        )?
+                    } else {
+                        vec![document]
+                    };
+                    documents.try_reserve(group.children.len()).map_err(|_| {
+                        invalid_project("could not allocate AnimatorController member documents")
+                    })?;
+                    for child in &group.children {
+                        let identity = ExportAssetIdentity {
+                            collection: ExportAssetCollectionIdentity::SerializedFile {
+                                file_index: child.object.file_index,
+                            },
+                            object_index: child.object.object_index,
+                            path_id: child.object.path_id,
+                            class_id: child.object.factory.class_id,
+                        };
+                        let mut document =
+                            workspace_object_to_unity_yaml_document_with_streamed_resources(
+                                workspace,
+                                reference_graph,
+                                pointer_map,
+                                child.object,
+                                identity,
+                                child.file_id,
+                                entry.collection_index,
+                                None,
+                                limits.yaml_collection.object_conversion,
+                                &streamed_resources,
+                            )?
+                            .ok_or_else(|| {
+                                invalid_project(format!(
+                                    "AnimatorController member {}:{} produced no YAML document",
+                                    child.object.file_index, child.object.path_id,
+                                ))
+                            })?;
+                        if group.is_release && child.object.factory.class_id == 114 {
+                            hide_controller_behaviour(&mut document)?;
+                        }
+                        documents.push(document);
+                    }
+                    additional_exported_document_count = documents.len().saturating_sub(1);
+                    write_unity_yaml_documents(&documents, limits.yaml_write)?.into_bytes()
+                } else {
+                    write_unity_yaml_documents(&[document], limits.yaml_write)?.into_bytes()
+                }
             }
             ObjectRoute::EngineRedirect | ObjectRoute::Skipped => {
                 unreachable!("non-exportable routes are filtered above")
@@ -537,6 +619,7 @@ pub(super) fn plan_routed_asset_files(
         };
         exported_object_count = exported_object_count
             .checked_add(1)
+            .and_then(|count| count.checked_add(additional_exported_document_count))
             .ok_or_else(|| invalid_project("exported object count overflows"))?;
         total_bytes = total_bytes
             .checked_add(bytes.len())
@@ -570,13 +653,17 @@ pub(super) fn plan_routed_asset_files(
         }
         let relative_path = match entry.route {
             ObjectRoute::Asset => {
-                let extension = export_extension_for(entry.facts);
-                let extension = if extension.is_empty() {
-                    DEFAULT_EXPORT_EXTENSION
+                if let Some(group) = &entry.scriptable_object_group {
+                    planner.plan_asset_path(&identity, group.extension)?
                 } else {
-                    extension
-                };
-                planner.plan_asset_path(&identity, extension)?
+                    let extension = export_extension_for(entry.facts);
+                    let extension = if extension.is_empty() {
+                        DEFAULT_EXPORT_EXTENSION
+                    } else {
+                        extension
+                    };
+                    planner.plan_asset_path(&identity, extension)?
+                }
             }
             ObjectRoute::AudioYaml => planned_audio_asset_path
                 .ok_or_else(|| invalid_project("AudioYaml route has no planned asset path"))?,
