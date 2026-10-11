@@ -35,6 +35,15 @@ use super::model::{
     WorkspaceStreamedYamlResourceContext, WorkspaceYamlExportContext,
 };
 
+fn should_use_scene_editor_type_tree(class_id: i32, unity_version_text: Option<&str>) -> bool {
+    let Some(version) = unity_version_text.and_then(FactoryUnityVersion::parse) else {
+        return false;
+    };
+    let supported_version =
+        (version.major == 5 && version.minor == 6) || (version.major == 2022 && version.minor == 3);
+    supported_version && matches!(class_id, 1 | 4 | 23 | 33 | 108)
+}
+
 pub(super) struct WorkspaceYamlObjectConversionRequest<'object> {
     pub(super) object: &'object WorkspaceObject,
     pub(super) source: ExportAssetIdentity,
@@ -422,12 +431,9 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
 
         let mut editor_manager_type_tree = None;
         let mut editor_manager_root = None;
-        let unity_5_6_scene_object = unity_version_text
-            .and_then(FactoryUnityVersion::parse)
-            .is_some_and(|version| version.major == 5 && version.minor == 6);
         if ((animation_clip_editor_format && class_id == 74)
             || matches!(class_id, 104 | 157)
-            || (unity_5_6_scene_object && matches!(class_id, 1 | 4 | 23 | 33 | 108)))
+            || should_use_scene_editor_type_tree(class_id, unity_version_text))
             && matches!(&object.factory.kind, FactoryAssetKind::Generated(_))
         {
             let unity_version_text = unity_version_text.ok_or_else(|| {
@@ -2203,6 +2209,19 @@ pub fn workspace_object_to_unity_yaml_document_with_processed_animation_root(
 mod tests {
     use super::*;
     use crate::export::pointer_map::ExportPointerGuid;
+
+    #[test]
+    fn unity_2022_3_scene_classes_use_editor_type_trees() {
+        for class_id in [1, 4, 23, 33, 108] {
+            assert!(should_use_scene_editor_type_tree(
+                class_id,
+                Some("2022.3.22f1")
+            ));
+        }
+        assert!(!should_use_scene_editor_type_tree(1, Some("2022.2.0f1")));
+        assert!(!should_use_scene_editor_type_tree(20, Some("2022.3.22f1")));
+        assert!(should_use_scene_editor_type_tree(1, Some("5.6.0f1")));
+    }
 
     #[test]
     fn material_shader_pointer_preserves_predefined_internal_asset_type() {
