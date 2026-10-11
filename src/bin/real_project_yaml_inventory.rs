@@ -13,6 +13,8 @@ const YAML_EXTENSIONS: &[&str] = &[
     "unity",
     "prefab",
     "playable",
+    "lighting",
+    "texture2D",
 ];
 
 #[derive(Debug)]
