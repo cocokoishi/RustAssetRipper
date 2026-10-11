@@ -41,7 +41,28 @@ fn should_use_scene_editor_type_tree(class_id: i32, unity_version_text: Option<&
     };
     let supported_version =
         (version.major == 5 && version.minor == 6) || (version.major == 2022 && version.minor == 3);
-    supported_version && matches!(class_id, 1 | 4 | 23 | 33 | 108)
+    let supported_class = matches!(class_id, 1 | 4 | 23 | 33 | 108)
+        || (version.major == 2022 && version.minor == 3 && class_id == 137);
+    supported_version && supported_class
+}
+
+fn should_preserve_type_tree_field_names(
+    class_id: i32,
+    factory_kind: &FactoryAssetKind,
+    editor_type_tree_used: bool,
+    animation_clip_editor_format: bool,
+    generated_prefab_internal: bool,
+) -> bool {
+    let generated = matches!(factory_kind, FactoryAssetKind::Generated(_));
+    let generated_game_object_or_transform = matches!(class_id, 1 | 4) && generated;
+    let generated_controller_member =
+        matches!(class_id, 91 | 114 | 206 | 1101 | 1102 | 1107 | 1109) && generated;
+
+    generated_game_object_or_transform
+        || generated_controller_member
+        || (animation_clip_editor_format && class_id == 74)
+        || (editor_type_tree_used && matches!(class_id, 23 | 33 | 104 | 108 | 137 | 157))
+        || (generated_prefab_internal && generated)
 }
 
 pub(super) struct WorkspaceYamlObjectConversionRequest<'object> {
@@ -533,7 +554,7 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
                 )
                 .map_err(|message| scene_editor_format_error(source, class_id, message))?;
             }
-            if matches!(class_id, 1 | 4 | 23) {
+            if matches!(class_id, 1 | 4 | 23 | 137) {
                 apply_scene_object_editor_format(
                     &mut root,
                     export_root,
@@ -594,18 +615,13 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
             merge_editor_yaml_hints_with_source_fallback(&mut hints, source_hints)
                 .map_err(UnityYamlWorkspaceExportError::Conversion)?;
         }
-        let generated_game_object_or_transform = matches!(class_id, 1 | 4)
-            && matches!(&object.factory.kind, FactoryAssetKind::Generated(_));
-        let generated_controller_member =
-            matches!(class_id, 91 | 114 | 206 | 1101 | 1102 | 1107 | 1109)
-                && matches!(&object.factory.kind, FactoryAssetKind::Generated(_));
-        if generated_game_object_or_transform
-            || generated_controller_member
-            || (animation_clip_editor_format && class_id == 74)
-            || (editor_manager_type_tree.is_some() && matches!(class_id, 23 | 33 | 104 | 108 | 157))
-            || (generated_prefab_internal.is_some()
-                && matches!(&object.factory.kind, FactoryAssetKind::Generated(_)))
-        {
+        if should_preserve_type_tree_field_names(
+            class_id,
+            &object.factory.kind,
+            editor_manager_type_tree.is_some(),
+            animation_clip_editor_format,
+            generated_prefab_internal.is_some(),
+        ) {
             // Generated source classes walk their original member names. TPK recovery has already
             // selected the class layout; YAML compatibility aliases would rename serialized fields.
             if class_id == 91 && matches!(&object.factory.kind, FactoryAssetKind::Generated(_)) {
@@ -1296,7 +1312,7 @@ fn apply_scene_object_editor_format(
             object_index,
             reference_graph,
         ),
-        23 => apply_renderer_editor_format(editor_root),
+        23 | 137 => apply_renderer_editor_format(editor_root),
         _ => Ok(()),
     }
 }
@@ -2212,7 +2228,7 @@ mod tests {
 
     #[test]
     fn unity_2022_3_scene_classes_use_editor_type_trees() {
-        for class_id in [1, 4, 23, 33, 108] {
+        for class_id in [1, 4, 23, 33, 108, 137] {
             assert!(should_use_scene_editor_type_tree(
                 class_id,
                 Some("2022.3.22f1")
@@ -2220,7 +2236,50 @@ mod tests {
         }
         assert!(!should_use_scene_editor_type_tree(1, Some("2022.2.0f1")));
         assert!(!should_use_scene_editor_type_tree(20, Some("2022.3.22f1")));
+        assert!(!should_use_scene_editor_type_tree(137, Some("5.6.0f1")));
         assert!(should_use_scene_editor_type_tree(1, Some("5.6.0f1")));
+    }
+
+    #[test]
+    fn unity_2022_3_skinned_mesh_renderer_has_editor_tree_fields() {
+        let version = FactoryUnityVersion::parse("2022.3.22f1").unwrap();
+        let (_, editor_tree) = reference_class_layouts()
+            .tpk_trees(137, &version)
+            .unwrap()
+            .expect("Unity 2022.3 source TPK must contain the SkinnedMeshRenderer layout");
+
+        for field in [
+            "m_ObjectHideFlags",
+            "m_CorrespondingSourceObject",
+            "m_PrefabInstance",
+            "m_PrefabAsset",
+        ] {
+            assert!(
+                editor_tree
+                    .nodes
+                    .iter()
+                    .any(|node| node.name.as_deref() == Some(field)),
+                "SkinnedMeshRenderer editor TypeTree has no {field} field"
+            );
+        }
+        assert!(
+            !editor_tree
+                .nodes
+                .iter()
+                .any(|node| node.name.as_deref() == Some("m_HideFlags")),
+            "SkinnedMeshRenderer editor TypeTree unexpectedly has release m_HideFlags"
+        );
+    }
+
+    #[test]
+    fn skinned_mesh_renderer_editor_tree_preserves_editor_field_names() {
+        let generated = FactoryAssetKind::Generated("SkinnedMeshRenderer_2021".to_owned());
+        assert!(should_preserve_type_tree_field_names(
+            137, &generated, true, false, false
+        ));
+        assert!(!should_preserve_type_tree_field_names(
+            137, &generated, false, false, false
+        ));
     }
 
     #[test]

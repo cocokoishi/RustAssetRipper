@@ -1030,3 +1030,10 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Next: trace the baseline importer factories and export-collection path/GUID ownership, then connect concrete importer generation and .meta sidecars to a bounded project output pipeline without calling the destructive reference exporter.
 
 - Cloud verification: local implementation commit 48daaf498a8d78489eb3f7ff9e73ef2cc59fc442 has tree f57b916cfd706e4dd43974f8a656dbe92758756a; non-forced remote main checkpoint a97359808afb84c99a4b0d13b2ef67ababef9c17 has the same tree and parent 82285b1deabf2f27272861d0ea505c239ad1911d. ls-remote, fetch, and fetched-tree comparison all matched.
+
+## Unity 2022.3 SkinnedMeshRenderer editor YAML field names (2026-10-11)
+
+- Fixed the class-137 editor TypeTree route so it preserves `m_ObjectHideFlags` instead of applying the release TypeTree alias `m_HideFlags`. Two focused tests passed; the release binary built successfully.
+- The fresh 青岚雅苑` export check matched all 97 class-137 documents by fileID and found all four editor base fields in every document, with no `m_HideFlags`. Evidence and limits are in `docs/validation-log.md` and `docs/differential-findings.md`.
+- Product and sample acceptance remain incomplete. The broad project comparator still reports unmatched documents and paths, and Unity Editor runtime validation is unavailable.
+- Next: continue the open AssetRipper feature-parity audit; do not treat this targeted sample check as a phase-gate or overall acceptance pass.
