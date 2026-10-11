@@ -938,6 +938,139 @@
     }
 
     #[test]
+    fn export_project_preserves_5_6_render_settings_halo_texture_with_lighting_data() {
+        let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
+
+        fn fixture_value(fixture: &str, prefix: &str) -> Vec<u8> {
+            let hex = fixture
+                .lines()
+                .find_map(|line| line.strip_prefix(prefix))
+                .unwrap_or_else(|| panic!("source fixture lacks {prefix}"));
+            assert!(hex.len().is_multiple_of(2), "fixture hex has even length");
+            hex.as_bytes()
+                .chunks_exact(2)
+                .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+                .collect()
+        }
+
+        fn normalize(text: &str) -> String {
+            let mut output = String::with_capacity(text.len());
+            for line in text.lines() {
+                let chars = line.chars().collect::<Vec<_>>();
+                let mut normalized = String::with_capacity(line.len());
+                let mut index = 0;
+                while index < chars.len() {
+                    let is_guid = index + 32 <= chars.len()
+                        && (index == 0 || !chars[index - 1].is_ascii_hexdigit())
+                        && chars[index..index + 32]
+                            .iter()
+                            .all(|character| character.is_ascii_hexdigit())
+                        && (index + 32 == chars.len()
+                            || !chars[index + 32].is_ascii_hexdigit());
+                    if is_guid {
+                        normalized.push_str("<GUID>");
+                        index += 32;
+                    } else {
+                        normalized.push(chars[index]);
+                        index += 1;
+                    }
+                }
+                if normalized.starts_with("timeCreated: ") {
+                    normalized = "timeCreated: <TIME>".to_owned();
+                }
+                output.push_str(&normalized);
+                output.push('\n');
+            }
+            output
+        }
+
+        let fixture = include_str!(
+            "export/lightmap_project_source_5_6_render_settings_halo_texture_fixture.txt"
+        );
+        assert!(fixture.lines().any(|line| line == "UNITY_VERSION|5.6.0f1"));
+        let input_bytes = fixture_value(fixture, "INPUT_HEX|LightmapFixture.assets|");
+        let directory = TestInputDirectory::new_root();
+        let source_path = directory.join("LightmapFixture.assets");
+        let settings_path = directory.join("lightmap-render-settings-halo.json");
+        let output_root = directory.join("project-lightmap-5.6-render-settings-halo");
+        fs::write(&source_path, &input_bytes).unwrap();
+        let settings = include_str!("export/settings_file_defaults.json")
+            .replace("\"ImageExportFormat\": 4", "\"ImageExportFormat\": 0")
+            .replace(
+                "\"LightmapTextureExportFormat\": 2",
+                "\"LightmapTextureExportFormat\": 1",
+            )
+            .replace(
+                "\"PreferOriginalTextureExtension\": true",
+                "\"PreferOriginalTextureExtension\": false",
+            );
+        fs::write(&settings_path, settings).unwrap();
+        super::run(
+            [
+                std::ffi::OsString::from("export-project"),
+                std::ffi::OsString::from("--settings"),
+                settings_path.into_os_string(),
+                output_root.clone().into_os_string(),
+                source_path.clone().into_os_string(),
+            ]
+            .into_iter(),
+        )
+        .expect("Unity 5.6 RenderSettings HaloTexture reference exports with LightingDataAsset");
+
+        let scene_path = output_root.join("Assets/Scenes/lightmapfixture.assets.unity");
+        let scene = fs::read_to_string(&scene_path).unwrap();
+        let source_scene = fixture_value(
+            fixture,
+            "SOURCE_OUTPUT|ExportedProject/Assets/Scenes/lightmapfixture.assets.unity|",
+        );
+        assert_eq!(
+            normalize(&scene),
+            normalize(std::str::from_utf8(&source_scene).unwrap()),
+            "complete Unity 5.6 Scene with a RenderSettings texture reference differs from frozen source"
+        );
+
+        let lighting_data_path =
+            output_root.join("Assets/Scenes/lightmapfixture.assets/LightingData.asset");
+        let lighting_data = fs::read_to_string(&lighting_data_path).unwrap();
+        let source_lighting_data = fixture_value(
+            fixture,
+            "SOURCE_OUTPUT|ExportedProject/Assets/Scenes/lightmapfixture.assets/LightingData.asset|",
+        );
+        assert_eq!(
+            normalize(&lighting_data),
+            normalize(std::str::from_utf8(&source_lighting_data).unwrap()),
+            "complete Unity 5.6 LightingDataAsset with a RenderSettings texture reference differs from frozen source"
+        );
+
+        let lighting_data_meta = fs::read_to_string(format!("{}.meta", lighting_data_path.display()))
+            .unwrap();
+        let source_lighting_data_meta = fixture_value(
+            fixture,
+            "SOURCE_OUTPUT|ExportedProject/Assets/Scenes/lightmapfixture.assets/LightingData.asset.meta|",
+        );
+        assert_eq!(
+            normalize(&lighting_data_meta),
+            normalize(std::str::from_utf8(&source_lighting_data_meta).unwrap()),
+            "Unity 5.6 LightingDataAsset metadata differs from frozen source"
+        );
+        let lightmap_texture_meta = fs::read_to_string(
+            output_root.join("Assets/Scenes/lightmapfixture.assets/LightmapFixture.bmp.meta"),
+        )
+        .unwrap();
+        let texture_guid = lightmap_texture_meta
+            .lines()
+            .find_map(|line| line.strip_prefix("guid: "))
+            .expect("lightmap texture metadata contains a GUID");
+        assert!(scene.contains(&format!(
+            "m_HaloTexture: {{fileID: 2800000, guid: {texture_guid}, type: 3}}"
+        )));
+        assert!(lighting_data.contains(&format!(
+            "m_Lightmap: {{fileID: 2800000, guid: {texture_guid}, type: 3}}"
+        )));
+        assert_eq!(fs::read(&source_path).unwrap(), input_bytes);
+    }
+
+    #[test]
     fn export_project_recovers_assembly_backed_monobehaviour_structure() {
         let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
         let directory = TestInputDirectory::new_root();
@@ -2041,4 +2174,107 @@
 
         fs::remove_dir_all(&output_root).expect("remove nested-bundle project output");
         drop(input);
+    }
+
+    #[test]
+    fn export_project_preserves_source_controller_behaviours_and_shared_editor_members() {
+        let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
+        let release =
+            include_str!("resources/animator_behaviour_state_machine_source_2022_3_fixture.txt");
+        let editor = include_str!(
+            "resources/animator_behaviour_state_machine_editor_source_2022_3_input.hex"
+        );
+        let shared =
+            include_str!("resources/animator_shared_controller_editor_source_2022_3_input.hex");
+        let release_hex = release
+            .lines()
+            .find_map(|line| line.strip_prefix("SOURCE_SERIALIZED_FILE_HEX|"))
+            .unwrap();
+        let input_hex = |fixture: &'static str| {
+            fixture
+                .lines()
+                .find(|line| !line.starts_with('#') && !line.is_empty())
+                .unwrap()
+        };
+        for (name, hex, controllers) in [
+            ("ReleaseController.assets", release_hex, 1),
+            ("EditorController.assets", input_hex(editor), 1),
+            ("SharedControllers.assets", input_hex(shared), 2),
+        ] {
+            let bytes = hex
+                .as_bytes()
+                .chunks_exact(2)
+                .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+                .collect::<Vec<_>>();
+            let directory = TestInputDirectory::new_root();
+            let source_path = directory.join(name);
+            fs::write(&source_path, &bytes).unwrap();
+            let input = TestInputDirectory {
+                directory: directory.clone(),
+                files: vec![source_path.clone()],
+                subdirectories: Vec::new(),
+            };
+            let output_root = directory.join("project");
+            let mut status = Vec::new();
+            super::export_project_to(
+                std::slice::from_ref(&source_path),
+                &output_root,
+                false,
+                &default_export_settings(),
+                &mut status,
+            )
+            .unwrap();
+            let status = String::from_utf8(status).unwrap();
+            assert!(
+                status.contains(&format!(
+                    "{} objects in {} asset files",
+                    controllers * 26,
+                    controllers
+                )),
+                "{status}"
+            );
+            let controller_directory = output_root.join("Assets/AnimatorController");
+            let mut guids = std::collections::HashSet::new();
+            for controller_name in ["Nested State Machine Source", "Shared State Machine Source"]
+                .into_iter()
+                .take(controllers)
+            {
+                let path = controller_directory.join(format!("{controller_name}.controller"));
+                let yaml = fs::read_to_string(&path).unwrap();
+                let ids = yaml
+                    .lines()
+                    .filter_map(|line| {
+                        line.strip_prefix("--- !u!")
+                            .map(|line| line.split_once(" &").unwrap().1.parse::<i64>().unwrap())
+                    })
+                    .collect::<std::collections::HashSet<_>>();
+                assert_eq!(ids.len(), 26);
+                assert_eq!(yaml.matches("--- !u!114 ").count(), 2);
+                assert_eq!(yaml.matches("--- !u!1107 ").count(), 4);
+                assert!(!yaml.contains("m_HideFlags:"));
+                for reference in yaml.split("{fileID: ").skip(1) {
+                    let id = reference.split_once('}').unwrap().0.parse::<i64>().unwrap();
+                    assert!(
+                        id == 0 || ids.contains(&id),
+                        "{controller_name} has an undefined local fileID {id}"
+                    );
+                }
+                let meta = controller_directory.join(format!("{controller_name}.controller.meta"));
+                guids.insert(meta_guid(&meta));
+                let meta = fs::read_to_string(meta).unwrap();
+                assert!(meta.contains("NativeFormatImporter:"));
+                assert!(meta.contains("mainObjectFileID: 9100000"));
+            }
+            assert_eq!(guids.len(), controllers);
+            assert!(!output_root.join("Assets/MonoBehaviour").exists());
+            assert!(!output_root.join("Assets/AnimatorStateMachine").exists());
+            assert!(
+                fs::read_to_string(output_root.join("ProjectSettings/ProjectVersion.txt"))
+                    .unwrap()
+                    .contains("2022.3.0f1")
+            );
+            assert_eq!(fs::read(&source_path).unwrap(), bytes);
+            fs::remove_dir_all(&output_root).unwrap();
+            drop(input);
+        }
     }

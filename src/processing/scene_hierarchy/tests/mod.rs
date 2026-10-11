@@ -162,6 +162,8 @@ fn empty_collection_graph(file_index: usize) -> WorkspaceSceneCollectionHierarch
         missing_transform_plans: Vec::new(),
         source_graph_complete: true,
         source_reference_scans_complete: true,
+        source_prefab_processor_reference_scans_complete: true,
+        source_scene_membership_reference_scans_complete: true,
         roots: WorkspaceSceneRootDiscovery::default(),
         hierarchy_audit: WorkspaceSceneHierarchyAudit::default(),
     }
@@ -313,6 +315,8 @@ fn workspace_hierarchy_fixture(cycle: bool) -> WorkspaceSceneHierarchies {
         missing_transform_plans: Vec::new(),
         source_graph_complete: true,
         source_reference_scans_complete: true,
+        source_prefab_processor_reference_scans_complete: true,
+        source_scene_membership_reference_scans_complete: true,
         roots: WorkspaceSceneRootDiscovery::default(),
         hierarchy_audit: WorkspaceSceneHierarchyAudit::default(),
     };
@@ -392,6 +396,8 @@ fn workspace_hierarchy_fixture(cycle: bool) -> WorkspaceSceneHierarchies {
         missing_transform_plans: Vec::new(),
         source_graph_complete: true,
         source_reference_scans_complete: true,
+        source_prefab_processor_reference_scans_complete: true,
+        source_scene_membership_reference_scans_complete: true,
         roots: WorkspaceSceneRootDiscovery::default(),
         hierarchy_audit: WorkspaceSceneHierarchyAudit::default(),
     };
@@ -464,6 +470,8 @@ fn prefab_root_workspace(
         missing_transform_plans: Vec::new(),
         source_graph_complete: true,
         source_reference_scans_complete: true,
+        source_prefab_processor_reference_scans_complete: true,
+        source_scene_membership_reference_scans_complete: true,
         roots: WorkspaceSceneRootDiscovery::default(),
         hierarchy_audit: WorkspaceSceneHierarchyAudit::default(),
     };

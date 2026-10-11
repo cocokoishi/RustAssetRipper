@@ -14,9 +14,8 @@
 //!
 //! Deliberately open: the commented-out `StreamingInfo`/`LoadType` branches in
 //! `AudioClipExtensions` are not live behavior (commented in the source) and stay
-//! unported; FSB-container decoding needs the external `Fmod5Sharp` owner (see
-//! `export::audio_export`); numeric `FmodSoundFormat` discriminants have no
-//! `ToRawExtension` in the baseline, so no format-extension table is invented here.
+//! unported; numeric `FmodSoundFormat` discriminants have no `ToRawExtension` in the
+//! baseline, so no format-extension table is invented here.
 //!
 //! The version gates are read by field presence: Unity 3.5 carries inline
 //! `m_AudioData` with `m_Type`/`m_Format` (`Has_AudioData`/`Has_Type`/`Has_Format`
@@ -149,6 +148,18 @@ pub struct AudioClipView {
     pub sound_type: Option<i32>,
     /// Raw `m_Format` value, when present.
     pub format: Option<i32>,
+    /// Raw `m_CompressionFormat` value copied into modern AudioImporter default settings.
+    pub compression_format: Option<i32>,
+    /// Raw `m_LoadType` value copied into modern AudioImporter default settings.
+    pub load_type: Option<i32>,
+    /// Whether Unity should preload the clip's audio data.
+    pub preload_audio_data: Option<bool>,
+    /// Whether audio loads in the background.
+    pub load_in_background: Option<bool>,
+    /// Whether the clip is ambisonic.
+    pub ambisonic: Option<bool>,
+    /// Whether the clip is spatialized as 3D audio.
+    pub is_3d: Option<bool>,
 }
 
 impl AudioClipView {
@@ -160,6 +171,12 @@ impl AudioClipView {
             resource: optional_stream(root, AUDIO_RESOURCE_FIELD)?,
             sound_type: optional_i32(root, AUDIO_TYPE_FIELD)?,
             format: optional_i32(root, AUDIO_FORMAT_FIELD)?,
+            compression_format: optional_i32(root, "m_CompressionFormat")?,
+            load_type: optional_i32(root, "m_LoadType")?,
+            preload_audio_data: optional_bool(root, "m_PreloadAudioData")?,
+            load_in_background: optional_bool(root, "m_LoadInBackground")?,
+            ambisonic: optional_bool(root, "m_Ambisonic")?,
+            is_3d: optional_bool(root, "m_3D")?,
         })
     }
 
@@ -316,6 +333,20 @@ fn optional_i32(
         None => Ok(None),
         Some(SerializedValue::I32(value)) => Ok(Some(*value)),
         Some(SerializedValue::U32(value)) => Ok(Some(*value as i32)),
+        Some(value) => Err(AudioClipViewError::WrongType {
+            field: name,
+            actual: serialized_kind(value),
+        }),
+    }
+}
+
+fn optional_bool(
+    root: &SerializedValue,
+    name: &'static str,
+) -> Result<Option<bool>, AudioClipViewError> {
+    match lookup(root, name)? {
+        None => Ok(None),
+        Some(SerializedValue::Bool(value)) => Ok(Some(*value)),
         Some(value) => Err(AudioClipViewError::WrongType {
             field: name,
             actual: serialized_kind(value),

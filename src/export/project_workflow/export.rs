@@ -295,6 +295,9 @@ pub fn export_workspace_yaml_project_with_serialized_settings(
     // Pass 1: route every object through the registration stack. No file is planned yet, so a
     // mis-routed or unhandled object aborts with nothing written.
     let routing_context = ProjectRoutingContext {
+        filesystem,
+        root_catalog,
+        resource_provider,
         workspace,
         objects,
         reference_graph,
@@ -312,6 +315,7 @@ pub fn export_workspace_yaml_project_with_serialized_settings(
         controller_collections: &controller_collections,
         lightmap_texture_directories: &lightmap_texture_directories,
         existing_guids: &used_guids,
+        limits,
     };
     let RoutedProjectObjects {
         routed,

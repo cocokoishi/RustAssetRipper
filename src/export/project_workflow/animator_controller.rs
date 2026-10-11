@@ -455,6 +455,29 @@ fn read_state_machine_constants(
     Ok(result)
 }
 
+fn legacy_default_state_index(
+    raw: &SerializedValue,
+    state_count: usize,
+) -> Result<Option<usize>, Box<dyn Error>> {
+    if state_count == 0 {
+        return Ok(None);
+    }
+    let serialized_index = optional_u32_field(raw, "m_DefaultState")?.unwrap_or(u32::MAX);
+    let index = if serialized_index == u32::MAX {
+        0
+    } else {
+        usize::try_from(serialized_index).map_err(|_| {
+            invalid_project("AnimatorController default state index does not fit usize")
+        })?
+    };
+    if index >= state_count {
+        return Err(invalid_project(format!(
+            "AnimatorController legacy default state index {index} is outside {state_count} states"
+        )));
+    }
+    Ok(Some(index))
+}
+
 #[derive(Clone)]
 struct SelectorState {
     full_path_id: u32,
@@ -504,8 +527,14 @@ fn rebuild_state_machine_hierarchy(
     allocator: &mut FileIdAllocator,
 ) -> Result<StateMachineConstant, Box<dyn Error>> {
     let root_file_id = allocator.allocate()?;
+    let has_selector_array = optional_field(raw, "m_SelectorStateConstantArray")?.is_some();
     let selectors = read_selector_states(raw)?;
     let raw_states = array_field(raw, "m_StateConstantArray", "StateMachineConstant")?;
+    let legacy_default_state_index = if has_selector_array {
+        None
+    } else {
+        legacy_default_state_index(raw, raw_states.len())?
+    };
     let mut states = Vec::new();
     states
         .try_reserve_exact(raw_states.len())
@@ -574,39 +603,44 @@ fn rebuild_state_machine_hierarchy(
         });
     }
 
-    let mut path_ids = Vec::new();
-    path_ids
-        .try_reserve_exact(selectors.len().max(1))
-        .map_err(|_| invalid_project("could not allocate AnimatorController selector paths"))?;
-    for selector in &selectors {
-        if path_ids.last() != Some(&selector.full_path_id) {
-            if path_ids.contains(&selector.full_path_id) {
-                return Err(invalid_project(format!(
-                    "AnimatorController selector path {} occurs in non-contiguous groups",
-                    selector.full_path_id
-                )));
+    let resolved = if has_selector_array {
+        let mut path_ids = Vec::new();
+        path_ids
+            .try_reserve_exact(selectors.len().max(1))
+            .map_err(|_| invalid_project("could not allocate AnimatorController selector paths"))?;
+        for selector in &selectors {
+            if path_ids.last() != Some(&selector.full_path_id) {
+                if path_ids.contains(&selector.full_path_id) {
+                    return Err(invalid_project(format!(
+                        "AnimatorController selector path {} occurs in non-contiguous groups",
+                        selector.full_path_id
+                    )));
+                }
+                path_ids.push(selector.full_path_id);
             }
-            path_ids.push(selector.full_path_id);
         }
-    }
-    if path_ids.is_empty() {
-        path_ids.push(layer.binding_path_id);
-    }
-    if path_ids[0] != layer.binding_path_id {
-        return Err(invalid_project(format!(
-            "AnimatorController root selector path {} disagrees with layer binding {}",
-            path_ids[0], layer.binding_path_id
-        )));
-    }
-
-    let resolved = hierarchy::resolve_machine_paths(
-        &path_ids,
-        &mut paths,
-        &states,
-        &selectors,
-        raw,
-        &layer.name,
-    )?;
+        if path_ids.is_empty() {
+            path_ids.push(layer.binding_path_id);
+        }
+        // Selector FullPathIDs identify state machines. Layer.Binding supplies the root
+        // name only when there are no states; with states, names come from their TOS paths.
+        hierarchy::resolve_machine_paths(
+            &path_ids,
+            &mut paths,
+            &states,
+            &selectors,
+            raw,
+            &layer.name,
+        )?
+    } else {
+        hierarchy::resolve_legacy_machine_paths(
+            &states,
+            &paths,
+            layer.binding_path_id,
+            &layer.name,
+            legacy_default_state_index,
+        )?
+    };
     let mut nodes = Vec::new();
     nodes.try_reserve_exact(resolved.len()).map_err(|_| {
         invalid_project("could not allocate AnimatorController editor state machines")
@@ -687,6 +721,14 @@ fn rebuild_state_machine_hierarchy(
         if node.synthetic_default_state.is_some() {
             continue;
         }
+        if !has_selector_array {
+            if node.parent_index.is_none() {
+                if let Some(index) = legacy_default_state_index {
+                    node.default_state_file_id = states[index].file_id;
+                }
+            }
+            continue;
+        }
         let mut entries = selectors
             .iter()
             .filter(|selector| selector.full_path_id == node.full_path_id && selector.is_entry);
@@ -714,9 +756,6 @@ fn rebuild_state_machine_hierarchy(
                 })
                 .transpose()?
                 .unwrap_or(u32::MAX),
-            None if selectors.is_empty() => {
-                optional_u32_field(raw, "m_DefaultState")?.unwrap_or(u32::MAX)
-            }
             None => u32::MAX,
         };
         if destination != u32::MAX {
@@ -943,17 +982,14 @@ fn validate_layer_state_machines(
     machines: &[StateMachineConstant],
 ) -> Result<(), Box<dyn Error>> {
     for (index, layer) in layers.iter().enumerate() {
-        let machine = machines.get(layer.state_machine_index).ok_or_else(|| {
+        machines.get(layer.state_machine_index).ok_or_else(|| {
             invalid_project(format!(
                 "AnimatorController LayerArray[{index}] references absent StateMachineArray[{}]",
                 layer.state_machine_index
             ))
         })?;
-        if machine.machines[0].full_path_id == 0 && !machine.states.is_empty() {
-            return Err(invalid_project(format!(
-                "AnimatorController LayerArray[{index}] state machine has states but no path identity"
-            )));
-        }
+        // ID 0 is the CRC32 of the empty root path. AnimatorStateContext deliberately
+        // seeds that path when states exist, so zero is a valid root identity here.
     }
     Ok(())
 }

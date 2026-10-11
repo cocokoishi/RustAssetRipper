@@ -342,14 +342,23 @@ pub(super) fn export_texture_to<W: io::Write>(
     let platform_blob_little_endian =
         file.metadata.prefix.body_endian == assetripper::io::binary::Endian::Little;
     let image = match &target {
-        TextureExportTarget::Texture2D { view, flip_y } => export_texture2d_image(
-            view,
-            stream_bytes.as_deref(),
-            platform,
-            platform_blob_little_endian,
-            *flip_y,
-            format,
-        ),
+        TextureExportTarget::Texture2D { view, flip_y } => {
+            let unity_version = file
+                .metadata
+                .prefix
+                .unity_version_text
+                .as_deref()
+                .and_then(UnityVersion::parse);
+            export_texture2d_image_with_unity_version(
+                view,
+                stream_bytes.as_deref(),
+                platform,
+                platform_blob_little_endian,
+                *flip_y,
+                unity_version,
+                format,
+            )
+        }
         TextureExportTarget::Texture3D { view } => {
             export_texture3d_image(view, stream_bytes.as_deref(), format)
         }

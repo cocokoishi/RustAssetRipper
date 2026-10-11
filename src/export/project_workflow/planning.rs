@@ -204,10 +204,21 @@ pub(super) fn plan_routed_asset_files(
         if identity.class_name.is_empty() {
             identity.class_name = entry.class_name.clone();
         }
-        let planned_audio_asset_path = if entry.route == ObjectRoute::AudioYaml {
-            Some(planner.plan_asset_path(&identity, "audioclip")?)
-        } else {
-            None
+        let planned_audio_asset_path = match entry.route {
+            ObjectRoute::AudioYaml => Some(planner.plan_asset_path(&identity, "audioclip")?),
+            ObjectRoute::AudioBinary => {
+                let audio = entry.audio_binary_export.as_ref().ok_or_else(|| {
+                    invalid_project("AudioClip binary route has no decoded audio details")
+                })?;
+                if audio.decoded_extension == "ogg" && audio.collection_extension == "wav" {
+                    return Err(invalid_project(format!(
+                        "AudioClip {}:{} requires Ogg-to-WAV conversion under PreferWav, which is not implemented",
+                        entry.object.file_index, entry.object.path_id
+                    )));
+                }
+                Some(planner.plan_asset_path(&identity, &audio.collection_extension)?)
+            }
+            _ => None,
         };
         let planned_audio_sidecar_path = match (
             entry.audio_yaml_resource.as_ref(),
@@ -308,6 +319,14 @@ pub(super) fn plan_routed_asset_files(
                 &mut raw_file_cache,
                 limits,
             )?,
+            ObjectRoute::AudioBinary => entry
+                .audio_binary_export
+                .as_ref()
+                .ok_or_else(|| {
+                    invalid_project("AudioClip binary route has no decoded audio bytes")
+                })?
+                .bytes
+                .clone(),
             ObjectRoute::ShaderText => {
                 let shader = entry.shader_view.as_ref().ok_or_else(|| {
                     invalid_project(format!(
@@ -349,6 +368,27 @@ pub(super) fn plan_routed_asset_files(
                     .map_err(|_| invalid_project("could not allocate TextAsset export bytes"))?;
                 output.extend_from_slice(script);
                 output
+            }
+            ObjectRoute::FontBinary => {
+                let payload = entry.object.payload.as_ref().map_err(|error| {
+                    invalid_project(format!(
+                        "Font {}:{} has no decoded payload: {error}",
+                        entry.object.file_index, entry.object.path_id
+                    ))
+                })?;
+                let data = font_asset_data(&payload.root)?.ok_or_else(|| {
+                    invalid_project(format!(
+                        "Font {}:{} has no m_FontData for binary export",
+                        entry.object.file_index, entry.object.path_id
+                    ))
+                })?;
+                if data.is_empty() {
+                    return Err(invalid_project(format!(
+                        "Font {}:{} has empty m_FontData after FontAssetExporter admission",
+                        entry.object.file_index, entry.object.path_id
+                    )));
+                }
+                data.to_vec()?
             }
             ObjectRoute::TextureImage => {
                 let texture = entry.texture_export.as_ref().ok_or_else(|| {
@@ -667,6 +707,8 @@ pub(super) fn plan_routed_asset_files(
             }
             ObjectRoute::AudioYaml => planned_audio_asset_path
                 .ok_or_else(|| invalid_project("AudioYaml route has no planned asset path"))?,
+            ObjectRoute::AudioBinary => planned_audio_asset_path
+                .ok_or_else(|| invalid_project("AudioBinary route has no planned asset path"))?,
             ObjectRoute::TextureImage => {
                 let texture = entry.texture_export.as_ref().ok_or_else(|| {
                     invalid_project("TextureExportCollection route has no planned image extension")
@@ -679,6 +721,21 @@ pub(super) fn plan_routed_asset_files(
                     .as_ref()
                     .ok_or_else(|| invalid_project("TextAsset route has no planned extension"))?;
                 planner.plan_asset_path(&identity, &text_asset.extension)?
+            }
+            ObjectRoute::FontBinary => {
+                let payload = entry.object.payload.as_ref().map_err(|error| {
+                    invalid_project(format!(
+                        "Font {}:{} has no decoded payload while planning its extension: {error}",
+                        entry.object.file_index, entry.object.path_id
+                    ))
+                })?;
+                let data = font_asset_data(&payload.root)?.ok_or_else(|| {
+                    invalid_project(format!(
+                        "Font {}:{} has no m_FontData while planning its extension",
+                        entry.object.file_index, entry.object.path_id
+                    ))
+                })?;
+                planner.plan_asset_path(&identity, data.extension()?)?
             }
             ObjectRoute::ShaderText => planner.plan_asset_path(&identity, "shader")?,
             ObjectRoute::ShaderYaml => planner.plan_asset_path(&identity, YAML_SHADER_EXTENSION)?,
@@ -738,6 +795,15 @@ pub(super) fn plan_routed_asset_files(
                     importer,
                 })
             }
+            ObjectRoute::AudioBinary => {
+                let audio = entry.audio_binary_export.as_ref().ok_or_else(|| {
+                    invalid_project("AudioClip binary route has no importer metadata")
+                })?;
+                Some(PlannedProjectMeta {
+                    importer_class: "AudioImporter".to_owned(),
+                    importer: audio.importer.clone(),
+                })
+            }
             ObjectRoute::TextureImage => Some(PlannedProjectMeta {
                 importer_class: "TextureImporter".to_owned(),
                 importer: entry
@@ -759,6 +825,27 @@ pub(super) fn plan_routed_asset_files(
                 Some(PlannedProjectMeta {
                     importer_class: "TextScriptImporter".to_owned(),
                     importer: default_importer(asset_bundle_name.as_deref())?,
+                })
+            }
+            ObjectRoute::FontBinary => {
+                let payload = entry.object.payload.as_ref().map_err(|error| {
+                    invalid_project(format!(
+                        "Font {}:{} has no decoded payload for TrueTypeFontImporter metadata: {error}",
+                        entry.object.file_index, entry.object.path_id
+                    ))
+                })?;
+                let values = font_importer_values(payload)?;
+                let fallback_references = font_fallback_references_yaml(
+                    entry,
+                    &values,
+                    objects,
+                    reference_graph,
+                    pointer_map,
+                    project_version,
+                )?;
+                Some(PlannedProjectMeta {
+                    importer_class: "TrueTypeFontImporter".to_owned(),
+                    importer: font_importer_yaml(&values, fallback_references)?,
                 })
             }
             ObjectRoute::Script => {

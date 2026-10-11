@@ -639,6 +639,8 @@ pub struct WorkspaceSceneCollectionHierarchy {
     missing_transform_plans: Vec<WorkspaceMissingTransformPlan>,
     source_graph_complete: bool,
     source_reference_scans_complete: bool,
+    source_prefab_processor_reference_scans_complete: bool,
+    source_scene_membership_reference_scans_complete: bool,
     roots: WorkspaceSceneRootDiscovery,
     hierarchy_audit: WorkspaceSceneHierarchyAudit,
 }

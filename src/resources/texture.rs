@@ -31,7 +31,11 @@ use super::texture_array::{
     texture2d_array_complete_image_size, CubemapArrayView, Texture2DArrayView, Texture3DView,
     TextureArrayError,
 };
-use super::texture_converter::{try_convert_to_bitmap, TextureConvertError, TextureImage};
+use super::texture_converter::{
+    try_convert_to_bitmap, try_convert_to_bitmap_with_unity_version, TextureConvertError,
+    TextureImage,
+};
+use super::vertex_data_blob::UnityVersion;
 use super::texture_format::{
     is_swap_bytes, swap_adjacent_bytes, SwapBytesError, SWITCH_BUILD_TARGET,
 };
@@ -434,10 +438,38 @@ pub fn export_texture2d_image(
     flip_y: bool,
     format: ImageExportFormat,
 ) -> Result<Vec<u8>, TextureExportError> {
+    export_texture2d_image_with_unity_version(
+        view,
+        stream_content,
+        platform,
+        platform_blob_little_endian,
+        flip_y,
+        None,
+        format,
+    )
+}
+
+/// Exports one `Texture2D` to an encoded image using its SerializedFile Unity version.
+///
+/// The source version selects classic Crunch versus Unity Crunch for crunched texture formats.
+pub fn export_texture2d_image_with_unity_version(
+    view: &Texture2DView,
+    stream_content: Option<&[u8]>,
+    platform: i32,
+    platform_blob_little_endian: bool,
+    flip_y: bool,
+    unity_version: Option<UnityVersion>,
+    format: ImageExportFormat,
+) -> Result<Vec<u8>, TextureExportError> {
     let data = view.resolved_image_data(platform, platform_blob_little_endian, stream_content)?;
     let image = view.to_texture_image(&data);
     let unpack_normal = view.lightmap_format == TEXTURE_USAGE_MODE_NORMALMAP_DXT5NM;
-    let bitmap = try_convert_to_bitmap(&image, flip_y, unpack_normal)?;
+    let bitmap = try_convert_to_bitmap_with_unity_version(
+        &image,
+        flip_y,
+        unpack_normal,
+        unity_version,
+    )?;
     let mut output = Vec::new();
     bitmap.save(&mut output, format)?;
     Ok(output)

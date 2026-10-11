@@ -16,9 +16,13 @@ ruzstd = { version = "=0.9.0", default-features = false, features = ["std", "has
 brotli-decompressor = "=5.0.3"
 flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend"] }
 dotnetdll = "=0.3.0"
+texture2ddecoder = "=0.1.2"
+lewton = { version = "=0.10.2", default-features = false }
+phf = { version = "=0.11.3", features = ["macros"] }
 
 [patch.crates-io]
 dotnetdll = { path = "vendor/dotnetdll-0.3.0" }
+texture2ddecoder = { path = "vendor/texture2ddecoder" }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "=1.1.5", features = ["fs"] }

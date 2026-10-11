@@ -1,0 +1,14 @@
+[package]
+name = "texture2ddecoder"
+version = "0.1.2"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Pure Rust no-std texture decoder with bounded multi-face Crunch support"
+repository = "https://github.com/UniversalGameExtraction/texture2ddecoder"
+
+[features]
+default = ["alloc"]
+alloc = []
+
+[dependencies]
+paste = "^1.0.12"

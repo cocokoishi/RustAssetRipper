@@ -2,6 +2,7 @@ use super::*;
 use crate::export::settings::ExportDefaults;
 use crate::export::settings_file::ExportSettingsFile;
 use crate::export::workspace_yaml::tests::load_workspace_named_bytes_with_source_factory;
+use crate::serialized_file::object::SerializedFieldValue;
 use crate::serialized_file::object_workspace::{ObjectWorkspace, ObjectWorkspaceLimits};
 use crate::serialized_file::reference_graph::{
     MultiFileReferenceGraphLimits, ReferenceGraphLimits,
@@ -853,6 +854,79 @@ fn invalid_nested_destinations_are_errors_instead_of_null_references() {
 }
 
 #[test]
+fn selector_root_path_is_independent_from_layer_binding() {
+    fn raw_field(name: &str, value: SerializedValue) -> SerializedFieldValue {
+        SerializedFieldValue {
+            name: name.to_owned(),
+            value,
+        }
+    }
+
+    fn wrapped(value: SerializedValue) -> SerializedValue {
+        SerializedValue::Struct(vec![raw_field("data", value)])
+    }
+
+    fn selector(is_entry: bool) -> SerializedValue {
+        wrapped(SerializedValue::Struct(vec![
+            raw_field("m_FullPathID", SerializedValue::U32(0)),
+            raw_field("m_IsEntry", SerializedValue::Bool(is_entry)),
+            raw_field(
+                "m_TransitionConstantArray",
+                SerializedValue::Array(Vec::new()),
+            ),
+        ]))
+    }
+
+    let layer = ControllerLayer {
+        name: "Bound.Layer".to_owned(),
+        binding_path_id: 0xD00D_0001,
+        state_machine_index: 0,
+        synchronized_layer_index: 0,
+        default_weight: 1.0,
+        blending_mode: 0,
+        ik_pass: false,
+        synced_layer_affects_timing: false,
+    };
+    let mut tos = HashMap::from([(100, ".State".to_owned()), (101, "State".to_owned())]);
+    let selectors = SerializedValue::Array(vec![selector(true), selector(false)]);
+
+    let stateful = SerializedValue::Struct(vec![
+        raw_field(
+            "m_StateConstantArray",
+            SerializedValue::Array(vec![wrapped(SerializedValue::Struct(vec![
+                raw_field("m_FullPathID", SerializedValue::U32(100)),
+                raw_field("m_NameID", SerializedValue::U32(101)),
+            ]))]),
+        ),
+        raw_field("m_SelectorStateConstantArray", selectors.clone()),
+    ]);
+    let rebuilt =
+        rebuild_state_machine_hierarchy(&stateful, &layer, &tos, &mut FileIdAllocator::new())
+            .unwrap();
+    assert_eq!(rebuilt.machines.len(), 1);
+    assert_eq!(rebuilt.machines[0].full_path_id, 0);
+    assert_eq!(rebuilt.machines[0].name, "");
+    validate_layer_state_machines(std::slice::from_ref(&layer), std::slice::from_ref(&rebuilt))
+        .unwrap();
+
+    // Without states, the source names the root from Layer.Binding while retaining
+    // the selector's distinct path ID.
+    tos.clear();
+    let state_free = SerializedValue::Struct(vec![
+        raw_field("m_StateConstantArray", SerializedValue::Array(Vec::new())),
+        raw_field("m_SelectorStateConstantArray", selectors),
+    ]);
+    let rebuilt =
+        rebuild_state_machine_hierarchy(&state_free, &layer, &tos, &mut FileIdAllocator::new())
+            .unwrap();
+    assert_eq!(rebuilt.machines.len(), 1);
+    assert_eq!(rebuilt.machines[0].full_path_id, 0);
+    assert_eq!(rebuilt.machines[0].name, "Bound_Layer");
+    validate_layer_state_machines(std::slice::from_ref(&layer), std::slice::from_ref(&rebuilt))
+        .unwrap();
+}
+
+#[test]
 fn generated_hierarchy_ids_skip_the_existing_controller_root() {
     let documents = rebuilt_documents_with_root(&fixture_payload(), GENERATED_FILE_ID_BASE);
     assert_eq!(
@@ -1061,10 +1135,49 @@ fn controller_behaviour_ranges_and_collection_match_source_yaml() {
     )
     .unwrap();
     let group = &prepared.roots[&(root.file_index, root.object_index)];
+    assert!(
+        group.is_release,
+        "fixture must exercise compiled release data"
+    );
     assert_eq!(
         group.children.len(),
         2,
         "shared bindings do not duplicate a behaviour within one collection"
+    );
+    assert!(
+        group.children.iter().all(|member| member.register_global),
+        "the first collection claims its source behaviours"
+    );
+    let already_owned = group
+        .children
+        .iter()
+        .map(
+            |member| crate::export::scene_collection::ExportAssetObjectKey {
+                collection:
+                    crate::export::scene_collection::ExportAssetCollectionIdentity::SerializedFile {
+                        file_index: member.key.0,
+                    },
+                object_index: member.key.1,
+            },
+        )
+        .collect::<HashSet<_>>();
+    let copied = super::super::animator_collections::prepare_controller_collections(
+        &workspace,
+        &objects,
+        &graph,
+        &already_owned,
+        crate::export::pointer_map::ExportPointerMapLimits::default(),
+    )
+    .unwrap();
+    let copied_group = &copied.roots[&(root.file_index, root.object_index)];
+    assert!(copied_group.is_release);
+    assert_eq!(copied_group.children.len(), 2);
+    assert!(
+        copied_group
+            .children
+            .iter()
+            .all(|member| !member.register_global),
+        "a release hierarchy already owned elsewhere receives collection-local copies"
     );
     let pointers = behaviours::BehaviourTable::read(&payload.root)
         .unwrap()

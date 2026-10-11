@@ -17,6 +17,9 @@ use super::type_tree::{
 };
 use super::value::{ParsedObjectPayload, SerializedFieldValue, SerializedValue};
 use crate::io::binary::{BinaryError, BinaryReader, Endian};
+
+const COMPACT_BYTE_ARRAY_EXPANDED_ALLOCATION_THRESHOLD: usize = 64 * 1024;
+
 impl SerializedFileMetadata {
     /// Decode one object's payload using its resolved serialized type and TypeTree.
     ///
@@ -940,9 +943,18 @@ fn decode_array(
     let count = read_i32(reader, &format!("{path} array count"))?;
     let count = nonnegative_length(count, reader, object_index, path)?;
     let data_node_value = &type_tree.nodes[data_node];
-    let compact_byte_array = count > budget.limits.max_array_elements
-        && matches!(data_node_value.type_name.as_deref(), Some("char" | "UInt8"))
+    let byte_array = matches!(data_node_value.type_name.as_deref(), Some("char" | "UInt8"))
         && direct_children(type_tree, data_node, object_index, reader.offset())?.is_empty();
+    let expanded_value_bytes = count.checked_mul(std::mem::size_of::<SerializedValue>());
+    let expanded_values_exceed_budget = expanded_value_bytes
+        .map(|bytes| bytes > budget.remaining_allocation_bytes())
+        .unwrap_or(true);
+    let expanded_values_are_large = expanded_value_bytes
+        .is_some_and(|bytes| bytes > COMPACT_BYTE_ARRAY_EXPANDED_ALLOCATION_THRESHOLD);
+    let compact_byte_array = byte_array
+        && (count > budget.limits.max_array_elements
+            || expanded_values_exceed_budget
+            || expanded_values_are_large);
     if !compact_byte_array && count > budget.limits.max_array_elements {
         return Err(decode_limit_error(
             reader.offset(),
@@ -988,11 +1000,10 @@ fn decode_array(
         ));
     }
 
-    // Large Unity byte vectors such as Mesh.m_IndexBuffer are stored contiguously in
-    // the payload. Representing each byte as a SerializedValue enum multiplies their
-    // decoded allocation by the enum size and can make a valid object appear to exceed
-    // the allocation budget by dozens of times. Keep the exact bytes instead; this is
-    // also the representation the Unity YAML writer uses for byte data.
+    // Unity byte vectors such as Mesh.m_IndexBuffer are stored contiguously in the
+    // payload. Retain large vectors as exact bytes instead of a SerializedValue enum per
+    // byte, which otherwise adds substantial overhead and makes their representation
+    // depend on remaining workspace budget. Small vectors keep the structured array form.
     if compact_byte_array {
         budget.charge(count, reader.offset(), path)?;
         let bytes = reader

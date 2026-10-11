@@ -1,5 +1,5 @@
 use super::asset_classification::{
-    classify_scene_collection_objects, ClassifiedSceneCollectionObjects,
+    classify_scene_collection_objects, scene_asset_category, ClassifiedSceneCollectionObjects,
 };
 use super::collection_snapshot::{
     copy_scene_graph_issue, copy_scene_object, copy_scene_relationship,
@@ -30,6 +30,8 @@ pub(super) struct PreparedCollectionGraph<'a> {
     roots: WorkspaceSceneRootDiscovery,
     hierarchy_audit: WorkspaceSceneHierarchyAudit,
     source_reference_scans_complete: bool,
+    source_prefab_processor_reference_scans_complete: bool,
+    source_scene_membership_reference_scans_complete: bool,
     scene_assets: Vec<WorkspaceSceneAssetIdentity>,
     lighting_data_asset_field_object_indices: Vec<usize>,
     component_candidates: Vec<WorkspaceSceneComponentCandidate>,
@@ -65,10 +67,24 @@ impl<'a> PreparedCollectionGraph<'a> {
             &hierarchy_audit,
             references,
         )?;
-        let source_reference_scans_complete =
-            (0..scene_graph.objects().len()).all(|object_index| {
-                references.object_scan_is_complete(file_index, object_index) == Some(true)
-            });
+        let source_reference_scans_complete = scene_graph.objects().iter().all(|object| {
+            references.object_scan_is_complete(file_index, object.object_index) == Some(true)
+        });
+        let source_prefab_processor_reference_scans_complete =
+            prefab_processor_reference_scans_complete(
+                file_index,
+                scene_graph.objects().iter().map(|object| {
+                    (
+                        object.object_index,
+                        references
+                            .object_class_id(file_index, object.object_index)
+                            .or(object.class_id),
+                    )
+                }),
+                |file_index, object_index| {
+                    references.object_scan_is_complete(file_index, object_index)
+                },
+            );
         let ClassifiedSceneCollectionObjects {
             scene_assets,
             lighting_data_asset_field_object_indices,
@@ -79,6 +95,15 @@ impl<'a> PreparedCollectionGraph<'a> {
             has_lighting_data_asset,
             references,
         )?;
+        let source_scene_membership_reference_scans_complete =
+            scene_membership_reference_scans_complete(
+                file_index,
+                &scene_assets,
+                &component_candidates,
+                |file_index, object_index| {
+                    references.object_scan_is_complete(file_index, object_index)
+                },
+            );
         let missing_transform_plans =
             build_missing_transform_plans(file_index, &roots, references)?;
         let scene_objects = scene_graph
@@ -150,6 +175,8 @@ impl<'a> PreparedCollectionGraph<'a> {
             roots,
             hierarchy_audit,
             source_reference_scans_complete,
+            source_prefab_processor_reference_scans_complete,
+            source_scene_membership_reference_scans_complete,
             scene_assets,
             lighting_data_asset_field_object_indices,
             component_candidates,
@@ -187,6 +214,8 @@ impl<'a> PreparedCollectionGraph<'a> {
             roots,
             hierarchy_audit,
             source_reference_scans_complete,
+            source_prefab_processor_reference_scans_complete,
+            source_scene_membership_reference_scans_complete,
             scene_assets,
             lighting_data_asset_field_object_indices,
             component_candidates,
@@ -263,8 +292,140 @@ impl<'a> PreparedCollectionGraph<'a> {
             missing_transform_plans,
             source_graph_complete: scene_graph.is_complete(),
             source_reference_scans_complete,
+            source_prefab_processor_reference_scans_complete,
+            source_scene_membership_reference_scans_complete,
             roots,
             hierarchy_audit,
         })
+    }
+}
+
+fn prefab_processor_reference_scans_complete(
+    file_index: usize,
+    objects: impl IntoIterator<Item = (usize, Option<i32>)>,
+    mut object_scan_is_complete: impl FnMut(usize, usize) -> Option<bool>,
+) -> bool {
+    objects.into_iter().all(|(object_index, class_id)| {
+        let prefab_processor_input = scene_asset_category(class_id).is_some()
+            || matches!(class_id, Some(TRANSFORM_CLASS_ID | RECT_TRANSFORM_CLASS_ID));
+        !prefab_processor_input
+            || object_scan_is_complete(file_index, object_index) == Some(true)
+    })
+}
+
+fn scene_membership_reference_scans_complete(
+    file_index: usize,
+    scene_assets: &[WorkspaceSceneAssetIdentity],
+    component_candidates: &[WorkspaceSceneComponentCandidate],
+    mut object_scan_is_complete: impl FnMut(usize, usize) -> Option<bool>,
+) -> bool {
+    scene_assets
+        .iter()
+        .filter(|asset| asset.identity.file_index == file_index)
+        .all(|asset| {
+            object_scan_is_complete(file_index, asset.identity.object_index) == Some(true)
+        })
+        && component_candidates
+            .iter()
+            .filter(|candidate| candidate.identity.file_index == file_index)
+            .all(|candidate| {
+                object_scan_is_complete(file_index, candidate.identity.object_index) == Some(true)
+            })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        prefab_processor_reference_scans_complete, scene_membership_reference_scans_complete,
+    };
+    use crate::processing::scene_hierarchy::{
+        WorkspaceSceneAssetCategory, WorkspaceSceneAssetIdentity, WorkspaceSceneComponentCandidate,
+        WorkspaceSceneComponentEvidence, WorkspaceSceneObjectIdentity,
+    };
+
+    #[test]
+    fn prefab_processor_reference_scan_scope_ignores_unrelated_asset_failures() {
+        let objects = [
+            (0, Some(43)),  // Mesh
+            (1, Some(1)),   // GameObject
+            (3, Some(128)), // Font
+            (5, Some(4)),   // Transform
+        ];
+        let mut scanned = Vec::new();
+
+        let complete = prefab_processor_reference_scans_complete(
+            7,
+            objects,
+            |file_index, object_index| {
+                assert_eq!(file_index, 7);
+                scanned.push(object_index);
+                Some(matches!(object_index, 1 | 5))
+            },
+        );
+
+        assert!(complete);
+        assert_eq!(scanned, [1, 5]);
+    }
+
+    #[test]
+    fn prefab_processor_reference_scan_scope_fails_closed_for_incomplete_game_object() {
+        let complete = prefab_processor_reference_scans_complete(
+            2,
+            [(4, Some(1)), (9, Some(43))],
+            |file_index, object_index| {
+                assert_eq!(file_index, 2);
+                Some(object_index != 4)
+            },
+        );
+
+        assert!(!complete);
+    }
+
+    #[test]
+    fn scene_membership_reference_scan_scope_covers_assets_and_local_components_only() {
+        let scene_assets = [WorkspaceSceneAssetIdentity {
+            identity: WorkspaceSceneObjectIdentity {
+                file_index: 7,
+                object_index: 1,
+                path_id: 11,
+                class_id: Some(1),
+            },
+            category: WorkspaceSceneAssetCategory::GameObject,
+        }];
+        let component_candidates = [
+            WorkspaceSceneComponentCandidate {
+                identity: WorkspaceSceneObjectIdentity {
+                    file_index: 7,
+                    object_index: 5,
+                    path_id: 15,
+                    class_id: Some(23),
+                },
+                evidence: WorkspaceSceneComponentEvidence::TypeTreeComponentBase,
+            },
+            WorkspaceSceneComponentCandidate {
+                identity: WorkspaceSceneObjectIdentity {
+                    file_index: 3,
+                    object_index: 9,
+                    path_id: 39,
+                    class_id: Some(23),
+                },
+                evidence: WorkspaceSceneComponentEvidence::GameObjectComponentReference,
+            },
+        ];
+        let mut scanned = Vec::new();
+
+        let complete = scene_membership_reference_scans_complete(
+            7,
+            &scene_assets,
+            &component_candidates,
+            |file_index, object_index| {
+                assert_eq!(file_index, 7);
+                scanned.push(object_index);
+                Some(matches!(object_index, 1 | 5))
+            },
+        );
+
+        assert!(complete);
+        assert_eq!(scanned, [1, 5]);
     }
 }

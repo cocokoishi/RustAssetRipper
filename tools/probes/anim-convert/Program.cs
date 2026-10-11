@@ -1,8 +1,11 @@
 using System.Reflection;
 using System.Text;
 using AssetRipper.Assets;
+using AssetRipper.Assets.Bundles;
 using AssetRipper.Assets.Collections;
 using AssetRipper.Assets.IO.Writing;
+using AssetRipper.Import.AssetCreation;
+using AssetRipper.Import.Structure.Assembly.Managers;
 using AssetRipper.IO.Endian;
 using AssetRipper.IO.Files;
 using AssetRipper.IO.Files.SerializedFiles;
@@ -176,6 +179,22 @@ public static class Program
                 try
                 {
                     return DumpControllerNestedStateMachine(args[1], args[2], behaviourBindings: true, sharedEditorInput: true);
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine(ex.ToString());
+                    return 3;
+                }
+            case "controller-dual-release-clone":
+                if (args.Length != 2)
+                {
+                    Console.Error.WriteLine("usage: anim-convert controller-dual-release-clone <out>");
+                    return 2;
+                }
+                try
+                {
+                    return DumpControllerNestedStateMachine(
+                        args[1], behaviourBindings: true, dualReleaseControllers: true);
                 }
                 catch (Exception ex)
                 {
@@ -388,7 +407,7 @@ public static class Program
         builder.Append(record).Append('|').Append(name).Append('|').Append(text).Append('\n');
     }
 
-    private static int DumpControllerNestedStateMachine(string output, string? editorInputOutput = null, bool emptyMachines = false, bool behaviourBindings = false, bool sharedEditorInput = false)
+    private static int DumpControllerNestedStateMachine(string output, string? editorInputOutput = null, bool emptyMachines = false, bool behaviourBindings = false, bool sharedEditorInput = false, bool dualReleaseControllers = false)
     {
         var bundle = new AssetRipper.Assets.Bundles.GameBundle();
         var collection = new ProcessedAssetCollection(bundle);
@@ -400,6 +419,7 @@ public static class Program
             10000, 91, version);
         controller.Name_R = new AssetRipper.Primitives.Utf8String("Nested State Machine Source");
         controller.TOS.Add(0, AssetRipper.Primitives.Utf8String.Empty);
+        var sourceControllers = new List<AssetRipper.SourceGenerated.Classes.ClassID_91.IAnimatorController> { controller };
 
         uint Register(string text)
         {
@@ -582,6 +602,15 @@ public static class Program
             Range(Crc32(machinePaths[0]), 3, 3); // machines omit the null slot
             Range(Crc32(machinePaths[2]), 0, 1); // same behaviour bound on a child machine
         }
+        if (dualReleaseControllers)
+        {
+            var second = (AssetRipper.SourceGenerated.Classes.ClassID_91.IAnimatorController)NewAsset(
+                typeof(AssetRipper.SourceGenerated.Classes.ClassID_91.AnimatorController), collection,
+                10001, 91, version);
+            second.CopyValues(controller, new AssetRipper.Assets.Cloning.PPtrConverter(collection, collection));
+            second.Name_R = new AssetRipper.Primitives.Utf8String("Nested State Machine Source Second");
+            sourceControllers.Add(second);
+        }
 
         byte[] releasePayload;
         using (var payload = new MemoryStream())
@@ -602,12 +631,29 @@ public static class Program
         };
         var controllerType = new SerializedType { RawTypeID = 91 };
         sourceBuilder.Types.Add(controllerType);
-        sourceBuilder.Objects.Add(new ObjectInfo(controllerType)
+        foreach (var sourceController in sourceControllers)
         {
-            FileID = 10000,
-            TypeID = 91,
-            ObjectData = releasePayload,
-        });
+            byte[] controllerPayload;
+            if (sourceController == controller)
+            {
+                controllerPayload = releasePayload;
+            }
+            else
+            {
+                using var payload = new MemoryStream();
+                using (var writer = new AssetWriter(payload, collection))
+                {
+                    sourceController.WriteRelease(writer);
+                }
+                controllerPayload = payload.ToArray();
+            }
+            sourceBuilder.Objects.Add(new ObjectInfo(controllerType)
+            {
+                FileID = sourceController.PathID,
+                TypeID = 91,
+                ObjectData = controllerPayload,
+            });
+        }
         if (behaviourBindings)
         {
             var behaviourType = new SerializedType { RawTypeID = 114 };
@@ -625,6 +671,10 @@ public static class Program
         var sourceFile = sourceBuilder.Build();
         sourceFile.FilePath = collection.FilePath;
         byte[] serializedBytes = sourceFile.ToByteArray();
+        if (dualReleaseControllers)
+        {
+            return DumpDualReleaseControllerClone(output, sourceFile, serializedBytes, version);
+        }
 
         // Invoke the frozen processor's per-controller path, so layer construction and graph
         // reconstruction run exactly as the production reference, without launching Unity.
@@ -824,8 +874,178 @@ public static class Program
         return 0;
     }
 
+    private static int DumpDualReleaseControllerClone(
+        string output, SerializedFile sourceFile, byte[] serializedBytes,
+        AssetRipper.Primitives.UnityVersion version)
+    {
+        var bundle = new GameBundle();
+        var factory = new GameAssetFactory(new BaseManager(_ => { }));
+        var inputCollection = bundle.AddCollectionFromSerializedFile(sourceFile, factory);
+        inputCollection.FilePath = sourceFile.FilePath;
+        object gameData = Activator.CreateInstance(
+            ProcessingAsm.GetType("AssetRipper.Processing.GameData")!,
+            bundle, version, null, null)!;
+        Type processorType = ProcessingAsm.GetType("AssetRipper.Processing.AnimatorControllers.AnimatorControllerProcessor")!;
+        object processor = Activator.CreateInstance(processorType)!;
+        Type gameDataType = ProcessingAsm.GetType("AssetRipper.Processing.GameData")!;
+        processorType.GetMethod("Process", BindingFlags.Public | BindingFlags.Instance, null,
+            new[] { gameDataType }, null)!.Invoke(processor, new[] { gameData });
+
+        var controllers = inputCollection
+            .OfType<AssetRipper.SourceGenerated.Classes.ClassID_91.IAnimatorController>()
+            .OrderBy(controller => controller.PathID)
+            .ToArray();
+        if (controllers.Length != 2)
+        {
+            throw new InvalidOperationException($"expected two release controllers, found {controllers.Length}");
+        }
+        ProcessedAssetCollection generated = bundle.FetchAssetCollections()
+            .OfType<ProcessedAssetCollection>()
+            .Single(collection => collection.Name == "Generated AnimatorController Dependencies");
+        var clonedBehaviours = generated
+            .OfType<AssetRipper.SourceGenerated.Classes.ClassID_114.IMonoBehaviour>()
+            .OrderBy(behaviour => behaviour.PathID)
+            .ToArray();
+        if (clonedBehaviours.Length != 2)
+        {
+            throw new InvalidOperationException($"expected two source controller behaviour clones, found {clonedBehaviours.Length}");
+        }
+
+        var rows = new StringBuilder();
+        rows.Append("# Frozen AssetRipper 2022.3.0f1 dual release AnimatorController clone replay.\n");
+        rows.Append("# SOURCE_SERIALIZED_FILE_HEX is the two-controller release input before processing.\n");
+        rows.Append("SOURCE_SERIALIZED_FILE_HEX|").Append(Convert.ToHexString(serializedBytes)).Append('\n');
+        foreach (var controller in controllers)
+        {
+            string name = controller.Name_R.String;
+            var hierarchy = controller.FetchEditorHierarchy()
+                .Where(asset => asset is not null)
+                .Select(asset => asset!)
+                .Distinct()
+                .OrderBy(asset => asset.PathID)
+                .ToArray();
+            var identities = BuildControllerSourceIdentities(controller, hierarchy);
+            rows.Append("SOURCE_CONTROLLER|").Append(controller.PathID).Append('|').Append(name)
+                .Append('|').Append(hierarchy.Length).Append('\n');
+            foreach (IUnityObjectBase asset in hierarchy)
+            {
+                rows.Append("SOURCE_CONTROLLER_OBJECT|").Append(controller.PathID).Append('|')
+                    .Append(asset.PathID).Append('|').Append(asset.ClassID).Append('|')
+                    .Append(identities[asset]).Append('\n');
+            }
+            var section = new StringBuilder();
+            AppendControllerSourceYaml(section, hierarchy, version, identities);
+            string sectionText = section.ToString();
+            int begin = sectionText.IndexOf("SOURCE_YAML_BEGIN\n", StringComparison.Ordinal);
+            int end = sectionText.IndexOf("SOURCE_YAML_END", begin, StringComparison.Ordinal);
+            if (begin < 0 || end < begin)
+            {
+                throw new InvalidOperationException("source YAML section markers were not emitted");
+            }
+            string yaml = sectionText[(begin + "SOURCE_YAML_BEGIN\n".Length)..end];
+            rows.Append("SOURCE_CONTROLLER_YAML_BEGIN|").Append(controller.PathID).Append('\n')
+                .Append(yaml);
+            if (!yaml.EndsWith('\n')) { rows.Append('\n'); }
+            rows.Append("SOURCE_CONTROLLER_YAML_END|").Append(controller.PathID).Append('\n');
+        }
+        var originalBehaviours = inputCollection
+            .OfType<AssetRipper.SourceGenerated.Classes.ClassID_114.IMonoBehaviour>()
+            .OrderBy(behaviour => behaviour.PathID)
+            .ToArray();
+        if (originalBehaviours.Length != clonedBehaviours.Length)
+        {
+            throw new InvalidOperationException("source clone set does not match the shared release behaviours");
+        }
+        for (int i = 0; i < clonedBehaviours.Length; i++)
+        {
+            rows.Append("SOURCE_CLONE|").Append(controllers[1].PathID).Append('|')
+                .Append(clonedBehaviours[i].PathID).Append('|').Append(originalBehaviours[i].PathID).Append('|')
+                .Append(clonedBehaviours[i].Name_R.String).Append('\n');
+        }
+        string fullPath = Path.GetFullPath(output);
+        Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+        File.WriteAllText(fullPath, rows.ToString(), new UTF8Encoding(false));
+        Console.WriteLine($"wrote dual release controller source clone replay path={fullPath}");
+        return 0;
+    }
+
+    private static Dictionary<IUnityObjectBase, string> BuildControllerSourceIdentities(
+        AssetRipper.SourceGenerated.Classes.ClassID_91.IAnimatorController controller,
+        IReadOnlyList<IUnityObjectBase> hierarchy)
+    {
+        var identities = new Dictionary<IUnityObjectBase, string> { [controller] = "controller" };
+        void AddTransition(string identity, IUnityObjectBase? transition)
+        {
+            if (transition is not null) { identities.Add(transition, identity); }
+        }
+        void IndexMachine(
+            AssetRipper.SourceGenerated.Classes.ClassID_1107.IAnimatorStateMachine machine,
+            string parent)
+        {
+            string path = parent.Length == 0 ? machine.Name.String : parent + "." + machine.Name.String;
+            identities.Add(machine, path);
+            foreach (var child in machine.ChildStates)
+            {
+                var state = child.State.TryGetAsset(controller.Collection)
+                    ?? throw new InvalidOperationException("controller child state is missing");
+                string statePath = path + "." + state.Name.String;
+                identities.Add(state, statePath);
+                for (int i = 0; i < state.TransitionsP.Count; i++)
+                {
+                    AddTransition("STATE:" + statePath + ":" + i, state.TransitionsP[i]);
+                }
+            }
+            for (int i = 0; i < machine.EntryTransitionsP.Count; i++)
+            {
+                AddTransition("ENTRY:" + path + ":" + i, machine.EntryTransitionsP[i]);
+            }
+            for (int i = 0; i < machine.AnyStateTransitionsP.Count; i++)
+            {
+                AddTransition("ANY:" + path + ":" + i, machine.AnyStateTransitionsP[i]);
+            }
+            foreach (var pair in machine.StateMachineTransitions)
+            {
+                var childMachine = pair.Key.TryGetAsset(controller.Collection)
+                    ?? throw new InvalidOperationException("exit transition child machine is missing");
+                for (int i = 0; i < pair.Value.Count; i++)
+                {
+                    var transition = pair.Value[i].TryGetAsset(controller.Collection);
+                    AddTransition("EXIT:" + path + ":" + childMachine.Name.String + ":" + i, transition);
+                }
+            }
+            foreach (var child in machine.ChildStateMachines)
+            {
+                var nested = child.StateMachine.TryGetAsset(controller.Collection)
+                    ?? throw new InvalidOperationException("controller child machine is missing");
+                IndexMachine(nested, path);
+            }
+            foreach (var behaviour in machine.StateMachineBehavioursP)
+            {
+                var asset = behaviour.TryGetAsset(controller.Collection);
+                if (asset is not null)
+                {
+                    identities.TryAdd(asset, "BEHAVIOUR:" + asset.Name_R.String);
+                }
+            }
+        }
+        foreach (var layer in controller.AnimatorLayers)
+        {
+            var root = layer.StateMachine.TryGetAsset(controller.Collection)
+                ?? throw new InvalidOperationException("controller layer root machine is missing");
+            IndexMachine(root, string.Empty);
+        }
+        foreach (IUnityObjectBase asset in hierarchy)
+        {
+            if (!identities.ContainsKey(asset))
+            {
+                throw new InvalidOperationException($"source hierarchy object has no stable identity: class={asset.ClassID} pathID={asset.PathID}");
+            }
+        }
+        return identities;
+    }
+
     private static void AppendControllerSourceYaml(
-        StringBuilder rows, ProcessedAssetCollection collection,
+        StringBuilder rows, IEnumerable<IUnityObjectBase> assets,
         AssetRipper.Primitives.UnityVersion version,
         IReadOnlyDictionary<IUnityObjectBase, string> identities)
     {
@@ -847,7 +1067,7 @@ public static class Program
             walkerType.GetMethod("WithUnityVersion")!.Invoke(walker, new object[] { version });
             Type writerType = yaml.GetType("AssetRipper.Yaml.YamlWriter")!;
             object yamlWriter = Activator.CreateInstance(writerType)!;
-            foreach (IUnityObjectBase asset in collection.OrderBy(asset => asset.PathID))
+            foreach (IUnityObjectBase asset in assets.OrderBy(asset => asset.PathID))
             {
                 string identity = identities[asset];
                 rows.Append("SOURCE_OBJECT|").Append(asset.PathID).Append('|').Append(asset.ClassID).Append('|').Append(identity).Append('\n');

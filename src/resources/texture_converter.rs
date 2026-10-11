@@ -9,11 +9,8 @@
 //! only place the reference's generic pixel type matters is `UnpackNormal`, which it applies only
 //! when the bitmap is `ColorRGBA<byte>`; [`is_rgba8_target`] tracks that condition.
 //!
-//! Crunch decompression (`CrunchHandler`) is not yet ported; a crunched format returns
-//! [`TextureConvertError::CrunchUnsupported`] rather than silently decoding wrong data.
-//! [`is_use_unity_crunch`] records which external decompressor the reference would call
-//! (`UnityCrunch` vs `Crunch`); both live in external NuGet packages with no in-snapshot
-//! implementation, so both paths still report `CrunchUnsupported`.
+//! Crunch payloads use the pure-Rust `texture2ddecoder` implementation. The serialized Unity
+//! version selects classic Crunch or Unity Crunch exactly as the frozen `CrunchHandler` does.
 
 use super::astc::decode_astc;
 use super::atc_yuy2::{decode_atc_rgb4, decode_atc_rgba8, decode_yuy2};
@@ -38,6 +35,7 @@ use super::texture_decode::{
 };
 use super::texture_format::is_crunched;
 use super::vertex_data_blob::UnityVersion;
+use texture2ddecoder::CrnTextureInfo;
 
 /// A texture conversion failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -67,10 +65,25 @@ pub enum TextureConvertError {
         /// Required byte count.
         required: usize,
     },
-    /// The format is block-crunched and Crunch decompression is not yet ported.
+    /// The format is block-crunched, but no source Unity version was available to select its decoder.
     CrunchUnsupported {
         /// The crunched `TextureFormat` discriminant.
         texture_format: i32,
+    },
+    /// The CRN header or its codec does not agree with the serialized Texture2D.
+    CrunchDecodeFailed {
+        /// Decoder reason or failed structural invariant.
+        reason: &'static str,
+    },
+    /// A CRN payload is too large for the decoder's 32-bit length parameter.
+    CrunchInputTooLarge {
+        /// Payload byte count.
+        byte_count: usize,
+    },
+    /// A bounded output allocation could not be reserved.
+    AllocationFailed {
+        /// Requested byte count.
+        requested_bytes: usize,
     },
     /// Neither the `TextureFormat` nor the `GraphicsFormat` is handled by the reference switch.
     UnsupportedFormat {
@@ -111,7 +124,19 @@ impl core::fmt::Display for TextureConvertError {
             ),
             Self::CrunchUnsupported { texture_format } => write!(
                 formatter,
-                "crunched texture format {texture_format} is not yet supported"
+                "crunched texture format {texture_format} requires the source Unity version"
+            ),
+            Self::CrunchDecodeFailed { reason } => {
+                write!(formatter, "Crunch texture could not be decoded: {reason}")
+            }
+            Self::CrunchInputTooLarge { byte_count } => write!(
+                formatter,
+                "Crunch payload has {byte_count} bytes; the decoder accepts at most {}",
+                u32::MAX
+            ),
+            Self::AllocationFailed { requested_bytes } => write!(
+                formatter,
+                "could not reserve {requested_bytes} bytes for decoded texture pixels"
             ),
             Self::UnsupportedFormat {
                 texture_format,
@@ -130,10 +155,8 @@ impl std::error::Error for TextureConvertError {}
 /// `CrunchHandler.IsUseUnityCrunch`.
 ///
 /// Unity 2017.3 and later always decompress through `UnityCrunch`; older versions use it
-/// only for the ETC crunched formats and fall back to `Crunch` otherwise. Both callees are
-/// external NuGet packages (`AssetRipper.Conversions.UnityCrunch` 1.0.3 and
-/// `AssetRipper.Conversions.Crunch` 1.0.3) with no implementation in the frozen snapshot,
-/// so this gate only records which external decompressor the reference would call.
+/// only for the ETC crunched formats and fall back to `Crunch` otherwise. The same gate selects
+/// the matching pure-Rust decoder path below.
 pub fn is_use_unity_crunch(version: UnityVersion, texture_format: i32) -> bool {
     if version.at_least_at(2017, 3) {
         return true;
@@ -249,7 +272,17 @@ pub fn try_convert_to_bitmap(
     flip_y: bool,
     unpack_normal: bool,
 ) -> Result<Bitmap, TextureConvertError> {
-    let mut bitmap = convert_to_bitmap(image)?;
+    try_convert_to_bitmap_with_unity_version(image, flip_y, unpack_normal, None)
+}
+
+/// `TextureConverter.TryConvertToBitmap` with the SerializedFile's Unity version for Crunch.
+pub fn try_convert_to_bitmap_with_unity_version(
+    image: &TextureImage<'_>,
+    flip_y: bool,
+    unpack_normal: bool,
+    unity_version: Option<UnityVersion>,
+) -> Result<Bitmap, TextureConvertError> {
+    let mut bitmap = convert_to_bitmap_with_unity_version(image, unity_version)?;
     if flip_y {
         bitmap.flip_y();
     }
@@ -261,6 +294,14 @@ pub fn try_convert_to_bitmap(
 
 /// `TextureConverter.TryConvertToBitmap<TColor, TChannelValue>` for the pixel buffer only.
 pub fn convert_to_bitmap(image: &TextureImage<'_>) -> Result<Bitmap, TextureConvertError> {
+    convert_to_bitmap_with_unity_version(image, None)
+}
+
+/// Pixel conversion with the source Unity version used to select the Crunch container variant.
+pub fn convert_to_bitmap_with_unity_version(
+    image: &TextureImage<'_>,
+    unity_version: Option<UnityVersion>,
+) -> Result<Bitmap, TextureConvertError> {
     if image.width == 0 || image.height == 0 || image.depth == 0 {
         return Err(TextureConvertError::InvalidDimensions {
             width: image.width,
@@ -288,9 +329,10 @@ pub fn convert_to_bitmap(image: &TextureImage<'_>) -> Result<Bitmap, TextureConv
     }
 
     if is_crunched(image.texture_format) {
-        return Err(TextureConvertError::CrunchUnsupported {
+        let unity_version = unity_version.ok_or(TextureConvertError::CrunchUnsupported {
             texture_format: image.texture_format,
-        });
+        })?;
+        return convert_crunched_texture(image, unity_version, pixel_bytes);
     }
 
     // `bytesPerLayer`: `None` mirrors the source's `-1` for a Texture3D whose data is exactly one
@@ -335,6 +377,138 @@ pub fn convert_to_bitmap(image: &TextureImage<'_>) -> Result<Bitmap, TextureConv
     }
 
     Ok(bitmap)
+}
+
+fn convert_crunched_texture(
+    image: &TextureImage<'_>,
+    unity_version: UnityVersion,
+    pixel_bytes: usize,
+) -> Result<Bitmap, TextureConvertError> {
+    let data_size =
+        u32::try_from(image.data.len()).map_err(|_| TextureConvertError::CrunchInputTooLarge {
+            byte_count: image.data.len(),
+        })?;
+    let mut info = CrnTextureInfo::default();
+    if !info.crnd_get_texture_info(image.data, data_size) {
+        return Err(TextureConvertError::CrunchDecodeFailed {
+            reason: "invalid CRN header",
+        });
+    }
+    if info.width == 0
+        || info.height == 0
+        || info.levels == 0
+        || usize::try_from(info.faces).ok() != Some(image.depth)
+    {
+        return Err(TextureConvertError::CrunchDecodeFailed {
+            reason: "CRN header has invalid dimensions, mip count, or face count",
+        });
+    }
+    if usize::try_from(info.width).ok() != Some(image.width)
+        || usize::try_from(info.height).ok() != Some(image.height)
+    {
+        return Err(TextureConvertError::CrunchDecodeFailed {
+            reason: "CRN dimensions do not match the serialized Texture2D",
+        });
+    }
+    let mut max_mip_count = 1_u32;
+    let mut largest_dimension = info.width.max(info.height);
+    while largest_dimension > 1 {
+        largest_dimension >>= 1;
+        max_mip_count += 1;
+    }
+    if info.levels > max_mip_count {
+        return Err(TextureConvertError::CrunchDecodeFailed {
+            reason: "CRN mip count exceeds the dimensions' full mip chain",
+        });
+    }
+
+    // `CrnFormat` is intentionally not re-exported by texture2ddecoder 0.1.2. These pinned
+    // ordinals mirror its public enum declaration and reject a CRN codec that disagrees with
+    // Unity's serialized TextureFormat before either decoder is called.
+    const CRN_DXT1: u32 = 0;
+    const CRN_DXT5_FIRST: u32 = 2;
+    const CRN_DXT5_LAST: u32 = 6;
+    const CRN_ETC1: u32 = 10;
+    const CRN_ETC1S: u32 = 13;
+    const CRN_ETC2A: u32 = 12;
+    const CRN_ETC2AS: u32 = 14;
+    let crn_format = info.format as u32;
+    let unity_crunch = is_use_unity_crunch(unity_version, image.texture_format);
+    let matches_texture_format = match image.texture_format {
+        28 => crn_format == CRN_DXT1,
+        29 => (CRN_DXT5_FIRST..=CRN_DXT5_LAST).contains(&crn_format),
+        64 => unity_crunch && matches!(crn_format, CRN_ETC1 | CRN_ETC1S),
+        65 => unity_crunch && matches!(crn_format, CRN_ETC2A | CRN_ETC2AS),
+        _ => false,
+    };
+    if !matches_texture_format {
+        return Err(TextureConvertError::CrunchDecodeFailed {
+            reason: "CRN codec does not match the serialized Unity TextureFormat",
+        });
+    }
+
+    let pixel_count = image
+        .width
+        .checked_mul(image.height)
+        .and_then(|count| count.checked_mul(image.depth))
+        .ok_or(TextureConvertError::TextureTooLarge {
+            width: image.width,
+            height: image.height,
+            depth: image.depth,
+        })?;
+    let decoded_pixel_bytes = pixel_count.checked_mul(core::mem::size_of::<u32>()).ok_or(
+        TextureConvertError::TextureTooLarge {
+            width: image.width,
+            height: image.height,
+            depth: image.depth,
+        },
+    )?;
+    let mut decoded_pixels = Vec::new();
+    decoded_pixels.try_reserve_exact(pixel_count).map_err(|_| {
+        TextureConvertError::AllocationFailed {
+            requested_bytes: decoded_pixel_bytes,
+        }
+    })?;
+    decoded_pixels.resize(pixel_count, 0_u32);
+    let decode_result = if unity_crunch {
+        texture2ddecoder::decode_unity_crunch_faces(
+            image.data,
+            image.width,
+            image.height,
+            image.depth,
+            &mut decoded_pixels,
+        )
+    } else {
+        texture2ddecoder::decode_crunch_faces(
+            image.data,
+            image.width,
+            image.height,
+            image.depth,
+            &mut decoded_pixels,
+        )
+    };
+    decode_result.map_err(|reason| TextureConvertError::CrunchDecodeFailed { reason })?;
+
+    let mut pixels = Vec::new();
+    pixels
+        .try_reserve_exact(pixel_bytes)
+        .map_err(|_| TextureConvertError::AllocationFailed {
+            requested_bytes: pixel_bytes,
+        })?;
+    for packed in decoded_pixels {
+        // texture2ddecoder stores each packed color as little-endian BGRA bytes.
+        let [blue, green, red, alpha] = packed.to_le_bytes();
+        pixels.extend_from_slice(&[red, green, blue, alpha]);
+    }
+
+    Ok(Bitmap {
+        width: image.width,
+        height: image.height,
+        depth: image.depth,
+        is_rgba8: is_rgba8_target(image.texture_format),
+        has_alpha: has_alpha(image.texture_format),
+        pixels,
+    })
 }
 
 /// The reference's outer `TryConvertToBitmap` pixel type is `ColorRGBA<byte>` for these formats.
@@ -691,6 +865,28 @@ mod tests {
         assert_eq!(
             convert_to_bitmap(&image),
             Err(TextureConvertError::CrunchUnsupported { texture_format: 28 })
+        );
+    }
+
+    #[test]
+    fn versioned_crunched_texture_reaches_the_crn_decoder() {
+        let image = TextureImage {
+            texture_format: 28,
+            graphics_format: 0,
+            width: 4,
+            height: 4,
+            depth: 1,
+            image_size: 8,
+            data: &[0; 8],
+        };
+        assert_eq!(
+            convert_to_bitmap_with_unity_version(
+                &image,
+                Some(UnityVersion::parse("2022.3.22f1").unwrap()),
+            ),
+            Err(TextureConvertError::CrunchDecodeFailed {
+                reason: "invalid CRN header"
+            })
         );
     }
 

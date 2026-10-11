@@ -10,7 +10,10 @@ use std::io;
 
 use crate::processing::scene_naming::SceneUnityVersion;
 use crate::resources::image_export::ImageExportFormat;
-use crate::resources::texture::{export_texture2d_image, Texture2DView, TextureExportError};
+use crate::resources::texture::{
+    export_texture2d_image_with_unity_version, Texture2DView, TextureExportError,
+};
+use crate::resources::vertex_data_blob::UnityVersion;
 use crate::serialized_file::object::SerializedValue;
 
 use super::importer_reads::calculate_max_texture_size;
@@ -61,6 +64,8 @@ pub struct TextureProjectPlan {
     pub image_format: ImageExportFormat,
     pub extension: String,
     pub importer: UnityYamlNode,
+    unity_version: Option<UnityVersion>,
+    is_cubemap: bool,
 }
 
 impl TextureProjectPlan {
@@ -70,12 +75,13 @@ impl TextureProjectPlan {
         platform: i32,
         body_is_little_endian: bool,
     ) -> Result<Vec<u8>, TextureExportError> {
-        export_texture2d_image(
+        export_texture2d_image_with_unity_version(
             &self.view,
             stream_content,
             platform,
             body_is_little_endian,
-            true,
+            !self.is_cubemap,
+            self.unity_version,
             self.image_format,
         )
     }
@@ -91,7 +97,69 @@ pub fn plan_texture_project_export(
     settings: &ExportSettingsFile,
     asset_bundle_name: Option<&str>,
 ) -> Result<TextureProjectPlan, Box<dyn Error>> {
-    plan_texture_project_export_with_sprite_mesh_type(root, version, settings, asset_bundle_name, 0)
+    plan_texture_project_export_with_source_version(
+        root,
+        version,
+        Some(UnityVersion {
+            major: version.major,
+            minor: version.minor,
+            patch: version.patch,
+        }),
+        settings,
+        asset_bundle_name,
+        0,
+        false,
+    )
+}
+
+/// Selects a texture image decoder using the Unity version of the SerializedFile that owns it.
+pub fn plan_texture_project_export_for_source_version(
+    root: &SerializedValue,
+    project_version: SceneUnityVersion,
+    source_unity_version: Option<UnityVersion>,
+    settings: &ExportSettingsFile,
+    asset_bundle_name: Option<&str>,
+) -> Result<TextureProjectPlan, Box<dyn Error>> {
+    plan_texture_project_export_with_source_version(
+        root,
+        project_version,
+        source_unity_version,
+        settings,
+        asset_bundle_name,
+        0,
+        false,
+    )
+}
+
+/// Plans the source TextureExportCollection image route for a Unity 2022.3 Cubemap.
+///
+/// Cubemap faces are exported as one vertically stacked image; its importer reconstructs the six
+/// faces when Unity imports the PNG. Other importer versions stay on the existing explicit
+/// fallback until their cubemap metadata layouts are source-pinned.
+pub fn plan_cubemap_project_export_for_source_version(
+    root: &SerializedValue,
+    project_version: SceneUnityVersion,
+    source_unity_version: Option<UnityVersion>,
+    settings: &ExportSettingsFile,
+    asset_bundle_name: Option<&str>,
+) -> Result<TextureProjectPlan, Box<dyn Error>> {
+    if TextureImporterLayout::for_project_version(project_version)
+        != Some(TextureImporterLayout::Unity2022_3)
+    {
+        return Err(invalid_data(format!(
+            "Cubemap TextureImporter serialization is not source-pinned for Unity {}.{}",
+            project_version.major, project_version.minor
+        )));
+    }
+    plan_texture_project_export_with_source_version(
+        root,
+        project_version,
+        source_unity_version,
+        settings,
+        asset_bundle_name,
+        0,
+        true,
+    )
 }
 
 /// Build the specialized lightmap importer used by `LightmapExportCollection`.
@@ -104,12 +172,35 @@ pub fn plan_lightmap_texture_project_export(
     settings: &ExportSettingsFile,
     asset_bundle_name: Option<&str>,
 ) -> Result<TextureProjectPlan, Box<dyn Error>> {
-    let mut plan = plan_texture_project_export_with_sprite_mesh_type(
+    plan_lightmap_texture_project_export_for_source_version(
         root,
         version,
+        Some(UnityVersion {
+            major: version.major,
+            minor: version.minor,
+            patch: version.patch,
+        }),
+        settings,
+        asset_bundle_name,
+    )
+}
+
+/// Selects the lightmap decoder using the Unity version of its owning SerializedFile.
+pub fn plan_lightmap_texture_project_export_for_source_version(
+    root: &SerializedValue,
+    project_version: SceneUnityVersion,
+    source_unity_version: Option<UnityVersion>,
+    settings: &ExportSettingsFile,
+    asset_bundle_name: Option<&str>,
+) -> Result<TextureProjectPlan, Box<dyn Error>> {
+    let mut plan = plan_texture_project_export_with_source_version(
+        root,
+        project_version,
+        source_unity_version,
         settings,
         asset_bundle_name,
         1,
+        false,
     )?;
     let image_format = match settings.lightmap_texture_export_format {
         crate::export::settings::LightmapTextureExportFormat::Exr => {
@@ -128,17 +219,19 @@ pub fn plan_lightmap_texture_project_export(
     Ok(plan)
 }
 
-fn plan_texture_project_export_with_sprite_mesh_type(
+fn plan_texture_project_export_with_source_version(
     root: &SerializedValue,
-    version: SceneUnityVersion,
+    project_version: SceneUnityVersion,
+    source_unity_version: Option<UnityVersion>,
     settings: &ExportSettingsFile,
     asset_bundle_name: Option<&str>,
     sprite_mesh_type: i64,
+    is_cubemap: bool,
 ) -> Result<TextureProjectPlan, Box<dyn Error>> {
-    let layout = TextureImporterLayout::for_project_version(version).ok_or_else(|| {
+    let layout = TextureImporterLayout::for_project_version(project_version).ok_or_else(|| {
         invalid_data(format!(
             "TextureImporter serialization is not source-pinned for Unity {}.{}",
-            version.major, version.minor
+            project_version.major, project_version.minor
         ))
     })?;
     let view = Texture2DView::from_value(root)?;
@@ -146,12 +239,21 @@ fn plan_texture_project_export_with_sprite_mesh_type(
     let extension = settings
         .image_export_format
         .texture_extension(settings.prefer_original_texture_extension, None);
-    let importer = texture_importer(root, &view, layout, asset_bundle_name, sprite_mesh_type)?;
+    let importer = texture_importer(
+        root,
+        &view,
+        layout,
+        asset_bundle_name,
+        sprite_mesh_type,
+        is_cubemap,
+    )?;
     Ok(TextureProjectPlan {
         view,
         image_format,
         extension,
         importer,
+        unity_version: source_unity_version,
+        is_cubemap,
     })
 }
 
@@ -161,6 +263,7 @@ fn texture_importer(
     layout: TextureImporterLayout,
     asset_bundle_name: Option<&str>,
     sprite_mesh_type: i64,
+    is_cubemap: bool,
 ) -> Result<UnityYamlNode, Box<dyn Error>> {
     let facts = TextureImporterFacts::from_value(root, texture)?;
     match layout {
@@ -220,13 +323,13 @@ fn texture_importer(
         importer.insert_field("ignoreMipmapLimit", signed(0))?;
     }
     importer.insert_field("grayScaleToAlpha", signed(0))?;
-    importer.insert_field("generateCubemap", signed(6))?;
+    importer.insert_field("generateCubemap", signed(if is_cubemap { 5 } else { 6 }))?;
     importer.insert_field("cubemapConvolution", signed(0))?;
     importer.insert_field("seamlessCubemap", signed(0))?;
     importer.insert_field("textureFormat", signed(i64::from(facts.format)))?;
     importer.insert_field("maxTextureSize", signed(i64::from(facts.max_texture_size)))?;
     importer.insert_field("textureSettings", texture_settings(&facts)?)?;
-    importer.insert_field("nPOTScale", signed(0))?;
+    importer.insert_field("nPOTScale", signed(if is_cubemap { 1 } else { 0 }))?;
     importer.insert_field("lightmap", signed(0))?;
     importer.insert_field("compressionQuality", signed(50))?;
     importer.insert_field("spriteMode", signed(1))?;
@@ -240,8 +343,11 @@ fn texture_importer(
     importer.insert_field("alphaUsage", signed(1))?;
     importer.insert_field("alphaIsTransparency", signed(1))?;
     importer.insert_field("spriteTessellationDetail", signed(-1))?;
-    importer.insert_field("textureType", signed(if facts.normal_map { 1 } else { 0 }))?;
-    importer.insert_field("textureShape", signed(1))?;
+    importer.insert_field(
+        "textureType",
+        signed(if !is_cubemap && facts.normal_map { 1 } else { 0 }),
+    )?;
+    importer.insert_field("textureShape", signed(if is_cubemap { 2 } else { 1 }))?;
     importer.insert_field("singleChannelComponent", signed(0))?;
     if modern {
         importer.insert_field("flipbookRows", signed(0))?;

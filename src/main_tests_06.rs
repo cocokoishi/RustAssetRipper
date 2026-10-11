@@ -901,8 +901,8 @@
                 "Assets/Mesh/Tri.asset.meta".to_owned(),
                 "Assets/Shader/Test_Simple.shader".to_owned(),
                 "Assets/Shader/Test_Simple.shader.meta".to_owned(),
-                "Assets/Texture2D/Texture2D.texture2D".to_owned(),
-                "Assets/Texture2D/Texture2D.texture2D.meta".to_owned(),
+                "Assets/Texture2D/Texture2D.png".to_owned(),
+                "Assets/Texture2D/Texture2D.png.meta".to_owned(),
                 "AuxiliaryFiles/path_id_map.json".to_owned(),
                 "Packages/manifest.json".to_owned(),
                 "ProjectSettings/EditorSettings.asset".to_owned(),
@@ -918,6 +918,12 @@
             path_id_map.contains("\"Type\": \"Texture2D\""),
             "{path_id_map}"
         );
+        let texture_image = fs::read(output_root.join("Assets/Texture2D/Texture2D.png"))
+            .expect("a decodable embedded-TypeTree texture exports as an image");
+        assert!(texture_image.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert!(fs::read_to_string(output_root.join("Assets/Texture2D/Texture2D.png.meta"))
+            .unwrap()
+            .contains("TextureImporter:"));
         assert!(
             path_id_map.contains("\"Type\": \"Shader\""),
             "{path_id_map}"
@@ -933,13 +939,13 @@
             "{main_yaml}"
         );
 
-        // Native asset sidecars use AssetRipper's class-prefixed main export IDs.
+        // Native asset sidecars use AssetRipper's class-prefixed main export IDs. The
+        // TextureImporter sidecar is checked above because it uses Unity's image importer.
         for (relative, main_id) in [
             ("Assets/GameObject/GameObject.asset.meta", 100_000),
             ("Assets/GameObject/GameObject_0.asset.meta", 100_000),
             ("Assets/Material/TestMat.mat.meta", 2_100_000),
             ("Assets/Mesh/Tri.asset.meta", 4_300_000),
-            ("Assets/Texture2D/Texture2D.texture2D.meta", 2_800_000),
         ] {
             let meta = fs::read_to_string(output_root.join(relative)).unwrap();
             assert!(
@@ -985,7 +991,7 @@
             "Assets/Material/TestMat.mat.meta",
             "Assets/Mesh/Tri.asset.meta",
             shader_meta_path,
-            "Assets/Texture2D/Texture2D.texture2D.meta",
+            "Assets/Texture2D/Texture2D.png.meta",
         ]
         .iter()
         .map(|relative| meta_guid(&output_root.join(relative)))

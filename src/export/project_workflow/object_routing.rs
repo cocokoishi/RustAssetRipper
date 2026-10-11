@@ -103,8 +103,86 @@ fn project_object_name(
     payload.and_then(object_asset_name)
 }
 
-pub(super) fn route_project_objects<'context, 'graph>(
-    context: &ProjectRoutingContext<'context, 'graph>,
+fn texture_has_exportable_image_payload(payload: &ParsedObjectPayload) -> bool {
+    let Ok(view) = crate::resources::texture::Texture2DView::from_value(&payload.root) else {
+        return false;
+    };
+    view.width > 0
+        && view.height > 0
+        && (!view.image_data.is_empty()
+            || view
+                .stream_data
+                .as_ref()
+                .is_some_and(|stream| stream.is_set() && stream.size > 0))
+}
+
+fn read_audio_data_for_project_export(
+    context: &ProjectRoutingContext<'_, '_, '_>,
+    file_index: usize,
+    path_id: i64,
+    view: &crate::resources::audio::AudioClipView,
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    use crate::resources::audio::AudioDataSource;
+
+    match view.audio_data_source() {
+        AudioDataSource::Inline(bytes) => Ok(bytes.to_vec()),
+        AudioDataSource::Empty => Ok(Vec::new()),
+        AudioDataSource::Resource(resource) if resource.size == 0 => Ok(Vec::new()),
+        AudioDataSource::Resource(resource) => {
+            if resource.path.is_empty() {
+                return Err(invalid_project(format!(
+                    "file {file_index} AudioClip PathID {path_id} declares {} streamed bytes with an empty resource path",
+                    resource.size
+                )));
+            }
+            let source_bundle_index = context
+                .workspace
+                .files()
+                .get(file_index)
+                .ok_or_else(|| {
+                    invalid_project(format!(
+                        "AudioClip references absent SerializedFile {file_index}"
+                    ))
+                })?
+                .container_bundle_index;
+            match resolve_and_read_streamed_resource_range(
+                context.filesystem,
+                context.workspace,
+                source_bundle_index,
+                StreamedResourceRange {
+                    path: &resource.path,
+                    offset: resource.offset,
+                    size: resource.size,
+                },
+                context.root_catalog,
+                context.resource_provider,
+                context.limits.streamed_content,
+            )
+            .map_err(|error| {
+                invalid_project(format!(
+                    "file {file_index} AudioClip PathID {path_id} stream {:?} could not be read: {error}",
+                    resource.path
+                ))
+            })? {
+                StreamedResourceContentResolution::Resolved { bytes, .. } => Ok(bytes),
+                StreamedResourceContentResolution::Missing {
+                    unavailable_data_paths,
+                } => Err(invalid_project(format!(
+                    "file {file_index} AudioClip PathID {path_id} stream {:?} is missing; unavailable data paths: [{}]",
+                    resource.path,
+                    unavailable_data_paths.join(", ")
+                ))),
+                StreamedResourceContentResolution::Unset => Err(invalid_project(format!(
+                    "file {file_index} AudioClip PathID {path_id} stream {:?} became unset during resolution",
+                    resource.path
+                ))),
+            }
+        }
+    }
+}
+
+pub(super) fn route_project_objects<'context, 'provider, 'graph>(
+    context: &ProjectRoutingContext<'context, 'provider, 'graph>,
 ) -> Result<RoutedProjectObjects<'context>, Box<dyn Error>> {
     let workspace = context.workspace;
     let objects = context.objects;
@@ -131,7 +209,6 @@ pub(super) fn route_project_objects<'context, 'graph>(
         .map_err(|_| invalid_project("could not allocate routed project objects"))?;
     let mut notices: Vec<ProjectExportNotice> = Vec::new();
     let mut unresolved_script_content: Vec<ProjectExportNotice> = Vec::new();
-    let mut fallback_notices: Vec<ProjectExportNotice> = Vec::new();
     let mut opaque_fallback_notices: Vec<ProjectExportNotice> = Vec::new();
     for (file_index, file) in workspace.files().iter().enumerate() {
         for (object_index, object_info) in file.metadata.objects.iter().enumerate() {
@@ -206,6 +283,79 @@ pub(super) fn route_project_objects<'context, 'graph>(
             } else {
                 None
             };
+            let mut audio_binary_export = None;
+            let audio_claim_decode = if let Some(view) = audio_view.as_ref().filter(|_| {
+                project_version.major == 2022
+                    && project_version.minor == 3
+                    && matches!(
+                        settings.audio_export_format,
+                        crate::export::settings::AudioExportFormat::Default
+                            | crate::export::settings::AudioExportFormat::PreferWav
+                    )
+            }) {
+                let data = read_audio_data_for_project_export(
+                    context,
+                    file_index,
+                    object_info.path_id,
+                    view,
+                )?;
+                let name = view
+                    .name
+                    .as_deref()
+                    .map(String::from_utf8_lossy)
+                    .unwrap_or_default();
+                match crate::export::audio_export::try_decode_audio_with_limit(
+                    &name,
+                    view.sound_type,
+                    &data,
+                    crate::export::audio_export::MAX_DECODED_AUDIO_BYTES
+                        .min(context.limits.max_total_asset_payload_bytes),
+                ) {
+                    Ok((bytes, extension)) if !bytes.is_empty() => {
+                        let collection_extension = crate::export::audio_export::plan_audio_clip_collection(
+                            crate::export::audio_export::AudioDecodeFact {
+                                is_audio_clip: true,
+                                decode_succeeded: true,
+                                decoded_is_empty: false,
+                                decoded_extension: extension,
+                                format: settings.audio_export_format,
+                            },
+                        )
+                        .map_err(|refusal| {
+                            invalid_project(format!(
+                                "AudioClip {}:{} decoded successfully but collection planning refused it: {refusal:?}",
+                                file_index, object_info.path_id
+                            ))
+                        })?;
+                        let audio_importer = audio_importer_yaml_2022_3(
+                            view,
+                            payload.and_then(object_asset_bundle_name).as_deref(),
+                        )?;
+                        audio_binary_export = Some(AudioBinaryExportDetails {
+                            bytes,
+                            decoded_extension: extension,
+                            collection_extension,
+                            importer: audio_importer,
+                        });
+                        crate::export::collection_claims::AudioClaimDecode::Decoded {
+                            is_ogg: extension == "ogg",
+                        }
+                    }
+                    Ok(_) => crate::export::collection_claims::AudioClaimDecode::Empty,
+                    Err(
+                        error @ crate::export::audio_export::AudioDecodeError::DecodedDataLimitExceeded { .. }
+                        | error @ crate::export::audio_export::AudioDecodeError::OutputAllocationFailed,
+                    ) => {
+                        return Err(invalid_project(format!(
+                            "file {file_index} AudioClip PathID {} could not be safely decoded: {error}",
+                            object_info.path_id
+                        )));
+                    }
+                    Err(_) => crate::export::collection_claims::AudioClaimDecode::Undecodable,
+                }
+            } else {
+                crate::export::collection_claims::AudioClaimDecode::Undecodable
+            };
             let shader_text = match shader_view.as_ref().and_then(|view| view.script.as_deref()) {
                 None => crate::export::collection_claims::ShaderTextState::NoScript,
                 Some(script) if script_has_decompiled_text(script) => {
@@ -218,11 +368,18 @@ pub(super) fn route_project_objects<'context, 'graph>(
             } else {
                 None
             };
-            let standalone_texture = engine_guid.is_none()
-                && class_id == 28
+            let font_data = if source_engine_guid.is_none() && class_id == 128 {
+                payload
+                    .map(|payload| font_asset_data(&payload.root))
+                    .transpose()?
+                    .flatten()
+            } else {
+                None
+            };
+            let texture_image_exportable = engine_guid.is_none()
+                && matches!(class_id, 28 | crate::resources::texture::CUBEMAP_CLASS_ID)
                 && matches!(&object.factory.kind, FactoryAssetKind::Generated(_))
-                && object.recovered_type_tree.is_some()
-                && !has_sprite_reference_to_object(reference_graph, file_index, object_index);
+                && payload.is_some_and(texture_has_exportable_image_payload);
             let lightmap_scene_directory = lightmap_texture_directories
                 .get(&(file_index, object_index))
                 .cloned();
@@ -233,21 +390,34 @@ pub(super) fn route_project_objects<'context, 'graph>(
                 );
             let texture_importer_supported =
                 TextureImporterLayout::for_project_version(project_version).is_some();
+            let cubemap_importer_supported =
+                class_id != crate::resources::texture::CUBEMAP_CLASS_ID
+                    || TextureImporterLayout::for_project_version(project_version)
+                        == Some(TextureImporterLayout::Unity2022_3);
             let texture_route_supported = texture_importer_supported
-                && ((standalone_texture && lightmap_scene_directory.is_none())
+                && cubemap_importer_supported
+                && ((texture_image_exportable && lightmap_scene_directory.is_none())
                     || lightmap_image_route);
             let mut claim_facts = claim_facts_for_shader_text(facts, settings_facts, shader_text);
+            claim_facts.audio_decode = audio_claim_decode;
             claim_facts.engine_file = engine_guid.is_some();
-            claim_facts.data_valid = text_asset_script
-                .as_ref()
-                .is_some_and(|script| !script.is_empty());
-            if lightmap_scene_directory.is_some() {
+            claim_facts.data_valid = match class_id {
+                49 => text_asset_script
+                    .as_ref()
+                    .is_some_and(|script| !script.is_empty()),
+                128 => font_data.is_some_and(|data| !data.is_empty()),
+                _ => false,
+            };
+            if class_id == 128 {
+                claim_facts.main = ClaimMainKind::Font;
+            } else if lightmap_scene_directory.is_some() {
                 // LightingDataProcessor assigns the generated LightingDataAsset as the
                 // main asset for every texture referenced by LightmapSettings.Lightmaps.
                 claim_facts.main = ClaimMainKind::LightingData;
             } else if texture_route_supported {
-                // SpriteProcessor creates this generated main asset for a standalone ITexture2D.
-                // Keep selection in the ordinary registration walk with the processed fact.
+                // SpriteProcessor assigns exportable textures a generated main asset, including
+                // textures referenced by Sprite objects. Keep image routing in the ordinary
+                // registration walk with the processed fact.
                 claim_facts.main = ClaimMainKind::SpriteInformation;
             } else if scriptable_group_plan.is_some() {
                 claim_facts.main = ClaimMainKind::ScriptableObjectGroup;
@@ -290,14 +460,18 @@ pub(super) fn route_project_objects<'context, 'graph>(
                 false
             };
             if class_id == crate::resources::audio::AUDIO_CLIP_CLASS_ID
-                && matches!(
-                    selection.exporter,
-                    "NativeAudioExporter" | "AudioClipExporter"
-                )
+                && selection.exporter == "NativeAudioExporter"
             {
                 return Err(invalid_project(format!(
-                    "file {file_index} object {object_index} PathID {} selected {}, whose binary AudioClip project route is not integrated",
-                    object.path_id, selection.exporter
+                    "file {file_index} object {object_index} PathID {} selected NativeAudioExporter, whose binary native AudioClip route is not integrated",
+                    object.path_id
+                )));
+            }
+            let audio_binary_route = selection.exporter == "AudioClipExporter";
+            if audio_binary_route && audio_binary_export.is_none() {
+                return Err(invalid_project(format!(
+                    "file {file_index} object {object_index} PathID {} selected AudioClipExporter without retained decoded audio bytes",
+                    object.path_id
                 )));
             }
             let audio_yaml_resource = if audio_yaml_route {
@@ -347,17 +521,33 @@ pub(super) fn route_project_objects<'context, 'graph>(
                     )
                 })?;
                 let asset_bundle_name = object_asset_bundle_name(payload);
-                let plan = if lightmap_image_route {
-                    plan_lightmap_texture_project_export(
+                let source_unity_version = file
+                    .metadata
+                    .prefix
+                    .unity_version_text
+                    .as_deref()
+                    .and_then(crate::resources::vertex_data_blob::UnityVersion::parse);
+                let plan = if class_id == crate::resources::texture::CUBEMAP_CLASS_ID {
+                    plan_cubemap_project_export_for_source_version(
                         &payload.root,
                         project_version,
+                        source_unity_version,
+                        settings,
+                        asset_bundle_name.as_deref(),
+                    )
+                } else if lightmap_image_route {
+                    plan_lightmap_texture_project_export_for_source_version(
+                        &payload.root,
+                        project_version,
+                        source_unity_version,
                         settings,
                         asset_bundle_name.as_deref(),
                     )
                 } else {
-                    plan_texture_project_export(
+                    plan_texture_project_export_for_source_version(
                         &payload.root,
                         project_version,
+                        source_unity_version,
                         settings,
                         asset_bundle_name.as_deref(),
                     )
@@ -450,6 +640,18 @@ pub(super) fn route_project_objects<'context, 'graph>(
                 ExportCollectionKind::Asset if selection.exporter == "TextAssetExporter" => {
                     (ObjectRoute::TextAsset, "", None)
                 }
+                ExportCollectionKind::Asset if selection.exporter == "FontAssetExporter" => {
+                    if class_id != 128 || font_data.map_or(true, |data| data.is_empty()) {
+                        return Err(invalid_project(format!(
+                            "FontAssetExporter selected class {class_id} at {file_index}:{} without non-empty Font.m_FontData",
+                            object_info.path_id
+                        )));
+                    }
+                    (ObjectRoute::FontBinary, "", None)
+                }
+                ExportCollectionKind::Asset if audio_binary_route => {
+                    (ObjectRoute::AudioBinary, "", None)
+                }
                 ExportCollectionKind::Asset if audio_yaml_route => {
                     (ObjectRoute::AudioYaml, "", None)
                 }
@@ -530,7 +732,7 @@ pub(super) fn route_project_objects<'context, 'graph>(
                 ),
                 }
             };
-            let fallback_reason = if standalone_texture && !texture_route_supported {
+            let fallback_reason = if texture_image_exportable && !texture_route_supported {
                 Some("the source TextureExportCollection image/importer route is not yet ported for this Unity importer version or Sprite group")
             } else {
                 fallback_reason
@@ -544,12 +746,6 @@ pub(super) fn route_project_objects<'context, 'graph>(
                 notices.push(ProjectExportNotice {
                     subject: label.clone(),
                     reason: skip_reason,
-                });
-            }
-            if let Some(reason) = fallback_reason {
-                fallback_notices.push(ProjectExportNotice {
-                    subject: label.clone(),
-                    reason,
                 });
             }
             if matches!(route, ObjectRoute::Unknown | ObjectRoute::Unreadable) {
@@ -581,6 +777,8 @@ pub(super) fn route_project_objects<'context, 'graph>(
             let file_id = match route {
                 ObjectRoute::Asset
                 | ObjectRoute::AudioYaml
+                | ObjectRoute::AudioBinary
+                | ObjectRoute::FontBinary
                 | ObjectRoute::TextureImage
                 | ObjectRoute::TextAsset
                 | ObjectRoute::ShaderText
@@ -693,13 +891,16 @@ pub(super) fn route_project_objects<'context, 'graph>(
                 facts,
                 shader_view,
                 audio_yaml_resource,
+                audio_binary_export,
                 text_asset_export,
+                font_collection: None,
                 texture_export,
                 script_export,
                 scriptable_object_group,
                 controller_collection,
                 selection,
                 route,
+                fallback_reason,
                 collection_index,
                 guid,
                 pointer_guid,
@@ -707,6 +908,20 @@ pub(super) fn route_project_objects<'context, 'graph>(
             });
         }
     }
+
+    attach_font_collection_subassets(&mut routed, objects, reference_graph)?;
+    let fallback_notices = routed
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .fallback_reason
+                .map(|reason| (entry.selection.collection_name, reason))
+        })
+        .map(|(collection_name, reason)| ProjectExportNotice {
+            subject: collection_name.to_owned(),
+            reason,
+        })
+        .collect();
 
     Ok(RoutedProjectObjects {
         routed,
@@ -718,6 +933,159 @@ pub(super) fn route_project_objects<'context, 'graph>(
         next_guid_sequence,
         used_guids,
     })
+}
+
+fn attach_font_collection_subassets<'object>(
+    routed: &mut [RoutedObject<'object>],
+    objects: &'object ObjectWorkspace,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+) -> Result<(), Box<dyn Error>> {
+    let mut prepared = Vec::new();
+    let mut owners = HashMap::<(usize, usize), usize>::new();
+    for (root_index, root) in routed.iter().enumerate() {
+        if root.route != ObjectRoute::FontBinary {
+            continue;
+        }
+        let mut children = Vec::new();
+        for (field, class_id, expected_name) in [
+            ("m_DefaultMaterial", 21, "Font Material"),
+            ("m_Texture", 28, "Font Texture"),
+        ] {
+            let Some(child) = font_collection_subasset(
+                root,
+                field,
+                class_id,
+                expected_name,
+                objects,
+                reference_graph,
+            )?
+            else {
+                continue;
+            };
+            let key = (child.object.file_index, child.object.object_index);
+            if let Some(previous_root) = owners.insert(key, root_index) {
+                return Err(invalid_project(format!(
+                    "Font subasset {}:{} is claimed by Font collections at routed indexes {previous_root} and {root_index}",
+                    key.0, key.1
+                )));
+            }
+            children.push(child);
+        }
+        prepared.push((root_index, RoutedFontCollection { children }));
+    }
+
+    for (root_index, font_collection) in prepared {
+        routed[root_index].font_collection = Some(font_collection);
+    }
+    for (entry_index, entry) in routed.iter_mut().enumerate() {
+        let key = (entry.object.file_index, entry.object.object_index);
+        if let Some(root_index) = owners.get(&key).copied() {
+            if root_index == entry_index {
+                return Err(invalid_project(format!(
+                    "Font collection at routed index {root_index} claims itself as a generated subasset"
+                )));
+            }
+            entry.route = ObjectRoute::Skipped;
+            entry.collection_index = usize::MAX;
+            entry.fallback_reason = None;
+        }
+    }
+    Ok(())
+}
+
+fn font_collection_subasset<'object>(
+    root: &RoutedObject<'object>,
+    field_name: &str,
+    expected_class_id: i32,
+    expected_name: &str,
+    objects: &'object ObjectWorkspace,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+) -> Result<Option<RoutedFontCollectionChild<'object>>, Box<dyn Error>> {
+    let payload = root.object.payload.as_ref().map_err(|error| {
+        invalid_project(format!(
+            "Font {}:{} has no decoded payload while planning generated subassets: {error}",
+            root.object.file_index, root.object.path_id
+        ))
+    })?;
+    let value = payload
+        .root
+        .unique_field_in_base_chain(field_name)
+        .map_err(|error| invalid_project(format!("Font {field_name} lookup failed: {error}")))?;
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let SerializedValue::PPtr { file_id, path_id } = value else {
+        return Err(invalid_project(format!(
+            "Font {}:{} field {field_name} is not a PPtr",
+            root.object.file_index, root.object.path_id
+        )));
+    };
+    if *path_id == 0 {
+        return Ok(None);
+    }
+    let mut edges = reference_graph
+        .references_from_object(root.object.file_index, root.object.object_index)
+        .filter(|edge| {
+            edge.field_path == field_name && edge.file_id == *file_id && edge.path_id == *path_id
+        });
+    let edge = edges.next().ok_or_else(|| {
+        invalid_project(format!(
+            "Font {}:{} has non-null {field_name} PPtr ({file_id}, {path_id}) without a matching reference-graph edge",
+            root.object.file_index, root.object.path_id
+        ))
+    })?;
+    if edges.next().is_some() {
+        return Err(invalid_project(format!(
+            "Font {}:{} has duplicate reference-graph edges for {field_name} PPtr ({file_id}, {path_id})",
+            root.object.file_index, root.object.path_id
+        )));
+    }
+    let (target_file_index, target_object_index) = match &edge.resolution {
+        MultiFilePPtrResolution::Object {
+            target_file_index,
+            target_object_index,
+        } => (*target_file_index, *target_object_index),
+        MultiFilePPtrResolution::PredefinedEngineAsset { .. } => return Ok(None),
+        MultiFilePPtrResolution::Null => {
+            return Err(invalid_project(format!(
+                "Font {}:{} non-null {field_name} PPtr was classified as null",
+                root.object.file_index, root.object.path_id
+            )))
+        }
+        unresolved => {
+            return Err(invalid_project(format!(
+                "Font {}:{} {field_name} PPtr ({file_id}, {path_id}) is unresolved: {unresolved:?}",
+                root.object.file_index, root.object.path_id
+            )))
+        }
+    };
+    let target = objects
+        .get(target_file_index, target_object_index)
+        .ok_or_else(|| {
+            invalid_project(format!(
+                "Font {}:{} {field_name} resolves to absent workspace object {target_file_index}:{target_object_index}",
+                root.object.file_index, root.object.path_id
+            ))
+        })?;
+    if target.factory.class_id != expected_class_id {
+        return Err(invalid_project(format!(
+            "Font {}:{} {field_name} resolves to class {}, expected {expected_class_id}",
+            root.object.file_index, root.object.path_id, target.factory.class_id
+        )));
+    }
+    if target.factory.name != expected_name {
+        return Ok(None);
+    }
+    let file_id =
+        crate::export::ids::get_main_export_id(expected_class_id, 0).map_err(|error| {
+            invalid_project(format!(
+                "Font generated {expected_name:?} file ID could not be planned: {error}"
+            ))
+        })?;
+    Ok(Some(RoutedFontCollectionChild {
+        object: target,
+        file_id,
+    }))
 }
 
 #[cfg(test)]

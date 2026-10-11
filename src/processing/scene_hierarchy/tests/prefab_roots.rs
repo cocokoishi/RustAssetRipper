@@ -74,6 +74,8 @@ fn resolves_prefab_instance_root_in_workspace_file_order() {
         missing_transform_plans: Vec::new(),
         source_graph_complete: true,
         source_reference_scans_complete: true,
+        source_prefab_processor_reference_scans_complete: true,
+        source_scene_membership_reference_scans_complete: true,
         roots: WorkspaceSceneRootDiscovery::default(),
         hierarchy_audit: WorkspaceSceneHierarchyAudit::default(),
     };
@@ -98,6 +100,8 @@ fn resolves_prefab_instance_root_in_workspace_file_order() {
         missing_transform_plans: Vec::new(),
         source_graph_complete: true,
         source_reference_scans_complete: true,
+        source_prefab_processor_reference_scans_complete: true,
+        source_scene_membership_reference_scans_complete: true,
         roots: WorkspaceSceneRootDiscovery::default(),
         hierarchy_audit: WorkspaceSceneHierarchyAudit::default(),
     };

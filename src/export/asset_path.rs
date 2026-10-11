@@ -49,7 +49,7 @@ impl HostPathPlatform {
     /// expression always adds `,`, `[`, `]`, and `U+0000..=U+001F`.
     fn invalid_file_name_characters(self) -> &'static [char] {
         match self {
-            Self::Windows => &['"', '<', '>', '|', ':', '/', '\\', ',', '[', ']'],
+            Self::Windows => &['"', '<', '>', '|', ':', '/', '\\', '?', '*', ',', '[', ']'],
             Self::Unix => &['/', ':', ',', '[', ']'],
         }
     }
@@ -59,7 +59,7 @@ impl HostPathPlatform {
     /// The baseline does not add `:` to this set, so a colon survives `FixInvalidPathCharacters`.
     fn invalid_path_characters(self) -> &'static [char] {
         match self {
-            Self::Windows => &['"', '<', '>', '|', ',', '[', ']'],
+            Self::Windows => &['"', '<', '>', '|', '?', '*', ',', '[', ']'],
             Self::Unix => &[',', '[', ']'],
         }
     }
@@ -743,6 +743,10 @@ mod tests {
             Ok("a_b_c_d_e_f_g_h_i".to_owned())
         );
         assert_eq!(
+            fix_invalid_file_name_characters("question?star*", HostPathPlatform::Windows),
+            Ok("question_star_".to_owned())
+        );
+        assert_eq!(
             fix_invalid_file_name_characters("a<b>c:d[e]", HostPathPlatform::Unix),
             Ok("a<b>c_d_e_".to_owned())
         );
@@ -761,6 +765,10 @@ mod tests {
         assert_eq!(
             fix_invalid_path_characters("Assets / Meshes", HostPathPlatform::Windows),
             Ok("Assets/Meshes".to_owned())
+        );
+        assert_eq!(
+            fix_invalid_path_characters("Assets/Question?/Star*", HostPathPlatform::Windows),
+            Ok("Assets/Question_/Star_".to_owned())
         );
     }
 

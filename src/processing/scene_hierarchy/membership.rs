@@ -354,7 +354,7 @@ impl WorkspaceSceneHierarchyScene {
                     limits.max_issues,
                 )?;
             }
-            if !collection.source_reference_scans_complete() {
+            if !collection.source_scene_membership_reference_scans_complete() {
                 push_membership_issue(
                     &mut membership.issues,
                     WorkspaceSceneHierarchyMembershipIssue::IncompleteReferenceScans { file_index },

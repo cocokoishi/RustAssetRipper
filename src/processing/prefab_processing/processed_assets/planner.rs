@@ -112,11 +112,10 @@ impl<'a> SourceHierarchyIndex<'a> {
             let has_hierarchy_inputs = graph.game_object_count() != 0
                 || graph.transform_count() != 0
                 || !graph.scene_assets().is_empty()
-                || !graph.component_candidates().is_empty()
                 || !graph.missing_transform_plans().is_empty();
-            if !graph.is_complete() && has_hierarchy_inputs {
+            if !graph.is_prefab_processor_complete() && has_hierarchy_inputs {
                 return Ok(HierarchyIndexPreparation::Incomplete(format!(
-                    "collection file {file_index} has an incomplete scene hierarchy graph ({} GameObjects, {} Transforms, {} scene assets, {} component candidates, {} missing-Transform plans)",
+                    "collection file {file_index} has incomplete PrefabProcessor hierarchy inputs ({} GameObjects, {} Transforms, {} scene assets, {} component candidates, {} missing-Transform plans)",
                     graph.game_object_count(),
                     graph.transform_count(),
                     graph.scene_assets().len(),

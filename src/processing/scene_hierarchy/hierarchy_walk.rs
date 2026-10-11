@@ -240,7 +240,9 @@ impl WorkspaceSceneHierarchies {
             walk.issue = Some(WorkspaceGetRootGameObjectIssue::MissingCollectionGraph);
             return Ok(walk);
         };
-        if !graph.source_graph_complete() || !graph.source_reference_scans_complete() {
+        if !graph.source_graph_complete()
+            || !graph.source_prefab_processor_reference_scans_complete()
+        {
             walk.issue = Some(WorkspaceGetRootGameObjectIssue::IncompleteCollectionGraph {
                 file_index: game_object.file_index,
             });
@@ -384,7 +386,7 @@ impl WorkspaceSceneHierarchies {
                 return Ok(walk);
             };
             if !current_graph.source_graph_complete()
-                || !current_graph.source_reference_scans_complete()
+                || !current_graph.source_prefab_processor_reference_scans_complete()
             {
                 walk.issue = Some(WorkspaceGetRootGameObjectIssue::IncompleteCollectionGraph {
                     file_index: current_transform.file_index,
@@ -591,7 +593,7 @@ fn note_incomplete_collection_graph(
     let root_discovery_complete = graph.roots().is_complete();
     let transform_audit_complete = graph.hierarchy_audit().is_complete();
     if graph.source_graph_complete()
-        && graph.source_reference_scans_complete()
+        && graph.source_prefab_processor_reference_scans_complete()
         && root_discovery_complete
         && transform_audit_complete
     {
@@ -602,7 +604,7 @@ fn note_incomplete_collection_graph(
         WorkspaceGameObjectHierarchyIssue::IncompleteCollectionGraph {
             file_index,
             source_graph_complete: graph.source_graph_complete(),
-            reference_scans_complete: graph.source_reference_scans_complete(),
+            reference_scans_complete: graph.source_prefab_processor_reference_scans_complete(),
             root_discovery_complete,
             transform_audit_complete,
             graph_issue_count: graph.graph_issues().len(),

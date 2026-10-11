@@ -12,6 +12,8 @@
 
 `dotnetdll` reads and writes PE/CLI and ECMA-335 CLR metadata for the Mono assembly path. The project vendors upstream 0.3.0 at `vendor/dotnetdll-0.3.0` and locally fixes two assembly-round-trip defects: the `ManagedMask` reader mapping and TypeDef method-list starts when methods are stored as property/event accessors. It also preserves caller-specified ExportedType flags for an AssemblyRef implementation without adding the Forwarder bit. The patch record is `vendor/dotnetdll-0.3.0/UPSTREAM-PATCHES.md`; the upstream `LICENSE` is retained. This is a Rust metadata library and does not invoke a .NET process. It does not parse Unity containers or SerializedFiles; those remain Rust core responsibilities. Its GPL-3.0+ license is compatible with this GPL-3.0-only project when distributed under GPL-3.0; retain the crate attribution and applicable license notice in distribution materials.
 
+`lewton` parses and validates Vorbis packets with a pure-Rust decoder. FSB5 audio export rebuilds the identification/comment/setup headers and wraps the original compressed Vorbis packets in Ogg pages, preserving the source packet bytes instead of decoding and re-encoding lossy audio. The static setup-header lookup was derived from `fsbex` 0.3.0's generated Vorbis table; its MIT license notice is retained at `vendor/fsbex-vorbis-table/LICENSE-MIT`. `phf` provides the compile-time CRC32-to-setup-header lookup. FSB5 remains limited to one Vorbis stream per AudioClip and applies the configured output cap.
+
 | Crate | Locked version | Use | Declared license | Rust version metadata |
 |---|---:|---|---|---|
 | [lzma-rs](https://github.com/gendx/lzma-rs) | 0.3.0 | Pure Rust raw LZMA decoder | MIT | Not declared in the published crate manifest |
@@ -20,6 +22,8 @@
 | [flate2](https://github.com/rust-lang/flate2-rs) | 1.1.10 | GZip stream decoder and encoder using `rust_backend` | MIT OR Apache-2.0 | 1.67 |
 | [rustix](https://github.com/bytecodealliance/rustix) | 1.1.5 | Safe Unix `flock` bindings for retained input handles | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | 1.65 |
 | [dotnetdll](https://github.com/nickbclifford/dotnetdll) | 0.3.0, locally patched | Rust PE/CLI reader and writer for CLR assembly metadata used by Mono type lookup and manager-backed script DLL export | GPL-3.0+ | 1.85.1 |
+| [lewton](https://github.com/RustAudio/lewton) | 0.10.2 | Pure Rust Vorbis packet validation and decoded frame counts for Ogg granule positions | MIT OR Apache-2.0 | Not declared in the published crate manifest |
+| [phf](https://github.com/rust-phf/rust-phf) | 0.11.3 | Compile-time lookup of FMOD Vorbis setup headers by CRC32 | MIT OR Apache-2.0 | 1.61 |
 | [byteorder](https://github.com/BurntSushi/byteorder) | 1.5.0 | Little-endian parsing used by `lzma-rs` | Unlicense OR MIT | 1.60 |
 | [bitflags](https://github.com/bitflags/bitflags) | 2.13.2 | Flag types used by `rustix` | MIT OR Apache-2.0 | 1.56 |
 | [crc](https://github.com/mrhooray/crc-rs) | 3.4.0 | CRC support compiled as an `lzma-rs` dependency | MIT OR Apache-2.0 | 1.83 |
@@ -36,7 +40,7 @@
 | [libc](https://github.com/rust-lang/libc) | 0.2.190 | Platform bindings used by `rustix` on non-Linux Unix targets | MIT OR Apache-2.0 | 1.65 |
 | [linux-raw-sys](https://github.com/sunfishcode/linux-raw-sys) | 0.12.1 | Linux syscall bindings used by `rustix` | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | 1.63 |
 
-`Cargo.lock` records the exact selected dependency graph. The package minimum is Rust 1.87 to satisfy `ruzstd` 0.9.0. Rust 1.87 is not installed in the current environment, so only Rust 1.98.1 has been used to build and test this repository. The selected crates are pure Rust and do not require a native C codec toolchain.
+`Cargo.lock` records the exact selected dependency graph. The package minimum is Rust 1.87 to satisfy `ruzstd` 0.9.0. Rust 1.87 is not installed in the current environment, so only Rust 1.98.1 has been used to build and test this repository. The selected audio implementation is pure Rust and has no native codec build requirement.
 
 The AssetRipper port is GPL-3.0-only. Before distributing binaries, package the applicable third-party license texts and notices alongside the product; this record is not a substitute for those distribution artifacts.
 

@@ -189,6 +189,7 @@ pub(super) fn prepare_generated_collections(
         lighting_data_assets.push(RoutedLightingDataAsset {
             scene_index: scene.scene_index,
             source_owner,
+            render_settings_owner: export_identity_for_scene_object(render_settings_identity)?,
             scene_guid: scene.guid,
             collection_index,
             identity: ExportAssetIdentity {
@@ -259,6 +260,12 @@ pub(super) fn build_project_pointer_map(
             )?
             .checked_add(
                 entry
+                    .font_collection
+                    .as_ref()
+                    .map_or(0, |group| group.children.len()),
+            )?
+            .checked_add(
+                entry
                     .controller_collection
                     .as_ref()
                     .map_or(0, |group| group.children.len()),
@@ -321,6 +328,8 @@ pub(super) fn build_project_pointer_map(
                 ObjectRoute::Script
                     | ObjectRoute::ScriptPointerOnly
                     | ObjectRoute::TextAsset
+                    | ObjectRoute::AudioBinary
+                    | ObjectRoute::FontBinary
                     | ObjectRoute::TextureImage
             ) {
                 UnityProjectAssetType::Meta
@@ -336,6 +345,25 @@ pub(super) fn build_project_pointer_map(
             collection_index: entry.collection_index,
         });
         if let Some(group) = &entry.scriptable_object_group {
+            pointer_entries.extend(
+                group
+                    .children
+                    .iter()
+                    .map(|child| ExportedAssetPointerEntry {
+                        asset: ExportAssetIdentity {
+                            collection: ExportAssetCollectionIdentity::SerializedFile {
+                                file_index: child.object.file_index,
+                            },
+                            object_index: child.object.object_index,
+                            path_id: child.object.path_id,
+                            class_id: child.object.factory.class_id,
+                        },
+                        file_id: child.file_id,
+                        collection_index: entry.collection_index,
+                    }),
+            );
+        }
+        if let Some(group) = &entry.font_collection {
             pointer_entries.extend(
                 group
                     .children

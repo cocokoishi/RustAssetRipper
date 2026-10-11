@@ -142,6 +142,7 @@ fn scene_asset_membership_preserves_source_order_and_reports_weak_component_evid
 fn scene_asset_membership_marks_incomplete_scans_and_enforces_asset_limit() {
     let mut collection = empty_collection_graph(0);
     collection.source_reference_scans_complete = false;
+    collection.source_scene_membership_reference_scans_complete = false;
     collection.scene_assets.push(WorkspaceSceneAssetIdentity {
         identity: identity(0, 0, 10, GAME_OBJECT_CLASS_ID),
         category: WorkspaceSceneAssetCategory::GameObject,
@@ -171,6 +172,28 @@ fn scene_asset_membership_marks_incomplete_scans_and_enforces_asset_limit() {
             limit: 1,
         })
     ));
+}
+
+#[test]
+fn scene_asset_membership_ignores_unrelated_asset_scan_failures() {
+    let mut collection = empty_collection_graph(0);
+    collection.source_reference_scans_complete = false;
+    collection.source_scene_membership_reference_scans_complete = true;
+    collection.scene_assets.push(WorkspaceSceneAssetIdentity {
+        identity: identity(0, 0, 10, GAME_OBJECT_CLASS_ID),
+        category: WorkspaceSceneAssetCategory::GameObject,
+    });
+    let scene = WorkspaceSceneHierarchyScene {
+        plan: scene_definition_plan(0),
+        collections: vec![collection],
+    };
+
+    let membership = scene
+        .asset_membership(WorkspaceSceneHierarchyMembershipLimits::default())
+        .unwrap();
+
+    assert!(membership.is_complete());
+    assert!(membership.issues().is_empty());
 }
 
 #[test]

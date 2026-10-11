@@ -54,18 +54,25 @@ pub(super) fn resolve_machine_paths(
     raw: &SerializedValue,
     root_name: &str,
 ) -> Result<Vec<ResolvedMachine>, Box<dyn Error>> {
+    if path_ids.is_empty() {
+        return Err(invalid_project(
+            "AnimatorController has no root state-machine selector path",
+        ));
+    }
     if states.is_empty() {
-        if path_ids.len() != 1 {
-            return Err(invalid_project(
-                "AnimatorController with no states has nested selectors but no recoverable root path",
-            ));
+        let recovered_root_name = root_name.replace('.', "_");
+        if let Some(existing) = paths.get(&path_ids[0]) {
+            if existing != &recovered_root_name {
+                return Err(invalid_project(
+                    "AnimatorController state-free root path conflicts with its layer name",
+                ));
+            }
+        } else {
+            paths.try_reserve(1).map_err(|_| {
+                invalid_project("could not allocate AnimatorController root machine path")
+            })?;
+            paths.insert(path_ids[0], recovered_root_name);
         }
-        return Ok(vec![ResolvedMachine {
-            full_path_id: path_ids[0],
-            name: root_name.replace('.', "_"),
-            parent_index: None,
-            is_extra: false,
-        }]);
     }
     let mut inference = HierarchyInference {
         nodes: Vec::new(),
@@ -189,6 +196,64 @@ pub(super) fn resolve_machine_paths(
             },
             parent_index: node.parent,
             is_extra: index >= path_ids.len(),
+        });
+    }
+    Ok(resolved)
+}
+
+/// Unity 4's controller constants have no selector graph: the source chooses the default
+/// state's state-machine path as the root, then attaches every other encountered state path
+/// directly beneath it.
+pub(super) fn resolve_legacy_machine_paths(
+    states: &[super::StateConstant],
+    paths: &HashMap<u32, String>,
+    layer_binding_path_id: u32,
+    layer_name: &str,
+    default_state_index: Option<usize>,
+) -> Result<Vec<ResolvedMachine>, Box<dyn Error>> {
+    if states.is_empty() {
+        return Ok(vec![ResolvedMachine {
+            full_path_id: layer_binding_path_id,
+            name: layer_name.replace('.', "_"),
+            parent_index: None,
+            is_extra: false,
+        }]);
+    }
+
+    let default_state = states
+        .get(default_state_index.ok_or_else(|| {
+            invalid_project("AnimatorController legacy state hierarchy has no default state")
+        })?)
+        .ok_or_else(|| {
+            invalid_project("AnimatorController legacy default state is out of bounds")
+        })?;
+    let root_path_id = default_state.parent_path_id;
+    let mut path_ids = Vec::new();
+    path_ids
+        .try_reserve_exact(states.len())
+        .map_err(|_| invalid_project("could not allocate legacy AnimatorController paths"))?;
+    path_ids.push(root_path_id);
+    for state in states {
+        if !path_ids.contains(&state.parent_path_id) {
+            path_ids.push(state.parent_path_id);
+        }
+    }
+
+    let mut resolved = Vec::new();
+    resolved
+        .try_reserve_exact(path_ids.len())
+        .map_err(|_| invalid_project("could not allocate legacy AnimatorController hierarchy"))?;
+    for (index, full_path_id) in path_ids.into_iter().enumerate() {
+        let name = paths.get(&full_path_id).cloned().ok_or_else(|| {
+            invalid_project(format!(
+                "AnimatorController legacy state-machine path {full_path_id} is missing its TOS name"
+            ))
+        })?;
+        resolved.push(ResolvedMachine {
+            full_path_id,
+            name,
+            parent_index: (index != 0).then_some(0),
+            is_extra: false,
         });
     }
     Ok(resolved)
@@ -597,5 +662,139 @@ impl HierarchyInference<'_> {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::serialized_file::object::SerializedFieldValue;
+
+    fn field(name: &str, value: SerializedValue) -> SerializedFieldValue {
+        SerializedFieldValue {
+            name: name.to_owned(),
+            value,
+        }
+    }
+
+    fn selector_transition(destination: u32) -> SerializedValue {
+        SerializedValue::Struct(vec![field(
+            "m_Destination",
+            SerializedValue::U32(destination),
+        )])
+    }
+
+    fn legacy_state(state_path_id: u32, parent_path_id: u32) -> super::super::StateConstant {
+        super::super::StateConstant {
+            raw: SerializedValue::Struct(Vec::new()),
+            name: String::new(),
+            state_path_id,
+            parent_path_id,
+            file_id: i64::from(state_path_id),
+            motion: super::super::local_pointer(0),
+            transition_file_ids: Vec::new(),
+            behaviours: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn state_free_nested_selector_paths_follow_entry_transition_ownership() {
+        let root_path = "Base_Layer";
+        let nested_path = "Base_Layer.EMPTY_Child";
+        let root_id = crate::resources::blend_shape::crc32_ieee(root_path.as_bytes());
+        let nested_id = crate::resources::blend_shape::crc32_ieee(nested_path.as_bytes());
+        // Selector destinations use the original selector-array indices. The final entry
+        // destination is the default-state slot and remains null for a state-free machine.
+        let selectors = vec![
+            SelectorState {
+                full_path_id: root_id,
+                is_entry: true,
+                transitions: vec![selector_transition(30_002), selector_transition(u32::MAX)],
+            },
+            SelectorState {
+                full_path_id: root_id,
+                is_entry: false,
+                transitions: Vec::new(),
+            },
+            SelectorState {
+                full_path_id: nested_id,
+                is_entry: true,
+                transitions: vec![selector_transition(u32::MAX)],
+            },
+            SelectorState {
+                full_path_id: nested_id,
+                is_entry: false,
+                transitions: Vec::new(),
+            },
+        ];
+        let raw = SerializedValue::Struct(vec![field(
+            "m_AnyStateTransitionConstantArray",
+            SerializedValue::Array(Vec::new()),
+        )]);
+        let mut paths = HashMap::new();
+
+        let resolved = resolve_machine_paths(
+            &[root_id, nested_id],
+            &mut paths,
+            &[],
+            &selectors,
+            &raw,
+            "Base.Layer",
+        )
+        .unwrap();
+
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(resolved[0].name, "Base_Layer");
+        assert_eq!(resolved[0].parent_index, None);
+        assert_eq!(resolved[1].parent_index, Some(0));
+        let recovered_nested_path = paths.get(&nested_id).unwrap();
+        assert_eq!(crc32_ieee(recovered_nested_path.as_bytes()), nested_id);
+        assert_eq!(
+            recovered_nested_path.rsplit('.').next(),
+            Some(resolved[1].name.as_str())
+        );
+    }
+
+    #[test]
+    fn legacy_default_state_selects_root_and_remaining_paths_are_direct_children() {
+        let root_path = "Legacy.Root";
+        let child_path = "Other.Machine";
+        let root_id = crate::resources::blend_shape::crc32_ieee(root_path.as_bytes());
+        let child_id = crate::resources::blend_shape::crc32_ieee(child_path.as_bytes());
+        let states = [
+            legacy_state(10, root_id),
+            legacy_state(11, child_id),
+            legacy_state(12, root_id),
+        ];
+        let raw = SerializedValue::Struct(vec![field(
+            "m_DefaultState",
+            SerializedValue::U32(u32::MAX),
+        )]);
+        let default_state = super::super::legacy_default_state_index(&raw, states.len()).unwrap();
+        let paths = HashMap::from([
+            (root_id, root_path.to_owned()),
+            (child_id, child_path.to_owned()),
+        ]);
+
+        let resolved =
+            resolve_legacy_machine_paths(&states, &paths, 999, "ignored.layer", default_state)
+                .unwrap();
+
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(resolved[0].full_path_id, root_id);
+        assert_eq!(resolved[0].name, root_path);
+        assert_eq!(resolved[0].parent_index, None);
+        assert_eq!(resolved[1].full_path_id, child_id);
+        assert_eq!(resolved[1].name, child_path);
+        assert_eq!(resolved[1].parent_index, Some(0));
+
+        assert_eq!(
+            super::super::legacy_default_state_index(
+                &SerializedValue::Struct(vec![field("m_DefaultState", SerializedValue::U32(1))]),
+                states.len()
+            )
+            .unwrap(),
+            Some(1)
+        );
     }
 }

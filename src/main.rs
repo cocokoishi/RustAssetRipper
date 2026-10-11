@@ -102,8 +102,9 @@ use assetripper::resources::mesh::MeshView;
 use assetripper::resources::packed_bit_vector::PackedBitVectorLimits;
 use assetripper::resources::shader::{ShaderView, SHADER_CLASS_ID};
 use assetripper::resources::texture::{
-    export_cubemap_array_image, export_texture2d_array_image, export_texture2d_image,
-    export_texture3d_image, Texture2DView, CUBEMAP_CLASS_ID,
+    export_cubemap_array_image, export_texture2d_array_image,
+    export_texture2d_image_with_unity_version, export_texture3d_image, Texture2DView,
+    CUBEMAP_CLASS_ID,
 };
 use assetripper::resources::texture_array::{
     CubemapArrayView, Texture2DArrayView, Texture3DView, CUBEMAPARRAY_CLASS_ID,

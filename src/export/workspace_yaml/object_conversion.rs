@@ -602,7 +602,20 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
         {
             // Generated source classes walk their original member names. TPK recovery has already
             // selected the class layout; YAML compatibility aliases would rename serialized fields.
-            hints.field_name_aliases.clear();
+            if class_id == 91 && matches!(&object.factory.kind, FactoryAssetKind::Generated(_)) {
+                // AnimatorController ValueArray shapes still require these vector-field aliases.
+                hints.field_name_aliases.retain(|_, alias| {
+                    matches!(
+                        alias.as_str(),
+                        "m_PositionValues3"
+                            | "m_PositionValues4"
+                            | "m_ScaleValues3"
+                            | "m_ScaleValues4"
+                    )
+                });
+            } else {
+                hints.field_name_aliases.clear();
+            }
             hints.preserve_type_tree_field_names = true;
         }
 

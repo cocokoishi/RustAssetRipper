@@ -83,6 +83,7 @@ pub enum UnityProjectOutputError {
         limit: usize,
     },
     InvalidRelativePath {
+        path: String,
         reason: &'static str,
     },
     AllocationFailed {
@@ -136,8 +137,8 @@ impl Display for UnityProjectOutputError {
                 formatter,
                 "project output path has {count} components, exceeding limit {limit}"
             ),
-            Self::InvalidRelativePath { reason } => {
-                write!(formatter, "unsafe project output path: {reason}")
+            Self::InvalidRelativePath { path, reason } => {
+                write!(formatter, "unsafe project output path {path:?}: {reason}")
             }
             Self::AllocationFailed { resource, requested } => {
                 write!(formatter, "could not allocate {requested} entries for {resource}")
@@ -358,6 +359,7 @@ pub fn export_asset_with_meta(
     let components = validated_path_components(&plan.relative_asset_path, path_limits)?;
     let (dir_components, [file_name]) = components.split_at(components.len() - 1) else {
         return Err(UnityProjectOutputError::InvalidRelativePath {
+            path: plan.relative_asset_path.clone(),
             reason: "path must contain only ordinary relative components",
         });
     };
@@ -441,6 +443,7 @@ pub(super) fn write_new_project_stream(
     let components = validated_path_components(relative_path, path_limits)?;
     let (directory_components, [file_name]) = components.split_at(components.len() - 1) else {
         return Err(UnityProjectOutputError::InvalidRelativePath {
+            path: relative_path.to_owned(),
             reason: "path must contain only ordinary relative components",
         });
     };
@@ -596,6 +599,7 @@ fn validated_path_components_for_platform(
     }
     if path.is_empty() {
         return Err(UnityProjectOutputError::InvalidRelativePath {
+            path: path.to_owned(),
             reason: "path is empty",
         });
     }
@@ -621,6 +625,7 @@ fn validated_path_components_for_platform(
             || component.chars().any(char::is_control)
         {
             return Err(UnityProjectOutputError::InvalidRelativePath {
+                path: path.to_owned(),
                 reason: "path must contain only ordinary relative components",
             });
         }
@@ -789,6 +794,23 @@ mod tests {
                 .unwrap(),
             vec!["Assets", "Folder", "Literal", "Icon.png"]
         );
+    }
+
+    #[test]
+    fn unsafe_output_path_error_includes_the_rejected_path() {
+        let error = validated_path_components_for_platform(
+            "Assets/CON.txt",
+            UnityProjectOutputLimits::default(),
+            HostPathPlatform::Windows,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            &error,
+            UnityProjectOutputError::InvalidRelativePath { path, .. }
+                if path == "Assets/CON.txt"
+        ));
+        assert!(error.to_string().contains("Assets/CON.txt"));
     }
 
     #[test]

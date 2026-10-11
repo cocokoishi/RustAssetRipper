@@ -65,7 +65,7 @@ fn predefined_engine_asset_resolution(
 }
 
 fn default_resource_class_id(path_id: i64, unity_version: &str) -> Option<i32> {
-    if !uses_engine_resources_2022_3_11(unity_version) {
+    if !uses_engine_resources_2022_3(unity_version) {
         return None;
     }
     static INDEX: OnceLock<HashMap<i64, i32>> = OnceLock::new();
@@ -91,7 +91,7 @@ fn default_resource_class_id(path_id: i64, unity_version: &str) -> Option<i32> {
         .copied()
 }
 
-fn uses_engine_resources_2022_3_11(unity_version: &str) -> bool {
+fn uses_engine_resources_2022_3(unity_version: &str) -> bool {
     let mut parts = unity_version.trim().split('.');
     let (Some(major), Some(minor), Some(build_suffix)) = (parts.next(), parts.next(), parts.next())
     else {
@@ -107,13 +107,7 @@ fn uses_engine_resources_2022_3_11(unity_version: &str) -> bool {
         .chars()
         .take_while(char::is_ascii_digit)
         .collect();
-    let Ok(build) = build_text.parse::<u32>() else {
-        return false;
-    };
-    if build > 11 {
-        return true;
-    }
-    if build < 11 {
+    if build_text.parse::<u32>().is_err() {
         return false;
     }
     matches!(

@@ -255,6 +255,83 @@ fn compact_u8_vectors_fit_a_byte_sized_decode_budget_and_roundtrip() {
 }
 
 #[test]
+fn compacts_u8_vectors_when_expanded_values_exceed_remaining_decode_budget() {
+    let count = 8usize;
+    let mut payload = Vec::with_capacity(4 + count);
+    payload.extend_from_slice(&(count as i32).to_le_bytes());
+    payload.extend(0..count as u8);
+    let (file, header, mut metadata) = make_file(&payload);
+    metadata.types[0].type_tree = Some(TypeTree {
+        nodes: vec![
+            node(0, "Root", "Root", -1, 0),
+            node(1, "m_Bytes", "vector", -1, 0),
+            node(2, "Array", "Array", -1, 0),
+            node(3, "size", "int", 4, 0),
+            node(3, "data", "UInt8", 1, 0),
+        ],
+        string_buffer: Vec::new(),
+    });
+
+    // The vector is below max_array_elements, but representing each element as a
+    // SerializedValue would exceed the bytes left after the root field allocation.
+    let limits = ObjectDecodeLimits {
+        max_decoded_allocation_bytes: std::mem::size_of::<super::SerializedFieldValue>() + count,
+        max_array_elements: 16,
+        ..ObjectDecodeLimits::default()
+    };
+    let object = metadata
+        .decode_object_payload_with_limits(&file, &header, 0, &limits)
+        .unwrap();
+    assert_eq!(
+        object.root.unique_field("m_Bytes").unwrap(),
+        Some(&SerializedValue::Bytes((0..count as u8).collect()))
+    );
+    assert_eq!(object.allocated_bytes, limits.max_decoded_allocation_bytes);
+
+    let too_small_limits = ObjectDecodeLimits {
+        max_decoded_allocation_bytes: limits.max_decoded_allocation_bytes - 1,
+        ..limits
+    };
+    assert!(matches!(
+        metadata
+            .decode_object_payload_with_limits(&file, &header, 0, &too_small_limits)
+            .unwrap_err()
+            .kind(),
+        ObjectDecodeErrorKind::DecodeLimitExceeded { .. }
+    ));
+}
+
+#[test]
+fn compacts_u8_vectors_with_large_enum_storage_even_when_budget_allows_it() {
+    let count = (64 * 1024 / std::mem::size_of::<SerializedValue>()) + 1;
+    let mut payload = Vec::with_capacity(4 + count);
+    payload.extend_from_slice(&i32::try_from(count).unwrap().to_le_bytes());
+    payload.resize(4 + count, 0x5a);
+    while payload.len() % 4 != 0 {
+        payload.push(0);
+    }
+    let (file, header, mut metadata) = make_file(&payload);
+    metadata.types[0].type_tree = Some(TypeTree {
+        nodes: vec![
+            node(0, "Root", "Root", -1, 0),
+            node(1, "m_Bytes", "vector", -1, 0),
+            node(2, "Array", "Array", -1, 0),
+            node(3, "size", "int", 4, 0),
+            node(3, "data", "UInt8", 1, 0),
+        ],
+        string_buffer: Vec::new(),
+    });
+
+    let object = metadata.decode_object_payload(&file, &header, 0).unwrap();
+    let Some(SerializedValue::Bytes(bytes)) = object.root.unique_field("m_Bytes").unwrap() else {
+        panic!("large UInt8 vectors should use the compact byte representation");
+    };
+    assert_eq!(bytes.len(), count);
+    assert!(bytes.iter().all(|byte| *byte == 0x5a));
+    assert!(object.allocated_bytes < 16 * 1024 * 1024);
+}
+
+#[test]
 fn decodes_aligned_utf8_byte_strings_before_later_fields() {
     let mut payload = Vec::new();
     payload.extend_from_slice(&3i32.to_le_bytes());
@@ -581,12 +658,24 @@ fn aligns_each_inner_complex_array_when_the_field_requests_alignment() {
 }
 
 #[test]
+fn default_object_decode_budget_covers_large_real_target_arrays() {
+    // A Unity 2022.3 target contains a 299,669,826-byte Font.m_FontData vector.
+    // A 2022.3.22f1 Mesh with a large BlendShapeVertex array reaches at least
+    // 805,306,494 decoded allocation bytes before vertex 818,053. Keep the default
+    // bounded cap above that measured requirement so the valid Mesh remains readable.
+    assert!(
+        ObjectDecodeLimits::default().max_decoded_allocation_bytes >= 805_306_494,
+        "the default per-object cap must admit measured large Unity assets while remaining bounded"
+    );
+}
+
+#[test]
 fn large_payload_measurements_justify_decode_defaults() {
     use crate::io::binary::BinaryReader;
     use std::time::Instant;
 
     // Representative large-file shapes must decode inside the product
-    // defaults (256 MB allocation, 16 M array elements, 64 MB strings,
+    // defaults (512 MB allocation, 16 M array elements, 64 MB strings,
     // depth 256). Timings are reported for the record; success (not
     // speed) is asserted.
     let limits = super::ObjectDecodeLimits::default();

@@ -614,23 +614,46 @@ fn engine_resource_alias_fallback_matches_the_bundle_resolver() {
 
 #[test]
 fn absent_2022_3_default_resources_resolve_only_known_tpk_path_ids() {
-    let mut source_metadata = metadata_with_external(&[11], "Library/unity default resources");
-    source_metadata.prefix.unity_version_text = Some("2022.3.22f1".to_owned());
     let source_graph = graph_with_reference(&[11], 11, 1, 10202);
-    let files = [named_file("main.assets", &source_metadata, &source_graph)];
+    for version in [
+        "2022.3.0f1",
+        "2022.3.6f1",
+        "2022.3.10f1",
+        "2022.3.11f1",
+        "2022.3.22f1",
+    ] {
+        let mut source_metadata = metadata_with_external(&[11], "Library/unity default resources");
+        source_metadata.prefix.unity_version_text = Some(version.to_owned());
+        let files = [named_file("main.assets", &source_metadata, &source_graph)];
+        let graph = MultiFileReferenceGraph::build(&files).unwrap();
+        assert_eq!(
+            graph.references()[0].resolution,
+            MultiFilePPtrResolution::PredefinedEngineAsset {
+                external_index: 0,
+                resource: PredefinedEngineResourceKind::DefaultResources,
+                path_id: 10202,
+                class_id: 43,
+            },
+            "engine resource PathID should resolve using the frozen TPK row for Unity {version}"
+        );
+        assert!(graph.is_complete());
+    }
 
+    let mut source_metadata = metadata_with_external(&[11], "Library/unity default resources");
+    source_metadata.prefix.unity_version_text = Some("2022.2.22f1".to_owned());
+    let files = [named_file("main.assets", &source_metadata, &source_graph)];
     let graph = MultiFileReferenceGraph::build(&files).unwrap();
     assert_eq!(
         graph.references()[0].resolution,
-        MultiFilePPtrResolution::PredefinedEngineAsset {
+        MultiFilePPtrResolution::MissingDependency {
             external_index: 0,
-            resource: PredefinedEngineResourceKind::DefaultResources,
             path_id: 10202,
-            class_id: 43,
         }
     );
-    assert!(graph.is_complete());
+    assert!(!graph.is_complete());
 
+    let mut source_metadata = metadata_with_external(&[11], "Library/unity default resources");
+    source_metadata.prefix.unity_version_text = Some("2022.3.22f1".to_owned());
     let unknown_graph = graph_with_reference(&[11], 11, 1, 10201);
     let files = [named_file("main.assets", &source_metadata, &unknown_graph)];
     let graph = MultiFileReferenceGraph::build(&files).unwrap();
@@ -639,19 +662,6 @@ fn absent_2022_3_default_resources_resolve_only_known_tpk_path_ids() {
         MultiFilePPtrResolution::MissingDependency {
             external_index: 0,
             path_id: 10201,
-        }
-    );
-    assert!(!graph.is_complete());
-
-    let mut earlier_metadata = source_metadata;
-    earlier_metadata.prefix.unity_version_text = Some("2022.3.10f1".to_owned());
-    let files = [named_file("main.assets", &earlier_metadata, &source_graph)];
-    let graph = MultiFileReferenceGraph::build(&files).unwrap();
-    assert_eq!(
-        graph.references()[0].resolution,
-        MultiFilePPtrResolution::MissingDependency {
-            external_index: 0,
-            path_id: 10202,
         }
     );
     assert!(!graph.is_complete());

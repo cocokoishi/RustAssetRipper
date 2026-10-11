@@ -658,11 +658,11 @@ pub(super) fn build_lighting_data_asset_root(
         "m_BakedAmbientProbeInGamma",
         "m_BakedAmbientProbesInGamma",
     )?;
-
-    if has_non_null_pointer_field(render_settings, "m_GeneratedSkyboxReflection")? {
-        return Err(invalid_project(
-            "bounded LightingDataAsset generation cannot omit non-null RenderSettings.m_GeneratedSkyboxReflection cubemap data",
-        ));
-    }
+    copy_render_settings_pointer_to_array(
+        render_settings,
+        &mut root,
+        "m_GeneratedSkyboxReflection",
+        "m_BakedReflectionProbeCubemaps",
+    )?;
     Ok(root)
 }

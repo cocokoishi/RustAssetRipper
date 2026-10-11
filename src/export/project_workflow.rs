@@ -120,8 +120,9 @@ use super::shader_export::{
 };
 use super::streamed_assets::StreamedYamlAssetLimits;
 use super::texture_project::{
-    plan_lightmap_texture_project_export, plan_texture_project_export, TextureImporterLayout,
-    TextureProjectPlan,
+    plan_cubemap_project_export_for_source_version,
+    plan_lightmap_texture_project_export_for_source_version,
+    plan_texture_project_export_for_source_version, TextureImporterLayout, TextureProjectPlan,
 };
 use super::unity_yaml::{
     project_pointer_to_unity_yaml, write_unity_yaml_documents, UnityYamlMappingStyle,
@@ -206,8 +207,12 @@ enum ObjectRoute {
     Asset,
     /// `TextAssetExportCollection`: raw `m_Script` bytes, mode-based extension, and TextScriptImporter.
     TextAsset,
+    /// `FontAssetExportCollection`: raw font bytes with a TrueTypeFontImporter and generated subasset IDs.
+    FontBinary,
     /// `YamlAudioExportCollection`: AudioClip YAML with the source `audioclip` extension.
     AudioYaml,
+    /// `AudioClipExportCollection`: decoded audio bytes with AudioImporter metadata.
+    AudioBinary,
     /// `TextureExportCollection`: a converted image plus the generated TextureImporter sidecar.
     TextureImage,
     /// `ShaderExportCollection` using `DummyShaderTextExporter` or `SimpleShaderExporter`.
@@ -242,13 +247,16 @@ struct RoutedObject<'a> {
     facts: ObjectClassFacts,
     shader_view: Option<ShaderView>,
     audio_yaml_resource: Option<crate::resources::audio::AudioClipResourceInfo>,
+    audio_binary_export: Option<AudioBinaryExportDetails>,
     text_asset_export: Option<TextAssetExportDetails>,
+    font_collection: Option<RoutedFontCollection<'a>>,
     texture_export: Option<TextureProjectPlan>,
     script_export: Option<ScriptExportDetails>,
     scriptable_object_group: Option<RoutedScriptableObjectGroup<'a>>,
     controller_collection: Option<RoutedControllerCollection<'a>>,
     selection: super::project_exporter::CollectionSelection,
     route: ObjectRoute,
+    fallback_reason: Option<&'static str>,
     collection_index: usize,
     /// GUID written into the collection's `.meta` file.
     guid: [u8; 16],
@@ -296,6 +304,23 @@ struct TextAssetExportDetails {
     extension: String,
 }
 
+#[derive(Clone, Debug)]
+struct AudioBinaryExportDetails {
+    bytes: Vec<u8>,
+    decoded_extension: &'static str,
+    collection_extension: String,
+    importer: UnityYamlNode,
+}
+
+struct RoutedFontCollection<'a> {
+    children: Vec<RoutedFontCollectionChild<'a>>,
+}
+
+struct RoutedFontCollectionChild<'a> {
+    object: &'a WorkspaceObject,
+    file_id: i64,
+}
+
 /// One processed Scene collection staged for the Unity project exporter.
 struct RoutedSceneCollection {
     scene_index: usize,
@@ -313,6 +338,7 @@ struct RoutedSceneCollection {
 struct RoutedLightingDataAsset {
     scene_index: usize,
     source_owner: ExportAssetIdentity,
+    render_settings_owner: ExportAssetIdentity,
     scene_guid: [u8; 16],
     collection_index: usize,
     identity: ExportAssetIdentity,
@@ -409,7 +435,10 @@ struct RoutedProjectObjects<'inputs> {
     used_guids: HashSet<[u8; 16]>,
 }
 
-struct ProjectRoutingContext<'context, 'graph> {
+struct ProjectRoutingContext<'context, 'provider, 'graph> {
+    filesystem: &'context VirtualFileSystem,
+    root_catalog: &'context RootResourceFileCatalog,
+    resource_provider: &'context PlatformResourceProvider<'provider>,
     workspace: &'context SerializedFileWorkspace,
     objects: &'context ObjectWorkspace,
     reference_graph: &'context MultiFileReferenceGraph<'graph>,
@@ -427,6 +456,7 @@ struct ProjectRoutingContext<'context, 'graph> {
     controller_collections: &'context PreparedControllerCollections,
     lightmap_texture_directories: &'context HashMap<(usize, usize), String>,
     existing_guids: &'context HashSet<[u8; 16]>,
+    limits: WorkspaceProjectExportLimits,
 }
 
 /// The collection type name that would wrap the object, for diagnostics.
@@ -448,6 +478,7 @@ mod audio_asset;
 mod collection_planning;
 mod entrypoints;
 mod export;
+mod font_asset;
 mod importer_metadata;
 mod lighting_asset;
 mod object_routing;
@@ -471,6 +502,7 @@ use self::collection_planning::{
     GeneratedCollectionPreparationContext, PreparedGeneratedCollections, ProjectPointerPlan,
     ProjectPointerPlanningContext,
 };
+use self::font_asset::*;
 use self::importer_metadata::*;
 use self::lighting_asset::*;
 use self::object_routing::route_project_objects;

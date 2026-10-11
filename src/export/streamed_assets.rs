@@ -15,6 +15,7 @@ use crate::serialized_file::object::{
 };
 
 const STREAMED_CONTENT_LIMIT: usize = 512 * 1024 * 1024;
+const SOURCE_VALUE_COPY_LIMIT: usize = 1024 * 1024 * 1024;
 const IMAGE_TEXTURE_STREAM_FIELDS: &[&str] = &[
     "m_StreamData_C189",
     "m_StreamData_C188",
@@ -53,7 +54,7 @@ impl Default for StreamedYamlAssetLimits {
     fn default() -> Self {
         Self {
             max_inline_bytes: STREAMED_CONTENT_LIMIT,
-            max_source_value_copy_bytes: STREAMED_CONTENT_LIMIT,
+            max_source_value_copy_bytes: SOURCE_VALUE_COPY_LIMIT,
         }
     }
 }
@@ -595,6 +596,15 @@ mod tests {
     };
     use crate::resource::extract_streamed_resource_info;
     use crate::serialized_file::object::{SerializedFieldValue, SerializedValue};
+
+    #[test]
+    fn default_streamed_yaml_copy_limit_covers_decoded_object_budget() {
+        assert!(
+            StreamedYamlAssetLimits::default().max_source_value_copy_bytes
+                >= crate::serialized_file::object::ObjectDecodeLimits::default()
+                    .max_decoded_allocation_bytes
+        );
+    }
 
     fn field(name: &str, value: SerializedValue) -> SerializedFieldValue {
         SerializedFieldValue {

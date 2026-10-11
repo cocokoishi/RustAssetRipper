@@ -280,6 +280,19 @@ impl WorkspaceSceneCollectionHierarchy {
         self.source_reference_scans_complete
     }
 
+    /// True when objects consumed by `PrefabProcessor` have complete source reference scans.
+    /// Unrelated asset scans remain visible through `source_reference_scans_complete` and the
+    /// workspace reference-graph report, but do not affect prefab hierarchy allocation.
+    pub fn source_prefab_processor_reference_scans_complete(&self) -> bool {
+        self.source_prefab_processor_reference_scans_complete
+    }
+
+    /// True when every local source object consumed by SceneDefinition membership has a complete
+    /// reference scan. Workspace-wide unrelated asset scans remain available separately.
+    pub fn source_scene_membership_reference_scans_complete(&self) -> bool {
+        self.source_scene_membership_reference_scans_complete
+    }
+
     pub fn roots(&self) -> &WorkspaceSceneRootDiscovery {
         &self.roots
     }
@@ -291,6 +304,14 @@ impl WorkspaceSceneCollectionHierarchy {
     pub fn is_complete(&self) -> bool {
         self.source_graph_complete
             && self.source_reference_scans_complete
+            && self.graph_issues.is_empty()
+            && self.roots.is_complete()
+            && self.hierarchy_audit.is_complete()
+    }
+
+    pub fn is_prefab_processor_complete(&self) -> bool {
+        self.source_graph_complete
+            && self.source_prefab_processor_reference_scans_complete
             && self.graph_issues.is_empty()
             && self.roots.is_complete()
             && self.hierarchy_audit.is_complete()

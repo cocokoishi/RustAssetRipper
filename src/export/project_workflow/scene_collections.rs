@@ -767,21 +767,6 @@ pub(super) fn source_object_key(file_index: usize, object_index: usize) -> Expor
     }
 }
 
-pub(super) fn has_sprite_reference_to_object(
-    reference_graph: &MultiFileReferenceGraph<'_>,
-    file_index: usize,
-    object_index: usize,
-) -> bool {
-    const SPRITE_CLASS_ID: i32 = 213;
-    reference_graph
-        .references_to_object(file_index, object_index)
-        .any(|reference| {
-            reference_graph
-                .object_class_id(reference.source_file_index, reference.source_object_index)
-                == Some(SPRITE_CLASS_ID)
-        })
-}
-
 pub(super) fn opaque_factory_object_keys(
     objects: &ObjectWorkspace,
 ) -> Result<HashSet<(usize, usize)>, Box<dyn Error>> {

@@ -208,6 +208,7 @@ fn prefab_hierarchy_plan_inserts_missing_transform_after_source_components() {
 fn prefab_processing_stops_after_an_incomplete_hierarchy_walk() {
     let mut workspace = workspace_hierarchy_fixture(false);
     workspace.non_scene_collections[1].source_reference_scans_complete = false;
+    workspace.non_scene_collections[1].source_prefab_processor_reference_scans_complete = false;
     let root = identity(0, 0, 1, GAME_OBJECT_CLASS_ID);
     let plan = plan_workspace_prefab_processing(&workspace, &[0, 1], Default::default()).unwrap();
 
@@ -223,6 +224,16 @@ fn prefab_processing_stops_after_an_incomplete_hierarchy_walk() {
         } if *root_game_object == root && !hierarchy.is_complete()
     ));
     assert_eq!(plan.events().len(), 1);
+}
+
+#[test]
+fn prefab_scope_can_be_complete_while_unrelated_asset_scans_remain_incomplete() {
+    let mut collection = empty_collection_graph(0);
+    collection.source_reference_scans_complete = false;
+    collection.source_prefab_processor_reference_scans_complete = true;
+
+    assert!(!collection.is_complete());
+    assert!(collection.is_prefab_processor_complete());
 }
 
 #[test]
@@ -402,6 +413,8 @@ fn generated_transform_gets_its_source_collection_path_id_before_prefab_assets()
         }],
         source_graph_complete: true,
         source_reference_scans_complete: true,
+        source_prefab_processor_reference_scans_complete: true,
+        source_scene_membership_reference_scans_complete: true,
         roots: WorkspaceSceneRootDiscovery::default(),
         hierarchy_audit: WorkspaceSceneHierarchyAudit::default(),
     };

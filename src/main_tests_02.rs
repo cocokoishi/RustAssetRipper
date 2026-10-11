@@ -1250,7 +1250,7 @@
             &mut Vec::new(),
         )
         .unwrap_err();
-        assert!(error.to_string().contains("Fmod5Sharp"), "{error}");
+        assert!(error.to_string().contains("unsupported FSB5 version"), "{error}");
         assert!(!output_path.exists());
         drop(input);
     }

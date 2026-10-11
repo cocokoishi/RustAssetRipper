@@ -18,7 +18,7 @@ pub struct ObjectDecodeLimits {
 impl Default for ObjectDecodeLimits {
     fn default() -> Self {
         Self {
-            max_decoded_allocation_bytes: 256 * 1024 * 1024,
+            max_decoded_allocation_bytes: 1024 * 1024 * 1024,
             max_array_elements: 16 * 1024 * 1024,
             max_string_bytes: 64 * 1024 * 1024,
             max_type_tree_depth: MAX_TYPE_TREE_DEPTH,

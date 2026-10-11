@@ -267,6 +267,53 @@ pub(super) fn copy_render_settings_probe(
     }
 }
 
+pub(super) fn copy_render_settings_pointer_to_array(
+    render_settings: &SerializedValue,
+    destination: &mut SerializedValue,
+    source_name: &str,
+    destination_name: &str,
+) -> Result<(), Box<dyn Error>> {
+    let Some(source_index) = unique_lighting_data_field_index(render_settings, source_name)? else {
+        return Ok(());
+    };
+    let pointer =
+        match &render_settings.struct_fields().expect("validated struct")[source_index].value {
+            SerializedValue::PPtr { file_id, path_id } => (*file_id, *path_id),
+            other => {
+                return Err(invalid_project(format!(
+                    "RenderSettings {source_name} has unsupported pointer value {other:?}"
+                )))
+            }
+        };
+    if pointer.1 == 0 {
+        return Ok(());
+    }
+    let destination_index = unique_lighting_data_field_index(destination, destination_name)?
+        .ok_or_else(|| {
+            invalid_project(format!(
+                "RenderSettings contains non-null {source_name}, but the LightingDataAsset TypeTree has no {destination_name} field"
+            ))
+        })?;
+    let SerializedValue::Struct(fields) = destination else {
+        return Err(invalid_project("LightingDataAsset value is not a struct"));
+    };
+    let SerializedValue::Array(values) = &mut fields[destination_index].value else {
+        return Err(invalid_project(format!(
+            "LightingDataAsset {destination_name} field is not an array"
+        )));
+    };
+    values.try_reserve(1).map_err(|_| {
+        invalid_project(format!(
+            "could not allocate LightingDataAsset {destination_name}"
+        ))
+    })?;
+    values.push(SerializedValue::PPtr {
+        file_id: pointer.0,
+        path_id: pointer.1,
+    });
+    Ok(())
+}
+
 pub(super) fn append_lighting_data_renderer_records(
     type_tree: &crate::serialized_file::metadata::TypeTree,
     root: &mut SerializedValue,
@@ -640,24 +687,6 @@ pub(super) fn lighting_data_bytes_field_value(
     }
 }
 
-pub(super) fn has_non_null_pointer_field(
-    value: &SerializedValue,
-    field_name: &str,
-) -> Result<bool, Box<dyn Error>> {
-    let Some(index) = unique_lighting_data_field_index(value, field_name)? else {
-        return Ok(false);
-    };
-    let fields = value
-        .struct_fields()
-        .expect("unique_lighting_data_field_index validates a struct");
-    match &fields[index].value {
-        SerializedValue::PPtr { path_id, .. } => Ok(*path_id != 0),
-        other => Err(invalid_project(format!(
-            "RenderSettings {field_name} has unsupported pointer value {other:?}"
-        ))),
-    }
-}
-
 pub(super) fn create_empty_lighting_enlighten_data(
     version: &FactoryUnityVersion,
 ) -> Result<Vec<u8>, Box<dyn Error>> {
@@ -894,8 +923,23 @@ fn resolve_generated_lighting_data_pointer(
         });
     }
 
-    let ExportAssetCollectionIdentity::SerializedFile { file_index } =
-        asset.source_owner.collection
+    let reflection_cubemap_index =
+        lighting_data_baked_reflection_probe_cubemap_index(request.field_path);
+    if reflection_cubemap_index.is_some_and(|index| index != 0) {
+        return fail(
+            error,
+            format!(
+                "generated LightingDataAsset has unsupported baked reflection Cubemap index in {:?}",
+                request.field_path
+            ),
+        );
+    }
+    let (source_owner, source_field_path) = if reflection_cubemap_index.is_some() {
+        (asset.render_settings_owner, "m_GeneratedSkyboxReflection")
+    } else {
+        (asset.source_owner, request.field_path)
+    };
+    let ExportAssetCollectionIdentity::SerializedFile { file_index } = source_owner.collection
     else {
         return fail(
             error,
@@ -903,9 +947,9 @@ fn resolve_generated_lighting_data_pointer(
         );
     };
     let mut matching_edges = reference_graph
-        .references_from_object(file_index, asset.source_owner.object_index)
+        .references_from_object(file_index, source_owner.object_index)
         .filter(|edge| {
-            edge.field_path == request.field_path
+            edge.field_path == source_field_path
                 && edge.file_id == request.file_id
                 && edge.path_id == request.path_id
         });
@@ -913,8 +957,8 @@ fn resolve_generated_lighting_data_pointer(
         return fail(
             error,
             format!(
-                "copied PPtr at {:?} ({}, {}) has no matching source LightmapSettings edge",
-                request.field_path, request.file_id, request.path_id
+                "copied PPtr at {:?} ({}, {}) has no matching source object reference edge",
+                source_field_path, request.file_id, request.path_id
             ),
         );
     };
@@ -922,8 +966,8 @@ fn resolve_generated_lighting_data_pointer(
         return fail(
             error,
             format!(
-                "copied PPtr at {:?} ({}, {}) matches multiple source LightmapSettings edges",
-                request.field_path, request.file_id, request.path_id
+                "copied PPtr at {:?} ({}, {}) matches multiple source object reference edges",
+                source_field_path, request.file_id, request.path_id
             ),
         );
     }
@@ -984,9 +1028,9 @@ fn resolve_generated_lighting_data_pointer(
         },
         resolution => ProjectPointerRequest::UnresolvedInput(UnresolvedProjectPointer {
             source_file_index: file_index,
-            source_object_index: asset.source_owner.object_index,
-            source_path_id: asset.source_owner.path_id,
-            field_path: request.field_path.to_owned(),
+            source_object_index: source_owner.object_index,
+            source_path_id: source_owner.path_id,
+            field_path: source_field_path.to_owned(),
             serialized_file_id: request.file_id,
             serialized_path_id: request.path_id,
             expected_class_id: None,
@@ -1008,7 +1052,7 @@ fn resolve_generated_lighting_data_pointer(
                 is_lighting_data_texture_field(request.field_path)
                     && routed.iter().any(|target| {
                         identity_of(target) == target_identity
-                            && target.class_id == 28
+                            && matches!(target.class_id, 28 | 89)
                             && target.route == ObjectRoute::TextureImage
                             && target.original_directory.as_deref()
                                 == Some(asset.original_directory.as_str())
@@ -1053,54 +1097,91 @@ fn lighting_data_uv_mesh_index(field_path: &str) -> Option<usize> {
     index.parse().ok()
 }
 
+fn lighting_data_baked_reflection_probe_cubemap_index(field_path: &str) -> Option<usize> {
+    let index = field_path
+        .strip_prefix("m_BakedReflectionProbeCubemaps[")?
+        .strip_suffix(']')?;
+    if index.is_empty() || !index.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    index.parse().ok()
+}
+
 fn is_lighting_data_texture_field(field_path: &str) -> bool {
-    field_path.starts_with("m_Lightmaps[")
-        && matches!(
-            field_path.rsplit('.').next(),
-            Some("m_Lightmap" | "m_DirLightmap" | "m_ShadowMask")
-        )
+    lighting_data_baked_reflection_probe_cubemap_index(field_path).is_some()
+        || (field_path.starts_with("m_Lightmaps[")
+            && matches!(
+                field_path.rsplit('.').next(),
+                Some("m_Lightmap" | "m_DirLightmap" | "m_ShadowMask")
+            ))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{has_non_null_pointer_field, SerializedFieldValue, SerializedValue};
+    use super::{
+        copy_render_settings_pointer_to_array, is_lighting_data_texture_field,
+        SerializedFieldValue, SerializedValue,
+    };
 
     #[test]
-    fn render_settings_reflection_guard_is_scoped_to_generated_skybox() {
-        let render_settings = SerializedValue::Struct(vec![
-            SerializedFieldValue {
-                name: "m_HaloTexture".to_owned(),
-                value: SerializedValue::PPtr {
-                    file_id: 0,
-                    path_id: 42,
-                },
+    fn render_settings_skybox_reflection_is_copied_to_lighting_data_asset() {
+        let render_settings = SerializedValue::Struct(vec![SerializedFieldValue {
+            name: "m_GeneratedSkyboxReflection".to_owned(),
+            value: SerializedValue::PPtr {
+                file_id: 2,
+                path_id: 42,
             },
-            SerializedFieldValue {
-                name: "m_GeneratedSkyboxReflection".to_owned(),
-                value: SerializedValue::PPtr {
-                    file_id: 0,
-                    path_id: 0,
-                },
-            },
-        ]);
+        }]);
+        let mut lighting_data = SerializedValue::Struct(vec![SerializedFieldValue {
+            name: "m_BakedReflectionProbeCubemaps".to_owned(),
+            value: SerializedValue::Array(Vec::new()),
+        }]);
 
-        assert!(
-            !has_non_null_pointer_field(&render_settings, "m_GeneratedSkyboxReflection").unwrap()
+        copy_render_settings_pointer_to_array(
+            &render_settings,
+            &mut lighting_data,
+            "m_GeneratedSkyboxReflection",
+            "m_BakedReflectionProbeCubemaps",
+        )
+        .unwrap();
+
+        assert_eq!(
+            lighting_data.struct_fields().unwrap()[0].value,
+            SerializedValue::Array(vec![SerializedValue::PPtr {
+                file_id: 2,
+                path_id: 42,
+            }])
         );
+        assert!(is_lighting_data_texture_field(
+            "m_BakedReflectionProbeCubemaps[0]"
+        ));
     }
 
     #[test]
-    fn render_settings_reflection_guard_detects_non_null_generated_skybox() {
+    fn null_render_settings_skybox_reflection_leaves_lighting_data_array_empty() {
         let render_settings = SerializedValue::Struct(vec![SerializedFieldValue {
             name: "m_GeneratedSkyboxReflection".to_owned(),
             value: SerializedValue::PPtr {
                 file_id: 0,
-                path_id: 42,
+                path_id: 0,
             },
         }]);
+        let mut lighting_data = SerializedValue::Struct(vec![SerializedFieldValue {
+            name: "m_BakedReflectionProbeCubemaps".to_owned(),
+            value: SerializedValue::Array(Vec::new()),
+        }]);
 
-        assert!(
-            has_non_null_pointer_field(&render_settings, "m_GeneratedSkyboxReflection").unwrap()
+        copy_render_settings_pointer_to_array(
+            &render_settings,
+            &mut lighting_data,
+            "m_GeneratedSkyboxReflection",
+            "m_BakedReflectionProbeCubemaps",
+        )
+        .unwrap();
+
+        assert_eq!(
+            lighting_data.struct_fields().unwrap()[0].value,
+            SerializedValue::Array(Vec::new())
         );
     }
 }
