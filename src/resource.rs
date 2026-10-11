@@ -53,6 +53,8 @@ pub struct StreamedResourceLimits {
 }
 
 /// Work and diagnostic-path bounds for finding nested StreamingInfo values in one decoded object.
+/// The node limit counts only decoded structs and arrays; scalar leaves cannot contain a nested
+/// StreamingInfo and are not added to the traversal worklist.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StreamedResourceScanLimits {
     pub max_value_nodes: usize,
@@ -855,6 +857,7 @@ pub fn scan_streamed_resource_infos(
         segment: None,
         expected_info: false,
     });
+    let mut pending_value_nodes = 1usize;
     let mut field_path = Vec::new();
     let mut located = Vec::new();
     let mut value_node_count = 0usize;
@@ -869,6 +872,9 @@ pub fn scan_streamed_resource_infos(
                 segment,
                 expected_info,
             } => {
+                pending_value_nodes = pending_value_nodes
+                    .checked_sub(1)
+                    .ok_or(StreamedResourceScanError::ValueNodeCountOverflow)?;
                 let previous_path_length = field_path.len();
                 if let Some(segment) = segment {
                     field_path.try_reserve(1).map_err(|_| {
@@ -956,13 +962,23 @@ pub fn scan_streamed_resource_infos(
                                 info,
                             });
                         } else {
-                            events.try_reserve(fields.len()).map_err(|_| {
-                                scan_allocation_error(
-                                    "StreamingInfo traversal events",
-                                    fields.len(),
-                                )
+                            let child_count = fields
+                                .iter()
+                                .filter(|field| is_stream_info_scan_container(&field.value))
+                                .count();
+                            schedule_stream_info_children(
+                                &mut pending_value_nodes,
+                                value_node_count,
+                                child_count,
+                                limits.max_value_nodes,
+                            )?;
+                            events.try_reserve(child_count).map_err(|_| {
+                                scan_allocation_error("StreamingInfo traversal events", child_count)
                             })?;
                             for field in fields.iter().rev() {
+                                if !is_stream_info_scan_container(&field.value) {
+                                    continue;
+                                }
                                 events.push(StreamInfoScanEvent::Visit {
                                     value: &field.value,
                                     segment: Some(StreamInfoPathSegment::Field(&field.name)),
@@ -972,10 +988,23 @@ pub fn scan_streamed_resource_infos(
                         }
                     }
                     SerializedValue::Array(values) => {
-                        events.try_reserve(values.len()).map_err(|_| {
-                            scan_allocation_error("StreamingInfo traversal events", values.len())
+                        let child_count = values
+                            .iter()
+                            .filter(|value| is_stream_info_scan_container(value))
+                            .count();
+                        schedule_stream_info_children(
+                            &mut pending_value_nodes,
+                            value_node_count,
+                            child_count,
+                            limits.max_value_nodes,
+                        )?;
+                        events.try_reserve(child_count).map_err(|_| {
+                            scan_allocation_error("StreamingInfo traversal events", child_count)
                         })?;
                         for (index, value) in values.iter().enumerate().rev() {
+                            if !is_stream_info_scan_container(value) {
+                                continue;
+                            }
                             events.push(StreamInfoScanEvent::Visit {
                                 value,
                                 segment: Some(StreamInfoPathSegment::Index(index)),
@@ -992,6 +1021,37 @@ pub fn scan_streamed_resource_infos(
         value_nodes_scanned: value_node_count,
         values: located,
     })
+}
+
+fn is_stream_info_scan_container(value: &SerializedValue) -> bool {
+    matches!(
+        value,
+        SerializedValue::Struct(_) | SerializedValue::Array(_)
+    )
+}
+
+fn schedule_stream_info_children(
+    pending_value_nodes: &mut usize,
+    processed_value_nodes: usize,
+    child_count: usize,
+    max_value_nodes: usize,
+) -> Result<(), StreamedResourceScanError> {
+    let scheduled_value_nodes = processed_value_nodes
+        .checked_add(*pending_value_nodes)
+        .ok_or(StreamedResourceScanError::ValueNodeCountOverflow)?;
+    let total_scheduled_value_nodes = scheduled_value_nodes
+        .checked_add(child_count)
+        .ok_or(StreamedResourceScanError::ValueNodeCountOverflow)?;
+    if total_scheduled_value_nodes > max_value_nodes {
+        return Err(StreamedResourceScanError::ValueNodeLimitExceeded {
+            count: max_value_nodes.saturating_add(1),
+            limit: max_value_nodes,
+        });
+    }
+    *pending_value_nodes = pending_value_nodes
+        .checked_add(child_count)
+        .ok_or(StreamedResourceScanError::ValueNodeCountOverflow)?;
+    Ok(())
 }
 
 /// Convenience wrapper that returns only the located StreamingInfo values.

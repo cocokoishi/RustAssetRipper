@@ -5,6 +5,7 @@
         find_streamed_resource_infos, open_streamed_resource_range, read_streamed_resource_bytes,
         read_streamed_resource_info_bytes, resolve_and_read_streamed_resource_info,
         resolve_and_read_streamed_resource_range, resolve_streamed_resource_info,
+        scan_streamed_resource_infos,
         ExplicitRootResourceInput, InvalidStreamedResourceRange, LocatedStreamedResourceInfo,
         ResolvedResourceFile, RootResourceCatalogError, RootResourceCatalogLimits,
         RootResourceFileCatalog, StreamedResourceContentError, StreamedResourceContentLimits,
@@ -292,6 +293,51 @@
                 },
             ]
         );
+    }
+
+    #[test]
+    fn streamed_info_scan_skips_large_scalar_arrays_without_hiding_later_descriptors() {
+        let mut scalar_values = vec![SerializedValue::U32(7); 100_000];
+        scalar_values.push(streaming_info_value(
+            b"after-large-array.resS",
+            SerializedValue::U64(13),
+        ));
+        let root = SerializedValue::Struct(vec![SerializedFieldValue {
+            name: "m_IndexBuffer".to_owned(),
+            value: SerializedValue::Array(scalar_values),
+        }]);
+
+        let scan = scan_streamed_resource_infos(
+            &root,
+            StreamedResourceScanLimits {
+                max_value_nodes: 3,
+                ..StreamedResourceScanLimits::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(scan.value_nodes_scanned, 3);
+        assert_eq!(scan.values.len(), 1);
+        assert_eq!(scan.values[0].field_path, "m_IndexBuffer[100000]");
+        assert_eq!(scan.values[0].info.path, "after-large-array.resS");
+    }
+
+    #[test]
+    fn streamed_info_scan_does_not_queue_primitive_array_leaves() {
+        let root = SerializedValue::Struct(vec![SerializedFieldValue {
+            name: "m_IndexBuffer".to_owned(),
+            value: SerializedValue::Array(vec![SerializedValue::U8(0); 100_000]),
+        }]);
+
+        let scan = scan_streamed_resource_infos(
+            &root,
+            StreamedResourceScanLimits {
+                max_value_nodes: 2,
+                ..StreamedResourceScanLimits::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(scan.value_nodes_scanned, 2);
+        assert!(scan.values.is_empty());
     }
 
     #[test]

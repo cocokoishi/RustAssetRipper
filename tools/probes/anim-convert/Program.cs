@@ -1,5 +1,6 @@
 using System.Reflection;
 using System.Text;
+using System.Text.Json;
 using AssetRipper.Assets;
 using AssetRipper.Assets.Bundles;
 using AssetRipper.Assets.Collections;
@@ -201,6 +202,36 @@ public static class Program
                     Console.Error.WriteLine(ex.ToString());
                     return 3;
                 }
+            case "controller-bundle-constants":
+                if (args.Length != 4)
+                {
+                    Console.Error.WriteLine("usage: anim-convert controller-bundle-constants <bundle> <controller-path-id> <out>");
+                    return 2;
+                }
+                try
+                {
+                    return DumpBundleControllerConstants(args[1], args[2], args[3]);
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine(ex.ToString());
+                    return 3;
+                }
+            case "controller-bundle-process":
+                if (args.Length != 4)
+                {
+                    Console.Error.WriteLine("usage: anim-convert controller-bundle-process <bundle> <controller-path-id> <out>");
+                    return 2;
+                }
+                try
+                {
+                    return DumpBundleControllerProcess(args[1], args[2], args[3]);
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine(ex.ToString());
+                    return 3;
+                }
             default:
                 Console.Error.WriteLine($"unknown mode {mode}");
                 return 2;
@@ -234,6 +265,202 @@ public static class Program
         {
             Console.WriteLine(type.FullName);
         }
+        return 0;
+    }
+
+    private static int DumpBundleControllerConstants(string bundlePath, string controllerPathId, string output)
+    {
+        long requestedPathId = long.Parse(controllerPathId, System.Globalization.CultureInfo.InvariantCulture);
+        using var bundle = GameBundle.FromPaths(
+            new[] { Path.GetFullPath(bundlePath) },
+            new GameAssetFactory(new BaseManager(_ => { })),
+            LocalFileSystem.Instance);
+        var controller = bundle.FetchAssets()
+            .OfType<AssetRipper.SourceGenerated.Classes.ClassID_91.IAnimatorController>()
+            .Single(asset => asset.PathID == requestedPathId);
+
+        var tos = new Dictionary<uint, string>();
+        foreach (var pair in controller.TOS)
+        {
+            tos[pair.Key] = pair.Value.String;
+        }
+        string TosName(uint id) => tos.TryGetValue(id, out string? value) ? value : $"<missing:{id}>";
+
+        var outputRows = new List<Dictionary<string, object?>>();
+        void AddRow(string kind, params (string Key, object? Value)[] values)
+        {
+            var row = new Dictionary<string, object?> { ["kind"] = kind };
+            foreach (var (key, value) in values)
+            {
+                row[key] = value;
+            }
+            outputRows.Add(row);
+        }
+
+        AddRow("controller", ("pathId", controller.PathID), ("name", controller.Name_R.String), ("objectCount", bundle.FetchAssets().LongCount()));
+        object controllerConstant = Get(controller, "Controller")!;
+        object layers = Get(controllerConstant, "LayerArray")!;
+        for (int layerIndex = 0; layerIndex < Count(layers); layerIndex++)
+        {
+            object layer = Get(At(layers, layerIndex), "Data")!;
+            AddRow("layer", ("index", layerIndex), ("stateMachineIndex", Get(layer, "StateMachineIndex")),
+                ("syncedLayerIndex", Get(layer, "StateMachineSynchronizedLayerIndex")), ("binding", Get(layer, "Binding")));
+        }
+
+        object stateMachineArray = Get(controllerConstant, "StateMachineArray")!;
+        for (int machineIndex = 0; machineIndex < Count(stateMachineArray); machineIndex++)
+        {
+            object machineOffset = At(stateMachineArray, machineIndex);
+            object machine = Get(machineOffset, "Data")!;
+            object selectors = Get(machine, "SelectorStateConstantArray")!;
+            object states = Get(machine, "StateConstantArray")!;
+            AddRow("stateMachine", ("index", machineIndex), ("defaultState", Get(machine, "DefaultState")),
+                ("stateCount", Count(states)), ("selectorCount", Count(selectors)));
+
+            for (int selectorIndex = 0; selectorIndex < Count(selectors); selectorIndex++)
+            {
+                object selectorOffset = At(selectors, selectorIndex);
+                object selector = Get(selectorOffset, "Data") ?? selectorOffset;
+                AddRow("selector", ("machineIndex", machineIndex), ("index", selectorIndex),
+                    ("fullPathId", Get(selector, "FullPathID")), ("isEntry", Get(selector, "IsEntry")));
+            }
+
+            for (int stateIndex = 0; stateIndex < Count(states); stateIndex++)
+            {
+                object stateOffset = At(states, stateIndex);
+                object state = Get(stateOffset, "Data")!;
+                uint nameId = Convert.ToUInt32(Get(state, "NameID"), System.Globalization.CultureInfo.InvariantCulture);
+                uint pathId = Convert.ToUInt32(Get(state, "PathID"), System.Globalization.CultureInfo.InvariantCulture);
+                uint fullPathId = Convert.ToUInt32(Get(state, "FullPathID"), System.Globalization.CultureInfo.InvariantCulture);
+                var transitions = new List<object>();
+                object transitionArray = Get(state, "TransitionConstantArray")!;
+                for (int transitionIndex = 0; transitionIndex < Count(transitionArray); transitionIndex++)
+                {
+                    object transition = Get(At(transitionArray, transitionIndex), "Data")!;
+                    object conditionArray = Get(transition, "ConditionConstantArray")!;
+                    var conditions = new List<object>();
+                    for (int conditionIndex = 0; conditionIndex < Count(conditionArray); conditionIndex++)
+                    {
+                        object condition = Get(At(conditionArray, conditionIndex), "Data")!;
+                        uint eventId = Convert.ToUInt32(Get(condition, "EventID"), System.Globalization.CultureInfo.InvariantCulture);
+                        conditions.Add(new
+                        {
+                            eventId,
+                            eventName = TosName(eventId),
+                            conditionMode = Get(condition, "ConditionMode"),
+                            eventThreshold = Get(condition, "EventThreshold"),
+                            exitTime = Get(condition, "ExitTime"),
+                        });
+                    }
+                    transitions.Add(new
+                    {
+                        index = transitionIndex,
+                        destinationState = Get(transition, "DestinationState"),
+                        fullPathId = Get(transition, "FullPathID"),
+                        id = Get(transition, "ID"),
+                        userId = Get(transition, "UserID"),
+                        transitionDuration = Get(transition, "TransitionDuration"),
+                        transitionOffset = Get(transition, "TransitionOffset"),
+                        exitTime = Get(transition, "ExitTime"),
+                        hasExitTime = Get(transition, "HasExitTime"),
+                        atomic = Get(transition, "Atomic"),
+                        conditions,
+                    });
+                }
+                AddRow("state", ("machineIndex", machineIndex), ("index", stateIndex), ("nameId", nameId),
+                    ("name", TosName(nameId)), ("pathId", pathId), ("pathName", TosName(pathId)),
+                    ("fullPathId", fullPathId), ("fullPathName", TosName(fullPathId)), ("transitions", transitions));
+            }
+        }
+
+        string fullPath = Path.GetFullPath(output);
+        Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+        File.WriteAllText(fullPath, JsonSerializer.Serialize(outputRows, new JsonSerializerOptions { WriteIndented = true }) + "\n", new UTF8Encoding(false));
+        Console.WriteLine($"wrote source-parsed controller constants path={fullPath} machineCount={Count(stateMachineArray)}");
+        return 0;
+    }
+
+    private static int DumpBundleControllerProcess(string bundlePath, string controllerPathId, string output)
+    {
+        long requestedPathId = long.Parse(controllerPathId, System.Globalization.CultureInfo.InvariantCulture);
+        using var bundle = GameBundle.FromPaths(
+            new[] { Path.GetFullPath(bundlePath) },
+            new GameAssetFactory(new BaseManager(_ => { })),
+            LocalFileSystem.Instance);
+        var controllers = bundle.FetchAssets()
+            .OfType<AssetRipper.SourceGenerated.Classes.ClassID_91.IAnimatorController>()
+            .ToArray();
+        var controller = controllers.Single(asset => asset.PathID == requestedPathId);
+
+        object gameData = Activator.CreateInstance(
+            ProcessingAsm.GetType("AssetRipper.Processing.GameData")!,
+            bundle,
+            controller.Collection.Version,
+            null,
+            null)!;
+        Type processorType = ProcessingAsm.GetType("AssetRipper.Processing.AnimatorControllers.AnimatorControllerProcessor")!;
+        object processor = Activator.CreateInstance(processorType)!;
+        Type gameDataType = ProcessingAsm.GetType("AssetRipper.Processing.GameData")!;
+        processorType.GetMethod("Process", BindingFlags.Public | BindingFlags.Instance, null,
+            new[] { gameDataType }, null)!.Invoke(processor, new[] { gameData });
+
+        var rows = new List<object>();
+        foreach (var layer in controller.AnimatorLayers.Where(layer =>
+                     layer.Name_R.String is "AutoDresser_Comp" or "AutoDresser_Decomp"))
+        {
+            var machine = layer.StateMachine.TryGetAsset<AssetRipper.SourceGenerated.Classes.ClassID_1107.IAnimatorStateMachine>(controller.Collection)
+                ?? throw new InvalidOperationException($"source processor did not resolve layer '{layer.Name_R.String}' root machine");
+            var entries = new List<object>();
+            foreach (var transition in machine.EntryTransitionsP)
+            {
+                var state = transition.DestinationStateP;
+                var stateTransitions = new List<object>();
+                if (state is not null)
+                {
+                    foreach (var stateTransition in state.TransitionsP)
+                    {
+                        stateTransitions.Add(new
+                        {
+                            pathId = stateTransition.PathID,
+                            isExit = stateTransition.IsExit,
+                            destinationState = stateTransition.DestinationStateP?.Name_R.String,
+                            conditions = stateTransition.Conditions.Select(condition => new
+                            {
+                                eventName = condition.ConditionEvent.String,
+                                conditionMode = condition.ConditionMode,
+                                threshold = condition.EventTreshold,
+                            }).ToArray(),
+                        });
+                    }
+                }
+                entries.Add(new
+                {
+                    destinationState = state?.Name_R.String,
+                    destinationPathId = state?.PathID,
+                    destinationTransitionCount = stateTransitions.Count,
+                    destinationTransitions = stateTransitions,
+                    entryConditions = transition.Conditions.Select(condition => new
+                    {
+                        eventName = condition.ConditionEvent.String,
+                        conditionMode = condition.ConditionMode,
+                        threshold = condition.EventTreshold,
+                    }).ToArray(),
+                });
+            }
+            rows.Add(new
+            {
+                layerName = layer.Name_R.String,
+                rootStateMachineName = machine.Name.String,
+                childStateCount = machine.ChildStates.Count,
+                entryTransitionCount = machine.EntryTransitionsP.Count,
+                entries,
+            });
+        }
+
+        string fullPath = Path.GetFullPath(output);
+        Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+        File.WriteAllText(fullPath, JsonSerializer.Serialize(rows, new JsonSerializerOptions { WriteIndented = true }) + "\n", new UTF8Encoding(false));
+        Console.WriteLine($"wrote source-processed controller layer projection path={fullPath} layerCount={rows.Count}");
         return 0;
     }
 
@@ -986,7 +1213,7 @@ public static class Program
             identities.Add(machine, path);
             foreach (var child in machine.ChildStates)
             {
-                var state = child.State.TryGetAsset(controller.Collection)
+                var state = child.State.TryGetAsset<AssetRipper.SourceGenerated.Classes.ClassID_1102.IAnimatorState>(controller.Collection)
                     ?? throw new InvalidOperationException("controller child state is missing");
                 string statePath = path + "." + state.Name.String;
                 identities.Add(state, statePath);
@@ -1005,7 +1232,7 @@ public static class Program
             }
             foreach (var pair in machine.StateMachineTransitions)
             {
-                var childMachine = pair.Key.TryGetAsset(controller.Collection)
+                var childMachine = pair.Key.TryGetAsset<AssetRipper.SourceGenerated.Classes.ClassID_1107.IAnimatorStateMachine>(controller.Collection)
                     ?? throw new InvalidOperationException("exit transition child machine is missing");
                 for (int i = 0; i < pair.Value.Count; i++)
                 {
@@ -1015,22 +1242,21 @@ public static class Program
             }
             foreach (var child in machine.ChildStateMachines)
             {
-                var nested = child.StateMachine.TryGetAsset(controller.Collection)
+                var nested = child.StateMachine.TryGetAsset<AssetRipper.SourceGenerated.Classes.ClassID_1107.IAnimatorStateMachine>(controller.Collection)
                     ?? throw new InvalidOperationException("controller child machine is missing");
                 IndexMachine(nested, path);
             }
             foreach (var behaviour in machine.StateMachineBehavioursP)
             {
-                var asset = behaviour.TryGetAsset(controller.Collection);
-                if (asset is not null)
+                if (behaviour is not null)
                 {
-                    identities.TryAdd(asset, "BEHAVIOUR:" + asset.Name_R.String);
+                    identities.TryAdd(behaviour, "BEHAVIOUR:" + behaviour.Name_R.String);
                 }
             }
         }
         foreach (var layer in controller.AnimatorLayers)
         {
-            var root = layer.StateMachine.TryGetAsset(controller.Collection)
+            var root = layer.StateMachine.TryGetAsset<AssetRipper.SourceGenerated.Classes.ClassID_1107.IAnimatorStateMachine>(controller.Collection)
                 ?? throw new InvalidOperationException("controller layer root machine is missing");
             IndexMachine(root, string.Empty);
         }
