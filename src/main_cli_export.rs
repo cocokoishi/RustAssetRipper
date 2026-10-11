@@ -1,5 +1,33 @@
 use super::*;
 
+fn resolved_workspace_object_class_id(
+    class_id: Option<i16>,
+    resolved_type_index: Option<usize>,
+    raw_type_id: i32,
+) -> Option<i32> {
+    class_id
+        .map(i32::from)
+        .or_else(|| resolved_type_index.map(|_| raw_type_id))
+}
+
+#[cfg(test)]
+mod workspace_object_class_id_tests {
+    use super::resolved_workspace_object_class_id;
+
+    #[test]
+    fn resolved_type_record_supplies_missing_direct_class_id() {
+        assert_eq!(
+            resolved_workspace_object_class_id(None, Some(0), 33),
+            Some(33)
+        );
+        assert_eq!(
+            resolved_workspace_object_class_id(Some(43), None, 0),
+            Some(43)
+        );
+        assert_eq!(resolved_workspace_object_class_id(None, None, 33), None);
+    }
+}
+
 pub(super) fn export_file_yaml_from_arguments(
     arguments: impl Iterator<Item = OsString>,
 ) -> Result<(), Box<dyn Error>> {
@@ -1862,10 +1890,12 @@ pub(super) fn export_object_yaml_to<W: io::Write>(
     let object = objects
         .get(serialized_file_index, object_index)
         .ok_or_else(|| invalid_data("selected workspace object is missing"))?;
-    let class_id = object
-        .class_id
-        .map(i32::from)
-        .ok_or_else(|| invalid_data("selected object has no class ID"))?;
+    let class_id = resolved_workspace_object_class_id(
+        object.class_id,
+        object.resolved_type_index,
+        object.raw_type_id,
+    )
+    .ok_or_else(|| invalid_data("selected object has no class ID"))?;
     let source = ExportAssetIdentity {
         collection: ExportAssetCollectionIdentity::SerializedFile {
             file_index: serialized_file_index,
@@ -2042,9 +2072,11 @@ pub(super) fn export_file_yaml_to<W: io::Write>(
         let object = objects
             .get(serialized_file_index, object_index)
             .ok_or_else(|| invalid_data("selected workspace object is missing"))?;
-        let class_id = object
-            .class_id
-            .map(i32::from)
+        let class_id = resolved_workspace_object_class_id(
+            object.class_id,
+            object.resolved_type_index,
+            object.raw_type_id,
+        )
             .ok_or_else(|| invalid_data_owned(format!(
                 "SerializedFile {serialized_file_index} object {object_index} PathID {} has no class ID",
                 object_info.path_id
