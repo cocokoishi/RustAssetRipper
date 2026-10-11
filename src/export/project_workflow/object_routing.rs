@@ -130,6 +130,14 @@ fn texture3d_has_exportable_image_payload(payload: &ParsedObjectPayload) -> bool
                 .is_some_and(|stream| stream.is_set() && stream.size > 0))
 }
 
+fn should_report_unported_texture_route(
+    image_payload_exportable: bool,
+    texture_route_supported: bool,
+    yaml_lightmap_route: bool,
+) -> bool {
+    image_payload_exportable && !texture_route_supported && !yaml_lightmap_route
+}
+
 fn read_audio_data_for_project_export(
     context: &ProjectRoutingContext<'_, '_, '_>,
     file_index: usize,
@@ -407,11 +415,12 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
             let lightmap_scene_directory = lightmap_texture_directories
                 .get(&(file_index, object_index))
                 .cloned();
-            let lightmap_image_route = lightmap_scene_directory.is_some()
-                && !matches!(
+            let yaml_lightmap_route = lightmap_scene_directory.is_some()
+                && matches!(
                     settings.lightmap_texture_export_format,
                     crate::export::settings::LightmapTextureExportFormat::Yaml
                 );
+            let lightmap_image_route = lightmap_scene_directory.is_some() && !yaml_lightmap_route;
             let texture_importer_supported =
                 TextureImporterLayout::for_project_version(project_version).is_some();
             let cubemap_importer_supported = class_id
@@ -779,9 +788,11 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                     ),
                 }
             };
-            let fallback_reason = if (texture_image_exportable || texture3d_image_exportable)
-                && !texture_route_supported
-            {
+            let fallback_reason = if should_report_unported_texture_route(
+                texture_image_exportable || texture3d_image_exportable,
+                texture_route_supported,
+                yaml_lightmap_route,
+            ) {
                 Some(
                     "the source TextureExportCollection image/importer route is not yet ported for this Unity importer version or Sprite group",
                 )
@@ -1141,9 +1152,19 @@ fn font_collection_subasset<'object>(
 
 #[cfg(test)]
 mod tests {
-    use super::{predefined_engine_shader_target, project_object_name};
+    use super::{
+        predefined_engine_shader_target, project_object_name, should_report_unported_texture_route,
+    };
     use crate::export::project_workflow::SHADER_CLASS_ID;
     use crate::resources::shader::{ParsedShaderForm, ParsedShaderProperty, ShaderView};
+
+    #[test]
+    fn default_yaml_lightmaps_do_not_report_an_unported_image_route() {
+        assert!(!should_report_unported_texture_route(true, false, true));
+        assert!(should_report_unported_texture_route(true, false, false));
+        assert!(!should_report_unported_texture_route(true, true, false));
+        assert!(!should_report_unported_texture_route(false, false, false));
+    }
 
     #[test]
     fn unity_2022_3_predefined_shader_matches_name_and_ordered_properties() {

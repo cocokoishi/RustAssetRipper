@@ -1,6 +1,19 @@
 ﻿# RustAssetRipper hand-off — 2026-10-10
 
-## Current state
+## Active stage (2026-10-11)
+
+Product Convergence mode is active under the user's current task attachment. Local 用户资源格式/VRCA acceptance is authorized. Frozen AssetRipper source remains the behavioral reference. Unity Editor runtime validation is unavailable in this environment.
+
+## Current acceptance and blocker
+
+- Primary acceptance sample: 青岚雅苑` (Unity 2022.3.22f1). Rust export: `target/real-acceptance-20261011-avtr青岚古境-final`; 8,548 objects, 1,537 asset files, 705 AnimationClips, and 9 AnimatorControllers. The static inventory resolved all local fileIDs, but no source-project semantic comparison was run.
+- `青岚山河卷` (SHA-256 `100338C82E934B51357CE143106DE8EC43C4389DD50727E0674BFD3CC137267A`) exports to 1,087 assets. Its 12 default-YAML lightmaps are class-28 YAML and were byte-identical before and after the false-positive notice fix. Latest replay: `target/real-acceptance-20261011-青岚山河卷-yaml-diagnostics-r1`.
+- CURRENT_BLOCKER: AnimatorController/AnimationClip subasset identity and graph semantics on a real animation-heavy sample lack a trustworthy source comparison. Local-pointer validity alone does not prove controller behavior.
+- Next action: produce an isolated frozen-AssetRipper export for 青岚雅苑`; compare controller layers, nested state-machine paths, ordered states/transitions, behavior ownership, and motion/clip references. Pair repeated or unnamed subassets by graph context, not only class/type/name or document order. Turn the first confirmed semantic divergence into a general production fix and replay the real sample.
+
+The dated checkpoint below is historical. Its Phase 2 lock is superseded by the current Product Convergence authorization. Preserve the untracked local `cleanup_manifest.txt` and `tools/probes/anim-convert/packages/`.
+
+## Historical checkpoint state
 
 - Repository: C:\Users\koishi\Desktop\RustAssetripper\RustAssetRipper
 - Branch: main; starting HEAD: 4bcaba2399eb3e3f72741aebd0c40e6d06ee34aa, matched origin/main before this checkpoint.
