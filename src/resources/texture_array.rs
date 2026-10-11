@@ -12,16 +12,18 @@
 //! `Has_LightmapFormat`-vs-`UsageMode`, `MipCount`-vs-`MipMap`, `Int32`-vs-`UInt32`
 //! complete size, `GraphicsFormat`-to-`TextureFormat` with an `RGBA32` fallback).
 //!
-//! Open: the bitmap export wiring, the CLI classes, and per-version field gates
-//! (probed `Has_*` outcomes: `Format_Int32`, `MipCount`, and `CompleteImageSize_UInt32`
-//! hold on 5.6/2019.4/2022.3; `LightmapFormat` does not, so the usage mode backs it).
+//! The class-117 bitmap conversion and Unity 2022.3 project importer are wired through the
+//! project workflow. Open: class-187/class-188 bitmap project routes, corresponding CLI classes,
+//! and remaining per-version field gates (probed `Has_*` outcomes: `Format_Int32`, `MipCount`,
+//! and `CompleteImageSize_UInt32` hold on 5.6/2019.4/2022.3; `LightmapFormat` does not, so the
+//! usage mode backs it).
 
 use std::borrow::Cow;
 use std::error::Error;
 use std::fmt::{self, Display};
 
 use crate::resource::{
-    extract_streamed_resource_info, StreamedResourceInfo, StreamedResourceInfoError,
+    StreamedResourceInfo, StreamedResourceInfoError, extract_streamed_resource_info,
 };
 use crate::serialized_file::object::{SerializedValue, SerializedValueLookupError};
 
@@ -66,6 +68,11 @@ pub enum TextureArrayError {
         /// The underlying decode failure.
         source: StreamedResourceInfoError,
     },
+    /// More than one versioned spelling of one field is present.
+    ConflictingAliases {
+        /// The aliases checked by the reader.
+        fields: &'static [&'static str],
+    },
     /// A declared stream the caller could not resolve.
     StreamUnavailable,
     /// An integer product does not fit its target.
@@ -107,6 +114,12 @@ impl Display for TextureArrayError {
                     "could not decode StreamingInfo field '{field}': {source}"
                 )
             }
+            Self::ConflictingAliases { fields } => {
+                write!(
+                    formatter,
+                    "texture contains multiple aliases for {fields:?}"
+                )
+            }
             Self::StreamUnavailable => {
                 formatter.write_str("texture has neither inline image data nor a resolvable stream")
             }
@@ -144,7 +157,7 @@ pub struct Texture3DView {
     pub format_i32: Option<i32>,
     /// `m_Format` when stored as `UInt32`.
     pub format_u32: Option<u32>,
-    /// Inline `m_ImageData` bytes.
+    /// Inline `image data`/`m_ImageData` bytes.
     pub image_data: Vec<u8>,
     /// `m_StreamData`, if present.
     pub stream_data: Option<StreamedResourceInfo>,
@@ -202,14 +215,28 @@ impl Texture3DView {
     /// Reads the export-relevant fields from a decoded `Texture3D` payload.
     pub fn from_value(root: &SerializedValue) -> Result<Self, TextureArrayError> {
         let (format_i32, format_u32) = optional_i32_or_u32(root, "m_Format")?;
-        let (complete_u32, complete_i32) = optional_u32_or_i32(root, "m_CompleteImageSize")?;
+        let mut complete_u32 = optional_u32_aliases(
+            root,
+            &["CompleteImageSize_UInt32", "m_CompleteImageSize_UInt32"],
+        )?;
+        let mut complete_i32 = optional_i32_aliases(
+            root,
+            &["CompleteImageSize_Int32", "m_CompleteImageSize_Int32"],
+        )?;
+        if complete_u32.is_none() && complete_i32.is_none() {
+            (complete_u32, complete_i32) = optional_u32_or_i32_aliases(
+                root,
+                &["m_DataSize", "m_CompleteImageSize", "CompleteImageSize"],
+            )?;
+        }
         Ok(Self {
             width: nonnegative(required_i32(root, "m_Width")?, "m_Width")?,
             height: nonnegative(required_i32(root, "m_Height")?, "m_Height")?,
             depth: nonnegative(required_i32(root, "m_Depth")?, "m_Depth")?,
             format_i32,
             format_u32,
-            image_data: optional_bytes(root, "m_ImageData")?.unwrap_or_default(),
+            image_data: optional_bytes_aliases(root, &["image data", "m_ImageData"])?
+                .unwrap_or_default(),
             stream_data: optional_stream(root, "m_StreamData")?,
             lightmap_format: optional_i32(root, "m_LightmapFormat")?,
             usage_mode: optional_i32(root, "m_UsageMode")?.unwrap_or(0),
@@ -480,6 +507,55 @@ fn optional_u32_or_i32(
     }
 }
 
+fn optional_u32_aliases(
+    root: &SerializedValue,
+    names: &'static [&'static str],
+) -> Result<Option<u32>, TextureArrayError> {
+    let mut result = None;
+    for name in names {
+        if let Some(value) = optional_u32(root, name)? {
+            if result.is_some() {
+                return Err(TextureArrayError::ConflictingAliases { fields: names });
+            }
+            result = Some(value);
+        }
+    }
+    Ok(result)
+}
+
+fn optional_i32_aliases(
+    root: &SerializedValue,
+    names: &'static [&'static str],
+) -> Result<Option<i32>, TextureArrayError> {
+    let mut result = None;
+    for name in names {
+        if let Some(value) = optional_i32(root, name)? {
+            if result.is_some() {
+                return Err(TextureArrayError::ConflictingAliases { fields: names });
+            }
+            result = Some(value);
+        }
+    }
+    Ok(result)
+}
+
+fn optional_u32_or_i32_aliases(
+    root: &SerializedValue,
+    names: &'static [&'static str],
+) -> Result<(Option<u32>, Option<i32>), TextureArrayError> {
+    let mut result = (None, None);
+    for name in names {
+        let value = optional_u32_or_i32(root, name)?;
+        if value.0.is_some() || value.1.is_some() {
+            if result.0.is_some() || result.1.is_some() {
+                return Err(TextureArrayError::ConflictingAliases { fields: names });
+            }
+            result = value;
+        }
+    }
+    Ok(result)
+}
+
 fn optional_bool(
     root: &SerializedValue,
     name: &'static str,
@@ -518,7 +594,7 @@ fn optional_bytes(
                         return Err(TextureArrayError::WrongType {
                             field: name,
                             actual: serialized_kind(other),
-                        })
+                        });
                     }
                 }
             }
@@ -529,6 +605,22 @@ fn optional_bytes(
             actual: serialized_kind(value),
         }),
     }
+}
+
+fn optional_bytes_aliases(
+    root: &SerializedValue,
+    names: &'static [&'static str],
+) -> Result<Option<Vec<u8>>, TextureArrayError> {
+    let mut result = None;
+    for name in names {
+        if let Some(bytes) = optional_bytes(root, name)? {
+            if result.is_some() {
+                return Err(TextureArrayError::ConflictingAliases { fields: names });
+            }
+            result = Some(bytes);
+        }
+    }
+    Ok(result)
 }
 
 fn optional_stream(
@@ -784,6 +876,38 @@ mod tests {
         ]);
         let view = Texture3DView::from_value(&root).unwrap();
         assert_eq!(view.complete_image_size_value(), 32);
+    }
+
+    #[test]
+    fn texture3d_complete_size_reads_source_generated_property_field_names() {
+        let root = SerializedValue::Struct(vec![
+            field("m_Width", SerializedValue::I32(128)),
+            field("m_Height", SerializedValue::I32(128)),
+            field("m_Depth", SerializedValue::I32(128)),
+            field("CompleteImageSize_UInt32", SerializedValue::U32(2_097_152)),
+        ]);
+        let view = Texture3DView::from_value(&root).unwrap();
+        assert_eq!(view.complete_image_size_value(), 2_097_152);
+
+        let root = SerializedValue::Struct(vec![
+            field("m_Width", SerializedValue::I32(1)),
+            field("m_Height", SerializedValue::I32(1)),
+            field("m_Depth", SerializedValue::I32(1)),
+            field("CompleteImageSize_Int32", SerializedValue::I32(64)),
+        ]);
+        let view = Texture3DView::from_value(&root).unwrap();
+        assert_eq!(view.complete_image_size_value(), 64);
+
+        // The underlying TypeTree stores the UInt32 property as m_DataSize; the
+        // Unity YAML alias layer writes that same value as m_CompleteImageSize.
+        let root = SerializedValue::Struct(vec![
+            field("m_Width", SerializedValue::I32(128)),
+            field("m_Height", SerializedValue::I32(128)),
+            field("m_Depth", SerializedValue::I32(128)),
+            field("m_DataSize", SerializedValue::U32(2_097_152)),
+        ]);
+        let view = Texture3DView::from_value(&root).unwrap();
+        assert_eq!(view.complete_image_size_value(), 2_097_152);
     }
 
     #[test]

@@ -20,27 +20,27 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use super::asset_path::{
-    join_path, plan_asset_export_paths, ExportAssetPathIdentity, ExportFileSystem,
-    HostPathPlatform, UniqueNameLimits, UniqueNameState,
+    ExportAssetPathIdentity, ExportFileSystem, HostPathPlatform, UniqueNameLimits, UniqueNameState,
+    join_path, plan_asset_export_paths,
 };
 use super::collection_claims::{
-    claim_collection, is_supported_audio_export_format, AudioClaimDecode, ClaimAssetKind,
-    ClaimFacts, ClaimMainKind, ClaimOutcome, ShaderTextState,
+    AudioClaimDecode, ClaimAssetKind, ClaimFacts, ClaimMainKind, ClaimOutcome, ShaderTextState,
+    claim_collection, is_supported_audio_export_format,
 };
 use super::collection_kind::ExportCollectionKind;
 use super::collection_paths::{plan_unknown_export_paths, plan_unreadable_export_paths};
-use super::export_extension::{ExportClassIdentity, ExportClassMarker, EXPORT_CLASS_MARKERS};
+use super::export_extension::{EXPORT_CLASS_MARKERS, ExportClassIdentity, ExportClassMarker};
 use super::export_root::prepare_export_root;
 use super::meta::UnityMetaFileOptions;
 use super::post_export::{default_package_dependencies, project_version_file_contents};
 use super::project_order::ProjectExportEvent;
 use super::project_output::{
-    create_project_directory, export_asset_with_meta, validate_project_output_path,
-    write_new_project_file, write_new_project_stream, AssetExportStep, AssetExportWithMetaPlan,
-    UnityProjectOutputLimits,
+    AssetExportStep, AssetExportWithMetaPlan, UnityProjectOutputLimits, create_project_directory,
+    export_asset_with_meta, validate_project_output_path, write_new_project_file,
+    write_new_project_stream,
 };
 use super::project_plan::plan_manager_export_paths;
-use super::registration::{RegistrationGate, EXPORTER_REGISTRATIONS};
+use super::registration::{EXPORTER_REGISTRATIONS, RegistrationGate};
 use super::settings::{
     AudioExportFormat, LightmapTextureExportFormat, ShaderExportMode, SpriteExportMode,
 };
@@ -272,14 +272,17 @@ pub fn claim_asset_kind(facts: ObjectClassFacts) -> ClaimAssetKind {
         ClaimAssetKind::MonoScript
     } else if has("IMesh") {
         ClaimAssetKind::Mesh
+    } else if has("ICubemapArray") || has("ITexture2DArray") || has("ITexture3D") {
+        // The source registration stack puts TextureArrayAssetExporter after
+        // YamlStreamedAssetExporter. Preserve that specialized route even though these
+        // generated interfaces also inherit IImageTexture.
+        ClaimAssetKind::TextureArray
     } else if has("IImageTexture") {
         ClaimAssetKind::ImageTexture
     } else if has("ISpriteAtlas") {
         ClaimAssetKind::SpriteAtlas
     } else if has("ISprite") {
         ClaimAssetKind::Sprite
-    } else if has("ICubemapArray") || has("ITexture2DArray") || has("ITexture3D") {
-        ClaimAssetKind::TextureArray
     } else if has("ITexture2D") {
         ClaimAssetKind::Texture2D
     } else if has("IShader") {
@@ -1592,6 +1595,26 @@ mod tests {
     }
 
     #[test]
+    fn texture3d_uses_the_registered_texture_array_exporter() {
+        let settings = ProjectExportSettings::from_export_settings(
+            &ExportSettingsFile::from(crate::export::settings::ExportDefaults::default()),
+            SceneUnityVersion::parse("2022.3.22f1").unwrap(),
+        );
+        let texture3d = ObjectClassFacts::new(117, false);
+        assert_eq!(claim_asset_kind(texture3d), ClaimAssetKind::TextureArray);
+
+        let mut claim_facts = claim_facts_for(texture3d, settings);
+        claim_facts.data_valid = true;
+        let selected =
+            select_collection_with_claim_facts(texture3d, settings, claim_facts).unwrap();
+        assert_eq!(selected.exporter, "TextureArrayAssetExporter");
+        assert_eq!(
+            selected.collection_name,
+            "TextureArrayAssetExportCollection"
+        );
+    }
+
+    #[test]
     fn sprite_and_shader_mode_gates_flip_the_selection() {
         let mut settings = defaults();
         settings.sprite_export_mode_yaml = false;
@@ -1763,11 +1786,10 @@ mod tests {
 
     #[test]
     fn host_relative_paths_reject_escapes_and_collisions() {
-        assert!(validate_host_relative_path(
-            "Assets/GameObject/Thing.asset",
-            HostPathPlatform::Windows
-        )
-        .is_ok());
+        assert!(
+            validate_host_relative_path("Assets/GameObject/Thing.asset", HostPathPlatform::Windows)
+                .is_ok()
+        );
         for bad in [
             "",
             "/absolute",
@@ -1782,11 +1804,13 @@ mod tests {
                 "{bad:?} must be rejected"
             );
         }
-        assert!(validate_host_relative_path(
-            "Assets/Folder\\Literal/Thing.asset",
-            HostPathPlatform::Unix
-        )
-        .is_ok());
+        assert!(
+            validate_host_relative_path(
+                "Assets/Folder\\Literal/Thing.asset",
+                HostPathPlatform::Unix
+            )
+            .is_ok()
+        );
         let plan = ProjectExportPlan {
             project_version_text: "2019.4.0f1".to_owned(),
             project_version_file: String::new(),

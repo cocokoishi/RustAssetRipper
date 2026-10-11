@@ -1,9 +1,11 @@
-//! Standalone `TextureExportCollection` project output for source-generated class-28 textures.
+//! Standalone texture image project output for source-generated textures.
 //!
 //! The source `SpriteProcessor` gives a texture without sprites a generated
 //! `SpriteInformationObject`; the collection then converts the texture and writes a
-//! `TextureImporter`. This module owns the converted image and the source-versioned importer
-//! body. Stream lookup stays with the project workflow, which owns the resource-file scope.
+//! `TextureImporter`. Standalone Texture3D objects use the source `TextureArrayAssetExporter`
+//! and its fixed Texture3D importer shape. This module owns the converted image and the
+//! source-versioned importer body. Stream lookup stays with the project workflow, which owns
+//! the resource-file scope.
 
 use std::error::Error;
 use std::io;
@@ -11,8 +13,10 @@ use std::io;
 use crate::processing::scene_naming::SceneUnityVersion;
 use crate::resources::image_export::ImageExportFormat;
 use crate::resources::texture::{
-    export_texture2d_image_with_unity_version, Texture2DView, TextureExportError,
+    Texture2DView, TextureExportError, export_texture2d_image_with_unity_version,
+    export_texture3d_image,
 };
+use crate::resources::texture_array::Texture3DView;
 use crate::resources::vertex_data_blob::UnityVersion;
 use crate::serialized_file::object::SerializedValue;
 
@@ -60,12 +64,42 @@ impl TextureImporterLayout {
 /// All values needed to plan a converted texture project file and its importer sidecar.
 #[derive(Clone, Debug)]
 pub struct TextureProjectPlan {
-    pub view: Texture2DView,
+    pub view: TextureProjectView,
     pub image_format: ImageExportFormat,
     pub extension: String,
     pub importer: UnityYamlNode,
     unity_version: Option<UnityVersion>,
-    is_cubemap: bool,
+}
+
+/// The object fields used by one image conversion route.
+#[derive(Clone, Debug)]
+pub enum TextureProjectView {
+    Texture2D(Texture2DView),
+    Cubemap(Texture2DView),
+    Texture3D(Texture3DView),
+}
+
+impl TextureProjectView {
+    pub fn image_data(&self) -> &[u8] {
+        match self {
+            Self::Texture2D(view) | Self::Cubemap(view) => &view.image_data,
+            Self::Texture3D(view) => &view.image_data,
+        }
+    }
+
+    pub fn stream_data(&self) -> Option<&crate::resource::StreamedResourceInfo> {
+        match self {
+            Self::Texture2D(view) | Self::Cubemap(view) => view.stream_data.as_ref(),
+            Self::Texture3D(view) => view.stream_data.as_ref(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TextureProjectKind {
+    Texture2D,
+    Cubemap,
+    Texture3D,
 }
 
 impl TextureProjectPlan {
@@ -75,15 +109,29 @@ impl TextureProjectPlan {
         platform: i32,
         body_is_little_endian: bool,
     ) -> Result<Vec<u8>, TextureExportError> {
-        export_texture2d_image_with_unity_version(
-            &self.view,
-            stream_content,
-            platform,
-            body_is_little_endian,
-            !self.is_cubemap,
-            self.unity_version,
-            self.image_format,
-        )
+        match &self.view {
+            TextureProjectView::Texture2D(view) => export_texture2d_image_with_unity_version(
+                view,
+                stream_content,
+                platform,
+                body_is_little_endian,
+                true,
+                self.unity_version,
+                self.image_format,
+            ),
+            TextureProjectView::Cubemap(view) => export_texture2d_image_with_unity_version(
+                view,
+                stream_content,
+                platform,
+                body_is_little_endian,
+                false,
+                self.unity_version,
+                self.image_format,
+            ),
+            TextureProjectView::Texture3D(view) => {
+                export_texture3d_image(view, stream_content, self.image_format)
+            }
+        }
     }
 }
 
@@ -108,7 +156,7 @@ pub fn plan_texture_project_export(
         settings,
         asset_bundle_name,
         0,
-        false,
+        TextureProjectKind::Texture2D,
     )
 }
 
@@ -127,7 +175,7 @@ pub fn plan_texture_project_export_for_source_version(
         settings,
         asset_bundle_name,
         0,
-        false,
+        TextureProjectKind::Texture2D,
     )
 }
 
@@ -158,7 +206,37 @@ pub fn plan_cubemap_project_export_for_source_version(
         settings,
         asset_bundle_name,
         0,
-        true,
+        TextureProjectKind::Cubemap,
+    )
+}
+
+/// Plans the source `TextureArrayAssetExporter` image and importer route for a Texture3D.
+///
+/// The current Unity project importer is pinned to the 2022.3 layout, matching the source
+/// exporter fixture and the target project version used by the real acceptance bundle.
+pub fn plan_texture3d_project_export_for_source_version(
+    root: &SerializedValue,
+    project_version: SceneUnityVersion,
+    source_unity_version: Option<UnityVersion>,
+    settings: &ExportSettingsFile,
+    asset_bundle_name: Option<&str>,
+) -> Result<TextureProjectPlan, Box<dyn Error>> {
+    if TextureImporterLayout::for_project_version(project_version)
+        != Some(TextureImporterLayout::Unity2022_3)
+    {
+        return Err(invalid_data(format!(
+            "Texture3D TextureImporter serialization is not source-pinned for Unity {}.{}",
+            project_version.major, project_version.minor
+        )));
+    }
+    plan_texture_project_export_with_source_version(
+        root,
+        project_version,
+        source_unity_version,
+        settings,
+        asset_bundle_name,
+        1,
+        TextureProjectKind::Texture3D,
     )
 }
 
@@ -200,7 +278,7 @@ pub fn plan_lightmap_texture_project_export_for_source_version(
         settings,
         asset_bundle_name,
         1,
-        false,
+        TextureProjectKind::Texture2D,
     )?;
     let image_format = match settings.lightmap_texture_export_format {
         crate::export::settings::LightmapTextureExportFormat::Exr => {
@@ -226,7 +304,7 @@ fn plan_texture_project_export_with_source_version(
     settings: &ExportSettingsFile,
     asset_bundle_name: Option<&str>,
     sprite_mesh_type: i64,
-    is_cubemap: bool,
+    texture_kind: TextureProjectKind,
 ) -> Result<TextureProjectPlan, Box<dyn Error>> {
     let layout = TextureImporterLayout::for_project_version(project_version).ok_or_else(|| {
         invalid_data(format!(
@@ -234,7 +312,19 @@ fn plan_texture_project_export_with_source_version(
             project_version.major, project_version.minor
         ))
     })?;
-    let view = Texture2DView::from_value(root)?;
+    let view = match texture_kind {
+        TextureProjectKind::Texture2D | TextureProjectKind::Cubemap => {
+            let view = Texture2DView::from_value(root)?;
+            if texture_kind == TextureProjectKind::Cubemap {
+                TextureProjectView::Cubemap(view)
+            } else {
+                TextureProjectView::Texture2D(view)
+            }
+        }
+        TextureProjectKind::Texture3D => {
+            TextureProjectView::Texture3D(Texture3DView::from_value(root)?)
+        }
+    };
     let image_format = ImageExportFormat::from_settings_format(settings.image_export_format);
     let extension = settings
         .image_export_format
@@ -245,7 +335,7 @@ fn plan_texture_project_export_with_source_version(
         layout,
         asset_bundle_name,
         sprite_mesh_type,
-        is_cubemap,
+        texture_kind,
     )?;
     Ok(TextureProjectPlan {
         view,
@@ -253,28 +343,28 @@ fn plan_texture_project_export_with_source_version(
         extension,
         importer,
         unity_version: source_unity_version,
-        is_cubemap,
     })
 }
 
 fn texture_importer(
     root: &SerializedValue,
-    texture: &Texture2DView,
+    texture: &TextureProjectView,
     layout: TextureImporterLayout,
     asset_bundle_name: Option<&str>,
     sprite_mesh_type: i64,
-    is_cubemap: bool,
+    texture_kind: TextureProjectKind,
 ) -> Result<UnityYamlNode, Box<dyn Error>> {
     let facts = TextureImporterFacts::from_value(root, texture)?;
+    let is_cubemap = texture_kind == TextureProjectKind::Cubemap;
     match layout {
         TextureImporterLayout::Unity5_0 => {
-            return texture_importer_v2(&facts, asset_bundle_name, sprite_mesh_type, false, false)
+            return texture_importer_v2(&facts, asset_bundle_name, sprite_mesh_type, false, false);
         }
         TextureImporterLayout::Unity5_2 => {
-            return texture_importer_v2(&facts, asset_bundle_name, sprite_mesh_type, true, false)
+            return texture_importer_v2(&facts, asset_bundle_name, sprite_mesh_type, true, false);
         }
         TextureImporterLayout::Unity5_3 => {
-            return texture_importer_v2(&facts, asset_bundle_name, sprite_mesh_type, true, true)
+            return texture_importer_v2(&facts, asset_bundle_name, sprite_mesh_type, true, true);
         }
         TextureImporterLayout::Unity5_4 => {
             return texture_importer_v2_with_sheet_version(
@@ -285,22 +375,22 @@ fn texture_importer(
                 true,
                 true,
                 true,
-            )
+            );
         }
         TextureImporterLayout::Unity5_6 => {
-            return texture_importer_v4_5_6(&facts, asset_bundle_name, sprite_mesh_type)
+            return texture_importer_v4_5_6(&facts, asset_bundle_name, sprite_mesh_type);
         }
         TextureImporterLayout::Unity2017_2 => {
-            return texture_importer_v4_2017(&facts, asset_bundle_name, sprite_mesh_type, true)
+            return texture_importer_v4_2017(&facts, asset_bundle_name, sprite_mesh_type, true);
         }
         TextureImporterLayout::Unity2017_4 => {
-            return texture_importer_v4_2017(&facts, asset_bundle_name, sprite_mesh_type, false)
+            return texture_importer_v4_2017(&facts, asset_bundle_name, sprite_mesh_type, false);
         }
         TextureImporterLayout::Unity2018_2 => {
-            return texture_importer_v7(&facts, asset_bundle_name, sprite_mesh_type, true, true)
+            return texture_importer_v7(&facts, asset_bundle_name, sprite_mesh_type, true, true);
         }
         TextureImporterLayout::Unity2018_3 => {
-            return texture_importer_v7(&facts, asset_bundle_name, sprite_mesh_type, false, true)
+            return texture_importer_v7(&facts, asset_bundle_name, sprite_mesh_type, false, true);
         }
         TextureImporterLayout::Unity2019_4 | TextureImporterLayout::Unity2022_3 => {}
     }
@@ -345,9 +435,20 @@ fn texture_importer(
     importer.insert_field("spriteTessellationDetail", signed(-1))?;
     importer.insert_field(
         "textureType",
-        signed(if !is_cubemap && facts.normal_map { 1 } else { 0 }),
+        signed(if !is_cubemap && facts.normal_map {
+            1
+        } else {
+            0
+        }),
     )?;
-    importer.insert_field("textureShape", signed(if is_cubemap { 2 } else { 1 }))?;
+    importer.insert_field(
+        "textureShape",
+        signed(match texture_kind {
+            TextureProjectKind::Texture2D => 1,
+            TextureProjectKind::Cubemap => 2,
+            TextureProjectKind::Texture3D => 8,
+        }),
+    )?;
     importer.insert_field("singleChannelComponent", signed(0))?;
     if modern {
         importer.insert_field("flipbookRows", signed(0))?;
@@ -698,21 +799,54 @@ struct TextureImporterFacts {
 }
 
 impl TextureImporterFacts {
-    fn from_value(root: &SerializedValue, texture: &Texture2DView) -> Result<Self, Box<dyn Error>> {
+    fn from_value(
+        root: &SerializedValue,
+        texture: &TextureProjectView,
+    ) -> Result<Self, Box<dyn Error>> {
         let color_space = optional_i32(root, &["m_ColorSpace", "ColorSpace_C28E"])?.unwrap_or(0);
-        let streaming_mipmaps =
-            optional_bool(root, &["m_StreamingMipmaps", "StreamingMipmaps_C28"])?.unwrap_or(false);
-        let streaming_mipmaps_priority = optional_i32(
-            root,
-            &["m_StreamingMipmapsPriority", "StreamingMipmapsPriority_C28"],
-        )?
-        .unwrap_or(0);
+        let (
+            width,
+            height,
+            enable_mipmap,
+            format,
+            normal_map,
+            streaming_mipmaps,
+            streaming_mipmaps_priority,
+        ) = match texture {
+            TextureProjectView::Texture2D(view) | TextureProjectView::Cubemap(view) => (
+                view.width,
+                view.height,
+                view.has_mips(),
+                view.texture_format,
+                matches!(view.lightmap_format, 3 | 4 | 10),
+                optional_bool(root, &["m_StreamingMipmaps", "StreamingMipmaps_C28"])?
+                    .unwrap_or(false),
+                optional_i32(
+                    root,
+                    &["m_StreamingMipmapsPriority", "StreamingMipmapsPriority_C28"],
+                )?
+                .unwrap_or(0),
+            ),
+            TextureProjectView::Texture3D(view) => {
+                let has_mip_map = root.unique_field_in_base_chain("m_MipMap")?.is_some();
+                (
+                    view.width,
+                    view.height,
+                    (view.mip_count.is_some_and(|count| count > 1))
+                        || (has_mip_map && view.mip_map),
+                    view.texture_format_or_default(),
+                    matches!(view.lightmap_value(), 3 | 4 | 10),
+                    false,
+                    0,
+                )
+            }
+        };
         let is_readable =
             optional_bool(root, &["m_IsReadable", "IsReadable_C28"])?.unwrap_or(false);
-        let width = i32::try_from(texture.width)
-            .map_err(|_| invalid_data("Texture2D width exceeds importer integer range"))?;
-        let height = i32::try_from(texture.height)
-            .map_err(|_| invalid_data("Texture2D height exceeds importer integer range"))?;
+        let width = i32::try_from(width)
+            .map_err(|_| invalid_data("texture width exceeds importer integer range"))?;
+        let height = i32::try_from(height)
+            .map_err(|_| invalid_data("texture height exceeds importer integer range"))?;
         let texture_settings = field(root, &["m_TextureSettings", "TextureSettings_C28"])?;
         let get_setting = |names: &[&str]| -> Result<i32, Box<dyn Error>> {
             optional_i32_from(texture_settings, names).map(|value| value.unwrap_or(0))
@@ -726,12 +860,12 @@ impl TextureImporterFacts {
             Ok(optional_i32_from(texture_settings, &[axis_name, "m_WrapMode"])?.unwrap_or(0))
         };
         Ok(Self {
-            enable_mipmap: texture.has_mips(),
+            enable_mipmap,
             srgb_texture: color_space == 1,
             is_readable,
             streaming_mipmaps,
             streaming_mipmaps_priority,
-            format: texture.texture_format,
+            format,
             max_texture_size: calculate_max_texture_size(width, height),
             filter_mode: get_setting(&["m_FilterMode", "FilterMode"])?,
             aniso: get_setting(&["m_Aniso", "Aniso"])?,
@@ -740,7 +874,7 @@ impl TextureImporterFacts {
             wrap_u: get_wrap("U")?,
             wrap_v: get_wrap("V")?,
             wrap_w: get_wrap("W")?,
-            normal_map: matches!(texture.lightmap_format, 3 | 4 | 10),
+            normal_map,
         })
     }
 }
@@ -1176,7 +1310,7 @@ fn optional_i32_from(
             return Err(invalid_data(format!(
                 "texture importer field {:?} is not an integer",
                 names[0]
-            )))
+            )));
         }
     };
     Ok(Some(number))
@@ -1231,7 +1365,7 @@ fn field<'a>(
                 return Err(invalid_data(format!(
                     "texture importer aliases {:?} are both present",
                     names
-                )))
+                )));
             }
             Some(value) => found = Some(value),
             None => {}
@@ -1242,4 +1376,95 @@ fn field<'a>(
 
 fn invalid_data(message: impl Into<String>) -> Box<dyn Error> {
     Box::new(io::Error::new(io::ErrorKind::InvalidData, message.into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::export::unity_yaml::UnityYamlNodeKind;
+    use crate::serialized_file::object::SerializedFieldValue;
+
+    fn value(name: &str, value: SerializedValue) -> SerializedFieldValue {
+        SerializedFieldValue {
+            name: name.to_owned(),
+            value,
+        }
+    }
+
+    fn mapping_field<'a>(node: &'a UnityYamlNode, name: &str) -> &'a UnityYamlNode {
+        let UnityYamlNodeKind::Mapping { entries, .. } = &node.kind else {
+            panic!("expected a YAML mapping")
+        };
+        entries
+            .iter()
+            .find_map(|(key, value)| match &key.kind {
+                UnityYamlNodeKind::Scalar(UnityYamlScalar::PlainString(key)) if key == name => {
+                    Some(value)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing YAML field {name:?}"))
+    }
+
+    fn signed_scalar(node: &UnityYamlNode) -> i64 {
+        let UnityYamlNodeKind::Scalar(UnityYamlScalar::Signed(value)) = &node.kind else {
+            panic!("expected a signed YAML scalar")
+        };
+        *value
+    }
+
+    #[test]
+    fn unity_2022_3_texture3d_importer_uses_volume_shape_and_source_facts() {
+        let root = SerializedValue::Struct(vec![
+            value("m_Width", SerializedValue::I32(256)),
+            value("m_Height", SerializedValue::I32(128)),
+            value("m_Depth", SerializedValue::I32(4)),
+            value("m_Format", SerializedValue::U32(1)),
+            value("m_DataSize", SerializedValue::U32(16)),
+            value("m_MipCount", SerializedValue::I32(2)),
+            value("m_MipMap", SerializedValue::Bool(false)),
+            value("m_UsageMode", SerializedValue::I32(0)),
+            value("m_IsReadable", SerializedValue::Bool(true)),
+            value("image data", SerializedValue::Bytes(vec![0x5a; 16])),
+        ]);
+        let settings = ExportSettingsFile::from(crate::export::settings::ExportDefaults::default());
+        let version = SceneUnityVersion::parse("2022.3.22f1").unwrap();
+        let plan =
+            plan_texture3d_project_export_for_source_version(&root, version, None, &settings, None)
+                .unwrap();
+
+        assert_eq!(plan.extension, "png");
+        let TextureProjectView::Texture3D(view) = &plan.view else {
+            panic!("expected a Texture3D project view")
+        };
+        assert_eq!(view.image_data, vec![0x5a; 16]);
+        assert_eq!(view.complete_image_size_value(), 16);
+        assert_eq!(
+            signed_scalar(mapping_field(&plan.importer, "textureShape")),
+            8
+        );
+        assert_eq!(
+            signed_scalar(mapping_field(&plan.importer, "textureType")),
+            0
+        );
+        assert_eq!(
+            signed_scalar(mapping_field(&plan.importer, "isReadable")),
+            1
+        );
+        assert_eq!(
+            signed_scalar(mapping_field(
+                mapping_field(&plan.importer, "mipmaps"),
+                "enableMipMap"
+            )),
+            1
+        );
+        assert_eq!(
+            signed_scalar(mapping_field(&plan.importer, "streamingMipmaps")),
+            0
+        );
+        assert_eq!(
+            signed_scalar(mapping_field(&plan.importer, "streamingMipmapsPriority")),
+            0
+        );
+    }
 }

@@ -400,16 +400,13 @@ pub(super) fn plan_routed_asset_files(
                         .get(entry.object.file_index)
                         .ok_or_else(|| {
                             invalid_project(format!(
-                                "Texture2D references absent SerializedFile {}",
+                                "texture references absent SerializedFile {}",
                                 entry.object.file_index
                             ))
                         })?;
-                let stream_content = if texture.view.image_data.is_empty() {
-                    if let Some(stream_info) = texture
-                        .view
-                        .stream_data
-                        .as_ref()
-                        .filter(|info| info.is_set())
+                let stream_content = if texture.view.image_data().is_empty() {
+                    if let Some(stream_info) =
+                        texture.view.stream_data().filter(|info| info.is_set())
                     {
                         match resolve_and_read_streamed_resource_info(
                             filesystem,
@@ -422,7 +419,7 @@ pub(super) fn plan_routed_asset_files(
                         )
                         .map_err(|error| {
                             invalid_project(format!(
-                                "file {} object {} PathID {} Texture2D stream {:?} could not be read: {error}",
+                                "file {} object {} PathID {} texture stream {:?} could not be read: {error}",
                                 entry.object.file_index,
                                 entry.object.object_index,
                                 entry.object.path_id,
@@ -436,7 +433,7 @@ pub(super) fn plan_routed_asset_files(
                                 unavailable_data_paths,
                             } => {
                                 return Err(invalid_project(format!(
-                                    "file {} object {} PathID {} Texture2D stream {:?} is missing; unavailable data paths: [{}]",
+                                    "file {} object {} PathID {} texture stream {:?} is missing; unavailable data paths: [{}]",
                                     entry.object.file_index,
                                     entry.object.object_index,
                                     entry.object.path_id,
@@ -446,7 +443,7 @@ pub(super) fn plan_routed_asset_files(
                             }
                             StreamedResourceContentResolution::Unset => {
                                 return Err(invalid_project(format!(
-                                    "file {} object {} PathID {} Texture2D stream {:?} became unset during resolution",
+                                    "file {} object {} PathID {} texture stream {:?} became unset during resolution",
                                     entry.object.file_index,
                                     entry.object.object_index,
                                     entry.object.path_id,
@@ -473,7 +470,7 @@ pub(super) fn plan_routed_asset_files(
                     )
                     .map_err(|error| {
                         invalid_project(format!(
-                            "file {} object {} PathID {} Texture2D image conversion failed: {error}",
+                            "file {} object {} PathID {} texture image conversion failed: {error}",
                             entry.object.file_index,
                             entry.object.object_index,
                             entry.object.path_id

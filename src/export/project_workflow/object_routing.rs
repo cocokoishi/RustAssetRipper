@@ -72,7 +72,7 @@ fn predefined_engine_shader_target(
                 return Err(invalid_project(format!(
                     "predefined Shader table row {} has unknown resource kind {other:?}",
                     line_index + 1
-                )))
+                )));
             }
         };
         let mut guid = [0; 16];
@@ -109,6 +109,20 @@ fn texture_has_exportable_image_payload(payload: &ParsedObjectPayload) -> bool {
     };
     view.width > 0
         && view.height > 0
+        && (!view.image_data.is_empty()
+            || view
+                .stream_data
+                .as_ref()
+                .is_some_and(|stream| stream.is_set() && stream.size > 0))
+}
+
+fn texture3d_has_exportable_image_payload(payload: &ParsedObjectPayload) -> bool {
+    let Ok(view) = crate::resources::texture_array::Texture3DView::from_value(&payload.root) else {
+        return false;
+    };
+    view.width > 0
+        && view.height > 0
+        && view.depth > 0
         && (!view.image_data.is_empty()
             || view
                 .stream_data
@@ -246,6 +260,13 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                 validate_decoded_object(object, object_info.path_id, reference_graph)?;
             }
             let facts = match &object.factory.kind {
+                FactoryAssetKind::TypeTreeObject
+                    if class_id == crate::resources::texture_array::TEXTURE3D_CLASS_ID =>
+                {
+                    // Texture3D has a source-generated collection even when its fields were
+                    // decoded through the owning TypeTree instead of a generated class body.
+                    ObjectClassFacts::new(class_id, payload.is_none())
+                }
                 FactoryAssetKind::TypeTreeObject => ObjectClassFacts::type_tree_object(class_id),
                 FactoryAssetKind::Unknown => ObjectClassFacts::with_known(class_id, false, false),
                 FactoryAssetKind::Unreadable => ObjectClassFacts::new(class_id, true),
@@ -380,6 +401,9 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                 && matches!(class_id, 28 | crate::resources::texture::CUBEMAP_CLASS_ID)
                 && matches!(&object.factory.kind, FactoryAssetKind::Generated(_))
                 && payload.is_some_and(texture_has_exportable_image_payload);
+            let texture3d_image_exportable = engine_guid.is_none()
+                && class_id == crate::resources::texture_array::TEXTURE3D_CLASS_ID
+                && payload.is_some_and(texture3d_has_exportable_image_payload);
             let lightmap_scene_directory = lightmap_texture_directories
                 .get(&(file_index, object_index))
                 .cloned();
@@ -390,14 +414,15 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                 );
             let texture_importer_supported =
                 TextureImporterLayout::for_project_version(project_version).is_some();
-            let cubemap_importer_supported =
-                class_id != crate::resources::texture::CUBEMAP_CLASS_ID
-                    || TextureImporterLayout::for_project_version(project_version)
-                        == Some(TextureImporterLayout::Unity2022_3);
+            let cubemap_importer_supported = class_id
+                != crate::resources::texture::CUBEMAP_CLASS_ID
+                || TextureImporterLayout::for_project_version(project_version)
+                    == Some(TextureImporterLayout::Unity2022_3);
             let texture_route_supported = texture_importer_supported
                 && cubemap_importer_supported
                 && ((texture_image_exportable && lightmap_scene_directory.is_none())
-                    || lightmap_image_route);
+                    || lightmap_image_route
+                    || (texture3d_image_exportable && lightmap_scene_directory.is_none()));
             let mut claim_facts = claim_facts_for_shader_text(facts, settings_facts, shader_text);
             claim_facts.audio_decode = audio_claim_decode;
             claim_facts.engine_file = engine_guid.is_some();
@@ -406,6 +431,7 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                     .as_ref()
                     .is_some_and(|script| !script.is_empty()),
                 128 => font_data.is_some_and(|data| !data.is_empty()),
+                crate::resources::texture_array::TEXTURE3D_CLASS_ID => texture3d_image_exportable,
                 _ => false,
             };
             if class_id == 128 {
@@ -414,7 +440,9 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                 // LightingDataProcessor assigns the generated LightingDataAsset as the
                 // main asset for every texture referenced by LightmapSettings.Lightmaps.
                 claim_facts.main = ClaimMainKind::LightingData;
-            } else if texture_route_supported {
+            } else if texture_route_supported
+                && class_id != crate::resources::texture_array::TEXTURE3D_CLASS_ID
+            {
                 // SpriteProcessor assigns exportable textures a generated main asset, including
                 // textures referenced by Sprite objects. Keep image routing in the ordinary
                 // registration walk with the processed fact.
@@ -504,20 +532,23 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                 None
             };
             let texture_export = if texture_route_supported {
-                let expected_exporter = if lightmap_image_route {
-                    "LightmapTextureAssetExporter"
-                } else {
-                    "TextureAssetExporter"
-                };
+                let expected_exporter =
+                    if class_id == crate::resources::texture_array::TEXTURE3D_CLASS_ID {
+                        "TextureArrayAssetExporter"
+                    } else if lightmap_image_route {
+                        "LightmapTextureAssetExporter"
+                    } else {
+                        "TextureAssetExporter"
+                    };
                 if selection.exporter != expected_exporter {
                     return Err(invalid_project(format!(
-                        "generated Texture2D selected {}, expected the registered {expected_exporter}",
+                        "generated texture class {class_id} selected {}, expected the registered {expected_exporter}",
                         selection.exporter,
                     )));
                 }
                 let payload = payload.ok_or_else(|| {
                     invalid_project(
-                        "texture image exporter was selected without decoded Texture2D fields",
+                        "texture image exporter was selected without decoded texture fields",
                     )
                 })?;
                 let asset_bundle_name = object_asset_bundle_name(payload);
@@ -527,7 +558,15 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                     .unity_version_text
                     .as_deref()
                     .and_then(crate::resources::vertex_data_blob::UnityVersion::parse);
-                let plan = if class_id == crate::resources::texture::CUBEMAP_CLASS_ID {
+                let plan = if class_id == crate::resources::texture_array::TEXTURE3D_CLASS_ID {
+                    plan_texture3d_project_export_for_source_version(
+                        &payload.root,
+                        project_version,
+                        source_unity_version,
+                        settings,
+                        asset_bundle_name.as_deref(),
+                    )
+                } else if class_id == crate::resources::texture::CUBEMAP_CLASS_ID {
                     plan_cubemap_project_export_for_source_version(
                         &payload.root,
                         project_version,
@@ -585,7 +624,7 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                         "the imported manager has no matching script type; its source pointer is retained and no .cs file is emitted"
                     }
                     (true, _) => {
-                            "the assembly is absent from the imported catalog; its source GUID/fileID pointer is retained and the missing script DLL is not fabricated"
+                        "the assembly is absent from the imported catalog; its source GUID/fileID pointer is retained and the missing script DLL is not fabricated"
                     }
                     (false, _) => {
                         "the source script content is unavailable; its pointer is retained and no .cs file is emitted"
@@ -634,106 +673,118 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                 (ObjectRoute::EngineRedirect, "", None)
             } else {
                 match kind {
-                ExportCollectionKind::Manager => (ObjectRoute::Manager, "", None),
-                ExportCollectionKind::Unknown => (ObjectRoute::Unknown, "", None),
-                ExportCollectionKind::Unreadable => (ObjectRoute::Unreadable, "", None),
-                ExportCollectionKind::Asset if selection.exporter == "TextAssetExporter" => {
-                    (ObjectRoute::TextAsset, "", None)
-                }
-                ExportCollectionKind::Asset if selection.exporter == "FontAssetExporter" => {
-                    if class_id != 128 || font_data.map_or(true, |data| data.is_empty()) {
-                        return Err(invalid_project(format!(
-                            "FontAssetExporter selected class {class_id} at {file_index}:{} without non-empty Font.m_FontData",
-                            object_info.path_id
-                        )));
+                    ExportCollectionKind::Manager => (ObjectRoute::Manager, "", None),
+                    ExportCollectionKind::Unknown => (ObjectRoute::Unknown, "", None),
+                    ExportCollectionKind::Unreadable => (ObjectRoute::Unreadable, "", None),
+                    ExportCollectionKind::Asset if selection.exporter == "TextAssetExporter" => {
+                        (ObjectRoute::TextAsset, "", None)
                     }
-                    (ObjectRoute::FontBinary, "", None)
-                }
-                ExportCollectionKind::Asset if audio_binary_route => {
-                    (ObjectRoute::AudioBinary, "", None)
-                }
-                ExportCollectionKind::Asset if audio_yaml_route => {
-                    (ObjectRoute::AudioYaml, "", None)
-                }
-                ExportCollectionKind::Asset if selection.exporter == "YamlShaderExporter" => {
-                    (ObjectRoute::ShaderYaml, "", None)
-                }
-                ExportCollectionKind::Asset
-                    if selection.exporter == "DummyShaderTextExporter"
-                        || selection.exporter == "SimpleShaderExporter" =>
-                {
-                    (ObjectRoute::ShaderText, "", None)
-                }
-                ExportCollectionKind::Asset if texture_export.is_some() => {
-                    (ObjectRoute::TextureImage, "", None)
-                }
-                ExportCollectionKind::Asset => {
-                    (ObjectRoute::Asset, "", asset_family_fallback(selection.collection_name))
-                }
-                ExportCollectionKind::Script | ExportCollectionKind::EmptyScript
-                    if let Some(script) = script_export.as_ref() => (
-                    if script.export_type == AssemblyExportType::Save
-                        || (script.export_type == AssemblyExportType::Skip
-                            && assembly_manager_is_set)
-                        || (script.export_type == AssemblyExportType::Decompile
-                            && assembly_manager_is_set
-                            && script.source_script_present == Some(false))
+                    ExportCollectionKind::Asset if selection.exporter == "FontAssetExporter" => {
+                        if class_id != 128 || font_data.map_or(true, |data| data.is_empty()) {
+                            return Err(invalid_project(format!(
+                                "FontAssetExporter selected class {class_id} at {file_index}:{} without non-empty Font.m_FontData",
+                                object_info.path_id
+                            )));
+                        }
+                        (ObjectRoute::FontBinary, "", None)
+                    }
+                    ExportCollectionKind::Asset if audio_binary_route => {
+                        (ObjectRoute::AudioBinary, "", None)
+                    }
+                    ExportCollectionKind::Asset if audio_yaml_route => {
+                        (ObjectRoute::AudioYaml, "", None)
+                    }
+                    ExportCollectionKind::Asset if selection.exporter == "YamlShaderExporter" => {
+                        (ObjectRoute::ShaderYaml, "", None)
+                    }
+                    ExportCollectionKind::Asset
+                        if selection.exporter == "DummyShaderTextExporter"
+                            || selection.exporter == "SimpleShaderExporter" =>
                     {
-                        ObjectRoute::ScriptPointerOnly
-                    } else {
-                        ObjectRoute::Script
-                    },
-                    "",
-                    None,
-                ),
-                ExportCollectionKind::Script | ExportCollectionKind::EmptyScript
-                    if class_id == 115 => (
-                    ObjectRoute::Skipped,
-                    "injected MonoScripts have no standalone script file in the source exporter",
-                    None,
-                ),
-                ExportCollectionKind::Scene | ExportCollectionKind::Prefab => (
-                    ObjectRoute::Asset,
-                    "",
-                    Some(
-                        "the specialized collection renderer is not ported; the object was written \
-                         through the generic asset family",
+                        (ObjectRoute::ShaderText, "", None)
+                    }
+                    ExportCollectionKind::Asset if texture_export.is_some() => {
+                        (ObjectRoute::TextureImage, "", None)
+                    }
+                    ExportCollectionKind::Asset => (
+                        ObjectRoute::Asset,
+                        "",
+                        asset_family_fallback(selection.collection_name),
                     ),
-                ),
-                ExportCollectionKind::Script | ExportCollectionKind::EmptyScript => (
-                    ObjectRoute::Skipped,
-                    "a script export collection was selected without a MonoScript object",
-                    None,
-                ),
-                ExportCollectionKind::Fail => (
-                    ObjectRoute::Skipped,
-                    "FailExportCollection writes nothing and reports a failed export",
-                    None,
-                ),
-                ExportCollectionKind::Empty => (
-                    ObjectRoute::Skipped,
-                    "EmptyExportCollection is not exportable; the baseline writes nothing",
-                    None,
-                ),
-                ExportCollectionKind::Skip => (
-                    ObjectRoute::Skipped,
-                    "SkipExportCollection is not exportable; references become missing references",
-                    None,
-                ),
-                ExportCollectionKind::Deleted => (
-                    ObjectRoute::Skipped,
-                    "DeletedAssetsExportCollection is not exportable",
-                    None,
-                ),
-                ExportCollectionKind::Redirect => (
-                    ObjectRoute::Skipped,
-                    "RedirectExportCollection is not exportable",
-                    None,
-                ),
+                    ExportCollectionKind::Script | ExportCollectionKind::EmptyScript
+                        if let Some(script) = script_export.as_ref() =>
+                    {
+                        (
+                            if script.export_type == AssemblyExportType::Save
+                                || (script.export_type == AssemblyExportType::Skip
+                                    && assembly_manager_is_set)
+                                || (script.export_type == AssemblyExportType::Decompile
+                                    && assembly_manager_is_set
+                                    && script.source_script_present == Some(false))
+                            {
+                                ObjectRoute::ScriptPointerOnly
+                            } else {
+                                ObjectRoute::Script
+                            },
+                            "",
+                            None,
+                        )
+                    }
+                    ExportCollectionKind::Script | ExportCollectionKind::EmptyScript
+                        if class_id == 115 =>
+                    {
+                        (
+                            ObjectRoute::Skipped,
+                            "injected MonoScripts have no standalone script file in the source exporter",
+                            None,
+                        )
+                    }
+                    ExportCollectionKind::Scene | ExportCollectionKind::Prefab => (
+                        ObjectRoute::Asset,
+                        "",
+                        Some(
+                            "the specialized collection renderer is not ported; the object was written \
+                         through the generic asset family",
+                        ),
+                    ),
+                    ExportCollectionKind::Script | ExportCollectionKind::EmptyScript => (
+                        ObjectRoute::Skipped,
+                        "a script export collection was selected without a MonoScript object",
+                        None,
+                    ),
+                    ExportCollectionKind::Fail => (
+                        ObjectRoute::Skipped,
+                        "FailExportCollection writes nothing and reports a failed export",
+                        None,
+                    ),
+                    ExportCollectionKind::Empty => (
+                        ObjectRoute::Skipped,
+                        "EmptyExportCollection is not exportable; the baseline writes nothing",
+                        None,
+                    ),
+                    ExportCollectionKind::Skip => (
+                        ObjectRoute::Skipped,
+                        "SkipExportCollection is not exportable; references become missing references",
+                        None,
+                    ),
+                    ExportCollectionKind::Deleted => (
+                        ObjectRoute::Skipped,
+                        "DeletedAssetsExportCollection is not exportable",
+                        None,
+                    ),
+                    ExportCollectionKind::Redirect => (
+                        ObjectRoute::Skipped,
+                        "RedirectExportCollection is not exportable",
+                        None,
+                    ),
                 }
             };
-            let fallback_reason = if texture_image_exportable && !texture_route_supported {
-                Some("the source TextureExportCollection image/importer route is not yet ported for this Unity importer version or Sprite group")
+            let fallback_reason = if (texture_image_exportable || texture3d_image_exportable)
+                && !texture_route_supported
+            {
+                Some(
+                    "the source TextureExportCollection image/importer route is not yet ported for this Unity importer version or Sprite group",
+                )
             } else {
                 fallback_reason
             };
@@ -1050,13 +1101,13 @@ fn font_collection_subasset<'object>(
             return Err(invalid_project(format!(
                 "Font {}:{} non-null {field_name} PPtr was classified as null",
                 root.object.file_index, root.object.path_id
-            )))
+            )));
         }
         unresolved => {
             return Err(invalid_project(format!(
                 "Font {}:{} {field_name} PPtr ({file_id}, {path_id}) is unresolved: {unresolved:?}",
                 root.object.file_index, root.object.path_id
-            )))
+            )));
         }
     };
     let target = objects
