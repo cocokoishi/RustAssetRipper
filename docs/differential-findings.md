@@ -2429,7 +2429,7 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Input and reference | 20 青岚山河卷 dummy shaders (ASE/poiyomi/Hidden); TypeTree probes (5.6/2019.4/2022.3) all showing `float m_DefValue[0..3]`; frozen dummy property rendering. |
 | Before-fix difference | Rust read fictional `m_DefValue_0_` fields, kept zeros, and rendered `Range(0, 0) = 0`. |
 | Rust change | Read the literal bracket names; documented the serialization-vs-generated sanitization rule; new `_Wind` regression test. |
-| Verification | `AE_Leaves.shader` SHA-256-identical; all 20 shaders byte-identical in r23; `resources::shader` 16/16; `export::` 512/512. |
+| Verification | `AE_Leaves.shader` SHA-256-identical; all 20 shaders byte-identical in r23; all 8 松月竹庭 lilToon shaders byte-identical in r12; `resources::shader` 16/16; `export::` 514/514. |
 | Limits | None known. Unity Editor import/runtime and UABEA were not run. |
 
 ## DIFF-OPAQUE-OGG-FRAMING-001 - Ogg page framing with identical packet streams

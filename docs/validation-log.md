@@ -4843,6 +4843,11 @@ These results do not pass the first-phase gate. The reference .NET solution buil
 - Results on latest exports: 青岚山河卷 r23 34,416/0, 青岚古境 r3 3,867/0, 云栖仙府 r3 5,944/0, 玉京烟霞 r3 14,029/0, 烟雨长亭 r1 2,311/0, 松月竹庭 r11 656/0 — 61,223 references checked with zero dangling. (Two tool bugs found and fixed during development: missed `.anim`/`.mat`/`.renderTexture` includes and missing font/scene exemptions; the LightingData→scene 102900000 case was verified conventional against source, not a gap.)
 - Evidence: `DIFF-REFS-INTEGRITY-001`. Unity Editor import/runtime and UABEA were not run; import-equivalence of the resolved graph is static evidence only.
 
+## 2026-10-12 松月竹庭 r12 replay proves shader-fix breadth — no code change
+
+- Fresh release export command `target\release\assetripper-rs.exe export-project target\real-acceptance-20261012-avtr松月竹庭-r12 青岚雅苑` exited 0 (1 SerializedFile, 1,870 objects, 352 assets). Audit vs frozen source export: document table identical to r11 across every class (all repaired slices hold); opaque identical 17→25 with different 69→61 — the 8 resolved files are exactly 松月竹庭's 8 lilToon shaders, proving the DefValue bracket fix generalizes beyond 青岚山河卷's ASE/poiyomi set.
+- Evidence extends `DIFF-OPAQUE-SHADER-PROPS-001`. Unity Editor import/runtime and UABEA were not run; the avatar and overall product remain unaccepted.
+
 ## 2026-10-12 青岚古境 opaque proof plus controller export-rule mapping — no product change
 
 - 青岚古境 r3 opaque fully classified with committed proof tools (`tools/compare-png-pixels.ps1`, `tools/compare-ogg-packets.ps1`, promoted from round scratch after third reuse): 52 byte-identical + 439/439 pixel-identical PNGs + 24/24 packet-identical OGGs (49–1,411 packets each) = 515/515 with zero unexplained bytes.
