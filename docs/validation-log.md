@@ -4837,6 +4837,12 @@ These results do not pass the first-phase gate. The reference .NET solution buil
 - Conclusion: Rust preserves 21 KB of authored bundle bytes with consistent references; the frozen source drops the object and remaps the slot to the engine builtin. Per the source-of-truth hierarchy (serialized bytes first; reference not infallible), Rust's behavior stands as the defensible one — recorded as a known acceptable difference, not a bug. Open micro-question: byte-equality of the bundle texture against Unity's engine builtin was not checked (would need engine bytes).
 - Evidence: `DIFF-青岚古境-MATERIAL-BUILTIN-001`. Unity Editor import/runtime and UABEA were not run.
 
+## 2026-10-12 青岚古境 opaque proof plus controller export-rule mapping — no product change
+
+- 青岚古境 r3 opaque fully classified with committed proof tools (`tools/compare-png-pixels.ps1`, `tools/compare-ogg-packets.ps1`, promoted from round scratch after third reuse): 52 byte-identical + 439/439 pixel-identical PNGs + 24/24 packet-identical OGGs (49–1,411 packets each) = 515/515 with zero unexplained bytes.
+- Export-rule mapping completed at the source level: `ProjectExporter.CreateCollections` visits every bundle asset; `AnimatorControllerExporter` claims only `MainAsset is IAnimatorController`; everything else falls through the exporter stack to `DefaultYamlExporter` (always claims). Bundle-original sub-assets replaced by processed objects keep `MainAsset == null` (the processor assigns it only to processed-hierarchy assets; `MainAssetProcessor` covers just Font/TerrainData) — yet only 66 export separately, so the replaced originals must leave `FetchAssets()` or be otherwise suppressed at export time. That last link (removal vs suppression site) is the one unverified step; the port spec is otherwise complete.
+- Evidence extends `DIFF-青岚古境-CONTROLLER-001`. Unity Editor import/runtime and UABEA were not run.
+
 ## 2026-10-12 云栖仙府 opaque proof plus controller orphan analysis — r3 replay in flight
 
 - 云栖仙府 r3 opaque fully classified: 44 byte-identical files plus 231/231 pixel-identical PNGs (round 18) plus 12/12 packet-identical OGGs (this round, per-file packet counts 36–1,157, all matching) — zero unexplained opaque bytes. Non-ASCII OGG names resolve through the audit junctions. Evidence extends `DIFF-云栖仙府-BREADTH-001`.
