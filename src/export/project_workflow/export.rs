@@ -155,6 +155,7 @@ fn validate_workspace_project_export<'inputs, 'provider, 'graph>(
             .map(|&(file_index, object_index)| source_object_key(file_index, object_index)),
     );
     let scriptable_object_groups = prepare_scriptable_object_groups(
+        inputs.workspace,
         inputs.objects,
         inputs.reference_graph,
         &already_owned_scene_objects,

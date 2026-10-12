@@ -2352,6 +2352,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Verification | `cargo test --release --lib --locked export::workspace_yaml::object_conversion::tests -- --nocapture` passed 8/8, including the new manager-family regression (104/157/196 have `m_ObjectHideFlags`, lack the three PPtr base fields); `cargo test --release --lib --locked export::` passed 501/501 (1 ignored); `cargo build --release --locked --bin assetripper-rs` exited 0. Fresh full export `target/real-acceptance-current-青岚山河卷-r8` exited 0: 2 SerializedFiles, 72,350 objects, 1,087 asset files, 243,562,238 asset bytes, 6 support files, 2 post-exporter files. Newly byte-exact: 81 (1/1), 193 (1,456/1,456), 196 (1/1), 223 (2/2), 224 (19/19). All prior exact and GUID-semantic slices recheck unchanged. |
 | Limits | Class 320 bindings, class-4 float prints, Default-Material direction, and the lighting path remain open (see validation log). Unity Editor import/runtime and UABEA were not run. |
 
+## DIFF-REAL-青岚山河卷-TIMELINE-IDS-001 - ScriptableObject group child export IDs use pseudo-random class-prefixed hashing
+
+| Field | Finding |
+|---|---|
+| Input and reference | `青岚山河卷` (Unity 2022.3.6f1), `Assets/MonoBehaviour/Lost Kitten.playable` child documents; frozen `AssetsExportCollection.GenerateExportID` (`AssetRipper.Export.UnityProjects/Project/AssetsExportCollection.cs` line 53-56) and `ExportIdHandler.GetPseudoRandomExportId` (class-114 prefix plus `XxHash64(seed) mod 10^15`, seed = `m_exportIDs.Count`). |
+| Before-fix difference | Source timeline children carry `114709254077376921`, `114730242686860875`, ... while Rust planned sequential `11400001`, `11400002`, ... via `get_main_export_id(114, n+1)`. Scene binding keys/values/order/targets otherwise matched, so only the key fileIDs (and the playable asset's own document IDs) diverged. |
+| Rust change | `prepare_scriptable_object_groups` plans each child with `get_pseudo_random_export_id(114, zero_based_insertion_seed, child_collection_version)`, threading the workspace through the export context with explicit version errors. Covers TimelineAsset and PostProcessProfile groups generically. |
+| Verification | Scratch reproduction of the first four frozen IDs from the repo's own hash routine before editing; new 4-vector contract test; `export::ids::` 5/5; `export::` 505/505; warnings-denied Clippy; release build; r13 replay (timeline IDs exact, timeline file GUID-normalized identical, scene 49,862 exact + 21,375 semGUID with zero residuals) and the 松月竹庭 r8 regression replay (identical to r7 on every headline metric), all recorded in the validation-log entry above. |
+| Limits | Unity Editor import/runtime and UABEA were not run. The world scene surface is at parity; product acceptance remains open. |
+
 ## DIFF-REAL-青岚山河卷-LIGHTING-001 - LightingSettings editor defaults and scene-subfolder paths
 
 | Field | Finding |

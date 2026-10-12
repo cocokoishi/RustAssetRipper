@@ -188,6 +188,28 @@ mod tests {
     }
 
     #[test]
+    fn pseudo_random_export_ids_match_frozen_timeline_group_children() {
+        // Frozen source `Lost Kitten.playable` child export IDs in document order
+        // (after the `11400000` root) from `青岚山河卷` (Unity 2022.3.6f1): the
+        // source `AssetsExportCollection.GenerateExportID` assigns
+        // `GetPseudoRandomExportId(asset, m_exportIDs.Count)`, i.e. zero-based
+        // insertion seeds, not sequential `11400001`-style modifiers.
+        let version_2022_3_6 = version("2022.3.6f1");
+        for (seed, expected) in [
+            (0, 114709254077376921i64),
+            (1, 114730242686860875i64),
+            (2, 114724804207875695i64),
+            (3, 114618682377417806i64),
+        ] {
+            assert_eq!(
+                get_pseudo_random_export_id(114, seed, version_2022_3_6),
+                expected,
+                "timeline group child seed {seed}"
+            );
+        }
+    }
+
+    #[test]
     fn pseudo_random_values_remain_unique_across_the_baseline_million_seed_probe() {
         let mut values = HashSet::new();
         values.try_reserve(1_000_000).unwrap();

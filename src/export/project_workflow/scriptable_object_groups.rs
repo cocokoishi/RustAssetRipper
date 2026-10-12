@@ -29,6 +29,7 @@ struct GroupRootCandidate {
 /// Timeline members are emitted into one `.playable` YAML stream. Children referenced from more
 /// than one group remain standalone assets, matching the source processor's unique-child rule.
 pub(super) fn prepare_scriptable_object_groups(
+    workspace: &SerializedFileWorkspace,
     objects: &ObjectWorkspace,
     reference_graph: &MultiFileReferenceGraph<'_>,
     already_owned: &HashSet<ExportAssetObjectKey>,
@@ -111,16 +112,16 @@ pub(super) fn prepare_scriptable_object_groups(
             {
                 continue;
             }
-            let modifier = u32::try_from(children.len().checked_add(1).ok_or_else(|| {
-                invalid_project("ScriptableObjectGroup child file ID modifier overflows")
-            })?)
-            .map_err(|_| invalid_project("ScriptableObjectGroup has too many child assets"))?;
-            let file_id =
-                crate::export::ids::get_main_export_id(114, modifier).map_err(|error| {
-                    invalid_project(format!(
-                        "ScriptableObjectGroup child file ID could not be planned: {error}"
-                    ))
-                })?;
+            let seed = i32::try_from(children.len()).map_err(|_| {
+                invalid_project("ScriptableObjectGroup child export ID seed overflows")
+            })?;
+            // The frozen AssetsExportCollection.GenerateExportID assigns
+            // GetPseudoRandomExportId(asset, m_exportIDs.Count): the seed is the
+            // zero-based insertion index and the version is the child's collection
+            // version, not a sequential 11400001-style modifier.
+            let child_version =
+                source_file_unity_version(workspace, child.0, "ScriptableObjectGroup child")?;
+            let file_id = crate::export::ids::get_pseudo_random_export_id(114, seed, child_version);
             children.push(ScriptableObjectGroupMemberPlan {
                 file_index: child.0,
                 object_index: child.1,
@@ -140,6 +141,33 @@ pub(super) fn prepare_scriptable_object_groups(
     Ok(PreparedScriptableObjectGroups {
         roots: prepared_roots,
         member_keys,
+    })
+}
+
+fn source_file_unity_version(
+    workspace: &SerializedFileWorkspace,
+    file_index: usize,
+    context: &str,
+) -> Result<SceneUnityVersion, Box<dyn Error>> {
+    let file = workspace.files().get(file_index).ok_or_else(|| {
+        invalid_project(format!(
+            "{context} refers to absent workspace file {file_index}"
+        ))
+    })?;
+    let text = file
+        .metadata
+        .prefix
+        .unity_version_text
+        .as_deref()
+        .ok_or_else(|| {
+            invalid_project(format!(
+                "{context} workspace file {file_index} has no Unity version for export ID planning"
+            ))
+        })?;
+    SceneUnityVersion::parse(text).ok_or_else(|| {
+        invalid_project(format!(
+            "{context} workspace file {file_index} has invalid Unity version {text:?}"
+        ))
     })
 }
 
