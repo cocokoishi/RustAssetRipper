@@ -1,0 +1,199 @@
+# EngineAssetsTpk band 2022.2.15f1 Shader name and ordered property-name signatures; source TPK resource order.
+# Probed with: dotnet run --project tools/probes/engine-assets/EngineAssetsProbe.csproj --configuration Release -p:ReferenceRoot=<isolated build> -- tsv <request-version> <materialsOut> <shadersOut>
+17|D|Hidden/InternalErrorShader|
+68|D|Hidden/InternalClear|
+69|D|Hidden/Internal-Colored|_Color _SrcBlend _DstBlend _ZWrite _ZTest _Cull _ZBias
+70|D|Hidden/Internal-Loading|
+10101|D|GUI/Text Shader|_MainTex _Color
+10755|D|Hidden/FrameDebuggerRenderTargetDisplay|_MainTex
+1|F|Legacy Shaders/Diffuse Fast|_Color _MainTex
+2|F|Legacy Shaders/Bumped Diffuse|_Color _MainTex _BumpMap
+3|F|Legacy Shaders/Specular|_Color _SpecColor _Shininess _MainTex
+4|F|Legacy Shaders/Bumped Specular|_Color _SpecColor _Shininess _MainTex _BumpMap
+5|F|Legacy Shaders/Diffuse Detail|_Color _MainTex _Detail
+6|F|Legacy Shaders/VertexLit|_Color _SpecColor _Emission _Shininess _MainTex
+7|F|Legacy Shaders/Diffuse|_Color _MainTex
+8|F|Legacy Shaders/Parallax Diffuse|_Color _Parallax _MainTex _BumpMap _ParallaxMap
+9|F|Legacy Shaders/Parallax Specular|_Color _SpecColor _Shininess _Parallax _MainTex _BumpMap _ParallaxMap
+10|F|Legacy Shaders/Self-Illumin/Diffuse|_Color _MainTex _Illum _Emission
+11|F|Legacy Shaders/Self-Illumin/Bumped Diffuse|_Color _MainTex _Illum _BumpMap _Emission
+12|F|Legacy Shaders/Self-Illumin/Specular|_Color _SpecColor _Shininess _MainTex _Illum _Emission
+13|F|Legacy Shaders/Self-Illumin/Bumped Specular|_Color _SpecColor _Shininess _MainTex _Illum _BumpMap _Emission
+14|F|Legacy Shaders/Self-Illumin/VertexLit|_Color _SpecColor _Shininess _MainTex _Illum _Emission
+15|F|Legacy Shaders/Self-Illumin/Parallax Diffuse|_Color _Parallax _MainTex _Illum _BumpMap _ParallaxMap _Emission
+16|F|Legacy Shaders/Self-Illumin/Parallax Specular|_Color _SpecColor _Shininess _Parallax _MainTex _Illum _BumpMap _ParallaxMap _Emission
+19|F|Hidden/Internal-StencilWrite|
+20|F|Legacy Shaders/Reflective/Diffuse|_Color _ReflectColor _MainTex _Cube
+21|F|Legacy Shaders/Reflective/Bumped Diffuse|_Color _ReflectColor _MainTex _Cube _BumpMap
+22|F|Legacy Shaders/Reflective/Specular|_Color _SpecColor _Shininess _ReflectColor _MainTex _Cube
+23|F|Legacy Shaders/Reflective/Bumped Specular|_Color _SpecColor _Shininess _ReflectColor _MainTex _Cube _BumpMap
+24|F|Legacy Shaders/Reflective/VertexLit|_Color _ReflectColor _MainTex _Cube
+25|F|Legacy Shaders/Reflective/Bumped Unlit|_Color _ReflectColor _MainTex _Cube _BumpMap
+26|F|Legacy Shaders/Reflective/Bumped VertexLit|_Color _SpecColor _Shininess _ReflectColor _MainTex _Cube _BumpMap
+27|F|Legacy Shaders/Reflective/Parallax Diffuse|_Color _ReflectColor _Parallax _MainTex _Cube _BumpMap _ParallaxMap
+28|F|Legacy Shaders/Reflective/Parallax Specular|_Color _SpecColor _Shininess _ReflectColor _Parallax _MainTex _Cube _BumpMap _ParallaxMap
+30|F|Legacy Shaders/Transparent/Diffuse|_Color _MainTex
+31|F|Legacy Shaders/Transparent/Bumped Diffuse|_Color _MainTex _BumpMap
+32|F|Legacy Shaders/Transparent/Specular|_Color _SpecColor _Shininess _MainTex
+33|F|Legacy Shaders/Transparent/Bumped Specular|_Color _SpecColor _Shininess _MainTex _BumpMap
+34|F|Legacy Shaders/Transparent/VertexLit|_Color _SpecColor _Emission _Shininess _MainTex
+35|F|Legacy Shaders/Transparent/Parallax Diffuse|_Color _Parallax _MainTex _BumpMap _ParallaxMap
+36|F|Legacy Shaders/Transparent/Parallax Specular|_Color _SpecColor _Shininess _Parallax _MainTex _BumpMap _ParallaxMap
+40|F|Legacy Shaders/Lightmapped/VertexLit|_Color _SpecColor _Shininess _MainTex _LightMap
+41|F|Legacy Shaders/Lightmapped/Diffuse|_Color _MainTex _LightMap
+42|F|Legacy Shaders/Lightmapped/Bumped Diffuse|_Color _MainTex _BumpMap _LightMap
+43|F|Legacy Shaders/Lightmapped/Specular|_Color _SpecColor _Shininess _MainTex _LightMap
+44|F|Legacy Shaders/Lightmapped/Bumped Specular|_Color _SpecColor _Shininess _MainTex _BumpMap _LightMap
+45|F|Standard (Specular setup)|_Color _MainTex _Cutoff _Glossiness _GlossMapScale _SmoothnessTextureChannel _SpecColor _SpecGlossMap _SpecularHighlights _GlossyReflections _BumpScale _BumpMap _Parallax _ParallaxMap _OcclusionStrength _OcclusionMap _EmissionColor _EmissionMap _DetailMask _DetailAlbedoMap _DetailNormalMapScale _DetailNormalMap _UVSec _Mode _SrcBlend _DstBlend _ZWrite
+46|F|Standard|_Color _MainTex _Cutoff _Glossiness _GlossMapScale _SmoothnessTextureChannel _Metallic _MetallicGlossMap _SpecularHighlights _GlossyReflections _BumpScale _BumpMap _Parallax _ParallaxMap _OcclusionStrength _OcclusionMap _EmissionColor _EmissionMap _DetailMask _DetailAlbedoMap _DetailNormalMapScale _DetailNormalMap _UVSec _Mode _SrcBlend _DstBlend _ZWrite
+47|F|Autodesk Interactive|_Color _MainTex _Cutoff _Glossiness _SpecGlossMap _Metallic _MetallicGlossMap _SpecularHighlights _GlossyReflections _BumpScale _BumpMap _Parallax _ParallaxMap _OcclusionStrength _OcclusionMap _EmissionColor _EmissionMap _DetailMask _DetailAlbedoMap _DetailNormalMapScale _DetailNormalMap _UVSec _Mode _SrcBlend _DstBlend _ZWrite
+50|F|Legacy Shaders/Transparent/Cutout/VertexLit|_Color _SpecColor _Emission _Shininess _MainTex _Cutoff
+51|F|Legacy Shaders/Transparent/Cutout/Diffuse|_Color _MainTex _Cutoff
+52|F|Legacy Shaders/Transparent/Cutout/Bumped Diffuse|_Color _MainTex _BumpMap _Cutoff
+53|F|Legacy Shaders/Transparent/Cutout/Specular|_Color _SpecColor _Shininess _MainTex _Cutoff
+54|F|Legacy Shaders/Transparent/Cutout/Bumped Specular|_Color _SpecColor _Shininess _MainTex _BumpMap _Cutoff
+62|F|Hidden/Internal-DepthNormalsTexture|_MainTex _Cutoff _Color
+64|F|Hidden/Internal-ScreenSpaceShadows|_ShadowMapTexture _ODSWorldTexture
+65|F|Hidden/Internal-CombineDepthNormals|
+66|F|Hidden/BlitCopy|_MainTex _Color
+67|F|Hidden/BlitCopyDepth|_MainTex
+68|F|Hidden/ConvertTexture|
+69|F|Hidden/Internal-DeferredShading|_LightTexture0 _LightTextureB0 _ShadowMapTexture _SrcBlend _DstBlend
+74|F|Hidden/Internal-DeferredReflections|_SrcBlend _DstBlend
+75|F|Hidden/Internal-MotionVectors|
+100|F|Legacy Shaders/Decal|_Color _MainTex _DecalTex
+101|F|FX/Flare|_MainTex
+102|F|Hidden/Internal-Flare|
+103|F|Skybox/Cubemap|_Tint _Exposure _Rotation _Tex
+104|F|Skybox/6 Sided|_Tint _Exposure _Rotation _FrontTex _BackTex _LeftTex _RightTex _UpTex _DownTex
+105|F|Hidden/Internal-Halo|
+106|F|Skybox/Procedural|_SunDisk _SunSize _SunSizeConvergence _AtmosphereThickness _SkyTint _GroundColor _Exposure
+107|F|Hidden/BlitCopyWithDepth|_MainTex _Color
+108|F|Skybox/Panoramic|_Tint _Exposure _Rotation _MainTex _Mapping _ImageType _MirrorOnBack _Layout
+109|F|Hidden/BlitToDepth|_MainTex _Color
+110|F|Hidden/BlitToDepth_MSAA|_MainTex
+111|F|Hidden/BlitCopyHDRTonemap|_MainTex _NitsForPaperWhite _ColorGamut _ForceGammaToLinear
+113|F|Hidden/Internal-DebugPattern|_MainTex
+200|F|Legacy Shaders/Particles/Additive|_TintColor _MainTex _InvFade
+201|F|Legacy Shaders/Particles/~Additive-Multiply|_TintColor _MainTex _InvFade
+202|F|Legacy Shaders/Particles/Additive (Soft)|_MainTex _InvFade
+203|F|Legacy Shaders/Particles/Alpha Blended|_TintColor _MainTex _InvFade
+205|F|Legacy Shaders/Particles/Multiply|_MainTex _InvFade
+206|F|Legacy Shaders/Particles/Multiply (Double)|_MainTex _InvFade
+207|F|Legacy Shaders/Particles/Alpha Blended Premultiply|_MainTex _InvFade
+208|F|Legacy Shaders/Particles/VertexLit Blended|_EmisColor _MainTex
+209|F|Legacy Shaders/Particles/Anim Alpha Blended|_TintColor _MainTex _InvFade
+210|F|Particles/Standard Surface|_MainTex _Color _Cutoff _MetallicGlossMap _Metallic _Glossiness _BumpScale _BumpMap _EmissionColor _EmissionMap _DistortionStrength _DistortionBlend _SoftParticlesNearFadeDistance _SoftParticlesFarFadeDistance _CameraNearFadeDistance _CameraFarFadeDistance _Mode _FlipbookMode _LightingEnabled _DistortionEnabled _EmissionEnabled _BlendOp _SrcBlend _DstBlend _ZWrite _Cull _SoftParticlesEnabled _CameraFadingEnabled _SoftParticleFadeParams _CameraFadeParams _DistortionStrengthScaled
+211|F|Particles/Standard Unlit|_MainTex _Color _Cutoff _BumpScale _BumpMap _EmissionColor _EmissionMap _DistortionStrength _DistortionBlend _SoftParticlesNearFadeDistance _SoftParticlesFarFadeDistance _CameraNearFadeDistance _CameraFarFadeDistance _Mode _ColorMode _FlipbookMode _LightingEnabled _DistortionEnabled _EmissionEnabled _BlendOp _SrcBlend _DstBlend _ZWrite _Cull _SoftParticlesEnabled _CameraFadingEnabled _SoftParticleFadeParams _CameraFadeParams _ColorAddSubDiff _DistortionStrengthScaled
+9000|F|Hidden/Internal-GUITextureClip|_MainTex
+9001|F|Hidden/Internal-GUITextureClipText|_MainTex
+9002|F|Hidden/Internal-GUITexture|_MainTex
+9003|F|Hidden/Internal-GUITextureBlit|_MainTex
+9004|F|Hidden/Internal-GUIRoundedRect|_MainTex _SrcBlend _DstBlend
+9007|F|Hidden/Internal-GUIRoundedRectWithColorPerBorder|_MainTex _SrcBlend _DstBlend
+9100|F|Hidden/Internal-UIRDefault|_MainTex _FontTex _CustomTex _Color
+9101|F|Hidden/Internal-UIRAtlasBlitCopy|_MainTex0 _MainTex1 _MainTex2 _MainTex3 _MainTex4 _MainTex5 _MainTex6 _MainTex7
+9102|F|Hidden/Internal-UIRDefaultWorld|_MainTex _FontTex _CustomTex _Color
+9103|F|Hidden/UIElements/EditorUIE|_MainTex _FontTex _CustomTex _Color
+9104|F|Hidden/GraphView/GraphViewUIE|_MainTex _FontTex _CustomTex _Color
+9105|F|Hidden/Internal-UIE-ColorConversionBlit|_MainTex _ColorConversion
+9106|F|Hidden/GTF/GTFUIE|_MainTex _FontTex _CustomTex _Color
+10490|F|Hidden/Nature/Terrain/Utilities|
+10500|F|Hidden/TerrainEngine/Details/Vertexlit|_MainTex
+10501|F|Hidden/TerrainEngine/Details/WavingDoublePass|_WavingTint _MainTex _WaveAndDistance _Cutoff
+10502|F|Hidden/TerrainEngine/Details/BillboardWavingDoublePass|_WavingTint _MainTex _WaveAndDistance _Cutoff
+10503|F|Hidden/TerrainEngine/Splatmap/Diffuse-AddPass|_TerrainHolesTexture
+10504|F|Hidden/TerrainEngine/Splatmap/Diffuse-Base|_Color _MainTex _TerrainHolesTexture
+10505|F|Nature/Terrain/Diffuse|_MainTex _Color _TerrainHolesTexture
+10506|F|Hidden/TerrainEngine/Splatmap/Diffuse-BaseGen|_DstBlend
+10507|F|Hidden/TerrainEngine/BillboardTree|_MainTex
+10508|F|Hidden/Nature/Tree Soft Occlusion Bark Rendertex|_Color _MainTex _BaseLight _AO _TreeInstanceColor _TreeInstanceScale _SquashAmount
+10509|F|Nature/Tree Soft Occlusion Bark|_Color _MainTex _BaseLight _AO _TreeInstanceColor _TreeInstanceScale _SquashAmount
+10510|F|Hidden/Nature/Tree Soft Occlusion Leaves Rendertex|_Color _MainTex _Cutoff _HalfOverCutoff _BaseLight _AO _Occlusion _TreeInstanceColor _TreeInstanceScale _SquashAmount
+10511|F|Nature/Tree Soft Occlusion Leaves|_Color _MainTex _Cutoff _BaseLight _AO _Occlusion _TreeInstanceColor _TreeInstanceScale _SquashAmount
+10512|F|Legacy Shaders/Transparent/Cutout/Soft Edge Unlit|_Color _MainTex _Cutoff
+10513|F|Hidden/TerrainEngine/CameraFacingBillboardTree|_MainTex _NormalTex _TranslucencyViewDependency _TranslucencyColor _AlphaToMask
+10600|F|Nature/Tree Creator Bark|_Color _Shininess _MainTex _BumpMap _GlossMap _SpecColor _TreeInstanceColor _TreeInstanceScale _SquashAmount
+10601|F|Nature/Tree Creator Leaves|_Color _Shininess _MainTex _BumpMap _GlossMap _TranslucencyMap _ShadowOffset _Cutoff _TreeInstanceColor _TreeInstanceScale _SquashAmount
+10602|F|Hidden/Nature/Tree Creator Bark Rendertex|_MainTex _BumpSpecMap _TranslucencyMap _SpecColor
+10603|F|Hidden/Nature/Tree Creator Leaves Rendertex|_TranslucencyColor _Cutoff _HalfOverCutoff _TranslucencyViewDependency _MainTex _BumpSpecMap _TranslucencyMap
+10604|F|Hidden/Nature/Tree Creator Bark Optimized|_Color _MainTex _BumpSpecMap _TranslucencyMap _Cutoff _SpecColor _TreeInstanceColor _TreeInstanceScale _SquashAmount
+10605|F|Hidden/Nature/Tree Creator Leaves Optimized|_Color _TranslucencyColor _Cutoff _TranslucencyViewDependency _ShadowStrength _ShadowOffsetScale _MainTex _ShadowTex _BumpSpecMap _TranslucencyMap _TreeInstanceColor _TreeInstanceScale _SquashAmount
+10606|F|Nature/Tree Creator Leaves Fast|_Color _TranslucencyColor _Cutoff _TranslucencyViewDependency _ShadowStrength _MainTex _TreeInstanceColor _TreeInstanceScale _SquashAmount
+10607|F|Hidden/Nature/Tree Creator Leaves Fast Optimized|_Color _TranslucencyColor _Cutoff _TranslucencyViewDependency _ShadowStrength _MainTex _ShadowTex _TreeInstanceColor _TreeInstanceScale _SquashAmount
+10608|F|Hidden/Nature/Tree Creator Albedo Rendertex|_TranslucencyColor _Cutoff _HalfOverCutoff _TranslucencyViewDependency _MainTex _BumpSpecMap _TranslucencyMap
+10609|F|Hidden/Nature/Tree Creator Normal Rendertex|_TranslucencyColor _Cutoff _HalfOverCutoff _TranslucencyViewDependency _MainTex _BumpSpecMap _TranslucencyMap
+10620|F|Nature/Terrain/Specular|_SpecColor _Shininess _MainTex _Color _TerrainHolesTexture
+10621|F|Hidden/TerrainEngine/Splatmap/Specular-AddPass|_SpecColor _Shininess _TerrainHolesTexture
+10622|F|Hidden/TerrainEngine/Splatmap/Specular-Base|_SpecColor _Shininess _MainTex _Color _TerrainHolesTexture
+10623|F|Nature/Terrain/Standard|_MainTex _Color _TerrainHolesTexture
+10624|F|Hidden/TerrainEngine/Splatmap/Standard-AddPass|_TerrainHolesTexture
+10625|F|Hidden/TerrainEngine/Splatmap/Standard-Base|_MainTex _MetallicTex _Color _TerrainHolesTexture
+10626|F|Hidden/TerrainEngine/Splatmap/Standard-BaseGen|_DstBlend
+10700|F|Mobile/Skybox|_FrontTex _BackTex _LeftTex _RightTex _UpTex _DownTex
+10701|F|Mobile/VertexLit|_MainTex
+10703|F|Mobile/Diffuse|_MainTex
+10704|F|Mobile/Bumped Diffuse|_MainTex _BumpMap
+10705|F|Mobile/Bumped Specular|_Shininess _MainTex _BumpMap
+10706|F|Mobile/Bumped Specular (1 Directional Realtime Light)|_Shininess _MainTex _BumpMap
+10707|F|Mobile/VertexLit (Only Directional Lights)|_MainTex
+10708|F|Mobile/Unlit (Supports Lightmap)|_MainTex
+10720|F|Mobile/Particles/Additive|_MainTex
+10721|F|Mobile/Particles/Alpha Blended|_MainTex
+10722|F|Mobile/Particles/VertexLit Blended|_EmisColor _MainTex
+10723|F|Mobile/Particles/Multiply|_MainTex
+10750|F|Unlit/Transparent|_MainTex
+10751|F|Unlit/Transparent Cutout|_MainTex _Cutoff
+10752|F|Unlit/Texture|_MainTex
+10753|F|Sprites/Default|_MainTex _Color PixelSnap _RendererColor _Flip _AlphaTex _EnableExternalAlpha
+10755|F|Unlit/Color|_Color
+10757|F|Sprites/Mask|_MainTex _AlphaTex _Cutoff _Color _EnableExternalAlpha PixelSnap
+10760|F|UI/Unlit/Transparent|_MainTex _Color _StencilComp _Stencil _StencilOp _StencilWriteMask _StencilReadMask _ColorMask _UseUIAlphaClip
+10761|F|UI/Unlit/Detail|_MainTex _Color _DetailTex _Strength _StencilComp _Stencil _StencilOp _StencilWriteMask _StencilReadMask _ColorMask _UseUIAlphaClip
+10762|F|UI/Unlit/Text|_MainTex _Color _StencilComp _Stencil _StencilOp _StencilWriteMask _StencilReadMask _ColorMask _UseUIAlphaClip
+10763|F|UI/Unlit/Text Detail|_MainTex _Color _DetailTex _Strength _StencilComp _Stencil _StencilOp _StencilWriteMask _StencilReadMask _ColorMask _UseUIAlphaClip
+10764|F|UI/Lit/Transparent|_MainTex _Color _Specular _StencilComp _Stencil _StencilOp _StencilWriteMask _StencilReadMask _ColorMask _UseUIAlphaClip
+10765|F|UI/Lit/Bumped|_Color _Specular _MainTex _MainBump _Shininess _StencilComp _Stencil _StencilOp _StencilWriteMask _StencilReadMask _ColorMask _UseUIAlphaClip
+10766|F|UI/Lit/Detail|_Color _Specular _MainTex _MainBump _DetailTex _DetailBump _Strength _Shininess _StencilComp _Stencil _StencilOp _StencilWriteMask _StencilReadMask _ColorMask _UseUIAlphaClip
+10767|F|UI/Lit/Refraction|_Color _Specular _MainTex _MainBump _Mask _Shininess _Focus _StencilComp _Stencil _StencilOp _StencilWriteMask _StencilReadMask _ColorMask _UseUIAlphaClip
+10768|F|UI/Lit/Refraction Detail|_Color _Specular _MainTex _MainBump _Mask _DetailTex _DetailBump _DetailMask _Shininess _Focus _StencilComp _Stencil _StencilOp _StencilWriteMask _StencilReadMask _ColorMask _UseUIAlphaClip
+10770|F|UI/Default|_MainTex _Color _StencilComp _Stencil _StencilOp _StencilWriteMask _StencilReadMask _ColorMask _UseUIAlphaClip
+10782|F|UI/Default Font|_MainTex _Color _StencilComp _Stencil _StencilOp _StencilWriteMask _StencilReadMask _ColorMask _UseUIAlphaClip
+10783|F|UI/DefaultETC1|_MainTex _AlphaTex _Color _StencilComp _Stencil _StencilOp _StencilWriteMask _StencilReadMask _ColorMask _UseUIAlphaClip
+10784|F|Hidden/UI/CompositeOverdraw|_MainTex
+10785|F|Hidden/UI/Overdraw|_MainTex _Color _StencilComp _Stencil _StencilOp _StencilWriteMask _StencilReadMask _ColorMask _UseUIAlphaClip
+10800|F|Sprites/Diffuse|_MainTex _Color PixelSnap _RendererColor _Flip _AlphaTex _EnableExternalAlpha
+14000|F|Nature/SpeedTree|_Color _HueVariation _MainTex _DetailTex _BumpMap _Cutoff _Cull _WindQuality
+14001|F|Nature/SpeedTree Billboard|_Color _HueVariation _MainTex _BumpMap _Cutoff _WindQuality
+14002|F|Nature/SpeedTree8|_MainTex _Color _HueVariationKwToggle _HueVariationColor _NormalMapKwToggle _BumpMap _ExtraTex _Glossiness _Metallic _SubsurfaceKwToggle _SubsurfaceTex _SubsurfaceColor _SubsurfaceIndirect _BillboardKwToggle _BillboardShadowFade _TwoSided _WindQuality
+15100|F|Hidden/GIDebug/TextureUV|_MainTex
+15101|F|Hidden/GIDebug/ShowLightMask|_MainTex _LightTexture _SrcBlend _DstBlend
+15102|F|Hidden/GIDebug/UV1sAsPositions|_Color
+15103|F|Hidden/GIDebug/VertexColors|_MainTex
+15104|F|Hidden/CubeBlur|_MainTex _Texel _Level _Scale
+15105|F|Hidden/CubeCopy|_MainTex _Level
+15106|F|Hidden/CubeBlend|_TexA _TexB _value
+15300|F|VR/SpatialMapping/Occlusion|
+15301|F|VR/SpatialMapping/Wireframe|_WireThickness
+15304|F|Hidden/VR/BlitTexArraySlice|_MainTex
+15305|F|Hidden/VR/Internal-VRDistortion|_MainTex
+15306|F|Hidden/VR/BlitTexArraySliceToDepth|_MainTex
+15307|F|Hidden/VR/BlitTexArraySliceToDepth_MSAA|_MainTex
+15308|F|Hidden/Internal-ODSWorldTexture|_MainTex _Cutoff _Color
+15309|F|Hidden/Internal-CubemapToEquirect|_MainTex
+15312|F|Hidden/VR/BlitFromTex2DToTexArraySlice|_MainTex
+16000|F|Hidden/VideoComposite|_MainTex
+16001|F|Hidden/VideoDecode|_MainTex _SecondTex _ThirdTex
+16002|F|Hidden/VideoDecodeOSX|
+16003|F|Hidden/VideoDecodeAndroid|
+17000|F|Hidden/Compositing|_MainTex _SecondTex
+18000|F|Hidden/TerrainEngine/PaintHeight|_MainTex
+18001|F|Hidden/TerrainEngine/HeightBlitCopy|_MainTex
+18002|F|Hidden/TerrainEngine/GenerateNormalmap|_MainTex
+18003|F|Hidden/TerrainEngine/TerrainLayerUtils|_MainTex
+18004|F|Hidden/TerrainEngine/BrushPreview|
+18005|F|Hidden/TerrainEngine/CrossBlendNeighbors|_TopTex _BottomTex _LeftTex _RightTex
+18006|F|Hidden/TerrainEngine/TerrainBlitCopyZWrite|_MainTex _Color
+19010|F|Hidden/TextCore/Distance Field|_FaceColor _FaceDilate _OutlineColor _OutlineWidth _OutlineSoftness _WeightNormal _WeightBold _ScaleRatioA _ScaleRatioB _ScaleRatioC _MainTex _GradientScale _ScaleX _ScaleY _Sharpness _VertexOffsetX _VertexOffsetY
+19011|F|Hidden/TextCore/Distance Field SSD|_FaceColor _FaceDilate _OutlineColor _OutlineWidth _OutlineSoftness _UnderlayColor _UnderlayOffsetX _UnderlayOffsetY _UnderlayDilate _UnderlaySoftness _WeightNormal _WeightBold _ShaderFlags _ScaleRatioA _ScaleRatioB _ScaleRatioC _MainTex _TextureWidth _TextureHeight _GradientScale _ScaleX _ScaleY _PerspectiveFilter _Sharpness _VertexOffsetX _VertexOffsetY
+19012|F|Hidden/TextCore/Sprite|_MainTex _Color _StencilComp _Stencil _StencilOp _StencilWriteMask _StencilReadMask _CullMode _ColorMask _ClipRect

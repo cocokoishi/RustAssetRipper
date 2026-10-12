@@ -1,4 +1,5 @@
-# Unity 2022.3.11f1 TPK Material name and resolved Shader-name signatures; source resource order.
+# EngineAssetsTpk band 2022.2.15f1 Material name and resolved Shader-name signatures; source resource order.
+# Probed with: dotnet run --project tools/probes/engine-assets/EngineAssetsProbe.csproj --configuration Release -p:ReferenceRoot=<isolated build> -- tsv <request-version> <materialsOut> <shadersOut>
 10100|D|Font Material|GUI/Text Shader
 10756|D|FrameDebuggerRenderTargetDisplay|Hidden/FrameDebuggerRenderTargetDisplay
 10301|F|Default-Particle|Legacy Shaders/Particles/Alpha Blended Premultiply

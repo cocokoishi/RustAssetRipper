@@ -1,8 +1,17 @@
 use super::*;
 
-const PREDEFINED_ENGINE_SHADERS_2022_3_11: &str = include_str!("predefined_shaders_2022_3_11.tsv");
-const PREDEFINED_ENGINE_MATERIALS_2022_3_11: &str =
-    include_str!("predefined_materials_2022_3_11.tsv");
+use crate::processing::asset_factory::FactoryUnityVersion;
+
+/// Ordered `EngineAssetsTpk` blob band keys, one per line, in source blob order.
+const ENGINE_ASSET_BAND_KEYS: &str = include_str!("engine_asset_bands.tsv");
+const PREDEFINED_ENGINE_MATERIALS_BAND_2022_2_15F1: &str =
+    include_str!("predefined_materials_band_2022_2_15f1.tsv");
+const PREDEFINED_ENGINE_MATERIALS_BAND_2022_3_11F1: &str =
+    include_str!("predefined_materials_band_2022_3_11f1.tsv");
+const PREDEFINED_ENGINE_SHADERS_BAND_2022_2_15F1: &str =
+    include_str!("predefined_shaders_band_2022_2_15f1.tsv");
+const PREDEFINED_ENGINE_SHADERS_BAND_2022_3_11F1: &str =
+    include_str!("predefined_shaders_band_2022_3_11f1.tsv");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PredefinedEngineAssetTarget {
@@ -10,13 +19,79 @@ struct PredefinedEngineAssetTarget {
     guid: [u8; 16],
 }
 
+/// Selects the `EngineAssetsTpk` band key for an export Unity version.
+///
+/// This mirrors the frozen `EngineAssetsExporter.CreateFromTpkBlob` selection over the
+/// embedded blob band keys: the first key stays selected while the requested version does
+/// not exceed it, otherwise the last key at or below the requested version wins.
+/// Versions that cannot be ordered, and empty band lists, select nothing.
+fn select_engine_assets_band(unity_version: Option<&str>) -> Option<&'static str> {
+    let version = FactoryUnityVersion::parse(unity_version?.trim())?;
+    let bits = version.source_order_bits()?;
+    let mut entries = ENGINE_ASSET_BAND_KEYS.lines().filter_map(|line| {
+        let key = line.trim();
+        if key.is_empty() || key.starts_with('#') {
+            return None;
+        }
+        let parsed = FactoryUnityVersion::parse(key)?;
+        Some((parsed.source_order_bits()?, key))
+    });
+    let (mut previous_bits, mut previous_key) = entries.next()?;
+    if bits <= previous_bits {
+        return Some(previous_key);
+    }
+    let mut selected_key = previous_key;
+    for (key_bits, key) in entries {
+        selected_key = key;
+        if bits <= key_bits {
+            selected_key = previous_key;
+            break;
+        }
+        previous_bits = key_bits;
+        previous_key = key;
+    }
+    let _ = previous_bits;
+    Some(selected_key)
+}
+
+/// Material identity rows for an `EngineAssetsTpk` band key.
+///
+/// Only probed bands have embedded rows; anything else selects nothing. Each band keeps
+/// its own rows file so a future band refresh stays independent; the regression suite
+/// pins the probe-verified fact that the two 2022.3 bands are currently byte-identical.
+fn predefined_engine_material_rows(band: &str) -> Option<&'static str> {
+    match band {
+        "2022.2.15f1" => Some(PREDEFINED_ENGINE_MATERIALS_BAND_2022_2_15F1),
+        "2022.3.11f1" => Some(PREDEFINED_ENGINE_MATERIALS_BAND_2022_3_11F1),
+        _ => None,
+    }
+}
+
+/// Shader identity rows for an `EngineAssetsTpk` band key.
+///
+/// Only probed bands have embedded rows; anything else selects nothing.
+fn predefined_engine_shader_rows(band: &str) -> Option<&'static str> {
+    match band {
+        "2022.2.15f1" => Some(PREDEFINED_ENGINE_SHADERS_BAND_2022_2_15F1),
+        "2022.3.11f1" => Some(PREDEFINED_ENGINE_SHADERS_BAND_2022_3_11F1),
+        _ => None,
+    }
+}
+
 fn predefined_engine_shader_target(
     shader_view: &ShaderView,
+    unity_version: Option<&str>,
 ) -> Result<Option<PredefinedEngineAssetTarget>, Box<dyn Error>> {
     let Some(parsed) = shader_view.parsed.as_ref() else {
         return Ok(None);
     };
-    for (line_index, line) in PREDEFINED_ENGINE_SHADERS_2022_3_11.lines().enumerate() {
+    let Some(band) = select_engine_assets_band(unity_version) else {
+        return Ok(None);
+    };
+    let Some(table) = predefined_engine_shader_rows(band) else {
+        return Ok(None);
+    };
+    for (line_index, line) in table.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
@@ -91,14 +166,14 @@ fn predefined_engine_material_target(
     shader_name: Option<&str>,
     unity_version: Option<&str>,
 ) -> Result<Option<PredefinedEngineAssetTarget>, Box<dyn Error>> {
-    let version_matches = unity_version
-        .and_then(crate::resources::vertex_data_blob::UnityVersion::parse)
-        .is_some_and(|version| version.major == 2022 && version.minor == 3 && version.patch >= 11);
-    if !version_matches {
+    let Some(band) = select_engine_assets_band(unity_version) else {
         return Ok(None);
-    }
+    };
+    let Some(table) = predefined_engine_material_rows(band) else {
+        return Ok(None);
+    };
 
-    for (line_index, line) in PREDEFINED_ENGINE_MATERIALS_2022_3_11.lines().enumerate() {
+    for (line_index, line) in table.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
@@ -227,19 +302,25 @@ fn predefined_engine_shader_name(
             "D"
         }
     };
-    PREDEFINED_ENGINE_SHADERS_2022_3_11
-        .lines()
-        .find_map(|line| {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                return None;
-            }
-            let mut fields = line.splitn(4, '|');
-            let file_id = fields.next()?.parse::<i64>().ok()?;
-            let candidate_resource = fields.next()?;
-            let name = fields.next()?;
-            (file_id == path_id && candidate_resource == resource_kind).then_some(name)
-        })
+    // Default-resource shader rows are probe-verified identical across the embedded bands,
+    // so the reverse name lookup is band-independent.
+    [
+        PREDEFINED_ENGINE_SHADERS_BAND_2022_2_15F1,
+        PREDEFINED_ENGINE_SHADERS_BAND_2022_3_11F1,
+    ]
+    .into_iter()
+    .flat_map(str::lines)
+    .find_map(|line| {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            return None;
+        }
+        let mut fields = line.splitn(4, '|');
+        let file_id = fields.next()?.parse::<i64>().ok()?;
+        let candidate_resource = fields.next()?;
+        let name = fields.next()?;
+        (file_id == path_id && candidate_resource == resource_kind).then_some(name)
+    })
 }
 
 fn project_object_name(
@@ -451,7 +532,12 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                 if source_engine_guid.is_none() && class_id == SHADER_CLASS_ID {
                     shader_view
                         .as_ref()
-                        .map(predefined_engine_shader_target)
+                        .map(|view| {
+                            predefined_engine_shader_target(
+                                view,
+                                file.metadata.prefix.unity_version_text.as_deref(),
+                            )
+                        })
                         .transpose()?
                         .flatten()
                 } else {
@@ -875,7 +961,7 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                         (ObjectRoute::TextAsset, "", None)
                     }
                     ExportCollectionKind::Asset if selection.exporter == "FontAssetExporter" => {
-                        if class_id != 128 || font_data.map_or(true, |data| data.is_empty()) {
+                        if class_id != 128 || font_data.is_none_or(|data| data.is_empty()) {
                             return Err(invalid_project(format!(
                                 "FontAssetExporter selected class {class_id} at {file_index}:{} without non-empty Font.m_FontData",
                                 object_info.path_id
@@ -1339,7 +1425,8 @@ fn font_collection_subasset<'object>(
 #[cfg(test)]
 mod tests {
     use super::{
-        predefined_engine_material_target, predefined_engine_shader_target, project_object_name,
+        predefined_engine_material_rows, predefined_engine_material_target,
+        predefined_engine_shader_target, project_object_name, select_engine_assets_band,
         should_report_unported_texture_route,
     };
     use crate::export::project_workflow::SHADER_CLASS_ID;
@@ -1351,6 +1438,59 @@ mod tests {
         assert!(should_report_unported_texture_route(true, false, false));
         assert!(!should_report_unported_texture_route(true, true, false));
         assert!(!should_report_unported_texture_route(false, false, false));
+    }
+
+    #[test]
+    fn engine_assets_band_selection_matches_the_source_blob_order() {
+        assert_eq!(select_engine_assets_band(None), None);
+        assert_eq!(select_engine_assets_band(Some("not a version")), None);
+        // First band key wins while the requested version does not exceed it.
+        assert_eq!(select_engine_assets_band(Some("2.0.0f1")), Some("3.2.0f1"));
+        assert_eq!(select_engine_assets_band(Some("3.2.0f1")), Some("3.2.0f1"));
+        // Otherwise the last band key at or below the requested version wins.
+        assert_eq!(
+            select_engine_assets_band(Some("2022.3.6f1")),
+            Some("2022.2.15f1")
+        );
+        assert_eq!(
+            select_engine_assets_band(Some("2022.3.10f1")),
+            Some("2022.2.15f1")
+        );
+        assert_eq!(
+            select_engine_assets_band(Some("2022.3.11f1")),
+            Some("2022.2.15f1")
+        );
+        assert_eq!(
+            select_engine_assets_band(Some("2022.3.22f1")),
+            Some("2022.3.11f1")
+        );
+        assert_eq!(
+            select_engine_assets_band(Some("2021.3.0f1")),
+            Some("2021.2.0b14")
+        );
+        // Past the final band key, the final band stays selected.
+        assert_eq!(
+            select_engine_assets_band(Some("6100.0.0f1")),
+            Some("6000.5.0a3")
+        );
+    }
+
+    #[test]
+    fn predefined_material_band_rows_stay_byte_identical() {
+        // Probe-verified fact (isolated engine-assets TPK dump): the two embedded 2022.3
+        // bands carry identical Material rows. If a future probe refresh diverges, the
+        // band mapping above must gain independent tables instead of sharing.
+        fn data_rows(table: &str) -> Vec<&str> {
+            table
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                .collect()
+        }
+        assert_eq!(
+            data_rows(predefined_engine_material_rows("2022.2.15f1").unwrap()),
+            data_rows(predefined_engine_material_rows("2022.3.11f1").unwrap())
+        );
     }
 
     #[test]
@@ -1367,9 +1507,9 @@ mod tests {
             ..ShaderView::default()
         };
 
-        let target = predefined_engine_shader_target(&shader)
+        let target = predefined_engine_shader_target(&shader, Some("2022.3.6f1"))
             .unwrap()
-            .expect("the 2022.3 TPK contains Unlit/Color");
+            .expect("the 2022.2.15f1 engine-assets band contains Unlit/Color");
         let mut expected_guid = [0; 16];
         for (index, word) in crate::export::guid_policy::ENGINE_BUILTIN_EXTRA_GUID_WORDS
             .iter()
@@ -1380,11 +1520,23 @@ mod tests {
         assert_eq!(target.file_id, 10755);
         assert_eq!(target.guid, expected_guid);
 
-        let mut different_properties = shader;
+        let mut different_properties = shader.clone();
         different_properties.parsed.as_mut().unwrap().properties[0].name = "_MainTex".to_owned();
         assert_eq!(
-            predefined_engine_shader_target(&different_properties).unwrap(),
+            predefined_engine_shader_target(&different_properties, Some("2022.3.6f1")).unwrap(),
             None
+        );
+        // Versions selecting an unprobed band resolve nothing instead of borrowing a
+        // newer band's rows.
+        assert_eq!(
+            predefined_engine_shader_target(&shader, Some("2019.4.40f1")).unwrap(),
+            None,
+            "2019.4 selects an unprobed engine-assets band"
+        );
+        assert_eq!(
+            predefined_engine_shader_target(&shader, None).unwrap(),
+            None,
+            "a missing version selects no engine-assets band"
         );
     }
 
@@ -1406,6 +1558,17 @@ mod tests {
         }
         assert_eq!(target.file_id, 10303);
         assert_eq!(target.guid, expected_guid);
+        // Unity 2022.3.10f1 selects the 2022.2.15f1 band, which carries the same
+        // Default-Material row: the old patch-11 gate was the bug.
+        let earlier_patch = predefined_engine_material_target(
+            "Default-Material",
+            Some("Standard"),
+            Some("2022.3.10f1"),
+        )
+        .unwrap()
+        .expect("2022.3.10f1 selects the 2022.2.15f1 engine-assets band");
+        assert_eq!(earlier_patch.file_id, 10303);
+        assert_eq!(earlier_patch.guid, expected_guid);
         assert_eq!(
             predefined_engine_material_target(
                 "Default-Material",
@@ -1420,11 +1583,11 @@ mod tests {
             predefined_engine_material_target(
                 "Default-Material",
                 Some("Standard"),
-                Some("2022.3.10f1")
+                Some("2021.3.0f1")
             )
             .unwrap(),
             None,
-            "a TPK snapshot cannot be applied before its source version"
+            "a version selecting an unprobed band resolves nothing"
         );
     }
 
@@ -1474,9 +1637,9 @@ mod tests {
             ..ShaderView::default()
         };
 
-        let target = predefined_engine_shader_target(&shader)
+        let target = predefined_engine_shader_target(&shader, Some("2022.3.22f1"))
             .unwrap()
-            .expect("the 2022.3 TPK contains Standard");
+            .expect("the 2022.3.11f1 engine-assets band contains Standard");
         assert_eq!(target.file_id, 46);
         let mut expected_guid = [0; 16];
         for (index, word) in crate::export::guid_policy::ENGINE_BUILTIN_EXTRA_GUID_WORDS
@@ -1490,7 +1653,7 @@ mod tests {
         let mut reordered = shader;
         reordered.parsed.as_mut().unwrap().properties.swap(0, 1);
         assert_eq!(
-            predefined_engine_shader_target(&reordered).unwrap(),
+            predefined_engine_shader_target(&reordered, Some("2022.3.22f1")).unwrap(),
             None,
             "property ordering is part of the predefined shader identity"
         );

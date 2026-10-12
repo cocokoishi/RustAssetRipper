@@ -1,4 +1,5 @@
-# Unity 2022.3.11f1 TPK Shader name and ordered property-name signatures; source TPK resource order.
+# EngineAssetsTpk band 2022.3.11f1 Shader name and ordered property-name signatures; source TPK resource order.
+# Probed with: dotnet run --project tools/probes/engine-assets/EngineAssetsProbe.csproj --configuration Release -p:ReferenceRoot=<isolated build> -- tsv <request-version> <materialsOut> <shadersOut>
 17|D|Hidden/InternalErrorShader|
 68|D|Hidden/InternalClear|
 69|D|Hidden/Internal-Colored|_Color _SrcBlend _DstBlend _ZWrite _ZTest _Cull _ZBias

@@ -1,0 +1,150 @@
+// Isolated reference probe for the engine-assets TPK version bands.
+//
+// Modes:
+//   bands <out>
+//       Dumps the ordered TpkEngineAssetsBlob band keys as `index|version` rows.
+//   bandjson <version> <out>
+//       Applies the exact frozen `EngineAssetsExporter.CreateFromTpkBlob` band
+//       selection for <version> and writes `KEY|<selected band key>` followed
+//       by the raw band JSON. Reads only the embedded TPK; writes only <out>.
+using System.Text.Json;
+using AssetRipper.Primitives;
+using AssetRipper.SourceGenerated;
+using AssetRipper.Tpk;
+using AssetRipper.Tpk.EngineAssets;
+
+if (args.Length == 0)
+{
+	Console.Error.WriteLine("usage: bands <out> | bandjson <version> <out> | tsv <version> <materialsOut> <shadersOut>");
+	return 2;
+}
+
+try
+{
+	switch (args[0])
+	{
+		case "bands":
+			DumpBands(args[1]);
+			return 0;
+		case "bandjson":
+			DumpBandJson(args[1], args[2]);
+			return 0;
+		case "tsv":
+			DumpTsv(args[1], args[2], args[3]);
+			return 0;
+		default:
+			Console.Error.WriteLine($"unknown mode {args[0]}");
+			return 2;
+	}
+}
+catch (Exception ex)
+{
+	Console.Error.WriteLine($"FAILED: {ex}");
+	return 1;
+}
+
+static TpkEngineAssetsBlob LoadBlob()
+{
+	using Stream stream = EngineAssetsTpk.GetStream();
+	return (TpkEngineAssetsBlob)TpkFile.FromStream(stream).GetDataBlob();
+}
+
+static void DumpBands(string output)
+{
+	TpkEngineAssetsBlob blob = LoadBlob();
+	List<string> lines = new();
+	for (int i = 0; i < blob.Data.Count; i++)
+	{
+		lines.Add($"{i}|{blob.Data[i].Key}");
+	}
+	File.WriteAllLines(output, lines);
+}
+
+static void DumpBandJson(string versionText, string output)
+{
+	TpkEngineAssetsBlob blob = LoadBlob();
+	UnityVersion version = UnityVersion.Parse(versionText);
+	// Exact copy of EngineAssetsExporter.CreateFromTpkBlob band selection.
+	int index;
+	if (version <= blob.Data[0].Key)
+	{
+		index = 0;
+	}
+	else
+	{
+		index = blob.Data.Count - 1;
+		for (int i = 1; i < blob.Data.Count; i++)
+		{
+			if (version <= blob.Data[i].Key)
+			{
+				index = i - 1;
+				break;
+			}
+		}
+	}
+	File.WriteAllText(output, $"KEY|{blob.Data[index].Key}\n{blob.Data[index].Value}");
+}
+
+static void DumpTsv(string versionText, string materialsOut, string shadersOut)
+{
+	TpkEngineAssetsBlob blob = LoadBlob();
+	UnityVersion version = UnityVersion.Parse(versionText);
+	// Same band selection as DumpBandJson.
+	int index;
+	if (version <= blob.Data[0].Key)
+	{
+		index = 0;
+	}
+	else
+	{
+		index = blob.Data.Count - 1;
+		for (int i = 1; i < blob.Data.Count; i++)
+		{
+			if (version <= blob.Data[i].Key)
+			{
+				index = i - 1;
+				break;
+			}
+		}
+	}
+	using JsonDocument document = JsonDocument.Parse(blob.Data[index].Value);
+	List<string> materials = new();
+	List<string> shaders = new();
+	foreach (string section in new[] { "DefaultResources", "ExtraResources" })
+	{
+		string kind = section == "DefaultResources" ? "D" : "F";
+		if (!document.RootElement.TryGetProperty(section, out JsonElement resources))
+		{
+			continue;
+		}
+		foreach (JsonProperty entry in resources.EnumerateObject())
+		{
+			JsonElement value = entry.Value;
+			string type = value.GetProperty("$type").GetString() ?? "";
+			string name = value.TryGetProperty("Name", out JsonElement nameElement)
+				? nameElement.GetString() ?? ""
+				: "";
+			if (type == "Material")
+			{
+				string shader = value.TryGetProperty("Shader", out JsonElement shaderElement)
+					? shaderElement.GetString() ?? ""
+					: "";
+				materials.Add($"{entry.Name}|{kind}|{name}|{shader}");
+			}
+			else if (type == "Shader")
+			{
+				List<string> properties = new();
+				if (value.TryGetProperty("PropertyNames", out JsonElement props))
+				{
+					foreach (JsonElement prop in props.EnumerateArray())
+					{
+						properties.Add(prop.GetString() ?? "");
+					}
+				}
+				shaders.Add($"{entry.Name}|{kind}|{name}|{string.Join(" ", properties)}");
+			}
+		}
+	}
+	File.WriteAllLines(materialsOut, materials);
+	File.WriteAllLines(shadersOut, shaders);
+}

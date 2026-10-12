@@ -1273,12 +1273,10 @@ fn type_tree_array_element_node(type_tree: &TypeTree, node_index: usize) -> Resu
     for child_index in children {
         match type_tree.nodes[child_index].name.as_deref() {
             Some("size") => has_size = true,
-            Some("data") => {
-                if data_node_index.replace(child_index).is_some() {
-                    return Err(format!(
-                        "editor TypeTree array node {array_node_index} has duplicate data nodes"
-                    ));
-                }
+            Some("data") if data_node_index.replace(child_index).is_some() => {
+                return Err(format!(
+                    "editor TypeTree array node {array_node_index} has duplicate data nodes"
+                ));
             }
             _ => {}
         }
