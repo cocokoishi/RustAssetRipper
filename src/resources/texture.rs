@@ -41,7 +41,10 @@ use super::texture_format::{
 };
 
 /// `TextureUsageMode.NormalmapDXT5nm`; the only lightmap format that triggers `UnpackNormal`.
-pub const TEXTURE_USAGE_MODE_NORMALMAP_DXT5NM: u8 = 5;
+/// The value is pinned by frozen behavior on real bundles: a Texture2D storing
+/// `m_LightmapFormat: 3` (青岚山河卷 `1001_normal`, PathID 152) is unpacked by
+/// `TextureConverter`, so the enum member equals 3.
+pub const TEXTURE_USAGE_MODE_NORMALMAP_DXT5NM: u8 = 3;
 
 /// A failure while reading a `Texture2D` field view.
 #[derive(Debug)]
@@ -803,6 +806,26 @@ mod tests {
         assert_eq!(view.image_count, 1);
         assert_eq!(view.actual_image_size(), 8);
         assert_eq!(view.image_data_length(), 8);
+    }
+
+    #[test]
+    fn lightmap_format_three_is_the_dxt5nm_unpack_trigger() {
+        // Frozen behavior on real bundles: a Texture2D storing `m_LightmapFormat: 3`
+        // as an I32 (青岚山河卷 `1001_normal`, PathID 152, whose pixels the frozen
+        // exporter unpacks) must read back as the DXT5nm trigger value.
+        assert_eq!(TEXTURE_USAGE_MODE_NORMALMAP_DXT5NM, 3);
+        let mut root = rgba32_texture();
+        let SerializedValue::Struct(fields) = &mut root else {
+            unreachable!()
+        };
+        fields
+            .iter_mut()
+            .find(|field| field.name == "m_LightmapFormat")
+            .unwrap()
+            .value = SerializedValue::I32(3);
+        let view = Texture2DView::from_value(&root).unwrap();
+        assert_eq!(view.lightmap_format, 3);
+        assert_eq!(view.lightmap_format, TEXTURE_USAGE_MODE_NORMALMAP_DXT5NM);
     }
 
     #[test]

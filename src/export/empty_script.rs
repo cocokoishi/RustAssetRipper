@@ -139,7 +139,7 @@ const GLOBAL_TEMPLATE_LINES: &[&str] = &[
         "\t\tUnity asset bundles and serialized files do not contain script information to decompile.",
         "\t\t\t* For Mono games, that information is contained in .NET dll files.",
         "\t\t\t* For Il2Cpp games, that information is contained in compiled C++ assemblies and the global metadata.",
-        "",
+        "\t\t\t",
         "\t\tAssetRipper usually expects games to conform to a normal file structure for Unity games of that platform.",
         "\t\tA unexpected file structure could cause AssetRipper to not find the required files.",
         "",
@@ -381,11 +381,11 @@ mod tests {
         assert!(global.contains("\t*/\r\n"));
         assert!(global.contains("https://github.com/AssetRipper/AssetRipper/issues/653"));
         assert!(global.contains("https://github.com/AssetRipper/AssetRipper/issues/655"));
-        // The global template's whitespace-only lines render empty; the namespaced template's
-        // retained raw-string whitespace is source-pinned by the project-export regression.
-        assert!(
-            global.contains("assemblies and the global metadata.\r\n\r\n\t\tAssetRipper usually")
-        );
+        // Both templates retain the frozen raw-string whitespace on blank comment
+        // lines (global `\t\t\t`, namespaced `\t\t\t\t`), pinned by the
+        // 青岚山河卷 `Door.cs` differential (`\t\t\t` vs empty on line 13).
+        assert!(global
+            .contains("assemblies and the global metadata.\r\n\t\t\t\r\n\t\tAssetRipper usually"));
         let namespaced = empty_script_content("N", "C").unwrap();
         assert!(namespaced.contains("namespace N\r\n{\r\n"));
         assert_eq!(EMPTY_SCRIPT_COLLECTION_NAME, "EmptyScriptExportCollection");

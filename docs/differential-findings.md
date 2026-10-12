@@ -2352,6 +2352,26 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Verification | `cargo test --release --lib --locked export::workspace_yaml::object_conversion::tests -- --nocapture` passed 8/8, including the new manager-family regression (104/157/196 have `m_ObjectHideFlags`, lack the three PPtr base fields); `cargo test --release --lib --locked export::` passed 501/501 (1 ignored); `cargo build --release --locked --bin assetripper-rs` exited 0. Fresh full export `target/real-acceptance-current-青岚山河卷-r8` exited 0: 2 SerializedFiles, 72,350 objects, 1,087 asset files, 243,562,238 asset bytes, 6 support files, 2 post-exporter files. Newly byte-exact: 81 (1/1), 193 (1,456/1,456), 196 (1/1), 223 (2/2), 224 (19/19). All prior exact and GUID-semantic slices recheck unchanged. |
 | Limits | Class 320 bindings, class-4 float prints, Default-Material direction, and the lighting path remain open (see validation log). Unity Editor import/runtime and UABEA were not run. |
 
+## DIFF-OPAQUE-SCRIPT-001 - Global dummy-script blank-line whitespace
+
+| Field | Finding |
+|---|---|
+| Input and reference | 青岚山河卷 `Door.cs`; frozen `EmptyScript.cs` global raw-string template. |
+| Before-fix difference | One blank comment line: source `\t\t\t`, Rust empty (2,698 vs 2,695 bytes, the only diff). |
+| Rust change | Global template line restored to `\t\t\t`; test expectation corrected to source truth. |
+| Verification | `Door.cs` byte-identical in r22; template unit tests green. |
+| Limits | None known. Unity Editor import/runtime and UABEA were not run. |
+
+## DIFF-OPAQUE-NORMALMAP-001 - DXT5nm unpack trigger value
+
+| Field | Finding |
+|---|---|
+| Input and reference | 33 青岚山河卷 normal-map PNGs; frozen `TextureConverter` (`LightmapFormatE == NormalmapDXT5nm` → `UnpackNormal`); bundle `m_LightmapFormat: 3` on `1001_normal` (PathID 152). |
+| Before-fix difference | Rust compared against transcribed value 5, skipped the unpack, and wrote packed DXT5nm pixels. |
+| Rust change | Constant corrected to 3 with behavioral rationale; test pins the literal through `from_value` on an I32 field. |
+| Verification | GDI+ pixel-hash over all 235 PNG pairs: 235/235 identical (was 202/235); `resources::texture` 54/54; `export::` 512/512. |
+| Limits | PNG bytes still differ (encoder-only). 20 dummy-shader property gaps and 1 OGG re-encode gap stay open. Unity Editor import/runtime and UABEA were not run. |
+
 ## DIFF-REAL-青岚山河卷-SPRITE-001 - SpriteProcessor geometry recomputation
 
 | Field | Finding |
