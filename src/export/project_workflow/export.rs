@@ -164,6 +164,11 @@ fn validate_workspace_project_export<'inputs, 'provider, 'graph>(
         inputs.objects,
         inputs.reference_graph,
     )?;
+    let scene_lighting_subasset_directories = scene_lighting_subasset_directories(
+        &scene_processing,
+        inputs.objects,
+        inputs.reference_graph,
+    )?;
 
     Ok(WorkspaceProjectExportContext {
         inputs,
@@ -184,6 +189,7 @@ fn validate_workspace_project_export<'inputs, 'provider, 'graph>(
         processing_warnings,
         used_guids,
         lightmap_texture_directories,
+        scene_lighting_subasset_directories,
     })
 }
 
@@ -276,6 +282,7 @@ pub fn export_workspace_yaml_project_with_serialized_settings(
         processing_warnings,
         used_guids,
         lightmap_texture_directories,
+        scene_lighting_subasset_directories,
     } = context;
     let WorkspaceProjectExportInputs {
         output_root,
@@ -314,6 +321,7 @@ pub fn export_workspace_yaml_project_with_serialized_settings(
         scriptable_object_groups: &scriptable_object_groups,
         controller_collections: &controller_collections,
         lightmap_texture_directories: &lightmap_texture_directories,
+        scene_lighting_subasset_directories: &scene_lighting_subasset_directories,
         existing_guids: &used_guids,
         limits,
     };

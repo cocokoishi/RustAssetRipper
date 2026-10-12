@@ -56,6 +56,84 @@ pub(super) fn lightmap_texture_scene_directories(
     Ok(directories)
 }
 
+/// Scene-subfolder directories for unshared LightProbes and LightingSettings assets.
+///
+/// This mirrors the frozen `LightingDataProcessor.SetPathsAndMainAsset` rule: a scene's
+/// LightmapSettings moves its `m_LightProbes` (class 258) and `m_LightingSettings`
+/// (class 850595691) targets into the scene subfolder via `OriginalDirectory`, unless
+/// the target is shared with another scene. Lightmap textures and the generated
+/// LightingDataAsset follow neighboring rules and are handled elsewhere.
+pub(super) fn scene_lighting_subasset_directories(
+    processing: &WorkspaceSceneProcessing,
+    objects: &ObjectWorkspace,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+) -> Result<HashMap<(usize, usize), String>, Box<dyn Error>> {
+    let mut owners: HashMap<(usize, usize), (usize, String)> = HashMap::new();
+    let mut shared: HashSet<(usize, usize)> = HashSet::new();
+    for (ordinal, scene) in processing.hierarchies.scenes().iter().enumerate() {
+        let Some(owner) = scene.lighting_data_dependency_owner() else {
+            continue;
+        };
+        for reference in reference_graph.references().iter().filter(|reference| {
+            reference.source_file_index == owner.file_index
+                && reference.source_object_index == owner.object_index
+                && matches!(reference.field_path, "m_LightProbes" | "m_LightingSettings")
+        }) {
+            let (target_file_index, target_object_index) = match reference.resolution {
+                MultiFilePPtrResolution::Null => continue,
+                MultiFilePPtrResolution::PredefinedEngineAsset { .. } => continue,
+                MultiFilePPtrResolution::Object {
+                    target_file_index,
+                    target_object_index,
+                } => (target_file_index, target_object_index),
+                _ => {
+                    return Err(invalid_project(format!(
+                        "LightmapSettings {}:{} has unresolved lighting subasset pointer at {}",
+                        owner.file_index, owner.object_index, reference.field_path
+                    )))
+                }
+            };
+            let target = objects
+                .get(target_file_index, target_object_index)
+                .ok_or_else(|| {
+                    invalid_project(format!(
+                        "LightmapSettings {}:{} points to missing workspace object {}:{} at {}",
+                        owner.file_index,
+                        owner.object_index,
+                        target_file_index,
+                        target_object_index,
+                        reference.field_path
+                    ))
+                })?;
+            if !matches!(target.factory.class_id, 258 | 850595691) {
+                continue;
+            }
+            let key = (target_file_index, target_object_index);
+            if shared.contains(&key) {
+                continue;
+            }
+            match owners.insert(key, (ordinal, scene.plan.path.clone())) {
+                Some((previous_ordinal, _)) if previous_ordinal != ordinal => {
+                    owners.remove(&key);
+                    shared.try_reserve(1).map_err(|_| {
+                        invalid_project("could not allocate shared lighting subasset index")
+                    })?;
+                    shared.insert(key);
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut directories = HashMap::new();
+    directories
+        .try_reserve(owners.len())
+        .map_err(|_| invalid_project("could not allocate lighting subasset directory index"))?;
+    for (key, (_, path)) in owners {
+        directories.insert(key, path);
+    }
+    Ok(directories)
+}
+
 fn is_lightmap_texture_pointer_field(field_path: &str) -> bool {
     let Some(lightmap_data_path) = field_path.strip_prefix("m_Lightmaps[") else {
         return false;

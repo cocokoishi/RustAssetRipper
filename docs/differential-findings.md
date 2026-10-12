@@ -2352,6 +2352,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Verification | `cargo test --release --lib --locked export::workspace_yaml::object_conversion::tests -- --nocapture` passed 8/8, including the new manager-family regression (104/157/196 have `m_ObjectHideFlags`, lack the three PPtr base fields); `cargo test --release --lib --locked export::` passed 501/501 (1 ignored); `cargo build --release --locked --bin assetripper-rs` exited 0. Fresh full export `target/real-acceptance-current-青岚山河卷-r8` exited 0: 2 SerializedFiles, 72,350 objects, 1,087 asset files, 243,562,238 asset bytes, 6 support files, 2 post-exporter files. Newly byte-exact: 81 (1/1), 193 (1,456/1,456), 196 (1/1), 223 (2/2), 224 (19/19). All prior exact and GUID-semantic slices recheck unchanged. |
 | Limits | Class 320 bindings, class-4 float prints, Default-Material direction, and the lighting path remain open (see validation log). Unity Editor import/runtime and UABEA were not run. |
 
+## DIFF-REAL-青岚山河卷-LIGHTING-001 - LightingSettings editor defaults and scene-subfolder paths
+
+| Field | Finding |
+|---|---|
+| Input and reference | `青岚山河卷` (Unity 2022.3.6f1); frozen source `Assets/Scenes/Lost Kitten/Lost KittenSettings.lighting` (1,807 bytes); frozen `LightingDataProcessor.SetPathsAndMainAsset` and `LightmapEditorSettingsExtensions.ConvertToEditorFormat`; isolated `ser-factory` TPK probe for class 850595691. |
+| Before-fix difference | Rust r10 emitted `Assets/LightingSettings/Lost KittenSettings.lighting` (344 bytes, truncated after `m_UsingShadowmask`, no base fields) and `Assets/LightProbes_258/LightProbes_258.asset`. Root causes: (1) the recovered release TypeTree (14 nodes, proven by probe) was used as the export schema while the full payload decoded from the embedded tree was silently narrowed to it; (2) no equivalent of `SetPathsAndMainAsset` assigned scene-subfolder directories to unshared LightProbes/LightingSettings targets. |
+| Rust change | Class 850595691 uses the reference editor TypeTree; `apply_lighting_settings_editor_defaults` ports `ConvertToEditorFormat` unconditionally per the probed node types; `scene_lighting_subasset_directories` ports the scene-path rule with shared-target unsetting, applied as an `original_directory` fallback isolated from texture lightmap flags. |
+| Verification | `export::` 505/505, warnings-denied Clippy, release build, and the r12 replay are recorded in the validation-log entry above: the `.lighting` asset is byte-identical at the source path, LightProbes moved to the scene subfolder, and the scene audit totals 49,862 exact + 21,374 semGUID with only class 320 left. |
+| Limits | The `LightProbes_258.asset` file-stem suffix (source: `LightProbes.asset`) remains open. Class 320 bindings remain open. Unity Editor import/runtime and UABEA were not run. |
+
 ## DIFF-YAML-FLOAT-TIE-001 - Shortest-float tie-break vs .NET Single.ToString
 
 | Field | Finding |

@@ -424,6 +424,7 @@ struct WorkspaceProjectExportContext<'inputs, 'provider, 'graph> {
     processing_warnings: Vec<String>,
     used_guids: HashSet<[u8; 16]>,
     lightmap_texture_directories: HashMap<(usize, usize), String>,
+    scene_lighting_subasset_directories: HashMap<(usize, usize), String>,
 }
 
 struct RoutedProjectObjects<'inputs> {
@@ -457,6 +458,7 @@ struct ProjectRoutingContext<'context, 'provider, 'graph> {
     scriptable_object_groups: &'context PreparedScriptableObjectGroups,
     controller_collections: &'context PreparedControllerCollections,
     lightmap_texture_directories: &'context HashMap<(usize, usize), String>,
+    scene_lighting_subasset_directories: &'context HashMap<(usize, usize), String>,
     existing_guids: &'context HashSet<[u8; 16]>,
     limits: WorkspaceProjectExportLimits,
 }

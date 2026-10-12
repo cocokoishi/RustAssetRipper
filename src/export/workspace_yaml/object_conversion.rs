@@ -67,6 +67,7 @@ fn should_use_scene_editor_type_tree(class_id: i32, unity_version_text: Option<&
                     | 319
                     | 198
                     | 199
+                    | 850_595_691
                     | 895_512_359
                     | 1_773_428_102
                     | 1_818_360_608
@@ -585,6 +586,10 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
             }
             if class_id == 196 {
                 apply_nav_mesh_settings_editor_defaults(&mut root)
+                    .map_err(|message| scene_editor_format_error(source, class_id, message))?;
+            }
+            if class_id == 850595691 {
+                apply_lighting_settings_editor_defaults(&mut root)
                     .map_err(|message| scene_editor_format_error(source, class_id, message))?;
             }
             if class_id == 43 {
@@ -2044,6 +2049,119 @@ fn apply_nav_mesh_settings_editor_defaults(root: &mut SerializedValue) -> Result
     Ok(())
 }
 
+/// Applies the frozen `LightmapEditorSettingsExtensions.ConvertToEditorFormat`
+/// behavior for `ILightingSettings`: every editor-only field receives its Unity
+/// default, mirroring the source's unconditional assignments.
+///
+/// Field names and value shapes follow the 2022.3 editor TypeTree node names; the
+/// numeric values reproduce the frozen method exactly (verified against the frozen
+/// `Lost KittenSettings.lighting` export, which carries these defaults verbatim).
+/// Fields absent from the active editor layout are left untouched, matching the
+/// versioned generated-class behavior of the source.
+fn apply_lighting_settings_editor_defaults(root: &mut SerializedValue) -> Result<(), String> {
+    const DEFAULTS: &[(&str, SceneEditorFormatDefault)] = &[
+        ("m_BakeBackend", SceneEditorFormatDefault::I32(0)),
+        ("m_LightmapMaxSize", SceneEditorFormatDefault::I32(4096)),
+        ("m_BakeResolution", SceneEditorFormatDefault::F32(40.0)),
+        ("m_Padding", SceneEditorFormatDefault::I32(2)),
+        ("m_LightmapCompression", SceneEditorFormatDefault::I32(3)),
+        ("m_AO", SceneEditorFormatDefault::Bool(false)),
+        ("m_AOMaxDistance", SceneEditorFormatDefault::F32(1.0)),
+        ("m_CompAOExponent", SceneEditorFormatDefault::F32(1.0)),
+        ("m_CompAOExponentDirect", SceneEditorFormatDefault::F32(0.0)),
+        ("m_ExtractAO", SceneEditorFormatDefault::Bool(false)),
+        ("m_MixedBakeMode", SceneEditorFormatDefault::I32(2)),
+        ("m_LightmapsBakeMode", SceneEditorFormatDefault::I32(1)),
+        ("m_FilterMode", SceneEditorFormatDefault::I32(1)),
+        (
+            "m_ExportTrainingData",
+            SceneEditorFormatDefault::Bool(false),
+        ),
+        (
+            "m_TrainingDataDestination",
+            SceneEditorFormatDefault::String("TrainingData"),
+        ),
+        ("m_RealtimeResolution", SceneEditorFormatDefault::F32(2.0)),
+        ("m_ForceWhiteAlbedo", SceneEditorFormatDefault::Bool(false)),
+        ("m_ForceUpdates", SceneEditorFormatDefault::Bool(false)),
+        ("m_FinalGather", SceneEditorFormatDefault::Bool(false)),
+        ("m_FinalGatherRayCount", SceneEditorFormatDefault::I32(256)),
+        (
+            "m_FinalGatherFiltering",
+            SceneEditorFormatDefault::Bool(true),
+        ),
+        ("m_PVRCulling", SceneEditorFormatDefault::Bool(true)),
+        ("m_PVRSampling", SceneEditorFormatDefault::I32(1)),
+        ("m_PVRDirectSampleCount", SceneEditorFormatDefault::I32(32)),
+        ("m_PVRSampleCount", SceneEditorFormatDefault::I32(500)),
+        (
+            "m_PVREnvironmentSampleCount",
+            SceneEditorFormatDefault::I32(256),
+        ),
+        (
+            "m_PVREnvironmentReferencePointCount",
+            SceneEditorFormatDefault::I32(2048),
+        ),
+        (
+            "m_LightProbeSampleCountMultiplier",
+            SceneEditorFormatDefault::F32(4.0),
+        ),
+        ("m_PVRBounces", SceneEditorFormatDefault::I32(2)),
+        ("m_PVRMinBounces", SceneEditorFormatDefault::I32(2)),
+        (
+            "m_PVREnvironmentImportanceSampling",
+            SceneEditorFormatDefault::Bool(true),
+        ),
+        ("m_PVRFilteringMode", SceneEditorFormatDefault::I32(1)),
+        ("m_PVRDenoiserTypeDirect", SceneEditorFormatDefault::I32(1)),
+        (
+            "m_PVRDenoiserTypeIndirect",
+            SceneEditorFormatDefault::I32(1),
+        ),
+        ("m_PVRDenoiserTypeAO", SceneEditorFormatDefault::I32(1)),
+        ("m_PVRFilterTypeDirect", SceneEditorFormatDefault::I32(0)),
+        ("m_PVRFilterTypeIndirect", SceneEditorFormatDefault::I32(0)),
+        ("m_PVRFilterTypeAO", SceneEditorFormatDefault::I32(0)),
+        (
+            "m_PVRFilteringGaussRadiusDirect",
+            SceneEditorFormatDefault::F32(1.0),
+        ),
+        (
+            "m_PVRFilteringGaussRadiusIndirect",
+            SceneEditorFormatDefault::F32(5.0),
+        ),
+        (
+            "m_PVRFilteringGaussRadiusAO",
+            SceneEditorFormatDefault::F32(2.0),
+        ),
+        (
+            "m_PVRFilteringAtrousPositionSigmaDirect",
+            SceneEditorFormatDefault::F32(0.5),
+        ),
+        (
+            "m_PVRFilteringAtrousPositionSigmaIndirect",
+            SceneEditorFormatDefault::F32(2.0),
+        ),
+        (
+            "m_PVRFilteringAtrousPositionSigmaAO",
+            SceneEditorFormatDefault::F32(1.0),
+        ),
+        ("m_PVRTiledBaking", SceneEditorFormatDefault::I32(0)),
+        (
+            "m_NumRaysToShootPerTexel",
+            SceneEditorFormatDefault::I32(-1),
+        ),
+        (
+            "m_RespectSceneVisibilityWhenBakingGI",
+            SceneEditorFormatDefault::Bool(false),
+        ),
+    ];
+    for (name, default) in DEFAULTS {
+        set_scene_editor_format_default(root, name, *default)?;
+    }
+    Ok(())
+}
+
 fn set_scene_editor_scalar_default(
     value: &mut SerializedValue,
     default: SceneEditorFormatDefault,
@@ -2601,6 +2719,7 @@ mod tests {
             137,
             198,
             199,
+            850_595_691,
             895_512_359,
             1_773_428_102,
             1_818_360_608,
@@ -2683,6 +2802,7 @@ mod tests {
             1_773_428_102,
             198,
             199,
+            850_595_691,
             895_512_359,
             1_818_360_608,
             1_818_360_609,

@@ -461,6 +461,7 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
     let scriptable_object_groups = context.scriptable_object_groups;
     let controller_collections = context.controller_collections;
     let lightmap_texture_directories = context.lightmap_texture_directories;
+    let scene_lighting_subasset_directories = context.scene_lighting_subasset_directories;
     let mut used_guids = context.existing_guids.clone();
     let mut next_guid_sequence = 0u64;
     let mut next_collection_index = 0usize;
@@ -1221,7 +1222,15 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                 class_id,
                 class_name: class_name.clone(),
                 named_name,
-                original_directory: lightmap_scene_directory,
+                // LightingDataProcessor assigns unshared LightProbes and LightingSettings
+                // assets to their scene subfolder. Lightmap textures never share collection
+                // membership with those classes, so this fallback cannot misroute, and the
+                // texture-only lightmap flags above stay untouched.
+                original_directory: lightmap_scene_directory.or_else(|| {
+                    scene_lighting_subasset_directories
+                        .get(&(file_index, object_index))
+                        .cloned()
+                }),
                 facts,
                 shader_view,
                 audio_yaml_resource,
