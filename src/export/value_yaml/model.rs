@@ -48,6 +48,20 @@ pub struct UnityYamlObjectConversionHints {
     pub importer_excluded_field_paths: HashSet<String>,
     /// Dictionary representation derived from TypeTree `map` and `pair` nodes.
     pub dictionary_representations: HashMap<String, UnityYamlDictionaryRepresentation>,
+    /// Paths (`[*]` for array elements) whose `TypelessData`-typed values expand
+    /// into Unity's project-YAML shape (`<name>: <byte count>` plus a
+    /// `_typelessdata` payload), because the TPK tree represents both members as
+    /// one `Bytes` value. Observed on Mesh `m_DataSize`, Texture2D `image data`,
+    /// and Sprite render-data vertex blobs.
+    pub typeless_data_expansion_paths: HashSet<String>,
+    /// Paths (`[*]` for array elements) whose `pair`-typed values render as keyed
+    /// single-pair mappings (`- key: value`) instead of `first`/`second` structs.
+    /// The frozen walker emits this shape for pairs with valid dictionary-key
+    /// first fields in any position (observed on ComputeShader variant maps and
+    /// Sprite render-data keys); pairs with other key types keep struct rendering.
+    /// Pairs owned by `map` nodes record here too but always convert through the
+    /// dictionary branch.
+    pub keyed_pair_element_paths: HashSet<String>,
     pub hash128_schemas: HashMap<String, UnityYamlHash128Schema>,
     pub guid_schemas: HashMap<String, UnityYamlGuidSchema>,
     pub property_name_schemas: HashMap<String, UnityYamlPropertyNameSchema>,
@@ -147,6 +161,9 @@ pub enum UnityYamlObjectConversionError {
     InvalidDictionaryKey {
         field_path: String,
         element_index: usize,
+    },
+    InvalidPairElement {
+        field_path: String,
     },
     UnsupportedRawValue {
         field_path: String,
@@ -253,6 +270,10 @@ impl Display for UnityYamlObjectConversionError {
             } => write!(
                 f,
                 "Unity dictionary at {field_path:?} has a key that cannot be represented as a scalar at index {element_index}"
+            ),
+            Self::InvalidPairElement { field_path } => write!(
+                f,
+                "Unity pair array element at {field_path:?} does not have ordered first and second fields"
             ),
             Self::UnsupportedRawValue {
                 field_path,

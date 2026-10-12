@@ -2352,6 +2352,56 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Verification | `cargo test --release --lib --locked export::workspace_yaml::object_conversion::tests -- --nocapture` passed 8/8, including the new manager-family regression (104/157/196 have `m_ObjectHideFlags`, lack the three PPtr base fields); `cargo test --release --lib --locked export::` passed 501/501 (1 ignored); `cargo build --release --locked --bin assetripper-rs` exited 0. Fresh full export `target/real-acceptance-current-青岚山河卷-r8` exited 0: 2 SerializedFiles, 72,350 objects, 1,087 asset files, 243,562,238 asset bytes, 6 support files, 2 post-exporter files. Newly byte-exact: 81 (1/1), 193 (1,456/1,456), 196 (1/1), 223 (2/2), 224 (19/19). All prior exact and GUID-semantic slices recheck unchanged. |
 | Limits | Class 320 bindings, class-4 float prints, Default-Material direction, and the lighting path remain open (see validation log). Unity Editor import/runtime and UABEA were not run. |
 
+## DIFF-松月竹庭-PATHS-001 - Export ClassName overrides and bundle-container original directories
+
+| Field | Finding |
+|---|---|
+| Input and reference | 青岚雅苑` (Unity 2022.3.11f1); frozen `Pass110` overrides, `IUnityObjectBase.GetBestDirectory`, `OriginalPathProcessor`, `CreatePrefabForRoot`, `PrefabExportCollection`; isolated reflection probe. |
+| Differences | `AvatarMask_319/` vs `AvatarMask/` (enum spelling vs `OriginalName`); root prefab under `GameObject/` vs `Assets/` root (unwired container mapping). |
+| Rust change | `class_original_name` override table (238/258/319/329, reflection ground truth); `bundle_container_original_directories` (DirectExport `FileID == 0` container mapping, source processor order) wired into routing and prefab planning. |
+| Verification | Unit tests for both rules; 松月竹庭 r9 replay (all 356 files pair, zero path residuals); 青岚山河卷 r14+ scene parity held; full suite green. |
+| Limits | ResourceManager-container mapping, GroupByBundleName mode, shader override paths, lowercasing restoration, and original name/extension plumbing stay open. Unity Editor import/runtime and UABEA were not run. |
+
+## DIFF-YAML-FLOAT-TIE-002 - Exact decimal tie-break for shortest-float printing
+
+| Field | Finding |
+|---|---|
+| Input and reference | Frozen `.NET Single.ToString` shortest-repr tie-to-even rule; `Face (merged).baked.asset` mesh vertices (`2^-12` printing `...463` instead of `...462`). |
+| Before-fix difference | Round-10 fix compared neighbors by `f64` distance, whose rounding noise flips exact ties. |
+| Rust change | Exact comparison of `2*value` against the neighbor digit sum as terminating decimals (bounded string arithmetic, no bigints); off-by-one caught by the existing probe fixture during development. |
+| Verification | 28-row fixture, both tie tests, new power-of-two vectors; `export::` 511/511; 青岚山河卷 r20 mesh 93/93 exact; 松月竹庭 r11 monotonicity. |
+| Limits | `f64` tie behavior remains unprobed. Unity Editor import/runtime and UABEA were not run. |
+
+## DIFF-YAML-POINTER-TYPE-001 - Binary-exporter pointer type for shader references
+
+| Field | Finding |
+|---|---|
+| Input and reference | `PostProcessResources.asset` shader fields; frozen `BinaryAssetExporter.ToExportType` (`Meta`) vs `YamlExporterBase` (`Serialized`). |
+| Before-fix difference | Generic pointer map reported `Serialized` (type 2) for `ShaderText`-routed shaders; source reports `Meta` (type 3). |
+| Rust change | `ObjectRoute::ShaderText` joins the `Meta` arm; YAML-mode shaders keep `Serialized`. |
+| Verification | 青岚山河卷 r16 class 114 zero diffs; materials unaffected (own path already emitted type 3). |
+| Limits | Unity Editor import/runtime and UABEA were not run. |
+
+## DIFF-YAML-PAIR-RENDERING-001 - Keyed rendering for pairs with valid dictionary keys
+
+| Field | Finding |
+|---|---|
+| Input and reference | ComputeShader variant maps (`- : 0` vs `- first:`/`second:`, 35 occurrences vs zero source-wide), Sprite `m_RenderDataKey`; frozen `YamlWalker.EnterPair`/`EnterDictionaryPair` + `IsValidDictionaryKey` (string/primitive/`GUID`). |
+| Before-fix difference | Rust rendered every non-`map` pair as a `first`/`second` struct. |
+| Rust change | `keyed_pair_element_paths` hint (any-position `pair` with valid-key first; `map`-owned pairs stay on the dictionary branch) plus struct-branch keyed rendering with loud shape/key errors. |
+| Verification | Vector-element and direct-field tests incl. empty keys; 青岚山河卷 r19/r20 compute shaders 12/12 exact; sprite pairs fixed (residual is geometry values only). |
+| Limits | Vector/direct pairs with invalid-key first keep struct rendering (unprobed). Unity Editor import/runtime and UABEA were not run. |
+
+## DIFF-YAML-TYPELESS-001 - Schema-driven TypelessData count-plus-payload expansion
+
+| Field | Finding |
+|---|---|
+| Input and reference | Texture2D `image data` and SpriteRD `m_DataSize` rendering inline hex vs source count+`_typelessdata` (third and fourth instances of the Mesh `m_DataSize` rule); TPK `TypelessData` node type; compute-shader `code:` bytecode confirmed inline in both (non-TypelessData, unaffected). |
+| Before-fix difference | Only class-scoped helpers expanded; Sprite render-data blobs rendered inline. |
+| Rust change | `typeless_data_expansion_paths` records `TypelessData`-typed nodes; struct writer expands `Bytes` values (other shapes keep generic rendering, so mesh/texture helpers and streamed tests are unaffected). |
+| Verification | New conversion test; full suite green; 青岚山河卷 r20 sprite family halved (10 diff → 5 semGUID + 5 diff). |
+| Limits | Unity Editor import/runtime and UABEA were not run. |
+
 ## DIFF-松月竹庭-BREADTH-001 - Stable-identity breadth audit: export-ID family, avatar style proof, path and opaque triage
 
 | Field | Finding |
@@ -2359,6 +2409,7 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Input and reference | 青岚雅苑` (Unity 2022.3.11f1); committed `tools/audit-project-documents.ps1` (stable `classID|localFileID` pairing, per-project `.meta` GUID maps); report `target/real-acceptance-20261012-avtr松月竹庭-r8-audit.json`. |
 | Stable-identity results | Exact: classes 1, 4, 43 (40/40 Mesh), plus material/texture GUID-semantic slices. Open: controller/animation member export IDs (1101/1102/1107/206 unmatched; 91 roots all Different; 114 sub-objects 72 unmatched pairs), one Avatar style diff, two collection path divergences, 69 opaque content diffs. Prior weak-pairing lists are superseded as pairing artifacts where they relied on display names. |
 | Export-ID family | Frozen `AssetsExportCollection.GenerateExportID` assigns `GetPseudoRandomExportId(asset, m_exportIDs.Count)`; Rust uses sequential `get_main_export_id` modifiers plus `GENERATED_FILE_ID_BASE` allocator anchors. Same root cause as the timeline fix, but the controller re-synthesis needs seed-order alignment with `FetchEditorHierarchy` and anchor/pointer replumbing — deferred to a dedicated round. Internally consistent on both sides; no corruption. |
+| Export-ID family (reclassified 2026-10-12) | KNOWN ACCEPTABLE DIFFERENCE: all 455 member references in the frozen controller output are file-local (`{fileID: ...}` with no guid), and Rust's re-synthesis is internally consistent (anchors and pointers agree) and deterministic. File-local IDs carry no Unity import/runtime semantics, so cloning the pseudo-random scheme would be zero-functional-gain surgery on a 3,000-line subsystem. Per product priorities (data correctness first), this stays accepted until all functional gaps close; revisit only on contrary Unity evidence. |
 | Avatar style proof | Ordered scalar-token sequences from both `云栖仙府Avatar.asset` files are identical (21,688 tokens, zero non-semantic diffs); only flow-vs-block nesting style differs. The exact source rule for `float3` sequence-nested values is unpinned; no writer change made. |
 | Path and opaque triage | `AvatarMask` vs `AvatarMask_319` directories; root-level vs `GameObject/` prefab placement — both open in the collection-directory family. Opaque: 52 PNG, 9 OGG, 8 shader diffs untriaged; 17 identical. |
 | Limits | Unity Editor import/runtime and UABEA were not run. Product acceptance remains open. |

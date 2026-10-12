@@ -543,6 +543,138 @@ fn dictionary_yaml_uses_type_tree_keys_and_unity_version_shape() {
 }
 
 #[test]
+fn vector_pair_elements_with_string_keys_render_keyed_not_first_second() {
+    // ComputeShader `variantIndices` shape: a vector of `pair` elements with a
+    // string first field. The frozen walker emits `- key: value` entries (empty
+    // keys render as `- : 0`), never `first`/`second` structs.
+    let pair_vector_tree = TypeTree {
+        nodes: vec![
+            type_tree_node(0, "ComputeShader", "Base", 0),
+            type_tree_node(1, "vector", "variantIndices", 0),
+            type_tree_node(2, "Array", "Array", 0),
+            type_tree_node(3, "SInt32", "size", 0),
+            type_tree_node(3, "pair", "data", 0),
+            type_tree_node(4, "string", "first", 0),
+            type_tree_node(5, "Array", "Array", 0),
+            type_tree_node(6, "SInt32", "size", 0),
+            type_tree_node(6, "char", "data", 0),
+            type_tree_node(4, "unsigned int", "second", 0),
+        ],
+        string_buffer: Vec::new(),
+    };
+    let hints = UnityYamlObjectConversionHints::from_type_tree(
+        &pair_vector_tree,
+        version(),
+        UnityYamlObjectConversionLimits::default(),
+    )
+    .unwrap();
+    assert!(hints.keyed_pair_element_paths.contains("variantIndices[*]"));
+    let value = SerializedValue::Struct(vec![field(
+        "variantIndices",
+        SerializedValue::Array(vec![
+            SerializedValue::Struct(vec![
+                field("first", SerializedValue::StringBytes(Vec::new())),
+                field("second", SerializedValue::U32(0)),
+            ]),
+            SerializedValue::Struct(vec![
+                field("first", SerializedValue::StringBytes(b"kernel".to_vec())),
+                field("second", SerializedValue::U32(7)),
+            ]),
+        ]),
+    )]);
+    let output = crate::export::unity_yaml::write_unity_yaml_documents(
+        &[convert_with_object_hints(&value, &hints, |_| {
+            unreachable!("the pair fixture has no PPtrs")
+        })
+        .unwrap()],
+        crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+    )
+    .unwrap();
+    assert!(output.contains("- : 0"), "{output}");
+    assert!(output.contains("- kernel: 7"), "{output}");
+    assert!(!output.contains("first:"), "{output}");
+    assert!(!output.contains("second:"), "{output}");
+}
+
+#[test]
+fn direct_pair_fields_with_string_keys_render_keyed_not_first_second() {
+    // Sprite `m_RenderDataKey` shape: a directly nested `pair` with a valid
+    // dictionary-key first field renders keyed, just like vector elements.
+    let direct_pair_tree = TypeTree {
+        nodes: vec![
+            type_tree_node(0, "Sprite", "Base", 0),
+            type_tree_node(1, "pair", "m_RenderDataKey", 0),
+            type_tree_node(2, "string", "first", 0),
+            type_tree_node(3, "Array", "Array", 0),
+            type_tree_node(4, "SInt32", "size", 0),
+            type_tree_node(4, "char", "data", 0),
+            type_tree_node(2, "SInt64", "second", 0),
+        ],
+        string_buffer: Vec::new(),
+    };
+    let hints = UnityYamlObjectConversionHints::from_type_tree(
+        &direct_pair_tree,
+        version(),
+        UnityYamlObjectConversionLimits::default(),
+    )
+    .unwrap();
+    assert!(hints.keyed_pair_element_paths.contains("m_RenderDataKey"));
+    let value = SerializedValue::Struct(vec![field(
+        "m_RenderDataKey",
+        SerializedValue::Struct(vec![
+            field("first", SerializedValue::StringBytes(b"0e1b9fd4".to_vec())),
+            field("second", SerializedValue::I64(21300000)),
+        ]),
+    )]);
+    let output = crate::export::unity_yaml::write_unity_yaml_documents(
+        &[convert_with_object_hints(&value, &hints, |_| {
+            unreachable!("the pair fixture has no PPtrs")
+        })
+        .unwrap()],
+        crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+    )
+    .unwrap();
+    assert!(output.contains("0e1b9fd4: 21300000"), "{output}");
+    assert!(!output.contains("first:"), "{output}");
+    assert!(!output.contains("second:"), "{output}");
+}
+
+#[test]
+fn typeless_data_bytes_expand_to_count_and_payload() {
+    // The TPK tree carries one `Bytes` value where Unity project YAML writes a
+    // byte count plus a `_typelessdata` payload (Mesh `m_DataSize`, Texture2D
+    // `image data`, Sprite render-data blobs).
+    let typeless_tree = TypeTree {
+        nodes: vec![
+            type_tree_node(0, "Mesh", "Base", 0),
+            type_tree_node(1, "TypelessData", "image data", 0),
+        ],
+        string_buffer: Vec::new(),
+    };
+    let hints = UnityYamlObjectConversionHints::from_type_tree(
+        &typeless_tree,
+        version(),
+        UnityYamlObjectConversionLimits::default(),
+    )
+    .unwrap();
+    assert!(hints.typeless_data_expansion_paths.contains("image data"));
+    let value = SerializedValue::Struct(vec![field(
+        "image data",
+        SerializedValue::Bytes(vec![0x32, 0x33, 0x34]),
+    )]);
+    let output = crate::export::unity_yaml::write_unity_yaml_documents(
+        &[convert_with_object_hints(&value, &hints, |_| {
+            unreachable!("the bytes fixture has no PPtrs")
+        })
+        .unwrap()],
+        crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+    )
+    .unwrap();
+    assert!(output.contains("image data: 3"), "{output}");
+    assert!(output.contains("_typelessdata: 323334"), "{output}");
+}
+
+#[test]
 fn float_dictionary_keys_use_dotnet_tostring_not_rust_display() {
     // Negative zero keeps its sign, exactly like the source `ToString` (the
     // float fixture pins `-0` for these bits through the same call).

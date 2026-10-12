@@ -42,7 +42,8 @@ fn workspace_yaml_export_resolves_and_embeds_streamed_image_texture_bytes() {
     .expect("streamed image texture should be exported");
     let yaml = write_unity_yaml_documents(&[document], UnityYamlWriteLimits::default()).unwrap();
 
-    assert!(yaml.contains("m_ImageData_C189: 323334"));
+    assert!(yaml.contains("m_ImageData_C189: 3"));
+    assert!(yaml.contains("_typelessdata: 323334"));
     assert!(yaml.contains("offset: 0"));
     assert!(yaml.contains("size: 0"));
     assert!(!yaml.contains("texture.resS"));
@@ -63,7 +64,8 @@ fn workspace_yaml_export_resolves_and_embeds_streamed_image_texture_bytes() {
         &context,
     )
     .unwrap();
-    assert!(collection_yaml.contains("m_ImageData_C189: 323334"));
+    assert!(collection_yaml.contains("m_ImageData_C189: 3"));
+    assert!(collection_yaml.contains("_typelessdata: 323334"));
     let scene_yaml = workspace_scene_assignments_to_unity_yaml_with_streamed_resources(
         &workspace,
         &objects,
@@ -76,7 +78,8 @@ fn workspace_yaml_export_resolves_and_embeds_streamed_image_texture_bytes() {
         &context,
     )
     .unwrap();
-    assert!(scene_yaml.contains("m_ImageData_C189: 323334"));
+    assert!(scene_yaml.contains("m_ImageData_C189: 3"));
+    assert!(scene_yaml.contains("_typelessdata: 323334"));
 
     let payload = objects.objects()[0].payload.as_ref().unwrap();
     assert_eq!(
@@ -416,7 +419,8 @@ fn workspace_yaml_export_resolves_and_embeds_streamed_mesh_bytes() {
     .expect("streamed Mesh should be exported");
     let yaml = write_unity_yaml_documents(&[document], UnityYamlWriteLimits::default()).unwrap();
 
-    assert!(yaml.contains("m_Data: 323334"));
+    assert!(yaml.contains("m_Data: 3"));
+    assert!(yaml.contains("_typelessdata: 323334"));
     assert!(yaml.contains("offset: 0"));
     assert!(yaml.contains("size: 0"));
     assert!(!yaml.contains("texture.resS"));

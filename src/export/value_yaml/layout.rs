@@ -570,6 +570,27 @@ impl<'a> UnityYamlTypeTreeLayout<'a> {
         })
     }
 
+    /// Whether a TypeTree node is a `pair` element whose first field is a valid
+    /// dictionary key, so vector-held elements render keyed (`- key: value`).
+    fn is_keyed_pair_element(
+        &self,
+        node_index: usize,
+    ) -> Result<bool, UnityYamlObjectConversionError> {
+        if self.type_name(node_index)? != "pair" {
+            return Ok(false);
+        }
+        let pair_fields = self.child_indices(node_index)?;
+        if pair_fields.len() != 2
+            || self.node(pair_fields[0])?.name.as_deref() != Some("first")
+            || self.node(pair_fields[1])?.name.as_deref() != Some("second")
+        {
+            return Ok(false);
+        }
+        Ok(is_valid_dictionary_key_type_tree_type(
+            self.type_name(pair_fields[0])?,
+        ))
+    }
+
     fn dictionary_representation(
         &self,
         node_index: usize,
@@ -899,6 +920,24 @@ impl<'a> UnityYamlTypeTreeLayout<'a> {
         }
 
         if node_type == "TypelessData" || node_type == "string" || node_type.starts_with("PPtr<") {
+            if node_type == "TypelessData" {
+                // `TypelessData` members expand into a byte count plus a `_typelessdata`
+                // payload in project YAML, even though the tree carries one `Bytes`
+                // value (observed on Mesh `m_DataSize`, Texture2D `image data`, and
+                // Sprite render-data vertex blobs). Recorded before the leaf early
+                // return below.
+                hints
+                    .typeless_data_expansion_paths
+                    .try_reserve(1)
+                    .map_err(|_| UnityYamlObjectConversionError::AllocationFailed {
+                        resource: "Unity YAML TypelessData hint paths",
+                        requested: hints.typeless_data_expansion_paths.len().saturating_add(1),
+                    })?;
+                hints.typeless_data_expansion_paths.insert(try_copy_string(
+                    field_path,
+                    "Unity YAML TypelessData hint path",
+                )?);
+            }
             return Ok(());
         }
 
@@ -912,6 +951,25 @@ impl<'a> UnityYamlTypeTreeLayout<'a> {
             hints.flow_mapped_struct_paths.insert(try_copy_string(
                 field_path,
                 "Unity YAML flow mapping hint path",
+            )?);
+        }
+
+        // `pair` nodes with valid dictionary-key first fields render as keyed
+        // single-pair mappings (`- key: value`) rather than `first`/`second`
+        // structs, in any position (vector elements, direct fields). Pairs owned
+        // by `map` nodes record here too but always convert through the dictionary
+        // branch, so the hint never misfires there; pairs with other key types
+        // keep struct rendering.
+        if self.is_keyed_pair_element(node_index)? {
+            hints.keyed_pair_element_paths.try_reserve(1).map_err(|_| {
+                UnityYamlObjectConversionError::AllocationFailed {
+                    resource: "Unity YAML keyed pair hint paths",
+                    requested: hints.keyed_pair_element_paths.len().saturating_add(1),
+                }
+            })?;
+            hints.keyed_pair_element_paths.insert(try_copy_string(
+                field_path,
+                "Unity YAML keyed pair hint path",
             )?);
         }
 

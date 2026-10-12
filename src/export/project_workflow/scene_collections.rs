@@ -134,6 +134,139 @@ pub(super) fn scene_lighting_subasset_directories(
     Ok(directories)
 }
 
+/// Original directories from AssetBundle Container keys (DirectExport mode).
+///
+/// Ports the AssetBundle half of the frozen `OriginalPathProcessor`: container entries
+/// with `FileID == 0` assign `OriginalPath` (`Assets/` plus the container key) to local
+/// assets, so export directories follow the bundle layout instead of the class name.
+/// Rooted keys without an `Assets` segment and empty keys are skipped exactly like the
+/// source (`EnsurePathNotRooted`); shared-file entries (`FileID != 0`) never map.
+/// This runs before the lighting-subasset rule, matching the source processor order
+/// (`OriginalPathProcessor` yields before `LightingDataProcessor`, whose `??=` only
+/// fills unset directories). ResourceManager-container mapping, GroupByBundleName mode,
+/// shader override paths, and path-lowercasing restoration stay open.
+pub(super) fn bundle_container_original_directories(
+    workspace: &SerializedFileWorkspace,
+    objects: &ObjectWorkspace,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+) -> Result<HashMap<(usize, usize), String>, Box<dyn Error>> {
+    let mut directories = HashMap::new();
+    for object in objects
+        .objects()
+        .iter()
+        .filter(|object| object.factory.class_id == 142)
+    {
+        let payload = object.payload.as_ref().map_err(|error| {
+            invalid_project(format!(
+                "AssetBundle {}:{} could not be decoded for container paths: {error}",
+                object.file_index, object.path_id
+            ))
+        })?;
+        let references = match extract_asset_bundle_container_references(
+            &payload.root,
+            SceneBundleMappingLimits::default(),
+        ) {
+            Ok(references) => references,
+            Err(AssetBundleContainerDecodeError::MissingContainerField) => continue,
+            Err(error) => {
+                return Err(invalid_project(format!(
+                    "AssetBundle {}:{} has a malformed container table: {error}",
+                    object.file_index, object.path_id
+                )))
+            }
+        };
+        let Some(file_graph) = reference_graph.managed_graph_for_file(object.file_index) else {
+            return Err(invalid_project(format!(
+                "AssetBundle {}:{} has no reference graph for container resolution",
+                object.file_index, object.path_id
+            )));
+        };
+        let Some(metadata) = workspace
+            .files()
+            .get(object.file_index)
+            .map(|file| &file.metadata)
+        else {
+            return Err(invalid_project(format!(
+                "AssetBundle {}:{} refers to absent workspace file {}",
+                object.file_index, object.path_id, object.file_index
+            )));
+        };
+        for reference in &references {
+            // Shared-file references must not be treated as local container assets.
+            if reference.file_id != 0 {
+                continue;
+            }
+            let target = resolve_asset_bundle_container_reference(reference, metadata, file_graph);
+            let AssetBundleContainerTarget::LocalObject { object_index } = target else {
+                continue;
+            };
+            let Some(directory) = direct_export_container_directory(&reference.path) else {
+                continue;
+            };
+            // The source assigns OriginalPath unconditionally, so later entries win.
+            directories.try_reserve(1).map_err(|_| {
+                invalid_project("could not allocate bundle container directory index")
+            })?;
+            directories.insert((object.file_index, object_index), directory);
+        }
+    }
+    Ok(directories)
+}
+
+/// Directory half of the frozen `OriginalPathHelper.EnsureStartsWithAssets` plus the
+/// `OriginalPath` split for DirectExport mode: `Assets/` plus the container key, keeping
+/// only the parent directory. Returns `None` for empty keys and for rooted keys without
+/// an `Assets` segment, mirroring `EnsurePathNotRooted`.
+fn direct_export_container_directory(key: &str) -> Option<String> {
+    if key.is_empty() {
+        return None;
+    }
+    let tail = if is_rooted_container_key(key) {
+        // Keep only the `Assets/...` tail, like `EnsurePathNotRooted`.
+        let segments: Vec<&str> = key.split(['/', '\\']).collect();
+        let position = segments.iter().position(is_assets_segment)?;
+        segments[position..].join("/")
+    } else {
+        key.to_owned()
+    };
+    if tail.is_empty() {
+        return None;
+    }
+    const ASSETS_PREFIX: &str = "Assets/";
+    let full = if tail.starts_with(ASSETS_PREFIX) {
+        tail
+    } else if tail.len() > ASSETS_PREFIX.len()
+        && tail[..ASSETS_PREFIX.len()].eq_ignore_ascii_case(ASSETS_PREFIX)
+    {
+        format!("Assets/{}", &tail[ASSETS_PREFIX.len()..])
+    } else {
+        format!("Assets/{tail}")
+    };
+    full.rsplit_once('/')
+        .map(|(directory, _)| directory.to_owned())
+}
+
+fn is_assets_segment(segment: &&str) -> bool {
+    segment.len() == "Assets".len() && segment.eq_ignore_ascii_case("Assets")
+}
+
+/// `.NET Path.IsPathRooted` over `/`-separated container keys: a leading separator or a
+/// drive-letter prefix counts as rooted.
+fn is_rooted_container_key(key: &str) -> bool {
+    if key.starts_with('/') || key.starts_with('\\') {
+        return true;
+    }
+    let bytes = key.as_bytes();
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'/' || bytes[2] == b'\\')
+    {
+        return true;
+    }
+    false
+}
+
 fn is_lightmap_texture_pointer_field(field_path: &str) -> bool {
     let Some(lightmap_data_path) = field_path.strip_prefix("m_Lightmaps[") else {
         return false;
@@ -153,6 +286,7 @@ pub(super) fn prepare_scene_collections(
     objects: &ObjectWorkspace,
     reference_graph: &MultiFileReferenceGraph<'_>,
     project_version: SceneUnityVersion,
+    container_directories: &HashMap<(usize, usize), String>,
 ) -> Result<PreparedSceneCollections, Box<dyn Error>> {
     let processing = process_workspace_scenes_and_prefabs(
         filesystem,
@@ -283,6 +417,7 @@ pub(super) fn prepare_scene_collections(
         &processing,
         project_version,
         &scene_member_keys,
+        container_directories,
     )?;
 
     let mut processing_warnings = Vec::new();
@@ -312,6 +447,7 @@ fn prepare_prefab_collections(
     processing: &WorkspaceSceneProcessing,
     project_version: SceneUnityVersion,
     scene_member_keys: &HashSet<ExportAssetObjectKey>,
+    container_directories: &HashMap<(usize, usize), String>,
 ) -> Result<(Vec<RoutedPrefabCollection>, HashSet<ExportAssetObjectKey>), Box<dyn Error>> {
     let has_prefab_hierarchy_assets =
         processing
@@ -425,7 +561,8 @@ fn prepare_prefab_collections(
             unity_version: project_version,
         };
 
-        let (prefab_identity, representation, class_name) = match prefab_reference {
+        let (prefab_identity, representation, class_name, original_directory) =
+            match prefab_reference {
             crate::processing::prefab_processing::WorkspaceProcessedPrefabReference::Existing(
                 source_prefab,
             ) => {
@@ -463,6 +600,13 @@ fn prepare_prefab_collections(
                     },
                     representation,
                     payload.type_name.clone(),
+                    // An existing bundle PrefabInstance carries its own container path.
+                    container_directories
+                        .get(&(
+                            source_prefab.file_index,
+                            source_prefab.object_index,
+                        ))
+                        .cloned(),
                 )
             }
             crate::processing::prefab_processing::WorkspaceProcessedPrefabReference::Generated(
@@ -534,6 +678,15 @@ fn prepare_prefab_collections(
                     // baseline names a Prefab collection created from a loose GameObject after
                     // its root GameObject, even when the collection uses PrefabImporter.
                     "GameObject".to_owned(),
+                    // `CreatePrefabForRoot` copies `root.GetBestDirectory()` into the
+                    // prefab `OverrideDirectory`, so a generated prefab follows the
+                    // root GameObject's container path when the bundle assigns one.
+                    container_directories
+                        .get(&(
+                            root_game_object.file_index,
+                            root_game_object.object_index,
+                        ))
+                        .cloned(),
                 )
             }
         };
@@ -651,6 +804,7 @@ fn prepare_prefab_collections(
                 .unwrap_or_else(|| "PrefabInstance".to_owned()),
             class_name,
             named_name: root_name,
+            original_directory,
             asset_bundle_name: object_asset_bundle_name(root_payload),
             representation,
             export_ids,
@@ -924,4 +1078,41 @@ pub(super) fn scene_build_settings_entry_is_duplicate(
         .iter()
         .enumerate()
         .any(|(index, scene)| index != scene_index && scene.path == selected.path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn container_directories_follow_direct_export_path_rules() {
+        // Bare container keys land directly under `Assets/`.
+        assert_eq!(
+            direct_export_container_directory("prefab-id-v1_avtr_02c4b897_2026960512"),
+            Some("Assets".to_owned())
+        );
+        // Pathed keys keep their parent directory under `Assets/`.
+        assert_eq!(
+            direct_export_container_directory("Models/Avatar/body"),
+            Some("Assets/Models/Avatar".to_owned())
+        );
+        // Keys already under `Assets/` are not doubled.
+        assert_eq!(
+            direct_export_container_directory("Assets/Texture2D/foo"),
+            Some("Assets/Texture2D".to_owned())
+        );
+        // Case-insensitive `assets/` prefixes are repaired like the source.
+        assert_eq!(
+            direct_export_container_directory("assets/Texture2D/foo"),
+            Some("Assets/Texture2D".to_owned())
+        );
+        // Empty keys never map.
+        assert_eq!(direct_export_container_directory(""), None);
+        // Rooted keys without an `Assets` segment are skipped.
+        assert_eq!(direct_export_container_directory("/other/root/asset"), None);
+        assert_eq!(
+            direct_export_container_directory("/mnt/bundle/Assets/Mesh/part"),
+            Some("Assets/Mesh".to_owned())
+        );
+    }
 }

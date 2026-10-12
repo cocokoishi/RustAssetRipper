@@ -1240,8 +1240,10 @@ pub(super) fn assert_yaml_asset_order_and_streamed_bytes(yaml: &str) {
     let first_start = yaml.find("--- !u!189 &101").unwrap();
     assert!(second_start < first_start);
     assert_eq!(yaml.matches("--- !u!189").count(), 2);
-    assert!(yaml[second_start..first_start].contains("m_ImageData_C189: 58595a"));
-    assert!(yaml[first_start..].contains("m_ImageData_C189: 4f524947"));
+    assert!(yaml[second_start..first_start].contains("m_ImageData_C189: 3"));
+    assert!(yaml[second_start..first_start].contains("_typelessdata: 58595a"));
+    assert!(yaml[first_start..].contains("m_ImageData_C189: 4"));
+    assert!(yaml[first_start..].contains("_typelessdata: 4f524947"));
     assert!(!yaml.contains("first.resS"));
     assert!(!yaml.contains("second.resS"));
 }

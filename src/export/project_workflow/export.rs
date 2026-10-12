@@ -93,6 +93,11 @@ fn validate_workspace_project_export<'inputs, 'provider, 'graph>(
             unresolved_references.join("; ")
         )));
     }
+    let bundle_container_original_directories = bundle_container_original_directories(
+        inputs.workspace,
+        inputs.objects,
+        inputs.reference_graph,
+    )?;
     let PreparedSceneCollections {
         processing: scene_processing,
         routed: scene_collections,
@@ -107,6 +112,7 @@ fn validate_workspace_project_export<'inputs, 'provider, 'graph>(
         inputs.objects,
         inputs.reference_graph,
         project_version,
+        &bundle_container_original_directories,
     )?;
     let has_animation_clips =
         inputs
@@ -191,6 +197,7 @@ fn validate_workspace_project_export<'inputs, 'provider, 'graph>(
         used_guids,
         lightmap_texture_directories,
         scene_lighting_subasset_directories,
+        bundle_container_original_directories,
     })
 }
 
@@ -284,6 +291,7 @@ pub fn export_workspace_yaml_project_with_serialized_settings(
         used_guids,
         lightmap_texture_directories,
         scene_lighting_subasset_directories,
+        bundle_container_original_directories,
     } = context;
     let WorkspaceProjectExportInputs {
         output_root,
@@ -323,6 +331,7 @@ pub fn export_workspace_yaml_project_with_serialized_settings(
         controller_collections: &controller_collections,
         lightmap_texture_directories: &lightmap_texture_directories,
         scene_lighting_subasset_directories: &scene_lighting_subasset_directories,
+        bundle_container_original_directories: &bundle_container_original_directories,
         existing_guids: &used_guids,
         limits,
     };

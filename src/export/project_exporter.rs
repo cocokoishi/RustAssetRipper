@@ -103,9 +103,33 @@ pub fn is_generated_class(class_id: i32) -> bool {
     class_id == PLAYER_SETTINGS_CLASS_ID || class_interface_table().contains_key(&class_id)
 }
 
+/// The frozen `Pass110` ClassName overrides for classes whose `ClassIDType` enum
+/// name carries a version suffix: export display (`ClassName`, hence collection
+/// directories) uses the unversioned Unity name, while recovery naming keeps the
+/// enum spelling via [`crate::serialized_file::object::class_id_type_name`].
+///
+/// Ground truth: isolated reflection dump over the SourceGenerated assembly
+/// (`EngineAssetsProbe classnames`, `target/class-original-names.tsv`), which
+/// lists the unsuffixed current variant per class (e.g. `319|AvatarMask`).
+/// Classes without generated code (194, 197, 327, 1011) keep their enum names.
+/// Unity 3.5-era `NavMesh_3_5` (class 238) is a known older-variant exception
+/// this table does not model; all authorized samples are 2022.3.x.
+fn class_original_name(class_id: i32) -> Option<&'static str> {
+    match class_id {
+        238 => Some("NavMeshData"),
+        258 => Some("LightProbes"),
+        319 => Some("AvatarMask"),
+        329 => Some("VideoClip"),
+        _ => None,
+    }
+}
+
 /// The source's `ClassName` for one object: the generated class name when the class ID has
 /// one, else the TypeTree root type name, else the decimal class ID.
 pub fn object_class_name(class_id: i32, type_tree_root: Option<&str>) -> String {
+    if let Some(name) = class_original_name(class_id) {
+        return name.to_owned();
+    }
     if let Some(name) = crate::serialized_file::object::class_id_type_name(class_id) {
         return name.to_owned();
     }
@@ -1477,6 +1501,17 @@ mod tests {
         assert_eq!(object_class_name(129, None), "129");
         assert_eq!(object_class_name(999_999, Some("Root")), "Root");
         assert_eq!(object_class_name(999_999, None), "999999");
+    }
+
+    #[test]
+    fn class_names_use_unversioned_original_names_for_display() {
+        // Frozen Pass110 overrides (reflection ground truth): the export ClassName
+        // drops the ClassIDType version suffix.
+        assert_eq!(object_class_name(319, Some("AvatarMask_319")), "AvatarMask");
+        assert_eq!(object_class_name(319, None), "AvatarMask");
+        assert_eq!(object_class_name(258, None), "LightProbes");
+        assert_eq!(object_class_name(329, None), "VideoClip");
+        assert_eq!(object_class_name(238, None), "NavMeshData");
     }
 
     #[test]

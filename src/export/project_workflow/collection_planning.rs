@@ -331,6 +331,10 @@ pub(super) fn build_project_pointer_map(
                     | ObjectRoute::AudioBinary
                     | ObjectRoute::FontBinary
                     | ObjectRoute::TextureImage
+                    // The frozen `BinaryAssetExporter.ToExportType` (which the Dummy and
+                    // Simple shader exporters inherit) reports `AssetType.Meta`; only the
+                    // opt-in YAML shader exporter reports `Serialized`.
+                    | ObjectRoute::ShaderText
             ) {
                 UnityProjectAssetType::Meta
             } else if entry.route == ObjectRoute::EngineRedirect {

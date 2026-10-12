@@ -1016,6 +1016,7 @@ pub(super) fn plan_prefab_files(
             &crate::export::asset_path::ExportAssetPathIdentity {
                 class_name: prefab.class_name.clone(),
                 named_name: prefab.named_name.clone(),
+                original_directory: prefab.original_directory.clone(),
                 ..Default::default()
             },
             "prefab",

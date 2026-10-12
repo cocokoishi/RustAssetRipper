@@ -1,4 +1,5 @@
-// Isolated reference probe for the engine-assets TPK version bands.
+// Isolated reference probe for the engine-assets TPK version bands and the
+// generated class (OriginalName) table.
 //
 // Modes:
 //   bands <out>
@@ -7,6 +8,12 @@
 //       Applies the exact frozen `EngineAssetsExporter.CreateFromTpkBlob` band
 //       selection for <version> and writes `KEY|<selected band key>` followed
 //       by the raw band JSON. Reads only the embedded TPK; writes only <out>.
+//   classnames <out>
+//       Dumps the generated `ClassID_*` class names as `classID|OriginalName`
+//       rows sorted by class ID. These are the frozen `Pass110` ClassName
+//       overrides (unversioned Unity names), read via reflection over the
+//       SourceGenerated assembly. Reads nothing else; writes only <out>.
+using System.Reflection;
 using System.Text.Json;
 using AssetRipper.Primitives;
 using AssetRipper.SourceGenerated;
@@ -15,7 +22,7 @@ using AssetRipper.Tpk.EngineAssets;
 
 if (args.Length == 0)
 {
-	Console.Error.WriteLine("usage: bands <out> | bandjson <version> <out> | tsv <version> <materialsOut> <shadersOut>");
+	Console.Error.WriteLine("usage: bands <out> | bandjson <version> <out> | tsv <version> <materialsOut> <shadersOut> | classnames <out>");
 	return 2;
 }
 
@@ -31,6 +38,9 @@ try
 			return 0;
 		case "tsv":
 			DumpTsv(args[1], args[2], args[3]);
+			return 0;
+		case "classnames":
+			DumpClassNames(args[1]);
 			return 0;
 		default:
 			Console.Error.WriteLine($"unknown mode {args[0]}");
@@ -147,4 +157,30 @@ static void DumpTsv(string versionText, string materialsOut, string shadersOut)
 	}
 	File.WriteAllLines(materialsOut, materials);
 	File.WriteAllLines(shadersOut, shaders);
+}
+
+static void DumpClassNames(string output)
+{
+	Assembly assembly = typeof(AssetRipper.SourceGenerated.Classes.ClassID_1.GameObject).Assembly;
+	List<string> lines = new();
+	foreach (Type type in assembly.GetTypes())
+	{
+		string? ns = type.Namespace;
+		if (ns is null || !ns.StartsWith("AssetRipper.SourceGenerated.Classes.ClassID_", StringComparison.Ordinal))
+		{
+			continue;
+		}
+		string rest = ns.Substring("AssetRipper.SourceGenerated.Classes.ClassID_".Length);
+		if (rest.Contains('.') || !int.TryParse(rest, out int classId))
+		{
+			continue;
+		}
+		if (!type.IsClass || type.IsNested)
+		{
+			continue;
+		}
+		lines.Add($"{classId}|{type.Name}");
+	}
+	lines.Sort(StringComparer.Ordinal);
+	File.WriteAllLines(output, lines);
 }

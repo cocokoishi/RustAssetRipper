@@ -926,10 +926,10 @@ pub fn format_dotnet_f32(value: f32) -> String {
 /// parses back to the identical bits; otherwise the input is returned unchanged.
 ///
 /// The winner among the round-tripping neighbors is the closest to the exact value with
-/// exact `f64` ties broken toward even. Widening `f32` to `f64` is exact and decimal
-/// parsing is correctly rounded, so the discrimination margin (decimal-ulp scale) is
-/// roughly nine orders above the `f64` rounding quantum; the full-workspace real-sample
-/// replay differentially guards the outcome.
+/// exact ties broken toward even. Closeness is decided by comparing `2*value` against
+/// the neighbor sum as exact terminating decimals (binary fractions always terminate),
+/// so no floating-point rounding noise can flip an exact tie. The full-workspace
+/// real-sample replay differentially guards the outcome.
 fn round_shortest_tie_to_even_f32(sci: &str, value: f32) -> String {
     let (mantissa, exponent_text) = match sci.split_once('e') {
         Some(parts) => parts,
@@ -968,28 +968,214 @@ fn round_shortest_tie_to_even_f32(sci: &str, value: f32) -> String {
     if candidates.len() < 2 {
         return sci.to_owned();
     }
-    let exact = f64::from(value);
+    // All candidates share the digit length and the exponent, so closeness to `value`
+    // is decided exactly: `2*value` below/above/equal to the pairwise digit sum means
+    // the smaller/larger/either neighbor wins. Exact ties resolve toward even.
+    let doubled = exact_doubled_decimal_expansion_f32(bits);
+    let Some(scale) = decimal_last_place_scale(exponent_text, digits.len()) else {
+        return sci.to_owned();
+    };
     let mut best = 0usize;
-    let mut best_distance = f64::INFINITY;
-    let mut best_tied_even = false;
-    for (index, candidate) in candidates.iter().enumerate() {
-        let text = rebuild_sci_string(negative, candidate, exponent_text);
-        let parsed: f64 = match text.parse() {
-            Ok(parsed) => parsed,
-            Err(_) => continue,
-        };
-        let distance = (parsed - exact).abs();
-        let last_even = (candidate[candidate.len() - 1] - b'0').is_multiple_of(2);
-        if distance < best_distance || (distance == best_distance && last_even && !best_tied_even) {
-            best = index;
-            best_distance = distance;
-            best_tied_even = last_even;
+    for index in 1..candidates.len() {
+        let sum = digit_string_sum(&candidates[best], &candidates[index]);
+        match cmp_doubled_value_against_sum(&doubled, &sum, scale) {
+            std::cmp::Ordering::Less => {
+                if candidates[index] < candidates[best] {
+                    best = index;
+                }
+            }
+            std::cmp::Ordering::Greater => {
+                if candidates[index] > candidates[best] {
+                    best = index;
+                }
+            }
+            std::cmp::Ordering::Equal => {
+                let best_even =
+                    (candidates[best][candidates[best].len() - 1] - b'0').is_multiple_of(2);
+                let challenger_even =
+                    (candidates[index][candidates[index].len() - 1] - b'0').is_multiple_of(2);
+                if challenger_even && !best_even {
+                    best = index;
+                }
+            }
         }
     }
     if best == 0 {
         return sci.to_owned();
     }
     rebuild_sci_string(negative, &candidates[best], exponent_text)
+}
+
+/// Decimal scale (`10^scale`) of the shared last digit place for a shortest-form digit
+/// string with the given `LowerExp` exponent text. Returns `None` for malformed exponents.
+fn decimal_last_place_scale(exponent_text: &str, digit_len: usize) -> Option<i32> {
+    let exponent: i32 = exponent_text.parse().ok()?;
+    let len = i32::try_from(digit_len).ok()?;
+    exponent.checked_sub(len)?.checked_add(1)
+}
+
+/// Digit-string sum of two same-length decimal digit strings.
+fn digit_string_sum(left: &[u8], right: &[u8]) -> Vec<u8> {
+    debug_assert_eq!(left.len(), right.len());
+    let mut sum = Vec::with_capacity(left.len() + 1);
+    let mut carry = 0u8;
+    for (left_digit, right_digit) in left.iter().rev().zip(right.iter().rev()) {
+        let total = (left_digit - b'0') + (right_digit - b'0') + carry;
+        sum.push(b'0' + total % 10);
+        carry = total / 10;
+    }
+    if carry != 0 {
+        sum.push(b'0' + carry);
+    }
+    sum.reverse();
+    sum
+}
+
+/// Exact decimal expansion of `2*value` for a nonzero finite `f32` magnitude, as
+/// `(integer_digits, frac_digits)`. Binary fractions terminate in decimal, so the
+/// expansion is complete; doubling/halving digit strings is exact and bounded
+/// (at most ~150 steps for binary32 extremes).
+fn exact_doubled_decimal_expansion_f32(bits: u32) -> (Vec<u8>, Vec<u8>) {
+    let exponent_field = bits >> 23 & 0xFF;
+    let fraction_field = bits & 0x7F_FFFF;
+    let (mantissa, shift) = if exponent_field == 0 {
+        (fraction_field, -148i32)
+    } else {
+        // `2*value = mantissa * 2^(exponent_field - 149)`.
+        (
+            fraction_field | 0x80_0000,
+            i32::try_from(exponent_field).unwrap_or(0) - 149,
+        )
+    };
+    // Decimal digits of the mantissa, then `2*value = mantissa * 2^shift`.
+    let mut parts = DecimalParts {
+        integer: mantissa.to_string().into_bytes(),
+        frac: Vec::new(),
+    };
+    if shift >= 0 {
+        for _ in 0..shift {
+            parts.double();
+        }
+    } else {
+        for _ in 0..(-shift) {
+            parts.halve();
+        }
+    }
+    parts.trim();
+    (parts.integer, parts.frac)
+}
+
+/// Exact terminating decimal split into integer and frac digit strings.
+struct DecimalParts {
+    integer: Vec<u8>,
+    frac: Vec<u8>,
+}
+
+impl DecimalParts {
+    fn double(&mut self) {
+        let mut carry = 0u8;
+        for digit in self
+            .frac
+            .iter_mut()
+            .rev()
+            .chain(self.integer.iter_mut().rev())
+        {
+            let total = (*digit - b'0') * 2 + carry;
+            *digit = b'0' + total % 10;
+            carry = total / 10;
+        }
+        if carry != 0 {
+            self.integer.insert(0, b'0' + carry);
+        }
+    }
+
+    fn halve(&mut self) {
+        let mut remainder = 0u8;
+        for digit in self.integer.iter_mut().chain(self.frac.iter_mut()) {
+            let total = remainder * 10 + (*digit - b'0');
+            *digit = b'0' + total / 2;
+            remainder = total % 2;
+        }
+        if remainder != 0 {
+            self.frac.push(b'5');
+        }
+    }
+
+    fn trim(&mut self) {
+        while self.integer.len() > 1 && self.integer[0] == b'0' {
+            self.integer.remove(0);
+        }
+        while self.frac.last() == Some(&b'0') {
+            self.frac.pop();
+        }
+    }
+}
+
+/// Compare exact `2*value` (as an expansion from
+/// [`exact_doubled_decimal_expansion_f32`]) against a digit-string sum at decimal
+/// scale `10^scale`. Both sides terminate, so padding the shorter frac part with
+/// zeros is exact.
+fn cmp_doubled_value_against_sum(
+    doubled: &(Vec<u8>, Vec<u8>),
+    sum_digits: &[u8],
+    scale: i32,
+) -> std::cmp::Ordering {
+    let (sum_integer, sum_frac) = split_scaled_digits(sum_digits, scale);
+    let (value_integer, value_frac) = (&doubled.0, &doubled.1);
+    let stripped_value: &[u8] = trim_leading_zeros(value_integer);
+    let stripped_sum: &[u8] = trim_leading_zeros(&sum_integer);
+    if stripped_value.len() != stripped_sum.len() {
+        return stripped_value.len().cmp(&stripped_sum.len());
+    }
+    match stripped_value.cmp(stripped_sum) {
+        std::cmp::Ordering::Equal => {}
+        ordering => return ordering,
+    }
+    let width = value_frac.len().max(sum_frac.len());
+    for index in 0..width {
+        let left = value_frac.get(index).copied().unwrap_or(b'0');
+        let right = sum_frac.get(index).copied().unwrap_or(b'0');
+        match left.cmp(&right) {
+            std::cmp::Ordering::Equal => {}
+            ordering => return ordering,
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+fn trim_leading_zeros(digits: &[u8]) -> &[u8] {
+    let mut start = 0;
+    while start + 1 < digits.len() && digits[start] == b'0' {
+        start += 1;
+    }
+    &digits[start..]
+}
+
+/// Place a digit string at decimal scale `10^scale`, splitting into
+/// `(integer_digits, frac_digits)`.
+fn split_scaled_digits(digits: &[u8], scale: i32) -> (Vec<u8>, Vec<u8>) {
+    let mut trimmed: &[u8] = digits;
+    while trimmed.len() > 1 && trimmed[0] == b'0' {
+        trimmed = &trimmed[1..];
+    }
+    if scale >= 0 {
+        let zeros = usize::try_from(scale).unwrap_or(usize::MAX).min(1024);
+        let mut integer = Vec::with_capacity(trimmed.len() + zeros);
+        integer.extend_from_slice(trimmed);
+        integer.extend(std::iter::repeat_n(b'0', zeros));
+        (integer, Vec::new())
+    } else {
+        let point = usize::try_from(-scale).unwrap_or(usize::MAX).min(2048);
+        if trimmed.len() > point {
+            let split = trimmed.len() - point;
+            (trimmed[..split].to_vec(), trimmed[split..].to_vec())
+        } else {
+            let mut frac = Vec::with_capacity(point);
+            frac.extend(std::iter::repeat_n(b'0', point - trimmed.len()));
+            frac.extend_from_slice(trimmed);
+            (vec![b'0'], frac)
+        }
+    }
 }
 
 /// Steps a decimal digit string by `delta` (±1) with borrow/carry propagation.
@@ -1614,6 +1800,25 @@ mod tests {
         // Non-tie values keep Rust's shortest choice.
         assert_eq!(format_dotnet_f32(51.55f32), "51.55");
         assert_eq!(format_dotnet_f32(-153.0f32), "-153");
+    }
+
+    /// Exact ties at negative powers of two resolve toward even through exact
+    /// decimal comparison, not `f64` distance (whose rounding noise flipped these
+    /// cases before). Bits `0x39800000`/`0xB9800000` are exactly `2^-12`; both
+    /// `...462` and `...463` spellings parse back, and the frozen reference's
+    /// `Face (merged).baked.asset` mesh vertices print the even neighbor.
+    #[test]
+    fn format_dotnet_f32_rounds_power_of_two_ties_to_even() {
+        for (bits, expected) in [
+            (0x39800000u32, "0.00024414062"),
+            (0xB9800000u32, "-0.00024414062"),
+        ] {
+            assert_eq!(
+                format_dotnet_f32(f32::from_bits(bits)),
+                expected,
+                "f32 {bits:#010X}"
+            );
+        }
     }
     /// Byte-for-byte differential against the reference `AssetRipper.Yaml` runtime layout.
     ///

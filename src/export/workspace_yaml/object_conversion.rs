@@ -50,6 +50,8 @@ fn should_use_scene_editor_type_tree(class_id: i32, unity_version_text: Option<&
                 20 | 43
                     | 64
                     | 65
+                    | 28
+                    | 72
                     | 81
                     | 136
                     | 193
@@ -62,6 +64,7 @@ fn should_use_scene_editor_type_tree(class_id: i32, unity_version_text: Option<&
                     | 90
                     | 82
                     | 95
+                    | 213
                     | 135
                     | 137
                     | 319
@@ -594,6 +597,10 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
             }
             if class_id == 43 {
                 apply_mesh_editor_format(&mut root)
+                    .map_err(|message| scene_editor_format_error(source, class_id, message))?;
+            }
+            if class_id == 28 {
+                apply_texture_editor_format(&mut root)
                     .map_err(|message| scene_editor_format_error(source, class_id, message))?;
             }
             if animation_clip_editor_format && class_id == 74 {
@@ -1960,6 +1967,54 @@ fn apply_mesh_editor_format(root: &mut SerializedValue) -> Result<(), String> {
     )
 }
 
+/// Expands a Texture2D `image data` TypelessData field into Unity's project-YAML
+/// shape (`image data: <byte count>` plus a `_typelessdata` payload), mirroring
+/// the frozen mesh `m_DataSize` expansion: the TPK tree represents both as one
+/// `Bytes` value. A missing field (streamed textures without inline bytes) is left
+/// untouched; any other shape is an explicit error.
+fn apply_texture_editor_format(root: &mut SerializedValue) -> Result<(), String> {
+    let SerializedValue::Struct(fields) = root else {
+        return Err("Texture2D editor root is not a struct".to_owned());
+    };
+    let Some(data_index) = fields.iter().position(|field| field.name == "image data") else {
+        return Ok(());
+    };
+    if fields.iter().any(|field| field.name == "_typelessdata") {
+        return Err("Texture2D already has a _typelessdata field".to_owned());
+    }
+    let data_length = match &fields[data_index].value {
+        SerializedValue::Bytes(bytes) => bytes.len(),
+        value => {
+            return Err(format!(
+                "Texture2D image data has value {value:?}, expected TypelessData bytes"
+            ));
+        }
+    };
+    let serialized_length = i32::try_from(data_length)
+        .map_err(|_| "Texture2D TypelessData exceeds Unity's signed length range".to_owned())?;
+    fields
+        .try_reserve(1)
+        .map_err(|_| "could not reserve the Unity TypelessData YAML payload field".to_owned())?;
+    let payload = match std::mem::replace(
+        &mut fields[data_index].value,
+        SerializedValue::I32(serialized_length),
+    ) {
+        SerializedValue::Bytes(bytes) => bytes,
+        value => {
+            fields[data_index].value = value;
+            return Err("Texture2D image data changed while preparing YAML".to_owned());
+        }
+    };
+    fields.insert(
+        data_index + 1,
+        SerializedFieldValue {
+            name: "_typelessdata".to_owned(),
+            value: SerializedValue::Bytes(payload),
+        },
+    );
+    Ok(())
+}
+
 /// Applies the frozen `NavMeshSettingsExtensions.ConvertToEditorFormat` behavior for the
 /// serialized null-`m_NavMeshData` case: `BuildSettings.SetToDefault()`.
 ///
@@ -2699,12 +2754,16 @@ mod tests {
             43,
             64,
             65,
+            28,
+            72,
             136,
             205,
             222,
             223,
             224,
             320,
+            28,
+            72,
             81,
             193,
             196,
@@ -2713,6 +2772,7 @@ mod tests {
             33,
             82,
             95,
+            213,
             108,
             135,
             319,
@@ -2786,6 +2846,8 @@ mod tests {
             43,
             64,
             65,
+            28,
+            72,
             136,
             205,
             222,
@@ -2797,6 +2859,7 @@ mod tests {
             90,
             82,
             95,
+            213,
             135,
             319,
             1_773_428_102,

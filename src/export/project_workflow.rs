@@ -31,6 +31,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::io::filesystem::VirtualFileSystem;
 use crate::io::platform_structure::PlatformResourceProvider;
+use crate::processing::asset_bundle::{
+    AssetBundleContainerTarget, resolve_asset_bundle_container_reference,
+};
 use crate::processing::asset_factory::{
     ClassLayoutSource, FactoryAssetKind, FactoryUnityVersion, FactoryVersionType,
     reference_class_layouts,
@@ -39,7 +42,9 @@ use crate::processing::managed_assembly::{
     ManagedAssembly, ManagedAssemblyCatalog, ManagedAssemblyLimits, mono_script_export_identity,
 };
 use crate::processing::scene_collections::{
-    SceneDefinitionGuidPlan, SceneDefinitionPathSource, SceneGuidWords, SceneManagerKind,
+    AssetBundleContainerDecodeError, SceneBundleMappingLimits, SceneDefinitionGuidPlan,
+    SceneDefinitionPathSource, SceneGuidWords, SceneManagerKind,
+    extract_asset_bundle_container_references,
 };
 use crate::processing::scene_hierarchy::{
     WorkspaceSceneAssetCategory, WorkspaceSceneHierarchyScene, WorkspaceSceneObjectIdentity,
@@ -382,6 +387,11 @@ struct RoutedPrefabCollection {
     name: String,
     class_name: String,
     named_name: Option<String>,
+    /// Bundle-container `OriginalDirectory` of the prefab root (generated prefabs) or the
+    /// prefab instance itself (existing prefabs); mirrors `CreatePrefabForRoot` copying
+    /// `root.GetBestDirectory()` into `OverrideDirectory`. Falls back to the class
+    /// directory when the bundle container assigns no path.
+    original_directory: Option<String>,
     asset_bundle_name: Option<String>,
     representation: PrefabAssetRepresentation,
     export_ids: PrefabExportIdPlan,
@@ -425,6 +435,7 @@ struct WorkspaceProjectExportContext<'inputs, 'provider, 'graph> {
     used_guids: HashSet<[u8; 16]>,
     lightmap_texture_directories: HashMap<(usize, usize), String>,
     scene_lighting_subasset_directories: HashMap<(usize, usize), String>,
+    bundle_container_original_directories: HashMap<(usize, usize), String>,
 }
 
 struct RoutedProjectObjects<'inputs> {
@@ -459,6 +470,7 @@ struct ProjectRoutingContext<'context, 'provider, 'graph> {
     controller_collections: &'context PreparedControllerCollections,
     lightmap_texture_directories: &'context HashMap<(usize, usize), String>,
     scene_lighting_subasset_directories: &'context HashMap<(usize, usize), String>,
+    bundle_container_original_directories: &'context HashMap<(usize, usize), String>,
     existing_guids: &'context HashSet<[u8; 16]>,
     limits: WorkspaceProjectExportLimits,
 }

@@ -105,6 +105,44 @@ where
         if stripped_fields.is_some_and(|allowed| !allowed.contains(&field.name.as_str())) {
             continue;
         }
+        let contextual_field_name =
+            field_name_alias_for_path(&field_path, hints, limits)?.unwrap_or(field.name.as_str());
+        let field_name = if hints.preserve_type_tree_field_names {
+            try_copy_string(contextual_field_name, "Unity TypeTree field name")?
+        } else {
+            baseline_yaml_field_name(contextual_field_name)?
+        };
+        // `TypelessData` members with inline bytes expand into Unity's split shape
+        // (`<name>: <byte count>` plus a `_typelessdata` payload). Any other value
+        // shape keeps the generic rendering.
+        if typeless_data_expansion_for_path(&field_path, hints, limits)? {
+            if let SerializedValue::Bytes(bytes) = &field.value {
+                let count = i32::try_from(bytes.len()).map_err(|_| {
+                    UnityYamlObjectConversionError::ValueLimitExceeded {
+                        requested: bytes.len(),
+                        limit: i32::MAX as usize,
+                    }
+                })?;
+                let hex_length = bytes.len().checked_mul(2).ok_or(
+                    UnityYamlObjectConversionError::HexScalarLimitExceeded {
+                        requested: usize::MAX,
+                        limit: limits.max_generated_scalar_bytes,
+                        field_path: field_path.clone(),
+                    },
+                )?;
+                let hex = encode_byte_hex(bytes, hex_length, &field_path, limits)?;
+                destination
+                    .insert_field(
+                        field_name,
+                        UnityYamlNode::scalar(UnityYamlScalar::Signed(i64::from(count))),
+                    )
+                    .map_err(UnityYamlObjectConversionError::NodeBuild)?;
+                destination
+                    .insert_field("_typelessdata", UnityYamlNode::plain_string(hex))
+                    .map_err(UnityYamlObjectConversionError::NodeBuild)?;
+                continue;
+            }
+        }
         let value = convert_value(
             &field.value,
             &field_path,
@@ -118,13 +156,6 @@ where
             budget,
             resolve_pointer,
         )?;
-        let contextual_field_name =
-            field_name_alias_for_path(&field_path, hints, limits)?.unwrap_or(field.name.as_str());
-        let field_name = if hints.preserve_type_tree_field_names {
-            try_copy_string(contextual_field_name, "Unity TypeTree field name")?
-        } else {
-            baseline_yaml_field_name(contextual_field_name)?
-        };
         destination
             .insert_field(field_name, value)
             .map_err(UnityYamlObjectConversionError::NodeBuild)?;
@@ -221,6 +252,20 @@ where
                 convert_hash128_value(fields, schema, field_path, depth, limits, budget)?
             } else if let Some(schema) = guid_schema_for_path(field_path, hints, limits)? {
                 convert_guid_value(fields, schema, field_path, depth, budget)?
+            } else if is_keyed_pair_element_path(field_path, hints, limits)? {
+                convert_keyed_pair_element(
+                    fields,
+                    field_path,
+                    depth,
+                    source,
+                    hints,
+                    field_mode,
+                    unity_version,
+                    missing_reference_guid,
+                    limits,
+                    budget,
+                    resolve_pointer,
+                )?
             } else {
                 let mut mapping =
                     UnityYamlNode::mapping(if is_flow_mapped_path(field_path, hints, limits)? {
@@ -1380,6 +1425,120 @@ fn is_flow_mapped_path(
     }
     let canonical_path = canonical_array_path(path, limits.max_field_path_bytes)?;
     Ok(hints.flow_mapped_struct_paths.contains(&canonical_path))
+}
+
+fn is_keyed_pair_element_path(
+    path: &str,
+    hints: &UnityYamlObjectConversionHints,
+    limits: UnityYamlObjectConversionLimits,
+) -> Result<bool, UnityYamlObjectConversionError> {
+    if hints.keyed_pair_element_paths.contains(path) {
+        return Ok(true);
+    }
+    if !path.contains('[') {
+        return Ok(false);
+    }
+    let canonical_path = canonical_array_path(path, limits.max_field_path_bytes)?;
+    Ok(hints.keyed_pair_element_paths.contains(&canonical_path))
+}
+
+fn typeless_data_expansion_for_path(
+    path: &str,
+    hints: &UnityYamlObjectConversionHints,
+    limits: UnityYamlObjectConversionLimits,
+) -> Result<bool, UnityYamlObjectConversionError> {
+    if hints.typeless_data_expansion_paths.contains(path) {
+        return Ok(true);
+    }
+    if !path.contains('[') {
+        return Ok(false);
+    }
+    let canonical_path = canonical_array_path(path, limits.max_field_path_bytes)?;
+    Ok(hints
+        .typeless_data_expansion_paths
+        .contains(&canonical_path))
+}
+
+/// Render one vector-held `pair` element as a keyed single-pair mapping
+/// (`- key: value`), matching the frozen walker for pairs with valid
+/// dictionary-key first fields. Non-scalar keys and non-`first`/`second`
+/// shapes are explicit errors, never silent struct fallbacks.
+#[allow(clippy::too_many_arguments)]
+fn convert_keyed_pair_element<F>(
+    fields: &[SerializedFieldValue],
+    field_path: &str,
+    depth: usize,
+    source: ExportAssetIdentity,
+    hints: &UnityYamlObjectConversionHints,
+    field_mode: UnityYamlObjectFieldMode,
+    unity_version: SceneUnityVersion,
+    missing_reference_guid: Option<[u8; 16]>,
+    limits: UnityYamlObjectConversionLimits,
+    budget: &mut ConversionBudget,
+    resolve_pointer: &mut F,
+) -> Result<UnityYamlNode, UnityYamlObjectConversionError>
+where
+    F: FnMut(UnityYamlPPtrRequest<'_>) -> ProjectPointerResolution,
+{
+    let [first, second] = fields else {
+        return Err(UnityYamlObjectConversionError::InvalidPairElement {
+            field_path: field_path.to_owned(),
+        });
+    };
+    if first.name != "first" || second.name != "second" {
+        return Err(UnityYamlObjectConversionError::InvalidPairElement {
+            field_path: field_path.to_owned(),
+        });
+    }
+    let first_path = child_field_path(field_path, "first", limits.max_field_path_bytes)?;
+    let second_path = child_field_path(field_path, "second", limits.max_field_path_bytes)?;
+    budget.visit(depth + 1)?;
+    budget.check_field_path(&first_path)?;
+    budget.check_field_path(&second_path)?;
+    let first_node = convert_value(
+        &first.value,
+        &first_path,
+        depth + 2,
+        source,
+        hints,
+        field_mode,
+        unity_version,
+        missing_reference_guid,
+        limits,
+        budget,
+        resolve_pointer,
+    )?;
+    let second_node = convert_value(
+        &second.value,
+        &second_path,
+        depth + 2,
+        source,
+        hints,
+        field_mode,
+        unity_version,
+        missing_reference_guid,
+        limits,
+        budget,
+        resolve_pointer,
+    )?;
+    if !matches!(first_node.kind, UnityYamlNodeKind::Scalar(_)) {
+        return Err(UnityYamlObjectConversionError::InvalidPairElement {
+            field_path: field_path.to_owned(),
+        });
+    }
+    let mut mapping = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    if let Some(version) = serialized_version_for_path(field_path, hints, limits)? {
+        mapping
+            .insert_field_begin(
+                "serializedVersion",
+                UnityYamlNode::scalar(UnityYamlScalar::Signed(i64::from(version))),
+            )
+            .map_err(UnityYamlObjectConversionError::NodeBuild)?;
+    }
+    mapping
+        .insert(first_node, second_node)
+        .map_err(UnityYamlObjectConversionError::NodeBuild)?;
+    Ok(mapping)
 }
 
 #[allow(clippy::too_many_arguments)]
