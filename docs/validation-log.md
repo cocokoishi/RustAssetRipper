@@ -4843,6 +4843,13 @@ These results do not pass the first-phase gate. The reference .NET solution buil
 - Results on latest exports: 青岚山河卷 r23 34,416/0, 青岚古境 r3 3,867/0, 云栖仙府 r3 5,944/0, 玉京烟霞 r3 14,029/0, 烟雨长亭 r1 2,311/0, 松月竹庭 r11 656/0 — 61,223 references checked with zero dangling. (Two tool bugs found and fixed during development: missed `.anim`/`.mat`/`.renderTexture` includes and missing font/scene exemptions; the LightingData→scene 102900000 case was verified conventional against source, not a gap.)
 - Evidence: `DIFF-REFS-INTEGRITY-001`. Unity Editor import/runtime and UABEA were not run; import-equivalence of the resolved graph is static evidence only.
 
+## 2026-10-12 controller oracle probe decodes the split mechanism — probe committed
+
+- New differential oracle `tools/probes/controller-oracle/` (frozen load+process pipeline as oracle only, never a product dependency): `ExportHandler.Load/Process` on 青岚雅苑`, dumping pre/post member census plus per-controller hierarchy histograms to `target/controller-oracle-青岚古境2.tsv` (3,589 lines, uncommitted evidence).
+- Decisive results: pre-processing CAB holds ZERO 1101/1102/1107/1109/206 objects (only 752+1 behaviours) — the bundle genuinely stores no separate sub-asset objects in the C# model; processing creates all 2,074 (1,059+639+141+61+174) fresh in `Generated AnimatorController Dependencies`. Post MainAsset-null sets reconcile EXACTLY with separate files: 13 states (PathIDs 645-650/658-663 + Root 602) → 13 `.state`; 41 trees → 41 `.blendtree`; 78 CAB behaviours (+1 engine) → 78 `.asset`. Embedded trees reconcile as hierarchy sums (35 FX + 24 Gesture + 73 Loco + 1 Idle = 133). Earlier round-16 counts (66/246) are superseded: the true split total is 132.
+- Port spec (final): Rust's rebuild must attach the oracle's kept subset, emit dropped created objects as separate main-style-ID files, and split unreferenced bundle behaviours (674 embed / 78 separate). Open: the state-drop rule itself (parent-assignment restrictions) plus cascade to motions/behaviours — the oracle names the exact drop sets for reverse-engineering.
+- Unity Editor import/runtime and UABEA were not run; the product remains unaccepted.
+
 ## 2026-10-12 松月竹庭 r12 replay proves shader-fix breadth — no code change
 
 - Fresh release export command `target\release\assetripper-rs.exe export-project target\real-acceptance-20261012-avtr松月竹庭-r12 青岚雅苑` exited 0 (1 SerializedFile, 1,870 objects, 352 assets). Audit vs frozen source export: document table identical to r11 across every class (all repaired slices hold); opaque identical 17→25 with different 69→61 — the 8 resolved files are exactly 松月竹庭's 8 lilToon shaders, proving the DefValue bracket fix generalizes beyond 青岚山河卷's ASE/poiyomi set.

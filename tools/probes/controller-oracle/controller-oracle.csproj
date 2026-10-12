@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>controller-oracle</AssemblyName>
+    <ReferenceRoot Condition="'$(ReferenceRoot)' == ''">$(LOCALAPPDATA)\Temp\opencode\ar-ref</ReferenceRoot>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="$(ReferenceRoot)\Source\AssetRipper.Export.UnityProjects\AssetRipper.Export.UnityProjects.csproj" />
+    <PackageReference Include="AssetRipper.SourceGenerated" Version="1.4.0" />
+  </ItemGroup>
+</Project>
