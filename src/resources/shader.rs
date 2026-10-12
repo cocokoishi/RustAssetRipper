@@ -141,7 +141,7 @@ pub struct ParsedShaderProperty {
     pub flags: u32,
     /// `SerializedPropertyType` discriminant.
     pub type_number: i32,
-    /// `DefValue_0_` through `DefValue_3_`.
+    /// `DefValue[0]` through `DefValue[3]`.
     pub default_values: [f32; 4],
     /// `DefTexture.TexDim`.
     pub texture_dimension: i32,
@@ -155,7 +155,7 @@ pub struct ParsedShaderProperty {
 /// serialized class-48 TypeTree coverage is still partial. The projected fields are:
 /// (`m_ParsedForm` with `m_Name`, `m_PropInfo`/`m_Props`, `m_FallbackName`,
 /// `m_CustomEditorName`; each property with `m_Attributes`, `m_Flags`, `m_Name`,
-/// `m_Description`, `m_Type`, `m_DefValue_0..3`, and `m_DefTexture` with
+/// `m_Description`, `m_Type`, `m_DefValue[0..3]`, and `m_DefTexture` with
 /// `m_TexDim`/`m_DefaultName`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ParsedShaderForm {
@@ -307,11 +307,15 @@ fn read_parsed_property(value: &SerializedValue) -> Result<ParsedShaderProperty,
         }
     }
     let mut default_values = [0.0f32; 4];
+    // The serialized TypeTree stores the four defaults as static-array elements
+    // named `m_DefValue[0]` through `m_DefValue[3]` on every probed version
+    // (5.6, 2019.4, 2022.3); the generated C# sanitizes these to `DefValue_0_`,
+    // which never appears in decoded payloads.
     for (index, field) in [
-        "m_DefValue_0_",
-        "m_DefValue_1_",
-        "m_DefValue_2_",
-        "m_DefValue_3_",
+        "m_DefValue[0]",
+        "m_DefValue[1]",
+        "m_DefValue[2]",
+        "m_DefValue[3]",
     ]
     .into_iter()
     .enumerate()
@@ -793,6 +797,36 @@ mod tests {
         let view = ShaderView::from_value(&shader(None, false)).unwrap();
         assert_eq!(view.script, None);
         assert!(!view.has_parsed_form);
+    }
+
+    #[test]
+    fn parsed_defaults_read_static_array_bracket_field_names() {
+        // The serialized TypeTree names the four defaults `m_DefValue[0]`
+        // through `m_DefValue[3]` on every probed version; the 青岚山河卷
+        // `_Wind` property stores range default 0.49 with min 0 and max 10.
+        let property = SerializedValue::Struct(vec![
+            field("m_Name", string_value("_Wind")),
+            field("m_Type", SerializedValue::I32(3)),
+            field("m_DefValue[0]", SerializedValue::F32(0.49)),
+            field("m_DefValue[1]", SerializedValue::F32(0.0)),
+            field("m_DefValue[2]", SerializedValue::F32(10.0)),
+            field("m_DefValue[3]", SerializedValue::F32(0.0)),
+        ]);
+        let root = SerializedValue::Struct(vec![field(
+            "m_ParsedForm",
+            SerializedValue::Struct(vec![field(
+                "m_PropInfo",
+                SerializedValue::Struct(vec![field(
+                    "m_Props",
+                    SerializedValue::Array(vec![property]),
+                )]),
+            )]),
+        )]);
+        let view = ShaderView::from_value(&root).unwrap();
+        let parsed = view.parsed.expect("parsed form decodes");
+        assert_eq!(parsed.properties.len(), 1);
+        assert_eq!(parsed.properties[0].name, "_Wind");
+        assert_eq!(parsed.properties[0].default_values, [0.49, 0.0, 10.0, 0.0]);
     }
 
     #[test]

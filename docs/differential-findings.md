@@ -2362,6 +2362,26 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Verification | Exact bundle-count reconciliation (174 trees, 639 states); all 66 r2 MonoBehaviour files content-twin to source; `subMenu` reference-equivalence proof across ordinals; duplicate-export suspicion exonerated (both sides duplicate identically). The 59 青岚古境 114 diffs are guid/path artifacts with zero masked-content residual. |
 | Limits | Processor port (reconstruction + claiming + cloning + MainAsset + separate-file export) is open and scoped as the next controller task; base export-order alignment unverified. Unity Editor import/runtime and UABEA were not run. |
 
+## DIFF-OPAQUE-SHADER-PROPS-001 - Shader DefValue static-array field names
+
+| Field | Finding |
+|---|---|
+| Input and reference | 20 青岚山河卷 dummy shaders (ASE/poiyomi/Hidden); TypeTree probes (5.6/2019.4/2022.3) all showing `float m_DefValue[0..3]`; frozen dummy property rendering. |
+| Before-fix difference | Rust read fictional `m_DefValue_0_` fields, kept zeros, and rendered `Range(0, 0) = 0`. |
+| Rust change | Read the literal bracket names; documented the serialization-vs-generated sanitization rule; new `_Wind` regression test. |
+| Verification | `AE_Leaves.shader` SHA-256-identical; all 20 shaders byte-identical in r23; `resources::shader` 16/16; `export::` 512/512. |
+| Limits | None known. Unity Editor import/runtime and UABEA were not run. |
+
+## DIFF-OPAQUE-OGG-FRAMING-001 - Ogg page framing with identical packet streams
+
+| Field | Finding |
+|---|---|
+| Input and reference | 青岚山河卷 `Nijika Lost Kitten (Bocchi the Rock).ogg` (FSB5 Vorbis remux); Ogg page/packet splitter over both outputs. |
+| Before-fix difference | 1.6M/1.9M bytes differ from byte 22 (page checksums onward). |
+| Analysis | Both files carry 6,729 packets with identical headers (identification, comment, setup) and bit-identical audio-packet streams — Rust remuxes original packets verbatim; only page grouping differs. |
+| Verification | Packet-stream SHA-256 equality; `AE_Leaves`-class byte proof does not apply here — classified content-EXACT, framing differs. |
+| Limits | Page-granule detail unverified; exact page-split parity deferred as zero-gain. Unity Editor import/runtime and UABEA were not run. |
+
 ## DIFF-OPAQUE-SCRIPT-001 - Global dummy-script blank-line whitespace
 
 | Field | Finding |

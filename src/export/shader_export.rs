@@ -1212,7 +1212,10 @@ mod tests {
     /// runtime property lists of a created `Shader` and its parsed-form chain.
     /// This replaces the open class-48 TypeTree-dump question with shipped-runtime
     /// evidence: the names the decoder addresses all exist on the objects the
-    /// reference exporter itself reads.
+    /// reference exporter itself reads. Static-array elements are the one
+    /// systematic exception: serialized `m_DefValue[0]` decodes to the generated
+    /// `DefValue_0_` property (brackets sanitized to underscores), so both
+    /// spellings are pinned below.
     #[test]
     fn generated_property_names_back_every_m_field_read() {
         let fixture = include_str!("shader_parsed_fixture.txt");
