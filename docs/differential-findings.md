@@ -2352,6 +2352,17 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Verification | `cargo test --release --lib --locked export::workspace_yaml::object_conversion::tests -- --nocapture` passed 8/8, including the new manager-family regression (104/157/196 have `m_ObjectHideFlags`, lack the three PPtr base fields); `cargo test --release --lib --locked export::` passed 501/501 (1 ignored); `cargo build --release --locked --bin assetripper-rs` exited 0. Fresh full export `target/real-acceptance-current-青岚山河卷-r8` exited 0: 2 SerializedFiles, 72,350 objects, 1,087 asset files, 243,562,238 asset bytes, 6 support files, 2 post-exporter files. Newly byte-exact: 81 (1/1), 193 (1,456/1,456), 196 (1/1), 223 (2/2), 224 (19/19). All prior exact and GUID-semantic slices recheck unchanged. |
 | Limits | Class 320 bindings, class-4 float prints, Default-Material direction, and the lighting path remain open (see validation log). Unity Editor import/runtime and UABEA were not run. |
 
+## DIFF-松月竹庭-BREADTH-001 - Stable-identity breadth audit: export-ID family, avatar style proof, path and opaque triage
+
+| Field | Finding |
+|---|---|
+| Input and reference | 青岚雅苑` (Unity 2022.3.11f1); committed `tools/audit-project-documents.ps1` (stable `classID|localFileID` pairing, per-project `.meta` GUID maps); report `target/real-acceptance-20261012-avtr松月竹庭-r8-audit.json`. |
+| Stable-identity results | Exact: classes 1, 4, 43 (40/40 Mesh), plus material/texture GUID-semantic slices. Open: controller/animation member export IDs (1101/1102/1107/206 unmatched; 91 roots all Different; 114 sub-objects 72 unmatched pairs), one Avatar style diff, two collection path divergences, 69 opaque content diffs. Prior weak-pairing lists are superseded as pairing artifacts where they relied on display names. |
+| Export-ID family | Frozen `AssetsExportCollection.GenerateExportID` assigns `GetPseudoRandomExportId(asset, m_exportIDs.Count)`; Rust uses sequential `get_main_export_id` modifiers plus `GENERATED_FILE_ID_BASE` allocator anchors. Same root cause as the timeline fix, but the controller re-synthesis needs seed-order alignment with `FetchEditorHierarchy` and anchor/pointer replumbing — deferred to a dedicated round. Internally consistent on both sides; no corruption. |
+| Avatar style proof | Ordered scalar-token sequences from both `云栖仙府Avatar.asset` files are identical (21,688 tokens, zero non-semantic diffs); only flow-vs-block nesting style differs. The exact source rule for `float3` sequence-nested values is unpinned; no writer change made. |
+| Path and opaque triage | `AvatarMask` vs `AvatarMask_319` directories; root-level vs `GameObject/` prefab placement — both open in the collection-directory family. Opaque: 52 PNG, 9 OGG, 8 shader diffs untriaged; 17 identical. |
+| Limits | Unity Editor import/runtime and UABEA were not run. Product acceptance remains open. |
+
 ## DIFF-REAL-青岚山河卷-TIMELINE-IDS-001 - ScriptableObject group child export IDs use pseudo-random class-prefixed hashing
 
 | Field | Finding |
