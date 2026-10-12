@@ -1,0 +1,42 @@
+RustAssetRipper Product Convergence
+==================================
+
+Objective
+---------
+Continue the full Rust port and acceptance work defined by the project's AGENTS.md and the user's Product Convergence task. Do not declare completion until the current AssetRipper baseline's required product behavior is implemented and validated, and every authorized VRChat sample has a traceable acceptance result. Keep unresolved behavior explicitly open.
+
+Repository checkpoint
+---------------------
+Repository: C:\Users\koishi\Desktop\RustAssetripper\RustAssetRipper
+Branch: main
+Remote: origin/main
+Last verified remote before this checkpoint's commit: 9f08fa92b232a355b3042db402ebf193c73bd75f
+Reference source: C:\Users\koishi\Desktop\RustAssetripper\AssetRipper
+Reference manifest: docs/baseline-files.sha256 (1,449 entries)
+
+Latest validated world export
+-----------------------------
+Input: ..\青岚山河卷
+SHA-256: 100338C82E934B51357CE143106DE8EC43C4389DD50727E0674BFD3CC137267A
+Latest fully built/exported Rust result: target\real-acceptance-current-青岚山河卷-r5
+Result: 2 SerializedFiles, 72,350 objects, 1,087 asset files, 242,984,898 asset bytes.
+Verified scene slices: class 258 LightProbes; 3,997 class 65 BoxColliders; 629 class 64 MeshColliders; 86 class 136 CapsuleColliders. For class 64, generated GUIDs were normalized only when each project's .meta mapped them to the same relative asset path; all 11 referenced Mesh .asset files were byte-identical.
+Limits: the world is not accepted. Unity Editor import/runtime is blocked by the missing Editor license. UABEA was not run. Other scene/project differences and baseline non-exportable empty collections remain open.
+
+Current in-progress item: class 205 LODGroup
+-------------------------------------------
+The prior world scene audit paired 2,739 class-205 documents and found differences in all of them. A source/Rust example omitted four editor base fields in Rust; nested m_LODs values, order, and renderer references still need comparison.
+
+The current source edit adds class 205 to the Unity 2022.3 editor-TypeTree route and both regression lists. `cargo test --release --lib --locked unity_2022_3_ -- --nocapture` passed 8/8, including the selector and editor-base-field tests. This is not a full export result: the release CLI has not been rebuilt after the class-205 edit, and the LODGroup replay is pending.
+
+Next actions
+------------
+1. Rebuild: `cargo build --release --locked --bin assetripper-rs`.
+2. Export to a new directory: `target\release\assetripper-rs.exe export-project target\real-acceptance-current-青岚山河卷-r6 ..\青岚山河卷`.
+3. Pair all source and Rust class-205 documents by local fileID. Compare every nested LOD and renderer reference; normalize GUIDs only through matching .meta relative paths. Recheck classes 64, 65, and 136 in r6.
+4. If differences remain, trace the serialized input and source behavior before changing the implementation. Add evidence and focused regressions, then replay the full sample.
+5. Update docs/differential-findings.md, docs/validation-log.md, docs/continuation.md, and docs/next-agent-handoff.md with actual results. Commit and push coherent validated progress; continue with the next blocker.
+
+Preservation
+------------
+Do not remove or stage the user-owned untracked `cleanup_manifest.txt` or `tools/probes/anim-convert/packages/`. Do not modify the frozen AssetRipper source or original bundles. Do not use `git reset --hard`, `git clean`, or forced pushes.

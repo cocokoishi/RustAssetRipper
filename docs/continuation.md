@@ -1072,7 +1072,7 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - Classes 65 (BoxCollider) and 64 (MeshCollider) were omitted from the Unity 2022.3 editor-TypeTree route, dropping the four editor base fields. Both IDs are now routed through their source editor TypeTrees and included in the selector/base-field tests.
 - `cargo test --release --lib --locked export::workspace_yaml::object_conversion::tests -- --nocapture` passed 7/7; the optimized CLI build and targeted formatting/diff checks passed. Fresh full export `target/real-acceptance-current-青岚山河卷-r4` wrote 72,350 objects and 1,087 asset files.
 - The source and Rust scene match exactly for all 3,997 BoxCollider documents. All 629 MeshCollider documents match after resolving 11 independently generated GUID pairs by their shared `.meta` relative paths; the 11 referenced mesh `.asset` files are byte-identical. Finding: `DIFF-REAL-青岚山河卷-COLLIDER-EDITOR-TREES-001`.
-- Unity Editor import/runtime was not run because the installed Editor has no valid license; UABEA was not run. Other world scene classes remain under investigation. The 86 class-136 CapsuleCollider documents were fixed in the subsequent r5 replay; class 205 LODGroup remains the next schema audit. The world and overall product remain unaccepted.
+- Unity Editor import/runtime was not run because the installed Editor has no valid license; UABEA was not run. Other world scene classes remain under investigation. The 86 class-136 CapsuleCollider documents were fixed in the subsequent r5 replay; class 205 LODGroup is now in progress. The world and overall product remain unaccepted.
 
 ## 青岚山河卷 Unity 2022.3 CapsuleCollider editor TypeTree (2026-10-11)
 
@@ -1080,3 +1080,9 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - The selector test and editor-base-field test passed 1/1 each; the focused `object_conversion::tests` group passed 7/7. Release CLI build and targeted formatting/diff checks passed.
 - Fresh full export `target/real-acceptance-current-青岚山河卷-r5` produced exact source/Rust YAML for all 86 class-136 documents. Revalidation in the same r5 scene retained exact class-65 documents and exact class-64 documents after `.meta`-path GUID normalization. Finding: `DIFF-REAL-青岚山河卷-CAPSULECOLLIDER-EDITOR-TREE-001`.
 - Unity Editor import/runtime and UABEA were not run. Class 205 LODGroup and other scene differences remain open; the sample and overall product remain unaccepted.
+
+## 青岚山河卷 Unity 2022.3 LODGroup editor TypeTree — pending replay (2026-10-11)
+
+- The prior scene audit paired 2,739 class-205 LODGroup documents and found all differed. A source/Rust example showed the four editor base fields missing from Rust; nested `m_LODs` values, ordering, and renderer references still need full comparison.
+- Added class 205 to the Unity 2022.3 editor-TypeTree selector and the selector/base-field regression lists. `cargo test --release --lib --locked unity_2022_3_ -- --nocapture` passed 8/8. This only validates the route and available reference TypeTree; it does not verify the production export.
+- Pending: rebuild `target/release/assetripper-rs.exe`, export `..\青岚山河卷` to a fresh `target/real-acceptance-current-青岚山河卷-r6`, and compare all class-205 documents by local fileID. Verify nested LOD order and all renderer references, normalizing GUIDs only through identical `.meta` relative paths. The export and semantic comparison are not yet run.
