@@ -1820,6 +1820,28 @@ mod tests {
             );
         }
     }
+
+    /// `format_dotnet_f64` agrees with the .NET oracle on ordinary values
+    /// (3,675-row sweep: powers of two, odd multiples, boundary decimals, and
+    /// 3,000 pseudo-random bit patterns — only 4 E-notation subnormal-adjacent
+    /// cases diverge, where .NET prints a shorter non-round-tripping string;
+    /// no decoded F64 reaches real-sample YAML, so that quirk stays latent).
+    /// Expectations below are oracle-pinned (`tools/probes/tostring-oracle`).
+    #[test]
+    fn format_dotnet_f64_matches_oracle_on_ordinary_values() {
+        for (bits, expected) in [
+            (0x3FF8000000000000u64, "1.5"),
+            (0x400921FB54442D18u64, "3.141592653589793"),
+            (0x8000000000000000u64, "-0"),
+            (0x0019D438AE9B4CFEu64, "3.591963138571574E-308"),
+        ] {
+            assert_eq!(
+                format_dotnet_f64(f64::from_bits(bits)),
+                expected,
+                "f64 {bits:#018X}"
+            );
+        }
+    }
     /// Byte-for-byte differential against the reference `AssetRipper.Yaml` runtime layout.
     ///
     /// Expected documents come from the isolated net10.0 probe `Temp/opencode/layoutprobe`

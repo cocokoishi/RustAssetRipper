@@ -2352,6 +2352,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Verification | `cargo test --release --lib --locked export::workspace_yaml::object_conversion::tests -- --nocapture` passed 8/8, including the new manager-family regression (104/157/196 have `m_ObjectHideFlags`, lack the three PPtr base fields); `cargo test --release --lib --locked export::` passed 501/501 (1 ignored); `cargo build --release --locked --bin assetripper-rs` exited 0. Fresh full export `target/real-acceptance-current-青岚山河卷-r8` exited 0: 2 SerializedFiles, 72,350 objects, 1,087 asset files, 243,562,238 asset bytes, 6 support files, 2 post-exporter files. Newly byte-exact: 81 (1/1), 193 (1,456/1,456), 196 (1/1), 223 (2/2), 224 (19/19). All prior exact and GUID-semantic slices recheck unchanged. |
 | Limits | Class 320 bindings, class-4 float prints, Default-Material direction, and the lighting path remain open (see validation log). Unity Editor import/runtime and UABEA were not run. |
 
+## DIFF-YAML-FLOAT-F64-001 - f64 E-notation quirk stays latent
+
+| Field | Finding |
+|---|---|
+| Input and reference | 3,675-pattern oracle sweep (net10.0, matching frozen TFM); 青岚山河卷 r23 full-output scan. |
+| Before-fix difference | 4 E-notation cases where .NET prints a shorter non-round-tripping string (Grisu-interval quirk, e.g. `2^-25`); true ties already match. |
+| Rust change | None (test-only): oracle-pinned agreement test; oracle committed as permanent probe. |
+| Verification | 3,671/3,675 agree; zero F64 values in real-sample YAML; `export::` 514/514. |
+| Limits | Revisit if F64 ever reaches real output. Unity Editor import/runtime and UABEA were not run. |
+
 ## DIFF-云栖仙府-BREADTH-001 - First 云栖仙府 audit with four editor routes
 
 | Field | Finding |
