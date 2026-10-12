@@ -4837,6 +4837,12 @@ These results do not pass the first-phase gate. The reference .NET solution buil
 - Conclusion: Rust preserves 21 KB of authored bundle bytes with consistent references; the frozen source drops the object and remaps the slot to the engine builtin. Per the source-of-truth hierarchy (serialized bytes first; reference not infallible), Rust's behavior stands as the defensible one — recorded as a known acceptable difference, not a bug. Open micro-question: byte-equality of the bundle texture against Unity's engine builtin was not checked (would need engine bytes).
 - Evidence: `DIFF-青岚古境-MATERIAL-BUILTIN-001`. Unity Editor import/runtime and UABEA were not run.
 
+## 2026-10-12 project-wide referential integrity — new proof tool, zero dangling
+
+- New committed tool `tools/check-project-references.ps1`: every `{fileID, guid, type}` PPtr in an exported project must resolve to an existing YAML document (path + fileID), a `.meta` guid owner without documents (scripts, shader text, scenes by convention — scene fileIDs like 102900000 proven identical on the frozen side, binary media, fonts), or an engine builtin family. Nulls and builtins skip by design.
+- Results on latest exports: 青岚山河卷 r23 34,416/0, 青岚古境 r3 3,867/0, 云栖仙府 r3 5,944/0, 玉京烟霞 r3 14,029/0, 烟雨长亭 r1 2,311/0, 松月竹庭 r11 656/0 — 61,223 references checked with zero dangling. (Two tool bugs found and fixed during development: missed `.anim`/`.mat`/`.renderTexture` includes and missing font/scene exemptions; the LightingData→scene 102900000 case was verified conventional against source, not a gap.)
+- Evidence: `DIFF-REFS-INTEGRITY-001`. Unity Editor import/runtime and UABEA were not run; import-equivalence of the resolved graph is static evidence only.
+
 ## 2026-10-12 青岚古境 opaque proof plus controller export-rule mapping — no product change
 
 - 青岚古境 r3 opaque fully classified with committed proof tools (`tools/compare-png-pixels.ps1`, `tools/compare-ogg-packets.ps1`, promoted from round scratch after third reuse): 52 byte-identical + 439/439 pixel-identical PNGs + 24/24 packet-identical OGGs (49–1,411 packets each) = 515/515 with zero unexplained bytes.

@@ -2402,6 +2402,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Verification | Object dump shows full image data; generated PNG decodes it (64×64 soft dot, no fabrication); sibling slot proven same-target both sides. |
 | Limits | Byte-equality against Unity's engine builtin unchecked. KNOWN ACCEPTABLE DIFFERENCE (Rust preserves). Unity Editor import/runtime and UABEA were not run. |
 
+## DIFF-REFS-INTEGRITY-001 - Project-wide reference resolution
+
+| Field | Finding |
+|---|---|
+| Input and reference | Latest exports of all six samples; `.meta` guid maps; frozen scene-ID convention. |
+| Before-fix difference | No product change — new verification lane. |
+| Rust change | Committed `tools/check-project-references.ps1`. |
+| Verification | 61,223 PPtrs resolve with zero dangling across 青岚山河卷/青岚古境/云栖仙府/玉京烟霞/烟雨长亭/松月竹庭. |
+| Limits | Static evidence only; Unity import behavior unobserved. Unity Editor import/runtime and UABEA were not run. |
+
 ## DIFF-青岚古境-CONTROLLER-001 - AnimatorController shared-asset claiming and cloning
 
 | Field | Finding |
