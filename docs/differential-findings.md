@@ -2352,6 +2352,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Verification | `cargo test --release --lib --locked export::workspace_yaml::object_conversion::tests -- --nocapture` passed 8/8, including the new manager-family regression (104/157/196 have `m_ObjectHideFlags`, lack the three PPtr base fields); `cargo test --release --lib --locked export::` passed 501/501 (1 ignored); `cargo build --release --locked --bin assetripper-rs` exited 0. Fresh full export `target/real-acceptance-current-青岚山河卷-r8` exited 0: 2 SerializedFiles, 72,350 objects, 1,087 asset files, 243,562,238 asset bytes, 6 support files, 2 post-exporter files. Newly byte-exact: 81 (1/1), 193 (1,456/1,456), 196 (1/1), 223 (2/2), 224 (19/19). All prior exact and GUID-semantic slices recheck unchanged. |
 | Limits | Class 320 bindings, class-4 float prints, Default-Material direction, and the lighting path remain open (see validation log). Unity Editor import/runtime and UABEA were not run. |
 
+## DIFF-青岚古境-CONTROLLER-001 - AnimatorController shared-asset claiming and cloning
+
+| Field | Finding |
+|---|---|
+| Input and reference | 青岚雅苑` controllers; frozen `AnimatorControllerProcessor` (reconstruction from `ControllerConstant`, `FetchEditorHierarchy` claiming, processed-collection cloning, `MainAsset` assignment). |
+| Before-fix difference | Source splits 41 shared BlendTrees, 13 shared states, and 12 shared behaviours (e.g. `VRCAvatarParameterDriver`) into separate `.blendtree`/`.state`/`.asset` files; Rust embeds raw hierarchies once per object, with export-order ordinals permuted by the missing interleaved clones. |
+| Rust change | None this round (triage only). |
+| Verification | Exact bundle-count reconciliation (174 trees, 639 states); all 66 r2 MonoBehaviour files content-twin to source; `subMenu` reference-equivalence proof across ordinals; duplicate-export suspicion exonerated (both sides duplicate identically). The 59 青岚古境 114 diffs are guid/path artifacts with zero masked-content residual. |
+| Limits | Processor port (reconstruction + claiming + cloning + MainAsset + separate-file export) is open and scoped as the next controller task; base export-order alignment unverified. Unity Editor import/runtime and UABEA were not run. |
+
 ## DIFF-OPAQUE-SCRIPT-001 - Global dummy-script blank-line whitespace
 
 | Field | Finding |
