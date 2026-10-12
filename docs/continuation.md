@@ -1037,3 +1037,11 @@ Do not read UABEA or any user AssetBundle until the first-phase gate has actual 
 - The fresh 青岚雅苑` export check matched all 97 class-137 documents by fileID and found all four editor base fields in every document, with no `m_HideFlags`. Evidence and limits are in `docs/validation-log.md` and `docs/differential-findings.md`.
 - Product and sample acceptance remain incomplete. The broad project comparator still reports unmatched documents and paths, and Unity Editor runtime validation is unavailable.
 - Next: continue the open AssetRipper feature-parity audit; do not treat this targeted sample check as a phase-gate or overall acceptance pass.
+
+## Unity 2022.3 Mesh editor schema replay (2026-10-11)
+
+- Current stage: user-authorized real-sample convergence; the full AssetRipper parity gate and final sample acceptance remain open. Repository baseline before this Mesh change was `23321a7`; preserve the two existing untracked local entries `cleanup_manifest.txt` and `tools/probes/anim-convert/packages/`.
+- Added Unity 2022.3 class-43 editor TypeTree selection and baseline `m_MeshOptimizationFlags = -1`. A fresh replay found the TPK TypelessData field shape needed Unity's `m_DataSize` byte count plus `_typelessdata`; Rust now emits that structure and preserves the blob.
+- Focused release regression passed 1/1; release CLI build and fresh 青岚雅苑` export exited 0. Of 112 same-path Mesh assets, 109 are byte-exact; the other three have only 27 decimal Float32 spellings that parse to identical Float32 bits. `Halo_Kokona.asset` is exact. Root prefab audit paired 4,491/4,491 documents and found all 100 MeshRenderer and 100 MeshFilter documents exact after GUID-path normalization.
+- Evidence: `docs/validation-log.md`, `docs/differential-findings.md`, and ignored run output `target/real-acceptance-20261011-avtr青岚古境-mesh-editor-r2`.
+- Unity Editor runtime validation is unavailable and UABEA was not run. This targeted replay does not mean the avatar or product is accepted. The expression-menu asset path difference is already recursively reconciled; continue from the next unresolved real project export discrepancy after committing this validated Mesh change.

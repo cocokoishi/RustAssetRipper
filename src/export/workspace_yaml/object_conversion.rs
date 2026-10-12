@@ -47,7 +47,8 @@ fn should_use_scene_editor_type_tree(class_id: i32, unity_version_text: Option<&
             && version.minor == 3
             && matches!(
                 class_id,
-                20 | 82
+                20 | 43
+                    | 82
                     | 95
                     | 135
                     | 137
@@ -567,6 +568,10 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
             }
             if class_id == 157 {
                 apply_lightmap_settings_editor_defaults(&mut root)
+                    .map_err(|message| scene_editor_format_error(source, class_id, message))?;
+            }
+            if class_id == 43 {
+                apply_mesh_editor_format(&mut root)
                     .map_err(|message| scene_editor_format_error(source, class_id, message))?;
             }
             if animation_clip_editor_format && class_id == 74 {
@@ -1866,6 +1871,74 @@ enum SceneEditorFormatDefault {
     String(&'static str),
 }
 
+fn apply_mesh_editor_format(root: &mut SerializedValue) -> Result<(), String> {
+    // Unity's project YAML expands a TypelessData member into its byte count and payload,
+    // even though AssetRipper's TPK tree represents both as one `Bytes` value.
+    let vertex_data = root
+        .unique_field_in_base_chain_mut("m_VertexData")
+        .map_err(|error| format!("could not inspect m_VertexData: {error}"))?
+        .ok_or_else(|| "Mesh editor TypeTree has no m_VertexData field".to_owned())?;
+    let SerializedValue::Struct(vertex_fields) = vertex_data else {
+        return Err(format!(
+            "m_VertexData has value {vertex_data:?}, expected a struct"
+        ));
+    };
+    let mut data_fields = vertex_fields
+        .iter()
+        .enumerate()
+        .filter(|(_, field)| field.name == "m_DataSize");
+    let (data_index, data_field) = data_fields
+        .next()
+        .ok_or_else(|| "m_VertexData has no m_DataSize TypelessData field".to_owned())?;
+    if data_fields.next().is_some() {
+        return Err("m_VertexData has duplicate m_DataSize fields".to_owned());
+    }
+    if vertex_fields
+        .iter()
+        .any(|field| field.name == "_typelessdata")
+    {
+        return Err("m_VertexData already has a _typelessdata field".to_owned());
+    }
+    let data_length = match &data_field.value {
+        SerializedValue::Bytes(bytes) => bytes.len(),
+        value => {
+            return Err(format!(
+                "m_VertexData.m_DataSize has value {value:?}, expected TypelessData bytes"
+            ));
+        }
+    };
+    let serialized_length = i32::try_from(data_length)
+        .map_err(|_| "m_VertexData TypelessData exceeds Unity's signed length range".to_owned())?;
+    vertex_fields
+        .try_reserve(1)
+        .map_err(|_| "could not reserve the Unity TypelessData YAML payload field".to_owned())?;
+    let payload = match std::mem::replace(
+        &mut vertex_fields[data_index].value,
+        SerializedValue::I32(serialized_length),
+    ) {
+        SerializedValue::Bytes(bytes) => bytes,
+        value => {
+            vertex_fields[data_index].value = value;
+            return Err("m_VertexData.m_DataSize changed while preparing YAML".to_owned());
+        }
+    };
+    vertex_fields.insert(
+        data_index + 1,
+        SerializedFieldValue {
+            name: "_typelessdata".to_owned(),
+            value: SerializedValue::Bytes(payload),
+        },
+    );
+
+    // Frozen AssetRipper's EditorFormatProcessor calls
+    // SetMeshOptimizationFlags(MeshOptimizationFlags.Everything); Everything is -1.
+    set_scene_editor_format_default(
+        root,
+        "m_MeshOptimizationFlags",
+        SceneEditorFormatDefault::I32(-1),
+    )
+}
+
 fn apply_lightmap_settings_editor_defaults(root: &mut SerializedValue) -> Result<(), String> {
     set_scene_editor_format_default(root, "m_GIWorkflowMode", SceneEditorFormatDefault::I32(1))?;
     const DEFAULTS: &[(&str, SceneEditorFormatDefault)] = &[
@@ -2381,6 +2454,7 @@ mod tests {
             1,
             4,
             20,
+            43,
             23,
             33,
             82,
@@ -2405,6 +2479,7 @@ mod tests {
         assert!(!should_use_scene_editor_type_tree(24, Some("2022.3.22f1")));
         assert!(!should_use_scene_editor_type_tree(20, Some("2022.2.0f1")));
         assert!(!should_use_scene_editor_type_tree(137, Some("5.6.0f1")));
+        assert!(!should_use_scene_editor_type_tree(43, Some("5.6.0f1")));
         assert!(should_use_scene_editor_type_tree(1, Some("5.6.0f1")));
     }
 
@@ -2451,6 +2526,7 @@ mod tests {
 
         for class_id in [
             20,
+            43,
             82,
             95,
             135,
@@ -2485,6 +2561,59 @@ mod tests {
                 "class {class_id} editor TypeTree unexpectedly has release m_HideFlags"
             );
         }
+    }
+
+    #[test]
+    fn unity_2022_3_mesh_editor_tree_has_optimization_field() {
+        let version = FactoryUnityVersion::parse("2022.3.22f1").unwrap();
+        let (_, editor_tree) = reference_class_layouts()
+            .tpk_trees(43, &version)
+            .unwrap()
+            .expect("Unity 2022.3 source TPK must contain the Mesh editor layout");
+        assert!(editor_tree
+            .nodes
+            .iter()
+            .any(|node| node.name.as_deref() == Some("m_MeshOptimizationFlags")));
+        assert!(editor_tree.nodes.iter().enumerate().any(|(index, node)| {
+            node.type_name.as_deref() == Some("TypelessData")
+                && node.name.as_deref() == Some("m_DataSize")
+                && editor_tree.nodes.get(index + 1).is_some_and(|child| {
+                    child.name.as_deref() == Some("size")
+                        && child.type_name.as_deref() == Some("int")
+                })
+        }));
+
+        let payload = vec![0x6e, 0x12, 0x03, 0x3b];
+        let mut root = SerializedValue::Struct(vec![
+            SerializedFieldValue {
+                name: "m_VertexData".to_owned(),
+                value: SerializedValue::Struct(vec![SerializedFieldValue {
+                    name: "m_DataSize".to_owned(),
+                    value: SerializedValue::Bytes(payload.clone()),
+                }]),
+            },
+            SerializedFieldValue {
+                name: "m_MeshOptimizationFlags".to_owned(),
+                value: SerializedValue::I32(0),
+            },
+        ]);
+        apply_mesh_editor_format(&mut root).unwrap();
+        assert!(matches!(
+            root.unique_field("m_MeshOptimizationFlags").unwrap(),
+            Some(SerializedValue::I32(-1))
+        ));
+        let vertex_data = root
+            .unique_field("m_VertexData")
+            .unwrap()
+            .expect("Mesh has vertex data");
+        assert!(matches!(
+            vertex_data.unique_field("m_DataSize").unwrap(),
+            Some(SerializedValue::I32(4))
+        ));
+        assert_eq!(
+            vertex_data.unique_field("_typelessdata").unwrap(),
+            Some(&SerializedValue::Bytes(payload))
+        );
     }
 
     #[test]
