@@ -2392,6 +2392,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Verification | 96 at semGUID in r3; 120/212/123/124 structurally verified in 玉京烟霞 r3; unit test green; full suite green. |
 | Limits | Frozen 玉京烟霞/烟雨长亭 source exports blocked (no CLI path in frozen app). Unity Editor import/runtime and UABEA were not run. |
 
+## DIFF-青岚古境-MATERIAL-BUILTIN-001 - Bundle texture preserved vs builtin remap
+
+| Field | Finding |
+|---|---|
+| Input and reference | 青岚雅苑` `Minigun Particle Colision.mat`; bundle Texture2D `Default-ParticleSystem` (PathID 4988150354445090395, 64×64 RGBA32, 21,844 bytes). |
+| Before-fix difference | Source points the slot at builtin 10307 and drops the object; Rust exports the decoded bytes and references them (r3's only rust-only file). |
+| Rust change | None: the material PPtr provably resolves locally (export refuses unresolved; zero dangling texture PPtrs), so Rust is bundle-faithful. |
+| Verification | Object dump shows full image data; generated PNG decodes it (64×64 soft dot, no fabrication); sibling slot proven same-target both sides. |
+| Limits | Byte-equality against Unity's engine builtin unchecked. KNOWN ACCEPTABLE DIFFERENCE (Rust preserves). Unity Editor import/runtime and UABEA were not run. |
+
 ## DIFF-青岚古境-CONTROLLER-001 - AnimatorController shared-asset claiming and cloning
 
 | Field | Finding |
