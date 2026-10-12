@@ -3,16 +3,31 @@ RustAssetRipper Product Convergence
 
 Objective
 ---------
-Continue the full Rust port and acceptance work defined by the project's AGENTS.md and the user's Product Convergence task. Do not declare completion until the current AssetRipper baseline's required product behavior is implemented and validated, and every authorized VRChat sample has a traceable acceptance result. Keep unresolved behavior explicitly open.
+Continue the full Rust port and acceptance work defined by the project's `AGENTS.md` and the user's Product Convergence task. The current local AssetRipper source snapshot is the authoritative behavior baseline. The delivered product core must be Rust-owned; it must not delegate parsing, object construction, reference resolution, resource restoration, scene/Prefab/animation handling, or export to AssetRipper, UABEA, C# DLLs, or .NET processes.
+
+Do not declare completion until the full in-scope product surface is implemented and validated, the Rust product builds and runs independently, every authorized VRChat sample has a traceable final result, correctness-critical differences are resolved, and required regressions and hand-off documentation are complete. Any required behavior or check that is unimplemented, failed, externally blocked, or not run keeps the overall goal open.
+
+Execution discipline (mandatory)
+-------------------------------
+1. **Work one concrete blocker at a time.** Reproduce it, identify affected input objects and source behavior, establish expected semantics, make one generic fix, run focused and affected tests, rebuild the actual product, replay the same real input into a fresh output directory, compare the affected semantics and previously fixed slices, record evidence, then commit coherent progress before taking the next blocker.
+2. **Investigate before editing.** Trace each difference through input bytes/SerializedFile fields, source implementation or TypeTree, Rust decoding/routing, references, and output representation. Class IDs, versions, file scope, PathID/local fileID, field order, array order, and external references matter. Do not infer correctness from names, counts, folder sizes, or one reference tool's output.
+3. **Use evidence-backed normalization only.** Pair documents by stable identity such as source file, class ID, and local fileID. Normalize an output GUID only after both projects' `.meta` files resolve it to the same relative asset path. Keep array order, curve tangents, bindings, LOD membership, renderer references, and runtime-relevant values intact. Do not widen numeric tolerances after seeing a difference.
+4. **Never turn a partial check into a pass.** A passing unit test does not prove product behavior. A successful CLI exit or generated file does not prove semantic correctness. A check not actually run must be recorded as “not run”; a failed command must retain its real exit code and cause. Keep static validation separate from Unity import/runtime validation.
+5. **Do not hide unsupported or failed data.** No sample-name/hash/PathID special cases; no skipped resources, dropped fields, null substitution for unresolved references, default/zero replacement, raw-byte dump as a substitute for structured export, relaxed assertions, or deleted failing tests to make a report green.
+6. **Treat comparison tools as evidence, not truth.** Investigate Rust/source/UABEA differences against original bytes, format rules, stable object identities, and actual exported references. Two tools failing alike does not establish that Rust may omit support.
+7. **Protect the workspace.** At each continuation, read this file, `docs/next-agent-handoff.md`, the latest relevant `docs/validation-log.md` entry, and `git status`. Preserve user edits and untracked files. Never alter/move/delete original bundles, frozen source, or UABEA. Never run destructive reset/clean or force-push commands. Stage explicit paths only.
+8. **Keep the hand-off truthful and actionable.** Record source symbol, Rust location, exact command, exit code, input identity, fresh output path, semantic result, limitations, and the single next blocker. Update the difference log, validation log, continuation notes, and hand-off when a blocker changes state. Never write expected or inferred results as executed results.
+9. **Commit only coherent, reviewed progress.** Before commit, inspect the diff and staged file list; run relevant checks; verify user-owned scratch is excluded. Use a normal push only, then compare local HEAD with `origin/main`. If push fails, diagnose it without force. If the user explicitly requests a checkpoint before a required build or real-sample replay, commit only with the missing validation clearly marked pending and exact next steps recorded; never describe that implementation as resolved.
+10. **Continue autonomously.** Do not stop after each small fix to ask whether to continue. Ask only when missing user data, authorization, or an external-state change genuinely prevents progress; continue independent work meanwhile.
 
 Repository checkpoint
 ---------------------
 Repository: C:\Users\koishi\Desktop\RustAssetripper\RustAssetRipper
 Branch: main
 Remote: origin/main
-Last verified remote before this checkpoint's commit: 9f08fa92b232a355b3042db402ebf193c73bd75f
+Latest pushed checkpoint before this prompt upgrade: `ab8cacd461ab47c9130c837f14c3784a7458f005` (`origin/main` matched HEAD).
 Reference source: C:\Users\koishi\Desktop\RustAssetripper\AssetRipper
-Reference manifest: docs/baseline-files.sha256 (1,449 entries)
+Reference manifest: `docs/baseline-files.sha256` (1,449 entries). The full-tree guard reports unlisted `Source/**/obj` artifacts; a direct hash check found all 1,449 listed files present and unchanged. Do not delete reference-tree files to silence the guard; report the full-tree check as non-clean.
 
 Latest validated world export
 -----------------------------
@@ -20,23 +35,25 @@ Input: ..\青岚山河卷
 SHA-256: 100338C82E934B51357CE143106DE8EC43C4389DD50727E0674BFD3CC137267A
 Latest fully built/exported Rust result: target\real-acceptance-current-青岚山河卷-r5
 Result: 2 SerializedFiles, 72,350 objects, 1,087 asset files, 242,984,898 asset bytes.
-Verified scene slices: class 258 LightProbes; 3,997 class 65 BoxColliders; 629 class 64 MeshColliders; 86 class 136 CapsuleColliders. For class 64, generated GUIDs were normalized only when each project's .meta mapped them to the same relative asset path; all 11 referenced Mesh .asset files were byte-identical.
+Verified scene slices: class 258 LightProbes; 3,997 class 65 BoxColliders; 629 class 64 MeshColliders; 86 class 136 CapsuleColliders. For class 64, generated GUIDs were normalized only when each project's `.meta` mapped them to the same relative asset path; all 11 referenced Mesh `.asset` files were byte-identical.
 Limits: the world is not accepted. Unity Editor import/runtime is blocked by the missing Editor license. UABEA was not run. Other scene/project differences and baseline non-exportable empty collections remain open.
 
 Current in-progress item: class 205 LODGroup
 -------------------------------------------
 The prior world scene audit paired 2,739 class-205 documents and found differences in all of them. A source/Rust example omitted four editor base fields in Rust; nested m_LODs values, order, and renderer references still need comparison.
 
-The current source edit adds class 205 to the Unity 2022.3 editor-TypeTree route and both regression lists. `cargo test --release --lib --locked unity_2022_3_ -- --nocapture` passed 8/8, including the selector and editor-base-field tests. This is not a full export result: the release CLI has not been rebuilt after the class-205 edit, and the LODGroup replay is pending.
+Pushed commit `ab8cacd` adds class 205 to the Unity 2022.3 editor-TypeTree route and both regression lists. `cargo test --release --lib --locked unity_2022_3_ -- --nocapture` passed 8/8, including the selector and editor-base-field tests. This is not a full export result: the release CLI has not been rebuilt after the class-205 edit, and the LODGroup replay is pending.
 
 Next actions
 ------------
-1. Rebuild: `cargo build --release --locked --bin assetripper-rs`.
-2. Export to a new directory: `target\release\assetripper-rs.exe export-project target\real-acceptance-current-青岚山河卷-r6 ..\青岚山河卷`.
-3. Pair all source and Rust class-205 documents by local fileID. Compare every nested LOD and renderer reference; normalize GUIDs only through matching .meta relative paths. Recheck classes 64, 65, and 136 in r6.
-4. If differences remain, trace the serialized input and source behavior before changing the implementation. Add evidence and focused regressions, then replay the full sample.
-5. Update docs/differential-findings.md, docs/validation-log.md, docs/continuation.md, and docs/next-agent-handoff.md with actual results. Commit and push coherent validated progress; continue with the next blocker.
+1. Recheck branch, HEAD, remote, and `git status`; preserve the two user-owned untracked paths listed below.
+2. Rebuild: `cargo build --release --locked --bin assetripper-rs`.
+3. Confirm the output directory is absent, then export to a fresh directory: `target\release\assetripper-rs.exe export-project target\real-acceptance-current-青岚山河卷-r6 ..\青岚山河卷`.
+4. Pair every source and Rust class-205 document by local fileID. Compare every nested LOD value, ordering, renderer set, and pointer target. Normalize GUIDs only through matching `.meta` relative paths. Recheck classes 64, 65, 136, and 258 in r6.
+5. If differences remain, trace them to input objects and source behavior before changing code. Add focused regression coverage; rerun the affected test group, release build, full real-sample export, and semantic comparison.
+6. Record commands, exit codes, hashes, output statistics, exact matches/differences, and external limits in `docs/differential-findings.md`, `docs/validation-log.md`, `docs/continuation.md`, and `docs/next-agent-handoff.md`. Do not mark LODGroup resolved until r6 has been compared.
+7. Inspect staged paths and diffs, commit the coherent validated increment, normal-push it, verify remote HEAD, then continue with the next actual blocker.
 
 Preservation
 ------------
-Do not remove or stage the user-owned untracked `cleanup_manifest.txt` or `tools/probes/anim-convert/packages/`. Do not modify the frozen AssetRipper source or original bundles. Do not use `git reset --hard`, `git clean`, or forced pushes.
+Do not remove or stage the user-owned untracked `cleanup_manifest.txt` or `tools/probes/anim-convert/packages/`. Do not modify the frozen AssetRipper source or original bundles. Do not use `git reset --hard`, `git clean`, or forced pushes. Do not claim world, avatar, first-stage, or product-wide acceptance from these component-level results.
