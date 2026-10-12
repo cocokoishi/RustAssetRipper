@@ -2372,6 +2372,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Verification | r3 audit: 54/84/153 exact, 96 semGUID; 231/231 PNGs pixel-identical; zero rust-only files; `export::` 513/513. |
 | Limits | Controller placement families, 246 source-only files, 243 opaque files stay open. Unity Editor import/runtime and UABEA were not run. |
 
+## DIFF-玉京烟霞-BREADTH-001 - First 玉京烟霞/烟雨长亭 replays with renderer and Flare routes
+
+| Field | Finding |
+|---|---|
+| Input and reference | `松月云庭图` (2022.3.22f1, 34,150 objects), 青岚雅苑` (5,829 objects); TPK editor-base probes for 120/212/123/124. No frozen source exports exist (no CLI path — blocked lane). |
+| Before-fix difference | 120/212/123/124 exported release-shaped (missing base; zeroed renderer defaults on 120/212). |
+| Rust change | 120/212 join the editor selector, both regression lists, scene-object dispatch, and renderer arm; 123/124 join the selector and both lists. |
+| Verification | r3 docs carry base fields + Unity defaults; `export::` 514/514; 烟雨长亭 census clean (159 = EditorSettings). |
+| Limits | Differential vs source blocked on frozen exports. Unity Editor import/runtime and UABEA were not run. |
+
 ## DIFF-YAML-RENDERER-RULE-001 - Universal IRenderer editor defaults
 
 | Field | Finding |
@@ -2379,8 +2389,8 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Input and reference | 云栖仙府 TrailRenderer GI fields (1/3/4/0.5/89 vs zeros); frozen `EditorFormatConverter.Convert(IRenderer)` + `EditorFormatProcessor` interface dispatch. |
 | Before-fix difference | Rust scoped the overwrite to 23/137/199; every other renderer kept zeros. |
 | Rust change | 96 joins the renderer arm and scene-object dispatch; direct test pins all six defaults. |
-| Verification | 96 at semGUID in r3; unit test green; full suite green. |
-| Limits | LineRenderer (120) has no sample coverage and stays out. Unity Editor import/runtime and UABEA were not run. |
+| Verification | 96 at semGUID in r3; 120/212/123/124 structurally verified in 玉京烟霞 r3; unit test green; full suite green. |
+| Limits | Frozen 玉京烟霞/烟雨长亭 source exports blocked (no CLI path in frozen app). Unity Editor import/runtime and UABEA were not run. |
 
 ## DIFF-青岚古境-CONTROLLER-001 - AnimatorController shared-asset claiming and cloning
 

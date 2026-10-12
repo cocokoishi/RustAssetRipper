@@ -76,6 +76,14 @@ fn should_use_scene_editor_type_tree(class_id: i32, unity_version_text: Option<&
                     | 84
                     | 96
                     | 153
+                    // 玉京烟霞 breadth: LineRenderer and SpriteRenderer are IRenderers
+                    // with full editor base on 2022.3 (probed); same truncation.
+                    | 120
+                    | 212
+                    // 玉京烟霞 breadth: LensFlare and FlareLayer carry full editor
+                    // base on 2022.3 (probed); same truncation, no extra format.
+                    | 123
+                    | 124
                     | 850_595_691
                     | 895_512_359
                     | 1_773_428_102
@@ -621,7 +629,7 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
                 )
                 .map_err(|message| scene_editor_format_error(source, class_id, message))?;
             }
-            if matches!(class_id, 1 | 4 | 23 | 96 | 137 | 199 | 224) {
+            if matches!(class_id, 1 | 4 | 23 | 96 | 120 | 137 | 199 | 212 | 224) {
                 apply_scene_object_editor_format(
                     &mut root,
                     export_root,
@@ -1503,7 +1511,10 @@ fn apply_scene_object_editor_format(
             object_index,
             reference_graph,
         ),
-        23 | 96 | 137 | 199 => apply_renderer_editor_format(editor_root),
+        // The frozen `EditorFormatConverter.Convert(IRenderer)` covers every
+        // renderer; 23/137/199 were the first transcribed, 96 came from 云栖仙府
+        // breadth, and 120/212 from 玉京烟霞 breadth (all probed on 2022.3).
+        23 | 96 | 120 | 137 | 199 | 212 => apply_renderer_editor_format(editor_root),
         _ => Ok(()),
     }
 }
@@ -3040,6 +3051,10 @@ mod tests {
             84,
             96,
             153,
+            120,
+            212,
+            123,
+            124,
             850_595_691,
             895_512_359,
             1_773_428_102,
@@ -3130,6 +3145,10 @@ mod tests {
             84,
             96,
             153,
+            120,
+            212,
+            123,
+            124,
             850_595_691,
             895_512_359,
             1_818_360_608,
