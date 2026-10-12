@@ -52,6 +52,7 @@ fn should_use_scene_editor_type_tree(class_id: i32, unity_version_text: Option<&
                     | 65
                     | 136
                     | 205
+                    | 222
                     | 90
                     | 82
                     | 95
@@ -2465,6 +2466,7 @@ mod tests {
             65,
             136,
             205,
+            222,
             90,
             23,
             33,
@@ -2544,6 +2546,7 @@ mod tests {
             65,
             136,
             205,
+            222,
             90,
             82,
             95,
