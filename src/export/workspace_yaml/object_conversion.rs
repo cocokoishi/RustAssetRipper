@@ -60,6 +60,7 @@ fn should_use_scene_editor_type_tree(class_id: i32, unity_version_text: Option<&
                     | 1_773_428_102
                     | 1_818_360_608
                     | 1_818_360_609
+                    | 258
             ));
     supported_version && supported_class
 }
@@ -2471,6 +2472,7 @@ mod tests {
             1_773_428_102,
             1_818_360_608,
             1_818_360_609,
+            258,
         ] {
             assert!(should_use_scene_editor_type_tree(
                 class_id,
@@ -2541,6 +2543,7 @@ mod tests {
             895_512_359,
             1_818_360_608,
             1_818_360_609,
+            258,
         ] {
             let (_, editor_tree) = reference_class_layouts()
                 .tpk_trees(class_id, &version)
