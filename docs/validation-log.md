@@ -4843,6 +4843,13 @@ These results do not pass the first-phase gate. The reference .NET solution buil
 - Results on latest exports: 青岚山河卷 r23 34,416/0, 青岚古境 r3 3,867/0, 云栖仙府 r3 5,944/0, 玉京烟霞 r3 14,029/0, 烟雨长亭 r1 2,311/0, 松月竹庭 r11 656/0 — 61,223 references checked with zero dangling. (Two tool bugs found and fixed during development: missed `.anim`/`.mat`/`.renderTexture` includes and missing font/scene exemptions; the LightingData→scene 102900000 case was verified conventional against source, not a gap.)
 - Evidence: `DIFF-REFS-INTEGRITY-001`. Unity Editor import/runtime and UABEA were not run; import-equivalence of the resolved graph is static evidence only.
 
+## 2026-10-12 drop rule pinpointed to one line plus emission design — implementation next
+
+- Instrumented rebuild trace (temporary, reverted) proves Rust reads constants IDENTICALLY to C# (selectors [(0,true),(0,false)], states `(name, pathID, parent=0)` match the oracle `SCONST` rows exactly). The divergence is purely the attachment rule: source `AnimatorStateMachineContext.AssignStateMachineChildStates` skips `Name.IsEmpty` machines, so states under empty-path (leading-dot TOS, e.g. `.AutoDresserTo0`) parents never attach and fall to separate files; Rust attaches by bare ID equality (`parent 0 == node 0`).
+- Verified end state matches everywhere else: r3 has the same 3 empty-named machines (0103/0105/0112 hold Root + 12 states that source drops), same 98 count, same 5 `New State` states. Fix = skip state attachment to empty-named resolved machines (selector path only, not legacy), drop unattached states (+ their trees) to separate main-style-ID files (uniform anchors `&110200000`/`&20600000` proven), rewire kept `m_DstState`/`m_DefaultState` refs as cross-file PPtrs (source precedent confirmed in output), keep behaviours embedded (deferred, status quo). Double-rebuild (docs + behaviour pointers) confirmed legitimate, not a bug.
+- Emission design: synthetic-file pattern exists (`plan_lighting_data_files` precedent: bytes + `plan_asset_path` + GUID + `NativeFormatImporter` meta); assign GUIDs during rebuild via the drop map so kept cross-file PPtrs resolve in one pass.
+- Evidence: `target/oracle-trace.log` (uncommitted) + `DIFF-青岚古境-CONTROLLER-001`. Unity Editor import/runtime and UABEA were not run; product unaccepted.
+
 ## 2026-10-12 controller oracle probe decodes the split mechanism — probe committed
 
 - New differential oracle `tools/probes/controller-oracle/` (frozen load+process pipeline as oracle only, never a product dependency): `ExportHandler.Load/Process` on 青岚雅苑`, dumping pre/post member census plus per-controller hierarchy histograms to `target/controller-oracle-青岚古境2.tsv` (3,589 lines, uncommitted evidence).

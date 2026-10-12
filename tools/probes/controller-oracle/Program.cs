@@ -37,7 +37,49 @@ static class Oracle
 		handler.Process(gameData);
 		DumpControllers(gameData, writer);
 		DumpMembers(gameData, writer, "POST");
+		DumpConstants(gameData, writer);
 		return 0;
+	}
+
+	static void DumpConstants(GameData gameData, StreamWriter writer)
+	{
+		List<IAnimatorController> controllers = [];
+		foreach (IUnityObjectBase asset in gameData.GameBundle.FetchAssets())
+		{
+			if (asset is IAnimatorController controller)
+			{
+				controllers.Add(controller);
+			}
+		}
+		controllers.Sort(static (a, b) => a.PathID.CompareTo(b.PathID));
+		foreach (IAnimatorController controller in controllers)
+		{
+			foreach (var tosPair in controller.TOS)
+			{
+				writer.WriteLine($"TOS\t{controller.PathID}\t{tosPair.Key}\t{Escape(tosPair.Value.String)}");
+			}
+			var controllerConstant = controller.Controller;
+			for (int mi = 0; mi < controllerConstant.StateMachineArray.Count; mi++)
+			{
+				var machine = controllerConstant.StateMachineArray[mi].Data;
+				writer.WriteLine($"MCONST\t{controller.PathID}\t{mi}\t{machine.StateConstantArray.Count}\t{(machine.Has_SelectorStateConstantArray() ? machine.SelectorStateConstantArray.Count : -1)}");
+				for (int si = 0; si < machine.StateConstantArray.Count; si++)
+				{
+					var stateConstant = machine.StateConstantArray[si].Data;
+					uint fullPathID = stateConstant.GetId();
+					string fullPath = controller.TOS.TryGetValue(fullPathID, out var pathName) ? pathName.String : "<missing>";
+					writer.WriteLine($"SCONST\t{controller.PathID}\t{mi}\t{si}\t{fullPathID}\t{Escape(fullPath)}");
+				}
+				if (machine.Has_SelectorStateConstantArray())
+				{
+					for (int qi = 0; qi < machine.SelectorStateConstantArray.Count; qi++)
+					{
+						var selector = machine.SelectorStateConstantArray[qi].Data;
+						writer.WriteLine($"SEL\t{controller.PathID}\t{mi}\t{qi}\t{selector.FullPathID}\t{(selector.IsEntry ? 1 : 0)}");
+					}
+				}
+			}
+		}
 	}
 
 	static void DumpControllers(GameData gameData, StreamWriter writer)
@@ -72,6 +114,43 @@ static class Oracle
 			string histogram = string.Join(",", counts.OrderBy(static pair => pair.Key).Select(static pair => $"{pair.Key}:{pair.Value}"));
 			string distinctHistogram = string.Join(",", distinctCounts.OrderBy(static pair => pair.Key).Select(static pair => $"{pair.Key}:{pair.Value}"));
 			writer.WriteLine($"CONTROLLER\t{controller.PathID}\t{Escape(controller.GetBestName())}\t{Escape(controller.Collection.Name)}\t{total}\t{histogram}\t{distinct.Count}\t{distinctHistogram}");
+			DumpAttachment(controller, writer);
+		}
+	}
+
+	static void DumpAttachment(IAnimatorController controller, StreamWriter writer)
+	{
+		HashSet<IUnityObjectBase> seen = [];
+		foreach (IUnityObjectBase member in controller.FetchEditorHierarchy())
+		{
+			if (member is not AssetRipper.SourceGenerated.Classes.ClassID_1107.IAnimatorStateMachine machine || !seen.Add(machine))
+			{
+				continue;
+			}
+			List<string> childStates = [];
+			if (machine.Has_ChildStates())
+			{
+				foreach (var child in machine.ChildStates)
+				{
+					childStates.Add(child.State.TryGetAsset(machine.Collection, out var state) && state is not null ? state.PathID.ToString() : "null");
+				}
+			}
+			else
+			{
+				foreach (var state in machine.StatesP)
+				{
+					childStates.Add(state is not null ? state.PathID.ToString() : "null");
+				}
+			}
+			List<string> childMachines = [];
+			if (machine.Has_ChildStateMachines())
+			{
+				foreach (var child in machine.ChildStateMachines)
+				{
+					childMachines.Add(child.StateMachine.TryGetAsset(machine.Collection, out var sub) && sub is not null ? sub.PathID.ToString() : "null");
+				}
+			}
+			writer.WriteLine($"ATTACH\t{controller.PathID}\t{machine.PathID}\t{Escape(machine.GetBestName())}\t{string.Join(",", childStates)}\t{string.Join(",", childMachines)}");
 		}
 	}
 
