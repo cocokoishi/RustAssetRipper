@@ -909,7 +909,136 @@ pub fn format_dotnet_f32(value: f32) -> String {
             "0".to_owned()
         };
     }
-    format_dotnet_shortest(&format!("{value:e}"), negative, 9)
+    format_dotnet_shortest(
+        &round_shortest_tie_to_even_f32(&format!("{value:e}"), value),
+        negative,
+        9,
+    )
+}
+
+/// Resolve shortest-representation ties the way .NET's `Single.ToString` does.
+///
+/// Rust's `LowerExp` already yields *a* shortest round-tripping decimal, but when several
+/// same-length decimals round-trip to `value` it may pick a different one than .NET, which
+/// resolves the tie toward the even last digit (observed: `-280.890625f32` prints
+/// `-280.89062` under .NET and `-280.89063` under Rust, while both spellings parse to
+/// bits `0xC38C7200`). This only adjusts the digit string when a same-length neighbor
+/// parses back to the identical bits; otherwise the input is returned unchanged.
+///
+/// The winner among the round-tripping neighbors is the closest to the exact value with
+/// exact `f64` ties broken toward even. Widening `f32` to `f64` is exact and decimal
+/// parsing is correctly rounded, so the discrimination margin (decimal-ulp scale) is
+/// roughly nine orders above the `f64` rounding quantum; the full-workspace real-sample
+/// replay differentially guards the outcome.
+fn round_shortest_tie_to_even_f32(sci: &str, value: f32) -> String {
+    let (mantissa, exponent_text) = match sci.split_once('e') {
+        Some(parts) => parts,
+        None => return sci.to_owned(),
+    };
+    let negative = mantissa.starts_with('-');
+    let digits: Vec<u8> = mantissa.bytes().filter(u8::is_ascii_digit).collect();
+    if digits.is_empty() {
+        return sci.to_owned();
+    }
+    let bits = value.to_bits();
+    if !sci_parses_to_f32_bits(negative, &digits, exponent_text, bits) {
+        return sci.to_owned();
+    }
+    // Same-length decimals that round-trip form a contiguous run around `value`; walk it
+    // in both directions. The cap is far above any physically possible run length for
+    // binary32 shortest forms (the rounding interval spans only a few decimal ulps).
+    let mut candidates: Vec<Vec<u8>> = vec![digits.clone()];
+    for delta in [-1i32, 1i32] {
+        let mut current = digits.clone();
+        for _ in 0..8 {
+            let Some(next) = step_decimal_digits(&current, delta) else {
+                break;
+            };
+            if next.len() != digits.len() || next[0] == b'0' {
+                // Length or magnitude rollover: not the same shortest form.
+                break;
+            }
+            if !sci_parses_to_f32_bits(negative, &next, exponent_text, bits) {
+                break;
+            }
+            current = next.clone();
+            candidates.push(next);
+        }
+    }
+    if candidates.len() < 2 {
+        return sci.to_owned();
+    }
+    let exact = f64::from(value);
+    let mut best = 0usize;
+    let mut best_distance = f64::INFINITY;
+    let mut best_tied_even = false;
+    for (index, candidate) in candidates.iter().enumerate() {
+        let text = rebuild_sci_string(negative, candidate, exponent_text);
+        let parsed: f64 = match text.parse() {
+            Ok(parsed) => parsed,
+            Err(_) => continue,
+        };
+        let distance = (parsed - exact).abs();
+        let last_even = (candidate[candidate.len() - 1] - b'0').is_multiple_of(2);
+        if distance < best_distance || (distance == best_distance && last_even && !best_tied_even) {
+            best = index;
+            best_distance = distance;
+            best_tied_even = last_even;
+        }
+    }
+    if best == 0 {
+        return sci.to_owned();
+    }
+    rebuild_sci_string(negative, &candidates[best], exponent_text)
+}
+
+/// Steps a decimal digit string by `delta` (±1) with borrow/carry propagation.
+/// Returns `None` when the step overflows past the most significant digit.
+fn step_decimal_digits(digits: &[u8], delta: i32) -> Option<Vec<u8>> {
+    let mut next = digits.to_vec();
+    let mut carry = delta;
+    let mut index = next.len();
+    while index > 0 && carry != 0 {
+        index -= 1;
+        let digit = next[index] as i32 - b'0' as i32 + carry;
+        if digit < 0 {
+            next[index] = b'9';
+            carry = -1;
+        } else if digit > 9 {
+            next[index] = b'0';
+            carry = 1;
+        } else {
+            next[index] = b'0' + digit as u8;
+            carry = 0;
+        }
+    }
+    if carry != 0 {
+        return None;
+    }
+    Some(next)
+}
+
+/// Rebuilds a `[-]d[.ddd]e{exponent}` string from a digit string after tie resolution.
+fn rebuild_sci_string(negative: bool, digits: &[u8], exponent_text: &str) -> String {
+    let mut text = String::with_capacity(digits.len() + exponent_text.len() + 3);
+    if negative {
+        text.push('-');
+    }
+    text.push(digits[0] as char);
+    if digits.len() > 1 {
+        text.push('.');
+        text.extend(digits[1..].iter().map(|digit| *digit as char));
+    }
+    text.push('e');
+    text.push_str(exponent_text);
+    text
+}
+
+/// Checks that a digit string with the given exponent parses back to `bits` as `f32`.
+fn sci_parses_to_f32_bits(negative: bool, digits: &[u8], exponent_text: &str, bits: u32) -> bool {
+    rebuild_sci_string(negative, digits, exponent_text)
+        .parse::<f32>()
+        .is_ok_and(|parsed| parsed.to_bits() == bits)
 }
 
 /// Format an `f64` exactly like .NET's `Double.ToString(CultureInfo.InvariantCulture)`.
@@ -1463,6 +1592,28 @@ mod tests {
             rows += 1;
         }
         assert_eq!(rows, 28, "all probed float rows are asserted");
+    }
+
+    /// Shortest-representation ties resolve toward the even last digit like .NET.
+    ///
+    /// Both spellings of each pair parse to identical `f32` bits (checked with a
+    /// scratch parse: `280.89062` and `280.89063` are both bits `0x438C7200`;
+    /// `477.89062` and `477.89063` are both `0x43EEF200`). The expected strings are
+    /// the frozen reference's YAML spellings from `青岚山河卷` class-4
+    /// `m_LocalPosition.z` documents (local fileID 34284 decodes the exact midpoint
+    /// `-280.890625`), while Rust's own formatter picks the odd neighbor.
+    #[test]
+    fn format_dotnet_f32_rounds_exact_midpoint_ties_to_even() {
+        for (bits, expected) in [(0xC38C7200u32, "-280.89062"), (0xC3EEF200u32, "-477.89062")] {
+            assert_eq!(
+                format_dotnet_f32(f32::from_bits(bits)),
+                expected,
+                "f32 {bits:#010X}"
+            );
+        }
+        // Non-tie values keep Rust's shortest choice.
+        assert_eq!(format_dotnet_f32(51.55f32), "51.55");
+        assert_eq!(format_dotnet_f32(-153.0f32), "-153");
     }
     /// Byte-for-byte differential against the reference `AssetRipper.Yaml` runtime layout.
     ///

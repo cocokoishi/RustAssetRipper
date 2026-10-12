@@ -2352,6 +2352,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Verification | `cargo test --release --lib --locked export::workspace_yaml::object_conversion::tests -- --nocapture` passed 8/8, including the new manager-family regression (104/157/196 have `m_ObjectHideFlags`, lack the three PPtr base fields); `cargo test --release --lib --locked export::` passed 501/501 (1 ignored); `cargo build --release --locked --bin assetripper-rs` exited 0. Fresh full export `target/real-acceptance-current-青岚山河卷-r8` exited 0: 2 SerializedFiles, 72,350 objects, 1,087 asset files, 243,562,238 asset bytes, 6 support files, 2 post-exporter files. Newly byte-exact: 81 (1/1), 193 (1,456/1,456), 196 (1/1), 223 (2/2), 224 (19/19). All prior exact and GUID-semantic slices recheck unchanged. |
 | Limits | Class 320 bindings, class-4 float prints, Default-Material direction, and the lighting path remain open (see validation log). Unity Editor import/runtime and UABEA were not run. |
 
+## DIFF-YAML-FLOAT-TIE-001 - Shortest-float tie-break vs .NET Single.ToString
+
+| Field | Finding |
+|---|---|
+| Input and reference | `青岚山河卷` (Unity 2022.3.6f1), class-4 `m_LocalPosition.z` (e.g. local fileID 34284); frozen reference YAML spellings `-280.89062`/`-477.89062` vs Rust `-280.89063`/`-477.89063`. |
+| Root cause and proof | Both spellings parse to identical `f32` bits (`0xC38C7200`, `0xC3EEF200`; exact midpoint values `-280.890625`, `-477.890625`), so decoding is exonerated. Rust's `LowerExp` picks the odd shortest neighbor where .NET resolves the exact tie toward the even last digit. All 34 residuals are this single pattern (one field, two value pairs). |
+| Rust change | `round_shortest_tie_to_even_f32` adjusts only the shared `format_dotnet_f32` path: same-length round-tripping neighbor runs are enumerated (capped, rollover-safe) and the closest-to-exact spelling wins with exact `f64` ties broken toward even; all other values return Rust's string untouched. `f64` formatting is unchanged (no observed divergence; remains open). |
+| Verification | Reference-derived regression vectors plus non-tie controls; full `unity_yaml`/`export` suites, warnings-denied Clippy, release build, and the r10 replay (class 4: 20,547/20,547 exact; scene totals 49,862 exact + 21,373 semGUID with 2 residuals) are recorded in the validation-log entry above. The r9-vs-r10 whole-tree guard (232 changed non-`.meta` files, zero structural/line-count diffs, 28/28 unique number pairs bit-identical as `f32`) proves the formatter change is spelling-only. |
+| Limits | `f64` tie behavior is unprobed. Class 157 and class 320 scene residuals remain open. Unity Editor import/runtime and UABEA were not run. |
+
 ## DIFF-ENGINE-PREDEFINED-BANDS-001 - Engine-assets TPK version-band selection for predefined Material/Shader identity
 
 | Field | Finding |
