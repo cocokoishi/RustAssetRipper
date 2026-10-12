@@ -2352,6 +2352,26 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Verification | `cargo test --release --lib --locked export::workspace_yaml::object_conversion::tests -- --nocapture` passed 8/8, including the new manager-family regression (104/157/196 have `m_ObjectHideFlags`, lack the three PPtr base fields); `cargo test --release --lib --locked export::` passed 501/501 (1 ignored); `cargo build --release --locked --bin assetripper-rs` exited 0. Fresh full export `target/real-acceptance-current-青岚山河卷-r8` exited 0: 2 SerializedFiles, 72,350 objects, 1,087 asset files, 243,562,238 asset bytes, 6 support files, 2 post-exporter files. Newly byte-exact: 81 (1/1), 193 (1,456/1,456), 196 (1/1), 223 (2/2), 224 (19/19). All prior exact and GUID-semantic slices recheck unchanged. |
 | Limits | Class 320 bindings, class-4 float prints, Default-Material direction, and the lighting path remain open (see validation log). Unity Editor import/runtime and UABEA were not run. |
 
+## DIFF-云栖仙府-BREADTH-001 - First 云栖仙府 audit with four editor routes
+
+| Field | Finding |
+|---|---|
+| Input and reference | 青岚雅苑` (Unity 2022.3.22f1); 20261011 source export; TPK editor-base probes for 54/84/96/153. |
+| Before-fix difference | Four classes exported release-shaped (missing base fields, zeroed renderer defaults). |
+| Rust change | 54/84/96/153 join the 2022.3 editor selector plus both regression lists. |
+| Verification | r3 audit: 54/84/153 exact, 96 semGUID; 231/231 PNGs pixel-identical; zero rust-only files; `export::` 513/513. |
+| Limits | Controller placement families, 246 source-only files, 243 opaque files stay open. Unity Editor import/runtime and UABEA were not run. |
+
+## DIFF-YAML-RENDERER-RULE-001 - Universal IRenderer editor defaults
+
+| Field | Finding |
+|---|---|
+| Input and reference | 云栖仙府 TrailRenderer GI fields (1/3/4/0.5/89 vs zeros); frozen `EditorFormatConverter.Convert(IRenderer)` + `EditorFormatProcessor` interface dispatch. |
+| Before-fix difference | Rust scoped the overwrite to 23/137/199; every other renderer kept zeros. |
+| Rust change | 96 joins the renderer arm and scene-object dispatch; direct test pins all six defaults. |
+| Verification | 96 at semGUID in r3; unit test green; full suite green. |
+| Limits | LineRenderer (120) has no sample coverage and stays out. Unity Editor import/runtime and UABEA were not run. |
+
 ## DIFF-青岚古境-CONTROLLER-001 - AnimatorController shared-asset claiming and cloning
 
 | Field | Finding |

@@ -70,6 +70,12 @@ fn should_use_scene_editor_type_tree(class_id: i32, unity_version_text: Option<&
                     | 319
                     | 198
                     | 199
+                    // 云栖仙府 breadth: these carry full editor base fields on
+                    // 2022.3 (probed TPK base for each) but exported release-shaped.
+                    | 54
+                    | 84
+                    | 96
+                    | 153
                     | 850_595_691
                     | 895_512_359
                     | 1_773_428_102
@@ -615,7 +621,7 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
                 )
                 .map_err(|message| scene_editor_format_error(source, class_id, message))?;
             }
-            if matches!(class_id, 1 | 4 | 23 | 137 | 199 | 224) {
+            if matches!(class_id, 1 | 4 | 23 | 96 | 137 | 199 | 224) {
                 apply_scene_object_editor_format(
                     &mut root,
                     export_root,
@@ -1497,7 +1503,7 @@ fn apply_scene_object_editor_format(
             object_index,
             reference_graph,
         ),
-        23 | 137 | 199 => apply_renderer_editor_format(editor_root),
+        23 | 96 | 137 | 199 => apply_renderer_editor_format(editor_root),
         _ => Ok(()),
     }
 }
@@ -3030,6 +3036,10 @@ mod tests {
             137,
             198,
             199,
+            54,
+            84,
+            96,
+            153,
             850_595_691,
             895_512_359,
             1_773_428_102,
@@ -3116,6 +3126,10 @@ mod tests {
             1_773_428_102,
             198,
             199,
+            54,
+            84,
+            96,
+            153,
             850_595_691,
             895_512_359,
             1_818_360_608,
@@ -3333,6 +3347,55 @@ mod tests {
             material_shader_pointer(project_asset).asset_type,
             UnityProjectAssetType::Meta
         );
+    }
+
+    #[test]
+    fn renderer_editor_format_overwrites_gi_defaults_for_any_renderer() {
+        // The frozen `EditorFormatConverter.Convert(IRenderer)` overwrites these
+        // fields unconditionally on every renderer; 云栖仙府 TrailRenderer (96)
+        // exports zeros without it.
+        let mut root = SerializedValue::Struct(vec![
+            SerializedFieldValue {
+                name: "m_ScaleInLightmap".to_owned(),
+                value: SerializedValue::F32(0.0),
+            },
+            SerializedFieldValue {
+                name: "m_ReceiveGI".to_owned(),
+                value: SerializedValue::I32(0),
+            },
+            SerializedFieldValue {
+                name: "m_SelectedEditorRenderState".to_owned(),
+                value: SerializedValue::I32(0),
+            },
+            SerializedFieldValue {
+                name: "m_MinimumChartSize".to_owned(),
+                value: SerializedValue::I32(0),
+            },
+            SerializedFieldValue {
+                name: "m_AutoUVMaxDistance".to_owned(),
+                value: SerializedValue::F32(0.0),
+            },
+            SerializedFieldValue {
+                name: "m_AutoUVMaxAngle".to_owned(),
+                value: SerializedValue::F32(0.0),
+            },
+        ]);
+        apply_renderer_editor_format(&mut root).unwrap();
+        let field = |name: &str| {
+            root.unique_field(name)
+                .unwrap()
+                .unwrap_or_else(|| panic!("renderer root has no {name}"))
+                .clone()
+        };
+        assert_eq!(field("m_ScaleInLightmap"), SerializedValue::F32(1.0));
+        assert_eq!(field("m_ReceiveGI"), SerializedValue::I32(1));
+        assert_eq!(
+            field("m_SelectedEditorRenderState"),
+            SerializedValue::I32(3)
+        );
+        assert_eq!(field("m_MinimumChartSize"), SerializedValue::I32(4));
+        assert_eq!(field("m_AutoUVMaxDistance"), SerializedValue::F32(0.5));
+        assert_eq!(field("m_AutoUVMaxAngle"), SerializedValue::F32(89.0));
     }
 
     #[test]
