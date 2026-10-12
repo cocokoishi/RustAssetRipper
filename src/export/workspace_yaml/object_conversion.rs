@@ -48,6 +48,8 @@ fn should_use_scene_editor_type_tree(class_id: i32, unity_version_text: Option<&
             && matches!(
                 class_id,
                 20 | 43
+                    | 64
+                    | 65
                     | 90
                     | 82
                     | 95
@@ -2457,6 +2459,8 @@ mod tests {
             4,
             20,
             43,
+            64,
+            65,
             90,
             23,
             33,
@@ -2532,6 +2536,8 @@ mod tests {
         for class_id in [
             20,
             43,
+            64,
+            65,
             90,
             82,
             95,
