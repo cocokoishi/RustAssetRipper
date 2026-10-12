@@ -50,9 +50,15 @@ fn should_use_scene_editor_type_tree(class_id: i32, unity_version_text: Option<&
                 20 | 43
                     | 64
                     | 65
+                    | 81
                     | 136
+                    | 193
+                    | 196
                     | 205
                     | 222
+                    | 223
+                    | 224
+                    | 320
                     | 90
                     | 82
                     | 95
@@ -569,12 +575,16 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
                 "",
             )
             .map_err(|message| scene_editor_format_error(source, class_id, message))?;
-            if matches!(class_id, 104 | 157) {
+            if matches!(class_id, 104 | 157 | 196) {
                 ensure_scene_manager_hide_flags(&mut root)
                     .map_err(|message| scene_editor_format_error(source, class_id, message))?;
             }
             if class_id == 157 {
                 apply_lightmap_settings_editor_defaults(&mut root)
+                    .map_err(|message| scene_editor_format_error(source, class_id, message))?;
+            }
+            if class_id == 196 {
+                apply_nav_mesh_settings_editor_defaults(&mut root)
                     .map_err(|message| scene_editor_format_error(source, class_id, message))?;
             }
             if class_id == 43 {
@@ -589,7 +599,7 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
                 )
                 .map_err(|message| scene_editor_format_error(source, class_id, message))?;
             }
-            if matches!(class_id, 1 | 4 | 23 | 137 | 199) {
+            if matches!(class_id, 1 | 4 | 23 | 137 | 199 | 224) {
                 apply_scene_object_editor_format(
                     &mut root,
                     export_root,
@@ -1465,7 +1475,7 @@ fn apply_scene_object_editor_format(
 ) -> Result<(), String> {
     match class_id {
         1 => apply_game_object_editor_format(editor_root, source_root),
-        4 => apply_transform_editor_format(
+        4 | 224 => apply_transform_editor_format(
             editor_root,
             source_root,
             source,
@@ -1874,6 +1884,7 @@ fn ensure_scene_manager_hide_flags(root: &mut SerializedValue) -> Result<(), Str
 enum SceneEditorFormatDefault {
     Bool(bool),
     I32(i32),
+    U32(u32),
     F32(f32),
     String(&'static str),
 }
@@ -1944,6 +1955,114 @@ fn apply_mesh_editor_format(root: &mut SerializedValue) -> Result<(), String> {
         "m_MeshOptimizationFlags",
         SceneEditorFormatDefault::I32(-1),
     )
+}
+
+/// Applies the frozen `NavMeshSettingsExtensions.ConvertToEditorFormat` behavior for the
+/// serialized null-`m_NavMeshData` case: `BuildSettings.SetToDefault()`.
+///
+/// A non-null `m_NavMeshData` requires reading the referenced class-238 `NavMeshData` payload
+/// (`NavMeshParams` or `NavMeshBuildSettings`) and is deliberately an explicit error rather than
+/// silently writing the standalone defaults.
+fn apply_nav_mesh_settings_editor_defaults(root: &mut SerializedValue) -> Result<(), String> {
+    let nav_mesh_data = root
+        .unique_field_in_base_chain("m_NavMeshData")
+        .map_err(|error| format!("could not inspect NavMeshSettings.m_NavMeshData: {error}"))?;
+    match nav_mesh_data {
+        Some(SerializedValue::PPtr { path_id: 0, .. }) | None => {}
+        Some(SerializedValue::PPtr { file_id, path_id }) => {
+            return Err(format!(
+                "NavMeshSettings.m_NavMeshData is non-null (fileID {file_id}, PathID {path_id}); the referenced NavMeshData payload is not yet read"
+            ));
+        }
+        Some(value) => {
+            return Err(format!(
+                "NavMeshSettings.m_NavMeshData has value {value:?}, expected a PPtr"
+            ));
+        }
+    }
+
+    let build_settings = root
+        .unique_field_in_base_chain_mut("m_BuildSettings")
+        .map_err(|error| format!("could not inspect NavMeshSettings.m_BuildSettings: {error}"))?
+        .ok_or_else(|| "NavMeshSettings editor TypeTree has no m_BuildSettings field".to_owned())?;
+    let SerializedValue::Struct(fields) = build_settings else {
+        return Err(format!(
+            "NavMeshSettings.m_BuildSettings has value {build_settings:?}, expected a struct"
+        ));
+    };
+
+    // Field names follow the source editor TypeTree node names; `buildHeightMesh` is the
+    // Unity 2022.3 spelling of the source `AccuratePlacement` property.
+    const DEFAULTS: &[(&str, SceneEditorFormatDefault)] = &[
+        ("agentTypeID", SceneEditorFormatDefault::I32(0)),
+        ("agentRadius", SceneEditorFormatDefault::F32(0.5)),
+        ("agentHeight", SceneEditorFormatDefault::F32(2.0)),
+        ("agentSlope", SceneEditorFormatDefault::F32(45.0)),
+        ("agentClimb", SceneEditorFormatDefault::F32(0.4)),
+        ("ledgeDropHeight", SceneEditorFormatDefault::F32(0.0)),
+        ("maxJumpAcrossDistance", SceneEditorFormatDefault::F32(0.0)),
+        ("minRegionArea", SceneEditorFormatDefault::F32(2.0)),
+        ("manualCellSize", SceneEditorFormatDefault::I32(0)),
+        ("cellSize", SceneEditorFormatDefault::F32(1.0 / 6.0)),
+        ("manualTileSize", SceneEditorFormatDefault::I32(0)),
+        ("tileSize", SceneEditorFormatDefault::I32(256)),
+        ("buildHeightMesh", SceneEditorFormatDefault::I32(0)),
+        ("maxJobWorkers", SceneEditorFormatDefault::U32(0)),
+        (
+            "preserveTilesOutsideBounds",
+            SceneEditorFormatDefault::I32(0),
+        ),
+    ];
+
+    for (name, default) in DEFAULTS {
+        let field = fields
+            .iter_mut()
+            .find(|field| field.name == *name)
+            .ok_or_else(|| format!("NavMeshSettings.m_BuildSettings has no {name} field"))?;
+        set_scene_editor_scalar_default(&mut field.value, *default, name)?;
+    }
+
+    let debug = fields
+        .iter_mut()
+        .find(|field| field.name == "debug")
+        .ok_or_else(|| "NavMeshSettings.m_BuildSettings has no debug field".to_owned())?;
+    let SerializedValue::Struct(debug_fields) = &mut debug.value else {
+        return Err(format!(
+            "NavMeshSettings.m_BuildSettings.debug has value {:?}, expected a struct",
+            debug.value
+        ));
+    };
+    let flags = debug_fields
+        .iter_mut()
+        .find(|field| field.name == "m_Flags")
+        .ok_or_else(|| "NavMeshSettings.m_BuildSettings.debug has no m_Flags field".to_owned())?;
+    let SerializedValue::U8(value) = &mut flags.value else {
+        return Err(format!(
+            "NavMeshSettings.m_BuildSettings.debug.m_Flags has value {:?}, expected UInt8",
+            flags.value
+        ));
+    };
+    *value = 0;
+    Ok(())
+}
+
+fn set_scene_editor_scalar_default(
+    value: &mut SerializedValue,
+    default: SceneEditorFormatDefault,
+    field_name: &str,
+) -> Result<(), String> {
+    match (value, default) {
+        (SerializedValue::Bool(value), SceneEditorFormatDefault::Bool(default)) => *value = default,
+        (SerializedValue::I32(value), SceneEditorFormatDefault::I32(default)) => *value = default,
+        (SerializedValue::U32(value), SceneEditorFormatDefault::U32(default)) => *value = default,
+        (SerializedValue::F32(value), SceneEditorFormatDefault::F32(default)) => *value = default,
+        (value, default) => {
+            return Err(format!(
+                "editor default for {field_name} has incompatible value shape {value:?} vs {default:?}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn apply_lightmap_settings_editor_defaults(root: &mut SerializedValue) -> Result<(), String> {
@@ -2467,6 +2586,12 @@ mod tests {
             136,
             205,
             222,
+            223,
+            224,
+            320,
+            81,
+            193,
+            196,
             90,
             23,
             33,
@@ -2547,6 +2672,11 @@ mod tests {
             136,
             205,
             222,
+            223,
+            224,
+            320,
+            81,
+            193,
             90,
             82,
             95,
@@ -2582,6 +2712,39 @@ mod tests {
                     .any(|node| node.name.as_deref() == Some("m_HideFlags")),
                 "class {class_id} editor TypeTree unexpectedly has release m_HideFlags"
             );
+        }
+    }
+
+    #[test]
+    fn unity_2022_3_manager_classes_have_object_hide_flags_only() {
+        let version = FactoryUnityVersion::parse("2022.3.22f1").unwrap();
+        for class_id in [104, 157, 196] {
+            let (_, editor_tree) = reference_class_layouts()
+                .tpk_trees(class_id, &version)
+                .unwrap()
+                .unwrap_or_else(|| {
+                    panic!("Unity 2022.3 source TPK has no editor tree for class {class_id}")
+                });
+            assert!(
+                editor_tree
+                    .nodes
+                    .iter()
+                    .any(|node| node.name.as_deref() == Some("m_ObjectHideFlags")),
+                "manager class {class_id} editor TypeTree has no m_ObjectHideFlags field"
+            );
+            for field in [
+                "m_CorrespondingSourceObject",
+                "m_PrefabInstance",
+                "m_PrefabAsset",
+            ] {
+                assert!(
+                    !editor_tree
+                        .nodes
+                        .iter()
+                        .any(|node| node.name.as_deref() == Some(field)),
+                    "manager class {class_id} editor TypeTree unexpectedly has {field}"
+                );
+            }
         }
     }
 
