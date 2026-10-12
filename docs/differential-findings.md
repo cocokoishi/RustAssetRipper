@@ -2352,6 +2352,16 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Verification | `cargo test --release --lib --locked export::workspace_yaml::object_conversion::tests -- --nocapture` passed 8/8, including the new manager-family regression (104/157/196 have `m_ObjectHideFlags`, lack the three PPtr base fields); `cargo test --release --lib --locked export::` passed 501/501 (1 ignored); `cargo build --release --locked --bin assetripper-rs` exited 0. Fresh full export `target/real-acceptance-current-青岚山河卷-r8` exited 0: 2 SerializedFiles, 72,350 objects, 1,087 asset files, 243,562,238 asset bytes, 6 support files, 2 post-exporter files. Newly byte-exact: 81 (1/1), 193 (1,456/1,456), 196 (1/1), 223 (2/2), 224 (19/19). All prior exact and GUID-semantic slices recheck unchanged. |
 | Limits | Class 320 bindings, class-4 float prints, Default-Material direction, and the lighting path remain open (see validation log). Unity Editor import/runtime and UABEA were not run. |
 
+## DIFF-REAL-青岚山河卷-SPRITE-001 - SpriteProcessor geometry recomputation
+
+| Field | Finding |
+|---|---|
+| Input and reference | `青岚山河卷` packed sprites (Cookie, Video Player, bed, mirror, music); frozen `SpriteProcessor.ProcessSprite` and `SpriteExtensions.GetSpriteCoordinatesInAtlas`. |
+| Before-fix difference | Source rederives Rect/Pivot/Border from the render-data rectangle and recomputes Offset/TextureRectOffset (1-ulp and derived differences); Rust emitted raw bundle values. |
+| Rust change | `apply_sprite_geometry` ports the unconditional recompute in source order with `f32` semantics for class 213; non-null `m_SpriteAtlas` is a loud error (atlas-copy branch needs cross-object reads); `Has_*` follows bundle field presence. |
+| Verification | Bit-exact regression test on Cookie vectors; 青岚山河卷 r21 class 213 at 10 semGUID with zero diffs; `export::` 512/512; Clippy clean. A casing bug (`TextureRect` vs real `textureRect`) failed the first replay loudly and was fixed with real node names in both code and fixture. |
+| Limits | Atlas-packed sprites (non-null atlas) are an explicit error, unvalidated. Unity Editor import/runtime and UABEA were not run. |
+
 ## DIFF-松月竹庭-PATHS-001 - Export ClassName overrides and bundle-container original directories
 
 | Field | Finding |

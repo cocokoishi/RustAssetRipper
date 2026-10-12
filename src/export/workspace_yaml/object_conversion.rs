@@ -603,6 +603,10 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
                 apply_texture_editor_format(&mut root)
                     .map_err(|message| scene_editor_format_error(source, class_id, message))?;
             }
+            if class_id == 213 {
+                apply_sprite_geometry(export_root, &mut root)
+                    .map_err(|message| scene_editor_format_error(source, class_id, message))?;
+            }
             if animation_clip_editor_format && class_id == 74 {
                 apply_animation_clip_editor_format(
                     &mut root,
@@ -1967,7 +1971,254 @@ fn apply_mesh_editor_format(root: &mut SerializedValue) -> Result<(), String> {
     )
 }
 
-/// Expands a Texture2D `image data` TypelessData field into Unity's project-YAML
+/// Applies the frozen `SpriteProcessor.ProcessSprite` geometry recomputation for
+/// atlas-less sprites: Rect/Pivot/Border are rederived from the render-data
+/// rectangle, then Offset and TextureRectOffset are recomputed from the new
+/// values, in source order with `f32` IEEE semantics.
+///
+/// The atlas-copy branch (non-null `m_SpriteAtlas` with a `RenderDataKey` map hit)
+/// needs cross-object `RenderDataMap` reads unavailable at conversion time and is
+/// a loud error instead of silent raw values; no authorized sample sprite uses it.
+/// `Has_Pivot`/`Has_Border` follow bundle field presence on the source payload.
+fn apply_sprite_geometry(
+    source_payload: &SerializedValue,
+    root: &mut SerializedValue,
+) -> Result<(), String> {
+    let atlas = root
+        .unique_field_in_base_chain("m_SpriteAtlas")
+        .map_err(|error| format!("could not inspect Sprite.m_SpriteAtlas: {error}"))?;
+    match atlas {
+        Some(SerializedValue::PPtr { path_id: 0, .. }) | None => {}
+        Some(SerializedValue::PPtr { file_id, path_id }) => {
+            return Err(format!(
+                "Sprite references SpriteAtlas (fileID {file_id}, PathID {path_id}); atlas-packed sprite RenderDataMap resolution is not implemented"
+            ));
+        }
+        Some(value) => {
+            return Err(format!(
+                "Sprite.m_SpriteAtlas has value {value:?}, expected a PPtr"
+            ));
+        }
+    }
+    let rect = read_rect_field(source_payload, "m_Rect")?;
+    let render_data = source_payload
+        .unique_field_in_base_chain("m_RD")
+        .map_err(|error| format!("could not inspect Sprite.m_RD: {error}"))?
+        .ok_or_else(|| "Sprite source payload has no m_RD field".to_owned())?;
+    let texture_rect = read_rect_field(render_data, "textureRect")?;
+    let crop_bottom_left = read_vec2_field(render_data, "textureRectOffset")?;
+    let atlas_rect = (
+        texture_rect.0,
+        texture_rect.1,
+        texture_rect.2,
+        texture_rect.3,
+    );
+    let size_delta = (rect.2 - atlas_rect.2, rect.3 - atlas_rect.3);
+    let crop_top_right = (
+        size_delta.0 - crop_bottom_left.0,
+        size_delta.1 - crop_bottom_left.1,
+    );
+    let pivot = if source_payload
+        .unique_field_in_base_chain("m_Pivot")
+        .map_err(|error| format!("could not inspect Sprite.m_Pivot: {error}"))?
+        .is_some()
+    {
+        read_vec2_field(source_payload, "m_Pivot")?
+    } else {
+        let center = (rect.2 / 2.0, rect.3 / 2.0);
+        let offset = read_vec2_field(source_payload, "m_Offset")?;
+        let pivot_offset = (center.0 + offset.0, center.1 + offset.1);
+        (pivot_offset.0 / rect.2, pivot_offset.1 / rect.3)
+    };
+    let pivot_position = (pivot.0 * rect.2, pivot.1 * rect.3);
+    let atlas_pivot_position = (
+        pivot_position.0 - crop_bottom_left.0,
+        pivot_position.1 - crop_bottom_left.1,
+    );
+    let atlas_pivot = (
+        atlas_pivot_position.0 / atlas_rect.2,
+        atlas_pivot_position.1 / atlas_rect.3,
+    );
+    let has_border = source_payload
+        .unique_field_in_base_chain("m_Border")
+        .map_err(|error| format!("could not inspect Sprite.m_Border: {error}"))?
+        .is_some();
+    if has_border {
+        let border = read_vec4_field(source_payload, "m_Border")?;
+        let adjusted = (
+            adjust_sprite_border(border.0, crop_bottom_left.0),
+            adjust_sprite_border(border.1, crop_bottom_left.1),
+            adjust_sprite_border(border.2, crop_top_right.0),
+            adjust_sprite_border(border.3, crop_top_right.1),
+        );
+        write_vec4_field(root, "m_Border", adjusted)?;
+    }
+    write_rect_field(root, "m_Rect", atlas_rect)?;
+    if root
+        .unique_field_in_base_chain("m_Pivot")
+        .map_err(|error| format!("could not inspect Sprite.m_Pivot: {error}"))?
+        .is_some()
+    {
+        write_vec2_field(root, "m_Pivot", atlas_pivot)?;
+    }
+    write_vec2_field(
+        root,
+        "m_Offset",
+        (
+            (atlas_pivot.0 - 0.5) * atlas_rect.2,
+            (atlas_pivot.1 - 0.5) * atlas_rect.3,
+        ),
+    )?;
+    write_vec2_field(
+        render_data_output(root)?,
+        "textureRectOffset",
+        (texture_rect.0 - atlas_rect.0, texture_rect.1 - atlas_rect.1),
+    )?;
+    Ok(())
+}
+
+fn adjust_sprite_border(value: f32, crop: f32) -> f32 {
+    if value == 0.0 {
+        0.0
+    } else {
+        value - crop
+    }
+}
+
+fn render_data_output(root: &mut SerializedValue) -> Result<&mut SerializedValue, String> {
+    root.unique_field_in_base_chain_mut("m_RD")
+        .map_err(|error| format!("could not inspect Sprite.m_RD: {error}"))?
+        .ok_or_else(|| "Sprite editor root has no m_RD field".to_owned())
+}
+
+fn sprite_struct_field<'a>(
+    value: &'a SerializedValue,
+    container: &str,
+    name: &str,
+) -> Result<&'a SerializedValue, String> {
+    let SerializedValue::Struct(fields) = value else {
+        return Err(format!("{container} is not a struct"));
+    };
+    fields
+        .iter()
+        .find(|field| field.name == name)
+        .map(|field| &field.value)
+        .ok_or_else(|| format!("{container} has no {name} field"))
+}
+
+fn sprite_f32_field(value: &SerializedValue, container: &str, name: &str) -> Result<f32, String> {
+    match sprite_struct_field(value, container, name)? {
+        SerializedValue::F32(v) => Ok(*v),
+        other => Err(format!("{container}.{name} is {other:?}, expected F32")),
+    }
+}
+
+fn read_vec2_field(value: &SerializedValue, name: &str) -> Result<(f32, f32), String> {
+    let field = sprite_struct_field(value, "Sprite", name)?;
+    Ok((
+        sprite_f32_field(field, name, "x")?,
+        sprite_f32_field(field, name, "y")?,
+    ))
+}
+
+fn read_vec4_field(value: &SerializedValue, name: &str) -> Result<(f32, f32, f32, f32), String> {
+    let field = sprite_struct_field(value, "Sprite", name)?;
+    Ok((
+        sprite_f32_field(field, name, "x")?,
+        sprite_f32_field(field, name, "y")?,
+        sprite_f32_field(field, name, "z")?,
+        sprite_f32_field(field, name, "w")?,
+    ))
+}
+
+fn read_rect_field(value: &SerializedValue, name: &str) -> Result<(f32, f32, f32, f32), String> {
+    let field = sprite_struct_field(value, "Sprite", name)?;
+    Ok((
+        sprite_f32_field(field, name, "x")?,
+        sprite_f32_field(field, name, "y")?,
+        sprite_f32_field(field, name, "width")?,
+        sprite_f32_field(field, name, "height")?,
+    ))
+}
+
+fn sprite_struct_field_mut<'a>(
+    value: &'a mut SerializedValue,
+    container: &str,
+    name: &str,
+) -> Result<&'a mut SerializedValue, String> {
+    let SerializedValue::Struct(fields) = value else {
+        return Err(format!("{container} is not a struct"));
+    };
+    fields
+        .iter_mut()
+        .find(|field| field.name == name)
+        .map(|field| &mut field.value)
+        .ok_or_else(|| format!("{container} has no {name} field"))
+}
+
+fn write_vec2_field(
+    value: &mut SerializedValue,
+    name: &str,
+    vec: (f32, f32),
+) -> Result<(), String> {
+    let field = sprite_struct_field_mut(value, "Sprite", name)?;
+    let SerializedValue::Struct(components) = field else {
+        return Err(format!("Sprite.{name} is not a struct"));
+    };
+    for (component_name, component_value) in [("x", vec.0), ("y", vec.1)] {
+        let component = components
+            .iter_mut()
+            .find(|field| field.name == component_name)
+            .ok_or_else(|| format!("Sprite.{name} has no {component_name} field"))?;
+        component.value = SerializedValue::F32(component_value);
+    }
+    Ok(())
+}
+
+fn write_vec4_field(
+    value: &mut SerializedValue,
+    name: &str,
+    vec: (f32, f32, f32, f32),
+) -> Result<(), String> {
+    let field = sprite_struct_field_mut(value, "Sprite", name)?;
+    let SerializedValue::Struct(components) = field else {
+        return Err(format!("Sprite.{name} is not a struct"));
+    };
+    for (component_name, component_value) in
+        [("x", vec.0), ("y", vec.1), ("z", vec.2), ("w", vec.3)]
+    {
+        let component = components
+            .iter_mut()
+            .find(|field| field.name == component_name)
+            .ok_or_else(|| format!("Sprite.{name} has no {component_name} field"))?;
+        component.value = SerializedValue::F32(component_value);
+    }
+    Ok(())
+}
+
+fn write_rect_field(
+    value: &mut SerializedValue,
+    name: &str,
+    rect: (f32, f32, f32, f32),
+) -> Result<(), String> {
+    let field = sprite_struct_field_mut(value, "Sprite", name)?;
+    let SerializedValue::Struct(components) = field else {
+        return Err(format!("Sprite.{name} is not a struct"));
+    };
+    for (component_name, component_value) in [
+        ("x", rect.0),
+        ("y", rect.1),
+        ("width", rect.2),
+        ("height", rect.3),
+    ] {
+        let component = components
+            .iter_mut()
+            .find(|field| field.name == component_name)
+            .ok_or_else(|| format!("Sprite.{name} has no {component_name} field"))?;
+        component.value = SerializedValue::F32(component_value);
+    }
+    Ok(())
+}
 /// shape (`image data: <byte count>` plus a `_typelessdata` payload), mirroring
 /// the frozen mesh `m_DataSize` expansion: the TPK tree represents both as one
 /// `Bytes` value. A missing field (streamed textures without inline bytes) is left
@@ -3082,5 +3333,132 @@ mod tests {
             material_shader_pointer(project_asset).asset_type,
             UnityProjectAssetType::Meta
         );
+    }
+
+    #[test]
+    fn sprite_geometry_recomputes_rect_pivot_and_offsets_bit_exact() {
+        fn vec2(x: f32, y: f32) -> SerializedValue {
+            SerializedValue::Struct(vec![
+                SerializedFieldValue {
+                    name: "x".to_owned(),
+                    value: SerializedValue::F32(x),
+                },
+                SerializedFieldValue {
+                    name: "y".to_owned(),
+                    value: SerializedValue::F32(y),
+                },
+            ])
+        }
+        fn rect(x: f32, y: f32, width: f32, height: f32) -> SerializedValue {
+            SerializedValue::Struct(vec![
+                SerializedFieldValue {
+                    name: "x".to_owned(),
+                    value: SerializedValue::F32(x),
+                },
+                SerializedFieldValue {
+                    name: "y".to_owned(),
+                    value: SerializedValue::F32(y),
+                },
+                SerializedFieldValue {
+                    name: "width".to_owned(),
+                    value: SerializedValue::F32(width),
+                },
+                SerializedFieldValue {
+                    name: "height".to_owned(),
+                    value: SerializedValue::F32(height),
+                },
+            ])
+        }
+        // Frozen `Cookie.asset` vectors: the bundle stores rect height one ulp above
+        // 848 (`0x44540001`) with an exact 0.5 pivot, while the frozen export carries
+        // rect height 848, pivot.y `0.50000006`, and offset.y `5.054474E-05`.
+        let source = SerializedValue::Struct(vec![
+            SerializedFieldValue {
+                name: "m_Rect".to_owned(),
+                value: rect(0.0, 0.0, 1024.0, f32::from_bits(0x4454_0001)),
+            },
+            SerializedFieldValue {
+                name: "m_Pivot".to_owned(),
+                value: vec2(0.5, 0.5),
+            },
+            SerializedFieldValue {
+                name: "m_Border".to_owned(),
+                value: SerializedValue::Struct(vec![
+                    SerializedFieldValue {
+                        name: "x".to_owned(),
+                        value: SerializedValue::F32(0.0),
+                    },
+                    SerializedFieldValue {
+                        name: "y".to_owned(),
+                        value: SerializedValue::F32(0.0),
+                    },
+                    SerializedFieldValue {
+                        name: "z".to_owned(),
+                        value: SerializedValue::F32(0.0),
+                    },
+                    SerializedFieldValue {
+                        name: "w".to_owned(),
+                        value: SerializedValue::F32(0.0),
+                    },
+                ]),
+            },
+            SerializedFieldValue {
+                name: "m_Offset".to_owned(),
+                value: vec2(0.0, 0.0),
+            },
+            SerializedFieldValue {
+                name: "m_RD".to_owned(),
+                value: SerializedValue::Struct(vec![
+                    SerializedFieldValue {
+                        name: "textureRect".to_owned(),
+                        value: rect(0.0, 0.0, 1024.0, 848.0),
+                    },
+                    SerializedFieldValue {
+                        name: "textureRectOffset".to_owned(),
+                        value: vec2(0.0, 0.0),
+                    },
+                ]),
+            },
+        ]);
+        let mut root = source.clone();
+        // The merged editor root also carries the null atlas pointer.
+        if let SerializedValue::Struct(fields) = &mut root {
+            fields.push(SerializedFieldValue {
+                name: "m_SpriteAtlas".to_owned(),
+                value: SerializedValue::PPtr {
+                    file_id: 0,
+                    path_id: 0,
+                },
+            });
+        }
+        apply_sprite_geometry(&source, &mut root).unwrap();
+        let height = sprite_f32_field(
+            sprite_struct_field(&root, "Sprite", "m_Rect").unwrap(),
+            "m_Rect",
+            "height",
+        )
+        .unwrap();
+        assert_eq!(height.to_bits(), 0x4454_0000, "rect height");
+        let pivot_y = sprite_f32_field(
+            sprite_struct_field(&root, "Sprite", "m_Pivot").unwrap(),
+            "m_Pivot",
+            "y",
+        )
+        .unwrap();
+        assert_eq!(pivot_y.to_bits(), 0x3F00_0001, "pivot.y");
+        assert_eq!(pivot_y, 0.50000006f32);
+        let offset_y = sprite_f32_field(
+            sprite_struct_field(&root, "Sprite", "m_Offset").unwrap(),
+            "m_Offset",
+            "y",
+        )
+        .unwrap();
+        assert_eq!(offset_y, 5.054474E-05f32, "offset.y");
+        let texture_offset = read_vec2_field(
+            sprite_struct_field(&root, "Sprite", "m_RD").unwrap(),
+            "textureRectOffset",
+        )
+        .unwrap();
+        assert_eq!(texture_offset, (0.0, 0.0));
     }
 }
