@@ -176,3 +176,11 @@ The Unity 5.6 RenderSettings regression in src/main_tests_05.rs and its source f
 - Remaining Sprite work: connect TypeTree object payloads and reference-graph ownership to the decoded-value kernel; resolve streamed bytes using the owning collection; implement legacy `Vertices`/`Indices`; serialize outlines into SpriteMetaData and the texture importer. `GeneratePhysicsShape` and `SetBoneGeometry` also remain open.
 - Next: trace the general SpriteRenderData ownership and stream-resolution path, add regression fixtures for that mapping, then wire the already-validated kernel to importer output. Continue the Phase 1 completion audit before any Phase 2 input inspection.
 - Preserve staged and unstaged work. Keep `GOAL.TXT`, `cleanup_manifest.txt`, and probe package directories out of commits. No subagents were used.
+
+## 2026-10-13 continuation - Legacy Sprite geometry (51ea73c)
+
+- Phase 1 remains open; Phase 2 remains locked. Commit `51ea73c` is pushed normally. No user-provided bundle, UABEA, or Unity runtime was used.
+- Sprite outline generation now reads both decoded modern submesh geometry and the frozen-source legacy `m_Vertices`/`m_Indices` geometry. Modern branch precedence, `pos` Vector3 decoding, 16-bit index triples, trailing-index behavior, and malformed-value errors have synthetic regressions.
+- GitHub Actions run 38437678839 passed Linux and Windows workspace tests, warnings-denied Clippy, release builds, changed-line formatting, and public-repository hygiene. Exact counts and commands are in `docs/validation-log.md`. Local Cargo validation was not run.
+- Next: trace Sprite object to `SpriteRenderData`/atlas ownership and stream resolution through the owning collection, then connect generated outlines to SpriteMetaData and texture importer output with synthetic cross-object fixtures. Continue source-backed `GeneratePhysicsShape` and `SetBoneGeometry` coverage afterward.
+- Preserve all staged and unstaged work. Keep `GOAL.TXT`, `cleanup_manifest.txt`, and `tools/probes/*/packages/` out of commits. Routine Cargo work stays on GitHub Actions because local performance is limited.
