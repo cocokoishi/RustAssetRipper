@@ -1,5 +1,13 @@
 # RustAssetRipper hand-off — 2026-10-10
 
+## Latest current checkpoint — 2026-10-13
+
+- Phase 1 remains open. Commit 1dd286c adds the Sprite bone importer path; synthetic regressions cover source scaling, inline vertex/skin/index decoding, and Single/Multiple metadata output.
+- GitHub Actions run 38460712103 passed Linux and Windows workspace tests, warnings-denied Clippy, release builds, changed-line formatting, and public-repository hygiene. Local Cargo tests/builds were not run.
+- The latest implementation uses the frozen source direct inline VertexDataBlob path. Investigate external streamed geometry separately, then continue the remaining Phase 1 closure inventory. The source Edges TODO remains empty; Unity Editor import/runtime and project-output audits were not run.
+- Work remains in the isolated feature branch codex/mesh-partial-channel-20261013. No user input was opened. Use GitHub Actions for Cargo validation.
+
+
 ## Current checkpoint — 2026-10-13 active
 
 ### Latest validated increments
