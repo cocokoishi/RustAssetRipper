@@ -331,6 +331,12 @@ pub fn collect_sprite_facts_for_texture(
             .and_then(UnityVersion::parse);
         let Some(mut link) =
             read_sprite_texture_link(&payload.root, source_version.as_ref(), texture_name)
+                .map_err(|error| {
+                    invalid_sprite_data(format!(
+                        "Sprite object {} texture metadata could not be read: {error}",
+                        sprite.object_index
+                    ))
+                })?
         else {
             continue;
         };
@@ -855,8 +861,7 @@ fn read_sprite_physics_shape(
     root: &SerializedValue,
     transform: SpriteOutlineTransform,
 ) -> Result<Vec<Vec<[f32; 2]>>, Box<dyn Error>> {
-    let root =
-        data_or_self(root).ok_or_else(|| invalid_sprite_data("Sprite payload is not a struct"))?;
+    let root = sprite_value_scope(root)?;
     let value = match root.unique_field("m_PhysicsShape") {
         Ok(Some(value)) => value,
         Ok(None) => return Ok(Vec::new()),
@@ -888,9 +893,9 @@ fn read_sprite_physics_shape(
             .try_reserve_exact(source_points.len())
             .map_err(|_| invalid_sprite_data("could not allocate physics-shape points"))?;
         for (point_index, source_point) in source_points.iter().enumerate() {
-            let point_value = data_or_self(source_point).ok_or_else(|| {
+            let point_value = sprite_value_scope(source_point).map_err(|error| {
                 invalid_sprite_data(format!(
-                    "m_PhysicsShape polygon {shape_index} point {point_index} is not a Vector2 struct"
+                    "m_PhysicsShape polygon {shape_index} point {point_index} is not a Vector2 struct: {error}"
                 ))
             })?;
             let read_component = |axis| -> Result<f32, Box<dyn Error>> {
@@ -956,8 +961,9 @@ struct SpriteTextureLink<'a> {
 }
 
 /// Read `AddSprites` caller facts from one Sprite payload, resolving the sprite name against
-/// the queried texture. Returns `None` when the sprite is atlas-packed (recovery stays open),
-/// when the render-data texture pointer is null, or when a required field is absent or mistyped.
+/// the queried texture. Returns `Ok(None)` when the sprite is atlas-packed (recovery stays open)
+/// or when the render-data texture pointer is null. Missing required fields, duplicate fields,
+/// and malformed value shapes are errors, not skipped sprites.
 ///
 /// Crucially, the facts carry the *processed* rect/pivot/border: `SpriteProcessor.ProcessSprite`
 /// recalculates them from the render data (`GetSpriteCoordinatesInAtlas` plus copies), and
@@ -966,39 +972,64 @@ fn read_sprite_texture_link<'a>(
     root: &'a SerializedValue,
     source_version: Option<&UnityVersion>,
     texture_name: &str,
-) -> Option<SpriteTextureLink<'a>> {
+) -> Result<Option<SpriteTextureLink<'a>>, Box<dyn Error>> {
     use crate::resources::sprite::get_sprite_coordinates_in_atlas;
     // Atlas-packed sprites need render-data recovery from the atlas map first, which
     // stays open; only atlas-null sprites take the direct render-data path.
-    match sprite_field(root, "m_SpriteAtlas") {
+    match strict_sprite_field(root, "m_SpriteAtlas")? {
         None => {}
         Some(SerializedValue::PPtr {
             file_id: 0,
             path_id: 0,
         }) => {}
-        Some(_) => return None,
+        Some(SerializedValue::PPtr { .. }) => return Ok(None),
+        Some(value) => {
+            return Err(invalid_sprite_data(format!(
+                "Sprite.m_SpriteAtlas has kind {}, expected PPtr",
+                sprite_value_kind(value)
+            )))
+        }
     }
-    let rd = data_or_self(sprite_field(root, "m_RD")?)?;
-    let (texture_file_id, texture_path_id) = match sprite_field(rd, "texture")? {
+    let rd_value = strict_required_sprite_field(root, "m_RD")?;
+    let rd = sprite_value_scope(rd_value)?;
+    let texture_value = strict_required_sprite_field(rd, "texture")?;
+    let (texture_file_id, texture_path_id) = match texture_value {
         SerializedValue::PPtr { file_id, path_id } => (*file_id, *path_id),
-        _ => return None,
+        value => {
+            return Err(invalid_sprite_data(format!(
+                "Sprite.m_RD.texture has kind {}, expected PPtr",
+                sprite_value_kind(value)
+            )))
+        }
     };
     if texture_path_id == 0 {
-        return None;
+        return Ok(None);
     }
-    let sprite_rect = sprite_rect4(sprite_field(root, "m_Rect")?)?;
-    let texture_rect = sprite_rect4(sprite_field(rd, "textureRect")?)?;
-    let texture_rect_offset = sprite_point2(sprite_field(rd, "textureRectOffset")?)?;
-    let offset = sprite_point2(sprite_field(root, "m_Offset")?)?;
-    let mesh_type = sprite_mesh_type(sprite_field(rd, "settingsRaw")?)?;
-    let stored_pivot = sprite_field(root, "m_Pivot").and_then(sprite_point2);
-    let stored_border = sprite_field(root, "m_Border").and_then(sprite_point4);
+    let sprite_rect = strict_sprite_rect4(root, "m_Rect")?;
+    let texture_rect = strict_sprite_rect4(rd, "textureRect")?;
+    let texture_rect_offset = strict_sprite_point2(rd, "textureRectOffset")?;
+    let offset = strict_sprite_point2(root, "m_Offset")?;
+    let settings_raw_value = strict_required_sprite_field(rd, "settingsRaw")?;
+    let mesh_type = sprite_mesh_type(settings_raw_value).ok_or_else(|| {
+        invalid_sprite_data(format!(
+            "Sprite.m_RD.settingsRaw has kind {}, expected integer",
+            sprite_value_kind(settings_raw_value)
+        ))
+    })?;
+    let settings_raw = sprite_u32(settings_raw_value).ok_or_else(|| {
+        invalid_sprite_data(format!(
+            "Sprite.m_RD.settingsRaw has kind {}, expected unsigned integer",
+            sprite_value_kind(settings_raw_value)
+        ))
+    })?;
+    let stored_pivot = strict_sprite_optional_point2(root, "m_Pivot")?;
+    let stored_border = strict_sprite_optional_point4(root, "m_Border")?;
     // `Has_Pivot`/`Has_Border` are layout gates, not value presence: every supported
     // layout carries the fields, so a present bundle value always counts; missing bundle
     // values on ancient layouts fall back to the derived/zero coordinates below.
-    let layout_has_pivot = sprite_field(root, "m_Pivot").is_some()
+    let layout_has_pivot = stored_pivot.is_some()
         || source_version.is_some_and(|version| (version.major, version.minor) >= (5, 0));
-    let layout_has_border = sprite_field(root, "m_Border").is_some()
+    let layout_has_border = stored_border.is_some()
         || source_version.is_some_and(|version| (version.major, version.minor) >= (5, 0));
     let coords = get_sprite_coordinates_in_atlas(
         sprite_rect,
@@ -1013,10 +1044,31 @@ fn read_sprite_texture_link<'a>(
         stored_border.is_some(),
         stored_border.unwrap_or([0.0, 0.0, 0.0, 0.0]),
     );
-    let name = sprite_name(root)?;
-    let settings_raw = sprite_u32(sprite_field(rd, "settingsRaw")?)?;
-    let pixels_to_units = sprite_f32(sprite_field(root, "m_PixelsToUnits")?)?;
-    Some(SpriteTextureLink {
+    let name_value = strict_required_sprite_field(root, "m_Name")?;
+    let name = match name_value {
+        SerializedValue::StringBytes(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+        value => {
+            return Err(invalid_sprite_data(format!(
+                "Sprite.m_Name has kind {}, expected string",
+                sprite_value_kind(value)
+            )))
+        }
+    };
+    let extrude_value = strict_required_sprite_field(root, "m_Extrude")?;
+    let extrude = sprite_u32(extrude_value).ok_or_else(|| {
+        invalid_sprite_data(format!(
+            "Sprite.m_Extrude has kind {}, expected integer",
+            sprite_value_kind(extrude_value)
+        ))
+    })?;
+    let pixels_to_units_value = strict_required_sprite_field(root, "m_PixelsToUnits")?;
+    let pixels_to_units = sprite_f32(pixels_to_units_value).ok_or_else(|| {
+        invalid_sprite_data(format!(
+            "Sprite.m_PixelsToUnits has kind {}, expected float",
+            sprite_value_kind(pixels_to_units_value)
+        ))
+    })?;
+    Ok(Some(SpriteTextureLink {
         facts: SpriteFacts {
             name: name.clone(),
             export_id: None,
@@ -1024,7 +1076,7 @@ fn read_sprite_texture_link<'a>(
             source_rect_size: [coords.rect[2], coords.rect[3]],
             texture_rect,
             name_matches_texture: name == texture_name,
-            extrude: sprite_u32(sprite_field(root, "m_Extrude")?)?,
+            extrude,
             mesh_type,
             has_pivot: layout_has_pivot,
             pivot: coords.pivot,
@@ -1047,7 +1099,59 @@ fn read_sprite_texture_link<'a>(
             is_packed: sprite_settings_raw_is_packed(settings_raw),
             packing_rotation: sprite_settings_raw_packing_rotation(settings_raw),
         },
-    })
+    }))
+}
+
+fn strict_sprite_rect4(root: &SerializedValue, name: &str) -> Result<[f32; 4], Box<dyn Error>> {
+    let value = strict_required_sprite_field(root, name)?;
+    Ok([
+        strict_f32_field(value, "x")?,
+        strict_f32_field(value, "y")?,
+        strict_f32_field(value, "width")?,
+        strict_f32_field(value, "height")?,
+    ])
+}
+
+fn strict_sprite_point2(root: &SerializedValue, name: &str) -> Result<[f32; 2], Box<dyn Error>> {
+    let value = strict_required_sprite_field(root, name)?;
+    strict_sprite_point2_value(value, name)
+}
+
+fn strict_sprite_optional_point2(
+    root: &SerializedValue,
+    name: &str,
+) -> Result<Option<[f32; 2]>, Box<dyn Error>> {
+    strict_sprite_field(root, name)?
+        .map(|value| strict_sprite_point2_value(value, name))
+        .transpose()
+}
+
+fn strict_sprite_point2_value(
+    value: &SerializedValue,
+    name: &str,
+) -> Result<[f32; 2], Box<dyn Error>> {
+    Ok([strict_f32_field(value, "x")?, strict_f32_field(value, "y")?])
+}
+
+fn strict_sprite_optional_point4(
+    root: &SerializedValue,
+    name: &str,
+) -> Result<Option<[f32; 4]>, Box<dyn Error>> {
+    strict_sprite_field(root, name)?
+        .map(|value| strict_sprite_point4_value(value, name))
+        .transpose()
+}
+
+fn strict_sprite_point4_value(
+    value: &SerializedValue,
+    name: &str,
+) -> Result<[f32; 4], Box<dyn Error>> {
+    Ok([
+        strict_f32_field(value, "x")?,
+        strict_f32_field(value, "y")?,
+        strict_f32_field(value, "z")?,
+        strict_f32_field(value, "w")?,
+    ])
 }
 
 fn sprite_importer_id(file_index: usize, path_id: i64) -> String {
@@ -1318,13 +1422,6 @@ fn sprite_mesh_type(value: &SerializedValue) -> Option<i32> {
     sprite_u32(value).map(|raw| ((raw >> 6) & 1) as i32)
 }
 
-fn sprite_name(root: &SerializedValue) -> Option<String> {
-    match sprite_field(root, "m_Name")? {
-        SerializedValue::StringBytes(bytes) => Some(String::from_utf8_lossy(bytes).into_owned()),
-        _ => None,
-    }
-}
-
 fn sprite_u32(value: &SerializedValue) -> Option<u32> {
     match value {
         SerializedValue::U32(value) => Some(*value),
@@ -1342,52 +1439,6 @@ fn sprite_f32(value: &SerializedValue) -> Option<f32> {
         SerializedValue::U32(value) => Some(*value as f32),
         _ => None,
     }
-}
-
-fn sprite_rect4(value: &SerializedValue) -> Option<[f32; 4]> {
-    let value = data_or_self(value)?;
-    Some([
-        sprite_f32(sprite_field(value, "x")?)?,
-        sprite_f32(sprite_field(value, "y")?)?,
-        sprite_f32(sprite_field(value, "width")?)?,
-        sprite_f32(sprite_field(value, "height")?)?,
-    ])
-}
-
-fn sprite_point2(value: &SerializedValue) -> Option<[f32; 2]> {
-    let value = data_or_self(value)?;
-    Some([
-        sprite_f32(sprite_field(value, "x")?)?,
-        sprite_f32(sprite_field(value, "y")?)?,
-    ])
-}
-
-fn sprite_point4(value: &SerializedValue) -> Option<[f32; 4]> {
-    let value = data_or_self(value)?;
-    Some([
-        sprite_f32(sprite_field(value, "x")?)?,
-        sprite_f32(sprite_field(value, "y")?)?,
-        sprite_f32(sprite_field(value, "z")?)?,
-        sprite_f32(sprite_field(value, "w")?)?,
-    ])
-}
-
-/// Find a struct field by name, following `data` wrappers like the payload readers do.
-/// Lookup failures (missing field, duplicate field, non-struct scope) read as absent so
-/// structurally unfamiliar sprites fall back to the default importer fields.
-fn sprite_field<'a>(value: &'a SerializedValue, name: &str) -> Option<&'a SerializedValue> {
-    data_or_self(value)?.unique_field(name).ok()?
-}
-
-/// Unwrap a `data` child when present, else read the struct itself.
-fn data_or_self(value: &SerializedValue) -> Option<&SerializedValue> {
-    let SerializedValue::Struct(_) = value else {
-        return None;
-    };
-    if let Ok(Some(data)) = value.unique_field("data") {
-        return Some(data);
-    }
-    Some(value)
 }
 
 fn yaml_key_is(key: &UnityYamlNode, name: &str) -> bool {
@@ -1814,8 +1865,7 @@ mod tests {
         );
     }
 
-    /// Menu-shaped bundle Sprite payload: the single full-rect sprite the frozen
-    /// `menu.png` importer was built from (name match, settingsRaw bit 6 set).
+    /// Synthetic Sprite payload: a single full-rect sprite (name match, settingsRaw bit 6 set).
     fn menu_sprite_payload() -> SerializedValue {
         use crate::serialized_file::object::SerializedFieldValue;
         fn field(name: &str, value: SerializedValue) -> SerializedFieldValue {
@@ -1905,8 +1955,9 @@ mod tests {
     fn sprite_link_reads_menu_shaped_payload() {
         let root = menu_sprite_payload();
         let version = UnityVersion::parse("2022.3.0f1").unwrap();
-        let link =
-            read_sprite_texture_link(&root, Some(&version), "menu").expect("menu sprite links");
+        let link = read_sprite_texture_link(&root, Some(&version), "menu")
+            .unwrap()
+            .expect("menu sprite links");
         assert_eq!(link.texture_file_id, 0);
         assert_eq!(link.texture_path_id, 12345);
         assert_eq!(
@@ -1933,8 +1984,9 @@ mod tests {
             }
         );
         // A different texture name only flips the match flag.
-        let other =
-            read_sprite_texture_link(&root, Some(&version), "other").expect("links regardless");
+        let other = read_sprite_texture_link(&root, Some(&version), "other")
+            .unwrap()
+            .expect("links regardless");
         assert!(!other.facts.name_matches_texture);
         // A null texture pointer skips the sprite like the source null check.
         let mut null_root = root.clone();
@@ -1954,7 +2006,40 @@ mod tests {
                 }
             }
         }
-        assert!(read_sprite_texture_link(&null_root, Some(&version), "menu").is_none());
+        assert!(read_sprite_texture_link(&null_root, Some(&version), "menu")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn sprite_link_reports_ambiguous_and_malformed_required_fields() {
+        use crate::serialized_file::object::SerializedFieldValue;
+
+        let version = UnityVersion::parse("2022.3.0f1").unwrap();
+        let mut duplicate = menu_sprite_payload();
+        if let SerializedValue::Struct(fields) = &mut duplicate {
+            fields.push(SerializedFieldValue {
+                name: "m_RD".to_owned(),
+                value: SerializedValue::Struct(Vec::new()),
+            });
+        }
+        assert!(read_sprite_texture_link(&duplicate, Some(&version), "menu").is_err());
+
+        let mut malformed = menu_sprite_payload();
+        if let SerializedValue::Struct(fields) = &mut malformed {
+            let rect = fields
+                .iter_mut()
+                .find(|field| field.name == "m_Rect")
+                .unwrap();
+            rect.value = SerializedValue::I32(7);
+        }
+        assert!(read_sprite_texture_link(&malformed, Some(&version), "menu").is_err());
+
+        let mut missing = menu_sprite_payload();
+        if let SerializedValue::Struct(fields) = &mut missing {
+            fields.retain(|field| field.name != "m_Offset");
+        }
+        assert!(read_sprite_texture_link(&missing, Some(&version), "menu").is_err());
     }
 
     #[test]
@@ -1990,6 +2075,18 @@ mod tests {
             value: SerializedValue::I32(7),
         }]);
         assert!(read_sprite_physics_shape(&malformed, transform).is_err());
+
+        let ambiguous_wrapper = SerializedValue::Struct(vec![
+            SerializedFieldValue {
+                name: "data".to_owned(),
+                value: SerializedValue::Struct(Vec::new()),
+            },
+            SerializedFieldValue {
+                name: "data".to_owned(),
+                value: SerializedValue::Struct(Vec::new()),
+            },
+        ]);
+        assert!(read_sprite_physics_shape(&ambiguous_wrapper, transform).is_err());
     }
 
     #[test]
@@ -2038,8 +2135,9 @@ mod tests {
         assert!(!importer_node_has_field(&importer, "missing"));
         let root = menu_sprite_payload();
         let version = UnityVersion::parse("2022.3.0f1").unwrap();
-        let link =
-            read_sprite_texture_link(&root, Some(&version), "menu").expect("menu sprite links");
+        let link = read_sprite_texture_link(&root, Some(&version), "menu")
+            .unwrap()
+            .expect("menu sprite links");
         let decision = decide_sprite_importer(std::slice::from_ref(&link.facts), false, true, true);
         assert_eq!(decision.mode, SpriteImportMode::Single);
         apply_sprite_importer_decision(&mut importer, &decision).unwrap();
