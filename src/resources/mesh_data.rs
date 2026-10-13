@@ -436,6 +436,9 @@ mod tests {
     use crate::resources::compressed_mesh::{decompress, CompressedMesh};
     use crate::resources::packed_bit_vector::PackedBitVectorLimits;
     use crate::resources::sub_mesh_data::MeshTopology;
+    use crate::resources::vertex_data_blob::{
+        ChannelInfo, EndianType, StreamInfo, UnityVersion, VertexDataBlob, VertexFormat,
+    };
 
     /// The five vertex-channel lists the reference probe fed into `FillWithCompressedMeshData`.
     type TriangleInputs = (Vec<Vec3>, Vec<Vec3>, Vec<Vec4>, Vec<ColorFloat>, Vec<Vec2>);
@@ -803,6 +806,67 @@ mod tests {
             vec![vec3(1.0, 2.0, 3.0), vec3(4.0, 5.0, 6.0)]
         );
         assert_eq!(data.index_format(), IndexFormat::UInt16);
+    }
+
+    #[test]
+    fn non_position_vertex_blob_channels_merge_with_compressed_positions() {
+        let version = UnityVersion::parse("2022.3.0f1").unwrap();
+        let channels = vec![
+            ChannelInfo {
+                dimension: 0,
+                offset: 0,
+                format: VertexFormat::Float as u8,
+                stream: 0,
+            },
+            ChannelInfo {
+                dimension: 3,
+                offset: 0,
+                format: VertexFormat::Float as u8,
+                stream: 0,
+            },
+        ];
+        let streams = vec![StreamInfo {
+            channel_mask: 0b10,
+            offset: 0,
+            stride: 12,
+            ..StreamInfo::default()
+        }];
+        let mut normal_bytes = Vec::new();
+        for component in [0.0_f32, 0.0, 1.0] {
+            normal_bytes.extend_from_slice(&component.to_le_bytes());
+        }
+        let blob = VertexDataBlob::from_parts(
+            Some(channels),
+            Some(streams),
+            normal_bytes,
+            1,
+            version,
+            EndianType::Little,
+        )
+        .unwrap();
+
+        // The public ReadData result remains false without positions, as in the source. The
+        // MeshExtensions merge path must still retain its independently decoded normal channel.
+        assert!(blob.read_data().unwrap().is_none());
+        let partial_channels = blob
+            .read_channels_for_mesh_merge()
+            .unwrap()
+            .expect("the normal channel was decoded");
+        assert!(partial_channels.vertices.is_empty());
+        assert_eq!(partial_channels.normals, Some(vec![vec3(0.0, 0.0, 1.0)]));
+
+        let compressed = DecompressedMesh {
+            vertices: Some(vec![CompressedVec3::new(4.0, 5.0, 6.0)]),
+            ..DecompressedMesh::default()
+        };
+        let merged = MeshData::try_make_from_parts(MeshParts {
+            blob: Some(partial_channels),
+            compressed,
+            ..empty_parts()
+        })
+        .expect("compressed positions complete the mesh");
+        assert_eq!(merged.vertices, vec![vec3(4.0, 5.0, 6.0)]);
+        assert_eq!(merged.normals, Some(vec![vec3(0.0, 0.0, 1.0)]));
     }
 
     #[test]
