@@ -3833,6 +3833,17 @@ These results do not pass the first-phase gate. The reference .NET solution buil
 - The external source probe reported SOURCE_PROVIDER|calls=1|name=texture.resS and SOURCE_STREAMED_YAML|class=28|data=323334|offset=0|size=0|path_empty=true. These rows are frozen in src/export/streamed_image_resource_fixture.txt. The custom provider reads a synthetic resource file under Rust target; the frozen reference source tree remains untouched.
 - Rust product test export_project_resolves_streamed_texture2d_from_platform_data_path passed. It invokes export-project on a generated Windows player layout, resolves the selected class-28 stream from game_Data/texture.resS at offset 2/size 3, emits 323334, clears export-view fields, writes Texture2D metadata and Unity ProjectVersion, and preserves both input files.
 - Existing test export_project_materializes_streamed_texture2d_and_fails_closed_when_resource_is_missing passed for the explicit root-resource export and missing-resource no-output path.
+
+## 2026-10-13 - GitHub Actions validation for streamed texture YAML
+
+- Validated commit: `b0a828fe7c492b46e88983f39cab4350d9193b48`; [Actions run 38424252512](https://github.com/cocokoishi/RustAssetRipper/actions/runs/38424252512) completed successfully.
+- `cargo test --workspace --locked`: exit 0 on Ubuntu (1,714 library and 127 CLI tests passed; 1 ignored) and Windows (1,716 library and 127 CLI tests passed; 1 ignored).
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: exit 0 on both operating systems.
+- `cargo build --workspace --release --locked`: exit 0 on both operating systems.
+- `python3 tools/check_changed_rust_format.py` and `python3 tools/check_public_repository.py`: exit 0; the Gitleaks job also completed successfully.
+- The synthetic streamed image tests now assert Unity YAML's byte count plus `_typelessdata` bytes per object. The AudioClip assertion canonicalizes host path separators only for the source-path line. Failed texture assertions no longer print YAML to Actions logs.
+- Input scope was the committed Rust test suite and generated fixtures only. No user asset bundles were opened or analyzed, no Unity Editor test was run, and no workflow artifacts were uploaded. This validates the tests and build matrix, not the full product completion gate.
+- The earlier run on `b8c90ea` failed the changed-line format check and was canceled when its formatting correction was pushed; this final run includes the corrected tree.
 - Full workspace validation after rustfmt: cargo test --workspace --locked --quiet exited 0 (1,497 library tests passed, 1 ignored; 82 product tests passed; 1 doc test ignored). Warnings-denied cargo clippy --workspace --all-targets --all-features --locked -- -D warnings, cargo fmt --all -- --check, git diff --check, and tools/verify-baseline.ps1 exited 0. The baseline verifier confirmed all 1,449 frozen source files unchanged.
 - The ledger now has 378 IDs: 354 verified, 13 implemented but unverified, 7 in progress, and 4 investigated; the open queue has exactly the 24 non-verified rows. IO-RESOURCE-001 is verified for the generic resolver path exercised through Mesh and generated IImageTexture streamed YAML export. Per-family decoding/export and full project-export parity remain open. Phase 1 is incomplete; Phase 2 remains locked.
 - Unity Editor import/runtime was not run because the installed 2022.3.22f1 Editor has no license. No user AssetBundle or UABEA contents were accessed.
