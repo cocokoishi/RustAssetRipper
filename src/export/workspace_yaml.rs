@@ -5,6 +5,7 @@ mod error;
 mod generated_assets;
 mod model;
 mod object_conversion;
+mod sprite_atlas;
 
 pub use assignment::{
     workspace_assignments_to_unity_yaml,

@@ -35,6 +35,7 @@ use super::model::{
     WorkspaceGeneratedLightingDataYamlPointer, WorkspaceGeneratedPrefabInternalPointer,
     WorkspaceStreamedYamlResourceContext, WorkspaceYamlExportContext,
 };
+use super::sprite_atlas::{WorkspaceSpriteAtlasPointer, WorkspaceSpriteAtlasYamlOverlay};
 
 fn should_use_scene_editor_type_tree(class_id: i32, unity_version_text: Option<&str>) -> bool {
     let Some(version) = unity_version_text.and_then(FactoryUnityVersion::parse) else {
@@ -124,6 +125,7 @@ pub(super) struct WorkspaceYamlObjectConversionRequest<'object> {
     pub(super) generated_component_overlay: Option<&'object WorkspaceGeneratedComponentYamlOverlay>,
     pub(super) generated_prefab_internal: Option<&'object WorkspaceGeneratedPrefabInternalPointer>,
     pub(super) generated_lighting_data: Option<&'object WorkspaceGeneratedLightingDataYamlPointer>,
+    pub(super) sprite_atlas_overlay: Option<&'object WorkspaceSpriteAtlasYamlOverlay>,
 }
 
 impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'graph, 'provider> {
@@ -140,6 +142,7 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
             generated_component_overlay,
             generated_prefab_internal,
             generated_lighting_data,
+            sprite_atlas_overlay,
         } = request;
         let workspace = self.workspace;
         let reference_graph = self.reference_graph;
@@ -236,12 +239,23 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
             && (class_id != 74
                 || generated_component_overlay.is_some()
                 || generated_prefab_internal.is_some()
-                || generated_lighting_data.is_some())
+                || generated_lighting_data.is_some()
+                || sprite_atlas_overlay.is_some())
         {
             return Err(UnityYamlWorkspaceExportError::AnimationClipEditorFormatInvariant {
                 source,
                 message: "processed AnimationClip root is attached to an incompatible object or another generated overlay".to_owned(),
             });
+        }
+        if let Some(overlay) = sprite_atlas_overlay {
+            if source.class_id != 213 || overlay.source != source || object.factory.class_id != 213
+            {
+                return Err(UnityYamlWorkspaceExportError::SpriteAtlasInvariant {
+                    source,
+                    message: "SpriteAtlas overlay does not match the source Sprite identity"
+                        .to_owned(),
+                });
+            }
         }
         if !payload.trailing_bytes.is_empty() {
             return Err(UnityYamlWorkspaceExportError::UnparsedTrailingPayload {
@@ -459,7 +473,8 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
         }
         let mut export_root = streamed_export_root
             .or_else(|| processed_animation_root.cloned())
-            .or_else(|| generated_component_overlay.map(|overlay| overlay.payload.root.clone()));
+            .or_else(|| generated_component_overlay.map(|overlay| overlay.payload.root.clone()))
+            .or_else(|| sprite_atlas_overlay.map(|overlay| overlay.root.clone()));
         if let Some(pointer) = generated_prefab_internal {
             if export_root.is_none() {
                 export_root = Some(payload.root.clone());
@@ -730,6 +745,9 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
         let mut generated_prefab_internal_pointer_seen = false;
         let mut generated_lighting_data_pointer_seen = false;
         let mut generated_lighting_data_pointer_observations = Vec::new();
+        let mut sprite_atlas_pointer_seen = sprite_atlas_overlay
+            .map(|overlay| vec![false; overlay.pointers.len()])
+            .unwrap_or_default();
         let document = serialized_object_value_to_unity_yaml_document(
             source,
             &payload.type_name,
@@ -781,6 +799,23 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
                             &mut generated_prefab_internal_pointer_seen,
                             &mut pointer_error,
                         );
+                    }
+                }
+                if let Some(overlay) = sprite_atlas_overlay {
+                    if request.source == overlay.source {
+                        for (index, pointer) in overlay.pointers.iter().enumerate() {
+                            if request.field_path == pointer.field_path {
+                                return resolve_sprite_atlas_pointer(
+                                    request,
+                                    overlay.source,
+                                    pointer,
+                                    pointer_map,
+                                    current_collection_index,
+                                    &mut sprite_atlas_pointer_seen[index],
+                                    &mut pointer_error,
+                                );
+                            }
+                        }
                     }
                 }
                 if let Some(overlay) = generated_component_overlay {
@@ -867,6 +902,17 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
             },
         );
         }
+        if let Some(overlay) = sprite_atlas_overlay {
+            if let Some(index) = sprite_atlas_pointer_seen.iter().position(|seen| !seen) {
+                return Err(UnityYamlWorkspaceExportError::SpriteAtlasInvariant {
+                    source,
+                    message: format!(
+                        "copied SpriteAtlas PPtr at {:?} was not visited by the YAML walker",
+                        overlay.pointers[index].field_path
+                    ),
+                });
+            }
+        }
         Ok(Some(document))
     }
 }
@@ -911,6 +957,50 @@ fn resolve_generated_component_pointer(
         }
         Err(error_source) => {
             *error = Some(UnityYamlWorkspaceExportError::PointerMap(error_source));
+            ProjectPointerResolution::Null
+        }
+    }
+}
+
+fn resolve_sprite_atlas_pointer(
+    request: UnityYamlPPtrRequest<'_>,
+    source: ExportAssetIdentity,
+    planned: &WorkspaceSpriteAtlasPointer,
+    pointer_map: &ProjectExportPointerMap,
+    current_collection_index: usize,
+    seen: &mut bool,
+    error: &mut Option<UnityYamlWorkspaceExportError>,
+) -> ProjectPointerResolution {
+    let invariant_error =
+        |message: String| UnityYamlWorkspaceExportError::SpriteAtlasInvariant { source, message };
+    if request.file_id != 0 || request.path_id != planned.path_id {
+        *error = Some(invariant_error(format!(
+            "copied SpriteAtlas PPtr at {:?} has FileID/PathID ({}, {}), expected (0, {})",
+            request.field_path, request.file_id, request.path_id, planned.path_id
+        )));
+        return ProjectPointerResolution::Null;
+    }
+    if *seen {
+        *error = Some(invariant_error(format!(
+            "copied SpriteAtlas PPtr at {:?} was visited more than once",
+            request.field_path
+        )));
+        return ProjectPointerResolution::Null;
+    }
+    *seen = true;
+    let planned_null = matches!(&planned.target, ProjectPointerRequest::Null);
+    match pointer_map.resolve(planned.target.clone(), current_collection_index) {
+        Ok(ProjectPointerResolution::Null) if planned_null => ProjectPointerResolution::Null,
+        Ok(ProjectPointerResolution::Null) => {
+            *error = Some(invariant_error(format!(
+                "non-null SpriteAtlas PPtr at {:?} resolved as null",
+                request.field_path
+            )));
+            ProjectPointerResolution::Null
+        }
+        Ok(resolution) => resolution,
+        Err(source) => {
+            *error = Some(UnityYamlWorkspaceExportError::PointerMap(source));
             ProjectPointerResolution::Null
         }
     }
@@ -2941,6 +3031,7 @@ pub fn workspace_object_to_unity_yaml_document(
         generated_component_overlay: None,
         generated_prefab_internal: None,
         generated_lighting_data: None,
+        sprite_atlas_overlay: None,
     })?
     else {
         return Err(UnityYamlWorkspaceExportError::ImageTextureSkippedWithoutContent { source });
@@ -3014,6 +3105,7 @@ pub fn workspace_object_to_unity_yaml_document_with_processed_animation_root(
         generated_component_overlay: None,
         generated_prefab_internal: None,
         generated_lighting_data: None,
+        sprite_atlas_overlay: None,
     })
 }
 

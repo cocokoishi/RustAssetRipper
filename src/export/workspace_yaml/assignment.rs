@@ -13,6 +13,7 @@ use super::super::scene_collection::{
 };
 use super::super::unity_yaml::write_unity_yaml_documents;
 use super::error::UnityYamlWorkspaceCollectionError;
+use super::error::UnityYamlWorkspaceExportError;
 use super::generated_assets::{
     workspace_generated_component_yaml_overlay,
     workspace_generated_prefab_assignment_to_unity_yaml_document,
@@ -25,6 +26,7 @@ use super::model::{
     WorkspaceStreamedYamlResourceContext, WorkspaceYamlExportContext,
 };
 use super::object_conversion::WorkspaceYamlObjectConversionRequest;
+use super::sprite_atlas::workspace_sprite_atlas_yaml_overlay;
 
 /// A typed Scene or Prefab export-ID assignment usable by the YAML collection executor.
 pub trait UnityYamlCollectionAssignment {
@@ -359,6 +361,18 @@ fn workspace_assignments_to_unity_yaml_with_context<A: UnityYamlCollectionAssign
                 } else {
                     None
                 };
+                let sprite_atlas_overlay = if asset.class_id == 213 {
+                    workspace_sprite_atlas_yaml_overlay(objects, reference_graph, object, asset)
+                        .map_err(|message| UnityYamlWorkspaceCollectionError::ObjectExport {
+                            assignment_index,
+                            source: Box::new(UnityYamlWorkspaceExportError::SpriteAtlasInvariant {
+                                source: asset,
+                                message,
+                            }),
+                        })?
+                } else {
+                    None
+                };
                 export_context
                     .convert(WorkspaceYamlObjectConversionRequest {
                         object,
@@ -369,6 +383,7 @@ fn workspace_assignments_to_unity_yaml_with_context<A: UnityYamlCollectionAssign
                         generated_component_overlay: generated_component_overlay.as_ref(),
                         generated_prefab_internal: generated_prefab_internal.as_ref(),
                         generated_lighting_data,
+                        sprite_atlas_overlay: sprite_atlas_overlay.as_ref(),
                     })
                     .map_err(|source| UnityYamlWorkspaceCollectionError::ObjectExport {
                         assignment_index,
