@@ -34,6 +34,7 @@
 use std::error::Error;
 use std::io;
 
+use crate::export::ids::get_main_export_id;
 use crate::export::unity_yaml::{UnityYamlNode, UnityYamlNodeKind, UnityYamlScalar};
 use crate::resources::sprite::{
     generate_sprite_render_data_outlines_from_value, sprite_settings_raw_is_packed,
@@ -111,6 +112,8 @@ pub const TEXTURE_IMPORTER_TYPE_SPRITE: i32 = 8;
 pub struct SpriteFacts {
     /// Sprite `Name`, copied into a Multiple-mode SpriteMetaData entry.
     pub name: String,
+    /// `TextureExportCollection.GetExportID` for this sprite in collection encounter order.
+    pub export_id: Option<i64>,
     /// The sprite `Rect` (`[x, y, width, height]`).
     pub rect: [f32; 4],
     /// The sprite render-data texture rect in the same layout.
@@ -244,10 +247,10 @@ const SPRITE_OBJECT_CLASS_ID: i32 = 213;
 /// resolves to one texture object.
 ///
 /// This mirrors the `SpriteProcessor` association (`sprite.RD.Texture.TryGetAsset`) for the
-/// importer path only; asset grouping and multiple-sprite sheets stay open. Facts follow
-/// workspace encounter order. Source file version and endianness select the render-data
-/// geometry decoder. When sprite-sheet export is enabled, malformed outline or physics-shape
-/// geometry is an error rather than a silently omitted field.
+/// importer path only; asset grouping stays open. Facts follow workspace file/object encounter
+/// order, matching the source `SpriteInformationObject` insertion sequence. Source file version
+/// and endianness select the render-data geometry decoder. When sprite-sheet export is enabled,
+/// malformed outline or physics-shape geometry is an error rather than a silently omitted field.
 #[allow(clippy::too_many_arguments)]
 pub fn collect_sprite_facts_for_texture(
     workspace: &SerializedFileWorkspace,
@@ -354,6 +357,7 @@ pub fn collect_sprite_facts_for_texture(
         facts
             .try_reserve(1)
             .map_err(|_| invalid_sprite_data("could not allocate sprite facts"))?;
+        link.facts.export_id = Some(sprite_export_id_for_ordinal(facts.len())?);
         facts.push(link.facts);
     }
     Ok(facts)
@@ -407,12 +411,10 @@ pub fn apply_sprite_importer_decision(
     Ok(())
 }
 
-/// Copies the source outline and physics-shape fields for a Single-mode sheet.
-///
-/// Multiple-mode sheets require per-sprite metadata records and planned export IDs. Until those
-/// are connected, an enabled Multiple-mode export fails instead of emitting an empty sheet.
-/// Bone metadata is also rejected when both source and target layouts expose it because the
-/// source derives additional vertices, indices, and weights for that branch.
+/// Writes the source outline and physics-shape fields for a Single-mode sheet, or source-ordered
+/// per-sprite metadata and export-name mappings for legacy Multiple-mode layouts. Bone metadata
+/// is rejected when the target layout exposes it because the source also derives vertices,
+/// indices, and weights for that branch.
 pub fn apply_sprite_sheet_metadata_to_importer(
     importer: &mut UnityYamlNode,
     sprites: &[SpriteFacts],
@@ -425,9 +427,29 @@ pub fn apply_sprite_sheet_metadata_to_importer(
         return Ok(());
     };
     if decision.mode == SpriteImportMode::Multiple {
-        return Err(invalid_sprite_data(
-            "multiple SpriteSheet metadata entries and export IDs are not yet planned",
-        ));
+        if [
+            "bones", "spriteID", "vertices", "indices", "edges", "weights",
+        ]
+        .into_iter()
+        .any(|field| importer_node_has_field(sprite_sheet, field))
+        {
+            return Err(invalid_sprite_data(
+                "multiple SpriteSheet bone geometry is not yet planned",
+            ));
+        }
+        let mut metadata =
+            UnityYamlNode::sequence(crate::export::unity_yaml::UnityYamlSequenceStyle::Block);
+        for sprite in sprites {
+            metadata.push(sprite_meta_data_to_yaml(sprite, sprite_sheet)?)?;
+        }
+        let Some(sprites_field) = yaml_mapping_field_mut(sprite_sheet, "sprites") else {
+            return Err(invalid_sprite_data(
+                "multiple SpriteSheet layout has no sprites field",
+            ));
+        };
+        *sprites_field = metadata;
+        write_sprite_export_name_table(importer, sprites)?;
+        return Ok(());
     }
     let [sprite] = sprites else {
         return Err(invalid_sprite_data(
@@ -447,6 +469,125 @@ pub fn apply_sprite_sheet_metadata_to_importer(
     };
     *outline_field = sprite_outline_to_yaml(&sprite.outline)?;
     write_sprite_physics_shape(sprite_sheet, &sprite.physics_shape)
+}
+
+fn sprite_meta_data_to_yaml(
+    sprite: &SpriteFacts,
+    sprite_sheet: &UnityYamlNode,
+) -> Result<UnityYamlNode, Box<dyn Error>> {
+    let mut metadata =
+        UnityYamlNode::mapping(crate::export::unity_yaml::UnityYamlMappingStyle::Block);
+    metadata.insert_field("serializedVersion", signed_node(2))?;
+    metadata.insert_field("name", UnityYamlNode::string(sprite.name.clone()))?;
+    let mut rect = UnityYamlNode::mapping(crate::export::unity_yaml::UnityYamlMappingStyle::Block);
+    rect.insert_field("serializedVersion", signed_node(2))?;
+    for (name, value) in [
+        ("x", sprite.rect[0]),
+        ("y", sprite.rect[1]),
+        ("width", sprite.rect[2]),
+        ("height", sprite.rect[3]),
+    ] {
+        rect.insert_field(name, float_node(value))?;
+    }
+    metadata.insert_field("rect", rect)?;
+    metadata.insert_field("alignment", signed_node(SpriteAlignment::Custom as i64))?;
+    metadata.insert_field("pivot", sprite_point_node(sprite.pivot)?)?;
+    if sprite.has_border {
+        metadata.insert_field("border", sprite_border_node(sprite.border)?)?;
+    }
+    if importer_node_has_field(sprite_sheet, "outline") {
+        metadata.insert_field("outline", sprite_outline_to_yaml(&sprite.outline)?)?;
+    }
+    if importer_node_has_field(sprite_sheet, "physicsShape") {
+        metadata.insert_field(
+            "physicsShape",
+            sprite_outline_to_yaml(&sprite.physics_shape)?,
+        )?;
+    }
+    metadata.insert_field("tessellationDetail", signed_node(0))?;
+    if importer_node_has_field(sprite_sheet, "internalID") {
+        let export_id = sprite
+            .export_id
+            .ok_or_else(|| invalid_sprite_data("Sprite metadata has no planned export ID"))?;
+        metadata.insert_field("internalID", signed_node(export_id))?;
+    }
+    Ok(metadata)
+}
+
+fn sprite_export_id_for_ordinal(ordinal: usize) -> Result<i64, Box<dyn Error>> {
+    let modifier = ordinal
+        .checked_mul(2)
+        .and_then(|modifier| u32::try_from(modifier).ok())
+        .ok_or_else(|| invalid_sprite_data("Sprite export ID modifier overflows"))?;
+    Ok(get_main_export_id(SPRITE_OBJECT_CLASS_ID, modifier)?)
+}
+
+fn write_sprite_export_name_table(
+    importer: &mut UnityYamlNode,
+    sprites: &[SpriteFacts],
+) -> Result<(), Box<dyn Error>> {
+    if let Some(table) = yaml_mapping_field_mut(importer, "internalIDToNameTable") {
+        for sprite in sprites {
+            let export_id = sprite
+                .export_id
+                .ok_or_else(|| invalid_sprite_data("Sprite name table has no planned export ID"))?;
+            let mut id_pair =
+                UnityYamlNode::mapping(crate::export::unity_yaml::UnityYamlMappingStyle::Block);
+            id_pair.insert_field("first", signed_node(i64::from(SPRITE_OBJECT_CLASS_ID)))?;
+            id_pair.insert_field("second", signed_node(export_id))?;
+            let mut entry =
+                UnityYamlNode::mapping(crate::export::unity_yaml::UnityYamlMappingStyle::Block);
+            entry.insert_field("first", id_pair)?;
+            entry.insert_field("second", UnityYamlNode::string(sprite.name.clone()))?;
+            table.push(entry)?;
+        }
+    } else if let Some(table) = yaml_mapping_field_mut(importer, "fileIDToRecycleName") {
+        for sprite in sprites {
+            let export_id = sprite
+                .export_id
+                .ok_or_else(|| invalid_sprite_data("Sprite name table has no planned export ID"))?;
+            let UnityYamlNodeKind::Mapping { entries, .. } = &mut table.kind else {
+                return Err(invalid_sprite_data("fileIDToRecycleName must be a mapping"));
+            };
+            let key = export_id.to_string();
+            let duplicate = entries.iter().any(|(field, _)| yaml_key_is(field, &key));
+            if duplicate {
+                return Err(invalid_sprite_data(format!(
+                    "duplicate Sprite export ID {export_id} in fileIDToRecycleName"
+                )));
+            }
+            table.insert_field(key, UnityYamlNode::string(sprite.name.clone()))?;
+        }
+    }
+    Ok(())
+}
+
+fn signed_node(value: i64) -> UnityYamlNode {
+    UnityYamlNode::scalar(UnityYamlScalar::Signed(value))
+}
+
+fn float_node(value: f32) -> UnityYamlNode {
+    UnityYamlNode::scalar(UnityYamlScalar::Float32(value))
+}
+
+fn sprite_point_node(point: [f32; 2]) -> Result<UnityYamlNode, Box<dyn Error>> {
+    let mut node = UnityYamlNode::mapping(crate::export::unity_yaml::UnityYamlMappingStyle::Flow);
+    node.insert_field("x", float_node(point[0]))?;
+    node.insert_field("y", float_node(point[1]))?;
+    Ok(node)
+}
+
+fn sprite_border_node(border: [f32; 4]) -> Result<UnityYamlNode, Box<dyn Error>> {
+    let mut node = UnityYamlNode::mapping(crate::export::unity_yaml::UnityYamlMappingStyle::Flow);
+    for (name, value) in [
+        ("x", border[0]),
+        ("y", border[1]),
+        ("z", border[2]),
+        ("w", border[3]),
+    ] {
+        node.insert_field(name, float_node(value))?;
+    }
+    Ok(node)
 }
 
 fn write_sprite_physics_shape(
@@ -664,6 +805,7 @@ fn read_sprite_texture_link<'a>(
     Some(SpriteTextureLink {
         facts: SpriteFacts {
             name: name.clone(),
+            export_id: None,
             rect: coords.rect,
             texture_rect,
             name_matches_texture: name == texture_name,
@@ -1039,9 +1181,9 @@ mod tests {
         apply_sprite_importer_decision, apply_sprite_sheet_metadata_to_importer,
         decide_sprite_importer, importer_node_has_field, propagate_asset_bundle_name,
         read_sprite_physics_shape, read_sprite_texture_link, select_prefab_importer,
-        truncate_execution_order, PrefabImporterBranch, SpriteAlignment, SpriteFacts,
-        SpriteImportMode, SpriteImporterDecision, SpriteOutlineTransform,
-        SPRITE_MESH_TYPE_FULL_RECT, TEXTURE_IMPORTER_TYPE_SPRITE,
+        sprite_export_id_for_ordinal, truncate_execution_order, PrefabImporterBranch,
+        SpriteAlignment, SpriteFacts, SpriteImportMode, SpriteImporterDecision,
+        SpriteOutlineTransform, SPRITE_MESH_TYPE_FULL_RECT, TEXTURE_IMPORTER_TYPE_SPRITE,
     };
     use super::{plugin_importer, texture_importer};
     use crate::export::unity_yaml::{UnityYamlNode, UnityYamlNodeKind, UnityYamlScalar};
@@ -1091,6 +1233,7 @@ mod tests {
         fn sprite(matching: bool) -> SpriteFacts {
             SpriteFacts {
                 name: if matching { "texture" } else { "sprite" }.to_owned(),
+                export_id: None,
                 rect: [1.0, 2.0, 32.0, 16.0],
                 texture_rect: if matching {
                     [1.0, 2.0, 32.0, 16.0]
@@ -1285,6 +1428,7 @@ mod tests {
             link.facts,
             SpriteFacts {
                 name: "menu".to_owned(),
+                export_id: None,
                 rect: [0.0, 0.0, 1071.0, 755.0],
                 texture_rect: [0.0, 0.0, 1071.0, 755.0],
                 name_matches_texture: true,
@@ -1446,11 +1590,12 @@ mod tests {
     }
 
     #[test]
-    fn sprite_sheet_outline_is_written_for_single_and_rejects_unplanned_multiple() {
+    fn sprite_sheet_outline_is_written_for_single_and_bone_metadata_stays_explicit() {
         use crate::export::unity_yaml::{UnityYamlMappingStyle, UnityYamlSequenceStyle};
 
         let sprite = SpriteFacts {
             name: "texture".to_owned(),
+            export_id: Some(21_300_000),
             rect: [0.0, 0.0, 8.0, 8.0],
             texture_rect: [0.0, 0.0, 8.0, 8.0],
             name_matches_texture: true,
@@ -1560,6 +1705,126 @@ mod tests {
         assert!(
             apply_sprite_sheet_metadata_to_importer(&mut importer, &[sprite], &multiple,).is_err()
         );
+    }
+
+    #[test]
+    fn legacy_multiple_sprite_sheet_writes_ordered_metadata_and_export_ids() {
+        use crate::export::unity_yaml::{UnityYamlMappingStyle, UnityYamlSequenceStyle};
+
+        fn field<'a>(node: &'a UnityYamlNode, name: &str) -> &'a UnityYamlNode {
+            let UnityYamlNodeKind::Mapping { entries, .. } = &node.kind else {
+                panic!("expected mapping while reading {name}");
+            };
+            entries
+                .iter()
+                .find(|(key, _)| super::yaml_key_is(key, name))
+                .map(|(_, value)| value)
+                .unwrap_or_else(|| panic!("missing field {name}"))
+        }
+
+        fn sprite(name: &str, export_id: i64, rect: [f32; 4]) -> SpriteFacts {
+            SpriteFacts {
+                name: name.to_owned(),
+                export_id: Some(export_id),
+                rect,
+                texture_rect: rect,
+                name_matches_texture: false,
+                extrude: 1,
+                mesh_type: 0,
+                has_pivot: true,
+                pivot: [0.25, 0.75],
+                has_border: true,
+                border: [1.0, 2.0, 3.0, 4.0],
+                pixels_to_units: 100.0,
+                outline: vec![vec![[1.0, 2.0], [3.0, 4.0]]],
+                physics_shape: vec![vec![[5.0, 6.0], [7.0, 8.0]]],
+                source_has_bones: false,
+            }
+        }
+
+        assert_eq!(sprite_export_id_for_ordinal(0).unwrap(), 21_300_000);
+        assert_eq!(sprite_export_id_for_ordinal(1).unwrap(), 21_300_002);
+
+        let sprites = [
+            sprite("first", 21_300_000, [0.0, 0.0, 16.0, 8.0]),
+            sprite("second", 21_300_002, [16.0, 0.0, 8.0, 16.0]),
+        ];
+        let decision = decide_sprite_importer(&sprites, true, true, true);
+        assert_eq!(decision.mode, SpriteImportMode::Multiple);
+
+        let mut sprite_sheet = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+        sprite_sheet
+            .insert_field(
+                "sprites",
+                UnityYamlNode::sequence(UnityYamlSequenceStyle::Block),
+            )
+            .unwrap();
+        sprite_sheet
+            .insert_field(
+                "outline",
+                UnityYamlNode::sequence(UnityYamlSequenceStyle::Block),
+            )
+            .unwrap();
+        sprite_sheet
+            .insert_field(
+                "physicsShape",
+                UnityYamlNode::sequence(UnityYamlSequenceStyle::Block),
+            )
+            .unwrap();
+        let mut importer = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+        importer
+            .insert_field(
+                "fileIDToRecycleName",
+                UnityYamlNode::mapping(UnityYamlMappingStyle::Block),
+            )
+            .unwrap();
+        importer.insert_field("spriteSheet", sprite_sheet).unwrap();
+
+        apply_sprite_sheet_metadata_to_importer(&mut importer, &sprites, &decision).unwrap();
+
+        let entries = field(&field(&importer, "spriteSheet"), "sprites");
+        let UnityYamlNodeKind::Sequence { items, .. } = &entries.kind else {
+            panic!("SpriteSheet.sprites must be a sequence");
+        };
+        assert_eq!(items.len(), 2);
+        assert!(matches!(
+            &field(&items[0], "name").kind,
+            crate::export::unity_yaml::UnityYamlNodeKind::Scalar(UnityYamlScalar::String(name))
+                if name == "first"
+        ));
+        assert!(matches!(
+            &field(&items[1], "name").kind,
+            crate::export::unity_yaml::UnityYamlNodeKind::Scalar(UnityYamlScalar::String(name))
+                if name == "second"
+        ));
+        assert!(matches!(
+            &field(&field(&items[0], "rect"), "width").kind,
+            crate::export::unity_yaml::UnityYamlNodeKind::Scalar(UnityYamlScalar::Float32(width))
+                if *width == 16.0
+        ));
+        assert!(matches!(
+            &field(&items[1], "tessellationDetail").kind,
+            crate::export::unity_yaml::UnityYamlNodeKind::Scalar(UnityYamlScalar::Signed(0))
+        ));
+
+        let UnityYamlNodeKind::Mapping { entries: ids, .. } =
+            &field(&importer, "fileIDToRecycleName").kind
+        else {
+            panic!("fileIDToRecycleName must be a mapping");
+        };
+        assert_eq!(ids.len(), 2);
+        assert!(matches!(
+            &ids[0].0.kind,
+            crate::export::unity_yaml::UnityYamlNodeKind::Scalar(
+                UnityYamlScalar::PlainString(id)
+            ) if id == "21300000"
+        ));
+        assert!(matches!(
+            &ids[1].0.kind,
+            crate::export::unity_yaml::UnityYamlNodeKind::Scalar(
+                UnityYamlScalar::PlainString(id)
+            ) if id == "21300002"
+        ));
     }
 
     #[test]
