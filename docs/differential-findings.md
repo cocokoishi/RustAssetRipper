@@ -1,8 +1,12 @@
 # Source behavior and differential findings
 
-## DIFF-CONTROLLER-SUBDOC-IDS-001 — controller sub-docs use allocator IDs, source uses hierarchy-order pseudo-random (open)
+## DIFF-CONTROLLER-SUBDOC-IDS-001 — controller sub-doc IDs and emission order (fixed)
 
-玉京烟霞 r14 all 8 `.controller` docs differ: Rust emits `[91, 1102-state(7000000001), 1107-machine(7000000000)]` while source emits `[91, 1107-machine(1107709254077376921), 1102-state(1102730242686860875)]` — same values otherwise. `AnimatorControllerExportCollection` inherits default `GenerateExportID` (`GetPseudoRandomExportId(asset, m_exportIDs.Count)`); `AddAsset` skips the controller itself, so seeds count non-controller assets in `FetchEditorHierarchy` order (machine 0, states/transitions/blendtrees inline after). Proven by `pseudo_random_export_ids_match_frozen_玉京烟霞_controller_subdocs` (ahoge machine/state IDs reproduce exactly). Remaining: replace the `7000000000` allocator for kept docs with hierarchy-order pseudo-random assignment and emit docs in hierarchy order (stress cases: moon_doll 100+ mixed docs, TriggerHoldDetect inline 1101 transitions).
+玉京烟霞 r14 reproduced the defect: the same AnimatorController sub-documents were emitted in allocator order with IDs beginning 7000000000, while frozen source emitted FetchEditorHierarchy order with GetPseudoRandomExportId(class, childIndex). Source AddAsset skips the root controller, so the first child uses seed 0. The frozen extension and actual TriggerHoldDetect source output established the order and IDs (machine 1107709254077376921, state 1102730242686860875, transition 1101724804207875695); this was not inferred from names or hashes.
+
+Fixed in animator_controller.rs and planning.rs: after the release collection is assembled, walk its emitted Unity YAML graph in source hierarchy order, assign the source pseudo-random IDs to non-root documents, remap local PPtrs/anchors, and reorder the documents. Unreachable child documents and ID collisions return errors. Rebuild/drop ordering and non-release output remain unchanged. Regression release_controller_documents_follow_source_hierarchy_ids_and_order pins the exact TriggerHoldDetect IDs, order, and local references.
+
+Fresh exports and the independent exact-decimal/BigInt static structure comparator cover 玉京烟霞 (8 controllers, 197 documents), 云栖仙府 (9 controllers), 松月竹庭 (9), 烟雨长亭 (9), 青岚古境 (9), and 青岚山河卷 (1). All compared controller documents map with no unmapped records or semantic differences. The full project audits still fail for separately recorded Avatar/material/opaque/reference-completeness differences; this finding closes only the controller sub-document defect. Unity import/runtime and UABEA were not run.
 
 ## DIFF-SPRITE-IMPORTER-FACTS-001 — sprite facts wired (fixed)
 

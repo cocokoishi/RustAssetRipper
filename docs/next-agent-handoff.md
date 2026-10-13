@@ -1,8 +1,28 @@
 # RustAssetRipper hand-off — 2026-10-10
 
-## Current checkpoint — 2026-10-12 user-requested pause
+## Current checkpoint — 2026-10-13 active (supersedes the pause checkpoint below)
 
-**PAUSED, NOT COMPLETE.** The user explicitly said “ok now stop and hand-off write.” Resume product work only after a new user instruction. This section supersedes every older checkpoint below. At most **one** subagent is permitted; the sole working subagent was interrupted. The active goal was marked `paused`. No product export, compression, or reference server remains running at this checkpoint.
+**ACTIVE, NOT COMPLETE.** The user resumed work and explicitly instructed: “DONT USE SUB AGENTS!!!” No subagents were used in this continuation. Continue autonomously; do not ask whether to proceed.
+
+### Repository and latest validated change
+
+- Repository: C:/Users/koishi/Desktop/RustAssetripper/RustAssetRipper, branch main. Implementation commit 9f6ecf2 fixes AnimatorController release sub-document IDs and emission order. Check git log -5 for the immediately following evidence-document commit and push status.
+- Root cause: frozen FetchEditorHierarchy traversal order determines the child asset count passed to GetPseudoRandomExportId; the controller root is omitted from that count. The old export allocator IDs/order differed. The generic post-assembly walker now follows the emitted YAML hierarchy, assigns/remaps IDs and local PPtrs/anchors, and errors on unreachable documents/collisions. Regression release_controller_documents_follow_source_hierarchy_ids_and_order pins the source TriggerHoldDetect machine/state/transition IDs and order.
+- Validation after the final code edit: cargo test --locked --lib exit0 (1708 passed, 1 ignored); cargo clippy --locked --all-targets -- -D warnings exit0; cargo build --release --locked exit0. cargo fmt --all -- --check exit1 on established unrelated drift in target_dependency_probe.rs, project_workflow.rs other import blocks, texture_project.rs, collection_preparation.rs, prefab_roots.rs, texture.rs, texture_array.rs. Do not format those unrelated regions. Logs: target/controller-id-final-{lib-tests,clippy,format,release-build}.log.
+- Fresh replays r15/r9/r19/r9/r10/r28 for 玉京烟霞/云栖仙府/松月竹庭/烟雨长亭/青岚古境/青岚山河卷 all exited0; six exact-decimal/BigInt static structure reports show every Avatar/controller structure equivalent with no unmapped controller docs. Class-91/1101/1102/1107 IDs/order now pair; complete counts and raw outputs are in docs/validation-log.md and target/controller-id-*-source-audit.json.
+- Whole-project strict audits still exit1. Avatar class-90 style/representation diffs remain, 烟雨长亭/青岚古境 material/cache differences remain, opaque byte differences remain despite PNG pixel and OGG packet equality, and path_id_map audit-root scope artifacts remain. Strict reference scans are PARTIAL with zero reported dangling issues (counts: 玉京烟霞111812, 云栖仙府35601, 松月竹庭9006, 烟雨长亭17137, 青岚古境25453, 青岚山河卷207388). These are not full acceptance passes.
+- Unity Editor import/runtime sampling and UABEA were not run. No static result is to be described as Unity behavior validation. All six replay exports explicitly report baseline EmptyExportCollection object(s) as non-exportable. Product remains unaccepted.
+- Current short roots added: C:/rS10 -> 青岚古境 r10; C:/rW28 -> 青岚山河卷 r28. Existing short roots C:/rarM15, C:/kjR9, C:/rK19, C:/rM9 remain for the other fresh outputs. Existing source roots are C:/rarMS, C:/kjKS, C:/rKS, C:/rarAS, C:/rSS, C:/rWS/ExportedProject. Recheck junction targets before use.
+- Disk at the last check was about 4.3GB free. No replay/comparator/test process remained running. Do not delete target audit JSON. Keep using fresh output paths, never --delete-existing. Original bundles and frozen outputs were not modified.
+- Protected paths remain unstaged: GOAL.TXT, cleanup_manifest.txt, tools/probes/*/packages/. Also leave the untracked historical docs/completion-audit-玉京烟霞-20261012.md untouched unless a concrete need is established.
+
+### Next operation — GOAL.TXT §25 broad completion-gate audit
+
+Start from the actual tree and use tools/parity-report.ps1 plus targeted rg scans to inventory behavior-affecting TODOs, unsupported class families, generic exporter fallbacks, unresolved references, version branches, resource paths, silent-loss paths, stale parity claims, ignored/failing tests, comparison exclusions, unvalidated asset families, and runtime dependencies. Trace the highest-value candidate through source bytes → TypeTree/decode → references → emitted project before changing code. For a fix, add a non-sample-specific regression, run the full required test/clippy/fmt/build checks, replay fresh outputs, update differential/validation/handoff evidence, and commit/push normally. Avoid starting a large replay until checking free disk.
+
+### Current checkpoint before the previous user-requested pause (historical)
+
+**Historical status only.** At that checkpoint the user had said “ok now stop and hand-off write,” and the goal was marked paused. A later user instruction resumed work; the active status above supersedes this historical paragraph. The sole working subagent was interrupted at that earlier checkpoint.
 
 ### Repository and saved work
 
