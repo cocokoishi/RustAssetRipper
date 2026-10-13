@@ -680,7 +680,9 @@ fn append_float_wav_samples(
         .try_reserve_exact(sample_bytes)
         .map_err(|_| AudioDecodeError::OutputAllocationFailed)?;
     for sample in &samples[..sample_count] {
-        sample_data.extend_from_slice(&sample.to_le_bytes());
+        // The baseline's NVorbis reader clips decoded samples to the normalized
+        // floating-point audio range before NAudio writes them to WAV.
+        sample_data.extend_from_slice(&sample.clamp(-1.0, 1.0).to_le_bytes());
     }
     output
         .write_all(&sample_data)
@@ -1499,15 +1501,43 @@ mod tests {
     use std::io::Write;
 
     use super::{
-        check_magic, classify_audio_data, compression_format_raw_extension,
-        convert_ogg_to_wav_with_limit, converts_ogg_to_wav, diagnostic_hex, diagnostic_printable,
-        empty_decoded_audio_warning, is_supported_export_format, native_audio_empty_warning,
-        native_audio_extension, plan_audio_clip_collection, plan_native_audio_export,
-        plan_streamed_resource, sound_type_raw_extension, tracker_extension, try_decode_audio,
-        AudioDataKind, AudioDecodeError, AudioDecodeFact, AudioRefusal, NativeAudioExport,
+        append_float_wav_samples, check_magic, classify_audio_data,
+        compression_format_raw_extension, convert_ogg_to_wav_with_limit, converts_ogg_to_wav,
+        diagnostic_hex, diagnostic_printable, empty_decoded_audio_warning,
+        is_supported_export_format, native_audio_empty_warning, native_audio_extension,
+        plan_audio_clip_collection, plan_native_audio_export, plan_streamed_resource,
+        sound_type_raw_extension, tracker_extension, try_decode_audio, AudioDataKind,
+        AudioDecodeError, AudioDecodeFact, AudioRefusal, LimitedAudioWriter, NativeAudioExport,
         StreamedResourcePlan, MOD_MAGICS,
     };
     use crate::export::settings::AudioExportFormat;
+
+    #[test]
+    fn ogg_to_wav_clips_decoded_float_samples_to_unit_range() {
+        let samples = [-1.25, -1.0, -0.25, 0.0, 0.25, 1.0, 1.25];
+        let expected = [-1.0, -1.0, -0.25, 0.0, 0.25, 1.0, 1.0];
+        let mut output = LimitedAudioWriter::new(samples.len() * 4);
+        let mut total_frames = 0;
+
+        append_float_wav_samples(
+            &mut output,
+            &samples,
+            samples.len(),
+            1,
+            4,
+            &mut total_frames,
+            samples.len() * 4,
+        )
+        .unwrap();
+
+        let written: Vec<_> = output
+            .bytes
+            .chunks_exact(4)
+            .map(|sample| f32::from_le_bytes(sample.try_into().unwrap()))
+            .collect();
+        assert_eq!(written, expected);
+        assert_eq!(total_frames, samples.len() as u64);
+    }
 
     #[test]
     fn ogg_to_wav_matches_reference_float_wav_and_decoded_frames() {
