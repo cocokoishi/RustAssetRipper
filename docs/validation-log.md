@@ -1,5 +1,13 @@
 # Validation log
 
+## 2026-10-12 PrefabImporter defect fixed (layout gates + bundle-name stamp)
+
+- Reproduced exactly: source prefab meta has `variantParentGUID: 000...000`, no `unableToImportOnPreviousDomainReload`, real `.unity3d` assetBundleName; Rust had the inverse plus empty name.
+- Root causes traced to source: (1) `PrefabImporter.Create` uses the full export version — frozen TPK class 468431735 proves `m_UnableToImportOnPreviousDomainReload` exists 2018.3–2019.x only (gone 2020.1+) and `m_VariantParentGUID` exists 2022.2+ only; (2) the bundle name is the `OriginalPathProcessor` Container stamp (`SetOriginalPaths` line 124: FileID==0 assets get `GetAssetBundleName()`), proven by oracle PRE-empty vs POST-stamped `PREFABROOT` rows — not the GameObject serialized field (empty pre-process).
+- Fix (`importer_metadata.rs` version-gated fields + order; `scene_collections.rs` stamp mirror resolving the 142 through the decoded workspace because file metadata drops its class ID; fresh importers are never variants so parent GUID is zeros): 烟雨长亭 r7 prefab meta now matches source exactly modulo guid/time; 松月竹庭 r16 meta matches source exactly.
+- Regression: new unit test pins all three version layouts; workflow suite green; clippy `-D warnings` green; fmt clean on touched regions. Fresh replays + audits: 烟雨长亭 r7 (r5-vs-r7 zero doc diffs, opaque 311/311; integrity PARTIAL-exit-0 issues), 松月竹庭 r16 (r15-vs-r16 zero doc diffs), 青岚古境 r9 (profile identical to r8), 云栖仙府 r8 (profile identical), 青岚山河卷 r27 (r26-vs-r27 equivalent). 玉京烟霞 r9 not run: r8 has zero prefabs so the fix is vacuous there; the r9 attempt failed os112 at Mesh_1.asset under parallel load (environmental, same mode as r6/r7; partial deleted, failure logged here).
+- No Unity runtime claim; product unaccepted.
+
 ## 2026-10-12 pending-files monotonicity plus first 玉京烟霞 three-way audit — resumed
 
 - Goal resumed from `paused`. Four pending files (`value_yaml/model.rs`, `value_yaml/object_document.rs`, `value_yaml/tests/value_conversion.rs`, `workspace_yaml/object_conversion.rs`) unchanged since the other agent's green suite (1,701 passed), clippy, and release build; re-verified `cargo test --locked --lib export::`: exit0, 520 passed/1 ignored.

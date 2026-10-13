@@ -1119,7 +1119,7 @@ pub(super) fn plan_prefab_files(
         } else {
             Some(PlannedProjectMeta {
                 importer_class: "PrefabImporter".to_owned(),
-                importer: prefab_importer(prefab.asset_bundle_name.as_deref())?,
+                importer: prefab_importer(project_version, prefab.asset_bundle_name.as_deref())?,
             })
         };
         files.push(PlannedProjectFile {

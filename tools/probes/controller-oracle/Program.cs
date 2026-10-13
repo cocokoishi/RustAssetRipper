@@ -16,6 +16,7 @@ using AssetRipper.Export.Configuration;
 using AssetRipper.Export.UnityProjects;
 using AssetRipper.IO.Files;
 using AssetRipper.Processing;
+using AssetRipper.SourceGenerated.Classes.ClassID_1;
 using AssetRipper.SourceGenerated.Classes.ClassID_91;
 using AssetRipper.SourceGenerated.Extensions;
 
@@ -34,11 +35,24 @@ static class Oracle
 		GameData gameData = handler.Load([args[0]], LocalFileSystem.Instance);
 		using StreamWriter writer = new(args[1], false, new System.Text.UTF8Encoding(false));
 		DumpMembers(gameData, writer, "PRE");
+		DumpPrefabRoots(gameData, writer, "PRE");
 		handler.Process(gameData);
 		DumpControllers(gameData, writer);
 		DumpMembers(gameData, writer, "POST");
 		DumpConstants(gameData, writer);
+		DumpPrefabRoots(gameData, writer, "POST");
 		return 0;
+	}
+
+	static void DumpPrefabRoots(GameData gameData, StreamWriter writer, string phase)
+	{
+		foreach (IUnityObjectBase asset in gameData.GameBundle.FetchAssets())
+		{
+			if (asset is IGameObject gameObject)
+			{
+				writer.WriteLine($"{phase}-PREFABROOT\t{gameObject.PathID}\t{Escape(gameObject.Name)}\t{Escape(gameObject.AssetBundleName)}\t{Escape(gameObject.Collection.Name)}");
+			}
+		}
 	}
 
 	static void DumpConstants(GameData gameData, StreamWriter writer)

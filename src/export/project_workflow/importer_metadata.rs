@@ -217,7 +217,13 @@ pub(super) fn scene_default_importer(
     Ok(importer)
 }
 
+/// `PrefabExportCollection.CreateImporter` modern branch (`PrefabImporter.Create` with the
+/// full export version). Frozen TPK class 468431735 proves the field gates:
+/// `m_UnableToImportOnPreviousDomainReload` exists 2018.3 through 2019.x but not 2020.1+;
+/// `m_VariantParentGUID` exists 2022.2+ but not 2022.1 or earlier. Fresh importers are never
+/// variants, so the parent GUID renders as 32 zeros.
 pub(super) fn prefab_importer(
+    version: SceneUnityVersion,
     asset_bundle_name: Option<&str>,
 ) -> Result<UnityYamlNode, Box<dyn Error>> {
     let mut importer = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
@@ -230,10 +236,18 @@ pub(super) fn prefab_importer(
         "isPrefabVariant",
         UnityYamlNode::scalar(crate::export::unity_yaml::UnityYamlScalar::Signed(0)),
     )?;
-    importer.insert_field(
-        "unableToImportOnPreviousDomainReload",
-        UnityYamlNode::scalar(crate::export::unity_yaml::UnityYamlScalar::Signed(0)),
-    )?;
+    if (version.major, version.minor) < (2020, 1) {
+        importer.insert_field(
+            "unableToImportOnPreviousDomainReload",
+            UnityYamlNode::scalar(crate::export::unity_yaml::UnityYamlScalar::Signed(0)),
+        )?;
+    }
+    if (version.major, version.minor) >= (2022, 2) {
+        importer.insert_field(
+            "variantParentGUID",
+            UnityYamlNode::string("00000000000000000000000000000000"),
+        )?;
+    }
     importer.insert_field("userData", UnityYamlNode::string(""))?;
     importer.insert_field(
         "assetBundleName",
@@ -247,4 +261,50 @@ pub(super) fn count_unity_yaml_documents(yaml: &str) -> usize {
     yaml.lines()
         .filter(|line| line.starts_with("--- !u!"))
         .count()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::export::unity_yaml::{write_unity_yaml_mapping, UnityYamlWriteLimits};
+
+    fn render_prefab_importer(version: &str) -> String {
+        let node =
+            prefab_importer(SceneUnityVersion::parse(version).unwrap(), Some("bundle")).unwrap();
+        write_unity_yaml_mapping(&node, UnityYamlWriteLimits::default()).unwrap()
+    }
+
+    /// Frozen TPK class 468431735 proves the gates: `unableToImport...` exists
+    /// 2018.3-2019.x but not 2020.1+; `variantParentGUID` exists 2022.2+ but
+    /// not earlier. The order matches the source meta files.
+    #[test]
+    fn prefab_importer_fields_follow_frozen_version_gates() {
+        let old = render_prefab_importer("2019.4.40f1");
+        assert!(
+            old.contains("unableToImportOnPreviousDomainReload: 0"),
+            "{old}"
+        );
+        assert!(!old.contains("variantParentGUID"), "{old}");
+
+        let mid = render_prefab_importer("2021.3.0f1");
+        assert!(
+            !mid.contains("unableToImportOnPreviousDomainReload"),
+            "{mid}"
+        );
+        assert!(!mid.contains("variantParentGUID"), "{mid}");
+
+        let new = render_prefab_importer("2022.3.22f1");
+        assert!(
+            !new.contains("unableToImportOnPreviousDomainReload"),
+            "{new}"
+        );
+        assert!(
+            new.contains("variantParentGUID: 00000000000000000000000000000000"),
+            "{new}"
+        );
+        let variant = new.find("variantParentGUID").unwrap();
+        assert!(new.find("isPrefabVariant").unwrap() < variant, "{new}");
+        assert!(variant < new.find("userData").unwrap(), "{new}");
+        assert!(new.contains("assetBundleName: bundle"), "{new}");
+    }
 }

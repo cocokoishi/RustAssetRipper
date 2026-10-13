@@ -441,6 +441,72 @@ pub(super) fn prepare_scene_collections(
     })
 }
 
+const ASSET_BUNDLE_OBJECT_CLASS_ID: i32 = 142;
+
+/// Mirror `OriginalPathProcessor.SetOriginalPaths` plus
+/// `PrefabExportCollection.CreateImporter`: assets listed in the AssetBundle Container with
+/// `FileID == 0` are stamped with the bundle name (`.bundle` suffix removed), and the
+/// PrefabImporter copies that stamp. Other roots keep their serialized field.
+///
+/// The stamp source is the AssetBundle object found through the decoded workspace (file
+/// metadata does not reliably carry its class ID), preferring the root's own file.
+fn prefab_importer_bundle_name(
+    workspace: &SerializedFileWorkspace,
+    objects: &ObjectWorkspace,
+    root_file_index: usize,
+    root_path_id: i64,
+    root_payload: &ParsedObjectPayload,
+) -> Result<Option<String>, Box<dyn Error>> {
+    let serialized = object_asset_bundle_name(root_payload);
+    // Two passes over the same query (own file first, then the rest) avoid allocating a
+    // candidate list while keeping the preference order deterministic.
+    for same_file_only in [true, false] {
+        for candidate in objects.objects().iter().filter(|object| {
+            object.factory.class_id == ASSET_BUNDLE_OBJECT_CLASS_ID
+                && (object.file_index == root_file_index) == same_file_only
+        }) {
+            let Ok(payload) = &candidate.payload else {
+                continue;
+            };
+            let fallback = container_bundle_name(workspace, candidate.file_index);
+            let Ok(bundle_name) = crate::processing::asset_bundle::get_asset_bundle_name(
+                &payload.root,
+                fallback.as_deref().unwrap_or_default(),
+            ) else {
+                continue;
+            };
+            let Ok(references) = extract_asset_bundle_container_references(
+                &payload.root,
+                SceneBundleMappingLimits::default(),
+            ) else {
+                continue;
+            };
+            if references
+                .iter()
+                .any(|reference| reference.file_id == 0 && reference.path_id == root_path_id)
+            {
+                let bundle_name =
+                    crate::processing::asset_bundle::asset_bundle_name_for_asset(&bundle_name)
+                        .map_err(|error| {
+                            invalid_project(format!("Prefab bundle name is invalid: {error}"))
+                        })?;
+                return Ok(Some(bundle_name));
+            }
+        }
+    }
+    Ok(serialized)
+}
+
+/// Name of the container bundle directly owning a file, used as the `GetAssetBundleName`
+/// fallback when the AssetBundle object carries no serialized name.
+fn container_bundle_name(workspace: &SerializedFileWorkspace, file_index: usize) -> Option<String> {
+    workspace
+        .container_bundles()
+        .iter()
+        .find(|bundle| bundle.direct_collection_file_indices.contains(&file_index))
+        .and_then(|bundle| bundle.name_fixed.clone())
+}
+
 fn prepare_prefab_collections(
     workspace: &SerializedFileWorkspace,
     objects: &ObjectWorkspace,
@@ -805,7 +871,13 @@ fn prepare_prefab_collections(
             class_name,
             named_name: root_name,
             original_directory,
-            asset_bundle_name: object_asset_bundle_name(root_payload),
+            asset_bundle_name: prefab_importer_bundle_name(
+                workspace,
+                objects,
+                root_game_object.file_index,
+                root_game_object.path_id,
+                root_payload,
+            )?,
             representation,
             export_ids,
             collection_index: usize::MAX,
