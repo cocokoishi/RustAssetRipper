@@ -784,7 +784,11 @@ fn decode_fsb5_vorbis_with_headers(
     let mut output = LimitedAudioWriter::new(max_decoded_bytes);
     let mut ogg = OggPacketWriter::default();
     let comment_packet = build_vorbis_comment_packet();
-    let packets = [identification_packet, comment_packet.as_slice(), setup_header];
+    let packets = [
+        identification_packet,
+        comment_packet.as_slice(),
+        setup_header,
+    ];
     for packet in packets {
         if let Err(error) = ogg.write_packet(&mut output, packet, 0, false) {
             return Err(audio_output_error(error, &output, max_decoded_bytes));
