@@ -1106,7 +1106,7 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                             &mut plan.importer,
                             &decision,
                         )?;
-                        crate::export::importer_fields::apply_sprite_outline_to_importer(
+                        crate::export::importer_fields::apply_sprite_sheet_metadata_to_importer(
                             &mut plan.importer,
                             &sprite_facts,
                             &decision,
