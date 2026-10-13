@@ -13,7 +13,7 @@
 
 ### Immediate next work under the current gate
 
-- The header-indexed parity report is still open (389 rows, 365 verified, 24 non-verified; `phase1_gate=OPEN`). The latest user-supplied AGENTS instructions require the Phase 1 gate before further Phase 2/UABEA work. Continue with the in-repository six-CRN-vector regression through `convert_to_bitmap_with_unity_version`, compare full RGBA output to the pinned independent hashes, then run required tests/Clippy/fmt/release build. Existing generic vectors are under `target/crunch-reference-fixtures-20261013`; do not add user-bundle content as fixtures.
+- The header-indexed parity report remains open (389 rows, 365 verified, 24 non-verified; `phase1_gate=OPEN`), so Phase 2/UABEA stays gated. The six-vector CRN production-wrapper regression passes against the independent full-RGBA hashes; full library tests (1712 passed, 1 ignored), Clippy, and release build pass. Global fmt still reports only the seven documented pre-existing files; `texture_converter.rs` is clean. Next: continue the broad GOAL §25 audit and close Phase 1 gaps. No sample replay, Unity check, or UABEA run was done for this test-only increment.
 - After that, continue the broad GOAL §25 audit: malformed feature rows, unsupported class/version branches, silent-loss fallbacks, user entry completeness, and runtime dependency sweep. Keep the goal open; Unity licensing remains unavailable, and no static comparison substitutes for Editor runtime.
 
 ### 2026-10-13 Crunch reconciliation

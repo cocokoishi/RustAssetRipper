@@ -918,6 +918,82 @@ mod tests {
     }
 
     #[test]
+    fn valid_crunch_payloads_match_independent_rgba_oracle_hashes() {
+        let cases: [(&str, i32, &str, &[u8], u64); 6] = [
+            (
+                "classic_dxt1.crn",
+                28,
+                "2017.2.0f1",
+                &include_bytes!("../../tests/fixtures/crunch/classic_dxt1.crn")[..],
+                0x141e_cbae_e8fd_eb6b,
+            ),
+            (
+                "classic_dxt5.crn",
+                29,
+                "2017.2.0f1",
+                &include_bytes!("../../tests/fixtures/crunch/classic_dxt5.crn")[..],
+                0xf6bb_d719_6ee7_b293,
+            ),
+            (
+                "unity_dxt1.crn",
+                28,
+                "2017.3.0f1",
+                &include_bytes!("../../tests/fixtures/crunch/unity_dxt1.crn")[..],
+                0x2325_b896_a579_1851,
+            ),
+            (
+                "unity_dxt5.crn",
+                29,
+                "2017.3.0f1",
+                &include_bytes!("../../tests/fixtures/crunch/unity_dxt5.crn")[..],
+                0xb69e_1abe_cd80_0da1,
+            ),
+            (
+                "unity_etc1.crn",
+                64,
+                "2017.2.0f1",
+                &include_bytes!("../../tests/fixtures/crunch/unity_etc1.crn")[..],
+                0x794f_5132_6238_5ed4,
+            ),
+            (
+                "unity_etc2a.crn",
+                65,
+                "2017.2.0f1",
+                &include_bytes!("../../tests/fixtures/crunch/unity_etc2a.crn")[..],
+                0xb00c_f611_3233_e6db,
+            ),
+        ];
+
+        for (name, texture_format, unity_version, data, expected_hash) in cases {
+            let image = TextureImage {
+                texture_format,
+                graphics_format: 0,
+                width: 512,
+                height: 512,
+                depth: 1,
+                image_size: data.len(),
+                data,
+            };
+            let version = UnityVersion::parse(unity_version).unwrap();
+            let bitmap = convert_to_bitmap_with_unity_version(&image, Some(version))
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(
+                (bitmap.width, bitmap.height, bitmap.depth),
+                (512, 512, 1),
+                "{name}"
+            );
+            assert_eq!(bitmap.pixels.len(), 512 * 512 * 4, "{name}");
+            let actual_hash = bitmap
+                .pixels
+                .iter()
+                .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+                    (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+                });
+            assert_eq!(actual_hash, expected_hash, "{name} full RGBA oracle hash");
+        }
+    }
+
+    #[test]
     fn unpack_normal_reconstructs_blue() {
         // The reference swaps alpha and red: the output red is the input
         // alpha and the output alpha is the input red; blue is recomputed
