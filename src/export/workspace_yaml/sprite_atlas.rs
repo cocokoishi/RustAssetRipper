@@ -1094,7 +1094,16 @@ mod tests {
 
         let nonmatching_sprite = SerializedValue::Struct(vec![SerializedFieldValue {
             name: "m_RenderDataKey".to_owned(),
-            value: other_key,
+            value: SerializedValue::Struct(vec![
+                SerializedFieldValue {
+                    name: "first".to_owned(),
+                    value: SerializedValue::U64(0x1234),
+                },
+                SerializedFieldValue {
+                    name: "second".to_owned(),
+                    value: SerializedValue::I64(92),
+                },
+            ]),
         }]);
         assert!(SpriteAtlasRenderDataIndex::new(&atlas_root)
             .unwrap()
