@@ -10,7 +10,10 @@
     proven mapping (each side's GUID independently resolved through its own
     `.meta` files); unmapped GUIDs stay explicit. Array order, curve data, and
     all other bytes are compared intact. Non-YAML files are hash-compared only
-    and reported separately, never silently passed.
+    and reported separately, never silently passed. Importer .meta files and
+    files outside Assets (including ProjectSettings/Packages) are compared too.
+    This is a diagnostic inventory unless RequireEquivalent is supplied; a
+    successful diagnostic invocation does not establish product acceptance.
 
 .PARAMETER SourceProject
     Frozen-reference project root (contains an `Assets/` directory).
@@ -25,7 +28,8 @@
 param(
     [Parameter(Mandatory = $true)][string]$SourceProject,
     [Parameter(Mandatory = $true)][string]$RustProject,
-    [Parameter(Mandatory = $true)][string]$ReportPath
+    [Parameter(Mandatory = $true)][string]$ReportPath,
+    [switch]$RequireEquivalent
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -65,10 +69,12 @@ function Try-Read-YamlDocuments([string]$Path) {
     $headers = [regex]::Matches($text, '(?m)^--- !u!(?<class>\d+) &(?<fileid>-?\d+)(?:\s+[^\r\n]*)?\r?\n')
     if ($headers.Count -eq 0) { return $null }
     $documents = [System.Collections.Generic.Dictionary[string,object]]::new([System.StringComparer]::Ordinal)
+    $fileIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
     for ($i = 0; $i -lt $headers.Count; $i++) {
         $header = $headers[$i]
         $end = if ($i + 1 -lt $headers.Count) { $headers[$i + 1].Index } else { $text.Length }
         $key = "$($header.Groups['class'].Value)|$($header.Groups['fileid'].Value)"
+        if (-not $fileIds.Add($header.Groups['fileid'].Value)) { throw "Duplicate YAML local fileID in $Path : $key" }
         if ($documents.ContainsKey($key)) { throw "Duplicate YAML identity $key in $Path" }
         $documents.Add($key, [pscustomobject]@{
             ClassId = [int]$header.Groups['class'].Value
@@ -87,6 +93,14 @@ function Normalize-Guids([string]$Document, $GuidMap) {
         }
         return $match.Groups['prefix'].Value + 'UNMAPPED_GUID:' + $guid.ToLowerInvariant()
     })
+}
+
+function Normalize-Meta([string]$Document, $GuidMap) {
+    $mapped = Normalize-Guids $Document $GuidMap
+    # Frozen Meta.cs emits CurrentTick (export-time Unix seconds), not an
+    # input/importer setting. Preserve the field and normalize only its numeric
+    # root value. Importer fields, mainObjectFileID and array order stay exact.
+    return [regex]::Replace($mapped, '(?m)^(?<key>timeCreated:\s*)[0-9]+(?=\r?$)', '${key}EXPORT_CREATION_TIME')
 }
 
 function Get-FileHashSha256([string]$Path) {
@@ -138,11 +152,21 @@ function Get-ClassRow([int]$ClassId) {
     return $classes[$ClassId]
 }
 
+function Count-UnpairedDocuments([string]$Path, [bool]$IsSource) {
+    $docs = Try-Read-YamlDocuments $Path
+    if ($null -eq $docs) { return }
+    foreach ($document in $docs.Values) {
+        $row = Get-ClassRow $document.ClassId
+        if ($IsSource) { $row.Source++; $row.SourceOnly++ }
+        else { $row.Rust++; $row.RustOnly++ }
+    }
+}
+
 foreach ($rel in $allPaths) {
     $inSource = $sourceFiles.ContainsKey($rel)
     $inRust = $rustFiles.ContainsKey($rel)
-    if (-not $inSource) { $onlyRustPaths.Add($rel); continue }
-    if (-not $inRust) { $onlySourcePaths.Add($rel); continue }
+    if (-not $inSource) { $onlyRustPaths.Add($rel); Count-UnpairedDocuments $rustFiles[$rel] $false; continue }
+    if (-not $inRust) { $onlySourcePaths.Add($rel); Count-UnpairedDocuments $sourceFiles[$rel] $true; continue }
     $pairedFiles++
     $sourceDocuments = Try-Read-YamlDocuments $sourceFiles[$rel]
     $rustDocuments = Try-Read-YamlDocuments $rustFiles[$rel]
@@ -184,7 +208,55 @@ foreach ($rel in $allPaths) {
     }
 }
 
+# The original asset-document inventory omitted importer and project data.
+# Compare these separately to retain the meaning of its existing counters.
+function Index-AdditionalFiles([string]$Root) {
+    $rootFull = [System.IO.Path]::GetFullPath($Root).TrimEnd('\', '/')
+    $entries = @{}
+    foreach ($file in Get-ChildItem -LiteralPath $Root -Recurse -File) {
+        $rel = $file.FullName.Substring($rootFull.Length).TrimStart('\', '/').Replace('\', '/')
+        if ($file.Name -like '*.meta' -or -not $rel.StartsWith('Assets/', [StringComparison]::Ordinal)) {
+            $entries[$rel] = $file.FullName
+        }
+    }
+    return $entries
+}
+$sourceAdditional = Index-AdditionalFiles $SourceProject
+$rustAdditional = Index-AdditionalFiles $RustProject
+$additionalPaths = [System.Collections.Generic.SortedSet[string]]::new([System.StringComparer]::Ordinal)
+foreach ($path in $sourceAdditional.Keys) { [void]$additionalPaths.Add($path) }
+foreach ($path in $rustAdditional.Keys) { [void]$additionalPaths.Add($path) }
+$additionalResults = [System.Collections.Generic.List[object]]::new()
+foreach ($path in $additionalPaths) {
+    $result = 'DIFFERENT'
+    if (-not $sourceAdditional.ContainsKey($path)) { $result = 'RUST_ONLY' }
+    elseif (-not $rustAdditional.ContainsKey($path)) { $result = 'SOURCE_ONLY' }
+    elseif ((Get-FileHashSha256 $sourceAdditional[$path]) -ceq (Get-FileHashSha256 $rustAdditional[$path])) { $result = 'EXACT' }
+    elseif ($path.EndsWith('.meta', [StringComparison]::OrdinalIgnoreCase)) {
+        $sourceText = [System.IO.File]::ReadAllText($sourceAdditional[$path])
+        $rustText = [System.IO.File]::ReadAllText($rustAdditional[$path])
+        if ((Normalize-Meta $sourceText $sourceGuids.Map) -ceq (Normalize-Meta $rustText $rustGuids.Map)) {
+            $result = 'GUID_PATH_AND_EXPORT_TIME_EQUIVALENT'
+        }
+    }
+    $additionalResults.Add([pscustomobject]@{
+        Path = $path; Kind = $(if ($path.EndsWith('.meta', [StringComparison]::OrdinalIgnoreCase)) { 'META' } else { 'PROJECT_OR_AUXILIARY' })
+        Result = $result
+    })
+}
+$additionalDifferences = @($additionalResults | Where-Object { $_.Result -notin @('EXACT', 'GUID_PATH_AND_EXPORT_TIME_EQUIVALENT') })
+$documentDifferences = 0
+foreach ($row in $classes.Values) { $documentDifferences += $row.Different + $row.SourceOnly + $row.RustOnly }
+$equivalent = ($documentDifferences -eq 0 -and $onlySourcePaths.Count -eq 0 -and $onlyRustPaths.Count -eq 0 -and
+    $opaqueDifferent.Count -eq 0 -and $additionalDifferences.Count -eq 0 -and
+    $sourceGuids.DuplicateGuidPaths -eq 0 -and $rustGuids.DuplicateGuidPaths -eq 0)
+
 $report = [ordered]@{
+    SchemaVersion = 2
+    Scope = 'All project files; asset document identities, meta importer content, project/auxiliary bytes'
+    EquivalentWithinComparisonScope = $equivalent
+    AcceptanceGateRequested = [bool]$RequireEquivalent
+    Status = $(if ($equivalent) { 'EQUIVALENT_WITHIN_COMPARISON_SCOPE' } else { 'DIFFERENCES_REQUIRE_INVESTIGATION' })
     SourceProject = $SourceProject; RustProject = $RustProject
     PairedFiles = $pairedFiles
     OnlySourcePaths = @($onlySourcePaths); OnlyRustPaths = @($onlyRustPaths)
@@ -193,6 +265,14 @@ $report = [ordered]@{
     SourceDuplicateGuidPaths = $sourceGuids.DuplicateGuidPaths
     RustDuplicateGuidPaths = $rustGuids.DuplicateGuidPaths
     Classes = @($classes.Values)
+    AdditionalFiles = @($additionalResults.ToArray())
+    AdditionalDifferences = $additionalDifferences
+    MetadataNormalization = @('GUIDs resolved independently through each project meta owner',
+        'Root timeCreated numeric value only: frozen Meta.cs CurrentTick records export time; field presence is preserved')
+    ComparisonLimitations = @('GUID normalization proves path ownership only, not imported subasset IDs',
+        'Different local fileIDs are reported; no unsupported identity remapping is guessed',
+        'Opaque byte differences require independent pixel/packet/resource evidence',
+        'Unity import/runtime and source-input semantic completeness are outside this comparison')
 }
 $reportDirectory = [System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($ReportPath))
 if (-not [System.IO.Directory]::Exists($reportDirectory)) {
@@ -204,3 +284,5 @@ $summary = foreach ($row in $classes.Values) {
 }
 $summary
 "pairedFiles=$pairedFiles onlySource=$($onlySourcePaths.Count) onlyRust=$($onlyRustPaths.Count) opaque=$opaqueCompared identical=$opaqueIdentical different=$($opaqueDifferent.Count)"
+"additionalFiles=$($additionalResults.Count) additionalDifferences=$($additionalDifferences.Count) equivalentWithinComparisonScope=$equivalent"
+if ($RequireEquivalent -and -not $equivalent) { exit 1 }

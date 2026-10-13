@@ -1,5 +1,17 @@
 # Source behavior and differential findings
 
+## DIFF-REFERENCE-WEB-EXPORT-001 — missing CLI locally bypassed
+
+Frozen GUI.Web Commands routes accept `/LoadFile` and `/Export/UnityProject` forms. The existing isolated GUI.Free build produced fresh 玉京烟霞/烟雨长亭 projects via loopback without changing the baseline. `tools/export-reference-web.ps1` captures hashes/settings/logs, refuses existing destinations and stops its own server. Both exit0; comparison reveals new class86/121/124 gaps. “No CLI, blocked” is superseded. See newest validation-log evidence.
+
+## DIFF-VALIDATION-REFERENCE-SCOPE-001 — local IDs and failure exits
+
+Old checker matched only full GUID PPtrs. Missing local777 falsely reported zero dangling; dangling GUIDs still exited0. New checker validates local scope, YAML IDs, duplicates, owner existence and malformed syntax; JSON preserves issues. Thirteen contracts pass. Builtins/imported IDs remain PARTIAL; `-RequireComplete` exits2. Actual 烟雨长亭/云栖仙府/玉京烟霞 existence results have zero issues, with all incomplete target categories retained. No complete reference acceptance inferred.
+
+## DIFF-VALIDATION-PROJECT-SCOPE-001 — importer/project omission
+
+Old auditor ignored meta/non-Assets files; a different importer mainObjectFileID and EditorSettings falsely produced no differences. Supplementary results now include all project files; unpaired YAML contributes to totals; duplicate local IDs fail; `-RequireEquivalent` exits1 on unresolved raw differences. Nine contracts pass. Meta normalization uses proven per-project GUID ownership and root numeric timeCreated (frozen Meta.cs export-time CurrentTick), preserving timestamp presence, importer data, IDs, array order and opaque bytes. Diagnostic exit0 is not a completion gate.
+
 This log records behavior differences found between the Rust port and the frozen local source. A source-code analysis is identified as such; it is not described as an executed C# differential.
 
 ## DIFF-MANAGED-DLL-SAVE-001 — manager-backed assembly save output

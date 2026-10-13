@@ -1,5 +1,18 @@
 # RustAssetRipper hand-off — 2026-10-10
 
+## Current checkpoint — 2026-10-12 completion audit
+
+This section supersedes all older checkpoints below. Only **one** subagent at most is authorized. Root user samples and frozen Web oracle runs are explicitly authorized by the current user; preserve input bytes and source files.
+
+- Frozen 玉京烟霞/烟雨长亭 projects now exist: `target/real-acceptance-20261012-松月云庭图-source-web-r1/ExportedProject`, `target/real-acceptance-20261012-avtrm烟雨长亭-source-web-r1/ExportedProject`. Missing CLI resolved by `tools/export-reference-web.ps1` HTTP routes, not an external blocker.
+- Short roots: `C:/rarMS`/`C:/rarMR` 玉京烟霞 source/Rust r5; `C:/rarAS`/`C:/rarAR` 烟雨长亭 source/Rust r3. Existing `C:/kjS`, `C:/kjKS`, `C:/kjR6`, `C:/kjR3` remain. Do not use deleted kjR4/kjR5.
+- Completion audit NOT COMPLETE (`docs/completion-audit-20261012.md`). Ledger389/366 bounded verified/23 open. Strict original baseline directory check fails on643 unlisted build outputs (zero changed/missing manifest files); preserve rather than clean them. Isolated oracle source1449/1449 hashes match.
+- Fixed validation blind spots: local PPtrs, duplicate identities/owners and nonzero failure exits; meta/importer/ProjectSettings/Packages comparison. Tool contracts13+9 passed. Required full reference identity uses `-RequireComplete` (exit2 for builtin/imported IDs); required document equality uses `-RequireEquivalent` (exit1 for unresolved differences).
+- New substantive gaps: 烟雨长亭 class86 CustomRenderTexture missing editor/hash fields; 玉京烟霞 class121 Flare missing editor fields and class124 wrong Behaviour label. Root has layout correction/tests in progress; sole subagent implements native ClassName alias correction and tests. Do not call these validated before fresh release replay.
+- Next: full lib/Clippy + release containing corrections; fresh 烟雨长亭 and 玉京烟霞 replays; whole-project document/meta/support audits and reference checks; revalidate older samples; then investigate38 烟雨长亭 Soft/builtin material references, Avatar/controller identity families and opaque content on these new oracle inputs.
+- Baseline library1698 passed/1 ignored and lint/lifetime cleanup verified. Full fmt remains pre-existing failure, do not format unrelated regions. Source/Rust 玉京烟霞 new local/external existence checks111812 each with0 issues, but263 builtin+1806 imported identity refs remain PARTIAL. Unity runtime and UABEA not run.
+- Protected unstaged: GOAL.TXT, cleanup_manifest.txt, tools/probes/*/packages/. Disk roughly3GB before new replays; remove only proven superseded generated outputs if needed, preserve JSON evidence.
+
 ## Active stage (2026-10-11)
 
 Product Convergence mode is active under the user's current task attachment. Local 用户资源格式/VRCA acceptance is authorized. Frozen AssetRipper source remains the behavioral reference. Unity Editor runtime validation is unavailable in this environment.
