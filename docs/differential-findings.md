@@ -1,8 +1,8 @@
 # Source behavior and differential findings
 
-## DIFF-SPRITE-IMPORTER-FACTS-001 — production never consumes sprite facts (open)
+## DIFF-SPRITE-IMPORTER-FACTS-001 — sprite facts wired (fixed)
 
-玉京烟霞 `menu.png` (+4 VRC UI textures) `.meta` differs: `textureType` 8 vs 0, `spriteMeshType` 1 vs 0, `alignment` 9 vs 0 (both sides agree `spriteMode` 1). Rust takes the no-sprites branch because production never calls `decide_sprite_importer` (test-only) and never discovers per-texture sprites; the versioned importer builders receive default sprite fields. Source `TextureExportCollection.AddSprites` reads collection sprites (single path: Custom alignment, sprite mesh type, forced Sprite texture type). Traced association rule: `SpriteProcessor` groups each class-213 sprite under `sprite.RD.Texture.TryGetAsset` (`SpriteExtensions.cs:73-76`); `SpriteInformationObject` carries the group to the exporter, and no Rust implementation runs that processor (name only in the pipeline table). Only 玉京烟霞 carries class-213 Sprite objects among the samples; pixel bytes are unaffected (opaque proofs hold). Impact is Unity sprite-import behavior for affected textures. Minimal faithful slice: per-texture 213 discovery via `m_RD.m_Texture` plus `decide_sprite_importer` field application (sprite asset grouping/sheets stay open; both sides emit empty sheets here). Scoped for its own round with 玉京烟霞 replay validation.
+玉京烟霞 `menu.png` (+4 VRC UI textures) `.meta` differed: `textureType` 8 vs 0, `spriteMeshType` 1 vs 0, `alignment` 9 vs 0 (both sides agreed `spriteMode` 1). Production never called `decide_sprite_importer` (test-only) and discovered no per-texture sprites. Fixed by workspace/graph discovery via `m_RD.m_Texture` plus `decide_sprite_importer` field application as a planning post-pass on the plain-Texture2D route, with facts carrying the processed coords values and `f32` rendering. All 5 metas match source; cubemap/3D/lightmap/atlas-packed stay open with prior behavior.
 
 ## DIFF-PATH-ID-MAP-FILE-ORDER-001 — multi-CAB file order fixed via source collection order
 

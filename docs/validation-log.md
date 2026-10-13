@@ -1,5 +1,11 @@
 # Validation log
 
+## 2026-10-12 sprite importer facts wired (DIFF-SPRITE-IMPORTER-FACTS-001 fixed)
+
+- Production never called `decide_sprite_importer` (test-only) and discovered no per-texture sprites, so 5 玉京烟霞 UI-sprite `.metas` defaulted textureType/meshType/alignment. Root causes traced: (1) no `SpriteProcessor` implementation runs (name only in the pipeline table) — association rule proven as `sprite.RD.Texture.TryGetAsset`; (2) facts must carry *processed* rect/pivot/border (`ProcessSprite` recalculates via `GetSpriteCoordinatesInAtlas` plus copies — bundle `m_Rect` is stale, e.g. nc `[0,0,1280,720]` vs processed `[351.0761,...]`); (3) mesh type is RD `settingsRaw` bit 6 (3/3 witnessed); (4) float fields must render `f32` precision (`0.49999997`, not the `f64`-widened `0.4999999701976776`).
+- Fix (`importer_fields.rs` readers + workspace/graph discovery + node post-pass in the plain-Texture2D routing arm; cubemap/3D/lightmap/atlas-packed stay open): all 5 玉京烟霞 sprite metas match source modulo guid/time (Single, single-Multiple with derived pivot reproduced bit-exact, Multiple with first-sprite ppu 50). r14 full audit profile identical to r10 with additional differences down to just the known path_id_map scope artifact. 松月竹庭 r18 zero-diff regression (no 213s, post-pass never fires). Full suite 1,706/1,706, clippy `-D warnings` green, fmt clean on touched files. New regressions: menu-shaped payload link test, single-precision render test (existing decide-branch tests already covered all AddSprites paths).
+- No Unity runtime claim; product unaccepted.
+
 ## 2026-10-12 path_id_map file order fixed, sprite importer gap recorded
 
 - `build_path_id_map` now iterates `source_collection_file_indices` (canonical source order) instead of workspace insertion order. 玉京烟霞 r10 map byte-exact (66,977/66,977); r10 full audit profile identical to r8 with one fewer additional difference (manifest now matches); 松月竹庭 r17 zero-doc-diff regression (the single additional difference is the manifest fix landing). Full suite 1,703/1,703, clippy `-D warnings` green, fmt clean on the touched file.

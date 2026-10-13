@@ -866,13 +866,45 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                         asset_bundle_name.as_deref(),
                     )
                 } else {
-                    plan_texture_project_export_for_source_version(
+                    let mut plan = plan_texture_project_export_for_source_version(
                         &payload.root,
                         project_version,
                         source_unity_version,
                         settings,
                         asset_bundle_name.as_deref(),
-                    )
+                    )?;
+                    // Mirror `TextureExportCollection.AddSprites` for plain Texture2D
+                    // collections: sprites bound to this texture through their render-data
+                    // texture pointer overwrite the default sprite importer fields.
+                    // Cubemap, Texture3D, and lightmap routes keep their existing fields.
+                    let sprite_facts =
+                        crate::export::importer_fields::collect_sprite_facts_for_texture(
+                            objects,
+                            reference_graph,
+                            file_index,
+                            object_index,
+                            &object.factory.name,
+                            (project_version.major, project_version.minor),
+                        )?;
+                    if !sprite_facts.is_empty() {
+                        let decision = crate::export::importer_fields::decide_sprite_importer(
+                            &sprite_facts,
+                            false,
+                            crate::export::importer_fields::importer_node_has_field(
+                                &plan.importer,
+                                "spritePivot",
+                            ),
+                            crate::export::importer_fields::importer_node_has_field(
+                                &plan.importer,
+                                "spriteBorder",
+                            ),
+                        );
+                        crate::export::importer_fields::apply_sprite_importer_decision(
+                            &mut plan.importer,
+                            &decision,
+                        )?;
+                    }
+                    Ok(plan)
                 };
                 Some(plan.map_err(|error| {
                     invalid_project(format!(

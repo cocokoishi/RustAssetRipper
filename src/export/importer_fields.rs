@@ -31,6 +31,14 @@
 //! `Has_*` version gates stays open: the member lists and the gate thresholds live in the
 //! generated package, and porting them from memory would be guessing.
 
+use std::error::Error;
+use std::io;
+
+use crate::export::unity_yaml::{UnityYamlNode, UnityYamlNodeKind, UnityYamlScalar};
+use crate::serialized_file::object::SerializedValue;
+use crate::serialized_file::object_workspace::ObjectWorkspace;
+use crate::serialized_file::reference_graph::{MultiFilePPtrResolution, MultiFileReferenceGraph};
+
 /// Copy an asset bundle name onto an importer exactly like the eight baseline overrides.
 ///
 /// The copy happens only when the generated importer exposes the field and the source name is
@@ -213,6 +221,350 @@ pub fn select_prefab_importer(is_prefab_marker: bool) -> PrefabImporterBranch {
     } else {
         PrefabImporterBranch::ModernPrefabImporter
     }
+}
+
+/// Class ID of Sprite objects whose render data can point at a texture.
+const SPRITE_OBJECT_CLASS_ID: i32 = 213;
+
+/// Collect `AddSprites` caller facts for the bundle sprites whose render-data texture
+/// resolves to one texture object.
+///
+/// This mirrors the `SpriteProcessor` association (`sprite.RD.Texture.TryGetAsset`) for the
+/// importer-field path only; asset grouping and sheets stay open. Facts follow workspace
+/// encounter order. Null or unresolvable texture pointers are skipped exactly like the
+/// source null check. Structurally unreadable sprites are skipped as well: only the 2022.3
+/// bundle layout below is witnessed, and the previous default fields (which match every
+/// sprite-less texture) remain the fallback rather than failing exports on other layouts.
+pub fn collect_sprite_facts_for_texture(
+    objects: &ObjectWorkspace,
+    graph: &MultiFileReferenceGraph<'_>,
+    texture_file_index: usize,
+    texture_object_index: usize,
+    texture_name: &str,
+    project_version: (u32, u32),
+) -> Result<Vec<SpriteFacts>, Box<dyn Error>> {
+    let mut facts = Vec::new();
+    for sprite in objects
+        .objects()
+        .iter()
+        .filter(|object| object.factory.class_id == SPRITE_OBJECT_CLASS_ID)
+    {
+        let Ok(payload) = &sprite.payload else {
+            continue;
+        };
+        let Some(link) = read_sprite_texture_link(&payload.root, texture_name, project_version)
+        else {
+            continue;
+        };
+        let target = graph
+            .references_from_object(sprite.file_index, sprite.object_index)
+            .find(|edge| {
+                edge.file_id == link.texture_file_id && edge.path_id == link.texture_path_id
+            });
+        let Some(edge) = target else {
+            continue;
+        };
+        let MultiFilePPtrResolution::Object {
+            target_file_index,
+            target_object_index,
+        } = edge.resolution
+        else {
+            continue;
+        };
+        if target_file_index != texture_file_index || target_object_index != texture_object_index {
+            continue;
+        }
+        facts
+            .try_reserve(1)
+            .map_err(|_| invalid_sprite_data("could not allocate sprite facts"))?;
+        facts.push(link.facts);
+    }
+    Ok(facts)
+}
+
+/// Whether a built importer mapping exposes a field (the caller-side equivalent of the
+/// generated `Has_*` gates for the sprite pivot/border copies).
+pub fn importer_node_has_field(importer: &UnityYamlNode, name: &str) -> bool {
+    let UnityYamlNodeKind::Mapping { entries, .. } = &importer.kind else {
+        return false;
+    };
+    entries.iter().any(|(key, _)| yaml_key_is(key, name))
+}
+
+/// Apply an `AddSprites` decision to a built importer mapping, overwriting the default
+/// sprite fields in place so field order is preserved. Fields the decision leaves alone
+/// (the texture type on the empty path) are never touched. Missing target fields fail
+/// loudly: the pivot/border gates are derived from the node itself, and every other
+/// assigned field exists in all versioned importer layouts.
+pub fn apply_sprite_importer_decision(
+    importer: &mut UnityYamlNode,
+    decision: &SpriteImporterDecision,
+) -> Result<(), Box<dyn Error>> {
+    set_importer_signed(importer, "spriteMode", i64::from(decision.mode as i32))?;
+    set_importer_signed(importer, "spriteExtrude", i64::from(decision.extrude))?;
+    set_importer_signed(importer, "spriteMeshType", i64::from(decision.mesh_type))?;
+    set_importer_signed(importer, "alignment", i64::from(decision.alignment as i32))?;
+    if let Some(pivot) = decision.pivot {
+        set_importer_point(importer, "spritePivot", &[("x", pivot[0]), ("y", pivot[1])])?;
+    }
+    if let Some(border) = decision.border {
+        set_importer_point(
+            importer,
+            "spriteBorder",
+            &[
+                ("x", border[0]),
+                ("y", border[1]),
+                ("z", border[2]),
+                ("w", border[3]),
+            ],
+        )?;
+    }
+    set_importer_float(importer, "spritePixelsToUnits", decision.pixels_to_units)?;
+    if decision.texture_type_is_sprite {
+        set_importer_signed(
+            importer,
+            "textureType",
+            i64::from(TEXTURE_IMPORTER_TYPE_SPRITE),
+        )?;
+    }
+    Ok(())
+}
+
+/// One sprite render-data texture link: caller facts plus the bundle texture pointer.
+struct SpriteTextureLink {
+    facts: SpriteFacts,
+    texture_file_id: i32,
+    texture_path_id: i64,
+}
+
+/// Read `AddSprites` caller facts from one Sprite payload, resolving the sprite name against
+/// the queried texture. Returns `None` when the sprite is atlas-packed (recovery stays open),
+/// when the render-data texture pointer is null, or when any required field is absent or
+/// mistyped (only the witnessed 2022.3 bundle layout reads).
+///
+/// Crucially, the facts carry the *processed* rect/pivot/border: `SpriteProcessor.ProcessSprite`
+/// recalculates them from the render data (`GetSpriteCoordinatesInAtlas` plus copies), and
+/// `AddSprites` reads those processed values — not the stale bundle `m_Rect`/`m_Pivot`.
+fn read_sprite_texture_link(
+    root: &SerializedValue,
+    texture_name: &str,
+    project_version: (u32, u32),
+) -> Option<SpriteTextureLink> {
+    use crate::resources::sprite::get_sprite_coordinates_in_atlas;
+    // Atlas-packed sprites need render-data recovery from the atlas map first, which
+    // stays open; only atlas-null sprites take the direct render-data path.
+    match sprite_field(root, "m_SpriteAtlas") {
+        None => {}
+        Some(SerializedValue::PPtr {
+            file_id: 0,
+            path_id: 0,
+        }) => {}
+        Some(_) => return None,
+    }
+    let rd = data_or_self(sprite_field(root, "m_RD")?)?;
+    let (texture_file_id, texture_path_id) = match sprite_field(rd, "texture")? {
+        SerializedValue::PPtr { file_id, path_id } => (*file_id, *path_id),
+        _ => return None,
+    };
+    if texture_path_id == 0 {
+        return None;
+    }
+    let sprite_rect = sprite_rect4(sprite_field(root, "m_Rect")?)?;
+    let texture_rect = sprite_rect4(sprite_field(rd, "textureRect")?)?;
+    let texture_rect_offset = sprite_point2(sprite_field(rd, "textureRectOffset")?)?;
+    let offset = sprite_point2(sprite_field(root, "m_Offset")?)?;
+    let mesh_type = sprite_mesh_type(sprite_field(rd, "settingsRaw")?)?;
+    let stored_pivot = sprite_field(root, "m_Pivot").and_then(sprite_point2);
+    let stored_border = sprite_field(root, "m_Border").and_then(sprite_point4);
+    // `Has_Pivot`/`Has_Border` are layout gates, not value presence: every supported
+    // layout carries the fields, so a present bundle value always counts; missing bundle
+    // values on ancient layouts fall back to the derived/zero coordinates below.
+    let layout_has_pivot = sprite_field(root, "m_Pivot").is_some() || project_version >= (5, 0);
+    let layout_has_border = sprite_field(root, "m_Border").is_some() || project_version >= (5, 0);
+    let coords = get_sprite_coordinates_in_atlas(
+        sprite_rect,
+        texture_rect,
+        texture_rect_offset,
+        false,
+        [0.0; 4],
+        [0.0; 2],
+        stored_pivot.is_some(),
+        stored_pivot.unwrap_or([0.0, 0.0]),
+        offset,
+        stored_border.is_some(),
+        stored_border.unwrap_or([0.0, 0.0, 0.0, 0.0]),
+    );
+    Some(SpriteTextureLink {
+        facts: SpriteFacts {
+            rect: coords.rect,
+            texture_rect,
+            name_matches_texture: sprite_name(root)? == texture_name,
+            extrude: sprite_u32(sprite_field(root, "m_Extrude")?)?,
+            mesh_type,
+            has_pivot: layout_has_pivot,
+            pivot: coords.pivot,
+            has_border: layout_has_border,
+            border: coords.border,
+            pixels_to_units: sprite_f32(sprite_field(root, "m_PixelsToUnits")?)?,
+        },
+        texture_file_id,
+        texture_path_id,
+    })
+}
+
+/// Sprite render-data mesh type: bit 6 of the render-data `settingsRaw`, matching the
+/// witnessed imports (bit set reads back as the source `spriteMeshType` value).
+fn sprite_mesh_type(value: &SerializedValue) -> Option<i32> {
+    sprite_u32(value).map(|raw| ((raw >> 6) & 1) as i32)
+}
+
+fn sprite_name(root: &SerializedValue) -> Option<String> {
+    match sprite_field(root, "m_Name")? {
+        SerializedValue::StringBytes(bytes) => Some(String::from_utf8_lossy(bytes).into_owned()),
+        _ => None,
+    }
+}
+
+fn sprite_u32(value: &SerializedValue) -> Option<u32> {
+    match value {
+        SerializedValue::U32(value) => Some(*value),
+        SerializedValue::U8(value) => Some(u32::from(*value)),
+        SerializedValue::U16(value) => Some(u32::from(*value)),
+        SerializedValue::I32(value) if *value >= 0 => Some(*value as u32),
+        _ => None,
+    }
+}
+
+fn sprite_f32(value: &SerializedValue) -> Option<f32> {
+    match value {
+        SerializedValue::F32(value) => Some(*value),
+        SerializedValue::I32(value) => Some(*value as f32),
+        SerializedValue::U32(value) => Some(*value as f32),
+        _ => None,
+    }
+}
+
+fn sprite_rect4(value: &SerializedValue) -> Option<[f32; 4]> {
+    let value = data_or_self(value)?;
+    Some([
+        sprite_f32(sprite_field(value, "x")?)?,
+        sprite_f32(sprite_field(value, "y")?)?,
+        sprite_f32(sprite_field(value, "width")?)?,
+        sprite_f32(sprite_field(value, "height")?)?,
+    ])
+}
+
+fn sprite_point2(value: &SerializedValue) -> Option<[f32; 2]> {
+    let value = data_or_self(value)?;
+    Some([
+        sprite_f32(sprite_field(value, "x")?)?,
+        sprite_f32(sprite_field(value, "y")?)?,
+    ])
+}
+
+fn sprite_point4(value: &SerializedValue) -> Option<[f32; 4]> {
+    let value = data_or_self(value)?;
+    Some([
+        sprite_f32(sprite_field(value, "x")?)?,
+        sprite_f32(sprite_field(value, "y")?)?,
+        sprite_f32(sprite_field(value, "z")?)?,
+        sprite_f32(sprite_field(value, "w")?)?,
+    ])
+}
+
+/// Find a struct field by name, following `data` wrappers like the payload readers do.
+/// Lookup failures (missing field, duplicate field, non-struct scope) read as absent so
+/// structurally unfamiliar sprites fall back to the default importer fields.
+fn sprite_field<'a>(value: &'a SerializedValue, name: &str) -> Option<&'a SerializedValue> {
+    data_or_self(value)?.unique_field(name).ok()?
+}
+
+/// Unwrap a `data` child when present, else read the struct itself.
+fn data_or_self(value: &SerializedValue) -> Option<&SerializedValue> {
+    let SerializedValue::Struct(_) = value else {
+        return None;
+    };
+    if let Ok(Some(data)) = value.unique_field("data") {
+        return Some(data);
+    }
+    Some(value)
+}
+
+fn yaml_key_is(key: &UnityYamlNode, name: &str) -> bool {
+    match &key.kind {
+        UnityYamlNodeKind::Scalar(crate::export::unity_yaml::UnityYamlScalar::PlainString(
+            text,
+        ))
+        | UnityYamlNodeKind::Scalar(crate::export::unity_yaml::UnityYamlScalar::String(text)) => {
+            text == name
+        }
+        _ => false,
+    }
+}
+
+fn set_importer_signed(
+    importer: &mut UnityYamlNode,
+    name: &str,
+    value: i64,
+) -> Result<(), Box<dyn Error>> {
+    set_importer_scalar(
+        importer,
+        name,
+        UnityYamlNode::scalar(UnityYamlScalar::Signed(value)),
+    )
+}
+
+fn set_importer_float(
+    importer: &mut UnityYamlNode,
+    name: &str,
+    value: f32,
+) -> Result<(), Box<dyn Error>> {
+    // Importer float fields render with single precision like the source `float`
+    // members; widening to `f64` first would print artifacts such as
+    // `0.4999999701976776` instead of `0.49999997`.
+    set_importer_scalar(
+        importer,
+        name,
+        UnityYamlNode::scalar(UnityYamlScalar::Float32(value)),
+    )
+}
+
+fn set_importer_point(
+    importer: &mut UnityYamlNode,
+    name: &str,
+    components: &[(&str, f32)],
+) -> Result<(), Box<dyn Error>> {
+    let mut point = UnityYamlNode::mapping(crate::export::unity_yaml::UnityYamlMappingStyle::Flow);
+    for (component, value) in components {
+        point
+            .insert_field(
+                *component,
+                UnityYamlNode::scalar(UnityYamlScalar::Float32(*value)),
+            )
+            .map_err(|_| invalid_sprite_data("could not build importer point"))?;
+    }
+    set_importer_scalar(importer, name, point)
+}
+
+fn set_importer_scalar(
+    importer: &mut UnityYamlNode,
+    name: &str,
+    value: UnityYamlNode,
+) -> Result<(), Box<dyn Error>> {
+    let UnityYamlNodeKind::Mapping { entries, .. } = &mut importer.kind else {
+        return Err(invalid_sprite_data("sprite importer is not a mapping"));
+    };
+    let Some((_, slot)) = entries.iter_mut().find(|(key, _)| yaml_key_is(key, name)) else {
+        return Err(invalid_sprite_data(format!(
+            "sprite importer has no {name} field"
+        )));
+    };
+    *slot = value;
+    Ok(())
+}
+
+fn invalid_sprite_data(message: impl Into<String>) -> Box<dyn Error> {
+    Box::new(io::Error::new(io::ErrorKind::InvalidData, message.into()))
 }
 
 /// Unconditional literals from `ImporterFactory.GenerateTextureImporter`.
@@ -405,11 +757,15 @@ pub mod fixed_importer_literals {
 #[cfg(test)]
 mod tests {
     use super::{
-        decide_sprite_importer, propagate_asset_bundle_name, select_prefab_importer,
+        apply_sprite_importer_decision, decide_sprite_importer, importer_node_has_field,
+        propagate_asset_bundle_name, read_sprite_texture_link, select_prefab_importer,
         truncate_execution_order, PrefabImporterBranch, SpriteAlignment, SpriteFacts,
-        SpriteImportMode, SPRITE_MESH_TYPE_FULL_RECT, TEXTURE_IMPORTER_TYPE_SPRITE,
+        SpriteImportMode, SpriteImporterDecision, SPRITE_MESH_TYPE_FULL_RECT,
+        TEXTURE_IMPORTER_TYPE_SPRITE,
     };
     use super::{plugin_importer, texture_importer};
+    use crate::export::unity_yaml::UnityYamlNode;
+    use crate::serialized_file::object::SerializedValue;
 
     #[test]
     fn bundle_name_propagates_only_with_field_and_non_null_source() {
@@ -543,6 +899,282 @@ mod tests {
             !decide_sprite_importer(&[sprite(false), sprite(true)], false, true, true)
                 .build_sprite_sheet
         );
+    }
+
+    /// Menu-shaped bundle Sprite payload: the single full-rect sprite the frozen
+    /// `menu.png` importer was built from (name match, settingsRaw bit 6 set).
+    fn menu_sprite_payload() -> SerializedValue {
+        use crate::serialized_file::object::SerializedFieldValue;
+        fn field(name: &str, value: SerializedValue) -> SerializedFieldValue {
+            SerializedFieldValue {
+                name: name.to_owned(),
+                value,
+            }
+        }
+        fn rect(x: f32, y: f32, width: f32, height: f32) -> SerializedValue {
+            SerializedValue::Struct(vec![
+                field("x", SerializedValue::F32(x)),
+                field("y", SerializedValue::F32(y)),
+                field("width", SerializedValue::F32(width)),
+                field("height", SerializedValue::F32(height)),
+            ])
+        }
+        SerializedValue::Struct(vec![
+            field("m_Name", SerializedValue::StringBytes(b"menu".to_vec())),
+            field("m_Rect", rect(0.0, 0.0, 1071.0, 755.0)),
+            field("m_Offset", rect_point(0.0, 0.0)),
+            field("m_Pivot", rect_point(0.5, 0.5)),
+            field("m_Border", rect_border(0.0, 0.0, 0.0, 0.0)),
+            field("m_PixelsToUnits", SerializedValue::F32(100.0)),
+            field("m_Extrude", SerializedValue::U32(1)),
+            field(
+                "m_SpriteAtlas",
+                SerializedValue::PPtr {
+                    file_id: 0,
+                    path_id: 0,
+                },
+            ),
+            field(
+                "m_RD",
+                SerializedValue::Struct(vec![
+                    field(
+                        "texture",
+                        SerializedValue::PPtr {
+                            file_id: 0,
+                            path_id: 12345,
+                        },
+                    ),
+                    field("textureRect", rect(0.0, 0.0, 1071.0, 755.0)),
+                    field("textureRectOffset", rect_point(0.0, 0.0)),
+                    field("settingsRaw", SerializedValue::U32(64)),
+                ]),
+            ),
+        ])
+    }
+
+    fn rect_point(x: f32, y: f32) -> SerializedValue {
+        use crate::serialized_file::object::SerializedFieldValue;
+        SerializedValue::Struct(vec![
+            SerializedFieldValue {
+                name: "x".to_owned(),
+                value: SerializedValue::F32(x),
+            },
+            SerializedFieldValue {
+                name: "y".to_owned(),
+                value: SerializedValue::F32(y),
+            },
+        ])
+    }
+
+    fn rect_border(x: f32, y: f32, z: f32, w: f32) -> SerializedValue {
+        use crate::serialized_file::object::SerializedFieldValue;
+        SerializedValue::Struct(vec![
+            SerializedFieldValue {
+                name: "x".to_owned(),
+                value: SerializedValue::F32(x),
+            },
+            SerializedFieldValue {
+                name: "y".to_owned(),
+                value: SerializedValue::F32(y),
+            },
+            SerializedFieldValue {
+                name: "z".to_owned(),
+                value: SerializedValue::F32(z),
+            },
+            SerializedFieldValue {
+                name: "w".to_owned(),
+                value: SerializedValue::F32(w),
+            },
+        ])
+    }
+
+    #[test]
+    fn sprite_link_reads_menu_shaped_payload() {
+        let root = menu_sprite_payload();
+        let link = read_sprite_texture_link(&root, "menu", (2022, 3)).expect("menu sprite links");
+        assert_eq!(link.texture_file_id, 0);
+        assert_eq!(link.texture_path_id, 12345);
+        assert_eq!(
+            link.facts,
+            SpriteFacts {
+                rect: [0.0, 0.0, 1071.0, 755.0],
+                texture_rect: [0.0, 0.0, 1071.0, 755.0],
+                name_matches_texture: true,
+                extrude: 1,
+                mesh_type: 1,
+                has_pivot: true,
+                pivot: [0.5, 0.5],
+                has_border: true,
+                border: [0.0, 0.0, 0.0, 0.0],
+                pixels_to_units: 100.0,
+            }
+        );
+        // A different texture name only flips the match flag.
+        let other = read_sprite_texture_link(&root, "other", (2022, 3)).expect("links regardless");
+        assert!(!other.facts.name_matches_texture);
+        // A null texture pointer skips the sprite like the source null check.
+        let mut null_root = root.clone();
+        if let SerializedValue::Struct(fields) = &mut null_root {
+            for field in fields.iter_mut() {
+                if field.name == "m_RD" {
+                    if let SerializedValue::Struct(rd) = &mut field.value {
+                        for rd_field in rd.iter_mut() {
+                            if rd_field.name == "texture" {
+                                rd_field.value = SerializedValue::PPtr {
+                                    file_id: 0,
+                                    path_id: 0,
+                                };
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(read_sprite_texture_link(&null_root, "menu", (2022, 3)).is_none());
+    }
+
+    #[test]
+    fn sprite_decision_applies_to_built_importer() {
+        use crate::export::unity_yaml::{
+            write_unity_yaml_mapping, UnityYamlMappingStyle, UnityYamlScalar, UnityYamlWriteLimits,
+        };
+        let mut importer = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+        for (name, value) in [
+            (
+                "spriteMode",
+                UnityYamlNode::scalar(UnityYamlScalar::Signed(1)),
+            ),
+            (
+                "spriteExtrude",
+                UnityYamlNode::scalar(UnityYamlScalar::Signed(1)),
+            ),
+            (
+                "spriteMeshType",
+                UnityYamlNode::scalar(UnityYamlScalar::Signed(0)),
+            ),
+            (
+                "alignment",
+                UnityYamlNode::scalar(UnityYamlScalar::Signed(0)),
+            ),
+            (
+                "spritePivot",
+                UnityYamlNode::mapping(UnityYamlMappingStyle::Flow),
+            ),
+            (
+                "spriteBorder",
+                UnityYamlNode::mapping(UnityYamlMappingStyle::Flow),
+            ),
+            (
+                "spritePixelsToUnits",
+                UnityYamlNode::scalar(UnityYamlScalar::Float64(100.0)),
+            ),
+            (
+                "textureType",
+                UnityYamlNode::scalar(UnityYamlScalar::Signed(0)),
+            ),
+        ] {
+            importer.insert_field(name, value).unwrap();
+        }
+        assert!(importer_node_has_field(&importer, "spritePivot"));
+        assert!(!importer_node_has_field(&importer, "missing"));
+        let root = menu_sprite_payload();
+        let link = read_sprite_texture_link(&root, "menu", (2022, 3)).expect("menu sprite links");
+        let decision = decide_sprite_importer(std::slice::from_ref(&link.facts), false, true, true);
+        assert_eq!(decision.mode, SpriteImportMode::Single);
+        apply_sprite_importer_decision(&mut importer, &decision).unwrap();
+        let rendered =
+            write_unity_yaml_mapping(&importer, UnityYamlWriteLimits::default()).unwrap();
+        for line in [
+            "spriteMode: 1",
+            "spriteExtrude: 1",
+            "spriteMeshType: 1",
+            "alignment: 9",
+            "spritePivot: {x: 0.5, y: 0.5}",
+            "spriteBorder: {x: 0, y: 0, z: 0, w: 0}",
+            "spritePixelsToUnits: 100",
+            "textureType: 8",
+        ] {
+            assert!(rendered.contains(line), "{line}\n{rendered}");
+        }
+        // Field order is preserved by in-place overwrite.
+        let order: Vec<&str> = rendered
+            .lines()
+            .filter_map(|line| line.split(':').next())
+            .collect();
+        assert_eq!(
+            order,
+            [
+                "spriteMode",
+                "spriteExtrude",
+                "spriteMeshType",
+                "alignment",
+                "spritePivot",
+                "spriteBorder",
+                "spritePixelsToUnits",
+                "textureType"
+            ]
+        );
+    }
+
+    #[test]
+    fn sprite_floats_render_with_single_precision() {
+        use crate::export::unity_yaml::{
+            write_unity_yaml_mapping, UnityYamlMappingStyle, UnityYamlScalar, UnityYamlWriteLimits,
+        };
+        let mut importer = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+        for (name, value) in [
+            (
+                "spriteMode",
+                UnityYamlNode::scalar(UnityYamlScalar::Signed(1)),
+            ),
+            (
+                "spriteExtrude",
+                UnityYamlNode::scalar(UnityYamlScalar::Signed(1)),
+            ),
+            (
+                "spriteMeshType",
+                UnityYamlNode::scalar(UnityYamlScalar::Signed(0)),
+            ),
+            (
+                "alignment",
+                UnityYamlNode::scalar(UnityYamlScalar::Signed(0)),
+            ),
+            (
+                "spritePivot",
+                UnityYamlNode::mapping(UnityYamlMappingStyle::Flow),
+            ),
+            (
+                "spritePixelsToUnits",
+                UnityYamlNode::scalar(UnityYamlScalar::Float64(100.0)),
+            ),
+            (
+                "textureType",
+                UnityYamlNode::scalar(UnityYamlScalar::Signed(0)),
+            ),
+        ] {
+            importer.insert_field(name, value).unwrap();
+        }
+        let decision = SpriteImporterDecision {
+            mode: SpriteImportMode::Multiple,
+            texture_type_is_sprite: true,
+            extrude: 1,
+            mesh_type: 1,
+            alignment: SpriteAlignment::Custom,
+            pivot: Some([0.49999997, 0.5]),
+            border: None,
+            pixels_to_units: 50.0,
+            build_sprite_sheet: false,
+        };
+        apply_sprite_importer_decision(&mut importer, &decision).unwrap();
+        let rendered =
+            write_unity_yaml_mapping(&importer, UnityYamlWriteLimits::default()).unwrap();
+        // The exact `f32` bits render with `f32` precision like the source `float`
+        // members; `f64` precision would print `0.4999999701976776`.
+        assert!(
+            rendered.contains("spritePivot: {x: 0.49999997, y: 0.5}"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("spritePixelsToUnits: 50"), "{rendered}");
     }
 
     #[test]
