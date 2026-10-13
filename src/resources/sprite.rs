@@ -14,7 +14,7 @@
 //! the atlas render-data lookup stay caller-side: these kernels take the resolved
 //! facts so the source shapes stay auditable without a managed collection.
 //!
-//! `sprite_outline::generate_mesh_outlines` ports the source `MeshOutlineGenerator`
+//! `generate_mesh_outlines` ports the source `MeshOutlineGenerator`
 //! over caller-provided vertices and triangles. The caller still owns versioned
 //! `VertexData`/index-buffer extraction and the subsequent PPU, pivot, and atlas
 //! packing transforms. `GeneratePhysicsShape` and the `SetBoneGeometry` body

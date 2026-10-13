@@ -149,3 +149,12 @@ Continue from docs/phase1-closure-inventory.md. The nearest product gaps are sha
 
 The checkpoint intentionally excludes and leaves untouched: src/bin/ (three local probe programs), tools/compare-real-unity-projects.ps1, and tools/probes/anim-convert/packages/ (22 restored package files). Review these separately before any future staging.
 The Unity 5.6 RenderSettings regression in src/main_tests_05.rs and its source fixture are also preserved locally but excluded from this checkpoint, following the earlier limit on adding Unity 5.6-specific synthetic cases.
+
+## 2026-10-13 — Sprite outline continuation (45f4609)
+
+- Phase 1 is still open and Phase 2 remains locked. This increment read only the frozen source code; it did not open user bundles or UABEA.
+- Commit `45f4609` was pushed normally to `codex/mesh-partial-channel-20261013`. It adds a source-compatible standalone mesh-outline walk and reference-output regression cases in `src/resources/sprite.rs`.
+- The run for that commit is GitHub Actions `38429434143` (<https://github.com/cocokoishi/RustAssetRipper/actions/runs/38429434143>) and completed successfully. Linux: 1717 library and 127 CLI tests passed (one ignored library test); Clippy with warnings denied and release build passed. Windows: 1719 library and 127 CLI tests passed (one ignored library test); Clippy with warnings denied and release build passed. Changed-line formatting and public-repository hygiene passed.
+- Local full Cargo checks/builds were not run. The temporary frozen-source probe command and outputs are in `docs/validation-log.md`.
+- The new mesh walk is not yet connected to texture importer output. Next: finish Actions, record the final result, then implement versioned render-data vertex/index extraction and the caller-side PPU/pivot/packing transforms needed to feed `GenerateOutline`. Continue with the source path, not bundle-specific patches.
+- The prior checkpoint's pending no-push notice is superseded by the ordinary push of `45f4609`. Preserve all other staged and unstaged work. Keep `GOAL.TXT`, `cleanup_manifest.txt`, and probe package directories out of commits; do not stage entire docs or source directories.
