@@ -183,7 +183,16 @@ static class Oracle
 		foreach (IUnityObjectBase asset in members)
 		{
 			IUnityObjectBase? main = asset.MainAsset;
-			writer.WriteLine($"{phase}-MEMBER\t{asset.ClassID}\t{asset.PathID}\t{Escape(asset.GetBestName())}\t{Escape(asset.Collection.Name)}\t{(main is null ? "null" : main.ClassID.ToString())}\t{(main is null ? "null" : main.PathID.ToString())}\t{(main is null ? "null" : Escape(main.GetBestName()))}");
+			string hideFlags;
+			try
+			{
+				hideFlags = ((dynamic)asset).ObjectHideFlags.ToString();
+			}
+			catch
+			{
+				hideFlags = "unknown";
+			}
+			writer.WriteLine($"{phase}-MEMBER\t{asset.ClassID}\t{asset.PathID}\t{Escape(asset.GetBestName())}\t{Escape(asset.Collection.Name)}\t{(main is null ? "null" : main.ClassID.ToString())}\t{(main is null ? "null" : main.PathID.ToString())}\t{(main is null ? "null" : Escape(main.GetBestName()))}\t{hideFlags}");
 		}
 	}
 

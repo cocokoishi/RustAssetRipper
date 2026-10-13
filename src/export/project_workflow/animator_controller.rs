@@ -2430,12 +2430,16 @@ fn behaviour_nodes(pointers: &[UnityYamlNode]) -> Result<UnityYamlNode, Box<dyn 
 
 /// Source FetchEditorHierarchy includes only slots actually bound to a generated
 /// state/machine. Unused controller behaviour pointers remain independent assets.
+/// Claimed behaviour pointers plus the bundle PPtr identities selected only
+/// by dropped states, which stay unclaimed and route as separate files.
+type BehaviourOwnership<'a> = (Vec<&'a SerializedValue>, HashSet<(i32, i64)>);
+
 pub(super) fn release_controller_behaviour_pointers(
     payload: &ParsedObjectPayload,
-) -> Result<Vec<&SerializedValue>, Box<dyn Error>> {
+) -> Result<BehaviourOwnership<'_>, Box<dyn Error>> {
     let table = behaviours::BehaviourTable::read(&payload.root)?;
     if table.pointers.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), HashSet::new()));
     }
     let controller = required_field(&payload.root, "m_Controller", "AnimatorController")?;
     let tos = read_tos(required_field(
@@ -2446,6 +2450,10 @@ pub(super) fn release_controller_behaviour_pointers(
     let layers = read_layers(controller, &tos)?;
     let constants = read_state_machine_constants(controller)?;
     let mut pointers = Vec::new();
+    // Bundle PPtr identity per behaviour slot, flagged when any kept owner
+    // (kept state or machine) selects it. Slots selected only by dropped
+    // states export as separate files, mirroring unclaimed MainAsset objects.
+    let mut slot_kept: HashMap<(i32, i64), bool> = HashMap::new();
     let mut allocator = FileIdAllocator::new();
     for (machine_index, raw) in constants.iter().enumerate() {
         let owner = layers
@@ -2459,22 +2467,57 @@ pub(super) fn release_controller_behaviour_pointers(
                 )
             })?;
         let machine = rebuild_state_machine_hierarchy(raw, &layers[owner], &tos, &mut allocator)?;
-        for path in machine
-            .states
-            .iter()
-            .map(|state| state.state_path_id)
-            .chain(machine.machines.iter().map(|node| node.full_path_id))
-        {
+        let mut owner_paths = Vec::new();
+        owner_paths.try_reserve(
+            machine
+                .states
+                .len()
+                .checked_add(machine.machines.len())
+                .ok_or_else(|| {
+                    invalid_project("could not allocate AnimatorController behaviour owners")
+                })?,
+        )?;
+        for (state_index, state) in machine.states.iter().enumerate() {
+            let kept = !machine.dropped_state_indexes.contains(&state_index);
+            owner_paths.push((state.state_path_id, kept));
+        }
+        for node in &machine.machines {
+            // Machines always export (even unnamed and empty), so their slots
+            // always keep the selected behaviours.
+            owner_paths.push((node.full_path_id, true));
+        }
+        for (path, kept) in owner_paths {
             let slots = table.slots(owner, path)?;
             pointers.try_reserve(slots.len()).map_err(|_| {
                 invalid_project(
                     "could not allocate AnimatorController behaviour ownership pointers",
                 )
             })?;
-            pointers.extend(slots.into_iter().map(|slot| &table.pointers[slot]));
+            slot_kept.try_reserve(slots.len()).map_err(|_| {
+                invalid_project("could not allocate AnimatorController behaviour ownership flags")
+            })?;
+            for slot in slots {
+                let pointer = &table.pointers[slot];
+                pointers.push(pointer);
+                if let SerializedValue::PPtr { file_id, path_id } = pointer {
+                    if *path_id != 0 {
+                        let flag = slot_kept.entry((*file_id, *path_id)).or_insert(false);
+                        *flag |= kept;
+                    }
+                }
+            }
         }
     }
-    Ok(pointers)
+    let mut dropped = HashSet::new();
+    dropped.try_reserve(slot_kept.len()).map_err(|_| {
+        invalid_project("could not allocate AnimatorController dropped behaviour identities")
+    })?;
+    for (key, kept) in slot_kept {
+        if !kept {
+            dropped.insert(key);
+        }
+    }
+    Ok((pointers, dropped))
 }
 
 fn document_file_id(document: &UnityYamlDocument) -> Result<i64, Box<dyn Error>> {

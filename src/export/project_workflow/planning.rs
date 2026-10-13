@@ -16,6 +16,9 @@ pub(super) struct RoutedAssetPlanningContext<'context, 'object, 'provider, 'grap
     pub(super) streamed_resources: WorkspaceStreamedYamlResourceContext<'context, 'provider>,
     pub(super) processed_animation_roots: &'context HashMap<(usize, usize), SerializedValue>,
     pub(super) limits: WorkspaceProjectExportLimits,
+    /// Bundle behaviours split out of controller hierarchies, keyed by
+    /// workspace object. Their singleton documents render the stamped flags.
+    pub(super) split_behaviour_keys: &'context HashSet<(usize, usize)>,
 }
 
 pub(super) struct PrefabPlanningContext<'context, 'graph> {
@@ -128,6 +131,7 @@ pub(super) fn plan_routed_asset_files(
         streamed_resources,
         processed_animation_roots,
         limits,
+        split_behaviour_keys,
     } = *context;
     let mut total_bytes = builder.total_bytes;
     let mut exported_object_count = builder.exported_object_count;
@@ -523,6 +527,14 @@ pub(super) fn plan_routed_asset_files(
                     });
                     continue;
                 };
+                // Split controller behaviours render the processor-stamped
+                // HideFlags, mirroring range-resolved MainAsset objects.
+                if entry.class_id == 114
+                    && split_behaviour_keys
+                        .contains(&(entry.object.file_index, entry.object.object_index))
+                {
+                    hide_controller_behaviour(&mut document)?;
+                }
                 if entry.route == ObjectRoute::AudioYaml {
                     add_generated_audio_yaml_defaults(
                         &mut document,

@@ -422,6 +422,7 @@ pub fn export_workspace_yaml_project_with_serialized_settings(
             streamed_resources,
             processed_animation_roots: &processed_animation_roots,
             limits,
+            split_behaviour_keys: &controller_collections.split_behaviour_keys,
         },
         &mut plan_builder,
         &mut notices,

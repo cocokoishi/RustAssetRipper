@@ -6,6 +6,11 @@ type ObjectKey = (usize, usize);
 pub(super) struct PreparedControllerCollections {
     pub(super) roots: HashMap<ObjectKey, ControllerCollectionPlan>,
     pub(super) member_keys: HashSet<ObjectKey>,
+    /// Bundle behaviours selected only by dropped states, keyed by workspace
+    /// object. They route as separate files; the frozen processor stamps them
+    /// `HideInHierarchy` through behaviour-range resolution, so their
+    /// singleton documents render the flag too.
+    pub(super) split_behaviour_keys: HashSet<ObjectKey>,
 }
 
 pub(super) struct ControllerCollectionPlan {
@@ -43,6 +48,7 @@ pub(super) fn prepare_controller_collections(
     let mut prepared = PreparedControllerCollections {
         roots: HashMap::new(),
         member_keys: HashSet::new(),
+        split_behaviour_keys: HashSet::new(),
     };
     let mut claimed = HashSet::new();
     let mut planned_assets = 0usize;
@@ -82,8 +88,51 @@ pub(super) fn prepare_controller_collections(
             controller_error(root, format!("could not decode hierarchy: {error}"))
         })?;
         if is_release {
-            for pointer in animator_controller::release_controller_behaviour_pointers(payload)? {
+            let (pointers, dropped) =
+                animator_controller::release_controller_behaviour_pointers(payload)?;
+            for pointer in pointers {
+                // Behaviours selected only by dropped states stay unclaimed and
+                // route as separate files, mirroring unassigned MainAsset objects.
+                if let SerializedValue::PPtr { file_id, path_id } = pointer {
+                    if dropped.contains(&(*file_id, *path_id)) {
+                        continue;
+                    }
+                }
                 traversal.enqueue(root, pointer, &[114])?;
+            }
+            // Record the split behaviours' workspace keys so their singleton
+            // documents render the processor-stamped HideFlags.
+            for (file_id, path_id) in &dropped {
+                let edge = graph
+                    .references_from_object(root.file_index, root.object_index)
+                    .find(|edge| edge.file_id == *file_id && edge.path_id == *path_id)
+                    .ok_or_else(|| {
+                        controller_error(
+                            root,
+                            format!(
+                                "dropped behaviour PPtr ({file_id}, {path_id}) has no typed graph edge"
+                            ),
+                        )
+                    })?;
+                let MultiFilePPtrResolution::Object {
+                    target_file_index,
+                    target_object_index,
+                } = edge.resolution
+                else {
+                    return Err(controller_error(
+                        root,
+                        format!(
+                            "dropped behaviour PPtr ({file_id}, {path_id}) is unresolved: {:?}",
+                            edge.resolution
+                        ),
+                    ));
+                };
+                prepared.split_behaviour_keys.try_reserve(1).map_err(|_| {
+                    invalid_project("could not allocate AnimatorController split behaviour lookup")
+                })?;
+                prepared
+                    .split_behaviour_keys
+                    .insert((target_file_index, target_object_index));
             }
         } else {
             traversal.pending.push((root.file_index, root.object_index));

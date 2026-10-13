@@ -4843,6 +4843,13 @@ These results do not pass the first-phase gate. The reference .NET solution buil
 - Results on latest exports: 青岚山河卷 r23 34,416/0, 青岚古境 r3 3,867/0, 云栖仙府 r3 5,944/0, 玉京烟霞 r3 14,029/0, 烟雨长亭 r1 2,311/0, 松月竹庭 r11 656/0 — 61,223 references checked with zero dangling. (Two tool bugs found and fixed during development: missed `.anim`/`.mat`/`.renderTexture` includes and missing font/scene exemptions; the LightingData→scene 102900000 case was verified conventional against source, not a gap.)
 - Evidence: `DIFF-REFS-INTEGRITY-001`. Unity Editor import/runtime and UABEA were not run; import-equivalence of the resolved graph is static evidence only.
 
+## 2026-10-12 behaviour split lands (r6/r7): exclusion-only design, HideFlags stamp
+
+- Implemented entirely as prepare-side exclusion: behaviours selected only by dropped states stay unclaimed and route as normal singletons (own files/GUIDs/meta/pointer-map entries via existing machinery); kept/dropped state and machine docs resolve them cross-file automatically through pointer_map. Plus HideFlags stamp: source `GetStateBehaviours` writes `HideInHierarchy` on every range-selected behaviour, so split singletons force the flag via a workspace-key set threaded prepare→planning (unreferenced singletons keep payload 0 on both sides, verified 44 pairs).
+- 青岚古境 r7 vs source: 114 diff=0 (was 59→12→0), onlySource=0, onlyRust=1 standing; integrity 3,935 refs zero dangling. 云栖仙府 r6 vs source: 114 diff=0 (was 76), 1102 diff=0, onlySource=0 onlyRust=0. Regressions byte-stable: 松月竹庭 r14, 烟雨长亭 r3, 玉京烟霞 r5, 青岚山河卷 r25 (all zero-diff; opaque unchanged).
+- Full lib suite 1,698/1,698, clippy `-D warnings` green, fmt clean on touched regions. No new unit tests (split logic shares the `table.slots` kernel with binding; real-sample replay+audit+integrity is the validation).
+- Unity Editor import/runtime and UABEA were not run; product unaccepted.
+
 ## 2026-10-12 hierarchy-drop split lands for states and trees (r5) — behaviours deferred
 
 - Implemented the oracle-specified rule plus separate-file emission in `src/export/project_workflow/animator_controller.rs` (+ planning/builder GUID threading): unnamed selector-path machines receive no child states; unattached states and their BlendTrees export as separate main-anchor files with minted GUIDs; kept transitions/default-states reference them cross-file (`{fileID, guid, type: 2}`); dropped-source transitions skipped. Full lib suite 1,698/1,698, clippy `-D warnings` green, fmt clean on touched regions.
