@@ -167,3 +167,12 @@ The Unity 5.6 RenderSettings regression in src/main_tests_05.rs and its source f
 - Remaining Sprite work: decode the render-data fields from TypeTree values; resolve external stream bytes before calling the kernel; implement the legacy `Vertices`/`Indices` branch; connect the result to importer output and `FillSpriteMetaData`. `GeneratePhysicsShape` and `SetBoneGeometry` remain open. Unity import/runtime remains unverified.
 - Next: trace the generic SpriteRenderData-to-importer facts path in the frozen source and Rust routing, add synthetic regressions for the mapping, then wire the kernel without sample-specific dispatch. Continue Phase 1 completion audit afterward.
 - Keep all existing staged and unstaged work intact. Do not stage `GOAL.TXT`, `cleanup_manifest.txt`, or probe package directories. No subagents were used.
+
+## 2026-10-13 continuation — Decoded SpriteRenderData outline inputs (`a879d4f`)
+
+- Phase 1 remains open; Phase 2 remains locked. This increment used frozen source and synthetic decoded values only. No user resource, UABEA, or Unity runtime was used.
+- The Rust path now maps a decoded render-data value into version-aware vertex slices and source-specific 16-bit little-endian submesh triangles. A set external stream must be resolved by the caller; unresolved bytes are an explicit error. The no-modern-data result signals the legacy path and does not claim that legacy geometry was implemented.
+- Commit `a879d4f` was pushed normally. Actions `38434778368` passed: Ubuntu 1,722 library + 127 CLI tests and Windows 1,724 library + 127 CLI tests (one ignored library test per platform), warnings-denied Clippy and release builds on both platforms, changed-line formatting, and public-repository hygiene. Local Cargo validation was not run.
+- Remaining Sprite work: connect TypeTree object payloads and reference-graph ownership to the decoded-value kernel; resolve streamed bytes using the owning collection; implement legacy `Vertices`/`Indices`; serialize outlines into SpriteMetaData and the texture importer. `GeneratePhysicsShape` and `SetBoneGeometry` also remain open.
+- Next: trace the general SpriteRenderData ownership and stream-resolution path, add regression fixtures for that mapping, then wire the already-validated kernel to importer output. Continue the Phase 1 completion audit before any Phase 2 input inspection.
+- Preserve staged and unstaged work. Keep `GOAL.TXT`, `cleanup_manifest.txt`, and probe package directories out of commits. No subagents were used.
