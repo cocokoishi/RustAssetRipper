@@ -32,7 +32,7 @@
     }
 
     #[test]
-    fn export_audio_settings_file_prefer_wav_reports_conversion_without_creating_output() {
+    fn export_audio_settings_file_prefer_wav_converts_vorbis_ogg_to_float_wav() {
         use std::ffi::OsString;
 
         let directory = TestInputDirectory::new_root();
@@ -44,10 +44,11 @@
             include_str!("export/settings_file_modified.json"),
         )
         .unwrap();
-        // Sound type 14 decodes as `ogg`, which `PreferWav` redirects to `wav`.
+        // Sound type 14 decodes as `ogg`, which `PreferWav` converts to `wav`.
+        let ogg = include_bytes!("export/ogg_to_wav_test_fixture.ogg");
         fs::write(
             &serialized_path,
-            make_audio_clip_file(b"OggS....", Some(14)),
+            make_audio_clip_file(ogg, Some(14)),
         )
         .unwrap();
         let output_path = directory.join("clip.wav");
@@ -69,9 +70,24 @@
             output_path.clone().into_os_string(),
             serialized_path.into_os_string(),
         ];
-        let error = super::export_audio_from_arguments(arguments.into_iter()).unwrap_err();
-        assert!(error.to_string().contains("Vorbis"), "{error}");
-        assert!(!output_path.exists());
+        super::export_audio_from_arguments(arguments.into_iter()).unwrap();
+        let converted = fs::read(&output_path).unwrap();
+        let reference = include_bytes!("export/ogg_to_wav_test_fixture_reference.wav");
+        assert_eq!(converted.len(), reference.len());
+        assert_eq!(&converted[..58], &reference[..58]);
+        let largest_sample_error = converted[58..]
+            .chunks_exact(4)
+            .zip(reference[58..].chunks_exact(4))
+            .map(|(actual, expected)| {
+                let actual = f32::from_le_bytes(actual.try_into().unwrap());
+                let expected = f32::from_le_bytes(expected.try_into().unwrap());
+                (actual - expected).abs()
+            })
+            .fold(0.0f32, f32::max);
+        assert!(
+            largest_sample_error <= 1.0e-6,
+            "largest reference sample error was {largest_sample_error}"
+        );
         drop(input);
     }
 
@@ -1412,11 +1428,11 @@
         put_typetree_string_value(&mut payload, "TestClip");
         put_i32_le(&mut payload, i32::try_from(data.len()).unwrap());
         payload.extend_from_slice(data);
-        let padding = (4 - payload.len() % 4) % 4;
-        payload.resize(payload.len() + padding, 0);
         if let Some(sound_type) = sound_type {
             put_i32_le(&mut payload, sound_type);
         }
+        let padding = (4 - payload.len() % 4) % 4;
+        payload.resize(payload.len() + padding, 0);
         assert!(payload.len().is_multiple_of(4), "payload is 4-byte aligned");
         finish_single_object_file(b"3.5.0f1\0", 83, &nodes, &strings, &payload, 42)
     }

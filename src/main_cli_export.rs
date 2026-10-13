@@ -1678,17 +1678,20 @@ pub(super) fn export_audio_to<W: io::Write>(
             "SerializedFile {serialized_file_index} PathID {path_id} audio export refused: {refusal:?}"
         ))
     })?;
-    if converts_ogg_to_wav(extension, &collection_extension) {
-        return Err(invalid_data_owned(format!(
-            "SerializedFile {serialized_file_index} PathID {path_id} requires an Ogg-to-WAV conversion, which needs a Vorbis decoder that is not available"
-        ))
-        .into());
-    }
+    let export_bytes = if converts_ogg_to_wav(extension, &collection_extension) {
+        convert_ogg_to_wav_with_limit(&decoded, MAX_DECODED_AUDIO_BYTES).map_err(|error| {
+            invalid_data_owned(format!(
+                "SerializedFile {serialized_file_index} PathID {path_id} Ogg-to-WAV conversion failed: {error}"
+            ))
+        })?
+    } else {
+        decoded
+    };
     let mut destination = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(output_path)?;
-    destination.write_all(&decoded)?;
+    destination.write_all(&export_bytes)?;
     writeln!(
         status_output,
         "Wrote a {collection_extension} audio from SerializedFile {serialized_file_index} PathID {path_id} to {output_path:?}."

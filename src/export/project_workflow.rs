@@ -314,7 +314,6 @@ struct TextAssetExportDetails {
 #[derive(Clone, Debug)]
 struct AudioBinaryExportDetails {
     bytes: Vec<u8>,
-    decoded_extension: &'static str,
     collection_extension: String,
     importer: UnityYamlNode,
 }

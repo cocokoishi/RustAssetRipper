@@ -12,7 +12,9 @@
 
 `dotnetdll` reads and writes PE/CLI and ECMA-335 CLR metadata for the Mono assembly path. The project vendors upstream 0.3.0 at `vendor/dotnetdll-0.3.0` and locally fixes two assembly-round-trip defects: the `ManagedMask` reader mapping and TypeDef method-list starts when methods are stored as property/event accessors. It also preserves caller-specified ExportedType flags for an AssemblyRef implementation without adding the Forwarder bit. The patch record is `vendor/dotnetdll-0.3.0/UPSTREAM-PATCHES.md`; the upstream `LICENSE` is retained. This is a Rust metadata library and does not invoke a .NET process. It does not parse Unity containers or SerializedFiles; those remain Rust core responsibilities. Its GPL-3.0+ license is compatible with this GPL-3.0-only project when distributed under GPL-3.0; retain the crate attribution and applicable license notice in distribution materials.
 
-`lewton` parses and validates Vorbis packets with a pure-Rust decoder. FSB5 audio export rebuilds the identification/comment/setup headers and wraps the original compressed Vorbis packets in Ogg pages, preserving the source packet bytes instead of decoding and re-encoding lossy audio. The static setup-header lookup was derived from `fsbex` 0.3.0's generated Vorbis table; its MIT license notice is retained at `vendor/fsbex-vorbis-table/LICENSE-MIT`. `phf` provides the compile-time CRC32-to-setup-header lookup. FSB5 remains limited to one Vorbis stream per AudioClip and applies the configured output cap.
+`lewton` parses and decodes Vorbis packets with a pure-Rust decoder. FSB5 audio export rebuilds the identification/comment/setup headers and wraps the original compressed Vorbis packets in Ogg pages, preserving the source packet bytes instead of decoding and re-encoding lossy audio. `PreferWav` export decodes Vorbis samples to 32-bit IEEE-float WAV and uses the Ogg stream's final granule position to trim overlap samples. The static setup-header lookup was derived from `fsbex` 0.3.0's generated Vorbis table; its MIT license notice is retained at `vendor/fsbex-vorbis-table/LICENSE-MIT`. `phf` provides the compile-time CRC32-to-setup-header lookup. FSB5 remains limited to one Vorbis stream per AudioClip and applies the configured output cap.
+
+`ogg` supplies the pure-Rust Ogg page and packet reader used by `PreferWav`. Its page granules identify the decoded PCM extent; the WAV output writer remains in the Rust project.
 
 | Crate | Locked version | Use | Declared license | Rust version metadata |
 |---|---:|---|---|---|
@@ -22,7 +24,8 @@
 | [flate2](https://github.com/rust-lang/flate2-rs) | 1.1.10 | GZip stream decoder and encoder using `rust_backend` | MIT OR Apache-2.0 | 1.67 |
 | [rustix](https://github.com/bytecodealliance/rustix) | 1.1.5 | Safe Unix `flock` bindings for retained input handles | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | 1.65 |
 | [dotnetdll](https://github.com/nickbclifford/dotnetdll) | 0.3.0, locally patched | Rust PE/CLI reader and writer for CLR assembly metadata used by Mono type lookup and manager-backed script DLL export | GPL-3.0+ | 1.85.1 |
-| [lewton](https://github.com/RustAudio/lewton) | 0.10.2 | Pure Rust Vorbis packet validation and decoded frame counts for Ogg granule positions | MIT OR Apache-2.0 | Not declared in the published crate manifest |
+| [lewton](https://github.com/RustAudio/lewton) | 0.10.2 | Pure Rust Vorbis packet validation, FSB5 reconstruction, and decoded float samples | MIT OR Apache-2.0 | Not declared in the published crate manifest |
+| [ogg](https://github.com/RustAudio/ogg) | 0.8.0 | Pure Rust Ogg page and packet reading for Vorbis-to-WAV export | BSD-3-Clause | Not declared in the published crate manifest |
 | [phf](https://github.com/rust-phf/rust-phf) | 0.11.3 | Compile-time lookup of FMOD Vorbis setup headers by CRC32 | MIT OR Apache-2.0 | 1.61 |
 | [byteorder](https://github.com/BurntSushi/byteorder) | 1.5.0 | Little-endian parsing used by `lzma-rs` | Unlicense OR MIT | 1.60 |
 | [bitflags](https://github.com/bitflags/bitflags) | 2.13.2 | Flag types used by `rustix` | MIT OR Apache-2.0 | 1.56 |

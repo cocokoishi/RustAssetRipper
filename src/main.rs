@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 
 use assetripper::export::audio_export::try_decode_audio;
 use assetripper::export::audio_export::{
-    converts_ogg_to_wav, plan_audio_clip_collection, AudioDecodeFact,
+    convert_ogg_to_wav_with_limit, converts_ogg_to_wav, plan_audio_clip_collection,
+    AudioDecodeFact, MAX_DECODED_AUDIO_BYTES,
 };
 use assetripper::export::pointer_map::{
     ExportCollectionPointerMetadata, ExportPointerMapLimits, ExportedAssetPointerEntry,

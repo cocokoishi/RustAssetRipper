@@ -220,12 +220,6 @@ pub(super) fn plan_routed_asset_files(
                 let audio = entry.audio_binary_export.as_ref().ok_or_else(|| {
                     invalid_project("AudioClip binary route has no decoded audio details")
                 })?;
-                if audio.decoded_extension == "ogg" && audio.collection_extension == "wav" {
-                    return Err(invalid_project(format!(
-                        "AudioClip {}:{} requires Ogg-to-WAV conversion under PreferWav, which is not implemented",
-                        entry.object.file_index, entry.object.path_id
-                    )));
-                }
                 Some(planner.plan_asset_path(&identity, &audio.collection_extension)?)
             }
             _ => None,

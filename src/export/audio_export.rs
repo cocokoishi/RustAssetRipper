@@ -1,8 +1,8 @@
 //! Audio export decisions ported from the frozen baseline.
 //!
 //! The mode enum itself lives in `settings`; this module owns byte-level dispatch and
-//! bounded FSB5 Vorbis reconstruction. `AudioConverter.OggToWav` and streamed-content
-//! reads remain with their respective owners:
+//! bounded FSB5 Vorbis reconstruction and Ogg-to-WAV conversion. Streamed-content reads
+//! remain with their respective owners:
 //!
 //! - `AudioExportFormat` has four modes, but only `Default` and `PreferWav` are supported
 //!   export formats.
@@ -21,18 +21,24 @@
 //! - `NativeAudioExporter` refuses empty payloads with a warning and otherwise writes raw
 //!   bytes; its collection extension follows the sound type when present and the
 //!   compression format otherwise. Both exporter warning texts are pinned below.
-//! - `AudioConverter.OggToWav` has no codec owner in this tree: only the conversion
-//!   trigger is pinned here, and the pipeline reports the conversion unavailable when it
-//!   fires. The converter's empty-input and failure edges stay open with it.
+//! - `AudioConverter.OggToWav` emits IEEE-float RIFF/WAV from Vorbis Ogg. The converter
+//!   uses the encoded stream's final granule position to trim decoder overlap samples and
+//!   enforces the caller's output cap.
 //! - `YamlAudioExportCollection.ExportInner` stages streamed content into a `.resS`
 //!   sidecar, rewrites the resource reference to a relative path, exports, then restores
 //!   the original reference; missing content zeroes the reference instead. The relative
 //!   path computation stays caller-side; only the sidecar path rule and the
 //!   save/rewrite/restore discipline are pinned here.
 
-use std::io::{self, Write};
+use std::io::{self, Cursor, Read, Write};
 
 use super::settings::AudioExportFormat;
+use lewton::{
+    audio::{read_audio_packet_generic, PreviousWindowRight},
+    header::{read_header_comment, read_header_ident, read_header_setup, IdentHeader, SetupHeader},
+    samples::InterleavedSamples,
+};
+use ogg::{Packet, PacketReader};
 
 #[rustfmt::skip]
 mod vorbis_lookup;
@@ -366,6 +372,366 @@ pub fn try_decode_audio_with_limit(
                 hex: diagnostic_hex(data).iter().collect(),
             }),
         },
+    }
+}
+
+const FLOAT_WAV_HEADER_LEN: usize = 58;
+const FLOAT_WAV_RIFF_OVERHEAD: u64 = 50;
+
+/// Converts a Vorbis Ogg stream to the 32-bit IEEE-float WAV written by the baseline
+/// `AudioConverter.OggToWav` path. The limit includes the WAV header and sample data.
+pub fn convert_ogg_to_wav_with_limit(
+    data: &[u8],
+    max_output_bytes: usize,
+) -> Result<Vec<u8>, AudioDecodeError> {
+    if data.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut packet_reader = PacketReader::new(Cursor::new(data));
+    let first_packet = read_ogg_packet(&mut packet_reader, "identification header")?;
+    let mut headers = read_ogg_vorbis_headers(&mut packet_reader, first_packet)?;
+    let channels = u16::from(headers.ident.audio_channels);
+    let sample_rate = headers.ident.audio_sample_rate;
+    let block_align = channels
+        .checked_mul(4)
+        .ok_or_else(|| ogg_to_wav_failed("channel count overflows WAV block alignment"))?;
+    let byte_rate = sample_rate
+        .checked_mul(u32::from(block_align))
+        .ok_or_else(|| ogg_to_wav_failed("sample rate overflows WAV byte rate"))?;
+
+    let mut output = LimitedAudioWriter::new(max_output_bytes);
+    let header = float_wav_header(channels, sample_rate, byte_rate, block_align);
+    output
+        .write_all(&header)
+        .map_err(|error| ogg_output_error(error, &output, max_output_bytes))?;
+
+    let mut total_frames = 0u64;
+    let mut stream_frames = 0u64;
+    let mut previous_window = PreviousWindowRight::new();
+    let mut stream_ended = headers.ended_in_headers;
+
+    while let Some(packet) = packet_reader
+        .read_packet()
+        .map_err(|error| ogg_to_wav_failed(format!("invalid Ogg packet stream: {error}")))?
+    {
+        if packet.stream_serial() != headers.serial {
+            if packet.first_in_stream() {
+                if !stream_ended {
+                    return Err(ogg_to_wav_failed(
+                        "a new logical stream began before the previous Vorbis stream ended",
+                    ));
+                }
+                let next_headers = read_ogg_vorbis_headers(&mut packet_reader, packet)?;
+                if next_headers.ident.audio_channels != headers.ident.audio_channels
+                    || next_headers.ident.audio_sample_rate != headers.ident.audio_sample_rate
+                {
+                    return Err(ogg_to_wav_failed(format!(
+                        "chained Vorbis stream has {} channels at {} Hz; the WAV already uses {} channels at {} Hz",
+                        next_headers.ident.audio_channels,
+                        next_headers.ident.audio_sample_rate,
+                        headers.ident.audio_channels,
+                        headers.ident.audio_sample_rate
+                    )));
+                }
+                headers = next_headers;
+                stream_frames = 0;
+                previous_window = PreviousWindowRight::new();
+                stream_ended = headers.ended_in_headers;
+                continue;
+            }
+            // The source Vorbis reader ignores packets from other serials unless they
+            // begin a chained logical stream.
+            continue;
+        }
+        if stream_ended {
+            return Err(ogg_to_wav_failed(
+                "Vorbis audio packets follow the logical stream's EOS packet",
+            ));
+        }
+
+        let decoded: InterleavedSamples<f32> = read_audio_packet_generic(
+            &headers.ident,
+            &headers.setup,
+            &packet.data,
+            &mut previous_window,
+        )
+        .map_err(|error| ogg_to_wav_failed(format!("invalid Vorbis audio packet: {error:?}")))?;
+        if decoded.channel_count == 0
+            || decoded.channel_count != usize::from(channels)
+            || !decoded.samples.len().is_multiple_of(decoded.channel_count)
+        {
+            return Err(ogg_to_wav_failed(format!(
+                "decoded Vorbis packet has {} samples across {} channels, expected {} channels",
+                decoded.samples.len(),
+                decoded.channel_count,
+                channels
+            )));
+        }
+        if packet.last_in_stream() && !packet.last_in_page() {
+            return Err(ogg_to_wav_failed(
+                "the Vorbis EOS packet is not the last packet on its Ogg page",
+            ));
+        }
+
+        let packet_frames = decoded.samples.len() / decoded.channel_count;
+        let decoded_stream_end = stream_frames
+            .checked_add(u64::try_from(packet_frames).map_err(|_| {
+                ogg_to_wav_failed("decoded Vorbis packet frame count exceeds 64-bit range")
+            })?)
+            .ok_or_else(|| ogg_to_wav_failed("decoded Vorbis frame count overflowed"))?;
+        let frames_to_write = if packet.last_in_page() {
+            let page_granule = packet.absgp_page();
+            if packet.last_in_stream() {
+                if page_granule < stream_frames || page_granule > decoded_stream_end {
+                    return Err(ogg_to_wav_failed(format!(
+                        "Vorbis EOS granule {page_granule} is outside the decoded frame range {}..={decoded_stream_end}",
+                        stream_frames
+                    )));
+                }
+                stream_ended = true;
+                usize::try_from(page_granule - stream_frames).map_err(|_| {
+                    ogg_to_wav_failed("Vorbis EOS frame count exceeds address space")
+                })?
+            } else {
+                if page_granule != decoded_stream_end {
+                    return Err(ogg_to_wav_failed(format!(
+                        "Ogg page granule {page_granule} does not match {decoded_stream_end} decoded Vorbis frames"
+                    )));
+                }
+                packet_frames
+            }
+        } else {
+            packet_frames
+        };
+
+        append_float_wav_samples(
+            &mut output,
+            &decoded.samples,
+            frames_to_write,
+            channels,
+            block_align,
+            &mut total_frames,
+            max_output_bytes,
+        )?;
+        stream_frames = if packet.last_in_stream() {
+            packet.absgp_page()
+        } else {
+            decoded_stream_end
+        };
+    }
+
+    if !stream_ended {
+        return Err(ogg_to_wav_failed(
+            "Vorbis Ogg data ended without a logical-stream EOS packet",
+        ));
+    }
+    finish_float_wav(&mut output.bytes, total_frames, block_align)?;
+    Ok(output.bytes)
+}
+
+struct OggVorbisHeaders {
+    serial: u32,
+    ident: IdentHeader,
+    setup: SetupHeader,
+    ended_in_headers: bool,
+}
+
+fn read_ogg_vorbis_headers<R: Read + io::Seek>(
+    packet_reader: &mut PacketReader<R>,
+    first_packet: Packet,
+) -> Result<OggVorbisHeaders, AudioDecodeError> {
+    if !first_packet.first_in_stream() {
+        return Err(ogg_to_wav_failed(
+            "the Vorbis identification header is not at the start of an Ogg logical stream",
+        ));
+    }
+    let serial = first_packet.stream_serial();
+    let ident = read_header_ident(&first_packet.data).map_err(|error| {
+        ogg_to_wav_failed(format!("invalid Vorbis identification header: {error:?}"))
+    })?;
+    let comment_packet = read_next_ogg_packet_in_stream(packet_reader, serial, "comment header")?;
+    read_header_comment(&comment_packet.data)
+        .map_err(|error| ogg_to_wav_failed(format!("invalid Vorbis comment header: {error:?}")))?;
+    let setup_packet = read_next_ogg_packet_in_stream(packet_reader, serial, "setup header")?;
+    let setup = read_header_setup(
+        &setup_packet.data,
+        ident.audio_channels,
+        (ident.blocksize_0, ident.blocksize_1),
+    )
+    .map_err(|error| ogg_to_wav_failed(format!("invalid Vorbis setup header: {error:?}")))?;
+    if setup_packet.last_in_stream() && setup_packet.absgp_page() != 0 {
+        return Err(ogg_to_wav_failed(format!(
+            "header-only Vorbis stream has nonzero EOS granule {}",
+            setup_packet.absgp_page()
+        )));
+    }
+    Ok(OggVorbisHeaders {
+        serial,
+        ident,
+        setup,
+        ended_in_headers: setup_packet.last_in_stream(),
+    })
+}
+
+fn read_next_ogg_packet_in_stream<R: Read + io::Seek>(
+    packet_reader: &mut PacketReader<R>,
+    serial: u32,
+    header_name: &str,
+) -> Result<Packet, AudioDecodeError> {
+    loop {
+        let packet = read_ogg_packet(packet_reader, header_name)?;
+        if packet.stream_serial() == serial {
+            return Ok(packet);
+        }
+    }
+}
+
+fn read_ogg_packet<R: Read + io::Seek>(
+    packet_reader: &mut PacketReader<R>,
+    expected: &str,
+) -> Result<Packet, AudioDecodeError> {
+    packet_reader
+        .read_packet()
+        .map_err(|error| ogg_to_wav_failed(format!("could not read Ogg {expected}: {error}")))?
+        .ok_or_else(|| ogg_to_wav_failed(format!("Ogg stream ended before its {expected}")))
+}
+
+fn float_wav_header(
+    channels: u16,
+    sample_rate: u32,
+    byte_rate: u32,
+    block_align: u16,
+) -> [u8; FLOAT_WAV_HEADER_LEN] {
+    let mut header = [0u8; FLOAT_WAV_HEADER_LEN];
+    header[..4].copy_from_slice(b"RIFF");
+    header[4..8].copy_from_slice(&(FLOAT_WAV_RIFF_OVERHEAD as u32).to_le_bytes());
+    header[8..12].copy_from_slice(b"WAVE");
+    header[12..16].copy_from_slice(b"fmt ");
+    header[16..20].copy_from_slice(&18u32.to_le_bytes());
+    header[20..22].copy_from_slice(&3u16.to_le_bytes());
+    header[22..24].copy_from_slice(&channels.to_le_bytes());
+    header[24..28].copy_from_slice(&sample_rate.to_le_bytes());
+    header[28..32].copy_from_slice(&byte_rate.to_le_bytes());
+    header[32..34].copy_from_slice(&block_align.to_le_bytes());
+    header[34..36].copy_from_slice(&32u16.to_le_bytes());
+    header[36..38].copy_from_slice(&0u16.to_le_bytes());
+    header[38..42].copy_from_slice(b"fact");
+    header[42..46].copy_from_slice(&4u32.to_le_bytes());
+    header[50..54].copy_from_slice(b"data");
+    header
+}
+
+fn append_float_wav_samples(
+    output: &mut LimitedAudioWriter,
+    samples: &[f32],
+    frames: usize,
+    channels: u16,
+    block_align: u16,
+    total_frames: &mut u64,
+    max_output_bytes: usize,
+) -> Result<(), AudioDecodeError> {
+    let sample_count = frames
+        .checked_mul(usize::from(channels))
+        .ok_or_else(|| ogg_to_wav_failed("decoded Vorbis sample count overflowed"))?;
+    if sample_count > samples.len() {
+        return Err(ogg_to_wav_failed(format!(
+            "Vorbis packet contains {} samples, fewer than the {sample_count} WAV samples requested",
+            samples.len()
+        )));
+    }
+    let new_total_frames = total_frames
+        .checked_add(
+            u64::try_from(frames)
+                .map_err(|_| ogg_to_wav_failed("WAV frame count exceeds 64-bit range"))?,
+        )
+        .ok_or_else(|| ogg_to_wav_failed("WAV frame count overflowed"))?;
+    if new_total_frames > u64::from(u32::MAX) {
+        return Err(ogg_to_wav_failed(
+            "WAV fact chunk cannot represent more than 2^32-1 sample frames",
+        ));
+    }
+    let data_bytes = new_total_frames
+        .checked_mul(u64::from(block_align))
+        .ok_or_else(|| ogg_to_wav_failed("WAV data length overflowed"))?;
+    let riff_bytes = FLOAT_WAV_RIFF_OVERHEAD
+        .checked_add(data_bytes)
+        .ok_or_else(|| ogg_to_wav_failed("WAV RIFF chunk length overflowed"))?;
+    if data_bytes > u64::from(u32::MAX) || riff_bytes > u64::from(u32::MAX) {
+        return Err(ogg_to_wav_failed(
+            "WAV data exceeds the RIFF 32-bit chunk-size limit",
+        ));
+    }
+    let sample_bytes = sample_count
+        .checked_mul(4)
+        .ok_or_else(|| ogg_to_wav_failed("WAV packet byte length overflowed"))?;
+    let new_output_len = output.bytes.len().checked_add(sample_bytes).ok_or(
+        AudioDecodeError::DecodedDataLimitExceeded {
+            limit: max_output_bytes,
+        },
+    )?;
+    if new_output_len > max_output_bytes {
+        return Err(AudioDecodeError::DecodedDataLimitExceeded {
+            limit: max_output_bytes,
+        });
+    }
+    let mut sample_data = Vec::new();
+    sample_data
+        .try_reserve_exact(sample_bytes)
+        .map_err(|_| AudioDecodeError::OutputAllocationFailed)?;
+    for sample in &samples[..sample_count] {
+        sample_data.extend_from_slice(&sample.to_le_bytes());
+    }
+    output
+        .write_all(&sample_data)
+        .map_err(|error| ogg_output_error(error, output, max_output_bytes))?;
+    *total_frames = new_total_frames;
+    Ok(())
+}
+
+fn finish_float_wav(
+    output: &mut [u8],
+    total_frames: u64,
+    block_align: u16,
+) -> Result<(), AudioDecodeError> {
+    let data_len = total_frames
+        .checked_mul(u64::from(block_align))
+        .ok_or_else(|| ogg_to_wav_failed("WAV data length overflowed"))?;
+    let riff_len = FLOAT_WAV_RIFF_OVERHEAD
+        .checked_add(data_len)
+        .ok_or_else(|| ogg_to_wav_failed("WAV RIFF chunk length overflowed"))?;
+    let data_len = u32::try_from(data_len)
+        .map_err(|_| ogg_to_wav_failed("WAV data exceeds the RIFF 32-bit chunk-size limit"))?;
+    let riff_len = u32::try_from(riff_len)
+        .map_err(|_| ogg_to_wav_failed("WAV RIFF chunk exceeds the 32-bit size limit"))?;
+    let frame_count = u32::try_from(total_frames)
+        .map_err(|_| ogg_to_wav_failed("WAV fact chunk exceeds the 32-bit sample-frame limit"))?;
+    if output.len() < FLOAT_WAV_HEADER_LEN {
+        return Err(ogg_to_wav_failed("WAV output is shorter than its header"));
+    }
+    output[4..8].copy_from_slice(&riff_len.to_le_bytes());
+    output[46..50].copy_from_slice(&frame_count.to_le_bytes());
+    output[54..58].copy_from_slice(&data_len.to_le_bytes());
+    Ok(())
+}
+
+fn ogg_output_error(
+    error: io::Error,
+    output: &LimitedAudioWriter,
+    limit: usize,
+) -> AudioDecodeError {
+    if output.limit_exceeded {
+        AudioDecodeError::DecodedDataLimitExceeded { limit }
+    } else if output.allocation_failed || error.kind() == io::ErrorKind::OutOfMemory {
+        AudioDecodeError::OutputAllocationFailed
+    } else {
+        ogg_to_wav_failed(format!("could not write WAV output: {error}"))
+    }
+}
+
+fn ogg_to_wav_failed(reason: impl Into<String>) -> AudioDecodeError {
+    AudioDecodeError::OggToWavFailed {
+        reason: reason.into(),
     }
 }
 
@@ -1068,6 +1434,11 @@ pub enum AudioDecodeError {
     },
     /// FSB output allocation failed.
     OutputAllocationFailed,
+    /// Ogg/Vorbis validation, decoding, or WAV conversion failed.
+    OggToWavFailed {
+        /// Decoder or writer diagnostic.
+        reason: String,
+    },
     /// A valid container yielded no encoded audio bytes.
     NoDecodedAudioData,
     /// None of the magics matched; carries the printable/hex diagnostic words.
@@ -1106,6 +1477,9 @@ impl core::fmt::Display for AudioDecodeError {
                 formatter,
                 "could not allocate decoded audio output"
             ),
+            Self::OggToWavFailed { reason } => {
+                write!(formatter, "Ogg-to-WAV conversion failed: {reason}")
+            }
             Self::NoDecodedAudioData => write!(
                 formatter,
                 "FSB5 decoder produced no audio bytes"
@@ -1125,15 +1499,91 @@ mod tests {
     use std::io::Write;
 
     use super::{
-        check_magic, classify_audio_data, compression_format_raw_extension, converts_ogg_to_wav,
-        diagnostic_hex, diagnostic_printable, empty_decoded_audio_warning,
-        is_supported_export_format, native_audio_empty_warning, native_audio_extension,
-        plan_audio_clip_collection, plan_native_audio_export, plan_streamed_resource,
-        sound_type_raw_extension, tracker_extension, try_decode_audio, AudioDataKind,
-        AudioDecodeError, AudioDecodeFact, AudioRefusal, NativeAudioExport, StreamedResourcePlan,
-        MOD_MAGICS,
+        check_magic, classify_audio_data, compression_format_raw_extension,
+        convert_ogg_to_wav_with_limit, converts_ogg_to_wav, diagnostic_hex, diagnostic_printable,
+        empty_decoded_audio_warning, is_supported_export_format, native_audio_empty_warning,
+        native_audio_extension, plan_audio_clip_collection, plan_native_audio_export,
+        plan_streamed_resource, sound_type_raw_extension, tracker_extension, try_decode_audio,
+        AudioDataKind, AudioDecodeError, AudioDecodeFact, AudioRefusal, NativeAudioExport,
+        StreamedResourcePlan, MOD_MAGICS,
     };
     use crate::export::settings::AudioExportFormat;
+
+    #[test]
+    fn ogg_to_wav_matches_reference_float_wav_and_decoded_frames() {
+        let ogg = include_bytes!("ogg_to_wav_test_fixture.ogg");
+        let reference = include_bytes!("ogg_to_wav_test_fixture_reference.wav");
+        let converted = convert_ogg_to_wav_with_limit(ogg, 1024 * 1024).unwrap();
+
+        assert_eq!(converted.len(), reference.len());
+        assert_eq!(&converted[..58], &reference[..58]);
+        assert_eq!(&converted[..4], b"RIFF");
+        assert_eq!(&converted[8..12], b"WAVE");
+        assert_eq!(&converted[12..16], b"fmt ");
+        assert_eq!(u16::from_le_bytes(converted[20..22].try_into().unwrap()), 3);
+        assert_eq!(u16::from_le_bytes(converted[22..24].try_into().unwrap()), 1);
+        assert_eq!(
+            u32::from_le_bytes(converted[24..28].try_into().unwrap()),
+            8000
+        );
+        assert_eq!(
+            u16::from_le_bytes(converted[34..36].try_into().unwrap()),
+            32
+        );
+        assert_eq!(&converted[38..42], b"fact");
+        assert_eq!(
+            u32::from_le_bytes(converted[46..50].try_into().unwrap()),
+            544
+        );
+        assert_eq!(&converted[50..54], b"data");
+        assert_eq!(
+            u32::from_le_bytes(converted[54..58].try_into().unwrap()),
+            544 * 4
+        );
+
+        let largest_sample_error = converted[58..]
+            .chunks_exact(4)
+            .zip(reference[58..].chunks_exact(4))
+            .map(|(actual, expected)| {
+                let actual = f32::from_le_bytes(actual.try_into().unwrap());
+                let expected = f32::from_le_bytes(expected.try_into().unwrap());
+                (actual - expected).abs()
+            })
+            .fold(0.0f32, f32::max);
+        // The source and Rust decoders both return IEEE binary32 samples. Allow eight
+        // binary32 ULP at unit magnitude for decoder implementation rounding.
+        assert!(
+            largest_sample_error <= 1.0e-6,
+            "largest reference sample error was {largest_sample_error}"
+        );
+    }
+
+    #[test]
+    fn ogg_to_wav_reports_invalid_input_and_enforces_the_complete_output_limit() {
+        assert_eq!(convert_ogg_to_wav_with_limit(&[], 0), Ok(Vec::new()));
+        assert!(matches!(
+            convert_ogg_to_wav_with_limit(b"not an Ogg stream", 1024),
+            Err(AudioDecodeError::OggToWavFailed { .. })
+        ));
+
+        let ogg = include_bytes!("ogg_to_wav_test_fixture.ogg");
+        let exact_output_limit = include_bytes!("ogg_to_wav_test_fixture_reference.wav").len();
+        assert_eq!(
+            convert_ogg_to_wav_with_limit(ogg, exact_output_limit)
+                .unwrap()
+                .len(),
+            exact_output_limit
+        );
+        assert!(matches!(
+            convert_ogg_to_wav_with_limit(ogg, exact_output_limit - 1),
+            Err(AudioDecodeError::DecodedDataLimitExceeded { limit })
+                if limit == exact_output_limit - 1
+        ));
+        assert!(matches!(
+            convert_ogg_to_wav_with_limit(ogg, 57),
+            Err(AudioDecodeError::DecodedDataLimitExceeded { limit: 57 })
+        ));
+    }
 
     #[test]
     fn export_format_support_matches_is_supported_export_format() {

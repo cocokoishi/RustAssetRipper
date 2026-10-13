@@ -607,14 +607,15 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                     .as_deref()
                     .map(String::from_utf8_lossy)
                     .unwrap_or_default();
+                let audio_output_limit = crate::export::audio_export::MAX_DECODED_AUDIO_BYTES
+                    .min(context.limits.max_total_asset_payload_bytes);
                 match crate::export::audio_export::try_decode_audio_with_limit(
                     &name,
                     view.sound_type,
                     &data,
-                    crate::export::audio_export::MAX_DECODED_AUDIO_BYTES
-                        .min(context.limits.max_total_asset_payload_bytes),
+                    audio_output_limit,
                 ) {
-                    Ok((bytes, extension)) if !bytes.is_empty() => {
+                    Ok((decoded_bytes, extension)) if !decoded_bytes.is_empty() => {
                         let collection_extension = crate::export::audio_export::plan_audio_clip_collection(
                             crate::export::audio_export::AudioDecodeFact {
                                 is_audio_clip: true,
@@ -630,13 +631,29 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                                 file_index, object_info.path_id
                             ))
                         })?;
+                        let bytes = if crate::export::audio_export::converts_ogg_to_wav(
+                            extension,
+                            &collection_extension,
+                        ) {
+                            crate::export::audio_export::convert_ogg_to_wav_with_limit(
+                                &decoded_bytes,
+                                audio_output_limit,
+                            )
+                            .map_err(|error| {
+                                invalid_project(format!(
+                                    "file {file_index} AudioClip PathID {} Ogg-to-WAV conversion failed: {error}",
+                                    object_info.path_id
+                                ))
+                            })?
+                        } else {
+                            decoded_bytes
+                        };
                         let audio_importer = audio_importer_yaml_2022_3(
                             view,
                             payload.and_then(object_asset_bundle_name).as_deref(),
                         )?;
                         audio_binary_export = Some(AudioBinaryExportDetails {
                             bytes,
-                            decoded_extension: extension,
                             collection_extension,
                             importer: audio_importer,
                         });
