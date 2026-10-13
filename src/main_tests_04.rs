@@ -720,14 +720,10 @@
             "the only source difference is rebasing the sliced sidecar offset to zero"
         );
         assert!(normalized_lines(&actual_yaml).contains(
-            normalized_lines("m_Source: Assets\\AudioClip\\AudioFixture.audioclip.resS")
-                .trim_end()
+            normalized_lines("m_Source: Assets\\AudioClip\\AudioFixture.audioclip.resS").trim_end()
         ));
-        assert!(
-            normalized_lines(&actual_yaml).contains(
-                normalized_lines("m_Offset: 0\n    m_Size: 3").trim_end()
-            )
-        );
+        assert!(normalized_lines(&actual_yaml)
+            .contains(normalized_lines("m_Offset: 0\n    m_Size: 3").trim_end()));
         assert_eq!(fs::read(&audio_sidecar_path).unwrap(), source_sidecar);
         assert_eq!(
             normalized_meta(&fs::read_to_string(&audio_meta_path).unwrap()).as_bytes(),
