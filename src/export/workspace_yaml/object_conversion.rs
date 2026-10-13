@@ -48,6 +48,8 @@ fn should_use_scene_editor_type_tree(class_id: i32, unity_version_text: Option<&
             && matches!(
                 class_id,
                 20 | 43
+                    | 86
+                    | 121
                     | 64
                     | 65
                     | 28
@@ -714,6 +716,13 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
                 hints.field_name_aliases.clear();
             }
             hints.preserve_type_tree_field_names = true;
+        }
+
+        if matches!(&object.factory.kind, FactoryAssetKind::Generated(_)) {
+            // Generated native assets expose ClassName independently of their
+            // shared schema root. TypeTreeObject fallbacks keep that root name.
+            hints.native_class_name =
+                crate::serialized_file::object::class_id_type_name(class_id).map(str::to_owned);
         }
 
         let mut pointer_error = None;
@@ -3014,12 +3023,69 @@ mod tests {
     use crate::export::pointer_map::ExportPointerGuid;
 
     #[test]
+    fn unity_2022_3_render_texture_and_flare_require_editor_layouts() {
+        let version = FactoryUnityVersion::parse("2022.3.22f1").unwrap();
+        for (class_id, expected_name) in [(86, "CustomRenderTexture"), (121, "Flare")] {
+            let (release, editor) = reference_class_layouts()
+                .tpk_trees(class_id, &version)
+                .unwrap()
+                .expect("frozen TPK must contain the resource layout");
+            assert_eq!(editor.nodes[0].type_name.as_deref(), Some(expected_name));
+            for field in [
+                "m_ObjectHideFlags",
+                "m_CorrespondingSourceObject",
+                "m_PrefabInstance",
+                "m_PrefabAsset",
+            ] {
+                assert!(editor
+                    .nodes
+                    .iter()
+                    .any(|node| node.name.as_deref() == Some(field)));
+                assert!(!release
+                    .nodes
+                    .iter()
+                    .any(|node| node.name.as_deref() == Some(field)));
+            }
+            if class_id == 86 {
+                assert!(editor.nodes.iter().any(|node| {
+                    node.name.as_deref() == Some("m_ImageContentsHash")
+                        && node.type_name.as_deref() == Some("Hash128")
+                }));
+                assert!(!release
+                    .nodes
+                    .iter()
+                    .any(|node| { node.name.as_deref() == Some("m_ImageContentsHash") }));
+                // Hash128's exported serializedVersion comes from its Unity
+                // version contract, independently of the TPK node version.
+                let hints = UnityYamlObjectConversionHints::from_type_tree(
+                    &editor,
+                    SceneUnityVersion::parse("2022.3.22f1").unwrap(),
+                    UnityYamlObjectConversionLimits::default(),
+                )
+                .unwrap();
+                assert_eq!(
+                    hints
+                        .hash128_schemas
+                        .get("m_ImageContentsHash")
+                        .map(|schema| schema.serialized_version),
+                    Some(2)
+                );
+            }
+            assert!(should_use_scene_editor_type_tree(
+                class_id,
+                Some("2022.3.22f1")
+            ));
+        }
+    }
+    #[test]
     fn unity_2022_3_scene_classes_use_editor_type_trees() {
         for class_id in [
             1,
             4,
             20,
             43,
+            86,
+            121,
             64,
             65,
             28,
@@ -3120,6 +3186,8 @@ mod tests {
         for class_id in [
             20,
             43,
+            86,
+            121,
             64,
             65,
             28,

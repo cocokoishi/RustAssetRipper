@@ -70,6 +70,10 @@ pub struct UnityYamlObjectConversionHints {
     /// Preserve names from a recovered TypeTree when the source factory materialized the
     /// corresponding generated engine class, whose editor walker uses its generated members.
     pub preserve_type_tree_field_names: bool,
+    /// Declared class name of a generated native object when its TypeTree reuses
+    /// an abstract base layout. TypeTreeObject fallbacks deliberately leave this
+    /// unset because their source ClassName comes from the editor schema.
+    pub native_class_name: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

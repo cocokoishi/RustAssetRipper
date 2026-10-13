@@ -112,6 +112,20 @@ where
             _ => {}
         }
     }
+    // The source walker labels native documents with asset.ClassName, not the
+    // TypeTree root. Some native classes reuse an abstract base layout: both
+    // FlareLayer and HaloLayer have a Behaviour root even in their editor tree.
+    // Keep that schema for the fields, but preserve the declared native identity
+    // in project YAML. Unknown classes and explicit/script names stay intact.
+    let class_name = if field_mode == UnityYamlObjectFieldMode::ProjectAsset
+        && matches!(
+            class_name,
+            "Object" | "EditorExtension" | "Component" | "Behaviour"
+        ) {
+        hints.native_class_name.as_deref().unwrap_or(class_name)
+    } else {
+        class_name
+    };
     UnityYamlDocument::object(source.class_id, file_id, class_name, body, stripped)
         .map_err(UnityYamlObjectConversionError::NodeBuild)
 }

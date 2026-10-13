@@ -1,6 +1,111 @@
 use super::*;
 
 #[test]
+fn project_yaml_uses_native_class_identity_for_shared_base_type_tree_roots() {
+    // Frozen TPK roots for both classes are Behaviour in release/editor layouts
+    // at 3.5.0f1 and 2022.3.22f1. YamlWalker instead emits asset.ClassName.
+    for unity_version in [
+        SceneUnityVersion::parse("3.5.0f1").unwrap(),
+        SceneUnityVersion::parse("2022.3.22f1").unwrap(),
+    ] {
+        for (class_id, expected_name) in [(124, "FlareLayer"), (125, "HaloLayer")] {
+            let root = SerializedValue::Struct(vec![
+                field("m_GameObject", null_pptr()),
+                field("m_Enabled", SerializedValue::U8(1)),
+            ]);
+            let document = serialized_object_value_to_unity_yaml_document(
+                source_with_class_id(class_id),
+                "Behaviour",
+                1,
+                1_000_001,
+                false,
+                &root,
+                &UnityYamlObjectConversionHints {
+                    native_class_name: Some(expected_name.to_owned()),
+                    ..UnityYamlObjectConversionHints::default()
+                },
+                UnityYamlObjectFieldMode::ProjectAsset,
+                unity_version,
+                None,
+                UnityYamlObjectConversionLimits::default(),
+                |_| ProjectPointerResolution::Null,
+            )
+            .unwrap();
+            let yaml = crate::export::unity_yaml::write_unity_yaml_documents(
+                &[document],
+                crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+            )
+            .unwrap();
+            assert!(yaml.contains(&format!("--- !u!{class_id} &1000001\n{expected_name}:\n")));
+            assert!(yaml.contains("  m_GameObject: {fileID: 0}\n  m_Enabled: 1\n"));
+            assert!(!yaml.contains("\nBehaviour:\n"));
+        }
+    }
+}
+
+#[test]
+fn native_class_identity_keeps_schema_fallback_script_explicit_and_importer_names() {
+    for (class_id, name, native_class_name, field_mode) in [
+        (
+            999_999,
+            "Behaviour",
+            None,
+            UnityYamlObjectFieldMode::ProjectAsset,
+        ),
+        (
+            124,
+            "Behaviour",
+            None,
+            UnityYamlObjectFieldMode::ProjectAsset,
+        ),
+        (
+            114,
+            "MonoBehaviour",
+            Some("MonoBehaviour"),
+            UnityYamlObjectFieldMode::ProjectAsset,
+        ),
+        (
+            124,
+            "ExplicitClassName",
+            Some("FlareLayer"),
+            UnityYamlObjectFieldMode::ProjectAsset,
+        ),
+        (
+            124,
+            "Behaviour",
+            Some("FlareLayer"),
+            UnityYamlObjectFieldMode::AssetImporter,
+        ),
+    ] {
+        let root = SerializedValue::Struct(vec![field("m_Enabled", SerializedValue::U8(1))]);
+        let document = serialized_object_value_to_unity_yaml_document(
+            source_with_class_id(class_id),
+            name,
+            1,
+            1_000_001,
+            false,
+            &root,
+            &UnityYamlObjectConversionHints {
+                native_class_name: native_class_name.map(str::to_owned),
+                ..UnityYamlObjectConversionHints::default()
+            },
+            field_mode,
+            version(),
+            None,
+            UnityYamlObjectConversionLimits::default(),
+            |_| ProjectPointerResolution::Null,
+        )
+        .unwrap();
+        let yaml = crate::export::unity_yaml::write_unity_yaml_documents(
+            &[document],
+            crate::export::unity_yaml::UnityYamlWriteLimits::default(),
+        )
+        .unwrap();
+        assert!(yaml.contains(&format!("\n{name}:\n")));
+    }
+}
+
+#[test]
 fn game_object_component_array_uses_plural_baseline_field_name() {
     let type_tree = TypeTree {
         nodes: vec![
