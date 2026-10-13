@@ -31,6 +31,12 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 
+use crate::numerics::Vec3;
+
+use super::sub_mesh_data::SubMeshView;
+use super::vertex_data_blob::UnityVersion;
+use super::vertex_data_extensions::{generate_vertices, VertexDataExtensionError, VertexDataView};
+
 /// The class ID of `Sprite` (class 213).
 pub const SPRITE_CLASS_ID: i32 = 213;
 
@@ -289,6 +295,178 @@ impl fmt::Display for SpriteOutlineError {
 }
 
 impl std::error::Error for SpriteOutlineError {}
+
+/// Failure while extracting one sprite render-data submesh for outline generation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SpriteRenderDataOutlineError {
+    /// The versioned vertex-channel reader failed for this submesh.
+    VertexData {
+        /// Position of the submesh in the serialized list.
+        submesh_index: usize,
+        /// Vertex-data decoding failure.
+        source: VertexDataExtensionError,
+    },
+    /// The source's 16-bit little-endian index walk exceeded the supplied buffer.
+    IndexBufferRange {
+        /// Position of the submesh in the serialized list.
+        submesh_index: usize,
+        /// `FirstByte` from the serialized submesh.
+        first_byte: u32,
+        /// Bytes required for `IndexCount / 3` complete triangles.
+        byte_length: u64,
+        /// Available index-buffer length.
+        buffer_length: usize,
+    },
+    /// Reserving the decoded triangle list failed.
+    AllocationFailed {
+        /// Position of the submesh in the serialized list.
+        submesh_index: usize,
+        /// Number of triangles requested.
+        triangle_count: usize,
+    },
+    /// The extracted triangle refers to a vertex outside the submesh's local vertex list.
+    Outline {
+        /// Position of the submesh in the serialized list.
+        submesh_index: usize,
+        /// Mesh-outline generation failure.
+        source: SpriteOutlineError,
+    },
+}
+
+impl fmt::Display for SpriteRenderDataOutlineError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::VertexData {
+                submesh_index,
+                source,
+            } => write!(formatter, "sprite submesh {submesh_index} vertex data: {source}"),
+            Self::IndexBufferRange {
+                submesh_index,
+                first_byte,
+                byte_length,
+                buffer_length,
+            } => write!(
+                formatter,
+                "sprite submesh {submesh_index} index range {first_byte}..{} exceeds the {buffer_length}-byte index buffer",
+                u64::from(*first_byte) + *byte_length
+            ),
+            Self::AllocationFailed {
+                submesh_index,
+                triangle_count,
+            } => write!(
+                formatter,
+                "sprite submesh {submesh_index} could not reserve {triangle_count} outline triangles"
+            ),
+            Self::Outline {
+                submesh_index,
+                source,
+            } => write!(formatter, "sprite submesh {submesh_index} outline: {source}"),
+        }
+    }
+}
+
+impl std::error::Error for SpriteRenderDataOutlineError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::VertexData { source, .. } => Some(source),
+            Self::Outline { source, .. } => Some(source),
+            Self::IndexBufferRange { .. } | Self::AllocationFailed { .. } => None,
+        }
+    }
+}
+
+/// Generates source-compatible outlines from already-decoded sprite render-data fields.
+///
+/// This follows `SpriteMetaDataExtensions.GenerateOutline`: each submesh selects its
+/// vertex slice with `FirstVertex`/`VertexCount`, then reads `IndexCount / 3` triangles
+/// as 16-bit little-endian indices starting at the byte offset `FirstByte`. The source
+/// path does not apply `BaseVertex`, `IndexFormat`, or topology conversion here. The
+/// caller supplies a [`VertexDataView`] whose bytes have already been resolved, including
+/// any external stream content. TypeTree decoding, streamed-resource lookup, the legacy
+/// `Vertices`/`Indices` fallback, and importer wiring remain caller-side.
+pub fn generate_render_data_sprite_outlines(
+    vertex_data: &VertexDataView<'_>,
+    version: UnityVersion,
+    index_buffer: &[u8],
+    sub_meshes: &[SubMeshView],
+) -> Result<Vec<Vec<[f32; 2]>>, SpriteRenderDataOutlineError> {
+    let mut outlines = Vec::new();
+    for (submesh_index, submesh) in sub_meshes.iter().enumerate() {
+        let vertices = generate_vertices(
+            vertex_data,
+            version,
+            submesh.first_vertex,
+            submesh.vertex_count,
+        )
+        .map_err(|source| SpriteRenderDataOutlineError::VertexData {
+            submesh_index,
+            source,
+        })?;
+        let triangles = read_sprite_submesh_triangles(index_buffer, submesh, submesh_index)?;
+        let vertices: Vec<[f32; 3]> = vertices
+            .into_iter()
+            .map(|Vec3 { x, y, z }| [x, y, z])
+            .collect();
+        let mut submesh_outlines =
+            generate_mesh_outlines(&vertices, &triangles).map_err(|source| {
+                SpriteRenderDataOutlineError::Outline {
+                    submesh_index,
+                    source,
+                }
+            })?;
+        outlines.append(&mut submesh_outlines);
+    }
+    Ok(outlines)
+}
+
+fn read_sprite_submesh_triangles(
+    index_buffer: &[u8],
+    submesh: &SubMeshView,
+    submesh_index: usize,
+) -> Result<Vec<[usize; 3]>, SpriteRenderDataOutlineError> {
+    let triangle_count = (submesh.index_count / 3) as usize;
+    if triangle_count == 0 {
+        return Ok(Vec::new());
+    }
+    let byte_length = u64::from(submesh.index_count / 3) * 6;
+    let start = usize::try_from(submesh.first_byte).ok();
+    let length = triangle_count.checked_mul(6);
+    let end = start
+        .zip(length)
+        .and_then(|(start, length)| start.checked_add(length));
+    let Some((start, end)) = start.zip(end).filter(|(_, end)| *end <= index_buffer.len()) else {
+        return Err(SpriteRenderDataOutlineError::IndexBufferRange {
+            submesh_index,
+            first_byte: submesh.first_byte,
+            byte_length,
+            buffer_length: index_buffer.len(),
+        });
+    };
+
+    let mut triangles = Vec::new();
+    triangles.try_reserve_exact(triangle_count).map_err(|_| {
+        SpriteRenderDataOutlineError::AllocationFailed {
+            submesh_index,
+            triangle_count,
+        }
+    })?;
+    for triangle_index in 0..triangle_count {
+        let offset = start + triangle_index * 6;
+        let read_index = |offset| {
+            usize::from(u16::from_le_bytes([
+                index_buffer[offset],
+                index_buffer[offset + 1],
+            ]))
+        };
+        triangles.push([
+            read_index(offset),
+            read_index(offset + 2),
+            read_index(offset + 4),
+        ]);
+    }
+    debug_assert_eq!(end - start, byte_length as usize);
+    Ok(triangles)
+}
 
 /// Generates the source `MeshOutlineGenerator` outline loops from 3D vertices
 /// and triangle indices, projecting the final points to the XY plane.
@@ -889,10 +1067,116 @@ pub fn fill_sprite_metadata(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resources::vertex_data_blob::{ChannelInfo, StreamInfo};
 
     #[test]
     fn sprite_class_id_matches_the_source() {
         assert_eq!(SPRITE_CLASS_ID, 213);
+    }
+
+    #[test]
+    fn render_data_outline_reads_submesh_vertex_slice_and_little_endian_indices() {
+        let positions = [
+            [-9.0f32, -9.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ];
+        let mut data = Vec::new();
+        for position in positions {
+            for component in position {
+                data.extend_from_slice(&component.to_le_bytes());
+            }
+        }
+        let channels = [ChannelInfo {
+            dimension: 3,
+            offset: 0,
+            format: 0,
+            stream: 0,
+        }];
+        let streams = [StreamInfo {
+            channel_mask: 1,
+            offset: 0,
+            stride: 12,
+            ..StreamInfo::default()
+        }];
+        let view = VertexDataView {
+            channels: Some(&channels),
+            streams: Some(&streams),
+            streams_0: None,
+            data: &data,
+            vertex_count: 4,
+            current_channels_int32: None,
+            current_channels_uint32: 0,
+        };
+        let version = UnityVersion::parse("2022.3.0f1").unwrap();
+        // Two prefix bytes exercise FirstByte. A fourth index is intentionally
+        // outside the complete triangle count and must be ignored by IndexCount / 3.
+        let index_buffer = [0xFF, 0xEE, 0, 0, 1, 0, 2, 0, 3, 0];
+        let submeshes = [SubMeshView {
+            first_byte: 2,
+            first_vertex: 1,
+            index_count: 4,
+            vertex_count: 3,
+            ..SubMeshView::default()
+        }];
+
+        assert_eq!(
+            generate_render_data_sprite_outlines(&view, version, &index_buffer, &submeshes),
+            Ok(vec![vec![[0.0, 1.0], [0.0, 0.0], [1.0, 0.0]]]),
+        );
+    }
+
+    #[test]
+    fn render_data_outline_checks_index_ranges_but_skips_empty_triangle_ranges() {
+        let channels = [ChannelInfo {
+            dimension: 3,
+            offset: 0,
+            format: 0,
+            stream: 0,
+        }];
+        let streams = [StreamInfo {
+            channel_mask: 1,
+            stride: 12,
+            ..StreamInfo::default()
+        }];
+        let data = [0; 36];
+        let view = VertexDataView {
+            channels: Some(&channels),
+            streams: Some(&streams),
+            streams_0: None,
+            data: &data,
+            vertex_count: 3,
+            current_channels_int32: None,
+            current_channels_uint32: 0,
+        };
+        let version = UnityVersion::parse("2022.3.0f1").unwrap();
+        let bad_range = [SubMeshView {
+            first_byte: 3,
+            index_count: 3,
+            vertex_count: 3,
+            ..SubMeshView::default()
+        }];
+        assert!(matches!(
+            generate_render_data_sprite_outlines(&view, version, &[0; 8], &bad_range),
+            Err(SpriteRenderDataOutlineError::IndexBufferRange {
+                submesh_index: 0,
+                first_byte: 3,
+                byte_length: 6,
+                buffer_length: 8,
+            })
+        ));
+
+        let empty_range = [SubMeshView {
+            first_byte: u32::MAX,
+            index_count: 2,
+            vertex_count: 0,
+            ..SubMeshView::default()
+        }];
+        assert_eq!(
+            generate_render_data_sprite_outlines(&view, version, &[], &empty_range),
+            Ok(Vec::new()),
+        );
     }
 
     #[test]
