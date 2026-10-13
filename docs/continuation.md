@@ -1,10 +1,10 @@
 # Continuation status
 
-> Current handoff: `docs/next-agent-handoff.md` is the authoritative continuation record for the 2026-10-10 checkpoint. Older sections below are historical and may name an earlier next task or checkpoint; read the handoff first, then consult the feature ledger and validation log.
+> Current handoff: `docs/next-agent-handoff.md` is the authoritative continuation record for the 2026-10-13 checkpoint. Older sections below are historical and may name an earlier next task or checkpoint; read the handoff first, then consult the feature ledger and validation log.
 
 ## Current phase
 
-Phase 1: full Rust port of the local AssetRipper source baseline. The Phase 1 gate has not passed. Phase 2 remains locked: no user AssetBundle contents have been opened, hashed, identified, or parsed, and UABEA has not been read or run.
+The full Rust port remains incomplete and the GOAL §25 gate is OPEN. Later sample-validation work did read and replay user AssetBundle contents; the earlier “no contents read” statement below is historical, not current. There is still no complete immutable all-input manifest. UABEA was not read or run, and Unity import/runtime was not run in the latest Ogg/Sprite/GUI audits.
 
 ## Worktree and baseline
 
@@ -15,7 +15,7 @@ Phase 1: full Rust port of the local AssetRipper source baseline. The Phase 1 ga
 - The workspace inventory uses the harmless Chinese aliases 青岚雅苑 and 松风竹庭; exact input names are omitted. Later validation read and replayed sample contents, and the inventory remains incomplete and unfrozen. UABEA remains unread; the GOAL §25 gate remains OPEN.
 - Reference identity recorded in `docs/baseline.md`: AssetRipper 2.0.0, `net10.0`, 51 solution projects, including 8 test projects and 6 source generators. Full feature/dependency/platform/option audit remains incomplete.
 
-## Latest increment and next implementation
+## 2026-10-10 initial checkpoint (historical; superseded by current hand-off)
 
 - Phase 1 remains active; the full AssetRipper feature gate has not passed. No user AssetBundle bytes have been read or hashed, and UABEA remains unopened.
 - Local implementation commit `1da8b3a3d62c0ea45ce7e84e9394338ead3b93e8`, tree `b8e52a155edc29c4be4e4f3123d684435f07b493`. Verified cloud checkpoint on `main`: `cdc443d0b8f7e32697152b49fe63d285cb69862d`, parent `222ee6cef7e73fdcac6b4a499d14d18299aa8322`, same tree. The non-forced push succeeded; the live ref was read back and the fetched-tree diff was empty.
@@ -92,7 +92,7 @@ Phase 1: full Rust port of the local AssetRipper source baseline. The Phase 1 ga
 4. Add independent generic fixtures and source-derived regression coverage for untested SerializedFile generations and malformed layouts; obtain a usable .NET environment before claiming C# differential validation.
 5. Complete CLI options/configuration, resource handlers, export formats, UI workflows, and required integration/end-to-end verification.
 
-Do not read UABEA or any user AssetBundle until the first-phase gate has actual evidence for every required capability.
+Historical 2026-10-10 gate instruction (superseded): it prohibited reading UABEA or user AssetBundles until Phase 1. Later user sample validation has occurred under subsequent project instructions. Current stage and tool access are governed by GOAL.TXT and docs/next-agent-handoff.md.
 
 ## Single-file path to VFS import
 
