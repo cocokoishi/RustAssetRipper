@@ -1108,7 +1108,7 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Root cause | One real deviation found and fixed: `Bitmap::unpack_normal` kept red/alpha in place and only recomputed blue. The old synthetic-only tests encoded the bug (e.g. `(128,128,0,255)` expected `(128,128,254,255)`); the reference produces `(255,128,127,128)`. Two stale expectations corrected alongside the fix. |
 | Rust change | Swapped red/alpha lanes in `Bitmap::unpack_normal` (src/resources/texture_converter.rs); fixture src/resources/cubemap_convert_fixture.txt; test live_cubemap_conversion_matches_the_reference_runtime. |
 | Regression evidence | All three probed conversions reproduce every output pixel plus dimensions; full suite 1384 plus 65 pass with warnings-denied Clippy. |
-| Remaining comparison | Live-sprite/atlas conversion and Unity-produced textures stay with their own rows; external decoders (Crunch) stay unsupported like the 2D path. |
+| Remaining comparison | Live-sprite/atlas conversion and Unity-produced textures stay with their own rows. The versioned Rust CRN path is now present for Texture2D/Cubemap, but valid CRN pixel parity remains unverified (RES-TEXTURE-CRUNCH-001). |
 
 ## DIFF-SPRITE-ATLAS-001 - live-sprite atlas coordinates
 
@@ -1147,7 +1147,7 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Root cause | One real Rust deviation found and fixed: `export_texture3d_image` unpacked on the derived (usage-backed) lightmap value, so a normal-mapped usage with a default stored field unpacked where the reference does not. The gate now reads the stored field only. An early probe scare (ArgumentOutOfRange on every conversion) traced to short probe buffers (one pixel per stacked row); full buffers convert. |
 | Rust change | `resources::texture::export_texture3d_image` unpack gate plus doc comment; test `array_conversions_match_the_reference_runtime` in `resources::texture`; fixture `src/resources/texture_array_convert_fixture.txt`. No other production change (`flip_y` already flips per layer). |
 | Regression evidence | All five probed conversions reproduce ok/size/pixels through the export functions with PNG wiring asserted; the `t3-normal` row fails under the old derived gate. Full suite 1387 plus 65 pass with warnings-denied Clippy. |
-| Remaining comparison | Crunch stays unsupported on these paths like the 2D one; streamed fetching stays caller-side; Unity-produced array textures stay out per the row disposition. |
+| Remaining comparison | The Texture3D/array image helpers still call the no-version converter; this audit establishes no CRN behavior for those data shapes. Streamed fetching stays caller-side; Unity-produced array textures stay out per the row disposition. |
 
 ## DIFF-TEXTURE-EXPORTER-001 - exporter admission and format selection
 

@@ -34,6 +34,7 @@
 | [miniz_oxide](https://github.com/Frommi/miniz_oxide) | 0.9.1 | Pure Rust DEFLATE backend used by `flate2` | MIT OR Zlib OR Apache-2.0 | Not declared in the published crate manifest |
 | adler2 | 2.0.1 | Adler checksum used by `miniz_oxide` | 0BSD OR MIT OR Apache-2.0 | Not declared in the published crate manifest |
 | simd-adler32 | 0.3.10 | Adler checksum implementation used by `miniz_oxide` | MIT | Not declared in the published crate manifest |
+| [texture2ddecoder](https://github.com/UniversalGameExtraction/texture2ddecoder) | 0.1.2 (vendored) | Pure Rust CRN/Crunch and Unity Crunch decoder used by versioned Texture2D/Cubemap image export | MIT OR Apache-2.0; retain vendor/COPYRIGHT | Not declared in the published crate manifest |
 | [crc32fast](https://github.com/srijs/rust-crc32fast) | 1.5.2 | GZip CRC validation used by `flate2` | MIT OR Apache-2.0 | 1.63 |
 | [cfg-if](https://github.com/rust-lang/cfg-if) | 1.0.5 | Target configuration used by `crc32fast` | MIT OR Apache-2.0 | 1.32 |
 | [errno](https://github.com/lambda-fairy/rust-errno) | 0.3.14 | Unix error codes used by `rustix` on non-Linux Unix targets | MIT OR Apache-2.0 | 1.56 |
@@ -44,6 +45,9 @@
 
 The AssetRipper port is GPL-3.0-only. Before distributing binaries, package the applicable third-party license texts and notices alongside the product; this record is not a substitute for those distribution artifacts.
 
+## Vendored texture decoder
+
+The direct path dependency texture2ddecoder 0.1.2 supplies pure-Rust CRN/Crunch and Unity Crunch decoding for the versioned Texture2D/Cubemap image path. Its manifest declares MIT OR Apache-2.0. Preserve vendor/texture2ddecoder/COPYRIGHT; its README also identifies the included classic Crunch component as public domain and Unity Crunch component as ZLIB-licensed. A valid CRN pixel differential has not yet verified this path; see RES-TEXTURE-CRUNCH-001 and docs/validation-log.md.
 ## Verification scope
 
 The raw LZMA fixture is encoded with `lzma-rs`'s LZMA-alone encoder, then reshaped to Unity's raw layout by removing its eight-byte unpacked-size field. The size-prefixed fixture uses the same encoder but replaces its unknown-size sentinel with the known decoded size. These exercise both decoder and bundle integrations but are not independent codec evidence.
