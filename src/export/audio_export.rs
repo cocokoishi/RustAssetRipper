@@ -750,29 +750,41 @@ fn decode_fsb5_vorbis(
                 sample.setup_crc32
             ),
         })?;
-
     let identification_packet =
         build_vorbis_identification_packet(sample.channels, sample.sample_rate);
+    decode_fsb5_vorbis_with_headers(
+        sample,
+        &identification_packet,
+        setup_header,
+        max_decoded_bytes,
+    )
+}
+
+fn decode_fsb5_vorbis_with_headers(
+    sample: Fsb5VorbisSample<'_>,
+    identification_packet: &[u8],
+    setup_header: &[u8],
+    max_decoded_bytes: usize,
+) -> Result<(Vec<u8>, &'static str), AudioDecodeError> {
     let identification =
-        lewton::header::read_header_ident(&identification_packet).map_err(|error| {
+        lewton::header::read_header_ident(identification_packet).map_err(|error| {
             AudioDecodeError::Fsb5DecodeFailed {
                 reason: format!("invalid generated Vorbis identification header: {error}"),
             }
         })?;
-    let setup = lewton::header::read_header_setup(setup_header, sample.channels, (8, 11)).map_err(
-        |error| AudioDecodeError::Fsb5DecodeFailed {
-            reason: format!("Vorbis setup header could not be parsed: {error}"),
-        },
-    )?;
+    let setup = lewton::header::read_header_setup(
+        setup_header,
+        sample.channels,
+        (identification.blocksize_0, identification.blocksize_1),
+    )
+    .map_err(|error| AudioDecodeError::Fsb5DecodeFailed {
+        reason: format!("Vorbis setup header could not be parsed: {error}"),
+    })?;
 
     let mut output = LimitedAudioWriter::new(max_decoded_bytes);
     let mut ogg = OggPacketWriter::default();
     let comment_packet = build_vorbis_comment_packet();
-    let packets = [
-        identification_packet.as_slice(),
-        comment_packet.as_slice(),
-        setup_header,
-    ];
+    let packets = [identification_packet, comment_packet.as_slice(), setup_header];
     for packet in packets {
         if let Err(error) = ogg.write_packet(&mut output, packet, 0, false) {
             return Err(audio_output_error(error, &output, max_decoded_bytes));
@@ -1498,7 +1510,7 @@ impl std::error::Error for AudioDecodeError {}
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
+    use std::io::{Cursor, Write};
 
     use super::{
         append_float_wav_samples, check_magic, classify_audio_data,
@@ -2011,6 +2023,87 @@ mod tests {
             assert_eq!(packets.next_packet().unwrap(), Some(&[0][..]));
             assert_eq!(packets.next_packet().unwrap(), None);
         }
+    }
+
+    #[test]
+    fn fsb5_vorbis_reconstruction_preserves_audio_packets_and_source_samples() {
+        let source_ogg = include_bytes!("ogg_to_wav_test_fixture.ogg");
+        let source_wav = include_bytes!("ogg_to_wav_test_fixture_reference.wav");
+        let mut reader = ogg::PacketReader::new(Cursor::new(&source_ogg[..]));
+        let mut source_packets = Vec::new();
+        while let Some(packet) = reader.read_packet().unwrap() {
+            source_packets.push(packet.data);
+        }
+        assert!(source_packets.len() > 3);
+        assert_eq!(&source_packets[0][..7], b"\x01vorbis");
+        assert_eq!(&source_packets[2][..7], b"\x05vorbis");
+
+        let identification = lewton::header::read_header_ident(&source_packets[0]).unwrap();
+        let sample_count = u32::from_le_bytes(source_wav[46..50].try_into().unwrap());
+        assert_eq!(identification.audio_channels, 1);
+        assert_eq!(identification.audio_sample_rate, 8_000);
+        assert_eq!(sample_count, 544);
+        let setup_crc32 = crate::resources::blend_shape::crc32_ieee(&source_packets[2]);
+        assert_eq!(setup_crc32, 0xE258_E714);
+        assert!(!super::vorbis_lookup::VORBIS_LOOKUP.contains_key(&setup_crc32));
+
+        let mut packet_data = Vec::new();
+        for packet in &source_packets[3..] {
+            let packet_len = u16::try_from(packet.len()).unwrap();
+            packet_data.extend_from_slice(&packet_len.to_le_bytes());
+            packet_data.extend_from_slice(packet);
+        }
+
+        let mut fsb5 = vec![0u8; 60];
+        fsb5[..4].copy_from_slice(b"FSB5");
+        fsb5[4..8].copy_from_slice(&1u32.to_le_bytes());
+        fsb5[8..12].copy_from_slice(&1u32.to_le_bytes());
+        fsb5[12..16].copy_from_slice(&16u32.to_le_bytes());
+        fsb5[20..24].copy_from_slice(&u32::try_from(packet_data.len()).unwrap().to_le_bytes());
+        fsb5[24..28].copy_from_slice(&15u32.to_le_bytes());
+        let sample_header = (u64::from(sample_count) << 34) | (1 << 1) | 1;
+        fsb5.extend_from_slice(&sample_header.to_le_bytes());
+        fsb5.extend_from_slice(&[0x08, 0, 0, 0x16]);
+        fsb5.extend_from_slice(&setup_crc32.to_le_bytes());
+        fsb5.extend_from_slice(&packet_data);
+
+        let sample = super::Fsb5VorbisSample::parse(&fsb5).unwrap();
+        assert_eq!(sample.setup_crc32, setup_crc32);
+        let (rebuilt_ogg, extension) = super::decode_fsb5_vorbis_with_headers(
+            sample,
+            &source_packets[0],
+            &source_packets[2],
+            1024 * 1024,
+        )
+        .unwrap();
+        assert_eq!(extension, "ogg");
+
+        let mut reader = ogg::PacketReader::new(Cursor::new(rebuilt_ogg.as_slice()));
+        let mut rebuilt_packets = Vec::new();
+        while let Some(packet) = reader.read_packet().unwrap() {
+            rebuilt_packets.push(packet.data);
+        }
+        assert_eq!(rebuilt_packets.len(), source_packets.len());
+        assert_eq!(rebuilt_packets[0], source_packets[0]);
+        assert_eq!(rebuilt_packets[2], source_packets[2]);
+        assert_eq!(&rebuilt_packets[3..], &source_packets[3..]);
+
+        let rebuilt_wav = convert_ogg_to_wav_with_limit(&rebuilt_ogg, 1024 * 1024).unwrap();
+        assert_eq!(rebuilt_wav.len(), source_wav.len());
+        assert_eq!(&rebuilt_wav[..58], &source_wav[..58]);
+        let largest_sample_error = rebuilt_wav[58..]
+            .chunks_exact(4)
+            .zip(source_wav[58..].chunks_exact(4))
+            .map(|(actual, expected)| {
+                let actual = f32::from_le_bytes(actual.try_into().unwrap());
+                let expected = f32::from_le_bytes(expected.try_into().unwrap());
+                (actual - expected).abs()
+            })
+            .fold(0.0f32, f32::max);
+        assert!(
+            largest_sample_error <= 1.0e-6,
+            "largest source sample error was {largest_sample_error}"
+        );
     }
 
     #[test]
