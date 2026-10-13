@@ -293,6 +293,7 @@ pub fn select_prefab_importer(is_prefab_marker: bool) -> PrefabImporterBranch {
 
 /// Class ID of Sprite objects whose render data can point at a texture.
 const SPRITE_OBJECT_CLASS_ID: i32 = 213;
+type SpriteRenderDataTexturePointer = (String, i32, i64);
 
 /// Collect `AddSprites` caller facts for workspace sprites associated with one texture.
 ///
@@ -336,6 +337,7 @@ pub fn collect_sprite_facts_for_texture(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn collect_sprite_facts_for_texture_with_associations(
     workspace: &SerializedFileWorkspace,
     objects: &ObjectWorkspace,
@@ -720,7 +722,7 @@ impl<'objects> SpriteTextureAssociationIndex<'objects> {
                             object.file_index,
                             object.object_index,
                             sprite,
-                            &render_data_index,
+                            render_data_index,
                         )
                         .map_err(|error| {
                             invalid_sprite_data(format!(
@@ -843,7 +845,7 @@ fn record_sprite_texture_association(
 
 fn sprite_render_data_texture_pointer(
     root: &SerializedValue,
-) -> Result<Option<(String, i32, i64)>, Box<dyn Error>> {
+) -> Result<Option<SpriteRenderDataTexturePointer>, Box<dyn Error>> {
     let render_data = strict_required_sprite_field(root, "m_RD")?;
     let render_data_path = field_path_in_base_chain(root, "m_RD")?
         .ok_or_else(|| invalid_sprite_data("Sprite.m_RD has no serialized field path"))?;
@@ -2281,10 +2283,11 @@ mod tests {
         decide_sprite_importer, importer_node_has_field, propagate_asset_bundle_name,
         read_sprite_bone_geometry, read_sprite_bones, read_sprite_physics_shape,
         read_sprite_texture_link, record_sprite_texture_association, select_prefab_importer,
-        sprite_export_id_for_ordinal, sprite_render_data_texture_pointer, truncate_execution_order,
-        PrefabImporterBranch, SpriteAlignment, SpriteFacts, SpriteImportMode,
-        SpriteImporterAssociation, SpriteImporterDecision, SpriteOutlineTransform,
-        SPRITE_MESH_TYPE_FULL_RECT, TEXTURE_IMPORTER_TYPE_SPRITE,
+        sprite_export_id_for_ordinal, sprite_render_data_texture_pointer,
+        sprite_sheet_metadata_coordinates, truncate_execution_order, PrefabImporterBranch,
+        SpriteAlignment, SpriteFacts, SpriteImportMode, SpriteImporterAssociation,
+        SpriteImporterDecision, SpriteOutlineTransform, SPRITE_MESH_TYPE_FULL_RECT,
+        TEXTURE_IMPORTER_TYPE_SPRITE,
     };
     use super::{plugin_importer, texture_importer};
     use crate::export::unity_yaml::{UnityYamlNode, UnityYamlNodeKind, UnityYamlScalar};
