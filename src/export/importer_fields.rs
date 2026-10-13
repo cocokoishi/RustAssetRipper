@@ -37,7 +37,7 @@ use std::io;
 use crate::export::ids::get_main_export_id;
 use crate::export::unity_yaml::{UnityYamlNode, UnityYamlNodeKind, UnityYamlScalar};
 use crate::numerics::BoneWeight4;
-use crate::resources::mesh::MeshView;
+use crate::resources::mesh::{MeshVertexBytesSource, MeshView};
 use crate::resources::sprite::{
     generate_sprite_render_data_outlines_from_value, sprite_settings_raw_is_packed,
     sprite_settings_raw_packing_rotation, transform_sprite_outline_points, SpriteOutlineTransform,
@@ -289,8 +289,8 @@ const SPRITE_OBJECT_CLASS_ID: i32 = 213;
 /// order, matching the source `SpriteInformationObject` insertion sequence. Source file version
 /// and endianness select the render-data geometry decoder. When sprite-sheet export is enabled,
 /// malformed outline, physics-shape, or bone geometry is an error rather than a silently omitted
-/// field. Bone geometry intentionally decodes the inline `SpriteRenderData.VertexData` payload,
-/// matching the frozen baseline's `VertexDataBlob.Create` call in `SetBoneGeometry`.
+/// field. Bone geometry decodes inline vertex bytes or the resolved external stream selected by
+/// `SpriteRenderData.m_StreamData`.
 #[allow(clippy::too_many_arguments)]
 pub fn collect_sprite_facts_for_texture(
     workspace: &SerializedFileWorkspace,
@@ -410,6 +410,7 @@ pub fn collect_sprite_facts_for_texture(
                     link.render_data,
                     source_version,
                     endian,
+                    stream_bytes.as_deref(),
                     link.facts.pixels_to_units,
                     link.facts.source_rect_size,
                 )
@@ -1248,17 +1249,33 @@ fn read_sprite_bone_geometry(
     render_data: &SerializedValue,
     version: UnityVersion,
     endian: EndianType,
+    resolved_stream_vertex_bytes: Option<&[u8]>,
     pixels_to_units: f32,
     source_rect_size: [f32; 2],
 ) -> Result<SpriteBoneGeometry, Box<dyn Error>> {
     let mesh = MeshView::from_render_data_value(render_data, version, endian).map_err(|error| {
         invalid_sprite_data(format!("could not read SpriteRenderData: {error}"))
     })?;
+    let byte_source = mesh.vertex_data_bytes_source();
+    let stream_is_set = mesh
+        .stream_data
+        .as_ref()
+        .is_some_and(crate::resource::StreamedResourceInfo::is_set);
     let decoded = match mesh.vertex_data {
         Some(vertex_data) => VertexDataBlob::from_parts(
             vertex_data.channels,
             vertex_data.streams,
-            vertex_data.data,
+            match (byte_source, stream_is_set) {
+                (MeshVertexBytesSource::Streamed, true) => resolved_stream_vertex_bytes
+                    .ok_or_else(|| {
+                        invalid_sprite_data(
+                            "Sprite bone geometry requires unresolved streamed vertex bytes",
+                        )
+                    })?
+                    .to_vec(),
+                (MeshVertexBytesSource::Inline | MeshVertexBytesSource::Empty, _)
+                | (MeshVertexBytesSource::Streamed, false) => vertex_data.data,
+            },
             vertex_data.vertex_count,
             version,
             endian,
@@ -2473,16 +2490,81 @@ mod tests {
                 SerializedValue::Bytes(vec![0, 0, 1, 0, 0xff, 0xff, 0x7f]),
             ),
         ]);
+        let SerializedValue::Struct(render_fields) = &render_data else {
+            unreachable!("render data fixture is a struct");
+        };
+        let vertex_bytes = match &render_fields[0].value {
+            SerializedValue::Struct(vertex_fields) => match &vertex_fields[3].value {
+                SerializedValue::Bytes(bytes) => bytes.clone(),
+                _ => unreachable!("vertex data fixture bytes"),
+            },
+            _ => unreachable!("vertex data fixture is a struct"),
+        };
 
-        let geometry =
-            read_sprite_bone_geometry(&render_data, version, EndianType::Little, 2.0, [10.0, 6.0])
-                .unwrap();
+        let geometry = read_sprite_bone_geometry(
+            &render_data,
+            version,
+            EndianType::Little,
+            None,
+            2.0,
+            [10.0, 6.0],
+        )
+        .unwrap();
         assert_eq!(geometry.vertices, vec![[7.0, 7.0], [13.0, 13.0]]);
         assert_eq!(geometry.indices, vec![0, 1, -1]);
         assert_eq!(geometry.weights.len(), 2);
         assert_eq!(geometry.weights[0].weights, [0.5, 0.25, 0.25, 0.0]);
         assert_eq!(geometry.weights[0].indices, [0, 1, 2, 0]);
         assert_eq!(geometry.weights[1].indices, [3, 0, 0, 0]);
+
+        let mut streamed_render_data = render_data.clone();
+        let SerializedValue::Struct(render_fields) = &mut streamed_render_data else {
+            unreachable!("render data fixture is a struct");
+        };
+        let vertex_data = render_fields
+            .iter_mut()
+            .find(|field| field.name == "m_VertexData")
+            .map(|field| &mut field.value)
+            .unwrap();
+        let SerializedValue::Struct(vertex_fields) = vertex_data else {
+            unreachable!("vertex data fixture is a struct");
+        };
+        let data_field = vertex_fields
+            .iter_mut()
+            .find(|field| field.name == "m_DataSize")
+            .unwrap();
+        data_field.value = SerializedValue::Bytes(Vec::new());
+        render_fields.push(field(
+            "m_StreamData",
+            SerializedValue::Struct(vec![
+                field("path", SerializedValue::StringBytes(b"mesh.resS".to_vec())),
+                field("offset", SerializedValue::U64(0)),
+                field(
+                    "size",
+                    SerializedValue::U32(u32::try_from(vertex_bytes.len()).unwrap()),
+                ),
+            ]),
+        ));
+
+        let streamed_geometry = read_sprite_bone_geometry(
+            &streamed_render_data,
+            version,
+            EndianType::Little,
+            Some(&vertex_bytes),
+            2.0,
+            [10.0, 6.0],
+        )
+        .unwrap();
+        assert_eq!(streamed_geometry, geometry);
+        assert!(read_sprite_bone_geometry(
+            &streamed_render_data,
+            version,
+            EndianType::Little,
+            None,
+            2.0,
+            [10.0, 6.0],
+        )
+        .is_err());
     }
 
     #[test]
